@@ -1871,6 +1871,49 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	return n, nil
 }
 
+// StampExtractorVersionBatch advances `extractor_version` to the current
+// build's constant for the given paths WITHOUT touching `indexed_at`,
+// `enriched_at`, or `tags_json` — the store half of the version-stale
+// diff-guard (scanner.go `reExtractUnchanged`): a re-extraction whose
+// merged result is byte-identical to the stored row must not surface in
+// the iOS delta (`indexed_at` is the delta watermark), must not re-queue
+// enrichment (`enriched_at`), and must not rewrite the blob. Deliberately
+// NOT an `enriched_at` writer, so it stays outside that column's
+// sanctioned-writers set. `missing_count = 0` preserves the "seen this
+// scan" resilience contract the fast-skip path maintains via
+// ResetTrackMissingCount.
+//
+// Holds `s.mu` per the writer contract on Store; one transaction with a
+// prepared statement (the applyReconciledTracks template).
+func (s *Store) StampExtractorVersionBatch(ctx context.Context, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `
+		UPDATE tracks
+		SET extractor_version = ?,
+		    missing_count = 0
+		WHERE path = ?
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, p := range paths {
+		if _, err := stmt.ExecContext(ctx, ExtractorVersion, p); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ----- tracks -----
 
 // UpsertTrack writes or replaces the row for t.Path. The tags are encoded

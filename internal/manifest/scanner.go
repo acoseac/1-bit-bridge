@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -934,19 +935,24 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				// quiet-on-ctx-cancel logging.
 				scanLogger.Warn("skip-gate lookup", "path", pi.rel, "err", statErr)
 			}
-			// The `extractor_version` clause is on the OUTER guard (not the
-			// inner block) on purpose: a row whose stamp is < the current
-			// ExtractorVersion must fall through to the full extract path
-			// below, exactly like a size/mtime change — placing it inside
-			// the `!needsLocalArtworkRecovery` block would take the light
-			// ResetTrackMissingCount+return and NEVER re-extract. This is the
-			// self-healing metadata-migration trigger (e.g. the MP4 © atom
-			// fix that recovers M4A year/composer): the first scan after an
-			// ExtractorVersion bump re-extracts every stale row once.
+			// A version-stale stamp (or a local-art recovery need) on a
+			// size+mtime-UNCHANGED file must still re-extract — that is
+			// the self-healing metadata-migration trigger (e.g. the MP4 ©
+			// atom fix that recovers M4A year/composer): the first scan
+			// after an ExtractorVersion bump re-extracts every stale row
+			// once. But it routes through `reExtractUnchanged`'s
+			// diff-guard, NOT the unconditional full path below — the
+			// upsert bumps indexed_at + zeroes enriched_at + replaces
+			// tags_json wholesale on EVERY conflicting row, so a naive
+			// bump would surface the whole library in every iOS client's
+			// next delta sync (twice: once for the re-extract wave, once
+			// for the re-enrichment wave) and temporarily strip every
+			// enricher-owned field. Only a genuinely CHANGED row (or one
+			// whose merged re-extract differs) takes the full path.
 			if existing != nil && existing.Size == pi.info.Size() &&
-				existing.MTimeNS == pi.info.ModTime().UnixNano() &&
-				existing.ExtractorVersion >= ExtractorVersion {
-				if !s.needsLocalArtworkRecovery(existing.ArtworkMBID) {
+				existing.MTimeNS == pi.info.ModTime().UnixNano() {
+				if existing.ExtractorVersion >= ExtractorVersion &&
+					!s.needsLocalArtworkRecovery(existing.ArtworkMBID) {
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
 					// then-restore on a mtime-equal file (the exact
@@ -963,6 +969,20 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 					}
 					return
 				}
+				// Content-unchanged but version-stale (or the local-art
+				// cache needs rebuilding): re-extract honestly, diff
+				// before deciding what to write. A byte-identical merged
+				// result becomes a light extractor_version stamp (no
+				// indexed_at bump — see reExtractUnchanged); a real
+				// change takes the normal upsert. The art-recovery case
+				// lands on the stamp leg naturally: the fresh extract's
+				// stampLocalArtwork already re-wrote the missing cache
+				// file, and the row itself is unchanged.
+				trackToWrite = s.reExtractUnchanged(ctx, pi, multiRoot, ec)
+				if hook := afterExtractHookForTests; hook != nil {
+					hook(pi.abs)
+				}
+				return
 			}
 			t := &Track{
 				Path:    pi.rel,
@@ -1041,6 +1061,101 @@ func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 	return false
 }
 
+// reExtractUnchanged is the version-stale leg of the skip gate: the file's
+// size+mtime are UNCHANGED but its extractor_version is stale (or its
+// local-art cache file needs rebuilding), so it must re-extract — yet a
+// blind hand-off to the upsert would bump indexed_at, zero enriched_at,
+// and replace tags_json wholesale for a row that most likely didn't
+// change, turning every ExtractorVersion bump into a full-library iOS
+// delta plus a full re-enrichment crawl.
+//
+// It builds the fresh extract, merges the POST-SCAN-owned fields from the
+// stored row (copy-old-only-where-fresh-is-zero — see
+// mergePostScanFields), and compares both sides through
+// marshalForStorage. Byte-identical → the versionStampOnly marker routes
+// the row through StampExtractorVersionBatch (extractor_version +
+// missing_count only). Different (the row genuinely gained something —
+// e.g. parent-dir disc art) → the normal upsert path, whose indexed_at
+// bump is exactly what lets iOS pull the improvement.
+//
+// Failure posture: an EXTRACT error returns nil (skip write AND stamp —
+// the next scan retries; clobbering a good row with a partial extract
+// would be strictly worse, and a transient NAS flap heals itself). A
+// stored-row LOOKUP failure fails OPEN to the full upsert (today's
+// pre-guard behaviour — churn, never data loss).
+func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot bool, ec *ExtractContext) *Track {
+	t := &Track{
+		Path:    pi.rel,
+		Size:    pi.info.Size(),
+		ModTime: pi.info.ModTime().UTC(),
+	}
+	fillFromPath(t, pi.rel, multiRoot)
+	if err := ExtractWithContext(pi.abs, t, ec); err != nil {
+		scanLogger.Error("re-extract (version-stale)", "path", pi.abs, "err", err)
+		return nil
+	}
+	old, err := s.store.GetTrack(ctx, pi.rel)
+	if err != nil || old == nil {
+		if err != nil && ctx.Err() == nil {
+			scanLogger.Warn("version-stale diff lookup; falling back to full upsert",
+				"path", pi.rel, "err", err)
+		}
+		return t
+	}
+	mergePostScanFields(t, old)
+	freshRaw, freshErr := marshalForStorage(t)
+	oldRaw, oldErr := marshalForStorage(old)
+	if freshErr != nil || oldErr != nil {
+		// Can't prove equality — fail open to the full upsert.
+		return t
+	}
+	if bytes.Equal(freshRaw, oldRaw) {
+		t.versionStampOnly = true
+	}
+	return t
+}
+
+// mergePostScanFields copies the POST-SCAN-owned fields from the stored
+// row onto a fresh re-extract, old-wins-only-where-fresh-is-zero. The
+// set is DERIVED from the writers that mutate tags_json after the
+// scanner: MarkEnriched (MusicBrainzAlbumID / ArtworkMBID / ArtistMBID —
+// incl. its markSkipped resolveArtist leg) and the four
+// applyReconciledTracks passes (Album / AlbumArtist / Year /
+// TrackNumber). Do NOT pad it with fields no post-scan writer touches
+// (Genre, Composer, DiscNumber, …): those are extractor-owned, and
+// copying old values for them would mask the very extractor changes an
+// ExtractorVersion bump exists to apply.
+//
+// Fresh-non-zero WINS: a re-extract that now finds a `local-` cover
+// overrides a stored CAA UUID (the curated-art-outranks-remote
+// contract), and a tag the file genuinely carries beats a reconciler
+// fill. Maintenance contract: a future post-scan writer that gains a
+// NEW field must be added here — missing it only causes a spurious
+// diff (status-quo churn for those rows), never data loss.
+func mergePostScanFields(fresh, old *Track) {
+	if fresh.ArtworkMBID == "" {
+		fresh.ArtworkMBID = old.ArtworkMBID
+	}
+	if fresh.ArtistMBID == "" {
+		fresh.ArtistMBID = old.ArtistMBID
+	}
+	if fresh.MusicBrainzAlbumID == "" {
+		fresh.MusicBrainzAlbumID = old.MusicBrainzAlbumID
+	}
+	if fresh.Album == "" {
+		fresh.Album = old.Album
+	}
+	if fresh.AlbumArtist == "" {
+		fresh.AlbumArtist = old.AlbumArtist
+	}
+	if fresh.Year == nil {
+		fresh.Year = old.Year
+	}
+	if fresh.TrackNumber == nil {
+		fresh.TrackNumber = old.TrackNumber
+	}
+}
+
 // runScanWriter is the single writer goroutine that consumes Tracks
 // from `writes`, batches them into `scanBatchSize`-row chunks, and
 // flushes via `Store.UpsertTrackBatch` (one BEGIN/COMMIT per chunk).
@@ -1058,10 +1173,38 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 		if len(batch) == 0 {
 			return
 		}
-		if err := s.store.UpsertTrackBatch(ctx, batch); err != nil {
-			scanLogger.Error("upsert batch", "rows", len(batch), "err", err)
-		} else {
-			n := committed.Add(int64(len(batch)))
+		// Partition on the versionStampOnly marker (reExtractUnchanged):
+		// unchanged version-stale rows take the light stamp (no
+		// indexed_at / enriched_at / tags_json churn), everything else
+		// the normal upsert. Both legs keep the one-transaction-per-
+		// batch shape and both count into `committed` so the admin
+		// progress bar doesn't stall during an ExtractorVersion-bump scan.
+		var full []*Track
+		var stampPaths []string
+		for _, t := range batch {
+			if t.versionStampOnly {
+				stampPaths = append(stampPaths, t.Path)
+			} else {
+				full = append(full, t)
+			}
+		}
+		committedRows := 0
+		if len(full) > 0 {
+			if err := s.store.UpsertTrackBatch(ctx, full); err != nil {
+				scanLogger.Error("upsert batch", "rows", len(full), "err", err)
+			} else {
+				committedRows += len(full)
+			}
+		}
+		if len(stampPaths) > 0 {
+			if err := s.store.StampExtractorVersionBatch(ctx, stampPaths); err != nil {
+				scanLogger.Error("stamp extractor-version batch", "rows", len(stampPaths), "err", err)
+			} else {
+				committedRows += len(stampPaths)
+			}
+		}
+		if committedRows > 0 {
+			n := committed.Add(int64(committedRows))
 			s.progress.Store(n)
 		}
 		batch = batch[:0]
