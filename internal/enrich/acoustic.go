@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/metrics"
 )
 
 // AcousticMatch is what the fingerprint pipeline concluded about one track.
@@ -166,19 +167,40 @@ func HasUsableArtistWitness(localArtist string) bool {
 	return !isJunkArtistTag(localArtist)
 }
 
+// acousticOutcome distinguishes the ways the fallback can decline, so the
+// skip-reason counters stay meaningful.
+//
+// Collapsing these would make the metric lie: a library with full fingerprint
+// coverage but many vetoes would read identically to one with no fingerprints
+// at all, and the veto rate is precisely the number worth watching — a spike in
+// it means the pipeline is contradicting the library's own tags.
+type acousticOutcome int
+
+const (
+	// acousticNoVerdict — nothing has been fingerprinted for this track yet,
+	// or the gate refused it. A coverage signal.
+	acousticNoVerdict acousticOutcome = iota
+	// acousticRefused — a verdict existed and THIS layer rejected it: the
+	// local artist tag contradicted it, or an MBID failed validation. A
+	// disagreement signal.
+	acousticRefused
+	// acousticApplied — the artist was recovered.
+	acousticApplied
+)
+
 // applyAcousticFallback consults the fingerprint verdict for a track and, if
 // it survives the local-artist veto, writes the artist onto the track.
 //
-// Returns true when it recovered something. Writes ONLY the artist MBID, its
-// name, and the recording MBID — never a release or artwork MBID; see
-// AcousticMatch for why that restriction is structural rather than a policy.
-func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, bool) {
+// Writes ONLY the artist MBID, its name, and the recording MBID — never a
+// release or artwork MBID; see AcousticMatch for why that restriction is
+// structural rather than a policy.
+func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, acousticOutcome) {
 	if e.acoustic == nil {
-		return AcousticMatch{}, false
+		return AcousticMatch{}, acousticNoVerdict
 	}
 	m, ok := e.acoustic.LookupPath(t.Path)
 	if !ok || m.ArtistMBID == "" {
-		return AcousticMatch{}, false
+		return AcousticMatch{}, acousticNoVerdict
 	}
 	// Validate before the value can reach a URL or a cache path: the same
 	// F30 rationale the MusicBrainz results are held to. AcoustID is a
@@ -187,14 +209,14 @@ func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, bool
 	if !isValidMBID(m.ArtistMBID) {
 		logger.Warn("ignoring non-UUID fingerprint artist MBID",
 			"path", t.Path, "value", truncateForLog(m.ArtistMBID))
-		return AcousticMatch{}, false
+		return AcousticMatch{}, acousticRefused
 	}
 	// The veto — the only check using information the fingerprint pipeline
 	// did not produce.
 	if acousticMatchContradictsTag(t.Artist, m) {
 		logger.Info("fingerprint match contradicts the local artist tag; ignoring",
 			"path", t.Path, "tagged", t.Artist, "fingerprinted", m.ArtistName)
-		return AcousticMatch{}, false
+		return AcousticMatch{}, acousticRefused
 	}
 
 	// Do NOT overwrite an artist the text path already resolved. Reaching
@@ -209,7 +231,7 @@ func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, bool
 	}
 	logger.Info("artist recovered by acoustic fingerprint",
 		"path", t.Path, "artist", m.ArtistName, "mbid", m.ArtistMBID, "acoustid", m.AcoustID)
-	return m, true
+	return m, acousticApplied
 }
 
 // enrichWithRecoveredArtist finishes a track whose artist came from the audio
@@ -299,6 +321,20 @@ func (e *Enricher) resolveAlbumFromAcoustic(ctx context.Context, t *manifest.Tra
 		return "", "", nil
 	}
 
+	// SHARE the text path's album cache. Sibling tracks under one junk-tagged
+	// folder produce an identical (artistName, album) query, so without this
+	// every track on a "CD 01" album pays its own SearchRelease plus a full
+	// MBMinInterval sleep — 1.1s each against public MusicBrainz, on exactly
+	// the population this feature targets. The key semantics and value shape
+	// are the same as the text path's, so a hit from either side is the answer
+	// to the same question.
+	key := cacheKey(m.ArtistName, album)
+	if hit, ok := e.albumCache.Get(key); ok {
+		metrics.RecordMBCache("album", true)
+		return hit.ReleaseMBID, hit.ReleaseGroupMBID, nil
+	}
+	metrics.RecordMBCache("album", false)
+
 	// A single rung, deliberately: the ladder's own fallbacks exist to repair
 	// tags, and both terms here are already canonical — the artist name comes
 	// from MusicBrainz via AcoustID, and the album is either the operator's own
@@ -309,18 +345,31 @@ func (e *Enricher) resolveAlbumFromAcoustic(ctx context.Context, t *manifest.Tra
 	}
 	res, err := e.mb.SearchRelease(ctx, m.ArtistName, album)
 	if err != nil {
+		// Deliberately NOT cached. A transient failure must not poison the key
+		// for every sibling track — the same rule the text path follows.
 		return "", "", err
 	}
-	if res == nil || !isValidMBID(res.MBID) {
+	resolution := albumResolution{}
+	if res != nil {
+		if isValidMBID(res.MBID) {
+			resolution.ReleaseMBID = res.MBID
+		}
+		if isValidMBID(res.ReleaseGroupMBID) {
+			resolution.ReleaseGroupMBID = res.ReleaseGroupMBID
+		}
+	}
+	// Cached on a clean search whether or not it matched, mirroring the text
+	// path: a no-match for this exact query is as reusable as a hit, and the
+	// siblings are the reason this cache exists.
+	e.albumCache.Set(key, resolution)
+	if resolution.ReleaseMBID == "" {
 		return "", "", nil
 	}
-	rg := ""
-	if isValidMBID(res.ReleaseGroupMBID) {
-		rg = res.ReleaseGroupMBID
-	}
+	rg := resolution.ReleaseGroupMBID
 	logger.Info("album recovered via fingerprint artist",
-		"path", t.Path, "searchedArtist", m.ArtistName, "searchedAlbum", album, "release", res.MBID)
-	return res.MBID, rg, nil
+		"path", t.Path, "searchedArtist", m.ArtistName, "searchedAlbum", album,
+		"release", resolution.ReleaseMBID)
+	return resolution.ReleaseMBID, rg, nil
 }
 
 // albumSearchTerm picks the album string to search MusicBrainz by.

@@ -1,8 +1,10 @@
 package enrich
 
 import (
+	"context"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/lrucache"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -17,7 +19,7 @@ import (
 // Same spirit as TestSplitHeadCreditNeverSplitsOnAmpersandOrBareComma: the
 // dangerous direction is over-matching, so that is what gets the long list.
 func TestIsJunkArtistTagNeverClassifiesRealArtistsAsJunk(t *testing.T) {
-	real := []string{
+	realArtists := []string{
 		"Various Production",       // starts with "various"
 		"Unknown Mortal Orchestra", // starts with "unknown"
 		"The Unknown",
@@ -38,7 +40,7 @@ func TestIsJunkArtistTagNeverClassifiesRealArtistsAsJunk(t *testing.T) {
 		"Blink-182",
 		"Sunn O)))",
 	}
-	for _, name := range real {
+	for _, name := range realArtists {
 		if isJunkArtistTag(name) {
 			t.Errorf("%q classified as junk — that silently drops the veto on a real artist", name)
 		}
@@ -151,7 +153,7 @@ func TestApplyAcousticFallback(t *testing.T) {
 
 	t.Run("nil lookup means the feature is off", func(t *testing.T) {
 		e := &Enricher{}
-		if _, ok := e.applyAcousticFallback(&manifest.Track{Path: "a.flac"}); ok {
+		if _, o := e.applyAcousticFallback(&manifest.Track{Path: "a.flac"}); o == acousticApplied {
 			t.Fatal("a nil lookup must never recover anything")
 		}
 	})
@@ -162,9 +164,9 @@ func TestApplyAcousticFallback(t *testing.T) {
 			AlbumHint: "Before the Dawn Heals Us", AcoustID: "acid-1",
 		}}}
 		tr := &manifest.Track{Path: "a.flac", Artist: "An Unknown Artist"}
-		m, ok := e.applyAcousticFallback(tr)
-		if !ok {
-			t.Fatal("expected a recovery")
+		m, o := e.applyAcousticFallback(tr)
+		if o != acousticApplied {
+			t.Fatalf("outcome = %v, want applied", o)
 		}
 		if tr.ArtistMBID != goodMBID {
 			t.Errorf("ArtistMBID = %q", tr.ArtistMBID)
@@ -190,8 +192,11 @@ func TestApplyAcousticFallback(t *testing.T) {
 			ArtistMBID: goodMBID, ArtistName: "M83", RecordingMBID: recMBID,
 		}}}
 		tr := &manifest.Track{Path: "a.flac", Artist: "Some Other Band"}
-		if _, ok := e.applyAcousticFallback(tr); ok {
-			t.Fatal("the veto must refuse the match")
+		// REFUSED, not "no verdict": a verdict existed and this layer
+		// rejected it. The two must stay distinguishable or the skip-reason
+		// counters conflate coverage with disagreement.
+		if _, o := e.applyAcousticFallback(tr); o != acousticRefused {
+			t.Fatalf("outcome = %v, want refused", o)
 		}
 		if tr.ArtistMBID != "" || tr.MusicBrainzTrackID != "" {
 			t.Errorf("a vetoed match must write nothing at all: %+v", tr)
@@ -205,8 +210,8 @@ func TestApplyAcousticFallback(t *testing.T) {
 			ArtistMBID: "../../evil", ArtistName: "M83",
 		}}}
 		tr := &manifest.Track{Path: "a.flac"}
-		if _, ok := e.applyAcousticFallback(tr); ok {
-			t.Fatal("a non-UUID MBID must be refused before it can reach a path")
+		if _, o := e.applyAcousticFallback(tr); o != acousticRefused {
+			t.Fatalf("outcome = %v, want refused — a non-UUID MBID must not reach a path", o)
 		}
 		if tr.ArtistMBID != "" {
 			t.Errorf("ArtistMBID = %q", tr.ArtistMBID)
@@ -218,8 +223,8 @@ func TestApplyAcousticFallback(t *testing.T) {
 			ArtistMBID: goodMBID, ArtistName: "M83", RecordingMBID: "not-a-uuid",
 		}}}
 		tr := &manifest.Track{Path: "a.flac"}
-		if _, ok := e.applyAcousticFallback(tr); !ok {
-			t.Fatal("a bad recording MBID must not cost the artist")
+		if _, o := e.applyAcousticFallback(tr); o != acousticApplied {
+			t.Fatalf("outcome = %v — a bad recording MBID must not cost the artist", o)
 		}
 		if tr.ArtistMBID != goodMBID {
 			t.Errorf("ArtistMBID = %q", tr.ArtistMBID)
@@ -231,8 +236,8 @@ func TestApplyAcousticFallback(t *testing.T) {
 
 	t.Run("no verdict for this path", func(t *testing.T) {
 		e := &Enricher{acoustic: fakeLookup{}}
-		if _, ok := e.applyAcousticFallback(&manifest.Track{Path: "a.flac"}); ok {
-			t.Fatal("an absent verdict must not recover anything")
+		if _, o := e.applyAcousticFallback(&manifest.Track{Path: "a.flac"}); o != acousticNoVerdict {
+			t.Fatalf("outcome = %v, want no-verdict", o)
 		}
 	})
 }
@@ -263,7 +268,7 @@ func TestIsJunkAlbumTag(t *testing.T) {
 	// Real album titles must survive: misclassifying one discards the
 	// operator's own title in favour of a fingerprint hint, which is the
 	// wrong way round.
-	real := []string{
+	realAlbums := []string{
 		"Load", "CD Project Red", "Disc-Overy", "Untitled Unmastered",
 		"None So Vile", "Unknown Pleasures", "Album of the Year",
 		"Track and Field",
@@ -272,27 +277,10 @@ func TestIsJunkAlbumTag(t *testing.T) {
 		// substitute a fingerprint's title for the operator's own.
 		"1", "4", "21", "1989", "90125",
 	}
-	for _, a := range real {
+	for _, a := range realAlbums {
 		if isJunkAlbumTag(a) {
 			t.Errorf("%q classified as junk — a real title must win over a fingerprint hint", a)
 		}
-	}
-}
-
-// TestAlbumTermPrefersTheLocalTag pins the ordering in the album hop: the
-// operator's own album title is used when it is usable, and the fingerprint's
-// hint only fills in when there is nothing to search by.
-//
-// Backwards, this would let a fingerprint override a perfectly good album
-// title with whichever release group AcoustID happened to name.
-func TestAlbumTermPrefersTheLocalTag(t *testing.T) {
-	// A real local tag beats a hint.
-	if isJunkAlbumTag("Kind of Blue") {
-		t.Fatal("precondition: a real title must not be junk")
-	}
-	// A junk local tag yields to the hint.
-	if !isJunkAlbumTag("CD 03") {
-		t.Fatal("precondition: a disc-number title must be junk")
 	}
 }
 
@@ -336,9 +324,9 @@ func TestAcousticFallbackDoesNotOverwriteAResolvedArtist(t *testing.T) {
 	}}}
 	tr := &manifest.Track{Path: "a.flac", Artist: "M83", Album: "CD 01", ArtistMBID: fromText}
 
-	m, ok := e.applyAcousticFallback(tr)
-	if !ok {
-		t.Fatal("the fallback must still run — the album hint is the new information")
+	m, o := e.applyAcousticFallback(tr)
+	if o != acousticApplied {
+		t.Fatalf("outcome = %v — the fallback must still run, the album hint is the new information", o)
 	}
 	if tr.ArtistMBID != fromText {
 		t.Errorf("ArtistMBID = %q, want the text-resolved value preserved", tr.ArtistMBID)
@@ -346,5 +334,51 @@ func TestAcousticFallbackDoesNotOverwriteAResolvedArtist(t *testing.T) {
 	// The match is still returned so the caller can run the album hop.
 	if m.AlbumHint == "" {
 		t.Error("the caller needs the hint to search the album by")
+	}
+}
+
+// TestAlbumHopSharesTheTextPathCache pins the sibling-track saving.
+//
+// Every track under one junk-tagged folder produces an identical
+// (artistName, album) query. Without a shared cache each pays its own
+// SearchRelease plus a full MBMinInterval sleep — 1.1s each against public
+// MusicBrainz, on exactly the population this feature targets. A 15-track
+// "CD 01" folder would spend a quarter of a minute asking the same question
+// fifteen times.
+func TestAlbumHopSharesTheTextPathCache(t *testing.T) {
+	e := &Enricher{albumCache: lrucache.New[string, albumResolution](8)}
+	m := AcousticMatch{ArtistName: "M83", AlbumHint: "Before the Dawn Heals Us"}
+	tr := &manifest.Track{Path: "a.flac", Album: "CD 01"}
+
+	// Seed as though the text path had already resolved this exact query.
+	const release = "11111111-1111-1111-1111-111111111111"
+	const group = "22222222-2222-2222-2222-222222222222"
+	e.albumCache.Set(cacheKey(m.ArtistName, m.AlbumHint),
+		albumResolution{ReleaseMBID: release, ReleaseGroupMBID: group})
+
+	// e.mb is nil: reaching the network here would panic, which is precisely
+	// the assertion — the cache must answer without a round-trip.
+	gotRelease, gotGroup, err := e.resolveAlbumFromAcoustic(context.Background(), tr, m)
+	if err != nil {
+		t.Fatalf("resolveAlbumFromAcoustic: %v", err)
+	}
+	if gotRelease != release || gotGroup != group {
+		t.Errorf("got (%q, %q), want the cached resolution", gotRelease, gotGroup)
+	}
+}
+
+// TestAlbumHopUsesTheSameKeyAsTheTextPath — sharing only pays off if both
+// sides key identically. A divergence here would silently halve the hit rate
+// rather than fail anything.
+func TestAlbumHopUsesTheSameKeyAsTheTextPath(t *testing.T) {
+	if cacheKey("M83", "Album") != cacheKey("M83", "Album") {
+		t.Fatal("cacheKey must be stable")
+	}
+	// The hop keys on the fingerprint's canonical artist name and the resolved
+	// album term — the same two inputs the text path uses, in the same order.
+	m := AcousticMatch{ArtistName: "M83", AlbumHint: "Hint"}
+	tr := &manifest.Track{Album: "Real Album"}
+	if got, want := cacheKey(m.ArtistName, albumSearchTerm(tr, m)), cacheKey("M83", "Real Album"); got != want {
+		t.Errorf("key = %q, want %q", got, want)
 	}
 }

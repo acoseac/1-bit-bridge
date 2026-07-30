@@ -126,14 +126,14 @@ func TestSkipReasonsKeysStayBounded(t *testing.T) {
 	for k := range reasons {
 		switch k {
 		case skipReasonNoSearchTerms, skipReasonNoMBMatch, skipReasonMBError,
-			skipReasonNoFingerprintMatch:
+			skipReasonNoFingerprintMatch, skipReasonFingerprintVetoed:
 		default:
 			t.Errorf("unbounded skip-reason key %q — the variable part of a "+
 				"failure must ride the log line, not the map key", k)
 		}
 	}
-	if len(reasons) > 4 {
-		t.Errorf("skipReasons has %d keys, want at most the 4 constants: %v", len(reasons), reasons)
+	if len(reasons) > 5 {
+		t.Errorf("skipReasons has %d keys, want at most the 5 constants: %v", len(reasons), reasons)
 	}
 }
 
