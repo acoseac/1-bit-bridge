@@ -85,21 +85,37 @@ const shortTitleExactRunes = 3
 // TestFoldForMatchPinsTheOrderedPipeline.
 func foldTitle(s string) string { return foldForMatch(s, false) }
 
-// foldName folds an artist name for comparison. Same as foldTitle plus
-// leading-article stripping, which is what lets `The Carpenters` match
-// MusicBrainz's `Carpenters` (81 tracks on the production library; the
-// candidate scores 73, below the release-side floor).
+// foldName folds an artist name for comparison. Identical to foldTitle
+// today — the article strip lives in foldNameNoArticle, not here.
 //
-// Article stripping is the loosest rule here, so it is bounded three
-// ways: names only (never titles — `The Wall` must not fold to `Wall`),
-// only when more than one token remains (so `The The` folds to
-// `the the`, never `the`), and it is applied as a SEPARATE acceptance
-// pass in pickBestArtist so a non-article match always wins first.
+// Kept as a separate name because the CALL SITES differ in a way that
+// must never converge: a title can never be article-stripped (`The Wall`
+// must not fold to `Wall`), so the title path can never be handed the
+// flag, while the name path legitimately has both forms. One function
+// serving both would make that a per-call decision instead of a
+// per-domain one.
 func foldName(s string) string { return foldForMatch(s, false) }
 
-// foldNameNoArticle is foldName with a leading article removed. Split
-// from foldName rather than folded into it so pickBestArtist can try the
-// strict form first — see A2/A3 there.
+// foldNameNoArticle is foldName with a leading article removed, which is
+// what lets `The Carpenters` match MusicBrainz's `Carpenters` (81 tracks
+// on the production library; the candidate scores 73, below the
+// release-side floor).
+//
+// Article stripping is the loosest rule in this file, so it is bounded
+// three ways. Names only, never titles. Refused when the remainder is
+// empty or is ITSELF an article, which is what protects `The The` —
+// NOT a token-count rule; see stripLeadingArticle, which records that
+// "only strip when more than one token remains" was considered and
+// rejected because it would refuse `The Carpenters` -> `carpenters`,
+// the single-token case the feature exists for. And it is applied as a
+// SEPARATE acceptance pass in pickBestArtist, so a non-article match
+// always wins first.
+//
+// Split from foldName rather than folded into it so pickBestArtist can
+// try the strict form first — see A2/A3 there. That pass derives this
+// from foldName via stripLeadingArticle rather than calling it again,
+// an identity that holds only while the strip is the LAST stage of the
+// pipeline and is pinned by TestFoldNameNoArticleIsStripOverFoldName.
 func foldNameNoArticle(s string) string { return foldForMatch(s, true) }
 
 // foldForMatch is the shared pipeline.

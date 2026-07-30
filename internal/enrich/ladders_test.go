@@ -3,6 +3,7 @@ package enrich
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestStripUnbracketedEditionSuffix(t *testing.T) {
@@ -172,6 +173,62 @@ func TestSplitHeadCredit(t *testing.T) {
 				t.Errorf("splitHeadCredit(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSplitHeadCreditSurvivesRunesToLowerWouldShorten covers the offset bug.
+//
+// `cut` is found in the lowercased string and used to slice the ORIGINAL, so
+// the two have to agree byte for byte. strings.ToLower does not preserve
+// length: Go's case table shortens İ (U+0130, 2 bytes → 1), U+212A KELVIN
+// (3 → 1) and ẞ (U+1E9E, 3 → 2). Each such rune before the separator drags the
+// cut left.
+//
+// The UTF-8 assertion is the half that matters most, and the half a want-string
+// comparison alone would miss: a cut landing mid-sequence produces a slice that
+// is not valid UTF-8, and that is what reaches the network.
+func TestSplitHeadCreditSurvivesRunesToLowerWouldShorten(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"turkish dotted I", "İbrahim Tatlıses feat. Sezen Aksu", "İbrahim Tatlıses"},
+		{"two of them", "İsmail İpek; Someone", "İsmail İpek"},
+		{"kelvin sign", "KKeith; Someone", "KKeith"},
+		{"capital eszett", "Straẞe; Someone", "Straẞe"},
+		{"multibyte straddling the shifted offset", "İé; Someone", "İé"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitHeadCredit(tc.in)
+			if !utf8.ValidString(got) {
+				t.Fatalf("splitHeadCredit(%q) = %q — not valid UTF-8; the cut landed "+
+					"mid-rune, and this string goes into the query URL", tc.in, got)
+			}
+			if got != tc.want {
+				t.Errorf("splitHeadCredit(%q) = %q, want %q — an offset found in the "+
+					"lowercased string was used to slice the original", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLowerASCIIIsByteLengthPreserving pins the property splitHeadCredit
+// depends on, directly — including for the runes that break ToLower.
+func TestLowerASCIIIsByteLengthPreserving(t *testing.T) {
+	for _, s := range []string{
+		"", "Metallica", "ALL CAPS", "already lower",
+		"İbrahim", "KKelvin", "Straẞe", "Zdob și Zdub", "日本",
+		"Peter, Paul & Mary; Someone",
+	} {
+		got := lowerASCII(s)
+		if len(got) != len(s) {
+			t.Errorf("lowerASCII(%q) changed length %d -> %d", s, len(s), len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("lowerASCII(%q) = %q is not valid UTF-8", s, got)
+		}
+		// Same answer as ToLower wherever ToLower is length-preserving, which
+		// is the only place splitHeadCredit's separators can match anyway.
+		if lower := strings.ToLower(s); len(lower) == len(s) && got != lower {
+			t.Errorf("lowerASCII(%q) = %q, ToLower = %q", s, got, lower)
+		}
 	}
 }
 
