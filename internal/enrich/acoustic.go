@@ -93,6 +93,25 @@ var junkArtistTags = map[string]struct{}{
 // "Artist Name - Unknown" folds to "artist name unknown", which is a real
 // enough artist to be worth vetoing with, and a contains-check would classify
 // it as junk and silently drop the veto.
+// isDiscOrTrackLabel reports whether an ALREADY-FOLDED tag is a disc or track
+// label that leaked out of a folder name — "CD 01", "Disc 2", "Track 7".
+//
+// Shared by both artist-tag predicates on purpose: of everything they do, this
+// is the one shape they genuinely agree on. A folder label is neither a usable
+// witness nor a searchable name, so both want it, and naming it once keeps the
+// two from drifting on the one rule they should share. Everything else about
+// them differs deliberately — see isUnsearchableArtistTag.
+//
+// Takes the folded form because both callers have already folded.
+func isDiscOrTrackLabel(folded string) bool {
+	for _, prefix := range []string{"track ", "cd ", "disc ", "disk "} {
+		if rest, ok := strings.CutPrefix(folded, prefix); ok && isAllDigits(rest) {
+			return true
+		}
+	}
+	return false
+}
+
 func isJunkArtistTag(artist string) bool {
 	folded := foldName(artist)
 	if folded == "" {
@@ -111,12 +130,50 @@ func isJunkArtistTag(artist string) bool {
 	if isAllDigits(folded) {
 		return true
 	}
-	for _, prefix := range []string{"track ", "cd ", "disc ", "disk "} {
-		if rest, ok := strings.CutPrefix(folded, prefix); ok && isAllDigits(rest) {
-			return true
-		}
+	return isDiscOrTrackLabel(folded)
+}
+
+// isUnsearchableArtistTag reports whether an artist tag is one MusicBrainz
+// cannot possibly answer, so the query should never be sent.
+//
+// # This is NOT isJunkArtistTag, and the two must not be merged
+//
+// They look like duplicates and are not. The sets differ because a false
+// positive costs something different in each.
+//
+// For the veto, calling a real artist junk removes the local witness, and the
+// gate answers by demanding more submissions — stricter, still safe. So that
+// set can afford to be broad, and is: it includes all-digit names, "various
+// artists", and names that fold to nothing.
+//
+// Here, calling a real artist junk means the query is NEVER SENT, and the track
+// loses a text match it would have got. That is a permanent correctness loss,
+// not a stricter check, so the broad entries are exactly wrong:
+//
+//   - all-digits — 112 and 311 are real bands
+//   - "various artists" / "various" / "va" — a real MusicBrainz
+//     special-purpose artist that resolves today
+//   - folds-to-empty — "!!!" is a real band
+//
+// What remains is only what cannot name an artist under any reading: a disc or
+// track label that leaked out of a folder name, and the explicit placeholder
+// phrases taggers write when they have nothing. Bare "unknown", "none",
+// "untitled" and "artist" are deliberately absent — each is a plausible band
+// name, and one wasted query is the cheaper mistake.
+//
+// Skipping also avoids a bad write: "An Unknown Artist" put through the fuzzy
+// A4 pass can clear its threshold against a placeholder-shaped entity, which
+// would stamp a meaningless MBID on the track.
+func isUnsearchableArtistTag(artist string) bool {
+	folded := foldName(artist)
+	if folded == "" {
+		return false // may be a real name that folds away; let it search
 	}
-	return false
+	switch folded {
+	case "an unknown artist", "unknown artist", "no artist":
+		return true
+	}
+	return isDiscOrTrackLabel(folded)
 }
 
 func isAllDigits(s string) bool {

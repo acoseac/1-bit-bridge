@@ -94,19 +94,7 @@ func TestResolveArtist_TransientErrorIsNotCached(t *testing.T) {
 // preserving the documented PR #13 behaviour: a later metadata fix
 // should be able to resolve the artist without a process restart.
 func TestResolveArtist_NoMatchIsNotCached(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"artists":[]}`))
-	}))
-	defer srv.Close()
-
-	e := &Enricher{
-		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
-		MBMinInterval: 0,
-		artistCache:   newArtistCacheForTest(),
-	}
+	e, calls := newCountingArtistEnricher(t)
 
 	for i := 0; i < 3; i++ {
 		tr := &manifest.Track{Path: "Nobody/Album/x.flac", Artist: "Nobody At All"}
@@ -119,6 +107,28 @@ func TestResolveArtist_NoMatchIsNotCached(t *testing.T) {
 		t.Fatalf("upstream saw %d requests, want 3 — a no-match result was cached, "+
 			"blocking re-resolution after a metadata fix", got)
 	}
+}
+
+// newCountingArtistEnricher builds an Enricher whose upstream answers every
+// artist search with an empty result and counts the requests it received.
+//
+// Shared by the tests that assert on REQUEST COUNT rather than on the answer —
+// the no-match caching invariant and the unsearchable-tag skip. Both care about
+// what left the process, not what came back, so both need exactly this upstream.
+func newCountingArtistEnricher(t *testing.T) (*Enricher, *atomic.Int32) {
+	t.Helper()
+	calls := new(atomic.Int32)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"artists":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return &Enricher{
+		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
+		MBMinInterval: 0,
+		artistCache:   newArtistCacheForTest(),
+	}, calls
 }
 
 // newArtistCacheForTest builds the same cache shape NewEnricher wires,

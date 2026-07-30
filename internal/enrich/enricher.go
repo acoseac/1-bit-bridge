@@ -575,6 +575,23 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	if t.Artist == "" {
 		return nil
 	}
+	// A tag MusicBrainz cannot answer is not worth asking about. Returning nil
+	// puts the track exactly where a clean miss would: it falls through to the
+	// acoustic consult and then markSkipped, so no exit semantics change.
+	//
+	// Worth more than the saved request during an upstream outage. A 5xx is
+	// transient, so it returns without stamping and the track retries on every
+	// batch — for a real artist that is right, because the query will succeed
+	// once MusicBrainz recovers, but for "CD 01" the retry is futile forever.
+	// Those tracks spin instead of reaching the fingerprint fallback, which is
+	// the one thing that could still identify them, and which needs no
+	// MusicBrainz lookup to name the artist.
+	//
+	// See isUnsearchableArtistTag for why this is a narrower set than
+	// isJunkArtistTag and must stay that way.
+	if isUnsearchableArtistTag(t.Artist) {
+		return nil
+	}
 	key := "artist\x00" + t.Artist
 	var artistMBID string
 	if cached, ok := e.artistCache.Get(key); ok {
