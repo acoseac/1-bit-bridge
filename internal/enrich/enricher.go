@@ -80,6 +80,10 @@ type Enricher struct {
 	// enrichment (the default).
 	premiumCovers PremiumCoverFetcher
 
+	// acoustic is the fingerprint verdict source. Nil (the default) means
+	// acoustic fingerprinting is off, exactly like a nil premiumCovers.
+	acoustic AcousticLookup
+
 	// CacheDir is the root where the cached JPEGs live. Album covers go
 	// in <CacheDir>/<mbid>-<size>.jpg (see ArtworkCachePath); artist
 	// images go in <CacheDir>/artist-<mbid>.jpg (see ArtistImagePath).
@@ -347,6 +351,18 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// done anyway so we don't poll them forever. Runs AFTER the scrub above
 	// so the persisted row can't retain an unvalidated MBID.
 	if t.Artist == "" || t.Album == "" {
+		// Nothing to search MusicBrainz by — this is the population acoustic
+		// fingerprinting exists for, so consult it before giving up.
+		if m, ok := e.applyAcousticFallback(t); ok {
+			// The fingerprint supplied an artist; fall through so the artist
+			// image, the album ladder and MarkEnriched all run as normal.
+			// Deliberately NOT a separate write path: everything downstream
+			// treats a fingerprint-derived artist exactly like a tag-derived
+			// one, which is what keeps the fallback from growing its own
+			// half-parallel copy of enrichOne.
+			e.enrichWithRecoveredArtist(ctx, t, m)
+			return
+		}
 		e.markSkipped(ctx, t, skipReasonNoSearchTerms, "no artist/album to search by")
 		return
 	}
@@ -482,7 +498,20 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		if err := e.resolveArtist(ctx, t); err != nil {
 			return
 		}
-		e.markSkipped(ctx, t, skipReasonNoMBMatch, "no acceptable release candidate")
+		// The text ladder ran clean and found nothing. Before stamping, see
+		// whether the audio itself identifies the artist — the tags may be
+		// wrong rather than merely obscure.
+		if t.ArtistMBID == "" {
+			if m, ok := e.applyAcousticFallback(t); ok {
+				e.enrichWithRecoveredArtist(ctx, t, m)
+				return
+			}
+		}
+		reason := skipReasonNoMBMatch
+		if e.acoustic != nil {
+			reason = skipReasonNoFingerprintMatch
+		}
+		e.markSkipped(ctx, t, reason, "no acceptable release candidate")
 		return
 	}
 
@@ -848,6 +877,13 @@ const (
 	// skipReasonMBError — a PERSISTENT MusicBrainz error (4xx, decode).
 	// Transient errors return without stamping and never land here.
 	skipReasonMBError = "mb_error"
+	// skipReasonNoFingerprintMatch — the text ladder found nothing AND the
+	// acoustic fallback had no verdict for this track (not fingerprinted yet,
+	// refused by the gate, or unknown to AcoustID). Distinct from
+	// no_mb_match so the two populations can be told apart: no_mb_match
+	// shrinks when matching improves, this one shrinks when fingerprint
+	// coverage does.
+	skipReasonNoFingerprintMatch = "no_fingerprint_match"
 )
 
 // markSkipped stamps enriched_at so the worker doesn't retry the same
