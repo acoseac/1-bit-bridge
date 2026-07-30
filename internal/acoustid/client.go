@@ -88,6 +88,17 @@ type ReleaseGroup struct {
 type Recording struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
+	// Sources counts how many users submitted this fingerprint→recording
+	// link. It grades the LINK rather than the audio, which makes it the only
+	// reliability signal in the payload: one person running Picard over
+	// mis-tagged files produces a 1-source link that still scores 1.00.
+	//
+	// It lives PER RECORDING — verified against a live response, whose result
+	// objects carry only {id, score, recordings}. An earlier draft read it off
+	// the result and therefore always saw 0, which rejected every track. Being
+	// per-recording is also strictly more useful: it discriminates between two
+	// recordings hanging off one cluster, which a cluster-level count cannot.
+	Sources int `json:"sources"`
 	// Duration is AcoustID's recorded length in seconds. Zero or absent means
 	// "unknown", which the gate treats as disqualifying — an unverifiable
 	// length is exactly what we cannot accept an MBID on.
@@ -100,13 +111,9 @@ type Recording struct {
 type Result struct {
 	ID    string  `json:"id"`
 	Score float64 `json:"score"`
-	// Sources counts how many users submitted this fingerprint→recording
-	// link. It grades the LINK rather than the audio, which makes it the only
-	// reliability signal in the payload — see minSources.
-	//
-	// It is requested via `meta=sources` and arrives per-RESULT, so it cannot
-	// discriminate between two recordings hanging off one cluster.
-	Sources    int         `json:"sources"`
+	// NOTE there is deliberately no Sources field here: AcoustID reports it
+	// per RECORDING, and a result object carries only {id, score, recordings}.
+	// See Recording.Sources.
 	Recordings []Recording `json:"recordings"`
 }
 
@@ -172,6 +179,11 @@ func NewClient(baseURL, apiKey, userAgent string, httpClient *http.Client) *Clie
 		baseURL = DefaultBaseURL
 	}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	// Trim the key: a trailing space is easy to introduce (Windows `set
+	// VAR=value && ...` captures one, as do many .env editors) and AcoustID
+	// answers a padded key with a bare "invalid API key", which sends you
+	// looking at the key itself rather than the whitespace around it.
+	apiKey = strings.TrimSpace(apiKey)
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second, Transport: sharedHTTPTransport}
 	}

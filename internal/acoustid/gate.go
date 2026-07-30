@@ -309,14 +309,19 @@ func selectResult(in Input) (Result, RejectReason) {
 			return Result{}, ReasonAmbiguousResults
 		}
 	}
-	required := minSources
-	if !in.HasLocalArtistWitness {
-		required = minSourcesNoLocalArtist
-	}
-	if top.Sources < required {
-		return Result{}, ReasonFewSources
-	}
 	return top, ReasonNone
+}
+
+// requiredSources is the submission-count bar a recording must clear.
+//
+// It rises when the track has no usable artist tag to contradict the answer:
+// there the gate is entirely AcoustID grading its own homework, so the
+// evidence requirement goes up to compensate for the missing witness.
+func requiredSources(in Input) int {
+	if !in.HasLocalArtistWitness {
+		return minSourcesNoLocalArtist
+	}
+	return minSources
 }
 
 // acceptRecordings is stage 3: narrow the cluster's recordings to those whose
@@ -329,6 +334,15 @@ func acceptRecordings(in Input, top Result) (Decision, RejectReason) {
 	if len(survivors) == 0 {
 		return Decision{}, ReasonDurationMismatch
 	}
+	// Sources is graded PER RECORDING, so it acts as a second survivor filter
+	// rather than a cluster-level gate. That is more precise than it sounds: a
+	// cluster where one recording is well attested and another carries a
+	// single mis-tagged submission keeps the former and drops the latter,
+	// which also removes a common cause of spurious artist disagreement.
+	survivors = recordingsWithEnoughSources(survivors, requiredSources(in))
+	if len(survivors) == 0 {
+		return Decision{}, ReasonFewSources
+	}
 	headID, headName, reason := headArtistConsensus(survivors)
 	if reason != ReasonNone {
 		return Decision{}, reason
@@ -340,8 +354,37 @@ func acceptRecordings(in Input, top Result) (Decision, RejectReason) {
 		AlbumHint:     soleReleaseGroupTitle(survivors),
 		AcoustID:      top.ID,
 		Score:         top.Score,
-		Sources:       top.Sources,
+		Sources:       weakestSources(survivors),
 	}, ReasonNone
+}
+
+// recordingsWithEnoughSources keeps the recordings whose fingerprint→recording
+// link carries at least `required` independent submissions.
+func recordingsWithEnoughSources(recordings []Recording, required int) []Recording {
+	var out []Recording
+	for _, rec := range recordings {
+		if rec.Sources >= required {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// weakestSources reports the LOWEST submission count among the survivors —
+// the weakest evidence the decision actually rests on. Every survivor has
+// already cleared the bar, and the artist consensus spans all of them, so the
+// minimum is the honest number to record rather than the flattering maximum.
+func weakestSources(survivors []Recording) int {
+	if len(survivors) == 0 {
+		return 0
+	}
+	min := survivors[0].Sources
+	for _, rec := range survivors[1:] {
+		if rec.Sources < min {
+			min = rec.Sources
+		}
+	}
+	return min
 }
 
 // recordingsMatchingDuration keeps the recordings whose length agrees with the

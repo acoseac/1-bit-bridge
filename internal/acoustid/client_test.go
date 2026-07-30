@@ -74,8 +74,8 @@ func TestLookupRequestsItsMetadata(t *testing.T) {
 func TestLookupDecodesResults(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"status":"ok","results":[{
-			"id":"9ff43b6a-4f16-427c-93c2-92307ca505e0","score":0.97,"sources":8,
-			"recordings":[{"id":"cd2e7c47-16f5-46c6-a37c-a1eb7bf599ff","title":"T","duration":639,
+			"id":"9ff43b6a-4f16-427c-93c2-92307ca505e0","score":0.97,
+			"recordings":[{"id":"cd2e7c47-16f5-46c6-a37c-a1eb7bf599ff","title":"T","duration":639,"sources":8,
 				"artists":[{"id":"6d7b7cd4-254b-4c25-83f6-dd20f98ceacd","name":"M83"}],
 				"releasegroups":[{"id":"ddaa2d4d-314e-3e7c-b1d0-f6d207f5aa2f","title":"RG","type":"Album"}]}]}]}`)
 	})
@@ -87,8 +87,13 @@ func TestLookupDecodesResults(t *testing.T) {
 		t.Fatalf("got %d results, want 1", len(res))
 	}
 	r := res[0]
-	if r.Score != 0.97 || r.Sources != 8 {
-		t.Errorf("score/sources = %v/%d", r.Score, r.Sources)
+	if r.Score != 0.97 {
+		t.Errorf("score = %v", r.Score)
+	}
+	// sources lives on the RECORDING, not the result — verified against a live
+	// response. Reading it off the result yields 0 and rejects every track.
+	if r.Recordings[0].Sources != 8 {
+		t.Errorf("recording sources = %d, want 8", r.Recordings[0].Sources)
 	}
 	if len(r.Recordings) != 1 || r.Recordings[0].Duration != 639 {
 		t.Fatalf("recordings decoded wrong: %+v", r.Recordings)

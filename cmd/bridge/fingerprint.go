@@ -184,12 +184,20 @@ type fingerprintReport struct {
 }
 
 type fingerprintResultRow struct {
-	ID         string   `json:"id"`
-	Score      float64  `json:"score"`
-	Sources    int      `json:"sources"`
-	Recordings int      `json:"recordings"`
-	Artists    []string `json:"artists,omitempty"`
-	Titles     []string `json:"titles,omitempty"`
+	ID    string  `json:"id"`
+	Score float64 `json:"score"`
+	// Recordings holds one entry per recording rather than parallel
+	// artist/title/sources slices. An earlier shape kept three slices in step
+	// by hand and drifted the moment a recording carried no artist, printing a
+	// real artist name beside the wrong title. A struct per recording makes
+	// that misalignment unrepresentable rather than merely tested-against.
+	Recordings []fingerprintRecordingRow `json:"recordings,omitempty"`
+}
+
+type fingerprintRecordingRow struct {
+	Artist  string `json:"artist"`
+	Title   string `json:"title"`
+	Sources int    `json:"sources"`
 }
 
 func fingerprintOne(ctx context.Context, client *acoustid.Client, path string,
@@ -333,23 +341,22 @@ type fingerprintTotals struct {
 
 // buildResultRows flattens AcoustID results into the diagnostic's display rows.
 //
-// Artists and Titles are index-parallel: BOTH get an entry per recording, so
-// position j means the same recording in each. Appending the artist only when
-// one is present would shift every later entry and print the wrong artist
-// beside a title — a display bug that reads as a real mismatch.
+// One struct per recording, carrying its own artist, title and source count —
+// `sources` is a per-recording field in AcoustID's response, and pairing it
+// with its recording here is what lets the report show which link in a cluster
+// is well attested and which is a lone submission.
 func buildResultRows(results []acoustid.Result) []fingerprintResultRow {
 	rows := make([]fingerprintResultRow, 0, len(results))
 	for _, r := range results {
-		row := fingerprintResultRow{
-			ID: r.ID, Score: r.Score, Sources: r.Sources, Recordings: len(r.Recordings),
-		}
+		row := fingerprintResultRow{ID: r.ID, Score: r.Score}
 		for _, rec := range r.Recordings {
 			artist := "?"
 			if len(rec.Artists) > 0 {
 				artist = rec.Artists[0].Name
 			}
-			row.Artists = append(row.Artists, artist)
-			row.Titles = append(row.Titles, rec.Title)
+			row.Recordings = append(row.Recordings, fingerprintRecordingRow{
+				Artist: artist, Title: rec.Title, Sources: rec.Sources,
+			})
 		}
 		rows = append(rows, row)
 	}
@@ -413,14 +420,9 @@ func printFingerprintTiming(w io.Writer, r fingerprintReport, totals *fingerprin
 
 func printFingerprintResults(w io.Writer, r fingerprintReport) {
 	for i, res := range r.Results {
-		fmt.Fprintf(w, "    [%d] score %.2f  sources %d  recordings %d\n",
-			i+1, res.Score, res.Sources, res.Recordings)
-		for j := range res.Titles {
-			artist := "?"
-			if j < len(res.Artists) {
-				artist = res.Artists[j]
-			}
-			fmt.Fprintf(w, "        %s — %s\n", artist, res.Titles[j])
+		fmt.Fprintf(w, "    [%d] score %.2f  %d recording(s)\n", i+1, res.Score, len(res.Recordings))
+		for _, rec := range res.Recordings {
+			fmt.Fprintf(w, "        %-4d src  %s — %s\n", rec.Sources, rec.Artist, rec.Title)
 		}
 	}
 }

@@ -19,13 +19,13 @@ func goodInput() Input {
 		Fingerprint:           goodFP(240),
 		HasLocalArtistWitness: true,
 		Results: []Result{{
-			ID:      "9ff43b6a-4f16-427c-93c2-92307ca505e0",
-			Score:   0.99,
-			Sources: 12,
+			ID:    "9ff43b6a-4f16-427c-93c2-92307ca505e0",
+			Score: 0.99,
 			Recordings: []Recording{{
 				ID:            "cd2e7c47-16f5-46c6-a37c-a1eb7bf599ff",
 				Title:         "Lower Your Eyelids to Die With the Sun",
 				Duration:      240,
+				Sources:       12,
 				Artists:       []Artist{{ID: "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd", Name: "M83"}},
 				ReleaseGroups: []ReleaseGroup{{ID: "ddaa2d4d-314e-3e7c-b1d0-f6d207f5aa2f", Title: "Before the Dawn Heals Us", Type: "Album"}},
 			}},
@@ -70,11 +70,11 @@ func TestAcceptRejections(t *testing.T) {
 			in.Results = append(in.Results, runnerUp)
 		}},
 		{"too few sources with a local witness", ReasonFewSources, func(in *Input) {
-			in.Results[0].Sources = minSources - 1
+			in.Results[0].Recordings[0].Sources = minSources - 1
 		}},
 		{"too few sources without a local witness", ReasonFewSources, func(in *Input) {
 			in.HasLocalArtistWitness = false
-			in.Results[0].Sources = minSourcesNoLocalArtist - 1
+			in.Results[0].Recordings[0].Sources = minSourcesNoLocalArtist - 1
 		}},
 		{"no recordings on the cluster", ReasonNoRecordings, func(in *Input) {
 			in.Results[0].Recordings = nil
@@ -173,7 +173,7 @@ func TestDecisionCannotCarryAReleaseMBID(t *testing.T) {
 func TestMaximallyFavourableResponseStillYieldsNoRelease(t *testing.T) {
 	in := goodInput()
 	in.Results[0].Score = 1.0
-	in.Results[0].Sources = 500
+	in.Results[0].Recordings[0].Sources = 500
 	got, reason := Accept(in)
 	if reason != ReasonNone {
 		t.Fatalf("unexpected rejection: %q", reason)
@@ -286,7 +286,7 @@ func TestSourcesBarRisesWithoutALocalWitness(t *testing.T) {
 	const between = (minSources + minSourcesNoLocalArtist) / 2
 
 	in := goodInput()
-	in.Results[0].Sources = between
+	in.Results[0].Recordings[0].Sources = between
 	if _, reason := Accept(in); reason != ReasonNone {
 		t.Fatalf("with a local witness, %d sources should pass: %q", between, reason)
 	}
@@ -386,5 +386,66 @@ func TestRejectReasonsAreBounded(t *testing.T) {
 	}
 	if len(all) > 16 {
 		t.Errorf("reject reasons grew to %d; keep the set small and closed", len(all))
+	}
+}
+
+// TestSourcesFilterDiscriminatesWithinACluster pins the capability that came
+// out of reading a live AcoustID response: `sources` is reported PER RECORDING,
+// not per result.
+//
+// The bug this replaced was silent and total — the field was read off the
+// result object, where AcoustID never puts it, so every track saw 0 sources and
+// the clause rejected the entire library. Nothing in CI could catch that,
+// because a hand-written fixture reproduces whatever shape its author believed
+// in; only a real response settles it.
+//
+// Being per-recording is also strictly better than the cluster-level number the
+// gate was designed around: a cluster carrying one well-attested recording and
+// one lone mis-tagged submission now keeps the former and drops the latter,
+// which removes a common cause of spurious artist disagreement.
+func TestSourcesFilterDiscriminatesWithinACluster(t *testing.T) {
+	in := goodInput()
+	// A second recording, same duration and cluster, but a single submission —
+	// and crediting a different artist, which is what a mis-tagged link looks
+	// like in practice.
+	weak := in.Results[0].Recordings[0]
+	weak.ID = "99999999-9999-9999-9999-999999999999"
+	weak.Sources = 1
+	weak.Artists = []Artist{{ID: "88888888-8888-8888-8888-888888888888", Name: "Mis-tagged Someone"}}
+	in.Results[0].Recordings = append(in.Results[0].Recordings, weak)
+
+	got, reason := Accept(in)
+	if reason != ReasonNone {
+		t.Fatalf("a 1-source outlier must be filtered out, not veto the match: %q", reason)
+	}
+	if got.ArtistMBID != "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd" {
+		t.Errorf("ArtistMBID = %q, want the well-attested recording's artist", got.ArtistMBID)
+	}
+	// The weak recording is gone, so the survivor set is unique again.
+	if got.RecordingMBID != "cd2e7c47-16f5-46c6-a37c-a1eb7bf599ff" {
+		t.Errorf("RecordingMBID = %q, want the surviving recording", got.RecordingMBID)
+	}
+	// Sources reports the weakest survivor — the evidence actually relied on,
+	// not the flattering maximum.
+	if got.Sources != 12 {
+		t.Errorf("Sources = %d, want 12 (the weakest survivor)", got.Sources)
+	}
+}
+
+// TestWeakestSourcesReportsTheFloor — every survivor has already cleared the
+// bar, so the honest number to record is the lowest, not the highest.
+func TestWeakestSourcesReportsTheFloor(t *testing.T) {
+	in := goodInput()
+	second := in.Results[0].Recordings[0]
+	second.ID = "77777777-7777-7777-7777-777777777777"
+	second.Sources = 40
+	in.Results[0].Recordings = append(in.Results[0].Recordings, second)
+
+	got, reason := Accept(in)
+	if reason != ReasonNone {
+		t.Fatalf("unexpected rejection: %q", reason)
+	}
+	if got.Sources != 12 {
+		t.Errorf("Sources = %d, want 12 (the minimum across survivors)", got.Sources)
 	}
 }
