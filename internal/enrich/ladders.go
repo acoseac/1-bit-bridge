@@ -189,6 +189,42 @@ var headCreditSeparators = []string{
 	" feat. ", " feat ", " ft. ", " ft ", " featuring ",
 }
 
+// lowerASCII maps A-Z to a-z and leaves every other byte alone.
+//
+// UNLIKE strings.ToLower this is byte-length preserving, which is what makes
+// splitHeadCredit's `raw[:cut]` safe. Go's case table shortens İ (U+0130, 2
+// bytes → 1), U+212A KELVIN (3 → 1) and ẞ (U+1E9E, 3 → 2), so an offset found
+// in the lowered string is not an offset into the original: every such rune
+// before the separator shifts the cut left, truncating the head credit, and a
+// multi-byte rune straddling the shifted offset makes the slice invalid UTF-8
+// — which then flows through escapeLucene into the query URL.
+//
+// stripArtistPrefix's docblock states the rule this was breaking: "you cannot
+// map a folded offset back into the original".
+//
+// Lowering only ASCII loses no matches here because every separator is ASCII,
+// and an ASCII byte in UTF-8 is always a standalone rune (continuation bytes
+// are >= 0x80). Returns s unchanged when there is nothing to lower, so the
+// common case allocates nothing — strictly cheaper than ToLower, not merely
+// safer.
+func lowerASCII(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 'A' || s[i] > 'Z' {
+			continue
+		}
+		// First uppercase byte. Everything before it is already lower, so the
+		// copy starts here rather than rescanning from 0.
+		b := []byte(s)
+		for j := i; j < len(b); j++ {
+			if b[j] >= 'A' && b[j] <= 'Z' {
+				b[j] += 'a' - 'A'
+			}
+		}
+		return string(b)
+	}
+	return s
+}
+
 // splitHeadCredit returns the first credit in a multi-credit tag, or ""
 // when the tag carries only one credit.
 func splitHeadCredit(artist string) string {
@@ -196,7 +232,10 @@ func splitHeadCredit(artist string) string {
 	if raw == "" {
 		return ""
 	}
-	lower := strings.ToLower(raw)
+	// lowerASCII, NOT strings.ToLower — see its docblock. `cut` below is an
+	// offset into this string and is used to slice `raw`, so the two must
+	// agree byte for byte.
+	lower := lowerASCII(raw)
 	cut := -1
 	for _, sep := range headCreditSeparators {
 		if i := strings.Index(lower, sep); i >= 0 && (cut < 0 || i < cut) {

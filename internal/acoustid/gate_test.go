@@ -1,7 +1,11 @@
 package acoustid
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -373,27 +377,90 @@ func TestEntropyFloorCalibration(t *testing.T) {
 // TestRejectReasonsAreBounded keeps the reason set small enough to key a
 // counter map safely. It is NOT the enricher's skip-reason map — that one is
 // separately bounded and must never be keyed on one of these.
+//
+// Reads the const block rather than a hand-written list. The list version
+// stopped covering ReasonOnlyPlaceholderArtist the moment #613 added it —
+// silently, because a list that is missing an entry still passes every
+// assertion made about the entries it has. That is exactly the drift the
+// duplicate-value check exists to catch, so the enumeration cannot be the
+// thing doing the checking.
 func TestRejectReasonsAreBounded(t *testing.T) {
-	all := []RejectReason{
-		ReasonUnknownDuration, ReasonTooShort, ReasonTooLong, ReasonIsDSD,
-		ReasonLowEntropy, ReasonDecodeMismatch,
-		ReasonNoResults, ReasonLowScore, ReasonAmbiguousResults, ReasonFewSources,
-		ReasonNoRecordings, ReasonDurationMismatch, ReasonArtistDisagreement,
-		ReasonNoArtistMBID,
-	}
-	seen := map[RejectReason]bool{}
-	for _, r := range all {
-		if r == ReasonNone {
-			t.Error("ReasonNone must not appear in the rejection set")
-		}
-		if seen[r] {
-			t.Errorf("duplicate reason %q", r)
-		}
-		seen[r] = true
+	all := parseRejectReasonConsts(t)
+
+	if len(all) < 15 {
+		t.Errorf("found only %d reject reasons; the parse is probably not seeing the "+
+			"const block any more", len(all))
 	}
 	if len(all) > 16 {
 		t.Errorf("reject reasons grew to %d; keep the set small and closed", len(all))
 	}
+
+	seen := map[string]string{} // value -> name
+	for name, value := range all {
+		if value == "" {
+			if name != "ReasonNone" {
+				t.Errorf("%s has an empty value; only ReasonNone may", name)
+			}
+			continue
+		}
+		if prev, dup := seen[value]; dup {
+			t.Errorf("%s and %s share the value %q — a counter map would merge them",
+				prev, name, value)
+		}
+		seen[value] = name
+	}
+	if _, ok := all["ReasonNone"]; !ok {
+		t.Error("ReasonNone is gone; the accepted sentinel is part of this contract")
+	}
+}
+
+// parseRejectReasonConsts returns every `Name RejectReason = "value"` const
+// declared in gate.go, keyed by name.
+//
+// Go's test binary runs with the package directory as its working directory,
+// so the source is right here.
+func parseRejectReasonConsts(t *testing.T) map[string]string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "gate.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse gate.go: %v", err)
+	}
+
+	out := map[string]string{}
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			// Only the specs that name the type — the block also carries
+			// unrelated float and int thresholds.
+			if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != "RejectReason" {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					t.Errorf("%s is not a string literal; this test assumes it can read "+
+						"the value directly", name.Name)
+					continue
+				}
+				value, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatalf("unquote %s: %v", name.Name, err)
+				}
+				out[name.Name] = value
+			}
+		}
+	}
+	return out
 }
 
 // TestSourcesFilterDiscriminatesWithinACluster pins the capability that came
