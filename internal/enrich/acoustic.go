@@ -136,6 +136,12 @@ func isJunkArtistTag(artist string) bool {
 // isUnsearchableArtistTag reports whether an artist tag is one MusicBrainz
 // cannot possibly answer, so the query should never be sent.
 //
+// Consulted by BOTH ladders, per rung — buildArtistLadder and
+// buildReleaseLadder each drop a rung whose artist is unanswerable. Per rung
+// rather than per track, because a track carrying such a tag usually still has
+// an albumArtist worth asking about, and gating on the tag would discard that
+// rung along with the pointless one.
+//
 // # This is NOT isJunkArtistTag, and the two must not be merged
 //
 // They look like duplicates and are not. The sets differ because a false
@@ -164,8 +170,23 @@ func isJunkArtistTag(artist string) bool {
 // Skipping also avoids a bad write: "An Unknown Artist" put through the fuzzy
 // A4 pass can clear its threshold against a placeholder-shaped entity, which
 // would stamp a meaningless MBID on the track.
+//
+// The asymmetry argument above only gets STRONGER now that the release ladder
+// consults this too: a false positive costs the track its album match as well
+// as its artist. Do not widen this set.
 func isUnsearchableArtistTag(artist string) bool {
-	folded := foldName(artist)
+	return isUnsearchableArtistFolded(foldName(artist))
+}
+
+// isUnsearchableArtistFolded is isUnsearchableArtistTag over an ALREADY-FOLDED
+// tag, for the ladder builders — both of them fold the same string again a
+// line later to build their dedup key, and foldForMatch is not free (NFKD, a
+// rune pass, a case-fold and a re-join).
+//
+// Same convention as isDiscOrTrackLabel above, and the same hazard: passing a
+// raw tag here compares it against folded constants and silently answers
+// false. Call isUnsearchableArtistTag unless the fold is already in hand.
+func isUnsearchableArtistFolded(folded string) bool {
 	if folded == "" {
 		return false // may be a real name that folds away; let it search
 	}

@@ -1454,7 +1454,11 @@ func (e *Enricher) searchReleaseWithFallbacks(ctx context.Context, t *manifest.T
 			return nil, err
 		}
 		if res != nil {
-			if i > 0 {
+			// Gate on "we asked something other than the tags", not on the
+			// rung INDEX — dropping an unanswerable rung can make a fallback
+			// rung index 0, and this line is the operator's only measure of
+			// what the ladder buys. Same reasoning as the artist ladder's.
+			if foldName(a.artist) != foldName(t.Artist) || foldTitle(a.album) != foldTitle(t.Album) {
 				logger.Info("MB search matched on a fallback query",
 					"path", t.Path, "attempt", i,
 					"searchedArtist", a.artist, "searchedAlbum", a.album)
