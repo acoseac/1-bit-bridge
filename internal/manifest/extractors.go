@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,6 +105,30 @@ func isValidDSDSampleRate(sr uint32) bool {
 type ExtractContext struct {
 	ArtworkCacheDir string    // <dataDir>/artwork; "" disables local-art
 	FolderArtCache  *sync.Map // dir-path string -> *folderArtPromise
+	// LibraryRootDirs is the cleaned ABSOLUTE set of configured library
+	// roots — callers must supply keys in the same path form the
+	// extraction absPaths use (the scanner walks absolute paths, so a
+	// relative configured root must be Abs'd before insertion or the
+	// boundary check silently goes inert).
+	// It is the set of configured library roots,
+	// consulted by the disc-subfolder parent-art fallback so a root
+	// directory literally named like a disc folder ("Disc 1") can never
+	// read its PARENT — a directory outside the configured library
+	// (the internal/fs traversal-rejection posture). nil is safe: the
+	// guard is simply inert, which is correct for one-shot Extract /
+	// test callers that have no root set; only the scanner's workers
+	// need the boundary.
+	LibraryRootDirs map[string]struct{}
+}
+
+// isLibraryRoot reports whether dir (cleaned) is one of the configured
+// library roots. Nil-safe — see LibraryRootDirs.
+func (ec *ExtractContext) isLibraryRoot(dir string) bool {
+	if ec == nil || ec.LibraryRootDirs == nil {
+		return false
+	}
+	_, ok := ec.LibraryRootDirs[filepath.Clean(dir)]
+	return ok
 }
 
 // Ext enumerates the file extensions the scanner considers. Case-
@@ -154,7 +179,15 @@ var Ext = map[string]bool{
 // (year / composer / multi-value artist were silently dropped for M4A). The
 // first scan after this ships re-extracts every existing row once (all
 // formats), then size+mtime skips resume.
-const ExtractorVersion = 1
+//
+// Bumped to 2 with the disc-subfolder parent folder-art fallback
+// (extractLocalArtwork): the first scan after this ships re-extracts every
+// stale row once so existing multi-disc albums (Album/cover.jpg +
+// Album/Disc 1/track) pick up their album-root cover. The version-stale
+// diff-guard (scanner.go reExtractUnchanged) keeps rows whose merged
+// re-extract is byte-identical OUT of the iOS delta — only rows that
+// actually gained something (art, extractor fixes) bump indexed_at.
+const ExtractorVersion = 2
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -2130,8 +2163,11 @@ func parsePropChunks(body []byte, t *Track) (dstCompressed bool) {
 }
 
 // extractLocalArtwork stamps t.ArtworkMBID with `local-<sha256>` when
-// embedded artwork (preferred) or folder-level art (cover.jpg /
-// folder.jpg, case-insensitive — JPEG-only) is found. Caller must
+// embedded artwork (preferred), folder-level art (cover.jpg /
+// folder.jpg, case-insensitive — JPEG-only), or — for tracks living in
+// a disc-style subfolder ("Disc 1" / "CD2" / "LP 1"…) — the PARENT
+// directory's folder art is found. The parent climb is exactly ONE
+// level and disc-name-gated; see the fallback block below. Caller must
 // guarantee ec != nil and ec.ArtworkCacheDir != "".
 //
 // The embedded branch wins on a per-track basis — two tracks in the
@@ -2194,11 +2230,81 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 	})
 	if promise.res.found {
 		t.ArtworkMBID = promise.res.mbid
+		return
+	}
+
+	// 3) Disc-subfolder parent fallback: the standard multi-disc layout
+	//    keeps ONE cover at the album root with tracks a level deeper —
+	//    `Album/cover.jpg` + `Album/Disc 1/track.dsf` — which the own-dir
+	//    lookup above can never see (the confirmed root cause of the
+	//    "Puccini: Turandot" grey tile, 2026-07-30). Climb EXACTLY ONE
+	//    level, and ONLY when the track's own directory is named like a
+	//    disc folder: an unconditional walk-up would attribute
+	//    `Artist/cover.jpg` to every `Artist/Album/track`. The own-dir
+	//    candidates always win (the early return above).
+	//
+	//    Shallow-hierarchy consequence, accepted: a degenerate layout
+	//    `Artist/Disc 1/track` with an artist-level cover.jpg inherits
+	//    that asset — a wrong-ish cover beats a grey tile, and the
+	//    layout itself is malformed (a disc folder outside an album).
+	//
+	//    The parent lookup rides the SAME single-flight cache keyed on
+	//    the parent path, so `Album/Disc 1` + `Album/Disc 2` (and an
+	//    `Album/` that also holds loose tracks) share exactly one
+	//    ReadDir + hash for the album root per scan — positive AND
+	//    negative results cached, identical to an own-dir lookup of
+	//    that directory.
+	if !isDiscFolderName(filepath.Base(dir)) {
+		return
+	}
+	if ec.isLibraryRoot(dir) {
+		// The track's directory IS a configured root — its parent is
+		// outside the library; never read it.
+		return
+	}
+	parent := filepath.Dir(dir)
+	if parent == dir {
+		return // filesystem root
+	}
+	parentI, _ := ec.FolderArtCache.LoadOrStore(parent, &folderArtPromise{})
+	parentPromise := parentI.(*folderArtPromise)
+	parentPromise.once.Do(func() {
+		parentPromise.res = scanFolderArtwork(parent, ec.ArtworkCacheDir)
+	})
+	if parentPromise.res.found {
+		t.ArtworkMBID = parentPromise.res.mbid
 	}
 }
 
+// discFolderRe matches directory basenames that follow the common
+// multi-disc subfolder conventions: an optional-separator media word
+// (disc / disk / cd / lp / bd / dvd, any case) followed by a 1-3 digit
+// disc number, optionally followed by a separator-introduced suffix
+// ("Disc 1 - Bonus Material", "CD 1 [Remaster]", "Disc 2 (Live)").
+//
+// The digit anchor directly after the optional separator is what rejects
+// real album titles like "Disco 2" / "Discovery" (the trailing letters
+// fail the anchor) and bare "cd" / "Disc" (no number). The 1-3 digit cap
+// rejects year/catalog shapes ("CD 1234"). "Vol 1" / "Volume 2" are
+// deliberately NOT matched — volumes are usually distinct albums with
+// their own covers, and matching them would mis-attribute series-level
+// art. "Side A" (vinyl sides) likewise excluded: an album could
+// plausibly carry that name. Roman numerals ("Disc II") and localized
+// words ("Disque 1") are a future extension.
+var discFolderRe = regexp.MustCompile(`^(?i:disc|disk|cd|lp|bd|dvd)\s*[-_.#]?\s*[0-9]{1,3}(?:[\s._()\[\]\-].*)?$`)
+
+// isDiscFolderName reports whether name looks like a multi-disc
+// subfolder (see discFolderRe). Trims surrounding whitespace first so a
+// directory named "Disc 1 " (trailing space, common on SMB copies from
+// Windows) still matches.
+func isDiscFolderName(name string) bool {
+	return discFolderRe.MatchString(strings.TrimSpace(name))
+}
+
 // folderArtCandidates is the set of filenames the folder-level
-// fallback recognises. Compared case-insensitively (Linux
+// fallback recognises — for BOTH the own-directory lookup and the
+// disc-subfolder parent fallback (one candidate set, one contract).
+// Compared case-insensitively (Linux
 // filesystems are case-sensitive — Windows-tagger output
 // `Cover.JPG`, `FOLDER.JPG`, etc. would silently miss a hardcoded
 // lowercase os.Stat).
