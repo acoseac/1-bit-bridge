@@ -145,6 +145,22 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 		if t.ArtistMBID != "" && t.MusicBrainzAlbumID != "" {
 			return nil
 		}
+		// ...and only after the text ladder has actually had its turn.
+		// Enriched is spliced from enriched_at at read time, so false means
+		// "queued, not yet attempted" — the enricher stamps on every exit
+		// including markSkipped, so a genuine give-up always reads true.
+		// Fingerprinting those would race ahead of the cheap path and spend a
+		// decode (on a network-backed library, whole-object egress) to answer
+		// a question text is about to answer for free. It also makes the
+		// re-queue meaningful: a row already at enriched_at=0 is one
+		// ResetEnrichedByPaths cannot advance.
+		//
+		// Fails OPEN on a nil pointer: that degrades to sweeping the wider
+		// set, which is merely wasteful, where failing closed would disable
+		// the feature outright and silently.
+		if t.Enriched != nil && !*t.Enriched {
+			return nil
+		}
 		durationS, isDSD := 0.0, false
 		if t.Duration != nil {
 			durationS = *t.Duration
