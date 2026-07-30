@@ -60,8 +60,18 @@ func (s *Store) ResetEnrichedByPaths(ctx context.Context, paths []string) (int64
 	return res.RowsAffected()
 }
 
-// SetAcoustIDMatch records which AcoustID cluster produced the MBIDs on a
+// SetAcoustIDMatch records which AcoustID cluster the sweeper ACCEPTED for a
 // track, as provenance for the fingerprint fallback.
+//
+// Read the verb precisely, because the obvious undo depends on it. This is
+// written when the gate accepts, which is before the enricher has applied
+// anything — and the enricher can still refuse at apply time, where the
+// local-tag veto runs against the row's own tags. A row can also reach the
+// sweeper already holding a text-derived ArtistMBID, since a candidate only
+// needs ONE of the two MBIDs missing. So presence means "a fingerprint answer
+// was accepted for this path", NOT "every MBID on this row came from audio".
+// An undo may therefore use this column to SELECT rows, but must not blindly
+// clear their MBIDs — some of those are text-derived and predate the match.
 //
 // Column-only: it never reaches tags_json and never reaches the wire, so it
 // costs no ProtocolVersion bump and no iOS mirror. See the v28 migration for

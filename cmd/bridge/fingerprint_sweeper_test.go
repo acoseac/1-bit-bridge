@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // TestSweeperPacerSerialisesAcrossWorkers pins the fix for a bug that made the
@@ -124,5 +128,69 @@ func TestSweeperDrainGraceIsAShutdownBound(t *testing.T) {
 	if sweeperDrainGrace > time.Minute {
 		t.Errorf("sweeperDrainGrace = %v; it bounds SHUTDOWN, so it should stay small — "+
 			"a long value here delays process exit on a wedged mount", sweeperDrainGrace)
+	}
+}
+
+// TestCollectCandidatesSkipsTracksTheEnricherHasNotTriedYet pins the gate that
+// keeps the sweeper behind the text ladder rather than racing it.
+//
+// Found in production, not in review: home-pc logged "resolved=1 requeued=0",
+// and the zero is the tell — ResetEnrichedByPaths only advances rows at
+// enriched_at > 0, so every path it had just fingerprinted was already queued
+// for its first text attempt. An ExtractorVersion bump had re-extracted the
+// library and reset the whole thing to 0, and the sweeper followed it in.
+//
+// On a steady-state library the two populations are identical, which is why no
+// fixture caught this; the difference only appears while a re-extraction is in
+// flight, and it points the wrong way — the sweeper spends a decode (whole-object
+// egress on a network-backed root) to answer what text is about to answer free.
+func TestCollectCandidatesSkipsTracksTheEnricherHasNotTriedYet(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Both are eligible in every other respect: real file, PCM, a duration
+	// inside the gate's window, and missing exactly what fingerprinting supplies.
+	dur := 240.0
+	for _, name := range []string{"tried.flac", "untried.flac"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tr := &manifest.Track{Path: name, Size: 5, ModTime: time.Now(), Duration: &dur}
+		if err := store.UpsertTrack(ctx, tr); err != nil {
+			t.Fatalf("UpsertTrack %q: %v", name, err)
+		}
+	}
+	// UpsertTrack resets enriched_at to 0, so both rows now read "never tried".
+	// Stamp one of them the way the enricher does when it gives up.
+	if err := store.MarkEnriched(ctx, &manifest.Track{
+		Path: "tried.flac", Size: 5, ModTime: time.Now(), Duration: &dur,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &fingerprintSweeper{
+		store:     store,
+		resolver:  bridgefs.New([]string{root}),
+		cache:     acoustid.NewCache(16),
+		maxPerRun: 100,
+	}
+	got, err := s.collectCandidates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var paths []string
+	for _, c := range got {
+		paths = append(paths, c.path)
+	}
+	if len(paths) != 1 || paths[0] != "tried.flac" {
+		t.Errorf("candidates = %v, want exactly [tried.flac]; the untried row belongs to the "+
+			"text ladder until it stamps enriched_at", paths)
 	}
 }
