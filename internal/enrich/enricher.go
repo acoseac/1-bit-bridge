@@ -483,7 +483,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// MarkEnriched at the bottom stamps the track done so the worker
 	// doesn't loop on it. Without this relaxation, the local-artwork
 	// feature would silently fail to fix the very case it targets.
-	if albumMBID == "" && !strings.HasPrefix(t.ArtworkMBID, "local-") {
+	if albumMBID == "" {
 		// Resolve the ARTIST before giving up on the album. The two halves are
 		// independent — the artist search is a different, much more reliable
 		// query (30-190ms and a far smaller candidate space than the release
@@ -516,8 +516,30 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			e.enrichWithRecoveredArtist(ctx, t, m)
 			return
 		}
-		e.markSkipped(ctx, t, acousticSkipReason(e, outcome, skipReasonNoMBMatch),
-			"no acceptable release candidate")
+		// PR #98's local-artwork contract, and the reason this used to be
+		// part of the branch condition: a track whose cover the scanner
+		// curated locally is NOT a failure just because MusicBrainz has no
+		// release for it, so it is stamped rather than skipped.
+		//
+		// The condition governs the STAMP, never the consult. Gating
+		// reachability on it made the fallback dead on any library with
+		// folder.jpg files — on the test host that was 18,306 of 18,429
+		// tracks, i.e. effectively the entire population the feature
+		// targets. Whether the user curated artwork says nothing about
+		// whether MusicBrainz knows the recording.
+		if !strings.HasPrefix(t.ArtworkMBID, "local-") {
+			e.markSkipped(ctx, t, acousticSkipReason(e, outcome, skipReasonNoMBMatch),
+				"no acceptable release candidate")
+			return
+		}
+		// Local artwork, no release match, nothing recovered: there is
+		// nothing left to do but stamp, so do it here rather than falling
+		// through. The artwork block below is local-guarded and would be a
+		// no-op, but resolveArtist is NOT free on a second call — a cache
+		// hit still reaches ensureArtistImageCached, which stats the
+		// portrait path. Falling through would pay that per track, on the
+		// largest population in the library (Gemini, PR #612).
+		e.stampEnriched(ctx, t)
 		return
 	}
 
@@ -561,11 +583,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		return
 	}
 
-	if err := e.store.MarkEnriched(ctx, t); err != nil {
-		logger.Error("mark enriched", "path", t.Path, "err", err)
-		return
-	}
-	e.done.Add(1)
+	e.stampEnriched(ctx, t)
 }
 
 // resolveArtist fills in t.ArtistMBID and ensures the artist image is
@@ -929,6 +947,24 @@ func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) s
 		return skipReasonFingerprintVetoed
 	}
 	return skipReasonNoFingerprintMatch
+}
+
+// stampEnriched commits the track and counts it done.
+//
+// Shared by every success exit — the ordinary path, the fingerprint-recovered
+// path, and the local-artwork-without-a-release path. A MarkEnriched failure is
+// logged and swallowed: the row stays at enriched_at = 0 and the worker retries
+// it, which is the right outcome for a transient store error.
+//
+// Deliberately NOT shared with markSkipped, which differs on both counts: it
+// tallies a skip rather than a success, and it does not return early on error
+// because it still has a reason to record.
+func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
+	if err := e.store.MarkEnriched(ctx, t); err != nil {
+		logger.Error("mark enriched", "path", t.Path, "err", err)
+		return
+	}
+	e.done.Add(1)
 }
 
 // markSkipped stamps enriched_at so the worker doesn't retry the same

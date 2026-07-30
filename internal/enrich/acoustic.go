@@ -85,14 +85,6 @@ var junkArtistTags = map[string]struct{}{
 	"n a":               {}, // "N/A" — the slash folds to a space
 }
 
-// isJunkArtistTag reports whether an artist tag is too generic to contradict
-// anything.
-//
-// Fold-exact plus two shapes that are structurally generic: a purely numeric
-// tag, and "track N" / "cd N" / "disc N". Deliberately NOT substring matching:
-// "Artist Name - Unknown" folds to "artist name unknown", which is a real
-// enough artist to be worth vetoing with, and a contains-check would classify
-// it as junk and silently drop the veto.
 // isDiscOrTrackLabel reports whether an ALREADY-FOLDED tag is a disc or track
 // label that leaked out of a folder name — "CD 01", "Disc 2", "Track 7".
 //
@@ -112,6 +104,14 @@ func isDiscOrTrackLabel(folded string) bool {
 	return false
 }
 
+// isJunkArtistTag reports whether an artist tag is too generic to contradict
+// anything.
+//
+// Fold-exact plus two shapes that are structurally generic: a purely numeric
+// tag, and "track N" / "cd N" / "disc N". Deliberately NOT substring matching:
+// "Artist Name - Unknown" folds to "artist name unknown", which is a real
+// enough artist to be worth vetoing with, and a contains-check would classify
+// it as junk and silently drop the veto.
 func isJunkArtistTag(artist string) bool {
 	folded := foldName(artist)
 	if folded == "" {
@@ -304,11 +304,7 @@ func (e *Enricher) enrichWithRecoveredArtist(ctx context.Context, t *manifest.Tr
 		return // transient failure: leave enriched_at alone so the worker retries
 	}
 	e.fetchRecoveredArtistImage(ctx, t, m)
-	if err := e.store.MarkEnriched(ctx, t); err != nil {
-		logger.Error("mark enriched", "path", t.Path, "err", err)
-		return
-	}
-	e.done.Add(1)
+	e.stampEnriched(ctx, t)
 }
 
 // applyAlbumHop resolves and applies the album, returning false only when the
