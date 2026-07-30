@@ -115,7 +115,12 @@ func (s *fingerprintSweeper) sweep(ctx context.Context) {
 	if len(resolved) > 0 {
 		n, err := s.store.ResetEnrichedByPaths(ctx, resolved)
 		if err != nil {
-			logger.Error("fingerprint sweep: re-queue", "err", err)
+			// A cancelled context here is a normal shutdown, not a fault —
+			// logging it at Error would put a misleading line in the journal
+			// every time the bridge stops mid-sweep.
+			if ctx.Err() == nil {
+				logger.Error("fingerprint sweep: re-queue", "err", err)
+			}
 			return
 		}
 		logger.Info("fingerprint sweep re-queued resolved tracks", "resolved", len(resolved), "requeued", n)
@@ -316,21 +321,28 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 // wait applies the AcoustID pacing interval across ALL workers.
 //
 // Per-worker pacing would burst by exactly the worker count, because the
-// politeness contract belongs to the API key rather than to any one
-// goroutine.
+// politeness contract belongs to the API key rather than to any one goroutine.
+//
+// THE LOCK IS HELD ACROSS THE SLEEP, deliberately. An earlier version released
+// it before sleeping to avoid blocking siblings, which defeated the whole
+// mechanism: every worker then acquired the lock in turn, read the SAME stale
+// s.last, computed the same delay, and they all woke and fired together —
+// precisely the burst the pacer exists to prevent.
+//
+// The resulting convoy is not a smell here, it IS the rate limit: one request
+// per interval is the intended throughput, and a worker waiting its turn has
+// nothing else to do anyway — the lookup is its next step. Cancellation still
+// returns immediately, releasing the lock via the defer.
 func (s *fingerprintSweeper) wait(ctx context.Context) {
 	s.pacer.Lock()
-	interval := s.client.MinInterval()
-	if wait := interval - time.Since(s.last); wait > 0 && !s.last.IsZero() {
-		s.pacer.Unlock()
+	defer s.pacer.Unlock()
+	if wait := s.client.MinInterval() - time.Since(s.last); wait > 0 && !s.last.IsZero() {
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():
 		}
-		s.pacer.Lock()
 	}
 	s.last = time.Now()
-	s.pacer.Unlock()
 }
 
 // acousticLookupAdapter bridges the cache to the enricher's interface. The
