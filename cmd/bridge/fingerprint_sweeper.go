@@ -239,7 +239,7 @@ func (s *fingerprintSweeper) fingerprintAll(ctx context.Context, cands []candida
 	// normal work, the other is a wedged filesystem.
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
-	waitForWorkers(ctx, done)
+	waitForWorkers(ctx, sweeperDrainGrace, done)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -251,7 +251,11 @@ func (s *fingerprintSweeper) fingerprintAll(ctx context.Context, cands []candida
 //
 // Split out so the distinction it encodes is directly testable: a healthy
 // sweep must never be cut short, and a cancelled one must never hang.
-func waitForWorkers(ctx context.Context, done <-chan struct{}) {
+//
+// grace is a PARAMETER rather than a package-level knob so the tests never
+// have to mutate shared state to drive it — which would be a data race the
+// moment anything ran in parallel, and lets sweeperDrainGrace stay a const.
+func waitForWorkers(ctx context.Context, grace time.Duration, done <-chan struct{}) {
 	select {
 	case <-done:
 		return
@@ -259,7 +263,7 @@ func waitForWorkers(ctx context.Context, done <-chan struct{}) {
 	}
 	select {
 	case <-done:
-	case <-time.After(sweeperDrainGrace):
+	case <-time.After(grace):
 		logger.Warn("fingerprint sweep: workers did not drain within the shutdown grace window; " +
 			"continuing (a wedged filesystem can hold fpcalc in uninterruptible sleep)")
 	}
@@ -268,7 +272,7 @@ func waitForWorkers(ctx context.Context, done <-chan struct{}) {
 // sweeperDrainGrace bounds how long a CANCELLED sweep waits for its workers
 // before giving up on them. It is a shutdown bound, not a sweep budget — a
 // healthy sweep is never subject to it.
-var sweeperDrainGrace = 30 * time.Second
+const sweeperDrainGrace = 30 * time.Second
 
 // fingerprintOne decodes, looks up, and records one track. Returns true when
 // the gate accepted a match.

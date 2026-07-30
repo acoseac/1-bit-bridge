@@ -77,17 +77,15 @@ func TestSweeperPacerHonoursCancellation(t *testing.T) {
 // takes minutes, the other is a mount that will never answer.
 func TestWaitForWorkersLetsHealthyWorkersFinish(t *testing.T) {
 	// The worker must OUTLAST the grace, or the test passes under the buggy
-	// unconditional form too and pins nothing. Shortening the grace rather
-	// than lengthening the worker keeps the suite fast.
-	orig := sweeperDrainGrace
-	sweeperDrainGrace = 40 * time.Millisecond
-	t.Cleanup(func() { sweeperDrainGrace = orig })
+	// unconditional form too and pins nothing. A short grace keeps the suite
+	// fast; passing it in means no shared state is mutated to get it.
+	const grace = 40 * time.Millisecond
 
 	done := make(chan struct{})
 	go func() { time.Sleep(200 * time.Millisecond); close(done) }()
 
 	start := time.Now()
-	waitForWorkers(context.Background(), done)
+	waitForWorkers(context.Background(), grace, done)
 	elapsed := time.Since(start)
 
 	if elapsed < 180*time.Millisecond {
@@ -109,13 +107,11 @@ func TestWaitForWorkersGivesUpOnACancelledSweep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Shorten the grace for the test rather than sleeping it out for real.
-	orig := sweeperDrainGrace
-	sweeperDrainGrace = 80 * time.Millisecond
-	t.Cleanup(func() { sweeperDrainGrace = orig })
+	// A short grace rather than sleeping the real one out.
+	const grace = 80 * time.Millisecond
 
 	start := time.Now()
-	waitForWorkers(ctx, never)
+	waitForWorkers(ctx, grace, never)
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("waited %v on a cancelled sweep — a wedged worker must not hang shutdown", elapsed)
 	}
