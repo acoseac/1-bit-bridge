@@ -148,7 +148,21 @@ const (
 	ReasonDurationMismatch   RejectReason = "duration_mismatch"
 	ReasonArtistDisagreement RejectReason = "artist_disagreement"
 	ReasonNoArtistMBID       RejectReason = "no_artist_mbid"
+	// ReasonOnlyPlaceholderArtist — every surviving recording is credited to
+	// MusicBrainz's [unknown]. Distinct from no_artist_mbid on purpose: the
+	// data is well formed and the audio was identified, there is simply no
+	// performer named to write.
+	ReasonOnlyPlaceholderArtist RejectReason = "only_placeholder_artist"
 )
+
+// unknownArtistMBID is MusicBrainz's [unknown] special-purpose artist, whose
+// own disambiguation reads "Special Purpose Artist – Do not add releases here,
+// if possible."
+//
+// Verified against a LIVE AcoustID response rather than assumed: placeholder
+// recordings in the payload are credited to exactly this ID. Keyed on the MBID
+// and never the display name, which is localisable and third-party supplied.
+const unknownArtistMBID = "125ec42a-7229-4250-afc5-e057484327fe"
 
 // Input is everything the gate may consider. Deliberately not
 // *manifest.Track: passing the whole row would put every future field within
@@ -411,6 +425,23 @@ func acceptRecordings(in Input, top Result, tied bool) (Decision, RejectReason) 
 	if len(survivors) == 0 {
 		return Decision{}, ReasonFewSources
 	}
+	// MusicBrainz's [unknown] asserts NO KNOWLEDGE of the performer, not a
+	// different performer, so it must not get a vote in the consensus below.
+	// Counting it as dissent vetoes matches with overwhelming support: ABBA's
+	// "Waterloo" carries 6,259 submissions on one recording and was rejected
+	// artist_disagreement because a placeholder-credited sibling with 8
+	// cleared the sources filter. Both of that track's top two clusters
+	// carried one, so this is common rather than a curiosity.
+	//
+	// Dropping it from the VOTE is a correction, not a relaxation. It can
+	// never become the answer — if placeholders are all that survive there is
+	// no performer to write and the track is refused below — and every real
+	// recording still has to agree, so a genuinely dirty cluster is rejected
+	// exactly as before.
+	survivors = recordingsWithNamedArtist(survivors)
+	if len(survivors) == 0 {
+		return Decision{}, ReasonOnlyPlaceholderArtist
+	}
 	headID, headName, reason := headArtistConsensus(survivors)
 	if reason != ReasonNone {
 		return Decision{}, reason
@@ -438,6 +469,29 @@ func acceptRecordings(in Input, top Result, tied bool) (Decision, RejectReason) 
 
 // recordingsWithEnoughSources keeps the recordings whose fingerprint→recording
 // link carries at least `required` independent submissions.
+// recordingsWithNamedArtist drops recordings credited to MusicBrainz's
+// [unknown] placeholder.
+//
+// Applied AFTER the sources filter and BEFORE the consensus vote. Order
+// matters: a placeholder with few submissions is already gone, and what
+// remains is the case this exists for — a well-attested placeholder sitting
+// alongside the real credit for the same audio.
+//
+// A recording with NO artist at all is deliberately left in place, so that
+// headArtistConsensus still refuses it with ReasonNoArtistMBID. Silently
+// dropping those here would let a cluster be accepted on the strength of
+// whatever else remained.
+func recordingsWithNamedArtist(recordings []Recording) []Recording {
+	var out []Recording
+	for _, rec := range recordings {
+		if len(rec.Artists) > 0 && rec.Artists[0].ID == unknownArtistMBID {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
 func recordingsWithEnoughSources(recordings []Recording, required int) []Recording {
 	var out []Recording
 	for _, rec := range recordings {

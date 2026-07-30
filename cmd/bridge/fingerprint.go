@@ -222,9 +222,15 @@ type fingerprintResultRow struct {
 }
 
 type fingerprintRecordingRow struct {
-	Artist  string `json:"artist"`
-	Title   string `json:"title"`
-	Sources int    `json:"sources"`
+	Artist string `json:"artist"`
+	// ArtistMBID is what the GATE actually compares — headArtistConsensus
+	// keys on the ID, never the name. Printing only the name hid that a
+	// placeholder-credited recording was breaking consensus on clusters with
+	// overwhelming support, so the diagnostic now shows what the decision is
+	// made from.
+	ArtistMBID string `json:"artistMbid,omitempty"`
+	Title      string `json:"title"`
+	Sources    int    `json:"sources"`
 }
 
 func fingerprintOne(ctx context.Context, client *acoustid.Client, path string,
@@ -377,12 +383,12 @@ func buildResultRows(results []acoustid.Result) []fingerprintResultRow {
 	for _, r := range results {
 		row := fingerprintResultRow{ID: r.ID, Score: r.Score}
 		for _, rec := range r.Recordings {
-			artist := "?"
+			artist, artistMBID := "?", ""
 			if len(rec.Artists) > 0 {
-				artist = rec.Artists[0].Name
+				artist, artistMBID = rec.Artists[0].Name, rec.Artists[0].ID
 			}
 			row.Recordings = append(row.Recordings, fingerprintRecordingRow{
-				Artist: artist, Title: rec.Title, Sources: rec.Sources,
+				Artist: artist, ArtistMBID: artistMBID, Title: rec.Title, Sources: rec.Sources,
 			})
 		}
 		rows = append(rows, row)
