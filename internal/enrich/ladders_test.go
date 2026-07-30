@@ -263,6 +263,41 @@ func TestTruncateAtFirstRole(t *testing.T) {
 }
 
 // TestBuildReleaseLadderIsAdditiveAndCapped pins that rungs 1-4 are
+// TestBuildReleaseLadderDropsUnanswerableArtists pins the release half of the
+// per-rung rule.
+//
+// This is the query that runs FIRST — enrichOne resolves the album before it
+// reaches resolveArtist — so gating only the artist search left the louder
+// half of the junk traffic in place.
+//
+// The rescue rung must survive: dropping rung 1 promotes the albumArtist rung
+// to first, it does not remove it.
+func TestBuildReleaseLadderDropsUnanswerableArtists(t *testing.T) {
+	got := buildReleaseLadder("CD 01", "Abdullah Ibrahim", "Live At Montreux")
+	if len(got) == 0 {
+		t.Fatal("ladder is empty — the albumArtist rung is the whole point of this case")
+	}
+	for _, a := range got {
+		if isUnsearchableArtistTag(a.artist) {
+			t.Errorf("ladder queries %q as an artist: %+v", a.artist, got)
+		}
+	}
+	if got[0].artist != "Abdullah Ibrahim" {
+		t.Errorf("first rung = %+v, want the albumArtist rung promoted to first", got[0])
+	}
+
+	// Every rung unanswerable: no query at all, and the caller reads that the
+	// same way it reads a clean no-match.
+	if empty := buildReleaseLadder("CD 01", "Disc 2", "Live At Montreux"); len(empty) != 0 {
+		t.Errorf("ladder = %+v, want none — no rung names an artist", empty)
+	}
+
+	// Scoped, not a blanket disable.
+	if real := buildReleaseLadder("Abdullah Ibrahim", "", "Live At Montreux"); len(real) != 1 {
+		t.Errorf("ladder = %+v, want the single ordinary rung", real)
+	}
+}
+
 // byte-identical to what shipped before, so no album that resolves today
 // can change its answer by taking a different rung.
 func TestBuildReleaseLadderIsAdditiveAndCapped(t *testing.T) {

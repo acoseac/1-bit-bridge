@@ -381,6 +381,21 @@ func buildReleaseLadder(artist, albumArtist, album string) []releaseAttempt {
 		if ar == "" || al == "" || len(out) >= maxReleaseAttempts {
 			return
 		}
+		// A name MusicBrainz cannot answer as an artist cannot answer as half
+		// of an (artist, album) query either, and this is the query that runs
+		// FIRST — before resolveArtist is reached at all. Gating only the
+		// artist search left the louder half of the traffic in place.
+		//
+		// Per-rung, so rung 2's albumArtist — the rung that rescues exactly
+		// these tracks, and which simply becomes rung 1 — is untouched.
+		//
+		// Waste, not danger: pickBestRelease requires an artist-credit match,
+		// so "CD 01" could never have accepted a wrong release. What it could
+		// do is spin. A 5xx is transient, so the track retries on every batch
+		// without ever being able to succeed.
+		if isUnsearchableArtistTag(ar) {
+			return
+		}
 		key := foldName(ar) + "\x00" + foldTitle(al)
 		if _, dup := seen[key]; dup {
 			return
