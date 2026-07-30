@@ -347,10 +347,19 @@ func TestBuildArtistLadder(t *testing.T) {
 			"Peter, Paul & Mary", "",
 			[]string{"Peter, Paul & Mary"},
 		},
+		// The rung MusicBrainz cannot answer is dropped; the one it can
+		// survives. This case used to expect BOTH — which read as correct
+		// and was, for this function, while the guard one level up in
+		// resolveArtist meant production never reached either of them.
 		{
-			"albumArtist fallback",
+			"unanswerable head rung dropped, albumArtist survives",
 			"CD 01", "Abdullah Ibrahim",
-			[]string{"CD 01", "Abdullah Ibrahim"},
+			[]string{"Abdullah Ibrahim"},
+		},
+		{
+			"every rung unanswerable yields no ladder",
+			"CD 01", "Disc 2",
+			nil,
 		},
 		{
 			"albumArtist folds the same",
