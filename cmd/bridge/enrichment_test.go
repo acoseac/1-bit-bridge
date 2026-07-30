@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // TestRetryViaAdminWaitsOutTheRateLimitAndSaysSo pins the operator-facing
@@ -203,6 +206,83 @@ func TestValidMissFacetName(t *testing.T) {
 	for _, bad := range []string{"", "cover", "album", "ARTIST", "releases"} {
 		if validMissFacetName(bad) {
 			t.Errorf("%q should not be a valid facet", bad)
+		}
+	}
+}
+
+// TestProbeBridgeDistinguishesPublicModeFromDown is the regression test
+// for a lie the first version of this command told.
+//
+// A boolean "is the admin API usable?" collapses two very different
+// states onto one answer. On a PUBLIC-MODE bridge the admin listener is
+// HTTPS behind an adminauth session, so a plain-HTTP loopback probe gets
+// 400 and an HTTPS one gets 401 — and the command then reported "no
+// bridge running" while the bridge was serving traffic, and (worse) took
+// the offline path that writes to the store behind its back.
+func TestProbeBridgeDistinguishesPublicModeFromDown(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   bridgeLiveness
+	}{
+		{"loopback admin, healthy", http.StatusOK, bridgeAdminUsable},
+		// What a public-mode bridge actually returns to a plain-HTTP probe.
+		{"public mode, http against https", http.StatusBadRequest, bridgeUpAdminUnreachable},
+		{"public mode, needs a session", http.StatusUnauthorized, bridgeUpAdminUnreachable},
+		{"admin unhealthy", http.StatusInternalServerError, bridgeUpAdminUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			got := probeBridge(context.Background(), strings.TrimPrefix(srv.URL, "http://"))
+			if got != tc.want {
+				t.Errorf("probeBridge = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// Nothing listening — the ONLY state that means "not running".
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+	if got := probeBridge(context.Background(), addr); got != bridgeDown {
+		t.Errorf("probeBridge on a closed port = %v, want bridgeDown", got)
+	}
+}
+
+// TestEnrichmentRetryRefusesBehindALiveBridge — the offline reset writes
+// to the store from a second process, bypassing Store.mu, which only
+// serialises writers WITHIN one process. When we can see a bridge running
+// but cannot use its API, refusing is the only safe answer.
+func TestEnrichmentRetryRefusesBehindALiveBridge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized) // public-mode admin
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	cfg := &config.Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   "127.0.0.1:17788",
+		AdminAddress:    strings.TrimPrefix(srv.URL, "http://"),
+		DataDir:         filepath.Join(dir, "data"),
+		ScanIntervalSec: 3600,
+		LibraryName:     "T",
+	}
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := enrichmentRetryCmd(context.Background(), []string{"--config", cfgPath}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("retry succeeded behind a live bridge; it must refuse.\nstdout: %s", stdout.String())
+	}
+	msg := stderr.String()
+	for _, want := range []string{"a bridge is running", "single-writer", "systemctl stop"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal message missing %q:\n%s", want, msg)
 		}
 	}
 }
