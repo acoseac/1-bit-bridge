@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
-	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -37,9 +37,24 @@ import (
 // deliberately NOT the library-wide ResetEnrichedMisses, which selects roughly
 // half the library and would push a ~9,000-track delta to every paired device
 // on every sweep (the PR #369 wipe-loop class, on a timer).
+
+// pathResolver is the one method the sweeper needs from bridgefs.Resolver.
+//
+// Narrowed to an interface so a test can count the filesystem calls and see
+// WHEN they happen — the property that matters here is not just how many stats
+// the pass does but that none of them happens with a SQLite cursor open. A
+// concrete type makes that unobservable, and "the code plainly does it in the
+// right order" is what was true before the order was wrong.
+//
+// Production passes *bridgefs.Resolver, which keeps the hot-reload behaviour
+// that made it borrow apiSrv.Resolver() rather than snapshot the roots.
+type pathResolver interface {
+	ResolveChecked(clientPath string) (string, os.FileInfo, error)
+}
+
 type fingerprintSweeper struct {
 	store    *manifest.Store
-	resolver *bridgefs.Resolver
+	resolver pathResolver
 	client   *acoustid.Client
 	cache    *acoustid.Cache
 
@@ -138,7 +153,7 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if len(out) >= s.maxPerRun {
+		if len(out) >= s.scanCap() {
 			return errSweepFull
 		}
 		// Only tracks still missing what fingerprinting can supply.
@@ -174,29 +189,93 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 			return nil
 		}
 		// Already answered this exact file version in this process.
-		abs, info, rerr := s.resolver.ResolveChecked(t.Path)
-		if rerr != nil {
-			// EVERY resolve error is treated identically — ENOENT and a
-			// disconnected FUSE mount alike. Distinguishing them is the seed
-			// of a "mark permanently unfingerprintable" bug during a mount
-			// outage. Nothing is persisted, so an unreadable file costs
-			// exactly today's behaviour: the enricher skips it as before.
-			return nil
-		}
-		key := acoustid.Key{Path: t.Path, Size: info.Size(), MTimeNS: info.ModTime().UnixNano()}
+		//
+		// Keyed from the ROW, which costs nothing: the scanner writes Size and
+		// ModTime into tags_json, so StreamTracks has already unmarshalled
+		// both by the time this callback runs, and time.Time's RFC3339Nano
+		// round-trip is nanosecond-lossless. Statting first to build the key
+		// meant paying a filesystem round-trip for every row only to discard
+		// most of them — on a network-backed library the whole cost of the
+		// pass, repeated on the rows already answered, every sweep forever.
+		key := acoustid.Key{Path: t.Path, Size: t.Size, MTimeNS: t.ModTime.UnixNano()}
 		if _, hit := s.cache.Get(key); hit {
 			return nil
 		}
+		// absPath is filled in phase two. See below for why not here.
 		out = append(out, candidate{
-			path: t.Path, absPath: abs, durationS: durationS, isDSD: isDSD,
-			artist: t.Artist, size: info.Size(), mtimeNS: info.ModTime().UnixNano(),
+			path: t.Path, durationS: durationS, isDSD: isDSD,
+			artist: t.Artist, size: t.Size, mtimeNS: t.ModTime.UnixNano(),
 		})
 		return nil
 	})
 	if err != nil && !errors.Is(err, errSweepFull) && !errors.Is(err, context.Canceled) {
 		return nil, err
 	}
-	return out, nil
+	return s.resolveCandidates(out), nil
+}
+
+// scanCap bounds how many rows the stream may COLLECT, as opposed to how many
+// the sweep may WORK on.
+//
+// Two bounds because the cap moved sides. It used to be applied after
+// resolution, so an unresolvable row cost nothing and the stream simply kept
+// going until it had maxPerRun real candidates. Now that resolution happens
+// after the stream, a single cap would let unresolvable rows consume the
+// budget: a chunk of rows pointing at missing files — a folder removed but not
+// yet reaped, a root half-mounted — would fill all 500 slots, phase two would
+// drop every one of them, and the sweep would do nothing. StreamTracks order
+// is stable, so the same rows would win the race on every sweep and the tracks
+// behind them would never be reached.
+//
+// The headroom is what keeps that from happening, and it is a memory bound
+// rather than a work bound: a candidate is roughly 150 bytes, so even at the
+// factor below the slice stays well under a megabyte, which matters on the
+// low-memory hosts the rest of this codebase streams for.
+func (s *fingerprintSweeper) scanCap() int {
+	return s.maxPerRun * candidateScanFactor
+}
+
+// candidateScanFactor is how much unresolvable material a sweep can absorb
+// before it starts losing candidates to it: at 4, three quarters of the rows
+// scanned can fail to resolve and the sweep still fills its budget.
+const candidateScanFactor = 4
+
+// resolveCandidates turns client paths into absolute ones, dropping any that
+// will not resolve, and stops once it has maxPerRun of them.
+//
+// Runs AFTER the stream above, with no cursor open. That ordering is the
+// point: SQLite in WAL mode cannot reset the log while a reader holds a
+// snapshot, so a read transaction spanning thousands of filesystem calls pins
+// the WAL at its start mark for the whole sweep while concurrent enrichment
+// writes append behind it. Doing the I/O here leaves the stream doing nothing
+// but SQLite work — which is what the sweeper's own docblock argues for one
+// layer up, applied to the query path rather than only to the enricher.
+//
+// The early exit means the extra rows scanCap allows are only PAID for when
+// they are needed: a healthy library resolves the first maxPerRun and never
+// stats the rest.
+func (s *fingerprintSweeper) resolveCandidates(in []candidate) []candidate {
+	// Filter in place; the backing array is already sized. Indexed rather
+	// than ranged so the ~80-byte candidate is not copied per iteration —
+	// safe because append writes at len(out), which never runs ahead of i.
+	out := in[:0]
+	for i := range in {
+		if len(out) >= s.maxPerRun {
+			break
+		}
+		abs, _, err := s.resolver.ResolveChecked(in[i].path)
+		if err != nil {
+			// EVERY resolve error is treated identically — ENOENT and a
+			// disconnected FUSE mount alike. Distinguishing them is the seed
+			// of a "mark permanently unfingerprintable" bug during a mount
+			// outage. Nothing is persisted, so an unreadable file costs
+			// exactly today's behaviour: the enricher skips it as before.
+			continue
+		}
+		in[i].absPath = abs
+		out = append(out, in[i])
+	}
+	return out
 }
 
 // errSweepFull stops the candidate stream once the per-run cap is reached.
@@ -378,7 +457,11 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 func (s *fingerprintSweeper) wait(ctx context.Context) {
 	s.pacer.Lock()
 	defer s.pacer.Unlock()
-	if wait := s.client.MinInterval() - time.Since(s.last); wait > 0 && !s.last.IsZero() {
+	// No IsZero guard: time.Since on the zero Time saturates at ~292 years, so
+	// the first call's `wait` is hugely negative and the branch is already
+	// skipped. The conjunct that used to be here could never change the
+	// outcome.
+	if wait := s.client.MinInterval() - time.Since(s.last); wait > 0 {
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():

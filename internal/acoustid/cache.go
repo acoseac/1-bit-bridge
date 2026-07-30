@@ -11,6 +11,15 @@ import "sync"
 // against the same mounts and works. Dropping it to size-alone would trade a
 // proven signal for a slightly higher hit rate on a cache whose misses are
 // cheap and whose false hits are not.
+//
+// The sweeper builds these from the manifest ROW rather than from a stat, so
+// the version qualifier is "the file as the scanner last recorded it" rather
+// than "the file right now". The two diverge only between an on-disk change
+// and the next scan — and in that window UpsertTrack has not reset enriched_at
+// either, so the enricher could not consume a verdict for the row anyway. Once
+// the scanner catches up, tags_json carries the new size and mtime, the key
+// changes, and the next sweep re-fingerprints. Keying from the row is what
+// keeps a filesystem round-trip off the candidate scan.
 type Key struct {
 	Path    string
 	Size    int64
