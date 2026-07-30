@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,5 +193,144 @@ func TestCollectCandidatesSkipsTracksTheEnricherHasNotTriedYet(t *testing.T) {
 	if len(paths) != 1 || paths[0] != "tried.flac" {
 		t.Errorf("candidates = %v, want exactly [tried.flac]; the untried row belongs to the "+
 			"text ladder until it stamps enriched_at", paths)
+	}
+}
+
+// countingResolver wraps a real resolver and counts the calls.
+type countingResolver struct {
+	inner pathResolver
+	calls atomic.Int32
+}
+
+func (c *countingResolver) ResolveChecked(p string) (string, os.FileInfo, error) {
+	c.calls.Add(1)
+	return c.inner.ResolveChecked(p)
+}
+
+// TestCollectCandidatesDoesNoFilesystemWorkForCachedRows.
+//
+// The cache key used to be built from an os.Stat, so every row paid a
+// filesystem round-trip before the cache could say it had already been
+// answered. Steady state is the worst case for that, not the best: once the
+// backlog is done, each sweep walks the whole eligible set, stats every row,
+// and collects nothing. On a network-backed library that is the entire cost of
+// the pass, repeating every sweep forever.
+//
+// The discriminator is a row whose recorded size disagrees with the file's.
+// Keyed from the stat, the key misses the cache and the row becomes a
+// candidate; keyed from the row, it hits and is skipped. That difference is
+// also the honest statement of what changed: the key now tracks the file
+// version the SCANNER recorded, not the bytes on disk this instant.
+func TestCollectCandidatesDoesNoFilesystemWorkForCachedRows(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// On disk: 9 bytes. Recorded in the row: 5. A real library diverges this
+	// way whenever a file is touched between scans.
+	if err := os.WriteFile(filepath.Join(root, "a.flac"), []byte("realaudio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dur := 240.0
+	mtime := time.Now().Truncate(time.Second)
+	tr := &manifest.Track{Path: "a.flac", Size: 5, ModTime: mtime, Duration: &dur}
+	if err := store.UpsertTrack(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkEnriched(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := acoustid.NewCache(16)
+	cache.Set(acoustid.Key{Path: "a.flac", Size: 5, MTimeNS: mtime.UnixNano()}, acoustid.Outcome{})
+
+	res := &countingResolver{inner: bridgefs.New([]string{root})}
+	s := &fingerprintSweeper{store: store, resolver: res, cache: cache, maxPerRun: 100}
+
+	got, err := s.collectCandidates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("candidates = %+v, want none — the row's version is already answered", got)
+	}
+	if n := res.calls.Load(); n != 0 {
+		t.Errorf("resolver called %d times for a fully cached sweep, want 0 — the cache "+
+			"check must not be gated behind a filesystem round-trip", n)
+	}
+}
+
+// TestCollectCandidatesResolvesEveryCandidateExactlyOnce covers phase two.
+//
+// Resolution moved out of the StreamTracks callback so no filesystem call
+// happens with a SQLite cursor open: WAL mode cannot reset the log while a
+// reader holds a snapshot, so a read transaction spanning thousands of stats
+// pins the WAL for the whole sweep while enrichment writes append behind it.
+//
+// That ordering is structural — resolveCandidates is called on the result of
+// StreamTracks, after it returns — and not observable from here without a seam
+// on the store. What IS observable, and what a move back inside the callback
+// would disturb, is that every returned candidate carries the absPath phase
+// two assigns, at a cost of exactly one resolve each.
+func TestCollectCandidatesResolvesEveryCandidateExactlyOnce(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	dur := 240.0
+	// "gone.flac" has a row but no file — the mount-outage shape. It must be
+	// dropped silently rather than persisted as unfingerprintable.
+	for _, name := range []string{"a.flac", "b.flac", "gone.flac"} {
+		if name != "gone.flac" {
+			if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		tr := &manifest.Track{Path: name, Size: 5, ModTime: time.Now(), Duration: &dur}
+		if err := store.UpsertTrack(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.MarkEnriched(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := &countingResolver{inner: bridgefs.New([]string{root})}
+	s := &fingerprintSweeper{
+		store:     store,
+		resolver:  res,
+		cache:     acoustid.NewCache(16),
+		maxPerRun: 100,
+	}
+	got, err := s.collectCandidates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("candidates = %d, want 2 — the row with no file must be dropped", len(got))
+	}
+	for _, c := range got {
+		if c.absPath == "" {
+			t.Errorf("candidate %q has no absPath — phase two must fill it in", c.path)
+		}
+		if c.path == "gone.flac" {
+			t.Error("an unresolvable row reached the worker pool")
+		}
+	}
+	// Three eligible rows, three resolves: one per row that got past the cheap
+	// screens, none repeated.
+	if n := res.calls.Load(); n != 3 {
+		t.Errorf("resolver called %d times, want 3", n)
 	}
 }
