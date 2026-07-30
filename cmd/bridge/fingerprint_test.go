@@ -43,10 +43,12 @@ func TestBuildResultRowsKeepsArtistsAndTitlesAligned(t *testing.T) {
 
 	// The load-bearing assertion: the third recording's artist must still line
 	// up with the third title, despite the artist-less recording before it.
+	// ArtistMBID rides along on the same row, so a shift would misalign the
+	// ID the gate actually compares — not just the display name.
 	want := []fingerprintRecordingRow{
-		{Artist: "Artist One", Title: "First", Sources: 9},
-		{Artist: "?", Title: "Second (no artist)", Sources: 2},
-		{Artist: "Artist Three", Title: "Third", Sources: 40},
+		{Artist: "Artist One", ArtistMBID: "a1", Title: "First", Sources: 9},
+		{Artist: "?", ArtistMBID: "", Title: "Second (no artist)", Sources: 2},
+		{Artist: "Artist Three", ArtistMBID: "a3", Title: "Third", Sources: 40},
 	}
 	for j, w := range want {
 		if row.Recordings[j] != w {
