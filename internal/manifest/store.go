@@ -1281,6 +1281,39 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// v28: provenance for MBIDs written by the acoustic-fingerprinting
+		// fallback. Holds the AcoustID cluster ID that produced the write.
+		//
+		// COLUMN ONLY. It must never gain a `json:` tag and must never be
+		// spliced onto wire output — same rule as the v25 format-fact
+		// columns. That keeps it off the protocol entirely: no
+		// ProtocolVersion bump, no PROTOCOL.md change, no iOS mirror.
+		//
+		// It exists because a fingerprint match has a residual error rate
+		// that text matching does not. Without provenance, an MBID written
+		// from audio is indistinguishable from one written from tags,
+		// forever — so there is no way to audit the feature's output or undo
+		// it selectively. Presence alone gives a one-statement undo; the
+		// value lets a later pass re-check a link against AcoustID once
+		// upstream corrections land.
+		version: 28,
+		name:    "tracks acoustid_match provenance",
+		sql:     `-- column added idempotently in post(); see v28 docblock`,
+		post: func(db *sql.DB) error {
+			exists, err := atlasColumnExists(db, "tracks", "acoustid_match")
+			if err != nil {
+				return fmt.Errorf("inspect tracks.acoustid_match: %w", err)
+			}
+			if exists {
+				return nil
+			}
+			if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN acoustid_match TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("add tracks.acoustid_match: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
