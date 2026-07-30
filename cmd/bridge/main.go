@@ -1462,6 +1462,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return artworkCmd(ctx, args[1:], stdout, stderr)
 	case "enrichment":
 		return enrichmentCmd(ctx, args[1:], stdout, stderr)
+	case "fingerprint":
+		return fingerprintCmd(ctx, args[1:], stdout, stderr)
 	case "doctor":
 		return doctorCmd(args[1:], stdout, stderr)
 	case "update":
@@ -1539,6 +1541,11 @@ Subcommands:
            short of a cover / artist MBID / release MBID and which of the three each
            lacks; bridge enrichment retry re-queues them (the "Retry missing" button,
            scripted).
+  fingerprint
+           Acoustically fingerprint audio files and report what AcoustID knows about
+           them (requires fpcalc). A diagnostic for the tracks whose tags are too poor
+           to match on text — it prints coverage, cost and the acceptance verdict, and
+           writes nothing.
   doctor   Preflight: check ports, directories, service manager before init.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.

@@ -1,0 +1,367 @@
+package acoustid
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Live control harness — coverage and cost, measured with the REAL code path.
+//
+// Env-gated and skipped in CI. Run it by hand against a real library:
+//
+//	ACOUSTID_API_KEY=<key> \
+//	BRIDGE_ACOUSTID_CONTROL_DIR=/path/to/audio \
+//	go test ./internal/acoustid/ -run TestAcoustIDCoverageControl -v -count=1 -timeout 60m
+//
+// # Why this is a test and not a script
+//
+// The recall numbers behind the enrichment-matching work were first produced
+// by a Python reimplementation of the folding logic that was not byte-identical
+// to the shipped Go, so the numbers described the reimplementation rather than
+// the bridge. Numbers measured with a lookalike are evidence about the
+// lookalike. This drives the real Compute, the real Client and the real Accept,
+// so the claim and the artefact cannot drift.
+//
+// # What it deliberately does NOT measure
+//
+// It does not compare the fingerprint's answer against a tag-derived one. That
+// comparison — the one that estimates the FALSE-MATCH rate — needs the
+// enricher's already-resolved MBIDs, so it belongs with the enricher wiring.
+// Two things are worth stating in advance about it, because they decide how
+// its number should be read:
+//
+//   - the sample would be biased OPTIMISTIC. Tracks that resolve confidently
+//     from tags are mainstream, widely ripped and rich in AcoustID sources;
+//     the fallback population is the opposite. Any agreement rate measured
+//     that way is a LOWER bound, not "the false-match rate".
+//   - it cannot see shared-error modes. If MusicBrainz itself is wrong, both
+//     paths agree and the run reads green.
+//
+// What this harness answers instead is narrower and answerable now: of the
+// audio you point it at, how much is eligible, how much does AcoustID know,
+// how much survives the gate, what it costs, and — the two numbers that turn
+// defaults into justified constants — the distribution of `sources` on
+// accepted matches and of release-group counts per accepted recording.
+//
+// # No pass/fail bar on coverage
+//
+// Coverage depends on the upstream's data, not on this code, so a low number
+// is information rather than a regression. The harness fails only on things
+// that would be bugs here: a gate acceptance that carries no artist, or a
+// decode that contradicts itself.
+func TestAcoustIDCoverageControl(t *testing.T) {
+	dir := os.Getenv("BRIDGE_ACOUSTID_CONTROL_DIR")
+	if dir == "" {
+		t.Skip("BRIDGE_ACOUSTID_CONTROL_DIR not set — live control, run by hand")
+	}
+	key := os.Getenv("ACOUSTID_API_KEY")
+	if key == "" {
+		t.Skip("ACOUSTID_API_KEY not set — live control, run by hand")
+	}
+	if _, err := Probe(context.Background()); err != nil {
+		t.Skipf("fpcalc unavailable: %v", err)
+	}
+
+	files := collectAudio(t, dir, envInt(t, "BRIDGE_ACOUSTID_CONTROL_LIMIT", 200))
+	if len(files) == 0 {
+		t.Skipf("no audio files under %s", dir)
+	}
+	t.Logf("control set: %d file(s) under %s", len(files), dir)
+
+	client := NewClient("", key, "1-bit-bridge-control/0 (+https://github.com/acoseac/1-bit-bridge)", nil)
+	ctx := context.Background()
+
+	var (
+		ineligible   int
+		decodeFailed int
+		lookupFailed int
+		noMatch      int
+		accepted     int
+		rejected     int
+
+		totalDecode time.Duration
+		totalLookup time.Duration
+		totalBytes  int64
+
+		reasons     = map[RejectReason]int{}
+		sourcesHist = map[int]int{}
+		rgCountHist = map[int]int{}
+	)
+
+	for i, f := range files {
+		if i > 0 {
+			time.Sleep(client.MinInterval())
+		}
+
+		durationSec, isDSD, ok := containerFacts(f.path)
+		if !ok {
+			// Without a container duration there is nothing to gate against;
+			// in production this is the FLAC-only consequence of where
+			// Track.Duration is populated.
+			ineligible++
+			reasons[ReasonUnknownDuration]++
+			continue
+		}
+		if r := CheckEligible(durationSec, isDSD); r != ReasonNone {
+			ineligible++
+			reasons[r]++
+			continue
+		}
+
+		start := time.Now()
+		fp, err := Compute(ctx, f.path, DefaultLengthSeconds*time.Second)
+		totalDecode += time.Since(start)
+		totalBytes += f.size
+		if err != nil {
+			decodeFailed++
+			continue
+		}
+
+		in := Input{
+			DurationSec:           durationSec,
+			IsDSD:                 isDSD,
+			Fingerprint:           fp,
+			HasLocalArtistWitness: true, // the harness has no tags; assume the easier bar
+		}
+		if r := CheckFingerprint(in); r != ReasonNone {
+			rejected++
+			reasons[r]++
+			continue
+		}
+
+		start = time.Now()
+		results, err := client.Lookup(ctx, fp)
+		totalLookup += time.Since(start)
+		if err != nil {
+			if errors.Is(err, ErrNoMatch) {
+				noMatch++
+				reasons[ReasonNoResults]++
+				continue
+			}
+			lookupFailed++
+			t.Logf("lookup %s: %v", filepath.Base(f.path), err)
+			continue
+		}
+
+		in.Results = results
+		decision, reason := Accept(in)
+		if reason != ReasonNone {
+			rejected++
+			reasons[reason]++
+			continue
+		}
+
+		accepted++
+		// Bugs in THIS code, unlike coverage, are failures.
+		if decision.ArtistMBID == "" {
+			t.Errorf("%s: accepted with no artist MBID", filepath.Base(f.path))
+		}
+		sourcesHist[decision.Sources]++
+		rgCountHist[countReleaseGroups(results, decision)]++
+	}
+
+	n := len(files)
+	t.Logf("")
+	t.Logf("=== coverage over %d file(s) ===", n)
+	t.Logf("  ineligible (pre-decode)   %4d  %5.1f%%", ineligible, pct(ineligible, n))
+	t.Logf("  decode failed             %4d  %5.1f%%", decodeFailed, pct(decodeFailed, n))
+	t.Logf("  AcoustID knows nothing    %4d  %5.1f%%", noMatch, pct(noMatch, n))
+	t.Logf("  lookup errored            %4d  %5.1f%%", lookupFailed, pct(lookupFailed, n))
+	t.Logf("  refused by the gate       %4d  %5.1f%%", rejected, pct(rejected, n))
+	t.Logf("  ACCEPTED                  %4d  %5.1f%%", accepted, pct(accepted, n))
+
+	t.Logf("")
+	t.Logf("=== why tracks were refused ===")
+	for _, kv := range sortedReasons(reasons) {
+		t.Logf("  %-22s %4d", kv.k, kv.v)
+	}
+
+	t.Logf("")
+	t.Logf("=== `sources` on accepted matches ===")
+	t.Logf("  (this is what turns minSources=%d from a default into a justified", minSources)
+	t.Logf("   constant — if the mass sits at 1-2, the threshold is rejecting")
+	t.Logf("   real matches; if it sits well above, it can afford to be stricter)")
+	for _, kv := range sortedInts(sourcesHist) {
+		t.Logf("  sources=%-4d %4d", kv.k, kv.v)
+	}
+
+	t.Logf("")
+	t.Logf("=== release groups per accepted recording ===")
+	t.Logf("  (the empirical case for never picking one: every row above 1 is a")
+	t.Logf("   track whose album the fingerprint genuinely cannot determine)")
+	for _, kv := range sortedInts(rgCountHist) {
+		t.Logf("  groups=%-4d %4d", kv.k, kv.v)
+	}
+
+	t.Logf("")
+	t.Logf("=== cost ===")
+	t.Logf("  decode  %s total, %s/file", totalDecode.Round(time.Millisecond), perFile(totalDecode, n))
+	t.Logf("  lookup  %s total, %s/file", totalLookup.Round(time.Millisecond), perFile(totalLookup, n))
+	t.Logf("  source bytes on disk  %.2f GiB total, %.1f MiB/file",
+		float64(totalBytes)/(1<<30), float64(totalBytes)/float64(max(n, 1))/(1<<20))
+	t.Logf("")
+	t.Logf("  NOTE the byte figure is what the FILES weigh, not what a network")
+	t.Logf("  mount fetched. On rclone the whole object is pulled per candidate")
+	t.Logf("  at the default 128 MiB chunk size regardless of -length, so measure")
+	t.Logf("  the real egress with `rclone rc vfs/stats` around this run.")
+}
+
+type controlFile struct {
+	path string
+	size int64
+}
+
+// collectAudio walks dir for files the bridge would consider audio, capped at
+// limit. Sorted so two runs over the same tree measure the same set.
+func collectAudio(t *testing.T, dir string, limit int) []controlFile {
+	t.Helper()
+	exts := map[string]bool{
+		".flac": true, ".mp3": true, ".m4a": true, ".wav": true,
+		".aiff": true, ".aif": true, ".ogg": true, ".opus": true,
+	}
+	var out []controlFile
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable subtree — skip, don't abort the run
+		}
+		if d.IsDir() || !exts[strings.ToLower(filepath.Ext(p))] {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		out = append(out, controlFile{path: p, size: info.Size()})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// containerFacts reports the duration and DSD flag the gate needs.
+//
+// It reads the FLAC STREAMINFO directly rather than importing
+// internal/manifest, because internal/manifest is a heavyweight dependency
+// (the whole store) for two numbers, and a test-only import of it here would
+// invert the layering this package deliberately avoids. Non-FLAC inputs report
+// !ok, which mirrors production: Track.Duration is only populated for FLAC and
+// DSF today, so those are the files the feature can gate.
+func containerFacts(path string) (durationSec float64, isDSD bool, ok bool) {
+	if !strings.EqualFold(filepath.Ext(path), ".flac") {
+		return 0, false, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false, false
+	}
+	defer f.Close()
+
+	// "fLaC" magic + a 4-byte METADATA_BLOCK_HEADER + the 34-byte STREAMINFO.
+	var buf [42]byte
+	if _, err := f.Read(buf[:]); err != nil {
+		return 0, false, false
+	}
+	if string(buf[0:4]) != "fLaC" {
+		return 0, false, false
+	}
+	// STREAMINFO body starts at 8. Sample rate is 20 bits at bit offset 80 of
+	// the body; total samples is 36 bits starting 8 bits later.
+	b := buf[8:]
+	sampleRate := uint32(b[10])<<12 | uint32(b[11])<<4 | uint32(b[12])>>4
+	totalSamples := uint64(b[13]&0x0F)<<32 | uint64(b[14])<<24 |
+		uint64(b[15])<<16 | uint64(b[16])<<8 | uint64(b[17])
+	if sampleRate == 0 || totalSamples == 0 {
+		return 0, false, false
+	}
+	return float64(totalSamples) / float64(sampleRate), false, true
+}
+
+// countReleaseGroups counts the distinct release groups across the recordings
+// that produced a decision — the number the histogram above reports.
+func countReleaseGroups(results []Result, d Decision) int {
+	seen := map[string]struct{}{}
+	for _, r := range results {
+		if r.ID != d.AcoustID {
+			continue
+		}
+		for _, rec := range r.Recordings {
+			for _, rg := range rec.ReleaseGroups {
+				if rg.ID != "" {
+					seen[rg.ID] = struct{}{}
+				}
+			}
+		}
+	}
+	return len(seen)
+}
+
+func envInt(t *testing.T, key string, def int) int {
+	t.Helper()
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	var n int
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil || n <= 0 {
+		t.Fatalf("%s=%q must be a positive integer", key, v)
+	}
+	return n
+}
+
+func pct(part, whole int) float64 {
+	if whole == 0 {
+		return 0
+	}
+	return 100 * float64(part) / float64(whole)
+}
+
+func perFile(d time.Duration, n int) time.Duration {
+	if n == 0 {
+		return 0
+	}
+	return (d / time.Duration(n)).Round(time.Millisecond)
+}
+
+type reasonCount struct {
+	k RejectReason
+	v int
+}
+
+func sortedReasons(m map[RejectReason]int) []reasonCount {
+	out := make([]reasonCount, 0, len(m))
+	for k, v := range m {
+		out = append(out, reasonCount{k, v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].v != out[j].v {
+			return out[i].v > out[j].v
+		}
+		return out[i].k < out[j].k
+	})
+	return out
+}
+
+type intCount struct{ k, v int }
+
+func sortedInts(m map[int]int) []intCount {
+	out := make([]intCount, 0, len(m))
+	for k, v := range m {
+		out = append(out, intCount{k, v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].k < out[j].k })
+	return out
+}
