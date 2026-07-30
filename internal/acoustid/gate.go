@@ -276,40 +276,108 @@ func Accept(in Input) (Decision, RejectReason) {
 	if r := CheckFingerprint(in); r != ReasonNone {
 		return Decision{}, r
 	}
-	top, reason := selectResult(in)
+	top, tied, reason := selectResult(in)
 	if reason != ReasonNone {
 		return Decision{}, reason
 	}
-	return acceptRecordings(in, top)
+	return acceptRecordings(in, top, tied)
 }
 
-// selectResult is stage 2: pick the cluster, and refuse if the audio does not
-// point at exactly one of them convincingly enough.
-func selectResult(in Input) (Result, RejectReason) {
+// selectResult is stage 2: pick the cluster, and refuse if the audio points at
+// two clusters that would answer DIFFERENTLY.
+//
+// `tied` reports that a competing cluster cleared the floor within the margin
+// and agreed on the artist. The caller writes the artist but suppresses the
+// recording MBID and the album cue, because which of the tied clusters to draw
+// those from is genuinely undetermined.
+func selectResult(in Input) (top Result, tied bool, reason RejectReason) {
 	if len(in.Results) == 0 {
-		return Result{}, ReasonNoResults
+		return Result{}, false, ReasonNoResults
 	}
 	// AcoustID orders by score, but re-derive the top rather than trust it.
-	top := in.Results[0]
+	top = in.Results[0]
 	for i := range in.Results {
 		if in.Results[i].Score > top.Score {
 			top = in.Results[i]
 		}
 	}
 	if top.Score < minScore {
-		return Result{}, ReasonLowScore
+		return Result{}, false, ReasonLowScore
 	}
-	// Ambiguity: any OTHER result that also clears the floor and sits within
-	// the margin means the audio matches two clusters.
+	return resolveTiedClusters(in, top)
+}
+
+// resolveTiedClusters decides what a near-tie between clusters means.
+//
+// The clause this replaced refused any track whose runner-up cleared the score
+// floor within minScoreMargin, on the reasoning that the ordering between two
+// matching clusters is decided by nothing meaningful. Measured against a real
+// library that turned out to reject a quarter of the eligible population while
+// preventing nothing: AcoustID's database carries UNMERGED DUPLICATE clusters
+// for the same audio, so the overwhelming majority of "ties" are one answer
+// stored twice — ABBA at 0.978 against ABBA at 0.974. Of 16 ties sampled, 14
+// resolved to the same artist and the other 2 were already refused by the
+// duration and consensus clauses; cross-cluster disagreement, the thing the
+// clause was written for, did not occur once.
+//
+// So the predicate now measures what it was always about: ambiguity is the
+// tied clusters yielding a DIFFERENT ANSWER, not merely existing. That is the
+// same correction as head-artist-over-credit-tuple — the granularity of the
+// check has to match the field being written.
+//
+// It is not a relaxation of the strictness that protects the library. Every
+// competing cluster is put through the SAME duration and sources filtering as
+// the winner before its opinion counts, disagreement still refuses outright,
+// and a tie still costs the recording MBID and the album cue.
+func resolveTiedClusters(in Input, top Result) (Result, bool, RejectReason) {
+	topHead, ok := clusterHeadArtist(in, top)
+	if !ok {
+		// The winner has no usable answer of its own — no surviving
+		// recordings, or survivors that disagree. Defer: stage 3 refuses it
+		// with the specific reason (duration, sources, or disagreement),
+		// which is more useful than calling it ambiguous.
+		return top, false, ReasonNone
+	}
+
+	tied := false
 	for i := range in.Results {
 		other := in.Results[i]
-		if other.ID != top.ID &&
-			other.Score >= minScore &&
-			top.Score-other.Score < minScoreMargin {
-			return Result{}, ReasonAmbiguousResults
+		if other.ID == top.ID || other.Score < minScore ||
+			top.Score-other.Score >= minScoreMargin {
+			continue
 		}
+		otherHead, ok := clusterHeadArtist(in, other)
+		if !ok {
+			// A competitor that survives nothing is not a competing ANSWER.
+			// Refusing on its account would be refusing on the strength of a
+			// cluster that could not have answered at all.
+			continue
+		}
+		if otherHead != topHead {
+			return Result{}, false, ReasonAmbiguousResults
+		}
+		tied = true
 	}
-	return top, ReasonNone
+	return top, tied, ReasonNone
+}
+
+// clusterHeadArtist reports the single head artist a cluster would resolve to,
+// after the SAME duration and sources filtering the winner is held to. ok is
+// false when the cluster has no surviving recordings or its survivors name
+// more than one head artist — in both cases it has no single answer to offer.
+func clusterHeadArtist(in Input, r Result) (string, bool) {
+	survivors := recordingsWithEnoughSources(
+		recordingsMatchingDuration(r.Recordings, in.DurationSec),
+		requiredSources(in),
+	)
+	if len(survivors) == 0 {
+		return "", false
+	}
+	id, _, reason := headArtistConsensus(survivors)
+	if reason != ReasonNone || id == "" {
+		return "", false
+	}
+	return id, true
 }
 
 // requiredSources is the submission-count bar a recording must clear.
@@ -326,7 +394,7 @@ func requiredSources(in Input) int {
 
 // acceptRecordings is stage 3: narrow the cluster's recordings to those whose
 // length agrees with the file, then require them to agree on one artist.
-func acceptRecordings(in Input, top Result) (Decision, RejectReason) {
+func acceptRecordings(in Input, top Result, tied bool) (Decision, RejectReason) {
 	if len(top.Recordings) == 0 {
 		return Decision{}, ReasonNoRecordings
 	}
@@ -347,7 +415,7 @@ func acceptRecordings(in Input, top Result) (Decision, RejectReason) {
 	if reason != ReasonNone {
 		return Decision{}, reason
 	}
-	return Decision{
+	d := Decision{
 		ArtistMBID:    headID,
 		ArtistName:    headName,
 		RecordingMBID: soleRecordingMBID(survivors),
@@ -355,7 +423,17 @@ func acceptRecordings(in Input, top Result) (Decision, RejectReason) {
 		AcoustID:      top.ID,
 		Score:         top.Score,
 		Sources:       weakestSources(survivors),
-	}, ReasonNone
+	}
+	if tied {
+		// A competing cluster agreed on the artist, so the artist is earned —
+		// either cluster writes the same MBID. Which cluster to take a
+		// RECORDING or an album title from is undetermined, though, so those
+		// are dropped rather than guessed. Suppressing them is what makes
+		// accepting the tie conservative rather than merely permissive.
+		d.RecordingMBID = ""
+		d.AlbumHint = ""
+	}
+	return d, ReasonNone
 }
 
 // recordingsWithEnoughSources keeps the recordings whose fingerprint→recording

@@ -351,7 +351,7 @@ func containerFacts(path string) (durationSec float64, isDSD bool, ok bool) {
 // in-package, the test can call the unexported stages directly, so the number
 // reported is by construction the number the gate saw.
 func countSurvivorReleaseGroups(in Input) int {
-	top, reason := selectResult(in)
+	top, _, reason := selectResult(in)
 	if reason != ReasonNone {
 		return 0
 	}

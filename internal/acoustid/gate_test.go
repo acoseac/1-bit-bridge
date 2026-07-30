@@ -63,10 +63,17 @@ func TestAcceptRejections(t *testing.T) {
 		{"score below the floor", ReasonLowScore, func(in *Input) {
 			in.Results[0].Score = minScore - 0.01
 		}},
-		{"runner-up within the margin", ReasonAmbiguousResults, func(in *Input) {
+		{"runner-up within the margin naming a DIFFERENT artist", ReasonAmbiguousResults, func(in *Input) {
+			// Must differ on the artist to be ambiguous. A tie whose clusters
+			// agree is one answer stored twice — see
+			// TestTiedClustersAgreeingOnArtistAreNotAmbiguous.
 			runnerUp := in.Results[0]
 			runnerUp.ID = "11111111-1111-1111-1111-111111111111"
 			runnerUp.Score = in.Results[0].Score - (minScoreMargin / 2)
+			rec := runnerUp.Recordings[0]
+			rec.ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			rec.Artists = []Artist{{ID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", Name: "A Different Artist"}}
+			runnerUp.Recordings = []Recording{rec}
 			in.Results = append(in.Results, runnerUp)
 		}},
 		{"too few sources with a local witness", ReasonFewSources, func(in *Input) {
@@ -447,5 +454,116 @@ func TestWeakestSourcesReportsTheFloor(t *testing.T) {
 	}
 	if got.Sources != 12 {
 		t.Errorf("Sources = %d, want 12 (the minimum across survivors)", got.Sources)
+	}
+}
+
+// tieWith returns goodInput() plus a competing cluster inside the score
+// margin, whose single recording credits headID.
+func tieWith(headID, headName string) Input {
+	in := goodInput()
+	other := in.Results[0]
+	other.ID = "11111111-1111-1111-1111-111111111111"
+	other.Score = in.Results[0].Score - (minScoreMargin / 2)
+	rec := other.Recordings[0]
+	rec.ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	rec.Artists = []Artist{{ID: headID, Name: headName}}
+	other.Recordings = []Recording{rec}
+	in.Results = append(in.Results, other)
+	return in
+}
+
+// TestTiedClustersAgreeingOnArtistAreNotAmbiguous is the behavioural pin for
+// the artist-aware ambiguity rule.
+//
+// The clause this replaced refused ANY track whose runner-up cleared the floor
+// within the margin. Measured against a real library that rejected a quarter
+// of the eligible population while preventing nothing: AcoustID carries
+// unmerged duplicate clusters for the same audio, so most "ties" are one
+// answer stored twice (ABBA at 0.978 against ABBA at 0.974). Of 16 sampled
+// ties, 14 agreed and the other 2 were already refused by other clauses.
+//
+// The conservative half is what keeps this honest: the artist is written
+// because either cluster yields the same MBID, but the recording MBID and the
+// album cue are DROPPED, because which cluster to take those from is genuinely
+// undetermined.
+func TestTiedClustersAgreeingOnArtistAreNotAmbiguous(t *testing.T) {
+	const head = "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd" // same as goodInput's
+	got, reason := Accept(tieWith(head, "M83"))
+	if reason != ReasonNone {
+		t.Fatalf("reason = %q, want acceptance: agreeing clusters are one answer stored twice", reason)
+	}
+	if got.ArtistMBID != head {
+		t.Errorf("ArtistMBID = %q, want the agreed head", got.ArtistMBID)
+	}
+	if got.RecordingMBID != "" {
+		t.Errorf("RecordingMBID = %q, want empty: which tied cluster to take it from is undetermined", got.RecordingMBID)
+	}
+	if got.AlbumHint != "" {
+		t.Errorf("AlbumHint = %q, want empty for the same reason", got.AlbumHint)
+	}
+}
+
+// TestTiedClustersDisagreeingAreStillAmbiguous — the protection the clause
+// exists for is unchanged. This is the case that must never be accepted.
+func TestTiedClustersDisagreeingAreStillAmbiguous(t *testing.T) {
+	in := tieWith("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "A Different Artist")
+	got, reason := Accept(in)
+	if reason != ReasonAmbiguousResults {
+		t.Fatalf("reason = %q, want ambiguous_results", reason)
+	}
+	if got != (Decision{}) {
+		t.Fatalf("a refused track must yield a zero Decision, got %+v", got)
+	}
+}
+
+// TestUntiedResultKeepsRecordingAndAlbumCue is the regression guard for the
+// suppression above: it must apply ONLY to ties, not to every accept.
+func TestUntiedResultKeepsRecordingAndAlbumCue(t *testing.T) {
+	got, reason := Accept(goodInput())
+	if reason != ReasonNone {
+		t.Fatalf("unexpected rejection: %q", reason)
+	}
+	if got.RecordingMBID == "" {
+		t.Error("an unambiguous match must still yield its recording MBID")
+	}
+	if got.AlbumHint == "" {
+		t.Error("an unambiguous match must still yield its album cue")
+	}
+}
+
+// TestCompetitorWithNoSurvivorsIsNotACompetitor — a cluster that survives
+// nothing had no answer to offer, so refusing on its account would be refusing
+// on the strength of a cluster that could not have answered at all. One of the
+// 16 sampled ties was exactly this shape.
+func TestCompetitorWithNoSurvivorsIsNotACompetitor(t *testing.T) {
+	in := tieWith("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "A Different Artist")
+	// Push the competitor's only recording outside the duration tolerance, so
+	// it has no survivors despite naming a different artist.
+	in.Results[1].Recordings[0].Duration = in.DurationSec + 300
+
+	got, reason := Accept(in)
+	if reason != ReasonNone {
+		t.Fatalf("reason = %q, want acceptance: the competitor had no surviving answer", reason)
+	}
+	if got.ArtistMBID == "" {
+		t.Error("expected the top cluster's artist")
+	}
+	// Not a real tie, so nothing is suppressed.
+	if got.RecordingMBID == "" {
+		t.Error("no genuine competitor means no suppression")
+	}
+}
+
+// TestTieDefersToTheSpecificReasonWhenTheWinnerCannotAnswer — when the top
+// cluster itself has no usable answer, the track must be refused with the
+// reason that actually applies (duration / sources / disagreement) rather than
+// being labelled ambiguous, which would send a reader looking at the wrong clause.
+func TestTieDefersToTheSpecificReasonWhenTheWinnerCannotAnswer(t *testing.T) {
+	in := tieWith("6d7b7cd4-254b-4c25-83f6-dd20f98ceacd", "M83")
+	in.Results[0].Recordings[0].Duration = in.DurationSec + 300 // winner survives nothing
+
+	_, reason := Accept(in)
+	if reason != ReasonDurationMismatch {
+		t.Fatalf("reason = %q, want duration_mismatch — the specific cause, not ambiguity", reason)
 	}
 }
