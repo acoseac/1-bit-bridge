@@ -208,23 +208,21 @@ var headCreditSeparators = []string{
 // common case allocates nothing — strictly cheaper than ToLower, not merely
 // safer.
 func lowerASCII(s string) string {
-	hasUpper := false
 	for i := 0; i < len(s); i++ {
-		if s[i] >= 'A' && s[i] <= 'Z' {
-			hasUpper = true
-			break
+		if s[i] < 'A' || s[i] > 'Z' {
+			continue
 		}
-	}
-	if !hasUpper {
-		return s
-	}
-	b := []byte(s)
-	for i := range b {
-		if b[i] >= 'A' && b[i] <= 'Z' {
-			b[i] += 'a' - 'A'
+		// First uppercase byte. Everything before it is already lower, so the
+		// copy starts here rather than rescanning from 0.
+		b := []byte(s)
+		for j := i; j < len(b); j++ {
+			if b[j] >= 'A' && b[j] <= 'Z' {
+				b[j] += 'a' - 'A'
+			}
 		}
+		return string(b)
 	}
-	return string(b)
+	return s
 }
 
 // splitHeadCredit returns the first credit in a multi-credit tag, or ""
