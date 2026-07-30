@@ -82,10 +82,7 @@ func TestAcoustIDCoverageControl(t *testing.T) {
 	var tally controlTally
 	tally.init()
 
-	for i, f := range files {
-		if i > 0 {
-			time.Sleep(client.MinInterval())
-		}
+	for _, f := range files {
 		runControlFile(ctx, t, client, f, &tally)
 	}
 
@@ -225,6 +222,13 @@ func runControlFile(ctx context.Context, t *testing.T, client *Client, f control
 		return
 	}
 
+	// Pace only ACTUAL lookups. Sleeping once per file would pad the harness's
+	// own wall-clock with delays that paced nothing — most files never reach
+	// here (non-FLAC sources are ineligible, and decode failures and gate
+	// rejections return earlier), and wall-clock cost is what this measures.
+	if tally.lookups > 0 {
+		time.Sleep(client.MinInterval())
+	}
 	start = time.Now()
 	results, err := client.Lookup(ctx, fp)
 	tally.lookup += time.Since(start)

@@ -263,7 +263,10 @@ func ComputeFromPrefix(ctx context.Context, absPath string, length time.Duration
 	}
 	f, err := os.Open(absPath)
 	if err != nil {
-		return Fingerprint{}, fmt.Errorf("%w: %v", ErrUnreadable, filepath.Base(absPath))
+		// Redact the path but KEEP the cause: without it a permission failure
+		// and a missing file render identically, which is the difference an
+		// operator actually needs.
+		return Fingerprint{}, fmt.Errorf("%w: %s", ErrUnreadable, redactFpcalcErr("", absPath, err))
 	}
 	defer f.Close()
 

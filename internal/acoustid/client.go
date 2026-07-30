@@ -332,7 +332,18 @@ type RateLimitError struct {
 	err        error
 }
 
-func (e *RateLimitError) Error() string { return e.err.Error() }
+// Error is nil-safe on the unexported cause: RetryAfter is exported while err
+// is not, so any caller outside this package — the sweeper, the control
+// harness — can legitimately build &RateLimitError{RetryAfter: d}, and that
+// must not panic.
+func (e *RateLimitError) Error() string {
+	if e.err == nil {
+		return fmt.Sprintf("acoustid: rate limited, retry after %s", e.RetryAfter)
+	}
+	return e.err.Error()
+}
+
+// Unwrap returns nil when there is no cause, which errors.Is/As handle.
 func (e *RateLimitError) Unwrap() error { return e.err }
 
 // IsTransient reports whether err is worth retrying later.

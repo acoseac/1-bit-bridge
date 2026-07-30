@@ -348,3 +348,23 @@ func TestNewClientTrimsBaseURL(t *testing.T) {
 		t.Errorf("path = %q, want /v2/lookup — a trailing slash must not double up", gotPath)
 	}
 }
+
+// TestRateLimitErrorIsNilSafe — RetryAfter is exported while the cause is not,
+// so a caller outside this package (the sweeper, the control harness) can
+// legitimately construct one with only the duration. That must not panic.
+func TestRateLimitErrorIsNilSafe(t *testing.T) {
+	e := &RateLimitError{RetryAfter: 30 * time.Second}
+	if msg := e.Error(); msg == "" {
+		t.Fatal("Error() must produce a message without a cause")
+	}
+	if !strings.Contains(e.Error(), "30s") {
+		t.Errorf("Error() = %q, want the retry-after duration", e.Error())
+	}
+	if e.Unwrap() != nil {
+		t.Error("Unwrap() should be nil when there is no cause")
+	}
+	// The classification must still hold: a bare rate-limit is transient.
+	if !IsTransient(e) {
+		t.Error("a rate limit must classify transient even without a cause")
+	}
+}

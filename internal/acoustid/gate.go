@@ -378,13 +378,11 @@ func weakestSources(survivors []Recording) int {
 	if len(survivors) == 0 {
 		return 0
 	}
-	min := survivors[0].Sources
+	lowest := survivors[0].Sources
 	for _, rec := range survivors[1:] {
-		if rec.Sources < min {
-			min = rec.Sources
-		}
+		lowest = min(lowest, rec.Sources)
 	}
-	return min
+	return lowest
 }
 
 // recordingsMatchingDuration keeps the recordings whose length agrees with the

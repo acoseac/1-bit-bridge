@@ -72,29 +72,8 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 		return code
 	}
 
-	reports := make([]fingerprintReport, 0, len(paths))
-	interrupted := false
-	for i, p := range paths {
-		if ctx.Err() != nil {
-			interrupted = true
-			break
-		}
-		// Pace between files exactly as the sweeper will — the politeness
-		// contract is per-request, and a diagnostic that bursts is the one
-		// most likely to get a key rate-limited.
-		if i > 0 && client != nil {
-			select {
-			case <-time.After(client.MinInterval()):
-			case <-ctx.Done():
-				interrupted = true
-			}
-			if interrupted {
-				break
-			}
-		}
-		reports = append(reports, fingerprintOne(ctx, client, p,
-			time.Duration(*lengthSec)*time.Second, *prefixBytes))
-	}
+	reports, interrupted := runFingerprintFiles(ctx, client, paths,
+		time.Duration(*lengthSec)*time.Second, *prefixBytes)
 
 	// Print what we DID measure before reporting the interruption: on a long
 	// run over a network-backed library those partial numbers are the
@@ -117,6 +96,32 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 	return 0
 }
 
+// runFingerprintFiles walks the file list, pacing between AcoustID calls and
+// stopping cleanly on cancellation. Returns what it managed to measure and
+// whether it was cut short.
+func runFingerprintFiles(ctx context.Context, client *acoustid.Client, paths []string,
+	length time.Duration, prefixBytes int64) (reports []fingerprintReport, interrupted bool) {
+
+	reports = make([]fingerprintReport, 0, len(paths))
+	for i, p := range paths {
+		if ctx.Err() != nil {
+			return reports, true
+		}
+		// Pace between files exactly as the sweeper will — the politeness
+		// contract is per-request, and a diagnostic that bursts is the one
+		// most likely to get a key rate-limited.
+		if i > 0 && client != nil {
+			select {
+			case <-time.After(client.MinInterval()):
+			case <-ctx.Done():
+				return reports, true
+			}
+		}
+		reports = append(reports, fingerprintOne(ctx, client, p, length, prefixBytes))
+	}
+	return reports, false
+}
+
 // prepareFingerprintRun resolves the API key, checks the toolchain, and builds
 // the client. Returns a non-zero exit code when the run cannot proceed;
 // a nil client means --no-lookup (fingerprint without contacting AcoustID).
@@ -130,7 +135,9 @@ func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
 		fmt.Fprint(stderr, "No AcoustID key. Pass --key or set ACOUSTID_API_KEY.\n"+
 			"Get a free application key at https://acoustid.org/new-application\n"+
 			"Or pass --no-lookup to fingerprint without contacting AcoustID.\n")
-		return acoustid.Info{}, nil, 2
+		// 1, not 2: this is "the run could not start", the same class as a
+		// missing fpcalc a few lines below — not a malformed command line.
+		return acoustid.Info{}, nil, 1
 	}
 
 	info, err := acoustid.Probe(ctx)
