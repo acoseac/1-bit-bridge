@@ -384,6 +384,12 @@ func clusterHeadArtist(in Input, r Result) (string, bool) {
 		recordingsMatchingDuration(r.Recordings, in.DurationSec),
 		requiredSources(in),
 	)
+	// MUST apply the same placeholder filter acceptRecordings does. If the two
+	// disagree about what a cluster says, a cluster carrying a placeholder
+	// looks answerless here, resolveTiedClusters defers instead of comparing,
+	// and the ambiguity check never runs — while acceptRecordings goes on to
+	// accept it. That is a relaxation, not a deferral.
+	survivors = recordingsWithNamedArtist(survivors)
 	if len(survivors) == 0 {
 		return "", false
 	}

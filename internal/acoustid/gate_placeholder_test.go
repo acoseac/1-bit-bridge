@@ -130,3 +130,46 @@ func TestRecordingWithNoArtistStillRefused(t *testing.T) {
 		t.Fatalf("reason = %q, want %q", reason, ReasonNoArtistMBID)
 	}
 }
+
+// TestPlaceholderMustNotBypassTheAmbiguityCheck pins a hole the placeholder
+// filter opened in its first form (Gemini, HIGH on PR #613).
+//
+// acceptRecordings filtered placeholders but clusterHeadArtist did not, so the
+// two disagreed about what a cluster says. On a cluster carrying a placeholder,
+// clusterHeadArtist reported "no usable answer", resolveTiedClusters took that
+// as a reason to DEFER rather than compare, and the ambiguity check never ran —
+// then acceptRecordings, which does filter, accepted the cluster outright.
+//
+// The result was a genuine relaxation: a near-tie against a different real
+// artist could be accepted without ever being weighed. Both functions must
+// therefore apply the SAME survivor filtering; a disagreement between them is
+// exactly what reopens this.
+func TestPlaceholderMustNotBypassTheAmbiguityCheck(t *testing.T) {
+	rec := func(artistID, artistName string, sources int) Recording {
+		return Recording{
+			ID: artistID + "-rec", Title: "Track", Duration: 167, Sources: sources,
+			Artists: []Artist{{ID: artistID, Name: artistName}},
+		}
+	}
+	in := Input{
+		DurationSec:           167,
+		Fingerprint:           goodFP(167),
+		HasLocalArtistWitness: true,
+		Results: []Result{
+			// Winner: a real artist PLUS a placeholder.
+			{ID: waterlooCluster, Score: 0.99, Recordings: []Recording{
+				rec(abbaMBID, "ABBA", 10),
+				rec(unknownArtistMBID, "[unknown]", 10),
+			}},
+			// Competitor inside minScoreMargin naming a DIFFERENT real artist.
+			// The audio matches two clusters that disagree: ambiguous.
+			{ID: "9c6654f0-6126-4284-873f-2f3238ac8234", Score: 0.97, Recordings: []Recording{
+				rec(sweetboxMBID, "sweetbox", 10),
+			}},
+		},
+	}
+	if _, reason := Accept(in); reason != ReasonAmbiguousResults {
+		t.Fatalf("reason = %q, want %q — a placeholder in the winning cluster must not "+
+			"let a genuine tie skip the ambiguity check", reason, ReasonAmbiguousResults)
+	}
+}
