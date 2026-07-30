@@ -377,9 +377,10 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	albumMBID := t.MusicBrainzAlbumID
 	var rgMBID string
 	if albumMBID == "" {
-		// Cache by (artist, album) so sibling tracks on the same album
-		// share one MB call.
-		key := cacheKey(t.Artist, t.Album)
+		// Cache by every input the ladder reads, so sibling tracks on the
+		// same album share one MB call and two DIFFERENT albums never do.
+		// See releaseCacheKey.
+		key := releaseCacheKey(t.Artist, t.AlbumArtist, t.Album)
 		if res, ok := e.albumCache.Get(key); ok {
 			metrics.RecordMBCache("album", true)
 			albumMBID = res.ReleaseMBID
@@ -593,34 +594,42 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	if t.Artist == "" {
 		return nil
 	}
-	// A tag MusicBrainz cannot answer is not worth asking about. Returning nil
-	// puts the track exactly where a clean miss would: it falls through to the
-	// acoustic consult and then markSkipped, so no exit semantics change.
-	//
-	// Worth more than the saved request during an upstream outage. A 5xx is
-	// transient, so it returns without stamping and the track retries on every
-	// batch — for a real artist that is right, because the query will succeed
-	// once MusicBrainz recovers, but for "CD 01" the retry is futile forever.
-	// Those tracks spin instead of reaching the fingerprint fallback, which is
-	// the one thing that could still identify them, and which needs no
-	// MusicBrainz lookup to name the artist.
-	//
-	// See isUnsearchableArtistTag for why this is a narrower set than
-	// isJunkArtistTag and must stay that way.
-	if isUnsearchableArtistTag(t.Artist) {
-		return nil
-	}
-	key := "artist\x00" + t.Artist
+	key := artistCacheKey(t.Artist, t.AlbumArtist)
 	var artistMBID string
 	if cached, ok := e.artistCache.Get(key); ok {
 		metrics.RecordMBCache("artist", true)
 		artistMBID = cached
 	} else {
+		// A tag MusicBrainz cannot answer is not worth asking about, and
+		// buildArtistLadder drops those rungs. An EMPTY ladder means every
+		// rung was unanswerable — nothing left to ask.
+		//
+		// Returning here puts the track exactly where a clean miss would: it
+		// falls through to the acoustic consult and then markSkipped, so no
+		// exit semantics change. Nothing is cached, which keeps the PR #13
+		// invariant that a clean no-match is never cached.
+		//
+		// Worth more than the saved request during an upstream outage. A 5xx
+		// is transient, so it returns without stamping and the track retries
+		// on every batch — for a real artist that is right, because the query
+		// will succeed once MusicBrainz recovers, but for "CD 01" the retry is
+		// futile forever. Those tracks spin instead of reaching the
+		// fingerprint fallback, which is the one thing that could still
+		// identify them, and which needs no MusicBrainz lookup to name the
+		// artist.
+		//
+		// Built BEFORE the miss is recorded so a track that issues no request
+		// is not counted as a cache miss — and after the cache probe, so the
+		// hit path pays none of the folding.
+		attempts := buildArtistLadder(t.Artist, t.AlbumArtist)
+		if len(attempts) == 0 {
+			return nil
+		}
 		metrics.RecordMBCache("artist", false)
 		// Pacing now lives inside searchArtistWithFallbacks, which paces
 		// EVERY rung — the politeness contract is per-request, and a
 		// ladder that paced only its first rung would burst.
-		res, err := e.searchArtistWithFallbacks(ctx, t)
+		res, err := e.searchArtistWithFallbacks(ctx, attempts, t)
 		if err != nil {
 			// Don't cache transient errors session-wide — a network
 			// blip would otherwise block sibling-track retries until

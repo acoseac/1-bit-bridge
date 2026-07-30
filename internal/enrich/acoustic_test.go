@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
@@ -485,5 +486,48 @@ func TestResolveArtistSkipsTheRequestForUnsearchableTags(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("upstream saw %d requests after a real artist, want 1", got)
+	}
+}
+
+// TestResolveArtistStillAsksTheAlbumArtistForAnUnsearchableTag is the other
+// half of the same rule, and the half that went missing when the skip was
+// applied to the TAG instead of to the rungs.
+//
+// The albumArtist rung exists for precisely this track: the artist field holds
+// a folder label, and the album artist is the only thing on the row that names
+// anyone. Skipping on t.Artist returned before the ladder was built, so the
+// rung was never reached — and buildArtistLadder's own unit test kept passing,
+// because it calls the builder directly.
+//
+// Asserting on the SEARCHED NAME rather than the request count is what makes
+// this specific: a count alone would be satisfied by a version that sent the
+// useless "CD 01" query.
+func TestResolveArtistStillAsksTheAlbumArtistForAnUnsearchableTag(t *testing.T) {
+	var searched []string
+	e, calls := newRecordingArtistEnricher(t, &searched)
+
+	tr := &manifest.Track{
+		Path:        "Boxset/CD 01/01.flac",
+		Artist:      "CD 01",
+		AlbumArtist: "Abdullah Ibrahim",
+		Album:       "Some Album",
+	}
+	if err := e.resolveArtist(context.Background(), tr); err != nil {
+		t.Fatalf("resolveArtist: %v", err)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream saw %d requests, want exactly 1 (searched: %v). 0 means the "+
+			"albumArtist rung is unreachable — the tag that triggers the skip is the tag "+
+			"the rung exists for; 2 means the unanswerable rung was sent too",
+			got, searched)
+	}
+	if len(searched) != 1 || !strings.Contains(searched[0], "Abdullah Ibrahim") {
+		t.Errorf("searched %v, want a single query for the album artist", searched)
+	}
+	for _, q := range searched {
+		if strings.Contains(q, "CD 01") {
+			t.Errorf("searched %q — a folder label still went upstream", q)
+		}
 	}
 }

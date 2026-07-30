@@ -296,6 +296,57 @@ func truncateAtFirstRole(artist string) string {
 	return ""
 }
 
+// --- cache keys ---
+//
+// A memo key must name every input its ladder reads. These two live here, next
+// to the builders, because that is the only place the two can be checked
+// against each other by eye.
+//
+// They did not, and it was live. cacheKey(artist, album) has been the album
+// memo since the first enrichment PR, when buildReleaseLadder did not exist
+// and the query WAS (artist, album). The ladders later grew an albumArtist
+// rung — and on a track whose artist tag is junk, that rung is the one that
+// answers. So two tracks agreeing on (artist, album) and differing in
+// albumArtist shared one entry and got whichever answer ran first: a wrong
+// release MBID, and with it the wrong cover.
+//
+// The shape it bites is ordinary. A classical library tags artist with the
+// performer and albumArtist with the composer, so "Berliner Philharmoniker" /
+// "Symphony No. 5" is one key for Beethoven's and Mahler's alike.
+//
+// Both helpers collapse to the historic key when albumArtist is absent or
+// folds to the artist — the same useAlbumArtist test buildReleaseLadder uses
+// to decide whether the rung exists at all. So a library where the two agree
+// keeps byte-identical keys and the sibling-track sharing these caches exist
+// for is untouched; only the tracks that could get a wrong answer get a
+// narrower key.
+
+// releaseCacheKey keys the album cache on every input buildReleaseLadder
+// reads.
+func releaseCacheKey(artist, albumArtist, album string) string {
+	if !laddersUseAlbumArtist(artist, albumArtist) {
+		return cacheKey(artist, album)
+	}
+	return artist + "\x00" + albumArtist + "\x00" + album
+}
+
+// artistCacheKey keys the artist cache on every input buildArtistLadder
+// reads.
+func artistCacheKey(artist, albumArtist string) string {
+	if !laddersUseAlbumArtist(artist, albumArtist) {
+		return "artist\x00" + artist
+	}
+	return "artist\x00" + artist + "\x00" + albumArtist
+}
+
+// laddersUseAlbumArtist reports whether albumArtist can contribute a rung the
+// artist alone would not produce. Shared by both builders and both keys, so a
+// key can never disagree with the ladder it is memoizing.
+func laddersUseAlbumArtist(artist, albumArtist string) bool {
+	albumArtist = strings.TrimSpace(albumArtist)
+	return albumArtist != "" && foldName(albumArtist) != foldName(strings.TrimSpace(artist))
+}
+
 // --- ladder assembly ---
 
 // releaseAttempt is one (artist, album) query shape.
@@ -322,7 +373,7 @@ func buildReleaseLadder(artist, albumArtist, album string) []releaseAttempt {
 	// Folded compare, not EqualFold: it also suppresses a redundant rung
 	// when the two differ only by accent or punctuation ("Yael Naim" vs
 	// "Yael Naïm"), which used to cost a real request.
-	useAlbumArtist := albumArtist != "" && foldName(albumArtist) != foldName(artist)
+	useAlbumArtist := laddersUseAlbumArtist(artist, albumArtist)
 
 	var out []releaseAttempt
 	seen := map[string]struct{}{}
@@ -396,6 +447,23 @@ func buildArtistLadder(artist, albumArtist string) []string {
 		if s == "" || len(out) >= maxArtistAttempts {
 			return
 		}
+		// A tag MusicBrainz cannot answer is not worth asking about — but
+		// the judgement belongs to the RUNG, not to the tag the track
+		// happened to carry.
+		//
+		// It was applied one level up, at the top of resolveArtist, which
+		// returned before the ladder was ever built. That skipped the
+		// albumArtist rung too — the rung whose entire purpose is to
+		// recover an artist when the artist tag is a folder label. The tag
+		// that triggered the guard was the tag the rung existed for, so the
+		// guard removed the answer along with the pointless question.
+		//
+		// buildArtistLadder's own test names the case: artist "CD 01",
+		// albumArtist "Abdullah Ibrahim". It kept passing because it drives
+		// this function directly; production never got here.
+		if isUnsearchableArtistTag(s) {
+			return
+		}
 		key := foldName(s)
 		if key == "" {
 			return
@@ -442,8 +510,11 @@ func buildArtistLadder(artist, albumArtist string) []string {
 // persistent — returns immediately, so resolveArtist's transient-retry,
 // ctx-cancel and negative-cache branches all still see what they saw when
 // this was a single call.
-func (e *Enricher) searchArtistWithFallbacks(ctx context.Context, t *manifest.Track) (*SearchResult, error) {
-	attempts := buildArtistLadder(t.Artist, t.AlbumArtist)
+//
+// Takes the ladder rather than building it, so resolveArtist can decide what
+// an empty one means before recording a cache miss for a track that will
+// issue no request.
+func (e *Enricher) searchArtistWithFallbacks(ctx context.Context, attempts []string, t *manifest.Track) (*SearchResult, error) {
 	for i, name := range attempts {
 		// Pace EVERY rung — the politeness contract is per-request.
 		if !sleepCtx(ctx, e.MBMinInterval) {
@@ -454,7 +525,12 @@ func (e *Enricher) searchArtistWithFallbacks(ctx context.Context, t *manifest.Tr
 			return nil, err
 		}
 		if res != nil {
-			if i > 0 {
+			// Gate on "we asked something other than the tag", not on the
+			// rung INDEX. Dropping an unanswerable rung can make the
+			// albumArtist rung index 0, and an index-gated log would go
+			// quiet on exactly the recoveries worth knowing about — this
+			// line is the operator's only measure of what the ladder buys.
+			if foldName(name) != foldName(t.Artist) {
 				logger.Info("MB artist search matched on a fallback query",
 					"path", t.Path, "attempt", i,
 					"tagged", t.Artist, "searched", name)

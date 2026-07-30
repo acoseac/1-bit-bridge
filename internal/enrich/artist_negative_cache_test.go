@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -120,6 +122,30 @@ func newCountingArtistEnricher(t *testing.T) (*Enricher, *atomic.Int32) {
 	calls := new(atomic.Int32)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"artists":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return &Enricher{
+		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
+		MBMinInterval: 0,
+		artistCache:   newArtistCacheForTest(),
+	}, calls
+}
+
+// newRecordingArtistEnricher is newCountingArtistEnricher plus the queries
+// themselves, for the tests that care WHICH name went upstream rather than
+// only how many did. Appends to *out under the same lock the counter uses.
+func newRecordingArtistEnricher(t *testing.T, out *[]string) (*Enricher, *atomic.Int32) {
+	t.Helper()
+	calls := new(atomic.Int32)
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		q, _ := url.QueryUnescape(r.URL.Query().Get("query"))
+		mu.Lock()
+		*out = append(*out, q)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"artists":[]}`))
 	}))
