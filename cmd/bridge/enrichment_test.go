@@ -261,19 +261,7 @@ func TestEnrichmentRetryRefusesBehindALiveBridge(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "bridge.yaml")
-	cfg := &config.Config{
-		LibraryRoots:    []string{dir},
-		ListenAddress:   "127.0.0.1:17788",
-		AdminAddress:    strings.TrimPrefix(srv.URL, "http://"),
-		DataDir:         filepath.Join(dir, "data"),
-		ScanIntervalSec: 3600,
-		LibraryName:     "T",
-	}
-	if err := cfg.Save(cfgPath); err != nil {
-		t.Fatal(err)
-	}
+	_, cfgPath := writeProbeFixture(t, strings.TrimPrefix(srv.URL, "http://"))
 	var stdout, stderr bytes.Buffer
 	code := enrichmentRetryCmd(context.Background(), []string{"--config", cfgPath}, &stdout, &stderr)
 	if code == 0 {
@@ -303,23 +291,7 @@ func TestCollectMissesProbesOnce(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "bridge.yaml")
-	cfg := &config.Config{
-		LibraryRoots:    []string{dir},
-		ListenAddress:   "127.0.0.1:17788",
-		AdminAddress:    strings.TrimPrefix(srv.URL, "http://"),
-		DataDir:         filepath.Join(dir, "data"),
-		ScanIntervalSec: 3600,
-		LibraryName:     "T",
-	}
-	if err := cfg.Save(cfgPath); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded, _ := writeProbeFixture(t, strings.TrimPrefix(srv.URL, "http://"))
 	rep, err := collectMisses(context.Background(), loaded, "")
 	if err != nil {
 		t.Fatalf("collectMisses: %v", err)
@@ -331,4 +303,29 @@ func TestCollectMissesProbesOnce(t *testing.T) {
 	if !strings.Contains(rep.Source, "bridge is running") {
 		t.Errorf("Source = %q, want it to say the bridge is running", rep.Source)
 	}
+}
+
+// writeProbeFixture writes a bridge.yaml whose admin address points at
+// adminAddr, and returns both the loaded config and its path — the two
+// liveness tests need one each. Shared so the fixture lives in one place.
+func writeProbeFixture(t *testing.T, adminAddr string) (*config.Config, string) {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	cfg := &config.Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   "127.0.0.1:17788",
+		AdminAddress:    adminAddr,
+		DataDir:         filepath.Join(dir, "data"),
+		ScanIntervalSec: 3600,
+		LibraryName:     "T",
+	}
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loaded, cfgPath
 }
