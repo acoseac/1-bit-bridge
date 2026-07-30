@@ -390,66 +390,70 @@ func TestAlbumHopUsesTheSameKeyAsTheTextPath(t *testing.T) {
 	}
 }
 
-// TestUnsearchableArtistTagIsNarrowerThanJunk is the guard against merging two
-// predicates that look like duplicates.
+// TestArtistTagPredicatesDiffer is the guard against merging two predicates
+// that look like duplicates.
 //
-// isJunkArtistTag can afford to be broad: a false positive there only removes
+// One table rather than three loops, because the contrast IS the subject: each
+// row states what both predicates must say about the same name, so a reader
+// can see at a glance where they diverge and why.
+//
+// isJunkArtistTag can afford to be broad — a false positive there only removes
 // the local witness, and the gate compensates by demanding more submissions.
 // isUnsearchableArtistTag cannot: a false positive there means the MusicBrainz
 // query is never sent and the track permanently loses a text match it would
-// have had.
-//
-// So the values below MUST be classified junk (no witness) while remaining
-// searchable. Anyone collapsing the two functions fails here rather than
+// have had. Anyone collapsing the two fails here, named row by row, rather than
 // quietly costing real bands their metadata.
-func TestUnsearchableArtistTagIsNarrowerThanJunk(t *testing.T) {
-	for _, name := range []string{
-		"311",             // real band, all digits
-		"112",             // real band, all digits
-		"Various Artists", // a real MusicBrainz special-purpose artist
-		"VA",
-		"!!!",      // real band; folds to nothing
-		"unknown",  // plausible band name on its own
-		"None",     // ditto
-		"Untitled", // ditto
-	} {
-		if !isJunkArtistTag(name) {
-			t.Errorf("isJunkArtistTag(%q) = false, want true — the veto has no usable witness here", name)
-		}
-		if isUnsearchableArtistTag(name) {
-			t.Errorf("isUnsearchableArtistTag(%q) = true; this would stop MusicBrainz ever being "+
-				"asked about a name that may be real", name)
-		}
-	}
-}
+func TestArtistTagPredicatesDiffer(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		junk         bool // no usable witness for the fingerprint veto
+		unsearchable bool // MusicBrainz cannot answer; do not send the query
+		why          string
+	}{
+		// Broad for the veto, searchable here. These are the rows that make
+		// the two sets different, and the reason they cannot be merged.
+		{"311", true, false, "real band, all digits"},
+		{"112", true, false, "real band, all digits"},
+		{"Various Artists", true, false, "a real MusicBrainz special-purpose artist"},
+		{"VA", true, false, "abbreviation of the same real entity"},
+		{"!!!", true, false, "real band; folds to nothing, so no witness is possible"},
+		{"unknown", true, false, "plausible band name on its own"},
+		{"None", true, false, "plausible band name on its own"},
+		{"Untitled", true, false, "plausible band name on its own"},
 
-// TestUnsearchableArtistTagCatchesTheLeakedLabels pins the values the predicate
-// does exist for: folder labels that ended up in the artist field, and the
-// explicit placeholders taggers write when they have nothing.
-func TestUnsearchableArtistTagCatchesTheLeakedLabels(t *testing.T) {
-	for _, name := range []string{
-		"CD 01", "cd 2", "Disc 1", "disk 03", "Track 7",
-		"An Unknown Artist", "Unknown Artist", "No Artist",
-	} {
-		if !isUnsearchableArtistTag(name) {
-			t.Errorf("isUnsearchableArtistTag(%q) = false, want true", name)
-		}
-	}
-}
+		// What isUnsearchableArtistTag exists for: folder labels that landed
+		// in the artist field, and explicit placeholders.
+		{"CD 01", true, true, "disc folder label"},
+		{"cd 2", true, true, "disc folder label"},
+		{"Disc 1", true, true, "disc folder label"},
+		{"disk 03", true, true, "disc folder label"},
+		{"Track 7", true, true, "track label"},
+		{"An Unknown Artist", true, true, "explicit placeholder"},
+		{"Unknown Artist", true, true, "explicit placeholder"},
+		{"No Artist", true, true, "explicit placeholder"},
 
-// TestUnsearchableArtistTagLeavesRealNamesAlone is the tripwire. Every entry is
-// a real artist, and each one that slipped through would silently lose its
-// MusicBrainz identity for the life of the library.
-func TestUnsearchableArtistTagLeavesRealNamesAlone(t *testing.T) {
-	for _, name := range []string{
-		"CD Projekt", "Discharge", "Disclosure", "The Cardigans",
-		"Track and Field", "CD 01 Orchestra", "Unknown Mortal Orchestra",
-		"The Unknown Artist Collective", "Artist vs Poet",
-		"Peter, Paul and Mary", "Simon & Garfunkel", "Zdob și Zdub",
+		// Real artists that shade toward the patterns above. Each one that
+		// slipped through would lose its MusicBrainz identity for the life of
+		// the library.
+		{"CD Projekt", false, false, "starts with the cd prefix, not a label"},
+		{"Discharge", false, false, "starts with disc"},
+		{"Disclosure", false, false, "starts with disc"},
+		{"Track and Field", false, false, "starts with track"},
+		{"CD 01 Orchestra", false, false, "label-shaped prefix, but continues"},
+		{"Unknown Mortal Orchestra", false, false, "starts with unknown"},
+		{"The Unknown Artist Collective", false, false, "contains the placeholder phrase"},
+		{"Artist vs Poet", false, false, "starts with artist"},
+		{"Peter, Paul and Mary", false, false, "ordinary name"},
+		{"Simon & Garfunkel", false, false, "ordinary name"},
+		{"Zdob \u0219i Zdub", false, false, "non-ASCII, ordinary name"},
 	} {
-		if isUnsearchableArtistTag(name) {
-			t.Errorf("isUnsearchableArtistTag(%q) = true — this is a real artist and would "+
-				"never be searched for", name)
+		if got := isJunkArtistTag(tc.name); got != tc.junk {
+			t.Errorf("isJunkArtistTag(%q) = %v, want %v — %s", tc.name, got, tc.junk, tc.why)
+		}
+		if got := isUnsearchableArtistTag(tc.name); got != tc.unsearchable {
+			t.Errorf("isUnsearchableArtistTag(%q) = %v, want %v — %s\n"+
+				"\ta wrong true here stops MusicBrainz ever being asked about this name",
+				tc.name, got, tc.unsearchable, tc.why)
 		}
 	}
 }

@@ -93,6 +93,25 @@ var junkArtistTags = map[string]struct{}{
 // "Artist Name - Unknown" folds to "artist name unknown", which is a real
 // enough artist to be worth vetoing with, and a contains-check would classify
 // it as junk and silently drop the veto.
+// isDiscOrTrackLabel reports whether an ALREADY-FOLDED tag is a disc or track
+// label that leaked out of a folder name — "CD 01", "Disc 2", "Track 7".
+//
+// Shared by both artist-tag predicates on purpose: of everything they do, this
+// is the one shape they genuinely agree on. A folder label is neither a usable
+// witness nor a searchable name, so both want it, and naming it once keeps the
+// two from drifting on the one rule they should share. Everything else about
+// them differs deliberately — see isUnsearchableArtistTag.
+//
+// Takes the folded form because both callers have already folded.
+func isDiscOrTrackLabel(folded string) bool {
+	for _, prefix := range []string{"track ", "cd ", "disc ", "disk "} {
+		if rest, ok := strings.CutPrefix(folded, prefix); ok && isAllDigits(rest) {
+			return true
+		}
+	}
+	return false
+}
+
 func isJunkArtistTag(artist string) bool {
 	folded := foldName(artist)
 	if folded == "" {
@@ -111,12 +130,7 @@ func isJunkArtistTag(artist string) bool {
 	if isAllDigits(folded) {
 		return true
 	}
-	for _, prefix := range []string{"track ", "cd ", "disc ", "disk "} {
-		if rest, ok := strings.CutPrefix(folded, prefix); ok && isAllDigits(rest) {
-			return true
-		}
-	}
-	return false
+	return isDiscOrTrackLabel(folded)
 }
 
 // isUnsearchableArtistTag reports whether an artist tag is one MusicBrainz
@@ -159,12 +173,7 @@ func isUnsearchableArtistTag(artist string) bool {
 	case "an unknown artist", "unknown artist", "no artist":
 		return true
 	}
-	for _, prefix := range []string{"track ", "cd ", "disc ", "disk "} {
-		if rest, ok := strings.CutPrefix(folded, prefix); ok && isAllDigits(rest) {
-			return true
-		}
-	}
-	return false
+	return isDiscOrTrackLabel(folded)
 }
 
 func isAllDigits(s string) bool {
