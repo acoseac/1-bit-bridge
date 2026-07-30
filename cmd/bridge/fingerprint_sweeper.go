@@ -223,30 +223,52 @@ func (s *fingerprintSweeper) fingerprintAll(ctx context.Context, cands []candida
 		}
 	}()
 
-	// BOUNDED wait. exec.CommandContext sends SIGKILL on ctx expiry, but a
+	// A healthy sweep runs to COMPLETION however long it takes — 500
+	// candidates on one worker is minutes, by design.
+	//
+	// The bounded grace applies only AFTER cancellation, which is the case it
+	// exists for: exec.CommandContext sends SIGKILL on ctx expiry, but a
 	// process blocked in a FUSE syscall sits in uninterruptible sleep and will
-	// not take the signal until the driver unblocks — so a worker CAN outlive
-	// cancellation. An unbounded Wait here would hold the bgWriters join open
-	// and turn a wedged mount into a hung shutdown. A stuck worker costs one
-	// slot and a log line instead.
+	// not take the signal until the driver unblocks, so a worker can outlive
+	// cancellation and an unbounded wait would hold the bgWriters join open.
+	//
+	// An earlier version applied the grace unconditionally, which capped every
+	// sweep at 60s: the workers kept running past it while the sweep reported
+	// a truncated result and the next tick started on top of them. The two
+	// situations look alike in the code and are not alike at all — one is
+	// normal work, the other is a wedged filesystem.
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(sweeperDrainGrace):
-		logger.Warn("fingerprint sweep: workers did not drain within the grace window; " +
-			"continuing (a wedged filesystem can hold fpcalc in uninterruptible sleep)")
-	}
+	waitForWorkers(ctx, done)
 
 	mu.Lock()
 	defer mu.Unlock()
 	return append([]string(nil), resolved...)
 }
 
-// sweeperDrainGrace bounds how long a sweep waits for its workers. Generous
-// enough that a slow network decode finishes normally, short enough that a
-// wedged mount cannot hold up process exit.
-const sweeperDrainGrace = 60 * time.Second
+// waitForWorkers blocks until the workers finish, or — if the context is
+// already cancelled or becomes so — until the shutdown grace expires.
+//
+// Split out so the distinction it encodes is directly testable: a healthy
+// sweep must never be cut short, and a cancelled one must never hang.
+func waitForWorkers(ctx context.Context, done <-chan struct{}) {
+	select {
+	case <-done:
+		return
+	case <-ctx.Done():
+	}
+	select {
+	case <-done:
+	case <-time.After(sweeperDrainGrace):
+		logger.Warn("fingerprint sweep: workers did not drain within the shutdown grace window; " +
+			"continuing (a wedged filesystem can hold fpcalc in uninterruptible sleep)")
+	}
+}
+
+// sweeperDrainGrace bounds how long a CANCELLED sweep waits for its workers
+// before giving up on them. It is a shutdown bound, not a sweep budget — a
+// healthy sweep is never subject to it.
+var sweeperDrainGrace = 30 * time.Second
 
 // fingerprintOne decodes, looks up, and records one track. Returns true when
 // the gate accepted a match.
