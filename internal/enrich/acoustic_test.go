@@ -93,50 +93,49 @@ func TestIsJunkArtistTagCatchesTheGenericOnes(t *testing.T) {
 	}
 }
 
+// vetoSubject is the match every veto test compares against.
+func vetoSubject() AcousticMatch {
+	return AcousticMatch{ArtistMBID: "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd", ArtistName: "M83"}
+}
+
+// TestAcousticVetoRefusesAContradiction — the veto's whole job.
+func TestAcousticVetoRefusesAContradiction(t *testing.T) {
+	if !acousticMatchContradictsTag("Completely Different Band", vetoSubject()) {
+		t.Fatal("a real, disagreeing tag must veto")
+	}
+}
+
 // TestAcousticVetoOnlySubtracts pins the property that makes the veto safe to
 // add at all: it can refuse a fingerprint answer but can never promote one.
+// Everything below must NOT veto.
 func TestAcousticVetoOnlySubtracts(t *testing.T) {
-	m := AcousticMatch{ArtistMBID: "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd", ArtistName: "M83"}
+	m := vetoSubject()
 
-	t.Run("a contradicting tag vetoes", func(t *testing.T) {
-		if !acousticMatchContradictsTag("Completely Different Band", m) {
-			t.Fatal("a real, disagreeing tag must veto")
-		}
-	})
+	if acousticMatchContradictsTag("M83", m) {
+		t.Error("an agreeing tag must not veto")
+	}
 
-	t.Run("an agreeing tag does not veto", func(t *testing.T) {
-		if acousticMatchContradictsTag("M83", m) {
-			t.Error("an agreeing tag must not veto")
+	// No witness is not the same as a disagreeing witness. These tracks are
+	// the population fingerprinting exists for; the gate compensates by
+	// demanding more independent submissions.
+	for _, tag := range []string{"", "An Unknown Artist", "CD 03", "Various Artists"} {
+		if acousticMatchContradictsTag(tag, m) {
+			t.Errorf("%q must not veto — it carries no information", tag)
 		}
-	})
+	}
 
-	t.Run("junk and blank tags cannot veto", func(t *testing.T) {
-		// No witness is not the same as a disagreeing witness. These tracks
-		// are the population fingerprinting exists for; the gate compensates
-		// by demanding more independent submissions.
-		for _, tag := range []string{"", "An Unknown Artist", "CD 03", "Various Artists"} {
-			if acousticMatchContradictsTag(tag, m) {
-				t.Errorf("%q must not veto — it carries no information", tag)
-			}
+	// Real tags routinely carry more or less of the credit than MusicBrainz's
+	// canonical name. Those are not contradictions.
+	wider := AcousticMatch{ArtistName: "Bill Withers", ArtistMBID: "x"}
+	for _, tag := range []string{"Bill Withers", "bill withers", "Bill Withers & Friends"} {
+		if acousticMatchContradictsTag(tag, wider) {
+			t.Errorf("%q should not read as a contradiction of %q", tag, wider.ArtistName)
 		}
-	})
+	}
 
-	t.Run("token containment tolerates the usual credit shapes", func(t *testing.T) {
-		// Real tags routinely carry more or less of the credit than
-		// MusicBrainz's canonical name. Those are not contradictions.
-		wider := AcousticMatch{ArtistName: "Bill Withers", ArtistMBID: "x"}
-		for _, tag := range []string{"Bill Withers", "bill withers", "Bill Withers & Friends"} {
-			if acousticMatchContradictsTag(tag, wider) {
-				t.Errorf("%q should not read as a contradiction of %q", tag, wider.ArtistName)
-			}
-		}
-	})
-
-	t.Run("an empty fingerprint name cannot veto", func(t *testing.T) {
-		if acousticMatchContradictsTag("Some Artist", AcousticMatch{ArtistMBID: "x"}) {
-			t.Error("with no fingerprint name there is nothing to compare")
-		}
-	})
+	if acousticMatchContradictsTag("Some Artist", AcousticMatch{ArtistMBID: "x"}) {
+		t.Error("with no fingerprint name there is nothing to compare")
+	}
 }
 
 // fakeLookup is a canned AcousticLookup.
@@ -147,54 +146,60 @@ func (f fakeLookup) LookupPath(p string) (AcousticMatch, bool) {
 	return m, ok
 }
 
-func TestApplyAcousticFallback(t *testing.T) {
-	const goodMBID = "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd"
-	const recMBID = "cd2e7c47-16f5-46c6-a37c-a1eb7bf599ff"
+const (
+	fbArtistMBID = "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd"
+	fbRecMBID    = "cd2e7c47-16f5-46c6-a37c-a1eb7bf599ff"
+)
 
-	t.Run("nil lookup means the feature is off", func(t *testing.T) {
-		e := &Enricher{}
-		if _, o := e.applyAcousticFallback(&manifest.Track{Path: "a.flac"}); o == acousticApplied {
-			t.Fatal("a nil lookup must never recover anything")
-		}
-	})
+func TestApplyAcousticFallbackOffWhenNoLookup(t *testing.T) {
+	e := &Enricher{}
+	if _, o := e.applyAcousticFallback(&manifest.Track{Path: "a.flac"}); o != acousticNoVerdict {
+		t.Fatalf("outcome = %v — a nil lookup must never recover anything", o)
+	}
+}
 
-	t.Run("writes the artist and recording, never a release", func(t *testing.T) {
-		e := &Enricher{acoustic: fakeLookup{"a.flac": {
-			ArtistMBID: goodMBID, ArtistName: "M83", RecordingMBID: recMBID,
-			AlbumHint: "Before the Dawn Heals Us", AcoustID: "acid-1",
-		}}}
-		tr := &manifest.Track{Path: "a.flac", Artist: "An Unknown Artist"}
-		m, o := e.applyAcousticFallback(tr)
-		if o != acousticApplied {
-			t.Fatalf("outcome = %v, want applied", o)
-		}
-		if tr.ArtistMBID != goodMBID {
-			t.Errorf("ArtistMBID = %q", tr.ArtistMBID)
-		}
-		if tr.MusicBrainzTrackID != recMBID {
-			t.Errorf("MusicBrainzTrackID = %q", tr.MusicBrainzTrackID)
-		}
-		// The load-bearing assertion: an album cue is a QUERY term, and must
-		// not have been stored as an identifier.
-		if tr.MusicBrainzAlbumID != "" {
-			t.Errorf("MusicBrainzAlbumID = %q — a fingerprint cannot justify a release", tr.MusicBrainzAlbumID)
-		}
-		if tr.ArtworkMBID != "" {
-			t.Errorf("ArtworkMBID = %q — downstream of a release, equally unjustified", tr.ArtworkMBID)
-		}
-		if m.ArtistName != "M83" {
-			t.Errorf("the caller needs the canonical name for the portrait lookup, got %q", m.ArtistName)
-		}
-	})
+// TestApplyAcousticFallbackWritesArtistNeverRelease is the behavioural twin of
+// the gate's structural pin: even a maximally favourable verdict, carrying an
+// album cue, must leave the release and artwork fields empty. The cue is a
+// QUERY term, and storing it as an identifier is the one thing a fingerprint
+// cannot justify.
+func TestApplyAcousticFallbackWritesArtistNeverRelease(t *testing.T) {
+	e := &Enricher{acoustic: fakeLookup{"a.flac": {
+		ArtistMBID: fbArtistMBID, ArtistName: "M83", RecordingMBID: fbRecMBID,
+		AlbumHint: "Before the Dawn Heals Us", AcoustID: "acid-1",
+	}}}
+	tr := &manifest.Track{Path: "a.flac", Artist: "An Unknown Artist"}
 
+	m, o := e.applyAcousticFallback(tr)
+	if o != acousticApplied {
+		t.Fatalf("outcome = %v, want applied", o)
+	}
+	if tr.ArtistMBID != fbArtistMBID {
+		t.Errorf("ArtistMBID = %q", tr.ArtistMBID)
+	}
+	if tr.MusicBrainzTrackID != fbRecMBID {
+		t.Errorf("MusicBrainzTrackID = %q", tr.MusicBrainzTrackID)
+	}
+	if tr.MusicBrainzAlbumID != "" {
+		t.Errorf("MusicBrainzAlbumID = %q — a fingerprint cannot justify a release", tr.MusicBrainzAlbumID)
+	}
+	if tr.ArtworkMBID != "" {
+		t.Errorf("ArtworkMBID = %q — downstream of a release, equally unjustified", tr.ArtworkMBID)
+	}
+	if m.ArtistName != "M83" {
+		t.Errorf("the caller needs the canonical name for the portrait lookup, got %q", m.ArtistName)
+	}
+}
+
+// TestApplyAcousticFallbackRefusals — each of these must be REFUSED rather
+// than reported as "no verdict": a verdict existed and this layer rejected it,
+// and the skip-reason counters depend on telling those apart.
+func TestApplyAcousticFallbackRefusals(t *testing.T) {
 	t.Run("a contradicting tag refuses the whole match", func(t *testing.T) {
 		e := &Enricher{acoustic: fakeLookup{"a.flac": {
-			ArtistMBID: goodMBID, ArtistName: "M83", RecordingMBID: recMBID,
+			ArtistMBID: fbArtistMBID, ArtistName: "M83", RecordingMBID: fbRecMBID,
 		}}}
 		tr := &manifest.Track{Path: "a.flac", Artist: "Some Other Band"}
-		// REFUSED, not "no verdict": a verdict existed and this layer
-		// rejected it. The two must stay distinguishable or the skip-reason
-		// counters conflate coverage with disagreement.
 		if _, o := e.applyAcousticFallback(tr); o != acousticRefused {
 			t.Fatalf("outcome = %v, want refused", o)
 		}
@@ -211,22 +216,24 @@ func TestApplyAcousticFallback(t *testing.T) {
 		}}}
 		tr := &manifest.Track{Path: "a.flac"}
 		if _, o := e.applyAcousticFallback(tr); o != acousticRefused {
-			t.Fatalf("outcome = %v, want refused — a non-UUID MBID must not reach a path", o)
+			t.Fatalf("outcome = %v — a non-UUID MBID must not reach a path", o)
 		}
 		if tr.ArtistMBID != "" {
 			t.Errorf("ArtistMBID = %q", tr.ArtistMBID)
 		}
 	})
+}
 
+func TestApplyAcousticFallbackPartialData(t *testing.T) {
 	t.Run("a non-UUID recording MBID drops only that field", func(t *testing.T) {
 		e := &Enricher{acoustic: fakeLookup{"a.flac": {
-			ArtistMBID: goodMBID, ArtistName: "M83", RecordingMBID: "not-a-uuid",
+			ArtistMBID: fbArtistMBID, ArtistName: "M83", RecordingMBID: "not-a-uuid",
 		}}}
 		tr := &manifest.Track{Path: "a.flac"}
 		if _, o := e.applyAcousticFallback(tr); o != acousticApplied {
 			t.Fatalf("outcome = %v — a bad recording MBID must not cost the artist", o)
 		}
-		if tr.ArtistMBID != goodMBID {
+		if tr.ArtistMBID != fbArtistMBID {
 			t.Errorf("ArtistMBID = %q", tr.ArtistMBID)
 		}
 		if tr.MusicBrainzTrackID != "" {
@@ -371,9 +378,6 @@ func TestAlbumHopSharesTheTextPathCache(t *testing.T) {
 // sides key identically. A divergence here would silently halve the hit rate
 // rather than fail anything.
 func TestAlbumHopUsesTheSameKeyAsTheTextPath(t *testing.T) {
-	if cacheKey("M83", "Album") != cacheKey("M83", "Album") {
-		t.Fatal("cacheKey must be stable")
-	}
 	// The hop keys on the fingerprint's canonical artist name and the resolved
 	// album term — the same two inputs the text path uses, in the same order.
 	m := AcousticMatch{ArtistName: "M83", AlbumHint: "Hint"}

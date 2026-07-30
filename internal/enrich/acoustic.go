@@ -243,55 +243,80 @@ func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, acou
 // resolveAlbumFromAcoustic. Splitting the two keeps this function honest about
 // what it knows.
 func (e *Enricher) enrichWithRecoveredArtist(ctx context.Context, t *manifest.Track, m AcousticMatch) {
-	// The album hop: try to turn the recovered artist into a release through
-	// the existing text acceptance. A miss is normal and costs nothing; a
-	// TRANSIENT failure returns without stamping so the worker retries, which
-	// is the same contract the tag-driven paths honour.
-	releaseMBID, rgMBID, err := e.resolveAlbumFromAcoustic(ctx, t, m)
-	if err != nil {
-		if ctx.Err() == nil && !IsTransient(err) {
-			logger.Error("MB search (fingerprint artist)", "path", t.Path, "err", err)
-		} else {
-			return
-		}
+	if !e.applyAlbumHop(ctx, t, m) {
+		return // transient failure: leave enriched_at alone so the worker retries
 	}
-	if releaseMBID != "" {
-		t.MusicBrainzAlbumID = releaseMBID
-		// Artwork rides the same chain every other release does — nothing
-		// fingerprint-specific about it once a real release MBID exists.
-		if !strings.HasPrefix(t.ArtworkMBID, "local-") {
-			// The SAME term the release search used: the iTunes fallback
-			// inside ensureArtworkCached searches by (artist, album), so a
-			// junk local title here would quietly lose that fallback.
-			if cached, aerr := e.ensureArtworkCached(ctx, releaseMBID, rgMBID, m.ArtistName, albumSearchTerm(t, m), 500); aerr != nil {
-				if ctx.Err() == nil {
-					logger.Error("artwork", "mbid", releaseMBID, "err", aerr)
-				}
-			} else if cached {
-				t.ArtworkMBID = releaseMBID
-			}
-		}
-	}
-
-	// The portrait lookup needs an artist NAME, and on this path the track's
-	// own tag is exactly the thing that could not be trusted — for a
-	// junk-tagged file it is "An Unknown Artist" or a folder name. Use the
-	// canonical name the fingerprint resolved.
-	if t.ArtistMBID != "" && e.deezer != nil && !e.deezerNegCache.Has(t.ArtistMBID) {
-		found, err := e.ensureArtistImageCached(ctx, t.ArtistMBID, m.ArtistName)
-		if err != nil {
-			if ctx.Err() == nil {
-				logger.Error("artist image", "mbid", t.ArtistMBID, "err", err)
-			}
-		} else if !found {
-			e.deezerNegCache.Set(t.ArtistMBID, struct{}{})
-		}
-	}
+	e.fetchRecoveredArtistImage(ctx, t, m)
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		logger.Error("mark enriched", "path", t.Path, "err", err)
 		return
 	}
 	e.done.Add(1)
+}
+
+// applyAlbumHop resolves and applies the album, returning false only when the
+// caller must NOT stamp the track — i.e. on a transient upstream failure,
+// where leaving enriched_at alone is what lets the worker retry.
+//
+// A miss is normal and returns true: most of this population has no album to
+// find, and stamping them is correct.
+func (e *Enricher) applyAlbumHop(ctx context.Context, t *manifest.Track, m AcousticMatch) bool {
+	releaseMBID, rgMBID, err := e.resolveAlbumFromAcoustic(ctx, t, m)
+	if err != nil {
+		if ctx.Err() != nil || IsTransient(err) {
+			return false
+		}
+		logger.Error("MB search (fingerprint artist)", "path", t.Path, "err", err)
+		return true
+	}
+	if releaseMBID == "" {
+		return true
+	}
+	t.MusicBrainzAlbumID = releaseMBID
+	// Artwork rides the same chain every other release does — nothing
+	// fingerprint-specific about it once a real release MBID exists.
+	if strings.HasPrefix(t.ArtworkMBID, "local-") {
+		return true
+	}
+	// The SAME album term the release search used: the iTunes fallback inside
+	// ensureArtworkCached searches by (artist, album), so a junk local title
+	// here would quietly lose that fallback.
+	cached, aerr := e.ensureArtworkCached(ctx, releaseMBID, rgMBID, m.ArtistName, albumSearchTerm(t, m), 500)
+	if aerr != nil {
+		if ctx.Err() == nil {
+			logger.Error("artwork", "mbid", releaseMBID, "err", aerr)
+		}
+		return true
+	}
+	if cached {
+		t.ArtworkMBID = releaseMBID
+	}
+	return true
+}
+
+// fetchRecoveredArtistImage fetches the Deezer portrait for a
+// fingerprint-recovered artist.
+//
+// It uses the CANONICAL name from the match rather than the track's own tag,
+// because on this path that tag is exactly the thing that could not be trusted
+// — for a junk-tagged file it is "An Unknown Artist" or a folder name.
+//
+// Tier-2 throughout: any failure is logged and absorbed, so a portrait miss
+// never blocks the already-resolved MBIDs from committing.
+func (e *Enricher) fetchRecoveredArtistImage(ctx context.Context, t *manifest.Track, m AcousticMatch) {
+	if t.ArtistMBID == "" || e.deezer == nil || e.deezerNegCache.Has(t.ArtistMBID) {
+		return
+	}
+	found, err := e.ensureArtistImageCached(ctx, t.ArtistMBID, m.ArtistName)
+	if err != nil {
+		if ctx.Err() == nil {
+			logger.Error("artist image", "mbid", t.ArtistMBID, "err", err)
+		}
+		return
+	}
+	if !found {
+		e.deezerNegCache.Set(t.ArtistMBID, struct{}{})
+	}
 }
 
 // resolveAlbumFromAcoustic is the album hop: it turns a fingerprint-recovered
