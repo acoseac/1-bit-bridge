@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -332,5 +334,98 @@ func TestCollectCandidatesResolvesEveryCandidateExactlyOnce(t *testing.T) {
 	// screens, none repeated.
 	if n := res.calls.Load(); n != 3 {
 		t.Errorf("resolver called %d times, want 3", n)
+	}
+}
+
+// TestCollectCandidatesIsNotStarvedByUnresolvableRows.
+//
+// Moving resolution out of the stream moved the per-run cap to the wrong side
+// of it. With one bound, rows pointing at missing files — a folder removed but
+// not yet reaped, a root half-mounted — fill the budget, phase two drops every
+// one, and the sweep does nothing. StreamTracks order is stable, so the same
+// rows win the race on every sweep and the tracks behind them are never
+// reached: permanent starvation, not a slow pass.
+//
+// The old single-cap code did not have this problem, because it counted
+// candidates AFTER resolving them. Two bounds restore that property.
+func TestCollectCandidatesIsNotStarvedByUnresolvableRows(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	dur := 240.0
+	add := func(name string, onDisk bool) {
+		if onDisk {
+			if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		tr := &manifest.Track{Path: name, Size: 5, ModTime: time.Now(), Duration: &dur}
+		if err := store.UpsertTrack(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.MarkEnriched(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Six rows with no file, then two real ones. Sorted order puts the ghosts
+	// first, so a stream that stops at maxPerRun=2 collects only ghosts.
+	for i := range 6 {
+		add(fmt.Sprintf("aghost-%d.flac", i), false)
+	}
+	add("zreal-1.flac", true)
+	add("zreal-2.flac", true)
+
+	s := &fingerprintSweeper{
+		store:     store,
+		resolver:  bridgefs.New([]string{root}),
+		cache:     acoustid.NewCache(16),
+		maxPerRun: 2,
+	}
+	got, err := s.collectCandidates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("candidates = %d, want 2 — the sweep must reach past rows that "+
+			"cannot resolve, or the same ones starve it on every pass", len(got))
+	}
+	for _, c := range got {
+		if !strings.HasPrefix(c.path, "zreal-") {
+			t.Errorf("candidate %q is one of the unresolvable rows", c.path)
+		}
+	}
+}
+
+// TestResolveCandidatesStopsAtTheWorkCap pins the other half: the extra rows
+// scanCap allows are a memory allowance, not extra work. A healthy library
+// resolves the first maxPerRun and never stats the rest.
+func TestResolveCandidatesStopsAtTheWorkCap(t *testing.T) {
+	root := t.TempDir()
+	var in []candidate
+	for i := range 10 {
+		name := fmt.Sprintf("t-%d.flac", i)
+		if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		in = append(in, candidate{path: name})
+	}
+
+	res := &countingResolver{inner: bridgefs.New([]string{root})}
+	s := &fingerprintSweeper{resolver: res, maxPerRun: 3}
+
+	got := s.resolveCandidates(in)
+	if len(got) != 3 {
+		t.Errorf("resolved %d, want the work cap of 3", len(got))
+	}
+	if n := res.calls.Load(); n != 3 {
+		t.Errorf("resolver called %d times, want 3 — rows past the cap must not be "+
+			"stat'd at all", n)
 	}
 }

@@ -153,7 +153,7 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if len(out) >= s.maxPerRun {
+		if len(out) >= s.scanCap() {
 			return errSweepFull
 		}
 		// Only tracks still missing what fingerprinting can supply.
@@ -214,19 +214,52 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 	return s.resolveCandidates(out), nil
 }
 
-// resolveCandidates turns client paths into absolute ones, dropping any that
-// will not resolve. Runs AFTER the stream above, with no cursor open.
+// scanCap bounds how many rows the stream may COLLECT, as opposed to how many
+// the sweep may WORK on.
 //
-// That ordering is the point. SQLite in WAL mode cannot reset the log while a
-// reader holds a snapshot, so a read transaction spanning thousands of
-// filesystem calls pins the WAL at its start mark for the whole sweep while
-// concurrent enrichment writes append behind it. Doing the I/O here leaves the
-// stream doing nothing but SQLite work, which is what the sweeper's own
-// docblock argues for one layer up: the enricher has no filesystem dependency
-// and this is how it keeps one out of the query path too.
+// Two bounds because the cap moved sides. It used to be applied after
+// resolution, so an unresolvable row cost nothing and the stream simply kept
+// going until it had maxPerRun real candidates. Now that resolution happens
+// after the stream, a single cap would let unresolvable rows consume the
+// budget: a chunk of rows pointing at missing files — a folder removed but not
+// yet reaped, a root half-mounted — would fill all 500 slots, phase two would
+// drop every one of them, and the sweep would do nothing. StreamTracks order
+// is stable, so the same rows would win the race on every sweep and the tracks
+// behind them would never be reached.
+//
+// The headroom is what keeps that from happening, and it is a memory bound
+// rather than a work bound: a candidate is roughly 150 bytes, so even at the
+// factor below the slice stays well under a megabyte, which matters on the
+// low-memory hosts the rest of this codebase streams for.
+func (s *fingerprintSweeper) scanCap() int {
+	return s.maxPerRun * candidateScanFactor
+}
+
+// candidateScanFactor is how much unresolvable material a sweep can absorb
+// before it starts losing candidates to it: at 4, three quarters of the rows
+// scanned can fail to resolve and the sweep still fills its budget.
+const candidateScanFactor = 4
+
+// resolveCandidates turns client paths into absolute ones, dropping any that
+// will not resolve, and stops once it has maxPerRun of them.
+//
+// Runs AFTER the stream above, with no cursor open. That ordering is the
+// point: SQLite in WAL mode cannot reset the log while a reader holds a
+// snapshot, so a read transaction spanning thousands of filesystem calls pins
+// the WAL at its start mark for the whole sweep while concurrent enrichment
+// writes append behind it. Doing the I/O here leaves the stream doing nothing
+// but SQLite work — which is what the sweeper's own docblock argues for one
+// layer up, applied to the query path rather than only to the enricher.
+//
+// The early exit means the extra rows scanCap allows are only PAID for when
+// they are needed: a healthy library resolves the first maxPerRun and never
+// stats the rest.
 func (s *fingerprintSweeper) resolveCandidates(in []candidate) []candidate {
 	out := in[:0] // filter in place; the backing array is already sized
 	for _, c := range in {
+		if len(out) >= s.maxPerRun {
+			break
+		}
 		abs, _, err := s.resolver.ResolveChecked(c.path)
 		if err != nil {
 			// EVERY resolve error is treated identically — ENOENT and a
