@@ -69,6 +69,7 @@ type Config struct {
 	LibraryWatch    LibraryWatchConfig   `yaml:"libraryWatch,omitempty"`
 	Upscale         UpscaleConfig        `yaml:"upscale,omitempty"`
 	Analysis        AnalysisConfig       `yaml:"analysis,omitempty"`
+	Fingerprint     FingerprintConfig    `yaml:"fingerprint,omitempty"`
 	SmartPlaylists  SmartPlaylistsConfig `yaml:"smartPlaylists,omitempty"`
 	Tailscale       TailscaleConfig      `yaml:"tailscale,omitempty"`
 	Scanner         ScannerConfig        `yaml:"scanner,omitempty"`
@@ -1207,6 +1208,117 @@ func (a AnalysisConfig) EffectiveQueueCap() int {
 	return DefaultAnalysisQueueCap
 }
 
+// FingerprintConfig governs the optional acoustic-fingerprinting fallback for
+// the enricher: when text matching finds no acceptable MusicBrainz candidate,
+// fpcalc (Chromaprint) fingerprints the audio and AcoustID identifies the
+// recording from the sound itself.
+//
+// Disabled by default; opt in here AND install fpcalc AND supply an AcoustID
+// application key. A `true` config missing either degrades to feature-off
+// in-memory at startup with a stderr line, exactly like upscaling and
+// analysis — a host that cannot fingerprint must still boot and serve.
+//
+// FLAC-only in practice today, which is a consequence rather than a policy:
+// the gate needs a container-derived duration to check the match against, and
+// `Track.Duration` is populated only by the FLAC and DSF extractors (DSD is
+// excluded separately — fpcalc's handling of it is unreliable). Extending the
+// other extractors would widen this automatically.
+type FingerprintConfig struct {
+	// Enabled is the master toggle. Default false.
+	// Env: BRIDGE_FINGERPRINT_ENABLED.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// APIKey is the AcoustID application key, registered free at
+	// https://acoustid.org/new-application
+	//
+	// Precedence matches TailscaleConfig.AuthKey: the ACOUSTID_API_KEY
+	// environment variable wins, this field is the fallback for operators who
+	// cannot set env vars. Keep it out of version control.
+	//
+	// The bridge deliberately ships no built-in key. A key embedded in an
+	// open-source binary is shared by every install, which is how it gets
+	// rate-limited and then revoked for everyone.
+	APIKey string `yaml:"apiKey,omitempty"`
+
+	// Workers is the size of the fingerprint worker pool. Zero (the default)
+	// resolves to 1 — deliberately NOT NumCPU-derived like analysis.
+	//
+	// On a network-backed library each worker pulls whole files through the
+	// mount, so parallelism multiplies cache pressure by N: on an rclone VFS
+	// with a bounded cache that evicts whatever the operator is actually
+	// listening to. Operators on local disk can raise it freely.
+	Workers int `yaml:"workers,omitempty"`
+
+	// MaxPerRun caps how many tracks one sweep fingerprints. Zero resolves to
+	// DefaultFingerprintMaxPerRun.
+	//
+	// This is the blast-radius knob, not a throughput knob: it turns an
+	// unbounded first pass over a large backlog into a bounded chunk that
+	// repeats each sweep, which matters most on a metered or cached mount.
+	MaxPerRun int `yaml:"maxPerRun,omitempty"`
+
+	// LengthSeconds is how much audio to fingerprint. Zero resolves to
+	// acoustid.DefaultLengthSeconds (120).
+	//
+	// Exposed for CPU-starved hosts, but lowering it trades match confidence:
+	// AcoustID's reference fingerprints are built at 120s. It does NOT reduce
+	// egress on a network mount — rclone's default read chunk (128 MiB)
+	// exceeds every music file, so the first read fetches the whole object
+	// regardless of how little is decoded.
+	LengthSeconds int `yaml:"lengthSeconds,omitempty"`
+
+	// SweepIntervalHours is how often the sweep runs. Zero resolves to
+	// DefaultFingerprintSweepHours.
+	SweepIntervalHours int `yaml:"sweepIntervalHours,omitempty"`
+}
+
+// EffectiveWorkers resolves the worker count: explicit YAML wins; zero
+// defaults to 1. See the Workers docblock for why this does not scale with
+// NumCPU the way upscaling and analysis do.
+func (f FingerprintConfig) EffectiveWorkers() int {
+	if f.Workers > 0 {
+		return f.Workers
+	}
+	return 1
+}
+
+// EffectiveMaxPerRun resolves the per-sweep cap.
+func (f FingerprintConfig) EffectiveMaxPerRun() int {
+	if f.MaxPerRun > 0 {
+		return f.MaxPerRun
+	}
+	return DefaultFingerprintMaxPerRun
+}
+
+// EffectiveLength resolves how much audio to fingerprint.
+func (f FingerprintConfig) EffectiveLength() time.Duration {
+	if f.LengthSeconds > 0 {
+		return time.Duration(f.LengthSeconds) * time.Second
+	}
+	return DefaultFingerprintLengthSeconds * time.Second
+}
+
+// EffectiveSweepInterval resolves the sweep cadence.
+func (f FingerprintConfig) EffectiveSweepInterval() time.Duration {
+	if f.SweepIntervalHours > 0 {
+		return time.Duration(f.SweepIntervalHours) * time.Hour
+	}
+	return DefaultFingerprintSweepHours * time.Hour
+}
+
+// ResolvedAPIKey returns the AcoustID key, preferring the environment.
+//
+// Resolved at the CONSUMER rather than in applyEnvOverrides, matching how
+// tsnet reads TS_AUTHKEY: it keeps the secret out of the persisted config that
+// Save() writes back, so an operator using the env var never finds their key
+// copied into bridge.yaml on disk.
+func (f FingerprintConfig) ResolvedAPIKey() string {
+	if v := strings.TrimSpace(os.Getenv("ACOUSTID_API_KEY")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(f.APIKey)
+}
+
 // SmartPlaylistsConfig governs the optional server-side smart/dynamic
 // playlist generator (Heavy Rotation, Auto Mix, Forgotten Favorites,
 // time-of-day, Daily Mix, The Finish Line). Disabled by default; opt in
@@ -1417,6 +1529,21 @@ const (
 	// DefaultUpscaleQueueCap — a whole-library `bridge analyze` enqueue
 	// bounces against a clean rejection rather than exhausting memory.
 	DefaultAnalysisQueueCap = 5000
+	// DefaultFingerprintMaxPerRun bounds how many tracks one fingerprint sweep
+	// processes. Unlike the queue caps above this is a BLAST-RADIUS bound, not
+	// a memory bound: each candidate pulls a whole file through the library
+	// mount, so an unbounded first pass over a large backlog is a long burst
+	// of reads. 500 turns that into a bounded chunk that repeats per sweep.
+	DefaultFingerprintMaxPerRun = 500
+	// DefaultFingerprintLengthSeconds mirrors acoustid.DefaultLengthSeconds.
+	// Duplicated rather than imported because internal/config must not depend
+	// on a feature package; the acoustid package is the source of truth and
+	// the two are pinned equal by a test.
+	DefaultFingerprintLengthSeconds = 120
+	// DefaultFingerprintSweepHours is the sweep cadence. Slower than the
+	// scan interval by design: the candidate set only changes when enrichment
+	// gives up on a track, which happens at scan/enrich speed, not faster.
+	DefaultFingerprintSweepHours = 6
 	// DefaultBootstrapTargetRate is the integer Hz value used to seed
 	// scan_state.upscale_target_hz on first run when the YAML field
 	// is unset or "auto". 192000 covers most 44.1- and 48-family
@@ -1537,6 +1664,7 @@ func (c *Config) applyEnvOverrides() {
 	applyBoolEnv("BRIDGE_DISABLE_HTTP3", &c.DisableHTTP3)
 	applyBoolEnv("BRIDGE_UPSCALE_ENABLED", &c.Upscale.Enabled)
 	applyBoolEnv("BRIDGE_ANALYSIS_ENABLED", &c.Analysis.Enabled)
+	applyBoolEnv("BRIDGE_FINGERPRINT_ENABLED", &c.Fingerprint.Enabled)
 	if v := os.Getenv("BRIDGE_LIBRARY_ROOTS"); v != "" {
 		// Use the OS-native PATH-style separator: `:` on POSIX,
 		// `;` on Windows. Pre-fix we hard-coded `:` everywhere,
@@ -2020,6 +2148,23 @@ func (c *Config) Validate() error {
 	}
 	if c.Analysis.QueueCap < 0 {
 		return fmt.Errorf("analysis.queueCap: must be >= 0 (0 uses the default), got %d", c.Analysis.QueueCap)
+	}
+	// Fingerprint: shape checks only. Deliberately NOT "enabled requires a
+	// key" — a host with BRIDGE_FINGERPRINT_ENABLED set and no key must still
+	// BOOT, degrading the feature to off with a stderr line, exactly as a
+	// missing sox does for upscaling. Refusing to start would turn a missing
+	// optional credential into an outage.
+	if c.Fingerprint.Workers < 0 {
+		return fmt.Errorf("fingerprint.workers: must be >= 0 (0 uses the default), got %d", c.Fingerprint.Workers)
+	}
+	if c.Fingerprint.MaxPerRun < 0 {
+		return fmt.Errorf("fingerprint.maxPerRun: must be >= 0 (0 uses the default), got %d", c.Fingerprint.MaxPerRun)
+	}
+	if c.Fingerprint.LengthSeconds < 0 {
+		return fmt.Errorf("fingerprint.lengthSeconds: must be >= 0 (0 uses the default), got %d", c.Fingerprint.LengthSeconds)
+	}
+	if c.Fingerprint.SweepIntervalHours < 0 || c.Fingerprint.SweepIntervalHours > maxIntervalHours {
+		return fmt.Errorf("fingerprint.sweepIntervalHours: must be between 0 and %d, got %d", maxIntervalHours, c.Fingerprint.SweepIntervalHours)
 	}
 	if c.Update.CheckIntervalHours < 0 || c.Update.CheckIntervalHours > maxIntervalHours {
 		return fmt.Errorf("update.checkIntervalHours: must be between 0 and %d, got %d", maxIntervalHours, c.Update.CheckIntervalHours)

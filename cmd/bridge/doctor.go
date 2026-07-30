@@ -211,6 +211,9 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			d.UpscaleEnabled = cfg.Upscale.Enabled
 			d.AnalysisEnabled = cfg.Analysis.Enabled
+			d.FingerprintEnabled = cfg.Fingerprint.Enabled
+			// Presence only — the doctor report must never carry the key.
+			d.FingerprintHasAPIKey = cfg.Fingerprint.ResolvedAPIKey() != ""
 			if host, port, ok := splitHostPort(cfg.ListenAddress); ok {
 				_ = host
 				d.APIPort = port
