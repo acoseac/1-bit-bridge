@@ -65,3 +65,64 @@ func TestSweeperPacerHonoursCancellation(t *testing.T) {
 		t.Fatalf("wait took %v on a cancelled context, want a prompt return", elapsed)
 	}
 }
+
+// TestWaitForWorkersLetsHealthyWorkersFinish pins the distinction that a
+// production run exposed.
+//
+// The first version applied the shutdown grace UNCONDITIONALLY, so every sweep
+// was capped at it: on a real host, 500 candidates on one worker hit the cap
+// after 60s, the sweep reported a truncated result, and the workers kept
+// running past it into the next tick. A healthy sweep and a wedged filesystem
+// look alike in the code and are not alike at all — one is normal work that
+// takes minutes, the other is a mount that will never answer.
+func TestWaitForWorkersLetsHealthyWorkersFinish(t *testing.T) {
+	// The worker must OUTLAST the grace, or the test passes under the buggy
+	// unconditional form too and pins nothing. A short grace keeps the suite
+	// fast; passing it in means no shared state is mutated to get it.
+	const grace = 40 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() { time.Sleep(200 * time.Millisecond); close(done) }()
+
+	start := time.Now()
+	waitForWorkers(context.Background(), grace, done)
+	elapsed := time.Since(start)
+
+	if elapsed < 180*time.Millisecond {
+		t.Fatalf("returned after %v, before the worker finished at ~200ms — "+
+			"the shutdown grace is bounding healthy work, which caps every sweep", elapsed)
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("returned before the workers finished")
+	}
+}
+
+// TestWaitForWorkersGivesUpOnACancelledSweep — the case the grace exists for.
+// A worker wedged in an uninterruptible FUSE syscall will not take SIGKILL, so
+// the wait must not be unbounded once shutdown has begun.
+func TestWaitForWorkersGivesUpOnACancelledSweep(t *testing.T) {
+	never := make(chan struct{}) // a worker that never finishes
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// A short grace rather than sleeping the real one out.
+	const grace = 80 * time.Millisecond
+
+	start := time.Now()
+	waitForWorkers(ctx, grace, never)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("waited %v on a cancelled sweep — a wedged worker must not hang shutdown", elapsed)
+	}
+}
+
+// TestSweeperDrainGraceIsAShutdownBound documents what the constant is for, so
+// it is not repurposed as a per-sweep budget again. A sweep of 500 candidates
+// on one worker legitimately runs for minutes.
+func TestSweeperDrainGraceIsAShutdownBound(t *testing.T) {
+	if sweeperDrainGrace > time.Minute {
+		t.Errorf("sweeperDrainGrace = %v; it bounds SHUTDOWN, so it should stay small — "+
+			"a long value here delays process exit on a wedged mount", sweeperDrainGrace)
+	}
+}
