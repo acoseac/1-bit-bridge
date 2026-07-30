@@ -111,20 +111,11 @@ func (cc *controlClient) search(ctx context.Context, artist, album string) []rel
 	return body.Releases
 }
 
-// ladder mirrors the production rung order in searchReleaseWithFallbacks.
-func controlLadder(artist, albumArtist, album string) [][2]string {
-	out := [][2]string{{artist, album}}
-	useAA := albumArtist != "" && !strings.EqualFold(albumArtist, artist)
-	if useAA {
-		out = append(out, [2]string{albumArtist, album})
-	}
-	if s := stripAlbumEditionSuffix(album); s != "" {
-		out = append(out, [2]string{artist, s})
-		if useAA {
-			out = append(out, [2]string{albumArtist, s})
-		}
-	}
-	return out
+// controlLadder is the PRODUCTION ladder — not a mirror of it. Using the
+// real builder is the whole point: a control that reimplements the thing
+// it is validating measures the reimplementation.
+func controlLadder(artist, albumArtist, album string) []releaseAttempt {
+	return buildReleaseLadder(artist, albumArtist, album)
 }
 
 func loadControlRows(t *testing.T, env string) []controlRow {
@@ -172,15 +163,12 @@ func TestAtlasAcceptanceControl(t *testing.T) {
 		}
 		var legacy, folded *releaseCandidate
 		for _, rung := range controlLadder(row.Artist, row.AlbumArtist, row.Album) {
-			if rung[0] == "" || rung[1] == "" {
-				continue
-			}
-			cands := cc.search(ctx, rung[0], rung[1])
+			cands := cc.search(ctx, rung.artist, rung.album)
 			if legacy == nil {
-				legacy = pickBestReleaseLegacy(cands, rung[1], rung[0])
+				legacy = pickBestReleaseLegacy(cands, rung.album, rung.artist)
 			}
 			if folded == nil {
-				folded = pickBestRelease(cands, rung[1], rung[0])
+				folded = pickBestRelease(cands, rung.album, rung.artist)
 			}
 			if legacy != nil && folded != nil {
 				break
@@ -235,10 +223,7 @@ func TestAtlasRecallOnUnmatched(t *testing.T) {
 		totalAlbums++
 		totalTracks += row.N
 		for _, rung := range controlLadder(row.Artist, row.AlbumArtist, row.Album) {
-			if rung[0] == "" || rung[1] == "" {
-				continue
-			}
-			if got := pickBestRelease(cc.search(ctx, rung[0], rung[1]), rung[1], rung[0]); got != nil {
+			if got := pickBestRelease(cc.search(ctx, rung.artist, rung.album), rung.album, rung.artist); got != nil {
 				albums++
 				tracks += row.N
 				break
