@@ -105,7 +105,12 @@ func isValidDSDSampleRate(sr uint32) bool {
 type ExtractContext struct {
 	ArtworkCacheDir string    // <dataDir>/artwork; "" disables local-art
 	FolderArtCache  *sync.Map // dir-path string -> *folderArtPromise
-	// LibraryRootDirs is the cleaned set of configured library roots,
+	// LibraryRootDirs is the cleaned ABSOLUTE set of configured library
+	// roots — callers must supply keys in the same path form the
+	// extraction absPaths use (the scanner walks absolute paths, so a
+	// relative configured root must be Abs'd before insertion or the
+	// boundary check silently goes inert).
+	// It is the set of configured library roots,
 	// consulted by the disc-subfolder parent-art fallback so a root
 	// directory literally named like a disc folder ("Disc 1") can never
 	// read its PARENT — a directory outside the configured library
@@ -2286,7 +2291,7 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 // art. "Side A" (vinyl sides) likewise excluded: an album could
 // plausibly carry that name. Roman numerals ("Disc II") and localized
 // words ("Disque 1") are a future extension.
-var discFolderRe = regexp.MustCompile(`^(?i:disc|disk|cd|lp|bd|dvd)\s*[-_.#]?\s*[0-9]{1,3}([\s._()\[\]\-].*)?$`)
+var discFolderRe = regexp.MustCompile(`^(?i:disc|disk|cd|lp|bd|dvd)\s*[-_.#]?\s*[0-9]{1,3}(?:[\s._()\[\]\-].*)?$`)
 
 // isDiscFolderName reports whether name looks like a multi-disc
 // subfolder (see discFolderRe). Trims surrounding whitespace first so a

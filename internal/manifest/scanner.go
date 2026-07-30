@@ -331,11 +331,20 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		roots = *rootsPtr
 	}
 	multiRoot := len(roots) > 1
-	// Cleaned roots set for the disc-subfolder parent-art fallback's
-	// library boundary (ExtractContext.LibraryRootDirs).
+	// Cleaned ABSOLUTE roots set for the disc-subfolder parent-art
+	// fallback's library boundary (ExtractContext.LibraryRootDirs). The
+	// walk hands workers absolute paths, so a RELATIVE configured root
+	// must be Abs'd here or the boundary key never matches and the
+	// guard silently goes inert (filepath.Abs Cleans its result; the
+	// error fallback keeps the raw-Clean form — strictly no worse than
+	// no guard).
 	rootDirs := make(map[string]struct{}, len(roots))
 	for _, r := range roots {
-		rootDirs[filepath.Clean(r)] = struct{}{}
+		if abs, err := filepath.Abs(r); err == nil {
+			rootDirs[abs] = struct{}{}
+		} else {
+			rootDirs[filepath.Clean(r)] = struct{}{}
+		}
 	}
 
 	// Worker → writer pipeline. Both channels are buffered so a slow
@@ -1082,7 +1091,8 @@ func (s *Scanner) needsLocalArtworkRecovery(artworkMBID string) bool {
 // the next scan retries; clobbering a good row with a partial extract
 // would be strictly worse, and a transient NAS flap heals itself). A
 // stored-row LOOKUP failure fails OPEN to the full upsert (today's
-// pre-guard behaviour — churn, never data loss).
+// pre-guard behaviour — churn plus the same bounded post-scan re-fill
+// window the mergePostScanFields maintenance note describes).
 func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot bool, ec *ExtractContext) *Track {
 	t := &Track{
 		Path:    pi.rel,
@@ -1129,9 +1139,17 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 // Fresh-non-zero WINS: a re-extract that now finds a `local-` cover
 // overrides a stored CAA UUID (the curated-art-outranks-remote
 // contract), and a tag the file genuinely carries beats a reconciler
-// fill. Maintenance contract: a future post-scan writer that gains a
-// NEW field must be added here — missing it only causes a spurious
-// diff (status-quo churn for those rows), never data loss.
+// fill. (MusicBrainzTrackID is deliberately absent: its only writer is
+// the extractor itself — tag-derived, never post-scan.)
+//
+// Maintenance contract: a future post-scan writer that gains a NEW
+// field must be added here. Missing it makes the merged row DIFFER
+// from the stored one, so the row takes the full-upsert leg and the
+// fresh (zero) value overwrites the post-scan value — a bounded,
+// self-healing loss window rather than silence: the upsert zeroes
+// enriched_at (so the enricher re-fills its fields on the next pass)
+// and the reconciliation passes re-run every scan. Still: add the
+// field.
 func mergePostScanFields(fresh, old *Track) {
 	if fresh.ArtworkMBID == "" {
 		fresh.ArtworkMBID = old.ArtworkMBID
@@ -1266,11 +1284,20 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		return 0, fmt.Errorf("no library roots configured")
 	}
 	multiRoot := len(roots) > 1
-	// Cleaned roots set for the disc-subfolder parent-art fallback's
-	// library boundary (ExtractContext.LibraryRootDirs).
+	// Cleaned ABSOLUTE roots set for the disc-subfolder parent-art
+	// fallback's library boundary (ExtractContext.LibraryRootDirs). The
+	// walk hands workers absolute paths, so a RELATIVE configured root
+	// must be Abs'd here or the boundary key never matches and the
+	// guard silently goes inert (filepath.Abs Cleans its result; the
+	// error fallback keeps the raw-Clean form — strictly no worse than
+	// no guard).
 	rootDirs := make(map[string]struct{}, len(roots))
 	for _, r := range roots {
-		rootDirs[filepath.Clean(r)] = struct{}{}
+		if abs, err := filepath.Abs(r); err == nil {
+			rootDirs[abs] = struct{}{}
+		} else {
+			rootDirs[filepath.Clean(r)] = struct{}{}
+		}
 	}
 
 	// Resolve `dir` to its parent root so relPath produces the

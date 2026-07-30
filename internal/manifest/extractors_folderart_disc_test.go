@@ -174,8 +174,7 @@ func TestExtractLocalArtwork_OwnDirBeatsParent(t *testing.T) {
 // Two disc subfolders share ONE parent lookup through the same
 // single-flight cache — same mbid, one parent cache entry.
 func TestExtractLocalArtwork_DiscSubfoldersShareOneParentLookup(t *testing.T) {
-	root, albumDir, audio1, cacheDir, cover := discArtTree(t, "Disc 1", "a.mp3")
-	_ = root
+	_, albumDir, audio1, cacheDir, cover := discArtTree(t, "Disc 1", "a.mp3")
 	disc2 := filepath.Join(albumDir, "Disc 2")
 	if err := os.MkdirAll(disc2, 0o755); err != nil {
 		t.Fatal(err)
