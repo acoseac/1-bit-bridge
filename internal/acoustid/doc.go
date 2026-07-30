@@ -9,10 +9,10 @@
 //
 // # What this package may conclude
 //
-// A fingerprint identifies AUDIO. AcoustID maps audio to a RECORDING. It does
-// NOT identify a release — the reason one recording sits under many release
-// groups is precisely that those releases contain the same audio, so picking
-// one would be a uniform draw dressed up as a match. [Accept] therefore only
+// A fingerprint identifies AUDIO. AcoustID maps audio → RECORDING. It does
+// not identify a RELEASE, and cannot: the whole reason a recording appears
+// under N release-groups is that those releases contain *the same audio*.
+// Picking one is a uniform draw dressed up as a match. [Accept] therefore only
 // ever yields an artist MBID and (when unambiguous) a recording MBID, and the
 // [Decision] type has no field for a release. That is a structural guarantee,
 // not a convention: there is nowhere to put one.
@@ -37,11 +37,13 @@
 // The first two are seam-injectable so tests never touch a real binary or a
 // real host. Callers that only want to know whether the toolchain is usable
 // call [Probe] or [Precheck].
+//
+// # No package logger
+//
+// Deliberately absent. Nothing here logs: every failure is returned as a typed
+// error for the caller to classify (see [IsTransient]), and the gate's refusals
+// are returned as a [RejectReason] rather than written anywhere. The sweeper
+// that consumes this package is the layer with somewhere to put a log line, so
+// the `logging.Component` declaration belongs there — declaring one here would
+// be dead code today and an invitation to log from a pure predicate tomorrow.
 package acoustid
-
-import "github.com/acoseac/1-bit-bridge/internal/logging"
-
-// logger is the package-scoped structured logger. Resolves the default
-// handler at log time (see internal/logging), so it survives logging.Init()
-// running after package init.
-var logger = logging.Component("acoustid")

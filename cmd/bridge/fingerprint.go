@@ -35,7 +35,16 @@ import (
 // NOTHING here writes: not the manifest, not the artwork cache, not a single
 // MBID. The gate's verdict is printed, never applied.
 //
-// Exit codes: 0 clean, 1 runtime error, 2 usage error.
+// Exit codes: 0 the run completed, 1 the run could not start (no key, no
+// fpcalc, unwritable output), 2 usage error, 130 interrupted mid-batch
+// (POSIX 128+SIGINT) so a script can tell an interrupted run from a complete
+// one — matching `bridge analyze`.
+//
+// A file that cannot be read or decoded does NOT change the exit code. This is
+// a diagnostic whose job is to report per-file outcomes, and pointing it at 200
+// tracks of which 3 are unreadable is a successful run with three findings, not
+// a failed one. Those files are reported with an `error` line (and an `error`
+// field in --json), which is the surface to check.
 func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("fingerprint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -64,8 +73,10 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 
 	reports := make([]fingerprintReport, 0, len(paths))
+	interrupted := false
 	for i, p := range paths {
 		if ctx.Err() != nil {
+			interrupted = true
 			break
 		}
 		// Pace between files exactly as the sweeper will — the politeness
@@ -75,13 +86,20 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 			select {
 			case <-time.After(client.MinInterval()):
 			case <-ctx.Done():
-				return 1
+				interrupted = true
+			}
+			if interrupted {
+				break
 			}
 		}
 		reports = append(reports, fingerprintOne(ctx, client, p,
 			time.Duration(*lengthSec)*time.Second, *prefixBytes))
 	}
 
+	// Print what we DID measure before reporting the interruption: on a long
+	// run over a network-backed library those partial numbers are the
+	// expensive part, and discarding them because of a Ctrl+C would mean
+	// paying the egress again.
 	if *asJSON {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -89,9 +107,13 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 			fmt.Fprintf(stderr, "encode: %v\n", err)
 			return 1
 		}
-		return 0
+	} else {
+		printFingerprintReports(stdout, info, reports)
 	}
-	printFingerprintReports(stdout, info, reports)
+	if interrupted {
+		fmt.Fprintf(stderr, "\ninterrupted after %d of %d file(s)\n", len(reports), len(paths))
+		return 130
+	}
 	return 0
 }
 
@@ -235,7 +257,12 @@ func fingerprintOne(ctx context.Context, client *acoustid.Client, path string,
 		rep.Verdict, rep.Reason = "skipped", "no_lookup"
 		return rep
 	}
-	lookupAndDecide(ctx, client, in, fp, &rep)
+	// in.Fingerprint, NOT fp: in prefix mode the two differ, and AcoustID
+	// matches on the duration we send. Passing the raw fp would submit the
+	// prefix's length and could produce false misses. (Inert for FLAC today,
+	// where fpcalc reports the STREAMINFO duration regardless of how much it
+	// decoded — but that is a per-format accident, not a guarantee.)
+	lookupAndDecide(ctx, client, in, in.Fingerprint, &rep)
 	return rep
 }
 
@@ -280,18 +307,7 @@ func lookupAndDecide(ctx context.Context, client *acoustid.Client,
 		rep.Err = err.Error()
 		return
 	}
-	for _, r := range results {
-		row := fingerprintResultRow{
-			ID: r.ID, Score: r.Score, Sources: r.Sources, Recordings: len(r.Recordings),
-		}
-		for _, rec := range r.Recordings {
-			if len(rec.Artists) > 0 {
-				row.Artists = append(row.Artists, rec.Artists[0].Name)
-			}
-			row.Titles = append(row.Titles, rec.Title)
-		}
-		rep.Results = append(rep.Results, row)
-	}
+	rep.Results = buildResultRows(results)
 
 	in.Results = results
 	decision, reason := acoustid.Accept(in)
@@ -313,6 +329,31 @@ type fingerprintTotals struct {
 	accepted, rejected, failed int
 	decode, lookup             time.Duration
 	bytes                      int64
+}
+
+// buildResultRows flattens AcoustID results into the diagnostic's display rows.
+//
+// Artists and Titles are index-parallel: BOTH get an entry per recording, so
+// position j means the same recording in each. Appending the artist only when
+// one is present would shift every later entry and print the wrong artist
+// beside a title — a display bug that reads as a real mismatch.
+func buildResultRows(results []acoustid.Result) []fingerprintResultRow {
+	rows := make([]fingerprintResultRow, 0, len(results))
+	for _, r := range results {
+		row := fingerprintResultRow{
+			ID: r.ID, Score: r.Score, Sources: r.Sources, Recordings: len(r.Recordings),
+		}
+		for _, rec := range r.Recordings {
+			artist := "?"
+			if len(rec.Artists) > 0 {
+				artist = rec.Artists[0].Name
+			}
+			row.Artists = append(row.Artists, artist)
+			row.Titles = append(row.Titles, rec.Title)
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func printFingerprintReports(w io.Writer, info acoustid.Info, reports []fingerprintReport) {

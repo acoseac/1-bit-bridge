@@ -100,7 +100,6 @@ func TestAcoustIDCoverageControl(t *testing.T) {
 	t.Logf("  ACCEPTED                  %4d  %5.1f%%", tally.accepted, pct(tally.accepted, n))
 
 	reasons, sourcesHist, rgCountHist := tally.reasons, tally.sourcesHist, tally.rgCountHist
-	totalDecode, totalLookup, totalBytes := tally.decode, tally.lookup, tally.bytes
 
 	t.Logf("")
 	t.Logf("=== why tracks were refused ===")
@@ -127,10 +126,20 @@ func TestAcoustIDCoverageControl(t *testing.T) {
 
 	t.Logf("")
 	t.Logf("=== cost ===")
-	t.Logf("  decode  %s total, %s/file", totalDecode.Round(time.Millisecond), perFile(totalDecode, n))
-	t.Logf("  lookup  %s total, %s/file", totalLookup.Round(time.Millisecond), perFile(totalLookup, n))
-	t.Logf("  source bytes on disk  %.2f GiB total, %.1f MiB/file",
-		float64(totalBytes)/(1<<30), float64(totalBytes)/float64(max(n, 1))/(1<<20))
+	// Divide by the number of files that ACTUALLY decoded / were looked up,
+	// not by the whole set. Files filtered out before the decode contribute
+	// nothing to totalDecode, so averaging over all of them would understate
+	// the per-track cost — and understating it in the direction that makes
+	// the feature look cheaper is exactly the error to avoid when this
+	// number is what decides whether to run the sweep on a metered mount.
+	t.Logf("  decoded %d file(s), looked up %d", tally.decodes, tally.lookups)
+	t.Logf("  decode  %s total, %s per decode",
+		tally.decode.Round(time.Millisecond), perOp(tally.decode, tally.decodes))
+	t.Logf("  lookup  %s total, %s per lookup",
+		tally.lookup.Round(time.Millisecond), perOp(tally.lookup, tally.lookups))
+	t.Logf("  source bytes on disk  %.2f GiB total, %.1f MiB per decoded file",
+		float64(tally.bytes)/(1<<30),
+		float64(tally.bytes)/float64(max(tally.decodes, 1))/(1<<20))
 	t.Logf("")
 	t.Logf("  NOTE the byte figure is what the FILES weigh, not what a network")
 	t.Logf("  mount fetched. On rclone the whole object is pulled per candidate")
@@ -151,6 +160,13 @@ type controlTally struct {
 	noMatch      int
 	accepted     int
 	rejected     int
+
+	// decodes / lookups count the operations actually performed, so the
+	// averages divide by the right denominator. Files filtered out before the
+	// decode contribute nothing to `decode`, and averaging those over the whole
+	// set would understate per-track cost.
+	decodes int
+	lookups int
 
 	decode time.Duration
 	lookup time.Duration
@@ -190,6 +206,7 @@ func runControlFile(ctx context.Context, t *testing.T, client *Client, f control
 	start := time.Now()
 	fp, err := Compute(ctx, f.path, DefaultLengthSeconds*time.Second)
 	tally.decode += time.Since(start)
+	tally.decodes++
 	tally.bytes += f.size
 	if err != nil {
 		tally.decodeFailed++
@@ -211,6 +228,7 @@ func runControlFile(ctx context.Context, t *testing.T, client *Client, f control
 	start = time.Now()
 	results, err := client.Lookup(ctx, fp)
 	tally.lookup += time.Since(start)
+	tally.lookups++
 	if err != nil {
 		if errors.Is(err, ErrNoMatch) {
 			tally.noMatch++
@@ -236,7 +254,7 @@ func runControlFile(ctx context.Context, t *testing.T, client *Client, f control
 		t.Errorf("%s: accepted with no artist MBID", filepath.Base(f.path))
 	}
 	tally.sourcesHist[decision.Sources]++
-	tally.rgCountHist[countReleaseGroups(results, decision)]++
+	tally.rgCountHist[countSurvivorReleaseGroups(in)]++
 }
 
 // collectAudio walks dir for files the bridge would consider audio, capped at
@@ -250,7 +268,15 @@ func collectAudio(t *testing.T, dir string, limit int) []controlFile {
 	var out []controlFile
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // unreadable subtree — skip, don't abort the run
+			// Swallow errors BELOW the root only (an unreadable subtree should
+			// not abort a long run). A bad root must surface: otherwise a typo
+			// in BRIDGE_ACOUSTID_CONTROL_DIR reads as "no audio files here" and
+			// the control silently skips, which looks identical to a clean run
+			// that found nothing.
+			if p == dir {
+				return err
+			}
+			return nil
 		}
 		if d.IsDir() || !exts[strings.ToLower(filepath.Ext(p))] {
 			return nil
@@ -310,19 +336,26 @@ func containerFacts(path string) (durationSec float64, isDSD bool, ok bool) {
 	return float64(totalSamples) / float64(sampleRate), false, true
 }
 
-// countReleaseGroups counts the distinct release groups across the recordings
-// that produced a decision — the number the histogram above reports.
-func countReleaseGroups(results []Result, d Decision) int {
+// countSurvivorReleaseGroups counts the distinct release groups across the
+// recordings the gate ACTUALLY decided on.
+//
+// It re-runs the gate's own selection rather than walking the raw cluster,
+// because Accept filters recordings by duration first: counting every
+// recording AcoustID returned would include ones the gate rejected and inflate
+// the histogram — which would undercut the very claim the histogram exists to
+// support (that a fingerprint often cannot determine the album). Being
+// in-package, the test can call the unexported stages directly, so the number
+// reported is by construction the number the gate saw.
+func countSurvivorReleaseGroups(in Input) int {
+	top, reason := selectResult(in)
+	if reason != ReasonNone {
+		return 0
+	}
 	seen := map[string]struct{}{}
-	for _, r := range results {
-		if r.ID != d.AcoustID {
-			continue
-		}
-		for _, rec := range r.Recordings {
-			for _, rg := range rec.ReleaseGroups {
-				if rg.ID != "" {
-					seen[rg.ID] = struct{}{}
-				}
+	for _, rec := range recordingsMatchingDuration(top.Recordings, in.DurationSec) {
+		for _, rg := range rec.ReleaseGroups {
+			if rg.ID != "" {
+				seen[rg.ID] = struct{}{}
 			}
 		}
 	}
@@ -349,7 +382,9 @@ func pct(part, whole int) float64 {
 	return 100 * float64(part) / float64(whole)
 }
 
-func perFile(d time.Duration, n int) time.Duration {
+// perOp averages over the operations actually performed, not the whole file
+// set — see the cost block for why the denominator matters.
+func perOp(d time.Duration, n int) time.Duration {
 	if n == 0 {
 		return 0
 	}
