@@ -330,6 +330,12 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		roots = *rootsPtr
 	}
 	multiRoot := len(roots) > 1
+	// Cleaned roots set for the disc-subfolder parent-art fallback's
+	// library boundary (ExtractContext.LibraryRootDirs).
+	rootDirs := make(map[string]struct{}, len(roots))
+	for _, r := range roots {
+		rootDirs[filepath.Clean(r)] = struct{}{}
+	}
 
 	// Worker → writer pipeline. Both channels are buffered so a slow
 	// stage doesn't stall the others over short blips, but bounded so
@@ -341,7 +347,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
 		workersWG.Add(1)
-		go s.runScanWorker(ctx, paths, writes, multiRoot, &workersWG)
+		go s.runScanWorker(ctx, paths, writes, multiRoot, rootDirs, &workersWG)
 	}
 
 	committed := new(atomic.Int64)
@@ -847,7 +853,7 @@ func (s *Scanner) loadAndApplyReconciled(
 // channel. Errors from GetTrack/Extract are logged-and-skipped (matches
 // the legacy walker's "log + continue" semantics — a single corrupt
 // FLAC must not abort the whole scan).
-func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, multiRoot bool, wg *sync.WaitGroup) {
+func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writes chan<- *Track, multiRoot bool, rootDirs map[string]struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 	// One ExtractContext per worker, reused across every track this
 	// worker pulls. The pointer to s.folderArt is stable for the
@@ -855,9 +861,12 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 	// and nothing else mutates the field during the scan), so all
 	// workers share the same single-flight map. Empty s.artDir
 	// disables local-artwork extraction inside ExtractWithContext.
+	// rootDirs is the per-scan roots snapshot (cleaned) so the disc-
+	// subfolder parent-art fallback can't climb out of the library.
 	ec := &ExtractContext{
 		ArtworkCacheDir: s.artDir,
 		FolderArtCache:  &s.folderArt,
+		LibraryRootDirs: rootDirs,
 	}
 	for pi := range paths {
 		if ctx.Err() != nil {
@@ -1114,6 +1123,12 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		return 0, fmt.Errorf("no library roots configured")
 	}
 	multiRoot := len(roots) > 1
+	// Cleaned roots set for the disc-subfolder parent-art fallback's
+	// library boundary (ExtractContext.LibraryRootDirs).
+	rootDirs := make(map[string]struct{}, len(roots))
+	for _, r := range roots {
+		rootDirs[filepath.Clean(r)] = struct{}{}
+	}
 
 	// Resolve `dir` to its parent root so relPath produces the
 	// same library-relative form the full scan uses. Refuse when
@@ -1193,7 +1208,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	var workersWG sync.WaitGroup
 	for i := 0; i < nWorkers; i++ {
 		workersWG.Add(1)
-		go s.runScanWorker(ctx, paths, writes, multiRoot, &workersWG)
+		go s.runScanWorker(ctx, paths, writes, multiRoot, rootDirs, &workersWG)
 	}
 
 	committed := new(atomic.Int64)
