@@ -483,7 +483,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// MarkEnriched at the bottom stamps the track done so the worker
 	// doesn't loop on it. Without this relaxation, the local-artwork
 	// feature would silently fail to fix the very case it targets.
-	if albumMBID == "" && !strings.HasPrefix(t.ArtworkMBID, "local-") {
+	if albumMBID == "" {
 		// Resolve the ARTIST before giving up on the album. The two halves are
 		// independent — the artist search is a different, much more reliable
 		// query (30-190ms and a far smaller candidate space than the release
@@ -516,9 +516,26 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			e.enrichWithRecoveredArtist(ctx, t, m)
 			return
 		}
-		e.markSkipped(ctx, t, acousticSkipReason(e, outcome, skipReasonNoMBMatch),
-			"no acceptable release candidate")
-		return
+		// PR #98's local-artwork contract, and the reason this used to be
+		// part of the branch condition: a track whose cover the scanner
+		// curated locally is NOT a failure just because MusicBrainz has no
+		// release for it, so it is stamped rather than skipped.
+		//
+		// The condition governs the STAMP, never the consult. Gating
+		// reachability on it made the fallback dead on any library with
+		// folder.jpg files — on the test host that was 18,306 of 18,429
+		// tracks, i.e. effectively the entire population the feature
+		// targets. Whether the user curated artwork says nothing about
+		// whether MusicBrainz knows the recording.
+		if !strings.HasPrefix(t.ArtworkMBID, "local-") {
+			e.markSkipped(ctx, t, acousticSkipReason(e, outcome, skipReasonNoMBMatch),
+				"no acceptable release candidate")
+			return
+		}
+		// Local artwork, no release match, nothing recovered: fall through
+		// to MarkEnriched exactly as before. The artwork block below is
+		// itself local-guarded so it stays a no-op, and resolveArtist is
+		// cache-backed, so the second call costs a map lookup.
 	}
 
 	// Fetch and cache 500px front cover. If the file already exists, we
