@@ -174,7 +174,15 @@ var Ext = map[string]bool{
 // (year / composer / multi-value artist were silently dropped for M4A). The
 // first scan after this ships re-extracts every existing row once (all
 // formats), then size+mtime skips resume.
-const ExtractorVersion = 1
+//
+// Bumped to 2 with the disc-subfolder parent folder-art fallback
+// (extractLocalArtwork): the first scan after this ships re-extracts every
+// stale row once so existing multi-disc albums (Album/cover.jpg +
+// Album/Disc 1/track) pick up their album-root cover. The version-stale
+// diff-guard (scanner.go reExtractUnchanged) keeps rows whose merged
+// re-extract is byte-identical OUT of the iOS delta — only rows that
+// actually gained something (art, extractor fixes) bump indexed_at.
+const ExtractorVersion = 2
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -2289,7 +2297,9 @@ func isDiscFolderName(name string) bool {
 }
 
 // folderArtCandidates is the set of filenames the folder-level
-// fallback recognises. Compared case-insensitively (Linux
+// fallback recognises — for BOTH the own-directory lookup and the
+// disc-subfolder parent fallback (one candidate set, one contract).
+// Compared case-insensitively (Linux
 // filesystems are case-sensitive — Windows-tagger output
 // `Cover.JPG`, `FOLDER.JPG`, etc. would silently miss a hardcoded
 // lowercase os.Stat).

@@ -2075,8 +2075,11 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval time.Duration) {
 }
 
 // BuildManifest returns a Manifest built from the current Store contents.
-// since, if non-zero, filters tracks by mtime (for incremental iOS
-// updates).
+// since, if non-zero, filters tracks by `indexed_at` (the delta-sync
+// watermark `ListTracks` applies as `WHERE indexed_at > since`) — NOT by
+// file mtime, which an earlier version of this comment claimed:
+// enrichment, reconciliation, and variant writes all strict-advance
+// indexed_at precisely so incremental iOS syncs surface them.
 func BuildManifest(ctx context.Context, store *Store, roots []string, since time.Time) (*Manifest, error) {
 	var sp *time.Time
 	if !since.IsZero() {
