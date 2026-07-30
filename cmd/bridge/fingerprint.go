@@ -103,14 +103,18 @@ func runFingerprintFiles(ctx context.Context, client *acoustid.Client, paths []s
 	length time.Duration, prefixBytes int64) (reports []fingerprintReport, interrupted bool) {
 
 	reports = make([]fingerprintReport, 0, len(paths))
-	for i, p := range paths {
+	for _, p := range paths {
 		if ctx.Err() != nil {
 			return reports, true
 		}
-		// Pace between files exactly as the sweeper will — the politeness
-		// contract is per-request, and a diagnostic that bursts is the one
-		// most likely to get a key rate-limited.
-		if i > 0 && client != nil {
+		// Pace before an actual REQUEST, not before every file. Many paths
+		// never reach a lookup — ineligible container, decode failure, a gate
+		// refusal before the network — and sleeping for those would pad the
+		// run with intervals that paced nothing, which matters because this
+		// command's other job is measuring wall-clock cost honestly. The
+		// previous report's LookupMillis is the record of whether a request
+		// actually went out.
+		if client != nil && lastDidLookup(reports) {
 			select {
 			case <-time.After(client.MinInterval()):
 			case <-ctx.Done():
@@ -118,8 +122,24 @@ func runFingerprintFiles(ctx context.Context, client *acoustid.Client, paths []s
 			}
 		}
 		reports = append(reports, fingerprintOne(ctx, client, p, length, prefixBytes))
+		// Checked AFTER the append as well as before: cancellation during the
+		// last (or only) file would otherwise fall out of the loop normally
+		// and report a clean run, losing the 130 exit that tells a script the
+		// batch was cut short.
+		if ctx.Err() != nil {
+			return reports, true
+		}
 	}
 	return reports, false
+}
+
+// lastDidLookup reports whether the most recent file actually reached
+// AcoustID, which is what the pacing interval exists to space out.
+func lastDidLookup(reports []fingerprintReport) bool {
+	if len(reports) == 0 {
+		return false
+	}
+	return reports[len(reports)-1].LookupMillis > 0
 }
 
 // prepareFingerprintRun resolves the API key, checks the toolchain, and builds

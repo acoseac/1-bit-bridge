@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 )
@@ -56,5 +60,73 @@ func TestBuildResultRowsKeepsArtistsAndTitlesAligned(t *testing.T) {
 func TestBuildResultRowsEmpty(t *testing.T) {
 	if rows := buildResultRows(nil); len(rows) != 0 {
 		t.Fatalf("got %d rows, want none", len(rows))
+	}
+}
+
+// lateCancelCtx reports cancellation only from the Nth Err() call onward.
+//
+// The interleaving under test — cancelled DURING the final file — cannot be
+// produced by a timer without a race: the work on a rejected file finishes in
+// microseconds, so any sleep long enough to be reliable is also long enough to
+// miss. Counting Err() calls makes it exact: call 1 is the loop's pre-check
+// (must see a live context), call 2 is the post-append check this guards.
+type lateCancelCtx struct {
+	context.Context
+	calls *int
+	after int
+}
+
+func (c *lateCancelCtx) Err() error {
+	*c.calls++
+	if *c.calls > c.after {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestRunFingerprintFilesReportsCancellationOnTheLastFile pins the exit-code
+// contract at its weakest point.
+//
+// Cancellation used to be checked only at the TOP of the next iteration, so an
+// interrupt during the last — or only — file fell out of the loop normally and
+// reported a clean run. A script wrapping this would see exit 0 for a batch
+// that was cut short, which is exactly the distinction the 130 exists to make.
+func TestRunFingerprintFilesReportsCancellationOnTheLastFile(t *testing.T) {
+	dir := t.TempDir()
+	// Exists but is not decodable audio, so fingerprintOne returns a report
+	// promptly without consulting the context itself — leaving the loop's own
+	// two checks as the only Err() callers.
+	path := filepath.Join(dir, "not-audio.flac")
+	if err := os.WriteFile(path, []byte("definitely not a flac"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	ctx := &lateCancelCtx{Context: context.Background(), calls: &calls, after: 1}
+	reports, interrupted := runFingerprintFiles(ctx, nil, []string{path}, time.Second, 0)
+
+	if len(reports) != 1 {
+		t.Fatalf("got %d reports, want the file's result kept", len(reports))
+	}
+	if !interrupted {
+		t.Fatal("cancellation during the final file must be reported, or a run that was cut short exits 0")
+	}
+	if calls < 2 {
+		t.Fatalf("expected a post-append cancellation check; Err() called %d time(s)", calls)
+	}
+}
+
+// TestRunFingerprintFilesKeepsPartialResults — on a long run over a network
+// mount the measured results are the expensive part. A Ctrl+C must not throw
+// them away, or the egress has to be paid again.
+func TestRunFingerprintFilesKeepsPartialResults(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reports, interrupted := runFingerprintFiles(ctx, nil, []string{"a.flac", "b.flac"}, time.Second, 0)
+	if !interrupted {
+		t.Error("a pre-cancelled context must report interrupted")
+	}
+	if reports == nil {
+		t.Error("reports must be a usable empty slice, not nil")
 	}
 }
