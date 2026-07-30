@@ -33,10 +33,22 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// adminScheme is the transport for the loopback admin API. Always plain
-// HTTP: the admin console is loopback-only by design (config's
-// validateLoopbackAddress plus the loopbackOnly middleware), so there is
-// no TLS to negotiate and no remote hop to protect.
+// adminScheme is the transport used to reach the admin API.
+//
+// Plain HTTP, which is correct for a LOOPBACK-MODE bridge: the console is
+// loopback-only by design there (config's validateLoopbackAddress plus the
+// loopbackOnly middleware), so there is no TLS and no remote hop.
+//
+// It is NOT correct for a public-mode bridge, where admin is served over
+// autocert HTTPS behind an adminauth session — a plain-HTTP probe there
+// gets `400 Client sent an HTTP request to an HTTPS server`. That is
+// deliberate rather than an oversight: the CLI holds no session, so
+// speaking HTTPS would only turn a 400 into a 401. probeBridge classifies
+// both as bridgeUpAdminUnreachable, `misses` says so instead of claiming
+// the bridge is down, and `retry` refuses rather than writing to the store
+// behind a live process.
+//
+// Teaching the CLI to authenticate is the real fix and is its own change.
 const adminScheme = "http://"
 
 // enrichmentRetryWaitBudget bounds how long `retry` will sit on the
@@ -134,19 +146,37 @@ type missReport struct {
 }
 
 // collectMisses prefers the running bridge, falling back to a direct
-// read-only walk of the store when nothing is listening.
+// read-only walk of the store when the admin API isn't usable.
+//
+// The probe happens EXACTLY ONCE here and the verdict is passed down. It
+// is a real network round-trip with a 200ms budget, and both the dispatch
+// below and the Source line need the answer.
 func collectMisses(ctx context.Context, cfg *config.Config, scope string) (*missReport, error) {
-	if rep, ok, err := missesViaAdmin(ctx, cfg, scope); ok {
-		return rep, err
+	addr := adminAddrOf(cfg)
+	liveness := probeBridge(ctx, addr)
+
+	if liveness == bridgeAdminUsable {
+		return missesViaAdmin(ctx, addr, scope)
 	}
-	return missesViaStore(ctx, cfg, scope)
+	rep, err := missesViaStore(ctx, cfg, scope)
+	if err != nil {
+		return nil, err
+	}
+	// Say WHY we read the store rather than the API. "no bridge running"
+	// is a claim, and on a public-mode bridge it is a false one.
+	if liveness == bridgeUpAdminUnreachable {
+		rep.Source = "manifest store (bridge is running; admin API not reachable from the CLI — " +
+			"public mode needs a console session, so skip reasons are unavailable)"
+	}
+	return rep, nil
 }
 
-func missesViaAdmin(ctx context.Context, cfg *config.Config, scope string) (*missReport, bool, error) {
-	addr := adminAddrOf(cfg)
-	if !adminIsAlive(ctx, addr) {
-		return nil, false, nil
-	}
+// missesViaAdmin fetches the report from a bridge whose admin API the
+// caller has ALREADY established is usable. It does not probe, and it does
+// not fall back — an error here is a real failure of a surface we just
+// confirmed was answering, so it surfaces rather than silently degrading
+// to a store read that would report different numbers.
+func missesViaAdmin(ctx context.Context, addr, scope string) (*missReport, error) {
 	// No `limit` — omitting it makes the server apply its own cap, which
 	// is what we want and which cannot drift the way a hardcoded copy of
 	// that cap would. The CLI does its own --limit trimming at print time.
@@ -158,16 +188,16 @@ func missesViaAdmin(ctx context.Context, cfg *config.Config, scope string) (*mis
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
 	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
-		return nil, true, fmt.Errorf("admin request: %w", err)
+		return nil, fmt.Errorf("admin request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, true, fmt.Errorf("admin returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("admin returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var wire struct {
 		Path    string         `json:"path"`
@@ -182,7 +212,7 @@ func missesViaAdmin(ctx context.Context, cfg *config.Config, scope string) (*mis
 		SkipReasons map[string]int64 `json:"skipReasons"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
-		return nil, true, fmt.Errorf("decode admin response: %w", err)
+		return nil, fmt.Errorf("decode admin response: %w", err)
 	}
 	rep := &missReport{
 		Path: wire.Path, Scanned: wire.Scanned, Missing: wire.Missing,
@@ -195,7 +225,7 @@ func missesViaAdmin(ctx context.Context, cfg *config.Config, scope string) (*mis
 			rep.Sample[f] = append(rep.Sample[f], row.Path)
 		}
 	}
-	return rep, true, nil
+	return rep, nil
 }
 
 func missesViaStore(ctx context.Context, cfg *config.Config, scope string) (*missReport, error) {
@@ -328,8 +358,22 @@ func enrichmentRetryCmd(ctx context.Context, args []string, stdout, stderr io.Wr
 	}
 
 	addr := adminAddrOf(cfg)
-	if adminIsAlive(ctx, addr) {
+	switch probeBridge(ctx, addr) {
+	case bridgeAdminUsable:
 		return retryViaAdmin(ctx, addr, *pathScope, stdout, stderr)
+	case bridgeUpAdminUnreachable:
+		// REFUSE rather than write to the store behind a live bridge's
+		// back. Every other writer holds Store.mu, which serialises within
+		// ONE process — a second process bypasses it entirely. This is the
+		// same call tryLibraryViaAdmin makes for the same reason.
+		fmt.Fprintf(stderr, "enrichment retry: a bridge is running on %s but its admin API\n", addr)
+		fmt.Fprintln(stderr, "  is not reachable from the CLI (public mode serves admin over HTTPS behind")
+		fmt.Fprintln(stderr, "  an adminauth session).")
+		fmt.Fprintln(stderr, "  Refusing to reset enriched_at directly — that would write to the store")
+		fmt.Fprintln(stderr, "  from a second process, bypassing the single-writer contract.")
+		fmt.Fprintln(stderr, "  Either press \"Retry missing\" in the admin console, or:")
+		fmt.Fprintln(stderr, "    sudo systemctl stop 1-bit-bridge && bridge enrichment retry && sudo systemctl start 1-bit-bridge")
+		return 1
 	}
 
 	// Offline: reset directly. Same sanctioned writer the admin handler
@@ -486,23 +530,61 @@ func adminAddrOf(cfg *config.Config) string {
 	return probeLoopbackAddr(addr)
 }
 
-// adminIsAlive probes GET /api/stats with the same 200ms "are you up"
-// budget tryLibraryViaAdmin uses. A transport error other than
-// connection-refused is treated as NOT alive here (unlike the library
-// mutation path, which refuses outright) because both callers below are
-// safe against a live bridge: `misses` only reads, and `retry`'s offline
-// path is a single idempotent UPDATE that SQLite serialises.
-func adminIsAlive(ctx context.Context, addr string) bool {
+// bridgeLiveness is the tri-state result of probing the admin port.
+//
+// Two states is not enough, and assuming it was shipped a lie. On a
+// PUBLIC-MODE bridge the admin listener is HTTPS (autocert) and gated by
+// an adminauth session, so a plain-HTTP loopback probe gets `400 Client
+// sent an HTTP request to an HTTPS server` and an HTTPS one gets 401. A
+// boolean collapses both onto "not running" — and the offline path then
+// reports "no bridge running" while the bridge is serving traffic.
+type bridgeLiveness int
+
+const (
+	// bridgeDown — nothing is listening on the admin port.
+	bridgeDown bridgeLiveness = iota
+	// bridgeAdminUsable — the admin API answered 200; use it.
+	bridgeAdminUsable
+	// bridgeUpAdminUnreachable — something IS listening but the API is
+	// not usable from here: public-mode TLS, an adminauth session we do
+	// not have, or an unhealthy admin. The bridge is RUNNING.
+	bridgeUpAdminUnreachable
+)
+
+// probeBridge classifies the admin port with the same 200ms "are you up"
+// budget tryLibraryViaAdmin uses.
+//
+// Connection-refused is the only signal that means "not running". Any HTTP
+// response at all — including 400 and 401 — means a process is bound to
+// that port, which for the purposes of "may I write to the store?" is the
+// question that matters.
+func probeBridge(ctx context.Context, addr string) bridgeLiveness {
 	probeCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, adminScheme+addr+"/api/stats", nil)
 	if err != nil {
-		return false
+		// NOT bridgeDown. This is a malformed URL — a mangled AdminAddress
+		// in the config — which tells us nothing about whether a bridge is
+		// running. bridgeDown is the state that unlocks the offline
+		// ResetEnrichedMisses write, so classifying an unrelated failure
+		// as "not running" would reintroduce this PR's own hazard through
+		// a different door: a bad addr string instead of a TLS/auth
+		// response. Fail conservative.
+		return bridgeUpAdminUnreachable
 	}
 	resp, err := (&http.Client{Timeout: 200 * time.Millisecond}).Do(req)
 	if err != nil {
-		return false
+		if isConnRefused(err) {
+			return bridgeDown
+		}
+		// A timeout or TLS error means something is there and we cannot
+		// talk to it. Treat as running — the conservative reading, and the
+		// same call tryLibraryViaAdmin makes.
+		return bridgeUpAdminUnreachable
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode == http.StatusOK {
+		return bridgeAdminUsable
+	}
+	return bridgeUpAdminUnreachable
 }

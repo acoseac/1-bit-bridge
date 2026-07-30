@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // TestRetryViaAdminWaitsOutTheRateLimitAndSaysSo pins the operator-facing
@@ -203,6 +206,151 @@ func TestValidMissFacetName(t *testing.T) {
 	for _, bad := range []string{"", "cover", "album", "ARTIST", "releases"} {
 		if validMissFacetName(bad) {
 			t.Errorf("%q should not be a valid facet", bad)
+		}
+	}
+}
+
+// TestProbeBridgeDistinguishesPublicModeFromDown is the regression test
+// for a lie the first version of this command told.
+//
+// A boolean "is the admin API usable?" collapses two very different
+// states onto one answer. On a PUBLIC-MODE bridge the admin listener is
+// HTTPS behind an adminauth session, so a plain-HTTP loopback probe gets
+// 400 and an HTTPS one gets 401 — and the command then reported "no
+// bridge running" while the bridge was serving traffic, and (worse) took
+// the offline path that writes to the store behind its back.
+func TestProbeBridgeDistinguishesPublicModeFromDown(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   bridgeLiveness
+	}{
+		{"loopback admin, healthy", http.StatusOK, bridgeAdminUsable},
+		// What a public-mode bridge actually returns to a plain-HTTP probe.
+		{"public mode, http against https", http.StatusBadRequest, bridgeUpAdminUnreachable},
+		{"public mode, needs a session", http.StatusUnauthorized, bridgeUpAdminUnreachable},
+		{"admin unhealthy", http.StatusInternalServerError, bridgeUpAdminUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			got := probeBridge(context.Background(), strings.TrimPrefix(srv.URL, "http://"))
+			if got != tc.want {
+				t.Errorf("probeBridge = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// Nothing listening — the ONLY state that means "not running".
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+	if got := probeBridge(context.Background(), addr); got != bridgeDown {
+		t.Errorf("probeBridge on a closed port = %v, want bridgeDown", got)
+	}
+}
+
+// TestEnrichmentRetryRefusesBehindALiveBridge — the offline reset writes
+// to the store from a second process, bypassing Store.mu, which only
+// serialises writers WITHIN one process. When we can see a bridge running
+// but cannot use its API, refusing is the only safe answer.
+func TestEnrichmentRetryRefusesBehindALiveBridge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized) // public-mode admin
+	}))
+	defer srv.Close()
+
+	_, cfgPath := writeProbeFixture(t, strings.TrimPrefix(srv.URL, "http://"))
+	var stdout, stderr bytes.Buffer
+	code := enrichmentRetryCmd(context.Background(), []string{"--config", cfgPath}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("retry succeeded behind a live bridge; it must refuse.\nstdout: %s", stdout.String())
+	}
+	msg := stderr.String()
+	for _, want := range []string{"a bridge is running", "single-writer", "systemctl stop"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal message missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+// TestCollectMissesProbesOnce — the probe is a real network round-trip
+// with a 200ms budget, and an earlier version called it twice (once
+// transitively inside missesViaAdmin, once for the Source line). Both
+// callers need the same answer, so it happens once and is passed down.
+func TestCollectMissesProbesOnce(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/stats" {
+			probes.Add(1)
+			w.WriteHeader(http.StatusUnauthorized) // public-mode admin
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	loaded, _ := writeProbeFixture(t, strings.TrimPrefix(srv.URL, "http://"))
+	rep, err := collectMisses(context.Background(), loaded, "")
+	if err != nil {
+		t.Fatalf("collectMisses: %v", err)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("probed the admin port %d times, want exactly 1", got)
+	}
+	// And the fallback still tells the truth about why it read the store.
+	if !strings.Contains(rep.Source, "bridge is running") {
+		t.Errorf("Source = %q, want it to say the bridge is running", rep.Source)
+	}
+}
+
+// writeProbeFixture writes a bridge.yaml whose admin address points at
+// adminAddr, and returns both the loaded config and its path — the two
+// liveness tests need one each. Shared so the fixture lives in one place.
+func writeProbeFixture(t *testing.T, adminAddr string) (*config.Config, string) {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	cfg := &config.Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   "127.0.0.1:17788",
+		AdminAddress:    adminAddr,
+		DataDir:         filepath.Join(dir, "data"),
+		ScanIntervalSec: 3600,
+		LibraryName:     "T",
+	}
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loaded, cfgPath
+}
+
+// TestProbeBridgeNeverReportsDownOnAMalformedAddress guards the invariant
+// probeBridge's own docblock states: connection-refused is the ONLY
+// signal that means "not running".
+//
+// An http.NewRequestWithContext failure is a malformed URL — a mangled
+// AdminAddress in the config — and says nothing about whether a bridge is
+// running. Classifying it as bridgeDown would unlock the offline
+// ResetEnrichedMisses write, reintroducing this PR's own hazard through a
+// different door: a bad addr string instead of a TLS/auth response.
+func TestProbeBridgeNeverReportsDownOnAMalformedAddress(t *testing.T) {
+	for _, addr := range []string{
+		"host\x7fwith-control-char:7789",
+		"host with spaces:7789",
+		"[::1:7789",          // unbalanced bracket
+		"http://nested:7789", // scheme concatenated onto the scheme
+	} {
+		got := probeBridge(context.Background(), addr)
+		if got == bridgeDown {
+			t.Errorf("probeBridge(%q) = bridgeDown — a malformed address is not "+
+				"evidence the bridge is stopped, and bridgeDown unlocks the "+
+				"offline store write", addr)
 		}
 	}
 }
