@@ -80,6 +80,10 @@ type Enricher struct {
 	// enrichment (the default).
 	premiumCovers PremiumCoverFetcher
 
+	// acoustic is the fingerprint verdict source. Nil (the default) means
+	// acoustic fingerprinting is off, exactly like a nil premiumCovers.
+	acoustic AcousticLookup
+
 	// CacheDir is the root where the cached JPEGs live. Album covers go
 	// in <CacheDir>/<mbid>-<size>.jpg (see ArtworkCachePath); artist
 	// images go in <CacheDir>/artist-<mbid>.jpg (see ArtistImagePath).
@@ -347,7 +351,21 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// done anyway so we don't poll them forever. Runs AFTER the scrub above
 	// so the persisted row can't retain an unvalidated MBID.
 	if t.Artist == "" || t.Album == "" {
-		e.markSkipped(ctx, t, skipReasonNoSearchTerms, "no artist/album to search by")
+		// Nothing to search MusicBrainz by — this is the population acoustic
+		// fingerprinting exists for, so consult it before giving up.
+		m, outcome := e.applyAcousticFallback(t)
+		if outcome == acousticApplied {
+			// The fingerprint supplied an artist; fall through so the artist
+			// image, the album ladder and MarkEnriched all run as normal.
+			// Deliberately NOT a separate write path: everything downstream
+			// treats a fingerprint-derived artist exactly like a tag-derived
+			// one, which is what keeps the fallback from growing its own
+			// half-parallel copy of enrichOne.
+			e.enrichWithRecoveredArtist(ctx, t, m)
+			return
+		}
+		e.markSkipped(ctx, t, acousticSkipReason(e, outcome, skipReasonNoSearchTerms),
+			"no artist/album to search by")
 		return
 	}
 
@@ -482,7 +500,24 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		if err := e.resolveArtist(ctx, t); err != nil {
 			return
 		}
-		e.markSkipped(ctx, t, skipReasonNoMBMatch, "no acceptable release candidate")
+		// The text ladder ran clean and found nothing. Before stamping, see
+		// whether the audio itself identifies the artist — the tags may be
+		// wrong rather than merely obscure.
+		// Consulted even when the artist ALREADY resolved: a track can have a
+		// good artist tag and a junk album one ("CD 01"), in which case the
+		// text ladder has nothing to search the album by and the fingerprint's
+		// release-group hint is the only new information available. That is a
+		// large population — on the test host, over a thousand of the
+		// release-missing tracks sit under a generic disc folder.
+		// applyAcousticFallback will not overwrite an artist the text path
+		// already accepted.
+		m, outcome := e.applyAcousticFallback(t)
+		if outcome == acousticApplied {
+			e.enrichWithRecoveredArtist(ctx, t, m)
+			return
+		}
+		e.markSkipped(ctx, t, acousticSkipReason(e, outcome, skipReasonNoMBMatch),
+			"no acceptable release candidate")
 		return
 	}
 
@@ -848,7 +883,36 @@ const (
 	// skipReasonMBError — a PERSISTENT MusicBrainz error (4xx, decode).
 	// Transient errors return without stamping and never land here.
 	skipReasonMBError = "mb_error"
+	// skipReasonNoFingerprintMatch — the text ladder found nothing and the
+	// acoustic fallback had NO VERDICT for this track: not fingerprinted yet,
+	// unknown to AcoustID, or refused by the gate. A COVERAGE signal — it
+	// shrinks as fingerprinting reaches more of the library, where
+	// no_mb_match shrinks when text matching improves.
+	skipReasonNoFingerprintMatch = "no_fingerprint_match"
+	// skipReasonFingerprintVetoed — a verdict EXISTED and this layer refused
+	// it: the local artist tag contradicted it, or an MBID failed validation.
+	//
+	// Separate from the above on purpose. Collapsing them would make both
+	// numbers lie: a library with full coverage but many vetoes would read
+	// identically to one with no fingerprints at all. The veto rate is also
+	// the number worth watching in its own right — a spike means the pipeline
+	// is systematically contradicting the library's own tags, which points at
+	// something upstream rather than at individual tracks.
+	skipReasonFingerprintVetoed = "fingerprint_vetoed"
 )
+
+// acousticSkipReason maps a declined fallback onto its bounded skip reason.
+// fallback is used when the feature is off entirely, so a bridge without
+// fingerprinting reports exactly what it always did.
+func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) string {
+	if e.acoustic == nil {
+		return fallback
+	}
+	if outcome == acousticRefused {
+		return skipReasonFingerprintVetoed
+	}
+	return skipReasonNoFingerprintMatch
+}
 
 // markSkipped stamps enriched_at so the worker doesn't retry the same
 // unsearchable track forever.
