@@ -79,104 +79,28 @@ func TestAcoustIDCoverageControl(t *testing.T) {
 	client := NewClient("", key, "1-bit-bridge-control/0 (+https://github.com/acoseac/1-bit-bridge)", nil)
 	ctx := context.Background()
 
-	var (
-		ineligible   int
-		decodeFailed int
-		lookupFailed int
-		noMatch      int
-		accepted     int
-		rejected     int
-
-		totalDecode time.Duration
-		totalLookup time.Duration
-		totalBytes  int64
-
-		reasons     = map[RejectReason]int{}
-		sourcesHist = map[int]int{}
-		rgCountHist = map[int]int{}
-	)
+	var tally controlTally
+	tally.init()
 
 	for i, f := range files {
 		if i > 0 {
 			time.Sleep(client.MinInterval())
 		}
-
-		durationSec, isDSD, ok := containerFacts(f.path)
-		if !ok {
-			// Without a container duration there is nothing to gate against;
-			// in production this is the FLAC-only consequence of where
-			// Track.Duration is populated.
-			ineligible++
-			reasons[ReasonUnknownDuration]++
-			continue
-		}
-		if r := CheckEligible(durationSec, isDSD); r != ReasonNone {
-			ineligible++
-			reasons[r]++
-			continue
-		}
-
-		start := time.Now()
-		fp, err := Compute(ctx, f.path, DefaultLengthSeconds*time.Second)
-		totalDecode += time.Since(start)
-		totalBytes += f.size
-		if err != nil {
-			decodeFailed++
-			continue
-		}
-
-		in := Input{
-			DurationSec:           durationSec,
-			IsDSD:                 isDSD,
-			Fingerprint:           fp,
-			HasLocalArtistWitness: true, // the harness has no tags; assume the easier bar
-		}
-		if r := CheckFingerprint(in); r != ReasonNone {
-			rejected++
-			reasons[r]++
-			continue
-		}
-
-		start = time.Now()
-		results, err := client.Lookup(ctx, fp)
-		totalLookup += time.Since(start)
-		if err != nil {
-			if errors.Is(err, ErrNoMatch) {
-				noMatch++
-				reasons[ReasonNoResults]++
-				continue
-			}
-			lookupFailed++
-			t.Logf("lookup %s: %v", filepath.Base(f.path), err)
-			continue
-		}
-
-		in.Results = results
-		decision, reason := Accept(in)
-		if reason != ReasonNone {
-			rejected++
-			reasons[reason]++
-			continue
-		}
-
-		accepted++
-		// Bugs in THIS code, unlike coverage, are failures.
-		if decision.ArtistMBID == "" {
-			t.Errorf("%s: accepted with no artist MBID", filepath.Base(f.path))
-		}
-		sourcesHist[decision.Sources]++
-		rgCountHist[countReleaseGroups(results, decision)]++
+		runControlFile(ctx, t, client, f, &tally)
 	}
 
 	n := len(files)
 	t.Logf("")
 	t.Logf("=== coverage over %d file(s) ===", n)
-	t.Logf("  ineligible (pre-decode)   %4d  %5.1f%%", ineligible, pct(ineligible, n))
-	t.Logf("  decode failed             %4d  %5.1f%%", decodeFailed, pct(decodeFailed, n))
-	t.Logf("  AcoustID knows nothing    %4d  %5.1f%%", noMatch, pct(noMatch, n))
-	t.Logf("  lookup errored            %4d  %5.1f%%", lookupFailed, pct(lookupFailed, n))
-	t.Logf("  refused by the gate       %4d  %5.1f%%", rejected, pct(rejected, n))
-	t.Logf("  ACCEPTED                  %4d  %5.1f%%", accepted, pct(accepted, n))
+	t.Logf("  ineligible (pre-decode)   %4d  %5.1f%%", tally.ineligible, pct(tally.ineligible, n))
+	t.Logf("  decode failed             %4d  %5.1f%%", tally.decodeFailed, pct(tally.decodeFailed, n))
+	t.Logf("  AcoustID knows nothing    %4d  %5.1f%%", tally.noMatch, pct(tally.noMatch, n))
+	t.Logf("  lookup errored            %4d  %5.1f%%", tally.lookupFailed, pct(tally.lookupFailed, n))
+	t.Logf("  refused by the gate       %4d  %5.1f%%", tally.rejected, pct(tally.rejected, n))
+	t.Logf("  ACCEPTED                  %4d  %5.1f%%", tally.accepted, pct(tally.accepted, n))
+
+	reasons, sourcesHist, rgCountHist := tally.reasons, tally.sourcesHist, tally.rgCountHist
+	totalDecode, totalLookup, totalBytes := tally.decode, tally.lookup, tally.bytes
 
 	t.Logf("")
 	t.Logf("=== why tracks were refused ===")
@@ -217,6 +141,102 @@ func TestAcoustIDCoverageControl(t *testing.T) {
 type controlFile struct {
 	path string
 	size int64
+}
+
+// controlTally accumulates the run's counters and histograms.
+type controlTally struct {
+	ineligible   int
+	decodeFailed int
+	lookupFailed int
+	noMatch      int
+	accepted     int
+	rejected     int
+
+	decode time.Duration
+	lookup time.Duration
+	bytes  int64
+
+	reasons     map[RejectReason]int
+	sourcesHist map[int]int
+	rgCountHist map[int]int
+}
+
+func (c *controlTally) init() {
+	c.reasons = map[RejectReason]int{}
+	c.sourcesHist = map[int]int{}
+	c.rgCountHist = map[int]int{}
+}
+
+// runControlFile takes one file all the way through the real pipeline and
+// records where it landed.
+func runControlFile(ctx context.Context, t *testing.T, client *Client, f controlFile, tally *controlTally) {
+	t.Helper()
+
+	durationSec, isDSD, ok := containerFacts(f.path)
+	if !ok {
+		// Without a container duration there is nothing to gate against; in
+		// production this is the FLAC-only consequence of where Track.Duration
+		// is populated.
+		tally.ineligible++
+		tally.reasons[ReasonUnknownDuration]++
+		return
+	}
+	if r := CheckEligible(durationSec, isDSD); r != ReasonNone {
+		tally.ineligible++
+		tally.reasons[r]++
+		return
+	}
+
+	start := time.Now()
+	fp, err := Compute(ctx, f.path, DefaultLengthSeconds*time.Second)
+	tally.decode += time.Since(start)
+	tally.bytes += f.size
+	if err != nil {
+		tally.decodeFailed++
+		return
+	}
+
+	in := Input{
+		DurationSec:           durationSec,
+		IsDSD:                 isDSD,
+		Fingerprint:           fp,
+		HasLocalArtistWitness: true, // the harness has no tags; assume the easier bar
+	}
+	if r := CheckFingerprint(in); r != ReasonNone {
+		tally.rejected++
+		tally.reasons[r]++
+		return
+	}
+
+	start = time.Now()
+	results, err := client.Lookup(ctx, fp)
+	tally.lookup += time.Since(start)
+	if err != nil {
+		if errors.Is(err, ErrNoMatch) {
+			tally.noMatch++
+			tally.reasons[ReasonNoResults]++
+			return
+		}
+		tally.lookupFailed++
+		t.Logf("lookup %s: %v", filepath.Base(f.path), err)
+		return
+	}
+
+	in.Results = results
+	decision, reason := Accept(in)
+	if reason != ReasonNone {
+		tally.rejected++
+		tally.reasons[reason]++
+		return
+	}
+
+	tally.accepted++
+	// Bugs in THIS code, unlike coverage, are failures.
+	if decision.ArtistMBID == "" {
+		t.Errorf("%s: accepted with no artist MBID", filepath.Base(f.path))
+	}
+	tally.sourcesHist[decision.Sources]++
+	tally.rgCountHist[countReleaseGroups(results, decision)]++
 }
 
 // collectAudio walks dir for files the bridge would consider audio, capped at

@@ -58,32 +58,9 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 		return 2
 	}
 
-	if *key == "" {
-		*key = os.Getenv("ACOUSTID_API_KEY")
-	}
-	if *key == "" && !*noLookup {
-		fmt.Fprint(stderr, "No AcoustID key. Pass --key or set ACOUSTID_API_KEY.\n"+
-			"Get a free application key at https://acoustid.org/new-application\n"+
-			"Or pass --no-lookup to fingerprint without contacting AcoustID.\n")
-		return 2
-	}
-
-	info, err := acoustid.Probe(ctx)
-	if err != nil {
-		if errors.Is(err, acoustid.ErrFpcalcMissing) {
-			fmt.Fprintf(stderr, "%v\n\nInstall fpcalc (Chromaprint):\n", err)
-			printFpcalcInstallHint(stderr)
-		} else {
-			fmt.Fprintf(stderr, "fpcalc precheck: %v\n", err)
-		}
-		return 1
-	}
-
-	var client *acoustid.Client
-	if !*noLookup {
-		userAgent := fmt.Sprintf("1-bit-bridge/%s (+https://github.com/acoseac/1-bit-bridge)",
-			version.ServerVersion)
-		client = acoustid.NewClient("", *key, userAgent, nil)
+	info, client, code := prepareFingerprintRun(ctx, *key, *noLookup, stderr)
+	if code != 0 {
+		return code
 	}
 
 	reports := make([]fingerprintReport, 0, len(paths))
@@ -116,6 +93,40 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	printFingerprintReports(stdout, info, reports)
 	return 0
+}
+
+// prepareFingerprintRun resolves the API key, checks the toolchain, and builds
+// the client. Returns a non-zero exit code when the run cannot proceed;
+// a nil client means --no-lookup (fingerprint without contacting AcoustID).
+func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
+	stderr io.Writer) (acoustid.Info, *acoustid.Client, int) {
+
+	if key == "" {
+		key = os.Getenv("ACOUSTID_API_KEY")
+	}
+	if key == "" && !noLookup {
+		fmt.Fprint(stderr, "No AcoustID key. Pass --key or set ACOUSTID_API_KEY.\n"+
+			"Get a free application key at https://acoustid.org/new-application\n"+
+			"Or pass --no-lookup to fingerprint without contacting AcoustID.\n")
+		return acoustid.Info{}, nil, 2
+	}
+
+	info, err := acoustid.Probe(ctx)
+	if err != nil {
+		if errors.Is(err, acoustid.ErrFpcalcMissing) {
+			fmt.Fprintf(stderr, "%v\n\nInstall fpcalc (Chromaprint):\n", err)
+			printFpcalcInstallHint(stderr)
+		} else {
+			fmt.Fprintf(stderr, "fpcalc precheck: %v\n", err)
+		}
+		return acoustid.Info{}, nil, 1
+	}
+	if noLookup {
+		return info, nil, 0
+	}
+	userAgent := fmt.Sprintf("1-bit-bridge/%s (+https://github.com/acoseac/1-bit-bridge)",
+		version.ServerVersion)
+	return info, acoustid.NewClient("", key, userAgent, nil), 0
 }
 
 // fingerprintReport is the per-file result. CLI-only — this is a diagnostic
@@ -169,25 +180,9 @@ func fingerprintOne(ctx context.Context, client *acoustid.Client, path string,
 		rep.Err = err.Error()
 		return rep
 	}
-	if st, err := os.Stat(abs); err == nil {
-		rep.SizeBytes = st.Size()
-	}
-
-	// Extract through the SAME path the scanner uses, so the duration and DSD
-	// flag the gate sees here are the ones it would see in production. Using
-	// fpcalc's own decoded duration instead would make the decode-agreement
-	// clause compare a value against itself.
-	var track manifest.Track
-	if err := manifest.Extract(abs, &track); err != nil {
-		rep.Err = fmt.Sprintf("extract tags: %v", err)
+	artist, ok := readContainerFacts(abs, &rep)
+	if !ok {
 		return rep
-	}
-	rep.Codec = track.Codec
-	if track.Duration != nil {
-		rep.DurationSec = *track.Duration
-	}
-	if track.IsDSD != nil {
-		rep.IsDSD = *track.IsDSD
 	}
 
 	// The cheap screen first — it is what production runs before spending a
@@ -221,13 +216,13 @@ func fingerprintOne(ctx context.Context, client *acoustid.Client, path string,
 		// junk classification that production applies lives in the enricher
 		// (it needs the match-folding vocabulary), so this is an
 		// approximation — and it only affects which sources threshold applies.
-		HasLocalArtistWitness: track.Artist != "",
+		HasLocalArtistWitness: artist != "",
 	}
 
 	// A prefix read makes fpcalc report the PREFIX's length, so the
 	// decode-agreement clause would fire on every file. Feed it the container
-	// duration instead, and say so, rather than silently reporting a rejection
-	// that is an artefact of the measurement.
+	// duration instead, rather than reporting a rejection that is an artefact
+	// of the measurement.
 	if prefixBytes > 0 {
 		in.Fingerprint.Duration = rep.DurationSec
 	}
@@ -240,17 +235,50 @@ func fingerprintOne(ctx context.Context, client *acoustid.Client, path string,
 		rep.Verdict, rep.Reason = "skipped", "no_lookup"
 		return rep
 	}
+	lookupAndDecide(ctx, client, in, fp, &rep)
+	return rep
+}
 
-	start = time.Now()
+// readContainerFacts fills the container-derived fields and returns the local
+// artist tag.
+//
+// It extracts through the SAME path the scanner uses, so the duration and DSD
+// flag the gate sees here are the ones it would see in production. Using
+// fpcalc's own decoded duration instead would have the decode-agreement clause
+// compare a value against itself.
+func readContainerFacts(abs string, rep *fingerprintReport) (artist string, ok bool) {
+	if st, err := os.Stat(abs); err == nil {
+		rep.SizeBytes = st.Size()
+	}
+	var track manifest.Track
+	if err := manifest.Extract(abs, &track); err != nil {
+		rep.Err = fmt.Sprintf("extract tags: %v", err)
+		return "", false
+	}
+	rep.Codec = track.Codec
+	if track.Duration != nil {
+		rep.DurationSec = *track.Duration
+	}
+	if track.IsDSD != nil {
+		rep.IsDSD = *track.IsDSD
+	}
+	return track.Artist, true
+}
+
+// lookupAndDecide performs the AcoustID call and records the gate's verdict.
+func lookupAndDecide(ctx context.Context, client *acoustid.Client,
+	in acoustid.Input, fp acoustid.Fingerprint, rep *fingerprintReport) {
+
+	start := time.Now()
 	results, err := client.Lookup(ctx, fp)
 	rep.LookupMillis = time.Since(start).Milliseconds()
 	if err != nil {
 		if errors.Is(err, acoustid.ErrNoMatch) {
 			rep.Verdict, rep.Reason = "reject", "no_results"
-			return rep
+			return
 		}
 		rep.Err = err.Error()
-		return rep
+		return
 	}
 	for _, r := range results {
 		row := fingerprintResultRow{
@@ -269,7 +297,7 @@ func fingerprintOne(ctx context.Context, client *acoustid.Client, path string,
 	decision, reason := acoustid.Accept(in)
 	if reason != acoustid.ReasonNone {
 		rep.Verdict, rep.Reason = "reject", string(reason)
-		return rep
+		return
 	}
 	rep.Verdict = "accept"
 	rep.ArtistMBID = decision.ArtistMBID
@@ -277,95 +305,119 @@ func fingerprintOne(ctx context.Context, client *acoustid.Client, path string,
 	rep.RecordingMBID = decision.RecordingMBID
 	rep.AlbumHint = decision.AlbumHint
 	rep.AcoustID = decision.AcoustID
-	return rep
+}
+
+// fingerprintTotals accumulates the run-level numbers the cost measurement
+// wants: how many files landed where, and what they took to produce.
+type fingerprintTotals struct {
+	accepted, rejected, failed int
+	decode, lookup             time.Duration
+	bytes                      int64
 }
 
 func printFingerprintReports(w io.Writer, info acoustid.Info, reports []fingerprintReport) {
 	fmt.Fprintf(w, "fpcalc %s (%s)\n\n", nonEmptyOr(info.Version, "unknown version"), info.Path)
-
-	var accepted, rejected, failed int
-	var totalDecode, totalLookup time.Duration
-	var totalBytes int64
-
+	var totals fingerprintTotals
 	for _, r := range reports {
-		fmt.Fprintf(w, "%s\n", r.Path)
-		if r.Err != "" {
-			failed++
-			fmt.Fprintf(w, "  error       %s\n\n", r.Err)
-			continue
-		}
-		fmt.Fprintf(w, "  container   %s", formatSeconds(r.DurationSec))
-		if r.Codec != "" {
-			fmt.Fprintf(w, "  %s", r.Codec)
-		}
-		if r.IsDSD {
-			fmt.Fprint(w, "  DSD")
-		}
-		if r.SizeBytes > 0 {
-			fmt.Fprintf(w, "  %s", formatBytes(r.SizeBytes))
-		}
-		fmt.Fprintln(w)
+		printOneFingerprintReport(w, r, &totals)
+	}
+	printFingerprintTotals(w, len(reports), totals)
+}
 
-		if r.DecodeMillis > 0 {
-			totalDecode += time.Duration(r.DecodeMillis) * time.Millisecond
-			fmt.Fprintf(w, "  fingerprint %s  entropy %d/64  decoded %s",
-				formatMillis(r.DecodeMillis), r.DistinctB64, formatSeconds(r.DecodedSec))
-			if r.BytesRead > 0 {
-				totalBytes += r.BytesRead
-				fmt.Fprintf(w, "  read %s", formatBytes(r.BytesRead))
-			}
-			fmt.Fprintln(w)
-		}
-		if r.LookupMillis > 0 {
-			totalLookup += time.Duration(r.LookupMillis) * time.Millisecond
-			fmt.Fprintf(w, "  lookup      %s  %d result(s)\n",
-				formatMillis(r.LookupMillis), len(r.Results))
-		}
-		for i, res := range r.Results {
-			fmt.Fprintf(w, "    [%d] score %.2f  sources %d  recordings %d\n",
-				i+1, res.Score, res.Sources, res.Recordings)
-			for j := range res.Titles {
-				artist := "?"
-				if j < len(res.Artists) {
-					artist = res.Artists[j]
-				}
-				fmt.Fprintf(w, "        %s — %s\n", artist, res.Titles[j])
-			}
-		}
+func printOneFingerprintReport(w io.Writer, r fingerprintReport, totals *fingerprintTotals) {
+	fmt.Fprintf(w, "%s\n", r.Path)
+	if r.Err != "" {
+		totals.failed++
+		fmt.Fprintf(w, "  error       %s\n\n", r.Err)
+		return
+	}
+	printFingerprintContainer(w, r)
+	printFingerprintTiming(w, r, totals)
+	printFingerprintResults(w, r)
+	printFingerprintVerdict(w, r, totals)
+	fmt.Fprintln(w)
+}
 
-		switch r.Verdict {
-		case "accept":
-			accepted++
-			fmt.Fprintf(w, "  verdict     ACCEPT\n")
-			fmt.Fprintf(w, "    artist    %s (%s)\n", r.ArtistName, r.ArtistMBID)
-			if r.RecordingMBID != "" {
-				fmt.Fprintf(w, "    recording %s\n", r.RecordingMBID)
-			} else {
-				fmt.Fprintf(w, "    recording (ambiguous — not written)\n")
-			}
-			if r.AlbumHint != "" {
-				fmt.Fprintf(w, "    album cue %q\n", r.AlbumHint)
-			} else {
-				fmt.Fprintf(w, "    album cue (several release groups — falls back to the local tag)\n")
-			}
-		case "reject":
-			rejected++
-			fmt.Fprintf(w, "  verdict     REJECT (%s)\n", r.Reason)
-		default:
-			fmt.Fprintf(w, "  verdict     skipped (%s)\n", nonEmptyOr(r.Reason, "n/a"))
+func printFingerprintContainer(w io.Writer, r fingerprintReport) {
+	fmt.Fprintf(w, "  container   %s", formatSeconds(r.DurationSec))
+	if r.Codec != "" {
+		fmt.Fprintf(w, "  %s", r.Codec)
+	}
+	if r.IsDSD {
+		fmt.Fprint(w, "  DSD")
+	}
+	if r.SizeBytes > 0 {
+		fmt.Fprintf(w, "  %s", formatBytes(r.SizeBytes))
+	}
+	fmt.Fprintln(w)
+}
+
+func printFingerprintTiming(w io.Writer, r fingerprintReport, totals *fingerprintTotals) {
+	if r.DecodeMillis > 0 {
+		totals.decode += time.Duration(r.DecodeMillis) * time.Millisecond
+		fmt.Fprintf(w, "  fingerprint %s  entropy %d/64  decoded %s",
+			formatMillis(r.DecodeMillis), r.DistinctB64, formatSeconds(r.DecodedSec))
+		if r.BytesRead > 0 {
+			totals.bytes += r.BytesRead
+			fmt.Fprintf(w, "  read %s", formatBytes(r.BytesRead))
 		}
 		fmt.Fprintln(w)
 	}
+	if r.LookupMillis > 0 {
+		totals.lookup += time.Duration(r.LookupMillis) * time.Millisecond
+		fmt.Fprintf(w, "  lookup      %s  %d result(s)\n",
+			formatMillis(r.LookupMillis), len(r.Results))
+	}
+}
 
-	fmt.Fprintf(w, "%d file(s): %d accepted, %d rejected, %d errored\n",
-		len(reports), accepted, rejected, failed)
-	if totalDecode > 0 {
-		fmt.Fprintf(w, "decode %s total", totalDecode.Round(time.Millisecond))
-		if totalLookup > 0 {
-			fmt.Fprintf(w, ", lookup %s total", totalLookup.Round(time.Millisecond))
+func printFingerprintResults(w io.Writer, r fingerprintReport) {
+	for i, res := range r.Results {
+		fmt.Fprintf(w, "    [%d] score %.2f  sources %d  recordings %d\n",
+			i+1, res.Score, res.Sources, res.Recordings)
+		for j := range res.Titles {
+			artist := "?"
+			if j < len(res.Artists) {
+				artist = res.Artists[j]
+			}
+			fmt.Fprintf(w, "        %s — %s\n", artist, res.Titles[j])
 		}
-		if totalBytes > 0 {
-			fmt.Fprintf(w, ", %s fed to fpcalc", formatBytes(totalBytes))
+	}
+}
+
+func printFingerprintVerdict(w io.Writer, r fingerprintReport, totals *fingerprintTotals) {
+	switch r.Verdict {
+	case "accept":
+		totals.accepted++
+		fmt.Fprint(w, "  verdict     ACCEPT\n")
+		fmt.Fprintf(w, "    artist    %s (%s)\n", r.ArtistName, r.ArtistMBID)
+		if r.RecordingMBID != "" {
+			fmt.Fprintf(w, "    recording %s\n", r.RecordingMBID)
+		} else {
+			fmt.Fprint(w, "    recording (ambiguous — not written)\n")
+		}
+		if r.AlbumHint != "" {
+			fmt.Fprintf(w, "    album cue %q\n", r.AlbumHint)
+		} else {
+			fmt.Fprint(w, "    album cue (several release groups — falls back to the local tag)\n")
+		}
+	case "reject":
+		totals.rejected++
+		fmt.Fprintf(w, "  verdict     REJECT (%s)\n", r.Reason)
+	default:
+		fmt.Fprintf(w, "  verdict     skipped (%s)\n", nonEmptyOr(r.Reason, "n/a"))
+	}
+}
+
+func printFingerprintTotals(w io.Writer, n int, t fingerprintTotals) {
+	fmt.Fprintf(w, "%d file(s): %d accepted, %d rejected, %d errored\n",
+		n, t.accepted, t.rejected, t.failed)
+	if t.decode > 0 {
+		fmt.Fprintf(w, "decode %s total", t.decode.Round(time.Millisecond))
+		if t.lookup > 0 {
+			fmt.Fprintf(w, ", lookup %s total", t.lookup.Round(time.Millisecond))
+		}
+		if t.bytes > 0 {
+			fmt.Fprintf(w, ", %s fed to fpcalc", formatBytes(t.bytes))
 		}
 		fmt.Fprintln(w)
 	}

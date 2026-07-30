@@ -267,16 +267,29 @@ func CheckFingerprint(in Input) RejectReason {
 // and CheckFingerprint lose nothing by doing so.
 //
 // On refusal the returned Decision is zero and the reason names the clause.
+// The stages run in a fixed order and each may only ever REFUSE. That
+// ordering is the safety property, not an implementation detail: a later,
+// looser-looking clause can never lift a candidate an earlier one rejected.
+// Keep them as separate named steps — collapsing them into one pass would be
+// behaviour-preserving and property-hiding.
 func Accept(in Input) (Decision, RejectReason) {
 	if r := CheckFingerprint(in); r != ReasonNone {
 		return Decision{}, r
 	}
-	if len(in.Results) == 0 {
-		return Decision{}, ReasonNoResults
+	top, reason := selectResult(in)
+	if reason != ReasonNone {
+		return Decision{}, reason
 	}
+	return acceptRecordings(in, top)
+}
 
-	// Stage 2 — result selection. AcoustID orders by score, but the gate
-	// re-derives the top rather than trusting the order.
+// selectResult is stage 2: pick the cluster, and refuse if the audio does not
+// point at exactly one of them convincingly enough.
+func selectResult(in Input) (Result, RejectReason) {
+	if len(in.Results) == 0 {
+		return Result{}, ReasonNoResults
+	}
+	// AcoustID orders by score, but re-derive the top rather than trust it.
 	top := in.Results[0]
 	for i := range in.Results {
 		if in.Results[i].Score > top.Score {
@@ -284,77 +297,42 @@ func Accept(in Input) (Decision, RejectReason) {
 		}
 	}
 	if top.Score < minScore {
-		return Decision{}, ReasonLowScore
+		return Result{}, ReasonLowScore
 	}
 	// Ambiguity: any OTHER result that also clears the floor and sits within
 	// the margin means the audio matches two clusters.
 	for i := range in.Results {
 		other := in.Results[i]
-		if other.ID == top.ID {
-			continue
-		}
-		if other.Score >= minScore && top.Score-other.Score < minScoreMargin {
-			return Decision{}, ReasonAmbiguousResults
+		if other.ID != top.ID &&
+			other.Score >= minScore &&
+			top.Score-other.Score < minScoreMargin {
+			return Result{}, ReasonAmbiguousResults
 		}
 	}
-
 	required := minSources
 	if !in.HasLocalArtistWitness {
 		required = minSourcesNoLocalArtist
 	}
 	if top.Sources < required {
-		return Decision{}, ReasonFewSources
+		return Result{}, ReasonFewSources
 	}
+	return top, ReasonNone
+}
 
-	// Stage 3 — recording acceptance.
+// acceptRecordings is stage 3: narrow the cluster's recordings to those whose
+// length agrees with the file, then require them to agree on one artist.
+func acceptRecordings(in Input, top Result) (Decision, RejectReason) {
 	if len(top.Recordings) == 0 {
 		return Decision{}, ReasonNoRecordings
 	}
-	tol := math.Max(durationToleranceSec, durationToleranceFrac*in.DurationSec)
-	var survivors []Recording
-	for _, rec := range top.Recordings {
-		// A recording with no duration is rejected rather than waived. This is
-		// the deliberate inverse of analyze.decodedShortOfDuration, which
-		// fails OPEN on an unknown duration: there, an unknown length must not
-		// block a user's own file from being analysed; here, it must not let
-		// an unverifiable MBID into the library. Same arithmetic, opposite
-		// default, because the blast radius points the other way.
-		if rec.Duration <= 0 {
-			continue
-		}
-		if math.Abs(rec.Duration-in.DurationSec) <= tol {
-			survivors = append(survivors, rec)
-		}
-	}
+	survivors := recordingsMatchingDuration(top.Recordings, in.DurationSec)
 	if len(survivors) == 0 {
 		return Decision{}, ReasonDurationMismatch
 	}
-
-	// Head-artist consensus. Keyed on the PRIMARY credited artist, not the
-	// full ordered credit: MusicBrainz routinely models one piece of audio as
-	// both "[Tony Bennett]" (original album) and "[Tony Bennett, Bill Evans]"
-	// (compilation), and a full-tuple rule would veto a match whose answer is
-	// identical either way. ArtistMBID holds one MBID, so the head is the
-	// right granularity for the field being written.
-	//
-	// Disagreement is a VETO; agreement is not evidence. Every recording on
-	// one AcoustID descends from a single submission lineage, so "four
-	// recordings all say Miles Davis" is one witness repeated, not four.
-	// Vetoes may only subtract.
-	headID, headName := "", ""
-	for _, rec := range survivors {
-		if len(rec.Artists) == 0 || rec.Artists[0].ID == "" {
-			return Decision{}, ReasonNoArtistMBID
-		}
-		if headID == "" {
-			headID, headName = rec.Artists[0].ID, rec.Artists[0].Name
-			continue
-		}
-		if rec.Artists[0].ID != headID {
-			return Decision{}, ReasonArtistDisagreement
-		}
+	headID, headName, reason := headArtistConsensus(survivors)
+	if reason != ReasonNone {
+		return Decision{}, reason
 	}
-
 	return Decision{
 		ArtistMBID:    headID,
 		ArtistName:    headName,
@@ -364,6 +342,57 @@ func Accept(in Input) (Decision, RejectReason) {
 		Score:         top.Score,
 		Sources:       top.Sources,
 	}, ReasonNone
+}
+
+// recordingsMatchingDuration keeps the recordings whose length agrees with the
+// file's, within max(durationToleranceSec, durationToleranceFrac).
+//
+// A recording with no duration is REJECTED rather than waived. This is the
+// deliberate inverse of analyze.decodedShortOfDuration, which fails OPEN on an
+// unknown duration: there, an unknown length must not block a user's own file
+// from being analysed; here, it must not let an unverifiable MBID into the
+// library. Same arithmetic, opposite default, because the blast radius points
+// the other way.
+func recordingsMatchingDuration(recordings []Recording, durationSec float64) []Recording {
+	tol := math.Max(durationToleranceSec, durationToleranceFrac*durationSec)
+	var survivors []Recording
+	for _, rec := range recordings {
+		if rec.Duration <= 0 {
+			continue
+		}
+		if math.Abs(rec.Duration-durationSec) <= tol {
+			survivors = append(survivors, rec)
+		}
+	}
+	return survivors
+}
+
+// headArtistConsensus requires every survivor to name the same PRIMARY
+// credited artist.
+//
+// Keyed on the head rather than the full ordered credit: MusicBrainz routinely
+// models one piece of audio as both "[Tony Bennett]" (original album) and
+// "[Tony Bennett, Bill Evans]" (compilation), and a full-tuple rule would veto
+// a match whose answer is identical either way. ArtistMBID holds one MBID, so
+// the head is the right granularity for the field being written.
+//
+// Disagreement is a VETO; agreement is not evidence. Every recording on one
+// AcoustID descends from a single submission lineage, so "four recordings all
+// say Miles Davis" is one witness repeated, not four. Vetoes may only subtract.
+func headArtistConsensus(survivors []Recording) (id, name string, reason RejectReason) {
+	for _, rec := range survivors {
+		if len(rec.Artists) == 0 || rec.Artists[0].ID == "" {
+			return "", "", ReasonNoArtistMBID
+		}
+		if id == "" {
+			id, name = rec.Artists[0].ID, rec.Artists[0].Name
+			continue
+		}
+		if rec.Artists[0].ID != id {
+			return "", "", ReasonArtistDisagreement
+		}
+	}
+	return id, name, ReasonNone
 }
 
 // soleRecordingMBID returns the recording MBID when the survivors name exactly

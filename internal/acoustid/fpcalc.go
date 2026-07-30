@@ -50,6 +50,16 @@ var (
 	fpcalcCommand  = exec.CommandContext
 )
 
+// localePinnedEnv returns the process environment with the locale forced to C.
+//
+// Every fpcalc spawn uses it: a translated banner would defeat the version
+// parse, and a localised error string would defeat the redaction the privacy
+// contract depends on. Pinning all three variables is deliberate — LC_ALL wins
+// on glibc, but musl and some minimal images honour only LANG/LANGUAGE.
+func localePinnedEnv() []string {
+	return append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=C")
+}
+
 // Info is what Probe learned about the installed fpcalc.
 type Info struct {
 	Path    string
@@ -80,7 +90,7 @@ func Probe(ctx context.Context) (Info, error) {
 	defer cancel()
 	cmd := fpcalcCommand(ctx, path, "-version")
 	// Locale-pinned so a translated banner can't defeat the parse.
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=C")
+	cmd.Env = localePinnedEnv()
 	// CombinedOutput: some builds print the banner to stderr.
 	out, runErr := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -193,7 +203,7 @@ func Compute(ctx context.Context, absPath string, length time.Duration) (Fingerp
 	}
 
 	cmd := fpcalcCommand(ctx, path, "-json", "-length", fmt.Sprint(secs), absPath)
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=C")
+	cmd.Env = localePinnedEnv()
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, runErr := cmd.Output()
@@ -259,7 +269,7 @@ func ComputeFromPrefix(ctx context.Context, absPath string, length time.Duration
 
 	// "-" is fpcalc's own spelling for stdin (it rewrites it to "pipe:0").
 	cmd := fpcalcCommand(ctx, path, "-json", "-length", fmt.Sprint(secs), "-")
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=C")
+	cmd.Env = localePinnedEnv()
 	counter := &countingReader{r: io.LimitReader(f, limitBytes)}
 	cmd.Stdin = counter
 	var stderr strings.Builder
