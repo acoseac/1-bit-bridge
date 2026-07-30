@@ -295,3 +295,56 @@ func TestAlbumTermPrefersTheLocalTag(t *testing.T) {
 		t.Fatal("precondition: a disc-number title must be junk")
 	}
 }
+
+// TestAlbumSearchTermPrefersTheLocalTitle pins the one function both the
+// release search and the artwork chain's iTunes fallback consult.
+//
+// Computing it twice is how the two drift, and the failure is silent: a junk
+// album name reaching iTunes loses that fallback without any error.
+func TestAlbumSearchTermPrefersTheLocalTitle(t *testing.T) {
+	hint := AcousticMatch{AlbumHint: "Before the Dawn Heals Us"}
+
+	if got := albumSearchTerm(&manifest.Track{Album: "Kind of Blue"}, hint); got != "Kind of Blue" {
+		t.Errorf("got %q — a real local title must outrank the fingerprint's hint", got)
+	}
+	if got := albumSearchTerm(&manifest.Track{Album: "CD 03"}, hint); got != hint.AlbumHint {
+		t.Errorf("got %q — a junk local title must yield to the hint", got)
+	}
+	if got := albumSearchTerm(&manifest.Track{Album: ""}, hint); got != hint.AlbumHint {
+		t.Errorf("got %q — a blank title must yield to the hint", got)
+	}
+	// Numeric titles are real albums; see the asymmetry note on isJunkAlbumTag.
+	if got := albumSearchTerm(&manifest.Track{Album: "1989"}, hint); got != "1989" {
+		t.Errorf("got %q — a numeric album title must not be replaced", got)
+	}
+	// Nothing usable on either side.
+	if got := albumSearchTerm(&manifest.Track{Album: "CD 03"}, AcousticMatch{}); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// TestAcousticFallbackDoesNotOverwriteAResolvedArtist — reaching the fallback
+// with an artist already set means pickBestArtist accepted a real tag, which
+// is at least as trustworthy as audio. The fingerprint is being consulted for
+// the ALBUM in that case, so it must leave the artist alone.
+func TestAcousticFallbackDoesNotOverwriteAResolvedArtist(t *testing.T) {
+	const fromText = "11111111-1111-1111-1111-111111111111"
+	const fromAudio = "6d7b7cd4-254b-4c25-83f6-dd20f98ceacd"
+
+	e := &Enricher{acoustic: fakeLookup{"a.flac": {
+		ArtistMBID: fromAudio, ArtistName: "M83", AlbumHint: "Before the Dawn Heals Us",
+	}}}
+	tr := &manifest.Track{Path: "a.flac", Artist: "M83", Album: "CD 01", ArtistMBID: fromText}
+
+	m, ok := e.applyAcousticFallback(tr)
+	if !ok {
+		t.Fatal("the fallback must still run — the album hint is the new information")
+	}
+	if tr.ArtistMBID != fromText {
+		t.Errorf("ArtistMBID = %q, want the text-resolved value preserved", tr.ArtistMBID)
+	}
+	// The match is still returned so the caller can run the album hop.
+	if m.AlbumHint == "" {
+		t.Error("the caller needs the hint to search the album by")
+	}
+}

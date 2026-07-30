@@ -501,11 +501,17 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		// The text ladder ran clean and found nothing. Before stamping, see
 		// whether the audio itself identifies the artist — the tags may be
 		// wrong rather than merely obscure.
-		if t.ArtistMBID == "" {
-			if m, ok := e.applyAcousticFallback(t); ok {
-				e.enrichWithRecoveredArtist(ctx, t, m)
-				return
-			}
+		// Consulted even when the artist ALREADY resolved: a track can have a
+		// good artist tag and a junk album one ("CD 01"), in which case the
+		// text ladder has nothing to search the album by and the fingerprint's
+		// release-group hint is the only new information available. That is a
+		// large population — on the test host, over a thousand of the
+		// release-missing tracks sit under a generic disc folder.
+		// applyAcousticFallback will not overwrite an artist the text path
+		// already accepted.
+		if m, ok := e.applyAcousticFallback(t); ok {
+			e.enrichWithRecoveredArtist(ctx, t, m)
+			return
 		}
 		reason := skipReasonNoMBMatch
 		if e.acoustic != nil {

@@ -197,7 +197,13 @@ func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, bool
 		return AcousticMatch{}, false
 	}
 
-	t.ArtistMBID = m.ArtistMBID
+	// Do NOT overwrite an artist the text path already resolved. Reaching
+	// here with one set means pickBestArtist accepted a real tag, which is at
+	// least as trustworthy as audio — the fingerprint is being consulted for
+	// the ALBUM in that case, not the artist.
+	if t.ArtistMBID == "" {
+		t.ArtistMBID = m.ArtistMBID
+	}
 	if m.RecordingMBID != "" && isValidMBID(m.RecordingMBID) {
 		t.MusicBrainzTrackID = m.RecordingMBID
 	}
@@ -232,7 +238,10 @@ func (e *Enricher) enrichWithRecoveredArtist(ctx context.Context, t *manifest.Tr
 		// Artwork rides the same chain every other release does — nothing
 		// fingerprint-specific about it once a real release MBID exists.
 		if !strings.HasPrefix(t.ArtworkMBID, "local-") {
-			if cached, aerr := e.ensureArtworkCached(ctx, releaseMBID, rgMBID, m.ArtistName, t.Album, 500); aerr != nil {
+			// The SAME term the release search used: the iTunes fallback
+			// inside ensureArtworkCached searches by (artist, album), so a
+			// junk local title here would quietly lose that fallback.
+			if cached, aerr := e.ensureArtworkCached(ctx, releaseMBID, rgMBID, m.ArtistName, albumSearchTerm(t, m), 500); aerr != nil {
 				if ctx.Err() == nil {
 					logger.Error("artwork", "mbid", releaseMBID, "err", aerr)
 				}
@@ -285,10 +294,7 @@ func (e *Enricher) enrichWithRecoveredArtist(ctx context.Context, t *manifest.Tr
 // caller can leave enriched_at alone and retry — the same contract every other
 // search path here honours.
 func (e *Enricher) resolveAlbumFromAcoustic(ctx context.Context, t *manifest.Track, m AcousticMatch) (string, string, error) {
-	album := strings.TrimSpace(t.Album)
-	if isJunkAlbumTag(album) {
-		album = strings.TrimSpace(m.AlbumHint)
-	}
+	album := albumSearchTerm(t, m)
 	if album == "" || m.ArtistName == "" {
 		return "", "", nil
 	}
@@ -315,6 +321,25 @@ func (e *Enricher) resolveAlbumFromAcoustic(ctx context.Context, t *manifest.Tra
 	logger.Info("album recovered via fingerprint artist",
 		"path", t.Path, "searchedArtist", m.ArtistName, "searchedAlbum", album, "release", res.MBID)
 	return res.MBID, rg, nil
+}
+
+// albumSearchTerm picks the album string to search MusicBrainz by.
+//
+// The track's OWN tag wins whenever it is usable — a real title the operator
+// curated outranks anything the fingerprint suggests. The gate's hint fills in
+// only when the local tag has nothing to search by ("CD 03"), and the gate
+// sets that hint only when the accepted recordings share exactly one release
+// group, so it is never a guess between several.
+//
+// One function because two callers need the same answer: the release search
+// and the artwork chain's iTunes fallback, which also searches by
+// (artist, album). Computing it twice would let the two drift, and a junk
+// album name reaching iTunes silently loses the fallback.
+func albumSearchTerm(t *manifest.Track, m AcousticMatch) string {
+	if album := strings.TrimSpace(t.Album); !isJunkAlbumTag(album) {
+		return album
+	}
+	return strings.TrimSpace(m.AlbumHint)
 }
 
 // junkAlbumTags mirrors junkArtistTags for album titles: values that cannot
