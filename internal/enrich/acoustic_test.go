@@ -2,6 +2,9 @@ package enrich
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
@@ -384,5 +387,114 @@ func TestAlbumHopUsesTheSameKeyAsTheTextPath(t *testing.T) {
 	tr := &manifest.Track{Album: "Real Album"}
 	if got, want := cacheKey(m.ArtistName, albumSearchTerm(tr, m)), cacheKey("M83", "Real Album"); got != want {
 		t.Errorf("key = %q, want %q", got, want)
+	}
+}
+
+// TestUnsearchableArtistTagIsNarrowerThanJunk is the guard against merging two
+// predicates that look like duplicates.
+//
+// isJunkArtistTag can afford to be broad: a false positive there only removes
+// the local witness, and the gate compensates by demanding more submissions.
+// isUnsearchableArtistTag cannot: a false positive there means the MusicBrainz
+// query is never sent and the track permanently loses a text match it would
+// have had.
+//
+// So the values below MUST be classified junk (no witness) while remaining
+// searchable. Anyone collapsing the two functions fails here rather than
+// quietly costing real bands their metadata.
+func TestUnsearchableArtistTagIsNarrowerThanJunk(t *testing.T) {
+	for _, name := range []string{
+		"311",             // real band, all digits
+		"112",             // real band, all digits
+		"Various Artists", // a real MusicBrainz special-purpose artist
+		"VA",
+		"!!!",      // real band; folds to nothing
+		"unknown",  // plausible band name on its own
+		"None",     // ditto
+		"Untitled", // ditto
+	} {
+		if !isJunkArtistTag(name) {
+			t.Errorf("isJunkArtistTag(%q) = false, want true — the veto has no usable witness here", name)
+		}
+		if isUnsearchableArtistTag(name) {
+			t.Errorf("isUnsearchableArtistTag(%q) = true; this would stop MusicBrainz ever being "+
+				"asked about a name that may be real", name)
+		}
+	}
+}
+
+// TestUnsearchableArtistTagCatchesTheLeakedLabels pins the values the predicate
+// does exist for: folder labels that ended up in the artist field, and the
+// explicit placeholders taggers write when they have nothing.
+func TestUnsearchableArtistTagCatchesTheLeakedLabels(t *testing.T) {
+	for _, name := range []string{
+		"CD 01", "cd 2", "Disc 1", "disk 03", "Track 7",
+		"An Unknown Artist", "Unknown Artist", "No Artist",
+	} {
+		if !isUnsearchableArtistTag(name) {
+			t.Errorf("isUnsearchableArtistTag(%q) = false, want true", name)
+		}
+	}
+}
+
+// TestUnsearchableArtistTagLeavesRealNamesAlone is the tripwire. Every entry is
+// a real artist, and each one that slipped through would silently lose its
+// MusicBrainz identity for the life of the library.
+func TestUnsearchableArtistTagLeavesRealNamesAlone(t *testing.T) {
+	for _, name := range []string{
+		"CD Projekt", "Discharge", "Disclosure", "The Cardigans",
+		"Track and Field", "CD 01 Orchestra", "Unknown Mortal Orchestra",
+		"The Unknown Artist Collective", "Artist vs Poet",
+		"Peter, Paul and Mary", "Simon & Garfunkel", "Zdob și Zdub",
+	} {
+		if isUnsearchableArtistTag(name) {
+			t.Errorf("isUnsearchableArtistTag(%q) = true — this is a real artist and would "+
+				"never be searched for", name)
+		}
+	}
+}
+
+// TestResolveArtistSkipsTheRequestForUnsearchableTags pins the behaviour, not
+// just the predicate: the request must not be sent at all.
+//
+// The counter is the whole point. A version that sent the query and discarded
+// the answer would satisfy every assertion about the track, and would still
+// leave the tracks this exists for spinning against a 5xx forever — a transient
+// error returns without stamping, so a futile query retries on every batch and
+// never reaches the fingerprint fallback.
+func TestResolveArtistSkipsTheRequestForUnsearchableTags(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"artists":[]}`))
+	}))
+	defer srv.Close()
+
+	e := &Enricher{
+		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
+		MBMinInterval: 0,
+		artistCache:   newArtistCacheForTest(),
+	}
+
+	tr := &manifest.Track{Path: "CD 01/Album/01.flac", Artist: "CD 01", Album: "Some Album"}
+	if err := e.resolveArtist(context.Background(), tr); err != nil {
+		t.Fatalf("resolveArtist: %v", err)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("upstream saw %d requests, want 0 — a folder label was searched as an artist", got)
+	}
+	if tr.ArtistMBID != "" {
+		t.Errorf("ArtistMBID = %q, want empty", tr.ArtistMBID)
+	}
+
+	// A real name on the same enricher still goes out, so the skip is scoped
+	// rather than a blanket disable.
+	realArtist := &manifest.Track{Path: "a/b/c.flac", Artist: "Nobody At All", Album: "Some Album"}
+	if err := e.resolveArtist(context.Background(), realArtist); err != nil {
+		t.Fatalf("resolveArtist(real): %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("upstream saw %d requests after a real artist, want 1", got)
 	}
 }
