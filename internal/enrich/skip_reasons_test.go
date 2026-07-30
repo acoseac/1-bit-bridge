@@ -19,23 +19,9 @@ import (
 //
 // Two tracks, two distinct causes, one enricher run.
 func TestSkipReasonsAttributeTheRightCause(t *testing.T) {
-	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// Clean response, no candidates → the searchable track is a
-		// genuine no-match rather than an error.
-		_, _ = io.WriteString(w, `{"releases":[]}`)
-	}))
-	defer mbSrv.Close()
-	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	}))
-	defer caaSrv.Close()
-
-	dir := t.TempDir()
-	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	// The stubs answer cleanly with nothing, so the searchable track is a
+	// genuine no-match rather than an error — the distinction this test turns on.
+	e, store := newOfflineEnricher(t, nil)
 	ctx := context.Background()
 	// The "An Unknown Artist / CD 02" shape — nothing to search by.
 	if err := store.UpsertTrack(ctx, &manifest.Track{
@@ -51,8 +37,6 @@ func TestSkipReasonsAttributeTheRightCause(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
 	defer startEnricherForTest(e, 3*time.Second)()
 
 	deadline := time.Now().Add(3 * time.Second)

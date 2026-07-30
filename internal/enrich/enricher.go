@@ -532,10 +532,15 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 				"no acceptable release candidate")
 			return
 		}
-		// Local artwork, no release match, nothing recovered: fall through
-		// to MarkEnriched exactly as before. The artwork block below is
-		// itself local-guarded so it stays a no-op, and resolveArtist is
-		// cache-backed, so the second call costs a map lookup.
+		// Local artwork, no release match, nothing recovered: there is
+		// nothing left to do but stamp, so do it here rather than falling
+		// through. The artwork block below is local-guarded and would be a
+		// no-op, but resolveArtist is NOT free on a second call — a cache
+		// hit still reaches ensureArtistImageCached, which stats the
+		// portrait path. Falling through would pay that per track, on the
+		// largest population in the library (Gemini, PR #612).
+		e.stampEnriched(ctx, t)
+		return
 	}
 
 	// Fetch and cache 500px front cover. If the file already exists, we
@@ -578,11 +583,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		return
 	}
 
-	if err := e.store.MarkEnriched(ctx, t); err != nil {
-		logger.Error("mark enriched", "path", t.Path, "err", err)
-		return
-	}
-	e.done.Add(1)
+	e.stampEnriched(ctx, t)
 }
 
 // resolveArtist fills in t.ArtistMBID and ensures the artist image is
@@ -946,6 +947,24 @@ func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) s
 		return skipReasonFingerprintVetoed
 	}
 	return skipReasonNoFingerprintMatch
+}
+
+// stampEnriched commits the track and counts it done.
+//
+// Shared by every success exit — the ordinary path, the fingerprint-recovered
+// path, and the local-artwork-without-a-release path. A MarkEnriched failure is
+// logged and swallowed: the row stays at enriched_at = 0 and the worker retries
+// it, which is the right outcome for a transient store error.
+//
+// Deliberately NOT shared with markSkipped, which differs on both counts: it
+// tallies a skip rather than a success, and it does not return early on error
+// because it still has a reason to record.
+func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
+	if err := e.store.MarkEnriched(ctx, t); err != nil {
+		logger.Error("mark enriched", "path", t.Path, "err", err)
+		return
+	}
+	e.done.Add(1)
 }
 
 // markSkipped stamps enriched_at so the worker doesn't retry the same

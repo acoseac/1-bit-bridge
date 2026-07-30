@@ -2,10 +2,6 @@ package enrich
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -30,27 +26,9 @@ import (
 // The fixture is the production shape: local artwork present, MusicBrainz
 // answering cleanly with no candidates, and a fingerprint answer waiting.
 func TestAcousticFallbackReachableWithLocalArtwork(t *testing.T) {
-	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Clean, empty answer for BOTH the release and artist searches:
-		// a genuine no-match, so the track reaches the give-up path.
-		if r.URL.Path == "/artist/" {
-			_, _ = io.WriteString(w, `{"artists":[]}`)
-			return
-		}
-		_, _ = io.WriteString(w, `{"releases":[]}`)
-	}))
-	defer mbSrv.Close()
-	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	}))
-	defer caaSrv.Close()
-
-	dir := t.TempDir()
-	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	// Local artwork present, MusicBrainz answering cleanly with nothing: the
+	// production shape this bug hid in.
+	e, store := newOfflineEnricher(t, nil)
 	ctx := context.Background()
 
 	const localSentinel = "local-" +
@@ -65,8 +43,6 @@ func TestAcousticFallbackReachableWithLocalArtwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
 	e.WithAcousticFallback(fakeLookup{"curated.flac": {
 		ArtistMBID: fbArtistMBID, ArtistName: "Ducu Bertzi", AcoustID: "acid-reach",
 	}})
