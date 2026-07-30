@@ -286,3 +286,49 @@ func TestEnrichmentRetryRefusesBehindALiveBridge(t *testing.T) {
 		}
 	}
 }
+
+// TestCollectMissesProbesOnce — the probe is a real network round-trip
+// with a 200ms budget, and an earlier version called it twice (once
+// transitively inside missesViaAdmin, once for the Source line). Both
+// callers need the same answer, so it happens once and is passed down.
+func TestCollectMissesProbesOnce(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/stats" {
+			probes.Add(1)
+			w.WriteHeader(http.StatusUnauthorized) // public-mode admin
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	cfg := &config.Config{
+		LibraryRoots:    []string{dir},
+		ListenAddress:   "127.0.0.1:17788",
+		AdminAddress:    strings.TrimPrefix(srv.URL, "http://"),
+		DataDir:         filepath.Join(dir, "data"),
+		ScanIntervalSec: 3600,
+		LibraryName:     "T",
+	}
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := collectMisses(context.Background(), loaded, "")
+	if err != nil {
+		t.Fatalf("collectMisses: %v", err)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("probed the admin port %d times, want exactly 1", got)
+	}
+	// And the fallback still tells the truth about why it read the store.
+	if !strings.Contains(rep.Source, "bridge is running") {
+		t.Errorf("Source = %q, want it to say the bridge is running", rep.Source)
+	}
+}

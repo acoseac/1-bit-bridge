@@ -146,10 +146,19 @@ type missReport struct {
 }
 
 // collectMisses prefers the running bridge, falling back to a direct
-// read-only walk of the store when nothing is listening.
+// read-only walk of the store when the admin API isn't usable.
+//
+// The probe happens EXACTLY ONCE here and the verdict is passed down. It
+// is a real network round-trip with a 200ms budget, and both the dispatch
+// below and the Source line need the answer.
 func collectMisses(ctx context.Context, cfg *config.Config, scope string) (*missReport, error) {
-	if rep, ok, err := missesViaAdmin(ctx, cfg, scope); ok {
-		return rep, err
+	addr := adminAddrOf(cfg)
+	liveness := probeBridge(ctx, addr)
+
+	if liveness == bridgeAdminUsable {
+		if rep, ok, err := missesViaAdmin(ctx, addr, scope); ok {
+			return rep, err
+		}
 	}
 	rep, err := missesViaStore(ctx, cfg, scope)
 	if err != nil {
@@ -157,18 +166,16 @@ func collectMisses(ctx context.Context, cfg *config.Config, scope string) (*miss
 	}
 	// Say WHY we read the store rather than the API. "no bridge running"
 	// is a claim, and on a public-mode bridge it is a false one.
-	if probeBridge(ctx, adminAddrOf(cfg)) == bridgeUpAdminUnreachable {
+	if liveness == bridgeUpAdminUnreachable {
 		rep.Source = "manifest store (bridge is running; admin API not reachable from the CLI — " +
 			"public mode needs a console session, so skip reasons are unavailable)"
 	}
 	return rep, nil
 }
 
-func missesViaAdmin(ctx context.Context, cfg *config.Config, scope string) (*missReport, bool, error) {
-	addr := adminAddrOf(cfg)
-	if probeBridge(ctx, addr) != bridgeAdminUsable {
-		return nil, false, nil
-	}
+// missesViaAdmin fetches the report from a bridge whose admin API the
+// caller has ALREADY established is usable. It does not probe.
+func missesViaAdmin(ctx context.Context, addr, scope string) (*missReport, bool, error) {
 	// No `limit` — omitting it makes the server apply its own cap, which
 	// is what we want and which cannot drift the way a hardcoded copy of
 	// that cap would. The CLI does its own --limit trimming at print time.
