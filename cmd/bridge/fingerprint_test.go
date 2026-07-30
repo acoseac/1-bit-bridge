@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // TestBuildResultRowsKeepsArtistsAndTitlesAligned guards against a display bug
@@ -128,5 +129,23 @@ func TestRunFingerprintFilesKeepsPartialResults(t *testing.T) {
 	}
 	if reports == nil {
 		t.Error("reports must be a usable empty slice, not nil")
+	}
+}
+
+// TestFingerprintLengthDefaultsAgree pins two constants that must stay equal
+// across a layer boundary they cannot share.
+//
+// internal/config must not import a feature package, so it carries its own
+// DefaultFingerprintLengthSeconds. acoustid.DefaultLengthSeconds is the source
+// of truth (it is fpcalc's own default and the window AcoustID's reference
+// fingerprints were built at). cmd/bridge imports both, so this is the one
+// place the equality can be asserted — without it the duplication could drift
+// silently and quietly change match confidence.
+func TestFingerprintLengthDefaultsAgree(t *testing.T) {
+	if config.DefaultFingerprintLengthSeconds != acoustid.DefaultLengthSeconds {
+		t.Fatalf("config.DefaultFingerprintLengthSeconds = %d but acoustid.DefaultLengthSeconds = %d;\n"+
+			"the acoustid value is the source of truth (fpcalc's default and AcoustID's\n"+
+			"reference window) — update config to match, not the other way round.",
+			config.DefaultFingerprintLengthSeconds, acoustid.DefaultLengthSeconds)
 	}
 }
