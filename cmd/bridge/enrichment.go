@@ -156,9 +156,7 @@ func collectMisses(ctx context.Context, cfg *config.Config, scope string) (*miss
 	liveness := probeBridge(ctx, addr)
 
 	if liveness == bridgeAdminUsable {
-		if rep, ok, err := missesViaAdmin(ctx, addr, scope); ok {
-			return rep, err
-		}
+		return missesViaAdmin(ctx, addr, scope)
 	}
 	rep, err := missesViaStore(ctx, cfg, scope)
 	if err != nil {
@@ -174,8 +172,11 @@ func collectMisses(ctx context.Context, cfg *config.Config, scope string) (*miss
 }
 
 // missesViaAdmin fetches the report from a bridge whose admin API the
-// caller has ALREADY established is usable. It does not probe.
-func missesViaAdmin(ctx context.Context, addr, scope string) (*missReport, bool, error) {
+// caller has ALREADY established is usable. It does not probe, and it does
+// not fall back — an error here is a real failure of a surface we just
+// confirmed was answering, so it surfaces rather than silently degrading
+// to a store read that would report different numbers.
+func missesViaAdmin(ctx context.Context, addr, scope string) (*missReport, error) {
 	// No `limit` — omitting it makes the server apply its own cap, which
 	// is what we want and which cannot drift the way a hardcoded copy of
 	// that cap would. The CLI does its own --limit trimming at print time.
@@ -187,16 +188,16 @@ func missesViaAdmin(ctx context.Context, addr, scope string) (*missReport, bool,
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
 	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
-		return nil, true, fmt.Errorf("admin request: %w", err)
+		return nil, fmt.Errorf("admin request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, true, fmt.Errorf("admin returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("admin returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var wire struct {
 		Path    string         `json:"path"`
@@ -211,7 +212,7 @@ func missesViaAdmin(ctx context.Context, addr, scope string) (*missReport, bool,
 		SkipReasons map[string]int64 `json:"skipReasons"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
-		return nil, true, fmt.Errorf("decode admin response: %w", err)
+		return nil, fmt.Errorf("decode admin response: %w", err)
 	}
 	rep := &missReport{
 		Path: wire.Path, Scanned: wire.Scanned, Missing: wire.Missing,
@@ -224,7 +225,7 @@ func missesViaAdmin(ctx context.Context, addr, scope string) (*missReport, bool,
 			rep.Sample[f] = append(rep.Sample[f], row.Path)
 		}
 	}
-	return rep, true, nil
+	return rep, nil
 }
 
 func missesViaStore(ctx context.Context, cfg *config.Config, scope string) (*missReport, error) {
@@ -562,7 +563,14 @@ func probeBridge(ctx context.Context, addr string) bridgeLiveness {
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, adminScheme+addr+"/api/stats", nil)
 	if err != nil {
-		return bridgeDown
+		// NOT bridgeDown. This is a malformed URL — a mangled AdminAddress
+		// in the config — which tells us nothing about whether a bridge is
+		// running. bridgeDown is the state that unlocks the offline
+		// ResetEnrichedMisses write, so classifying an unrelated failure
+		// as "not running" would reintroduce this PR's own hazard through
+		// a different door: a bad addr string instead of a TLS/auth
+		// response. Fail conservative.
+		return bridgeUpAdminUnreachable
 	}
 	resp, err := (&http.Client{Timeout: 200 * time.Millisecond}).Do(req)
 	if err != nil {

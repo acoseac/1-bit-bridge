@@ -329,3 +329,28 @@ func writeProbeFixture(t *testing.T, adminAddr string) (*config.Config, string) 
 	}
 	return loaded, cfgPath
 }
+
+// TestProbeBridgeNeverReportsDownOnAMalformedAddress guards the invariant
+// probeBridge's own docblock states: connection-refused is the ONLY
+// signal that means "not running".
+//
+// An http.NewRequestWithContext failure is a malformed URL — a mangled
+// AdminAddress in the config — and says nothing about whether a bridge is
+// running. Classifying it as bridgeDown would unlock the offline
+// ResetEnrichedMisses write, reintroducing this PR's own hazard through a
+// different door: a bad addr string instead of a TLS/auth response.
+func TestProbeBridgeNeverReportsDownOnAMalformedAddress(t *testing.T) {
+	for _, addr := range []string{
+		"host\x7fwith-control-char:7789",
+		"host with spaces:7789",
+		"[::1:7789",          // unbalanced bracket
+		"http://nested:7789", // scheme concatenated onto the scheme
+	} {
+		got := probeBridge(context.Background(), addr)
+		if got == bridgeDown {
+			t.Errorf("probeBridge(%q) = bridgeDown — a malformed address is not "+
+				"evidence the bridge is stopped, and bridgeDown unlocks the "+
+				"offline store write", addr)
+		}
+	}
+}
