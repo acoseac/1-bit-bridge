@@ -255,12 +255,15 @@ const candidateScanFactor = 4
 // they are needed: a healthy library resolves the first maxPerRun and never
 // stats the rest.
 func (s *fingerprintSweeper) resolveCandidates(in []candidate) []candidate {
-	out := in[:0] // filter in place; the backing array is already sized
-	for _, c := range in {
+	// Filter in place; the backing array is already sized. Indexed rather
+	// than ranged so the ~80-byte candidate is not copied per iteration —
+	// safe because append writes at len(out), which never runs ahead of i.
+	out := in[:0]
+	for i := range in {
 		if len(out) >= s.maxPerRun {
 			break
 		}
-		abs, _, err := s.resolver.ResolveChecked(c.path)
+		abs, _, err := s.resolver.ResolveChecked(in[i].path)
 		if err != nil {
 			// EVERY resolve error is treated identically — ENOENT and a
 			// disconnected FUSE mount alike. Distinguishing them is the seed
@@ -269,8 +272,8 @@ func (s *fingerprintSweeper) resolveCandidates(in []candidate) []candidate {
 			// exactly today's behaviour: the enricher skips it as before.
 			continue
 		}
-		c.absPath = abs
-		out = append(out, c)
+		in[i].absPath = abs
+		out = append(out, in[i])
 	}
 	return out
 }
