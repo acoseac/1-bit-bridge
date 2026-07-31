@@ -156,7 +156,7 @@ func TestAtlasAcceptanceControl(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	var same, siblingRG, diffRG, newMatch, lostMatch int
+	var same, siblingRG, diffRG, newMatch, lostMatch, missingGroupArtifact int
 	for _, row := range rows {
 		if row.Album == "" {
 			continue
@@ -185,17 +185,27 @@ func TestAtlasAcceptanceControl(t *testing.T) {
 			same++
 		case rgOf(legacy) != "" && rgOf(legacy) == rgOf(folded):
 			siblingRG++
+		case rgOf(legacy) == "" && rgOf(folded) == "":
+			// Neither candidate carries a release-group in the search
+			// response — the upstream omitted the field, so same-vs-different
+			// group is undecidable. Counted separately instead of falling
+			// into diffRG, so the must-be-zero gate can only fail on a
+			// PROVEN group move, never on a missing-field artifact.
+			missingGroupArtifact++
+			t.Logf("missing-group artifact: %q / %q (was %q, now %q — no rg on either side)",
+				row.AlbumArtist, row.Album, legacy.Title, folded.Title)
 		default:
 			diffRG++
 			t.Errorf("DIFFERENT RELEASE GROUP: %q / %q\n  was: %q (rg %s)\n  now: %q (rg %s)",
 				row.AlbumArtist, row.Album, legacy.Title, rgOf(legacy), folded.Title, rgOf(folded))
 		}
 	}
-	total := same + siblingRG + diffRG + newMatch + lostMatch
+	total := same + siblingRG + diffRG + newMatch + lostMatch + missingGroupArtifact
 	t.Logf("control over %d albums that resolve today:", total)
 	t.Logf("  identical release        %d", same)
 	t.Logf("  sibling pressing, same RG %d", siblingRG)
 	t.Logf("  DIFFERENT release group   %d   <- must be 0", diffRG)
+	t.Logf("  missing-group artifacts   %d   (upstream omitted rg; not a gate)", missingGroupArtifact)
 	t.Logf("  newly matched             %d", newMatch)
 	t.Logf("  lost                      %d   <- must be 0", lostMatch)
 }
