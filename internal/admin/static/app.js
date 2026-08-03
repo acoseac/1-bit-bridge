@@ -6007,6 +6007,7 @@ function inspectorRenderSearchFlatList(data, q) {
 function makeVisibilityChain(fn, ms) {
   let timer = null;
   let ranOnce = false;
+  let inFlight = false;
   const tick = async () => {
     timer = null;
     if (!document.getElementById("jobs-page-root")) return;
@@ -6015,12 +6016,19 @@ function makeVisibilityChain(fn, ms) {
     // RECURRING polls pause while hidden; resume() re-arms them.
     if (document.hidden && ranOnce) return;
     ranOnce = true;
+    // Re-entry guard: while fn() is awaited, timer is null — a
+    // visibilitychange in that window would otherwise let resume()
+    // start a SECOND concurrent chain that never converges (Gemini
+    // HIGH on PR #621).
+    if (inFlight) return;
+    inFlight = true;
     try { await fn(); } catch { /* fn owns its error surface */ }
+    finally { inFlight = false; }
     timer = setTimeout(tick, ms);
   };
   return {
-    start() { if (timer === null) tick(); },
-    resume() { if (timer === null && !document.hidden) tick(); },
+    start() { if (timer === null && !inFlight) tick(); },
+    resume() { if (timer === null && !inFlight && !document.hidden) tick(); },
   };
 }
 
@@ -6104,11 +6112,19 @@ async function jobsSnapshotRefresh() {
   renderJobCards(data);
 }
 
+// zeroTimeISO — Go's zero time.Time marshals as "0001-01-01T…"; every
+// jobs DTO uses *time.Time+omitempty so it shouldn't reach the wire,
+// but a future bare-time.Time field would (the PR #68 lesson) — treat
+// it as absent rather than rendering a nonsense value.
+function isAbsentTime(iso) {
+  return !iso || String(iso).startsWith("0001-01-01");
+}
+
 // formatInFuture — "in 42m" / "in 3h" for next-due timestamps. The
 // server ships absolute times only (no ticking countdowns on the wire,
 // the PR #107 diff lesson); the browser derives the countdown.
 function formatInFuture(iso) {
-  if (!iso) return "—";
+  if (isAbsentTime(iso)) return "—";
   const sec = Math.floor((new Date(iso).getTime() - Date.now()) / 1000);
   if (sec <= 0) return "due now";
   if (sec < 60) return `in ${sec}s`;
@@ -6118,7 +6134,7 @@ function formatInFuture(iso) {
 }
 
 function agoOrDash(iso) {
-  return iso ? formatTimeAgo(new Date(iso)) : "—";
+  return isAbsentTime(iso) ? "—" : formatTimeAgo(new Date(iso));
 }
 
 function setBadge(id, cls, text) {
