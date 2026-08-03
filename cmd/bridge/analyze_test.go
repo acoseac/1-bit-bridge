@@ -68,6 +68,68 @@ func TestCollectAnalysisCandidatesSkipsZeroByteSource(t *testing.T) {
 	}
 }
 
+// TestAnalysisCoverageLockstepWithCollector pins the predicate-parity
+// contract between Store.AnalysisCoverage's SQL buckets (the Jobs
+// page's approximate whole-library tile) and
+// collectAnalysisCandidates' control flow (the sweeper's exact truth):
+// same DSD-by-extension rule, same zero-byte rule, same precedence
+// (DSD before zero-byte). If either side's predicate drifts, this
+// fails before an operator sees disagreeing numbers.
+func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
+	root := t.TempDir()
+	files := []struct {
+		name string
+		data []byte
+	}{
+		{"good.flac", []byte("fLaC-nonzero")},
+		{"more.mp3", []byte("ID3-nonzero")},
+		{"disc.dsf", []byte("DSD-nonzero")},
+		{"disc.dff", []byte("FRM8-nonzero")},
+		{"empty.flac", nil},
+	}
+	for _, f := range files {
+		if err := os.WriteFile(filepath.Join(root, f.name), f.data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, f := range files {
+		if err := store.UpsertTrack(ctx, &manifest.Track{Path: f.name, Size: int64(len(f.data)), ModTime: time.Now()}); err != nil {
+			t.Fatalf("UpsertTrack %q: %v", f.name, err)
+		}
+	}
+
+	res, err := collectAnalysisCandidates(ctx, store, bridgefs.New([]string{root}), t.TempDir(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cov, err := store.AnalysisCoverage(ctx, analyze.WaveformSchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cov.TotalLocal != res.total {
+		t.Errorf("TotalLocal = %d, collector total = %d", cov.TotalLocal, res.total)
+	}
+	if cov.DSDExcluded != res.dsdSkipped {
+		t.Errorf("DSDExcluded = %d, collector dsdSkipped = %d", cov.DSDExcluded, res.dsdSkipped)
+	}
+	if cov.ZeroByteExcluded != res.emptySkipped {
+		t.Errorf("ZeroByteExcluded = %d, collector emptySkipped = %d", cov.ZeroByteExcluded, res.emptySkipped)
+	}
+	// Sanity: the fixture has no missing/routed rows, so eligible ==
+	// candidates + fresh-skipped (all zero analysis rows here).
+	eligible := cov.TotalLocal - cov.DSDExcluded - cov.ZeroByteExcluded
+	if eligible != len(res.candidates)+res.skipped {
+		t.Errorf("eligible = %d, collector candidates+skipped = %d", eligible, len(res.candidates)+res.skipped)
+	}
+}
+
 // waitForSweep polls the recorder until a completed sweep newer than
 // `after` is visible or the deadline hits. Returns the lastEnd observed.
 func waitForSweep(t *testing.T, status *sweepStatus[admin.AnalysisSweepCounts], after time.Time, deadline time.Duration) time.Time {

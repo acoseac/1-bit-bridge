@@ -159,14 +159,17 @@ const startupBackupSkipThreshold = 24 * time.Hour
 // cost one snapshot per boot), and then on the configured interval.
 // All errors are logged to stderr — never fatal, since a failed
 // backup must never take down the running bridge.
-func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval time.Duration, stdout, stderr io.Writer) {
+func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval time.Duration, stdout, stderr io.Writer, status *sweepStatus[struct{}]) {
 	backupsRoot := filepath.Join(src.DataDir, backup.BackupsDirName)
 	doSnapshot := func(triggered string) {
+		status.sweepStarted()
 		dst, err := backup.Snapshot(ctx, src)
 		if err != nil {
 			fmt.Fprintf(stderr, "backup (%s): snapshot failed: %v\n", triggered, err)
+			status.sweepFinished(nil)
 			return
 		}
+		defer status.sweepFinished(&struct{}{})
 		fmt.Fprintf(stdout, "backup (%s): wrote %s\n", triggered, dst)
 		if keep > 0 {
 			deleted, err := backup.Prune(backupsRoot, keep)
@@ -196,6 +199,7 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		doSnapshot("startup")
 	}
 
+	status.scheduleNext(time.Now().Add(interval))
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -203,6 +207,7 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			status.scheduleNext(time.Now().Add(interval))
 			doSnapshot("scheduled")
 		}
 	}

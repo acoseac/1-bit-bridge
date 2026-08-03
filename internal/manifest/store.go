@@ -6542,6 +6542,62 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 	return tx.Commit()
 }
 
+// AnalysisCoverage is the whole-library analysed-vs-eligible breakdown
+// backing the admin Jobs page's coverage bar. Eligible = TotalLocal -
+// DSDExcluded - ZeroByteExcluded; the buckets are DISJOINT in the
+// analysis sweeper's own precedence order (DSD before zero-byte,
+// matching collectAnalysisCandidates' control flow in
+// cmd/bridge/analyze.go — pinned by the lockstep test there).
+type AnalysisCoverage struct {
+	// TotalLocal counts filesystem-backed tracks only — UPnP-routed
+	// rows never resolve on disk and are never analysed (they'd land
+	// in the sweeper's `missing` bucket forever).
+	TotalLocal int
+	// DSDExcluded: .dsf/.dff sources — sox can't decode 1-bit DSD, so
+	// these are permanently out of scope, not a backlog.
+	DSDExcluded int
+	// ZeroByteExcluded: zero-byte sources (failed/incomplete uploads)
+	// skipped at collection time. Size is the SCAN-TIME size.
+	ZeroByteExcluded int
+	// AnalysedFresh / AnalysedStale split eligible tracks' analysis
+	// rows by schema version. APPROXIMATION, documented for the UI:
+	// per-row disk mtime/size freshness (the sweeper's real skip gate)
+	// is not SQL-computable, so a row whose source changed on disk
+	// still counts as analysed here — the sweeper's last-run counts
+	// are the exact truth.
+	AnalysedFresh int
+	AnalysedStale int
+}
+
+// AnalysisCoverage computes the coverage snapshot in ONE pass over
+// tracks LEFT JOINed to track_analysis (PK source_path, ON DELETE
+// CASCADE — deleted-track orphans can't exist; the join conditions
+// additionally exclude analysis rows for tracks that have since become
+// DSD/zero-byte, so analysed <= eligible holds by construction).
+// Plain-column SQL (~ms at 20k rows) but call sites cache it behind a
+// TTL + singleflight — the admin polls this.
+func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (AnalysisCoverage, error) {
+	var c AnalysisCoverage
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN t.size = 0 AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff') THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version = ?1
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                         THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version != ?1
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                         THEN 1 ELSE 0 END), 0)
+		FROM tracks t
+		LEFT JOIN track_analysis ta ON ta.source_path = t.path
+		WHERE NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)`,
+		schemaVersion)
+	if err := row.Scan(&c.TotalLocal, &c.DSDExcluded, &c.ZeroByteExcluded, &c.AnalysedFresh, &c.AnalysedStale); err != nil {
+		return AnalysisCoverage{}, err
+	}
+	return c, nil
+}
+
 // CountAnalysis returns (rows-with-a-waveform, total waveform bytes)
 // for the analysis stats tile. Mirrors CountVariants' shape; degrades
 // to "stats unavailable" on error at the handler. Reads un-mutexed.

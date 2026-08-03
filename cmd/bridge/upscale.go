@@ -924,18 +924,22 @@ func soxFeatureReady(ctx context.Context, feature string, stderr io.Writer) bool
 // Both prerequisites are checked here rather than at config-validation time
 // for that reason: Validate() is a pure predicate and a host with
 // BRIDGE_FINGERPRINT_ENABLED set but no key still has to boot.
-func fingerprintFeatureReady(ctx context.Context, hasAPIKey bool, stderr io.Writer) bool {
+// The degradedReason return is a bounded key ("fpcalc_missing" /
+// "no_api_key", "" when ready) the admin Jobs card renders remediation
+// copy from — same bounded-key discipline as the enricher's skip
+// reasons.
+func fingerprintFeatureReady(ctx context.Context, hasAPIKey bool, stderr io.Writer) (ok bool, degradedReason string) {
 	if _, err := acoustid.Probe(ctx); err != nil {
 		fmt.Fprintf(stderr, "fingerprint: feature is enabled in bridge.yaml but fpcalc is not available — disabling: %v\n", err)
-		return false
+		return false, "fpcalc_missing"
 	}
 	if !hasAPIKey {
 		fmt.Fprint(stderr, "fingerprint: feature is enabled in bridge.yaml but no AcoustID API key is configured — disabling.\n"+
 			"  Register a free application key at https://acoustid.org/new-application,\n"+
 			"  then set ACOUSTID_API_KEY (preferred) or fingerprint.apiKey in bridge.yaml.\n")
-		return false
+		return false, "no_api_key"
 	}
-	return true
+	return true, ""
 }
 
 // soxCLIReady is the CLI-side sox preflight shared by `bridge upscale`,
