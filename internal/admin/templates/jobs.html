@@ -1,12 +1,226 @@
 {{define "content"}}
 {{template "library-subnav" .}}
-<section class="page jobs-page">
-  <h1>Upscale jobs</h1>
+<section class="page jobs-page" id="jobs-page-root">
+  <h1>Background activity</h1>
   <p class="lede">
-    Operator-initiated upscale batches, most recent first. Live
-    batches show their counters as they progress; finished and
-    failed batches stay in the list for audit until the table caps
-    out (last 100 rows).
+    Everything the bridge does on its own — scans, enrichment, audio
+    analysis, maintenance — with cadences, last runs, and manual
+    triggers. Feature toggles live in <a href="/settings">Settings</a>
+    (most apply on restart); this page shows what's actually running.
+  </p>
+
+  {{/* Slow-moving per-job state (gates, cadences, last/next runs,
+       analysis coverage) is polled from GET /api/jobs on a 10 s chain
+       (page-visible only) and painted by app.js renderJobCards. LIVE
+       counters ride the SSE events this page already receives: shared
+       element ids let applyStats paint the scanner card and
+       applyEnrichment the enrichment card with zero extra wiring;
+       applyAnalysisStats carries the analysis pool + sweep state. */}}
+  <div class="jobs-cards">
+
+    <div class="panel job-card">
+      <div class="panel-head">
+        <h2>Library scanner</h2>
+        <button type="button" id="jobs-scan-now" class="btn">Scan now</button>
+      </div>
+      <dl>
+        <dt>Status</dt>
+        <dd id="scan-status"><span class="badge idle">idle</span></dd>
+        <dt>Last full scan</dt>
+        <dd id="last-full-scan">—</dd>
+        <dt>Next scan</dt>
+        <dd id="job-scan-next">—</dd>
+        <dt>Cadence</dt>
+        <dd id="job-scan-cadence">—</dd>
+        <dt>Change watcher</dt>
+        <dd id="job-scan-watcher">—</dd>
+      </dl>
+      <p class="hint">
+        Walks the library roots on the cadence above (and at startup),
+        indexes changed files, then reconciles tags. The change watcher
+        is the optional filesystem shortcut for newly-dropped files —
+        a <code>bridge.yaml</code> setting (<code>libraryWatch.enabled</code>).
+      </p>
+    </div>
+
+    <div class="panel job-card" id="enrichment-panel">
+      <div class="panel-head">
+        <h2>Enrichment</h2>
+        <button type="button" id="enrich-retry" class="btn" hidden>Retry missing</button>
+      </div>
+      <dl>
+        <dt id="enrich-source-dt" hidden>Source</dt>
+        <dd id="enrich-source" hidden></dd>
+        <dt>Pending</dt>
+        <dd><span id="enrich-pending">0</span> tracks in the queue <span id="enrich-eta" class="hint"></span></dd>
+        <dt>Matched</dt>
+        <dd><span id="enrich-matched">0</span> tracks fully resolved</dd>
+        <dt>Missing</dt>
+        <dd><span id="enrich-missing">0</span> tracks short of cover, artist or release ID</dd>
+        <dt>Last enriched</dt>
+        <dd id="enrich-last">never</dd>
+        <dt>Atlas harvest</dt>
+        <dd id="job-harvest-state">—</dd>
+      </dl>
+      <p class="hint">
+        Always-on: fills covers, artist and release IDs after every
+        scan, paced to respect the enrichment source. Runs
+        automatically — <em>Retry missing</em> re-queues the tracks
+        still short of something.
+        <a href="/settings?tab=enrichment">Source settings</a>
+      </p>
+    </div>
+
+    <div class="panel job-card" id="job-analysis-card">
+      <div class="panel-head">
+        <h2>Audio analysis</h2>
+        <span class="panel-actions">
+          <span class="badge" id="job-analysis-state">—</span>
+          <button type="button" id="jobs-analyze-now" class="btn" hidden>Analyze now</button>
+        </span>
+      </div>
+      <div class="dist-section" id="job-analysis-coverage-section" hidden>
+        <div class="dist-title">Coverage</div>
+        <div class="dist-bar" id="job-analysis-coverage-bar" role="img"
+             aria-label="Analysed vs eligible tracks"></div>
+        <div class="dist-legend" id="job-analysis-coverage-legend"></div>
+        <p class="hint" id="job-analysis-excluded"></p>
+      </div>
+      <dl>
+        <dt>Sweeper</dt>
+        <dd id="job-analysis-sweep">—</dd>
+        <dt>Next sweep</dt>
+        <dd id="job-analysis-next">—</dd>
+        <dt>Queue</dt>
+        <dd id="job-analysis-queue">—</dd>
+      </dl>
+      <p class="hint" id="job-analysis-hint">
+        Computes waveform, loudness, key and tempo per track via sox —
+        feeds the iOS scrubber and the smart mixes. Sweeps run after
+        every scan and on the scan cadence; DSD sources are excluded by
+        design (sox can't decode 1-bit DSD).
+        <a href="/settings?tab=audio">Analysis settings</a>
+      </p>
+    </div>
+
+    <div class="panel job-card" id="job-fp-card">
+      <div class="panel-head">
+        <h2>Acoustic fingerprinting</h2>
+        <span class="panel-actions">
+          <span class="badge" id="job-fp-state">—</span>
+          <button type="button" id="jobs-fp-now" class="btn" hidden>Sweep now</button>
+        </span>
+      </div>
+      <dl>
+        <dt>Last sweep</dt>
+        <dd id="job-fp-last">—</dd>
+        <dt>Next sweep</dt>
+        <dd id="job-fp-next">—</dd>
+        <dt>Last result</dt>
+        <dd id="job-fp-counts">—</dd>
+      </dl>
+      <p class="hint" id="job-fp-hint">
+        Identifies tracks whose tags no text match can fix by
+        fingerprinting the audio (fpcalc → AcoustID), then hands the
+        recovered names back to the enricher. Off by default — needs
+        <code>fingerprint.enabled</code> plus fpcalc and a free
+        AcoustID key on the bridge host.
+      </p>
+    </div>
+
+    <div class="panel job-card" id="job-mix-card">
+      <div class="panel-head">
+        <h2>Smart mixes</h2>
+        <span class="panel-actions">
+          <span class="badge" id="job-mix-state">—</span>
+          <button type="button" id="jobs-mix-regen" class="btn" hidden>Regenerate now</button>
+        </span>
+      </div>
+      <dl>
+        <dt>Last regenerated</dt>
+        <dd id="job-mix-last">—</dd>
+        <dt>Next run</dt>
+        <dd id="job-mix-next">—</dd>
+        <dt>Cadence</dt>
+        <dd id="job-mix-cadence">—</dd>
+      </dl>
+      <p class="hint">
+        Rebuilds the auto-generated playlist families from playback
+        history + analysis. Families and the Camelot wheel live on
+        <a href="/smartmixes">Listening → Smart mixes</a>.
+        <a href="/settings?tab=audio">Settings</a>
+      </p>
+    </div>
+
+    <div class="panel job-card" id="job-backup-card">
+      <div class="panel-head">
+        <h2>Backups</h2>
+        <button type="button" id="jobs-backup-now" class="btn">Snapshot now</button>
+      </div>
+      <dl>
+        <dt>Status</dt>
+        <dd id="job-backup-state">—</dd>
+        <dt>Last snapshot</dt>
+        <dd id="job-backup-last">—</dd>
+        <dt>Next snapshot</dt>
+        <dd id="job-backup-next">—</dd>
+        <dt>Retention</dt>
+        <dd id="job-backup-keep">—</dd>
+      </dl>
+      <p class="hint">
+        Snapshots bridge.db, tokens, certs and config into the data
+        directory. Restore and the snapshot list live in
+        <a href="/settings?tab=backups">Settings → Backups</a>.
+      </p>
+    </div>
+
+    <div class="panel job-card" id="job-upd-card">
+      <div class="panel-head">
+        <h2>Update checks</h2>
+        <button type="button" id="jobs-upd-check" class="btn">Check now</button>
+      </div>
+      <dl>
+        <dt>Cadence</dt>
+        <dd id="job-upd-cadence">—</dd>
+        <dt>Auto-install</dt>
+        <dd id="job-upd-auto">—</dd>
+        <dt>Status</dt>
+        <dd id="job-upd-status">—</dd>
+      </dl>
+      <p class="hint">
+        Polls GitHub Releases for a newer bridge. Install controls live
+        on the <a href="/">Dashboard</a>;
+        <a href="/settings?tab=updates">update settings</a>.
+      </p>
+    </div>
+
+    <div class="panel job-card" id="job-misc-card">
+      <h2>Maintenance &amp; ingest</h2>
+      <dl>
+        <dt>Variant integrity</dt>
+        <dd id="job-maint-integrity">—</dd>
+        <dt>Orphan sidecar GC</dt>
+        <dd id="job-maint-gc">—</dd>
+        <dt>Artwork cache limit</dt>
+        <dd id="job-maint-artwork">—</dd>
+        <dt>UPnP ingest</dt>
+        <dd id="job-upnp">—</dd>
+      </dl>
+      <p class="hint">
+        Housekeeping sweepers (config-driven, <code>bridge.yaml</code>).
+        UPnP upstream rescans are triggered from the
+        <a href="/upnp">UPnP page</a>.
+      </p>
+    </div>
+
+  </div>
+
+  <h2 class="section-head">Upscale &amp; CarPlay batches</h2>
+  <p class="lede">
+    Operator-initiated conversion batches, most recent first. Live
+    batches show their counters as they progress; finished and failed
+    batches stay for audit (last 100 rows). Start batches from the
+    <a href="/inspector">Library Inspector</a>.
   </p>
 
   <div class="jobs-meta panel" id="jobs-throughput-panel" hidden>

@@ -845,6 +845,11 @@ async function runInstall(btn, force) {
 // or "check failed", a subsequent "update available" response could no
 // longer surface the link.
 function renderUpdateTile(u) {
+  // Jobs-page status line (guarded — the dashboard tile below has its
+  // own richer rendering).
+  if (u && document.getElementById("job-upd-status")) {
+    setText("job-upd-status", updateStatusLine(u));
+  }
   const status = document.getElementById("update-status");
   const lastCheck = document.getElementById("update-last-check");
   const lastError = document.getElementById("update-last-error");
@@ -1896,7 +1901,15 @@ function initSettingsTabs() {
   });
   let saved = null;
   try { saved = sessionStorage.getItem(STORAGE_KEY); } catch { /* private mode */ }
-  activate(saved && validIds.has(saved) ? saved : tabsArr[0].dataset.tab);
+  // ?tab=<id> deep-link (the Jobs page links straight to a section)
+  // outranks the sessionStorage restore; both validate against the
+  // rendered tab ids so a stale/typo'd value falls back cleanly.
+  const urlTab = new URLSearchParams(window.location.search).get("tab");
+  if (urlTab && validIds.has(urlTab)) {
+    activate(urlTab);
+  } else {
+    activate(saved && validIds.has(saved) ? saved : tabsArr[0].dataset.tab);
+  }
 }
 
 // initEnrichmentSource wires the Enrichment tab's source picker: the Atlas
@@ -2453,8 +2466,26 @@ function stopWorkerElapsedTicker() {
 // applyAnalysisStats renders the Settings "Audio analysis" tile from an
 // /api/analysis/stats payload (SSE `analysis` event). No-op off Settings.
 function applyAnalysisStats(r) {
+  if (!r) return;
+  // Jobs-page bindings (SSE is fresher than the 10 s /api/jobs poll
+  // for the pool + sweep lines). Guarded on the card's presence so
+  // this stays a no-op on every other page.
+  if (document.getElementById("job-analysis-card")) {
+    const q = document.getElementById("job-analysis-queue");
+    if (q) {
+      q.textContent = r.pool
+        ? `${r.pool.queueLen} queued · ${r.pool.inflight} in flight · ${r.pool.done} done · ${r.pool.failed} failed (${r.pool.workers} worker${r.pool.workers === 1 ? "" : "s"})`
+        : "—";
+    }
+    if (r.sweep) {
+      setText("job-analysis-sweep", r.sweep.running
+        ? "sweeping now"
+        : r.sweep.lastFinishedAt ? `last swept ${agoOrDash(r.sweep.lastFinishedAt)}` : "not yet run");
+      setText("job-analysis-next", formatInFuture(r.sweep.nextDueAt));
+    }
+  }
   const tile = document.getElementById("analysis-stats");
-  if (!tile || !r) return;
+  if (!tile) return;
   // Hide the tile when the feature has never been used (no cached
   // waveforms AND currently off). A disabled feature with cached files
   // keeps the tile up so the operator sees historical state.
@@ -5961,20 +5992,316 @@ function inspectorRenderSearchFlatList(data, q) {
 }
 
 // =============================================================
-// Jobs page (v1.3 upscale_batches history)
+// Jobs page — background-activity cards + upscale batch history
 // =============================================================
 
-function initJobs() {
-  // setTimeout chain (not setInterval) so a slow response can't
-  // build up overlapping in-flight requests when the bridge is
-  // under load — the next poll is scheduled only AFTER the
-  // current one resolves. Per CodeRabbit medium on PR #205
-  // round 2.
+// makeVisibilityChain builds a setTimeout chain (not setInterval, so a
+// slow response can't stack overlapping requests — CodeRabbit on PR
+// #205) that PAUSES while the tab is hidden: admin tabs live for days
+// in the background, and unconditional polling would be pure server
+// load for data nobody is looking at. When the chain pauses (tick
+// fires while hidden) it stops re-arming; resume() re-enters it — the
+// caller wires that to visibilitychange. The page-root guard stops a
+// stale chain from a previous page's DOM surviving into a future SPA-
+// style navigation.
+function makeVisibilityChain(fn, ms) {
+  let timer = null;
+  let ranOnce = false;
+  let inFlight = false;
   const tick = async () => {
-    await jobsRefresh();
-    setTimeout(tick, 5000);
+    timer = null;
+    if (!document.getElementById("jobs-page-root")) return;
+    // First paint always runs — a page opened in a background tab
+    // still gets content for when it's foregrounded. Only the
+    // RECURRING polls pause while hidden; resume() re-arms them.
+    if (document.hidden && ranOnce) return;
+    ranOnce = true;
+    // Re-entry guard: while fn() is awaited, timer is null — a
+    // visibilitychange in that window would otherwise let resume()
+    // start a SECOND concurrent chain that never converges (Gemini
+    // HIGH on PR #621).
+    if (inFlight) return;
+    inFlight = true;
+    try { await fn(); } catch { /* fn owns its error surface */ }
+    finally { inFlight = false; }
+    timer = setTimeout(tick, ms);
   };
-  tick();
+  return {
+    start() { if (timer === null && !inFlight) tick(); },
+    resume() { if (timer === null && !inFlight && !document.hidden) tick(); },
+  };
+}
+
+function initJobs() {
+  if (!document.getElementById("jobs-page-root")) return;
+
+  // Two chains: the 5 s upscale-batch table (fast — live counters
+  // during a batch) and the 10 s /api/jobs snapshot (slow-moving
+  // per-job state). Both pause in background tabs.
+  const batches = makeVisibilityChain(jobsRefresh, 5000);
+  const snapshot = makeVisibilityChain(jobsSnapshotRefresh, 10000);
+  batches.start();
+  snapshot.start();
+  document.addEventListener("visibilitychange", () => {
+    batches.resume();
+    snapshot.resume();
+  });
+
+  wireJobButton("jobs-scan-now", () => API.post("/api/scan"), "Scan started");
+  wireJobButton("jobs-analyze-now", () => API.post("/api/analysis/sweep"), "Sweep queued");
+  wireJobButton("jobs-fp-now", () => API.post("/api/fingerprint/sweep"), "Sweep queued");
+  wireJobButton("jobs-backup-now", () => API.post("/api/backups"), "Snapshot written");
+  wireJobButton("jobs-mix-regen", async () => {
+    // Synchronous server-side regeneration — can take a while on a
+    // big library, hence the disabled+spinner treatment from
+    // wireJobButton's in-flight state.
+    const r = await API.post("/api/smart-playlists/regenerate");
+    return `${r.families ?? 0} families`;
+  }, null);
+  wireJobButton("jobs-upd-check", async () => {
+    const r = await API.post("/api/updates/check");
+    setText("job-upd-status", updateStatusLine(r));
+    return "Checked";
+  }, null);
+
+  // "Retry missing" on the enrichment card — same endpoint + repaint
+  // contract as the dashboard's button (initDashboard wires that one;
+  // this page wires its own copy).
+  const retry = document.getElementById("enrich-retry");
+  if (retry) {
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      try {
+        const r = await API.post("/api/enrichment/retry");
+        if (r && r.enrichment) applyEnrichment(r.enrichment);
+        retry.textContent = "Re-queued";
+      } catch (err) {
+        retry.textContent = err.message.includes("rate_limited") ? "Try again in a minute" : "Retry failed";
+      }
+      setTimeout(() => { retry.textContent = "Retry missing"; retry.disabled = false; }, 4000);
+    });
+  }
+}
+
+// wireJobButton — shared trigger-button UX: disable while in flight,
+// flash the outcome (the action's own return string, or `okText`),
+// restore after 4 s. All POSTs route through API.post so the CSRF
+// content-type discipline holds.
+function wireJobButton(id, action, okText) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "Working…";
+    try {
+      const out = await action();
+      btn.textContent = typeof out === "string" && out ? out : (okText || "Done");
+    } catch (err) {
+      btn.textContent = "Failed";
+      console.warn(`${id}:`, err.message);
+    }
+    setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 4000);
+  });
+}
+
+// --- /api/jobs snapshot → cards ---
+
+async function jobsSnapshotRefresh() {
+  const data = await API.get("/api/jobs");
+  renderJobCards(data);
+}
+
+// zeroTimeISO — Go's zero time.Time marshals as "0001-01-01T…"; every
+// jobs DTO uses *time.Time+omitempty so it shouldn't reach the wire,
+// but a future bare-time.Time field would (the PR #68 lesson) — treat
+// it as absent rather than rendering a nonsense value.
+function isAbsentTime(iso) {
+  return !iso || String(iso).startsWith("0001-01-01");
+}
+
+// formatInFuture — "in 42m" / "in 3h" for next-due timestamps. The
+// server ships absolute times only (no ticking countdowns on the wire,
+// the PR #107 diff lesson); the browser derives the countdown.
+function formatInFuture(iso) {
+  if (isAbsentTime(iso)) return "—";
+  const sec = Math.floor((new Date(iso).getTime() - Date.now()) / 1000);
+  if (sec <= 0) return "due now";
+  if (sec < 60) return `in ${sec}s`;
+  if (sec < 3600) return `in ${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `in ${Math.floor(sec / 3600)}h`;
+  return `in ${Math.floor(sec / 86400)}d`;
+}
+
+function agoOrDash(iso) {
+  return isAbsentTime(iso) ? "—" : formatTimeAgo(new Date(iso));
+}
+
+function setBadge(id, cls, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = "badge " + cls;
+  el.textContent = text;
+}
+
+// Bounded degraded-reason keys → operator copy (server sends keys, not
+// prose — same discipline as the enricher's skip reasons).
+const JOB_DEGRADED_LABELS = {
+  sox_missing: "sox is not installed on the bridge host",
+  fpcalc_missing: "fpcalc is not installed on the bridge host",
+  no_api_key: "no AcoustID API key configured (ACOUSTID_API_KEY)",
+};
+
+function renderJobCards(j) {
+  if (!j || !document.getElementById("jobs-page-root")) return;
+
+  // Scanner (live status + last-scan ride the SSE stats frame via the
+  // shared scan-status / last-full-scan ids).
+  setText("job-scan-next", formatInFuture(j.scanner?.nextScanDue));
+  setText("job-scan-cadence", j.scanner?.intervalSec ? `every ${formatDuration(j.scanner.intervalSec)}` : "—");
+  setText("job-scan-watcher", j.scanner?.watcherEnabled
+    ? "on — new files indexed within seconds"
+    : "off — changes land on the next periodic scan");
+
+  // Enrichment extras (counts ride the SSE enrichment frame).
+  setText("job-harvest-state", j.enrichment?.harvestActive
+    ? "active — bios, descriptions & premium covers"
+    : "off");
+
+  // Audio analysis.
+  const an = j.analysis || {};
+  const analyzeBtn = document.getElementById("jobs-analyze-now");
+  if (an.active) {
+    setBadge("job-analysis-state", "running", "active");
+  } else if (an.enabled) {
+    setBadge("job-analysis-state", "warn", "degraded");
+  } else {
+    setBadge("job-analysis-state", "idle", "off");
+  }
+  if (analyzeBtn) analyzeBtn.hidden = !an.active;
+  const hint = document.getElementById("job-analysis-hint");
+  if (hint && an.enabled && !an.active && an.degradedReason) {
+    hint.textContent = `Enabled but inactive: ${JOB_DEGRADED_LABELS[an.degradedReason] || an.degradedReason}. Restart after fixing.`;
+  }
+  renderAnalysisCoverage(an.coverage);
+  const sweep = an.sweep;
+  if (sweep) {
+    setText("job-analysis-sweep", sweep.running
+      ? "sweeping now"
+      : sweep.lastFinishedAt ? `last swept ${agoOrDash(sweep.lastFinishedAt)}` : "not yet run");
+    setText("job-analysis-next", formatInFuture(sweep.nextDueAt));
+  }
+
+  // Fingerprint.
+  const fp = j.fingerprint;
+  const fpBtn = document.getElementById("jobs-fp-now");
+  if (fp) {
+    if (fp.active) setBadge("job-fp-state", "running", "active");
+    else if (fp.enabled) setBadge("job-fp-state", "warn", "degraded");
+    else setBadge("job-fp-state", "idle", "off");
+    if (fpBtn) fpBtn.hidden = !fp.active;
+    const fpHint = document.getElementById("job-fp-hint");
+    if (fpHint && fp.enabled && !fp.active && fp.degradedReason) {
+      fpHint.textContent = `Enabled but inactive: ${JOB_DEGRADED_LABELS[fp.degradedReason] || fp.degradedReason}. Restart after fixing.`;
+    }
+    setText("job-fp-last", fp.running ? "sweeping now" : agoOrDash(fp.lastFinishedAt));
+    setText("job-fp-next", formatInFuture(fp.nextDueAt));
+    setText("job-fp-counts", fp.last
+      ? `${fp.last.candidates} examined · ${fp.last.resolved} identified · ${fp.last.requeued} re-queued`
+      : "—");
+  }
+
+  // Smart mixes.
+  const mix = j.smartMixes || {};
+  setBadge("job-mix-state", mix.enabled ? "running" : "idle", mix.enabled ? "on" : "off");
+  const mixBtn = document.getElementById("jobs-mix-regen");
+  if (mixBtn) mixBtn.hidden = !mix.enabled;
+  setText("job-mix-last", mix.run ? agoOrDash(mix.run.lastFinishedAt) : "—");
+  setText("job-mix-next", mix.run ? formatInFuture(mix.run.nextDueAt) : "—");
+  setText("job-mix-cadence", mix.intervalSec ? `every ${formatDuration(mix.intervalSec)}` : "—");
+
+  // Backups.
+  const bk = j.backups || {};
+  setText("job-backup-state", bk.intervalHours > 0
+    ? `scheduled every ${bk.intervalHours} h`
+    : "scheduler off — on-demand only");
+  setText("job-backup-last", agoOrDash(bk.lastBackupAt));
+  setText("job-backup-next", bk.run ? formatInFuture(bk.run.nextDueAt) : "—");
+  setText("job-backup-keep", bk.keep > 0 ? `keep last ${bk.keep}` : "keep all");
+
+  // Updates.
+  const upd = j.updates || {};
+  setText("job-upd-cadence", upd.checkIntervalHours ? `every ${upd.checkIntervalHours} h` : "—");
+  setText("job-upd-auto", upd.autoInstall ? "on" : "off — install from the Dashboard");
+
+  // Maintenance + UPnP.
+  const mt = j.maintenance || {};
+  setText("job-maint-integrity", mt.variantIntegrityActive ? "hourly sweep" : "off (upscale off or disabled)");
+  setText("job-maint-gc", mt.orphanSidecarGC ? "on" : "off (default)");
+  setText("job-maint-artwork", mt.artworkCacheLRU ? "capped — LRU eviction every 15 min" : "unlimited");
+  const up = j.upnp || {};
+  setText("job-upnp", up.enabled
+    ? `on — ${up.configuredServers} upstream server${up.configuredServers === 1 ? "" : "s"}`
+    : "off");
+}
+
+// renderAnalysisCoverage — analysed-vs-eligible bar + the exclusion
+// line that answers "why is analysed < total tracks". Reuses the
+// dist-bar visual language (matched = analysed, missing = remaining).
+function renderAnalysisCoverage(cov) {
+  const section = document.getElementById("job-analysis-coverage-section");
+  const bar = document.getElementById("job-analysis-coverage-bar");
+  const legend = document.getElementById("job-analysis-coverage-legend");
+  const excl = document.getElementById("job-analysis-excluded");
+  if (!section || !bar || !legend || !excl) return;
+  if (!cov || !cov.eligible) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  bar.textContent = "";
+  legend.textContent = "";
+  const analysed = Math.min(cov.analysed ?? 0, cov.eligible);
+  const remaining = Math.max(0, cov.eligible - analysed);
+  const segs = [
+    { label: "Analysed", count: analysed, cov: "matched" },
+    { label: "Remaining", count: remaining, cov: "missing" },
+  ];
+  for (const seg of segs) {
+    if (seg.count === 0) continue;
+    const pct = (seg.count / cov.eligible) * 100;
+    const span = document.createElement("span");
+    span.className = "dist-seg";
+    span.dataset.cov = seg.cov;
+    span.style.width = pct.toFixed(2) + "%";
+    span.title = `${seg.label}: ${seg.count} (${pct.toFixed(1)}%)`;
+    bar.appendChild(span);
+    const item = document.createElement("span");
+    item.className = "dist-legend-item";
+    item.dataset.cov = seg.cov;
+    const swatch = document.createElement("i");
+    swatch.className = "dist-swatch";
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode(`${seg.label} `));
+    const b = document.createElement("b");
+    b.textContent = String(seg.count);
+    item.appendChild(b);
+    legend.appendChild(item);
+  }
+  const parts = [];
+  if (cov.dsdExcluded > 0) parts.push(`${cov.dsdExcluded} DSD excluded by design (sox can't decode DSD)`);
+  if (cov.zeroByteExcluded > 0) parts.push(`${cov.zeroByteExcluded} unreadable (zero-byte)`);
+  if (cov.stale > 0) parts.push(`${cov.stale} awaiting re-analysis (schema update)`);
+  excl.textContent = parts.length
+    ? `Not counted as eligible: ${parts.join(" · ")}.`
+    : "Every track is eligible.";
+}
+
+function updateStatusLine(r) {
+  if (!r) return "—";
+  if (r.updateAvailable) return `update available: ${r.latestVersion || "?"}`;
+  if (r.lastError) return `check failed: ${r.lastError}`;
+  return "up to date";
 }
 
 async function jobsRefresh() {
