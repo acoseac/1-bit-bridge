@@ -999,7 +999,7 @@ func TestUpscaleSoxAvailabilityCached(t *testing.T) {
 func TestPagesRenderWithoutError(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
-	for _, path := range []string{"/", "/library", "/devices", "/upnp", "/settings"} {
+	for _, path := range []string{"/", "/library", "/devices", "/upnp", "/settings", "/jobs"} {
 		req := httptest.NewRequest("GET", path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
 		rw := httptest.NewRecorder()
@@ -1014,6 +1014,59 @@ func TestPagesRenderWithoutError(t *testing.T) {
 		if !strings.Contains(rw.Body.String(), "1-bit") {
 			t.Errorf("%s: body missing brand", path)
 		}
+	}
+}
+
+// TestJobsPageRendersBackgroundActivity pins the reworked Jobs page:
+// the background-activity card grid (scanner / enrichment / analysis /
+// fingerprint / smart mixes / backups / updates / maintenance) renders
+// alongside the pre-existing upscale batch table, and the Settings
+// analysis copy points at the automatic pipeline instead of telling
+// operators to run `bridge analyze` by hand.
+func TestJobsPageRendersBackgroundActivity(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	req := httptest.NewRequest("GET", "/jobs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("/jobs: status %d", rw.Code)
+	}
+	body := rw.Body.String()
+	for _, want := range []string{
+		"Background activity",
+		"jobs-page-root",
+		"Library scanner",
+		"enrichment-panel",
+		"job-analysis-card",
+		"job-fp-card",
+		"Smart mixes",
+		"Backups",
+		"Update checks",
+		"jobs-table", // the upscale batch table survives the rework
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/jobs body missing %q", want)
+		}
+	}
+
+	// Settings: the stale "run `bridge analyze` to populate" operator
+	// instruction is gone — analysis runs automatically now.
+	req = httptest.NewRequest("GET", "/settings", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw = httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("/settings: status %d", rw.Code)
+	}
+	sbody := rw.Body.String()
+	if !strings.Contains(sbody, "analyses the library automatically") {
+		t.Error("/settings: analysis copy should describe the automatic pipeline")
+	}
+	if strings.Contains(sbody, "then run <code>bridge analyze</code>") {
+		t.Error("/settings: stale manual bridge-analyze instruction still present")
 	}
 }
 
