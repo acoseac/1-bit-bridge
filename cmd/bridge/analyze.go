@@ -335,7 +335,12 @@ func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *br
 
 		res, err := collectAnalysisCandidates(ctx, store, resolver, outputDir, "", false)
 		if err != nil {
-			logger.Warn("auto-analysis sweep: list tracks", "err", err)
+			// A cancelled context here is a normal shutdown, not a fault —
+			// same suppression the fingerprint sweeper applies (Gemini on
+			// PR #619).
+			if ctx.Err() == nil {
+				logger.Warn("auto-analysis sweep: list tracks", "err", err)
+			}
 			return
 		}
 		enqueued := 0
