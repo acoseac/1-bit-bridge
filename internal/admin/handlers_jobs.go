@@ -169,8 +169,11 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 
 	// Enrichment (always-on worker; the card links to Settings for the
 	// source picker and shows live counts from the SSE event).
+	// HarvestActive is CONFIG-derived — the HarvestForceSubmit closure
+	// is wired unconditionally (it returns false when the client isn't
+	// running), so closure presence is not a signal here.
 	resp.Enrichment.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
-	resp.Enrichment.HarvestActive = s.deps.HarvestForceSubmit != nil
+	resp.Enrichment.HarvestActive = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled
 
 	// Smart mixes.
 	resp.SmartMixes = jobsSmartMixes{
