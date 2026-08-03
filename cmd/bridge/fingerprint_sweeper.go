@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
+	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -80,49 +81,78 @@ type candidate struct {
 	mtimeNS   int64
 }
 
-// runFingerprintSweeper is the loop. Modelled on runAnalysisSweeper, including
-// the settle delay so the first sweep does not compete with startup work.
-func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, interval time.Duration) {
-	const settleDelay = 90 * time.Second
+// fingerprintSweeperSettleDelay is the startup settle window. A var
+// (not const) purely as the test seam — production never mutates.
+var fingerprintSweeperSettleDelay = 90 * time.Second
+
+// runFingerprintSweeper is the loop. Modelled on runAnalysisSweeper —
+// settle delay, then ticker OR nudge (the admin "Sweep now" button
+// non-blocking-sends on the buffered-1 channel; a pending nudge
+// coalesces). The only nudge drain sits post-settle before the initial
+// sweep; a nudge arriving mid-sweep stays buffered so the select fires
+// an immediate follow-up. status (nil-safe) records the lifecycle for
+// the admin Jobs surface.
+func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, interval time.Duration, nudge <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
+	run := func() {
+		status.sweepStarted()
+		status.sweepFinished(s.sweep(ctx))
+	}
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(settleDelay):
+	case <-time.After(fingerprintSweeperSettleDelay):
 	}
-	s.sweep(ctx)
-	if interval <= 0 {
+	select {
+	case <-nudge:
+	default:
+	}
+	if interval > 0 {
+		status.scheduleNext(time.Now().Add(interval))
+	}
+	run()
+	if interval <= 0 && nudge == nil {
 		return
 	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
+	var tickC <-chan time.Time
+	if interval > 0 {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		tickC = t.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			s.sweep(ctx)
+		case <-tickC:
+			status.scheduleNext(time.Now().Add(interval))
+			run()
+		case <-nudge:
+			run()
 		}
 	}
 }
 
 // sweep runs one pass: collect candidates, fingerprint them, then re-queue
-// whatever resolved.
-func (s *fingerprintSweeper) sweep(ctx context.Context) {
+// whatever resolved. Returns the per-run counts for the admin recorder —
+// nil on failure/cancel so the recorder keeps the last successful
+// breakdown.
+func (s *fingerprintSweeper) sweep(ctx context.Context) *admin.FingerprintSweepCounts {
 	cands, err := s.collectCandidates(ctx)
 	if err != nil {
 		logger.Warn("fingerprint sweep: list candidates", "err", err)
-		return
+		return nil
 	}
 	if len(cands) == 0 {
-		return
+		return &admin.FingerprintSweepCounts{}
 	}
 	logger.Info("fingerprint sweep starting", "candidates", len(cands), "workers", s.workers)
 
 	resolved := s.fingerprintAll(ctx, cands)
 	if ctx.Err() != nil {
-		return
+		return nil
 	}
 
+	counts := &admin.FingerprintSweepCounts{Candidates: len(cands), Resolved: len(resolved)}
 	// Cache writes complete before the re-queue: the enricher must be able to
 	// find an answer for every path it is handed. Reversed, a row could be
 	// picked up on enriched_at=0 before its verdict existed, miss the cache,
@@ -136,10 +166,12 @@ func (s *fingerprintSweeper) sweep(ctx context.Context) {
 			if ctx.Err() == nil {
 				logger.Error("fingerprint sweep: re-queue", "err", err)
 			}
-			return
+			return nil
 		}
+		counts.Requeued = int(n)
 		logger.Info("fingerprint sweep re-queued resolved tracks", "resolved", len(resolved), "requeued", n)
 	}
+	return counts
 }
 
 // collectCandidates finds tracks the enricher gave up on that are worth the

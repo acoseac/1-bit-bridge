@@ -2009,10 +2009,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// bridge still boots. fingerprintCache stays nil in that case, and a nil
 	// AcousticLookup means the fallback is simply never consulted.
 	var fingerprintCache *acoustid.Cache
+	var fingerprintDegraded string // bounded key for the admin Jobs card ("" = not demoted)
 	acoustIDKey := cfg.Fingerprint.ResolvedAPIKey()
-	if cfg.Fingerprint.Enabled && fingerprintFeatureReady(ctx, acoustIDKey != "", stderr) {
-		fingerprintCache = acoustid.NewCache(fingerprintCacheCap)
-		enricher.WithAcousticFallback(acousticLookupAdapter{cache: fingerprintCache})
+	if cfg.Fingerprint.Enabled {
+		if ok, reason := fingerprintFeatureReady(ctx, acoustIDKey != "", stderr); ok {
+			fingerprintCache = acoustid.NewCache(fingerprintCacheCap)
+			enricher.WithAcousticFallback(acousticLookupAdapter{cache: fingerprintCache})
+		} else {
+			fingerprintDegraded = reason
+		}
 	}
 	bgWriters.Add(1)
 	go func() {
@@ -2040,7 +2045,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// disabled the ticker (`intervalHours: 0`); we skip the goroutine in
 	// that case. The on-demand CLI path stays available regardless.
 	backupSources := buildBackupSources(cfg, *configPath)
+	var backupRunState *sweepStatus[struct{}]
 	if hrs := cfg.Backup.EffectiveIntervalHours(); hrs > 0 {
+		backupRunState = &sweepStatus[struct{}]{}
 		backupInterval := time.Duration(hrs) * time.Hour
 		// Joined on bgWriters like every other background worker. It is not
 		// a manifest-store writer — `vacuumInto` opens its own mode=ro
@@ -2053,7 +2060,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr)
+			runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr, backupRunState)
 		}()
 	}
 
@@ -2486,6 +2493,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// construction would keep routing against the old roots after an admin
 	// add/remove. Joined to bgWriters so a live fpcalc child cannot outlive
 	// runServe.
+	var fingerprintNudge chan struct{}
+	var fingerprintSweepState *sweepStatus[admin.FingerprintSweepCounts]
 	if fingerprintCache != nil {
 		sweeper := &fingerprintSweeper{
 			store:     manifestStore,
@@ -2496,22 +2505,30 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			maxPerRun: cfg.Fingerprint.EffectiveMaxPerRun(),
 			length:    cfg.Fingerprint.EffectiveLength(),
 		}
+		// Buffered-1 nudge for the admin "Sweep now" button — same
+		// coalescing contract as the analysis sweeper's.
+		fingerprintNudge = make(chan struct{}, 1)
+		fingerprintSweepState = &sweepStatus[admin.FingerprintSweepCounts]{}
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			runFingerprintSweeper(scanCtx, sweeper, cfg.Fingerprint.EffectiveSweepInterval())
+			runFingerprintSweeper(scanCtx, sweeper, cfg.Fingerprint.EffectiveSweepInterval(),
+				fingerprintNudge, fingerprintSweepState)
 		}()
 	}
 
 	// Smart-playlist regenerator (shares scanCtx). analysisActive (the
 	// sox-resolved flag) gates the harmonic/discovery families.
+	var smartMixRunState *sweepStatus[struct{}]
 	if smartPlaylistsActive {
+		smartMixRunState = &sweepStatus[struct{}]{}
 		// Joined via bgWriters — the regenerator persists generated playlists
 		// to the store, so it must drain before Store.Close().
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive, cfg.SmartPlaylists.EffectiveRegenerateInterval())
+			runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive,
+				cfg.SmartPlaylists.EffectiveRegenerateInterval(), smartMixRunState)
 		}()
 	}
 
@@ -3016,9 +3033,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		AnalysisActive: func() bool { return analysisActive },
 		// Analysis pool + sweeper surfaces (nil when the feature is off —
 		// the admin then omits the fields, mirroring the upscale tile).
-		AnalysisPoolStats:    analysisPoolStatsClosure(analysisPool),
-		AnalysisSweep:        analysisSweepClosure(analysisSweepState),
-		TriggerAnalysisSweep: analysisTriggerClosure(analysisNudge),
+		AnalysisPoolStats:     analysisPoolStatsClosure(analysisPool),
+		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
+		TriggerAnalysisSweep:  nudgeTriggerClosure(analysisNudge),
+		AnalysisSchemaVersion: analyze.WaveformSchemaVersion,
+		// Fingerprint job card: always wired so a feature-off bridge still
+		// explains WHY (config flag + degraded reason); the trigger stays
+		// nil unless the sweeper is actually running.
+		FingerprintState: fingerprintStateClosure(cfg.Fingerprint.Enabled,
+			fingerprintCache != nil, fingerprintDegraded, fingerprintSweepState),
+		TriggerFingerprintSweep: nudgeTriggerClosure(fingerprintNudge),
+		// Last/next-run recorders for the smart-mix + backup cards (nil
+		// when the respective loop isn't running).
+		SmartMixRun: jobRunClosure(smartMixRunState),
+		BackupRun:   jobRunClosure(backupRunState),
 		// Artist-image coverage source for the dashboard enrichment card —
 		// one ReadDir over the shared artwork cache dir, called behind the
 		// admin's 60s enrichment-meta TTL (never per-tick).

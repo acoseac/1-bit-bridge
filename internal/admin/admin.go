@@ -268,6 +268,32 @@ type Deps struct {
 	// inactive; the endpoint then 503s.
 	TriggerAnalysisSweep func() bool
 
+	// AnalysisSchemaVersion is analyze.WaveformSchemaVersion, passed by
+	// value so neither this package nor internal/manifest imports
+	// internal/analyze (the existing import-avoidance around the
+	// waveforms dir). Feeds the coverage query's fresh-vs-stale split;
+	// empty disables the coverage tile.
+	AnalysisSchemaVersion string
+
+	// FingerprintState returns the acoustic-fingerprint job's full admin
+	// snapshot: config flag, runtime active/degraded verdict, and the
+	// sweeper's lifecycle recorder. Wired in cmd/bridge/main.go for
+	// every serve (even feature-off — the card then explains WHY it's
+	// off). Nil-safe: absent omits the `fingerprint` field (test
+	// harnesses).
+	FingerprintState func() *FingerprintJobState
+
+	// TriggerFingerprintSweep — the fingerprint twin of
+	// TriggerAnalysisSweep (the "Sweep now" button). Nil when the
+	// feature is inactive; the endpoint then 503s.
+	TriggerFingerprintSweep func() bool
+
+	// SmartMixRun / BackupRun expose the smart-mix regenerator's and
+	// backup ticker's last/next-run recorders for the Jobs page cards.
+	// Nil-safe: absent omits the field (feature off or test harness).
+	SmartMixRun func() *JobRunState
+	BackupRun   func() *JobRunState
+
 	// ProjectedSize estimates the on-disk size of a FLAC
 	// variant produced from (sourceSize, sourceRate, sourceBits)
 	// at (targetRate, targetBits). Wired to
@@ -638,6 +664,43 @@ type AnalysisSweepCounts struct {
 	QueueSaturated bool `json:"queueSaturated,omitempty"`
 }
 
+// FingerprintJobState is the acoustic-fingerprint card's snapshot on
+// /api/jobs. Enabled is the config flag; Active the runtime verdict
+// (flag AND fpcalc AND AcoustID key at startup); DegradedReason the
+// bounded key explaining an Enabled-but-inactive state
+// ("fpcalc_missing" / "no_api_key"). Lifecycle fields follow
+// AnalysisSweepState's shape and rules (pointer timestamps, no ticking
+// countdowns).
+type FingerprintJobState struct {
+	Enabled        bool                    `json:"enabled"`
+	Active         bool                    `json:"active"`
+	DegradedReason string                  `json:"degradedReason,omitempty"`
+	Running        bool                    `json:"running"`
+	LastStartedAt  *time.Time              `json:"lastStartedAt,omitempty"`
+	LastFinishedAt *time.Time              `json:"lastFinishedAt,omitempty"`
+	NextDueAt      *time.Time              `json:"nextDueAt,omitempty"`
+	Last           *FingerprintSweepCounts `json:"last,omitempty"`
+}
+
+// FingerprintSweepCounts is the last completed fingerprint sweep's
+// outcome: candidates examined, tracks the audio identified, and rows
+// re-queued for the enricher.
+type FingerprintSweepCounts struct {
+	Candidates int `json:"candidates"`
+	Resolved   int `json:"resolved"`
+	Requeued   int `json:"requeued"`
+}
+
+// JobRunState is the minimal last/next-run shape shared by background
+// jobs that don't carry a per-run breakdown (smart-mix regenerator,
+// backup ticker). Same timestamp rules as AnalysisSweepState.
+type JobRunState struct {
+	Running        bool       `json:"running"`
+	LastStartedAt  *time.Time `json:"lastStartedAt,omitempty"`
+	LastFinishedAt *time.Time `json:"lastFinishedAt,omitempty"`
+	NextDueAt      *time.Time `json:"nextDueAt,omitempty"`
+}
+
 // TailscaleProvider is the read+refresh side of the Tailscale auto-pilot
 // the admin tile reads. The adapter in cmd/bridge/main.go wraps the
 // process-scoped autopilot so the wire shape lives entirely in this
@@ -824,6 +887,16 @@ type Server struct {
 	composition   compositionResponse
 	compositionAt time.Time
 	compositionSF singleflight.Group
+
+	// analysis-coverage cache (Jobs page analysed-vs-eligible bar).
+	// Plain-column SQL (single pass over tracks ⋈ track_analysis, ~ms
+	// at 20k rows) but /api/jobs is POLLED — 30s TTL + singleflight so
+	// N open tabs collapse to one query per window (the composition
+	// cache's shape, lighter TTL since the query is cheap).
+	analysisCoverageMu sync.Mutex
+	analysisCoverage   *jobsAnalysisCoverage
+	analysisCoverageAt time.Time
+	analysisCoverageSF singleflight.Group
 
 	// enrichment cache (dashboard enrichment-progress breakdown). Same shape
 	// and rationale as the composition cache above: EnrichmentBreakdown is a
@@ -1017,6 +1090,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
 	mux.HandleFunc("GET /api/analysis/stats", s.apiAnalysisStats)
 	mux.HandleFunc("POST /api/analysis/sweep", s.apiAnalysisSweep)
+	mux.HandleFunc("GET /api/jobs", s.apiJobs)
+	mux.HandleFunc("POST /api/fingerprint/sweep", s.apiFingerprintSweep)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)

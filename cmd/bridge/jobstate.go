@@ -137,12 +137,12 @@ func analysisSweepClosure(status *sweepStatus[admin.AnalysisSweepCounts]) func()
 	}
 }
 
-// analysisTriggerClosure wraps the sweeper's nudge channel in the
-// non-blocking-send shape Deps.TriggerAnalysisSweep expects. A pending
+// nudgeTriggerClosure wraps a sweeper's nudge channel in the
+// non-blocking-send shape the Deps.Trigger* closures expect. A pending
 // nudge coalesces (the sweep about to run covers the request), so the
 // send is always reported as accepted. nil channel → nil closure → the
 // trigger endpoint 503s.
-func analysisTriggerClosure(nudge chan<- struct{}) func() bool {
+func nudgeTriggerClosure(nudge chan<- struct{}) func() bool {
 	if nudge == nil {
 		return nil
 	}
@@ -152,5 +152,43 @@ func analysisTriggerClosure(nudge chan<- struct{}) func() bool {
 		default:
 		}
 		return true
+	}
+}
+
+// jobRunClosure adapts a counts-free recorder (smart-mix regenerator,
+// backup ticker) to the admin's JobRunState DTO. nil recorder → nil
+// closure → field omitted.
+func jobRunClosure(status *sweepStatus[struct{}]) func() *admin.JobRunState {
+	if status == nil {
+		return nil
+	}
+	return func() *admin.JobRunState {
+		running, lastStart, lastEnd, nextDue, _ := status.snapshot()
+		return &admin.JobRunState{
+			Running:        running,
+			LastStartedAt:  timePtrIfSet(lastStart),
+			LastFinishedAt: timePtrIfSet(lastEnd),
+			NextDueAt:      timePtrIfSet(nextDue),
+		}
+	}
+}
+
+// fingerprintStateClosure builds the Deps.FingerprintState snapshot.
+// Wired for EVERY serve — a feature-off bridge still gets a card
+// explaining why (enabled flag + degradedReason); status is nil in
+// that case and the lifecycle fields stay zero.
+func fingerprintStateClosure(enabled, active bool, degradedReason string, status *sweepStatus[admin.FingerprintSweepCounts]) func() *admin.FingerprintJobState {
+	return func() *admin.FingerprintJobState {
+		running, lastStart, lastEnd, nextDue, last := status.snapshot()
+		return &admin.FingerprintJobState{
+			Enabled:        enabled,
+			Active:         active,
+			DegradedReason: degradedReason,
+			Running:        running,
+			LastStartedAt:  timePtrIfSet(lastStart),
+			LastFinishedAt: timePtrIfSet(lastEnd),
+			NextDueAt:      timePtrIfSet(nextDue),
+			Last:           last,
+		}
 	}
 }
