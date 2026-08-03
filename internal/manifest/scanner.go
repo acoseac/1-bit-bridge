@@ -123,6 +123,27 @@ type Scanner struct {
 	// so a future admin-console live tune doesn't race the scanner's
 	// deletion pass; today it's set once at boot.
 	deleteThreshold atomic.Int64
+
+	// postScanHook, when set, fires after every successful full Scan —
+	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
+	// can't race a startup scan already in flight on another goroutine.
+	postScanHook atomic.Pointer[func()]
+}
+
+// SetPostScanHook installs a callback invoked after every SUCCESSFUL
+// full Scan (walk + deletion pass + DB commits all landed; reconciliation
+// being skipped does not count as failure). cmd/bridge wires it to a
+// non-blocking channel send that nudges the auto-analysis sweeper, so
+// freshly indexed music gets analysed right after the scan instead of
+// waiting out the next periodic tick. The hook MUST be cheap and
+// non-blocking — it runs on the scanner goroutine, and a nil hook is a
+// no-op. Not fired when the scan errored, panicked, or its context was
+// already cancelled (shutdown).
+func (s *Scanner) SetPostScanHook(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.postScanHook.Store(&fn)
 }
 
 // SetDeleteThreshold configures the missing-count grace period. Values
@@ -276,6 +297,21 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// but the cache still says "absent").
 	s.folderArt = sync.Map{}
 	defer s.scanning.Store(false)
+
+	// Post-scan hook: fired via defer so every successful return site is
+	// covered, gated on scanOK so an error return or a panic mid-scan
+	// never nudges downstream consumers, and on ctx liveness so a
+	// shutdown-time completion stays quiet. scanOK is set ONLY
+	// immediately before the successful `return count, nil` sites below.
+	scanOK := false
+	defer func() {
+		if !scanOK || ctx.Err() != nil {
+			return
+		}
+		if fn := s.postScanHook.Load(); fn != nil {
+			(*fn)()
+		}
+	}()
 
 	// Snapshot of paths we knew about BEFORE this scan. At the end we drop
 	// rows whose paths weren't touched during the walk — that's the
@@ -570,6 +606,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// / deadline) — the passes are best-effort and the next scan retries, so
 	// there's no point starting them (and no ERROR-log noise on a normal stop).
 	if ctx.Err() != nil {
+		scanOK = true // walk + deletion pass committed; hook still ctx-gated
 		return count, nil
 	}
 	// Compute the UPnP-routed exclusion set ONCE for the five reconciliation
@@ -588,6 +625,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		} else {
 			scanLogger.Error("reconciliation skipped: routed exclusion set", "err", rsErr)
 		}
+		scanOK = true // scan itself succeeded; reconciliation is best-effort
 		return count, nil
 	}
 
@@ -642,6 +680,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		scanLogger.Info("track-number reconciliation filled missing track numbers", "tracks", n)
 	}
 
+	scanOK = true
 	return count, nil
 }
 

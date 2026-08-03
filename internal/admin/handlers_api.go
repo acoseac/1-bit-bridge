@@ -2259,18 +2259,24 @@ func (s *Server) cachedSoxAvailability() *bool {
 	return &v
 }
 
-// analysisStatsResponse is the JSON shape /api/analysis/stats returns.
-// Simpler than upscaleStatsResponse: audio-analysis generation is
-// CLI-driven (`bridge analyze`), so there's no long-lived serve-side
-// pool to snapshot — just the enabled gate, sox availability, and the
-// on-disk cached-waveform totals. Field-compatible with the iOS-facing
-// /v1/analysis/stats shape (minus the pool).
+// analysisStatsResponse is the JSON shape /api/analysis/stats returns
+// (and the SSE `analysis` event payload). Pool and Sweep surface the
+// serve-side auto-analysis machinery: the long-lived analyze.Pool's
+// counters (same DTO the upscale pool uses — the field sets match
+// one-for-one, ActiveWorkers stays empty) and the sweeper's lifecycle.
+// Both omitted when the feature is off (closures nil), mirroring the
+// upscale tile's "absent ≠ idle" semantics. Diff-stable on the SSE
+// tick: no field in Pool/Sweep ticks monotonically while idle
+// (NextDueAt moves once per tick arm; countdowns are computed
+// browser-side — the PR #107 UptimeSec lesson).
 type analysisStatsResponse struct {
-	Enabled         bool   `json:"enabled"`
-	SoxAvailable    *bool  `json:"soxAvailable,omitempty"`
-	CachedWaveforms int    `json:"cachedWaveforms"`
-	CachedBytes     int64  `json:"cachedBytes"`
-	StoragePath     string `json:"storagePath,omitempty"`
+	Enabled         bool                `json:"enabled"`
+	SoxAvailable    *bool               `json:"soxAvailable,omitempty"`
+	CachedWaveforms int                 `json:"cachedWaveforms"`
+	CachedBytes     int64               `json:"cachedBytes"`
+	StoragePath     string              `json:"storagePath,omitempty"`
+	Pool            *UpscalePoolStats   `json:"pool,omitempty"`
+	Sweep           *AnalysisSweepState `json:"sweep,omitempty"`
 }
 
 // apiAnalysisStats: GET /api/analysis/stats — the admin tile's data
@@ -2318,7 +2324,30 @@ func (s *Server) getAnalysisStatsSnapshot(ctx context.Context) analysisStatsResp
 			resp.CachedBytes = bytes
 		}
 	}
+	if ps := s.deps.AnalysisPoolStats; ps != nil {
+		resp.Pool = ps()
+	}
+	if sw := s.deps.AnalysisSweep; sw != nil {
+		resp.Sweep = sw()
+	}
 	return resp
+}
+
+// apiAnalysisSweep: POST /api/analysis/sweep — queue an out-of-band
+// auto-analysis sweep. The trigger only nudges the already-running
+// serve-side sweeper goroutine (buffered-1 channel, coalescing), so
+// there is nothing to track or cancel here: 202 means "queued" — a
+// nudge sent during the sweeper's startup settle window is honored
+// once the settle elapses. 503 when the analysis feature is inactive
+// (disabled, or sox missing at startup).
+func (s *Server) apiAnalysisSweep(w http.ResponseWriter, _ *http.Request) {
+	trigger := s.deps.TriggerAnalysisSweep
+	if trigger == nil {
+		writeError(w, http.StatusServiceUnavailable, "analysis_unavailable", "audio analysis is not active on this bridge")
+		return
+	}
+	trigger()
+	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
 }
 
 // splitCustomEndpointsText parses the textarea form of the custom-

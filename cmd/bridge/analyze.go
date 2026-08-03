@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -305,22 +306,46 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 	return res, nil
 }
 
+// analysisSweeperSettleDelay is the serve-side sweeper's startup settle
+// window (let any startup scan land before the first candidate walk).
+// A var (not const) purely as the test seam — production never mutates.
+var analysisSweeperSettleDelay = 90 * time.Second
+
 // runAnalysisSweeper is the serve-side auto-analysis loop. After an
 // initial settle delay (let any startup scan land) and then on every
-// `interval` tick, it enqueues tracks missing a fresh waveform to the
-// long-lived pool. Idempotent — the scan-skip gate means already-
-// analyzed tracks are skipped, so a re-sweep over an unchanged library
-// enqueues nothing. Generation also stays available via the
-// `bridge analyze` CLI. Honors ctx for clean shutdown; a saturated
-// queue just defers the rest to the next tick.
-func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir string, pool *analyze.Pool, interval time.Duration) {
+// `interval` tick — or immediately on a `nudge` (the scanner's
+// post-scan hook and the admin "Analyze now" button both send one) —
+// it enqueues tracks missing a fresh waveform to the long-lived pool.
+// Idempotent — the scan-skip gate means already-analyzed tracks are
+// skipped, so a re-sweep over an unchanged library enqueues nothing.
+// Generation also stays available via the `bridge analyze` CLI. Honors
+// ctx for clean shutdown; a saturated queue just defers the rest to
+// the next tick.
+//
+// nudge is a buffered-1 channel; senders use a non-blocking send so a
+// pending nudge coalesces with the next sweep. status (nil-safe)
+// records the sweep lifecycle for the admin Jobs surface.
+func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir string, pool *analyze.Pool, interval time.Duration, nudge <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
 	sweep := func() {
+		status.sweepStarted()
+		// counts stays nil on failure/cancel so sweepFinished keeps the
+		// previous successful breakdown (see sweepStatus.sweepFinished).
+		var counts *admin.AnalysisSweepCounts
+		defer func() { status.sweepFinished(counts) }()
+
 		res, err := collectAnalysisCandidates(ctx, store, resolver, outputDir, "", false)
 		if err != nil {
-			logger.Warn("auto-analysis sweep: list tracks", "err", err)
+			// A cancelled context here is a normal shutdown, not a fault —
+			// same suppression the fingerprint sweeper applies (Gemini on
+			// PR #619).
+			if ctx.Err() == nil {
+				logger.Warn("auto-analysis sweep: list tracks", "err", err)
+			}
 			return
 		}
 		enqueued := 0
+		saturated := false
+	enqueueLoop:
 		for _, c := range res.candidates {
 			if ctx.Err() != nil {
 				return
@@ -331,35 +356,68 @@ func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *br
 			case errors.Is(err, analyze.ErrQueueFull), errors.Is(err, analyze.ErrPoolClosed):
 				// Queue saturated (or shutting down) — leave the rest
 				// for the next tick rather than spinning.
-				if enqueued > 0 {
-					logger.Info("auto-analysis sweep enqueued tracks (queue now full)", "count", enqueued)
-				}
-				return
+				saturated = true
+				break enqueueLoop
 			}
 		}
 		if enqueued > 0 {
-			logger.Info("auto-analysis sweep enqueued tracks", "count", enqueued)
+			if saturated {
+				logger.Info("auto-analysis sweep enqueued tracks (queue now full)", "count", enqueued)
+			} else {
+				logger.Info("auto-analysis sweep enqueued tracks", "count", enqueued)
+			}
+		}
+		counts = &admin.AnalysisSweepCounts{
+			Total:          res.total,
+			UpToDate:       res.skipped,
+			DSDExcluded:    res.dsdSkipped,
+			ZeroByte:       res.emptySkipped,
+			Missing:        res.missing,
+			Enqueued:       enqueued,
+			QueueSaturated: saturated,
 		}
 	}
 
 	// Settle delay so the sweep doesn't compete with startup work.
-	const settleDelay = 90 * time.Second
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(settleDelay):
+	case <-time.After(analysisSweeperSettleDelay):
+	}
+	// A nudge that landed DURING the settle window (e.g. the startup
+	// scan's post-scan hook) is covered by the sweep about to run —
+	// drain it once so we don't immediately re-sweep. This is the ONLY
+	// drain: a nudge arriving while a sweep is executing must stay
+	// buffered so the select below fires an immediate follow-up sweep
+	// for the freshly scanned files.
+	select {
+	case <-nudge:
+	default:
+	}
+	if interval > 0 {
+		status.scheduleNext(time.Now().Add(interval))
 	}
 	sweep()
-	if interval <= 0 {
+	if interval <= 0 && nudge == nil {
+		// Pre-nudge behaviour: single sweep, then done (CLI-ish call
+		// shapes / tests). With a nudge wired we stay parked for
+		// on-demand sweeps even without a periodic cadence.
 		return
 	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
+	var tickC <-chan time.Time
+	if interval > 0 {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		tickC = t.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-tickC:
+			status.scheduleNext(time.Now().Add(interval))
+			sweep()
+		case <-nudge:
 			sweep()
 		}
 	}

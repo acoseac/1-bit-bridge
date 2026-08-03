@@ -2444,9 +2444,31 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// (shares scanCtx with the other periodic workers). apiSrv.Resolver()
 	// is the hot-reloading resolver so a runtime root add/remove is
 	// reflected without restart (same rationale as the upscale enqueuer).
+	// analysisPool + the sweeper's nudge/status live in runServe scope so
+	// the admin Deps closures (wired further down) can read them; all stay
+	// nil when the feature is off, and the closures are only installed
+	// when analysisActive.
+	var analysisPool *analyze.Pool
+	var analysisNudge chan struct{}
+	var analysisSweepState *sweepStatus[admin.AnalysisSweepCounts]
 	if analysisActive {
-		analysisPool := analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap())
+		analysisPool = analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap())
 		defer analysisPool.Stop()
+		// Buffered-1 nudge: the scanner's post-scan hook and the admin
+		// "Analyze now" button both non-blocking-send; a pending nudge
+		// coalesces (the sweep about to run covers it).
+		analysisNudge = make(chan struct{}, 1)
+		analysisSweepState = &sweepStatus[admin.AnalysisSweepCounts]{}
+		// Post-scan hook: analyse freshly indexed music right after every
+		// successful scan (periodic, startup, and admin-triggered — all
+		// route through Scanner.Scan) instead of waiting out the next
+		// sweep tick. Cheap non-blocking send; the scanner never blocks.
+		scanner.SetPostScanHook(func() {
+			select {
+			case analysisNudge <- struct{}{}:
+			default:
+			}
+		})
 		// Joined via bgWriters: the sweeper queries the store and enqueues
 		// analysis jobs whose completions write it back, so it must drain
 		// before Store.Close() like the other manifest writers.
@@ -2454,7 +2476,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		go func() {
 			defer bgWriters.Done()
 			runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
-				analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval())
+				analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval(),
+				analysisNudge, analysisSweepState)
 		}()
 	}
 
@@ -2991,6 +3014,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// so the admin tile's `enabled` matches /v1/health's `waveform`
 		// flag rather than the persisted config flag.
 		AnalysisActive: func() bool { return analysisActive },
+		// Analysis pool + sweeper surfaces (nil when the feature is off —
+		// the admin then omits the fields, mirroring the upscale tile).
+		AnalysisPoolStats:    analysisPoolStatsClosure(analysisPool),
+		AnalysisSweep:        analysisSweepClosure(analysisSweepState),
+		TriggerAnalysisSweep: analysisTriggerClosure(analysisNudge),
 		// Artist-image coverage source for the dashboard enrichment card —
 		// one ReadDir over the shared artwork cache dir, called behind the
 		// admin's 60s enrichment-meta TTL (never per-tick).

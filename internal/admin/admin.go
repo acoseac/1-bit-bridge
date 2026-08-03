@@ -243,6 +243,31 @@ type Deps struct {
 	// `enabled`. Wired in cmd/bridge/main.go.
 	AnalysisActive func() bool
 
+	// AnalysisPoolStats returns a snapshot of the long-lived
+	// analyze.Pool's counters. Reuses the UpscalePoolStats DTO —
+	// analyze.PoolStats' field set matches transcode.PoolStats
+	// one-for-one (ActiveWorkers stays empty; the analysis pool has no
+	// per-worker grid). Same closure decoupling + nil semantics as
+	// UpscaleStats: nil when the feature is off (pool not
+	// instantiated), and the `pool` field is omitted rather than
+	// zero-padded. Wired in cmd/bridge/main.go.
+	AnalysisPoolStats func() *UpscalePoolStats
+
+	// AnalysisSweep returns the serve-side auto-analysis sweeper's
+	// lifecycle snapshot (running / last sweep timestamps + counts /
+	// next due). Ephemeral "since process start" state recorded by
+	// cmd/bridge's sweepStatus; nil-safe — absent omits the `sweep`
+	// field.
+	AnalysisSweep func() *AnalysisSweepState
+
+	// TriggerAnalysisSweep queues an out-of-band auto-analysis sweep by
+	// nudging the sweeper's buffered-1 channel (non-blocking send,
+	// coalescing — the "Analyze now" button). It only signals the
+	// already-bgWriters-joined sweeper goroutine, so no goroutine or
+	// WaitGroup concerns live on the admin side. Nil when analysis is
+	// inactive; the endpoint then 503s.
+	TriggerAnalysisSweep func() bool
+
 	// ProjectedSize estimates the on-disk size of a FLAC
 	// variant produced from (sourceSize, sourceRate, sourceBits)
 	// at (targetRate, targetBits). Wired to
@@ -581,6 +606,36 @@ type ActiveWorkerView struct {
 	Quality          string `json:"quality,omitempty"`
 	Kind             string `json:"kind,omitempty"`
 	StartedAtUnixMs  int64  `json:"startedAtUnixMs,omitempty"`
+}
+
+// AnalysisSweepState is the auto-analysis sweeper's lifecycle snapshot
+// — the `sweep` object on /api/analysis/stats and the SSE `analysis`
+// frame. Timestamps are *time.Time so `omitempty` genuinely drops the
+// zero value (the PR #68 omitempty-time.Time lesson: a bare time.Time
+// would emit "0001-01-01T00:00:00Z"). NextDueAt moves once per tick
+// arm — deliberately NOT a ticking countdown, which would churn the SSE
+// diff every frame (the PR #107 UptimeSec lesson); the browser computes
+// the countdown locally.
+type AnalysisSweepState struct {
+	Running        bool                 `json:"running"`
+	LastStartedAt  *time.Time           `json:"lastStartedAt,omitempty"`
+	LastFinishedAt *time.Time           `json:"lastFinishedAt,omitempty"`
+	NextDueAt      *time.Time           `json:"nextDueAt,omitempty"`
+	Last           *AnalysisSweepCounts `json:"last,omitempty"`
+}
+
+// AnalysisSweepCounts is the last completed sweep's candidate
+// breakdown — the exact per-run numbers from
+// collectAnalysisCandidates (the SQL coverage tile is the approximate
+// whole-library view; these are the sweeper's own truth).
+type AnalysisSweepCounts struct {
+	Total          int  `json:"total"`
+	UpToDate       int  `json:"upToDate"`
+	DSDExcluded    int  `json:"dsdExcluded"`
+	ZeroByte       int  `json:"zeroByte"`
+	Missing        int  `json:"missing"`
+	Enqueued       int  `json:"enqueued"`
+	QueueSaturated bool `json:"queueSaturated,omitempty"`
 }
 
 // TailscaleProvider is the read+refresh side of the Tailscale auto-pilot
@@ -961,6 +1016,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/settings", s.apiSettingsPatch)
 	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
 	mux.HandleFunc("GET /api/analysis/stats", s.apiAnalysisStats)
+	mux.HandleFunc("POST /api/analysis/sweep", s.apiAnalysisSweep)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)

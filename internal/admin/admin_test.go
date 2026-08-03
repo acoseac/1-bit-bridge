@@ -663,9 +663,10 @@ func TestSettingsPatchAnalysisEnabled(t *testing.T) {
 	}
 }
 
-// TestAnalysisStatsHandler covers GET /api/analysis/stats. No
-// serve-side pool (generation is CLI-driven), so the response carries
-// no Pool — just enabled / sox / cached counts / storage path.
+// TestAnalysisStatsHandler covers GET /api/analysis/stats. Without the
+// serve-side closures wired (feature off / test harness), the response
+// carries no Pool or Sweep — just enabled / sox / cached counts /
+// storage path.
 func TestAnalysisStatsHandler(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
@@ -705,6 +706,60 @@ func TestAnalysisStatsHandler(t *testing.T) {
 	}
 	if got.SoxAvailable == nil || !*got.SoxAvailable {
 		t.Error("SoxAvailable should be true when precheck reports nil")
+	}
+	// Pool/Sweep stay absent while the closures aren't wired — absent
+	// must read as "feature machinery off", never as zero-padded idle.
+	if got.Pool != nil || got.Sweep != nil {
+		t.Errorf("Pool/Sweep should be nil without closures; got pool=%+v sweep=%+v", got.Pool, got.Sweep)
+	}
+
+	// Wire the pool + sweep closures → both surface on the snapshot.
+	srv.deps.AnalysisPoolStats = func() *UpscalePoolStats {
+		return &UpscalePoolStats{Workers: 2, QueueCap: 5000, QueueLen: 3, Inflight: 1, Done: 7}
+	}
+	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	srv.deps.AnalysisSweep = func() *AnalysisSweepState {
+		return &AnalysisSweepState{
+			LastStartedAt: &start,
+			Last:          &AnalysisSweepCounts{Total: 10, UpToDate: 6, DSDExcluded: 2, ZeroByte: 1, Enqueued: 1},
+		}
+	}
+	got = analysisStatsResponse{}
+	if code := doJSON(t, h, "GET", "/api/analysis/stats", nil, &got); code != 200 {
+		t.Fatalf("stats with pool: %d", code)
+	}
+	if got.Pool == nil || got.Pool.Workers != 2 || got.Pool.Inflight != 1 {
+		t.Errorf("Pool not surfaced: %+v", got.Pool)
+	}
+	if got.Sweep == nil || got.Sweep.Last == nil || got.Sweep.Last.DSDExcluded != 2 {
+		t.Errorf("Sweep not surfaced: %+v", got.Sweep)
+	}
+}
+
+// TestApiAnalysisSweep covers POST /api/analysis/sweep: 503 when the
+// trigger closure isn't wired (analysis inactive), 202 "queued" when it
+// is — the endpoint only nudges the serve-side sweeper's buffered-1
+// channel, so there is nothing to track or await.
+func TestApiAnalysisSweep(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	var out map[string]any
+	if code := doJSON(t, h, "POST", "/api/analysis/sweep", nil, &out); code != http.StatusServiceUnavailable {
+		t.Fatalf("unwired trigger: code = %d, want 503", code)
+	}
+
+	triggered := 0
+	srv.deps.TriggerAnalysisSweep = func() bool { triggered++; return true }
+	out = nil
+	if code := doJSON(t, h, "POST", "/api/analysis/sweep", nil, &out); code != http.StatusAccepted {
+		t.Fatalf("wired trigger: code = %d, want 202", code)
+	}
+	if triggered != 1 {
+		t.Errorf("trigger invoked %d times, want 1", triggered)
+	}
+	if v, ok := out["triggered"].(bool); !ok || !v {
+		t.Errorf("response = %v, want {triggered: true}", out)
 	}
 }
 
