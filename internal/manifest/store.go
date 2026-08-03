@@ -1314,6 +1314,39 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// v29: the wf4 track-quality scalars — true peak (dB, of the
+		// 48 kHz analysis rendering, BS.1770-style 4x oversampled), the
+		// community DR score, and the FLAC audio-MD5 verification state
+		// ("verified"/"mismatch", NULL = not verifiable / not FLAC).
+		// Additive with NULL defaults per the v14 docblock's contract;
+		// backfill is driven by the WaveformSchemaVersion wf3→wf4 bump
+		// (the scan-skip gate re-enqueues every stale-stamped row), not
+		// by a NULL sentinel. Uses the v28 atlasColumnExists pre-check
+		// form rather than the older duplicate-column error swallow.
+		version: 29,
+		name:    "track_analysis quality scalars (true peak, DR, audio MD5)",
+		sql:     `-- columns added idempotently in post(); see v29 docblock`,
+		post: func(db *sql.DB) error {
+			for _, col := range []struct{ name, ddl string }{
+				{"true_peak_db", "ALTER TABLE track_analysis ADD COLUMN true_peak_db REAL"},
+				{"dr_score", "ALTER TABLE track_analysis ADD COLUMN dr_score INTEGER"},
+				{"audio_md5_state", "ALTER TABLE track_analysis ADD COLUMN audio_md5_state TEXT"},
+			} {
+				exists, err := atlasColumnExists(db, "track_analysis", col.name)
+				if err != nil {
+					return fmt.Errorf("inspect track_analysis.%s: %w", col.name, err)
+				}
+				if exists {
+					continue
+				}
+				if _, err := db.Exec(col.ddl); err != nil {
+					return fmt.Errorf("add track_analysis.%s: %w", col.name, err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
@@ -1607,6 +1640,12 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	if clone.bpmFromAnalysis {
 		clone.BPM = nil
 	}
+	// The wf4 quality scalars are analysis-only like KeyRoot/KeyMode —
+	// zero unconditionally so a round-tripped read Track never freezes
+	// them into tags_json.
+	clone.TruePeakDB = nil
+	clone.DRScore = nil
+	clone.AudioMD5State = ""
 	return json.Marshal(&clone)
 }
 
@@ -2639,33 +2678,43 @@ func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
 	}
 }
 
-// keyTempoSQL splices the estimated key + tempo onto each row as ONE
-// json_object (vs three scalar subqueries — same single indexed PK
+// analysisScalarsSQL splices the estimated key + tempo AND the wf4
+// quality scalars (true peak / DR / audio-MD5 state) onto each row as
+// ONE json_object (vs six scalar subqueries — same single indexed PK
 // lookup on track_analysis the waveform/replaygain splices use). NULL
 // when no analysis row exists; `{"root":null,...}` when the row exists
-// but the estimate is absent. Decoded + spliced by spliceAnalysisKeyTempo.
-const keyTempoSQL = `(SELECT json_object('root', key_root, 'mode', key_mode, 'bpm', bpm)
-	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_keytempo`
+// but a value is absent. Decoded + spliced by spliceAnalysisScalars.
+// (Renamed from the old keyTempo splice when the quality scalars joined the bundle.)
+const analysisScalarsSQL = `(SELECT json_object('root', key_root, 'mode', key_mode, 'bpm', bpm,
+	 'tp', true_peak_db, 'dr', dr_score, 'md5', audio_md5_state)
+	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_scalars`
 
-// analysisKeyTempo is the decode target for keyTempoSQL's json_object.
-type analysisKeyTempo struct {
-	Root *int    `json:"root"`
-	Mode *string `json:"mode"`
-	BPM  *int    `json:"bpm"`
+// analysisScalars is the decode target for analysisScalarsSQL's json_object.
+type analysisScalars struct {
+	Root     *int     `json:"root"`
+	Mode     *string  `json:"mode"`
+	BPM      *int     `json:"bpm"`
+	TruePeak *float64 `json:"tp"`
+	DR       *int     `json:"dr"`
+	MD5      *string  `json:"md5"`
 }
 
-// spliceAnalysisKeyTempo fills Track.KeyRoot/KeyMode (always — no tag
-// source today) and Track.BPM (tag-absent-only — a curated TBPM/BPM tag
-// always wins) from the analysis json_object. Malformed JSON is ignored
-// (the track stays playable without the estimate). Like ReplayGain, the
-// BPM splice marks provenance so marshalForStorage scrubs only the
-// analysis-derived value on write-back; KeyRoot/KeyMode have no tag
-// source, so marshalForStorage zeroes them unconditionally.
-func spliceAnalysisKeyTempo(t *Track, raw sql.NullString) {
+// spliceAnalysisScalars fills Track.KeyRoot/KeyMode (always — no tag
+// source today), Track.BPM (tag-absent-only — a curated TBPM/BPM tag
+// always wins), and the analysis-only quality scalars TruePeakDB /
+// DRScore / AudioMD5State from the analysis json_object. Malformed JSON
+// is ignored (the track stays playable without the estimates). Like
+// ReplayGain, the BPM splice marks provenance so marshalForStorage
+// scrubs only the analysis-derived value on write-back; the analysis-only
+// fields are zeroed unconditionally there. TruePeak carries the same
+// non-finite guard as spliceAnalysisReplayGain — `track_analysis` is
+// reachable by an external sqlite3 CLI, and json.Marshal rejects
+// non-finite floats, which would crash /v1/manifest mid-stream.
+func spliceAnalysisScalars(t *Track, raw sql.NullString) {
 	if !raw.Valid || raw.String == "" {
 		return
 	}
-	var kt analysisKeyTempo
+	var kt analysisScalars
 	if err := json.Unmarshal([]byte(raw.String), &kt); err != nil {
 		return
 	}
@@ -2680,6 +2729,17 @@ func spliceAnalysisKeyTempo(t *Track, raw sql.NullString) {
 		b := *kt.BPM
 		t.BPM = &b
 		t.bpmFromAnalysis = true
+	}
+	if kt.TruePeak != nil && !math.IsNaN(*kt.TruePeak) && !math.IsInf(*kt.TruePeak, 0) {
+		v := *kt.TruePeak
+		t.TruePeakDB = &v
+	}
+	if kt.DR != nil {
+		d := *kt.DR
+		t.DRScore = &d
+	}
+	if kt.MD5 != nil {
+		t.AudioMD5State = *kt.MD5
 	}
 }
 
@@ -2790,7 +2850,7 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version, booklet_tag FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2825,7 +2885,7 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysisScalars(&t, ktRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -2854,7 +2914,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version, booklet_tag FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2902,7 +2962,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysisScalars(&t, ktRaw)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -2931,7 +2991,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+keyTempoSQL+`, artwork_version, booklet_tag FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+analysisScalarsSQL+`, artwork_version, booklet_tag FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -2967,7 +3027,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysisScalars(&t, ktRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -6216,6 +6276,16 @@ type AnalysisRow struct {
 	KeyRoot *int
 	KeyMode string
 	BPM     *int
+
+	// The wf4 quality scalars (all analysis-only, no tag source):
+	// TruePeakDB — BS.1770-style 4x-oversampled true peak in dB of the
+	// 48 kHz analysis rendering; DRScore — the community DR value;
+	// AudioMD5State — "" / "verified" / "mismatch" (FLAC STREAMINFO
+	// audio-checksum verification; see internal/analyze/flacmd5.go for
+	// the failure direction).
+	TruePeakDB    *float64
+	DRScore       *int
+	AudioMD5State string
 }
 
 // intPtrEqual compares two optional ints by value (both nil equal, one nil
@@ -6243,10 +6313,13 @@ func nullIntPtr(n sql.NullInt64) *int {
 // Scan in SELECT column order (replaygain_track_db, key_root, key_mode,
 // bpm), then applyTo lifts them onto the row.
 type analysisScalarScan struct {
-	rg      sql.NullFloat64
-	keyRoot sql.NullInt64
-	keyMode sql.NullString
-	bpm     sql.NullInt64
+	rg       sql.NullFloat64
+	keyRoot  sql.NullInt64
+	keyMode  sql.NullString
+	bpm      sql.NullInt64
+	truePeak sql.NullFloat64
+	drScore  sql.NullInt64
+	md5State sql.NullString
 }
 
 func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
@@ -6254,6 +6327,9 @@ func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
 	a.KeyRoot = nullIntPtr(n.keyRoot)
 	a.KeyMode = n.keyMode.String
 	a.BPM = nullIntPtr(n.bpm)
+	a.TruePeakDB = nullFloatPtr(n.truePeak)
+	a.DRScore = nullIntPtr(n.drScore)
+	a.AudioMD5State = n.md5State.String
 }
 
 // float64PtrEqual compares two optional float64s by value: both nil is
@@ -6297,7 +6373,10 @@ func analysisRowsEqual(a, b *AnalysisRow) bool {
 		float64PtrEqual(a.ReplayGainTrackDB, b.ReplayGainTrackDB) &&
 		intPtrEqual(a.KeyRoot, b.KeyRoot) &&
 		a.KeyMode == b.KeyMode &&
-		intPtrEqual(a.BPM, b.BPM)
+		intPtrEqual(a.BPM, b.BPM) &&
+		float64PtrEqual(a.TruePeakDB, b.TruePeakDB) &&
+		intPtrEqual(a.DRScore, b.DRScore) &&
+		a.AudioMD5State == b.AudioMD5State
 }
 
 // UpsertAnalysis writes (or replaces) one `track_analysis` row AND
@@ -6338,6 +6417,16 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 	if a.BPM != nil {
 		bpmArg = *a.BPM
 	}
+	var truePeakArg, drScoreArg, md5StateArg interface{}
+	if a.TruePeakDB != nil {
+		truePeakArg = *a.TruePeakDB
+	}
+	if a.DRScore != nil {
+		drScoreArg = *a.DRScore
+	}
+	if a.AudioMD5State != "" {
+		md5StateArg = a.AudioMD5State
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -6348,8 +6437,9 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 		INSERT INTO track_analysis
 			(source_path, waveform_path, waveform_tag, waveform_size,
 			 source_mtime_ns, source_size, schema_version, created_at,
-			 replaygain_track_db, key_root, key_mode, bpm)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+			 replaygain_track_db, key_root, key_mode, bpm,
+			 true_peak_db, dr_score, audio_md5_state)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (source_path) DO UPDATE SET
 			waveform_path       = excluded.waveform_path,
 			waveform_tag        = excluded.waveform_tag,
@@ -6361,10 +6451,14 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			replaygain_track_db = excluded.replaygain_track_db,
 			key_root            = excluded.key_root,
 			key_mode            = excluded.key_mode,
-			bpm                 = excluded.bpm
+			bpm                 = excluded.bpm,
+			true_peak_db        = excluded.true_peak_db,
+			dr_score            = excluded.dr_score,
+			audio_md5_state     = excluded.audio_md5_state
 	`, a.SourcePath, a.WaveformPath, a.WaveformTag, a.WaveformSize,
 		a.SourceMTimeNS, a.SourceSize, a.SchemaVersion, a.CreatedAt,
-		rgArg, keyRootArg, keyModeArg, bpmArg); err != nil {
+		rgArg, keyRootArg, keyModeArg, bpmArg,
+		truePeakArg, drScoreArg, md5StateArg); err != nil {
 		return err
 	}
 	now := s.now().UnixNano()
@@ -6397,13 +6491,15 @@ func (s *Store) getAnalysisLocked(ctx context.Context, sourcePath string) (*Anal
 	err := s.db.QueryRowContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm
+		       replaygain_track_db, key_root, key_mode, bpm,
+		       true_peak_db, dr_score, audio_md5_state
 		FROM track_analysis
 		WHERE source_path = ?
 	`, sourcePath).Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
-		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm)
+		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
+		&sc.truePeak, &sc.drScore, &sc.md5State)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -6434,7 +6530,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm
+		       replaygain_track_db, key_root, key_mode, bpm,
+		       true_peak_db, dr_score, audio_md5_state
 		FROM track_analysis
 		WHERE unicode_lower(source_path) = unicode_lower(?)
 		LIMIT 2
@@ -6454,7 +6551,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 	if err := rows.Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
-		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm); err != nil {
+		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
+		&sc.truePeak, &sc.drScore, &sc.md5State); err != nil {
 		return nil, err
 	}
 	sc.applyTo(&a)
@@ -6481,7 +6579,8 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm
+		       replaygain_track_db, key_root, key_mode, bpm,
+		       true_peak_db, dr_score, audio_md5_state
 		FROM track_analysis
 	`)
 	if err != nil {
@@ -6495,7 +6594,8 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 		if err := rows.Scan(
 			&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
-			&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm); err != nil {
+			&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
+			&sc.truePeak, &sc.drScore, &sc.md5State); err != nil {
 			return nil, err
 		}
 		sc.applyTo(&a)
