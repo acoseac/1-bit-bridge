@@ -398,3 +398,50 @@ func TestCheckFingerprintToolchain(t *testing.T) {
 		}
 	})
 }
+
+// A port held on IPv6 ONLY must not be reported free. Probing just
+// 127.0.0.1 missed `[::]:port` under bindv6only and an explicit
+// `[::1]:port` — and the bridge's own default listen address is a
+// wildcard, so this is the ordinary case, not an exotic one. doctor said
+// "free", init proceeded, and serve then failed to bind.
+func TestCheckPortDetectsIPv6OnlyBinding(t *testing.T) {
+	prev := listenFunc
+	t.Cleanup(func() { listenFunc = prev })
+	listenFunc = func(network, addr string) (net.Listener, error) {
+		if strings.HasPrefix(addr, "[") { // the IPv6 probe
+			return nil, &net.OpError{
+				Op: "listen", Net: network,
+				Err: &os.SyscallError{Syscall: "bind", Err: syscall.EADDRINUSE},
+			}
+		}
+		return prev(network, "127.0.0.1:0") // IPv4 is free
+	}
+
+	c := checkPort("api", 7788, "")
+	if c.Status == OK {
+		t.Fatalf("checkPort = %s (%q), want not-OK — the port is held on "+
+			"IPv6 and binding only 127.0.0.1 cannot see it", c.Status, c.Summary)
+	}
+}
+
+// The mirror case: a host with no IPv6 returns EADDRNOTAVAIL for ::1,
+// which is an environment fact and must not read as a conflict.
+func TestCheckPortIPv6UnavailableIsStillFree(t *testing.T) {
+	prev := listenFunc
+	t.Cleanup(func() { listenFunc = prev })
+	listenFunc = func(network, addr string) (net.Listener, error) {
+		if strings.HasPrefix(addr, "[") {
+			return nil, &net.OpError{
+				Op: "listen", Net: network,
+				Err: &os.SyscallError{Syscall: "bind", Err: syscall.EADDRNOTAVAIL},
+			}
+		}
+		return prev(network, "127.0.0.1:0")
+	}
+
+	c := checkPort("api", 7788, "")
+	if c.Status != OK {
+		t.Errorf("checkPort = %s (%q), want OK — a v4-only host must not "+
+			"report its free port as a problem", c.Status, c.Summary)
+	}
+}
