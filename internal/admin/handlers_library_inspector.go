@@ -68,18 +68,34 @@ func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	// in turn cancels its manifest projection walk).
 	// Per Gemini high on PR #202.
 	kind := strings.ToLower(strings.TrimSpace(req.Kind))
+	// Normalise before the coordinator sees it — this handler used to
+	// forward req.Path VERBATIM, unlike every read-side endpoint. The
+	// store's prefix helpers treat a prefix that trims to empty as
+	// whole-library, so `{"path": "//"}` enqueued the ENTIRE library
+	// while the rollup card rendered beside it showed 0.
+	//
+	// normaliseBrowsePath is the same helper the projection endpoint
+	// uses: it strips ALL leading slashes (not just one) and already
+	// maps path.Clean's "." result back to "" — hand-rolling that here
+	// is how the `Clean("") == "."` trap gets reintroduced.
+	normalised, ok := normaliseBrowsePath(req.Path)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad-path",
+			"path must be a clean library-relative path (no traversal, no backslashes)")
+		return
+	}
 	var (
 		res AdminBatchSubmitResult
 		err error
 	)
 	switch kind {
 	case "", "upscale":
-		res, err = s.deps.BatchCoordinator.Submit(r.Context(), req.Path, req.TargetRate, req.TargetBits)
+		res, err = s.deps.BatchCoordinator.Submit(r.Context(), normalised, req.TargetRate, req.TargetBits)
 	case "optimize":
 		// Optimize ignores caller-supplied targetRate/targetBits —
 		// the coordinator auto-derives per-track via
 		// TargetRateForOptimize (family-preserving 16/44.1 or 16/48).
-		res, err = s.deps.BatchCoordinator.SubmitOptimize(r.Context(), req.Path)
+		res, err = s.deps.BatchCoordinator.SubmitOptimize(r.Context(), normalised)
 	default:
 		writeError(w, http.StatusBadRequest, "invalid-kind",
 			`unknown kind: `+req.Kind+` (expected "upscale" or "optimize")`)

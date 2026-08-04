@@ -32,13 +32,21 @@ func writeConfig(t *testing.T, yaml string) (configPath, libraryRoot string) {
 }
 
 func TestLoadHappyPathAllFields(t *testing.T) {
+	// Absolute on the HOST, not just on POSIX: the point of these three
+	// fields is that an absolute path survives Load verbatim, and
+	// "/tmp/bridge-data" is not absolute on Windows (no volume), so
+	// resolvePaths correctly rewrote it and the assertion failed for a
+	// reason that had nothing to do with the behaviour under test.
+	dataDir := absTestPath("tmp", "bridge-data")
+	crtPath := absTestPath("tmp", "bridge.crt")
+	keyPath := absTestPath("tmp", "bridge.key")
 	configPath, libRoot := writeConfig(t, `
 libraryRoots:
   - {{LIBRARY_ROOT}}
 listenAddress: "127.0.0.1:9000"
-dataDir: /tmp/bridge-data
-tlsCertPath: /tmp/bridge.crt
-tlsKeyPath: /tmp/bridge.key
+dataDir: `+yamlStr(dataDir)+`
+tlsCertPath: `+yamlStr(crtPath)+`
+tlsKeyPath: `+yamlStr(keyPath)+`
 scanIntervalSec: 600
 libraryName: "Test Library"
 `)
@@ -52,10 +60,10 @@ libraryName: "Test Library"
 	if cfg.ListenAddress != "127.0.0.1:9000" {
 		t.Errorf("ListenAddress = %q", cfg.ListenAddress)
 	}
-	if cfg.DataDir != "/tmp/bridge-data" {
+	if cfg.DataDir != dataDir {
 		t.Errorf("DataDir = %q", cfg.DataDir)
 	}
-	if cfg.TLSCertPath != "/tmp/bridge.crt" || cfg.TLSKeyPath != "/tmp/bridge.key" {
+	if cfg.TLSCertPath != crtPath || cfg.TLSKeyPath != keyPath {
 		t.Errorf("TLS paths = %q / %q", cfg.TLSCertPath, cfg.TLSKeyPath)
 	}
 	if cfg.ScanIntervalSec != 600 {

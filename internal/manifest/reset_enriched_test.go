@@ -30,36 +30,47 @@ func TestResetEnrichedMisses(t *testing.T) {
 		}
 	}
 
+	// "Complete" means all THREE MBIDs: the predicate gained a release-MBID arm
+	// (see enrichmentMissPredicateSQL), so artwork + artist alone still leaves
+	// the row missing the release the Atlas description / booklet / premium
+	// cover all key on.
 	upsert(&Track{Path: "A/complete.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtworkMBID: relMBID, ArtistMBID: artMBID}, true)
+		ArtworkMBID: relMBID, ArtistMBID: artMBID, MusicBrainzAlbumID: relMBID}, true)
 	upsert(&Track{Path: "B/no-artwork.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtistMBID: artMBID}, true)
+		ArtistMBID: artMBID, MusicBrainzAlbumID: relMBID}, true)
 	upsert(&Track{Path: "C/no-artist.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtworkMBID: relMBID}, true)
+		ArtworkMBID: relMBID, MusicBrainzAlbumID: relMBID}, true)
 	upsert(&Track{Path: "D/pending.flac", Size: 1, ModTime: time.Unix(1, 0)}, false)
 	// Explicit-empty MBID regression (CodeRabbit on PR #495): omitempty means
 	// UpsertTrack never writes "", so plant it with json_set directly — the
 	// COALESCE predicate must treat it as missing like JSON-null/absent.
 	upsert(&Track{Path: "E/empty-mbid.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtworkMBID: relMBID, ArtistMBID: artMBID}, true)
+		ArtworkMBID: relMBID, ArtistMBID: artMBID, MusicBrainzAlbumID: relMBID}, true)
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE tracks SET tags_json = json_set(tags_json, '$.artworkMBID', '') WHERE path = 'E/empty-mbid.flac'`); err != nil {
 		t.Fatal(err)
 	}
+	// The local-artwork blind spot the release-MBID arm exists for: a
+	// `local-<sha256>` sentinel satisfies the artwork arm and the artist
+	// resolved, but the release never did. 6,801 production rows looked like
+	// this and the two-arm predicate skipped every one.
+	upsert(&Track{Path: "F/local-art-no-release.flac", Size: 1, ModTime: time.Unix(1, 0),
+		ArtworkMBID: "local-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		ArtistMBID:  artMBID}, true)
 
 	n, err := s.ResetEnrichedMisses(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 3 {
-		t.Fatalf("reset = %d rows, want 3 (no-artwork + no-artist + empty-string artwork)", n)
+	if n != 4 {
+		t.Fatalf("reset = %d rows, want 4 (no-artwork + no-artist + empty-string artwork + local-art-no-release)", n)
 	}
 	pending, _, _, _, err := s.EnrichmentBreakdown(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending != 4 {
-		t.Errorf("pending after reset = %d, want 4 (3 reset + 1 already pending)", pending)
+	if pending != 5 {
+		t.Errorf("pending after reset = %d, want 5 (4 reset + 1 already pending)", pending)
 	}
 
 	// Idempotent: the reset rows are now pending (enriched_at = 0), so a
