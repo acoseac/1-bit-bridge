@@ -420,7 +420,22 @@ type snapshotEntry struct {
 // List returns the snapshots under `backupsRoot`, newest-first.
 // Directories without a readable manifest are skipped (likely
 // in-progress or corrupt — operator can clean them up by hand).
+//
+// Equivalent to ListContext with a background context. Kept for callers
+// with no scope to inherit (the CLI) and for the ones where the listing
+// is the whole point of the request.
 func List(backupsRoot string) ([]snapshotEntry, error) {
+	return ListContext(context.Background(), backupsRoot)
+}
+
+// ListContext is List, bounded by ctx.
+//
+// The cancellation point is per-directory, which is where the cost is:
+// each entry means an open + read + JSON parse of its manifest, so a root
+// holding many snapshots — or one on a stalled network mount — can take
+// arbitrarily long. Callers on a request path (the 10s-polled jobs
+// endpoint) need to be able to stop.
+func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, error) {
 	entries, err := os.ReadDir(backupsRoot)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -430,6 +445,9 @@ func List(backupsRoot string) ([]snapshotEntry, error) {
 	}
 	out := make([]snapshotEntry, 0, len(entries))
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !e.IsDir() {
 			continue
 		}

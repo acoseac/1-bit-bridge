@@ -898,6 +898,22 @@ type Server struct {
 	analysisCoverageAt time.Time
 	analysisCoverageSF singleflight.Group
 
+	// lastBackupAt caches the newest snapshot's timestamp for the jobs
+	// card. Same TTL + singleflight shape as analysisCoverage above,
+	// for the same reason: /api/jobs is polled every 10s per open tab,
+	// and the underlying backup.List walks every snapshot directory
+	// reading a manifest out of each — filesystem work that has no
+	// business happening once per poll per tab.
+	//
+	// invalidateLastBackup() clears it so an operator-triggered snapshot
+	// shows up immediately rather than up to a TTL later; waiting would
+	// just move the confusion from "why is this slow" to "did my backup
+	// work", and produce the refresh-spam this cache exists to remove.
+	lastBackupMu    sync.Mutex
+	lastBackupAt    time.Time // when the cache was filled
+	lastBackupAtVal *time.Time
+	lastBackupSF    singleflight.Group
+
 	// enrichment cache (dashboard enrichment-progress breakdown). Same shape
 	// and rationale as the composition cache above: EnrichmentBreakdown is a
 	// full-table json_extract scan (the matched/missing split), too expensive

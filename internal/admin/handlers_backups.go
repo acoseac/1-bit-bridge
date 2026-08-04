@@ -101,6 +101,10 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "snapshot-failed", err.Error())
 		return
 	}
+	// The jobs card caches the newest snapshot's timestamp; drop it so
+	// the operator who just pressed this sees their snapshot on the next
+	// poll rather than up to a TTL later.
+	s.invalidateLastBackup()
 
 	keep := cfg.Backup.EffectiveKeep()
 	if body.Keep != nil {

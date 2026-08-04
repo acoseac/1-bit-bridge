@@ -27,6 +27,19 @@ import (
 // no business re-running it each time.
 const analysisCoverageCacheTTL = 30 * time.Second
 
+// lastBackupCacheTTL bounds how often the snapshot directory is walked
+// for the jobs card. Matched to analysisCoverageCacheTTL — both back the
+// same 10s-polled endpoint, and a backup timestamp moves far more slowly
+// than a scan does. An operator-triggered snapshot doesn't wait for it:
+// invalidateLastBackup clears the entry directly.
+const lastBackupCacheTTL = 30 * time.Second
+
+// backupListTimeout bounds one snapshot listing. Larger than
+// snapshotDBTimeout because this is filesystem work whose cost scales
+// with the number of retained snapshots — and with `backup.keep <= 0`
+// the create path skips Prune, so that number has no ceiling.
+const backupListTimeout = 5 * time.Second
+
 // jobsScanner — the library scanner card. NextScanDue derives from
 // LastFullScan + interval (RunPeriodic's static ticker cadence);
 // omitted until a first scan has completed.
@@ -195,14 +208,10 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	if run := s.deps.BackupRun; run != nil {
 		resp.Backups.Run = run()
 	}
-	if root := s.deps.BackupSources.DataDir; root != "" {
-		// Newest snapshot's timestamp — covers snapshots from before
-		// this process started (the recorder is process-lifetime only).
-		if entries, err := backup.List(filepath.Join(root, backup.BackupsDirName)); err == nil && len(entries) > 0 {
-			t := entries[0].CreatedAt
-			resp.Backups.LastBackupAt = &t
-		}
-	}
+	// Newest snapshot's timestamp — covers snapshots from before this
+	// process started (the recorder is process-lifetime only). Cached:
+	// see getLastBackupAt.
+	resp.Backups.LastBackupAt = s.getLastBackupAt(ctx)
 
 	// Updates. CheckIntervalHours 0 means "updater default" (6 h,
 	// updater.DefaultCheckInterval) — resolve it here so the card never
@@ -229,6 +238,88 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		ConfiguredServers: len(cfg.UPnPUpstream.Servers),
 	}
 	return resp
+}
+
+// getLastBackupAt returns the TTL-cached timestamp of the newest
+// snapshot, single-flighted so concurrent polls collapse to one listing.
+//
+// backup.List walks every snapshot directory and reads a manifest out of
+// each. /api/jobs is polled every 10s per open admin tab, so doing that
+// inline — as this did — put unbounded, uncached filesystem work on a
+// hot polling path, right beside a database query the same handler was
+// careful to bound at 2s. It is also unbounded in the case that matters
+// most: with `backup.keep <= 0` the create path skips Prune entirely, so
+// snapshots accumulate without limit and the listing grows with them.
+//
+// Nil means "no snapshots, or we couldn't tell" — the card just omits
+// the line, which is the pre-existing behaviour on a listing error.
+func (s *Server) getLastBackupAt(ctx context.Context) *time.Time {
+	root := s.deps.BackupSources.DataDir
+	if root == "" {
+		return nil
+	}
+	s.lastBackupMu.Lock()
+	if !s.lastBackupAt.IsZero() && time.Since(s.lastBackupAt) < lastBackupCacheTTL {
+		v := s.lastBackupAtVal
+		s.lastBackupMu.Unlock()
+		return v
+	}
+	s.lastBackupMu.Unlock()
+
+	v, _, _ := s.lastBackupSF.Do("lastBackup", func() (any, error) {
+		s.lastBackupMu.Lock()
+		if !s.lastBackupAt.IsZero() && time.Since(s.lastBackupAt) < lastBackupCacheTTL {
+			val := s.lastBackupAtVal
+			s.lastBackupMu.Unlock()
+			return val, nil
+		}
+		s.lastBackupMu.Unlock()
+
+		// Detached from the request ctx: the result is shared by every
+		// queued caller, so one client's hang-up must not synthesize a
+		// failure for the rest (the PR #373 singleflight rule).
+		listCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backupListTimeout)
+		defer cancel()
+		entries, err := backup.ListContext(listCtx, filepath.Join(root, backup.BackupsDirName))
+		if err != nil {
+			logger.Warn("jobs: backup list", "err", err)
+			s.lastBackupMu.Lock()
+			val := s.lastBackupAtVal // last good (possibly nil)
+			// Stamp on failure too, so a slow or failing listing backs
+			// off for a TTL instead of being retried on every poll.
+			s.lastBackupAt = time.Now()
+			s.lastBackupMu.Unlock()
+			return val, nil
+		}
+		var newest *time.Time
+		if len(entries) > 0 {
+			t := entries[0].CreatedAt
+			newest = &t
+		}
+		s.lastBackupMu.Lock()
+		s.lastBackupAtVal = newest
+		s.lastBackupAt = time.Now()
+		s.lastBackupMu.Unlock()
+		return newest, nil
+	})
+	if t, ok := v.(*time.Time); ok {
+		return t
+	}
+	return nil
+}
+
+// invalidateLastBackup drops the cached snapshot timestamp so the next
+// poll re-reads it. Called after an operator-triggered snapshot: waiting
+// out a TTL there would trade "why is the jobs page slow" for "did my
+// backup actually work", and the second question is the one that gets
+// answered with refresh-spam.
+//
+// A snapshot taken by the SCHEDULER is deliberately not hooked: nobody is
+// watching for it, so TTL-bounded staleness is fine.
+func (s *Server) invalidateLastBackup() {
+	s.lastBackupMu.Lock()
+	s.lastBackupAt = time.Time{}
+	s.lastBackupMu.Unlock()
 }
 
 // getAnalysisCoverage returns the TTL-cached analysed-vs-eligible
@@ -264,6 +355,12 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 			logger.Warn("jobs: analysis coverage", "err", err)
 			s.analysisCoverageMu.Lock()
 			snap := s.analysisCoverage // last good (possibly nil)
+			// Stamp on failure too. Without this the TTL never trips
+			// after an error, so every 10s poll re-runs a full-table
+			// scan that is already failing — most likely because it is
+			// slow, which is exactly when hammering it is worst. The
+			// cache then backs off for a TTL and retries once.
+			s.analysisCoverageAt = time.Now()
 			s.analysisCoverageMu.Unlock()
 			return snap, nil
 		}
