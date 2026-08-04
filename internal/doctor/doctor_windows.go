@@ -52,6 +52,39 @@ func isAddrInUse(err error) bool {
 // Package var so tests can stub it.
 var portProbeAvailable = func() bool { return true }
 
+// pidAlive reports whether a process with this PID currently exists.
+//
+// Unlike unix, os.FindProcess DOES return an error for a dead PID here —
+// but it is not usable as-is. Go opens the handle with
+// STANDARD_RIGHTS_READ|PROCESS_QUERY_INFORMATION|SYNCHRONIZE, and
+// PROCESS_QUERY_INFORMATION can be denied ACROSS INTEGRITY LEVELS, so a
+// LIVE bridge running as a scheduled task under another account reads as
+// dead. That is exactly the home-pc install shape.
+// PROCESS_QUERY_LIMITED_INFORMATION exists for this and succeeds across
+// integrity levels.
+//
+// Error discrimination is load-bearing: ERROR_ACCESS_DENIED means ALIVE
+// (the process exists, we just can't open it); a dead PID surfaces as
+// ERROR_INVALID_PARAMETER. Collapsing "any error means dead" would
+// re-introduce the cross-account misread this helper is here to fix.
+//
+// A terminated-but-not-yet-reaped process can still be opened and so
+// reads as alive. That is the safe direction for the only caller —
+// checkPort uses this to soften a Fail into a Warn, so erring towards
+// alive costs a hint, while erring towards dead cries wolf about a
+// healthy install.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return errors.Is(err, windows.ERROR_ACCESS_DENIED)
+	}
+	_ = windows.CloseHandle(h)
+	return true
+}
+
 // tcpTableOwnerPIDListener is the TCP_TABLE_CLASS for GetExtendedTcpTable
 // that returns LISTENING sockets with their owning PID. The value is 3 —
 // 4 is TCP_TABLE_OWNER_PID_CONNECTIONS (established sockets), which would

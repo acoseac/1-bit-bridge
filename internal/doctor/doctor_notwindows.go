@@ -86,6 +86,33 @@ func isAddrInUse(err error) bool {
 	return errors.Is(err, syscall.EADDRINUSE)
 }
 
+// pidAlive reports whether a process with this PID currently exists.
+//
+// os.FindProcess NEVER returns an error on unix — it just wraps the
+// integer — so liveness has to be asked with signal 0, which runs the
+// kernel's existence and permission checks without delivering anything.
+//
+// EPERM means ALIVE: the process exists, we merely aren't allowed to
+// signal it. Reading that as dead is precisely the failure this helper
+// exists to avoid, because checkPort uses "our recorded PID is alive" to
+// decide a bound port is probably ours rather than a conflict.
+//
+// The Windows twin has the opposite shape and its own trap — see
+// doctor_windows.go.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if err := p.Signal(syscall.Signal(0)); err != nil {
+		return errors.Is(err, syscall.EPERM)
+	}
+	return true
+}
+
 // portProbeAvailable reports whether isPIDListeningOnPort can identify the
 // owner of a bound port on THIS host — i.e. lsof resolved to a usable
 // absolute path. When false, checkPort can't tell a port bound by our own

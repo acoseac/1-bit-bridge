@@ -316,6 +316,35 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 						"stop the other process or change the address in bridge.yaml")
 			case found:
 				return ok(name, fmt.Sprintf("bound by our own bridge (pid %d)", ownPID))
+			case pidAliveFunc(ownPID):
+				// The probe ran cleanly and did NOT name our PID, yet the
+				// PID we recorded at startup is still running. On a bridge
+				// that binds a privileged port through a file capability
+				// (`setcap cap_net_bind_service=+ep`, which the deployment
+				// runbook prescribes so a non-root service can bind :443)
+				// this is the EXPECTED result, not a conflict: that binary
+				// runs with dumpable=0, so no unprivileged observer can
+				// attribute the port to a pid — lsof, `ss -p` and a direct
+				// readlink of /proc/<pid>/fd all fail identically.
+				//
+				// Last resort before giving up: ask whether the listener is
+				// at least owned by OUR USER. On Linux that survives
+				// dumpable=0 (see portowner_linux.go); everywhere else it
+				// answers "don't know" and we fall through to the Warn.
+				if owned, ownErr := portOwnerFunc(port); ownErr == nil && owned {
+					return ok(name, fmt.Sprintf(
+						"in use by a process running as this user (uid %d; pid attribution blocked — capability-bound binary)",
+						os.Getuid()))
+				}
+				// "Our recorded pid is alive and something holds the port"
+				// is materially different from "we have no idea who owns
+				// this", and only the second deserves a Fail.
+				return warn(name, fmt.Sprintf(":%d in use", port),
+					fmt.Sprintf("our bridge (pid %d) is still running, but this host would not attribute "+
+						"the port to it — a binary granted cap_net_bind_service runs with dumpable=0, which "+
+						"blocks port→pid attribution for any non-root observer. If that is this install, "+
+						"this is expected; otherwise stop the other process or change the address in bridge.yaml",
+						ownPID))
 			}
 		}
 	}
@@ -588,6 +617,20 @@ func windowsStartupDir() string {
 // the native iphlpapi.dll implementation in doctor_windows.go. The "is it
 // us?" branch of checkPort calls them; see their per-platform docs for the
 // (found, error) contract.
+
+// pidAliveFunc and portOwnerFunc indirect the two platform-provided probes
+// that back checkPort's last-resort attribution arms, so tests can drive
+// those branches deterministically: neither "a PID that is definitely
+// dead" nor "a listener owned by a different user" can be conjured
+// portably on demand, and asserting them against whatever the host happens
+// to look like is how a test ends up passing for the wrong reason.
+//
+// Same seam convention as listenFunc and portProbeAvailable above.
+// Production code MUST NOT mutate them.
+var (
+	pidAliveFunc  = pidAlive
+	portOwnerFunc = portOwnedByThisUser
+)
 
 // ErrHasFail is returned by Run when the caller passes StopOnFail.
 var ErrHasFail = errors.New("doctor reports one or more failing checks")
