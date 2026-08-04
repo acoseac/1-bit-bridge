@@ -857,7 +857,51 @@ const enrichmentDBTimeout = 60 * time.Second
 // marshalled bytes only change when data changes — SSE diff-suppression
 // stays stable.
 func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
-	snap := s.getEnrichmentBreakdownPart()
+	return s.decorateEnrichment(s.getEnrichmentBreakdownPart())
+}
+
+// freshEnrichmentSnapshot reads the breakdown DIRECTLY, bypassing both the TTL
+// cache and the singleflight group.
+//
+// Used only by the retry ack, which must reflect the reset it just performed.
+// Invalidating the cache is not sufficient on its own: if an SSE tick had
+// already entered the singleflight before the reset landed, a cached-path read
+// would JOIN that in-flight call and be handed its pre-reset numbers — the very
+// staleness the ack exists to avoid. `Forget` would not close it either, since
+// the older flight still writes the cache when it finishes.
+//
+// Going direct is affordable precisely here: the retry is rate-guarded to once
+// per enrichRetryMinInterval, so this cannot become a scan storm the way an
+// uncached SSE path would. The caller still invalidates the cache so the next
+// tick recomputes rather than serving the pre-reset entry.
+//
+// It deliberately does NOT write the cache. A concurrent stale flight may still
+// store its result afterwards, which would silently undo the write; leaving the
+// cache alone means the worst case is one stale entry that expires in
+// enrichmentCacheTTL — comfortably before the 30s tick that would read it.
+func (s *Server) freshEnrichmentSnapshot(ctx context.Context) enrichmentResponse {
+	if s.deps.Manifest == nil {
+		return enrichmentResponse{}
+	}
+	pending, matched, missing, last, err := s.deps.Manifest.EnrichmentBreakdown(ctx)
+	if err != nil {
+		// Fall back to the cached path rather than handing the card zeroes.
+		logger.Warn("enrichment: fresh breakdown", "err", err)
+		return s.getEnrichmentSnapshot()
+	}
+	return s.decorateEnrichment(enrichmentResponse{
+		Pending:            pending,
+		Matched:            matched,
+		Missing:            missing,
+		LastEnrichedAt:     last,
+		EtaSecondsEstimate: int64(math.Round((float64(pending) / avgTracksPerAlbum) * enrichPaceSeconds)),
+	})
+}
+
+// decorateEnrichment fills the config-derived source label and the Atlas meta
+// facets onto a breakdown. The meta facets keep their own 60s cache — the retry
+// does not move them the way it moves pending/matched/missing.
+func (s *Server) decorateEnrichment(snap enrichmentResponse) enrichmentResponse {
 	if cfg := s.deps.CfgHolder.Load(); cfg != nil {
 		snap.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
 	}
@@ -1050,9 +1094,17 @@ const enrichRetryMinInterval = 60 * time.Second
 // enrichmentRetryResponse reports what the retry actually did: how many
 // tracks were re-queued for the enricher, and whether the Atlas harvest
 // client was nudged into a full re-submit (false when harvest isn't wired).
+//
+// Enrichment carries the post-retry snapshot so the card can repaint in one
+// trip, the same way apiUpdatesCheck returns the post-check status. Without it
+// the panel keeps rendering the pre-retry numbers until the next SSE slow tick
+// — the enrichment event rides the 30s ticker — and "0 tracks in the queue ·
+// all caught up" sitting under a button you just pressed reads as the button
+// having done nothing.
 type enrichmentRetryResponse struct {
-	ResetTracks        int64 `json:"resetTracks"`
-	HarvestResubmitted bool  `json:"harvestResubmitted"`
+	ResetTracks        int64               `json:"resetTracks"`
+	HarvestResubmitted bool                `json:"harvestResubmitted"`
+	Enrichment         *enrichmentResponse `json:"enrichment,omitempty"`
 }
 
 // apiEnrichmentRetry handles POST /api/enrichment/retry — the dashboard's
@@ -1100,15 +1152,26 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	if s.deps.HarvestForceSubmit != nil {
 		resubmitted = s.deps.HarvestForceSubmit()
 	}
-	// Invalidate the breakdown cache so the pending-count jump lands on the
-	// next SSE tick instead of after the 15s TTL.
+	// Invalidate the breakdown cache so the next SSE tick recomputes rather
+	// than serving the 15s-TTL entry taken before the rows moved.
 	s.enrichmentMu.Lock()
 	s.enrichmentAt = time.Time{}
 	s.enrichmentMu.Unlock()
+	// Same for the library-wide misses snapshot: the retry is about to
+	// re-populate the very fields it enumerates, so a stale entry would
+	// keep listing tracks that are already back in the queue.
+	s.libMetaInvalidateUnder("")
 	logger.Info("enrichment retry triggered", "resetTracks", reset, "harvestResubmitted", resubmitted)
+	// Hand the card its new numbers with the ack. The enrichment SSE event
+	// rides the 30s slow ticker, so without this the panel shows the pre-retry
+	// counts for up to half a minute after the click. Read direct rather than
+	// through the cache — see freshEnrichmentSnapshot for why invalidation
+	// alone would not be enough.
+	fresh := s.freshEnrichmentSnapshot(ctx)
 	writeJSON(w, http.StatusOK, enrichmentRetryResponse{
 		ResetTracks:        reset,
 		HarvestResubmitted: resubmitted,
+		Enrichment:         &fresh,
 	})
 }
 
@@ -1435,6 +1498,39 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	// UPnP-routed rows) rather than a prefix delete.
 	willCollapse := len(newList) == 1
 	removedBasename := filepath.Base(current[idx])
+
+	// Refuse when a SURVIVING root's basename case-folds to the removed
+	// one. `ValidateRoots` now rejects that configuration up front, but a
+	// bridge.yaml written before it did — or hand-edited since — can
+	// still carry the pair, and this handler is the point where it turns
+	// destructive: the prefix delete below removes rows by basename and
+	// unlinks their variant + waveform sidecars from disk. The delete
+	// predicate is case-exact now, so the survivor's rows are safe, but
+	// the operator's intent is genuinely ambiguous here and the right
+	// answer is to make them fix the config rather than guess.
+	//
+	// The CLI's offline `library remove` has carried an equivalent guard
+	// since PR #82; the admin path never did. Folded, not byte-exact, via
+	// the same helper ValidateRoots uses — those agreeing is the point.
+	//
+	// Skipped on the collapse branch: multi-root → single-root flips the
+	// stored path form, so that path runs WipeFilesystemTracks and
+	// rescans rather than selecting by basename, and there is nothing to
+	// be ambiguous about. The prefix delete is only reachable when two or
+	// more roots survive.
+	if !willCollapse {
+		removedKey := bridgefs.FoldRootBasename(current[idx])
+		for _, other := range newList {
+			if bridgefs.FoldRootBasename(other) == removedKey {
+				writeError(w, http.StatusConflict, "ambiguous-basename",
+					fmt.Sprintf("can't remove %q: surviving root %q has a basename that differs only by case (%q vs %q). "+
+						"Track paths are keyed by basename, so the removal target is ambiguous — rename one root's directory, "+
+						"or remove both and re-add the one you want to keep.",
+						abs, other, removedBasename, filepath.Base(other)))
+				return
+			}
+		}
+	}
 
 	// Commit order matters: run the destructive manifest op FIRST, and
 	// only persist the root list + broadcast SetRoots after it succeeds.
@@ -2196,18 +2292,24 @@ func (s *Server) cachedSoxAvailability() *bool {
 	return &v
 }
 
-// analysisStatsResponse is the JSON shape /api/analysis/stats returns.
-// Simpler than upscaleStatsResponse: audio-analysis generation is
-// CLI-driven (`bridge analyze`), so there's no long-lived serve-side
-// pool to snapshot — just the enabled gate, sox availability, and the
-// on-disk cached-waveform totals. Field-compatible with the iOS-facing
-// /v1/analysis/stats shape (minus the pool).
+// analysisStatsResponse is the JSON shape /api/analysis/stats returns
+// (and the SSE `analysis` event payload). Pool and Sweep surface the
+// serve-side auto-analysis machinery: the long-lived analyze.Pool's
+// counters (same DTO the upscale pool uses — the field sets match
+// one-for-one, ActiveWorkers stays empty) and the sweeper's lifecycle.
+// Both omitted when the feature is off (closures nil), mirroring the
+// upscale tile's "absent ≠ idle" semantics. Diff-stable on the SSE
+// tick: no field in Pool/Sweep ticks monotonically while idle
+// (NextDueAt moves once per tick arm; countdowns are computed
+// browser-side — the PR #107 UptimeSec lesson).
 type analysisStatsResponse struct {
-	Enabled         bool   `json:"enabled"`
-	SoxAvailable    *bool  `json:"soxAvailable,omitempty"`
-	CachedWaveforms int    `json:"cachedWaveforms"`
-	CachedBytes     int64  `json:"cachedBytes"`
-	StoragePath     string `json:"storagePath,omitempty"`
+	Enabled         bool                `json:"enabled"`
+	SoxAvailable    *bool               `json:"soxAvailable,omitempty"`
+	CachedWaveforms int                 `json:"cachedWaveforms"`
+	CachedBytes     int64               `json:"cachedBytes"`
+	StoragePath     string              `json:"storagePath,omitempty"`
+	Pool            *UpscalePoolStats   `json:"pool,omitempty"`
+	Sweep           *AnalysisSweepState `json:"sweep,omitempty"`
 }
 
 // apiAnalysisStats: GET /api/analysis/stats — the admin tile's data
@@ -2255,7 +2357,30 @@ func (s *Server) getAnalysisStatsSnapshot(ctx context.Context) analysisStatsResp
 			resp.CachedBytes = bytes
 		}
 	}
+	if ps := s.deps.AnalysisPoolStats; ps != nil {
+		resp.Pool = ps()
+	}
+	if sw := s.deps.AnalysisSweep; sw != nil {
+		resp.Sweep = sw()
+	}
 	return resp
+}
+
+// apiAnalysisSweep: POST /api/analysis/sweep — queue an out-of-band
+// auto-analysis sweep. The trigger only nudges the already-running
+// serve-side sweeper goroutine (buffered-1 channel, coalescing), so
+// there is nothing to track or cancel here: 202 means "queued" — a
+// nudge sent during the sweeper's startup settle window is honored
+// once the settle elapses. 503 when the analysis feature is inactive
+// (disabled, or sox missing at startup).
+func (s *Server) apiAnalysisSweep(w http.ResponseWriter, _ *http.Request) {
+	trigger := s.deps.TriggerAnalysisSweep
+	if trigger == nil {
+		writeError(w, http.StatusServiceUnavailable, "analysis_unavailable", "audio analysis is not active on this bridge")
+		return
+	}
+	trigger()
+	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
 }
 
 // splitCustomEndpointsText parses the textarea form of the custom-

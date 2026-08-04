@@ -566,6 +566,20 @@ Two new `Track` fields carry the key:
 
 Advertised via the `keyTempo` flag in `/v1/health.features`, present alongside `waveform`/`loudness` when analysis is active. Key + tempo are computed in the same decode as the waveform + loudness; a track gains them when (re)analyzed, and the write bumps `indexed_at` so they surface on the next delta (only when changed). Both are **skipped** for inputs with too little signal (very short, atonal, or arrhythmic) rather than guessed. A bridge upgraded to v1.8 backfills key/tempo on the same one-time re-analysis as loudness — the waveform bytes and loudness are unchanged, so clients re-fetch no sidecars and only the new scalars sync. `ProtocolVersion` stays `1`.
 
+#### Track quality — `truePeakDB` / `drScore` / `audioMD5State` (additive, since v1.9)
+
+The same offline decode also measures two dynamics scalars, and FLAC sources get an integrity verification pass. Three new `Track` fields, all additive `omitempty` (`ProtocolVersion` stays `1`):
+
+```json
+{ "path": "Music/Album/01.flac", "truePeakDB": -0.4, "drScore": 12, "audioMD5State": "verified" }
+```
+
+- `truePeakDB` is a **BS.1770-style true peak** in dB relative to full scale: 4× polyphase-oversampled intersample peak detection, measured on the bridge's **48 kHz analysis rendering** (the analysis pipeline's one-decode invariant — a track-level statistic, honestly derived but not a native-rate measurement; the client's own live meter measures the native stream during playback). Values above `0.0` flag a master with intersample overs. Absent for silence.
+- `drScore` is the **community DR value** (the Pleasurize Music Foundation / TT DR Offline Meter convention — "DR12"): per-channel 3-second blocks, the dB distance between the second-highest block peak and the energy-averaged RMS of the loudest 20 % of blocks, averaged across channels and rounded. Absent for programs under ~9 s or silence.
+- `audioMD5State` is the **FLAC audio-checksum verification** result: `"verified"` when a native-depth decode of the audio hashes exactly to the MD5 the encoder stored in STREAMINFO; `"mismatch"` when a clean, complete decode hashed differently — the audio no longer matches what its encoder checksummed (file modified or corrupt; some tag editors rewrite FLAC without updating the checksum, so a mismatch is a flag, not proof of corruption). Absent when not verifiable: non-FLAC sources, a zeroed (unset) STREAMINFO checksum, uncommon bit depths (12/20-bit), or decode-tool failure — verification **never** reports `mismatch` from a failed or truncated decode.
+
+Advertised via the `trackQuality` flag in `/v1/health.features`, present alongside `waveform`/`loudness`/`keyTempo` when analysis is active. All three ride the same analysis pass and surface via `indexed_at` deltas like the other scalars. A bridge upgraded to v1.9 re-analyzes once to backfill (the `wf4` schema stamp); waveform bytes, loudness, key and tempo are unchanged, so clients re-fetch no sidecars — only the new scalars sync.
+
 #### `GET /v1/analysis/stats` (bearer-authenticated)
 
 Authenticated read-only snapshot of the analysis feature, mirroring the admin tile. Cheap (one SQL `COUNT` + a TTL-cached sox precheck).

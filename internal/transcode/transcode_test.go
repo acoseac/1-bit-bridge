@@ -77,9 +77,15 @@ func TestOutputDirForJoinsSubdir(t *testing.T) {
 // at `--target-rate 192000` would silently overwrite the first
 // sidecar — a real bug Gemini bot caught at the plan-review stage.
 func TestSidecarPathIncludesVariantSuffix(t *testing.T) {
+	// Host-native OutputDir. The containment assertion below is a plain
+	// HasPrefix against this string, while SidecarPath builds its result
+	// with filepath.Join — which normalises separators. A POSIX literal
+	// therefore compared "\tmp\transcoded\..." against "/tmp/transcoded"
+	// on Windows and read as an escape from OutputDir. t.TempDir() is
+	// absolute and already in the host's own separator form.
 	base := JobSpec{
 		SourceLibraryRel: "Music/Artist/Album/01 Track.flac",
-		OutputDir:        "/tmp/transcoded",
+		OutputDir:        t.TempDir(),
 	}
 	a := base
 	a.TargetSampleRate = 176400

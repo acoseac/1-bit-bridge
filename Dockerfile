@@ -91,16 +91,22 @@ FROM alpine:${ALPINE_VERSION}
 # no separate plugin package is needed (the pipeline forces `-t flac`,
 # which `internal/doctor` verifies). ffmpeg (ships ffprobe too): the
 # analysis fallback decoder for AAC/m4a that Alpine sox can't open.
+# chromaprint: ships fpcalc, which the acoustic-fingerprinting fallback
+# shells out to when text matching finds no MusicBrainz candidate. It
+# links its own FFmpeg for decoding, so it is independent of the sox
+# above. Inert unless `fingerprint.enabled` is set AND an AcoustID API
+# key is configured — `internal/doctor` verifies both.
 # lsof: `bridge doctor`'s preflight port check runs `lsof -nP -iTCP…`
 # to name the process occupying the API/admin ports (busybox lsof lacks
 # those flags, so without it the check falls back to a vaguer Warn). It
 # doesn't currently distinguish our own running bridge — `bridge serve`
 # writes no PID file yet — so a `doctor` run inside a live-serving
 # container still reports those ports in use.
-# sox and ffmpeg run as separate executables
-# invoked via os/exec (aggregation, not linked into the Go binary), so
-# their GPL/LGPL terms don't affect the bridge's MIT license. All three
-# are inert unless upscale/analysis are enabled in config.
+# sox, ffmpeg and fpcalc all run as separate executables invoked via
+# os/exec (aggregation, not linked into the Go binary), so their
+# GPL/LGPL terms don't affect the bridge's MIT license — chromaprint is
+# LGPL-2.1, the same arrangement. All four are inert unless
+# upscale/analysis/fingerprint are enabled in config.
 #
 # `mkdir /data && chown bridge:bridge /data` BEFORE the USER switch
 # is load-bearing (Gemini High + Qodo Bug on PR #80): WORKDIR / VOLUME
@@ -110,7 +116,7 @@ FROM alpine:${ALPINE_VERSION}
 # errors. Operators bind-mounting their own pre-owned volume override
 # this — but the in-image baseline must be writable for fresh
 # `docker run -v 1-bit-bridge-state:/data` deployments to work.
-RUN apk add --no-cache ca-certificates tzdata sox ffmpeg lsof && \
+RUN apk add --no-cache ca-certificates tzdata sox ffmpeg chromaprint lsof && \
     addgroup -S bridge && \
     adduser -S -G bridge bridge && \
     mkdir -p /data && \

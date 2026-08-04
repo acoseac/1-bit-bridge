@@ -80,8 +80,11 @@ type ITunesAlbum struct {
 	// sourced artwork (e.g. `itunes-1234567890-500.jpg`) so a future
 	// iTunes-only rescan reads from disk without a re-fetch.
 	CollectionID int64
-	// CollectionName is the album title as iTunes returned it — kept
-	// for log lines / debugging, not used for matching.
+	// CollectionName is the album title as iTunes returned it. Used by
+	// SearchAlbum's either-direction substring filter (and for log
+	// lines / debugging) — a candidate carrying an empty one is
+	// rejected before that filter runs, since Contains(x, "") would
+	// otherwise match every query.
 	CollectionName string
 	// ArtworkURL100 is the 100×100 artwork URL iTunes ships in the
 	// search response. The high-res 600×600 URL is derived from this
@@ -134,7 +137,15 @@ func (c *ITunesClient) SearchAlbum(ctx context.Context, artist, album string) (*
 	albumLower := strings.ToLower(album)
 	for i := range body.Results {
 		r := &body.Results[i]
-		if r.CollectionID == 0 || r.ArtworkURL100 == "" {
+		// An EMPTY CollectionName must be rejected here, not left to
+		// the substring filter below: strings.Contains(x, "") is always
+		// true in Go, so a nameless candidate satisfies the
+		// either-direction match against ANY query and gets returned as
+		// a hit. The artwork would then be cached under the MB-derived
+		// release MBID and served to iOS until the cache is cleared.
+		// (`album` itself is guaranteed non-empty by the caller's trim
+		// guard, so the mirror case can't arise.)
+		if r.CollectionID == 0 || r.ArtworkURL100 == "" || strings.TrimSpace(r.CollectionName) == "" {
 			continue
 		}
 		// Substring match in either direction so suffix-decorated titles

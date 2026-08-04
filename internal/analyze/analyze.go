@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -67,7 +68,17 @@ const (
 	// again iOS re-fetches no sidecars and existing rows re-analyze once
 	// to backfill key/tempo — stamping wf3 so an un-estimable track (too
 	// short / atonal / arrhythmic) isn't re-enqueued forever.
-	WaveformSchemaVersion = "wf3"
+	//
+	// wf3 → wf4: the same decode additionally measures true peak
+	// (BS.1770-style 4x oversampled, of the 48 kHz analysis rendering)
+	// and the community DR score off the interleaved frames, and FLAC
+	// sources get an audio-MD5 verification pass against STREAMINFO
+	// (a second, native-depth decode of the same file — see flacmd5.go).
+	// Waveform bytes, loudness, key and tempo are all unchanged, so iOS
+	// re-fetches no sidecars; existing rows re-analyze once to backfill
+	// the three scalars and stamp wf4 (an unverifiable file — no stored
+	// checksum, odd bit depth — isn't re-enqueued forever).
+	WaveformSchemaVersion = "wf4"
 
 	// WaveformDirSubdir is the fixed subdir under cfg.DataDir where
 	// waveform sidecars land (source-path-mirrored beneath it).
@@ -143,6 +154,23 @@ type Result struct {
 	// BPM is the estimated tempo (onset autocorrelation), or nil when no
 	// confident estimate. Surfaced only when the source has no BPM tag.
 	BPM *int
+
+	// TruePeakDB is the BS.1770-style 4x-oversampled true peak in dB
+	// relative to full scale — of the 48 kHz ANALYSIS RENDERING (the
+	// package's one-decode invariant; see truepeak.go's honesty note).
+	// nil when the program was silence or nothing decoded.
+	TruePeakDB *float64
+
+	// DRScore is the community DR (dynamic range) value — the "DR12"
+	// convention. nil when the program is too short for the statistic
+	// (< ~9 s) or silent. See dr.go.
+	DRScore *int
+
+	// AudioMD5State is "" (not verifiable / not FLAC), "verified"
+	// (decoded audio matches the STREAMINFO checksum) or "mismatch"
+	// (clean decode, different hash — file modified or corrupt). FLAC
+	// only; see flacmd5.go for the failure direction.
+	AudioMD5State string
 }
 
 // RunAnalysis decodes the source via sox, computes the peak waveform +
@@ -187,6 +215,13 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 		meter = newLoudnessMeter(channels)
 	}
 	kt := newKeyTempoAnalyzer()
+	// True peak + DR ride the same interleaved frames regardless of
+	// channelsOK — unlike loudness, neither depends on channel SEMANTICS
+	// (true peak is a max over every decoded sample; DR averages its
+	// per-channel statistic), so a defaulted layout still measures
+	// honestly.
+	tp := newTruePeakMeter(channels)
+	dr := newDRMeter(channels)
 	total, err := decodeFrames(ctx, spec.SourceAbsPath, channels, tool, expectedSec, func(frame []float64) {
 		mono := downmixFrame(frame)
 		pk.add(mono)
@@ -196,6 +231,8 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 			meter.addFrame(frame)
 		}
 		kt.add(mono)
+		tp.addFrame(frame)
+		dr.addFrame(frame)
 	})
 	if err != nil {
 		return Result{}, err
@@ -233,6 +270,20 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	if bpm, ok := kt.estimateTempo(); ok {
 		res.BPM = &bpm
 	}
+	if peak, ok := tp.truePeakDB(); ok {
+		res.TruePeakDB = &peak
+	}
+	dr.finish()
+	if score, ok := dr.score(); ok {
+		res.DRScore = &score
+	}
+	// FLAC-only audio-MD5 verification — a second, native-depth decode of
+	// the same file (the analysis stream above is resampled f32 and is
+	// exactly the wrong bytes to hash; see flacmd5.go). Runs after the
+	// main decode so a truncated source has already been rejected.
+	if strings.EqualFold(filepath.Ext(spec.SourceAbsPath), ".flac") {
+		res.AudioMD5State = verifyFLACAudioMD5(ctx, spec.SourceAbsPath, tool)
+	}
 	logger.Debug("analyze ok",
 		"path", spec.SourceLibraryRel,
 		"buckets", pk.count(),
@@ -240,7 +291,10 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 		"channels", channels,
 		"loudness", res.HasLoudness,
 		"hasKey", res.KeyRoot != nil,
-		"hasTempo", res.BPM != nil)
+		"hasTempo", res.BPM != nil,
+		"hasTruePeak", res.TruePeakDB != nil,
+		"hasDR", res.DRScore != nil,
+		"md5", res.AudioMD5State)
 	return res, nil
 }
 

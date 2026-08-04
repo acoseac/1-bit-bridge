@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -334,6 +335,69 @@ func TestRootsAddDuplicateBasename(t *testing.T) {
 	}
 }
 
+// TestRootsRemoveRefusesCaseTwinBasename pins the guard on the destructive
+// branch of remove-root.
+//
+// Track paths are keyed by library-root BASENAME, and this handler prunes
+// them with DeleteTracksByPrefix(basename + "/") — which also enumerates
+// and UNLINKS the matching variant and waveform sidecars from disk. When
+// two roots' basenames differ only by case the removal target is genuinely
+// ambiguous, and the delete predicate used to resolve that ambiguity by
+// folding case: it took both roots' rows and both roots' files.
+//
+// ValidateRoots now refuses that configuration up front, so the pair can
+// only arrive via a bridge.yaml written before that landed or hand-edited
+// since — which is exactly when a destructive path should refuse rather
+// than guess. The CLI's offline `library remove` has carried an equivalent
+// guard since PR #82; this handler never did.
+//
+// The two colliding roots live under DIFFERENT parents so both exist as
+// real, distinct directories even on a case-insensitive filesystem — the
+// collision under test is between the BASENAMES, not the volumes.
+//
+// THREE roots, deliberately. With exactly two, removing either one takes
+// the collapse branch — multi-root → single-root flips the stored path
+// form, so the handler runs WipeFilesystemTracks and rescans, which
+// doesn't select by basename and so can't be ambiguous. The prefix delete
+// this guard protects is only reachable when the removal leaves two or
+// more roots behind.
+func TestRootsRemoveRefusesCaseTwinBasename(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// Inject the case-twin pair directly: apiRootsAdd would (correctly)
+	// reject it now, and the scenario being defended is a config that
+	// bypassed the API in the first place.
+	base := filepath.Dir(cfg.DataDir)
+	twin := filepath.Join(base, "other", "music")   // collides with the fixture's "Music"
+	third := filepath.Join(base, "third", "Spoken") // keeps the removal off the collapse branch
+	for _, d := range []string{twin, third} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roots := append([]string(nil), srv.deps.Scanner.Roots()...)
+	roots = append(roots, twin, third)
+	srv.deps.Scanner.SetRoots(roots)
+	if err := srv.deps.CfgHolder.Update(cfg.DataDir+"/../bridge.yaml", func(next *config.Config) error {
+		next.LibraryRoots = roots
+		return nil
+	}); err != nil {
+		t.Fatalf("inject roots: %v", err)
+	}
+
+	// Removing either of the pair must be refused, not guessed at.
+	code := doJSON(t, h, "DELETE", "/api/roots", map[string]string{"path": twin}, nil)
+	if code != http.StatusConflict {
+		t.Errorf("remove case-twin root: got %d, want 409 — an ambiguous destructive "+
+			"removal must be refused, not resolved by folding case", code)
+	}
+	// And nothing was removed.
+	if got := len(srv.deps.Scanner.Roots()); got != len(roots) {
+		t.Errorf("roots changed despite the refusal: %d, want %d", got, len(roots))
+	}
+}
+
 func TestRootsRemoveLastRejected(t *testing.T) {
 	srv, cfg, _ := newTestServer(t)
 	code := doJSON(t, srv.Handler(), "DELETE", "/api/roots",
@@ -424,8 +488,19 @@ func TestRootsRemoveSaveFailureRollsBackInMemory(t *testing.T) {
 	rootsBefore := append([]string(nil), srv.deps.CfgHolder.Load().LibraryRoots...)
 
 	// Make the config directory read-only so Cfg.Save's atomic-
-	// write-then-rename pattern can't land the new file. Reverted in
-	// cleanup so t.TempDir's teardown can still run.
+	// write-then-rename pattern can't land the new file.
+	//
+	// This injection is POSIX-only: a directory's mode bits do not gate
+	// creation on Windows — that is an NTFS ACL's job — so os.Chmod(dir,
+	// 0o500) leaves the Save perfectly able to succeed and the test then
+	// fails asserting a rollback that correctly never happened. Skipped
+	// rather than reworked: the rollback logic under test is
+	// platform-independent, and reproducing "Save fails" on Windows would
+	// need an ACL manipulation that tests nothing extra about it.
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only-directory injection has no effect on Windows (ACLs, not mode bits)")
+	}
+	// Reverted in cleanup so t.TempDir's teardown can still run.
 	dir := filepath.Dir(cfgPath)
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
@@ -478,6 +553,17 @@ func TestRootsAddSaveFailureRollsBackInMemory(t *testing.T) {
 
 	// Make the config directory read-only so Cfg.Save's atomic-
 	// write-then-rename pattern can't land the new file.
+	//
+	// This injection is POSIX-only: a directory's mode bits do not gate
+	// creation on Windows — that is an NTFS ACL's job — so os.Chmod(dir,
+	// 0o500) leaves the Save perfectly able to succeed and the test then
+	// fails asserting a rollback that correctly never happened. Skipped
+	// rather than reworked: the rollback logic under test is
+	// platform-independent, and reproducing "Save fails" on Windows would
+	// need an ACL manipulation that tests nothing extra about it.
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only-directory injection has no effect on Windows (ACLs, not mode bits)")
+	}
 	dir := filepath.Dir(cfgPath)
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
@@ -663,9 +749,10 @@ func TestSettingsPatchAnalysisEnabled(t *testing.T) {
 	}
 }
 
-// TestAnalysisStatsHandler covers GET /api/analysis/stats. No
-// serve-side pool (generation is CLI-driven), so the response carries
-// no Pool — just enabled / sox / cached counts / storage path.
+// TestAnalysisStatsHandler covers GET /api/analysis/stats. Without the
+// serve-side closures wired (feature off / test harness), the response
+// carries no Pool or Sweep — just enabled / sox / cached counts /
+// storage path.
 func TestAnalysisStatsHandler(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
@@ -705,6 +792,60 @@ func TestAnalysisStatsHandler(t *testing.T) {
 	}
 	if got.SoxAvailable == nil || !*got.SoxAvailable {
 		t.Error("SoxAvailable should be true when precheck reports nil")
+	}
+	// Pool/Sweep stay absent while the closures aren't wired — absent
+	// must read as "feature machinery off", never as zero-padded idle.
+	if got.Pool != nil || got.Sweep != nil {
+		t.Errorf("Pool/Sweep should be nil without closures; got pool=%+v sweep=%+v", got.Pool, got.Sweep)
+	}
+
+	// Wire the pool + sweep closures → both surface on the snapshot.
+	srv.deps.AnalysisPoolStats = func() *UpscalePoolStats {
+		return &UpscalePoolStats{Workers: 2, QueueCap: 5000, QueueLen: 3, Inflight: 1, Done: 7}
+	}
+	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	srv.deps.AnalysisSweep = func() *AnalysisSweepState {
+		return &AnalysisSweepState{
+			LastStartedAt: &start,
+			Last:          &AnalysisSweepCounts{Total: 10, UpToDate: 6, DSDExcluded: 2, ZeroByte: 1, Enqueued: 1},
+		}
+	}
+	got = analysisStatsResponse{}
+	if code := doJSON(t, h, "GET", "/api/analysis/stats", nil, &got); code != 200 {
+		t.Fatalf("stats with pool: %d", code)
+	}
+	if got.Pool == nil || got.Pool.Workers != 2 || got.Pool.Inflight != 1 {
+		t.Errorf("Pool not surfaced: %+v", got.Pool)
+	}
+	if got.Sweep == nil || got.Sweep.Last == nil || got.Sweep.Last.DSDExcluded != 2 {
+		t.Errorf("Sweep not surfaced: %+v", got.Sweep)
+	}
+}
+
+// TestApiAnalysisSweep covers POST /api/analysis/sweep: 503 when the
+// trigger closure isn't wired (analysis inactive), 202 "queued" when it
+// is — the endpoint only nudges the serve-side sweeper's buffered-1
+// channel, so there is nothing to track or await.
+func TestApiAnalysisSweep(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	var out map[string]any
+	if code := doJSON(t, h, "POST", "/api/analysis/sweep", nil, &out); code != http.StatusServiceUnavailable {
+		t.Fatalf("unwired trigger: code = %d, want 503", code)
+	}
+
+	triggered := 0
+	srv.deps.TriggerAnalysisSweep = func() bool { triggered++; return true }
+	out = nil
+	if code := doJSON(t, h, "POST", "/api/analysis/sweep", nil, &out); code != http.StatusAccepted {
+		t.Fatalf("wired trigger: code = %d, want 202", code)
+	}
+	if triggered != 1 {
+		t.Errorf("trigger invoked %d times, want 1", triggered)
+	}
+	if v, ok := out["triggered"].(bool); !ok || !v {
+		t.Errorf("response = %v, want {triggered: true}", out)
 	}
 }
 
@@ -944,7 +1085,7 @@ func TestUpscaleSoxAvailabilityCached(t *testing.T) {
 func TestPagesRenderWithoutError(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
-	for _, path := range []string{"/", "/library", "/devices", "/upnp", "/settings"} {
+	for _, path := range []string{"/", "/library", "/devices", "/upnp", "/settings", "/jobs"} {
 		req := httptest.NewRequest("GET", path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
 		rw := httptest.NewRecorder()
@@ -959,6 +1100,59 @@ func TestPagesRenderWithoutError(t *testing.T) {
 		if !strings.Contains(rw.Body.String(), "1-bit") {
 			t.Errorf("%s: body missing brand", path)
 		}
+	}
+}
+
+// TestJobsPageRendersBackgroundActivity pins the reworked Jobs page:
+// the background-activity card grid (scanner / enrichment / analysis /
+// fingerprint / smart mixes / backups / updates / maintenance) renders
+// alongside the pre-existing upscale batch table, and the Settings
+// analysis copy points at the automatic pipeline instead of telling
+// operators to run `bridge analyze` by hand.
+func TestJobsPageRendersBackgroundActivity(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	req := httptest.NewRequest("GET", "/jobs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("/jobs: status %d", rw.Code)
+	}
+	body := rw.Body.String()
+	for _, want := range []string{
+		"Background activity",
+		"jobs-page-root",
+		"Library scanner",
+		"enrichment-panel",
+		"job-analysis-card",
+		"job-fp-card",
+		"Smart mixes",
+		"Backups",
+		"Update checks",
+		"jobs-table", // the upscale batch table survives the rework
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/jobs body missing %q", want)
+		}
+	}
+
+	// Settings: the stale "run `bridge analyze` to populate" operator
+	// instruction is gone — analysis runs automatically now.
+	req = httptest.NewRequest("GET", "/settings", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rw = httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("/settings: status %d", rw.Code)
+	}
+	sbody := rw.Body.String()
+	if !strings.Contains(sbody, "analyses the library automatically") {
+		t.Error("/settings: analysis copy should describe the automatic pipeline")
+	}
+	if strings.Contains(sbody, "then run <code>bridge analyze</code>") {
+		t.Error("/settings: stale manual bridge-analyze instruction still present")
 	}
 }
 
