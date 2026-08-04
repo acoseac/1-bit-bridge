@@ -17,6 +17,11 @@ name: gate
 # GO_VERSION in step with go.mod — a stale pair breaks the image build under
 # GOTOOLCHAIN=local (it broke the first v0.1.7 image).
 #
+# A fifth job, `cross-platform`, runs the suite natively on Windows and
+# macOS. It is deliberately outside the `gate` fan-in and marked
+# continue-on-error for now — see its own comment for why and for what
+# has to happen before it is promoted.
+#
 # Cache: each job manages its own Go cache explicitly via actions/cache
 # rather than setup-go's built-in `cache: true`. The built-in cache keys
 # on go.sum alone (stable here) and only SAVES on a miss, so a one-time
@@ -144,9 +149,146 @@ jobs:
       - name: Dockerfile GO_VERSION matches go.mod
         run: make check-go-version
 
+  # Executes the suite on the two platforms `build-all` only ever
+  # CROSS-COMPILES. ~1,600 lines are behind `//go:build windows`
+  # (service install, SCM lifecycle, binary swap, startup launcher,
+  # native port→PID attribution) and have never run anywhere — the two
+  # `//go:build windows` test files in the tree have never been executed
+  # by any machine, and the 2026-07-18 audit found three bugs in that
+  # code by reading alone (B34 stop-timeout, B35 binary-swap window, B50
+  # `%` escaping). Windows is a target platform and one of the two live
+  # production bridges.
+  #
+  # DELIBERATELY NOT in the `gate` fan-in below, and `continue-on-error`,
+  # while the first-run backlog is triaged: these jobs are EXPECTED to be
+  # red initially and that must not block unrelated PRs. Once green,
+  # promote them — add to `needs:` + the result check, drop
+  # continue-on-error. Until then a red X here is informational.
+  #
+  # `go vet` / `go test` directly rather than the `make` targets the
+  # Linux jobs use: the Makefile's recipes assume a POSIX shell and
+  # `nproc`, neither of which the Windows runner provides. `-race` is
+  # deliberately omitted too — on Windows it needs cgo plus a C
+  # toolchain, and this is a pure-Go, cgo-free project (modernc.org/sqlite).
+  # Executing the platform code at all is the point; the race detector
+  # stays on the Linux `test` job above, which is where it is cheap.
+  cross-platform:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # See the block comment above — remove once this matrix is green.
+    continue-on-error: true
+    # 60, not 30: the per-package `go test -timeout 30m` below has to be
+    # able to actually reach its ceiling on more than one slow package
+    # without the job being killed out from under it first. A job killed
+    # at the wall clock loses the log tail, which is the part worth
+    # reading.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      # One platform's failure must not cancel the other's run: on the
+      # first pass we want the full picture from both, not whichever
+      # broke first.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    defaults:
+      run:
+        # bash on every runner (Git Bash on Windows) so one recipe works
+        # across all three shells.
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      # The Go caches live somewhere different on every platform
+      # (~/.cache/go-build on Linux, ~/Library/Caches/go-build on macOS,
+      # %LOCALAPPDATA%\go-build on Windows), so ask the toolchain instead
+      # of hardcoding the Linux paths the jobs above can safely assume.
+      - name: Resolve Go cache paths
+        id: gocache
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ${{ steps.gocache.outputs.build }}
+            ${{ steps.gocache.outputs.mod }}
+          key: ${{ runner.os }}-gobuild-xplat-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-xplat-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-xplat-
+      # Defender scans every file the suite writes and holds a handle
+      # across the scan. Go's `t.TempDir()` cleanup is a single
+      # RemoveAll with no retry, so a fixture still being scanned fails
+      # its test with "The process cannot access the file because it is
+      # being used by another process" — which is what ~25 of the first
+      # run's 55 failures were, concentrated in exactly the packages
+      # that write .flac fixtures.
+      #
+      # Excluding the runner's own temp tree is the standard
+      # accommodation, and it doubles as the EXPERIMENT that settles
+      # whose handle it is: an audit of internal/manifest and
+      # internal/integrity found no unclosed os.Open, so the hypothesis
+      # is that the handle is Defender's rather than ours. If the
+      # cluster survives this, the hypothesis is wrong and there is a
+      # real descriptor leak to go find — which would be a genuine
+      # product bug, since a scan of a 20k-track library would exhaust
+      # handles and would also block an operator from moving their own
+      # files while the bridge runs.
+      #
+      # Runner-local and test-only: it changes nothing about what the
+      # product does on an operator's machine.
+      # The path MUST be the one Go actually uses. The first attempt
+      # excluded $RUNNER_TEMP (D:\a\_temp) while `t.TempDir()` resolves
+      # os.TempDir() from %TEMP% — C:\Users\RUNNER~1\AppData\Local\Temp.
+      # Not one failing path was under RUNNER_TEMP, so the exclusion
+      # applied cleanly to a directory the suite never touches and the
+      # null result said nothing about the hypothesis. Ask Go where its
+      # temp dir is rather than assuming, and echo it so the log shows
+      # what was actually excluded.
+      - name: Exclude the Go temp tree from Defender
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: |
+          GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo "$TEMP")
+          echo "Go os.TempDir() = $GOTMP"
+          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'" || echo "could not set exclusion (non-fatal)"
+          pwsh -Command "(Get-MpPreference).ExclusionPath" || true
+      # Native vet matters most on Windows: the `unsafeptr` analyzer is
+      # the real check on `doctor_windows.go`'s Syscall6 argument
+      # liveness, and it cannot run from a non-Windows host.
+      - name: vet
+        run: go vet ./...
+      # -timeout 30m, matching the Makefile's `test` target rather than
+      # taking Go's 10m/package default. The Makefile already documents
+      # why 10m is too short even on Linux (internal/adminauth pays real
+      # bcrypt cost-12 per simulated login across its rate-limit tests);
+      # Windows is slower still, and the first full run had
+      # internal/admin and internal/manifest both stop dead at 600.0s —
+      # the default ceiling, not a hang. Those two showed up as ordinary
+      # failures, which is the misleading part: a package timeout is
+      # reported like a test failure, so it inflates the triage list with
+      # entries that were never really broken.
+      #
+      # `go test` applies the timeout PER package binary, so the job-level
+      # timeout-minutes above has to leave room for several slow packages
+      # in sequence — hence 60 there against 30 here.
+      - name: test
+        run: go test -timeout 30m ./...
+
   # Single green signal that fans in the parallel jobs. `if: always()` + the
   # explicit result check means a failed (or cancelled) dependency fails the
   # gate rather than letting a SKIP read as success.
+  #
+  # `cross-platform` is intentionally absent from `needs:` — see its own
+  # comment above; it joins here once its first-run backlog is cleared.
   gate:
     name: gate
     needs: [vet, test, build-all, go-version]
