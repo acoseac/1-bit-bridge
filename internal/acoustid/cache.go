@@ -60,6 +60,11 @@ type Cache struct {
 	// path and no stat — while byKey is what the sweeper dedupes on. Both
 	// point at the same outcomes; byPath simply loses the version qualifier.
 	byPath map[string]Outcome
+
+	// prevKey / prevPath are the previous generation, retained so
+	// overflow demotes rather than discards. See Set.
+	prevKey  map[Key]Outcome
+	prevPath map[string]Outcome
 }
 
 // NewCache builds a cache bounded at capacity entries. A non-positive
@@ -73,24 +78,51 @@ func NewCache(capacity int) *Cache {
 }
 
 // Get reports a previously computed outcome for an exact file version.
+// Checks the current generation, then the previous one (see Set).
 func (c *Cache) Get(k Key) (Outcome, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	o, ok := c.byKey[k]
+	if o, ok := c.byKey[k]; ok {
+		return o, true
+	}
+	o, ok := c.prevKey[k]
 	return o, ok
 }
 
 // Set records an outcome.
 //
-// Eviction is a whole-map reset rather than an LRU. That is deliberate: the
-// access pattern is a sweep, not a working set — each key is written once and
-// read at most once by the enricher — so recency carries no information and an
-// LRU's bookkeeping would buy nothing. Reaching the cap at all means the
-// sweeps have outrun consumption, and starting fresh is the correct response.
+// Overflow DEMOTES the current generation instead of discarding it: the
+// full maps become `prev` and a fresh pair starts, so the newest
+// `capacity` entries always survive and reads fall through to `prev`.
+// Memory is bounded at 2x capacity.
+//
+// This used to be a whole-map reset, justified by "each key is written
+// once and read at most once by the enricher, so recency carries no
+// information". The first half is true and the conclusion does not
+// follow, because of WHEN the read happens. The sweeper writes every
+// verdict and only then calls ResetEnrichedByPaths, whose own comment
+// spells out the ordering: "Cache writes complete before the re-queue:
+// the enricher must be able to find an answer for every path it is
+// handed." So the enricher reads the whole batch AFTER the sweep, and
+// the newest entries are exactly the ones whose consumer has not run.
+//
+// A reset therefore discarded the most valuable entries, not the least,
+// and "starting fresh is the correct response" was backwards: each
+// destroyed verdict costs an fpcalc decode plus an AcoustID lookup to
+// recompute on the next cycle. Self-healing, but not free — and it
+// degraded precisely under the load that caused it.
+//
+// A generation swap rather than the package's LRU (internal/lrucache)
+// because the two maps have to evict in lockstep and that LRU exposes no
+// eviction hook; keying byPath off byKey's evictions would need one.
+// Demotion also fits the access pattern better than recency ordering:
+// entries are written once, so there is no reuse for an LRU to learn
+// from — only age, which is all this needs.
 func (c *Cache) Set(k Key, o Outcome) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.capacity > 0 && len(c.byKey) >= c.capacity {
+		c.prevKey, c.prevPath = c.byKey, c.byPath
 		c.byKey = make(map[Key]Outcome)
 		c.byPath = make(map[string]Outcome)
 	}
@@ -115,15 +147,24 @@ func (c *Cache) LookupPath(path string) (Decision, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	o, ok := c.byPath[path]
+	if !ok {
+		// Fall through to the demoted generation — this is the read the
+		// generation swap exists for. The enricher consumes a batch
+		// AFTER the sweep that wrote it, so an overflow mid-sweep would
+		// otherwise lose exactly the verdicts it is about to ask for.
+		o, ok = c.prevPath[path]
+	}
 	if !ok || !o.Matched {
 		return Decision{}, false
 	}
 	return o.Decision, true
 }
 
-// Len reports the number of cached outcomes, for logging and tests.
+// Len reports the number of cached outcomes across both generations,
+// for logging and tests — what a caller can still find, not what is in
+// the current map.
 func (c *Cache) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return len(c.byKey)
+	return len(c.byKey) + len(c.prevKey)
 }

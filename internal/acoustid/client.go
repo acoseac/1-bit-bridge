@@ -411,9 +411,21 @@ func IsTransient(err error) bool {
 		errors.Is(err, syscall.EHOSTUNREACH)
 }
 
-// statusFromMessage recovers the status code from httpError's stable message
-// prefix. Anchored with HasPrefix so it can only ever read the code this
-// package wrote, never a number quoted inside an upstream body.
+// statusFromMessage recovers the status code from httpError's stable
+// message prefix.
+//
+// What protects it is the DISTINCTIVENESS of "acoustid: HTTP ", not the
+// position: that prefix is one this package writes and nothing else
+// does, so "musicbrainz: HTTP 503" and "upstream returned HTTP 503 in
+// its body" both miss.
+//
+// Deliberately strings.Index and NOT strings.HasPrefix. Callers wrap —
+// `fmt.Errorf("lookup failed: %w", err)` puts the prefix mid-string —
+// and anchoring at offset 0 silently stops recognising every wrapped
+// error, which is most of them by the time this is consulted. A review
+// pass proposed exactly that change on the strength of this comment,
+// which previously claimed "Anchored with HasPrefix"; the swap turns
+// TestStatusFromMessageRecognisesWrappedErrors red.
 func statusFromMessage(msg string) (int, bool) {
 	const prefix = "acoustid: HTTP "
 	i := strings.Index(msg, prefix)
