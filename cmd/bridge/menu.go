@@ -38,6 +38,13 @@ type menuState struct {
 	isWindows   bool
 	isAdmin     bool // Windows: UAC elevation; POSIX: always true
 	isRoot      bool // POSIX: euid == 0; Windows: false
+	// running reports whether something is answering on the admin
+	// address RIGHT NOW, as opposed to `kind`, which only says a
+	// service-manager artifact is installed. The two diverge exactly
+	// when it matters: a stopped-but-installed bridge still reports its
+	// launchd/SCM kind, so the menu used to claim it was up and "Open
+	// admin console" opened a connection-refused tab.
+	running bool
 }
 
 // detectState resolves the menu's view of the world from disk + env.
@@ -53,7 +60,52 @@ func detectState() menuState {
 		isWindows:   runtime.GOOS == "windows",
 		isAdmin:     packaging.IsAdmin(),
 		isRoot:      packaging.IsRoot(),
+		// Only worth asking once there is a config to read the admin
+		// address out of.
+		running: ok && adminRunningProbe(cfgPath),
 	}
+}
+
+// menuProbeTimeout bounds the run-state dial in detectState.
+//
+// The probe is SYNCHRONOUS, and deliberately so. A cached value updated
+// by a background ticker would be stale exactly when this matters — in
+// the moment right after the operator picks Start or Stop, which is the
+// transition the run-state display exists to show. The menu is a
+// prompt-driven loop rather than a render loop: detectState runs once per
+// repaint, immediately after the user pressed Enter, so the worst case is
+// a bounded pause before the menu paints, not a frozen UI.
+//
+// It is bounded tightly because it cannot be assumed to be a loopback
+// dial. validateLoopbackAddress sits in the ELSE branch of the config
+// validator, so a public-mode bridge may carry a routable admin address —
+// and those hosts are firewalled (bridge.ars.md runs ufw), where a DROP
+// rule gives a hang rather than an immediate refusal.
+const menuProbeTimeout = 150 * time.Millisecond
+
+// adminRunningProbe is the seam tests use to drive detectState's run-state
+// without a network. Production code MUST NOT mutate it.
+var adminRunningProbe = probeAdminRunning
+
+// probeAdminRunning reports whether the admin port accepts a connection.
+//
+// Deliberately a bare TCP connect, not an HTTP request: the question is
+// "is a process holding this socket", and a bridge that is up but slow to
+// answer (mid-scan, cold page cache) must not read as stopped.
+func probeAdminRunning(cfgPath string) bool {
+	addr := adminAddrFromCfg(cfgPath)
+	if addr == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), menuProbeTimeout)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", probeLoopbackAddr(addr))
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // menuOption is one row in the rendered menu. The action closure runs
@@ -89,12 +141,21 @@ func optionsFor(s menuState) []menuOption {
 		return opts
 	default:
 		// Initialized AND a service-manager artifact is installed.
+		//
+		// Start is offered UNCONDITIONALLY rather than only when the probe
+		// says stopped. Two reasons: picking Stop previously left no menu
+		// path back up (`bridge start` existed, but nothing in the menu
+		// reached it), and gating rows on the probe would mean a probe that
+		// is wrong — a bridge answering on an address we can't dial —
+		// silently removes the operator's ability to act. The status line
+		// carries the run state; the option list stays complete.
 		return []menuOption{
-			{'1', "Stop service", actStop},
-			{'2', "Restart service", actRestart},
-			{'3', "Open admin console", actOpenAdmin},
-			{'4', "Pair a device", actPair},
-			{'5', "Uninstall service", actUninstall},
+			{'1', "Start service", actStart},
+			{'2', "Stop service", actStop},
+			{'3', "Restart service", actRestart},
+			{'4', "Open admin console", actOpenAdmin},
+			{'5', "Pair a device", actPair},
+			{'6', "Uninstall service", actUninstall},
 			{'Q', "Quit", actQuit},
 		}
 	}
@@ -186,10 +247,28 @@ func writeStatusLine(w io.Writer, s menuState) {
 		svcLabel = paint(cBrightYellow, "● "+s.kind.Description())
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  status: %s   %s\n", initLabel, svcLabel)
+	fmt.Fprintf(w, "  status: %s   %s%s\n", initLabel, svcLabel, runStateSuffix(s))
 	if s.cfgPath != "" {
 		fmt.Fprintf(w, "  config: %s\n", truncateMid(s.cfgPath, frameWidth-12))
 	}
+}
+
+// runStateSuffix renders the third status badge: whether the bridge is
+// actually up, as distinct from installed.
+//
+// Empty before init, when there is no config to resolve an admin address
+// from and "not running" would be noise on a first-run screen. Shown for
+// every initialized state INCLUDING KindNone, because "Start the bridge
+// now (this terminal)" in another window is a real and common way for it
+// to be up without any service installed.
+func runStateSuffix(s menuState) string {
+	if !s.initialized {
+		return ""
+	}
+	if s.running {
+		return "   " + paint(cBrightYellow, "● running")
+	}
+	return "   " + paint(cDim, "○ not running")
 }
 
 // renderOptions paints the `[1] Start the bridge now ...` rows
@@ -474,6 +553,36 @@ func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer,
 	return -1
 }
 
+// actStart routes to packaging.Start and then confirms, rather than
+// asserting, that the service came up.
+//
+// Mirrors actRestart's shape for the same reason it has one: on Windows
+// Startup-folder installs the lifecycle call is "spawn detached", so the
+// new process has not bound its admin socket by the time the call
+// returns, and an unconditional "service started." is a claim the next
+// screen immediately contradicts.
+//
+// packaging.Start is idempotent ("service should be up"), so picking this
+// on an already-running bridge is harmless — which is what lets the menu
+// offer it unconditionally instead of gating on the run-state probe.
+func actStart(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
+	if err := packaging.Start(); err != nil {
+		fmt.Fprintf(stderr, "  start failed: %v\n", err)
+		return -1
+	}
+	addr := adminAddrFromCfg(s.cfgPath)
+	if addr == "" {
+		fmt.Fprintln(stdout, "  service started.")
+		return -1
+	}
+	if waitForListen(addr, 5*time.Second) {
+		fmt.Fprintln(stdout, "  service started.")
+	} else {
+		fmt.Fprintf(stdout, "  start issued, but admin port %s didn't respond within 5s — check the bridge log.\n", addr)
+	}
+	return -1
+}
+
 // actStop / actRestart route to packaging.Stop / Restart.
 func actStop(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, _ menuState) int {
 	if err := packaging.Stop(); err != nil {
@@ -593,6 +702,16 @@ func actOpenAdmin(_ context.Context, _ *bufio.Reader, stdout, _ io.Writer, s men
 		}
 	}
 	fmt.Fprintf(stdout, "  Admin console: %s\n", url)
+	// Don't open a tab that can only say "connection refused". The run
+	// state comes from the same repaint that drew the status line, so the
+	// message the operator sees here agrees with the badge above it.
+	//
+	// This prints the URL first and then declines, so an operator whose
+	// bridge IS up on an address we couldn't dial still has the link.
+	if !s.running {
+		fmt.Fprintln(stdout, "  not opening a browser: nothing is answering there yet — pick \"Start service\" first.")
+		return -1
+	}
 	// Delegate rather than re-implementing the per-OS switch. This copy had
 	// drifted: it invoked `cmd /c start <url>` WITHOUT the empty
 	// window-title argument, so on Windows `start` treated the quoted URL
