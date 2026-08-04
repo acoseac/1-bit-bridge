@@ -6,7 +6,7 @@ toolchain go1.26.5
 
 require (
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
-	github.com/fsnotify/fsnotify v1.10.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/mdns v1.0.6
 	github.com/mewkiz/flac v1.0.13
