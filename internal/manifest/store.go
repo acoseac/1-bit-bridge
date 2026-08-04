@@ -3869,10 +3869,56 @@ func subtreeLikePattern(prefix string) (pattern string, scoped bool) {
 	return likeEscape(base) + `/%`, true
 }
 
-// TrackPaths returns every known track path (sorted). Used by the scanner's
-// "remove tracks deleted from disk" pass.
+// TrackPaths returns every known track path (sorted), INCLUDING rows
+// routed from a UPnP upstream. Used by the scanner's "remove tracks
+// deleted from disk" pass.
+//
+// Including routed rows is load-bearing there and must stay: the
+// deletion pass spares them by looking them up in the routed set, and
+// it can only spare a row it was told to consider. Excluding them here
+// would put every routed row outside the snapshot entirely — which is
+// not "spared", it is invisible, and any future branch that reasons
+// about the snapshot would silently do the wrong thing for 15k rows.
+//
+// Anything that wants "tracks that exist as files on this host" wants
+// TrackPathsLocal instead.
 func (s *Store) TrackPaths(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT path FROM tracks ORDER BY path ASC`)
+	return s.trackPaths(ctx, `SELECT path FROM tracks ORDER BY path ASC`)
+}
+
+// TrackPathsLocal returns every known FILESYSTEM track path (sorted) —
+// TrackPaths minus anything routed from a UPnP upstream.
+//
+// Routed rows describe media on another device. They are real library
+// entries and belong in the manifest, but they have no local file, so
+// any caller that is going to resolve a path to something on disk gets
+// a guaranteed miss for every one of them.
+//
+// The analysis sweep was that caller. On a hybrid library (89 local
+// tracks, 15,283 routed from a Chord 2Go) each hourly sweep ran 15,283
+// futile `ResolveChecked` calls and then reported the misses to the
+// operator, so the Jobs page read `total 15372, missing 13553` beside a
+// coverage block that correctly said `totalLocal 89`. The two numbers
+// came from different queries with different ideas of what the library
+// is; this is that anti-join, so they now agree by construction.
+//
+// The `NOT EXISTS` form (rather than `NOT IN`) matches
+// AnalysisCoverage and the rest of the routed-exclusion sites: today
+// `source_path` is the routing PK and non-null so the two are
+// equivalent, but NOT EXISTS stays correct if that ever changes.
+func (s *Store) TrackPathsLocal(ctx context.Context) ([]string, error) {
+	return s.trackPaths(ctx, `
+		SELECT t.path FROM tracks t
+		WHERE NOT EXISTS (
+			SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path
+		)
+		ORDER BY t.path ASC`)
+}
+
+// trackPaths is the shared scan body for the two path enumerations
+// above. Reads are un-mutexed (WAL handles concurrent readers).
+func (s *Store) trackPaths(ctx context.Context, query string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -6792,8 +6838,17 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 // cmd/bridge/analyze.go — pinned by the lockstep test there).
 type AnalysisCoverage struct {
 	// TotalLocal counts filesystem-backed tracks only — UPnP-routed
-	// rows never resolve on disk and are never analysed (they'd land
-	// in the sweeper's `missing` bucket forever).
+	// rows never resolve on disk and are never analysed.
+	//
+	// The sweeper agrees: it enumerates via Store.TrackPathsLocal,
+	// which carries the same anti-join. It did NOT until that method
+	// existed — it walked every row, so all 15,283 routed tracks on the
+	// hybrid fixture landed in its `missing` bucket on every hourly
+	// tick, and the Jobs page showed `total 15372, missing 13553`
+	// directly beside this field reading 89. Keep the two enumerations
+	// on the same predicate: they are rendered side by side, so a
+	// divergence here is not a subtle inconsistency, it is one panel
+	// contradicting the other.
 	TotalLocal int
 	// DSDExcluded: .dsf/.dff sources — sox can't decode 1-bit DSD, so
 	// these are permanently out of scope, not a backlog.
