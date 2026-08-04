@@ -3641,3 +3641,35 @@ ul.histogram li {
  * two-up cards don't crowd their values. */
 .jobs-page .job-card dl { grid-template-columns: 130px 1fr; }
 .jobs-page .job-card .dist-section { margin: 4px 0 12px; }
+
+/* Enrichment misses drill-down (dashboard "Which tracks?").
+ *
+ * Track paths are long and must not force the page to scroll sideways,
+ * so the list scrolls in its own box — the same rule the wide-content
+ * elements elsewhere follow. */
+.enrich-miss-facet {
+  border-top: 1px solid var(--border);
+  padding: 8px 0;
+}
+.enrich-miss-facet > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.enrich-miss-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  max-height: 320px;
+  overflow: auto;
+  font-size: 0.9em;
+}
+.enrich-miss-list li {
+  /* Paths break at separators rather than mid-word, so a long one stays
+   * readable instead of becoming a wall of characters. */
+  overflow-wrap: anywhere;
+  margin-bottom: 2px;
+}
+.enrich-miss-reasons {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
