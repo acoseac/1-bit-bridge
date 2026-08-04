@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
@@ -222,12 +224,18 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 				_ = host
 				d.AdminPort = port
 			}
-			// Pidfile convention mirrors the default-install recipe in
-			// CLAUDE.md: `<dataDir>/../server.pid` or `<dataDir>/bridge.pid`.
-			// Neither is created by `bridge serve` today (issue for
-			// PR-2), so the file is usually absent — doctor then skips
-			// the "is it us?" branch and any port bind is a fail. Leave
-			// the path set so a future pidfile lands it in the check.
+			// `bridge serve` writes this file while it runs
+			// (writeServerPIDFile, keyed off the same DataDir), so on a
+			// live install the "is it us?" branch resolves. It is absent
+			// when the bridge is stopped, which is the correct time for a
+			// bound port to read as someone else's.
+			//
+			// NOTE: attribution can still fail on a binary granted
+			// cap_net_bind_service — dumpable=0 denies port→pid lookup to
+			// an unprivileged observer — which is why checkPort degrades
+			// to Warn on a live pid and consults /proc/net/tcp on Linux.
+			// The in-process caller sidesteps all of that via
+			// Deps.OwnedPorts.
 			d.OwnPIDFile = filepath.Join(cfg.DataDir, "server.pid")
 		}
 	}
@@ -319,3 +327,60 @@ func ensureDoctorClean(w io.Writer, d doctor.Deps) int {
 // `bridge doctor` uses os.Stdin but never reads; keep the signature
 // consistent with the other cmds for testability.
 var _ = os.Stdin
+
+// adminDoctorRunner returns the closure admin.Deps.DoctorRun is wired
+// with, so the console runs the SAME checks as `bridge doctor` from the
+// SAME Deps assembly. Duplicating buildDoctorDeps in internal/admin would
+// give the two surfaces separate notions of what to check, and the one
+// that drifts is the one nobody runs from a shell.
+//
+// ownedPorts are the ports THIS process bound. Passing them lets the
+// port checks be answered from knowledge instead of deduced from a bind
+// probe — which is not merely faster: in-process the probe can only
+// fail, because the port really is in use, by us.
+func adminDoctorRunner(cfgPath string, ownedPorts []int) func(context.Context) *admin.DoctorReport {
+	return func(_ context.Context) *admin.DoctorReport {
+		d := buildDoctorDeps(cfgPath)
+		d.OwnedPorts = ownedPorts
+		rep := doctor.Run(d)
+		out := &admin.DoctorReport{
+			Checks: make([]admin.DoctorCheck, 0, len(rep.Checks)),
+			OK:     rep.OKCount(),
+			Warn:   rep.WarnCount(),
+			Fail:   rep.FailCount(),
+		}
+		for _, c := range rep.Checks {
+			out.Checks = append(out.Checks, admin.DoctorCheck{
+				Name:    c.Name,
+				Status:  string(c.Status),
+				Summary: c.Summary,
+				Hint:    c.Hint,
+			})
+		}
+		return out
+	}
+}
+
+// ownedListenPorts returns the TCP ports this serve process binds, for
+// doctor.Deps.OwnedPorts.
+//
+// Derived from the config the running server was started with rather than
+// from the listeners themselves: the two agree by construction (runServe
+// binds these very addresses and fails to start otherwise), and reaching
+// into the live listeners would mean threading them through the admin
+// wiring for a diagnostic.
+//
+// A port that failed to parse is simply omitted — the check then falls
+// back to the normal probe path, which is the correct degradation.
+func ownedListenPorts(cfg *config.Config) []int {
+	if cfg == nil {
+		return nil
+	}
+	var out []int
+	for _, addr := range []string{cfg.ListenAddress, cfg.AdminAddress} {
+		if _, port, ok := splitHostPort(addr); ok {
+			out = append(out, port)
+		}
+	}
+	return out
+}

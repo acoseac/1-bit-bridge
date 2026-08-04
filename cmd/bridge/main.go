@@ -3069,7 +3069,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		AnalysisActive: func() bool { return analysisActive },
 		// Analysis pool + sweeper surfaces (nil when the feature is off —
 		// the admin then omits the fields, mirroring the upscale tile).
-		AnalysisPoolStats:     analysisPoolStatsClosure(analysisPool),
+		AnalysisPoolStats: analysisPoolStatsClosure(analysisPool),
+		// Ports this process bound, so the console's preflight answers
+		// the port checks from knowledge rather than a bind probe that
+		// can only fail against our own listeners.
+		DoctorRun:             adminDoctorRunner(absCfgPath, ownedListenPorts(cfg)),
 		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
 		TriggerAnalysisSweep:  nudgeTriggerClosure(analysisNudge),
 		AnalysisSchemaVersion: analyze.WaveformSchemaVersion,

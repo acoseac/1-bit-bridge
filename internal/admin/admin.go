@@ -258,6 +258,21 @@ type Deps struct {
 	// next due). Ephemeral "since process start" state recorded by
 	// cmd/bridge's sweepStatus; nil-safe — absent omits the `sweep`
 	// field.
+	// DoctorRun executes the preflight checks and returns the report,
+	// wired by cmd/bridge so internal/admin needs no dependency on
+	// internal/doctor and the Deps assembly (config paths, roots, ports,
+	// feature flags) lives in ONE place instead of being duplicated here
+	// where it would drift from the CLI's.
+	//
+	// The wiring passes the ports this process actually bound, so the port
+	// checks are answered from knowledge rather than deduced from a bind
+	// probe — which is both faster and immune to the capability/dumpable=0
+	// attribution problem that defeats every unprivileged probe.
+	//
+	// Nil disables the console's doctor panel (the handler says so rather
+	// than erroring).
+	DoctorRun func(ctx context.Context) *DoctorReport
+
 	AnalysisSweep func() *AnalysisSweepState
 
 	// TriggerAnalysisSweep queues an out-of-band auto-analysis sweep by
@@ -1118,6 +1133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/analysis/sweep", s.apiAnalysisSweep)
 	mux.HandleFunc("GET /api/jobs", s.apiJobs)
 	mux.HandleFunc("GET /api/diagnostics", s.apiDiagnostics)
+	mux.HandleFunc("GET /api/doctor", s.apiDoctor)
 	mux.HandleFunc("POST /api/fingerprint/sweep", s.apiFingerprintSweep)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)

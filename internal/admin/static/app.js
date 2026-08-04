@@ -6828,6 +6828,97 @@ function renderLogEventCounts(counts) {
   }
 }
 
+// ---- Preflight (doctor) panel on the Diagnostics page ----
+
+// runDoctor executes the preflight checks and paints the result.
+//
+// Click-driven only: the checks stat the filesystem and may exec sox /
+// fpcalc, so polling them would turn a diagnostic into a load source.
+async function runDoctor() {
+  const btn = document.getElementById("doctor-run");
+  const status = document.getElementById("doctor-status");
+  const results = document.getElementById("doctor-results");
+  if (!status || !results) return;
+  if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
+  status.textContent = "Running checks…";
+  results.replaceChildren();
+  try {
+    const d = await API.get("/api/doctor");
+    if (!d || !d.available) {
+      status.textContent = d?.reason || "Preflight is not available on this bridge.";
+      return;
+    }
+    renderDoctorReport(d.report);
+  } catch (err) {
+    status.textContent = `Couldn't run the checks: ${err.message}`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Run checks"; }
+  }
+}
+
+// renderDoctorReport paints one report. Built with
+// createElement/textContent: summaries and hints carry filesystem paths
+// and upstream error text.
+function renderDoctorReport(report) {
+  const status = document.getElementById("doctor-status");
+  const results = document.getElementById("doctor-results");
+  if (!status || !results) return;
+  const checks = report?.checks || [];
+  results.replaceChildren();
+  if (!checks.length) {
+    status.textContent = "No checks reported.";
+    return;
+  }
+  const fail = report.fail ?? 0;
+  const warn = report.warn ?? 0;
+  // Lead with the verdict, in the operator's terms. "11 ok, 0 warn,
+  // 0 fail" is the CLI footer; saying whether anything needs attention
+  // first means the common case is readable without parsing counts.
+  status.textContent = fail > 0
+    ? `${fail} check${fail === 1 ? "" : "s"} failing — see below.`
+    : warn > 0
+      ? `No failures, ${warn} warning${warn === 1 ? "" : "s"}.`
+      : "All checks passed.";
+
+  const ul = document.createElement("ul");
+  ul.className = "doctor-list";
+  // Worst first: on a report with one failure among a dozen passes, the
+  // failure is the entire reason the operator pressed the button.
+  const rank = { fail: 0, warn: 1, ok: 2 };
+  const ordered = [...checks].sort(
+    (a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
+  );
+  for (const c of ordered) {
+    const li = document.createElement("li");
+    li.className = "doctor-check";
+    li.dataset.status = c.status || "ok";
+
+    const badge = document.createElement("span");
+    badge.className = "doctor-badge";
+    badge.textContent = c.status || "ok";
+    li.appendChild(badge);
+
+    const name = document.createElement("span");
+    name.className = "doctor-name";
+    name.textContent = c.name || "";
+    li.appendChild(name);
+
+    const summary = document.createElement("span");
+    summary.className = "doctor-summary";
+    summary.textContent = c.summary || "";
+    li.appendChild(summary);
+
+    if (c.hint) {
+      const hint = document.createElement("div");
+      hint.className = "doctor-hint";
+      hint.textContent = c.hint;
+      li.appendChild(hint);
+    }
+    ul.appendChild(li);
+  }
+  results.appendChild(ul);
+}
+
 async function loadDiagnostics() {
   try {
     applyDiagnostics(await API.get("/api/diagnostics"));
@@ -6856,6 +6947,11 @@ function initDiagnostics() {
 
   loadDiagnostics();
   start();
+
+  // Preflight is click-driven and never polled — the checks stat the
+  // filesystem and may exec sox / fpcalc.
+  const doctorBtn = document.getElementById("doctor-run");
+  if (doctorBtn) doctorBtn.addEventListener("click", runDoctor);
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
