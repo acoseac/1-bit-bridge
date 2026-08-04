@@ -84,21 +84,23 @@ func (s *Store) StreamTrackMetaRefsUnderPrefix(ctx context.Context, prefix strin
 		       COALESCE(t.artwork_version, '')
 		  FROM tracks t`
 	var args []any
-	// subtreeLikePattern trims a caller-supplied trailing slash before
-	// appending its own, and treats a trims-to-empty prefix as
-	// whole-library. likeEscape (inside it) escapes %, _, AND the escape
-	// char itself, so a folder literally named `Rock \ Metal` can't
-	// produce a broken escape sequence.
+	// subtreeRangeBase trims a caller-supplied trailing slash before the
+	// bounds append their own, and treats a trims-to-empty prefix as
+	// whole-library. The byte-range form needs no LIKE escaping at all:
+	// a folder named `Rock \ Metal`, `100% Hits` or `foo_bar` is bound
+	// as a plain parameter, so there is no pattern metacharacter to
+	// escape and no escape sequence to get wrong.
 	//
 	// Every production caller here already normalises via
 	// normaliseBrowsePath, so the trim is defence in depth — but these
 	// four helpers were the ones missed when the same guard was added
 	// to the store.go prefix family, and the sibling that lacked it is
 	// exactly how the class recurs.
-	if pattern, scoped := subtreeLikePattern(prefix); scoped {
+	if base, scoped := subtreeRangeBase(prefix); scoped {
 		q += `
-		 WHERE t.path LIKE ? ESCAPE '\'`
-		args = append(args, pattern)
+		 WHERE t.path COLLATE BINARY >= ? || '/'
+		   AND t.path COLLATE BINARY < ? || '0'`
+		args = append(args, base, base)
 	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -178,13 +180,13 @@ func (s *Store) ResetEnrichedMissesUnderPrefix(ctx context.Context, prefix strin
 	// Unscoped ("" / "/" / "//") delegates to the library-wide reset —
 	// decided AFTER the trim, so a slash-only prefix can't fall through
 	// to a `LIKE '/%'` that silently resets nothing.
-	pattern, scoped := subtreeLikePattern(prefix)
+	base, scoped := subtreeRangeBase(prefix)
 	if !scoped {
 		return s.ResetEnrichedMisses(ctx)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, resetEnrichedMissesUnderPrefixSQL, pattern)
+	res, err := s.db.ExecContext(ctx, resetEnrichedMissesUnderPrefixSQL, base, base)
 	if err != nil {
 		return 0, err
 	}
@@ -194,17 +196,18 @@ func (s *Store) ResetEnrichedMissesUnderPrefix(ctx context.Context, prefix strin
 // DistinctArtistMBIDsUnderPrefix is the folder-scoped variant of
 // DistinctArtistMBIDs. Read-only; no s.mu.
 func (s *Store) DistinctArtistMBIDsUnderPrefix(ctx context.Context, prefix string) ([]string, error) {
-	pattern, scoped := subtreeLikePattern(prefix)
+	base, scoped := subtreeRangeBase(prefix)
 	if !scoped {
 		return s.DistinctArtistMBIDs(ctx)
 	}
 	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artistMBID')
 		  FROM tracks
-		 WHERE path LIKE ? ESCAPE '\'
+		 WHERE path COLLATE BINARY >= ? || '/'
+		   AND path COLLATE BINARY < ? || '0'
 		   AND json_extract(tags_json, '$.artistMBID') IS NOT NULL
 		   AND json_extract(tags_json, '$.artistMBID') != ''
-	`, pattern))
+	`, base, base))
 }
 
 // DistinctReleaseMBIDsUnderPrefix enumerates the distinct release
@@ -219,7 +222,7 @@ func (s *Store) DistinctReleaseMBIDsUnderPrefix(ctx context.Context, prefix stri
 	// Which one runs is decided AFTER the trim, so "/" and "//" take
 	// the whole-library branch rather than a `LIKE '/%'` that matches
 	// nothing.
-	pattern, scoped := subtreeLikePattern(prefix)
+	base, scoped := subtreeRangeBase(prefix)
 	if !scoped {
 		return collectStringColumn(s.db.QueryContext(ctx, `
 			SELECT DISTINCT json_extract(tags_json, '$.artworkMBID') AS mbid
@@ -238,18 +241,20 @@ func (s *Store) DistinctReleaseMBIDsUnderPrefix(ctx context.Context, prefix stri
 	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artworkMBID') AS mbid
 		  FROM tracks
-		 WHERE path LIKE ? ESCAPE '\'
+		 WHERE path COLLATE BINARY >= ? || '/'
+		   AND path COLLATE BINARY < ? || '0'
 		   AND json_extract(tags_json, '$.artworkMBID') IS NOT NULL
 		   AND json_extract(tags_json, '$.artworkMBID') != ''
 		   AND json_extract(tags_json, '$.artworkMBID') NOT LIKE 'local-%'
 		UNION
 		SELECT DISTINCT json_extract(tags_json, '$.musicBrainzAlbumID') AS mbid
 		  FROM tracks
-		 WHERE path LIKE ? ESCAPE '\'
+		 WHERE path COLLATE BINARY >= ? || '/'
+		   AND path COLLATE BINARY < ? || '0'
 		   AND json_extract(tags_json, '$.musicBrainzAlbumID') IS NOT NULL
 		   AND json_extract(tags_json, '$.musicBrainzAlbumID') != ''
 		   AND json_extract(tags_json, '$.musicBrainzAlbumID') NOT LIKE 'local-%'
-	`, pattern, pattern))
+	`, base, base, base, base))
 }
 
 // ResetBookletChecks zeroes check_attempts for the NOT-yet-available

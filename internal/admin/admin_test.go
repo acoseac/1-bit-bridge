@@ -334,6 +334,69 @@ func TestRootsAddDuplicateBasename(t *testing.T) {
 	}
 }
 
+// TestRootsRemoveRefusesCaseTwinBasename pins the guard on the destructive
+// branch of remove-root.
+//
+// Track paths are keyed by library-root BASENAME, and this handler prunes
+// them with DeleteTracksByPrefix(basename + "/") — which also enumerates
+// and UNLINKS the matching variant and waveform sidecars from disk. When
+// two roots' basenames differ only by case the removal target is genuinely
+// ambiguous, and the delete predicate used to resolve that ambiguity by
+// folding case: it took both roots' rows and both roots' files.
+//
+// ValidateRoots now refuses that configuration up front, so the pair can
+// only arrive via a bridge.yaml written before that landed or hand-edited
+// since — which is exactly when a destructive path should refuse rather
+// than guess. The CLI's offline `library remove` has carried an equivalent
+// guard since PR #82; this handler never did.
+//
+// The two colliding roots live under DIFFERENT parents so both exist as
+// real, distinct directories even on a case-insensitive filesystem — the
+// collision under test is between the BASENAMES, not the volumes.
+//
+// THREE roots, deliberately. With exactly two, removing either one takes
+// the collapse branch — multi-root → single-root flips the stored path
+// form, so the handler runs WipeFilesystemTracks and rescans, which
+// doesn't select by basename and so can't be ambiguous. The prefix delete
+// this guard protects is only reachable when the removal leaves two or
+// more roots behind.
+func TestRootsRemoveRefusesCaseTwinBasename(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// Inject the case-twin pair directly: apiRootsAdd would (correctly)
+	// reject it now, and the scenario being defended is a config that
+	// bypassed the API in the first place.
+	base := filepath.Dir(cfg.DataDir)
+	twin := filepath.Join(base, "other", "music")   // collides with the fixture's "Music"
+	third := filepath.Join(base, "third", "Spoken") // keeps the removal off the collapse branch
+	for _, d := range []string{twin, third} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roots := append([]string(nil), srv.deps.Scanner.Roots()...)
+	roots = append(roots, twin, third)
+	srv.deps.Scanner.SetRoots(roots)
+	if err := srv.deps.CfgHolder.Update(cfg.DataDir+"/../bridge.yaml", func(next *config.Config) error {
+		next.LibraryRoots = roots
+		return nil
+	}); err != nil {
+		t.Fatalf("inject roots: %v", err)
+	}
+
+	// Removing either of the pair must be refused, not guessed at.
+	code := doJSON(t, h, "DELETE", "/api/roots", map[string]string{"path": twin}, nil)
+	if code != http.StatusConflict {
+		t.Errorf("remove case-twin root: got %d, want 409 — an ambiguous destructive "+
+			"removal must be refused, not resolved by folding case", code)
+	}
+	// And nothing was removed.
+	if got := len(srv.deps.Scanner.Roots()); got != len(roots) {
+		t.Errorf("roots changed despite the refusal: %d, want %d", got, len(roots))
+	}
+}
+
 func TestRootsRemoveLastRejected(t *testing.T) {
 	srv, cfg, _ := newTestServer(t)
 	code := doJSON(t, srv.Handler(), "DELETE", "/api/roots",
