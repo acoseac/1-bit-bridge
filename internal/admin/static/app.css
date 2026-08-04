@@ -3612,3 +3612,32 @@ ul.histogram li {
   line-height: 1.5;
 }
 .smartmix-tracks li { padding: 0.05rem 0; }
+
+/* --- Jobs page: background-activity card grid --- */
+/* Two columns on wide screens, stacked on narrow. The gap replaces the
+ * panels' own bottom margin inside the grid so rows stay even. */
+.jobs-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+.jobs-cards .panel { margin-bottom: 0; }
+@media (min-width: 980px) {
+  .jobs-cards { grid-template-columns: 1fr 1fr; }
+}
+.jobs-page .job-card .panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.jobs-page .job-card .panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* Card dl rows: slightly tighter label column than the global 150px so
+ * two-up cards don't crowd their values. */
+.jobs-page .job-card dl { grid-template-columns: 130px 1fr; }
+.jobs-page .job-card .dist-section { margin: 4px 0 12px; }

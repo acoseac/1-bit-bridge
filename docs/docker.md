@@ -204,6 +204,8 @@ defaults. Empty / unset env = no change.
 | `BRIDGE_LIBRARY_ROOTS` | `libraryRoots` | Colon-separated list. Example: `/library:/library2`. |
 | `BRIDGE_UPSCALE_ENABLED` | `upscale.enabled` | `true`/`false`. Enables offline PCM upscaling + CarPlay-optimize. Uses the bundled audio toolchain — see [Audio features](#audio-features-upscale--analysis). |
 | `BRIDGE_ANALYSIS_ENABLED` | `analysis.enabled` | `true`/`false`. Enables waveform / loudness / key-tempo analysis. Same toolchain. |
+| `BRIDGE_FINGERPRINT_ENABLED` | `fingerprint.enabled` | `true`/`false`. Enables the acoustic-fingerprinting fallback for tracks whose tags are too poor to match on text. Needs `ACOUSTID_API_KEY` as well. |
+| `ACOUSTID_API_KEY` | `fingerprint.apiKey` | Free application key from [acoustid.org/new-application](https://acoustid.org/new-application). Secret — keep it out of version control. |
 | `BRIDGE_MUSICBRAINZ_BASE_URL` | `enrich.musicBrainzBaseURL` | Advanced. Point enrichment at a self-hosted Atlas metadata service instead of public MusicBrainz. Set together with the CoverArt override below. |
 | `BRIDGE_COVERART_BASE_URL` | `enrich.coverArtBaseURL` | Advanced. Cover-art source base URL; pair it with the MusicBrainz override above. |
 
@@ -251,19 +253,27 @@ volumes:
   bridge-state:
 ```
 
-## Audio features (upscale + analysis)
+## Audio features (upscale + analysis + fingerprinting)
 
 As of **v0.1.8** the image bundles the audio toolchain — `sox`,
-`ffmpeg`, and `ffprobe` — so the optional **offline upscaling /
-CarPlay-optimize** and **audio-analysis** (waveform, loudness,
-key/tempo) features work inside the container. Both are **off by
-default** and cost nothing until enabled. Bundling `ffmpeg` pushes the
+`ffmpeg`, `ffprobe`, and `fpcalc` — so the optional **offline upscaling /
+CarPlay-optimize**, **audio-analysis** (waveform, loudness,
+key/tempo), and **acoustic fingerprinting** features work inside the
+container. All are **off by default** and cost nothing until enabled. Bundling `ffmpeg` pushes the
 image to roughly **260 MB** (it dominates the size) — the deliberate
 trade for in-container audio processing.
 
 > There's no on-the-fly transcoding: the bridge pre-converts to FLAC
 > sidecars offline and serves them bit-exact, the same as any other
 > file. See [PROTOCOL.md](../PROTOCOL.md).
+
+**Fingerprinting needs one extra thing beyond the toggle:** a free AcoustID
+application key, from [acoustid.org/new-application](https://acoustid.org/new-application).
+The bridge ships no built-in key on purpose — a key embedded in an open-source
+binary is shared by every install, which is how it gets rate-limited and then
+revoked for everyone. Enabling the feature without a key is not an error: the
+bridge boots normally and disables it with one line in the log. Run
+`bridge doctor` to see the `fingerprint-toolchain` check say so plainly.
 
 ### Enabling
 

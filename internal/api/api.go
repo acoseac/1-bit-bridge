@@ -1546,6 +1546,16 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.smartPlaylistStore != nil {
 		feats = append(feats, "smartPlaylists")
 	}
+	// `trackQuality` advertises the wf4 quality scalars —
+	// Track.truePeakDB (48 kHz-rendering true peak), Track.drScore
+	// (community DR), Track.audioMD5State (FLAC audio-checksum
+	// verification). Same analysis-active gate as `waveform`; iOS treats
+	// field absence as absence either way (additive), the flag exists
+	// for discoverability. Alpha-sorted between `smartPlaylists` and
+	// `upscaleCompleteEvents` (s < t < u).
+	if s.analysisEnabled {
+		feats = append(feats, "trackQuality")
+	}
 	if s.upscaleEnabled {
 		feats = append(feats, "upscaleCompleteEvents")
 	}

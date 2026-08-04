@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 )
 
 // TestPlatformCheck — we only ship darwin/linux/windows × amd64/arm64.
@@ -324,7 +327,7 @@ func TestRun_FullReportShape(t *testing.T) {
 		"platform", "config-dir", "tls-cert",
 		"port-api", "port-admin",
 		"library-roots", "service-manager", "browser-opener",
-		"inotify-watch-limit", "audio-toolchain",
+		"inotify-watch-limit", "audio-toolchain", "fingerprint-toolchain",
 	}
 	if len(r.Checks) != len(wantNames) {
 		t.Fatalf("check count: got %d, want %d", len(r.Checks), len(wantNames))
@@ -348,4 +351,50 @@ func mustFreePort(t *testing.T) int {
 	port := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
 	return port
+}
+
+// TestCheckFingerprintToolchain covers the three states an operator can be in.
+//
+// The middle one is the reason this check exists: fpcalc present but no
+// AcoustID key is a SILENT failure. The feature degrades to off at startup
+// with one stderr line that scrolls away, so without a doctor entry the only
+// symptom is that fingerprinting never resolves anything — with nothing
+// anywhere saying why.
+func TestCheckFingerprintToolchain(t *testing.T) {
+	t.Run("disabled is a no-op", func(t *testing.T) {
+		c := checkFingerprintToolchain(Deps{FingerprintEnabled: false})
+		if c.Status != OK {
+			t.Fatalf("status = %v, want OK — a host that will never fingerprint must not be nagged", c.Status)
+		}
+		if !strings.Contains(c.Summary, "not enabled") {
+			t.Errorf("summary = %q", c.Summary)
+		}
+	})
+
+	t.Run("enabled without a key fails with a pointer to the fix", func(t *testing.T) {
+		if _, err := acoustid.Probe(context.Background()); err != nil {
+			t.Skip("fpcalc not installed; this case needs a working binary to reach the key check")
+		}
+		c := checkFingerprintToolchain(Deps{FingerprintEnabled: true, FingerprintHasAPIKey: false})
+		if c.Status != Fail {
+			t.Fatalf("status = %v, want Fail", c.Status)
+		}
+		if !strings.Contains(c.Hint, "acoustid.org/new-application") {
+			t.Errorf("hint must say where to get a key, got %q", c.Hint)
+		}
+		// The report gets pasted into issues; it must never carry the key.
+		if strings.Contains(c.Summary+c.Hint, "ACOUSTID_API_KEY=") {
+			t.Error("the check must not echo a key value")
+		}
+	})
+
+	t.Run("enabled with everything present passes", func(t *testing.T) {
+		if _, err := acoustid.Probe(context.Background()); err != nil {
+			t.Skip("fpcalc not installed")
+		}
+		c := checkFingerprintToolchain(Deps{FingerprintEnabled: true, FingerprintHasAPIKey: true})
+		if c.Status != OK {
+			t.Fatalf("status = %v, want OK: %s / %s", c.Status, c.Summary, c.Hint)
+		}
+	})
 }

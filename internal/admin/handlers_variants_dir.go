@@ -111,6 +111,13 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 				"variants directory must be an absolute path")
 			return
 		}
+		// Canonicalise, matching what config.resolvePaths does to this
+		// field on the Load() path. filepath.IsAbs accepts a trailing
+		// separator, and an uncleaned value flows straight into
+		// JobSpec.OutputDir — where it defeated the sox-stderr path
+		// redaction (the search string gained a doubled separator that
+		// never matched the Join-built sidecar path).
+		req.Path = filepath.Clean(req.Path)
 		cfg := s.deps.CfgHolder.Load()
 		if err := assertNotUnderLibraryRoots(req.Path, cfg.LibraryRoots); err != nil {
 			writeError(w, http.StatusBadRequest, "under-library-root", err.Error())

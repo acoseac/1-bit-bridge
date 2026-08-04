@@ -43,10 +43,15 @@ services:
       # e.g. BRIDGE_LIBRARY_ROOTS=/library:/library2.
       BRIDGE_LIBRARY_ROOTS: "${BRIDGE_LIBRARY_ROOTS:-/library}"
       BRIDGE_LIBRARY_NAME: "${BRIDGE_LIBRARY_NAME:-1-bit Library}"
-      # Optional audio features (bundled sox + ffmpeg toolchain). Off by default;
-      # they cost nothing until enabled. See docs/docker.md → "Audio features".
+      # Optional audio features (bundled sox + ffmpeg + fpcalc toolchain). Off
+      # by default; they cost nothing until enabled. See docs/docker.md →
+      # "Audio features".
       BRIDGE_UPSCALE_ENABLED: "${BRIDGE_UPSCALE_ENABLED:-false}"
       BRIDGE_ANALYSIS_ENABLED: "${BRIDGE_ANALYSIS_ENABLED:-false}"
+      # Acoustic fingerprinting also needs a free AcoustID application key;
+      # enabling it without one degrades to off with a line in the log.
+      BRIDGE_FINGERPRINT_ENABLED: "${BRIDGE_FINGERPRINT_ENABLED:-false}"
+      ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"
       # Set true to disable HTTP/3 entirely (also drop the /udp port above).
       BRIDGE_DISABLE_HTTP3: "${BRIDGE_DISABLE_HTTP3:-false}"
       # Local timezone for the auto-updater quiet-hours window.

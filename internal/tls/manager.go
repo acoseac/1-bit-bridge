@@ -372,9 +372,23 @@ func (m *Manager) FingerprintForServerName(serverName string) string {
 
 	// (2) Tailscale magic-DNS → the loaded LE cert (the leaf Get serves
 	// for that SNI).
+	//
+	// The EXPIRY GATE mirrors Get's: Get falls back to the self-signed
+	// cert once the Tailscale leaf is past NotAfter, so advertising the
+	// expired leaf's fingerprint here would bake a pin into the pairing
+	// QR that the listener never presents — the device captures the
+	// self-signed cert, compares it to the advertised value, and the
+	// join fails the pin check. This branch reads the STORED cert
+	// rather than delegating to Get (see the docblock above for why the
+	// autocert branch must not delegate), so the freshness check has to
+	// be restated rather than inherited.
 	if m.sniMatchesTailscale(sni) {
-		if fp := fingerprintLeaf(m.tailscaleCert.Load()); fp != "" {
-			return fp
+		if leCert := m.tailscaleCert.Load(); leCert != nil {
+			if notAfter, err := CertNotAfter(leCert); err == nil && !time.Now().After(notAfter) {
+				if fp := fingerprintLeaf(leCert); fp != "" {
+					return fp
+				}
+			}
 		}
 	}
 

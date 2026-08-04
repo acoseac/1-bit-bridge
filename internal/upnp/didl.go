@@ -274,7 +274,7 @@ func parseDIDL(didl string) (BrowseResult, error) {
 			Genre:       strings.TrimSpace(it.Genre),
 			Class:       strings.TrimSpace(it.Class),
 			Date:        strings.TrimSpace(it.Date),
-			TrackNumber: atoiOr(it.TrackNumber, 0),
+			TrackNumber: atoiTrackNumber(it.TrackNumber, 0),
 			AlbumArtURI: strings.TrimSpace(it.AlbumArtURI),
 		}
 		if r, ok := pickAudioRes(it.Res); ok {
@@ -342,6 +342,31 @@ func pickAudioRes(res []didlRes) (didlRes, bool) {
 
 func atoiOr(s string, def int) int {
 	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return v
+	}
+	return def
+}
+
+// atoiTrackNumber parses `upnp:originalTrackNumber`, tolerating the
+// non-conformant "N/M" form some third-party servers emit.
+//
+// The spec types this element as xsd:int and our own DIDL writer emits a bare
+// %d, as does MiniDLNA — so this is defence against an arbitrary upstream, not
+// a bug in anything we produce. But `strconv.Atoi("5/12")` fails, and atoiOr's
+// zero default then silently strips a perfectly good track number: the ingest
+// leaves Track.TrackNumber nil and the walker drops its "%02d - " filename
+// prefix.
+//
+// Deliberately NOT folded into atoiOr. Its other call sites are
+// NumberReturned / TotalMatches / ChildCount / sampleFrequency /
+// bitsPerSample / nrAudioChannels, where a '/' is genuinely malformed and
+// should stay a parse failure rather than being silently truncated.
+func atoiTrackNumber(s string, def int) int {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	if v, err := strconv.Atoi(s); err == nil {
 		return v
 	}
 	return def

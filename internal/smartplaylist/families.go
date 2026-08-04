@@ -305,13 +305,38 @@ func discoveryCandidates(familiar, pool []TrackFeature, played map[string]bool) 
 	return cands
 }
 
+// unknownBPMPenaltyFraction is what an unanalysed track "costs" in the
+// discovery ranking, as a fraction of the familiar set's median BPM.
+//
+// A nil BPM used to add nothing. Since the caller sorts ASCENDING with
+// no threshold, that scored an unanalysed track 0.0 — a PERFECT match,
+// unbeatable by any real BPM-bearing candidate (which scores
+// |bpm − median|, > 0 for anything not exactly at the median). So the
+// tracks promoted to the front of the discovery pool were precisely the
+// ones analysis had failed on, which inverts the intent.
+//
+// Half the median makes an unknown BPM rank like an average-distance
+// match: still present in the mix, never crowding out close ones. The
+// genre penalty (100) still dominates, so this only reorders WITHIN a
+// genre — which is the ordering this function exists to produce.
+const unknownBPMPenaltyFraction = 0.5
+
 func discoveryScore(f TrackFeature, domGenre string, medBPM float64) float64 {
 	score := 0.0
 	if domGenre != "" && f.Genre != domGenre {
 		score += 100 // genre mismatch penalised, but not excluded
 	}
-	if medBPM > 0 && f.BPM != nil {
-		score += math.Abs(float64(*f.BPM) - medBPM)
+	if medBPM > 0 {
+		// `*f.BPM > 0` matches medianBPM's own filter: a non-positive
+		// BPM is an extraction artefact, not a real tempo. Without the
+		// bound, a stored 0 scored |0 − median| — the FULL median as a
+		// penalty, worse than the honest "unknown" charge below, purely
+		// because the analyser wrote a placeholder instead of nothing.
+		if f.BPM != nil && *f.BPM > 0 {
+			score += math.Abs(float64(*f.BPM) - medBPM)
+		} else {
+			score += medBPM * unknownBPMPenaltyFraction
+		}
 	}
 	return score
 }
