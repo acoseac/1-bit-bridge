@@ -18,9 +18,14 @@ name: gate
 # GOTOOLCHAIN=local (it broke the first v0.1.7 image).
 #
 # A fifth job, `cross-platform`, runs the suite natively on Windows and
-# macOS. It is deliberately outside the `gate` fan-in and marked
-# continue-on-error for now — see its own comment for why and for what
-# has to happen before it is promoted.
+# macOS, and is part of the `gate` fan-in like the rest.
+#
+# It landed outside the fan-in and continue-on-error, because Windows had
+# 30 pre-existing failures the moment it was first run — the largest test
+# package had literally never been built for that platform. Those are
+# fixed (#624, #626, #629) and Windows is green, so it counts now. A
+# regression there is a real failure, not a footnote: both live bridges
+# this project deploys to are non-macOS, one of them Windows.
 #
 # Cache: each job manages its own Go cache explicitly via actions/cache
 # rather than setup-go's built-in `cache: true`. The built-in cache keys
@@ -159,11 +164,21 @@ jobs:
   # `%` escaping). Windows is a target platform and one of the two live
   # production bridges.
   #
-  # DELIBERATELY NOT in the `gate` fan-in below, and `continue-on-error`,
-  # while the first-run backlog is triaged: these jobs are EXPECTED to be
-  # red initially and that must not block unrelated PRs. Once green,
-  # promote them — add to `needs:` + the result check, drop
-  # continue-on-error. Until then a red X here is informational.
+  # PART OF THE `gate` FAN-IN. It was deliberately outside it, and
+  # continue-on-error, for its first few days: the very first run found
+  # 30 failures, which had to be triaged without blocking unrelated PRs.
+  #
+  # That backlog is closed. #624 made the `manifest` test binary compile
+  # for Windows at all (five fixture helpers had been stranded behind a
+  # `//go:build !windows` file since #606, so the largest test package —
+  # 21.6k lines — had never been built there). #626 fixed ~21
+  # POSIX-assuming fixtures. #629 closed the last of it: 26 leaked FLAC
+  # handles from a fixture writer plus four unclosed stores, and one test
+  # asserting a POSIX-absolute path.
+  #
+  # A red X here is now a real failure. Both live bridges this project
+  # deploys to are non-macOS and one of them is Windows, so a regression
+  # on this matrix is closer to production than the Linux jobs are.
   #
   # `go vet` / `go test` directly rather than the `make` targets the
   # Linux jobs use: the Makefile's recipes assume a POSIX shell and
@@ -175,8 +190,6 @@ jobs:
   cross-platform:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # See the block comment above — remove once this matrix is green.
-    continue-on-error: true
     # 60, not 30: the per-package `go test -timeout 30m` below has to be
     # able to actually reach its ceiling on more than one slow package
     # without the job being killed out from under it first. A job killed
@@ -291,7 +304,7 @@ jobs:
   # comment above; it joins here once its first-run backlog is cleared.
   gate:
     name: gate
-    needs: [vet, test, build-all, go-version]
+    needs: [vet, test, build-all, go-version, cross-platform]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
@@ -301,8 +314,9 @@ jobs:
           if [ "${{ needs.vet.result }}" != "success" ] \
             || [ "${{ needs.test.result }}" != "success" ] \
             || [ "${{ needs.build-all.result }}" != "success" ] \
-            || [ "${{ needs.go-version.result }}" != "success" ]; then
-            echo "::error::gate failed (vet=${{ needs.vet.result }} test=${{ needs.test.result }} build-all=${{ needs.build-all.result }} go-version=${{ needs.go-version.result }})"
+            || [ "${{ needs.go-version.result }}" != "success" ] \
+            || [ "${{ needs.cross-platform.result }}" != "success" ]; then
+            echo "::error::gate failed (vet=${{ needs.vet.result }} test=${{ needs.test.result }} build-all=${{ needs.build-all.result }} go-version=${{ needs.go-version.result }} cross-platform=${{ needs.cross-platform.result }})"
             exit 1
           fi
-          echo "gate passed: vet, test -race, build-all, go-version all green"
+          echo "gate passed: vet, test -race, build-all, go-version, cross-platform all green"
