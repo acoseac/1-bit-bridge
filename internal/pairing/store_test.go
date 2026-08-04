@@ -1265,3 +1265,27 @@ func TestDeleteApprovedNeverPolledLogsOrphan(t *testing.T) {
 		t.Errorf("Poll after orphan Delete: err = %v, want ErrNotFound", err)
 	}
 }
+
+// CreateRequest must refuse after Close. Every other path either works on
+// a row that already exists — whose timer Close stopped — or is a timer
+// callback that no-ops on the same flag; CreateRequest is the one that
+// arms a timer from scratch, and it did so unconditionally.
+//
+// Reachable because Close and the HTTP listener shut down concurrently:
+// a POST already past the handler's entry can land in CreateRequest
+// after Close has taken and released the mutex, leaving an AfterFunc
+// running against a store whose other timers were just stopped.
+func TestCreateRequestRefusesAfterClose(t *testing.T) {
+	s := quickStore(t, time.Hour, time.Hour, nil)
+	_, hashHex := makePollPair(t, "a")
+	s.Close()
+
+	_, err := s.CreateRequest("Phone", "1.4.0", hashHex, "10.0.0.1", "FP", "")
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("CreateRequest after Close = %v, want ErrClosed — a request "+
+			"created during shutdown arms a timer that outlives the store", err)
+	}
+	if n := len(s.List()); n != 0 {
+		t.Errorf("store holds %d requests after a refused create, want 0", n)
+	}
+}

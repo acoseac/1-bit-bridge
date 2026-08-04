@@ -357,6 +357,11 @@ var (
 	// the handler should map it to 503 + retry-later. Branchable via
 	// errors.Is so the HTTP layer can route it without string matching.
 	ErrIDCollisionCap = errors.New("pairing: request ID collision retry limit exceeded")
+	// ErrClosed signals the store has been Closed. Only CreateRequest
+	// returns it: every other path either operates on a row that already
+	// exists (and whose timer Close already stopped) or is a timer
+	// callback, which no-ops via the same flag.
+	ErrClosed = errors.New("pairing: store is closed")
 )
 
 // MintFunc is the Approve callback that creates the bearer token. The
@@ -386,6 +391,22 @@ func (s *Store) CreateRequest(deviceName, clientVersion, pollSecretHashHex, sour
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Refuse after Close, for the reason stated on the `closed` field:
+	// nothing may arm a timer that outlives Close. onTimer and
+	// scheduleTimer both gate on this already; CreateRequest is the one
+	// path that arms a timer from scratch and did not, so a request
+	// created during shutdown left an AfterFunc running against a store
+	// whose other timers had just been stopped — a bounded leak, and a
+	// callback firing into a store the process is finished with.
+	//
+	// Reachable because Close and the HTTP listener shut down
+	// concurrently: a POST /v1/pairing/requests already past the
+	// handler's entry can land here after Close has taken and released
+	// the mutex.
+	if s.closed {
+		return Request{}, ErrClosed
+	}
 
 	pending := 0
 	for _, r := range s.byID {

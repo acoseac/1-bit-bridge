@@ -72,9 +72,14 @@ func TestCacheKeyIncludesFileVersion(t *testing.T) {
 	}
 }
 
-// TestCacheEvictionKeepsBothMapsConsistent — eviction resets both indexes, so
-// a path can never survive its key. A leftover byPath entry would let the
+// TestCacheEvictionKeepsBothMapsConsistent — the two indexes move
+// together. A byPath entry outliving its byKey entry would let the
 // enricher act on a verdict the sweeper believes it has forgotten.
+//
+// Overflow DEMOTES rather than discards (see Set), so "together" now
+// means both are demoted, not both dropped — and Get / LookupPath both
+// read through to the demoted generation, so neither side can see a
+// state the other cannot.
 func TestCacheEvictionKeepsBothMapsConsistent(t *testing.T) {
 	const cap = 4
 	c := NewCache(cap)
@@ -86,19 +91,78 @@ func TestCacheEvictionKeepsBothMapsConsistent(t *testing.T) {
 		t.Fatalf("Len = %d, want %d", c.Len(), cap)
 	}
 
-	// The next write trips eviction.
+	// The next write trips the generation swap.
 	c.Set(Key{Path: "z", Size: 1, MTimeNS: 1}, Outcome{Matched: true, Decision: testDecision("z")})
-	if c.Len() != 1 {
-		t.Fatalf("Len = %d after eviction, want 1", c.Len())
+
+	if _, ok := c.LookupPath("z"); !ok {
+		t.Error("the entry that triggered the swap must survive")
 	}
 	for i := range cap {
 		p := string(rune('a' + i))
-		if _, ok := c.LookupPath(p); ok {
-			t.Errorf("%q survived eviction in byPath — the two indexes must reset together", p)
+		k := Key{Path: p, Size: 1, MTimeNS: 1}
+		_, viaKey := c.Get(k)
+		_, viaPath := c.LookupPath(p)
+		if viaKey != viaPath {
+			t.Errorf("%q: Get=%v but LookupPath=%v — the indexes must agree, "+
+				"or the enricher acts on a verdict the sweeper thinks is gone",
+				p, viaKey, viaPath)
 		}
 	}
-	if _, ok := c.LookupPath("z"); !ok {
-		t.Error("the entry that triggered eviction must survive")
+}
+
+// The generation before the swap must still be READABLE, which is the
+// whole point of demoting instead of resetting.
+//
+// The sweeper writes every verdict and only then calls
+// ResetEnrichedByPaths — its own comment states the ordering ("Cache
+// writes complete before the re-queue") — so the enricher consumes the
+// batch AFTER the sweep that produced it. A reset mid-sweep therefore
+// destroyed exactly the entries with a pending consumer, costing an
+// fpcalc decode plus an AcoustID lookup each to recompute.
+func TestCacheOverflowDemotesInsteadOfDiscarding(t *testing.T) {
+	const cap = 4
+	c := NewCache(cap)
+	for i := range cap {
+		c.Set(Key{Path: string(rune('a' + i)), Size: 1, MTimeNS: 1},
+			Outcome{Matched: true, Decision: testDecision("x")})
+	}
+	c.Set(Key{Path: "z", Size: 1, MTimeNS: 1}, Outcome{Matched: true, Decision: testDecision("z")})
+
+	for i := range cap {
+		p := string(rune('a' + i))
+		if _, ok := c.LookupPath(p); !ok {
+			t.Errorf("%q was discarded by the overflow; it must be demoted and "+
+				"still readable — the enricher has not consumed it yet", p)
+		}
+		if _, ok := c.Get(Key{Path: p, Size: 1, MTimeNS: 1}); !ok {
+			t.Errorf("%q missing from Get after demotion", p)
+		}
+	}
+}
+
+// Memory stays bounded: a second overflow drops the older generation, so
+// retention is at most 2x capacity however long the process runs.
+func TestCacheRetentionIsBoundedAtTwoGenerations(t *testing.T) {
+	const cap = 4
+	c := NewCache(cap)
+	write := func(prefix string) {
+		for i := range cap {
+			c.Set(Key{Path: prefix + string(rune('a'+i)), Size: 1, MTimeNS: 1},
+				Outcome{Matched: true, Decision: testDecision("x")})
+		}
+	}
+	write("g1-")
+	write("g2-") // demotes g1
+	write("g3-") // demotes g2, drops g1
+
+	if _, ok := c.LookupPath("g1-a"); ok {
+		t.Error("generation 1 survived two swaps — retention must stay bounded")
+	}
+	if _, ok := c.LookupPath("g3-a"); !ok {
+		t.Error("the newest generation must be present")
+	}
+	if c.Len() > 2*cap {
+		t.Errorf("Len = %d, want <= %d (two generations)", c.Len(), 2*cap)
 	}
 }
 

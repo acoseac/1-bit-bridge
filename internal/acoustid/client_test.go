@@ -244,13 +244,20 @@ func TestIsTransientPinsClassification(t *testing.T) {
 // TestStatusFromMessageIsAnchored — the fallback path parses the status out of
 // httpError's own stable prefix. It must never read a number that merely
 // appears inside an upstream body.
-func TestStatusFromMessageIsAnchored(t *testing.T) {
+// The name matters here: this pins PREFIX QUALIFICATION, not positional
+// anchoring. Its previous name ("...IsAnchored") plus a docblock
+// claiming HasPrefix sent a review pass at replacing strings.Index with
+// strings.HasPrefix — which would break the wrapped-error case below,
+// the shape most real callers produce.
+func TestStatusFromMessageRecognisesWrappedErrors(t *testing.T) {
 	cases := []struct {
 		msg      string
 		wantCode int
 		wantOK   bool
 	}{
 		{"acoustid: HTTP 503: unavailable", 503, true},
+		// Wrapped by a caller — the prefix is no longer at offset 0.
+		// This is the case HasPrefix would lose.
 		{"lookup failed: acoustid: HTTP 429: slow down", 429, true},
 		{"musicbrainz: HTTP 503: not ours", 0, false},
 		{"upstream returned HTTP 503 in its body", 0, false},
