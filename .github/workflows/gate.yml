@@ -17,6 +17,11 @@ name: gate
 # GO_VERSION in step with go.mod — a stale pair breaks the image build under
 # GOTOOLCHAIN=local (it broke the first v0.1.7 image).
 #
+# A fifth job, `cross-platform`, runs the suite natively on Windows and
+# macOS. It is deliberately outside the `gate` fan-in and marked
+# continue-on-error for now — see its own comment for why and for what
+# has to happen before it is promoted.
+#
 # Cache: each job manages its own Go cache explicitly via actions/cache
 # rather than setup-go's built-in `cache: true`. The built-in cache keys
 # on go.sum alone (stable here) and only SAVES on a miss, so a one-time
@@ -144,9 +149,90 @@ jobs:
       - name: Dockerfile GO_VERSION matches go.mod
         run: make check-go-version
 
+  # Executes the suite on the two platforms `build-all` only ever
+  # CROSS-COMPILES. ~1,600 lines are behind `//go:build windows`
+  # (service install, SCM lifecycle, binary swap, startup launcher,
+  # native port→PID attribution) and have never run anywhere — the two
+  # `//go:build windows` test files in the tree have never been executed
+  # by any machine, and the 2026-07-18 audit found three bugs in that
+  # code by reading alone (B34 stop-timeout, B35 binary-swap window, B50
+  # `%` escaping). Windows is a target platform and one of the two live
+  # production bridges.
+  #
+  # DELIBERATELY NOT in the `gate` fan-in below, and `continue-on-error`,
+  # while the first-run backlog is triaged: these jobs are EXPECTED to be
+  # red initially and that must not block unrelated PRs. Once green,
+  # promote them — add to `needs:` + the result check, drop
+  # continue-on-error. Until then a red X here is informational.
+  #
+  # `go vet` / `go test` directly rather than the `make` targets the
+  # Linux jobs use: the Makefile's recipes assume a POSIX shell and
+  # `nproc`, neither of which the Windows runner provides. `-race` is
+  # deliberately omitted too — on Windows it needs cgo plus a C
+  # toolchain, and this is a pure-Go, cgo-free project (modernc.org/sqlite).
+  # Executing the platform code at all is the point; the race detector
+  # stays on the Linux `test` job above, which is where it is cheap.
+  cross-platform:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # See the block comment above — remove once this matrix is green.
+    continue-on-error: true
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      # One platform's failure must not cancel the other's run: on the
+      # first pass we want the full picture from both, not whichever
+      # broke first.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    defaults:
+      run:
+        # bash on every runner (Git Bash on Windows) so one recipe works
+        # across all three shells.
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      # The Go caches live somewhere different on every platform
+      # (~/.cache/go-build on Linux, ~/Library/Caches/go-build on macOS,
+      # %LOCALAPPDATA%\go-build on Windows), so ask the toolchain instead
+      # of hardcoding the Linux paths the jobs above can safely assume.
+      - name: Resolve Go cache paths
+        id: gocache
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ${{ steps.gocache.outputs.build }}
+            ${{ steps.gocache.outputs.mod }}
+          key: ${{ runner.os }}-gobuild-xplat-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-xplat-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-xplat-
+      # Native vet matters most on Windows: the `unsafeptr` analyzer is
+      # the real check on `doctor_windows.go`'s Syscall6 argument
+      # liveness, and it cannot run from a non-Windows host.
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+
   # Single green signal that fans in the parallel jobs. `if: always()` + the
   # explicit result check means a failed (or cancelled) dependency fails the
   # gate rather than letting a SKIP read as success.
+  #
+  # `cross-platform` is intentionally absent from `needs:` — see its own
+  # comment above; it joins here once its first-run backlog is cleared.
   gate:
     name: gate
     needs: [vet, test, build-all, go-version]
