@@ -173,8 +173,18 @@ func TestFixtureWritersLeaveNoOpenHandle(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "fixture."+tc.name)
 			tc.write(t, path)
 
+			// Budget is deliberately generous — 10s, not the ~500ms a
+			// first draft used (Gemini on PR #629). A leak we hold is
+			// never released, so waiting longer cannot make a real
+			// failure pass; it only removes the chance that a loaded
+			// Windows runner with Defender mid-scan is misread as one.
+			// The cost is asymmetric: a slow success costs the wall
+			// clock ONCE, on a path that normally returns on the first
+			// attempt, while a false failure costs an investigation
+			// into a bug that is not there.
 			var lastErr error
-			for attempt := 1; attempt <= 20; attempt++ {
+			const attempts = 200
+			for attempt := 1; attempt <= attempts; attempt++ {
 				if lastErr = os.Remove(path); lastErr == nil {
 					if attempt > 1 {
 						t.Logf("removable only on attempt %d — an EXTERNAL "+
@@ -184,12 +194,12 @@ func TestFixtureWritersLeaveNoOpenHandle(t *testing.T) {
 					}
 					return
 				}
-				time.Sleep(25 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 			}
-			t.Fatalf("%s fixture still undeletable after 20 attempts (~500ms): %v\n"+
+			t.Fatalf("%s fixture still undeletable after %d attempts (~10s): %v\n"+
 				"the writer leaked a handle — on Windows this surfaces later and "+
 				"far away, as a t.TempDir RemoveAll cleanup failure attributed to "+
-				"whichever test used the fixture", tc.name, lastErr)
+				"whichever test used the fixture", tc.name, attempts, lastErr)
 		})
 	}
 }
