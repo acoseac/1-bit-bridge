@@ -105,6 +105,31 @@ function initDashboard() {
     });
   }
 
+  // Enrichment panel: "Which tracks?" opens the per-facet breakdown.
+  // Fetch happens on the FIRST open only — the endpoint walks the library
+  // with json_extract, so re-fetching on every toggle would make an
+  // expensive query a function of how often someone collapses a panel.
+  // "Retry missing" clears the cached view, since after a re-queue the
+  // old answer is exactly the thing the operator is trying to change.
+  const enrichMissesBtn = document.getElementById("enrich-misses-toggle");
+  const enrichMissesSection = document.getElementById("enrich-misses");
+  let enrichMissesLoaded = false;
+  if (enrichMissesBtn && enrichMissesSection) {
+    enrichMissesBtn.addEventListener("click", async () => {
+      const opening = enrichMissesSection.hidden;
+      enrichMissesSection.hidden = !opening;
+      enrichMissesBtn.setAttribute("aria-expanded", String(opening));
+      enrichMissesBtn.textContent = opening ? "Hide tracks" : "Which tracks?";
+      // Only mark it loaded if it actually loaded. Setting the flag
+      // before the await left a failed fetch permanently "loaded", so
+      // closing and reopening never retried and the error message was
+      // terminal until a page reload.
+      if (opening && !enrichMissesLoaded) {
+        enrichMissesLoaded = await loadEnrichMisses();
+      }
+    });
+  }
+
   // Enrichment panel: "Retry missing" re-queues enriched-but-incomplete
   // tracks + nudges the harvest re-submit. Success shows the re-queued
   // count briefly; the server 429s repeat clicks inside its rate window.
@@ -123,6 +148,12 @@ function initDashboard() {
         // panel keeps showing "0 tracks in the queue · all caught up" for up
         // to half a minute after a click that just queued thousands.
         if (r && r.enrichment) applyEnrichment(r.enrichment);
+        // The breakdown just became stale by construction. Drop it so a
+        // reopen re-fetches rather than showing the pre-retry answer.
+        enrichMissesLoaded = false;
+        if (enrichMissesSection && !enrichMissesSection.hidden) {
+          enrichMissesLoaded = await loadEnrichMisses();
+        }
       } catch (err) {
         enrichRetryBtn.textContent = idleText;
         alert("Retry failed: " + err.message);
@@ -428,6 +459,14 @@ function applyEnrichment(e) {
     retryBtn.hidden = !anyMissing;
   }
 
+  // "Which tracks?" is gated on `missing` ALONE, not the same anyMissing
+  // test as Retry. The endpoint enumerates the three per-track enricher
+  // facets (artwork / artist / release); it has nothing to say about
+  // artist images, bios or descriptions, so offering the drill-down on
+  // their account would open an empty panel.
+  const missesBtn = document.getElementById("enrich-misses-toggle");
+  if (missesBtn) missesBtn.hidden = (e.missing ?? 0) <= 0;
+
   renderCoverageBar(e.matched ?? 0, e.missing ?? 0);
 }
 
@@ -448,6 +487,175 @@ function setEnrichCoverage(baseId, counts) {
   const show = counts && typeof counts.have === "number";
   dt.hidden = dd.hidden = !show;
   if (show) dd.textContent = `${counts.have} have · ${counts.missing} missing`;
+}
+
+// Facet labels for the misses drill-down. Keys mirror
+// manifest.MissFacet* — artwork / artist / release — which are the three
+// things the enricher looks for per track and the exact set
+// enrichmentMissPredicateSQL selects on.
+const ENRICH_MISS_FACET_LABELS = {
+  artwork: "No cover art",
+  artist: "No artist MBID",
+  release: "No release MBID",
+};
+
+// The same facets as bare nouns, for the inline "also missing …" note.
+// Two maps rather than one because the section headings read best as
+// negations ("No cover art — 6,816 tracks") and the inline note supplies
+// its own — reusing the headings there produced "also missing no artist
+// mbid, no release mbid", which is how it rendered against the live
+// bridge before this map existed.
+const ENRICH_MISS_FACET_NOUNS = {
+  artwork: "cover art",
+  artist: "artist MBID",
+  release: "release MBID",
+};
+
+// Why the enricher gave up, keyed by the bounded reason constants it
+// tallies (skipReason* in internal/enrich). Bounded by design — a
+// formatted error string must never become a key — so this map can be
+// exhaustive, with an unknown key falling back to the raw reason.
+const ENRICH_SKIP_REASON_LABELS = {
+  no_search_terms: "Track had no artist/album tags to search on",
+  no_mb_match: "Searched, but the source returned no match",
+  mb_error: "The enrichment source errored",
+};
+
+// loadEnrichMisses fetches GET /api/enrichment/misses and paints the
+// per-facet breakdown.
+//
+// Click-driven only. The query behind it is a json_extract subtree walk
+// (the AtlasMetaBreakdownCounts cost class), which is why the endpoint
+// caches behind a TTL + singleflight and why this must never be attached
+// to a poll or an SSE tick.
+//
+// Returns whether the panel now holds real data. The caller uses that to
+// decide whether it may skip the fetch next time — a failed load must
+// stay retryable, or the operator is stuck looking at an error message
+// with no way back short of reloading the page.
+async function loadEnrichMisses() {
+  const section = document.getElementById("enrich-misses");
+  const status = document.getElementById("enrich-misses-status");
+  const body = document.getElementById("enrich-misses-body");
+  if (!section || !status || !body) return false;
+  status.textContent = "Looking…";
+  body.replaceChildren();
+  try {
+    const data = await API.get("/api/enrichment/misses");
+    renderEnrichMisses(data);
+    return true;
+  } catch (err) {
+    // Say what failed. The pre-existing pattern on this page swallowed
+    // errors into a silent no-op, which is indistinguishable from "you
+    // have no misses" — the one answer this panel must never fake.
+    status.textContent = `Couldn't load the breakdown: ${err.message}`;
+    return false;
+  }
+}
+
+// renderEnrichMisses paints the response. Everything user-visible goes
+// through createElement/textContent: track paths and skip reasons are
+// third-party strings (tag data and upstream error text).
+function renderEnrichMisses(data) {
+  const status = document.getElementById("enrich-misses-status");
+  const body = document.getElementById("enrich-misses-body");
+  if (!status || !body) return;
+  body.replaceChildren();
+
+  const scanned = data?.scanned ?? 0;
+  const missing = data?.missing ?? 0;
+  status.textContent = missing === 0
+    ? `Nothing short — all ${scanned} tracks carry a cover, an artist and a release ID.`
+    : `${missing} of ${scanned} tracks are short of at least one field. ` +
+      `A track missing two things is counted under both, so the rows below add up to more than ${missing}.`;
+  if (missing === 0) return;
+
+  const facets = data.facets || {};
+  const samples = data.sample || {};
+  const truncated = new Set(data.truncated || []);
+
+  for (const key of Object.keys(ENRICH_MISS_FACET_LABELS)) {
+    const count = facets[key] ?? 0;
+    if (count <= 0) continue;
+    const rows = samples[key] || [];
+
+    const details = document.createElement("details");
+    details.className = "enrich-miss-facet";
+    const summary = document.createElement("summary");
+    summary.textContent = `${ENRICH_MISS_FACET_LABELS[key]} — ${count} track${count === 1 ? "" : "s"}`;
+    details.appendChild(summary);
+
+    if (truncated.has(key)) {
+      const note = document.createElement("p");
+      note.className = "hint";
+      // Be explicit that the LIST is capped while the COUNT is exact —
+      // a silently-truncated list reads as "that's all of them".
+      note.textContent =
+        `Showing the first ${rows.length}. The count above is exact; ` +
+        `run \`bridge enrichment misses\` for the full list.`;
+      details.appendChild(note);
+    }
+
+    const ul = document.createElement("ul");
+    ul.className = "enrich-miss-list";
+    for (const row of rows) {
+      const li = document.createElement("li");
+      li.textContent = row.path;
+      // A track short of more than one field is listed under each; say
+      // so inline so the same path appearing three times reads as one
+      // badly-tagged track rather than three separate problems.
+      const others = (row.facets || []).filter((f) => f !== key);
+      if (others.length) {
+        const also = document.createElement("span");
+        also.className = "hint";
+        also.textContent = ` — also missing ${others.map((f) => ENRICH_MISS_FACET_NOUNS[f] || f).join(", ")}`;
+        li.appendChild(also);
+      }
+      ul.appendChild(li);
+    }
+    details.appendChild(ul);
+    body.appendChild(details);
+  }
+
+  renderEnrichSkipReasons(body, data.skipReasons);
+}
+
+// renderEnrichSkipReasons paints the enricher's process-lifetime tally of
+// WHY it gave up. Absent on a bridge with no enricher wired, and absent
+// when nothing has been skipped since start — in both cases the section
+// is simply omitted rather than shown as zeros.
+function renderEnrichSkipReasons(body, reasons) {
+  const entries = Object.entries(reasons || {}).filter(([, n]) => n > 0);
+  if (!entries.length) return;
+  entries.sort((a, b) => b[1] - a[1]);
+
+  const wrap = document.createElement("div");
+  wrap.className = "enrich-miss-reasons";
+  const title = document.createElement("div");
+  title.className = "dist-title";
+  title.textContent = "Why the enricher gave up";
+  wrap.appendChild(title);
+
+  const note = document.createElement("p");
+  note.className = "hint";
+  // Process-lifetime, not all-time: a restart zeroes it, and it counts
+  // ATTEMPTS rather than tracks, so it deliberately doesn't reconcile
+  // with the per-facet counts above.
+  note.textContent = "Counted since this bridge started, per attempt — not directly comparable with the totals above.";
+  wrap.appendChild(note);
+
+  const dl = document.createElement("dl");
+  dl.className = "composition";
+  for (const [reason, n] of entries) {
+    const dt = document.createElement("dt");
+    dt.textContent = ENRICH_SKIP_REASON_LABELS[reason] || reason;
+    const dd = document.createElement("dd");
+    dd.textContent = String(n);
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  }
+  wrap.appendChild(dl);
+  body.appendChild(wrap);
 }
 
 // formatEnrichEta turns the pending count + coarse server estimate into a

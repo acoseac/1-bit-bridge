@@ -92,6 +92,15 @@
            enricher and nudges the Atlas harvest client into a full re-submit
            (bios / descriptions). Revealed by applyEnrichment only when some
            facet actually has gaps; server rate-guards repeat clicks (429). */}}
+      {{/* Which tracks? — GET /api/enrichment/misses. The card has always
+           been able to say "N tracks are missing something" and never
+           which, or which of the three each one lacked; the endpoint has
+           returned exactly that since it shipped and nothing called it.
+           Click-driven ONLY: the query is a json_extract subtree walk
+           (the AtlasMetaBreakdownCounts cost class), so it must never be
+           wired to a poll or an SSE tick. */}}
+      <button type="button" id="enrich-misses-toggle" class="btn" hidden
+              aria-expanded="false" aria-controls="enrich-misses">Which tracks?</button>
       <button type="button" id="enrich-retry" class="btn" hidden>Retry missing</button>
     </div>
     <p class="hint">Metadata &amp; artwork fill in after a scan, paced to respect the enrichment source. <em>Matched</em> tracks came back with everything the enricher looks for — cover, artist and release IDs; <em>missing</em> are enriched but still short of at least one of those. Missing is exactly what <em>Retry missing</em> re-queues.</p>
@@ -127,6 +136,17 @@
       <div class="dist-title">Metadata coverage</div>
       <div class="dist-bar" id="enrich-coverage-bar" role="img" aria-label="Metadata coverage: fully resolved vs missing at least one field"></div>
       <div class="dist-legend" id="enrich-coverage-legend"></div>
+    </div>
+
+    {{/* Misses drill-down. Populated on demand by loadEnrichMisses; the
+         counts are exact while the per-facet path lists are capped
+         server-side (`bridge enrichment misses` is the full enumeration).
+         Contents are built with createElement/textContent — track paths
+         and skip reasons are third-party strings. */}}
+    <div class="dist-section" id="enrich-misses" hidden>
+      <div class="dist-title">Which tracks are short, and of what</div>
+      <p class="hint" id="enrich-misses-status"></p>
+      <div id="enrich-misses-body"></div>
     </div>
   </div>
 
