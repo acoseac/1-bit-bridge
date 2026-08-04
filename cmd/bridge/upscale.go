@@ -47,6 +47,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
@@ -909,6 +910,36 @@ func soxFeatureReady(ctx context.Context, feature string, stderr io.Writer) bool
 		return false
 	}
 	return true
+}
+
+// fingerprintFeatureReady reports whether the acoustic-fingerprinting fallback
+// can actually run at `bridge serve` startup: fpcalc on PATH AND an AcoustID
+// application key configured.
+//
+// Same contract as soxFeatureReady — on any disqualifying condition it writes
+// an operator-facing reason to stderr and returns false, so the caller
+// degrades the feature to off in-memory and the rest of the server keeps
+// running. A missing optional credential must never be an outage.
+//
+// Both prerequisites are checked here rather than at config-validation time
+// for that reason: Validate() is a pure predicate and a host with
+// BRIDGE_FINGERPRINT_ENABLED set but no key still has to boot.
+// The degradedReason return is a bounded key ("fpcalc_missing" /
+// "no_api_key", "" when ready) the admin Jobs card renders remediation
+// copy from — same bounded-key discipline as the enricher's skip
+// reasons.
+func fingerprintFeatureReady(ctx context.Context, hasAPIKey bool, stderr io.Writer) (ok bool, degradedReason string) {
+	if _, err := acoustid.Probe(ctx); err != nil {
+		fmt.Fprintf(stderr, "fingerprint: feature is enabled in bridge.yaml but fpcalc is not available — disabling: %v\n", err)
+		return false, "fpcalc_missing"
+	}
+	if !hasAPIKey {
+		fmt.Fprint(stderr, "fingerprint: feature is enabled in bridge.yaml but no AcoustID API key is configured — disabling.\n"+
+			"  Register a free application key at https://acoustid.org/new-application,\n"+
+			"  then set ACOUSTID_API_KEY (preferred) or fingerprint.apiKey in bridge.yaml.\n")
+		return false, "no_api_key"
+	}
+	return true, ""
 }
 
 // soxCLIReady is the CLI-side sox preflight shared by `bridge upscale`,

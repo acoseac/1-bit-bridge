@@ -93,11 +93,18 @@ func TestScannerSkipsVariantSidecars(t *testing.T) {
 		t.Fatalf("TrackPaths: %v", err)
 	}
 
-	if !containsString(paths, realTrack) {
+	// TrackPaths returns the STORED form, which is forward-slash separated
+	// on every OS (the wire convention in internal/fs's package docblock —
+	// iOS receives these paths verbatim). filepath.Join gives the native
+	// separator, so on Windows the expectation was "Album\\01 - Song.flac"
+	// while the scanner had correctly stored "Album/01 - Song.flac". The
+	// on-disk fixture above still uses the native join; only the comparison
+	// is normalised.
+	if !containsString(paths, filepath.ToSlash(realTrack)) {
 		t.Errorf("real track %q was not indexed; got %v", realTrack, paths)
 	}
 	for _, sc := range sidecars {
-		if containsString(paths, sc) {
+		if containsString(paths, filepath.ToSlash(sc)) {
 			t.Errorf("variant sidecar %q was indexed as a track; got %v", sc, paths)
 		}
 	}

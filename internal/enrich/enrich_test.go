@@ -1470,3 +1470,44 @@ func TestMusicBrainzGetReusesConnectionAfterSuccess(t *testing.T) {
 		t.Errorf("server opened %d connections across 2 calls; want 1 (success body not drained → keep-alive dropped)", got)
 	}
 }
+
+// newOfflineEnricher builds the standard no-network enricher fixture: a store
+// in a temp dir plus MusicBrainz and CoverArt stubs that answer cleanly with
+// nothing, so every search is a genuine no-match rather than an error.
+//
+// That distinction is the whole point of the fixture — a no-match falls through
+// to the give-up path, while an error returns without stamping — and getting it
+// wrong silently changes which branch a test exercises. Shared so the two tests
+// that need it cannot drift apart on it.
+//
+// mbHandler overrides the MusicBrainz stub when a test needs a shaped answer;
+// nil takes the empty-response default.
+func newOfflineEnricher(t *testing.T, mbHandler http.HandlerFunc) (*Enricher, *manifest.Store) {
+	t.Helper()
+	if mbHandler == nil {
+		mbHandler = func(w http.ResponseWriter, r *http.Request) {
+			if strings.Contains(r.URL.Path, "artist") {
+				_, _ = io.WriteString(w, `{"artists":[]}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"releases":[]}`)
+		}
+	}
+	mbSrv := httptest.NewServer(mbHandler)
+	t.Cleanup(mbSrv.Close)
+	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(caaSrv.Close)
+
+	dir := t.TempDir()
+	store, err := manifest.OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
+		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	return e, store
+}

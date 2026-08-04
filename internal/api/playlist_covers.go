@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -98,6 +99,13 @@ func (s *Server) playlistCover(w http.ResponseWriter, r *http.Request) {
 // always JPEG (uploads are normalized on the admin side). Bearer-authed via
 // the route wrapper, mirroring /v1/artwork.
 func (s *Server) serveCover(w http.ResponseWriter, r *http.Request, scope, key string) {
+	// Normalise exactly as getPlaylist / putPlaylist / deletePlaylist
+	// do. The on-disk name is sha256(scope + "\x00" + key), which is
+	// byte-exact, and GetPlaylistCover has no COLLATE NOCASE — so a
+	// caller that built the URL from a locally-generated uppercase UUID
+	// (Swift's UUID().uuidString is uppercase) got 200 from
+	// /v1/playlists/{ID} and 404 from /v1/playlist-image/{ID}.
+	key = strings.ToLower(strings.TrimSpace(key))
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing key")
 		return

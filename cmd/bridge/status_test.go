@@ -27,7 +27,7 @@ func TestStatusServiceNotRunning(t *testing.T) {
 	yaml := "libraryRoots:\n  - " + dir + "\n" +
 		"adminAddress: \"" + addr + "\"\n" +
 		"listenAddress: \":7788\"\n" +
-		"dataDir: \"" + filepath.Join(dir, "data") + "\"\n"
+		"dataDir: " + yamlStr(filepath.Join(dir, "data")) + "\n"
 	if err := os.WriteFile(cfg, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestStatusJSONFlagSurfacesNotRunning(t *testing.T) {
 	yaml := "libraryRoots:\n  - " + dir + "\n" +
 		"adminAddress: \"" + addr + "\"\n" +
 		"listenAddress: \":7788\"\n" +
-		"dataDir: \"" + filepath.Join(dir, "data") + "\"\n"
+		"dataDir: " + yamlStr(filepath.Join(dir, "data")) + "\n"
 	if err := os.WriteFile(cfg, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -29,6 +29,47 @@ type TrackMetaRef struct {
 	ArtworkVersion string
 }
 
+// Enrichment miss facets. These name the three arms of
+// enrichmentMissPredicateSQL (store.go) so an operator can ask WHICH
+// field a track is short of, not merely that it is short of something.
+const (
+	MissFacetArtwork = "artwork"
+	MissFacetArtist  = "artist"
+	MissFacetRelease = "release"
+)
+
+// MissFacets reports which enrichment facets this row is missing, in a
+// stable order. An empty result means the row is fully matched.
+//
+// LOCKSTEP MIRROR of enrichmentMissPredicateSQL (store.go): three arms,
+// each "field is empty", OR'd together. The SQL already COALESCEs each
+// column to ” in StreamTrackMetaRefsUnderPrefix, so an empty string here
+// means exactly what `COALESCE(...) = ”` means there.
+//
+// Keeping these in step is load-bearing: the dashboard's "missing" count,
+// the "Retry missing" button, and this enumeration must all describe the
+// same set of rows, or the operator is once again reading a number that
+// doesn't mean what the button does (the bug #596 fixed). Pinned by
+// TestMissFacetsMirrorsTheMissPredicate.
+func (r TrackMetaRef) MissFacets() []string {
+	var out []string
+	if r.ArtworkMBID == "" {
+		out = append(out, MissFacetArtwork)
+	}
+	if r.ArtistMBID == "" {
+		out = append(out, MissFacetArtist)
+	}
+	if r.ReleaseMBID == "" {
+		out = append(out, MissFacetRelease)
+	}
+	return out
+}
+
+// IsMiss reports whether the row would be re-queued by "Retry missing".
+func (r TrackMetaRef) IsMiss() bool {
+	return r.ArtworkMBID == "" || r.ArtistMBID == "" || r.ReleaseMBID == ""
+}
+
 // StreamTrackMetaRefsUnderPrefix walks every track under `prefix`
 // ("" = whole library) and yields the MBID projection per row. The
 // callback MUST NOT retain the value past its invocation (the
@@ -43,13 +84,23 @@ func (s *Store) StreamTrackMetaRefsUnderPrefix(ctx context.Context, prefix strin
 		       COALESCE(t.artwork_version, '')
 		  FROM tracks t`
 	var args []any
-	if prefix != "" {
-		// likeEscape escapes %, _, AND the escape char itself, so a
-		// folder literally named `Rock \ Metal` can't produce a broken
-		// escape sequence (store.go:likeEscape).
+	// subtreeRangeBase trims a caller-supplied trailing slash before the
+	// bounds append their own, and treats a trims-to-empty prefix as
+	// whole-library. The byte-range form needs no LIKE escaping at all:
+	// a folder named `Rock \ Metal`, `100% Hits` or `foo_bar` is bound
+	// as a plain parameter, so there is no pattern metacharacter to
+	// escape and no escape sequence to get wrong.
+	//
+	// Every production caller here already normalises via
+	// normaliseBrowsePath, so the trim is defence in depth — but these
+	// four helpers were the ones missed when the same guard was added
+	// to the store.go prefix family, and the sibling that lacked it is
+	// exactly how the class recurs.
+	if base, scoped := subtreeRangeBase(prefix); scoped {
 		q += `
-		 WHERE t.path LIKE ? ESCAPE '\'`
-		args = append(args, likeEscape(prefix)+"/%")
+		 WHERE t.path COLLATE BINARY >= ? || '/'
+		   AND t.path COLLATE BINARY < ? || '0'`
+		args = append(args, base, base)
 	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -126,18 +177,16 @@ func (s *Store) BookletStatesIn(ctx context.Context, mbids []string) (map[string
 // POST /api/library/enrichment/retry. Empty prefix delegates to the
 // library-wide ResetEnrichedMisses. Holds s.mu (writer contract).
 func (s *Store) ResetEnrichedMissesUnderPrefix(ctx context.Context, prefix string) (int64, error) {
-	if prefix == "" {
+	// Unscoped ("" / "/" / "//") delegates to the library-wide reset —
+	// decided AFTER the trim, so a slash-only prefix can't fall through
+	// to a `LIKE '/%'` that silently resets nothing.
+	base, scoped := subtreeRangeBase(prefix)
+	if !scoped {
 		return s.ResetEnrichedMisses(ctx)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE tracks SET enriched_at = 0
-		 WHERE enriched_at > 0
-		   AND path LIKE ? ESCAPE '\'
-		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
-		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = '')
-	`, likeEscape(prefix)+"/%")
+	res, err := s.db.ExecContext(ctx, resetEnrichedMissesUnderPrefixSQL, base, base)
 	if err != nil {
 		return 0, err
 	}
@@ -147,16 +196,18 @@ func (s *Store) ResetEnrichedMissesUnderPrefix(ctx context.Context, prefix strin
 // DistinctArtistMBIDsUnderPrefix is the folder-scoped variant of
 // DistinctArtistMBIDs. Read-only; no s.mu.
 func (s *Store) DistinctArtistMBIDsUnderPrefix(ctx context.Context, prefix string) ([]string, error) {
-	if prefix == "" {
+	base, scoped := subtreeRangeBase(prefix)
+	if !scoped {
 		return s.DistinctArtistMBIDs(ctx)
 	}
 	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artistMBID')
 		  FROM tracks
-		 WHERE path LIKE ? ESCAPE '\'
+		 WHERE path COLLATE BINARY >= ? || '/'
+		   AND path COLLATE BINARY < ? || '0'
 		   AND json_extract(tags_json, '$.artistMBID') IS NOT NULL
 		   AND json_extract(tags_json, '$.artistMBID') != ''
-	`, likeEscape(prefix)+"/%"))
+	`, base, base))
 }
 
 // DistinctReleaseMBIDsUnderPrefix enumerates the distinct release
@@ -168,7 +219,11 @@ func (s *Store) DistinctArtistMBIDsUnderPrefix(ctx context.Context, prefix strin
 func (s *Store) DistinctReleaseMBIDsUnderPrefix(ctx context.Context, prefix string) ([]string, error) {
 	// Two static query texts (no fragment concatenation — keeps the
 	// scoped form a fully-constant statement with bound params only).
-	if prefix == "" {
+	// Which one runs is decided AFTER the trim, so "/" and "//" take
+	// the whole-library branch rather than a `LIKE '/%'` that matches
+	// nothing.
+	base, scoped := subtreeRangeBase(prefix)
+	if !scoped {
 		return collectStringColumn(s.db.QueryContext(ctx, `
 			SELECT DISTINCT json_extract(tags_json, '$.artworkMBID') AS mbid
 			  FROM tracks
@@ -183,22 +238,23 @@ func (s *Store) DistinctReleaseMBIDsUnderPrefix(ctx context.Context, prefix stri
 			   AND json_extract(tags_json, '$.musicBrainzAlbumID') NOT LIKE 'local-%'
 		`))
 	}
-	pattern := likeEscape(prefix) + "/%"
 	return collectStringColumn(s.db.QueryContext(ctx, `
 		SELECT DISTINCT json_extract(tags_json, '$.artworkMBID') AS mbid
 		  FROM tracks
-		 WHERE path LIKE ? ESCAPE '\'
+		 WHERE path COLLATE BINARY >= ? || '/'
+		   AND path COLLATE BINARY < ? || '0'
 		   AND json_extract(tags_json, '$.artworkMBID') IS NOT NULL
 		   AND json_extract(tags_json, '$.artworkMBID') != ''
 		   AND json_extract(tags_json, '$.artworkMBID') NOT LIKE 'local-%'
 		UNION
 		SELECT DISTINCT json_extract(tags_json, '$.musicBrainzAlbumID') AS mbid
 		  FROM tracks
-		 WHERE path LIKE ? ESCAPE '\'
+		 WHERE path COLLATE BINARY >= ? || '/'
+		   AND path COLLATE BINARY < ? || '0'
 		   AND json_extract(tags_json, '$.musicBrainzAlbumID') IS NOT NULL
 		   AND json_extract(tags_json, '$.musicBrainzAlbumID') != ''
 		   AND json_extract(tags_json, '$.musicBrainzAlbumID') NOT LIKE 'local-%'
-	`, pattern, pattern))
+	`, base, base, base, base))
 }
 
 // ResetBookletChecks zeroes check_attempts for the NOT-yet-available

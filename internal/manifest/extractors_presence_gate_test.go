@@ -15,7 +15,7 @@ import (
 func TestHasAnyRawKey_TruthTable(t *testing.T) {
 	raw := map[string]any{
 		"tyer":      "1985",                               // string
-		"©ART":      []string{"Mozart", "Salieri"},        // []string
+		"\xa9ART":   []string{"Mozart", "Salieri"},        // []string — REAL dhowden single-byte MP4 atom (was UTF-8 "©ART", which masked the bug)
 		"tbpm":      120,                                  // int
 		"trkn":      &tag.Picture{MIMEType: "image/jpeg"}, // arbitrary non-supported type
 		"album_art": []byte{0x89, 0x50, 0x4e, 0x47},       // []byte

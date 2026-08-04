@@ -24,7 +24,7 @@ func TestEnvOverrides(t *testing.T) {
 	yaml := []byte("libraryRoots:\n  - " + filepath.Join(dir, "yaml-lib") + "\n" +
 		"listenAddress: \":7788\"\n" +
 		"adminAddress: \"127.0.0.1:7789\"\n" +
-		"dataDir: \"" + filepath.Join(dir, "yaml-data") + "\"\n" +
+		"dataDir: " + yamlStr(filepath.Join(dir, "yaml-data")) + "\n" +
 		"libraryName: \"yaml name\"\n")
 	cfgPath := filepath.Join(dir, "bridge.yaml")
 	if err := os.WriteFile(cfgPath, yaml, 0o644); err != nil {
@@ -144,7 +144,7 @@ func TestEnvOverridesAbsent(t *testing.T) {
 	yaml := []byte("libraryRoots:\n  - " + libDir + "\n" +
 		"listenAddress: \":7788\"\n" +
 		"adminAddress: \"127.0.0.1:7789\"\n" +
-		"dataDir: \"" + filepath.Join(dir, "data") + "\"\n")
+		"dataDir: " + yamlStr(filepath.Join(dir, "data")) + "\n")
 	cfgPath := filepath.Join(dir, "bridge.yaml")
 	if err := os.WriteFile(cfgPath, yaml, 0o644); err != nil {
 		t.Fatal(err)

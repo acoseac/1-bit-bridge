@@ -18,7 +18,7 @@ func writeEnrichTestConfig(t *testing.T, extraYAML string) string {
 		t.Fatal(err)
 	}
 	yaml := "libraryRoots:\n  - " + filepath.Join(dir, "lib") + "\n" +
-		"dataDir: \"" + filepath.Join(dir, "data") + "\"\n" + extraYAML
+		"dataDir: " + yamlStr(filepath.Join(dir, "data")) + "\n" + extraYAML
 	cfgPath := filepath.Join(dir, "bridge.yaml")
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)

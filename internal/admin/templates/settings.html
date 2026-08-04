@@ -457,8 +457,10 @@
       <p class="lede">
         Offline analysis pre-computes a peak <strong>waveform</strong> per track
         via <code>sox(1)</code> so the iOS player can render a scrubber waveform.
-        Disabled by default — opt in below, then run <code>bridge analyze</code>
-        on the server to populate the cache.
+        Disabled by default — once enabled (and after a restart), the bridge
+        analyses the library automatically: after every scan and on the scan
+        cadence. Progress and a manual trigger live under
+        <a href="/jobs">Library → Jobs</a>.
       </p>
 
       <div class="field">
@@ -469,8 +471,9 @@
         <small class="hint">
           When enabled, the bridge advertises <code>waveform</code> on
           <code>/v1/health</code> and serves <code>GET /v1/waveform</code> from
-          cached sidecars. Generation runs on the server via
-          <code>bridge analyze</code>; sidecars survive across toggles.
+          cached sidecars. Generation runs automatically in the background
+          (the <code>bridge analyze</code> CLI also still works); sidecars
+          survive across toggles.
         </small>
         {{if .Data.UpscaleSoxMissing}}
           <p class="warn-banner">
@@ -496,7 +499,7 @@
           <dt>Cached on disk</dt><dd id="analysis-cached-bytes">…</dd>
           <dt>Stored at</dt><dd><code class="storage-path" id="analysis-storage-path">…</code></dd>
         </dl>
-        <p class="panel-note">Refreshes every 5 s while this page is open. Run <code>bridge analyze</code> on the server to generate waveforms.</p>
+        <p class="panel-note">Refreshes every 5 s while this page is open. Waveforms generate automatically in the background — see <a href="/jobs">Library → Jobs</a> for coverage and a manual trigger.</p>
       </div>
 
       <h2 class="section-head">Smart mixes</h2>

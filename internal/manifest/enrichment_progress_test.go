@@ -15,12 +15,30 @@ import (
 // — masking the real migration / open error with a confusing
 // nil-pointer panic. CodeRabbit flagged the broader pattern on PR
 // #68; routing every test through this helper closes the gap once.
+//
+// It also registers the Close itself rather than trusting each caller
+// to `defer s.Close()`. That was load-bearing on Windows: a caller
+// that forgot left the SQLite handle open, and `t.TempDir`'s RemoveAll
+// cleanup then failed with "The process cannot access the file because
+// it is being used by another process". Exactly one file forgot
+// (`prefix_scope_agreement_test.go`), and its four tests were exactly
+// the four `bridge.db` cleanup failures in the Windows run — a whole
+// bug class riding on a convention no compiler checks.
+//
+// Ordering is what makes this correct: `t.TempDir()` registers its own
+// RemoveAll when it is CALLED, so registering Close afterwards puts it
+// later in the LIFO cleanup stack and it runs FIRST. Callers that
+// still `defer s.Close()` are unaffected — their defer runs at
+// function exit, before any cleanup, and `sql.DB.Close` is documented
+// idempotent (it early-returns nil once closed), so the second close
+// is a no-op rather than an error.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

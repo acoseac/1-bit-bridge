@@ -140,7 +140,13 @@ func TestServeStartsAndServesHealth(t *testing.T) {
 		done <- run(ctx, []string{"serve", "--config", cfgPath, "--addr", "127.0.0.1:0"}, stdout, stderr)
 	}()
 
-	addr, fingerprint := waitForListening(t, stdout, 5*time.Second)
+	// 30s, not 5s: startup mints a TLS keypair, runs the migration
+	// ladder, and kicks a scan before the banner prints, and on a loaded
+	// Windows runner that overran 5s ("timed out waiting for startup
+	// banner"). The wait returns as soon as the banner appears, so the
+	// larger budget costs nothing when things are quick — it only stops a
+	// slow machine being reported as a broken one.
+	addr, fingerprint := waitForListening(t, stdout, 30*time.Second)
 
 	// Hit /v1/health over TLS, pinning the server fingerprint.
 	var peerFP string

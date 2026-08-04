@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -43,6 +44,7 @@ const (
 	checkNameLibraryRoots   = "library-roots"
 	checkNameServiceManager = "service-manager"
 	checkNameAudioToolchain = "audio-toolchain"
+	checkNameFingerprint    = "fingerprint-toolchain"
 )
 
 // Check is one line of the doctor report.
@@ -88,6 +90,16 @@ type Deps struct {
 	// job at runtime). Both false → the check is a no-op "not enabled".
 	UpscaleEnabled  bool
 	AnalysisEnabled bool
+
+	// FingerprintEnabled mirrors cfg.Fingerprint.Enabled. When true,
+	// checkFingerprintToolchain verifies fpcalc is present AND an AcoustID key
+	// is configured. False → the check is a no-op "not enabled".
+	FingerprintEnabled bool
+	// FingerprintHasAPIKey reports whether a key resolved from either the
+	// environment or the config. The doctor never sees the key itself: there
+	// is no reason for a diagnostic report to carry a credential, and reports
+	// get pasted into issues.
+	FingerprintHasAPIKey bool
 }
 
 // Report is the collection of checks from a single doctor run.
@@ -128,6 +140,7 @@ func Run(d Deps) Report {
 		checkBrowserOpener,
 		checkInotifyLimit,
 		checkAudioToolchain,
+		checkFingerprintToolchain,
 	}
 	out := make([]Check, 0, len(checks))
 	for _, fn := range checks {
@@ -417,6 +430,47 @@ func checkAudioToolchain(d Deps) Check {
 		return ok(checkNameAudioToolchain, fmt.Sprintf("sox %s, FLAC supported", info.Version))
 	}
 	return ok(checkNameAudioToolchain, "sox present, FLAC supported")
+}
+
+// checkFingerprintToolchain verifies the acoustic-fingerprinting fallback can
+// actually run when it is switched on.
+//
+// Two prerequisites, and BOTH are silent failures without this check: fpcalc
+// on PATH, and an AcoustID application key. Missing either degrades the
+// feature to off at startup with a single stderr line that scrolls away, so
+// `bridge doctor` is where an operator finds out why fingerprinting never
+// resolved anything.
+//
+// Mirrors checkAudioToolchain's shape, including the no-op when the feature is
+// off — a host that will never fingerprint should not be nagged about a binary
+// it does not need.
+func checkFingerprintToolchain(d Deps) Check {
+	if !d.FingerprintEnabled {
+		return ok(checkNameFingerprint, "not enabled (fpcalc not required)")
+	}
+	info, err := acoustid.Probe(context.Background())
+	if err != nil {
+		if errors.Is(err, acoustid.ErrFpcalcMissing) {
+			return fail(checkNameFingerprint, "fpcalc not found",
+				"fingerprinting is enabled but fpcalc isn't on PATH; install Chromaprint "+
+					"(macOS: `brew install chromaprint`; Debian/Ubuntu: `sudo apt install libchromaprint-tools` "+
+					"— note the binary is in the -tools package, not libchromaprint1; "+
+					"Windows: `winget install AcoustID.Chromaprint`; Alpine: `apk add chromaprint`) "+
+					"or disable the feature in bridge.yaml")
+		}
+		return fail(checkNameFingerprint, "fpcalc not runnable",
+			"fpcalc is on PATH but failed to run: "+err.Error())
+	}
+	if !d.FingerprintHasAPIKey {
+		return fail(checkNameFingerprint, "no AcoustID API key",
+			"fingerprinting is enabled and fpcalc works, but no AcoustID key is configured; "+
+				"register a free application key at https://acoustid.org/new-application and set "+
+				"ACOUSTID_API_KEY (preferred) or fingerprint.apiKey in bridge.yaml")
+	}
+	if info.Version != "" {
+		return ok(checkNameFingerprint, fmt.Sprintf("fpcalc %s, API key configured", info.Version))
+	}
+	return ok(checkNameFingerprint, "fpcalc present, API key configured")
 }
 
 // --- helpers ---
