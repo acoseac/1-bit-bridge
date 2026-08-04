@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withTestSlog routes slog.Default to a buffer for the duration of the
@@ -394,6 +395,22 @@ func TestLogging_DownloadThroughput_PatternFromRealMux(t *testing.T) {
 	mux := http.NewServeMux()
 	body := make([]byte, downloadThroughputMinBytes)
 	mux.HandleFunc("GET /v1/download", func(w http.ResponseWriter, _ *http.Request) {
+		// Spend a measurable amount of wall clock before responding.
+		//
+		// The emit is gated on `duration > 0` — a correct guard, since
+		// the mbps division and the histogram observation both blow up
+		// at zero. But 2 MiB into an httptest recorder is essentially
+		// instantaneous, and on a platform with coarse timer
+		// granularity (Windows) the whole request lands inside one tick:
+		// duration_ms=0, the guard correctly suppresses the line, and
+		// the test reads that as the Pattern propagation being broken.
+		// It failed that way on #633's Windows run.
+		//
+		// Sleeping here rather than relaxing the guard: the guard is
+		// production behaviour worth keeping exactly as it is, and this
+		// test is about Pattern propagation, not about how fast a
+		// recorder can accept bytes.
+		time.Sleep(2 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	})
