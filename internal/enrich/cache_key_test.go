@@ -188,3 +188,91 @@ func TestCacheKeysAgreeWithTheLadder(t *testing.T) {
 		})
 	}
 }
+
+// TestAcousticAlbumCacheDoesNotPoisonTheTextPath is the third key in this
+// family, and the one PR #614 left behind.
+//
+// resolveAlbumFromAcoustic shares e.albumCache with the text path — correctly,
+// so sibling tracks under one junk-tagged folder don't each pay a
+// SearchRelease plus a full MBMinInterval sleep. But it used to share the KEY
+// too: cacheKey(artistName, album), which is byte-identical to what
+// releaseCacheKey produces for any track with no distinct albumArtist.
+//
+// The two paths are not interchangeable. The acoustic hop is deliberately
+// ONE rung; the text path writes a no-match only after
+// searchReleaseWithFallbacks has exhausted bracket-strip,
+// unbracketed-edition-strip, artist-prefix-strip and albumArtist. So an
+// acoustic miss on an edition suffix pre-empted rungs the text path had yet
+// to try, and every well-tagged sibling read that empty answer.
+//
+// Behavioural, like its siblings above: the assertion is that the second
+// track still resolves, not that the keys differ as strings.
+func TestAcousticAlbumCacheDoesNotPoisonTheTextPath(t *testing.T) {
+	const (
+		artist    = "The Rolling Stones"
+		tagged    = "Goats Head Soup (2020 Deluxe)" // what both tracks carry
+		canonical = "Goats Head Soup"               // what MusicBrainz knows
+		releaseID = "33333333-3333-4333-8333-333333333333"
+	)
+	// MusicBrainz answers ONLY the edition-stripped title — the exact shape
+	// that makes the acoustic path's single rung miss where the text path's
+	// stripping rung would hit.
+	var releaseQueries int
+	e, _ := newOfflineEnricher(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "artist") {
+			_, _ = w.Write([]byte(`{"artists":[]}`))
+			return
+		}
+		releaseQueries++
+		q, _ := url.QueryUnescape(r.URL.Query().Get("query"))
+		if strings.Contains(q, canonical) && !strings.Contains(q, "Deluxe") {
+			_, _ = w.Write([]byte(`{"releases":[{"id":"` + releaseID + `","title":"` + canonical +
+				`","score":100,"artist-credit":[{"name":"` + artist + `"}]}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"releases":[]}`))
+	})
+	e.MBMinInterval = 0
+
+	// Track A takes the acoustic fallback: its single rung queries the
+	// verbatim tagged title and misses.
+	gotA, _, err := e.resolveAlbumFromAcoustic(context.Background(),
+		&manifest.Track{Path: "junk/01.flac", Album: tagged},
+		AcousticMatch{ArtistName: artist})
+	if err != nil {
+		t.Fatalf("acoustic hop: %v", err)
+	}
+	if gotA != "" {
+		t.Fatalf("acoustic hop resolved %q — the fixture is wrong; it must miss "+
+			"for this test to say anything", gotA)
+	}
+
+	// Track B is well-tagged with no distinct albumArtist, so the key
+	// enrichOne computes for it collapses to cacheKey(artist, album) — the
+	// very string the acoustic hop keyed on before this fix.
+	//
+	// Asserting on the CACHE rather than on enrichOne: the text path's
+	// lookup is inline in enrichOne (no separate resolver to call), and the
+	// property under test is precisely that the acoustic write is invisible
+	// under this key.
+	trackB := &manifest.Track{Path: "good/01.flac", Artist: artist, Album: tagged}
+	if _, hit := e.albumCache.Get(releaseCacheKey(trackB.Artist, trackB.AlbumArtist, trackB.Album)); hit {
+		t.Fatal("the acoustic hop's no-match is visible under the text path's key — " +
+			"a well-tagged sibling would read it and skip the ladder entirely")
+	}
+
+	// And the ladder the text path would then run does resolve this album,
+	// which is what makes the poisoning a real loss rather than a wash.
+	res, err := e.searchReleaseWithFallbacks(context.Background(), trackB)
+	if err != nil {
+		t.Fatalf("text-path ladder: %v", err)
+	}
+	if res == nil || res.MBID != releaseID {
+		t.Errorf("text-path ladder resolved %+v, want release %q via the "+
+			"edition-strip rung", res, releaseID)
+	}
+	if releaseQueries < 2 {
+		t.Errorf("release queries = %d, want >=2 — the ladder never reached "+
+			"MusicBrainz", releaseQueries)
+	}
+}
