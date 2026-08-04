@@ -300,10 +300,22 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 			continue
 		}
 		if !force {
+			// WantsAudioMD5Retry is the one thing here that is not a
+			// freshness check. mtime, size and schema version are all
+			// unchanged for a row whose audio-MD5 pass failed for a
+			// reason that says nothing about the file — a pipe or spawn
+			// failure under load, a faulted read, a killed child — so
+			// without it the row is skipped forever and a one-second
+			// blip is permanently recorded as "unverifiable". The
+			// counter behind it is capped (AudioMD5MaxAttempts), so
+			// this re-enqueues a bounded number of times and then stops
+			// asking; each retry is a full re-analysis, since the
+			// pipeline is one decode rather than resumable stages.
 			if existing, gerr := store.GetAnalysis(ctx, rel); gerr == nil && existing != nil &&
 				existing.SourceMTimeNS == info.ModTime().UnixNano() &&
 				existing.SourceSize == info.Size() &&
-				existing.SchemaVersion == analyze.WaveformSchemaVersion {
+				existing.SchemaVersion == analyze.WaveformSchemaVersion &&
+				!existing.WantsAudioMD5Retry() {
 				res.skipped++
 				continue
 			}

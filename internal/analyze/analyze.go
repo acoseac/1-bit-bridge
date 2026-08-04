@@ -78,7 +78,39 @@ const (
 	// re-fetches no sidecars; existing rows re-analyze once to backfill
 	// the three scalars and stamp wf4 (an unverifiable file — no stored
 	// checksum, odd bit depth — isn't re-enqueued forever).
-	WaveformSchemaVersion = "wf4"
+	//
+	// wf4 → wf5: no new measurement. Two CORRECTIONS to how wf4's own
+	// scalars were computed, neither of which can reach an existing row
+	// without re-analysing it.
+	//
+	//  1. DR: one digitally-silent channel suppressed the score for the
+	//     WHOLE track — a 5.1 rip with an unused LFE, a
+	//     one-dead-channel LP transfer, a mono master in a stereo
+	//     container. Those rows carry DRScore == nil, indistinguishable
+	//     from a track that genuinely has no measurable DR (#631).
+	//  2. audio MD5: a failure that said nothing about the file — a
+	//     pipe or spawn failure under load, a faulted read, a killed
+	//     child — was recorded as the same permanent "cannot verify" as
+	//     a file carrying no stored checksum (#632).
+	//
+	// The bump is what makes those reach existing rows at all: the
+	// scan-skip gate is (mtime, size, schema version), and none of the
+	// first two move when the bug is in the computation rather than in
+	// the source. Waveform bytes, loudness, key, tempo and true peak are
+	// all unchanged, so iOS re-fetches no sidecars.
+	//
+	// The cost is real and was weighed rather than assumed: one
+	// re-decode per eligible track, two days after wf4 forced the same
+	// thing. Taken deliberately, because until it happens both fixes are
+	// inert on every already-analysed row — a track wrongly marked "no
+	// DR" or "cannot verify" stays that way indefinitely, and the next
+	// bump warranted on its own merits might be months out.
+	//
+	// (Migration v30's audio_md5_attempts backfill is a separate and
+	// deliberately narrower mechanism, and stays: it caps non-FLAC rows
+	// precisely so that migration cannot itself trigger a library-wide
+	// re-decode. This bump is the one that is meant to.)
+	WaveformSchemaVersion = "wf5"
 
 	// WaveformDirSubdir is the fixed subdir under cfg.DataDir where
 	// waveform sidecars land (source-path-mirrored beneath it).
@@ -171,6 +203,19 @@ type Result struct {
 	// (clean decode, different hash — file modified or corrupt). FLAC
 	// only; see flacmd5.go for the failure direction.
 	AudioMD5State string
+
+	// AudioMD5Retryable qualifies an EMPTY AudioMD5State: true means we
+	// could not ask (pipe/spawn failure, a faulted read, a killed
+	// child), false means we asked and this file cannot be verified.
+	// Meaningless when AudioMD5State is set.
+	//
+	// Store.UpsertAnalysis turns this into a capped attempt counter, so
+	// "could not ask" gets a bounded number of further chances while
+	// "cannot be verified" gets none. Without the distinction a
+	// one-second I/O blip permanently recorded a healthy file as
+	// unverifiable: the row commits with the schema stamp either way,
+	// and the scan-skip gate then never looks again.
+	AudioMD5Retryable bool
 }
 
 // RunAnalysis decodes the source via sox, computes the peak waveform +
@@ -282,7 +327,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	// exactly the wrong bytes to hash; see flacmd5.go). Runs after the
 	// main decode so a truncated source has already been rejected.
 	if strings.EqualFold(filepath.Ext(spec.SourceAbsPath), ".flac") {
-		res.AudioMD5State = verifyFLACAudioMD5(ctx, spec.SourceAbsPath, tool)
+		res.AudioMD5State, res.AudioMD5Retryable = verifyFLACAudioMD5(ctx, spec.SourceAbsPath, tool)
 	}
 	logger.Debug("analyze ok",
 		"path", spec.SourceLibraryRel,
@@ -294,7 +339,8 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 		"hasTempo", res.BPM != nil,
 		"hasTruePeak", res.TruePeakDB != nil,
 		"hasDR", res.DRScore != nil,
-		"md5", res.AudioMD5State)
+		"md5", res.AudioMD5State,
+		"md5Retryable", res.AudioMD5Retryable)
 	return res, nil
 }
 
