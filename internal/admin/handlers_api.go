@@ -1499,6 +1499,39 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	willCollapse := len(newList) == 1
 	removedBasename := filepath.Base(current[idx])
 
+	// Refuse when a SURVIVING root's basename case-folds to the removed
+	// one. `ValidateRoots` now rejects that configuration up front, but a
+	// bridge.yaml written before it did — or hand-edited since — can
+	// still carry the pair, and this handler is the point where it turns
+	// destructive: the prefix delete below removes rows by basename and
+	// unlinks their variant + waveform sidecars from disk. The delete
+	// predicate is case-exact now, so the survivor's rows are safe, but
+	// the operator's intent is genuinely ambiguous here and the right
+	// answer is to make them fix the config rather than guess.
+	//
+	// The CLI's offline `library remove` has carried an equivalent guard
+	// since PR #82; the admin path never did. Folded, not byte-exact, via
+	// the same helper ValidateRoots uses — those agreeing is the point.
+	//
+	// Skipped on the collapse branch: multi-root → single-root flips the
+	// stored path form, so that path runs WipeFilesystemTracks and
+	// rescans rather than selecting by basename, and there is nothing to
+	// be ambiguous about. The prefix delete is only reachable when two or
+	// more roots survive.
+	if !willCollapse {
+		removedKey := bridgefs.FoldRootBasename(current[idx])
+		for _, other := range newList {
+			if bridgefs.FoldRootBasename(other) == removedKey {
+				writeError(w, http.StatusConflict, "ambiguous-basename",
+					fmt.Sprintf("can't remove %q: surviving root %q has a basename that differs only by case (%q vs %q). "+
+						"Track paths are keyed by basename, so the removal target is ambiguous — rename one root's directory, "+
+						"or remove both and re-add the one you want to keep.",
+						abs, other, removedBasename, filepath.Base(other)))
+				return
+			}
+		}
+	}
+
 	// Commit order matters: run the destructive manifest op FIRST, and
 	// only persist the root list + broadcast SetRoots after it succeeds.
 	// The reverse (save config → wipe tracks) can leave disk in a state

@@ -177,9 +177,14 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 		// libraryRoots: directly), pruning by basename would wipe
 		// the surviving root's tracks too. Refuse rather than
 		// silently corrupt (Gemini High on PR #78).
+		// FoldRootBasename, not filepath.Base: the byte-exact compare
+		// let /srv/Music and /srv/music through, which is precisely the
+		// pair this guard exists to catch. Shared with ValidateRoots and
+		// the admin console's twin so all three agree on "same basename".
 		basename := filepath.Base(target)
+		targetKey := bridgefs.FoldRootBasename(target)
 		for _, surviving := range newList {
-			if filepath.Base(surviving) == basename {
+			if bridgefs.FoldRootBasename(surviving) == targetKey {
 				fmt.Fprintf(stderr, "library remove: refusing — another configured root (%q) shares the basename %q\n", surviving, basename)
 				fmt.Fprintln(stderr, "  rename the colliding root first; the manifest path namespace can't disambiguate.")
 				return 1
