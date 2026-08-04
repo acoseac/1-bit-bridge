@@ -20,9 +20,7 @@ import (
 // transcode.withFakeSox. CI has no audio toolchain and must not need one.
 func withFakeFpcalc(t *testing.T, stdout string, exitCode int) {
 	t.Helper()
-	if _, err := os.Stat("/bin/sh"); err != nil {
-		t.Skip("test uses /bin/sh, unavailable on this platform")
-	}
+	requirePOSIXShell(t)
 	origLook, origCmd := fpcalcLookPath, fpcalcCommand
 	t.Cleanup(func() { fpcalcLookPath, fpcalcCommand = origLook, origCmd })
 
@@ -34,6 +32,23 @@ func withFakeFpcalc(t *testing.T, stdout string, exitCode int) {
 			script += "; printf 'ERROR: could not decode\\n' >&2; exit " + strconv.Itoa(exitCode)
 		}
 		return exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	}
+}
+
+// requirePOSIXShell skips when /bin/sh is absent.
+//
+// The fpcalc seams are driven by a shell script standing in for the real
+// binary, which is exactly right on Linux and macOS and simply does not
+// exist on Windows — `exec: "/bin/sh": executable file not found in
+// %PATH%`. withFakeFpcalc has always guarded for it; the
+// error-redaction test grew its own inline seam later and did not, so it
+// failed on Windows for want of a shell rather than for anything to do
+// with path redaction. One helper so the next inline seam inherits the
+// guard instead of rediscovering it.
+func requirePOSIXShell(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("test drives the fpcalc seam through /bin/sh, unavailable on this platform")
 	}
 }
 
@@ -147,6 +162,7 @@ func TestComputeErrorsDoNotLeakAbsolutePaths(t *testing.T) {
 	origLook, origCmd := fpcalcLookPath, fpcalcCommand
 	t.Cleanup(func() { fpcalcLookPath, fpcalcCommand = origLook, origCmd })
 	fpcalcLookPath = func(string) (string, error) { return "/fake/fpcalc", nil }
+	requirePOSIXShell(t)
 	fpcalcCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "/bin/sh", "-c",
 			"printf 'ERROR: cannot open %s\\n' '"+abs+"' >&2; exit 2")

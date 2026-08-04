@@ -69,12 +69,20 @@ func TestSnapshotCapturesAllProvidedFiles(t *testing.T) {
 	}
 
 	// Permissions: snapshot dir 0700, files 0600.
-	if got := mode(t, dst); got&0o777 != 0o700 {
-		t.Errorf("snapshot dir mode = %o, want 0700", got&0o777)
-	}
-	for _, name := range []string{"bridge.db", "tokens.json", "server.crt", "server.key"} {
-		if got := mode(t, filepath.Join(dst, name)); got&0o777 != 0o600 {
-			t.Errorf("snapshot file %s mode = %o, want 0600", name, got&0o777)
+	//
+	// POSIX bits are ADVISORY on Windows — Go synthesises 0777/0666 from
+	// the read-only attribute, and the real protection is the NTFS ACL on
+	// the per-user %LOCALAPPDATA% profile (CLAUDE.md, PR #63). The
+	// snapshot still CONTAINS the right files there, which is what the
+	// rest of this test checks; only the numeric mode is unassertable.
+	if runtime.GOOS != "windows" {
+		if got := mode(t, dst); got&0o777 != 0o700 {
+			t.Errorf("snapshot dir mode = %o, want 0700", got&0o777)
+		}
+		for _, name := range []string{"bridge.db", "tokens.json", "server.crt", "server.key"} {
+			if got := mode(t, filepath.Join(dst, name)); got&0o777 != 0o600 {
+				t.Errorf("snapshot file %s mode = %o, want 0600", name, got&0o777)
+			}
 		}
 	}
 }
