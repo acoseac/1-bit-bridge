@@ -327,6 +327,14 @@ func TestLogging_DownloadThroughputRecordedForLargeTransfer(t *testing.T) {
 			buf := withTestSlog(t)
 			body := make([]byte, downloadThroughputMinBytes) // exactly at the floor (>=)
 			h := requestLogging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Measurable wall clock — see the note on
+				// TestLogging_DownloadThroughput_PatternFromRealMux. The
+				// emit is gated on `duration > 0`, and 2 MiB into a
+				// recorder finishes inside one tick on a coarse-clock
+				// platform, so without this the guard correctly
+				// suppresses the line and the test misreads that as the
+				// gate being broken.
+				time.Sleep(2 * time.Millisecond)
 				w.WriteHeader(tc.status)
 				_, _ = w.Write(body)
 			}))
