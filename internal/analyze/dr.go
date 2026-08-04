@@ -100,13 +100,30 @@ func (m *drMeter) finish() {
 }
 
 // score returns the rounded DR value, or ok=false when the program is too
-// short (fewer than drMinBlocks blocks) or silent.
+// short (fewer than drMinBlocks blocks) or every channel is silent.
+//
+// A silent channel is SKIPPED, not fatal. `flushBlock` appends to every
+// channel on the same tick, so block COUNT is a whole-program property
+// and `blocks < drMinBlocks` rightly returns for the track — but "this
+// channel carries no signal" is per-channel, and one such channel used
+// to return from the function and suppress the score for the whole
+// track. A 5.1 rip with an unused LFE, a one-dead-channel LP transfer,
+// or a mono master laid into a stereo container all landed there: a
+// DRScore of nil, committed with the schema stamp, so the scan-skip
+// gate never looked again.
+//
+// The `counted` accumulator below is the tell that this was an
+// oversight rather than a decision — it and its `counted == 0` guard
+// only mean anything if channels can drop out individually. Until now
+// `counted` was necessarily equal to m.channels and the guard was
+// unreachable.
 func (m *drMeter) score() (int, bool) {
 	total := 0.0
 	counted := 0
 	for c := 0; c < m.channels; c++ {
 		blocks := len(m.rms[c])
 		if blocks < drMinBlocks {
+			// Whole-track: every channel has the same block count.
 			return 0, false
 		}
 		// Loudest 20% of blocks by RMS, energy-averaged.
@@ -129,12 +146,20 @@ func (m *drMeter) score() (int, bool) {
 			peak = pks[1]
 		}
 		if peak <= 0 || rms20 <= 0 {
-			return 0, false
+			// This channel is digitally silent — no dynamic range to
+			// measure. Skip it rather than the track, and do NOT fold a
+			// zero into the average: a silent channel has no DR, which
+			// is not the same as a DR of zero (zero means maximally
+			// compressed, the loudness-war reading).
+			continue
 		}
 		total += 20 * math.Log10(peak/rms20)
 		counted++
 	}
 	if counted == 0 {
+		// Every channel silent — now reachable, and the correct answer:
+		// there is no dynamic range to report, so report nothing rather
+		// than a fabricated 0.
 		return 0, false
 	}
 	dr := int(math.Round(total / float64(counted)))
