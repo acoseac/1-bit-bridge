@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -369,9 +370,37 @@ func TestLibMetaCache_ErrorDoesNotCache(t *testing.T) {
 func TestLibMetaCache_BoundsEntries(t *testing.T) {
 	var c libMetaCache[string]
 	const overflow = 10
-	for i := range libMetaCacheMaxEntries + overflow {
+
+	// The oldest band is written FIRST and separated by a real pause,
+	// so its entries are strictly older than the rest rather than
+	// merely earlier in the loop.
+	//
+	// That separation is the whole point. Eviction picks the smallest
+	// `at` with a strict `e.at.Before(oldestAt)`, so TIED stamps fall
+	// through to Go's randomized map iteration order — and a tight loop
+	// writes all 74 entries inside one clock tick on a platform with
+	// coarse timer granularity, which Windows has. Every stamp then
+	// ties, all 74 are equally evictable, and which 10 go is a coin
+	// toss: the odds that none of a particular 10 is picked are
+	// C(64,10)/C(74,10) ~= 21%, so this failed about one Windows run in
+	// five. It is what took #632, #633 and #636 red.
+	//
+	// A previous pass at this softened the ASSERTION instead (from
+	// "key 0 must go" to "not all 10 may survive"), which lowered the
+	// failure rate without removing the tie that causes it. Separating
+	// the stamps removes it, and the assertion can then go back to
+	// being exact.
+	//
+	// 50ms clears the ~15.6ms worst-case Windows timer granularity with
+	// room to spare, once, in one test.
+	for i := range overflow {
 		c.put(strconv.Itoa(i), "v")
 	}
+	time.Sleep(50 * time.Millisecond)
+	for i := overflow; i < libMetaCacheMaxEntries+overflow; i++ {
+		c.put(strconv.Itoa(i), "v")
+	}
+
 	if len(c.m) != libMetaCacheMaxEntries {
 		t.Errorf("len = %d, want exactly %d — overflow reset the map instead of evicting",
 			len(c.m), libMetaCacheMaxEntries)
@@ -381,29 +410,21 @@ func TestLibMetaCache_BoundsEntries(t *testing.T) {
 	if _, ok := c.m[newest]; !ok {
 		t.Errorf("newest key %q evicted", newest)
 	}
-	// Exactly `overflow` entries had to go, and they must come from the
-	// oldest end.
-	//
-	// Asserted over the oldest BAND rather than pinning key "0"
-	// specifically. Eviction orders by the entry's time.Now() stamp, and
-	// this loop writes all 74 entries within a single clock tick on a
-	// platform with coarse timer granularity — Windows especially. With
-	// the stamps tied, which of the equally-old keys goes is genuinely
-	// undefined, so pinning "0" was asserting map iteration order.
-	//
-	// This still fails everything it needs to: a clear()-the-map policy
-	// trips the length check above, and a policy evicting from the NEWEST
-	// end (or at random) leaves survivors in the oldest band. Production
-	// puts are click-driven and seconds apart, so the tie is a property
-	// of the test loop, not of the cache.
-	survivingOldest := 0
+	// Exactly `overflow` entries had to go, and with the stamps now
+	// separated it is determined WHICH: the oldest band, all of it.
+	// Asserting zero survivors (not "fewer than all") is what makes this
+	// catch a policy that evicts from the newest end, or at random,
+	// rather than only catching a clear()-the-map policy.
+	var survivors []string
 	for i := range overflow {
 		if _, ok := c.m[strconv.Itoa(i)]; ok {
-			survivingOldest++
+			survivors = append(survivors, strconv.Itoa(i))
 		}
 	}
-	if survivingOldest == overflow {
-		t.Errorf("all %d oldest keys survived — eviction isn't expiry-ordered", overflow)
+	if len(survivors) != 0 {
+		t.Errorf("%d of the %d oldest keys survived (%v) — eviction isn't "+
+			"expiry-ordered; they are strictly older than every other entry",
+			len(survivors), overflow, survivors)
 	}
 }
 
