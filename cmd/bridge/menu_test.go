@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -35,14 +36,24 @@ func TestMenuOptionsByState(t *testing.T) {
 			wantKeys: []rune{'1', '2', '3', '4', '5', 'Q'},
 		},
 		{
+			// Start joins Stop/Restart here. It is offered regardless of
+			// the run-state probe — see the running/stopped pair below.
 			name:     "initialized-with-launchd",
 			state:    menuState{initialized: true, kind: packaging.KindLaunchdUser, isAdmin: true},
-			wantKeys: []rune{'1', '2', '3', '4', '5', 'Q'},
+			wantKeys: []rune{'1', '2', '3', '4', '5', '6', 'Q'},
 		},
 		{
 			name:     "initialized-with-scm",
 			state:    menuState{initialized: true, kind: packaging.KindWindowsSCM, isWindows: true, isAdmin: true},
-			wantKeys: []rune{'1', '2', '3', '4', '5', 'Q'},
+			wantKeys: []rune{'1', '2', '3', '4', '5', '6', 'Q'},
+		},
+		{
+			// The option list must NOT vary with the probe. A probe that
+			// is wrong (a bridge answering on an address we cannot dial)
+			// would otherwise remove the operator's ability to act.
+			name:     "initialized-with-launchd-running",
+			state:    menuState{initialized: true, kind: packaging.KindLaunchdUser, isAdmin: true, running: true},
+			wantKeys: []rune{'1', '2', '3', '4', '5', '6', 'Q'},
 		},
 	}
 	for _, c := range cases {
@@ -274,4 +285,162 @@ func TestWaitForListenTimesOutOnUnboundPort(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
 		t.Errorf("waitForListen ran %v, expected to honour ~600ms deadline", elapsed)
 	}
+}
+
+// TestOptionsForDoesNoIO pins optionsFor's docblock claim that the table
+// is "Pure data — no I/O".
+//
+// That purity is what makes the table unit-testable on every platform
+// without a config dir or a service install, and adding run-state to
+// menuState put it one careless line away from being lost: the natural
+// place to reach for `running` is inside optionsFor, where it would turn
+// every option-table assertion into a network call.
+func TestOptionsForDoesNoIO(t *testing.T) {
+	orig := adminRunningProbe
+	t.Cleanup(func() { adminRunningProbe = orig })
+	adminRunningProbe = func(string) bool {
+		t.Error("optionsFor probed the admin address; the option table must stay pure data")
+		return false
+	}
+	for _, st := range []menuState{
+		{initialized: false},
+		{initialized: true, kind: packaging.KindNone, isAdmin: true},
+		{initialized: true, kind: packaging.KindLaunchdUser, isAdmin: true},
+	} {
+		_ = optionsFor(st)
+	}
+}
+
+// TestMenuOffersStartOnServiceInstall pins that a stopped-but-installed
+// bridge has a menu path back up.
+//
+// Before this, the service-installed branch offered Stop / Restart /
+// Open admin / Pair / Uninstall: picking Stop left the operator with no
+// way to start it again from the menu. `bridge start` existed as a CLI
+// subcommand the whole time — it was the MENU that couldn't reach it.
+func TestMenuOffersStartOnServiceInstall(t *testing.T) {
+	for _, running := range []bool{true, false} {
+		opts := optionsFor(menuState{
+			initialized: true,
+			kind:        packaging.KindLaunchdUser,
+			isAdmin:     true,
+			running:     running,
+		})
+		// Match on the DISPATCH, not the label. A substring check for
+		// "start" cannot fail here — "Restart service" contains it — which
+		// is exactly how the first version of this test passed with the
+		// Start row deleted. Comparing func pointers also survives a
+		// relabelling and pins the thing that actually matters.
+		var found bool
+		want := reflect.ValueOf(actStart).Pointer()
+		for _, o := range opts {
+			if o.action != nil && reflect.ValueOf(o.action).Pointer() == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("running=%v: no row dispatching to actStart in the service-installed menu; got %v",
+				running, optionLabels(opts))
+		}
+	}
+}
+
+// TestRunStateSuffix pins the third status badge, which is the whole
+// point of tracking run state: `kind` reports what is INSTALLED, and a
+// stopped-but-installed bridge previously rendered as though it were up.
+func TestRunStateSuffix(t *testing.T) {
+	// Before init there is no config to resolve an admin address from,
+	// so "not running" would be noise on a first-run screen.
+	if got := runStateSuffix(menuState{initialized: false}); got != "" {
+		t.Errorf("uninitialized: got %q, want empty", got)
+	}
+	running := runStateSuffix(menuState{initialized: true, running: true})
+	if !strings.Contains(running, "running") || strings.Contains(running, "not running") {
+		t.Errorf("running: got %q, want a positive running badge", running)
+	}
+	stopped := runStateSuffix(menuState{initialized: true, running: false})
+	if !strings.Contains(stopped, "not running") {
+		t.Errorf("stopped: got %q, want a not-running badge", stopped)
+	}
+	// Shown even with no service installed: "Start the bridge now (this
+	// terminal)" in another window is a real way to be up.
+	bare := runStateSuffix(menuState{initialized: true, kind: packaging.KindNone, running: true})
+	if !strings.Contains(bare, "running") {
+		t.Errorf("initialized, no service, running: got %q, want a running badge", bare)
+	}
+}
+
+// TestStatusLineReportsRunState is the end-to-end of the above: the line
+// the operator actually reads must distinguish stopped from running.
+func TestStatusLineReportsRunState(t *testing.T) {
+	var up, down bytes.Buffer
+	base := menuState{initialized: true, kind: packaging.KindLaunchdUser, cfgPath: "/tmp/bridge.yaml"}
+	runningState := base
+	runningState.running = true
+	writeStatusLine(&up, runningState)
+	writeStatusLine(&down, base)
+	if up.String() == down.String() {
+		t.Fatal("status line is identical for a running and a stopped bridge — " +
+			"reporting install state as though it were run state is the bug this fixes")
+	}
+	if !strings.Contains(down.String(), "not running") {
+		t.Errorf("stopped status line %q does not say so", down.String())
+	}
+}
+
+// TestActOpenAdminDeclinesWhenNotRunning pins that the menu stops opening
+// a tab that can only say "connection refused" — the second half of the
+// stopped-but-installed bug.
+//
+// Only the not-running path is exercised: the running path really does
+// launch a browser, which is not something a test should do to the
+// machine it runs on.
+func TestActOpenAdminDeclinesWhenNotRunning(t *testing.T) {
+	var out bytes.Buffer
+	code := actOpenAdmin(context.Background(), nil, &out, io.Discard,
+		menuState{initialized: true, kind: packaging.KindLaunchdUser, running: false})
+	if code != -1 {
+		t.Errorf("exit code = %d, want -1 (stay in the menu)", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, "not opening a browser") {
+		t.Errorf("output %q does not decline to open a dead tab", got)
+	}
+	// The URL still prints, so an operator whose bridge IS up on an
+	// address we couldn't dial can still copy the link.
+	if !strings.Contains(got, "Admin console:") {
+		t.Errorf("output %q dropped the admin URL; declining must not hide it", got)
+	}
+}
+
+// TestDetectStateUsesTheProbe pins the wiring: menuState.running comes
+// from the probe, and is not asked at all before init (no config, so no
+// admin address to resolve).
+func TestDetectStateUsesTheProbe(t *testing.T) {
+	orig := adminRunningProbe
+	t.Cleanup(func() { adminRunningProbe = orig })
+
+	var called atomic.Int32
+	adminRunningProbe = func(string) bool { called.Add(1); return true }
+	st := detectState()
+	if st.initialized {
+		if !st.running {
+			t.Error("probe returned true but menuState.running is false")
+		}
+		if called.Load() == 0 {
+			t.Error("initialized state did not consult the probe")
+		}
+	} else if called.Load() != 0 {
+		t.Error("probed the admin address before init, when there is no config to read it from")
+	}
+}
+
+// optionLabels renders an option table for failure messages, so a broken
+// assertion says what the menu actually offered.
+func optionLabels(opts []menuOption) []string {
+	out := make([]string, 0, len(opts))
+	for _, o := range opts {
+		out = append(out, string(o.key)+":"+o.label)
+	}
+	return out
 }
