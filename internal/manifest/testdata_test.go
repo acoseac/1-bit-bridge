@@ -75,11 +75,37 @@ func writeMinimalFLACPairs(t *testing.T, path string, sampleRate, bitsPerSample 
 	}
 
 	// Sanity: our own mewkiz/flac wrapper can parse what we just wrote.
-	s, err := flac.ParseFile(path)
+	//
+	// This deliberately does NOT use `flac.ParseFile` / `flac.Open`, which
+	// LEAK the file handle in mewkiz/flac v1.0.13 despite their doc
+	// comments telling you to call Close. Both `os.Open` the path and hand
+	// the *os.File to `Parse` / `New`, which wrap it in a `bufio.Reader`
+	// and store only that on `Stream.r` — the *os.File is dropped. Their
+	// `Stream.Close` then does `if closer, ok := stream.r.(io.Closer)`,
+	// and a *bufio.Reader is not an io.Closer, so it returns nil having
+	// closed nothing. Measured: 20 ParseFile+Close cycles leak 20 fds.
+	//
+	// On POSIX that leak is invisible here — unlink succeeds against an
+	// open handle and the fds die with the test binary. On Windows the
+	// open handle blocks deletion, so `t.TempDir`'s RemoveAll cleanup
+	// failed with "The process cannot access the file because it is being
+	// used by another process" for every FLAC fixture this helper wrote:
+	// 26 of the suite's 30 Windows failures, across extractor, scanner and
+	// manifest tests. (The other four were unclosed stores.) Note the
+	// culprit is the FIXTURE WRITER, not the extractor — production never
+	// imports the top-level `flac` package at all, only `flac/meta`, and
+	// owns + closes its own handle.
+	//
+	// Own the handle and close it. `flac_handle_discipline_test.go` pins
+	// the rule for the whole module so it cannot come back.
+	f, err := os.Open(path)
 	if err != nil {
+		t.Fatalf("reopen FLAC fixture: %v", err)
+	}
+	defer f.Close()
+	if _, err := flac.Parse(f); err != nil {
 		t.Fatalf("fixture didn't round-trip through mewkiz/flac: %v", err)
 	}
-	_ = s.Close()
 }
 
 func writeMetaBlockHeader(w io.Writer, t meta.Type, isLast bool, length uint32) {
