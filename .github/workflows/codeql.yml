@@ -42,7 +42,20 @@ jobs:
           check-latest: true
           cache: true
 
-      - uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+      # The three github/codeql-action/* steps below MUST stay pinned to
+      # the SAME SHA. `init` writes a config file stamped with its own
+      # version and `autobuild` / `analyze` refuse to read one written by
+      # a different release:
+      #
+      #   Loaded a configuration file for version '4.37.3',
+      #   but running version '4.37.1'
+      #
+      # Dependabot treats them as three independent dependencies and
+      # opens three separate PRs (#577 / #578 / #580 for this bump), each
+      # of which fails on its own branch and would break CodeQL on main
+      # if merged alone. Bump all three in ONE commit and close the
+      # singles — do not merge a partial set to "make progress".
+      - uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           languages: ${{ matrix.language }}
           # The `security-extended` suite adds taint-flow + data-flow
@@ -52,8 +65,8 @@ jobs:
           # the extra coverage is worth the occasional false positive.
           queries: security-extended
 
-      - uses: github/codeql-action/autobuild@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+      - uses: github/codeql-action/autobuild@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
 
-      - uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+      - uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           category: "/language:${{ matrix.language }}"

@@ -58,15 +58,30 @@ func TestAutoInitSeedDoesNotCaptureEnv(t *testing.T) {
 	if err := writeAutoInitConfig(cfgPath); err != nil {
 		t.Fatalf("writeAutoInitConfig: %v", err)
 	}
-	t.Setenv("BRIDGE_LIBRARY_ROOTS", "/music")
+	// An ABSOLUTE root, derived rather than written literally. A hardcoded
+	// "/music" is absolute only on POSIX: filepath.IsAbs wants a drive
+	// letter on Windows, so resolvePaths correctly treated it as relative
+	// and joined it to the config dir, and the test read that as the seed
+	// having captured env. The env plumbing was fine; the fixture was
+	// asserting a POSIX path shape. (Drive letters are safe in the value
+	// itself — applyEnvOverrides splits on os.PathListSeparator, so `C:\`
+	// is not corrupted.)
+	envRoot := filepath.Join(t.TempDir(), "music")
+	t.Setenv("BRIDGE_LIBRARY_ROOTS", envRoot)
 	t.Setenv("BRIDGE_LIBRARY_NAME", "Env Name")
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if len(cfg.LibraryRoots) != 1 || cfg.LibraryRoots[0] != "/music" {
-		t.Errorf("runtime LibraryRoots = %v, want [/music] (env should win)", cfg.LibraryRoots)
+	if len(cfg.LibraryRoots) != 1 || cfg.LibraryRoots[0] != envRoot {
+		t.Errorf("runtime LibraryRoots = %v, want [%s] (env should win)",
+			cfg.LibraryRoots, envRoot)
+	}
+	if strings.Contains(strings.Join(cfg.LibraryRoots, ""), autoInitDefaultRoot) {
+		t.Errorf("runtime LibraryRoots = %v still carries the seed default %q — "+
+			"env must override it, not be appended to or resolved against it",
+			cfg.LibraryRoots, autoInitDefaultRoot)
 	}
 	if cfg.LibraryName != "Env Name" {
 		t.Errorf("runtime LibraryName = %q, want the env value", cfg.LibraryName)
@@ -74,7 +89,7 @@ func TestAutoInitSeedDoesNotCaptureEnv(t *testing.T) {
 	// The persisted YAML must still carry the sparse defaults, NOT the env
 	// values — otherwise dropping the env var later would surprise.
 	raw, _ := os.ReadFile(cfgPath)
-	if strings.Contains(string(raw), "/music") || strings.Contains(string(raw), "Env Name") {
+	if strings.Contains(string(raw), envRoot) || strings.Contains(string(raw), "Env Name") {
 		t.Errorf("seed YAML captured env state (should stay sparse):\n%s", raw)
 	}
 }

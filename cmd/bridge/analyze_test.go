@@ -245,3 +245,73 @@ func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestCollectAnalysisCandidatesExcludesUPnPRoutedRows is the end-to-end
+// half of the UPnP-exclusion fix, asserted on the numbers the operator
+// actually reads on the Jobs page rather than on the store method.
+//
+// A routed row describes media on an upstream device. It has no local
+// file, so `ResolveChecked` misses by construction and every one landed
+// in `res.missing` — the sweep reported `total 15372, missing 13553`
+// beside a coverage tile correctly reading `totalLocal 89`. Two numbers
+// for one library, disagreeing, with the alarming one attached to the
+// field that looks like an error count.
+//
+// The routed fixture path deliberately does NOT exist on disk, which is
+// the whole point: pre-fix it is counted as missing; post-fix it is
+// never enumerated. The `missing` assertion is therefore the sharp one
+// — a fix that merely stopped COUNTING routed rows while still
+// resolving them would pass a total-only check.
+func TestCollectAnalysisCandidatesExcludesUPnPRoutedRows(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "local.flac"), []byte("fLaC-nonzero-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	if err := store.UpsertTrack(ctx, &manifest.Track{
+		Path: "local.flac", Size: 18, ModTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTrack local: %v", err)
+	}
+	const routedPath = "Chord 2Go/Music/ABBA/Gold/01 Dancing Queen.flac"
+	if err := store.UpsertTrack(ctx, &manifest.Track{
+		Path: routedPath, Size: 42_000_000, ModTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTrack routed: %v", err)
+	}
+	if err := store.UpsertUPnPRouting(ctx, &manifest.UPnPRouting{
+		SourcePath: routedPath,
+		ServerUDN:  "uuid:4d696e69-444c-164e-9d41-00b78f5ae46a",
+		ObjectID:   "64$0$0$0",
+		ResURL:     "http://192.168.0.62:8200/MediaItems/25.flac",
+		LastSeenAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertUPnPRouting: %v", err)
+	}
+
+	res, err := collectAnalysisCandidates(ctx, store, bridgefs.New([]string{root}), t.TempDir(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.total != 1 {
+		t.Errorf("total = %d, want 1 (the filesystem track only) — the sweep "+
+			"must describe the same library as the coverage tile", res.total)
+	}
+	if res.missing != 0 {
+		t.Errorf("missing = %d, want 0 — a routed row must never be resolved "+
+			"against local disk, let alone reported to the operator as missing",
+			res.missing)
+	}
+	for _, c := range res.candidates {
+		if c.SourceLibraryRel == routedPath {
+			t.Error("routed track was enqueued for analysis; it has no local file to decode")
+		}
+	}
+}

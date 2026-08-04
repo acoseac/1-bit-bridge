@@ -345,23 +345,30 @@ func TestAcousticFallbackDoesNotOverwriteAResolvedArtist(t *testing.T) {
 	}
 }
 
-// TestAlbumHopSharesTheTextPathCache pins the sibling-track saving.
+// TestAlbumHopReusesASiblingsCachedResolution pins the sibling-track saving.
 //
 // Every track under one junk-tagged folder produces an identical
-// (artistName, album) query. Without a shared cache each pays its own
-// SearchRelease plus a full MBMinInterval sleep — 1.1s each against public
-// MusicBrainz, on exactly the population this feature targets. A 15-track
-// "CD 01" folder would spend a quarter of a minute asking the same question
-// fifteen times.
-func TestAlbumHopSharesTheTextPathCache(t *testing.T) {
+// (artistName, album) query. Without reuse each pays its own SearchRelease
+// plus a full MBMinInterval sleep — 1.1s each against public MusicBrainz, on
+// exactly the population this feature targets. A 15-track "CD 01" folder
+// would spend a quarter of a minute asking the same question fifteen times.
+//
+// Renamed from TestAlbumHopSharesTheTextPathCache: the hop shares the CACHE
+// with the text path, but must not share its KEY. The old name and its
+// text-path-keyed fixture described the collision that cost whole albums
+// their release MBID — see acousticCacheKey.
+func TestAlbumHopReusesASiblingsCachedResolution(t *testing.T) {
 	e := &Enricher{albumCache: lrucache.New[string, albumResolution](8)}
 	m := AcousticMatch{ArtistName: "M83", AlbumHint: "Before the Dawn Heals Us"}
 	tr := &manifest.Track{Path: "a.flac", Album: "CD 01"}
 
-	// Seed as though the text path had already resolved this exact query.
+	// Seed as though a SIBLING TRACK'S acoustic hop had already resolved this
+	// exact query — which is the saving being pinned. Seeded under the
+	// acoustic key space, not the text path's: sharing the cache is the
+	// point, sharing the key was a bug (see acousticCacheKey).
 	const release = "11111111-1111-1111-1111-111111111111"
 	const group = "22222222-2222-2222-2222-222222222222"
-	e.albumCache.Set(cacheKey(m.ArtistName, m.AlbumHint),
+	e.albumCache.Set(acousticCacheKey(m.ArtistName, m.AlbumHint),
 		albumResolution{ReleaseMBID: release, ReleaseGroupMBID: group})
 
 	// e.mb is nil: reaching the network here would panic, which is precisely
@@ -375,16 +382,40 @@ func TestAlbumHopSharesTheTextPathCache(t *testing.T) {
 	}
 }
 
-// TestAlbumHopUsesTheSameKeyAsTheTextPath — sharing only pays off if both
-// sides key identically. A divergence here would silently halve the hit rate
-// rather than fail anything.
-func TestAlbumHopUsesTheSameKeyAsTheTextPath(t *testing.T) {
-	// The hop keys on the fingerprint's canonical artist name and the resolved
-	// album term — the same two inputs the text path uses, in the same order.
+// TestAlbumHopKeyIsSeparateFromTheTextPath is the inverse of what this test
+// used to assert.
+//
+// It previously required the two key spaces to be IDENTICAL, on the reasoning
+// that "sharing only pays off if both sides key identically". The sharing that
+// pays off is of the cache, not the key — and identical keys let the hop's
+// deliberately single-rung no-match pre-empt ladder rungs the text path had
+// yet to try, costing whole albums their release MBID depending on which
+// track happened to enrich first.
+//
+// The hop still keys on the same two INPUTS in the same order, so siblings
+// taking the hop reuse each other's answer; only the namespace differs.
+func TestAlbumHopKeyIsSeparateFromTheTextPath(t *testing.T) {
 	m := AcousticMatch{ArtistName: "M83", AlbumHint: "Hint"}
 	tr := &manifest.Track{Album: "Real Album"}
-	if got, want := cacheKey(m.ArtistName, albumSearchTerm(tr, m)), cacheKey("M83", "Real Album"); got != want {
-		t.Errorf("key = %q, want %q", got, want)
+	hopKey := acousticCacheKey(m.ArtistName, albumSearchTerm(tr, m))
+
+	// A track with no distinct albumArtist is the collision case: its
+	// releaseCacheKey collapses to the bare two-part form.
+	textKey := releaseCacheKey("M83", "", "Real Album")
+	if hopKey == textKey {
+		t.Errorf("hop and text path share key %q — the hop's single-rung no-match "+
+			"would pre-empt the text ladder for every well-tagged sibling", hopKey)
+	}
+	// The adversarial case for the namespace: an artist literally named
+	// "acoustic" makes releaseCacheKey emit the hop's own prefix. This is
+	// why the marker is anchored behind a leading NUL.
+	if acousticCacheKey("artist", "album") == releaseCacheKey("acoustic", "artist", "album") {
+		t.Error("an artist named \"acoustic\" collides with the hop's namespace — " +
+			"the prefix must be unreachable from any real artist name")
+	}
+	// Siblings on the hop must still collide with each OTHER.
+	if got := acousticCacheKey("M83", albumSearchTerm(&manifest.Track{Album: "Real Album"}, m)); got != hopKey {
+		t.Errorf("two hop calls with the same inputs keyed differently: %q vs %q", got, hopKey)
 	}
 }
 

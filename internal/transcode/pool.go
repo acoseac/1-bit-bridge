@@ -81,8 +81,17 @@ type Pool struct {
 	upscaleJobs  chan poolJob
 	queueCap     int
 
-	mu       sync.Mutex
-	inflight map[string]struct{} // key = source_path + "|" + variant_id
+	mu sync.Mutex
+	// inflight maps the dedup key (source_path + "|" + variant_id) to
+	// the CLAIM GENERATION currently occupying it — not to a bare
+	// presence marker. See poolJob.claim and releaseDedup: a job may
+	// outlive its own entry (DropInflight), so "is this key taken" and
+	// "is this key taken BY ME" are different questions, and only the
+	// second one may authorise a release.
+	inflight map[string]uint64
+	// claimSeq issues those generations. Guarded by p.mu; pre-incremented
+	// so the first claim is 1 and a map miss (0) never matches.
+	claimSeq uint64
 
 	wg          sync.WaitGroup
 	stopCtx     context.Context
@@ -241,6 +250,15 @@ type Pool struct {
 type poolJob struct {
 	spec  JobSpec
 	dedup string
+	// claim identifies WHICH occupancy of `dedup` this job is. The
+	// dedup key alone cannot: DropInflight can free the key while
+	// this job still runs, a resubmission then claims the same key,
+	// and this job's completion would otherwise release the NEWER
+	// job's slot. Generations are monotonic and never reused, so a
+	// release only fires when the claim is still the one it took.
+	// Always >= 1, so the zero value of a missing map entry can
+	// never be mistaken for a live claim.
+	claim uint64
 }
 
 // jobCompleteEvent is the payload pushed onto Pool.jobCompleteChan
@@ -336,7 +354,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		optimizeJobs: make(chan poolJob, queueCap),
 		upscaleJobs:  make(chan poolJob, queueCap),
 		queueCap:     queueCap,
-		inflight:     make(map[string]struct{}),
+		inflight:     make(map[string]uint64),
 		activeJobs:   make([]atomic.Pointer[ActiveJob], workers),
 		stopCtx:      stopCtx,
 		stopCancel:   stopCancel,
@@ -406,7 +424,9 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	// send so two concurrent enqueues for the same job can't both
 	// pass the dedup check. If the channel send fails, we roll
 	// back below.
-	p.inflight[dedup] = struct{}{}
+	p.claimSeq++
+	claim := p.claimSeq
+	p.inflight[dedup] = claim
 	// Route per JobKind. `JobKindOptimize` → optimizeJobs (foreground);
 	// every other kind (`JobKindUpscale` AND empty-Kind legacy default)
 	// → upscaleJobs (background). Routing is pinned by a pure helper
@@ -417,7 +437,7 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 		jobsChan = p.optimizeJobs
 	}
 	select {
-	case jobsChan <- poolJob{spec: spec, dedup: dedup}:
+	case jobsChan <- poolJob{spec: spec, dedup: dedup, claim: claim}:
 		p.enqueuedCnt.Add(1)
 		// fireStateChange BEFORE the unlock. Stop() must hold p.mu to
 		// close the jobs channels and only closes stateChangeChan
@@ -433,9 +453,15 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 		p.mu.Unlock()
 		return nil
 	default:
-		// Roll back the optimistic claim — couldn't fit the job
-		// after all.
-		delete(p.inflight, dedup)
+		// Roll back the optimistic claim — couldn't fit the job after
+		// all. Ownership-compared like releaseDedup, even though p.mu
+		// has been held continuously since the claim was taken so
+		// nothing can have replaced it: the invariant that makes a bare
+		// delete safe here is non-local, and comparing keeps the
+		// rollback correct if the lock window is ever narrowed.
+		if p.inflight[dedup] == claim {
+			delete(p.inflight, dedup)
+		}
 		p.mu.Unlock()
 		return ErrQueueFull
 	}
@@ -788,6 +814,15 @@ func (p *Pool) ActiveWorkers() []ActiveJobView {
 // integrity watcher reaps the orphan within ≤1 h. Document the
 // race shape at the call site, not here.
 //
+// Because it frees keys belonging to jobs that are still RUNNING,
+// this is precisely why releaseDedup is ownership-checked. A dropped
+// job later completes and asks to release a key that a resubmission
+// may already have re-claimed; the generation comparison turns that
+// into a no-op. Without it the dropped job released the NEW job's
+// claim, a third enqueue passed the dedup check, and two workers ran
+// the same (source, variant) against one deterministic `.tmp` path —
+// see releaseDedup for the full sequence.
+//
 // Lock discipline: `p.mu` held only for the iteration window.
 // Predicate is called synchronously under the lock; predicate
 // authors keep predicates allocation-light (no DB calls, no map
@@ -999,7 +1034,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			}
 		}
 		if !released {
-			p.finishJob(workerID, job.dedup)
+			p.finishJob(workerID, job)
 			// Match the synchronous error branches' shape: fire the
 			// state-change AFTER releaseDedup so the published
 			// snapshot reflects the final state (job out of
@@ -1033,7 +1068,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	// Cooperative stop check before spending CPU on a sox
 	// invocation we'll just kill.
 	if p.closed.Load() {
-		p.finishJob(workerID, job.dedup)
+		p.finishJob(workerID, job)
 		released = true
 		return
 	}
@@ -1076,7 +1111,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 					"err", err)
 			}
 		}
-		p.finishJob(workerID, job.dedup)
+		p.finishJob(workerID, job)
 		released = true
 		// Fire AFTER releaseDedup so the published snapshot
 		// reflects the final state (job out of inflight) —
@@ -1122,7 +1157,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			_ = os.Remove(sidecarPath)
 			p.fireJobFailedFor(job, "fsync sidecar: "+err.Error(), startedAt)
 		}
-		p.finishJob(workerID, job.dedup)
+		p.finishJob(workerID, job)
 		released = true
 		if !p.closed.Load() {
 			p.fireStateChange()
@@ -1198,7 +1233,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		// fired the SSE first while the failed job was still in
 		// `p.inflight`, briefly publishing a stale snapshot that
 		// iOS clients then had to reconcile away on the next tick.
-		p.finishJob(workerID, job.dedup)
+		p.finishJob(workerID, job)
 		released = true
 		if !p.closed.Load() {
 			// Worker isn't stalled by the publisher's CountVariants
@@ -1213,7 +1248,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	dur := time.Since(startedAt).Seconds()
 	metrics.UpscaleDurationHist.Observe(dur)
 	metrics.UpscaleDurationWindow.Observe(dur)
-	p.finishJob(workerID, job.dedup)
+	p.finishJob(workerID, job)
 	released = true
 	// Per-job completion event fires AFTER UpsertVariant commits
 	// (success branch above) and AFTER releaseDedup so the
@@ -1326,16 +1361,43 @@ func redactSoxErr(s string, spec JobSpec) string {
 // and publish a snapshot still showing the just-finished worker as active
 // until the next tick. Store(nil) on an already-nil slot (the
 // cooperative-stop path runs before the slot is set) is a harmless no-op.
-func (p *Pool) finishJob(workerID int, dedup string) {
+func (p *Pool) finishJob(workerID int, job poolJob) {
 	p.activeJobs[workerID].Store(nil)
-	p.releaseDedup(dedup)
+	p.releaseDedup(job.dedup, job.claim)
 }
 
-// releaseDedup drops the (source, variant) slot from the inflight
-// set so a future Enqueue for the same pair can land. Must run on
-// every job-completion path (success, failure, cancel).
-func (p *Pool) releaseDedup(key string) {
+// releaseDedup drops the (source, variant) slot from the inflight set
+// so a future Enqueue for the same pair can land. Must run on every
+// job-completion path (success, failure, cancel).
+//
+// OWNERSHIP-CHECKED, and that check is the whole point. A job does not
+// necessarily still own the key it was enqueued under: DropInflight
+// (the variant-delete handler and the integrity watcher) frees keys for
+// jobs that are still RUNNING, by design, so that a resubmission is not
+// silently coalesced against a worker about to write a sidecar the
+// caller means to delete.
+//
+// With an unconditional delete that produced a real corruption path:
+//
+//	A enqueued, worker starts A       inflight{k}
+//	DropInflight(k)                   inflight{}
+//	B enqueued, worker starts B       inflight{k}
+//	A finishes -> delete(k)           inflight{}   <- released B's claim
+//	C enqueued: dedup check passes    two workers on the same (source, variant)
+//
+// B and C then share one deterministic `SidecarPath() + ".tmp"`, and
+// RunSox opens each job by `os.Remove`-ing that path to clear crash
+// debris — so the later starter unlinks the earlier's in-progress
+// output from under it, and they race the rename. The visible result is
+// a truncated or interleaved sidecar published as a complete variant.
+//
+// Comparing the generation makes a stale release a no-op: a missing key
+// reads 0, a re-claimed key reads a higher number, and neither equals
+// the caller's claim.
+func (p *Pool) releaseDedup(key string, claim uint64) {
 	p.mu.Lock()
-	delete(p.inflight, key)
+	if p.inflight[key] == claim {
+		delete(p.inflight, key)
+	}
 	p.mu.Unlock()
 }

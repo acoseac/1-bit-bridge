@@ -251,8 +251,21 @@ type analysisScanResult struct {
 // via the scan-skip gate (matching source mtime + size + schema). Shared
 // by `bridge analyze` and the serve-side sweeper so the two can't drift
 // on what "needs analysis" means.
+//
+// It enumerates LOCAL tracks only. Analysis decodes a file with
+// sox/ffmpeg, so a row routed from a UPnP upstream has nothing to
+// analyse — `ResolveChecked` cannot resolve it by construction, and
+// every one of them landed in `res.missing`. On the hybrid fixture (89
+// local tracks + 15,283 routed from a Chord 2Go) that meant 15,283
+// futile resolve calls per hourly sweep, reported to the operator as
+// `total 15372, missing 13553` next to a coverage block reading
+// `totalLocal 89` — two numbers for the same library, disagreeing,
+// with the alarming one attached to the thing that looks like an error
+// count. Store.TrackPathsLocal carries the same UPnP anti-join as
+// Store.AnalysisCoverage, so the sweep and the coverage tile now
+// describe the same set.
 func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir, filter string, force bool) (analysisScanResult, error) {
-	paths, err := store.TrackPaths(ctx)
+	paths, err := store.TrackPathsLocal(ctx)
 	if err != nil {
 		return analysisScanResult{}, err
 	}
