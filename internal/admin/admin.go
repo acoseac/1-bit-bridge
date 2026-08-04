@@ -824,6 +824,14 @@ type UpdateStatus struct {
 	LastError        string    `json:"lastError,omitempty"`
 	MinClientVersion string    `json:"minClientVersion,omitempty"`
 	CanInstall       bool      `json:"canInstall"`
+	// CanRollback reports whether a previous binary is actually on disk
+	// to roll back TO. POST /api/updates/rollback has existed with no
+	// caller since it shipped, and adding a button without this flag
+	// would have been worse than no button: rollback is a binary swap,
+	// so an operator pressing it with nothing staged gets an error where
+	// they expected a recovery. Filled by the cmd/bridge adapter, which
+	// stats the .bak the installer leaves beside the live binary.
+	CanRollback bool `json:"canRollback"`
 	// DeferredReason is the most-recent gate-refusal explanation
 	// from the auto-installer. Empty when the previous cycle
 	// either installed the candidate, found no candidate, or

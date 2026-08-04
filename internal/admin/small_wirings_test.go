@@ -1,0 +1,62 @@
+package admin
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestPlaylistTableUsesDeviceNames pins that the Listening table renders
+// the device NAME rather than the redacted token prefix.
+//
+// /api/devices has always carried deviceName; the table rendered
+// deviceTokenPrefix beside it, so the console showed an opaque hex string
+// (a3f91c2e…) for a device whose name the bridge already knew, and
+// PROTOCOL.md:664 promises the named surface.
+func TestPlaylistTableUsesDeviceNames(t *testing.T) {
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(b)
+	for _, want := range []string{"loadDeviceNames", "renderDeviceCell"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js no longer defines %s; the playlists table would fall back to the raw prefix", want)
+		}
+	}
+	// The lookup must be fed from /api/devices, not invented locally.
+	if !strings.Contains(js, `API.get("/api/devices")`) {
+		t.Error("nothing fetches /api/devices; the name map would always be empty and every row would show a prefix")
+	}
+}
+
+// TestRollbackButtonIsGatedOnCanRollback is the assertion that matters
+// for the rollback wiring.
+//
+// POST /api/updates/rollback shipped with no caller, so a bad update was
+// undoable only by curl. But rollback is a binary swap: a button offered
+// when nothing is staged turns an attempted recovery into an error, at
+// the exact moment the operator is least able to absorb one. The button
+// must be revealed from canRollback, which the adapter derives by
+// stat'ing the .bak the installer leaves behind.
+func TestRollbackButtonIsGatedOnCanRollback(t *testing.T) {
+	js, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(js), "canRollback") {
+		t.Error("app.js never reads canRollback; the Roll back button would show with nothing to roll back to")
+	}
+	html, err := templateFS.ReadFile("templates/dashboard.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(html), `id="update-rollback"`) {
+		t.Error("dashboard.html has no rollback button for app.js to reveal")
+	}
+	// Hidden at first paint: the server-rendered template cannot know
+	// whether a .bak exists, so the default must be invisible and the
+	// status frame must be what reveals it.
+	if !strings.Contains(string(html), `id="update-rollback" class="btn" hidden`) {
+		t.Error("the rollback button is not hidden by default; it would flash on every dashboard load")
+	}
+}

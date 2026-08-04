@@ -105,6 +105,31 @@ function initDashboard() {
     });
   }
 
+  // Updates: "Roll back" swaps the previous binary back in. Guarded by
+  // a typed-intent confirm rather than a bare one — this replaces the
+  // running binary, and the operator should not be able to do it by
+  // reflex from a dialog they were already dismissing.
+  const rollbackBtn = document.getElementById("update-rollback");
+  if (rollbackBtn) {
+    rollbackBtn.addEventListener("click", async () => {
+      if (!confirm(
+        "Roll back to the previous bridge binary?\n\n" +
+        "This swaps the running binary and clears the update state. " +
+        "The bridge must be restarted afterwards to load it."
+      )) return;
+      rollbackBtn.disabled = true;
+      rollbackBtn.textContent = "Rolling back…";
+      try {
+        await API.post("/api/updates/rollback");
+        rollbackBtn.textContent = "Rolled back — restart to apply";
+      } catch (err) {
+        rollbackBtn.textContent = "Roll back";
+        rollbackBtn.disabled = false;
+        alert("Rollback failed: " + err.message);
+      }
+    });
+  }
+
   // Enrichment panel: "Which tracks?" opens the per-facet breakdown.
   // Fetch happens on the FIRST open only — the endpoint walks the library
   // with json_extract, so re-fetching on every toggle would make an
@@ -1069,6 +1094,13 @@ function renderUpdateTile(u) {
   // the platform supports self-install AND an update is available.
   // Without this, a "checking…" → "update available" transition
   // mid-session would leave a paired client without a button.
+  // Roll back is revealed only when a previous binary is actually on
+  // disk. It is deliberately NOT gated on updateAvailable: the case it
+  // exists for is "the version I just installed is broken", where by
+  // definition there is no newer release to offer.
+  const rollbackBtn = document.getElementById("update-rollback");
+  if (rollbackBtn) rollbackBtn.hidden = !u?.canRollback;
+
   const actions = document.querySelector(".panel-head .panel-actions");
   let installBtn = document.getElementById("update-install");
   if (actions) {
@@ -6721,6 +6753,35 @@ function initData() {
   if (moreBtn) moreBtn.addEventListener("click", () => loadHistoryEvents(false));
 }
 
+// loadDeviceNames maps a redacted device-token prefix to the device's
+// name, from the registrations /api/devices already returns.
+//
+// Failure is non-fatal and returns an empty map: the caller falls back to
+// the prefix, which is exactly the pre-existing display. A device list
+// that fails to load must not take the playlists table down with it.
+async function loadDeviceNames() {
+  try {
+    const d = await API.get("/api/devices");
+    const out = new Map();
+    for (const dev of d?.devices || []) {
+      if (dev.deviceTokenPrefix && dev.deviceName) out.set(dev.deviceTokenPrefix, dev.deviceName);
+    }
+    return out;
+  } catch {
+    return new Map();
+  }
+}
+
+// renderDeviceCell shows the device NAME when known, keeping the prefix
+// as a title so the identifier is still recoverable — two devices can
+// share a name ("iPhone"), and the prefix is what every other surface
+// and the CLI key on.
+function renderDeviceCell(prefix, names) {
+  const name = names.get(prefix);
+  if (!name) return `<code>${escapeHTML(prefix || "")}</code>`;
+  return `<span title="${escapeHTML(prefix || "")}">${escapeHTML(name)}</span>`;
+}
+
 async function loadPlaylists() {
   const body = document.getElementById("playlists-body");
   if (!body) return;
@@ -6731,10 +6792,16 @@ async function loadPlaylists() {
       body.innerHTML = `<tr><td colspan="5"><em>No playlist backups yet.</em></td></tr>`;
       return;
     }
+    // Resolve device names once per render. /api/devices has always
+    // carried deviceName; this table rendered the token prefix
+    // (a3f91c2e…) beside it, so the console showed an opaque hex string
+    // for a device whose name the bridge already knew. PROTOCOL.md:664
+    // promises the named surface.
+    const deviceNames = await loadDeviceNames();
     body.innerHTML = rows.map((p) => `
       <tr class="playlist-row" data-device="${escapeHTML(p.deviceTokenPrefix)}" data-id="${escapeHTML(p.id)}">
         <td data-label="Name">${escapeHTML(p.name)}</td>
-        <td data-label="Device"><code>${escapeHTML(p.deviceTokenPrefix)}</code></td>
+        <td data-label="Device">${renderDeviceCell(p.deviceTokenPrefix, deviceNames)}</td>
         <td class="num" data-label="Tracks">${p.trackCount}</td>
         <td data-label="Updated">${p.updatedAt ? formatTimeAgo(new Date(p.updatedAt)) : "—"}</td>
         <td class="row-actions" data-label="Actions"><button type="button" class="btn open-playlist">View</button></td>

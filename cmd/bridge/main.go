@@ -1231,8 +1231,26 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		LastError:        s.LastError,
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
+		CanRollback:      a.canRollback(),
 		DeferredReason:   s.DeferredReason,
 	}
+}
+
+// canRollback reports whether the installer's backup of the previous
+// binary is present. RollbackBinary renames "<binary>.bak" over the live
+// path, so the presence of that file IS the precondition — deriving it
+// any other way (a flag in update-state.json, say) would let the two
+// disagree after a manual cleanup.
+//
+// Conservative on a stat error: an unreadable path means we cannot
+// promise a rollback would work, and offering one we can't honour is the
+// failure this flag exists to prevent.
+func (a updateInfoAdapter) canRollback() bool {
+	if a.binaryPath == "" {
+		return false
+	}
+	fi, err := os.Stat(a.binaryPath + ".bak")
+	return err == nil && !fi.IsDir()
 }
 
 func (a updateInfoAdapter) CheckNow(ctx context.Context) admin.UpdateStatus {

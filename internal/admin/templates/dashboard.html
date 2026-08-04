@@ -182,6 +182,12 @@
           <button type="button" id="update-install" class="btn btn-primary" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">Install &amp; {{if .Data.IsSupervised}}restart{{else}}stop{{end}}</button>
         {{end}}
         <button type="button" id="update-check" class="btn">Check now</button>
+        {{/* Rollback: revealed by applyUpdates only when a .bak of the
+             previous binary is actually on disk. POST /api/updates/rollback
+             shipped with no caller, so a bad update was undoable only by
+             curl — but a button offered with nothing staged would turn a
+             recovery into an error, hence the CanRollback gate. */}}
+        <button type="button" id="update-rollback" class="btn" hidden>Roll back</button>
       </span>
     </div>
     <dl>
