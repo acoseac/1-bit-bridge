@@ -136,13 +136,46 @@ func flacMD5DecodeCommand(tool decoderTool, srcAbs string, bits int) (string, []
 }
 
 // verifyFLACAudioMD5 returns AudioMD5Verified / AudioMD5Mismatch, or ""
-// when verification is not possible (no stored checksum, odd bit depth,
-// tool failure, decode error). See the file docblock for the failure
-// direction.
-func verifyFLACAudioMD5(ctx context.Context, srcAbs string, tool decoderTool) string {
+// when verification is not possible. See the file docblock for the
+// failure direction.
+//
+// The second return separates the two very different reasons for a ""
+// verdict:
+//
+//   - retryable=false — we asked and the file cannot be verified. No
+//     stored checksum, an odd bit depth, an unknown sample count, or a
+//     decode that came back the wrong length. Nothing about this file
+//     will change until the file itself does, and a source edit already
+//     re-triggers analysis through the mtime/size gate.
+//
+//   - retryable=true — we could not ask. The pipe or the process failed
+//     to start (EMFILE / fork pressure while the pool is saturated), the
+//     read faulted partway (a network mount blinking), or the child was
+//     killed. Nothing was learned about the file at all.
+//
+// Collapsing those into one "" is what made this worth fixing: the
+// caller commits the row with the schema stamp either way, so the
+// scan-skip gate never looks again, and a one-second I/O blip
+// permanently recorded a healthy file as unverifiable. The store keeps a
+// capped attempt counter off the back of this flag so the second kind
+// gets a bounded number of further chances and the first gets none.
+//
+// A decoder that exits non-zero is deliberately treated as retryable
+// even though a genuinely corrupt file also lands there. The cost of
+// being wrong is asymmetric: retrying a corrupt file wastes a bounded
+// handful of decodes, while giving up on a healthy one records a
+// falsehood that never self-corrects. A truly corrupt file exhausts the
+// cap and settles on the same permanent "" it has today.
+func verifyFLACAudioMD5(ctx context.Context, srcAbs string, tool decoderTool) (state string, retryable bool) {
 	info, err := readFLACStreamInfo(srcAbs)
-	if err != nil || !info.hasMD5 || !verifiableBitDepth(info.bitsPerSample) {
-		return ""
+	if err != nil {
+		// Reading STREAMINFO is an open + a short read of the file we
+		// were just handed, so a failure here is the filesystem, not
+		// the format — the same class as a faulted decode.
+		return "", true
+	}
+	if !info.hasMD5 || !verifiableBitDepth(info.bitsPerSample) {
+		return "", false
 	}
 	// totalSamples == 0 is legal ("unknown", streamed encodes) but makes
 	// completeness unverifiable — and a CLEAN EXIT is not proof of a
@@ -152,7 +185,7 @@ func verifyFLACAudioMD5(ctx context.Context, srcAbs string, tool decoderTool) st
 	// to check against, refuse to verify rather than risk hashing half a
 	// file into a false mismatch.
 	if info.totalSamples <= 0 || info.channels < 1 {
-		return ""
+		return "", false
 	}
 	expectedBytes := info.totalSamples * int64(info.channels) * int64(info.bitsPerSample/8)
 	name, args := flacMD5DecodeCommand(tool, srcAbs, info.bitsPerSample)
@@ -161,10 +194,13 @@ func verifyFLACAudioMD5(ctx context.Context, srcAbs string, tool decoderTool) st
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return ""
+		// Resource pressure, not a property of the file.
+		return "", true
 	}
 	if err := cmd.Start(); err != nil {
-		return ""
+		// EMFILE / fork pressure with the pool saturated, or the
+		// decoder briefly unavailable mid-upgrade.
+		return "", true
 	}
 	processReleased := false
 	defer func() {
@@ -181,13 +217,29 @@ func verifyFLACAudioMD5(ctx context.Context, srcAbs string, tool decoderTool) st
 	// may compare — a truncated decode hashes differently by construction
 	// (and sox exits 0 on truncation), so anything short or long reads as
 	// "cannot verify", never "mismatch".
-	if copyErr != nil || waitErr != nil || copied != expectedBytes {
-		return ""
+	if copyErr != nil {
+		// The read faulted partway. On a network mount that is the
+		// mount, not the file.
+		return "", true
+	}
+	if waitErr != nil {
+		// Non-zero exit or a killed child. Retryable by the asymmetry
+		// argued in the docblock: a corrupt file costs a bounded few
+		// extra decodes before settling on permanent, while a healthy
+		// file wrongly given up on stays wrong.
+		return "", true
+	}
+	if copied != expectedBytes {
+		// A clean exit that produced the wrong number of bytes is the
+		// truncation signature (sox exits 0 after LOST_SYNC). That is a
+		// property of the file: permanent until the file changes, and a
+		// re-upload moves mtime/size and re-triggers analysis anyway.
+		return "", false
 	}
 	var digest [16]byte
 	copy(digest[:], hasher.Sum(nil))
 	if digest == info.storedMD5 {
-		return AudioMD5Verified
+		return AudioMD5Verified, false
 	}
-	return AudioMD5Mismatch
+	return AudioMD5Mismatch, false
 }

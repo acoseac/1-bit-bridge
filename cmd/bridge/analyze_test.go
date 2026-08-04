@@ -315,3 +315,106 @@ func TestCollectAnalysisCandidatesExcludesUPnPRoutedRows(t *testing.T) {
 		}
 	}
 }
+
+// TestCollectAnalysisCandidatesRetriesTransientMD5Failure pins the half
+// of the transient-MD5 fix that actually causes a retry.
+//
+// Everything the skip gate normally looks at — mtime, size, schema
+// version — is unchanged for a row whose audio-MD5 pass failed for a
+// reason that says nothing about the file. So without
+// WantsAudioMD5Retry the row is skipped forever, and a one-second I/O
+// blip is permanently recorded as "unverifiable", indistinguishable from
+// a file that genuinely carries no checksum.
+//
+// The paired case is the one that keeps this bounded: at the cap the row
+// must go quiet again. Each retry is a full re-analysis, so a gate that
+// re-opened rows indefinitely would trade a wrong scalar for an hourly
+// re-decode of the library.
+func TestCollectAnalysisCandidatesRetriesTransientMD5Failure(t *testing.T) {
+	root := t.TempDir()
+	const name = "track.flac"
+	if err := os.WriteFile(filepath.Join(root, name), []byte("fLaC-nonzero-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(root, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.UpsertTrack(ctx, &manifest.Track{
+		Path: name, Size: info.Size(), ModTime: info.ModTime(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A row that is fresh by every other measure.
+	base := manifest.AnalysisRow{
+		SourcePath:    name,
+		WaveformPath:  filepath.Join(t.TempDir(), "wf"),
+		WaveformTag:   "deadbeef",
+		WaveformSize:  10,
+		SourceMTimeNS: info.ModTime().UnixNano(),
+		SourceSize:    info.Size(),
+		SchemaVersion: analyze.WaveformSchemaVersion,
+		CreatedAt:     1,
+	}
+
+	isCandidate := func(t *testing.T) bool {
+		t.Helper()
+		res, err := collectAnalysisCandidates(ctx, store, bridgefs.New([]string{root}), t.TempDir(), "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range res.candidates {
+			if c.SourceLibraryRel == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Transient failures, under the cap: must keep being re-enqueued.
+	for i := 1; i < manifest.AudioMD5MaxAttempts; i++ {
+		row := base
+		row.AudioMD5Retryable = true
+		if err := store.UpsertAnalysis(ctx, row); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+		if !isCandidate(t) {
+			t.Fatalf("after %d transient MD5 failure(s) the track must be "+
+				"re-analysed — mtime, size and schema are all unchanged, so "+
+				"nothing else in the gate can re-open it", i)
+		}
+	}
+
+	// At the cap: must go quiet. Each retry is a full re-analysis.
+	for i := manifest.AudioMD5MaxAttempts; i <= manifest.AudioMD5MaxAttempts+1; i++ {
+		row := base
+		row.AudioMD5Retryable = true
+		if err := store.UpsertAnalysis(ctx, row); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+	}
+	if isCandidate(t) {
+		t.Errorf("at the %d-attempt cap the track must stop being re-enqueued; "+
+			"an unbounded retry re-decodes the whole library every sweep for as "+
+			"long as the condition lasts", manifest.AudioMD5MaxAttempts)
+	}
+
+	// A file that simply cannot be verified must never be re-enqueued at
+	// all — there is nothing to learn by asking again.
+	permanent := base
+	permanent.AudioMD5Retryable = false
+	if err := store.UpsertAnalysis(ctx, permanent); err != nil {
+		t.Fatal(err)
+	}
+	if isCandidate(t) {
+		t.Error("a permanently-unverifiable file must not be re-analysed")
+	}
+}

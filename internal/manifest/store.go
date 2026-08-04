@@ -1347,6 +1347,74 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 30,
+		name:    "track_analysis audio_md5_attempts (bounded transient retry)",
+		sql:     `-- column added idempotently in post(); see the comment below`,
+		// v30 records how many times the FLAC audio-MD5 pass has failed
+		// for a reason that says nothing about the file — a pipe or
+		// spawn failure under load, a faulted read on a network mount,
+		// a killed child.
+		//
+		// It exists because a "" verdict is committed WITH the schema
+		// stamp, so the scan-skip gate never revisits the row: pre-v30
+		// a one-second I/O blip permanently recorded a healthy file as
+		// unverifiable, indistinguishable from one that genuinely
+		// carries no checksum.
+		//
+		// A counter rather than a plain retry flag so the retry is
+		// BOUNDED. Each retry costs a full re-analysis (the pipeline is
+		// one decode, not a resumable stage), and an unbounded one
+		// would re-decode every FLAC in the library on every sweep for
+		// as long as the condition lasted — trading a wrong scalar for
+		// an hourly treadmill.
+		//
+		// The one-time backfill is the load-bearing part, and DEFAULT 0
+		// alone is WRONG for it. The verification pass is FLAC-only, so
+		// every MP3 / M4A / WAV / AIFF row also carries an empty
+		// verdict — at 0 they all read as "worth another attempt", and
+		// since each attempt is a full re-analysis the migration would
+		// quietly re-decode most of the library. That is a schema-
+		// version bump wearing a different hat.
+		//
+		// So non-FLAC rows are written straight to the cap: the pass
+		// cannot run on them, and asking again would never change that.
+		// FLAC rows keep 0 and get their one bounded round, which is
+		// the population this feature is actually for. It self-limits —
+		// a row that verifies clears to 0, one that cannot be verified
+		// is written straight to the cap — so the cost is one extra
+		// decode per FLAC currently carrying an empty verdict, once.
+		//
+		// `lower(...) LIKE` rather than a bare LIKE for the extension
+		// match: SQLite's LIKE already folds ASCII case here, but the
+		// explicit lower() matches AnalysisCoverage's neighbouring
+		// predicates and does not rely on `case_sensitive_like` staying
+		// at its default. Getting this backwards is safe in the
+		// expensive direction only — a missed row retries once more
+		// than needed; a wrongly-capped row silently loses its heal.
+		post: func(db *sql.DB) error {
+			exists, err := atlasColumnExists(db, "track_analysis", "audio_md5_attempts")
+			if err != nil {
+				return fmt.Errorf("inspect track_analysis.audio_md5_attempts: %w", err)
+			}
+			if exists {
+				return nil
+			}
+			if _, err := db.Exec(
+				`ALTER TABLE track_analysis ADD COLUMN audio_md5_attempts INTEGER NOT NULL DEFAULT 0`,
+			); err != nil {
+				return fmt.Errorf("add track_analysis.audio_md5_attempts: %w", err)
+			}
+			if _, err := db.Exec(
+				`UPDATE track_analysis SET audio_md5_attempts = ?
+				  WHERE lower(source_path) NOT LIKE '%.flac'`,
+				AudioMD5MaxAttempts,
+			); err != nil {
+				return fmt.Errorf("backfill track_analysis.audio_md5_attempts: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
@@ -6525,6 +6593,49 @@ type AnalysisRow struct {
 	TruePeakDB    *float64
 	DRScore       *int
 	AudioMD5State string
+
+	// AudioMD5Attempts counts MD5 passes that failed for a reason that
+	// says nothing about the file. READ-ONLY on the row: producers
+	// leave it zero and UpsertAnalysis computes the stored value from
+	// AudioMD5Retryable, inside the same lock as the existing-row read,
+	// so two analyses of one path can't both increment from the same
+	// starting value.
+	//
+	// At AudioMD5MaxAttempts the row stops asking and the "" verdict is
+	// final. A permanent verdict jumps straight to the cap rather than
+	// counting up — same gate, no extra column, and WantsAudioMD5Retry
+	// is the only thing that reads either.
+	AudioMD5Attempts int
+
+	// AudioMD5Retryable is WRITE-INTENT, not state: set by the producer
+	// to say this run's empty verdict was "could not ask" rather than
+	// "cannot be verified". Never populated on read — reading it back
+	// would invite treating it as the stored value, which it is not.
+	AudioMD5Retryable bool
+}
+
+// AudioMD5MaxAttempts bounds how many times a FLAC whose audio-MD5 pass
+// keeps failing transiently is re-analysed before its "" verdict is
+// taken as final.
+//
+// 3, matching the pairing store's revoke retries; the booklet checker's
+// 8 is the other precedent but suits a cheap HTTP HEAD, and each retry
+// here is a full decode of the file. Three covers the realistic
+// transient — a saturated pool, a mount blinking, one OOM kill — without
+// letting a genuinely undecodable file cost more than a few passes
+// before it settles on the same permanent answer it has today.
+const AudioMD5MaxAttempts = 3
+
+// WantsAudioMD5Retry reports whether this row's audio-MD5 verdict is
+// still worth another attempt: empty (nothing learned) and under the
+// cap.
+//
+// The analysis scan-skip gate consults this, which is the whole point —
+// mtime, size and schema version are all unchanged for these rows, so
+// without it the row is skipped forever and a transient failure becomes
+// permanent. Nil-safe so the gate can call it on a lookup that missed.
+func (r *AnalysisRow) WantsAudioMD5Retry() bool {
+	return r != nil && r.AudioMD5State == "" && r.AudioMD5Attempts < AudioMD5MaxAttempts
 }
 
 // intPtrEqual compares two optional ints by value (both nil equal, one nil
@@ -6559,6 +6670,12 @@ type analysisScalarScan struct {
 	truePeak sql.NullFloat64
 	drScore  sql.NullInt64
 	md5State sql.NullString
+	// md5Attempts is NOT NULL DEFAULT 0 in the schema, but stays a
+	// NullInt64 so the three read sites survive a hand-repaired DB (or
+	// a future LEFT JOIN) that yields NULL — Valid==false lifts to 0,
+	// which reads as "eligible for a retry" rather than erroring the
+	// whole analysis lookup.
+	md5Attempts sql.NullInt64
 }
 
 func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
@@ -6569,6 +6686,7 @@ func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
 	a.TruePeakDB = nullFloatPtr(n.truePeak)
 	a.DRScore = nullIntPtr(n.drScore)
 	a.AudioMD5State = n.md5State.String
+	a.AudioMD5Attempts = int(n.md5Attempts.Int64)
 }
 
 // float64PtrEqual compares two optional float64s by value: both nil is
@@ -6615,7 +6733,41 @@ func analysisRowsEqual(a, b *AnalysisRow) bool {
 		intPtrEqual(a.BPM, b.BPM) &&
 		float64PtrEqual(a.TruePeakDB, b.TruePeakDB) &&
 		intPtrEqual(a.DRScore, b.DRScore) &&
-		a.AudioMD5State == b.AudioMD5State
+		a.AudioMD5State == b.AudioMD5State &&
+		a.AudioMD5Attempts == b.AudioMD5Attempts
+}
+
+// nextAudioMD5Attempts resolves the stored attempt counter for a fresh
+// analysis result, given whatever is already on disk.
+//
+//   - A real verdict (verified / mismatch) clears the counter. The
+//     question is answered, and clearing means a later source edit that
+//     re-opens it starts from a full budget rather than an exhausted one.
+//   - "Could not ask" (retryable) advances by one, saturating at the cap
+//     so a long outage can't run the number away.
+//   - "Cannot be verified" jumps straight to the cap. There is nothing
+//     to retry — no stored checksum, an odd bit depth, an unknown sample
+//     count, a length-mismatched decode — and counting up to it would
+//     spend two more full decodes to reach the answer already in hand.
+//
+// `fresh` is the producer's row, whose AudioMD5Attempts is always zero;
+// only AudioMD5Retryable is read from it. nil `existing` is a first
+// analysis, which starts from zero.
+func nextAudioMD5Attempts(existing, fresh *AnalysisRow) int {
+	if fresh.AudioMD5State != "" {
+		return 0
+	}
+	if !fresh.AudioMD5Retryable {
+		return AudioMD5MaxAttempts
+	}
+	prior := 0
+	if existing != nil {
+		prior = existing.AudioMD5Attempts
+	}
+	if prior+1 > AudioMD5MaxAttempts {
+		return AudioMD5MaxAttempts
+	}
+	return prior + 1
 }
 
 // UpsertAnalysis writes (or replaces) one `track_analysis` row AND
@@ -6637,6 +6789,17 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 	if err != nil {
 		return err
 	}
+
+	// Resolve the audio-MD5 attempt counter from the producer's intent
+	// plus what is already stored. Inside the lock, and BEFORE the
+	// equality check, for two reasons: two analyses of one path can't
+	// both increment from the same starting value, and a run whose only
+	// change is the counter must still be recognised as a change (an
+	// exhausted retry looks identical to its predecessor in every other
+	// column, and skipping that write would leave the row asking
+	// forever).
+	a.AudioMD5Attempts = nextAudioMD5Attempts(existing, &a)
+
 	if existing != nil && analysisRowsEqual(existing, &a) {
 		return nil // identical — no write, no indexed_at bump.
 	}
@@ -6677,8 +6840,8 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			(source_path, waveform_path, waveform_tag, waveform_size,
 			 source_mtime_ns, source_size, schema_version, created_at,
 			 replaygain_track_db, key_root, key_mode, bpm,
-			 true_peak_db, dr_score, audio_md5_state)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			 true_peak_db, dr_score, audio_md5_state, audio_md5_attempts)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (source_path) DO UPDATE SET
 			waveform_path       = excluded.waveform_path,
 			waveform_tag        = excluded.waveform_tag,
@@ -6693,11 +6856,12 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			bpm                 = excluded.bpm,
 			true_peak_db        = excluded.true_peak_db,
 			dr_score            = excluded.dr_score,
-			audio_md5_state     = excluded.audio_md5_state
+			audio_md5_state     = excluded.audio_md5_state,
+			audio_md5_attempts  = excluded.audio_md5_attempts
 	`, a.SourcePath, a.WaveformPath, a.WaveformTag, a.WaveformSize,
 		a.SourceMTimeNS, a.SourceSize, a.SchemaVersion, a.CreatedAt,
 		rgArg, keyRootArg, keyModeArg, bpmArg,
-		truePeakArg, drScoreArg, md5StateArg); err != nil {
+		truePeakArg, drScoreArg, md5StateArg, a.AudioMD5Attempts); err != nil {
 		return err
 	}
 	now := s.now().UnixNano()
@@ -6731,14 +6895,14 @@ func (s *Store) getAnalysisLocked(ctx context.Context, sourcePath string) (*Anal
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
 		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state
+		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts
 		FROM track_analysis
 		WHERE source_path = ?
 	`, sourcePath).Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
-		&sc.truePeak, &sc.drScore, &sc.md5State)
+		&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -6770,7 +6934,7 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
 		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state
+		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts
 		FROM track_analysis
 		WHERE unicode_lower(source_path) = unicode_lower(?)
 		LIMIT 2
@@ -6791,7 +6955,7 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
-		&sc.truePeak, &sc.drScore, &sc.md5State); err != nil {
+		&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts); err != nil {
 		return nil, err
 	}
 	sc.applyTo(&a)
@@ -6819,7 +6983,7 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
 		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state
+		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts
 		FROM track_analysis
 	`)
 	if err != nil {
@@ -6834,7 +6998,7 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 			&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 			&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
-			&sc.truePeak, &sc.drScore, &sc.md5State); err != nil {
+			&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts); err != nil {
 			return nil, err
 		}
 		sc.applyTo(&a)

@@ -171,6 +171,19 @@ type Result struct {
 	// (clean decode, different hash — file modified or corrupt). FLAC
 	// only; see flacmd5.go for the failure direction.
 	AudioMD5State string
+
+	// AudioMD5Retryable qualifies an EMPTY AudioMD5State: true means we
+	// could not ask (pipe/spawn failure, a faulted read, a killed
+	// child), false means we asked and this file cannot be verified.
+	// Meaningless when AudioMD5State is set.
+	//
+	// Store.UpsertAnalysis turns this into a capped attempt counter, so
+	// "could not ask" gets a bounded number of further chances while
+	// "cannot be verified" gets none. Without the distinction a
+	// one-second I/O blip permanently recorded a healthy file as
+	// unverifiable: the row commits with the schema stamp either way,
+	// and the scan-skip gate then never looks again.
+	AudioMD5Retryable bool
 }
 
 // RunAnalysis decodes the source via sox, computes the peak waveform +
@@ -282,7 +295,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	// exactly the wrong bytes to hash; see flacmd5.go). Runs after the
 	// main decode so a truncated source has already been rejected.
 	if strings.EqualFold(filepath.Ext(spec.SourceAbsPath), ".flac") {
-		res.AudioMD5State = verifyFLACAudioMD5(ctx, spec.SourceAbsPath, tool)
+		res.AudioMD5State, res.AudioMD5Retryable = verifyFLACAudioMD5(ctx, spec.SourceAbsPath, tool)
 	}
 	logger.Debug("analyze ok",
 		"path", spec.SourceLibraryRel,
@@ -294,7 +307,8 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 		"hasTempo", res.BPM != nil,
 		"hasTruePeak", res.TruePeakDB != nil,
 		"hasDR", res.DRScore != nil,
-		"md5", res.AudioMD5State)
+		"md5", res.AudioMD5State,
+		"md5Retryable", res.AudioMD5Retryable)
 	return res, nil
 }
 
