@@ -4250,18 +4250,52 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			)
 		}
 	}
-	// The threshold delete SPARES UPnP-routed rows regardless of their
-	// accumulated counter — defense-in-depth behind the scanner-side
-	// exclusion (see UPnPRoutedSourcePaths): rows that pre-date the
-	// exclusion may carry stale increments, and no caller may ever
-	// threshold-delete a routed row (its lifecycle is the ingest's
+	// The delete is SCOPED to the paths this pass actually observed
+	// missing, not to every row that happens to sit at the threshold.
+	//
+	// The scanner has already withheld anything under an errored
+	// subtree from `missingPaths` (isUnderErroredSubtree), so scoping
+	// makes that guard cover the SQL too. Unscoped it did not: a row
+	// already at or above the threshold is reaped by a bare
+	// `missing_count >= ?` even on a pass that never looked at it —
+	// which is exactly a pass where its subtree errored. The route in
+	// is lowering DeleteAfterMissingScans, since rows parked below the
+	// old threshold are instantly at-or-above the new one and the very
+	// next scan sweeps them whether or not it could see them.
+	//
+	// This generalises the rule the deletion pass already follows and
+	// that has regressed twice (#549, #568): "we could not see this
+	// path" must dominate every "…but it looks reapable"
+	// classification. A bare threshold predicate is that same mistake
+	// expressed in SQL instead of Go.
+	//
+	// Nothing is stranded by scoping. A genuinely-absent row is in the
+	// next scan's `missingPaths`, gets incremented, and is reaped in
+	// that pass — at most one scan later than before, and only ever
+	// after a pass that actually observed it.
+	//
+	// The set travels as ONE bound JSON array consumed by json_each
+	// (the ResetEnrichedByArtistMBIDs idiom): a single static statement
+	// with no placeholder construction and no bind-ceiling chunking,
+	// which matters here because a whole-root outage can put tens of
+	// thousands of paths in this list.
+	//
+	// The routed exclusion stays as defense-in-depth behind the
+	// scanner-side one (see UPnPRoutedSourcePaths): rows that pre-date
+	// that exclusion may carry stale increments, and no caller may ever
+	// threshold-delete a routed row — its lifecycle is the ingest's
 	// last_seen_at reap, which has its own offline / truncated-walk
-	// protections).
+	// protections.
+	missingBlob, err := json.Marshal(missingPaths)
+	if err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx, `
 		DELETE FROM tracks
 		 WHERE missing_count >= ?
+		   AND path IN (SELECT value FROM json_each(?))
 		   AND path NOT IN (SELECT source_path FROM upnp_track_routing)
-	`, threshold)
+	`, threshold, string(missingBlob))
 	if err != nil {
 		return 0, err
 	}
@@ -4318,7 +4352,24 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 			)
 		}
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM folders WHERE missing_count >= ?`, threshold)
+	// Scoped to this pass's observed-missing set for the reason spelled
+	// out on the tracks twin: unscoped, a bare `missing_count >= ?`
+	// reaps rows on a pass that never looked at them, which is exactly
+	// the pass where their subtree errored. Folders had NO exclusion of
+	// any kind here — not even the routed anti-join its sibling
+	// carries — so it was the weaker of the two.
+	//
+	// Folders are filesystem-only (UPnP ingest never writes this
+	// table), so there is deliberately no routing anti-join to mirror.
+	missingBlob, err := json.Marshal(missingPaths)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM folders
+		 WHERE missing_count >= ?
+		   AND path IN (SELECT value FROM json_each(?))
+	`, threshold, string(missingBlob))
 	if err != nil {
 		return 0, err
 	}
