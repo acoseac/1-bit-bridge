@@ -26,10 +26,15 @@ func TestGetEnrichmentSnapshot(t *testing.T) {
 		}
 	}
 
-	// 1 matched (enriched + artworkMBID) + 1 missing (enriched, no artwork).
+	// 1 matched (enriched, nothing left to fill) + 1 missing (enriched, no
+	// artwork). "Matched" needs all THREE MBIDs — the breakdown's missing count
+	// is defined as exactly the set "Retry missing" re-queues, so an artwork-only
+	// row is still a gap.
 	matched := &manifest.Track{
 		Path: "Music/M/matched.flac", Size: 1, ModTime: time.Unix(1, 0),
-		ArtworkMBID: "12aae8a7-e814-4c46-94d7-5c9e053bda5b",
+		ArtworkMBID:        "12aae8a7-e814-4c46-94d7-5c9e053bda5b",
+		ArtistMBID:         "22222222-2222-4222-8222-222222222222",
+		MusicBrainzAlbumID: "33333333-3333-4333-8333-333333333333",
 	}
 	if err := srv.deps.Manifest.UpsertTrack(ctx, matched); err != nil {
 		t.Fatalf("UpsertTrack matched: %v", err)

@@ -201,6 +201,14 @@ type Deps struct {
 	// `harvestResubmitted: false` on the retry response.
 	HarvestForceSubmit func() bool
 
+	// EnrichSkipReasons returns the enricher's process-lifetime tally of
+	// why it stopped short, keyed by bounded reason (no_search_terms /
+	// no_mb_match / mb_error). Wired to enrich.Enricher.SkipReasons in
+	// cmd/bridge/main.go — same decoupling as ArtistImageMBIDs, so admin
+	// still never imports internal/enrich. Nil-safe: absent → the
+	// skipReasons field is omitted from the misses response.
+	EnrichSkipReasons func() map[string]int64
+
 	// ArtworkPath / ArtistImagePath / BookletPath resolve cache-file
 	// paths for the inspector's loopback byte-serving routes
 	// (/api/library/artwork|artist-image|booklet). Closures over
@@ -234,6 +242,57 @@ type Deps struct {
 	// harnesses). Mirrors the intent of the upscale tile's pool-derived
 	// `enabled`. Wired in cmd/bridge/main.go.
 	AnalysisActive func() bool
+
+	// AnalysisPoolStats returns a snapshot of the long-lived
+	// analyze.Pool's counters. Reuses the UpscalePoolStats DTO —
+	// analyze.PoolStats' field set matches transcode.PoolStats
+	// one-for-one (ActiveWorkers stays empty; the analysis pool has no
+	// per-worker grid). Same closure decoupling + nil semantics as
+	// UpscaleStats: nil when the feature is off (pool not
+	// instantiated), and the `pool` field is omitted rather than
+	// zero-padded. Wired in cmd/bridge/main.go.
+	AnalysisPoolStats func() *UpscalePoolStats
+
+	// AnalysisSweep returns the serve-side auto-analysis sweeper's
+	// lifecycle snapshot (running / last sweep timestamps + counts /
+	// next due). Ephemeral "since process start" state recorded by
+	// cmd/bridge's sweepStatus; nil-safe — absent omits the `sweep`
+	// field.
+	AnalysisSweep func() *AnalysisSweepState
+
+	// TriggerAnalysisSweep queues an out-of-band auto-analysis sweep by
+	// nudging the sweeper's buffered-1 channel (non-blocking send,
+	// coalescing — the "Analyze now" button). It only signals the
+	// already-bgWriters-joined sweeper goroutine, so no goroutine or
+	// WaitGroup concerns live on the admin side. Nil when analysis is
+	// inactive; the endpoint then 503s.
+	TriggerAnalysisSweep func() bool
+
+	// AnalysisSchemaVersion is analyze.WaveformSchemaVersion, passed by
+	// value so neither this package nor internal/manifest imports
+	// internal/analyze (the existing import-avoidance around the
+	// waveforms dir). Feeds the coverage query's fresh-vs-stale split;
+	// empty disables the coverage tile.
+	AnalysisSchemaVersion string
+
+	// FingerprintState returns the acoustic-fingerprint job's full admin
+	// snapshot: config flag, runtime active/degraded verdict, and the
+	// sweeper's lifecycle recorder. Wired in cmd/bridge/main.go for
+	// every serve (even feature-off — the card then explains WHY it's
+	// off). Nil-safe: absent omits the `fingerprint` field (test
+	// harnesses).
+	FingerprintState func() *FingerprintJobState
+
+	// TriggerFingerprintSweep — the fingerprint twin of
+	// TriggerAnalysisSweep (the "Sweep now" button). Nil when the
+	// feature is inactive; the endpoint then 503s.
+	TriggerFingerprintSweep func() bool
+
+	// SmartMixRun / BackupRun expose the smart-mix regenerator's and
+	// backup ticker's last/next-run recorders for the Jobs page cards.
+	// Nil-safe: absent omits the field (feature off or test harness).
+	SmartMixRun func() *JobRunState
+	BackupRun   func() *JobRunState
 
 	// ProjectedSize estimates the on-disk size of a FLAC
 	// variant produced from (sourceSize, sourceRate, sourceBits)
@@ -575,6 +634,73 @@ type ActiveWorkerView struct {
 	StartedAtUnixMs  int64  `json:"startedAtUnixMs,omitempty"`
 }
 
+// AnalysisSweepState is the auto-analysis sweeper's lifecycle snapshot
+// — the `sweep` object on /api/analysis/stats and the SSE `analysis`
+// frame. Timestamps are *time.Time so `omitempty` genuinely drops the
+// zero value (the PR #68 omitempty-time.Time lesson: a bare time.Time
+// would emit "0001-01-01T00:00:00Z"). NextDueAt moves once per tick
+// arm — deliberately NOT a ticking countdown, which would churn the SSE
+// diff every frame (the PR #107 UptimeSec lesson); the browser computes
+// the countdown locally.
+type AnalysisSweepState struct {
+	Running        bool                 `json:"running"`
+	LastStartedAt  *time.Time           `json:"lastStartedAt,omitempty"`
+	LastFinishedAt *time.Time           `json:"lastFinishedAt,omitempty"`
+	NextDueAt      *time.Time           `json:"nextDueAt,omitempty"`
+	Last           *AnalysisSweepCounts `json:"last,omitempty"`
+}
+
+// AnalysisSweepCounts is the last completed sweep's candidate
+// breakdown — the exact per-run numbers from
+// collectAnalysisCandidates (the SQL coverage tile is the approximate
+// whole-library view; these are the sweeper's own truth).
+type AnalysisSweepCounts struct {
+	Total          int  `json:"total"`
+	UpToDate       int  `json:"upToDate"`
+	DSDExcluded    int  `json:"dsdExcluded"`
+	ZeroByte       int  `json:"zeroByte"`
+	Missing        int  `json:"missing"`
+	Enqueued       int  `json:"enqueued"`
+	QueueSaturated bool `json:"queueSaturated,omitempty"`
+}
+
+// FingerprintJobState is the acoustic-fingerprint card's snapshot on
+// /api/jobs. Enabled is the config flag; Active the runtime verdict
+// (flag AND fpcalc AND AcoustID key at startup); DegradedReason the
+// bounded key explaining an Enabled-but-inactive state
+// ("fpcalc_missing" / "no_api_key"). Lifecycle fields follow
+// AnalysisSweepState's shape and rules (pointer timestamps, no ticking
+// countdowns).
+type FingerprintJobState struct {
+	Enabled        bool                    `json:"enabled"`
+	Active         bool                    `json:"active"`
+	DegradedReason string                  `json:"degradedReason,omitempty"`
+	Running        bool                    `json:"running"`
+	LastStartedAt  *time.Time              `json:"lastStartedAt,omitempty"`
+	LastFinishedAt *time.Time              `json:"lastFinishedAt,omitempty"`
+	NextDueAt      *time.Time              `json:"nextDueAt,omitempty"`
+	Last           *FingerprintSweepCounts `json:"last,omitempty"`
+}
+
+// FingerprintSweepCounts is the last completed fingerprint sweep's
+// outcome: candidates examined, tracks the audio identified, and rows
+// re-queued for the enricher.
+type FingerprintSweepCounts struct {
+	Candidates int `json:"candidates"`
+	Resolved   int `json:"resolved"`
+	Requeued   int `json:"requeued"`
+}
+
+// JobRunState is the minimal last/next-run shape shared by background
+// jobs that don't carry a per-run breakdown (smart-mix regenerator,
+// backup ticker). Same timestamp rules as AnalysisSweepState.
+type JobRunState struct {
+	Running        bool       `json:"running"`
+	LastStartedAt  *time.Time `json:"lastStartedAt,omitempty"`
+	LastFinishedAt *time.Time `json:"lastFinishedAt,omitempty"`
+	NextDueAt      *time.Time `json:"nextDueAt,omitempty"`
+}
+
 // TailscaleProvider is the read+refresh side of the Tailscale auto-pilot
 // the admin tile reads. The adapter in cmd/bridge/main.go wraps the
 // process-scoped autopilot so the wire shape lives entirely in this
@@ -762,6 +888,16 @@ type Server struct {
 	compositionAt time.Time
 	compositionSF singleflight.Group
 
+	// analysis-coverage cache (Jobs page analysed-vs-eligible bar).
+	// Plain-column SQL (single pass over tracks ⋈ track_analysis, ~ms
+	// at 20k rows) but /api/jobs is POLLED — 30s TTL + singleflight so
+	// N open tabs collapse to one query per window (the composition
+	// cache's shape, lighter TTL since the query is cheap).
+	analysisCoverageMu sync.Mutex
+	analysisCoverage   *jobsAnalysisCoverage
+	analysisCoverageAt time.Time
+	analysisCoverageSF singleflight.Group
+
 	// enrichment cache (dashboard enrichment-progress breakdown). Same shape
 	// and rationale as the composition cache above: EnrichmentBreakdown is a
 	// full-table json_extract scan (the matched/missing split), too expensive
@@ -809,6 +945,11 @@ type Server struct {
 	// normalised path and swept together by libMetaInvalidateUnder.
 	libMetaRefs   libMetaCache[libraryMetaRefsResponse]
 	libMetaDetail libMetaCache[libraryMetaDetailResponse]
+	// libMetaMisses backs GET /api/enrichment/misses. Keyed by bare
+	// normalised path only — `facet` and `limit` narrow the cached
+	// snapshot in the handler rather than joining the key, so switching
+	// facets in the UI can't re-walk the library once per facet.
+	libMetaMisses libMetaCache[enrichmentMissesResponse]
 
 	// library-meta retry guard: POST /api/library/enrichment/retry is
 	// per-PATH rate-limited (60s per normalized folder) so an operator
@@ -914,6 +1055,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", s.apiStats)
 	mux.HandleFunc("GET /api/sources", s.apiSources)
 	mux.HandleFunc("GET /api/enrichment", s.apiEnrichment)
+	mux.HandleFunc("GET /api/enrichment/misses", s.apiEnrichmentMisses)
 	mux.HandleFunc("POST /api/enrichment/retry", s.apiEnrichmentRetry)
 	mux.HandleFunc("GET /api/endpoints", s.apiEndpoints)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
@@ -947,6 +1089,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/settings", s.apiSettingsPatch)
 	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
 	mux.HandleFunc("GET /api/analysis/stats", s.apiAnalysisStats)
+	mux.HandleFunc("POST /api/analysis/sweep", s.apiAnalysisSweep)
+	mux.HandleFunc("GET /api/jobs", s.apiJobs)
+	mux.HandleFunc("POST /api/fingerprint/sweep", s.apiFingerprintSweep)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)

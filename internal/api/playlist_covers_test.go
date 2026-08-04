@@ -110,3 +110,47 @@ func TestSmartPlaylistsDTO_advertisesImageHash(t *testing.T) {
 		t.Errorf("auto-mix should have no imageHash; got %q", hashes["auto-mix"])
 	}
 }
+
+// serveCover must normalise the key the same way getPlaylist /
+// putPlaylist / deletePlaylist do.
+//
+// The on-disk name is sha256(scope + "\x00" + key) — byte-exact — and
+// GetPlaylistCover has no COLLATE NOCASE, so case reaches the
+// filesystem. Swift's UUID().uuidString is UPPERCASE, so a client that
+// built the image URL from its locally-generated id rather than the
+// round-tripped DTO id got 200 from /v1/playlists/{ID} and 404 from
+// /v1/playlist-image/{ID} — a confusing split with no diagnostic.
+//
+// The admin write paths (uploadCover / deleteCover) normalise in
+// lockstep; doing only one side would orphan existing files.
+func TestServeCover_normalisesKeyCase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{LibraryRoots: []string{dir}, DataDir: dir, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("probe")
+
+	if err := os.MkdirAll(manifest.PlaylistCoverDir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Stored under the canonical lowercase id, as putPlaylist writes it.
+	const id = "b3c1f2a4-5d6e-7f80-9a1b-2c3d4e5f6071"
+	jpegMagic := []byte{0xFF, 0xD8, 0xFF, 0xE0}
+	if err := os.WriteFile(
+		manifest.PlaylistCoverPath(dir, manifest.CoverScopePlaylist, id, "jpg"),
+		jpegMagic, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(cfg, store, nil, "fp")
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+
+	// Uppercase — the shape Swift's UUID().uuidString produces.
+	resp := authedGET(t, hs.URL+"/v1/playlist-image/B3C1F2A4-5D6E-7F80-9A1B-2C3D4E5F6071", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("uppercase id status = %d, want 200 — the cover exists under the "+
+			"canonical lowercase key and every sibling playlist endpoint normalises",
+			resp.StatusCode)
+	}
+}

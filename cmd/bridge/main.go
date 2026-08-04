@@ -35,6 +35,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/term"
 
+	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
@@ -1460,6 +1461,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return variantsCmd(ctx, args[1:], stdout, stderr)
 	case "artwork":
 		return artworkCmd(ctx, args[1:], stdout, stderr)
+	case "enrichment":
+		return enrichmentCmd(ctx, args[1:], stdout, stderr)
+	case "fingerprint":
+		return fingerprintCmd(ctx, args[1:], stdout, stderr)
 	case "doctor":
 		return doctorCmd(args[1:], stdout, stderr)
 	case "update":
@@ -1532,6 +1537,16 @@ Subcommands:
            CarPlay / cellular streaming with zero fidelity loss vs. what the head unit
            accepts.
   artwork  Maintain on-disk artwork cache: bridge artwork --gc removes orphans.
+  enrichment
+           Inspect and re-queue metadata gaps: bridge enrichment misses lists tracks
+           short of a cover / artist MBID / release MBID and which of the three each
+           lacks; bridge enrichment retry re-queues them (the "Retry missing" button,
+           scripted).
+  fingerprint
+           Acoustically fingerprint audio files and report what AcoustID knows about
+           them (requires fpcalc). A diagnostic for the tracks whose tags are too poor
+           to match on text — it prints coverage, cost and the acceptance verdict, and
+           writes nothing.
   doctor   Preflight: check ports, directories, service manager before init.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
@@ -1983,6 +1998,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil)
 		enricher.WithPremiumCovers(premiumCovers)
 	}
+	// Acoustic fingerprinting: the cache is constructed here and attached
+	// BEFORE the enricher goroutine starts, so there is no field-write/read
+	// race — the same reasoning as the premium-cover wiring above. It is
+	// populated later by the sweeper, which needs apiSrv's hot-reloading
+	// resolver and therefore cannot be built until further down.
+	//
+	// Gated on the config flag AND both prerequisites: a `true` config with
+	// fpcalc or the API key missing degrades to feature-off here, so the
+	// bridge still boots. fingerprintCache stays nil in that case, and a nil
+	// AcousticLookup means the fallback is simply never consulted.
+	var fingerprintCache *acoustid.Cache
+	var fingerprintDegraded string // bounded key for the admin Jobs card ("" = not demoted)
+	acoustIDKey := cfg.Fingerprint.ResolvedAPIKey()
+	if cfg.Fingerprint.Enabled {
+		if ok, reason := fingerprintFeatureReady(ctx, acoustIDKey != "", stderr); ok {
+			fingerprintCache = acoustid.NewCache(fingerprintCacheCap)
+			enricher.WithAcousticFallback(acousticLookupAdapter{cache: fingerprintCache})
+		} else {
+			fingerprintDegraded = reason
+		}
+	}
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
@@ -2009,7 +2045,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// disabled the ticker (`intervalHours: 0`); we skip the goroutine in
 	// that case. The on-demand CLI path stays available regardless.
 	backupSources := buildBackupSources(cfg, *configPath)
+	var backupRunState *sweepStatus[struct{}]
 	if hrs := cfg.Backup.EffectiveIntervalHours(); hrs > 0 {
+		backupRunState = &sweepStatus[struct{}]{}
 		backupInterval := time.Duration(hrs) * time.Hour
 		// Joined on bgWriters like every other background worker. It is not
 		// a manifest-store writer — `vacuumInto` opens its own mode=ro
@@ -2022,7 +2060,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr)
+			runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr, backupRunState)
 		}()
 	}
 
@@ -2413,9 +2451,31 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// (shares scanCtx with the other periodic workers). apiSrv.Resolver()
 	// is the hot-reloading resolver so a runtime root add/remove is
 	// reflected without restart (same rationale as the upscale enqueuer).
+	// analysisPool + the sweeper's nudge/status live in runServe scope so
+	// the admin Deps closures (wired further down) can read them; all stay
+	// nil when the feature is off, and the closures are only installed
+	// when analysisActive.
+	var analysisPool *analyze.Pool
+	var analysisNudge chan struct{}
+	var analysisSweepState *sweepStatus[admin.AnalysisSweepCounts]
 	if analysisActive {
-		analysisPool := analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap())
+		analysisPool = analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap())
 		defer analysisPool.Stop()
+		// Buffered-1 nudge: the scanner's post-scan hook and the admin
+		// "Analyze now" button both non-blocking-send; a pending nudge
+		// coalesces (the sweep about to run covers it).
+		analysisNudge = make(chan struct{}, 1)
+		analysisSweepState = &sweepStatus[admin.AnalysisSweepCounts]{}
+		// Post-scan hook: analyse freshly indexed music right after every
+		// successful scan (periodic, startup, and admin-triggered — all
+		// route through Scanner.Scan) instead of waiting out the next
+		// sweep tick. Cheap non-blocking send; the scanner never blocks.
+		scanner.SetPostScanHook(func() {
+			select {
+			case analysisNudge <- struct{}{}:
+			default:
+			}
+		})
 		// Joined via bgWriters: the sweeper queries the store and enqueues
 		// analysis jobs whose completions write it back, so it must drain
 		// before Store.Close() like the other manifest writers.
@@ -2423,19 +2483,52 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		go func() {
 			defer bgWriters.Done()
 			runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
-				analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval())
+				analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval(),
+				analysisNudge, analysisSweepState)
+		}()
+	}
+
+	// Fingerprint sweeper. Wired HERE rather than beside the enricher because
+	// it needs apiSrv's hot-reloading resolver: a snapshot taken at enricher
+	// construction would keep routing against the old roots after an admin
+	// add/remove. Joined to bgWriters so a live fpcalc child cannot outlive
+	// runServe.
+	var fingerprintNudge chan struct{}
+	var fingerprintSweepState *sweepStatus[admin.FingerprintSweepCounts]
+	if fingerprintCache != nil {
+		sweeper := &fingerprintSweeper{
+			store:     manifestStore,
+			resolver:  apiSrv.Resolver(),
+			client:    acoustid.NewClient("", acoustIDKey, userAgent, nil),
+			cache:     fingerprintCache,
+			workers:   cfg.Fingerprint.EffectiveWorkers(),
+			maxPerRun: cfg.Fingerprint.EffectiveMaxPerRun(),
+			length:    cfg.Fingerprint.EffectiveLength(),
+		}
+		// Buffered-1 nudge for the admin "Sweep now" button — same
+		// coalescing contract as the analysis sweeper's.
+		fingerprintNudge = make(chan struct{}, 1)
+		fingerprintSweepState = &sweepStatus[admin.FingerprintSweepCounts]{}
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			runFingerprintSweeper(scanCtx, sweeper, cfg.Fingerprint.EffectiveSweepInterval(),
+				fingerprintNudge, fingerprintSweepState)
 		}()
 	}
 
 	// Smart-playlist regenerator (shares scanCtx). analysisActive (the
 	// sox-resolved flag) gates the harmonic/discovery families.
+	var smartMixRunState *sweepStatus[struct{}]
 	if smartPlaylistsActive {
+		smartMixRunState = &sweepStatus[struct{}]{}
 		// Joined via bgWriters — the regenerator persists generated playlists
 		// to the store, so it must drain before Store.Close().
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive, cfg.SmartPlaylists.EffectiveRegenerateInterval())
+			runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive,
+				cfg.SmartPlaylists.EffectiveRegenerateInterval(), smartMixRunState)
 		}()
 	}
 
@@ -2938,12 +3031,32 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// so the admin tile's `enabled` matches /v1/health's `waveform`
 		// flag rather than the persisted config flag.
 		AnalysisActive: func() bool { return analysisActive },
+		// Analysis pool + sweeper surfaces (nil when the feature is off —
+		// the admin then omits the fields, mirroring the upscale tile).
+		AnalysisPoolStats:     analysisPoolStatsClosure(analysisPool),
+		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
+		TriggerAnalysisSweep:  nudgeTriggerClosure(analysisNudge),
+		AnalysisSchemaVersion: analyze.WaveformSchemaVersion,
+		// Fingerprint job card: always wired so a feature-off bridge still
+		// explains WHY (config flag + degraded reason); the trigger stays
+		// nil unless the sweeper is actually running.
+		FingerprintState: fingerprintStateClosure(cfg.Fingerprint.Enabled,
+			fingerprintCache != nil, fingerprintDegraded, fingerprintSweepState),
+		TriggerFingerprintSweep: nudgeTriggerClosure(fingerprintNudge),
+		// Last/next-run recorders for the smart-mix + backup cards (nil
+		// when the respective loop isn't running).
+		SmartMixRun: jobRunClosure(smartMixRunState),
+		BackupRun:   jobRunClosure(backupRunState),
 		// Artist-image coverage source for the dashboard enrichment card —
 		// one ReadDir over the shared artwork cache dir, called behind the
 		// admin's 60s enrichment-meta TTL (never per-tick).
 		ArtistImageMBIDs: func() (map[string]struct{}, error) {
 			return enrich.CachedArtistImageMBIDs(artworkDir)
 		},
+		// Why the enricher stopped short, by bounded reason. In-memory and
+		// process-lifetime — it answers "is this library unmatchable, or is
+		// the matcher broken?", which the aggregate miss count cannot.
+		EnrichSkipReasons: enricher.SkipReasons,
 		// "Retry missing" harvest nudge: zeroing the last-submit stamp makes
 		// the harvest client's next tick re-submit the full library (Atlas
 		// re-attempts unresolved bios/descriptions; submit is idempotent).
@@ -3686,6 +3799,12 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// no-op for the CLI scan path.
 	artworkDir := filepath.Join(cfg.DataDir, "artwork")
 	scanner := manifest.NewScanner(cfg.LibraryRoots, store, artworkDir)
+	// Same missing_count grace period `bridge serve` wires. Without
+	// this the CLI scan falls back to effectiveDeleteThreshold's
+	// unwired default of 1 — immediate delete — so a single flaky
+	// enumeration under a manual `bridge scan` reaps rows that the
+	// documented 3-scan grace period exists to spare.
+	scanner.SetDeleteThreshold(cfg.Scanner.DeleteAfterMissingScans)
 
 	fmt.Fprintf(stdout, "Scanning %v ...\n", cfg.LibraryRoots)
 	start := time.Now()

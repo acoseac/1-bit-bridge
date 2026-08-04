@@ -543,6 +543,10 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			// `liveBatches`. If the first enqueue fails (nothing
 			// to drive a future callback), the DB row stays
 			// `running` with the original totals forever.
+			// (UpdateUpscaleBatchProgress carries total_files, so
+			// the reduced count reaches the DB here too — it did
+			// not before, which made "the original totals" only
+			// half-fixed by this write.)
 			//
 			// **Detached ctx** (CodeRabbit Major on PR #216): if
 			// the caller cancels the request mid-truncate, the
@@ -568,13 +572,19 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		enqueued++
 	}
 
-	// The 202 response reports `enqueued` — the persisted row's TotalFiles
-	// converges to exactly this in every path (it starts at len(cands), each
-	// dedup decrements it via dropDedupedPath, and a queue-full break sets it to
-	// `enqueued`). Reading it back from liveBatches would be both redundant AND
-	// wrong when a first-enqueue failure already deleted the batch: the lookup
-	// misses and falls back to len(cands), diverging from the row the admin Jobs
-	// page shows (CodeRabbit PR #515).
+	// The 202 response reports `enqueued` — TotalFiles converges to exactly
+	// this in every path (it starts at len(cands), each dedup decrements it via
+	// dropDedupedPath, and a queue-full break sets it to `enqueued`). Reading it
+	// back from liveBatches would be both redundant AND wrong when a
+	// first-enqueue failure already deleted the batch: the lookup misses and
+	// falls back to len(cands), diverging from the row the admin Jobs page shows
+	// (CodeRabbit PR #515).
+	//
+	// That convergence used to hold for the IN-MEMORY row only: no UPDATE
+	// carried total_files, so the persisted row kept its pre-dedup count
+	// forever and the DB-backed surfaces (admin Jobs page, GET
+	// /v1/upscale/batches) disagreed with SSE. Both store UPDATEs now write the
+	// column under a monotonic guard.
 	finalTotal := enqueued
 
 	// Every candidate deduped against in-flight jobs (a fully-overlapping

@@ -1251,6 +1251,102 @@ var migrations = []migration{
 			ON track_analysis(unicode_lower(source_path));
 		`,
 	},
+	{
+		// v27: per-track extractor-version stamp for self-healing tag
+		// re-extraction. `extractor_version` records the
+		// manifest.ExtractorVersion that produced the row's tags; the
+		// scan-skip gate (scanner.go) re-extracts any row whose stamp is
+		// < the current constant, so a tag-extraction fix (e.g. the MP4 ©
+		// atom canonicalization that recovers M4A year / composer /
+		// multi-value artist) self-applies on the next scan with no
+		// explicit backfill. NOT NULL DEFAULT 0 is a constant-time ADD
+		// COLUMN; every existing row reads 0, which is < ExtractorVersion
+		// (>= 1), so the first post-upgrade scan re-extracts the whole
+		// library once, then size+mtime skips resume. Mirrors the
+		// analyze.WaveformSchemaVersion stamp idiom.
+		version: 27,
+		name:    "tracks extractor_version stamp",
+		sql:     `-- column added idempotently in post(); see v27 docblock`,
+		post: func(db *sql.DB) error {
+			exists, err := atlasColumnExists(db, "tracks", "extractor_version")
+			if err != nil {
+				return fmt.Errorf("inspect tracks.extractor_version: %w", err)
+			}
+			if exists {
+				return nil
+			}
+			if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN extractor_version INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("add tracks.extractor_version: %w", err)
+			}
+			return nil
+		},
+	},
+	{
+		// v28: provenance for MBIDs written by the acoustic-fingerprinting
+		// fallback. Holds the AcoustID cluster ID that produced the write.
+		//
+		// COLUMN ONLY. It must never gain a `json:` tag and must never be
+		// spliced onto wire output — same rule as the v25 format-fact
+		// columns. That keeps it off the protocol entirely: no
+		// ProtocolVersion bump, no PROTOCOL.md change, no iOS mirror.
+		//
+		// It exists because a fingerprint match has a residual error rate
+		// that text matching does not. Without provenance, an MBID written
+		// from audio is indistinguishable from one written from tags,
+		// forever — so there is no way to audit the feature's output or undo
+		// it selectively. Presence alone gives a one-statement undo; the
+		// value lets a later pass re-check a link against AcoustID once
+		// upstream corrections land.
+		version: 28,
+		name:    "tracks acoustid_match provenance",
+		sql:     `-- column added idempotently in post(); see v28 docblock`,
+		post: func(db *sql.DB) error {
+			exists, err := atlasColumnExists(db, "tracks", "acoustid_match")
+			if err != nil {
+				return fmt.Errorf("inspect tracks.acoustid_match: %w", err)
+			}
+			if exists {
+				return nil
+			}
+			if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN acoustid_match TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("add tracks.acoustid_match: %w", err)
+			}
+			return nil
+		},
+	},
+	{
+		// v29: the wf4 track-quality scalars — true peak (dB, of the
+		// 48 kHz analysis rendering, BS.1770-style 4x oversampled), the
+		// community DR score, and the FLAC audio-MD5 verification state
+		// ("verified"/"mismatch", NULL = not verifiable / not FLAC).
+		// Additive with NULL defaults per the v14 docblock's contract;
+		// backfill is driven by the WaveformSchemaVersion wf3→wf4 bump
+		// (the scan-skip gate re-enqueues every stale-stamped row), not
+		// by a NULL sentinel. Uses the v28 atlasColumnExists pre-check
+		// form rather than the older duplicate-column error swallow.
+		version: 29,
+		name:    "track_analysis quality scalars (true peak, DR, audio MD5)",
+		sql:     `-- columns added idempotently in post(); see v29 docblock`,
+		post: func(db *sql.DB) error {
+			for _, col := range []struct{ name, ddl string }{
+				{"true_peak_db", "ALTER TABLE track_analysis ADD COLUMN true_peak_db REAL"},
+				{"dr_score", "ALTER TABLE track_analysis ADD COLUMN dr_score INTEGER"},
+				{"audio_md5_state", "ALTER TABLE track_analysis ADD COLUMN audio_md5_state TEXT"},
+			} {
+				exists, err := atlasColumnExists(db, "track_analysis", col.name)
+				if err != nil {
+					return fmt.Errorf("inspect track_analysis.%s: %w", col.name, err)
+				}
+				if exists {
+					continue
+				}
+				if _, err := db.Exec(col.ddl); err != nil {
+					return fmt.Errorf("add track_analysis.%s: %w", col.name, err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
@@ -1544,6 +1640,12 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	if clone.bpmFromAnalysis {
 		clone.BPM = nil
 	}
+	// The wf4 quality scalars are analysis-only like KeyRoot/KeyMode —
+	// zero unconditionally so a round-tripped read Track never freezes
+	// them into tags_json.
+	clone.TruePeakDB = nil
+	clone.DRScore = nil
+	clone.AudioMD5State = ""
 	return json.Marshal(&clone)
 }
 
@@ -1594,16 +1696,92 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	return err
 }
 
+// enrichmentMissPredicateSQL is the "this row is missing something the enricher
+// was supposed to fill" test, shared by ResetEnrichedMisses and its
+// folder-scoped twin ResetEnrichedMissesUnderPrefix so the two cannot drift.
+//
+// COALESCE-to-” folds JSON-null/absent and explicit-empty into one predicate —
+// Track MBID fields are omitempty so absent is the normal shape, but the
+// Distinct*MBIDs enumerators guard != ” for the same defensive reason
+// (CodeRabbit + Gemini on PR #495).
+//
+// The musicBrainzAlbumID arm is NOT redundant with artworkMBID. artworkMBID
+// also carries the scanner's `local-<sha256>` sentinel for embedded APIC /
+// folder.jpg art, so a track whose album never resolved on MusicBrainz but
+// which HAS local cover art reads as "not missing" on the artwork arm while
+// still having no release MBID at all — and therefore no Atlas description,
+// label, genres, booklet or premium cover, all of which key on it.
+//
+// Measured on the production bridge when the arm was added (2026-07-29): 8,945
+// of 19,482 tracks had no album MBID, and 6,801 of those — every one via a
+// local- sentinel — were invisible to the two-arm predicate. The operator
+// pressed "Retry missing" and 76% of the affected rows silently stayed put.
+//
+// Still scoped to rows that actually miss data, so a full-library MB/CAA
+// re-crawl is never triggered: on that same library this selects 46% of rows,
+// and the enricher's album/artist LRU caches collapse them to a few hundred
+// distinct upstream queries.
+// It is spelled out VERBATIM inside each statement below rather than
+// concatenated into them. A `const stmt = "…" + predicate` form is folded at
+// compile time and is exactly as safe, but it still reads as an assembled query
+// — to a reviewer and to SonarCloud's go:S2077 alike — and the whole statement
+// is easier to read in one piece anyway. TestEnrichmentMissPredicateIsShared
+// asserts both statements embed this text byte-for-byte, so the copies cannot
+// drift; that test is the thing keeping them honest, not the concatenation.
+const enrichmentMissPredicateSQL = `(COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
+
+// resetEnrichedMissesSQL is the library-wide "Retry missing" statement.
+const resetEnrichedMissesSQL = `
+		UPDATE tracks SET enriched_at = 0
+		 WHERE enriched_at > 0
+		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
+
+// resetEnrichedMissesUnderPrefixSQL is its folder-scoped twin. Takes the
+// subtree base (slash-free) as both bind parameters.
+//
+// Byte-range, not LIKE: SQLite's default LIKE folds ASCII case, so the
+// folder-scoped "Retry metadata" button also re-queued a case-twin
+// sibling folder's tracks. This is one of the few sanctioned
+// `enriched_at` writers and its whole justification is that it is
+// tightly scoped — a predicate that silently covers a folder the
+// operator did not select sends real MB/CAA/Deezer traffic for it.
+const resetEnrichedMissesUnderPrefixSQL = `
+		UPDATE tracks SET enriched_at = 0
+		 WHERE enriched_at > 0
+		   AND path COLLATE BINARY >= ? || '/'
+		   AND path COLLATE BINARY < ? || '0'
+		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
+		     OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')`
+
+// enrichmentBreakdownSQL backs the dashboard's enrichment card. `matched` is
+// the NEGATION of the same miss-predicate the two statements above use, so the
+// card's "missing" count is exactly what the "Retry missing" button re-queues —
+// see EnrichmentBreakdown for why that equality is load-bearing.
+const enrichmentBreakdownSQL = `
+		SELECT
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at = 0),
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0
+				AND NOT (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
+				      OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = ''
+				      OR COALESCE(json_extract(tags_json, '$.musicBrainzAlbumID'), '') = '')),
+			(SELECT COUNT(*) FROM tracks),
+			(SELECT MAX(enriched_at) FROM tracks)`
+
 // ResetEnrichedMisses re-queues every track the enricher finished WITHOUT a
 // full result — enriched (enriched_at > 0) but still missing its release
-// artwork MBID or its artist MBID — by resetting enriched_at to 0 so the
-// worker's `WHERE enriched_at = 0` query picks it up again. This is the
-// operator-triggered "Retry missing" reset behind POST /api/enrichment/retry:
-// the third sanctioned enriched_at writer alongside the upsert reset and
-// MarkEnriched (see CLAUDE.md "enriched_at monotonicity"). It is semantically
-// the documented manual `UPDATE tracks SET enriched_at = 0` recipe, scoped to
-// the rows that actually miss data so a full-library MB/CAA re-crawl is never
-// triggered.
+// artwork MBID, its artist MBID, or its release MBID — by resetting
+// enriched_at to 0 so the worker's `WHERE enriched_at = 0` query picks it up
+// again. This is the operator-triggered "Retry missing" reset behind
+// POST /api/enrichment/retry: the third sanctioned enriched_at writer alongside
+// the upsert reset and MarkEnriched (see CLAUDE.md "enriched_at monotonicity").
+// It is semantically the documented manual `UPDATE tracks SET enriched_at = 0`
+// recipe, scoped to the rows that actually miss data (see
+// enrichmentMissPredicateSQL).
 //
 // indexed_at is deliberately NOT bumped — nothing about the row's content
 // changed yet; MarkEnriched bumps it when the retry actually lands new data.
@@ -1613,16 +1791,7 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 func (s *Store) ResetEnrichedMisses(ctx context.Context) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// COALESCE-to-'' folds JSON-null/absent and explicit-empty into one
-	// "missing" predicate — Track MBID fields are omitempty so absent is the
-	// normal shape, but the Distinct*MBIDs enumerators guard != '' for the
-	// same defensive reason (CodeRabbit + Gemini on PR #495).
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE tracks SET enriched_at = 0
-		 WHERE enriched_at > 0
-		   AND (COALESCE(json_extract(tags_json, '$.artworkMBID'), '') = ''
-		     OR COALESCE(json_extract(tags_json, '$.artistMBID'), '') = '')
-	`)
+	res, err := s.db.ExecContext(ctx, resetEnrichedMissesSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -1782,6 +1951,49 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	return n, nil
 }
 
+// StampExtractorVersionBatch advances `extractor_version` to the current
+// build's constant for the given paths WITHOUT touching `indexed_at`,
+// `enriched_at`, or `tags_json` — the store half of the version-stale
+// diff-guard (scanner.go `reExtractUnchanged`): a re-extraction whose
+// merged result is byte-identical to the stored row must not surface in
+// the iOS delta (`indexed_at` is the delta watermark), must not re-queue
+// enrichment (`enriched_at`), and must not rewrite the blob. Deliberately
+// NOT an `enriched_at` writer, so it stays outside that column's
+// sanctioned-writers set. `missing_count = 0` preserves the "seen this
+// scan" resilience contract the fast-skip path maintains via
+// ResetTrackMissingCount.
+//
+// Holds `s.mu` per the writer contract on Store; one transaction with a
+// prepared statement (the applyReconciledTracks template).
+func (s *Store) StampExtractorVersionBatch(ctx context.Context, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `
+		UPDATE tracks
+		SET extractor_version = ?,
+		    missing_count = 0
+		WHERE path = ?
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, p := range paths {
+		if _, err := stmt.ExecContext(ctx, ExtractorVersion, p); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ----- tracks -----
 
 // UpsertTrack writes or replaces the row for t.Path. The tags are encoded
@@ -1807,8 +2019,9 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	rate, bits, isDSD, codec := formatColumnBinds(t)
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
-		                   sample_rate, bits_per_sample, is_dsd, codec)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   sample_rate, bits_per_sample, is_dsd, codec,
+		                   extractor_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -1843,9 +2056,14 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			sample_rate     = excluded.sample_rate,
 			bits_per_sample = excluded.bits_per_sample,
 			is_dsd          = excluded.is_dsd,
-			codec           = excluded.codec
+			codec           = excluded.codec,
+			-- extractor_version stamped on every upsert (constant per build).
+			-- The excluded.extractor_version assignment is MANDATORY: without
+			-- it a re-extracted (conflict) row keeps its stale stamp and would
+			-- re-extract on every subsequent scan.
+			extractor_version = excluded.extractor_version
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano(),
-		rate, bits, isDSD, codec)
+		rate, bits, isDSD, codec, ExtractorVersion)
 	return err
 }
 
@@ -1923,8 +2141,9 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	// per batch on Pi-class hardware and break the deterministic test seam.
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
-		                   sample_rate, bits_per_sample, is_dsd, codec)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   sample_rate, bits_per_sample, is_dsd, codec,
+		                   extractor_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -1950,7 +2169,12 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			sample_rate     = excluded.sample_rate,
 			bits_per_sample = excluded.bits_per_sample,
 			is_dsd          = excluded.is_dsd,
-			codec           = excluded.codec
+			codec           = excluded.codec,
+			-- extractor_version stamped on every upsert (constant per build).
+			-- The excluded.extractor_version assignment is MANDATORY: without
+			-- it a re-extracted (conflict) row keeps its stale stamp and would
+			-- re-extract on every subsequent scan.
+			extractor_version = excluded.extractor_version
 	`)
 	if err != nil {
 		return err
@@ -1959,7 +2183,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	now := s.now().UnixNano()
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
-			r.rate, r.bits, r.isDSD, r.codec); err != nil {
+			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion); err != nil {
 			return err
 		}
 	}
@@ -2201,6 +2425,12 @@ type TrackStat struct {
 	Size        int64
 	MTimeNS     int64
 	ArtworkMBID string
+	// ExtractorVersion is the `extractor_version` column — the
+	// manifest.ExtractorVersion that produced the row's tags. The
+	// scan-skip gate re-extracts any row whose stamp is < the current
+	// constant. NOT NULL DEFAULT 0, so it scans into a plain int (a
+	// pre-stamp row reads 0).
+	ExtractorVersion int
 }
 
 // GetTrackStat is the skip-gate twin of GetTrack: same exact-key
@@ -2233,9 +2463,10 @@ type TrackStat struct {
 func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, error) {
 	var st TrackStat
 	err := s.db.QueryRowContext(ctx, `
-		SELECT size, mtime_ns, COALESCE(json_extract(tags_json, '$.artworkMBID'), '')
+		SELECT size, mtime_ns, COALESCE(json_extract(tags_json, '$.artworkMBID'), ''),
+		       extractor_version
 		FROM tracks WHERE path = ?`, path).
-		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID)
+		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -2455,33 +2686,43 @@ func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
 	}
 }
 
-// keyTempoSQL splices the estimated key + tempo onto each row as ONE
-// json_object (vs three scalar subqueries — same single indexed PK
+// analysisScalarsSQL splices the estimated key + tempo AND the wf4
+// quality scalars (true peak / DR / audio-MD5 state) onto each row as
+// ONE json_object (vs six scalar subqueries — same single indexed PK
 // lookup on track_analysis the waveform/replaygain splices use). NULL
 // when no analysis row exists; `{"root":null,...}` when the row exists
-// but the estimate is absent. Decoded + spliced by spliceAnalysisKeyTempo.
-const keyTempoSQL = `(SELECT json_object('root', key_root, 'mode', key_mode, 'bpm', bpm)
-	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_keytempo`
+// but a value is absent. Decoded + spliced by spliceAnalysisScalars.
+// (Renamed from the old keyTempo splice when the quality scalars joined the bundle.)
+const analysisScalarsSQL = `(SELECT json_object('root', key_root, 'mode', key_mode, 'bpm', bpm,
+	 'tp', true_peak_db, 'dr', dr_score, 'md5', audio_md5_state)
+	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_scalars`
 
-// analysisKeyTempo is the decode target for keyTempoSQL's json_object.
-type analysisKeyTempo struct {
-	Root *int    `json:"root"`
-	Mode *string `json:"mode"`
-	BPM  *int    `json:"bpm"`
+// analysisScalars is the decode target for analysisScalarsSQL's json_object.
+type analysisScalars struct {
+	Root     *int     `json:"root"`
+	Mode     *string  `json:"mode"`
+	BPM      *int     `json:"bpm"`
+	TruePeak *float64 `json:"tp"`
+	DR       *int     `json:"dr"`
+	MD5      *string  `json:"md5"`
 }
 
-// spliceAnalysisKeyTempo fills Track.KeyRoot/KeyMode (always — no tag
-// source today) and Track.BPM (tag-absent-only — a curated TBPM/BPM tag
-// always wins) from the analysis json_object. Malformed JSON is ignored
-// (the track stays playable without the estimate). Like ReplayGain, the
-// BPM splice marks provenance so marshalForStorage scrubs only the
-// analysis-derived value on write-back; KeyRoot/KeyMode have no tag
-// source, so marshalForStorage zeroes them unconditionally.
-func spliceAnalysisKeyTempo(t *Track, raw sql.NullString) {
+// spliceAnalysisScalars fills Track.KeyRoot/KeyMode (always — no tag
+// source today), Track.BPM (tag-absent-only — a curated TBPM/BPM tag
+// always wins), and the analysis-only quality scalars TruePeakDB /
+// DRScore / AudioMD5State from the analysis json_object. Malformed JSON
+// is ignored (the track stays playable without the estimates). Like
+// ReplayGain, the BPM splice marks provenance so marshalForStorage
+// scrubs only the analysis-derived value on write-back; the analysis-only
+// fields are zeroed unconditionally there. TruePeak carries the same
+// non-finite guard as spliceAnalysisReplayGain — `track_analysis` is
+// reachable by an external sqlite3 CLI, and json.Marshal rejects
+// non-finite floats, which would crash /v1/manifest mid-stream.
+func spliceAnalysisScalars(t *Track, raw sql.NullString) {
 	if !raw.Valid || raw.String == "" {
 		return
 	}
-	var kt analysisKeyTempo
+	var kt analysisScalars
 	if err := json.Unmarshal([]byte(raw.String), &kt); err != nil {
 		return
 	}
@@ -2496,6 +2737,17 @@ func spliceAnalysisKeyTempo(t *Track, raw sql.NullString) {
 		b := *kt.BPM
 		t.BPM = &b
 		t.bpmFromAnalysis = true
+	}
+	if kt.TruePeak != nil && !math.IsNaN(*kt.TruePeak) && !math.IsInf(*kt.TruePeak, 0) {
+		v := *kt.TruePeak
+		t.TruePeakDB = &v
+	}
+	if kt.DR != nil {
+		d := *kt.DR
+		t.DRScore = &d
+	}
+	if kt.MD5 != nil {
+		t.AudioMD5State = *kt.MD5
 	}
 }
 
@@ -2606,7 +2858,7 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version, booklet_tag FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
 	args := []any{}
 	if since != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2641,7 +2893,7 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysisScalars(&t, ktRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -2670,7 +2922,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + keyTempoSQL + `, artwork_version, booklet_tag FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
 	args := []any{}
 	if sp != nil {
 		q += ` WHERE indexed_at > ?`
@@ -2718,7 +2970,7 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysisScalars(&t, ktRaw)
 		if err := fn(&t); err != nil {
 			return err
 		}
@@ -2747,7 +2999,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+keyTempoSQL+`, artwork_version, booklet_tag FROM tracks
+		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+analysisScalarsSQL+`, artwork_version, booklet_tag FROM tracks
 		WHERE path > ?
 		ORDER BY path ASC
 		LIMIT ?
@@ -2783,7 +3035,7 @@ func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int)
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
 		spliceAnalysisReplayGain(&t, rg)
-		spliceAnalysisKeyTempo(&t, ktRaw)
+		spliceAnalysisScalars(&t, ktRaw)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -3035,31 +3287,43 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 // spot coverage gaps:
 //
 //   - pending: never been through the enricher (`enriched_at = 0`).
-//   - matched: enriched AND an artwork MBID landed — a cover is cached.
-//   - missing: enriched but no cover found anywhere (MB/CAA/CAA-rg/iTunes all
-//     missed, or no MB match at all). This is the coverage-gap signal.
+//   - matched: enriched AND nothing left to fill — artwork, artist and release
+//     MBIDs all landed.
+//   - missing: enriched but still short at least one of those. This is the
+//     coverage-gap signal, and it is EXACTLY the set the "Retry missing" button
+//     re-queues.
 //
-// No new column: the split is derived from the existing `enriched_at` column +
-// the `$.artworkMBID` tag, so it stays exactly consistent with what `enrichOne`
-// writes — a track is MarkEnriched even when artwork misses, and `t.ArtworkMBID`
-// is set only when bytes reach disk, so an enriched row with a NULL
-// `$.artworkMBID` is precisely a gap. A `local-<sha256>` sentinel is a non-NULL
-// value, so a locally-curated cover counts as matched (correct). Because
-// `Track.ArtworkMBID` is `omitempty`, an empty value is absent from `tags_json`,
-// so IS NULL / IS NOT NULL is the exact test (and matches the functional index
-// expression `json_extract(tags_json,'$.artworkMBID')`).
+// That last equality is the point of sharing enrichmentMissPredicateSQL here.
+// `matched` used to be "non-NULL `$.artworkMBID`" alone, which made the card
+// disagree with its own button in both directions: a `local-<sha256>` sentinel
+// (embedded APIC / folder.jpg art) counted as matched even with no release MBID
+// at all, and a row with a cover but no artist MBID counted as matched too.
+// Measured on the production bridge when this was corrected (2026-07-29): the
+// card read 553 missing while the retry re-queued 10,194 — an operator watching
+// the number had no way to predict what the button would do. Same class of bug
+// as the predicate gap the button itself had (PR #595), one layer up in the
+// display.
 //
-// Four index-friendly subqueries in one statement (one consistent read, no
-// divergence window between separate COUNTs): `pending` and `total` are COUNTs
-// against `idx_tracks_enriched` / the table; `matched` counts non-NULL
-// `$.artworkMBID`, which the functional index `idx_tracks_artwork_mbid` answers
-// WITHOUT parsing every `tags_json` BLOB; and `missing` is DERIVED as
+// No new column: the split still derives from `enriched_at` + the tags, so it
+// stays exactly consistent with what `enrichOne` writes — a track is
+// MarkEnriched even when a facet misses. COALESCE-to-” is what makes the test
+// exact: `Track`'s MBID fields are `omitempty`, so absent is the normal shape
+// for a gap, but an explicitly-empty value must read the same way.
+//
+// Four subqueries in one statement (one consistent read, no divergence window
+// between separate COUNTs): `pending` and `total` are COUNTs against
+// `idx_tracks_enriched` / the table, and `missing` is DERIVED as
 // `total - pending - matched` (every track is pending XOR enriched, and enriched
-// splits matched/missing), so it costs no second json_extract pass. This is the
-// EnrichmentCounts subquery shape (same `> 0` sargeability note applies); the
-// admin caller still TTL-caches + single-flights it. Read-only, no `s.mu` (WAL
-// concurrent-reader), so a slow read can't stall a writer. (Gemini review on
-// PR #490.)
+// splits matched/missing) so it costs no second json_extract pass.
+//
+// `matched` no longer rides the `idx_tracks_artwork_mbid` functional index —
+// a three-field predicate can't — so it parses `tags_json` per row. Measured on
+// the 19,482-track production library: 34ms -> 64ms for the whole statement.
+// That is affordable because the admin caller TTL-caches (enrichmentCacheTTL)
+// and single-flights it; if this ever needs to run un-cached, count `missing`
+// against a purpose-built index rather than reverting to a predicate that
+// disagrees with the retry. Read-only, no `s.mu` (WAL concurrent-reader), so a
+// slow read can't stall a writer. (Gemini review on PR #490.)
 //
 // `lastEnrichedAt` mirrors EnrichmentCounts exactly: MAX(enriched_at) is a valid
 // `0` (NOT SQL NULL) on a fresh all-unenriched library, so the `!= 0` guard maps
@@ -3067,14 +3331,7 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 func (s *Store) EnrichmentBreakdown(ctx context.Context) (pending, matched, missing int, lastEnrichedAt *time.Time, err error) {
 	var lastNs sql.NullInt64
 	var total int
-	err = s.db.QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM tracks WHERE enriched_at = 0),
-			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0
-				AND json_extract(tags_json, '$.artworkMBID') IS NOT NULL),
-			(SELECT COUNT(*) FROM tracks),
-			(SELECT MAX(enriched_at) FROM tracks)
-	`).Scan(&pending, &matched, &total, &lastNs)
+	err = s.db.QueryRowContext(ctx, enrichmentBreakdownSQL).Scan(&pending, &matched, &total, &lastNs)
 	if err != nil {
 		return 0, 0, 0, nil, err
 	}
@@ -3131,10 +3388,28 @@ func (s *Store) CountTracksUnderRoot(ctx context.Context, rootBase string, multi
 // literally without an ESCAPE clause.
 func (s *Store) CountTracksByPrefix(ctx context.Context, prefix string) (int, error) {
 	// TrimRight, not TrimSuffix: a caller passing "Album//" would keep one
-	// slash and rebuild the same broken pattern. All four prefix helpers
-	// (here, RollupByPrefix, EligibleRollupByPrefix,
-	// ListTrackProjectionsUnderPrefix) use this form — keep them in step.
+	// slash and rebuild the same broken pattern.
+	//
+	// DECIDE AFTER THE TRIM. All four prefix helpers (here,
+	// RollupByPrefix, EligibleRollupByPrefix,
+	// ListTrackProjectionsUnderPrefix) treat a prefix that is EMPTY
+	// ONCE TRIMMED as whole-library — keep them in step. Deciding
+	// before the trim splits the family: "//" then means "everything"
+	// to two of them and "nothing" to the other two, and the admin
+	// Inspector renders a rollup and a projection from the same input
+	// side by side.
+	//
+	// Without the branch, base "" builds `path >= '/' AND path < '0'`,
+	// which matches nothing (library-relative paths never start with
+	// '/'). No caller passes "" today; the reachable degenerate is a
+	// multi-root `/` root, where filepath.Base gives "/" — and there
+	// the whole-table count is the FAIL-SAFE answer, because this
+	// feeds the scanner's FUSE drop-mode guard and a 0 silently
+	// bypasses it (see CountTracksUnderRoot's docblock).
 	base := strings.TrimRight(prefix, "/")
+	if base == "" {
+		return s.CountTracks(ctx)
+	}
 	var n int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM tracks WHERE path >= ? || '/' AND path < ? || '0'`,
@@ -3171,7 +3446,38 @@ func (s *Store) CountTracksByPrefix(ctx context.Context, prefix string) (int, er
 func (s *Store) DeleteTracksByPrefix(ctx context.Context, prefix string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	escaped := likeEscape(prefix)
+	// Byte-range, NOT `LIKE prefix||'%'`. SQLite's default LIKE folds
+	// ASCII case (nothing sets case_sensitive_like — see OpenStore's
+	// DSN), and this prefix is a library-root BASENAME, not the
+	// folder-derived prefix the PR #532 conversion could assume never
+	// differs only by case: ValidateRoots compares basenames
+	// case-sensitively, so /srv/Music and /srv/music are both accepted
+	// as roots. Removing one then matched BOTH — deleting the
+	// survivor's rows and, via the two sidecar enumerations below,
+	// UNLINKING ITS VARIANT AND WAVEFORM FILES FROM DISK. Worse, the
+	// count the operator confirmed against came from
+	// CountTracksByPrefix, which is already case-sensitive, so it
+	// understated the damage.
+	//
+	// The range rides the BINARY-collated `path` PRIMARY KEY (verified:
+	// SEARCH ... USING COVERING INDEX (path>? AND path<?), where the
+	// LIKE form was a full SCAN). '0' is the ASCII successor of '/'.
+	// Non-ASCII prefixes need no special handling: UTF-8 continuation
+	// bytes are all >= 0x80, so they sort after both '/' (0x2F) and
+	// '0' (0x30) and the range still bounds exactly the prefix+"/" set.
+	base := strings.TrimRight(prefix, "/")
+	if base == "" {
+		// Deliberately an ERROR, not a whole-table delete. The LIKE
+		// form matched nothing here (`likeEscape("//")+"%"` is `//%`,
+		// and library-relative paths never start with '/'), so a
+		// silent no-op was the old behaviour — but the range form's
+		// natural reading of an empty base is "everything", and this
+		// is the one method in the family where guessing wrong wipes
+		// the library. CountTracksByPrefix can fail safe to a whole-
+		// table COUNT because a count is harmless; a DELETE cannot.
+		// Whole-library removal is WipeAllTracks / WipeFilesystemTracks.
+		return 0, fmt.Errorf("delete tracks by prefix: empty prefix %q — use WipeAllTracks/WipeFilesystemTracks for a whole-library delete", prefix)
+	}
 	// Step 1: enumerate doomed sidecars BEFORE the cascade drops
 	// the rows. Reuses the proactive-cleanup contract documented
 	// on DeleteTrack.
@@ -3182,23 +3488,27 @@ func (s *Store) DeleteTracksByPrefix(ctx context.Context, prefix string) (int64,
 	// files on disk — the row-cascade hasn't run yet so we can
 	// abort cleanly and surface the error to the caller. Refusing
 	// upfront is better than committing a partial delete.
-	doomedSidecars, err := s.listSidecarsByPathPrefix(ctx, escaped)
+	doomedSidecars, err := s.listSidecarsByPathPrefix(ctx, base)
 	if err != nil {
 		return 0, err
 	}
 	// Waveform sidecars under the same prefix (track_analysis). Best-
 	// effort like the rest of the analysis cleanup; an orphan is a
 	// `bridge analyze --gc` problem, not a reason to fail the delete.
+	// Same byte-range bounds as the DELETE — these two MUST agree, or
+	// the unlink set and the row set diverge.
 	doomedSidecars = append(doomedSidecars,
-		s.listWaveformSidecars(ctx, `source_path LIKE ? ESCAPE '\'`, escaped+"%")...)
+		s.listWaveformSidecars(ctx,
+			`source_path COLLATE BINARY >= ? || '/' AND source_path COLLATE BINARY < ? || '0'`,
+			base, base)...)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx,
-		`DELETE FROM tracks WHERE path LIKE ? ESCAPE '\'`,
-		escaped+"%",
+		`DELETE FROM tracks WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'`,
+		base, base,
 	)
 	if err != nil {
 		return 0, err
@@ -3218,23 +3528,31 @@ func (s *Store) DeleteTracksByPrefix(ctx context.Context, prefix string) (int64,
 	return n, nil
 }
 
-// listSidecarsByPathPrefix returns every sidecar_path whose
-// source_path matches the LIKE-escaped prefix. Used by
-// DeleteTracksByPrefix's pre-cascade enumeration. Caller MUST
+// listSidecarsByPathPrefix returns every sidecar_path whose source_path
+// lies under base (a slash-free prefix — the caller has already trimmed).
+// Used by DeleteTracksByPrefix's pre-cascade enumeration. Caller MUST
 // hold s.mu (writer-serialization contract).
+//
+// Byte-range rather than LIKE, and the bounds MUST stay identical to
+// the DELETE in DeleteTracksByPrefix: this list is what gets UNLINKED
+// FROM DISK, so a predicate that matches more than the row delete does
+// destroys files belonging to rows that survive. That is exactly what
+// the case-folding LIKE did for two roots differing only in case.
 //
 // **Iterator-error returns propagate** (PR-C, audit follow-up):
 // the previous shape logged `rows.Err()` and returned `nil`,
 // masking partial-result truncation. Callers (the cascading
 // delete path) need to know when the enumeration was truncated
 // so they don't silently leave orphan sidecar files on disk.
-func (s *Store) listSidecarsByPathPrefix(ctx context.Context, escapedPrefix string) ([]string, error) {
+func (s *Store) listSidecarsByPathPrefix(ctx context.Context, base string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT sidecar_path FROM track_variants WHERE source_path LIKE ? ESCAPE '\'`,
-		escapedPrefix+"%",
+		`SELECT sidecar_path FROM track_variants
+		  WHERE source_path COLLATE BINARY >= ? || '/'
+		    AND source_path COLLATE BINARY < ? || '0'`,
+		base, base,
 	)
 	if err != nil {
-		logger.Warn("list sidecars by prefix", "prefix", escapedPrefix, "err", err)
+		logger.Warn("list sidecars by prefix", "prefix", base, "err", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -3477,10 +3795,130 @@ func likeEscape(s string) string {
 	return string(out)
 }
 
-// TrackPaths returns every known track path (sorted). Used by the scanner's
-// "remove tracks deleted from disk" pass.
+// subtreeRangeBase reduces `prefix` to the slash-free base that the
+// subtree byte-range bounds are built from, and reports whether the
+// query should be scoped at all.
+//
+// Callers pair it with the clause
+//
+//	<col> COLLATE BINARY >= ? || '/' AND <col> COLLATE BINARY < ? || '0'
+//
+// binding the returned base TWICE. The clause is written out at each
+// call site rather than assembled here: concatenating SQL reads as an
+// injection risk to a reviewer and to SonarCloud's go:S2077 alike, even
+// when every fragment is a compile-time literal.
+//
+// **This replaced a LIKE-pattern builder, and that is the point.**
+// SQLite's default LIKE folds ASCII case (nothing sets
+// case_sensitive_like — see OpenStore's DSN), so every one of these
+// helpers silently covered case-twin sibling directories. On the write
+// in this family — ResetEnrichedMissesUnderPrefix, one of the few
+// sanctioned `enriched_at` writers — that meant re-queueing tracks in a
+// folder the operator never selected, sending real MB/CAA/Deezer
+// traffic for it. The range form also rides the BINARY-collated `path`
+// PRIMARY KEY, where `LIKE 'prefix/%'` forced a full table scan.
+//
+// It exists so the decide-after-trim rule is applied structurally
+// rather than restated at each call site. Two failure modes it closes,
+// both of which have shipped here before:
+//
+//   - The bounds append their own '/', so a caller's trailing slash
+//     builds `>= 'Album//'` and matches NOTHING — a silently-empty
+//     result, not an error. TrimRight (not TrimSuffix) so "Album//"
+//     doesn't keep one slash and rebuild the same broken bound.
+//   - A prefix that is empty ONCE TRIMMED means whole-library. Deciding
+//     before the trim makes "//" mean "everything" to some helpers and
+//     "nothing" to others.
+//
+// scoped=false means "no WHERE clause" — the caller must NOT bind the
+// returned base in that case.
+func subtreeRangeBase(prefix string) (base string, scoped bool) {
+	base = strings.TrimRight(prefix, "/")
+	if base == "" {
+		return "", false
+	}
+	return base, true
+}
+
+// subtreeLikePattern is the case-FOLDING sibling of subtreeRangeBase,
+// applying the identical trim and decide-after-trim rules.
+//
+// **Pick deliberately, and default to subtreeRangeBase.** Case-folding
+// is the wrong answer for anything that writes, deletes, or decides a
+// scope the walk will be compared against — a case-twin sibling
+// directory is a DIFFERENT directory on a case-sensitive filesystem,
+// and treating it as the same one is how rows and their on-disk
+// sidecars got destroyed. This form remains only where matching
+// case-insensitively is the deliberate intent:
+//
+//   - ListVariantsByPathPrefix, whose query is explicitly
+//     `unicode_lower(source_path) LIKE unicode_lower(?)` so the variant
+//     GC finds sidecars written under a differently-cased source path
+//     (PR #477).
+//   - ListTrackProjectionsUnderPrefix, a display-only projection that
+//     also needs a match-everything fallback the range form can't
+//     express in one static statement.
+//
+// If you are adding a caller and cannot point at a reason case-folding
+// is *wanted*, you want subtreeRangeBase.
+func subtreeLikePattern(prefix string) (pattern string, scoped bool) {
+	base, scoped := subtreeRangeBase(prefix)
+	if !scoped {
+		return "", false
+	}
+	return likeEscape(base) + `/%`, true
+}
+
+// TrackPaths returns every known track path (sorted), INCLUDING rows
+// routed from a UPnP upstream. Used by the scanner's "remove tracks
+// deleted from disk" pass.
+//
+// Including routed rows is load-bearing there and must stay: the
+// deletion pass spares them by looking them up in the routed set, and
+// it can only spare a row it was told to consider. Excluding them here
+// would put every routed row outside the snapshot entirely — which is
+// not "spared", it is invisible, and any future branch that reasons
+// about the snapshot would silently do the wrong thing for 15k rows.
+//
+// Anything that wants "tracks that exist as files on this host" wants
+// TrackPathsLocal instead.
 func (s *Store) TrackPaths(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT path FROM tracks ORDER BY path ASC`)
+	return s.trackPaths(ctx, `SELECT path FROM tracks ORDER BY path ASC`)
+}
+
+// TrackPathsLocal returns every known FILESYSTEM track path (sorted) —
+// TrackPaths minus anything routed from a UPnP upstream.
+//
+// Routed rows describe media on another device. They are real library
+// entries and belong in the manifest, but they have no local file, so
+// any caller that is going to resolve a path to something on disk gets
+// a guaranteed miss for every one of them.
+//
+// The analysis sweep was that caller. On a hybrid library (89 local
+// tracks, 15,283 routed from a Chord 2Go) each hourly sweep ran 15,283
+// futile `ResolveChecked` calls and then reported the misses to the
+// operator, so the Jobs page read `total 15372, missing 13553` beside a
+// coverage block that correctly said `totalLocal 89`. The two numbers
+// came from different queries with different ideas of what the library
+// is; this is that anti-join, so they now agree by construction.
+//
+// The `NOT EXISTS` form (rather than `NOT IN`) matches
+// AnalysisCoverage and the rest of the routed-exclusion sites: today
+// `source_path` is the routing PK and non-null so the two are
+// equivalent, but NOT EXISTS stays correct if that ever changes.
+func (s *Store) TrackPathsLocal(ctx context.Context) ([]string, error) {
+	return s.trackPaths(ctx, `
+		SELECT t.path FROM tracks t
+		WHERE NOT EXISTS (
+			SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path
+		)
+		ORDER BY t.path ASC`)
+}
+
+// trackPaths is the shared scan body for the two path enumerations
+// above. Reads are un-mutexed (WAL handles concurrent readers).
+func (s *Store) trackPaths(ctx context.Context, query string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -3496,6 +3934,27 @@ func (s *Store) TrackPaths(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
+// trackScopeBase reduces a scope directory to the slash-free prefix the
+// byte-range bounds are built from, shared by TrackPathsUnder and
+// FolderPathsUnder so the two can't drift on what "under relDir" means.
+//
+// The "/." test is deliberately on the two-character suffix, not on "."
+// alone: relPath's multi-root whole-root sentinel is "<base>/.", but a
+// real directory may legitimately END in a dot ("Artist/Album."), and
+// trimming that would silently widen the scope to its parent.
+//
+// The trailing-slash trim mirrors CountTracksByPrefix's: the range
+// appends its own '/', so a caller passing "Album/" would otherwise
+// build `path >= 'Album//'` and match NOTHING — a silently-empty scope
+// rather than an error. TrimRight, not TrimSuffix, so "Album//" can't
+// keep one slash and rebuild the same broken bound.
+func trackScopeBase(relDir string) string {
+	if strings.HasSuffix(relDir, "/.") {
+		relDir = strings.TrimSuffix(relDir, "/.")
+	}
+	return strings.TrimRight(relDir, "/")
+}
+
 // TrackPathsUnder returns every track path at or under relDir (sorted).
 // relDir is in the library-relative forward-slash form used in storage.
 //
@@ -3505,27 +3964,45 @@ func (s *Store) TrackPaths(ctx context.Context) ([]string, error) {
 //   - "<base>/." (multi-root whole-root sentinel; relPath form for an
 //     fsnotify event on the root itself) returns every track under
 //     "<base>/".
-//   - otherwise the match is "<relDir>/%" with LIKE-special characters
-//     escaped via the ESCAPE clause so a directory whose name happens to
-//     contain "%" or "_" doesn't widen the match.
+//   - otherwise the scope is everything under "<relDir>/".
 //
 // Tracks are files, never directories, so a track path can never equal
-// relDir itself — only the descendant pattern is needed.
+// relDir itself — only the descendant range is needed. (Contrast
+// FolderPathsUnder, which must also match the directory's own row.)
+//
+// Byte-range, NOT `LIKE`. This is the SCOPE SNAPSHOT for ScanSubtree's
+// bounded deletion pass, and SQLite's default LIKE folds ASCII case
+// (nothing sets case_sensitive_like). On a case-sensitive filesystem
+// `Artist/Album` and `Artist/album` are two distinct real directories,
+// so scanning one pulled the OTHER's rows into the snapshot. They are
+// then absent from `seen` — and `caseOnlyRenames` fold-matches them to
+// a path that WAS seen, so the pass reaped them outright, bypassing the
+// missing_count debounce entirely.
+//
+// That reap is only sound because of the premise in caseOnlyRenames'
+// docblock: "a stored path that fold-matches a seen entry refers to a
+// file the walker DID enumerate this pass". True for a full Scan, false
+// here the moment the snapshot is broader than the walk. Keeping this
+// query case-exact is what keeps that premise true — the deletion pass
+// cannot spare a row it was never told to consider.
 //
 // Used by ScanSubtree's bounded deletion pass.
 func (s *Store) TrackPathsUnder(ctx context.Context, relDir string) ([]string, error) {
 	if relDir == "" || relDir == "." {
 		return s.TrackPaths(ctx)
 	}
-	var pattern string
-	if strings.HasSuffix(relDir, "/.") {
-		pattern = likeEscape(strings.TrimSuffix(relDir, ".")) + "%"
-	} else {
-		pattern = likeEscape(relDir) + "/%"
+	base := trackScopeBase(relDir)
+	if base == "" {
+		// Only reachable from a malformed sentinel ("/."), which relPath
+		// never produces. Whole-library scope matches the ""/"." branch.
+		return s.TrackPaths(ctx)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT path FROM tracks WHERE path LIKE ? ESCAPE '\' ORDER BY path ASC`,
-		pattern,
+		`SELECT path FROM tracks
+		  WHERE path COLLATE BINARY >= ? || '/'
+		    AND path COLLATE BINARY < ? || '0'
+		  ORDER BY path ASC`,
+		base, base,
 	)
 	if err != nil {
 		return nil, err
@@ -3622,46 +4099,43 @@ func (s *Store) FolderPaths(ctx context.Context) ([]string, error) {
 // (sorted), INCLUDING relDir itself when a row for it exists.
 // relDir is in the library-relative forward-slash form used in storage.
 //
-// Same three normalizations as TrackPathsUnder. Unlike tracks (which
-// are always files), the row for relDir itself is a real folder row
-// the scanner upserted on its previous walk, so the match must
-// include it — otherwise a "directory was renamed in place" event
-// would leave the original folder row behind.
+// Same normalizations as TrackPathsUnder, via the shared
+// trackScopeBase. Unlike tracks (which are always files), the row for
+// relDir itself is a real folder row the scanner upserted on its
+// previous walk, so the match must include it — otherwise a "directory
+// was renamed in place" event would leave the original folder row
+// behind.
+//
+// **The `path = ?` term is load-bearing and must survive any future
+// rewrite of this query.** It is the only thing that matches the
+// directory's own row (and, in multi-root mode, the "<base>/."
+// whole-root sentinel the walker upserts); the range covers strictly
+// descendants. Drop it and folder rows stop being reaped on rename.
+//
+// Byte-range for the descendant half, for the same reason as
+// TrackPathsUnder: SQLite's default LIKE folds ASCII case, so a
+// case-twin sibling directory's rows were being pulled into a scope
+// the walk never visits. See that function's docblock for what the
+// deletion pass then does with them.
 //
 // Used by ScanSubtree's bounded deletion pass.
 func (s *Store) FolderPathsUnder(ctx context.Context, relDir string) ([]string, error) {
 	if relDir == "" || relDir == "." {
 		return s.FolderPaths(ctx)
 	}
-	if strings.HasSuffix(relDir, "/.") {
-		// Multi-root whole-root sentinel ("<base>/."): match every
-		// folder under "<base>/". The "<base>/." row IS upserted by
-		// the walker (relPath(root, root, true) returns this form),
-		// so include it via an exact-match alongside the LIKE.
-		stripped := strings.TrimSuffix(relDir, ".")
-		pattern := likeEscape(stripped) + "%"
-		rows, err := s.db.QueryContext(ctx,
-			`SELECT path FROM folders WHERE path = ? OR path LIKE ? ESCAPE '\' ORDER BY path ASC`,
-			relDir, pattern,
-		)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		out := []string{}
-		for rows.Next() {
-			var p string
-			if err := rows.Scan(&p); err != nil {
-				return nil, err
-			}
-			out = append(out, p)
-		}
-		return out, rows.Err()
+	base := trackScopeBase(relDir)
+	if base == "" {
+		return s.FolderPaths(ctx)
 	}
-	pattern := likeEscape(relDir) + "/%"
+	// relDir (not base) on the exact-match arm: for the multi-root
+	// sentinel the stored row IS "<base>/.", so matching `base` would
+	// miss it.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT path FROM folders WHERE path = ? OR path LIKE ? ESCAPE '\' ORDER BY path ASC`,
-		relDir, pattern,
+		`SELECT path FROM folders
+		  WHERE path = ?
+		     OR (path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0')
+		  ORDER BY path ASC`,
+		relDir, base, base,
 	)
 	if err != nil {
 		return nil, err
@@ -3776,18 +4250,52 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			)
 		}
 	}
-	// The threshold delete SPARES UPnP-routed rows regardless of their
-	// accumulated counter — defense-in-depth behind the scanner-side
-	// exclusion (see UPnPRoutedSourcePaths): rows that pre-date the
-	// exclusion may carry stale increments, and no caller may ever
-	// threshold-delete a routed row (its lifecycle is the ingest's
+	// The delete is SCOPED to the paths this pass actually observed
+	// missing, not to every row that happens to sit at the threshold.
+	//
+	// The scanner has already withheld anything under an errored
+	// subtree from `missingPaths` (isUnderErroredSubtree), so scoping
+	// makes that guard cover the SQL too. Unscoped it did not: a row
+	// already at or above the threshold is reaped by a bare
+	// `missing_count >= ?` even on a pass that never looked at it —
+	// which is exactly a pass where its subtree errored. The route in
+	// is lowering DeleteAfterMissingScans, since rows parked below the
+	// old threshold are instantly at-or-above the new one and the very
+	// next scan sweeps them whether or not it could see them.
+	//
+	// This generalises the rule the deletion pass already follows and
+	// that has regressed twice (#549, #568): "we could not see this
+	// path" must dominate every "…but it looks reapable"
+	// classification. A bare threshold predicate is that same mistake
+	// expressed in SQL instead of Go.
+	//
+	// Nothing is stranded by scoping. A genuinely-absent row is in the
+	// next scan's `missingPaths`, gets incremented, and is reaped in
+	// that pass — at most one scan later than before, and only ever
+	// after a pass that actually observed it.
+	//
+	// The set travels as ONE bound JSON array consumed by json_each
+	// (the ResetEnrichedByArtistMBIDs idiom): a single static statement
+	// with no placeholder construction and no bind-ceiling chunking,
+	// which matters here because a whole-root outage can put tens of
+	// thousands of paths in this list.
+	//
+	// The routed exclusion stays as defense-in-depth behind the
+	// scanner-side one (see UPnPRoutedSourcePaths): rows that pre-date
+	// that exclusion may carry stale increments, and no caller may ever
+	// threshold-delete a routed row — its lifecycle is the ingest's
 	// last_seen_at reap, which has its own offline / truncated-walk
-	// protections).
+	// protections.
+	missingBlob, err := json.Marshal(missingPaths)
+	if err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx, `
 		DELETE FROM tracks
 		 WHERE missing_count >= ?
+		   AND path IN (SELECT value FROM json_each(?))
 		   AND path NOT IN (SELECT source_path FROM upnp_track_routing)
-	`, threshold)
+	`, threshold, string(missingBlob))
 	if err != nil {
 		return 0, err
 	}
@@ -3844,7 +4352,24 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 			)
 		}
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM folders WHERE missing_count >= ?`, threshold)
+	// Scoped to this pass's observed-missing set for the reason spelled
+	// out on the tracks twin: unscoped, a bare `missing_count >= ?`
+	// reaps rows on a pass that never looked at them, which is exactly
+	// the pass where their subtree errored. Folders had NO exclusion of
+	// any kind here — not even the routed anti-join its sibling
+	// carries — so it was the weaker of the two.
+	//
+	// Folders are filesystem-only (UPnP ingest never writes this
+	// table), so there is deliberately no routing anti-join to mirror.
+	missingBlob, err := json.Marshal(missingPaths)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM folders
+		 WHERE missing_count >= ?
+		   AND path IN (SELECT value FROM json_each(?))
+	`, threshold, string(missingBlob))
 	if err != nil {
 		return 0, err
 	}
@@ -4196,34 +4721,79 @@ func (s *Store) UpdateUpscaleBatchProgress(ctx context.Context, row UpscaleBatch
 	// completed/failed/cancelled/interrupted (see isTerminalStatus in batch.go);
 	// 'interrupted' is stamped by boot recovery, so a straggler callback after a
 	// crash/restart must not revive it either (Gemini PR #515 round 2).
+	// `total_files` is written here as well as at INSERT, because the
+	// coordinator SHRINKS it after the row exists: dropDedupedPath
+	// decrements per candidate deduped against an in-flight job, and a
+	// queue-full break sets it to the real enqueued count. Pre-fix no
+	// UPDATE in the codebase touched the column at all, so every one of
+	// those adjustments lived only in `liveBatches` and the persisted
+	// row kept its pre-dedup total FOREVER — it never self-heals,
+	// because the job-completion callbacks persist through this same
+	// statement and the batch is dropped from liveBatches once
+	// terminal. SSE (in-memory) rendered 7/7 while the admin Jobs page
+	// and GET /v1/upscale/batches (both DB-backed) rendered 7/10.
+	//
+	// CASE WHEN, not a bare assignment: TotalFiles is monotonically
+	// NON-INCREASING after INSERT (the only writers are the decrement
+	// and the truncation set), so this makes a stale snapshot landing
+	// out of order unable to regress the column. Same strict-monotonic
+	// shape as the indexed_at writes in UpsertTrack / UpsertVariant.
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
 		   SET status         = ?,
+		       total_files    = CASE WHEN total_files > ? THEN ? ELSE total_files END,
 		       processed_files = ?,
 		       failed_files    = ?,
 		       error          = ?,
 		       updated_at     = ?
 		 WHERE id = ?
 		   AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
-	`, row.Status, row.ProcessedFiles, row.FailedFiles, row.Error, row.UpdatedAt, row.ID[:])
+	`, row.Status, row.TotalFiles, row.TotalFiles,
+		row.ProcessedFiles, row.FailedFiles, row.Error, row.UpdatedAt, row.ID[:])
 	return err
 }
 
 // UpdateUpscaleBatchStatus is the narrow flavour of
-// UpdateUpscaleBatchProgress for the cases that only flip status +
-// error + updated_at without touching counters. Used by
+// UpdateUpscaleBatchProgress for the cases that flip status + error +
+// updated_at without touching the processed/failed counters. Used by
 // `Coordinator.Cancel`, `transitionStatus`, and pending→running
 // promotion at Submit.
+//
+// It DOES carry total_files, under the same monotonic guard as the
+// progress form. The fully-deduped batch reaches its terminal status
+// through here and nowhere else, so without this a re-submit that
+// overlaps an in-flight batch entirely would persist `0/N` — the
+// coordinator correctly shrinks the live row to 0, and the DB kept the
+// original candidate count. Every caller routes through
+// `transitionStatus`, which always builds its row copy from the live
+// `liveBatches` entry, so the value is authoritative at each site.
 func (s *Store) UpdateUpscaleBatchStatus(ctx context.Context, row UpscaleBatchRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Same terminal guard the progress form carries. transitionStatus
+	// builds its row copy under Coordinator.mu but persists OUTSIDE it,
+	// so two concurrent transitions (Submit's pending→running promotion
+	// racing a Cancel) can land in the opposite order and let the
+	// non-terminal write clobber the terminal one. Nothing corrects it
+	// afterwards: the terminal transition removed the batch from
+	// liveBatches, so no later callback revisits the row and it sits
+	// `running` forever.
+	//
+	// Boot recovery's 'interrupted' stamp is a separate statement
+	// (RecoverInterruptedBatches) and is unaffected. Blocking a
+	// terminal→terminal write costs nothing either: transitionStatus
+	// early-returns once the batch has left liveBatches, so the only
+	// writes this rejects are the stale racing ones.
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE upscale_batches
-		   SET status     = ?,
-		       error      = ?,
-		       updated_at = ?
+		   SET status      = ?,
+		       total_files = CASE WHEN total_files > ? THEN ? ELSE total_files END,
+		       error       = ?,
+		       updated_at  = ?
 		 WHERE id = ?
-	`, row.Status, row.Error, row.UpdatedAt, row.ID[:])
+		   AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
+	`, row.Status, row.TotalFiles, row.TotalFiles,
+		row.Error, row.UpdatedAt, row.ID[:])
 	return err
 }
 
@@ -4903,7 +5473,16 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	// so on a 50k+ track library the unconstrained-LIKE form is a
 	// needless O(N) scan. Run the aggregates with no WHERE clause
 	// instead — SQLite can satisfy the COUNT/SUM directly.
-	if prefix == "" {
+	//
+	// Gated on the TRIMMED prefix, not the raw one: "/" and "//" are
+	// whole-library here exactly as they are in
+	// ListTrackProjectionsUnderPrefix / EligibleRollupByPrefix. Testing
+	// the raw string sent them down the range branch with base "",
+	// building `path >= '/' AND path < '0'` — a match on nothing, while
+	// the projection helper called the same input the whole library.
+	// The Inspector renders both from one submit, so the two disagreed
+	// on screen.
+	if strings.TrimRight(prefix, "/") == "" {
 		// One round-trip: two scalar subqueries cover `tracks`, and the
 		// conditional aggregation scans `track_variants` exactly once
 		// instead of twice (Gemini on PR #340).
@@ -4943,9 +5522,14 @@ func (s *Store) RollupByPrefix(ctx context.Context, prefix string) (FolderRollup
 	// build `path >= 'Album//'` and match NOTHING — a silently-empty rollup
 	// rather than an error (Gemini HIGH, post-merge review of #532).
 	// TrimRight, not TrimSuffix: a caller passing "Album//" would keep one
-	// slash and rebuild the same broken pattern. All four prefix helpers
-	// (here, RollupByPrefix, EligibleRollupByPrefix,
-	// ListTrackProjectionsUnderPrefix) use this form — keep them in step.
+	// slash and rebuild the same broken pattern.
+	//
+	// All four prefix helpers (here, CountTracksByPrefix,
+	// EligibleRollupByPrefix, ListTrackProjectionsUnderPrefix) share the
+	// trim AND the decide-after-trim empty-base rule — keep them in
+	// step. They do NOT all share a query form: this one, its two
+	// byte-range siblings, and ListTrackProjectionsUnderPrefix (which
+	// uses an escaped LIKE) differ deliberately.
 	base := strings.TrimRight(prefix, "/")
 	var out FolderRollup
 	if err := s.db.QueryRowContext(ctx, `
@@ -5251,19 +5835,20 @@ type TrackProjection struct {
 // naturally contribute nothing to the projection. The admin can
 // surface a separate "X unknown-format tracks" counter if needed.
 func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, variantPrefix string) ([]TrackProjection, error) {
-	var pattern string
-	// TrimSuffix first: the pattern appends its own '/', so a
-	// caller-supplied trailing slash builds `LIKE 'Album//%'`, which
-	// matches nothing and silently reports ZERO candidate tracks — the
-	// batch pre-flight then shows "nothing to do" for a folder full of
-	// work. Not hypothetical: the admin Library Inspector's submit path
-	// (`handlers_library_inspector.go`) forwards `req.Path` verbatim,
-	// unlike `api/upscale_batch.go` which runs it through path.Clean.
-	// Same class as the RollupByPrefix guard.
-	if base := strings.TrimRight(prefix, "/"); base == "" {
+	// See subtreeRangeBase for why the trim and the decide-after-trim
+	// rule are load-bearing. Whole-library is a legal scope here, so an
+	// unscoped call falls back to the match-everything pattern rather
+	// than dropping the WHERE clause.
+	//
+	// Still on the case-FOLDING form: the range shape can't express
+	// "everything" in one static statement, and this is a display-only
+	// projection, so the folding is a cosmetic over-count on a case-twin
+	// folder rather than a write. Tracked as follow-up alongside the
+	// other browse-side LIKE readers (ListChildFolders / ListChildTracks
+	// and their Count/Page twins).
+	pattern, scoped := subtreeLikePattern(prefix)
+	if !scoped {
 		pattern = `%`
-	} else {
-		pattern = likeEscape(base) + `/%`
 	}
 	// **Parameter binding order is load-bearing**: the new `?` for
 	// `variantPrefix` lives inside the SELECT-block EXISTS subquery,
@@ -5648,7 +6233,25 @@ func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
 // handler so a partial result never silently leaks. Hits the v4
 // `idx_track_variants_source_path_unicode_lower` index.
 func (s *Store) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]VariantRow, error) {
-	pattern := likeEscape(prefix) + "%"
+	// The helper appends its OWN separator, so a caller supplies the
+	// folder name alone. Pre-fix this built a bare `prefix%`, which
+	// over-matched every sibling sharing the name as a prefix:
+	// `?prefix=Album` also reaped variants under `Album 2/`,
+	// `Albums/`, `Album Live/`. Silent, and the files are gone.
+	//
+	// The API layer could not work around it either — validateRelativePath
+	// rejects any prefix carrying a trailing slash (`cleaned != p`), so
+	// there was no input that produced a correctly-scoped delete. Fixing
+	// the query rather than loosening the validator keeps the primitive
+	// safe for every future caller and leaves the 400 correct as-is.
+	//
+	// Same decide-after-trim rule as the four tracks-side prefix
+	// helpers; empty stays "every row" for the delete-all path (the
+	// handler gates that behind ?confirm=true).
+	pattern, scoped := subtreeLikePattern(prefix)
+	if !scoped {
+		pattern = `%`
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, variant_id, sidecar_path, format,
 		       sample_rate, bits_per_sample, size_bytes,
@@ -5912,6 +6515,16 @@ type AnalysisRow struct {
 	KeyRoot *int
 	KeyMode string
 	BPM     *int
+
+	// The wf4 quality scalars (all analysis-only, no tag source):
+	// TruePeakDB — BS.1770-style 4x-oversampled true peak in dB of the
+	// 48 kHz analysis rendering; DRScore — the community DR value;
+	// AudioMD5State — "" / "verified" / "mismatch" (FLAC STREAMINFO
+	// audio-checksum verification; see internal/analyze/flacmd5.go for
+	// the failure direction).
+	TruePeakDB    *float64
+	DRScore       *int
+	AudioMD5State string
 }
 
 // intPtrEqual compares two optional ints by value (both nil equal, one nil
@@ -5939,10 +6552,13 @@ func nullIntPtr(n sql.NullInt64) *int {
 // Scan in SELECT column order (replaygain_track_db, key_root, key_mode,
 // bpm), then applyTo lifts them onto the row.
 type analysisScalarScan struct {
-	rg      sql.NullFloat64
-	keyRoot sql.NullInt64
-	keyMode sql.NullString
-	bpm     sql.NullInt64
+	rg       sql.NullFloat64
+	keyRoot  sql.NullInt64
+	keyMode  sql.NullString
+	bpm      sql.NullInt64
+	truePeak sql.NullFloat64
+	drScore  sql.NullInt64
+	md5State sql.NullString
 }
 
 func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
@@ -5950,6 +6566,9 @@ func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
 	a.KeyRoot = nullIntPtr(n.keyRoot)
 	a.KeyMode = n.keyMode.String
 	a.BPM = nullIntPtr(n.bpm)
+	a.TruePeakDB = nullFloatPtr(n.truePeak)
+	a.DRScore = nullIntPtr(n.drScore)
+	a.AudioMD5State = n.md5State.String
 }
 
 // float64PtrEqual compares two optional float64s by value: both nil is
@@ -5993,7 +6612,10 @@ func analysisRowsEqual(a, b *AnalysisRow) bool {
 		float64PtrEqual(a.ReplayGainTrackDB, b.ReplayGainTrackDB) &&
 		intPtrEqual(a.KeyRoot, b.KeyRoot) &&
 		a.KeyMode == b.KeyMode &&
-		intPtrEqual(a.BPM, b.BPM)
+		intPtrEqual(a.BPM, b.BPM) &&
+		float64PtrEqual(a.TruePeakDB, b.TruePeakDB) &&
+		intPtrEqual(a.DRScore, b.DRScore) &&
+		a.AudioMD5State == b.AudioMD5State
 }
 
 // UpsertAnalysis writes (or replaces) one `track_analysis` row AND
@@ -6034,6 +6656,16 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 	if a.BPM != nil {
 		bpmArg = *a.BPM
 	}
+	var truePeakArg, drScoreArg, md5StateArg interface{}
+	if a.TruePeakDB != nil {
+		truePeakArg = *a.TruePeakDB
+	}
+	if a.DRScore != nil {
+		drScoreArg = *a.DRScore
+	}
+	if a.AudioMD5State != "" {
+		md5StateArg = a.AudioMD5State
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -6044,8 +6676,9 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 		INSERT INTO track_analysis
 			(source_path, waveform_path, waveform_tag, waveform_size,
 			 source_mtime_ns, source_size, schema_version, created_at,
-			 replaygain_track_db, key_root, key_mode, bpm)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+			 replaygain_track_db, key_root, key_mode, bpm,
+			 true_peak_db, dr_score, audio_md5_state)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (source_path) DO UPDATE SET
 			waveform_path       = excluded.waveform_path,
 			waveform_tag        = excluded.waveform_tag,
@@ -6057,10 +6690,14 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			replaygain_track_db = excluded.replaygain_track_db,
 			key_root            = excluded.key_root,
 			key_mode            = excluded.key_mode,
-			bpm                 = excluded.bpm
+			bpm                 = excluded.bpm,
+			true_peak_db        = excluded.true_peak_db,
+			dr_score            = excluded.dr_score,
+			audio_md5_state     = excluded.audio_md5_state
 	`, a.SourcePath, a.WaveformPath, a.WaveformTag, a.WaveformSize,
 		a.SourceMTimeNS, a.SourceSize, a.SchemaVersion, a.CreatedAt,
-		rgArg, keyRootArg, keyModeArg, bpmArg); err != nil {
+		rgArg, keyRootArg, keyModeArg, bpmArg,
+		truePeakArg, drScoreArg, md5StateArg); err != nil {
 		return err
 	}
 	now := s.now().UnixNano()
@@ -6093,13 +6730,15 @@ func (s *Store) getAnalysisLocked(ctx context.Context, sourcePath string) (*Anal
 	err := s.db.QueryRowContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm
+		       replaygain_track_db, key_root, key_mode, bpm,
+		       true_peak_db, dr_score, audio_md5_state
 		FROM track_analysis
 		WHERE source_path = ?
 	`, sourcePath).Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
-		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm)
+		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
+		&sc.truePeak, &sc.drScore, &sc.md5State)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -6130,7 +6769,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm
+		       replaygain_track_db, key_root, key_mode, bpm,
+		       true_peak_db, dr_score, audio_md5_state
 		FROM track_analysis
 		WHERE unicode_lower(source_path) = unicode_lower(?)
 		LIMIT 2
@@ -6150,7 +6790,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 	if err := rows.Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
-		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm); err != nil {
+		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
+		&sc.truePeak, &sc.drScore, &sc.md5State); err != nil {
 		return nil, err
 	}
 	sc.applyTo(&a)
@@ -6177,7 +6818,8 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm
+		       replaygain_track_db, key_root, key_mode, bpm,
+		       true_peak_db, dr_score, audio_md5_state
 		FROM track_analysis
 	`)
 	if err != nil {
@@ -6191,7 +6833,8 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 		if err := rows.Scan(
 			&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
-			&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm); err != nil {
+			&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
+			&sc.truePeak, &sc.drScore, &sc.md5State); err != nil {
 			return nil, err
 		}
 		sc.applyTo(&a)
@@ -6236,6 +6879,71 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// AnalysisCoverage is the whole-library analysed-vs-eligible breakdown
+// backing the admin Jobs page's coverage bar. Eligible = TotalLocal -
+// DSDExcluded - ZeroByteExcluded; the buckets are DISJOINT in the
+// analysis sweeper's own precedence order (DSD before zero-byte,
+// matching collectAnalysisCandidates' control flow in
+// cmd/bridge/analyze.go — pinned by the lockstep test there).
+type AnalysisCoverage struct {
+	// TotalLocal counts filesystem-backed tracks only — UPnP-routed
+	// rows never resolve on disk and are never analysed.
+	//
+	// The sweeper agrees: it enumerates via Store.TrackPathsLocal,
+	// which carries the same anti-join. It did NOT until that method
+	// existed — it walked every row, so all 15,283 routed tracks on the
+	// hybrid fixture landed in its `missing` bucket on every hourly
+	// tick, and the Jobs page showed `total 15372, missing 13553`
+	// directly beside this field reading 89. Keep the two enumerations
+	// on the same predicate: they are rendered side by side, so a
+	// divergence here is not a subtle inconsistency, it is one panel
+	// contradicting the other.
+	TotalLocal int
+	// DSDExcluded: .dsf/.dff sources — sox can't decode 1-bit DSD, so
+	// these are permanently out of scope, not a backlog.
+	DSDExcluded int
+	// ZeroByteExcluded: zero-byte sources (failed/incomplete uploads)
+	// skipped at collection time. Size is the SCAN-TIME size.
+	ZeroByteExcluded int
+	// AnalysedFresh / AnalysedStale split eligible tracks' analysis
+	// rows by schema version. APPROXIMATION, documented for the UI:
+	// per-row disk mtime/size freshness (the sweeper's real skip gate)
+	// is not SQL-computable, so a row whose source changed on disk
+	// still counts as analysed here — the sweeper's last-run counts
+	// are the exact truth.
+	AnalysedFresh int
+	AnalysedStale int
+}
+
+// AnalysisCoverage computes the coverage snapshot in ONE pass over
+// tracks LEFT JOINed to track_analysis (PK source_path, ON DELETE
+// CASCADE — deleted-track orphans can't exist; the join conditions
+// additionally exclude analysis rows for tracks that have since become
+// DSD/zero-byte, so analysed <= eligible holds by construction).
+// Plain-column SQL (~ms at 20k rows) but call sites cache it behind a
+// TTL + singleflight — the admin polls this.
+func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (AnalysisCoverage, error) {
+	var c AnalysisCoverage
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN t.size = 0 AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff') THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version = ?1
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                         THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version != ?1
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                         THEN 1 ELSE 0 END), 0)
+		FROM tracks t
+		LEFT JOIN track_analysis ta ON ta.source_path = t.path
+		WHERE NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)`,
+		schemaVersion)
+	if err := row.Scan(&c.TotalLocal, &c.DSDExcluded, &c.ZeroByteExcluded, &c.AnalysedFresh, &c.AnalysedStale); err != nil {
+		return AnalysisCoverage{}, err
+	}
+	return c, nil
 }
 
 // CountAnalysis returns (rows-with-a-waveform, total waveform bytes)

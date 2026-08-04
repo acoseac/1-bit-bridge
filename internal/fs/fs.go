@@ -20,6 +20,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // ErrBadPath is returned when a client-supplied path fails a safety check
@@ -117,6 +120,27 @@ func (r *Resolver) setRootsLocked(roots []string) {
 // so a collision makes one root unreachable. cmd/bridge calls this after
 // config.Load so misconfiguration surfaces at startup rather than as a
 // silent 404 from /v1/list.
+//
+// **The comparison folds case**, so /srv/Music and /srv/music collide.
+// Two independent reasons, and the second is the sharp one:
+//
+//   - Resolve's basenameIndex is an exact-match map, but the paths it
+//     routes are compared against a filesystem that is case-insensitive
+//     on macOS and Windows — so the two roots are the same directory
+//     there, and accepting both silently makes one unreachable.
+//   - Several store-side prefix operations key off the basename, and
+//     the deletion path used to match case-insensitively: removing
+//     /srv/Music deleted /srv/music's rows AND unlinked its variant and
+//     waveform files. Those predicates are now case-exact, but the
+//     configuration that made the collision expressible in the first
+//     place is worth refusing outright rather than relying on every
+//     downstream consumer to keep getting it right.
+//
+// Unicode-aware lowering (the same cases.Lower(language.Und) the
+// scanner's fold uses) rather than strings.ToLower, so "MÚSICA" and
+// "música" collide too — a root basename is user-supplied text, not
+// ASCII. The error names both original spellings, since folded output
+// would be confusing to act on.
 func ValidateRoots(roots []string) error {
 	if len(roots) < 2 {
 		return nil
@@ -124,12 +148,32 @@ func ValidateRoots(roots []string) error {
 	seen := make(map[string]string, len(roots))
 	for _, root := range roots {
 		b := filepath.Base(root)
-		if prior, ok := seen[b]; ok {
-			return fmt.Errorf("duplicate library-root basename %q (%s vs %s) — multi-root listing requires unique basenames", b, prior, root)
+		key := FoldRootBasename(root)
+		if prior, ok := seen[key]; ok {
+			return fmt.Errorf("duplicate library-root basename %q (%s vs %s) — multi-root listing requires unique basenames (compared case-insensitively)", b, prior, root)
 		}
-		seen[b] = root
+		seen[key] = root
 	}
 	return nil
+}
+
+// basenameFolder is the shared caser. Package-level because
+// cases.Lower allocates a fresh caser per call otherwise, and this runs
+// per-root inside admin request handling.
+var basenameFolder = cases.Lower(language.Und)
+
+// FoldRootBasename returns the comparison key for a library root's
+// basename: its final path element, Unicode-lowered.
+//
+// Exported so the admin console's remove-root guard keys off the SAME
+// function ValidateRoots does. Those two agreeing is the invariant —
+// ValidateRoots decides which configurations are expressible, the admin
+// guard decides which removals are unambiguous, and if their notions of
+// "same basename" ever diverge you get a config that validates but whose
+// removal path can't tell the two roots apart. Keeping one function
+// makes that divergence impossible rather than merely unlikely.
+func FoldRootBasename(root string) string {
+	return basenameFolder.String(filepath.Base(root))
 }
 
 // Resolve maps a client-supplied relative path to an absolute server path.

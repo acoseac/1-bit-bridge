@@ -87,6 +87,16 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 		if resp.StatusCode >= 500 {
 			logger.Warn("atlas premium cover fetch", "mbid", mbid, "size", size, "status", resp.StatusCode)
 		}
+		// Drain before Close so the connection returns to the idle
+		// pool — net/http only reuses an HTTP/1.1 conn whose body was
+		// read to EOF. This file was the only one in the package not
+		// calling the shared helper, and it matters MORE here than
+		// elsewhere: NewAtlasPremiumFetcher builds a bare http.Client
+		// on http.DefaultTransport rather than the package's tuned
+		// sharedHTTPTransport, so MaxIdleConnsPerHost is 2 and the
+		// churn costs a fresh TLS handshake per miss. Error bodies are
+		// small, well inside drainBody's 64 KiB cap.
+		drainBody(resp.Body)
 		return false
 	}
 	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {
@@ -154,6 +164,8 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		f.clearOnAuthReject(resp.StatusCode)
+		// Same connection-reuse rationale as TryCache's non-200 branch.
+		drainBody(resp.Body)
 		switch {
 		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 			// Token rejected (now cleared) — surface as ErrNoCredential so the
@@ -169,6 +181,24 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 		// Atlas hasn't reverse-resolved a premium cover yet (still CAA) — leave
 		// the existing cache. This IS a genuine "not ready" miss (it counts
 		// toward the attempt cap), distinct from the transient errors above.
+		//
+		// Drain ONLY when the declared length fits drainBody's 64 KiB
+		// cap. Unlike the non-200 branches above, the body here is a
+		// full cover image — and the size decides the trade:
+		//
+		//   - Under the cap (a 500px CAA JPEG often is), the drain
+		//     reaches EOF and salvages the connection. Worth it: a
+		//     fresh TLS handshake costs more than the transfer, and
+		//     this fetcher runs on http.DefaultTransport with
+		//     MaxIdleConnsPerHost = 2.
+		//   - Over it, the drain CANNOT reach EOF, so it would burn
+		//     64 KiB of transfer and still lose the connection.
+		//
+		// Unknown length (chunked, ContentLength < 0) takes the
+		// conservative branch and skips the drain.
+		if resp.ContentLength >= 0 && resp.ContentLength <= maxDrainBytes {
+			drainBody(resp.Body)
+		}
 		return false, nil
 	}
 	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {

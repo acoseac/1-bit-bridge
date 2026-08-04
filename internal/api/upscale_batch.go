@@ -176,7 +176,12 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	// slash, no traversal. Empty string is a legitimate "whole-library"
 	// scope and accepted.
 	libraryRel := strings.ReplaceAll(strings.TrimSpace(req.Path), `\`, "/")
-	libraryRel = strings.TrimPrefix(libraryRel, "/")
+	// TrimLeft, not TrimPrefix: TrimPrefix strips exactly ONE slash, so
+	// "//" survived as "/", path.Clean("/") is "/" (the `== "."` guard
+	// below doesn't catch it), and the store's prefix helpers trim that
+	// to "" — i.e. whole-library. Same class as the leading-slash
+	// hardening in normaliseBrowsePath.
+	libraryRel = strings.TrimLeft(libraryRel, "/")
 	if libraryRel != "" {
 		cleaned := path.Clean(libraryRel)
 		if cleaned == ".." || strings.HasPrefix(cleaned, "../") {

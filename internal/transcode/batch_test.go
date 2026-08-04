@@ -556,3 +556,51 @@ func TestSubmit_SkipsLossySources(t *testing.T) {
 			res.TotalFiles, res.EnqueuedCount)
 	}
 }
+
+// TestRedactSoxErr_TrailingSeparatorOnOutputDir pins the redaction
+// against an OutputDir carrying a trailing separator.
+//
+// sox's real sidecar path comes from SidecarPath(), which builds with
+// filepath.Join and therefore Cleans — so a configured
+// `/var/lib/bridge/variants/` made the search string
+// `/var/lib/bridge/variants//`, which matches nothing. The absolute
+// host path then survived into upscale_batches.error (rendered on the
+// admin Jobs page) and the SSE payload, defeating the exact privacy
+// contract this function exists to enforce.
+//
+// Reachable through BOTH config routes: config.resolvePaths didn't
+// canonicalise Upscale.VariantsDir, and the admin hot-patch handler
+// only checked TrimSpace + filepath.IsAbs — and IsAbs is true for a
+// path ending in a separator.
+func TestRedactSoxErr_TrailingSeparatorOnOutputDir(t *testing.T) {
+	for _, outDir := range []string{
+		"/var/lib/bridge/variants",
+		"/var/lib/bridge/variants/",
+		"/var/lib/bridge/variants//",
+	} {
+		spec := JobSpec{OutputDir: outDir}
+		in := "sox FAIL formats: can't write '/var/lib/bridge/variants/Artist/Album/01.flac.upscaled-v2-192000-24.flac.tmp': No space left"
+		got := redactSoxErr(in, spec)
+		if strings.Contains(got, "/var/lib/bridge") {
+			t.Errorf("OutputDir %q: leaked the absolute variants path: %q", outDir, got)
+		}
+		if !strings.Contains(got, "Artist/Album/") {
+			t.Errorf("OutputDir %q: dropped the relative remainder: %q", outDir, got)
+		}
+	}
+}
+
+// The Windows separator form must keep working — redactSoxErr replaces
+// BOTH `dir/` and `dir\`, because sox stderr is arbitrary subprocess
+// output and the source-path pass in the same function relies on the
+// native form. (This is why the fix trims the trailing separator
+// rather than normalising the whole string through filepath.ToSlash,
+// which would corrupt legitimate backslashes and break that pass.)
+func TestRedactSoxErr_WindowsSeparatorStillRedacted(t *testing.T) {
+	spec := JobSpec{OutputDir: `C:\ProgramData\bridge\variants\`}
+	in := `sox FAIL formats: can't write 'C:\ProgramData\bridge\variants\Artist\01.flac.tmp': No space left`
+	got := redactSoxErr(in, spec)
+	if strings.Contains(got, `C:\ProgramData`) {
+		t.Errorf("leaked the absolute Windows variants path: %q", got)
+	}
+}
