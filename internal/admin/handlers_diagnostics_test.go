@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -126,5 +127,36 @@ func TestTailscaleStateLabel(t *testing.T) {
 		if got := tailscaleStateLabel(state); got != want {
 			t.Errorf("tailscaleStateLabel(%d) = %q, want %q", state, got, want)
 		}
+	}
+}
+
+// TestDiagnosticsPollActuallyPauses pins that the poll STOPS while the
+// tab is hidden, not merely refreshes on return.
+//
+// The first version of initDiagnostics carried a comment saying it
+// paused and did not — the interval kept firing every 5s in the
+// background, which was the entire cost the comment claimed to avoid. A
+// comment asserting behaviour the code lacks is the failure mode this
+// repo has been bitten by before (review item 5.7), so it gets a test
+// rather than a re-read.
+func TestDiagnosticsPollActuallyPauses(t *testing.T) {
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(b)
+	i := strings.Index(js, "function initDiagnostics(")
+	if i < 0 {
+		t.Fatal("initDiagnostics not found in app.js")
+	}
+	body := js[i:]
+	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
+		body = body[:j]
+	}
+	if !strings.Contains(body, "clearInterval") {
+		t.Error("initDiagnostics never clears its interval; the poll runs on in a hidden tab")
+	}
+	if !strings.Contains(body, "document.hidden") {
+		t.Error("initDiagnostics does not branch on document.hidden, so it cannot pause")
 	}
 }

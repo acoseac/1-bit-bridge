@@ -6807,14 +6807,35 @@ async function loadDiagnostics() {
 }
 
 function initDiagnostics() {
+  // Actually STOP the interval while the tab is hidden, rather than only
+  // refreshing on return. The first version of this carried a comment
+  // saying it paused and did not: the timer kept firing every 5s in the
+  // background, which is the whole cost the comment claimed to avoid.
+  let timer = null;
+  const start = () => {
+    if (timer === null) timer = setInterval(loadDiagnostics, DIAGNOSTICS_POLL_MS);
+  };
+  const stop = () => {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+
   loadDiagnostics();
-  const timer = setInterval(loadDiagnostics, DIAGNOSTICS_POLL_MS);
-  // Stop polling when the tab is hidden. Nothing here is worth waking a
-  // backgrounded tab for, and the page repaints on the next visible tick.
+  start();
+
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) loadDiagnostics();
+    if (document.hidden) {
+      stop();
+      return;
+    }
+    // Repaint immediately on return so the operator doesn't stare at
+    // values frozen from before the tab was backgrounded.
+    loadDiagnostics();
+    start();
   });
-  window.addEventListener("pagehide", () => clearInterval(timer));
+  window.addEventListener("pagehide", stop);
 }
 
 // --- boot ---
