@@ -257,3 +257,70 @@ func TestAudioMD5AttemptsBackfillSparesFLACAndCapsTheRest(t *testing.T) {
 		}
 	}
 }
+
+// The retry counter is internal bookkeeping with no wire presence, so
+// moving it must NOT bump the parent track's indexed_at — that is the
+// delta-sync trigger, and bumping would re-send the track to every
+// paired device up to AudioMD5MaxAttempts times per affected FLAC, for
+// a change no client can observe. (Gemini on PR #632; the PR #369 churn
+// class arriving by a new route.)
+//
+// Paired with the opposite assertion, because a fix that simply stopped
+// bumping would be worse than the bug: a real verdict landing on the row
+// is exactly what iOS needs to hear about.
+func TestUpsertAnalysisCounterOnlyChangeDoesNotBumpIndexedAt(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	const p = "Music/Artist/Album/04.flac"
+	if err := s.UpsertTrack(ctx, &Track{Path: p, Size: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	indexedAt := func(t *testing.T) int64 {
+		t.Helper()
+		var v int64
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT indexed_at FROM tracks WHERE path = ?`, p).Scan(&v); err != nil {
+			t.Fatalf("read indexed_at: %v", err)
+		}
+		return v
+	}
+
+	// First analysis: everything is new, so a bump is correct.
+	if err := s.UpsertAnalysis(ctx, md5Row(p, "", true)); err != nil {
+		t.Fatal(err)
+	}
+	afterFirst := indexedAt(t)
+
+	// Further transient failures move ONLY the counter.
+	for i := 2; i <= AudioMD5MaxAttempts; i++ {
+		if err := s.UpsertAnalysis(ctx, md5Row(p, "", true)); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+	}
+	if got := indexedAt(t); got != afterFirst {
+		t.Errorf("indexed_at moved %d -> %d while only the retry counter "+
+			"changed; every paired device now re-syncs this track for state "+
+			"it cannot see", afterFirst, got)
+	}
+	// ...and the counter still advanced, so the write itself happened.
+	row, err := s.GetAnalysis(ctx, p)
+	if err != nil || row == nil {
+		t.Fatalf("GetAnalysis: %v", err)
+	}
+	if row.AudioMD5Attempts != AudioMD5MaxAttempts {
+		t.Fatalf("attempts = %d, want %d — suppressing the BUMP must not "+
+			"suppress the WRITE, or the row asks forever",
+			row.AudioMD5Attempts, AudioMD5MaxAttempts)
+	}
+
+	// A real verdict is client-visible and must bump.
+	if err := s.UpsertAnalysis(ctx, md5Row(p, md5Verified, false)); err != nil {
+		t.Fatal(err)
+	}
+	if got := indexedAt(t); got <= afterFirst {
+		t.Errorf("indexed_at = %d, want > %d — a resolved audioMD5State is on "+
+			"the wire, so iOS has to hear about it", got, afterFirst)
+	}
+}

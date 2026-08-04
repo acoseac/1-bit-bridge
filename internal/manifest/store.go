@@ -6733,8 +6733,19 @@ func analysisRowsEqual(a, b *AnalysisRow) bool {
 		intPtrEqual(a.BPM, b.BPM) &&
 		float64PtrEqual(a.TruePeakDB, b.TruePeakDB) &&
 		intPtrEqual(a.DRScore, b.DRScore) &&
-		a.AudioMD5State == b.AudioMD5State &&
-		a.AudioMD5Attempts == b.AudioMD5Attempts
+		a.AudioMD5State == b.AudioMD5State
+}
+
+// audioMD5AttemptsEqual is deliberately NOT folded into
+// analysisRowsEqual. The counter is internal retry bookkeeping with no
+// wire presence, so the two questions it and analysisRowsEqual answer
+// are different: "must we write the row" needs both, "must we bump
+// indexed_at" needs only the visible half. Merging them would push a
+// delta-sync to every paired client each time the counter moved — up to
+// AudioMD5MaxAttempts times per affected FLAC, for a change no client
+// can observe (Gemini on PR #632).
+func audioMD5AttemptsEqual(a, b *AnalysisRow) bool {
+	return a.AudioMD5Attempts == b.AudioMD5Attempts
 }
 
 // nextAudioMD5Attempts resolves the stored attempt counter for a fresh
@@ -6800,7 +6811,22 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 	// forever).
 	a.AudioMD5Attempts = nextAudioMD5Attempts(existing, &a)
 
-	if existing != nil && analysisRowsEqual(existing, &a) {
+	// Two decisions, deliberately separate.
+	//
+	// `visibleSame` covers everything a client can observe. It gates the
+	// indexed_at bump, so a change to the retry counter alone does NOT
+	// re-send the track on every paired device's next delta-sync — that
+	// counter is internal bookkeeping, and bumping for it would push up
+	// to AudioMD5MaxAttempts spurious deltas per affected FLAC (the
+	// PR #369 churn class, arriving by a new route).
+	//
+	// `counterSame` is why the row may still need writing when
+	// `visibleSame` holds: on the tick that exhausts the retry budget
+	// the counter is the ONLY column that changes, and skipping that
+	// write would leave the row asking forever.
+	visibleSame := existing != nil && analysisRowsEqual(existing, &a)
+	counterSame := existing != nil && audioMD5AttemptsEqual(existing, &a)
+	if visibleSame && counterSame {
 		return nil // identical — no write, no indexed_at bump.
 	}
 
@@ -6864,15 +6890,19 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 		truePeakArg, drScoreArg, md5StateArg, a.AudioMD5Attempts); err != nil {
 		return err
 	}
-	now := s.now().UnixNano()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE tracks SET indexed_at = CASE
-			WHEN indexed_at >= ? THEN indexed_at + 1
-			ELSE ?
-		END
-		WHERE path = ?
-	`, now, now, a.SourcePath); err != nil {
-		return err
+	// Bump only when something a client can see changed — see the
+	// visibleSame / counterSame split above.
+	if !visibleSame {
+		now := s.now().UnixNano()
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tracks SET indexed_at = CASE
+				WHEN indexed_at >= ? THEN indexed_at + 1
+				ELSE ?
+			END
+			WHERE path = ?
+		`, now, now, a.SourcePath); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
