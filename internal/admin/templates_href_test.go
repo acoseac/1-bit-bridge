@@ -10,17 +10,32 @@ import (
 	"testing"
 )
 
-// hrefRe pulls every href out of a template. Deliberately permissive about
-// what is INSIDE the quotes — the classification happens in
-// checkableHrefTarget, where each rejected shape is named — because the
-// bug this test exists for was found with a grep whose character class
-// silently excluded `{`, `?` and `#`, and so could not have seen a
-// templated or query-carrying link at all.
-var hrefRe = regexp.MustCompile(`href="([^"]*)"`)
+// hrefRe pulls every href out of a template.
+//
+// Deliberately permissive about what is INSIDE the quotes — the
+// classification happens in checkableHrefTarget, where each rejected shape
+// is named — because the bug this test exists for was found with a grep
+// whose character class silently excluded `{`, `?` and `#`, and so could
+// not have seen a templated or query-carrying link at all.
+//
+// Equally permissive about the quoting: both styles and whitespace around
+// `=` are accepted. Every href in the templates is double-quoted with no
+// spaces TODAY, so this guards a future blind spot rather than a present
+// bug — and that is the point, because a link checker that silently stops
+// seeing links keeps passing, which is worse than not having one.
+//
+// Go's RE2 has no backreferences, so the two quote styles are separate
+// alternatives (which also rules out matching a mismatched pair) and the
+// caller takes whichever group matched.
+var hrefRe = regexp.MustCompile(`(?i)href\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 
-// goTemplateActionRe matches a {{...}} action, including one spanning
-// several words ({{if .X}}...{{end}} pieces, pipelines, etc.).
-var goTemplateActionRe = regexp.MustCompile(`{{[^}]*}}`)
+// goTemplateActionRe matches a {{...}} action.
+//
+// Non-greedy to the closing BRACE PAIR rather than `[^}]*`, because a
+// template action may legitimately contain a single `}` — {{if eq .V "}"}}
+// — which the naive form truncates, leaving `"}}` behind in the href.
+// (?s) so an action broken across lines still matches.
+var goTemplateActionRe = regexp.MustCompile(`(?s){{.*?}}`)
 
 // hrefTemplateDummy stands in for a Go template action inside an href.
 // A path like /playlists/{{.ID}} has to be resolved against the mux as a
@@ -94,7 +109,12 @@ func collectTemplateHrefs(t *testing.T) []hrefRef {
 			return readErr
 		}
 		for _, m := range hrefRe.FindAllStringSubmatch(string(b), -1) {
+			// Group 1 is the double-quoted alternative, group 2 the
+			// single-quoted one; exactly one is populated per match.
 			raw := m[1]
+			if raw == "" {
+				raw = m[2]
+			}
 			target, ok := checkableHrefTarget(raw)
 			if !ok {
 				continue
@@ -149,6 +169,11 @@ func TestCheckableHrefTarget(t *testing.T) {
 		// properly.
 		{"templated segment survives", "/playlists/{{.ID}}/cover", "/playlists/" + hrefTemplateDummy + "/cover"},
 		{"templated segment plus query", "/library/inspector?path={{.Path}}", "/library/inspector"},
+		// A template action may legitimately contain a single `}`. A
+		// `{{[^}]*}}` pattern stops at that brace and leaves `"}}` behind,
+		// producing a target that no route serves — a false broken-link
+		// report, which is how a guard test loses its credibility.
+		{"action containing a brace", `/x/{{if eq .V "}"}}/y`, "/x/" + hrefTemplateDummy + "/y"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -192,4 +217,37 @@ func checkableHrefTarget(raw string) (string, bool) {
 		return "", false
 	}
 	return target, true
+}
+
+// TestHrefRegexAcceptsBothQuotingStyles pins the extractor's reach.
+//
+// Every href in the templates today is double-quoted with no spaces
+// around the `=`, so this is guarding a FUTURE blind spot rather than a
+// present bug — and that is exactly the point: a link checker that
+// silently stops seeing links keeps passing, which is worse than not
+// having one. HTML permits single quotes and whitespace around `=`.
+func TestHrefRegexAcceptsBothQuotingStyles(t *testing.T) {
+	const doc = `
+	  <a href="/double">d</a>
+	  <a href='/single'>s</a>
+	  <a href = "/spaced">sp</a>
+	  <a HREF="/uppercase">u</a>
+	`
+	want := map[string]bool{"/double": true, "/single": true, "/spaced": true, "/uppercase": true}
+	got := map[string]bool{}
+	for _, m := range hrefRe.FindAllStringSubmatch(doc, -1) {
+		raw := m[1]
+		if raw == "" {
+			raw = m[2]
+		}
+		got[raw] = true
+	}
+	for w := range want {
+		if !got[w] {
+			t.Errorf("extractor missed %q; it would silently stop checking links written that way", w)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("extracted %v, want exactly %v", got, want)
+	}
 }
