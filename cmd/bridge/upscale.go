@@ -145,7 +145,7 @@ func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, configPath, qu
 func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("upscale", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	targetRate := fs.String("target-rate", "auto", "output sample rate in Hz, or 'auto' (44.1-family→176400, 48-family→192000)")
 	targetBits := fs.Int("target-bits", 24, "output bit depth (16/24/32)")
 	quality := fs.String("quality", "very-high", "SoX resampler preset (very-high|high|medium)")

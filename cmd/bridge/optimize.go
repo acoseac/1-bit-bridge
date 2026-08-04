@@ -34,7 +34,7 @@ import (
 func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("optimize", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	quality := fs.String("quality", "very-high", "SoX resampler preset (very-high|high|medium)")
 	workers := fs.Int("workers", 0, "concurrent sox processes; 0 = min(NumCPU-1, 4)")
 	filter := fs.String("filter", "", "case-sensitive substring filter on track path (empty = all)")

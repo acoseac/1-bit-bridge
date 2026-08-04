@@ -53,7 +53,7 @@ func libraryCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("library add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -76,7 +76,7 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, resolvedCfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "library add: config load: %v\n", err)
 		return 2
@@ -106,7 +106,7 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 		}
 	}
 	cfg.LibraryRoots = newList
-	if err := cfg.Save(*configPath); err != nil {
+	if err := cfg.Save(resolvedCfgPath); err != nil {
 		fmt.Fprintf(stderr, "library add: save config: %v\n", err)
 		return 1
 	}
@@ -117,7 +117,7 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("library remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -130,7 +130,7 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 		fmt.Fprintf(stderr, "library remove: %v\n", err)
 		return 2
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, resolvedCfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "library remove: config load: %v\n", err)
 		return 2
@@ -196,7 +196,7 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 		}
 	}
 	cfg.LibraryRoots = newList
-	if err := cfg.Save(*configPath); err != nil {
+	if err := cfg.Save(resolvedCfgPath); err != nil {
 		fmt.Fprintf(stderr, "library remove: save config: %v\n", err)
 		return 1
 	}

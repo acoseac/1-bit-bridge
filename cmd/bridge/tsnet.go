@@ -34,11 +34,11 @@ import (
 func loadConfigForCmd(args []string, stderr io.Writer) (*config.Config, error) {
 	fs := flag.NewFlagSet("tsnet", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return nil, err
@@ -446,12 +446,12 @@ const logoutConfirmPhrase = "WIPE"
 func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tsnet logout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	force := fs.Bool("force", false, "skip running-instance check")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 1

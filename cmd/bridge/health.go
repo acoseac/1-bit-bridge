@@ -7,8 +7,6 @@ import (
 	"io"
 	"net"
 	"time"
-
-	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // healthCmd is a container liveness probe (the Docker HEALTHCHECK). It checks
@@ -30,12 +28,12 @@ import (
 func healthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "health: config load: %v\n", err)
 		return 1

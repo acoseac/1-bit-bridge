@@ -28,19 +28,19 @@ import (
 func backupCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	keep := fs.Int("keep", 7, "number of snapshots to retain (0 disables prune)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, resolvedCfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
 	}
 
-	src := buildBackupSources(cfg, *configPath)
+	src := buildBackupSources(cfg, resolvedCfgPath)
 	// CLI runs to completion in a short-lived process; a non-context
 	// signal handler isn't wired here. context.Background() lets the
 	// underlying SQLite VACUUM run unconstrained — typical bundle
@@ -79,7 +79,7 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 func restoreCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	autoYes := fs.Bool("yes", false, "skip the interactive confirmation prompt")
 	fs.BoolVar(autoYes, "y", *autoYes, "alias for --yes")
 	if err := fs.Parse(args); err != nil {
@@ -97,7 +97,7 @@ func restoreCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, resolvedCfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
@@ -115,7 +115,7 @@ func restoreCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	targets := buildRestoreTargets(cfg, *configPath)
+	targets := buildRestoreTargets(cfg, resolvedCfgPath)
 	if err := backup.Restore(snapshotDir, targets); err != nil {
 		fmt.Fprintf(stderr, "restore: %v\n", err)
 		return 1
