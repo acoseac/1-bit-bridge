@@ -1,0 +1,114 @@
+{{define "content"}}
+<section class="diagnostics-page">
+  <h1>Diagnostics</h1>
+  <p class="lede">
+    Operational counters from this bridge process. Everything here is a
+    number or a state — no log text, deliberately: paths, hostnames and
+    track titles are all identifying in some deployment, and this page is
+    the kind of thing that gets pasted into an issue. Use
+    <code>bridge logs</code> when you need the text.
+  </p>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Storage</h2>
+    </div>
+    <p class="hint">
+      How long writers wait for the SQLite lock. The single best signal for
+      &ldquo;is the database what&rsquo;s making this bridge feel slow&rdquo;.
+      Measured over a sliding window, so it reflects now rather than
+      since-boot.
+    </p>
+    <dl class="composition">
+      <dt>Lock wait (p50)</dt>
+      <dd id="diag-sqlite-p50">—</dd>
+      <dt>Lock wait (p99)</dt>
+      <dd id="diag-sqlite-p99">—</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Enrichment cache</h2>
+    </div>
+    <p class="hint">
+      Hit ratio across the album, artist and release-group caches. A low
+      ratio on a library that is still enriching is normal; a low ratio on
+      a settled library means sibling tracks are re-querying the source.
+    </p>
+    <dl class="composition">
+      <dt>Hit ratio</dt>
+      <dd id="diag-mb-ratio">—</dd>
+      <dt>Lookups</dt>
+      <dd id="diag-mb-lookups">—</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Conversion pool</h2>
+    </div>
+    <p class="hint">
+      Upscale and CarPlay-optimize job durations. Live counters for the
+      same pool the Jobs page shows per-worker.
+    </p>
+    <dl class="composition">
+      <dt>In flight</dt>
+      <dd id="diag-upscale-inflight">—</dd>
+      <dt>Completed</dt>
+      <dd id="diag-upscale-done">—</dd>
+      <dt>Duration (p50)</dt>
+      <dd id="diag-upscale-p50">—</dd>
+      <dt>Duration (p99)</dt>
+      <dd id="diag-upscale-p99">—</dd>
+    </dl>
+  </div>
+
+  {{/* Tailscale: hidden unless the tsnet node is actually up. The
+       counters only exist in tsnet mode, so on a CLI-mode or disabled
+       bridge showing "down · 0 peers" would report a tailnet that was
+       never configured. */}}
+  <div class="panel" id="diag-tailscale-panel" hidden>
+    <div class="panel-head">
+      <h2>Tailscale</h2>
+    </div>
+    <p class="hint">Embedded tsnet node. Reported only in <code>tsnet</code> mode.</p>
+    <dl class="composition">
+      <dt>Node state</dt>
+      <dd id="diag-ts-state">—</dd>
+      <dt>Peers online</dt>
+      <dd id="diag-ts-peers">—</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Log events</h2>
+    </div>
+    <p class="hint">
+      Counted by level since this process started — a restart zeroes them.
+      A climbing error count with a healthy-looking bridge is the case
+      worth chasing.
+    </p>
+    <dl class="composition" id="diag-log-events">
+      <dt>—</dt><dd>no events recorded yet</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Process</h2>
+    </div>
+    <dl class="composition">
+      <dt>Uptime</dt>
+      <dd id="diag-uptime">—</dd>
+    </dl>
+    <p class="hint">
+      The same counters are exposed in Prometheus text format at
+      <a href="/metrics"><code>/metrics</code></a>, on this loopback
+      listener only. Point a scraper at it if you want history — this page
+      shows the current values, not a trend.
+    </p>
+  </div>
+</section>
+{{end}}

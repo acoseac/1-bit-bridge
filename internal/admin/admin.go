@@ -1014,6 +1014,7 @@ var pages = map[string]string{
 	"data":              "data.html",
 	"settings":          "settings.html",
 	"smartmixes":        "smartmixes.html",
+	"diagnostics":       "diagnostics.html",
 }
 
 // New constructs an admin Server. Call Handler to get the http.Handler for
@@ -1066,6 +1067,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /data", s.pageData)
 	mux.HandleFunc("GET /smartmixes", s.pageSmartMixes)
 	mux.HandleFunc("GET /settings", s.pageSettings)
+	mux.HandleFunc("GET /diagnostics", s.pageDiagnostics)
 
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
@@ -1107,6 +1109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/analysis/stats", s.apiAnalysisStats)
 	mux.HandleFunc("POST /api/analysis/sweep", s.apiAnalysisSweep)
 	mux.HandleFunc("GET /api/jobs", s.apiJobs)
+	mux.HandleFunc("GET /api/diagnostics", s.apiDiagnostics)
 	mux.HandleFunc("POST /api/fingerprint/sweep", s.apiFingerprintSweep)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)

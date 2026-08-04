@@ -6677,6 +6677,167 @@ function initMobileNav() {
   });
 }
 
+// ---- Diagnostics page ----
+
+// DIAGNOSTICS_POLL_MS: the numbers here are cheap (atomic counters and
+// sliding-window quantiles, no database), so this can poll rather than
+// ride the SSE stream. It is NOT on SSE deliberately: every field changes
+// continuously, so a diff-suppressed event would fire on every tick and
+// the frames would go to every open tab regardless of which page it is
+// showing. A poll scoped to this page costs nothing when nobody is
+// looking at it.
+const DIAGNOSTICS_POLL_MS = 5000;
+
+// formatSeconds renders a quantile. Sub-millisecond values are the normal
+// case for a healthy lock wait, and "0.00s" would read as "not measured";
+// the unit scales instead so a healthy bridge shows a small number rather
+// than a zero.
+function formatSeconds(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  if (n < 0.001) return `${(n * 1e6).toFixed(0)} µs`;
+  if (n < 1) return `${(n * 1000).toFixed(1)} ms`;
+  return `${n.toFixed(2)} s`;
+}
+
+// formatUptime renders whole seconds as a coarse human duration.
+function formatUptime(secs) {
+  const n = Number(secs);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  if (n < 60) return `${Math.round(n)}s`;
+  if (n < 3600) return `${Math.floor(n / 60)}m ${Math.round(n % 60)}s`;
+  if (n < 86400) return `${Math.floor(n / 3600)}h ${Math.floor((n % 3600) / 60)}m`;
+  return `${Math.floor(n / 86400)}d ${Math.floor((n % 86400) / 3600)}h`;
+}
+
+function setDiagText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+// applyDiagnostics paints one /api/diagnostics snapshot.
+function applyDiagnostics(d) {
+  if (!d) return;
+  setDiagText("diag-sqlite-p50", formatSeconds(d.sqliteLockWaitP50));
+  setDiagText("diag-sqlite-p99", formatSeconds(d.sqliteLockWaitP99));
+
+  // "No lookups yet" is NOT "0% hit ratio". Painting a 0% on a bridge
+  // that has simply never enriched anything would read as a broken
+  // cache, which is the opposite of the truth.
+  const lookups = Number(d.mbCacheLookups) || 0;
+  setDiagText("diag-mb-ratio", lookups === 0
+    ? "no lookups yet"
+    : `${(Number(d.mbCacheHitRatio) * 100).toFixed(1)}%`);
+  setDiagText("diag-mb-lookups", lookups.toLocaleString());
+
+  setDiagText("diag-upscale-inflight", String(d.upscaleJobsInFlight ?? 0));
+  setDiagText("diag-upscale-done", (Number(d.upscaleJobsCompletedTotal) || 0).toLocaleString());
+  setDiagText("diag-upscale-p50", formatSeconds(d.upscaleDurationP50));
+  setDiagText("diag-upscale-p99", formatSeconds(d.upscaleDurationP99));
+
+  // Tailscale rows only mean something in tsnet mode. On a CLI-mode or
+  // disabled bridge the collector reports "down" with zero peers, which
+  // would read as a broken tailnet rather than one that was never
+  // configured — so hide the panel instead.
+  const tsPanel = document.getElementById("diag-tailscale-panel");
+  if (tsPanel) {
+    const state = d.tailscaleNodeState || "down";
+    // Allowlist, not a denylist. A plain loopback install with no
+    // Tailscale config reports "disabled", and a CLI-mode bridge reports
+    // "down" — neither has a tailnet to describe, and a panel reading
+    // "disabled · 0 peers" looks like a fault rather than an absence.
+    // Verified against a fresh fixture, which returns "disabled": an
+    // earlier denylist checking only "down" showed the panel there.
+    // Listing the states that DO mean something also keeps a future
+    // fourth state from defaulting to visible.
+    tsPanel.hidden = !(state === "running" || state === "starting");
+    setDiagText("diag-ts-state", state);
+    setDiagText("diag-ts-peers", String(d.tailscalePeersOnline ?? 0));
+  }
+
+  renderLogEventCounts(d.logEventCounts);
+  setDiagText("diag-uptime", formatUptime(d.serverUptime));
+}
+
+// renderLogEventCounts paints the per-level tally. Built with
+// createElement/textContent — the level keys come from the logging
+// package rather than user input, but this is a list rendered from a
+// server map and the page's posture is uniform.
+function renderLogEventCounts(counts) {
+  const dl = document.getElementById("diag-log-events");
+  if (!dl) return;
+  const entries = Object.entries(counts || {}).filter(([, n]) => n > 0);
+  dl.replaceChildren();
+  if (!entries.length) {
+    const dt = document.createElement("dt");
+    dt.textContent = "—";
+    const dd = document.createElement("dd");
+    dd.textContent = "no events recorded yet";
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+    return;
+  }
+  // Severity order, not count order: an operator scanning this wants
+  // errors first regardless of how many debug lines are above them.
+  // The server emits UPPERCASE level keys ("INFO", "ERROR"), so rank on
+  // a lowercased key — matching on lowercase silently ranked every level
+  // at the fallback and sorted them alphabetically instead, putting
+  // DEBUG above ERROR. Caught against a live fixture, not in review.
+  const rank = { error: 0, warn: 1, info: 2, debug: 3 };
+  const rankOf = (k) => rank[String(k).toLowerCase()] ?? 9;
+  entries.sort((a, b) => rankOf(a[0]) - rankOf(b[0]) || a[0].localeCompare(b[0]));
+  for (const [level, n] of entries) {
+    const dt = document.createElement("dt");
+    dt.textContent = String(level).toLowerCase();
+    const dd = document.createElement("dd");
+    dd.textContent = Number(n).toLocaleString();
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  }
+}
+
+async function loadDiagnostics() {
+  try {
+    applyDiagnostics(await API.get("/api/diagnostics"));
+  } catch (err) {
+    // Surface it rather than leaving every row on its em-dash
+    // placeholder, which is indistinguishable from "nothing measured".
+    setDiagText("diag-uptime", `unavailable: ${err.message}`);
+  }
+}
+
+function initDiagnostics() {
+  // Actually STOP the interval while the tab is hidden, rather than only
+  // refreshing on return. The first version of this carried a comment
+  // saying it paused and did not: the timer kept firing every 5s in the
+  // background, which is the whole cost the comment claimed to avoid.
+  let timer = null;
+  const start = () => {
+    if (timer === null) timer = setInterval(loadDiagnostics, DIAGNOSTICS_POLL_MS);
+  };
+  const stop = () => {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+
+  loadDiagnostics();
+  start();
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stop();
+      return;
+    }
+    // Repaint immediately on return so the operator doesn't stare at
+    // values frozen from before the tab was backgrounded.
+    loadDiagnostics();
+    start();
+  });
+  window.addEventListener("pagehide", stop);
+}
+
 // --- boot ---
 
 // ---- Data page (playlists + listening history) ----
@@ -7182,6 +7343,7 @@ document.addEventListener("DOMContentLoaded", () => {
     case "data": initData(); break;
     case "smartmixes": initSmartMixes(); break;
     case "settings": initSettings(); break;
+    case "diagnostics": initDiagnostics(); break;
   }
   // Start the SSE stream after page-init so the initial snapshot
   // can paint into a fully-bootstrapped DOM. The first snapshot
