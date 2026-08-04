@@ -351,12 +351,29 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// affected subtree to drop out of `seen` and get DeleteTrack'd
 	// from the manifest. Files on disk were untouched but the
 	// bridge served an empty/partial library until the next clean
-	// scan repopulated. PR #N closes this hole.
+	// scan repopulated. PR #74 closes this hole.
 	//
-	// Keys are absolute directory paths (matching the form WalkDir
-	// passes to the err callback); the deletion-pass guard checks
-	// each candidate path against every entry as a hierarchical
-	// prefix.
+	// Keys are LIBRARY-RELATIVE directory paths — `relPath(root, dir,
+	// multiRoot)`, the same form stored in `tracks.path` — NOT the
+	// absolute paths WalkDir hands its err callback. Every writer
+	// converts. Two of them are sentinels rather than real
+	// directories: `"."` for a whole-root outage in single-root mode,
+	// and `"<rootBase>/."` for the multi-root equivalent, both of
+	// which isUnderErroredSubtree special-cases.
+	//
+	// The shape is load-bearing, which is why it is stated here: the
+	// guard compares these keys against candidate paths taken from the
+	// tracks table, so an absolute key matches nothing and the guard
+	// goes silently inert — no error, no log, just a deletion pass
+	// with its safety off. (This comment previously claimed the keys
+	// WERE absolute, and still carried an unfilled "PR #N". On a guard
+	// that has already regressed twice — #549 and #568, both by
+	// letting some other classification run ahead of it — a comment
+	// pointing at the wrong key shape is a live hazard, not a typo.)
+	//
+	// The deletion-pass guard checks each candidate against every
+	// entry as a hierarchical prefix, appending a separator so a
+	// sibling like "foo-other" cannot match "foo".
 	errorSubtrees := make(map[string]struct{})
 
 	// Snapshot roots once per scan so a mid-flight SetRoots doesn't re-enter
