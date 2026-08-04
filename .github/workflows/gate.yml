@@ -240,11 +240,22 @@ jobs:
       #
       # Runner-local and test-only: it changes nothing about what the
       # product does on an operator's machine.
-      - name: Exclude the runner temp tree from Defender
+      # The path MUST be the one Go actually uses. The first attempt
+      # excluded $RUNNER_TEMP (D:\a\_temp) while `t.TempDir()` resolves
+      # os.TempDir() from %TEMP% — C:\Users\RUNNER~1\AppData\Local\Temp.
+      # Not one failing path was under RUNNER_TEMP, so the exclusion
+      # applied cleanly to a directory the suite never touches and the
+      # null result said nothing about the hypothesis. Ask Go where its
+      # temp dir is rather than assuming, and echo it so the log shows
+      # what was actually excluded.
+      - name: Exclude the Go temp tree from Defender
         if: runner.os == 'Windows'
         continue-on-error: true
         run: |
-          pwsh -Command "Add-MpPreference -ExclusionPath '$env:RUNNER_TEMP'" || echo "could not set exclusion (non-fatal)"
+          GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo "$TEMP")
+          echo "Go os.TempDir() = $GOTMP"
+          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'" || echo "could not set exclusion (non-fatal)"
+          pwsh -Command "(Get-MpPreference).ExclusionPath" || true
       # Native vet matters most on Windows: the `unsafeptr` analyzer is
       # the real check on `doctor_windows.go`'s Syscall6 argument
       # liveness, and it cannot run from a non-Windows host.
