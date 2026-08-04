@@ -365,18 +365,22 @@ func TestCollectAnalysisCandidatesRetriesTransientMD5Failure(t *testing.T) {
 		CreatedAt:     1,
 	}
 
-	isCandidate := func(t *testing.T) bool {
+	isCandidateFor := func(t *testing.T, want string) bool {
 		t.Helper()
 		res, err := collectAnalysisCandidates(ctx, store, bridgefs.New([]string{root}), t.TempDir(), "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, c := range res.candidates {
-			if c.SourceLibraryRel == name {
+			if c.SourceLibraryRel == want {
 				return true
 			}
 		}
 		return false
+	}
+	isCandidate := func(t *testing.T) bool {
+		t.Helper()
+		return isCandidateFor(t, name)
 	}
 
 	// Transient failures, under the cap: must keep being re-enqueued.
@@ -409,12 +413,37 @@ func TestCollectAnalysisCandidatesRetriesTransientMD5Failure(t *testing.T) {
 
 	// A file that simply cannot be verified must never be re-enqueued at
 	// all — there is nothing to learn by asking again.
+	//
+	// A SECOND track, never previously failed. Reusing the one above
+	// would make this vacuous: the loops already drove it to the cap, so
+	// it stops being a candidate whatever the permanent branch does —
+	// verified by deleting that branch and watching this assertion still
+	// pass (CodeRabbit on PR #632). The store-level tests do cover the
+	// branch, but an assertion that cannot fail reads as coverage it
+	// does not provide.
+	const permName = "permanent.flac"
+	if err := os.WriteFile(filepath.Join(root, permName), []byte("fLaC-nonzero-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	permInfo, err := os.Stat(filepath.Join(root, permName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTrack(ctx, &manifest.Track{
+		Path: permName, Size: permInfo.Size(), ModTime: permInfo.ModTime(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	permanent := base
+	permanent.SourcePath = permName
+	permanent.SourceMTimeNS = permInfo.ModTime().UnixNano()
+	permanent.SourceSize = permInfo.Size()
 	permanent.AudioMD5Retryable = false
 	if err := store.UpsertAnalysis(ctx, permanent); err != nil {
 		t.Fatal(err)
 	}
-	if isCandidate(t) {
-		t.Error("a permanently-unverifiable file must not be re-analysed")
+	if isCandidateFor(t, permName) {
+		t.Error("a permanently-unverifiable file must not be re-analysed — " +
+			"nothing about it will change until the file itself does")
 	}
 }
