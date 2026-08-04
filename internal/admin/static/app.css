@@ -3673,3 +3673,41 @@ ul.histogram li {
   border-top: 1px solid var(--border);
   padding-top: 10px;
 }
+
+/* Preflight (doctor) results on the Diagnostics page. */
+.doctor-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.doctor-check {
+  display: grid;
+  grid-template-columns: 64px 180px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.doctor-badge {
+  text-transform: uppercase;
+  font-size: 0.72em;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+}
+.doctor-check[data-status="ok"]   .doctor-badge { color: var(--ok); }
+.doctor-check[data-status="warn"] .doctor-badge { color: var(--warn); }
+.doctor-check[data-status="fail"] .doctor-badge { color: var(--danger); }
+.doctor-name { font-weight: 600; }
+.doctor-summary { overflow-wrap: anywhere; }
+/* The hint spans the full row under the three columns — it is prose, and
+ * squeezing it into the summary column makes long remediation text
+ * unreadable. */
+.doctor-hint {
+  grid-column: 1 / -1;
+  font-size: 0.9em;
+  color: var(--muted);
+  padding-left: 72px;
+  overflow-wrap: anywhere;
+}
+/* Phone: the three-column grid crushes the name to one character per
+ * line, so stack instead (same lesson as the tile header at 375px). */
+@media (max-width: 560px) {
+  .doctor-check { grid-template-columns: 1fr; gap: 2px; }
+  .doctor-hint { padding-left: 0; }
+}

@@ -77,6 +77,24 @@ type Deps struct {
 	// (doctor must be idempotent while the server is running). Empty
 	// skips the own-PID check — any bind is fail.
 	OwnPIDFile string
+	// OwnedPorts lists ports the CALLER knows it bound itself.
+	//
+	// Only an in-process caller can populate this honestly — the admin
+	// console running inside `bridge serve`, which bound those listeners
+	// and does not have to deduce anything. It is checked BEFORE the
+	// bind probe, so it needs no attribution and cannot be defeated by
+	// the capability/dumpable=0 problem that makes port→pid attribution
+	// impossible for an unprivileged observer.
+	//
+	// The CLI leaves this empty and keeps using OwnPIDFile, which
+	// answers the same question by a weaker mechanism because from
+	// outside the process there is nothing better.
+	//
+	// A field rather than a functional option, deliberately: OwnPIDFile
+	// is the same kind of caller assertion and is a field, and adding an
+	// options mechanism for one flag would leave this package with two
+	// ways to say the same sort of thing.
+	OwnedPorts []int
 	// LibraryWatchEnabled mirrors cfg.LibraryWatch.Enabled. When
 	// true on Linux, the doctor's inotify watch-limit check
 	// activates — the operator gets a warning if their kernel
@@ -210,11 +228,46 @@ func checkTLSCert(d Deps) Check {
 }
 
 func checkAPIPort(d Deps) Check {
+	if owned := ownedPortCheck("port-api", d.APIPort, d.OwnedPorts); owned != nil {
+		return *owned
+	}
 	return checkPort("port-api", d.APIPort, d.OwnPIDFile)
 }
 
 func checkAdminPort(d Deps) Check {
+	if owned := ownedPortCheck("port-admin", d.AdminPort, d.OwnedPorts); owned != nil {
+		return *owned
+	}
 	return checkPort("port-admin", d.AdminPort, d.OwnPIDFile)
+}
+
+// ownedPortCheck short-circuits a port check the caller has told us it
+// bound itself, returning nil when the port isn't claimed.
+//
+// Takes the port explicitly rather than re-deriving it from `name`. The
+// first version matched `name == "port-admin"` to pick between
+// d.APIPort and d.AdminPort — inside a helper that was already being
+// handed the name — so a third port check would have silently been
+// graded against the API port.
+//
+// This runs BEFORE the bind probe, which is the whole point: an
+// in-process caller doesn't need to deduce ownership from a bind failure
+// and an lsof lookup, and on a capability-granted binary that deduction
+// is impossible anyway (dumpable=0 denies port→pid attribution to any
+// unprivileged observer — see portowner_linux.go). Probing here would
+// also be actively wrong: the port IS in use, by us, so the probe can
+// only fail.
+func ownedPortCheck(name string, port int, ownedPorts []int) *Check {
+	if port == 0 {
+		return nil
+	}
+	for _, p := range ownedPorts {
+		if p == port {
+			c := ok(name, fmt.Sprintf("bound by this bridge (:%d)", port))
+			return &c
+		}
+	}
+	return nil
 }
 
 // listenFunc is the TCP bind probe used by checkPort. A package var so
