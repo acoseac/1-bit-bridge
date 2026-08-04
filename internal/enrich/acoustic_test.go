@@ -406,6 +406,13 @@ func TestAlbumHopKeyIsSeparateFromTheTextPath(t *testing.T) {
 		t.Errorf("hop and text path share key %q — the hop's single-rung no-match "+
 			"would pre-empt the text ladder for every well-tagged sibling", hopKey)
 	}
+	// The adversarial case for the namespace: an artist literally named
+	// "acoustic" makes releaseCacheKey emit the hop's own prefix. This is
+	// why the marker is anchored behind a leading NUL.
+	if acousticCacheKey("artist", "album") == releaseCacheKey("acoustic", "artist", "album") {
+		t.Error("an artist named \"acoustic\" collides with the hop's namespace — " +
+			"the prefix must be unreachable from any real artist name")
+	}
 	// Siblings on the hop must still collide with each OTHER.
 	if got := acousticCacheKey("M83", albumSearchTerm(&manifest.Track{Album: "Real Album"}, m)); got != hopKey {
 		t.Errorf("two hop calls with the same inputs keyed differently: %q vs %q", got, hopKey)

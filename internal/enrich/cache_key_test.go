@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -217,13 +218,17 @@ func TestAcousticAlbumCacheDoesNotPoisonTheTextPath(t *testing.T) {
 	// MusicBrainz answers ONLY the edition-stripped title — the exact shape
 	// that makes the acoustic path's single rung miss where the text path's
 	// stripping rung would hit.
-	var releaseQueries int
+	// atomic: the httptest handler goroutine writes while the test
+	// goroutine reads. CLAUDE.md's convention for these counters, and it
+	// says to convert the grandfathered bare-int ones when a bot run
+	// flags them — this is that flag.
+	var releaseQueries atomic.Int32
 	e, _ := newOfflineEnricher(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "artist") {
 			_, _ = w.Write([]byte(`{"artists":[]}`))
 			return
 		}
-		releaseQueries++
+		releaseQueries.Add(1)
 		q, _ := url.QueryUnescape(r.URL.Query().Get("query"))
 		if strings.Contains(q, canonical) && !strings.Contains(q, "Deluxe") {
 			_, _ = w.Write([]byte(`{"releases":[{"id":"` + releaseID + `","title":"` + canonical +
@@ -271,8 +276,8 @@ func TestAcousticAlbumCacheDoesNotPoisonTheTextPath(t *testing.T) {
 		t.Errorf("text-path ladder resolved %+v, want release %q via the "+
 			"edition-strip rung", res, releaseID)
 	}
-	if releaseQueries < 2 {
+	if releaseQueries.Load() < 2 {
 		t.Errorf("release queries = %d, want >=2 — the ladder never reached "+
-			"MusicBrainz", releaseQueries)
+			"MusicBrainz", releaseQueries.Load())
 	}
 }

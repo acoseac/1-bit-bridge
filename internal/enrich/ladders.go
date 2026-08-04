@@ -355,8 +355,18 @@ func releaseCacheKey(artist, albumArtist, album string) string {
 // folder produce an identical query, and without the reuse every track
 // on a "CD 01" album pays its own SearchRelease plus a full
 // MBMinInterval sleep. Only the key space needed separating.
+// The LEADING NUL is what makes the namespace airtight, and it is not
+// decoration. With a bare "acoustic\x00" prefix, an artist literally
+// named "acoustic" collides: releaseCacheKey("acoustic", "artist",
+// "album") builds artist+"\x00"+albumArtist+"\x00"+album — the same
+// bytes acousticCacheKey("artist", "album") produces. A valid artist
+// name cannot START with a NUL (the path resolver rejects NUL bytes and
+// no upstream emits one), so anchoring the marker there is a guarantee
+// rather than an assumption about the input. Gemini caught this on
+// PR #627, after the shipped fix had already narrowed the collision from
+// "every well-tagged sibling" to "an artist named acoustic".
 func acousticCacheKey(artistName, album string) string {
-	return "acoustic\x00" + artistName + "\x00" + album
+	return "\x00acoustic\x00" + artistName + "\x00" + album
 }
 
 // artistCacheKey keys the artist cache on every input buildArtistLadder
