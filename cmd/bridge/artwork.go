@@ -38,7 +38,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -64,7 +63,7 @@ const artworkGCConfirmPhrase = "GC-ARTWORK"
 func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("artwork", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	gc := fs.Bool("gc", false, "remove cached artwork files no longer referenced by any track row")
 	dryRun := fs.Bool("dry-run", false, "list orphans without removing them (use with --gc)")
 	confirm := fs.String("confirm", "", "type "+artworkGCConfirmPhrase+" to authorize destructive deletion (required unless --dry-run)")
@@ -92,7 +91,7 @@ func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return 2

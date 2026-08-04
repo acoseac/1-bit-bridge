@@ -36,7 +36,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -72,7 +71,7 @@ Run "bridge variants <subcommand> -h" for subcommand-specific flags.`
 func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("variants move", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	to := fs.String("to", "", "absolute destination directory for variants (required)")
 	dryRun := fs.Bool("dry-run", false, "list planned moves without touching files or DB")
 	confirm := fs.String("confirm", "", "type MOVE to confirm destructive relocation (skipped under --dry-run)")
@@ -99,7 +98,7 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return 2

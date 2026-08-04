@@ -13,7 +13,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -44,7 +43,7 @@ import (
 func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	check := fs.Bool("check", false, "poll for an update and print the result; don't install")
 	yes := fs.Bool("yes", false, "non-interactive: skip the install + post-install restart prompts")
 	fs.BoolVar(yes, "y", *yes, "alias for --yes")
@@ -55,7 +54,7 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2

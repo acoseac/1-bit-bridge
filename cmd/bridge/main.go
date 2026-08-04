@@ -51,6 +51,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/tlsacme"
+
 	// Imported for its init() side effects (log-hook + collector
 	// registration) AND for `metrics.RegisterTsnetProvider` invoked
 	// from the tsnet startup goroutine below. Without this import,
@@ -1580,7 +1581,7 @@ type serveOpts struct {
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	addrOverride := fs.String("addr", "", "override listenAddress from config (host:port)")
 	initIfMissing := fs.Bool("init-if-missing", false, "on first run, write a default config if --config is missing, then serve (container convenience; env overrides still apply)")
 	if err := fs.Parse(args); err != nil {
@@ -1644,7 +1645,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				"path", *configPath, "libraryRoots", autoInitDefaultRoot)
 		}
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
@@ -1799,6 +1800,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			fmt.Fprintf(stderr, "auth: flush LastUsedAt on shutdown: %v\n", err)
 		}
 	}()
+
+	// Record our PID so `bridge doctor` can attribute the bound port to
+	// this process rather than reporting a conflict against the
+	// operator's own running bridge. doctor has read this file since it
+	// was written; nothing ever wrote it, so the attribution branch (and
+	// PR #432's native Windows port->PID probe, which only runs once
+	// there is a PID to attribute to) was unreachable.
+	//
+	// Non-fatal by design: a diagnostic aid failing to write must not
+	// stop the bridge serving.
+	pidPath, pidErr := writeServerPIDFile(cfg.DataDir)
+	if pidErr != nil {
+		fmt.Fprintf(stderr, "pidfile: %v (doctor will not be able to "+
+			"attribute the bound port to this process)\n", pidErr)
+	} else {
+		defer removeServerPIDFile(pidPath)
+	}
 
 	manifestStore, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
 	if err != nil {
@@ -3743,7 +3761,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 func pairCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	name := fs.String("name", "", "client name (e.g. \"iPhone 15 Pro\")")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -3752,7 +3770,7 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "pair: --name is required")
 		return 2
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
@@ -3778,11 +3796,11 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2

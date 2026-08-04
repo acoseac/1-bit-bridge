@@ -223,6 +223,17 @@ func checkAdminPort(d Deps) Check {
 // portProbeAvailable. Production code MUST NOT mutate it.
 var listenFunc = net.Listen
 
+// probeBind attempts a bind and immediately releases it, returning the
+// bind error (nil when the address was free). Split out so checkPort can
+// ask the same question of each address family.
+func probeBind(addr string) error {
+	lis, err := listenFunc("tcp", addr)
+	if err == nil {
+		_ = lis.Close()
+	}
+	return err
+}
+
 // checkPort probes `port` on 127.0.0.1. If the bind succeeds the port is
 // reported free; if it fails with "address already in use" and the
 // holding PID matches our OwnPIDFile, we report ok — doctor is
@@ -241,11 +252,29 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 	if port == 0 {
 		return warn(name, "no port set", "pass Deps."+name+"Port")
 	}
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	lis, err := listenFunc("tcp", addr)
-	if err == nil {
-		_ = lis.Close()
+	// Probe BOTH address families. Binding only 127.0.0.1 reports a port
+	// as free when something holds it on IPv6 alone — `[::]:port` under
+	// `bindv6only`, or an explicit `[::1]:port`. The bridge's own default
+	// listen address is a wildcard, so this is not exotic: doctor said
+	// "free", init proceeded, and serve then failed to bind. The port is
+	// occupied if EITHER family says so.
+	v4err := probeBind(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	v6err := probeBind(net.JoinHostPort("::1", strconv.Itoa(port)))
+
+	inUse := isAddrInUse(v4err) || isAddrInUse(v6err)
+	if !inUse && (v4err == nil || v6err == nil) {
+		// At least one family bound cleanly and neither reported a
+		// conflict. The other family failing is an environment fact, not
+		// a conflict — a v4-only host returns EADDRNOTAVAIL for ::1 —
+		// and must not be reported as a problem.
 		return ok(name, fmt.Sprintf("free (:%d)", port))
+	}
+	// Neither family bound. Report against whichever error is
+	// informative, preferring IPv4 since that is the one an operator
+	// will recognise.
+	err := v4err
+	if err == nil {
+		err = v6err
 	}
 	// Only "address already in use" means the port is genuinely occupied.
 	// Other bind failures — EACCES (a privileged port <1024 without
@@ -264,7 +293,7 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 	// degraded every real conflict to a Warn (letting `bridge init` proceed
 	// into a serve that can't bind) AND made the native GetExtendedTcpTable
 	// owner attribution below unreachable there.
-	if !isAddrInUse(err) {
+	if !inUse {
 		return warn(name, fmt.Sprintf(":%d not bindable", port),
 			"couldn't bind to probe this port ("+err.Error()+"); "+
 				"ports below 1024 need elevation, or the configured address may be invalid — check bridge.yaml")

@@ -84,7 +84,7 @@ func openTokenStoreFromCfg(configPath string, stderr io.Writer) (*auth.Store, in
 func tokenListCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -128,7 +128,7 @@ func tokenListCmd(args []string, stdout, stderr io.Writer) int {
 func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token rotate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -159,7 +159,7 @@ func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token expire", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	in := fs.Duration("in", 0, "invalidate the token after this duration from now (e.g. 24h, 7*24h). Required unless --clear is set.")
 	clear := fs.Bool("clear", false, "remove an existing expiry from the token")
 	if err := fs.Parse(args); err != nil {
@@ -205,7 +205,7 @@ func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 func tokenRevokeCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("token revoke", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", defaultConfigPath, configFlagUsage)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

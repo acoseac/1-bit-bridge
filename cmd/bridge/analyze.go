@@ -14,7 +14,6 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -31,7 +30,7 @@ import (
 func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "bridge.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	workers := fs.Int("workers", 0, "concurrent decoders; 0 = max(1, NumCPU/2)")
 	filter := fs.String("filter", "", "case-sensitive substring filter on track path (empty = all)")
 	dryRun := fs.Bool("dry-run", false, "list how many tracks would be analyzed without doing it")
@@ -41,7 +40,7 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return 2
