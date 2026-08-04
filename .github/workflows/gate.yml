@@ -219,6 +219,32 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gobuild-xplat-${{ hashFiles('**/go.sum') }}-
             ${{ runner.os }}-gobuild-xplat-
+      # Defender scans every file the suite writes and holds a handle
+      # across the scan. Go's `t.TempDir()` cleanup is a single
+      # RemoveAll with no retry, so a fixture still being scanned fails
+      # its test with "The process cannot access the file because it is
+      # being used by another process" — which is what ~25 of the first
+      # run's 55 failures were, concentrated in exactly the packages
+      # that write .flac fixtures.
+      #
+      # Excluding the runner's own temp tree is the standard
+      # accommodation, and it doubles as the EXPERIMENT that settles
+      # whose handle it is: an audit of internal/manifest and
+      # internal/integrity found no unclosed os.Open, so the hypothesis
+      # is that the handle is Defender's rather than ours. If the
+      # cluster survives this, the hypothesis is wrong and there is a
+      # real descriptor leak to go find — which would be a genuine
+      # product bug, since a scan of a 20k-track library would exhaust
+      # handles and would also block an operator from moving their own
+      # files while the bridge runs.
+      #
+      # Runner-local and test-only: it changes nothing about what the
+      # product does on an operator's machine.
+      - name: Exclude the runner temp tree from Defender
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: |
+          pwsh -Command "Add-MpPreference -ExclusionPath '$env:RUNNER_TEMP'" || echo "could not set exclusion (non-fatal)"
       # Native vet matters most on Windows: the `unsafeptr` analyzer is
       # the real check on `doctor_windows.go`'s Syscall6 argument
       # liveness, and it cannot run from a non-Windows host.
