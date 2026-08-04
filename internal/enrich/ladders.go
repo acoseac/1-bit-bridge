@@ -330,6 +330,35 @@ func releaseCacheKey(artist, albumArtist, album string) string {
 	return artist + "\x00" + albumArtist + "\x00" + album
 }
 
+// acousticCacheKey namespaces the acoustic album hop's entries away from
+// the text path's, even though both live in e.albumCache.
+//
+// They MUST NOT share a key. The acoustic path keys on the artist name
+// AcoustID/MusicBrainz gave it and an album term that may come from the
+// fingerprint's hint; the text path keys on the track's own tags via
+// releaseCacheKey — which, for a track with no distinct albumArtist,
+// collapses to exactly `cacheKey(artist, album)`. So the two produced
+// byte-identical keys for the common case, and the acoustic path writes
+// into it after a DELIBERATELY single-rung search while the text path
+// only writes a no-match once searchReleaseWithFallbacks has exhausted
+// all of bracket-strip, unbracketed-edition-strip, artist-prefix-strip
+// and albumArtist.
+//
+// The consequence was order-dependent album loss: one junk-tagged track
+// falls to the acoustic fallback, its single query misses on an edition
+// suffix ("Goats Head Soup (2020 Deluxe)"), and the empty resolution is
+// cached under the key every well-tagged sibling then reads — so the
+// whole album loses its release MBID and cover, and which track happened
+// to be enriched first decides whether it happens at all.
+//
+// Sharing the CACHE is still right: sibling tracks under one junk-tagged
+// folder produce an identical query, and without the reuse every track
+// on a "CD 01" album pays its own SearchRelease plus a full
+// MBMinInterval sleep. Only the key space needed separating.
+func acousticCacheKey(artistName, album string) string {
+	return "acoustic\x00" + artistName + "\x00" + album
+}
+
 // artistCacheKey keys the artist cache on every input buildArtistLadder
 // reads.
 func artistCacheKey(artist, albumArtist string) string {

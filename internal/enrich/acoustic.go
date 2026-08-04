@@ -420,14 +420,19 @@ func (e *Enricher) resolveAlbumFromAcoustic(ctx context.Context, t *manifest.Tra
 		return "", "", nil
 	}
 
-	// SHARE the text path's album cache. Sibling tracks under one junk-tagged
-	// folder produce an identical (artistName, album) query, so without this
-	// every track on a "CD 01" album pays its own SearchRelease plus a full
+	// Share the text path's album cache, under a SEPARATE key space.
+	//
+	// Sharing the cache is what keeps sibling tracks under one junk-tagged
+	// folder from each paying their own SearchRelease plus a full
 	// MBMinInterval sleep — 1.1s each against public MusicBrainz, on exactly
-	// the population this feature targets. The key semantics and value shape
-	// are the same as the text path's, so a hit from either side is the answer
-	// to the same question.
-	key := cacheKey(m.ArtistName, album)
+	// the population this feature targets.
+	//
+	// Sharing the KEY was a bug. This comment used to claim "the key
+	// semantics are the same as the text path's, so a hit from either side is
+	// the answer to the same question"; PR #614 moved the text path to
+	// releaseCacheKey and that stopped being true. See acousticCacheKey for
+	// what the collision cost.
+	key := acousticCacheKey(m.ArtistName, album)
 	if hit, ok := e.albumCache.Get(key); ok {
 		metrics.RecordMBCache("album", true)
 		return hit.ReleaseMBID, hit.ReleaseGroupMBID, nil
@@ -457,9 +462,12 @@ func (e *Enricher) resolveAlbumFromAcoustic(ctx context.Context, t *manifest.Tra
 			resolution.ReleaseGroupMBID = res.ReleaseGroupMBID
 		}
 	}
-	// Cached on a clean search whether or not it matched, mirroring the text
-	// path: a no-match for this exact query is as reusable as a hit, and the
-	// siblings are the reason this cache exists.
+	// Cached on a clean search whether or not it matched. Correct now that
+	// the key is namespaced: this path's ladder IS the single rung above, so
+	// a no-match here is a COMPLETE answer for anything that reaches it with
+	// the same (artistName, album) — unlike a no-match written under the text
+	// path's key, which would pre-empt rungs that path had yet to try.
+	// Siblings are the reason this cache exists.
 	e.albumCache.Set(key, resolution)
 	if resolution.ReleaseMBID == "" {
 		return "", "", nil
