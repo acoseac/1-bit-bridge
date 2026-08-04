@@ -3851,7 +3851,7 @@ func subtreeRangeBase(prefix string) (base string, scoped bool) {
 // sidecars got destroyed. This form remains only where matching
 // case-insensitively is the deliberate intent:
 //
-//   - ListVariantsUnderPrefix, whose query is explicitly
+//   - ListVariantsByPathPrefix, whose query is explicitly
 //     `unicode_lower(source_path) LIKE unicode_lower(?)` so the variant
 //     GC finds sidecars written under a differently-cased source path
 //     (PR #477).
