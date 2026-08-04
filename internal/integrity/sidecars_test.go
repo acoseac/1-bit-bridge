@@ -85,6 +85,39 @@ func seedSidecarAlbum(t *testing.T, outputDir, album string, n int) []string {
 // TestShouldConsiderSidecarFile pins the pure file-type predicate.
 // `.flac` is the only extension considered today; mismatched
 // extensions (incl. case variation) are skipped.
+
+// ageFixtures back-dates every file under dir so the sweeper's
+// grace-period check sees them as settled.
+//
+// The tests used `gracePeriodForTest = 1ns` to mean "nothing is too
+// fresh to sweep", which relies on `tickStart.Sub(info.ModTime())` being
+// positive for a file written moments earlier. That does not hold on
+// Windows: NTFS stamps come from the system clock, whose granularity is
+// ~15ms, while Go's time.Now() reads a high-resolution source — so a
+// just-written file can carry a stamp AHEAD of a tickStart sampled
+// afterwards. The difference goes negative, every candidate looks
+// too-fresh, and the sweeper correctly skips all of them
+// (`examined=1 unlinked=0`).
+//
+// Back-dating states the precondition directly instead of inferring it
+// from a clock race, which is both portable and a better description of
+// what these tests mean: a sidecar older than the grace period is
+// sweepable. Production grace is minutes, so the skew never mattered
+// there.
+func ageFixtures(t *testing.T, dir string) {
+	t.Helper()
+	old := time.Now().Add(-1 * time.Hour)
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		return os.Chtimes(path, old, old)
+	})
+	if err != nil {
+		t.Fatalf("age fixtures under %q: %v", dir, err)
+	}
+}
+
 func TestShouldConsiderSidecarFile(t *testing.T) {
 	cases := []struct {
 		path string
@@ -128,6 +161,7 @@ func TestOrphanSidecarSweeperTickUnlinksOrphans(t *testing.T) {
 	// are brand new (modtime ≈ now), and the race-protection
 	// regression has its own dedicated test below.
 	s.gracePeriodForTest = 1 * time.Nanosecond
+	ageFixtures(t, outputDir)
 	unlinked := s.tick(context.Background())
 	if unlinked != 3 {
 		t.Errorf("unlinked = %d, want 3 (paths[3..5] are orphans)", unlinked)
@@ -166,6 +200,7 @@ func TestOrphanSidecarSweeperCaseInsensitive(t *testing.T) {
 
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.gracePeriodForTest = 1 * time.Nanosecond
+	ageFixtures(t, outputDir)
 	if unlinked := s.tick(context.Background()); unlinked != 0 {
 		t.Errorf("unlinked = %d, want 0 (live sidecar with a case-only DB delta)", unlinked)
 	}
@@ -195,6 +230,7 @@ func TestOrphanSidecarSweeperRespectsChunkCap(t *testing.T) {
 	// Same bypass as TestOrphanSidecarSweeperTickUnlinksOrphans —
 	// freshly-seeded files would otherwise hit the 10-min grace floor.
 	s.gracePeriodForTest = 1 * time.Nanosecond
+	ageFixtures(t, outputDir)
 
 	tick1 := s.tick(context.Background())
 	if tick1 != testChunk {
@@ -234,6 +270,7 @@ func TestOrphanSidecarSweeperHonoursCancellation(t *testing.T) {
 	lister := &fakeSidecarLister{known: map[string]struct{}{}}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.gracePeriodForTest = 1 * time.Nanosecond
+	ageFixtures(t, outputDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel BEFORE the tick starts
@@ -278,6 +315,7 @@ func TestOrphanSidecarSweeperStartTickFires(t *testing.T) {
 	lister := &fakeSidecarLister{known: map[string]struct{}{}}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.gracePeriodForTest = 1 * time.Nanosecond
+	ageFixtures(t, outputDir)
 
 	tickFired := make(chan int, 1)
 	s.SetOnTickComplete(func(unlinked int) {
@@ -331,6 +369,7 @@ func TestOrphanSidecarSweeperPreservesNonFlacFiles(t *testing.T) {
 	lister := &fakeSidecarLister{known: map[string]struct{}{}}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.gracePeriodForTest = 1 * time.Nanosecond
+	ageFixtures(t, outputDir)
 	unlinked := s.tick(context.Background())
 
 	if unlinked != 1 {
@@ -478,6 +517,7 @@ func TestOrphanSidecarSweeperSkipDirResumesWithoutMissingOrphans(t *testing.T) {
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.chunkSizeForTest = 2 // forces 3 ticks: A/* | B/* | C/*
 	s.gracePeriodForTest = 1 * time.Nanosecond
+	ageFixtures(t, outputDir)
 
 	total := 0
 	for i := 0; i < 10; i++ { // bounded; sweep completes in 3
@@ -554,6 +594,7 @@ func TestOrphanSidecarSweeper_SiblingDashDir_NotPruned(t *testing.T) {
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.chunkSizeForTest = 2 // tick 1 fills on A/*, forcing a resume that must reach A-Bonus
 	s.gracePeriodForTest = 1 * time.Nanosecond
+	ageFixtures(t, outputDir)
 
 	total := 0
 	for i := 0; i < 10; i++ { // bounded; sweep completes in 2 ticks

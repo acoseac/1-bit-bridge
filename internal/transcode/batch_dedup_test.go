@@ -3,7 +3,6 @@ package transcode
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/google/uuid"
@@ -37,26 +36,7 @@ func TestSubmit_OverlappingReSubmitDoesNotStickRunning(t *testing.T) {
 
 	// Blocking runner: jobs stay claimed in the pool's inflight map (never
 	// commit a variant), so an overlapping re-submit dedups against them.
-	release := make(chan struct{})
-	p := NewPool(s, 2, 16)
-	t.Cleanup(p.Stop)
-	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		<-release
-		return spec.SourceSize * 2, nil
-	}
-	dataDir := t.TempDir()
-	c, err := NewCoordinator(p, s, dataDir, nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })
-	if err != nil {
-		t.Fatalf("NewCoordinator: %v", err)
-	}
-	c.SetPublish(func(BatchProgressEvent) {})
-	p.SetOnJobComplete(func(path, variantID string, sr, bps int, d float64, id uuid.UUID, at time.Time) {
-		c.OnJobComplete(path, variantID, sr, bps, d, id, at)
-	})
-	p.SetOnJobFailed(func(path, variantID, msg string, d float64, id uuid.UUID, at time.Time) {
-		c.OnJobFailed(path, variantID, msg, d, id, at)
-	})
+	c, release := blockingBatchCoordinator(t, s)
 
 	// Batch 1 enqueues 02 + 03; they block in the runner and stay in-flight.
 	r1, err := c.Submit(context.Background(), "Album", 192000, 24, t.TempDir())

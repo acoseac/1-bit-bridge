@@ -179,7 +179,7 @@ type Track struct {
 	// BPM (beats per minute). Tag-sourced (dhowden picks up TBPM / BPM /
 	// tmpo); when the source has no BPM tag, the offline analyzer's
 	// estimated tempo is spliced in (tag-absent-only, like
-	// ReplayGainTrackDB — see spliceAnalysisKeyTempo + bpmFromAnalysis).
+	// ReplayGainTrackDB — see spliceAnalysisScalars + bpmFromAnalysis).
 	// Pointer + omitempty; presence-gated.
 	BPM *int `json:"bpm,omitempty"`
 
@@ -193,6 +193,26 @@ type Track struct {
 	// ProtocolVersion stays 1.
 	KeyRoot *int   `json:"keyRoot,omitempty"`
 	KeyMode string `json:"keyMode,omitempty"`
+
+	// The wf4 track-quality scalars (additive since v1.9, the
+	// transparency batch). All analysis-only — no tag source — so like
+	// KeyRoot/KeyMode they are spliced from `track_analysis` at read time
+	// and NEVER persisted into `tags_json` (marshalForStorage zeroes them
+	// unconditionally). All omitempty; ProtocolVersion stays 1.
+	//
+	// TruePeakDB: BS.1770-style 4x-oversampled true peak in dB relative
+	// to full scale, measured on the bridge's 48 kHz analysis rendering
+	// (PROTOCOL.md states the derivation — the LIVE native-rate true
+	// peak is iOS's own meter's job). DRScore: the community DR value
+	// ("DR12"). AudioMD5State: "verified" | "mismatch" — FLAC audio-MD5
+	// verification against the STREAMINFO checksum; absent when not
+	// verifiable (non-FLAC, no stored checksum, odd bit depth, tool
+	// failure). A mismatch means "modified or corrupt", not proof of
+	// corruption — some tag editors rewrite FLAC without updating the
+	// checksum.
+	TruePeakDB    *float64 `json:"truePeakDB,omitempty"`
+	DRScore       *int     `json:"drScore,omitempty"`
+	AudioMD5State string   `json:"audioMD5State,omitempty"`
 
 	// WaveformTag signals that an offline-computed peak/RMS waveform
 	// sidecar is available for this track (the audio-analysis feature,
@@ -223,12 +243,23 @@ type Track struct {
 	replayGainFromAnalysis bool
 
 	// bpmFromAnalysis is the BPM twin of replayGainFromAnalysis: set by
-	// spliceAnalysisKeyTempo when it fills BPM from the analyzer's estimate
+	// spliceAnalysisScalars when it fills BPM from the analyzer's estimate
 	// (source had no BPM tag), so marshalForStorage scrubs only the
 	// analysis-derived BPM on write-back and a curated TBPM tag survives.
 	// KeyRoot/KeyMode need no such marker — they have no tag source, so
 	// marshalForStorage zeroes them unconditionally.
 	bpmFromAnalysis bool
+
+	// versionStampOnly is an internal, NON-WIRE marker (unexported ⇒ json
+	// ignores it — the replayGainFromAnalysis shape) set by the scanner's
+	// reExtractUnchanged when a version-stale re-extraction produced a row
+	// byte-identical (post post-scan-field merge) to what's stored. The
+	// scan writer routes such rows through StampExtractorVersionBatch —
+	// advancing extractor_version + resetting missing_count WITHOUT
+	// touching indexed_at / enriched_at / tags_json — so an
+	// ExtractorVersion bump doesn't surface the entire library in every
+	// iOS client's next delta sync nor re-queue full re-enrichment.
+	versionStampOnly bool
 }
 
 // Variant is one cached alternate rendering of a Track's source. The

@@ -598,6 +598,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 			// Unknown ObjectID under BrowseMetadata — same `NoSuchObject`
 			// signal the BrowseDirectChildren `default` arm produces.
 			// Strict controllers + lenient ones agree on this code.
+			logBrowseFault(browse, UPnPErrNoSuchObject)
 			writeSOAPFault(w, UPnPErrNoSuchObject)
 			return
 		}
@@ -610,6 +611,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 			escapeXMLText(didlLite), numberReturned, totalMatches,
 		)
 		body2 := SOAPResponseEnvelope(ContentDirectoryServiceType, "Browse", innerXML)
+		logBrowseResponse(browse, numberReturned, totalMatches, len(body2))
 		w.Header().Set("Content-Type", SOAPContentType)
 		w.Header().Set(SOAPResponseHeader, "")
 		w.WriteHeader(http.StatusOK)
@@ -800,6 +802,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 		if _, ok := folderIndex.LookupTrack(browse.ObjectID); ok {
 			break
 		}
+		logBrowseFault(browse, UPnPErrNoSuchObject)
 		writeSOAPFault(w, UPnPErrNoSuchObject)
 		return
 	}
@@ -1053,6 +1056,22 @@ func logBrowseResponse(b browseAction, numberReturned, totalMatches, responseByt
 		slog.Int("numberReturned", numberReturned),
 		slog.Int("totalMatches", totalMatches),
 		slog.Int("responseBytes", responseBytes),
+	)
+}
+
+// logBrowseFault closes the request/response pairing for the SOAP-fault exits.
+//
+// `logBrowseRequest` fires unconditionally at dispatch, so every arm that
+// returns without a matching response line leaves an ORPHAN request in the log
+// — and an orphan reads like a hang, which is exactly the failure this
+// instrumentation exists to tell apart from a clean "no such object". Strict
+// controllers (mconnect / Kazoo class) lead every drill-down with
+// BrowseMetadata, so these are the arms most likely to be under a microscope.
+func logBrowseFault(b browseAction, errCode int) {
+	packageLogger.Info("Browse fault",
+		slog.String("objectID", b.ObjectID),
+		slog.String("browseFlag", b.BrowseFlag),
+		slog.Int("upnpErrorCode", errCode),
 	)
 }
 

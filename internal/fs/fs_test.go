@@ -254,6 +254,64 @@ func TestValidateRootsRejectsDuplicateBasename(t *testing.T) {
 	}
 }
 
+// TestValidateRootsFoldsCase pins the collision check as case-INSENSITIVE.
+//
+// Byte-exact comparison accepted /srv/Music and /srv/music as two roots.
+// That is wrong on its own terms — the filesystem is case-insensitive on
+// macOS and Windows, so they are the same directory there and one root
+// becomes unreachable — but the sharp consequence was downstream: track
+// paths are keyed by basename, and the removal path matched them
+// case-insensitively, so removing one root deleted the other's rows and
+// unlinked its variant and waveform sidecars from disk.
+//
+// Those predicates are case-exact now. Refusing the configuration as well
+// is deliberate defence in depth: it keeps the collision from being
+// expressible at all, rather than relying on every present and future
+// consumer of a basename to keep getting it right.
+func TestValidateRootsFoldsCase(t *testing.T) {
+	for _, c := range [][2]string{
+		{"/srv/Music", "/srv/music"},
+		{"/a/MUSIC", "/b/music"},
+		{"/a/MÚSICA", "/b/música"}, // Unicode-aware, not just ASCII
+	} {
+		err := ValidateRoots([]string{c[0], c[1]})
+		if err == nil {
+			t.Errorf("ValidateRoots(%q, %q) = nil — basenames differing only by case must collide", c[0], c[1])
+			continue
+		}
+		if !strings.Contains(err.Error(), c[0]) || !strings.Contains(err.Error(), c[1]) {
+			t.Errorf("error should name both roots so the operator can act on it: %v", err)
+		}
+	}
+	// Genuinely distinct basenames still pass.
+	if err := ValidateRoots([]string{"/a/Music", "/b/Musique"}); err != nil {
+		t.Errorf("distinct basenames should not collide: %v", err)
+	}
+}
+
+// TestFoldRootBasenameIsSharedAcrossGuards pins the helper ValidateRoots
+// and the admin/CLI remove-root guards all key off. Those three agreeing
+// is the invariant: ValidateRoots decides which configurations are
+// expressible, the remove guards decide which removals are unambiguous,
+// and a divergence yields a config that validates but whose removal can't
+// tell the two roots apart.
+func TestFoldRootBasenameIsSharedAcrossGuards(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/srv/Music", "music"},
+		{"/srv/music", "music"},
+		{"/srv/MUSIC", "music"},
+		{"/a/b/Audiobooks", "audiobooks"},
+	}
+	for _, c := range cases {
+		if got := FoldRootBasename(c.in); got != c.want {
+			t.Errorf("FoldRootBasename(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if FoldRootBasename("/srv/Music") != FoldRootBasename("/other/music") {
+		t.Error("case-twin basenames must fold to the same key")
+	}
+}
+
 func TestValidateRootsSingleRootIsOK(t *testing.T) {
 	if err := ValidateRoots([]string{"/a/Music"}); err != nil {
 		t.Errorf("single root should not error: %v", err)

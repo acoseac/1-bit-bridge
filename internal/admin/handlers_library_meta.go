@@ -232,9 +232,24 @@ func (c *libMetaCache[T]) invalidateUnder(prefix string) {
 // leak.)
 func (c *libMetaCache[T]) serve(w http.ResponseWriter, r *http.Request,
 	key, errCode string, compute func(context.Context) (T, error)) {
-	if resp, ok := c.get(key); ok {
-		writeJSON(w, http.StatusOK, resp)
+	resp, err := c.fetch(r, key, compute)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, errCode, err.Error())
 		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// fetch is serve's value-returning half: same TTL + singleflight +
+// re-check-inside-the-flight discipline, but it hands the response back
+// instead of writing it. Callers that need to post-process a cached
+// snapshot before responding (filtering it by a query parameter that
+// must NOT become part of the cache key, or the expensive walk would run
+// once per parameter value) use this directly.
+func (c *libMetaCache[T]) fetch(r *http.Request, key string,
+	compute func(context.Context) (T, error)) (T, error) {
+	if resp, ok := c.get(key); ok {
+		return resp, nil
 	}
 	v, err, _ := c.sf.Do(key, func() (any, error) {
 		// Re-check inside the flight: a caller that missed above can be
@@ -257,10 +272,10 @@ func (c *libMetaCache[T]) serve(w http.ResponseWriter, r *http.Request,
 		return resp, nil
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, errCode, err.Error())
-		return
+		var zero T
+		return zero, err
 	}
-	writeJSON(w, http.StatusOK, v.(T))
+	return v.(T), nil
 }
 
 // pathOverlaps reports whether two normalised browse paths cover
@@ -290,6 +305,9 @@ func pathOverlaps(a, b string) bool {
 func (s *Server) libMetaInvalidateUnder(prefix string) {
 	s.libMetaRefs.invalidateUnder(prefix)
 	s.libMetaDetail.invalidateUnder(prefix)
+	// The misses snapshot reads the same three MBID fields a retry is
+	// about to re-populate, so it goes stale on exactly the same events.
+	s.libMetaMisses.invalidateUnder(prefix)
 }
 
 // apiLibraryEnrichmentRefs handles GET /api/library/enrichment?path=.

@@ -126,3 +126,49 @@ func TestExtractClientIPEmptyXRealIPFallsThroughToXFF(t *testing.T) {
 		t.Errorf("empty X-Real-IP should fall through to XFF; got %q", got)
 	}
 }
+
+// The returned IP is CANONICAL, not the caller's spelling.
+//
+// `192.0.2.1` and `::ffff:192.0.2.1` are the same host but were
+// distinct strings, so they keyed distinct rate-limit buckets — varying
+// the spelling handed a caller a fresh bucket and diluted the limiter.
+// Canonicalising collapses them, and makes "this only ever returns a
+// bare IP literal" structural rather than a property you re-derive from
+// the validation at each return.
+func TestExtractClientIP_CanonicalisesEquivalentSpellings(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"v4-mapped v6 collapses to v4", "::ffff:192.0.2.1", "192.0.2.1"},
+		{"plain v4 unchanged", "192.0.2.1", "192.0.2.1"},
+		{"v6 lowercased and compressed", "2001:0DB8:0000:0000:0000:0000:0000:0001", "2001:db8::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReq("10.0.0.1:1234", map[string]string{"X-Real-IP": tc.header})
+			if got := ExtractClientIP(r, true); got != tc.want {
+				t.Fatalf("ExtractClientIP = %q, want %q — equivalent spellings must "+
+					"collapse to one rate-limit bucket key", got, tc.want)
+			}
+		})
+	}
+}
+
+// Repeated X-Forwarded-For header LINES must all be considered, not
+// just the first. Go stores them as separate slice entries and
+// Header.Get returns only index 0, so a proxy that appends a line
+// (HAProxy's `option forwardfor`) rather than comma-appending would
+// leave the rightmost-valid walk seeing nothing but the
+// client-supplied line.
+func TestExtractClientIP_ConsidersRepeatedForwardedForLines(t *testing.T) {
+	r := newReq("10.0.0.1:1234", nil)
+	r.Header.Add("X-Forwarded-For", "203.0.113.9")  // attacker-supplied
+	r.Header.Add("X-Forwarded-For", "198.51.100.7") // appended by the trusted proxy
+
+	if got := ExtractClientIP(r, true); got != "198.51.100.7" {
+		t.Fatalf("ExtractClientIP = %q, want the proxy-appended 198.51.100.7 — "+
+			"only the first header line was examined", got)
+	}
+}

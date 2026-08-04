@@ -172,7 +172,7 @@ func TestArtworkGCRequiresTypedPhrase(t *testing.T) {
 	// one. DataDir points at the test temp dir so the (unused) DB
 	// open path resolves to a known location.
 	cfgPath := filepath.Join(dir, "bridge.yaml")
-	if err := os.WriteFile(cfgPath, []byte("dataDir: \""+dir+"\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("dataDir: "+yamlStr(dir)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

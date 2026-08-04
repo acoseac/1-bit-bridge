@@ -158,6 +158,38 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 
 **Host audio toolchain (upscale + analysis):** because this host runs the audio-analysis feature (and can run upscale/optimize), it needs the audio toolchain installed via apt: `sudo apt install sox libsox-fmt-all ffmpeg`. `sox` drives the offline upscale/optimize pipeline and is the primary analysis decoder; **`libsox-fmt-all` supplies FLAC** — Debian/Ubuntu split it into a separate plugin package and the bridge forces `-t flac`, so plain `sox` alone fails the `internal/doctor` FLAC check; `ffmpeg`/`ffprobe` are the analysis fallback decoder for AAC/m4a that sox can't open. Without these, `analysis.enabled` / `upscale.enabled` silently degrade to off at `bridge serve` startup (the LookPath probe logs a `disabling` line). This is a systemd/apt-host prerequisite only — the Docker image bundles the same toolchain by default (see [`docs/docker.md`](docker.md)).
 
+**Host fingerprint toolchain (acoustic fingerprinting):** the fallback shells out to
+`fpcalc` (Chromaprint), which is a *separate* dependency from sox — it links its own
+FFmpeg and is unaffected by the `libsox-fmt-all` split above. Install per OS:
+
+| OS | Command |
+|---|---|
+| Debian/Ubuntu | `sudo apt install libchromaprint-tools` |
+| macOS | `brew install chromaprint` |
+| Windows | `winget install AcoustID.Chromaprint` |
+| Alpine / Docker | bundled in the image (`apk add chromaprint`) |
+
+Two traps. **The Debian binary lives in `-tools`, not `libchromaprint1`** — the same
+split-package shape as `sox` / `libsox-fmt-all`, and installing the library alone
+leaves `fpcalc` absent. **On Windows, winget edits the machine PATH but an existing
+shell keeps the old one**, so a fresh SSH session sees no `fpcalc` until it
+reconnects; `$env:LOCALAPPDATA\Microsoft\WinGet\Links` is where it lands.
+
+Fingerprinting also needs a free AcoustID application key
+(https://acoustid.org/new-application), set as `ACOUSTID_API_KEY` or
+`fingerprint.apiKey`. With the feature enabled but either prerequisite missing the
+bridge boots normally and disables it with one stderr line — `bridge doctor`'s
+`fingerprint-toolchain` check is the durable place to see why.
+
+**Cost note for `bridge.ars.md` specifically.** Its library is an rclone/B2 FUSE
+mount, and fingerprinting decodes the first 120s of each candidate. rclone's default
+`--vfs-read-chunk-size` (128 MiB) exceeds every music file, so the first read pulls
+the **whole object** — `fingerprint.lengthSeconds` is a CPU lever, not an egress one.
+Egress itself is cheap against B2's 3x-stored free allowance; the real cost is cache
+thrash, since streaming a large backlog through the bounded VFS cache evicts whatever
+is actually being listened to. Hence `fingerprint.maxPerRun` (default 500) and
+`workers: 1`. Measure a sample with `rclone rc vfs/stats` before enabling it there.
+
 **Helper scripts**: none on the host today — operator runs setup commands directly during install. Update flow uses the cross-compile + `scp .new` + two-step rename + `systemctl restart` pattern from "Step 2 — Windows production bridge" below, adapted for Linux (see canonical deploy procedure below).
 
 **Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR). The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deploy-bridge-vps.sh) (cross-compile → SHA-gated upload → two-step swap → `setcap` → restart → verify); the manual steps below are what it runs:

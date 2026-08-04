@@ -60,10 +60,14 @@ func TestValidateVariantsDirRejectsUnderLibraryRoot(t *testing.T) {
 		variantsDir string
 		roots       []string
 	}{
-		{"direct child", "/lib/transcoded", []string{"/lib"}},
-		{"deep child", "/lib/Music/transcoded", []string{"/lib"}},
-		{"equal to root", "/lib", []string{"/lib"}},
-		{"second root", "/libB/transcoded", []string{"/libA", "/libB"}},
+		// absTestPath, not "/lib": these must be absolute on the HOST.
+		// On Windows "/lib" has no volume, so validateVariantsDir
+		// (correctly) rejected it at the absolute-path check and never
+		// reached the under-a-root check this test is about.
+		{"direct child", absTestPath("lib", "transcoded"), []string{absTestPath("lib")}},
+		{"deep child", absTestPath("lib", "Music", "transcoded"), []string{absTestPath("lib")}},
+		{"equal to root", absTestPath("lib"), []string{absTestPath("lib")}},
+		{"second root", absTestPath("libB", "transcoded"), []string{absTestPath("libA"), absTestPath("libB")}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -82,7 +86,7 @@ func TestValidateVariantsDirRejectsUnderLibraryRoot(t *testing.T) {
 // outside every library root is valid even if it shares a parent
 // directory with one (e.g. /data/lib + /data/variants).
 func TestValidateVariantsDirAcceptsSiblingPath(t *testing.T) {
-	if err := validateVariantsDir("/data/variants", []string{"/data/lib"}); err != nil {
+	if err := validateVariantsDir(absTestPath("data", "variants"), []string{absTestPath("data", "lib")}); err != nil {
 		t.Errorf("sibling path should be valid: %v", err)
 	}
 }
@@ -91,7 +95,8 @@ func TestValidateVariantsDirAcceptsSiblingPath(t *testing.T) {
 // strips trailing slashes deterministically; the check works on
 // both shapes.
 func TestValidateVariantsDirHandlesTrailingSlashes(t *testing.T) {
-	if err := validateVariantsDir("/lib/transcoded/", []string{"/lib/"}); err == nil {
+	sep := string(filepath.Separator)
+	if err := validateVariantsDir(absTestPath("lib", "transcoded")+sep, []string{absTestPath("lib") + sep}); err == nil {
 		t.Errorf("trailing-slash variant of 'under library root' should still reject")
 	}
 }

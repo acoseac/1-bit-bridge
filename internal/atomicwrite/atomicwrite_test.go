@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,12 @@ func TestWriteBytes_createsParentDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parent dir not created: %v", err)
 	}
-	if parentInfo.Mode().Perm() != 0o700 {
+	// POSIX permission bits are ADVISORY on Windows — the Go runtime
+	// synthesises 0777/0666 from the read-only attribute and real
+	// protection comes from NTFS ACLs on the per-user %LOCALAPPDATA%
+	// profile (CLAUDE.md, PR #63). Asserting the numeric mode there
+	// measures the platform, not the writer.
+	if runtime.GOOS != "windows" && parentInfo.Mode().Perm() != 0o700 {
 		t.Errorf("parent dir mode: got %o, want 0o700", parentInfo.Mode().Perm())
 	}
 }
