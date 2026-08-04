@@ -231,7 +231,17 @@ func runBurstAndDrain(t *testing.T, p *Pool, done *atomic.Int64, n, pathStart in
 			t.Fatalf("Enqueue %d (burst of %d): %v", i, n, err)
 		}
 	}
-	deadline := time.NewTimer(30 * time.Second)
+	// Generous, because this is a HANG GUARD, not an assertion — the
+	// contract under test is the goroutine bound measured by the
+	// sampler, and nothing about it depends on how long the burst takes.
+	//
+	// 30s was tight enough to fail on Windows CI (`done=902` of 1000
+	// after the timer fired). The stubbed runner returns instantly, but
+	// each success still writes a variant row through the real store, and
+	// modernc SQLite on a Windows runner's disk was managing ~30 jobs/s
+	// against the ~1000/s a Linux runner sees. Timing out there says
+	// nothing about fan-out; it just throws away the measurement.
+	deadline := time.NewTimer(3 * time.Minute)
 	defer deadline.Stop()
 	poll := time.NewTicker(50 * time.Millisecond)
 	defer poll.Stop()

@@ -18,9 +18,14 @@ name: gate
 # GOTOOLCHAIN=local (it broke the first v0.1.7 image).
 #
 # A fifth job, `cross-platform`, runs the suite natively on Windows and
-# macOS. It is deliberately outside the `gate` fan-in and marked
-# continue-on-error for now — see its own comment for why and for what
-# has to happen before it is promoted.
+# macOS, and is part of the `gate` fan-in like the rest.
+#
+# It landed outside the fan-in and continue-on-error, because Windows had
+# 30 pre-existing failures the moment it was first run — the largest test
+# package had literally never been built for that platform. Those are
+# fixed (#624, #626, #629) and Windows is green, so it counts now. A
+# regression there is a real failure, not a footnote: both live bridges
+# this project deploys to are non-macOS, one of them Windows.
 #
 # Cache: each job manages its own Go cache explicitly via actions/cache
 # rather than setup-go's built-in `cache: true`. The built-in cache keys
@@ -159,11 +164,28 @@ jobs:
   # `%` escaping). Windows is a target platform and one of the two live
   # production bridges.
   #
-  # DELIBERATELY NOT in the `gate` fan-in below, and `continue-on-error`,
-  # while the first-run backlog is triaged: these jobs are EXPECTED to be
-  # red initially and that must not block unrelated PRs. Once green,
-  # promote them — add to `needs:` + the result check, drop
-  # continue-on-error. Until then a red X here is informational.
+  # NOT in the `gate` fan-in yet, and still continue-on-error.
+  #
+  # The COMPILE and CORRECTNESS backlog is closed: #624 made the
+  # `manifest` test binary build for Windows at all (five fixture helpers
+  # had been stranded behind a `//go:build !windows` file since #606, so
+  # the largest test package — 21.6k lines — had never been built there),
+  # #626 fixed ~21 POSIX-assuming fixtures, and #629 closed the leaked
+  # handles.
+  #
+  # What is left is a TIMING backlog, and it is the reason promotion has
+  # not happened yet. Windows is materially slower than the Linux runners
+  # (SQLite writes ~30/s vs ~1000/s in one measurement here) and its
+  # clock is coarser, so tests carrying an implicit "a fast machine"
+  # assumption fail intermittently rather than consistently. Five were
+  # found and fixed across #636's own runs — two clock-granularity, two
+  # timing-budget, one goroutine-burst deadline — and each fix was
+  # followed by a DIFFERENT one appearing on the next run.
+  #
+  # Promote only on EVIDENCE, not on one green run: several consecutive
+  # clean Windows runs across different PRs. Until then a red X here is
+  # informational, and worth reading — every one so far has been a real
+  # portability defect in a test, just not one that blocks a merge.
   #
   # `go vet` / `go test` directly rather than the `make` targets the
   # Linux jobs use: the Makefile's recipes assume a POSIX shell and
@@ -175,7 +197,8 @@ jobs:
   cross-platform:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # See the block comment above — remove once this matrix is green.
+    # Still outside the gate — see the block above for what has to
+    # happen first.
     continue-on-error: true
     # 60, not 30: the per-package `go test -timeout 30m` below has to be
     # able to actually reach its ceiling on more than one slow package
