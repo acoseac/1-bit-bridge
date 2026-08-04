@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -138,6 +139,16 @@ func TestPIDAlive_SelfAndReaped(t *testing.T) {
 	}
 	if pidAlive(0) || pidAlive(-1) {
 		t.Error("pidAlive must reject non-positive pids rather than asking the OS about them")
+	}
+
+	// Out of range for a pid on any supported platform. This matters most
+	// on Windows, where the pid is cast to a DWORD: 4294967297 truncates
+	// to 1, a pid that very much exists, so an unbounded cast turns a
+	// corrupt pidfile into "alive". readPID parses with strconv.Atoi into
+	// an int, so a 64-bit host really can carry this value here.
+	if pidAlive(math.MaxUint32 + 1) {
+		t.Errorf("pidAlive(%d) = true; a pid past the platform's range must not be truncated into a live one",
+			uint64(math.MaxUint32)+1)
 	}
 
 	// The EPERM-means-alive branch, which is the one the whole fix leans

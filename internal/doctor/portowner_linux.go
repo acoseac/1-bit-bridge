@@ -40,21 +40,24 @@ func portOwnedByThisUser(port int) (bool, error) {
 	var firstErr error
 	readAny := false
 	for _, path := range procNetTCPFiles {
-		f, err := os.Open(path)
+		// Wrapped in a closure so the Close is deferred: this runs in a
+		// loop, so a plain `defer` would hold every descriptor until the
+		// function returns, and a bare post-call Close is skipped on a
+		// panic.
+		uids, err := func() ([]int, error) {
+			f, err := os.Open(path)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = f.Close() }()
+			return scanListenerUIDs(f, port)
+		}()
 		if err != nil {
 			// A kernel built without IPv6 has no /proc/net/tcp6. That is
 			// not a failure — the other family may still answer — so the
 			// error is kept only in case NEITHER file could be read.
 			if firstErr == nil {
 				firstErr = err
-			}
-			continue
-		}
-		uids, scanErr := scanListenerUIDs(f, port)
-		_ = f.Close()
-		if scanErr != nil {
-			if firstErr == nil {
-				firstErr = scanErr
 			}
 			continue
 		}

@@ -5,6 +5,7 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"math"
 	"syscall"
 	"unsafe"
 
@@ -74,7 +75,12 @@ var portProbeAvailable = func() bool { return true }
 // alive costs a hint, while erring towards dead cries wolf about a
 // healthy install.
 func pidAlive(pid int) bool {
-	if pid <= 0 {
+	// Windows PIDs are a DWORD, so anything past uint32 is not a pid at
+	// all — and the cast below would SILENTLY TRUNCATE it into one that
+	// may well exist (4294967297 wraps to 1). readPID parses with
+	// strconv.Atoi into an int, so on a 64-bit host a corrupt or
+	// hand-edited pidfile reaches here with exactly that value.
+	if pid <= 0 || pid > math.MaxUint32 {
 		return false
 	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))

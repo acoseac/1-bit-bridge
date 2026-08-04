@@ -4,6 +4,7 @@ package doctor
 
 import (
 	"errors"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,17 +101,48 @@ func isAddrInUse(err error) bool {
 // The Windows twin has the opposite shape and its own trap — see
 // doctor_windows.go.
 func pidAlive(pid int) bool {
-	if pid <= 0 {
+	// pid_t is int32, and an out-of-range value TRUNCATES into it — which
+	// is not merely wrong here, it is dangerous. 4294967296 truncates to
+	// 0, and kill(0, 0) does not mean "pid 0": it signals EVERY process in
+	// the caller's process group, succeeds, and reports the bogus pid as
+	// ALIVE. (Observed on darwin while pinning the Windows twin of this
+	// bound; a review had flagged only the Windows cast.) readPID parses
+	// with strconv.Atoi into an int, so a corrupt or hand-edited pidfile
+	// reaches here with exactly such a value on any 64-bit host.
+	if pid <= 0 || pid > math.MaxInt32 {
 		return false
 	}
 	p, err := os.FindProcess(pid)
-	if err != nil {
+	// Unreachable today: every branch of os/exec_unix.go's findProcess
+	// returns a nil error, including the already-reaped case (which comes
+	// back as a "done" Process, so the verdict falls out of Signal below).
+	// Kept anyway because the DOCUMENTED contract is "a Process or an
+	// error", and the failure mode of trusting it is a nil dereference
+	// inside a liveness probe. A review suggested `p, _ :=` — that is the
+	// version with the nil-deref.
+	if err != nil || p == nil {
 		return false
 	}
-	if err := p.Signal(syscall.Signal(0)); err != nil {
-		return errors.Is(err, syscall.EPERM)
+	return signal0Alive(p.Signal(syscall.Signal(0)))
+}
+
+// signal0Alive classifies the result of a signal-0 liveness probe.
+//
+// Split out from pidAlive so the classification can be tested directly.
+// Asserting it through pidAlive(1) instead would be permission-dependent:
+// unprivileged, signal 0 to init returns EPERM and exercises this branch,
+// but AS ROOT the signal simply succeeds — so on a root CI runner (the
+// common container case) that test passes without ever reaching the EPERM
+// path it exists to pin.
+//
+// EPERM means ALIVE: the process exists, we merely aren't allowed to
+// signal it. Everything else — ESRCH for a dead pid, os.ErrProcessDone
+// for a reaped child — means dead.
+func signal0Alive(err error) bool {
+	if err == nil {
+		return true
 	}
-	return true
+	return errors.Is(err, syscall.EPERM)
 }
 
 // portProbeAvailable reports whether isPIDListeningOnPort can identify the
