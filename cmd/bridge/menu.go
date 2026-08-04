@@ -92,11 +92,17 @@ var adminRunningProbe = probeAdminRunning
 // Deliberately a bare TCP connect, not an HTTP request: the question is
 // "is a process holding this socket", and a bridge that is up but slow to
 // answer (mid-scan, cold page cache) must not read as stopped.
+// Note it probes cfg.AdminAddress — where the console actually LISTENS —
+// which is not always the URL actOpenAdmin displays: in public mode
+// operatorAdminURL renders the autocert domain or the reverse-proxy
+// origin. That divergence is fine and deliberate. The question here is
+// "is the bridge up", and the local bind answers it in every posture,
+// whereas dialling the public URL would fold in DNS, TLS and the proxy.
 func probeAdminRunning(cfgPath string) bool {
+	// adminAddrFromCfg always yields a non-empty address (it falls back to
+	// config.DefaultAdminAddress on every failure path), so there is no
+	// empty case to guard.
 	addr := adminAddrFromCfg(cfgPath)
-	if addr == "" {
-		return false
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), menuProbeTimeout)
 	defer cancel()
 	var d net.Dialer
@@ -570,11 +576,9 @@ func actStart(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, s me
 		fmt.Fprintf(stderr, "  start failed: %v\n", err)
 		return -1
 	}
+	// Non-empty by construction — adminAddrFromCfg falls back to
+	// config.DefaultAdminAddress on every failure path.
 	addr := adminAddrFromCfg(s.cfgPath)
-	if addr == "" {
-		fmt.Fprintln(stdout, "  service started.")
-		return -1
-	}
 	if waitForListen(addr, 5*time.Second) {
 		fmt.Fprintln(stdout, "  service started.")
 	} else {
