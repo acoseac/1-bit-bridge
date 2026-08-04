@@ -31,7 +31,7 @@ const streamInfoMD5Offset = 8 + 18
 
 func TestFLACMD5RoundTripVerifies16Bit(t *testing.T) {
 	path := synthFLAC(t, 16, 2)
-	got := verifyFLACAudioMD5(context.Background(), path, decoderSox)
+	got, _ := verifyFLACAudioMD5(context.Background(), path, decoderSox)
 	if got != AudioMD5Verified {
 		t.Fatalf("state = %q, want %q (sox native-depth decode must hash to STREAMINFO's MD5)",
 			got, AudioMD5Verified)
@@ -40,7 +40,7 @@ func TestFLACMD5RoundTripVerifies16Bit(t *testing.T) {
 
 func TestFLACMD5RoundTripVerifies24Bit(t *testing.T) {
 	path := synthFLAC(t, 24, 2)
-	got := verifyFLACAudioMD5(context.Background(), path, decoderSox)
+	got, _ := verifyFLACAudioMD5(context.Background(), path, decoderSox)
 	if got != AudioMD5Verified {
 		t.Fatalf("24-bit state = %q, want %q", got, AudioMD5Verified)
 	}
@@ -54,7 +54,7 @@ func TestFLACMD5FFmpegDecoderParity(t *testing.T) {
 	if !ffmpegToolsAvailable() {
 		t.Skip("ffmpeg not installed; skipping decoder-parity check")
 	}
-	got := verifyFLACAudioMD5(context.Background(), path, decoderFFmpeg)
+	got, _ := verifyFLACAudioMD5(context.Background(), path, decoderFFmpeg)
 	if got != AudioMD5Verified {
 		t.Fatalf("ffmpeg-path state = %q, want %q", got, AudioMD5Verified)
 	}
@@ -73,7 +73,7 @@ func TestFLACMD5CorruptedStoredChecksumReadsMismatch(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := verifyFLACAudioMD5(context.Background(), path, decoderSox)
+	got, _ := verifyFLACAudioMD5(context.Background(), path, decoderSox)
 	if got != AudioMD5Mismatch {
 		t.Fatalf("state = %q, want %q", got, AudioMD5Mismatch)
 	}
@@ -94,8 +94,16 @@ func TestFLACMD5ZeroSentinelReadsAbsent(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := verifyFLACAudioMD5(context.Background(), path, decoderSox); got != "" {
+	got, retryable := verifyFLACAudioMD5(context.Background(), path, decoderSox)
+	if got != "" {
 		t.Fatalf("state = %q, want \"\" (zeroed checksum is unset, not wrong)", got)
+	}
+	// And PERMANENTLY unverifiable: a file with no stored checksum has
+	// nothing to learn by asking again. Classifying it retryable would
+	// spend the whole attempt budget — three full re-analyses — to
+	// arrive back here.
+	if retryable {
+		t.Error("a zeroed checksum must classify as permanent, not retryable")
 	}
 }
 
@@ -111,7 +119,14 @@ func TestFLACMD5TruncatedFileReadsAbsentNotMismatch(t *testing.T) {
 	if err := os.WriteFile(path, raw[:len(raw)/2], 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := verifyFLACAudioMD5(context.Background(), path, decoderSox); got == AudioMD5Mismatch {
+	// `retryable` is deliberately not asserted here. Truncation reaches
+	// the empty verdict by two different routes depending on the
+	// decoder build — a clean exit with too few bytes (permanent) or a
+	// non-zero exit (retryable, by the asymmetry argued in
+	// verifyFLACAudioMD5's docblock) — and pinning one of them would
+	// make this test a sox-version detector. The invariant that matters
+	// either way is the one below: never "mismatch".
+	if got, _ := verifyFLACAudioMD5(context.Background(), path, decoderSox); got == AudioMD5Mismatch {
 		t.Fatal("a truncated decode must never report mismatch")
 	}
 }
