@@ -177,7 +177,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     # See the block comment above — remove once this matrix is green.
     continue-on-error: true
-    timeout-minutes: 30
+    # 60, not 30: the per-package `go test -timeout 30m` below has to be
+    # able to actually reach its ceiling on more than one slow package
+    # without the job being killed out from under it first. A job killed
+    # at the wall clock loses the log tail, which is the part worth
+    # reading.
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -261,8 +266,22 @@ jobs:
       # liveness, and it cannot run from a non-Windows host.
       - name: vet
         run: go vet ./...
+      # -timeout 30m, matching the Makefile's `test` target rather than
+      # taking Go's 10m/package default. The Makefile already documents
+      # why 10m is too short even on Linux (internal/adminauth pays real
+      # bcrypt cost-12 per simulated login across its rate-limit tests);
+      # Windows is slower still, and the first full run had
+      # internal/admin and internal/manifest both stop dead at 600.0s —
+      # the default ceiling, not a hang. Those two showed up as ordinary
+      # failures, which is the misleading part: a package timeout is
+      # reported like a test failure, so it inflates the triage list with
+      # entries that were never really broken.
+      #
+      # `go test` applies the timeout PER package binary, so the job-level
+      # timeout-minutes above has to leave room for several slow packages
+      # in sequence — hence 60 there against 30 here.
       - name: test
-        run: go test ./...
+        run: go test -timeout 30m ./...
 
   # Single green signal that fans in the parallel jobs. `if: always()` + the
   # explicit result check means a failed (or cancelled) dependency fails the
