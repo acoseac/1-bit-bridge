@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -487,8 +488,19 @@ func TestRootsRemoveSaveFailureRollsBackInMemory(t *testing.T) {
 	rootsBefore := append([]string(nil), srv.deps.CfgHolder.Load().LibraryRoots...)
 
 	// Make the config directory read-only so Cfg.Save's atomic-
-	// write-then-rename pattern can't land the new file. Reverted in
-	// cleanup so t.TempDir's teardown can still run.
+	// write-then-rename pattern can't land the new file.
+	//
+	// This injection is POSIX-only: a directory's mode bits do not gate
+	// creation on Windows — that is an NTFS ACL's job — so os.Chmod(dir,
+	// 0o500) leaves the Save perfectly able to succeed and the test then
+	// fails asserting a rollback that correctly never happened. Skipped
+	// rather than reworked: the rollback logic under test is
+	// platform-independent, and reproducing "Save fails" on Windows would
+	// need an ACL manipulation that tests nothing extra about it.
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only-directory injection has no effect on Windows (ACLs, not mode bits)")
+	}
+	// Reverted in cleanup so t.TempDir's teardown can still run.
 	dir := filepath.Dir(cfgPath)
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
@@ -541,6 +553,17 @@ func TestRootsAddSaveFailureRollsBackInMemory(t *testing.T) {
 
 	// Make the config directory read-only so Cfg.Save's atomic-
 	// write-then-rename pattern can't land the new file.
+	//
+	// This injection is POSIX-only: a directory's mode bits do not gate
+	// creation on Windows — that is an NTFS ACL's job — so os.Chmod(dir,
+	// 0o500) leaves the Save perfectly able to succeed and the test then
+	// fails asserting a rollback that correctly never happened. Skipped
+	// rather than reworked: the rollback logic under test is
+	// platform-independent, and reproducing "Save fails" on Windows would
+	// need an ACL manipulation that tests nothing extra about it.
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only-directory injection has no effect on Windows (ACLs, not mode bits)")
+	}
 	dir := filepath.Dir(cfgPath)
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
