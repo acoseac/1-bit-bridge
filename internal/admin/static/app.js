@@ -120,9 +120,12 @@ function initDashboard() {
       enrichMissesSection.hidden = !opening;
       enrichMissesBtn.setAttribute("aria-expanded", String(opening));
       enrichMissesBtn.textContent = opening ? "Hide tracks" : "Which tracks?";
+      // Only mark it loaded if it actually loaded. Setting the flag
+      // before the await left a failed fetch permanently "loaded", so
+      // closing and reopening never retried and the error message was
+      // terminal until a page reload.
       if (opening && !enrichMissesLoaded) {
-        enrichMissesLoaded = true;
-        await loadEnrichMisses();
+        enrichMissesLoaded = await loadEnrichMisses();
       }
     });
   }
@@ -149,8 +152,7 @@ function initDashboard() {
         // reopen re-fetches rather than showing the pre-retry answer.
         enrichMissesLoaded = false;
         if (enrichMissesSection && !enrichMissesSection.hidden) {
-          enrichMissesLoaded = true;
-          await loadEnrichMisses();
+          enrichMissesLoaded = await loadEnrichMisses();
         }
       } catch (err) {
         enrichRetryBtn.textContent = idleText;
@@ -526,21 +528,28 @@ const ENRICH_SKIP_REASON_LABELS = {
 // (the AtlasMetaBreakdownCounts cost class), which is why the endpoint
 // caches behind a TTL + singleflight and why this must never be attached
 // to a poll or an SSE tick.
+//
+// Returns whether the panel now holds real data. The caller uses that to
+// decide whether it may skip the fetch next time — a failed load must
+// stay retryable, or the operator is stuck looking at an error message
+// with no way back short of reloading the page.
 async function loadEnrichMisses() {
   const section = document.getElementById("enrich-misses");
   const status = document.getElementById("enrich-misses-status");
   const body = document.getElementById("enrich-misses-body");
-  if (!section || !status || !body) return;
+  if (!section || !status || !body) return false;
   status.textContent = "Looking…";
   body.replaceChildren();
   try {
     const data = await API.get("/api/enrichment/misses");
     renderEnrichMisses(data);
+    return true;
   } catch (err) {
     // Say what failed. The pre-existing pattern on this page swallowed
     // errors into a silent no-op, which is indistinguishable from "you
     // have no misses" — the one answer this panel must never fake.
     status.textContent = `Couldn't load the breakdown: ${err.message}`;
+    return false;
   }
 }
 

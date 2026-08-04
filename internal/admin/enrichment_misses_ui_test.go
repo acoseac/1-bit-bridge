@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -87,18 +88,83 @@ func TestEnrichMissesFacetLabelsCoverThePredicate(t *testing.T) {
 	}
 }
 
-// jsObjectLiteral returns the text between `const <name> = {` and its
-// closing brace. Good enough for a flat literal of string values, which
-// is all these maps are.
+// jsObjectLiteral returns the body of `const <name> = { … }`.
+//
+// Whitespace-tolerant on the declaration and brace-counted to the close,
+// rather than scanning for a literal `const X = {` and the next `};`.
+// The strict form failed on reformatting — an extra space, or the
+// declaration wrapped across lines — and while that surfaced as a loud
+// t.Fatalf rather than a silent pass, a guard test that breaks on
+// unrelated formatting gets deleted rather than fixed.
 func jsObjectLiteral(js, name string) (string, bool) {
-	start := strings.Index(js, "const "+name+" = {")
-	if start < 0 {
+	decl := regexp.MustCompile(`(?s)\bconst\s+` + regexp.QuoteMeta(name) + `\s*=\s*\{`)
+	loc := decl.FindStringIndex(js)
+	if loc == nil {
 		return "", false
 	}
-	rest := js[start:]
-	end := strings.Index(rest, "};")
-	if end < 0 {
-		return "", false
+	// Count from the opening brace the declaration ended on. These maps
+	// hold flat string values with no braces of their own; a nested
+	// object would still be balanced, and a brace inside a string
+	// literal would not be — which is why the doc above says what shape
+	// this expects.
+	depth := 0
+	for i := loc[1] - 1; i < len(js); i++ {
+		switch js[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return js[loc[1]:i], true
+			}
+		}
 	}
-	return rest[:end], true
+	return "", false
+}
+
+// TestJSObjectLiteralToleratesFormatting pins the helper against the
+// reformattings that broke its first version, so "whitespace-tolerant"
+// is a tested property rather than a claim in a comment.
+func TestJSObjectLiteralToleratesFormatting(t *testing.T) {
+	tests := []struct {
+		name string
+		js   string
+	}{
+		{"canonical", `const M = {
+  a: "x",
+};`},
+		{"extra spaces around =", `const  M   =   {
+  a: "x",
+};`},
+		{"declaration wrapped across lines", `const M =
+{
+  a: "x",
+};`},
+		{"single line", `const M = { a: "x" };`},
+		{"no trailing semicolon", `const M = { a: "x" }`},
+		{"preceded by a similarly-named const", `const MOTHER = { b: "y" };
+const M = { a: "x" };`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body, ok := jsObjectLiteral(tc.js, "M")
+			if !ok {
+				t.Fatalf("jsObjectLiteral did not find M in:\n%s", tc.js)
+			}
+			if !strings.Contains(body, `a:`) {
+				t.Errorf("body %q does not contain the entry it should", body)
+			}
+			if strings.Contains(body, `b:`) {
+				t.Errorf("body %q leaked an entry from a different literal", body)
+			}
+		})
+	}
+	if _, ok := jsObjectLiteral(`const M = { a: "x" };`, "NOPE"); ok {
+		t.Error("found a literal that isn't there; a false positive here would make the facet test vacuous")
+	}
+	// Unbalanced input must report not-found rather than running to the
+	// end of the file and returning everything after the declaration.
+	if _, ok := jsObjectLiteral(`const M = { a: "x"`, "M"); ok {
+		t.Error("an unterminated literal must not be reported as found")
+	}
 }
