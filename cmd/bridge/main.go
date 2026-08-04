@@ -1801,6 +1801,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 	}()
 
+	// Record our PID so `bridge doctor` can attribute the bound port to
+	// this process rather than reporting a conflict against the
+	// operator's own running bridge. doctor has read this file since it
+	// was written; nothing ever wrote it, so the attribution branch (and
+	// PR #432's native Windows port->PID probe, which only runs once
+	// there is a PID to attribute to) was unreachable.
+	//
+	// Non-fatal by design: a diagnostic aid failing to write must not
+	// stop the bridge serving.
+	pidPath, pidErr := writeServerPIDFile(cfg.DataDir)
+	if pidErr != nil {
+		fmt.Fprintf(stderr, "pidfile: %v (doctor will not be able to "+
+			"attribute the bound port to this process)\n", pidErr)
+	} else {
+		defer removeServerPIDFile(pidPath)
+	}
+
 	manifestStore, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
 	if err != nil {
 		fmt.Fprintf(stderr, "open manifest store: %v\n", err)
