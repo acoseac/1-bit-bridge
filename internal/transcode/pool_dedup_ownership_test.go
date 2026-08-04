@@ -2,6 +2,8 @@ package transcode
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -47,7 +49,18 @@ func TestDropInflightThenCompletionDoesNotReleaseTheResubmission(t *testing.T) {
 		started  = make(chan int, 8)
 		runCount int
 	)
+	// State-change fires AFTER finishJob (documented ordering: "Fire
+	// AFTER releaseDedup so the published snapshot reflects the final
+	// state"), so it is the exact edge that says "A's release has now
+	// run" — no sleeping, no polling for the absence of a bug.
+	settled := make(chan struct{}, 64)
 	p := NewPool(nil, 2, 8)
+	p.SetOnStateChange(func() {
+		select {
+		case settled <- struct{}{}:
+		default:
+		}
+	})
 	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
 		mu.Lock()
 		runCount++
@@ -100,30 +113,39 @@ func TestDropInflightThenCompletionDoesNotReleaseTheResubmission(t *testing.T) {
 	}
 	idB := awaitStart(t, "B")
 
+	// Drain the enqueue/start transitions so the next signal can only
+	// be A's completion.
+	for draining := true; draining; {
+		select {
+		case <-settled:
+		default:
+			draining = false
+		}
+	}
+
 	// A completes. Its release must be a no-op — the key it was
 	// enqueued under is now B's.
 	releaseRun(idA)
+	select {
+	case <-settled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("A never reached finishJob")
+	}
 
-	// C must be refused for as long as B holds the claim. Poll rather
-	// than sleep-once: A's release happens on its worker goroutine, so
-	// a single immediate check could pass simply by racing ahead of the
-	// bug rather than by the fix working.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := p.Enqueue(dedupSpec(rel)); err != ErrDuplicateInflight {
-			t.Fatalf("a third enqueue was admitted (err=%v) while B is still "+
-				"running: A's completion released B's dedup claim. Two workers "+
-				"now share one SidecarPath()+\".tmp\", which RunSox removes at "+
-				"job start — the later starter unlinks the earlier's output", err)
-		}
-		time.Sleep(10 * time.Millisecond)
+	// A's release has definitively run, so this is a real observation
+	// rather than a race won by chance.
+	if err := p.Enqueue(dedupSpec(rel)); err != ErrDuplicateInflight {
+		t.Fatalf("a third enqueue was admitted (err=%v) while B is still "+
+			"running: A's completion released B's dedup claim. Two workers "+
+			"now share one SidecarPath()+\".tmp\", which RunSox removes at "+
+			"job start — the later starter unlinks the earlier's output", err)
 	}
 
 	// And once B really finishes, the key must free up again —
 	// otherwise the ownership check has simply wedged the slot.
 	releaseRun(idB)
 	freed := false
-	for deadline = time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
 		if err := p.Enqueue(dedupSpec(rel)); err == nil {
 			freed = true
 			break
@@ -174,30 +196,57 @@ func TestReleaseDedupFreesTheClaimItOwns(t *testing.T) {
 // release identifiable. Starting at 1 is load-bearing: a missing map
 // entry reads as the zero value, and a claim of 0 would make every
 // stale release match it.
+//
+// Driven through Enqueue rather than by incrementing claimSeq directly
+// (CodeRabbit on PR #633): poking the counter would assert that a
+// counter counts, not that Enqueue assigns from it. The generations are
+// then read back from the inflight map, which is where releaseDedup
+// actually compares them.
 func TestClaimGenerationsAreMonotonicAndNonZero(t *testing.T) {
-	p := NewPool(nil, 1, 16)
-	defer p.Stop()
+	const n = 8
+	hold := make(chan struct{})
+	p := NewPool(nil, 1, n*2)
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+		}
+		return 0, nil
+	}
+	defer func() { close(hold); p.Stop() }()
 
-	seen := map[uint64]bool{}
+	// Distinct keys so all n claims coexist; the blocking runner keeps
+	// them from being released before they can be read.
+	for i := 0; i < n; i++ {
+		if err := p.Enqueue(dedupSpec(fmt.Sprintf("Artist/Album/%02d.flac", i))); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+
+	p.mu.Lock()
+	claims := make([]uint64, 0, len(p.inflight))
+	for _, gen := range p.inflight {
+		claims = append(claims, gen)
+	}
+	p.mu.Unlock()
+
+	if len(claims) != n {
+		t.Fatalf("inflight holds %d claims, want %d", len(claims), n)
+	}
+	sort.Slice(claims, func(i, j int) bool { return claims[i] < claims[j] })
+
 	var prev uint64
-	for i := 0; i < 8; i++ {
-		p.mu.Lock()
-		p.claimSeq++
-		got := p.claimSeq
-		p.mu.Unlock()
-
+	for _, got := range claims {
 		if got == 0 {
-			t.Fatal("claim generation 0 issued — it collides with the zero " +
-				"value a missing inflight entry reads as, so every stale " +
-				"release would match")
+			t.Fatal("Enqueue assigned claim generation 0 — it collides with " +
+				"the zero value a missing inflight entry reads as, so every " +
+				"stale release would match it")
 		}
 		if got <= prev {
-			t.Fatalf("claim %d did not advance past %d", got, prev)
+			t.Fatalf("claim %d did not advance past %d — generations must be "+
+				"unique and monotonic or a reused one authorises a stale release",
+				got, prev)
 		}
-		if seen[got] {
-			t.Fatalf("claim %d reused", got)
-		}
-		seen[got] = true
 		prev = got
 	}
 }
