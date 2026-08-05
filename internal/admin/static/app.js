@@ -2334,6 +2334,12 @@ function initSettings() {
       // Rich-tier Atlas metadata opt-in (bios/descriptions via the app
       // ferry). Restart-required; same checkbox-coerce pattern.
       atlasEnabled: fd.get("atlasEnabled") === "on",
+      // Acoustic fingerprinting: toggle + set-only key field. A blank key
+      // input means "keep the current key" — drop the field entirely
+      // (undefined → removed by JSON.stringify → server pointer stays
+      // nil) rather than relying on the server's blank-is-noop guard.
+      fingerprintEnabled: fd.get("fingerprintEnabled") === "on",
+      fingerprintApiKey: (fd.get("fingerprintApiKey") || "").trim() || undefined,
       // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
       // dropdown value is one of "cli" / "tsnet" / "disabled".
       // mDNS checkbox is the FormData "on"/null shape — coerce
@@ -2362,6 +2368,14 @@ function initSettings() {
       const caRaw = form.querySelector('[name="enrichCoverArtBaseURL"]');
       if (mbRaw) mbRaw.value = enrichBases.mb;
       if (caRaw) caRaw.value = enrichBases.ca;
+      // A key was just persisted: clear the secret from the DOM and flip
+      // the placeholder to the on-file state so a later unrelated save
+      // can't re-send it and the UI reflects that a key is stored.
+      const fpKey = form.querySelector('[name="fingerprintApiKey"]');
+      if (fpKey && body.fingerprintApiKey) {
+        fpKey.value = "";
+        fpKey.placeholder = "key on file — leave blank to keep it";
+      }
       showMsg(msg, r.restartRequired ? "warn" : "ok",
         r.restartRequired
           ? "Saved. Some fields need a restart to take effect."
@@ -6290,6 +6304,33 @@ function initJobs() {
   wireJobButton("jobs-scan-now", () => API.post("/api/scan"), "Scan started");
   wireJobButton("jobs-analyze-now", () => API.post("/api/analysis/sweep"), "Sweep queued");
   wireJobButton("jobs-fp-now", () => API.post("/api/fingerprint/sweep"), "Sweep queued");
+
+  // Fingerprint Enable: a settings PATCH rather than a job trigger, so it
+  // gets its own handler instead of wireJobButton — the post-click state
+  // must LATCH (the /api/jobs snapshot keeps reporting the startup flag
+  // until the restart, and a refresh must not reset the button).
+  const fpEnable = document.getElementById("jobs-fp-enable");
+  fpEnable?.addEventListener("click", async () => {
+    fpEnable.disabled = true;
+    try {
+      await API.patch("/api/settings", { fingerprintEnabled: true });
+      fpEnable.dataset.latched = "true";
+      fpEnable.textContent = "Enabled — restart to apply";
+      const hint = document.getElementById("job-fp-hint");
+      if (hint) {
+        hint.textContent =
+          "Enabled. Add your AcoustID key (if you haven't yet) and restart " +
+          "the bridge to start fingerprinting. ";
+        const a = document.createElement("a");
+        a.href = "/settings?tab=enrichment";
+        a.textContent = "Fingerprint settings";
+        hint.appendChild(a);
+      }
+    } catch (err) {
+      fpEnable.disabled = false;
+      fpEnable.textContent = "Enable failed — retry";
+    }
+  });
   wireJobButton("jobs-backup-now", () => API.post("/api/backups"), "Snapshot written");
   wireJobButton("jobs-mix-regen", async () => {
     // Synchronous server-side regeneration — can take a while on a
@@ -6440,9 +6481,22 @@ function renderJobCards(j) {
     else if (fp.enabled) setBadge("job-fp-state", "warn", "degraded");
     else setBadge("job-fp-state", "idle", "off");
     if (fpBtn) fpBtn.hidden = !fp.active;
+    // The Enable button shows only while the STARTUP flag is off. After a
+    // click, the /api/jobs closure keeps reporting the startup value until
+    // the restart, so the click handler latches the button and this
+    // refresh must not un-latch it back to "Enable".
+    const fpEnable = document.getElementById("jobs-fp-enable");
+    if (fpEnable && fpEnable.dataset.latched !== "true") fpEnable.hidden = fp.enabled;
     const fpHint = document.getElementById("job-fp-hint");
     if (fpHint && fp.enabled && !fp.active && fp.degradedReason) {
-      fpHint.textContent = `Enabled but inactive: ${JOB_DEGRADED_LABELS[fp.degradedReason] || fp.degradedReason}. Restart after fixing.`;
+      // textContent wipes the static settings link along with the old
+      // text; re-append it so the fix for a degraded state (missing key)
+      // stays one click away.
+      fpHint.textContent = `Enabled but inactive: ${JOB_DEGRADED_LABELS[fp.degradedReason] || fp.degradedReason}. Restart after fixing. `;
+      const fpLink = document.createElement("a");
+      fpLink.href = "/settings?tab=enrichment";
+      fpLink.textContent = "Fingerprint settings";
+      fpHint.appendChild(fpLink);
     }
     setText("job-fp-last", fp.running ? "sweeping now" : agoOrDash(fp.lastFinishedAt));
     setText("job-fp-next", formatInFuture(fp.nextDueAt));

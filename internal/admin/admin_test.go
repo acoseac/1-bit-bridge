@@ -749,6 +749,86 @@ func TestSettingsPatchAnalysisEnabled(t *testing.T) {
 	}
 }
 
+// TestSettingsPatchFingerprint covers the acoustic-fingerprint settings
+// surface: the enable toggle (restart-required on change, idempotent
+// re-submits skip the banner) and the set-only AcoustID key field —
+// blank keeps the stored key (the settings form always submits the
+// field, so blank-as-clear would wipe the key on every unrelated save),
+// and the GET response reports presence without ever echoing the value.
+// Mirrors TestSettingsPatchUpscaleEnabled's pattern.
+func TestSettingsPatchFingerprint(t *testing.T) {
+	srv, _, cfgPath := newTestServer(t)
+	h := srv.Handler()
+
+	// Enable + set the key (whitespace-padded — must be trimmed) in one PATCH.
+	var resp settingsPatchResponse
+	code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"fingerprintEnabled": true, "fingerprintApiKey": "  testkey123  "}, &resp)
+	if code != 200 {
+		t.Fatalf("patch fingerprint on: %d", code)
+	}
+	if !resp.RestartRequired {
+		t.Error("fingerprint enable+key must mark restart required (sweeper wired at startup)")
+	}
+	live := srv.deps.CfgHolder.Load()
+	if !live.Fingerprint.Enabled {
+		t.Error("in-memory cfg did not reflect fingerprint.enabled=true")
+	}
+	if live.Fingerprint.APIKey != "testkey123" {
+		t.Errorf("key must be trimmed + stored, got %q", live.Fingerprint.APIKey)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Fingerprint.Enabled || reloaded.Fingerprint.APIKey != "testkey123" {
+		t.Errorf("fingerprint config did not persist: enabled=%v key=%q",
+			reloaded.Fingerprint.Enabled, reloaded.Fingerprint.APIKey)
+	}
+
+	// Same-value toggle + BLANK key (the form's every-save shape): no
+	// restart banner, stored key untouched.
+	resp = settingsPatchResponse{}
+	code = doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"fingerprintEnabled": true, "fingerprintApiKey": ""}, &resp)
+	if code != 200 {
+		t.Fatalf("idempotent re-submit: %d", code)
+	}
+	if resp.RestartRequired {
+		t.Error("same-value + blank-key re-submit must not mark restart required")
+	}
+	if got := srv.deps.CfgHolder.Load().Fingerprint.APIKey; got != "testkey123" {
+		t.Errorf("blank key input must keep the stored key, got %q", got)
+	}
+
+	// GET reports presence (fingerprintKeySet) but never the key itself —
+	// assert over the raw re-marshalled body so a future field addition
+	// can't sneak the credential out under a new name.
+	var got map[string]any
+	if code := doJSON(t, h, "GET", "/api/settings", nil, &got); code != 200 {
+		t.Fatalf("settings get: %d", code)
+	}
+	if got["fingerprintEnabled"] != true || got["fingerprintKeySet"] != true {
+		t.Errorf("GET flags wrong: enabled=%v keySet=%v",
+			got["fingerprintEnabled"], got["fingerprintKeySet"])
+	}
+	raw, _ := json.Marshal(got)
+	if strings.Contains(string(raw), "testkey123") {
+		t.Error("settings GET must never echo the AcoustID key")
+	}
+
+	// Implausibly long key → 400, nothing persisted.
+	resp = settingsPatchResponse{}
+	code = doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"fingerprintApiKey": strings.Repeat("k", 200)}, nil)
+	if code != 400 {
+		t.Fatalf("over-long key must 400, got %d", code)
+	}
+	if got := srv.deps.CfgHolder.Load().Fingerprint.APIKey; got != "testkey123" {
+		t.Errorf("rejected key must not persist, got %q", got)
+	}
+}
+
 // TestAnalysisStatsHandler covers GET /api/analysis/stats. Without the
 // serve-side closures wired (feature off / test harness), the response
 // carries no Pool or Sweep — just enabled / sox / cached counts /

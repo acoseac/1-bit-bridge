@@ -209,6 +209,15 @@ type settingsResponse struct {
 	// / genres via the app ferry — distinct from the Enrich base URLs above,
 	// which are the artwork + MusicBrainz source). Restart-required.
 	AtlasEnabled bool `json:"atlasEnabled"`
+	// Acoustic-fingerprint opt-in (fpcalc → AcoustID fallback for tracks no
+	// text match can fix). Restart-required: the sweeper goroutine and its
+	// fpcalc/key precheck run once at `bridge serve` startup.
+	FingerprintEnabled bool `json:"fingerprintEnabled"`
+	// FingerprintKeySet reports whether an AcoustID key is on file
+	// (bridge.yaml or the ACOUSTID_API_KEY env var, via ResolvedAPIKey)
+	// WITHOUT echoing it — the key is a credential and never travels back
+	// out on this surface.
+	FingerprintKeySet bool `json:"fingerprintKeySet"`
 	// EnrichSource / EnrichAtlasURL are template-only conveniences for the
 	// Settings → Enrichment tab's source picker, DERIVED from the two base
 	// URLs above by deriveEnrichSource (the URLs stay the single source of
@@ -343,6 +352,12 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 // composition scan gets its own, generous ceiling — see
 // compositionDBTimeout.)
 const snapshotDBTimeout = 2 * time.Second
+
+// maxFingerprintKeyLen bounds the AcoustID application key accepted by the
+// settings PATCH. Real keys are ~10-char tokens; the cap only rejects
+// obviously-wrong pastes (a URL, a whole config file) with a clear 400
+// instead of persisting garbage the sweeper would then fail with.
+const maxFingerprintKeyLen = 128
 
 // statsDBPart is the DB-derived subset of statsResponse, cached as a unit
 // so a transient SQL error or snapshotDBTimeout during a tick serves the
@@ -1709,6 +1724,8 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		EnrichMusicBrainzBaseURL: cfg.Enrich.MusicBrainzBaseURL,
 		EnrichCoverArtBaseURL:    cfg.Enrich.CoverArtBaseURL,
 		AtlasEnabled:             cfg.Atlas.Enabled,
+		FingerprintEnabled:       cfg.Fingerprint.Enabled,
+		FingerprintKeySet:        cfg.Fingerprint.ResolvedAPIKey() != "",
 		IsSupervised:             isSupervised,
 		BackupIntervalHours:      cfg.Backup.EffectiveIntervalHours(),
 		BackupKeep:               cfg.Backup.EffectiveKeep(),
@@ -1830,6 +1847,16 @@ type settingsPatch struct {
 	// the /v1/atlas-ingest + /v1/atlas-meta routes and the atlasEnrichment
 	// health flag are wired once at `bridge serve` startup.
 	AtlasEnabled *bool `json:"atlasEnabled,omitempty"`
+	// FingerprintEnabled is the acoustic-fingerprint opt-in. Restart-required:
+	// the sweeper goroutine + its fpcalc/key precheck are wired once at
+	// `bridge serve` startup (same rationale as UpscaleEnabled).
+	FingerprintEnabled *bool `json:"fingerprintEnabled,omitempty"`
+	// FingerprintAPIKey SETS the stored AcoustID application key. nil or
+	// blank = keep the current key — the settings form always submits the
+	// field, so blank MUST be a no-op or every unrelated save would wipe
+	// the stored key. Clearing is deliberately a YAML edit. Trimmed before
+	// compare; never echoed back by GET (see FingerprintKeySet).
+	FingerprintAPIKey *string `json:"fingerprintApiKey,omitempty"`
 	// PR 4: TailscaleMode dropdown (cli|tsnet|disabled).
 	// Hot-reload matrix:
 	//   - any → disabled:    no restart (Deps.TailscaleDisable
@@ -1999,6 +2026,32 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// Restart-required: the /v1/atlas-ingest + /v1/atlas-meta routes
 				// and the atlasEnrichment health flag are wired once at startup.
 				// Idempotent same-value submits skip the banner.
+				restart = true
+			}
+		}
+		if p.FingerprintEnabled != nil {
+			if *p.FingerprintEnabled != next.Fingerprint.Enabled {
+				next.Fingerprint.Enabled = *p.FingerprintEnabled
+				// The fingerprint sweeper + its fpcalc/AcoustID-key precheck
+				// run once at `bridge serve` startup (same startup-wired
+				// shape as upscale/analysis), so a runtime flip needs a
+				// restart. Idempotent same-value submits skip the banner.
+				restart = true
+			}
+		}
+		if p.FingerprintAPIKey != nil {
+			// Blank = keep current (the form always submits the field);
+			// clearing a stored key is deliberately a YAML edit.
+			if v := strings.TrimSpace(*p.FingerprintAPIKey); v != "" && v != next.Fingerprint.APIKey {
+				if len(v) > maxFingerprintKeyLen {
+					return &cfgAbort{status: http.StatusBadRequest, code: "validate",
+						msg: fmt.Sprintf("fingerprintApiKey: implausibly long (%d bytes; AcoustID application keys are short tokens)", len(v))}
+				}
+				next.Fingerprint.APIKey = v
+				// The key is read once by the sweeper precheck at startup;
+				// restart to activate (or to un-degrade an enabled-but-
+				// keyless bridge). Note ACOUSTID_API_KEY env, when set,
+				// still wins over this stored value (ResolvedAPIKey).
 				restart = true
 			}
 		}

@@ -152,6 +152,35 @@
           Off by default.
         </small>
       </div>
+
+      <h2 class="section-head">Acoustic fingerprinting</h2>
+      <p class="hint">
+        Identifies tracks whose tags no text match can fix by fingerprinting
+        the audio (fpcalc → AcoustID), then hands the recovered names back to
+        the enricher above. Needs <code>fpcalc</code> (Chromaprint) installed
+        on the bridge host and a free AcoustID application key — the lookup
+        goes to AcoustID's own matching service; a self-hosted Atlas mirror
+        holds no fingerprints and can't answer it.
+      </p>
+      <div class="field">
+        <label class="checkbox">
+          <input name="fingerprintEnabled" type="checkbox" role="switch" {{if .Data.FingerprintEnabled}}checked{{end}}>
+          Identify untagged tracks by audio <span class="badge warn">restart</span>
+        </label>
+      </div>
+      <div class="field">
+        <label>AcoustID application key <span class="badge warn">restart</span>
+          <input name="fingerprintApiKey" type="password" autocomplete="off"
+                 placeholder="{{if .Data.FingerprintKeySet}}key on file — leave blank to keep it{{else}}paste a key from acoustid.org/new-application{{end}}">
+        </label>
+        <small class="hint">
+          Registered free at
+          <a href="https://acoustid.org/new-application" target="_blank" rel="noopener">acoustid.org/new-application</a>.
+          Stored in <code>bridge.yaml</code>; the <code>ACOUSTID_API_KEY</code>
+          environment variable, when set, wins over the stored value. Leaving
+          the field blank keeps the current key.
+        </small>
+      </div>
     </div>
 
     <div id="settings-panel-networking" class="tab-pane" data-tab="networking"
