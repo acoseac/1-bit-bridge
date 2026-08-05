@@ -168,3 +168,105 @@ func (s *Store) LoadDupeSummary(ctx context.Context) (*DupeSummary, error) {
 	}
 	return &sum, nil
 }
+
+// DupeGroupMemberRow / DupeGroupRow are the admin Duplicates page's
+// group-listing projection — store row structs, NO json tags (the wire
+// DTO lives in internal/admin per the wire-type discipline).
+type DupeGroupMemberRow struct {
+	Path          string
+	Suppressed    bool
+	Codec         string
+	SampleRate    int
+	BitsPerSample int
+	IsDSD         bool
+	SizeBytes     int64
+	DurationSec   float64
+	Title         string
+	Album         string
+	AlbumArtist   string
+}
+
+type DupeGroupRow struct {
+	GroupID string
+	Tier    string
+	Members []DupeGroupMemberRow
+}
+
+// ListDupeGroupsPage pages over stamped duplicate groups (cursor =
+// dupe_group_id, exclusive), optionally narrowed to one tier, and
+// materialises each selected group's members. The DISTINCT-group
+// subquery rides the v31 partial index; the json_extract projection
+// runs only on the selected groups' member rows (bounded by
+// limit × group size), so this is a click-driven admin cost, not the
+// AtlasMetaBreakdownCounts full-walk class. nextCursor is "" on the
+// last page (limit+1 over-fetch on the group ids, the
+// buildManifestPage idiom). Read-only; no s.mu.
+func (s *Store) ListDupeGroupsPage(ctx context.Context, tier, afterGroupID string, limit int) ([]DupeGroupRow, string, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	idQuery := `SELECT DISTINCT dupe_group_id FROM tracks
+	             WHERE dupe_group_id != '' AND dupe_group_id > ?`
+	idArgs := []any{afterGroupID}
+	if tier != "" {
+		idQuery += ` AND dupe_tier = ?`
+		idArgs = append(idArgs, tier)
+	}
+	idQuery += ` ORDER BY dupe_group_id LIMIT ?`
+	idArgs = append(idArgs, limit+1)
+	ids, err := collectStringColumn(s.db.QueryContext(ctx, idQuery, idArgs...))
+	if err != nil {
+		return nil, "", fmt.Errorf("list dupe group ids: %w", err)
+	}
+	next := ""
+	if len(ids) > limit {
+		ids = ids[:limit]
+		next = ids[len(ids)-1]
+	}
+	if len(ids) == 0 {
+		return nil, "", nil
+	}
+	blob, err := json.Marshal(ids)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT t.dupe_group_id, t.dupe_tier, t.path, t.dupe_suppressed,
+		       COALESCE(t.codec, ''),
+		       COALESCE(t.sample_rate, 0),
+		       COALESCE(t.bits_per_sample, 0),
+		       COALESCE(t.is_dsd, 0),
+		       COALESCE(json_extract(t.tags_json, '$.size'),     0),
+		       COALESCE(json_extract(t.tags_json, '$.duration'), 0),
+		       COALESCE(json_extract(t.tags_json, '$.title'),       ''),
+		       COALESCE(json_extract(t.tags_json, '$.album'),       ''),
+		       COALESCE(json_extract(t.tags_json, '$.albumArtist'), '')
+		  FROM tracks t
+		 WHERE t.dupe_group_id IN (SELECT value FROM json_each(?))
+		 ORDER BY t.dupe_group_id, t.path
+	`, string(blob))
+	if err != nil {
+		return nil, "", fmt.Errorf("list dupe group members: %w", err)
+	}
+	defer rows.Close()
+	var out []DupeGroupRow
+	for rows.Next() {
+		var (
+			gid, tierVal      string
+			m                 DupeGroupMemberRow
+			suppressed, isDSD int
+		)
+		if err := rows.Scan(&gid, &tierVal, &m.Path, &suppressed,
+			&m.Codec, &m.SampleRate, &m.BitsPerSample, &isDSD,
+			&m.SizeBytes, &m.DurationSec, &m.Title, &m.Album, &m.AlbumArtist); err != nil {
+			return nil, "", err
+		}
+		m.Suppressed = suppressed != 0
+		m.IsDSD = isDSD != 0
+		if len(out) == 0 || out[len(out)-1].GroupID != gid {
+			out = append(out, DupeGroupRow{GroupID: gid, Tier: tierVal})
+		}
+		out[len(out)-1].Members = append(out[len(out)-1].Members, m)
+	}
+	return out, next, rows.Err()
+}

@@ -3126,6 +3126,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			fingerprintCache != nil, fingerprintDegraded, fingerprintSweepState),
 		TriggerFingerprintSweep: nudgeTriggerClosure(fingerprintNudge),
 		TriggerDuplicatesPass:   nudgeTriggerClosure(duplicatesNudge),
+		DuplicatesSweepRun:      jobRunClosure(duplicatesSweepState),
 		// Last/next-run recorders for the smart-mix + backup cards (nil
 		// when the respective loop isn't running).
 		SmartMixRun: jobRunClosure(smartMixRunState),

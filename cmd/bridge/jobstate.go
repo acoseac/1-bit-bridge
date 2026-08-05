@@ -155,10 +155,12 @@ func nudgeTriggerClosure(nudge chan<- struct{}) func() bool {
 	}
 }
 
-// jobRunClosure adapts a counts-free recorder (smart-mix regenerator,
-// backup ticker) to the admin's JobRunState DTO. nil recorder → nil
-// closure → field omitted.
-func jobRunClosure(status *sweepStatus[struct{}]) func() *admin.JobRunState {
+// jobRunClosure adapts any recorder to the admin's JobRunState DTO
+// (lifecycle only — per-sweep counts, when a card wants them, travel on
+// their own snapshot like the duplicates summary does). nil recorder →
+// nil closure → field omitted. Generic so counts-bearing recorders
+// (duplicates) and counts-free ones (smart-mix, backup) share it.
+func jobRunClosure[T any](status *sweepStatus[T]) func() *admin.JobRunState {
 	if status == nil {
 		return nil
 	}

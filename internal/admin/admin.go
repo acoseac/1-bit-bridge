@@ -318,6 +318,11 @@ type Deps struct {
 	SmartMixRun func() *JobRunState
 	BackupRun   func() *JobRunState
 
+	// DuplicatesSweepRun exposes the duplicates stamping sweeper's
+	// recorder for the Jobs card. Nil-safe: absent omits the run field
+	// (the card still renders policy + summary numbers).
+	DuplicatesSweepRun func() *JobRunState
+
 	// ProjectedSize estimates the on-disk size of a FLAC
 	// variant produced from (sourceSize, sourceRate, sourceBits)
 	// at (targetRate, targetBits). Wired to
@@ -1040,6 +1045,7 @@ var pages = map[string]string{
 	"dashboard":         "dashboard.html",
 	"library":           "library.html",
 	"library_inspector": "library_inspector.html",
+	"duplicates":        "duplicates.html",
 	"jobs":              "jobs.html",
 	"devices":           "devices.html",
 	"upnp":              "upnp.html",
@@ -1093,6 +1099,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.pageDashboard)
 	mux.HandleFunc("GET /library", s.pageLibrary)
 	mux.HandleFunc("GET /library/inspector", s.pageLibraryInspector)
+	mux.HandleFunc("GET /library/duplicates", s.pageDuplicates)
 	mux.HandleFunc("GET /jobs", s.pageJobs)
 	mux.HandleFunc("GET /devices", s.pageDevices)
 	mux.HandleFunc("GET /upnp", s.pageUPnP)
@@ -1144,6 +1151,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/diagnostics", s.apiDiagnostics)
 	mux.HandleFunc("GET /api/doctor", s.apiDoctor)
 	mux.HandleFunc("POST /api/fingerprint/sweep", s.apiFingerprintSweep)
+	mux.HandleFunc("GET /api/duplicates/summary", s.apiDuplicatesSummary)
+	mux.HandleFunc("GET /api/duplicates/groups", s.apiDuplicatesGroups)
+	mux.HandleFunc("POST /api/duplicates/sweep", s.apiDuplicatesSweep)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)

@@ -119,11 +119,25 @@ type jobsUPnP struct {
 	ConfiguredServers int  `json:"configuredServers"`
 }
 
+// jobsDuplicates — the duplicate-stamping card: live policy, the last
+// pass's headline numbers (from the persisted summary), and the
+// on-demand sweeper's run state. Cadence is implicit (every full scan's
+// tail) so there is no interval field.
+type jobsDuplicates struct {
+	Policy     string       `json:"policy"`
+	Stamped    bool         `json:"stamped"`
+	Groups     int          `json:"groups"`
+	Suppressed int          `json:"suppressed"`
+	StampedAt  *time.Time   `json:"stampedAt,omitempty"`
+	Run        *JobRunState `json:"run,omitempty"`
+}
+
 type jobsSnapshotResponse struct {
 	Scanner     jobsScanner          `json:"scanner"`
 	Analysis    jobsAnalysis         `json:"analysis"`
 	Fingerprint *FingerprintJobState `json:"fingerprint,omitempty"`
 	Enrichment  jobsEnrichment       `json:"enrichment"`
+	Duplicates  jobsDuplicates       `json:"duplicates"`
 	SmartMixes  jobsSmartMixes       `json:"smartMixes"`
 	Backups     jobsBackups          `json:"backups"`
 	Updates     jobsUpdates          `json:"updates"`
@@ -187,6 +201,21 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	// running), so closure presence is not a signal here.
 	resp.Enrichment.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
 	resp.Enrichment.HarvestActive = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled
+
+	// Duplicates stamping. Policy is live config; the headline numbers
+	// come from the persisted summary (one scan_state row — cheap on
+	// the 10 s poll). A load failure degrades to the policy-only card.
+	resp.Duplicates = jobsDuplicates{Policy: resolvedDuplicatesFilter(cfg)}
+	if sum, derr := s.deps.Manifest.LoadDupeSummary(ctx); derr == nil && sum != nil {
+		resp.Duplicates.Stamped = true
+		resp.Duplicates.Groups = sum.Groups
+		resp.Duplicates.Suppressed = sum.Suppressed
+		st := sum.StampedAt
+		resp.Duplicates.StampedAt = &st
+	}
+	if run := s.deps.DuplicatesSweepRun; run != nil {
+		resp.Duplicates.Run = run()
+	}
 
 	// Smart mixes.
 	resp.SmartMixes = jobsSmartMixes{
