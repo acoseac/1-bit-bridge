@@ -37,6 +37,12 @@
 //	  Deliberately weak (ToLower+TrimSpace). It groups albums for a pass
 //	  that REWRITES TAGS; over-folding there merges distinct albums.
 //
+//	clientkey normalize     internal/dupes/clientkey.go
+//	  A VERBATIM MIRROR of the iOS MetadataNormalizer, so its output must
+//	  equal the client's byte-for-byte — it may never be "improved". It
+//	  deliberately KEEPS diacritics that this fold strips ("Zdob și Zdub"
+//	  stays și there); TestClientKeyIsNotFoldForMatch is the tripwire.
+//
 // The output of foldTitle/foldName must never be persisted, hashed into a
 // filename, used as a cache key, or embedded in SQL.
 package enrich
