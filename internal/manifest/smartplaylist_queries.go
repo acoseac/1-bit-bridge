@@ -359,6 +359,15 @@ type TrackFeatureRow struct {
 // and the analysis-only key. LEFT JOIN so a track with no analysis row still
 // yields metadata (it just won't be harmonic-sequenceable). json1 is built
 // into the driver (the v1 migration already indexes json_extract(tags_json)).
+//
+// The served-set restriction (dupe_suppressed = 0) is baked into the
+// shared WHERE — every caller appends with AND — because smart-playlist
+// snapshots PERSIST paths and serve them verbatim to iOS: a suppressed
+// duplicate that slipped into a Daily Mix would reference a track the
+// client's manifest no longer contains. Baking it here also drops
+// suppressed paths arriving via playback HISTORY (TrackFeaturesForPaths
+// hydrates history paths through this select, and its drop-missing
+// contract makes the exclusion free).
 const trackFeatureSelect = `
 	SELECT t.path,
 	       COALESCE(json_extract(t.tags_json, '$.title'),  '') AS title,
@@ -372,7 +381,8 @@ const trackFeatureSelect = `
 	       COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'), ta.replaygain_track_db) AS replaygain,
 	       CAST(json_extract(t.tags_json, '$.sampleRate') AS INTEGER) AS sample_rate
 	  FROM tracks t
-	  LEFT JOIN track_analysis ta ON ta.source_path = t.path`
+	  LEFT JOIN track_analysis ta ON ta.source_path = t.path
+	 WHERE t.dupe_suppressed = 0`
 
 // TrackFeaturesForPaths hydrates metadata + analysis features for a set of
 // track paths (the path lists the history aggregations produced). Chunks the
@@ -388,7 +398,7 @@ func (s *Store) TrackFeaturesForPaths(ctx context.Context, paths []string) ([]Tr
 			end = len(paths)
 		}
 		batch := paths[i:end]
-		q := trackFeatureSelect + ` WHERE t.path IN (` + placeholders(len(batch)) + `)`
+		q := trackFeatureSelect + ` AND t.path IN (` + placeholders(len(batch)) + `)`
 		args := make([]any, len(batch))
 		for j, p := range batch {
 			args[j] = p
@@ -534,6 +544,7 @@ func (s *Store) LovedArtistDeepCuts(ctx context.Context, lovedSinceNS int64, lov
 			  JOIN loved_artists la
 			    ON la.artist = json_extract(t.tags_json, '$.artist')
 			 WHERE t.path NOT IN (SELECT path FROM recently_played)
+			   AND t.dupe_suppressed = 0
 		)
 		SELECT path, 1 AS plays, 0 AS last_played, 0 AS first_played
 		  FROM eligible
@@ -560,7 +571,7 @@ func (s *Store) LovedArtistDeepCuts(ctx context.Context, lovedSinceNS int64, lov
 // pool against pathological libraries. Read path — no s.mu.
 func (s *Store) QuietSlowTrackFeatures(ctx context.Context, bpmMax int, loudnessMin float64) ([]TrackFeatureRow, error) {
 	q := trackFeatureSelect + `
-		 WHERE COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 IS NOT NULL
+		   AND COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 IS NOT NULL
 		   AND COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 <= ?
 		   AND COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'),  ta.replaygain_track_db) IS NOT NULL
 		   AND COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'),  ta.replaygain_track_db) > ?
@@ -579,7 +590,7 @@ func (s *Store) QuietSlowTrackFeatures(ctx context.Context, bpmMax int, loudness
 // QuietSlowTrackFeatures. Read path — no s.mu.
 func (s *Store) LoudFastTrackFeatures(ctx context.Context, bpmMin int, loudnessMax float64) ([]TrackFeatureRow, error) {
 	q := trackFeatureSelect + `
-		 WHERE COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 IS NOT NULL
+		   AND COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 IS NOT NULL
 		   AND COALESCE(json_extract(t.tags_json, '$.bpm'),                ta.bpm)                 >= ?
 		   AND COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'),  ta.replaygain_track_db) IS NOT NULL
 		   AND COALESCE(json_extract(t.tags_json, '$.replayGainTrackDB'),  ta.replaygain_track_db) <= ?
@@ -604,7 +615,7 @@ const smartPlaylistPoolSafetyLimit = 50_000
 // everything — the engine only needs a working set. Read path — no s.mu.
 func (s *Store) AnalyzedTrackFeatures(ctx context.Context, genre string, limit int) ([]TrackFeatureRow, error) {
 	limit = clampLimit(limit, 5000, 50000)
-	q := trackFeatureSelect + ` WHERE ta.key_root IS NOT NULL`
+	q := trackFeatureSelect + ` AND ta.key_root IS NOT NULL`
 	var args []any
 	if genre != "" {
 		q += ` AND COALESCE(json_extract(t.tags_json, '$.genre'), '') = ?`

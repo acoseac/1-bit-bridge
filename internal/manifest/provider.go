@@ -135,11 +135,14 @@ func (p *Provider) IsScanning() bool { return p.scanner.IsScanning() }
 // LastFullScan satisfies api.ManifestProvider.
 func (p *Provider) LastFullScan() time.Time { return p.scanner.LastFullScan() }
 
-// TracksIndexed reports the total number of tracks currently in the
-// manifest store (not the count for a single scan). Backed by a
-// `SELECT COUNT(*)` so /v1/health doesn't allocate O(n) strings per poll.
+// TracksIndexed reports the number of SERVED tracks (duplicate-
+// suppressed rows excluded) — the served-population rule: /v1/health's
+// tracksIndexed must agree with the manifest a client can fetch, not
+// with the store's internal row count (which the admin dashboard's
+// RollupByPrefix keeps reporting in full). Backed by a `SELECT COUNT(*)`
+// so /v1/health doesn't allocate O(n) strings per poll.
 func (p *Provider) TracksIndexed(ctx context.Context) int {
-	n, err := p.store.CountTracks(ctx)
+	n, err := p.store.CountServedTracks(ctx)
 	if err != nil {
 		// Surface the DB fault for operators without changing the wire
 		// value — returning e.g. -1 would break the versioned /v1/health

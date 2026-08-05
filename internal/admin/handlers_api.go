@@ -218,6 +218,11 @@ type settingsResponse struct {
 	// WITHOUT echoing it — the key is a credential and never travels back
 	// out on this surface.
 	FingerprintKeySet bool `json:"fingerprintKeySet"`
+	// DuplicatesFilter is the RESOLVED duplicates.filter policy
+	// (highest-quality | same-format | off; empty config resolves to the
+	// default). Hot-applied — a PATCH re-runs the stamping pass via
+	// Deps.TriggerDuplicatesPass instead of requiring a restart.
+	DuplicatesFilter string `json:"duplicatesFilter"`
 	// EnrichSource / EnrichAtlasURL are template-only conveniences for the
 	// Settings → Enrichment tab's source picker, DERIVED from the two base
 	// URLs above by deriveEnrichSource (the URLs stay the single source of
@@ -1726,6 +1731,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		AtlasEnabled:             cfg.Atlas.Enabled,
 		FingerprintEnabled:       cfg.Fingerprint.Enabled,
 		FingerprintKeySet:        cfg.Fingerprint.ResolvedAPIKey() != "",
+		DuplicatesFilter:         resolvedDuplicatesFilter(cfg),
 		IsSupervised:             isSupervised,
 		BackupIntervalHours:      cfg.Backup.EffectiveIntervalHours(),
 		BackupKeep:               cfg.Backup.EffectiveKeep(),
@@ -1851,6 +1857,12 @@ type settingsPatch struct {
 	// the sweeper goroutine + its fpcalc/key precheck are wired once at
 	// `bridge serve` startup (same rationale as UpscaleEnabled).
 	FingerprintEnabled *bool `json:"fingerprintEnabled,omitempty"`
+	// DuplicatesFilter sets the duplicates.filter suppression policy
+	// (highest-quality | same-format | off, case/whitespace-tolerant).
+	// HOT-APPLIED: never sets RestartRequired — the handler fires
+	// Deps.TriggerDuplicatesPass so the stamping pass re-evaluates
+	// immediately.
+	DuplicatesFilter *string `json:"duplicatesFilter,omitempty"`
 	// FingerprintAPIKey SETS the stored AcoustID application key. nil or
 	// blank = keep the current key — the settings form always submits the
 	// field, so blank MUST be a no-op or every unrelated save would wipe
@@ -1884,6 +1896,19 @@ type settingsPatchResponse struct {
 	RestartRequired bool `json:"restartRequired"`
 }
 
+// resolvedDuplicatesFilter renders the effective duplicates.filter for
+// the settings surface. A stored value that no longer resolves (only
+// possible via a hand-edited bridge.yaml newer than this binary) falls
+// back to the raw string so the operator sees what is actually on disk
+// rather than a silently-substituted default.
+func resolvedDuplicatesFilter(cfg *config.Config) string {
+	v, err := cfg.Duplicates.EffectiveFilter()
+	if err != nil {
+		return cfg.Duplicates.Filter
+	}
+	return v
+}
+
 func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	var p settingsPatch
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&p); err != nil {
@@ -1910,6 +1935,7 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		tailscaleHotReload   bool
 		mdnsWasEnabled       bool
 		mdnsNowEnabled       bool
+		duplicatesChanged    bool
 	)
 	updateErr := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
 		if p.LibraryName != nil {
@@ -2039,6 +2065,23 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				restart = true
 			}
 		}
+		if p.DuplicatesFilter != nil {
+			trial := config.DuplicatesConfig{Filter: *p.DuplicatesFilter}
+			resolved, derr := trial.EffectiveFilter()
+			if derr != nil {
+				return &cfgAbort{status: http.StatusBadRequest, code: "validate", msg: derr.Error()}
+			}
+			if cur, _ := next.Duplicates.EffectiveFilter(); cur != resolved {
+				// Store the CANONICAL value (the UI is a select; there is
+				// no operator formatting to preserve). Hot-applied: the
+				// post-Update hook nudges the stamping sweeper — this is
+				// deliberately NOT a restart flag, unlike every other
+				// feature toggle, because the pass is DB-only and reads
+				// its policy per run.
+				next.Duplicates.Filter = resolved
+				duplicatesChanged = true
+			}
+		}
 		if p.FingerprintAPIKey != nil {
 			// Blank = keep current (the form always submits the field);
 			// clearing a stored key is deliberately a YAML edit.
@@ -2155,6 +2198,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.MDNSEnabled != nil && mdnsNowEnabled != mdnsWasEnabled && s.deps.MDNSToggle != nil {
 		s.deps.MDNSToggle(mdnsNowEnabled)
+	}
+	if duplicatesChanged && s.deps.TriggerDuplicatesPass != nil {
+		s.deps.TriggerDuplicatesPass()
 	}
 
 	writeJSON(w, http.StatusOK, settingsPatchResponse{RestartRequired: restart})

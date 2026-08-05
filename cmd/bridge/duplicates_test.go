@@ -51,7 +51,9 @@ func sampleReport() *dupeReport {
 			},
 		},
 	}
-	return buildDupeReport("", 100, groups, 50)
+	return buildDupeReport("", 100, groups, 50, map[string]bool{
+		"Chicago/CD 01/CD 01/x.flac": true,
+	})
 }
 
 // TestPrintDupeReportNeverFramesGeometryDifferenceAsRedundant pins the
