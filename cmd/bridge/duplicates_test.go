@@ -133,7 +133,9 @@ func TestBuildDupeReport_LimitZeroIsCountsOnly(t *testing.T) {
 			{Path: "C/b/x.flac", Codec: "FLAC", SampleRate: 44100, BitsPerSample: 16, Size: 9},
 		},
 	}}
-	rep := buildDupeReport("", 2, groups, 0)
+	// nil suppressed set = nothing suppressed — this test pins the limit-0
+	// counts-only contract, not the suppression annotations.
+	rep := buildDupeReport("", 2, groups, 0, nil)
 	for _, tr := range rep.Tiers {
 		if len(tr.Samples) != 0 {
 			t.Fatalf("limit 0 must emit no samples, tier %s has %d", tr.Tier, len(tr.Samples))
