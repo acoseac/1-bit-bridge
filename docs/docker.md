@@ -175,6 +175,7 @@ if present:
 ```sh
 docker run -d \
     --name 1-bit-bridge \
+    --restart unless-stopped \
     -p 7788:7788/tcp \
     -p 7788:7788/udp \
     -v ~/music:/library:ro \
@@ -183,6 +184,14 @@ docker run -d \
 ```
 
 **Note:** Both TCP and UDP must be published for the API port (7788) to support HTTP/3 upgrades. If you omit the `/udp` mapping, the bridge will fall back to HTTP/2.
+
+**`--restart unless-stopped` is load-bearing, not hygiene.** The admin
+console's Restart action (and an operator-triggered update install)
+exits the process **cleanly** and relies on the supervisor to relaunch
+it. Docker's default policy (`no`) — and `on-failure`, which ignores
+clean exits — leave the container permanently stopped after either of
+those. `unless-stopped` relaunches any exit while still honouring an
+explicit `docker stop`. The shipped `compose.yaml` already sets it.
 
 iOS devices pair against `https://<host>:7788` with the
 fingerprint shown by `docker exec 1-bit-bridge bridge cert info`
@@ -280,7 +289,7 @@ bridge boots normally and disables it with one line in the log. Run
 Flip either feature on with an env var (idiomatic for containers):
 
 ```sh
-docker run -d --name 1-bit-bridge \
+docker run -d --name 1-bit-bridge --restart unless-stopped \
     -p 7788:7788/tcp -p 7788:7788/udp \
     -v ~/music:/library:ro \
     -v 1-bit-bridge-state:/data \
@@ -405,7 +414,7 @@ allow it with `--sysctl net.ipv4.ip_unprivileged_port_start=0`, and
 publish `443` (TCP + UDP for HTTP/3):
 
 ```sh
-docker run -d --name 1-bit-bridge \
+docker run -d --name 1-bit-bridge --restart unless-stopped \
     --sysctl net.ipv4.ip_unprivileged_port_start=0 \
     -p 443:443/tcp -p 443:443/udp \
     -v 1-bit-bridge-state:/data \
@@ -557,7 +566,7 @@ Then start with a Tailscale auth key (generate a reusable/ephemeral key at
 `login.tailscale.com` → Settings → Keys):
 
 ```sh
-docker run -d --name 1-bit-bridge \
+docker run -d --name 1-bit-bridge --restart unless-stopped \
     -e TS_AUTHKEY=tskey-auth-xxxxxxxxxxxxxxxxxx \
     -v 1-bit-bridge-state:/data \
     -v ~/music:/library:ro \
