@@ -132,14 +132,19 @@ type DupeTierSummary struct {
 
 // DupeSummary is the persisted output of one stamping pass.
 type DupeSummary struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	StampedAt     time.Time         `json:"stampedAt"`
-	Policy        string            `json:"policy"`
-	Scanned       int               `json:"scanned"`
-	Groups        int               `json:"groups"`
-	Suppressed    int               `json:"suppressed"`
-	Served        int               `json:"served"`
-	Tiers         []DupeTierSummary `json:"tiers"`
+	SchemaVersion int       `json:"schemaVersion"`
+	StampedAt     time.Time `json:"stampedAt"`
+	Policy        string    `json:"policy"`
+	Scanned       int       `json:"scanned"`
+	Groups        int       `json:"groups"`
+	Suppressed    int       `json:"suppressed"`
+	Served        int       `json:"served"`
+	// MD5Known/MD5Total: audio-MD5 evidence coverage across group
+	// MEMBERS — the "evidence still arriving" signal while the
+	// ExtractorVersion-3 re-extract backfills the library.
+	MD5Known int               `json:"md5Known"`
+	MD5Total int               `json:"md5Total"`
+	Tiers    []DupeTierSummary `json:"tiers"`
 }
 
 // SaveDupeSummary persists the stamping-pass summary. scan_state writes

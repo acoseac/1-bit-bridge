@@ -35,6 +35,8 @@ type duplicatesSummaryResponse struct {
 	Groups        int                 `json:"groups"`
 	Suppressed    int                 `json:"suppressed"`
 	Served        int                 `json:"served"`
+	MD5Known      int                 `json:"md5Known"`
+	MD5Total      int                 `json:"md5Total"`
 	Tiers         []duplicatesTierRow `json:"tiers"`
 }
 
@@ -68,6 +70,7 @@ func (s *Server) apiDuplicatesSummary(w http.ResponseWriter, r *http.Request) {
 		resp.StampedPolicy = sum.Policy
 		resp.Scanned, resp.Groups = sum.Scanned, sum.Groups
 		resp.Suppressed, resp.Served = sum.Suppressed, sum.Served
+		resp.MD5Known, resp.MD5Total = sum.MD5Known, sum.MD5Total
 		for _, t := range sum.Tiers {
 			resp.Tiers = append(resp.Tiers, duplicatesTierRow(t))
 		}
@@ -106,11 +109,12 @@ type duplicatesMemberRow struct {
 	AlbumArtist   string  `json:"albumArtist,omitempty"`
 }
 
-// validDupeTierParam bounds the tier filter to the four stamped values —
+// validDupeTierParam bounds the tier filter to the stamped vocabulary —
 // an unknown tier is a 400, not a silently-empty listing.
 func validDupeTierParam(tier string) bool {
 	switch tier {
-	case "", "self-nested", "same-format", "different-format", "inconclusive":
+	case "", "self-nested", "same-format", "identical-audio", "different-audio",
+		"different-format", "inconclusive":
 		return true
 	}
 	return false

@@ -1478,6 +1478,39 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 32,
+		name:    "tracks audio_md5 (FLAC STREAMINFO checksum for duplicate evidence)",
+		sql:     `-- column added idempotently in post(); see the comment below`,
+		// v32 stores the FLAC STREAMINFO audio checksum captured by the
+		// extractor (ExtractorVersion 3) — the evidence that splits the
+		// same-format duplicate tier into identical-audio (a FACT) and
+		// different-audio (proven remasters, never suppressed). '' means
+		// unknown: non-FLAC, the spec's all-zero sentinel, or a row the
+		// v3 re-extract hasn't reached yet.
+		//
+		// COLUMN-ONLY (the v25/v28/v31 rule): must never gain a json tag
+		// or reach tags_json / the wire — Track carries it as the
+		// UNEXPORTED audioMD5 field. Deliberately NO backfill in post():
+		// unlike v25 the value is not derivable from tags_json — it
+		// needs the file, and the ExtractorVersion bump's one-shot
+		// re-extract is exactly that backfill.
+		post: func(db *sql.DB) error {
+			exists, err := atlasColumnExists(db, "tracks", "audio_md5")
+			if err != nil {
+				return fmt.Errorf("inspect tracks.audio_md5: %w", err)
+			}
+			if exists {
+				return nil
+			}
+			if _, err := db.Exec(
+				`ALTER TABLE tracks ADD COLUMN audio_md5 TEXT NOT NULL DEFAULT ''`,
+			); err != nil {
+				return fmt.Errorf("add tracks.audio_md5: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
@@ -2094,10 +2127,23 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 // scan" resilience contract the fast-skip path maintains via
 // ResetTrackMissingCount.
 //
+// Since v32 the stamp ALSO carries the freshly-captured audio_md5, with
+// the OPPOSITE update semantics from the upserts: `COALESCE(NULLIF(?,”),
+// audio_md5)` keeps a stored value when the fresh one is empty. The
+// asymmetry is load-bearing and reversing it fails silently — this leg
+// runs only when the row was PROVED byte-identical, so a fresh empty
+// (non-FLAC, the all-zero sentinel, or a truncated capture) must not
+// erase a known-good hash; the upserts run because the bytes CHANGED,
+// so there a stale hash must always be replaced, empty included.
+//
+// Takes []*Track (not paths) so this same-package writer can read the
+// unexported Track.audioMD5 directly — the field must never be exported
+// or gain a json tag (types.go docblock).
+//
 // Holds `s.mu` per the writer contract on Store; one transaction with a
 // prepared statement (the applyReconciledTracks template).
-func (s *Store) StampExtractorVersionBatch(ctx context.Context, paths []string) error {
-	if len(paths) == 0 {
+func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) error {
+	if len(ts) == 0 {
 		return nil
 	}
 	s.mu.Lock()
@@ -2110,15 +2156,16 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, paths []string) 
 	stmt, err := tx.PrepareContext(ctx, `
 		UPDATE tracks
 		SET extractor_version = ?,
-		    missing_count = 0
+		    missing_count = 0,
+		    audio_md5 = COALESCE(NULLIF(?, ''), audio_md5)
 		WHERE path = ?
 	`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-	for _, p := range paths {
-		if _, err := stmt.ExecContext(ctx, ExtractorVersion, p); err != nil {
+	for _, t := range ts {
+		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.Path); err != nil {
 			return err
 		}
 	}
@@ -2151,8 +2198,8 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
-		                   extractor_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   extractor_version, audio_md5)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -2198,9 +2245,16 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- re-evaluates (the full-scan tail runs in the SAME scan as
 			-- these upserts), and a fresh INSERT defaults to served —
 			-- fail-open in both directions.
-			extractor_version = excluded.extractor_version
+			extractor_version = excluded.extractor_version,
+			-- audio_md5 is UNCONDITIONAL (excluded, empty included): this
+			-- row runs because size or mtime CHANGED, so a stale hash
+			-- would assert old audio for new bytes. The opposite
+			-- semantics — keep-if-fresh-empty — belong to the
+			-- version-stale stamp leg (StampExtractorVersionBatch), which
+			-- only runs when the row was proved byte-identical.
+			audio_md5 = excluded.audio_md5
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano(),
-		rate, bits, isDSD, codec, ExtractorVersion)
+		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5)
 	return err
 }
 
@@ -2230,14 +2284,15 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	// on PR #71). marshalForStorage failures abort the whole batch
 	// before any SQL touches the DB.
 	type row struct {
-		path    string
-		size    int64
-		mtime   int64
-		tagsRaw []byte
-		rate    any
-		bits    any
-		isDSD   any
-		codec   any
+		path     string
+		size     int64
+		mtime    int64
+		tagsRaw  []byte
+		rate     any
+		bits     any
+		isDSD    any
+		codec    any
+		audioMD5 string
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -2247,14 +2302,15 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		}
 		rate, bits, isDSD, codec := formatColumnBinds(t)
 		rows[i] = row{
-			path:    t.Path,
-			size:    t.Size,
-			mtime:   t.ModTime.UnixNano(),
-			tagsRaw: raw,
-			rate:    rate,
-			bits:    bits,
-			isDSD:   isDSD,
-			codec:   codec,
+			path:     t.Path,
+			size:     t.Size,
+			mtime:    t.ModTime.UnixNano(),
+			tagsRaw:  raw,
+			rate:     rate,
+			bits:     bits,
+			isDSD:    isDSD,
+			codec:    codec,
+			audioMD5: t.audioMD5,
 		}
 	}
 
@@ -2279,8 +2335,8 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
-		                   extractor_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   extractor_version, audio_md5)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -2312,7 +2368,9 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			-- it a re-extracted (conflict) row keeps its stale stamp and would
 			-- re-extract on every subsequent scan.
 			-- v31 dupe stamps deliberately untouched — mirrors UpsertTrack.
-			extractor_version = excluded.extractor_version
+			extractor_version = excluded.extractor_version,
+			-- audio_md5 unconditional on a changed row — mirrors UpsertTrack.
+			audio_md5 = excluded.audio_md5
 	`)
 	if err != nil {
 		return err
@@ -2321,7 +2379,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	now := s.now().UnixNano()
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
-			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion); err != nil {
+			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5); err != nil {
 			return err
 		}
 	}

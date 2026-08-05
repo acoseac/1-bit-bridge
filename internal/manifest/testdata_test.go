@@ -31,9 +31,17 @@ func writeMinimalFLAC(t *testing.T, path string, sampleRate, bitsPerSample int, 
 // rather than collapsed by Go's map semantics.
 func writeMinimalFLACPairs(t *testing.T, path string, sampleRate, bitsPerSample int, vorbisTags [][2]string) {
 	t.Helper()
+	writeFLACFixture(t, path, sampleRate, bitsPerSample, vorbisTags, [16]byte{})
+}
+
+// writeFLACFixture is the shared core: md5sum lands in STREAMINFO bytes
+// 18..33 (all-zero = the spec's "not computed" sentinel).
+func writeFLACFixture(t *testing.T, path string, sampleRate, bitsPerSample int, vorbisTags [][2]string, md5sum [16]byte) {
+	t.Helper()
 
 	// STREAMINFO block. Most fields can be placeholder; only SampleRate,
-	// BitsPerSample, and NSamples are material to our extractor.
+	// BitsPerSample, NSamples — and, for the duplicates tests, MD5sum —
+	// are material to our extractor.
 	info := &meta.StreamInfo{
 		BlockSizeMin:  4096,
 		BlockSizeMax:  4096,
@@ -43,6 +51,7 @@ func writeMinimalFLACPairs(t *testing.T, path string, sampleRate, bitsPerSample 
 		NChannels:     2,
 		BitsPerSample: uint8(bitsPerSample),
 		NSamples:      uint64(sampleRate * 5), // 5 seconds
+		MD5sum:        md5sum,
 	}
 
 	// Vorbis comment block.
@@ -132,8 +141,23 @@ func writeStreamInfo(w io.Writer, si *meta.StreamInfo) {
 	packed |= uint64((uint8(si.BitsPerSample)-1)&0x1F) << 36
 	packed |= si.NSamples & 0xFFFFFFFFF
 	binary.BigEndian.PutUint64(b[10:18], packed)
-	// MD5 of unencoded audio (16 bytes) — all zeros.
+	// MD5 of unencoded audio (16 bytes) — zeros unless the fixture set
+	// one (the zero value is the spec's "not computed" sentinel, which
+	// the extractor must read as unknown).
+	copy(b[18:34], si.MD5sum[:])
 	w.Write(b[:])
+}
+
+// writeMinimalFLACWithMD5 is writeMinimalFLAC with a caller-chosen
+// STREAMINFO audio MD5 — the fixture for the duplicate program's
+// identical-audio / different-audio evidence tests.
+func writeMinimalFLACWithMD5(t *testing.T, path string, sampleRate, bitsPerSample int, vorbisTags map[string]string, md5sum [16]byte) {
+	t.Helper()
+	pairs := make([][2]string, 0, len(vorbisTags))
+	for k, v := range vorbisTags {
+		pairs = append(pairs, [2]string{k, v})
+	}
+	writeFLACFixture(t, path, sampleRate, bitsPerSample, pairs, md5sum)
 }
 
 func encodeVorbisComment(vc *meta.VorbisComment) []byte {

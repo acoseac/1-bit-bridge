@@ -217,3 +217,51 @@ func TestRestampDuplicates_RoutedRowsNeverStamped(t *testing.T) {
 		t.Fatalf("routed row must never be stamped: %+v", st)
 	}
 }
+
+// TestRestampDuplicates_DifferentAudioAutoUnsuppresses pins the MD5
+// evidence's safety payoff end-to-end: a pair suppressed on the
+// same-format INFERENCE gains full checksum coverage showing the audio
+// DIFFERS (remasters) — the next pass reclassifies to different-audio,
+// un-suppresses the hidden copy, and bumps it back into the delta.
+func TestRestampDuplicates_DifferentAudioAutoUnsuppresses(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	mode := dupes.FilterHighestQuality
+	sc := dupeScanner(t, s, &mode)
+	seedDupePair(t, s) // no MD5s yet → same-format
+	if _, err := sc.RestampDuplicates(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st := stampOf(t, s, "CopyA/Album/01 Song.flac"); !st.Suppressed || st.Tier != string(dupes.TierSameFormat) {
+		t.Fatalf("precondition: %+v", st)
+	}
+
+	// The v3 re-extract backfills DIFFERING checksums (simulated via the
+	// column the stamp leg writes).
+	if _, err := s.db.Exec(`UPDATE tracks SET audio_md5 = 'aaaa' WHERE path = 'CopyA/Album/01 Song.flac'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE tracks SET audio_md5 = 'bbbb' WHERE path = 'CopyB/Album/01 Song.flac'`); err != nil {
+		t.Fatal(err)
+	}
+	before := indexedAtOf(t, s, "CopyA/Album/01 Song.flac")
+
+	if _, err := sc.RestampDuplicates(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := stampOf(t, s, "CopyA/Album/01 Song.flac")
+	if st.Suppressed || st.Tier != string(dupes.TierDifferentAudio) {
+		t.Fatalf("proven remaster must be served: %+v", st)
+	}
+	if after := indexedAtOf(t, s, "CopyA/Album/01 Song.flac"); after <= before {
+		t.Fatalf("un-suppressed remaster must re-enter the delta (%d → %d)", before, after)
+	}
+	sum, err := s.LoadDupeSummary(ctx)
+	if err != nil || sum == nil {
+		t.Fatal(err)
+	}
+	if sum.MD5Known != 2 || sum.MD5Total != 2 {
+		t.Fatalf("summary coverage = %d/%d, want 2/2", sum.MD5Known, sum.MD5Total)
+	}
+}

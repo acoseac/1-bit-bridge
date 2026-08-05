@@ -7626,6 +7626,19 @@ async function refreshDupesSummary() {
   const stampedAt = document.getElementById("dupes-stamped-at");
   if (stampedAt && sum.stampedAt) stampedAt.textContent = `as of ${formatTimeAgo(new Date(sum.stampedAt))}`;
   document.getElementById("dupes-tiles")?.removeAttribute("hidden");
+  // Audio-checksum evidence coverage — the identical/different-audio
+  // tiers need FULL per-group coverage, so while the ExtractorVersion-3
+  // re-extract backfills, say the evidence is still arriving.
+  const md5Line = document.getElementById("dupes-md5-coverage");
+  if (md5Line) {
+    if (sum.md5Total > 0) {
+      md5Line.hidden = false;
+      md5Line.textContent = `Audio-checksum evidence: ${sum.md5Known} of ${sum.md5Total} group members` +
+        (sum.md5Known < sum.md5Total ? " — still arriving; groups refine into the audio tiers as it completes." : ".");
+    } else {
+      md5Line.hidden = true;
+    }
+  }
 
   const rows = document.getElementById("dupes-tier-rows");
   if (rows) {

@@ -50,6 +50,7 @@ const dupeRefSelect = `
 	       COALESCE(t.bits_per_sample, 0),
 	       COALESCE(t.is_dsd, 0),
 	       COALESCE(t.codec, ''),
+	       t.audio_md5,
 	       t.dupe_group_id,
 	       t.dupe_tier,
 	       t.dupe_suppressed
@@ -114,7 +115,7 @@ func (s *Store) StreamTrackDupeRefsUnderPrefix(ctx context.Context, prefix strin
 		if err := rows.Scan(&ref.Path, &ref.Title, &ref.Album, &ref.AlbumArtist,
 			&ref.Artist, &ref.Year, &disc, &track, &ref.Size, &ref.Duration,
 			&ref.SampleRate, &ref.BitsPerSample, &isDSD, &ref.Codec,
-			&st.GroupID, &st.Tier, &suppressed); err != nil {
+			&ref.AudioMD5, &st.GroupID, &st.Tier, &suppressed); err != nil {
 			return err
 		}
 		if disc.Valid {

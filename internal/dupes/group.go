@@ -124,6 +124,28 @@ func classify(members []Row) Tier {
 			return TierDifferentFormat
 		}
 	}
+	// Same geometry throughout. When audio-MD5 evidence covers EVERY
+	// member, refine: all equal → identical-audio (bit-identical fact);
+	// any difference → different-audio (same-geometry remasters, never
+	// suppressed). No group reaches either tier on partial coverage — a
+	// half-known group keeps the same-format inference.
+	allKnown := true
+	allEqual := true
+	for _, m := range members {
+		if m.AudioMD5 == "" {
+			allKnown = false
+			break
+		}
+		if m.AudioMD5 != members[0].AudioMD5 {
+			allEqual = false
+		}
+	}
+	if allKnown {
+		if allEqual {
+			return TierIdenticalAudio
+		}
+		return TierDifferentAudio
+	}
 	return TierSameFormat
 }
 
