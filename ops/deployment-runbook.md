@@ -40,6 +40,8 @@ Operator's home Windows machine. Reachable from the operator's macOS workstation
 
 **Runtime ownership:** Scheduled Task `1-bit-bridge (home-pc)` running as `arsenie\Interactive`, triggered `AtLogOn`. Survives SSH disconnect / logout / reboot. **Old bridge service install (different exe path) is registered but stopped** — leave alone or remove manually if cleanup is wanted; the new task is the canonical runtime.
 
+**⚠️ The admin-console Restart button likely strands the bridge on this host** (same incident class as the VPS `Restart=on-failure` outage of 2026-08-05 — see the bridge.ars.md section). `POST /api/restart` exits the process cleanly, and a Windows Scheduled Task does not relaunch a process that exited on its own — Task Scheduler restart settings (`RestartCount`/`RestartInterval`) only fire on task *failure*, and no repo script configures even those. Recovery after a console restart: `restart-bridge-windows.ps1` over SSH. Unverified on the live host as of 2026-08-05 (host unreachable from the workstation at the time) — when next on the LAN, check `(Get-ScheduledTask -TaskName '1-bit-bridge (home-pc)').Settings` and either confirm the strand or record the on-host task's restart config here.
+
 **Windows Defender Firewall rules** added by `firewall-bridge-windows.ps1`:
 - `1-bit-bridge (C:\1-bit-bridge)` — inbound TCP 7788 (HTTPS)
 - `1-bit-bridge (C:\1-bit-bridge) admin` — inbound TCP 7789 (admin console, loopback-only by bind but the rule is belt-and-braces)
@@ -140,8 +142,10 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 | Unit | Notes |
 |---|---|
 | `rclone-music.service` | `Type=notify`, `User=arsenie`, mounts `b2-music:1bitbucket` → `/mnt/music`. Bridge `Requires=` this so a failed mount blocks the bridge from starting (avoids the FUSE-drop deletion-pass trap). |
-| `1-bit-bridge.service` | `Type=simple`, `User=arsenie`, `Requires=rclone-music.service`, `AmbientCapabilities=CAP_NET_BIND_SERVICE`, `ProtectSystem=full` (via the `variants.conf` drop-in — see the sandbox note below) + `ReadWritePaths=/home/arsenie/bridge-data`. |
+| `1-bit-bridge.service` | `Type=simple`, `User=arsenie`, `Requires=rclone-music.service`, `AmbientCapabilities=CAP_NET_BIND_SERVICE`, `Restart=always` (NOT `on-failure` — see the console-restart note below), `ProtectSystem=full` (via the `variants.conf` drop-in — see the sandbox note below) + `ReadWritePaths=/home/arsenie/bridge-data`. |
 | `~/.config/rclone/rclone.conf` | `b2-music` backend defined as `s3` (NOT `b2` — bucket-scoped keys fail on the b2 backend); endpoint `s3.eu-central-003.backblazeb2.com`, `provider=Other`. Operator wrote it via `rclone config create` on the host — secrets never traverse this assistant or the local workstation. |
+
+**`Restart=always` is load-bearing for the admin-console Restart button (changed from `on-failure` 2026-08-05 after an outage).** `POST /api/restart` routes through the same graceful-shutdown closure as SIGTERM and **exits 0** — the design relies on the service manager to bring the process back up. `Restart=on-failure` ignores clean exits, so every web-console restart ended as a permanent shutdown (bridge down until a manual `systemctl start`; that is exactly what happened at 02:50 UTC on 2026-08-05). `Restart=always` also covers the auto-updater's install path, which exits the same way. Explicit `systemctl stop` / `restart` are unaffected — systemd never auto-restarts after its own stop job. Don't revert to `on-failure`.
 
 **systemd sandbox vs the FUSE mounts (changed 2026-07-16 — read before touching the unit).** The admin Library Inspector generates variants IN-DAEMON (PRs #435+/#504), so `/mnt/bridge-variants` must be WRITABLE for the service. The original unit used `ProtectSystem=strict` + a `ReadOnlyPaths=/mnt/bridge-variants` drop-in ("CLI-only generation, RO is sufficient") — with that config every Inspector Generate batch failed with `sox FAIL … Read-only file system` (field-reported 2026-07-16; the 167 GB of pre-existing optimized variants were written by CLI runs OUTSIDE the sandbox, which is why this never surfaced before). Two hard-won facts about the fix:
 
