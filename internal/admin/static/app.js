@@ -7606,12 +7606,21 @@ async function refreshDupesSummary() {
   if (!sum.stamped) {
     if (stampLine) {
       stampLine.hidden = false;
-      stampLine.textContent = "No stamping pass has run yet — counts appear after the first full scan.";
+      // Say WHICH wait this is: during a scan the first evaluation is
+      // already on its way (the scan tail runs it), and Re-evaluate is
+      // deliberately deferred — an unexplained empty state here read as
+      // a dead button on the first production deploy.
+      stampLine.textContent = sum.scanInFlight
+        ? "A library scan is running — the first duplicate evaluation happens automatically when it finishes."
+        : "No stamping pass has run yet — counts appear after the first full scan.";
     }
     return;
   }
   if (stampLine) {
-    if (sum.stampedPolicy && sum.policy && sum.stampedPolicy !== sum.policy) {
+    if (sum.scanInFlight) {
+      stampLine.hidden = false;
+      stampLine.textContent = "A library scan is running — duplicates re-evaluate automatically at its tail; the counts below are from the previous pass.";
+    } else if (sum.stampedPolicy && sum.policy && sum.stampedPolicy !== sum.policy) {
       stampLine.hidden = false;
       stampLine.textContent = `Re-evaluating under the new policy… (counts below still reflect “${sum.stampedPolicy}”)`;
     } else {
@@ -7762,8 +7771,18 @@ function initDuplicates() {
     const btn = e.currentTarget;
     btn.disabled = true;
     try {
-      await API.post("/api/duplicates/sweep");
-      scheduleDupesRefresh();
+      const ack = await API.post("/api/duplicates/sweep");
+      if (ack && ack.scanInFlight) {
+        // The nudge is deferred while a scan runs (its tail stamps under
+        // the current policy) — say so instead of silently no-opping.
+        const stampLine = document.getElementById("dupes-stamp-line");
+        if (stampLine) {
+          stampLine.hidden = false;
+          stampLine.textContent = "A library scan is running — the re-evaluation happens automatically when it finishes.";
+        }
+      } else {
+        scheduleDupesRefresh();
+      }
     } catch (err) {
       alert(`Re-evaluate failed: ${err.message || err}`);
     } finally {

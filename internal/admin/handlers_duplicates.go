@@ -27,17 +27,24 @@ type duplicatesSummaryResponse struct {
 	// the one the last pass ran under — they diverge only in the window
 	// between a settings PATCH and the nudged restamp finishing, and the
 	// page uses the pair to render a "re-evaluating…" hint.
-	Policy        string              `json:"policy"`
-	StampedPolicy string              `json:"stampedPolicy,omitempty"`
-	StampedAt     *time.Time          `json:"stampedAt,omitempty"`
-	Stamped       bool                `json:"stamped"`
-	Scanned       int                 `json:"scanned"`
-	Groups        int                 `json:"groups"`
-	Suppressed    int                 `json:"suppressed"`
-	Served        int                 `json:"served"`
-	MD5Known      int                 `json:"md5Known"`
-	MD5Total      int                 `json:"md5Total"`
-	Tiers         []duplicatesTierRow `json:"tiers"`
+	Policy        string     `json:"policy"`
+	StampedPolicy string     `json:"stampedPolicy,omitempty"`
+	StampedAt     *time.Time `json:"stampedAt,omitempty"`
+	Stamped       bool       `json:"stamped"`
+	// ScanInFlight lets the page say WHY counts are pending or stale:
+	// the stamping pass runs at the scan's tail, and the sweeper defers
+	// nudges while a scan runs (the tail applies the current policy
+	// anyway) — without this flag, "Re-evaluate now" during a long scan
+	// reads as a dead button (found live minutes after the v0.1.8
+	// deploy, mid ExtractorVersion-backfill scan).
+	ScanInFlight bool                `json:"scanInFlight"`
+	Scanned      int                 `json:"scanned"`
+	Groups       int                 `json:"groups"`
+	Suppressed   int                 `json:"suppressed"`
+	Served       int                 `json:"served"`
+	MD5Known     int                 `json:"md5Known"`
+	MD5Total     int                 `json:"md5Total"`
+	Tiers        []duplicatesTierRow `json:"tiers"`
 }
 
 type duplicatesTierRow struct {
@@ -62,6 +69,9 @@ func (s *Server) apiDuplicatesSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := duplicatesSummaryResponse{
 		Policy: resolvedDuplicatesFilter(s.deps.CfgHolder.Load()),
+	}
+	if sc := s.deps.Scanner; sc != nil {
+		resp.ScanInFlight = sc.IsScanning()
 	}
 	if sum != nil {
 		resp.Stamped = true
@@ -125,7 +135,7 @@ func (s *Server) apiDuplicatesGroups(w http.ResponseWriter, r *http.Request) {
 	tier := q.Get("tier")
 	if !validDupeTierParam(tier) {
 		writeError(w, http.StatusBadRequest, "validate",
-			"tier must be one of self-nested, same-format, different-format, inconclusive")
+			"tier must be one of self-nested, same-format, identical-audio, different-audio, different-format, inconclusive")
 		return
 	}
 	// Bad/absent limit silently falls to the store's default (the
@@ -164,6 +174,11 @@ func (s *Server) apiDuplicatesGroups(w http.ResponseWriter, r *http.Request) {
 // button. apiFingerprintSweep's shape: 202 = nudged (coalescing send),
 // 503 = sweeper not wired. No extra rate guard — the nudge coalesces and
 // the pass is a sub-second DB-only walk.
+//
+// scanInFlight in the 202 body tells the UI the nudge will be DEFERRED:
+// the sweeper skips while a scan runs because that scan's own tail
+// stamps under the current policy — the click isn't lost semantically,
+// but nothing happens until the scan finishes, and the page must say so.
 func (s *Server) apiDuplicatesSweep(w http.ResponseWriter, _ *http.Request) {
 	trigger := s.deps.TriggerDuplicatesPass
 	if trigger == nil {
@@ -172,5 +187,9 @@ func (s *Server) apiDuplicatesSweep(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	trigger()
-	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
+	scanInFlight := s.deps.Scanner != nil && s.deps.Scanner.IsScanning()
+	writeJSON(w, http.StatusAccepted, map[string]bool{
+		"triggered":    true,
+		"scanInFlight": scanInFlight,
+	})
 }
