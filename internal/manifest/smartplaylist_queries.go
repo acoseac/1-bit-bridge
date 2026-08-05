@@ -108,6 +108,66 @@ func (s *Store) ReplaceSmartPlaylists(ctx context.Context, snapshot []StoredSmar
 	return tx.Commit()
 }
 
+// ReplaceSmartPlaylistFamily replaces (or removes, when row == nil) ONE
+// cached family, leaving every other slug's row untouched — the per-family
+// "Regenerate this mix" admin affordance, distinct from the wholesale
+// ReplaceSmartPlaylists above. Position handling keeps the iOS homepage
+// order stable: an existing row keeps its cached position (only its contents
+// refresh); a newly-visible family appends after the current maximum so it
+// can't collide with a cached sibling's slot. The next full regeneration
+// restores the engine's canonical order. Returns whether a cached row for
+// the slug existed before the call. Holds s.mu (writer contract).
+func (s *Store) ReplaceSmartPlaylistFamily(ctx context.Context, slug string, row *StoredSmartPlaylist) (existed bool, err error) {
+	if slug == "" {
+		return false, errors.New("manifest: ReplaceSmartPlaylistFamily requires a slug")
+	}
+	if row != nil && row.Slug != slug {
+		return false, errors.New("manifest: ReplaceSmartPlaylistFamily row slug mismatch")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit; unwind guard otherwise
+
+	var cachedPos int
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT position FROM smart_playlists WHERE slug = ?`, slug).Scan(&cachedPos); {
+	case errors.Is(err, sql.ErrNoRows):
+		// not cached — fall through with existed == false
+	case err != nil:
+		return false, err
+	default:
+		existed = true
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM smart_playlists WHERE slug = ?`, slug); err != nil {
+		return existed, err
+	}
+	if row != nil {
+		pos := cachedPos
+		if !existed {
+			// COALESCE floor -1 so the first-ever family lands at position 0.
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COALESCE(MAX(position), -1) + 1 FROM smart_playlists`).Scan(&pos); err != nil {
+				return existed, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO smart_playlists
+				(slug, kind, title, subtitle, position, refreshed_at, items_json, energy_json, modal_rate_hz)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, row.Slug, row.Kind, row.Title, row.Subtitle, pos, row.RefreshedAt, row.ItemsJSON,
+			row.EnergyJSON, row.ModalRateHz); err != nil {
+			return existed, err
+		}
+	}
+	return existed, tx.Commit()
+}
+
 // LoadSmartPlaylists returns the cached smart playlists ordered by position.
 // Read path — no s.mu. An empty result (cold cache before the first
 // regeneration) is not an error.

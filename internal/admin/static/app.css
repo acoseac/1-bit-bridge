@@ -3589,20 +3589,67 @@ ul.histogram li {
   margin: 1rem 0;
 }
 
-/* Smart mixes page — generated-family cards + member-track lists. */
-.smartmix-family {
-  padding: 0.9rem 0;
-  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+/* Smart mixes page — generated families as a card grid. Track lists live
+ * inside a collapsed <details> so the page stays one screen of cards instead
+ * of a long scroll; per-card actions (regenerate / save as playlist / cover)
+ * sit above the disclosure. */
+.smartmix-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  margin-top: 0.8rem;
 }
-.smartmix-family:first-of-type { border-top: none; }
-.smartmix-family-head {
+.smartmix-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2, var(--bg-elev));
+  min-width: 0; /* let long titles wrap instead of blowing out the column */
+}
+.smartmix-card-head {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: 0.5rem;
 }
-.smartmix-family-head h3 { margin: 0; }
-.smartmix-subtitle { margin: 0.2rem 0 0.4rem; }
+.smartmix-card-head h3 { margin: 0; }
+.smartmix-meta { margin: 0; }
+.smartmix-subtitle { margin: 0; }
+.smartmix-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.2rem;
+}
+.smartmix-card-status { margin: 0; overflow-wrap: anywhere; }
+.smartmix-card-status:empty { display: none; }
+.smartmix-save-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.smartmix-save-name {
+  flex: 1 1 12rem;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface, var(--bg-panel));
+  color: inherit;
+  font: inherit;
+}
+.smartmix-tracklist { margin-top: auto; /* pin to the card foot so grids align */ }
+.smartmix-tracklist > summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+  user-select: none;
+}
+.smartmix-tracklist > summary:hover { color: inherit; }
 .smartmix-tracks {
   margin: 0.4rem 0 0;
   padding-left: 1.5rem;
@@ -3611,7 +3658,7 @@ ul.histogram li {
   font-size: 0.9rem;
   line-height: 1.5;
 }
-.smartmix-tracks li { padding: 0.05rem 0; }
+.smartmix-tracks li { padding: 0.05rem 0; overflow-wrap: anywhere; }
 
 /* --- Jobs page: background-activity card grid --- */
 /* Two columns on wide screens, stacked on narrow. The gap replaces the

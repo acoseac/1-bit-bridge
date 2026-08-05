@@ -52,32 +52,42 @@
       or wait for the daily run.
     </p>
     {{else}}
+    <div class="smartmix-grid">
     {{range .Data.Families}}
-    <div class="smartmix-family">
-      <div class="smartmix-family-head">
-        <h3>{{.Title}}</h3>
-        <span class="badge">{{.Kind}}</span>
-        <span class="muted">{{.ItemCount}} tracks · {{if .RefreshedAt.IsZero}}not yet refreshed{{else}}refreshed {{timeAgo .RefreshedAt}}{{end}}</span>
+      <div class="smartmix-card" data-slug="{{.Slug}}" data-title="{{.Title}}">
+        <div class="smartmix-card-head">
+          <h3>{{.Title}}</h3>
+          <span class="badge">{{.Kind}}</span>
+        </div>
+        <p class="muted smartmix-meta">{{.ItemCount}} tracks · {{if .RefreshedAt.IsZero}}not yet refreshed{{else}}refreshed {{timeAgo .RefreshedAt}}{{end}}</p>
+        {{if .Subtitle}}<p class="muted smartmix-subtitle">{{.Subtitle}}</p>{{end}}
+        <div class="smartmix-actions">
+          <button type="button" class="btn smartmix-regen-one">Regenerate</button>
+          <button type="button" class="btn smartmix-save">Save as playlist…</button>
+        </div>
+        <div class="smartmix-cover-control" data-slug="{{.Slug}}">
+          <label class="btn">
+            <input type="file" accept="image/jpeg,image/png" hidden class="smartmix-cover-input">
+            {{if .HasCover}}Replace cover…{{else}}Set custom cover…{{end}}
+          </label>
+          {{if .HasCover}}<button type="button" class="btn danger smartmix-cover-remove">Remove cover</button>{{end}}
+          <span class="smartmix-cover-status muted"></span>
+        </div>
+        <p class="smartmix-card-status muted" role="status"></p>
+        <details class="smartmix-tracklist">
+          <summary>Show tracks</summary>
+          <ol class="smartmix-tracks">
+            {{range .Tracks}}
+            <li>
+              <span class="smartmix-track-title">{{if .Title}}{{.Title}}{{else}}{{.Path}}{{end}}</span>
+              {{if .Artist}}<span class="muted"> — {{.Artist}}</span>{{end}}
+            </li>
+            {{end}}
+          </ol>
+        </details>
       </div>
-      {{if .Subtitle}}<p class="muted smartmix-subtitle">{{.Subtitle}}</p>{{end}}
-      <div class="smartmix-cover-control" data-slug="{{.Slug}}">
-        <label class="btn">
-          <input type="file" accept="image/jpeg,image/png" hidden class="smartmix-cover-input">
-          {{if .HasCover}}Replace cover…{{else}}Set custom cover…{{end}}
-        </label>
-        {{if .HasCover}}<button type="button" class="btn danger smartmix-cover-remove">Remove cover</button>{{end}}
-        <span class="smartmix-cover-status muted"></span>
-      </div>
-      <ol class="smartmix-tracks">
-        {{range .Tracks}}
-        <li>
-          <span class="smartmix-track-title">{{if .Title}}{{.Title}}{{else}}{{.Path}}{{end}}</span>
-          {{if .Artist}}<span class="muted"> — {{.Artist}}</span>{{end}}
-        </li>
-        {{end}}
-      </ol>
-    </div>
     {{end}}
+    </div>
     {{end}}
   </div>
   {{end}}
