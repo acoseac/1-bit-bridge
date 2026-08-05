@@ -69,10 +69,14 @@
     <p class="hint">
       Tier names are evidence claims, not verdicts: <strong>different-format</strong> members have
       different sample rates, bit depths or codecs — different masters, not redundant copies.
+      <strong>different-audio</strong> members share geometry but their FLAC audio checksums differ —
+      proven remasters, never suppressed. <strong>identical-audio</strong> is checksum-proven
+      bit-identical audio, the only tier where redundancy is a fact.
       <strong>self-nested</strong> is the one pure filesystem fact (the same file uploaded at
       multiple nesting depths, e.g. <code>CD&nbsp;01/CD&nbsp;01/CD&nbsp;01/…</code>) — fix those at
       the storage source. <strong>inconclusive</strong> absorbs every uncertainty.
     </p>
+    <p class="hint" id="dupes-md5-coverage" hidden></p>
   </div>
 
   <div class="panel" id="dupes-groups-panel" hidden>
@@ -81,7 +85,9 @@
       <select id="dupes-tier-filter" aria-label="Filter by tier">
         <option value="">All tiers</option>
         <option value="different-format">different-format</option>
+        <option value="different-audio">different-audio</option>
         <option value="same-format">same-format</option>
+        <option value="identical-audio">identical-audio</option>
         <option value="inconclusive">inconclusive</option>
         <option value="self-nested">self-nested</option>
       </select>

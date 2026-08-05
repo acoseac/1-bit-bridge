@@ -260,6 +260,21 @@ type Track struct {
 	// ExtractorVersion bump doesn't surface the entire library in every
 	// iOS client's next delta sync nor re-queue full re-enrichment.
 	versionStampOnly bool
+
+	// audioMD5 is the FLAC STREAMINFO audio checksum captured by
+	// extractFLACFormatFromReader — lowercase hex, or "" for non-FLAC
+	// sources and for the spec's all-zero "encoder did not compute it"
+	// sentinel. UNEXPORTED ON PURPOSE (the versionStampOnly shape): json
+	// ignores it, so it can never reach tags_json or the /v1 wire — it
+	// exists solely to travel from the extractor into the tracks.audio_md5
+	// column (v32), where the duplicate tiering reads it as the
+	// identical-audio / different-audio evidence. Deliberately NOT merged
+	// in mergePostScanFields: it is extractor-owned, and the
+	// version-stale stamp leg carries it via StampExtractorVersionBatch's
+	// COALESCE(NULLIF(…)) instead (marshalForStorage cannot see an
+	// unexported field, so every unchanged row takes that leg — the
+	// column would otherwise stay empty forever).
+	audioMD5 string
 }
 
 // Variant is one cached alternate rendering of a Track's source. The

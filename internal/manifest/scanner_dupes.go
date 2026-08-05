@@ -35,6 +35,14 @@ func (s *Scanner) currentDupePolicy() dupes.Policy {
 	return dupes.Policy{Mode: dupes.FilterOff}
 }
 
+// dupeSummaryTierOrder is the summary's stable tier ordering (the CLI's
+// presentation order): different-masters first, the MD5-refined tiers
+// beside their same-format parent, the filesystem-fact tier last.
+var dupeSummaryTierOrder = []dupes.Tier{
+	dupes.TierDifferentFormat, dupes.TierDifferentAudio, dupes.TierSameFormat,
+	dupes.TierIdenticalAudio, dupes.TierInconclusive, dupes.TierSelfNested,
+}
+
 // RestampDuplicates runs one full stamping pass and returns the number
 // of rows whose stamps changed. Shape:
 //
@@ -88,8 +96,9 @@ func (s *Scanner) RestampDuplicates(ctx context.Context) (int, error) {
 	groups := c.Groups()
 	var stamps []DupeStamp
 	suppressedTotal := 0
+	md5Known, md5Total := 0, 0
 	perTier := map[dupes.Tier]*DupeTierSummary{}
-	for _, tier := range []dupes.Tier{dupes.TierDifferentFormat, dupes.TierSameFormat, dupes.TierInconclusive, dupes.TierSelfNested} {
+	for _, tier := range dupeSummaryTierOrder {
 		perTier[tier] = &DupeTierSummary{Tier: string(tier)}
 	}
 	for _, g := range groups {
@@ -105,6 +114,9 @@ func (s *Scanner) RestampDuplicates(ctx context.Context) (int, error) {
 			ts.Suppressed += len(suppress)
 		}
 		suppressedTotal += len(suppress)
+		k, tot := g.MD5Coverage()
+		md5Known += k
+		md5Total += tot
 		for _, m := range g.Members {
 			want := DupeStamp{
 				Path:       m.Path,
@@ -141,8 +153,10 @@ func (s *Scanner) RestampDuplicates(ctx context.Context) (int, error) {
 		Groups:        len(groups),
 		Suppressed:    suppressedTotal,
 		Served:        c.Observed() - suppressedTotal,
+		MD5Known:      md5Known,
+		MD5Total:      md5Total,
 	}
-	for _, tier := range []dupes.Tier{dupes.TierDifferentFormat, dupes.TierSameFormat, dupes.TierInconclusive, dupes.TierSelfNested} {
+	for _, tier := range dupeSummaryTierOrder {
 		sum.Tiers = append(sum.Tiers, *perTier[tier])
 	}
 	if serr := s.store.SaveDupeSummary(ctx, sum); serr != nil {

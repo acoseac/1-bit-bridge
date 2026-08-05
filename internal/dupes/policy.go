@@ -112,8 +112,16 @@ func PlanSuppression(g Group, p Policy) []string {
 	switch g.Tier {
 	case TierSelfNested:
 		return planNestTwinSuppression(g.Members)
-	case TierSameFormat:
+	case TierSameFormat, TierIdenticalAudio:
+		// identical-audio is same-format with proof — same treatment,
+		// stronger claim.
 		return planDomainWinners(g.Members)
+	case TierDifferentAudio:
+		// Proven remasters: NEVER suppressed, under any mode. This is
+		// the MD5 evidence's safety payoff — it strips false redundancy
+		// off same-geometry groups, and the stamping pass's normal
+		// diff+bump un-suppresses any member a pre-evidence pass hid.
+		return nil
 	case TierDifferentFormat:
 		if p.Mode != FilterHighestQuality {
 			return nil

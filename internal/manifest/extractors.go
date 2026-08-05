@@ -187,7 +187,14 @@ var Ext = map[string]bool{
 // diff-guard (scanner.go reExtractUnchanged) keeps rows whose merged
 // re-extract is byte-identical OUT of the iOS delta — only rows that
 // actually gained something (art, extractor fixes) bump indexed_at.
-const ExtractorVersion = 2
+//
+// v3 (duplicates PR D): capture the FLAC STREAMINFO audio MD5 into the
+// unexported Track.audioMD5 → tracks.audio_md5 (migration v32) — the
+// identical-audio / different-audio duplicate evidence. The bump
+// re-opens every file once over its mount (the 1→2 bump's measured
+// precedent); per-file the MD5 read is free (the 34-byte STREAMINFO
+// body was already in hand, previously discarded).
+const ExtractorVersion = 3
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -1622,6 +1629,23 @@ func extractFLACFormatFromReader(r io.ReadSeeker, absPath string, t *Track) erro
 		uint64(body[15])<<16 |
 		uint64(body[16])<<8 |
 		uint64(body[17])
+
+	// Audio MD5 — bytes 18..33. An ALL-ZERO checksum is the FLAC spec's
+	// "encoder did not compute it" sentinel and MUST read as unknown
+	// (""): without this guard every checksum-less encode would collide
+	// with every other one — a library-wide false "bit-identical" claim
+	// in the one duplicate tier that asserts certainty. Mirrors the
+	// hasMD5 check in internal/analyze/flacmd5.go.
+	md5Zero := true
+	for _, b := range body[18:34] {
+		if b != 0 {
+			md5Zero = false
+			break
+		}
+	}
+	if !md5Zero {
+		t.audioMD5 = hex.EncodeToString(body[18:34])
+	}
 
 	// v1.2 additive: stamp the canonical codec for the iOS-side
 	// `Track.codec` column. FLAC files are unambiguously FLAC at

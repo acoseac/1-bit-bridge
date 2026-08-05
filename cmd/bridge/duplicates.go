@@ -32,12 +32,16 @@ import (
 // never internal/version.ProtocolVersion.
 const duplicatesJSONSchemaVersion = 1
 
-// dupeTierOrder is the display order: the different-masters tier prints
-// FIRST, with its preamble, so the least-redundant tier can't be skimmed
-// as deletion fodder; the self-nested section renders separately at the
-// end so a bad upload isn't read as hundreds of real duplicate albums.
+// dupeTierOrder is the display order: the different-masters tiers print
+// FIRST, with their preambles, so the least-redundant tiers can't be
+// skimmed as deletion fodder; the self-nested section renders separately
+// at the end so a bad upload isn't read as hundreds of real duplicate
+// albums. identical-audio sits last among the inline tiers — it is the
+// only tier whose bytes are a proven fact, and it reads best after the
+// inference tiers have set the vocabulary.
 var dupeTierOrder = []dupes.Tier{
-	dupes.TierDifferentFormat, dupes.TierSameFormat, dupes.TierInconclusive,
+	dupes.TierDifferentFormat, dupes.TierDifferentAudio, dupes.TierSameFormat,
+	dupes.TierInconclusive, dupes.TierIdenticalAudio,
 }
 
 type duplicatesOpts struct {
@@ -58,7 +62,7 @@ func duplicatesFlagSet(stderr io.Writer) (*flag.FlagSet, *duplicatesOpts) {
 	fs.SetOutput(stderr)
 	fs.StringVar(&o.configPath, "config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	fs.StringVar(&o.pathScope, "path", "", "restrict to a library subtree (default: whole library)")
-	fs.StringVar(&o.tier, "tier", "", "narrow to one tier: different-format | same-format | inconclusive | self-nested")
+	fs.StringVar(&o.tier, "tier", "", "narrow to one tier: different-format | different-audio | same-format | identical-audio | inconclusive | self-nested")
 	fs.IntVar(&o.limit, "limit", 50, "maximum groups to print per tier (0 = counts only)")
 	fs.BoolVar(&o.asJSON, "json", false, "emit JSON instead of a human summary")
 	fs.BoolVar(&o.nestedOnly, "nested-only", false, "print only the self-nested (upload accident) section")
@@ -72,7 +76,7 @@ func duplicatesCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 2
 	}
 	if o.tier != "" && !validDupeTierName(o.tier) {
-		fmt.Fprintf(stderr, "duplicates: --tier must be one of different-format, same-format, inconclusive, self-nested (got %q)\n", o.tier)
+		fmt.Fprintf(stderr, "duplicates: --tier must be one of different-format, different-audio, same-format, identical-audio, inconclusive, self-nested (got %q)\n", o.tier)
 		return 2
 	}
 	if o.limit < 0 {
@@ -104,7 +108,8 @@ func duplicatesCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 
 func validDupeTierName(s string) bool {
 	switch dupes.Tier(s) {
-	case dupes.TierDifferentFormat, dupes.TierSameFormat, dupes.TierInconclusive, dupes.TierSelfNested:
+	case dupes.TierDifferentFormat, dupes.TierDifferentAudio, dupes.TierSameFormat,
+		dupes.TierIdenticalAudio, dupes.TierInconclusive, dupes.TierSelfNested:
 		return true
 	}
 	return false
@@ -113,11 +118,18 @@ func validDupeTierName(s string) bool {
 // --- report shapes (CLI-local DTOs — never dupes.Group on the encoder) ---
 
 type dupeReport struct {
-	SchemaVersion int              `json:"schemaVersion"`
-	Path          string           `json:"path"`
-	Scanned       int              `json:"scanned"`
-	GroupsTotal   int              `json:"groupsTotal"`
-	Tiers         []dupeTierReport `json:"tiers"`
+	SchemaVersion int    `json:"schemaVersion"`
+	Path          string `json:"path"`
+	Scanned       int    `json:"scanned"`
+	GroupsTotal   int    `json:"groupsTotal"`
+	// MD5Known/MD5Total: audio-checksum evidence coverage across group
+	// members. The identical-audio / different-audio tiers require FULL
+	// per-group coverage, so a low number here reads as "evidence still
+	// arriving" (the ExtractorVersion-3 backfill), not as an absence of
+	// remasters.
+	MD5Known int              `json:"md5Known"`
+	MD5Total int              `json:"md5Total"`
+	Tiers    []dupeTierReport `json:"tiers"`
 }
 
 type dupeTierReport struct {
@@ -198,6 +210,11 @@ func buildDupeReport(scope string, scanned int, groups []dupes.Group, limit int,
 		Scanned:       scanned,
 		GroupsTotal:   len(groups),
 	}
+	for _, g := range groups {
+		k, tot := g.MD5Coverage()
+		rep.MD5Known += k
+		rep.MD5Total += tot
+	}
 	byTier := map[dupes.Tier][]dupes.Group{}
 	for _, g := range groups {
 		byTier[g.Tier] = append(byTier[g.Tier], g)
@@ -256,6 +273,10 @@ func printDupeReport(w io.Writer, rep *dupeReport, o *duplicatesOpts) {
 	fmt.Fprintln(w, "  This report never deletes or moves anything — the bridge has no code")
 	fmt.Fprintln(w, "  path that modifies library files.")
 	fmt.Fprintf(w, "\n  scanned %d tracks · %d groups\n", rep.Scanned, rep.GroupsTotal)
+	if rep.MD5Total > 0 {
+		fmt.Fprintf(w, "  audio-checksum evidence: %d of %d group members (FLAC STREAMINFO MD5)\n",
+			rep.MD5Known, rep.MD5Total)
+	}
 
 	for _, tr := range rep.Tiers {
 		if o.nestedOnly && tr.Tier != string(dupes.TierSelfNested) {
@@ -278,9 +299,18 @@ func printDupeTier(w io.Writer, tr dupeTierReport, limit int) {
 	case string(dupes.TierDifferentFormat):
 		fmt.Fprintln(w, "  Different sample rates, bit depths or codecs mean DIFFERENT MASTERS —")
 		fmt.Fprintln(w, "  these are not redundant copies.")
+	case string(dupes.TierDifferentAudio):
+		fmt.Fprintln(w, "  Same geometry but the FLAC audio checksums DIFFER — proven remasters,")
+		fmt.Fprintln(w, "  not redundant copies. Never suppressed.")
+	case string(dupes.TierSameFormat):
+		fmt.Fprintln(w, "  Identical geometry and agreeing durations — likely true duplicates")
+		fmt.Fprintln(w, "  (checksum evidence pending where the coverage line below says so).")
 	case string(dupes.TierInconclusive):
 		fmt.Fprintln(w, "  Durations disagree, geometry is unknown, or version markers differ —")
 		fmt.Fprintln(w, "  treat these as distinct recordings until proven otherwise.")
+	case string(dupes.TierIdenticalAudio):
+		fmt.Fprintln(w, "  Every member's FLAC audio checksum is known AND EQUAL — bit-identical")
+		fmt.Fprintln(w, "  audio. The one tier where the byte figure is genuinely reclaimable.")
 	case string(dupes.TierSelfNested):
 		fmt.Fprintln(w, "  The same file at multiple self-nesting depths (an upload accident,")
 		fmt.Fprintln(w, "  e.g. CD 01/CD 01/CD 01/…) — fix at the storage source.")

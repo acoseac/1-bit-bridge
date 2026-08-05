@@ -75,8 +75,18 @@ const (
 	// The one tier that is a pure filesystem fact.
 	TierSelfNested Tier = "self-nested"
 	// TierSameFormat — identical geometry (codec, rate, bits, DSD-ness)
-	// and agreeing durations: likely true duplicates.
+	// and agreeing durations: likely true duplicates. Once audio-MD5
+	// evidence covers EVERY member, the group refines into one of the
+	// two tiers below; partial coverage keeps it here.
 	TierSameFormat Tier = "same-format"
+	// TierIdenticalAudio — every member FLAC with a known STREAMINFO
+	// MD5, all equal: the ONLY tier where redundancy is a fact rather
+	// than an inference.
+	TierIdenticalAudio Tier = "identical-audio"
+	// TierDifferentAudio — every member's MD5 known, and they differ:
+	// same-geometry REMASTERS. A demotion out of same-format, and the
+	// evidence's real payoff — these are never suppressed.
+	TierDifferentAudio Tier = "different-audio"
 	// TierDifferentFormat — differing geometry: different masters of the
 	// same release (96/24 vs 48/24). NOT redundant.
 	TierDifferentFormat Tier = "different-format"
@@ -107,4 +117,17 @@ func (g *Group) RedundantBytes() int64 {
 		}
 	}
 	return sum - max
+}
+
+// MD5Coverage reports how much audio-MD5 evidence this group carries:
+// known = members with a non-empty AudioMD5, total = all members. The
+// report surfaces the aggregate so a partially-backfilled library reads
+// as "evidence still arriving", not as an absence of remasters.
+func (g *Group) MD5Coverage() (known, total int) {
+	for _, m := range g.Members {
+		if m.AudioMD5 != "" {
+			known++
+		}
+	}
+	return known, len(g.Members)
 }

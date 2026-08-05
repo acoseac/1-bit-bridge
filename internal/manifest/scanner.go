@@ -1273,10 +1273,15 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 		// batch shape and both count into `committed` so the admin
 		// progress bar doesn't stall during an ExtractorVersion-bump scan.
 		var full []*Track
-		var stampPaths []string
+		var stampRows []*Track
 		for _, t := range batch {
 			if t.versionStampOnly {
-				stampPaths = append(stampPaths, t.Path)
+				// Whole *Track, not just the path: the stamp leg carries
+				// the freshly-captured audio_md5 (unexported field the
+				// store reads directly) — a paths-only stamp would leave
+				// the v32 column empty forever, because byte-identical
+				// rows never reach the upsert leg.
+				stampRows = append(stampRows, t)
 			} else {
 				full = append(full, t)
 			}
@@ -1289,11 +1294,11 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 				committedRows += len(full)
 			}
 		}
-		if len(stampPaths) > 0 {
-			if err := s.store.StampExtractorVersionBatch(ctx, stampPaths); err != nil {
-				scanLogger.Error("stamp extractor-version batch", "rows", len(stampPaths), "err", err)
+		if len(stampRows) > 0 {
+			if err := s.store.StampExtractorVersionBatch(ctx, stampRows); err != nil {
+				scanLogger.Error("stamp extractor-version batch", "rows", len(stampRows), "err", err)
 			} else {
-				committedRows += len(stampPaths)
+				committedRows += len(stampRows)
 			}
 		}
 		if committedRows > 0 {
