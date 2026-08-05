@@ -1482,6 +1482,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return artworkCmd(ctx, args[1:], stdout, stderr)
 	case "enrichment":
 		return enrichmentCmd(ctx, args[1:], stdout, stderr)
+	case "duplicates":
+		return duplicatesCmd(ctx, args[1:], stdout, stderr)
 	case "fingerprint":
 		return fingerprintCmd(ctx, args[1:], stdout, stderr)
 	case "doctor":
@@ -1566,6 +1568,10 @@ Subcommands:
            them (requires fpcalc). A diagnostic for the tracks whose tags are too poor
            to match on text — it prints coverage, cost and the acceptance verdict, and
            writes nothing.
+  duplicates
+           Report duplicate track groups the iOS client would collapse, tiered by
+           evidence (different-format / same-format / inconclusive, plus self-nested
+           upload accidents). Read-only: deletes and moves are structurally absent.
   doctor   Preflight: check ports, directories, service manager before init.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
