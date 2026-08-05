@@ -24,6 +24,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // duplicatesJSONSchemaVersion identifies the --json report shape. CLI-only
@@ -149,6 +150,10 @@ type dupeMemberJSON struct {
 	SizeBytes     int64   `json:"sizeBytes"`
 	DurationSec   float64 `json:"durationSec,omitempty"`
 	NestDepth     int     `json:"nestDepth,omitempty"`
+	// Suppressed is the LIVE serving state from the stamp columns (what
+	// the bridge is excluding right now), not a prediction from this
+	// report's grouping.
+	Suppressed bool `json:"suppressedFromServing,omitempty"`
 }
 
 // collectDuplicates walks the store twice through the two-pass collector
@@ -162,23 +167,31 @@ func collectDuplicates(ctx context.Context, cfg *config.Config, o *duplicatesOpt
 	defer store.Close()
 
 	c := dupes.NewCollector()
-	if err := store.StreamTrackDupeRefsUnderPrefix(ctx, o.pathScope, o.includeRouted, func(r dupes.Row) error {
+	if err := store.StreamTrackDupeRefsUnderPrefix(ctx, o.pathScope, o.includeRouted, func(r dupes.Row, _ manifest.DupeStampState) error {
 		c.Note(r)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 	c.Seal()
-	if err := store.StreamTrackDupeRefsUnderPrefix(ctx, o.pathScope, o.includeRouted, func(r dupes.Row) error {
+	// The stamp state reflects what the bridge is SERVING right now —
+	// which may lag this report's freshly-computed groups until the next
+	// stamping pass (scan tail or settings flip). Badging the live state
+	// rather than a prediction keeps the report honest about behaviour.
+	suppressed := map[string]bool{}
+	if err := store.StreamTrackDupeRefsUnderPrefix(ctx, o.pathScope, o.includeRouted, func(r dupes.Row, st manifest.DupeStampState) error {
 		c.Collect(r)
+		if st.Suppressed {
+			suppressed[r.Path] = true
+		}
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	return buildDupeReport(o.pathScope, c.Observed(), c.Groups(), o.limit), nil
+	return buildDupeReport(o.pathScope, c.Observed(), c.Groups(), o.limit, suppressed), nil
 }
 
-func buildDupeReport(scope string, scanned int, groups []dupes.Group, limit int) *dupeReport {
+func buildDupeReport(scope string, scanned int, groups []dupes.Group, limit int, suppressed map[string]bool) *dupeReport {
 	rep := &dupeReport{
 		SchemaVersion: duplicatesJSONSchemaVersion,
 		Path:          scope,
@@ -208,14 +221,14 @@ func buildDupeReport(scope string, scanned int, groups []dupes.Group, limit int)
 				tr.SamplesTruncated = true
 				break
 			}
-			tr.Samples = append(tr.Samples, dupeGroupToJSON(g))
+			tr.Samples = append(tr.Samples, dupeGroupToJSON(g, suppressed))
 		}
 		rep.Tiers = append(rep.Tiers, tr)
 	}
 	return rep
 }
 
-func dupeGroupToJSON(g dupes.Group) dupeGroupJSON {
+func dupeGroupToJSON(g dupes.Group, suppressed map[string]bool) dupeGroupJSON {
 	out := dupeGroupJSON{
 		AlbumID: g.Key.AlbumID, Disc: g.Key.Disc, Track: g.Key.Track,
 		NormTitle: g.Key.NormTitle,
@@ -225,7 +238,8 @@ func dupeGroupToJSON(g dupes.Group) dupeGroupJSON {
 			Path: m.Path, Codec: m.Codec, SampleRate: m.SampleRate,
 			BitsPerSample: m.BitsPerSample, IsDSD: m.IsDSD,
 			SizeBytes: m.Size, DurationSec: m.Duration,
-			NestDepth: dupes.SelfNestDepth(m.Path),
+			NestDepth:  dupes.SelfNestDepth(m.Path),
+			Suppressed: suppressed[m.Path],
 		})
 	}
 	return out
@@ -277,7 +291,11 @@ func printDupeTier(w io.Writer, tr dupeTierReport, limit int) {
 	for _, g := range tr.Samples {
 		fmt.Fprintf(w, "    %s · disc %d · track %d · %q\n", g.AlbumID, g.Disc, g.Track, g.NormTitle)
 		for _, m := range g.Members {
-			fmt.Fprintf(w, "      %-24s %s\n", memberGeometry(m), m.Path)
+			badge := ""
+			if m.Suppressed {
+				badge = "   [suppressed from serving]"
+			}
+			fmt.Fprintf(w, "      %-24s %s%s\n", memberGeometry(m), m.Path, badge)
 		}
 	}
 	if tr.SamplesTruncated {

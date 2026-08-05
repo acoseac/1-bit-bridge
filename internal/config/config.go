@@ -70,6 +70,7 @@ type Config struct {
 	Upscale         UpscaleConfig        `yaml:"upscale,omitempty"`
 	Analysis        AnalysisConfig       `yaml:"analysis,omitempty"`
 	Fingerprint     FingerprintConfig    `yaml:"fingerprint,omitempty"`
+	Duplicates      DuplicatesConfig     `yaml:"duplicates,omitempty"`
 	SmartPlaylists  SmartPlaylistsConfig `yaml:"smartPlaylists,omitempty"`
 	Tailscale       TailscaleConfig      `yaml:"tailscale,omitempty"`
 	Scanner         ScannerConfig        `yaml:"scanner,omitempty"`
@@ -1319,6 +1320,59 @@ func (f FingerprintConfig) ResolvedAPIKey() string {
 	return strings.TrimSpace(f.APIKey)
 }
 
+// DuplicatesConfig governs serve-time duplicate suppression: the
+// post-scan stamping pass groups tracks by the iOS client's own
+// collapse identity (internal/dupes) and, per this policy, marks the
+// non-winning copies of a duplicate group as not-served. Stamping and
+// the stats surface ALWAYS run — the policy only decides what gets
+// suppressed. Suppression changes what /v1/manifest, DLNA and smart
+// mixes serve; it never deletes, moves or rewrites anything, and any
+// row it un-suppresses re-surfaces to delta-syncing clients via an
+// indexed_at bump.
+type DuplicatesConfig struct {
+	// Filter selects the suppression policy:
+	//
+	//   highest-quality  (default) suppress self-nested upload-accident
+	//                    twins, same-format duplicates, and collapse
+	//                    different-format groups to the highest-quality
+	//                    member within each DSD/PCM domain. DSD and PCM
+	//                    editions are NEVER cross-suppressed.
+	//   same-format      suppress self-nested twins and same-format
+	//                    duplicates only; cross-format groups serve all
+	//                    members.
+	//   off              suppress nothing (stats still computed).
+	//
+	// Empty resolves to highest-quality. Hot-applied: the admin settings
+	// PATCH re-runs the stamping pass, no restart needed.
+	Filter string `yaml:"filter,omitempty"`
+}
+
+// Canonical duplicates.filter values (the config vocabulary; internal/
+// dupes.FilterMode carries the same literals, lockstep-tested from
+// cmd/bridge which imports both).
+const (
+	DuplicatesFilterOff            = "off"
+	DuplicatesFilterSameFormat     = "same-format"
+	DuplicatesFilterHighestQuality = "highest-quality"
+)
+
+// EffectiveFilter resolves the configured policy, applying the
+// highest-quality default for empty values and rejecting unknowns (the
+// TailscaleMode.EffectiveMode shape: tolerant of case/whitespace, error
+// message preserves the operator's original input verbatim).
+func (d DuplicatesConfig) EffectiveFilter() (string, error) {
+	v := strings.ToLower(strings.TrimSpace(d.Filter))
+	switch v {
+	case "", DuplicatesFilterHighestQuality:
+		return DuplicatesFilterHighestQuality, nil
+	case DuplicatesFilterSameFormat:
+		return DuplicatesFilterSameFormat, nil
+	case DuplicatesFilterOff:
+		return DuplicatesFilterOff, nil
+	}
+	return "", fmt.Errorf("duplicates.filter: unknown value %q (want highest-quality|same-format|off)", d.Filter)
+}
+
 // SmartPlaylistsConfig governs the optional server-side smart/dynamic
 // playlist generator (Heavy Rotation, Auto Mix, Forgotten Favorites,
 // time-of-day, Daily Mix, The Finish Line). Disabled by default; opt in
@@ -2165,6 +2219,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Fingerprint.SweepIntervalHours < 0 || c.Fingerprint.SweepIntervalHours > maxIntervalHours {
 		return fmt.Errorf("fingerprint.sweepIntervalHours: must be between 0 and %d, got %d", maxIntervalHours, c.Fingerprint.SweepIntervalHours)
+	}
+	// Duplicates: the resolver IS the validation (unknown value → error),
+	// so a typo'd policy fails at load rather than silently serving with
+	// the default.
+	if _, err := c.Duplicates.EffectiveFilter(); err != nil {
+		return err
 	}
 	if c.Update.CheckIntervalHours < 0 || c.Update.CheckIntervalHours > maxIntervalHours {
 		return fmt.Errorf("update.checkIntervalHours: must be between 0 and %d, got %d", maxIntervalHours, c.Update.CheckIntervalHours)

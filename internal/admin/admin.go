@@ -303,6 +303,15 @@ type Deps struct {
 	// feature is inactive; the endpoint then 503s.
 	TriggerFingerprintSweep func() bool
 
+	// TriggerDuplicatesPass nudges the duplicates stamping sweeper
+	// (cmd/bridge runDuplicatesSweeper) to re-evaluate suppression under
+	// the CURRENT duplicates.filter policy — the hot-apply half of the
+	// settings PATCH: flipping the policy fires this instead of setting
+	// RestartRequired. Coalescing non-blocking send (nudgeTriggerClosure);
+	// nil when unwired (test harnesses) — the PATCH then still persists
+	// and the next full scan applies the policy.
+	TriggerDuplicatesPass func() bool
+
 	// SmartMixRun / BackupRun expose the smart-mix regenerator's and
 	// backup ticker's last/next-run recorders for the Jobs page cards.
 	// Nil-safe: absent omits the field (feature off or test harness).

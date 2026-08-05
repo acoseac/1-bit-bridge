@@ -480,7 +480,11 @@ func (a *manifestLibraryAdapter) rebuild() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	tracks, err := a.store.ListTracks(ctx, nil)
+	// Served set only: the whole CDS surface (All Tracks list + count,
+	// folder tree, FTS search resolution) derives from this one call, so
+	// duplicate suppression reaches DLNA renderers for free — and DLNA
+	// agrees with what /v1/manifest serves.
+	tracks, err := a.store.ListServedTracks(ctx, nil)
 	if err != nil {
 		a.log.Warn("manifest list failed", slog.String("err", err.Error()))
 		return

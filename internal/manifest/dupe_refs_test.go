@@ -43,7 +43,7 @@ func TestStreamTrackDupeRefs_ProjectionAndTagPresence(t *testing.T) {
 	})
 
 	refs := map[string]dupes.Row{}
-	err := s.StreamTrackDupeRefsUnderPrefix(ctx, "", false, func(r dupes.Row) error {
+	err := s.StreamTrackDupeRefsUnderPrefix(ctx, "", false, func(r dupes.Row, _ DupeStampState) error {
 		refs[r.Path] = r // value copy — safe to retain
 		return nil
 	})
@@ -89,7 +89,7 @@ func TestStreamTrackDupeRefs_ExcludesRoutedRowsByDefault(t *testing.T) {
 	seedRoutedTrack(t, s, "2go/Server/c.flac")
 
 	var got []string
-	if err := s.StreamTrackDupeRefsUnderPrefix(ctx, "", false, func(r dupes.Row) error {
+	if err := s.StreamTrackDupeRefsUnderPrefix(ctx, "", false, func(r dupes.Row, _ DupeStampState) error {
 		got = append(got, r.Path)
 		return nil
 	}); err != nil {
@@ -100,7 +100,7 @@ func TestStreamTrackDupeRefs_ExcludesRoutedRowsByDefault(t *testing.T) {
 	}
 
 	got = nil
-	if err := s.StreamTrackDupeRefsUnderPrefix(ctx, "", true, func(r dupes.Row) error {
+	if err := s.StreamTrackDupeRefsUnderPrefix(ctx, "", true, func(r dupes.Row, _ DupeStampState) error {
 		got = append(got, r.Path)
 		return nil
 	}); err != nil {
@@ -122,7 +122,7 @@ func TestStreamTrackDupeRefs_PrefixScopesByByteRange(t *testing.T) {
 
 	var got []string
 	// Trailing slash must be tolerated (subtreeRangeBase trims it).
-	if err := s.StreamTrackDupeRefsUnderPrefix(ctx, "music/", false, func(r dupes.Row) error {
+	if err := s.StreamTrackDupeRefsUnderPrefix(ctx, "music/", false, func(r dupes.Row, _ DupeStampState) error {
 		got = append(got, r.Path)
 		return nil
 	}); err != nil {

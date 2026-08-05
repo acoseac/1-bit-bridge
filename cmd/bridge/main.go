@@ -45,6 +45,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
@@ -1896,6 +1897,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// so operators who never touch the `scanner:` YAML block still get the
 	// standard 3-scan threshold.
 	scanner.SetDeleteThreshold(cfg.Scanner.DeleteAfterMissingScans)
+	// Duplicates policy MUST be wired BEFORE RunPeriodic starts below:
+	// the startup scan runs the stamping pass, and an unwired scanner
+	// stamps with FilterOff — which would CLEAR every suppression on
+	// each boot (mass indexed_at bumps → iOS delta churn) only for the
+	// next pass to re-suppress. The live config holder doesn't exist yet
+	// at this point (it belongs to apiSrv), so the closure late-binds it:
+	// boot snapshot until the holder lands, live holder afterwards — the
+	// two can't differ in between, because config mutations only arrive
+	// via the admin server, which starts later.
+	var dupeCfgLive atomic.Pointer[config.RuntimeConfig]
+	scanner.SetDupePolicy(func() dupes.Policy {
+		live := cfg
+		if h := dupeCfgLive.Load(); h != nil {
+			live = h.Load()
+		}
+		return dupePolicyFromConfig(live)
+	})
 	provider := manifest.NewProvider(manifestStore, scanner)
 
 	// Fire up the periodic scanner in the background. It runs an initial
@@ -2364,6 +2382,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 
 	cfgHolder := apiSrv.ConfigHolder()
+	// Flip the duplicates-policy closure from the boot snapshot to the
+	// live holder (see SetDupePolicy above) so settings PATCHes reach
+	// the next stamping pass.
+	dupeCfgLive.Store(cfgHolder)
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
 	// http.Server on its own port + an SSDP advertiser so any DLNA
@@ -2558,6 +2580,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				fingerprintNudge, fingerprintSweepState)
 		}()
 	}
+
+	// Duplicates stamping sweeper — ALWAYS wired (not feature-gated):
+	// stamping runs regardless of policy (stats work with the filter
+	// off), and the nudge is what makes an off→on settings flip
+	// hot-apply. Nudge-only (no tick, no startup run — the scan tail
+	// owns the periodic cadence); bgWriters-joined because the pass
+	// writes the store.
+	duplicatesNudge := make(chan struct{}, 1)
+	duplicatesSweepState := &sweepStatus[duplicatesSweepCounts]{}
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		runDuplicatesSweeper(scanCtx, scanner, duplicatesNudge, duplicatesSweepState)
+	}()
 
 	// Smart-playlist regenerator (shares scanCtx). analysisActive (the
 	// sox-resolved flag) gates the harmonic/discovery families.
@@ -3089,6 +3125,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		FingerprintState: fingerprintStateClosure(cfg.Fingerprint.Enabled,
 			fingerprintCache != nil, fingerprintDegraded, fingerprintSweepState),
 		TriggerFingerprintSweep: nudgeTriggerClosure(fingerprintNudge),
+		TriggerDuplicatesPass:   nudgeTriggerClosure(duplicatesNudge),
 		// Last/next-run recorders for the smart-mix + backup cards (nil
 		// when the respective loop isn't running).
 		SmartMixRun: jobRunClosure(smartMixRunState),

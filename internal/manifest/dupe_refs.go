@@ -49,20 +49,26 @@ const dupeRefSelect = `
 	       COALESCE(t.sample_rate, 0),
 	       COALESCE(t.bits_per_sample, 0),
 	       COALESCE(t.is_dsd, 0),
-	       COALESCE(t.codec, '')
+	       COALESCE(t.codec, ''),
+	       t.dupe_group_id,
+	       t.dupe_tier,
+	       t.dupe_suppressed
 	  FROM tracks t`
 
 // StreamTrackDupeRefsUnderPrefix walks every track under prefix ("" =
-// whole library) and yields the duplicate-grouping projection per row.
-// UPnP-routed rows are EXCLUDED unless includeRouted is set: their
-// lifecycle belongs to the ingest reconcile, the duplicate stamping pass
-// must never touch them, and mixing remote upstream content into the
-// default report invites acting on rows the bridge doesn't own.
+// whole library) and yields the duplicate-grouping projection per row,
+// paired with the row's CURRENT dupe-stamp state (so the stamping pass
+// can diff desired-vs-current, and the CLI can badge what is actually
+// being served right now). UPnP-routed rows are EXCLUDED unless
+// includeRouted is set: their lifecycle belongs to the ingest reconcile,
+// the duplicate stamping pass must never touch them, and mixing remote
+// upstream content into the default report invites acting on rows the
+// bridge doesn't own.
 //
-// The callback MUST NOT retain the value past its invocation (the
-// StreamTracks contract — the struct is reused across iterations).
+// The callback MUST NOT retain either value past its invocation (the
+// StreamTracks contract — the structs are reused across iterations).
 // Read-only; no s.mu.
-func (s *Store) StreamTrackDupeRefsUnderPrefix(ctx context.Context, prefix string, includeRouted bool, fn func(dupes.Row) error) error {
+func (s *Store) StreamTrackDupeRefsUnderPrefix(ctx context.Context, prefix string, includeRouted bool, fn func(dupes.Row, DupeStampState) error) error {
 	q := dupeRefSelect
 	var (
 		conds []string
@@ -94,17 +100,21 @@ func (s *Store) StreamTrackDupeRefsUnderPrefix(ctx context.Context, prefix strin
 	}
 	defer rows.Close()
 	var (
-		ref   dupes.Row
-		disc  sql.NullInt64
-		track sql.NullInt64
-		isDSD int
+		ref        dupes.Row
+		st         DupeStampState
+		disc       sql.NullInt64
+		track      sql.NullInt64
+		isDSD      int
+		suppressed int
 	)
 	for rows.Next() {
 		ref = dupes.Row{}
-		disc, track, isDSD = sql.NullInt64{}, sql.NullInt64{}, 0
+		st = DupeStampState{}
+		disc, track, isDSD, suppressed = sql.NullInt64{}, sql.NullInt64{}, 0, 0
 		if err := rows.Scan(&ref.Path, &ref.Title, &ref.Album, &ref.AlbumArtist,
 			&ref.Artist, &ref.Year, &disc, &track, &ref.Size, &ref.Duration,
-			&ref.SampleRate, &ref.BitsPerSample, &isDSD, &ref.Codec); err != nil {
+			&ref.SampleRate, &ref.BitsPerSample, &isDSD, &ref.Codec,
+			&st.GroupID, &st.Tier, &suppressed); err != nil {
 			return err
 		}
 		if disc.Valid {
@@ -116,7 +126,8 @@ func (s *Store) StreamTrackDupeRefsUnderPrefix(ctx context.Context, prefix strin
 			ref.TrackTagged = true
 		}
 		ref.IsDSD = isDSD != 0
-		if err := fn(ref); err != nil {
+		st.Suppressed = suppressed != 0
+		if err := fn(ref, st); err != nil {
 			return err
 		}
 	}

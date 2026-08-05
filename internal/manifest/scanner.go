@@ -22,6 +22,7 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
+	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -128,6 +129,12 @@ type Scanner struct {
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
 	// can't race a startup scan already in flight on another goroutine.
 	postScanHook atomic.Pointer[func()]
+
+	// dupePolicy, when set, supplies the duplicates-suppression policy
+	// snapshot each stamping pass runs under — see SetDupePolicy
+	// (scanner_dupes.go). Same atomic.Pointer rationale as postScanHook:
+	// boot-time wiring must not race a startup scan already in flight.
+	dupePolicy atomic.Pointer[func() dupes.Policy]
 }
 
 // SetPostScanHook installs a callback invoked after every SUCCESSFUL
@@ -695,6 +702,18 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		scanLogger.Error("track-number reconciliation", "err", rErr)
 	} else if n > 0 {
 		scanLogger.Info("track-number reconciliation filled missing track numbers", "tracks", n)
+	}
+	// Duplicate stamping runs LAST, after every metadata reconciliation,
+	// so the client-key grouping sees post-reconciliation tags. It does
+	// not take routedSet — its ref stream anti-joins UPnP-routed rows in
+	// SQL — but it deliberately sits behind the same fail-closed early
+	// returns above (ctx done / routed-set failure skip the whole tail;
+	// stamps go stale for one scan, which only ever fails open: unstamped
+	// and stale-served rows are still served). Same non-fatal contract.
+	if n, rErr := s.RestampDuplicates(ctx); rErr != nil {
+		scanLogger.Error("duplicate stamping", "err", rErr)
+	} else if n > 0 {
+		scanLogger.Info("duplicate stamping updated serving stamps", "tracks", n)
 	}
 
 	scanOK = true
@@ -2168,7 +2187,7 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 	if !since.IsZero() {
 		sp = &since
 	}
-	tracks, err := store.ListTracks(ctx, sp)
+	tracks, err := store.ListServedTracks(ctx, sp)
 	if err != nil {
 		return nil, err
 	}
@@ -2204,9 +2223,9 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 	// top-level `total`, so we still need this count — but we now do
 	// it once, here, instead of letting both the manifest builder and
 	// EnrichmentCounts each issue their own `COUNT(*)`.
-	total, terr := store.CountTracks(ctx)
+	total, terr := store.CountServedTracks(ctx)
 	if terr != nil {
-		logger.Error("CountTracks for enrichment-progress", "err", terr)
+		logger.Error("CountServedTracks for enrichment-progress", "err", terr)
 	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
 		m.EnrichmentProgress = &EnrichmentProgress{
 			TracksTotal:    total,
@@ -2269,9 +2288,13 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// `tracksTotal` and the iOS-side enrichment hint cohabit a single
 	// CountTracks() call so the protocol invariant `manifest.total ==
 	// EnrichmentProgress.TracksTotal` holds (Qodo #2 carry-over).
+	// SERVED-population rule: every number that leaves /v1 describes the
+	// served set (dupe_suppressed = 0), so the totals agree with the rows
+	// a client can actually fetch from the stream below. Operator-facing
+	// admin surfaces keep full-store counts instead.
 	var ep *EnrichmentProgress
-	if total, terr := store.CountTracks(ctx); terr != nil {
-		logger.Error("CountTracks for enrichment-progress", "err", terr)
+	if total, terr := store.CountServedTracks(ctx); terr != nil {
+		logger.Error("CountServedTracks for enrichment-progress", "err", terr)
 	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
 		ep = &EnrichmentProgress{
 			TracksTotal:    total,
@@ -2350,7 +2373,7 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// `]` lands after the last track's `\n` — also valid whitespace.
 	enc := json.NewEncoder(bw)
 	first := true
-	streamErr := store.StreamTracks(ctx, sp, func(t *Track) error {
+	streamErr := store.StreamServedTracks(ctx, sp, func(t *Track) error {
 		// Cheap per-row cancel check. SQLite's row iteration is
 		// synchronous so this is the natural pulse to honour the
 		// client's deadline / disconnect. Returning the ctx error
@@ -2425,8 +2448,9 @@ func buildManifestPageGated(ctx context.Context, store *Store, roots []string, c
 		limit = 1000
 	}
 	// Over-fetch by one so the last row of the current query tells us
-	// "is there another page" definitively.
-	tracks, err := store.ListTracksPage(ctx, cursor, limit+1)
+	// "is there another page" definitively. Served set only — the wire
+	// never carries suppressed duplicates.
+	tracks, err := store.ListServedTracksPage(ctx, cursor, limit+1)
 	if err != nil {
 		return nil, err
 	}
@@ -2462,7 +2486,9 @@ func buildManifestPageGated(ctx context.Context, store *Store, roots []string, c
 		if ferr != nil {
 			return nil, ferr
 		}
-		total, terr := store.CountTracks(ctx)
+		// Served count, so `total` equals the rows this pagination run
+		// will actually deliver (the served-population rule).
+		total, terr := store.CountServedTracks(ctx)
 		if terr != nil {
 			return nil, terr
 		}

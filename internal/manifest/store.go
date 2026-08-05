@@ -1424,6 +1424,60 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 31,
+		name:    "tracks duplicate-group stamps (dupe_group_id / dupe_tier / dupe_suppressed)",
+		sql:     `-- columns added idempotently in post(); see the comment below`,
+		// v31 backs serve-time duplicate suppression. The post-scan
+		// stamping pass (scanner runDuplicateStamping) writes:
+		//
+		//   dupe_group_id   hex SHA-256 of the iOS client-key (internal/
+		//                   dupes Key.ID); '' = not in any duplicate group
+		//   dupe_tier       the group's evidence tier (self-nested /
+		//                   same-format / different-format / inconclusive)
+		//   dupe_suppressed 1 = excluded from the SERVED set (the Served*
+		//                   readers, DLNA, smart-mix pools); the row, its
+		//                   variants, analysis and enrichment are otherwise
+		//                   untouched, and /v1/download by path still works
+		//
+		// COLUMN-ONLY, the v25/v28 rule: these must never gain a `json:`
+		// tag or be spliced onto wire output — that is what keeps the
+		// whole feature off the protocol (no ProtocolVersion bump, no iOS
+		// change). Both upserts deliberately DO NOT touch them (a changed
+		// file keeps its stamps until the next stamping pass re-evaluates;
+		// fail-open: fresh rows default to served). No backfill: '' / 0
+		// means "not yet stamped", which serves everything — the first
+		// full scan after deploy stamps the library once.
+		//
+		// The partial index serves the admin group-listing endpoint's
+		// ORDER BY dupe_group_id walk without taxing the (vastly more
+		// common) unstamped rows.
+		post: func(db *sql.DB) error {
+			for _, col := range []struct{ name, ddl string }{
+				{"dupe_group_id", `ALTER TABLE tracks ADD COLUMN dupe_group_id TEXT NOT NULL DEFAULT ''`},
+				{"dupe_tier", `ALTER TABLE tracks ADD COLUMN dupe_tier TEXT NOT NULL DEFAULT ''`},
+				{"dupe_suppressed", `ALTER TABLE tracks ADD COLUMN dupe_suppressed INTEGER NOT NULL DEFAULT 0`},
+			} {
+				exists, err := atlasColumnExists(db, "tracks", col.name)
+				if err != nil {
+					return fmt.Errorf("inspect tracks.%s: %w", col.name, err)
+				}
+				if exists {
+					continue
+				}
+				if _, err := db.Exec(col.ddl); err != nil {
+					return fmt.Errorf("add tracks.%s: %w", col.name, err)
+				}
+			}
+			if _, err := db.Exec(
+				`CREATE INDEX IF NOT EXISTS idx_tracks_dupe_group
+				   ON tracks(dupe_group_id) WHERE dupe_group_id != ''`,
+			); err != nil {
+				return fmt.Errorf("create idx_tracks_dupe_group: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
@@ -2138,6 +2192,12 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- The excluded.extractor_version assignment is MANDATORY: without
 			-- it a re-extracted (conflict) row keeps its stale stamp and would
 			-- re-extract on every subsequent scan.
+			-- The v31 dupe stamps (dupe_group_id / dupe_tier /
+			-- dupe_suppressed) are deliberately NOT touched here: a
+			-- changed file keeps its stamps until the next stamping pass
+			-- re-evaluates (the full-scan tail runs in the SAME scan as
+			-- these upserts), and a fresh INSERT defaults to served —
+			-- fail-open in both directions.
 			extractor_version = excluded.extractor_version
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano(),
 		rate, bits, isDSD, codec, ExtractorVersion)
@@ -2251,6 +2311,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			-- The excluded.extractor_version assignment is MANDATORY: without
 			-- it a re-extracted (conflict) row keeps its stale stamp and would
 			-- re-extract on every subsequent scan.
+			-- v31 dupe stamps deliberately untouched — mirrors UpsertTrack.
 			extractor_version = excluded.extractor_version
 	`)
 	if err != nil {
@@ -2935,13 +2996,45 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
-	args := []any{}
+	return s.listTracks(ctx, since, false)
+}
+
+// ListServedTracks is ListTracks restricted to the SERVED set
+// (dupe_suppressed = 0). It exists for the client-facing consumers —
+// the manifest builders and the DLNA adapter — while ListTracks keeps
+// full-store semantics for the internal machinery (reconciliation
+// passes, sweepers, CLI batches). Do NOT "simplify" the two into one
+// filtered reader: the scan tail and the enricher must keep seeing
+// suppressed rows or suppression would freeze their metadata forever.
+func (s *Store) ListServedTracks(ctx context.Context, since *time.Time) ([]Track, error) {
+	return s.listTracks(ctx, since, true)
+}
+
+// trackReadPredicates builds the WHERE clause shared by the track
+// readers: the served-set restriction and/or the since-delta filter,
+// AND-composed (the conditional-WHERE composition is exactly why this
+// helper exists — a naive `+= " WHERE …"` at two sites is how the two
+// filters would eventually collide).
+func trackReadPredicates(servedOnly bool, since *time.Time) (string, []any) {
+	var conds []string
+	var args []any
+	if servedOnly {
+		conds = append(conds, `dupe_suppressed = 0`)
+	}
 	if since != nil {
-		q += ` WHERE indexed_at > ?`
+		conds = append(conds, `indexed_at > ?`)
 		args = append(args, since.UnixNano())
 	}
-	q += ` ORDER BY path ASC`
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly bool) ([]Track, error) {
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
+	where, args := trackReadPredicates(servedOnly, since)
+	q += where + ` ORDER BY path ASC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -2992,6 +3085,19 @@ func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, erro
 // is propagated. rows.Err() (post-iteration) is also returned if fn
 // finished cleanly.
 func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track) error) error {
+	return s.streamTracks(ctx, sp, false, fn)
+}
+
+// StreamServedTracks is StreamTracks restricted to the SERVED set
+// (dupe_suppressed = 0) — the legacy /v1/manifest streaming leg's
+// reader. Same callback-reuse contract. See ListServedTracks for why
+// the full-store StreamTracks must stay unfiltered for internal
+// callers.
+func (s *Store) StreamServedTracks(ctx context.Context, sp *time.Time, fn func(*Track) error) error {
+	return s.streamTracks(ctx, sp, true, fn)
+}
+
+func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool, fn func(*Track) error) error {
 	if fn == nil {
 		// Defensive guard: invoking the callback later would panic with
 		// a nil-deref. CodeRabbit on PR #70 — surface a clear error
@@ -3000,12 +3106,8 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 		return errors.New("StreamTracks: nil callback")
 	}
 	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
-	args := []any{}
-	if sp != nil {
-		q += ` WHERE indexed_at > ?`
-		args = append(args, sp.UnixNano())
-	}
-	q += ` ORDER BY path ASC`
+	where, args := trackReadPredicates(servedOnly, sp)
+	q += where + ` ORDER BY path ASC`
 	// **QueryContext (not Query)** so a client disconnect mid-stream
 	// terminates the SQLite scan instead of holding the read lock +
 	// CPU until SQLite exhausts the result set. Senior-audit
@@ -3072,15 +3174,31 @@ func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track)
 // which isn't worth the complexity for a code path that already
 // returns bounded output.
 func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int) ([]Track, error) {
+	return s.listTracksPage(ctx, afterPath, limit, false)
+}
+
+// ListServedTracksPage is ListTracksPage restricted to the SERVED set
+// (dupe_suppressed = 0) — the paginated /v1/manifest reader. The path
+// cursor walks the same total order; suppressed rows are simply skipped,
+// so pages stay dense and NextCursor semantics are unchanged.
+func (s *Store) ListServedTracksPage(ctx context.Context, afterPath string, limit int) ([]Track, error) {
+	return s.listTracksPage(ctx, afterPath, limit, true)
+}
+
+func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int, servedOnly bool) ([]Track, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT tags_json, enriched_at, `+variantsAggSQL+`, `+waveformTagSQL+`, `+replayGainSQL+`, `+analysisScalarsSQL+`, artwork_version, booklet_tag FROM tracks
-		WHERE path > ?
+	q := `
+		SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks
+		WHERE path > ?`
+	if servedOnly {
+		q += ` AND dupe_suppressed = 0`
+	}
+	q += `
 		ORDER BY path ASC
-		LIMIT ?
-	`, afterPath, limit)
+		LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, q, afterPath, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -3271,6 +3389,20 @@ func (s *Store) CountTracks(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// CountServedTracks counts the SERVED set (dupe_suppressed = 0) — the
+// population every client-facing number must describe: manifest `total`,
+// `enrichmentProgress.tracksTotal` and /v1/health `tracksIndexed` all
+// read THIS, so they agree with what a client can actually fetch.
+// Admin/operator surfaces deliberately keep the full-store CountTracks /
+// RollupByPrefix truth instead — that split re-divides two numbers a
+// prior PR unified, and it is intentional: the operator sees everything,
+// the wire describes what is served.
+func (s *Store) CountServedTracks(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE dupe_suppressed = 0`).Scan(&n)
+	return n, err
+}
+
 // ArtworkMBIDsInUse returns the distinct artworkMBID values currently
 // referenced by at least one track row. Used by `bridge artwork --gc`
 // to identify cached files in <dataDir>/artwork/ that are no longer
@@ -3344,9 +3476,16 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 	// `> 0` form emits `SEARCH tracks USING COVERING INDEX
 	// idx_tracks_enriched (enriched_at>?)` while `!= 0` emits a bare
 	// `SCAN tracks` (CodeRabbit Major round-1 on PR #164).
+	// The enriched COUNT is scoped to the SERVED set (dupe_suppressed = 0)
+	// because its consumer is the wire's enrichmentProgress, whose
+	// tracksTotal is CountServedTracks — an unscoped numerator could
+	// exceed the total and permanently pin the iOS "Bridge enriching X/Y"
+	// footer. MAX(enriched_at) stays unscoped on purpose: it is a
+	// freshness stamp ("when did the enricher last land anything"), not a
+	// population count.
 	err = s.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0),
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0 AND dupe_suppressed = 0),
 			(SELECT MAX(enriched_at) FROM tracks)
 	`).Scan(&enriched, &lastNs)
 	if err != nil {
