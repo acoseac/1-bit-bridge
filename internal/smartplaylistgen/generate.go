@@ -131,6 +131,63 @@ func Regenerate(ctx context.Context, store *manifest.Store, opts Options) (int, 
 	return len(snapshot), nil
 }
 
+// RegenerateFamily rebuilds ONE family and commits only its cache row,
+// leaving every other cached family untouched — the per-family "Regenerate"
+// admin affordance. The full engine still runs (the families share the same
+// assembled inputs, so the dominant cost — the history/analysis queries — is
+// identical either way); only the requested slug's output is written. A slug
+// the fresh run no longer populates is REMOVED from the cache, matching the
+// wholesale path where an empty family simply isn't written — a mix whose
+// source signal dried up must not linger stale forever.
+//
+// Returns generated (the slug is in the fresh engine output and was
+// written), existed (a cached row was present before the call), and the
+// fresh item count (0 when !generated).
+func RegenerateFamily(ctx context.Context, store *manifest.Store, opts Options, slug string) (generated, existed bool, itemCount int, err error) {
+	in, err := assembleInputs(ctx, store, opts)
+	if err != nil {
+		return false, false, 0, err
+	}
+	gen := smartplaylist.Generate(in, opts.Engine)
+	var fresh *manifest.StoredSmartPlaylist
+	for i := range gen {
+		if gen[i].Slug != slug {
+			continue
+		}
+		// toStored's Position comes from the slice index and is ignored —
+		// ReplaceSmartPlaylistFamily preserves the cached slot (or appends).
+		rows, serr := toStored(gen[i:i+1], opts.NowNS)
+		if serr != nil {
+			return false, false, 0, serr
+		}
+		fresh = &rows[0]
+		itemCount = generatedItemCount(gen[i])
+		break
+	}
+	existed, err = store.ReplaceSmartPlaylistFamily(ctx, slug, fresh)
+	if err != nil {
+		return false, existed, 0, err
+	}
+	return fresh != nil, existed, itemCount, nil
+}
+
+// generatedItemCount reports a generated family's display size: distinct
+// track paths across the hourly pools for time-of-day, the flat item count
+// otherwise (mirrors the admin's smartPlaylistItemCount, computed here from
+// the engine output instead of the serialized blob).
+func generatedItemCount(g smartplaylist.GeneratedPlaylist) int {
+	if g.Kind == smartplaylist.KindTimeOfDay {
+		seen := map[string]struct{}{}
+		for _, items := range g.HourlyItems {
+			for _, it := range items {
+				seen[it.Path] = struct{}{}
+			}
+		}
+		return len(seen)
+	}
+	return len(g.Items)
+}
+
 func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (smartplaylist.Inputs, error) {
 	now := opts.NowNS
 	eng := opts.Engine

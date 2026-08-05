@@ -7452,6 +7452,99 @@ function initSmartMixes() {
     });
   }
 
+  // Per-card actions: regenerate ONE family in place / snapshot it as a
+  // regular playlist. Regenerate reloads on success (same pattern as the
+  // wholesale button + the cover flows); save stays on the page and links
+  // to the Data page where the snapshot landed.
+  document.querySelectorAll(".smartmix-card").forEach((card) => {
+    const slug = card.dataset.slug;
+    if (!slug) return;
+    const status = card.querySelector(".smartmix-card-status");
+    const setStatus = (t) => { if (status) status.textContent = t; };
+
+    const regen = card.querySelector(".smartmix-regen-one");
+    if (regen) {
+      regen.addEventListener("click", async () => {
+        regen.disabled = true;
+        const old = regen.textContent;
+        regen.textContent = "Regenerating…";
+        setStatus("");
+        try {
+          const r = await API.post(`/api/smart-playlists/${encodeURIComponent(slug)}/regenerate`);
+          if (r && r.removed) {
+            setStatus("Mix came back empty and was removed — reloading…");
+          } else {
+            const n = r && r.itemCount != null ? r.itemCount : "?";
+            setStatus(`Regenerated (${n} tracks) — reloading…`);
+          }
+          setTimeout(() => location.reload(), 700);
+        } catch (e) {
+          regen.disabled = false;
+          regen.textContent = old;
+          setStatus(e && e.message ? e.message : "Regeneration failed.");
+        }
+      });
+    }
+
+    // "Save as playlist…" opens an inline name form (no native prompt —
+    // consistent with the rest of the console and keyboard-friendly).
+    // Everything is built with createElement/textContent; r.name echoes
+    // operator input and must never reach innerHTML.
+    const save = card.querySelector(".smartmix-save");
+    if (save) {
+      save.addEventListener("click", () => {
+        if (card.querySelector(".smartmix-save-form")) return; // already open
+        const form = document.createElement("form");
+        form.className = "smartmix-save-form";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "smartmix-save-name";
+        input.setAttribute("aria-label", "Playlist name");
+        const today = new Date().toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+        input.value = `${card.dataset.title || slug} — ${today}`;
+        const ok = document.createElement("button");
+        ok.type = "submit";
+        ok.className = "btn primary";
+        ok.textContent = "Save";
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "btn";
+        cancel.textContent = "Cancel";
+        form.append(input, ok, cancel);
+        const actions = card.querySelector(".smartmix-actions");
+        (actions || save).after(form);
+        save.disabled = true;
+        input.focus();
+        input.select();
+        const close = () => { form.remove(); save.disabled = false; };
+        cancel.addEventListener("click", close);
+        form.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          ok.disabled = true;
+          cancel.disabled = true;
+          setStatus("Saving…");
+          try {
+            const nm = input.value.trim();
+            const r = await API.post(`/api/smart-playlists/${encodeURIComponent(slug)}/save-as-playlist`,
+              nm ? { name: nm } : {});
+            close();
+            if (status) {
+              status.textContent = `Saved “${r.name}” (${r.trackCount} tracks) — view it under `;
+              const link = document.createElement("a");
+              link.href = "/data";
+              link.textContent = "Playlists & history";
+              status.append(link, ".");
+            }
+          } catch (e) {
+            ok.disabled = false;
+            cancel.disabled = false;
+            setStatus(e && e.message ? e.message : "Save failed.");
+          }
+        });
+      });
+    }
+  });
+
   document.querySelectorAll(".smartmix-cover-control").forEach((ctrl) => {
     const slug = ctrl.dataset.slug;
     const status = ctrl.querySelector(".smartmix-cover-status");

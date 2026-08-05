@@ -1620,7 +1620,10 @@ func TestPageSmartMixes(t *testing.T) {
 	if strings.Contains(body, "smartmix-disabled-panel") {
 		t.Error("enabled /smartmixes MUST NOT show the disabled panel")
 	}
-	for _, want := range []string{"Heavy Rotation", "Song For Sathima", "smartmix-regen", "Morning Commute", "Morning Drive", "Never Run", "not yet refreshed"} {
+	for _, want := range []string{"Heavy Rotation", "Song For Sathima", "smartmix-regen", "Morning Commute", "Morning Drive", "Never Run", "not yet refreshed",
+		// Card-grid rework: per-family regenerate + save-as-playlist actions
+		// and the collapsed track-list disclosure.
+		"smartmix-grid", "smartmix-regen-one", "smartmix-save", "smartmix-tracklist", "Show tracks"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/smartmixes body missing %q", want)
 		}

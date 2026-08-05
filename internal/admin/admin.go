@@ -1133,6 +1133,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/history/export", s.apiHistoryExport)
 	mux.HandleFunc("GET /api/smart-playlists", s.apiSmartPlaylistsList)
 	mux.HandleFunc("POST /api/smart-playlists/regenerate", s.apiSmartPlaylistsRegenerate)
+	mux.HandleFunc("POST /api/smart-playlists/{slug}/regenerate", s.apiSmartPlaylistRegenerateOne)
+	mux.HandleFunc("POST /api/smart-playlists/{slug}/save-as-playlist", s.apiSmartPlaylistSaveAsPlaylist)
 	mux.HandleFunc("POST /api/smart-playlists/{slug}/cover", s.apiUploadSmartMixCover)
 	mux.HandleFunc("DELETE /api/smart-playlists/{slug}/cover", s.apiDeleteSmartMixCover)
 	mux.HandleFunc("POST /api/playlists/{id}/cover", s.apiUploadPlaylistCover)
