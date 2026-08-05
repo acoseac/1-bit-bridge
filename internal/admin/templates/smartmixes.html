@@ -68,8 +68,13 @@
           <button type="button" class="btn smartmix-regen-one">Regenerate</button>
           <button type="button" class="btn smartmix-save">Save as playlist…</button>
           <div class="smartmix-cover-control" data-slug="{{.Slug}}">
+            {{/* sr-only, NOT the hidden attribute: [hidden] is display:none
+                 !important (app.css reset), which drops the input from the
+                 tab order and the label isn't natively focusable — keyboard
+                 users couldn't reach the upload at all (Gemini on PR #658).
+                 sr-only keeps it focusable; the label paints focus-within. */}}
             <label class="btn">
-              <input type="file" accept="image/jpeg,image/png" hidden class="smartmix-cover-input">
+              <input type="file" accept="image/jpeg,image/png" class="sr-only smartmix-cover-input">
               {{if .HasCover}}Replace cover…{{else}}Set cover…{{end}}
             </label>
             {{if .HasCover}}<button type="button" class="btn danger smartmix-cover-remove">Remove</button>{{end}}

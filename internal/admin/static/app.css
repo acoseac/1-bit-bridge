@@ -3652,9 +3652,22 @@ ul.histogram li {
   background: var(--bg-elev);
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
-/* Remove-cover keeps its warning color despite the muted base above (this
- * rule is later in the file than .btn.danger, so restate it). */
+/* The cover-upload input is sr-only (focusable), not [hidden]; paint the
+ * global focus ring on its wrapping label when it holds keyboard focus —
+ * label.btn is not natively focusable so :focus-visible never fires there. */
+.smartmix-actions label.btn:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Remove-cover keeps its warning color despite the muted base above — this
+ * block sits later in the file than .btn.danger at EQUAL specificity, so
+ * both the rest state and the hover must be restated (Gemini on PR #658). */
 .smartmix-actions .btn.danger { color: var(--danger); }
+.smartmix-actions .btn.danger:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+}
 /* The cover wrapper joins the shared flex row; the element itself only
  * exists as app.js's data-slug binding hook. */
 .smartmix-cover-control { display: contents; }
