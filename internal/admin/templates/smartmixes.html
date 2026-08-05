@@ -61,17 +61,25 @@
         </div>
         <p class="muted smartmix-meta">{{.ItemCount}} tracks · {{if .RefreshedAt.IsZero}}not yet refreshed{{else}}refreshed {{timeAgo .RefreshedAt}}{{end}}</p>
         {{if .Subtitle}}<p class="muted smartmix-subtitle">{{.Subtitle}}</p>{{end}}
+        {{/* One quiet action row per card — the cover control participates
+             via display:contents so all buttons share the flex row while the
+             wrapper keeps the data-slug hook app.js binds to. */}}
         <div class="smartmix-actions">
           <button type="button" class="btn smartmix-regen-one">Regenerate</button>
           <button type="button" class="btn smartmix-save">Save as playlist…</button>
-        </div>
-        <div class="smartmix-cover-control" data-slug="{{.Slug}}">
-          <label class="btn">
-            <input type="file" accept="image/jpeg,image/png" hidden class="smartmix-cover-input">
-            {{if .HasCover}}Replace cover…{{else}}Set custom cover…{{end}}
-          </label>
-          {{if .HasCover}}<button type="button" class="btn danger smartmix-cover-remove">Remove cover</button>{{end}}
-          <span class="smartmix-cover-status muted"></span>
+          <div class="smartmix-cover-control" data-slug="{{.Slug}}">
+            {{/* sr-only, NOT the hidden attribute: [hidden] is display:none
+                 !important (app.css reset), which drops the input from the
+                 tab order and the label isn't natively focusable — keyboard
+                 users couldn't reach the upload at all (Gemini on PR #658).
+                 sr-only keeps it focusable; the label paints focus-within. */}}
+            <label class="btn">
+              <input type="file" accept="image/jpeg,image/png" class="sr-only smartmix-cover-input">
+              {{if .HasCover}}Replace cover…{{else}}Set cover…{{end}}
+            </label>
+            {{if .HasCover}}<button type="button" class="btn danger smartmix-cover-remove">Remove</button>{{end}}
+            <span class="smartmix-cover-status muted"></span>
+          </div>
         </div>
         <p class="smartmix-card-status muted" role="status"></p>
         <details class="smartmix-tracklist">
