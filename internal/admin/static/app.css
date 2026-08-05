@@ -3595,9 +3595,14 @@ ul.histogram li {
  * sit above the disclosure. */
 .smartmix-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  /* Two columns, not auto-fill: wider cards keep the whole action row on
+   * one line and the page still scans as a grid (operator call, 2026-08-05). */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   margin-top: 0.8rem;
+}
+@media (max-width: 768px) {
+  .smartmix-grid { grid-template-columns: 1fr; }
 }
 .smartmix-card {
   display: flex;
@@ -3621,9 +3626,39 @@ ul.histogram li {
 .smartmix-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.4rem;
   margin-top: 0.2rem;
 }
+/* Quiet, compact per-card actions: eleven cards × three chromed buttons read
+ * as a wall of controls, so the card buttons drop to a ghost treatment and
+ * the page-level "Regenerate now" stays the only loud button. Scoped to the
+ * actions row — the transient save-form keeps regular .btn/.btn.primary
+ * chrome (it's an editing state and SHOULD stand out). */
+.smartmix-actions .btn {
+  padding: 4px 11px;
+  font-size: 11.5px;
+  font-weight: 500;
+  /* Pinned so the <label class="btn"> cover control matches the <button>s
+   * pixel-for-pixel — labels inherit the page line-height, buttons use the
+   * UA default, and the 3px height drift shows on a row of pills. */
+  line-height: 1.4;
+  background: transparent;
+  color: var(--fg-muted);
+  border-radius: var(--radius-pill);
+}
+.smartmix-actions .btn:hover {
+  color: var(--fg);
+  background: var(--bg-elev);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+/* Remove-cover keeps its warning color despite the muted base above (this
+ * rule is later in the file than .btn.danger, so restate it). */
+.smartmix-actions .btn.danger { color: var(--danger); }
+/* The cover wrapper joins the shared flex row; the element itself only
+ * exists as app.js's data-slug binding hook. */
+.smartmix-cover-control { display: contents; }
+.smartmix-cover-status:empty { display: none; }
 .smartmix-card-status { margin: 0; overflow-wrap: anywhere; }
 .smartmix-card-status:empty { display: none; }
 .smartmix-save-form {
