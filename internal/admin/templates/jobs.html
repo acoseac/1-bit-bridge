@@ -129,6 +129,30 @@
       </p>
     </div>
 
+    <div class="panel job-card" id="job-dupes-card">
+      <div class="panel-head">
+        <h2>Duplicate serving</h2>
+        <span class="panel-actions">
+          <span class="badge" id="job-dupes-state">—</span>
+          <button type="button" id="jobs-dupes-restamp" class="btn">Re-evaluate</button>
+        </span>
+      </div>
+      <dl>
+        <dt>Groups</dt>
+        <dd id="job-dupes-groups">—</dd>
+        <dt>Suppressed</dt>
+        <dd id="job-dupes-suppressed">—</dd>
+        <dt>Last evaluated</dt>
+        <dd id="job-dupes-last">—</dd>
+      </dl>
+      <p class="hint">
+        Groups tracks the iOS app would collapse as copies and serves one
+        winner per group under the policy. Re-evaluates at every full
+        scan's tail and whenever the policy changes — nothing is deleted.
+        <a href="/library/duplicates">Duplicates page</a>
+      </p>
+    </div>
+
     <div class="panel job-card" id="job-mix-card">
       <div class="panel-head">
         <h2>Smart mixes</h2>

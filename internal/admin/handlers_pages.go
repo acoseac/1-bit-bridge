@@ -65,7 +65,7 @@ type pageData struct {
 // Playlists & history / Smart mixes. Standalone pages are their own section.
 func sectionForTab(tab string) string {
 	switch tab {
-	case "library", "library_inspector", "jobs":
+	case "library", "library_inspector", "duplicates", "jobs":
 		return "library"
 	case "data", "smartmixes":
 		return "listening"

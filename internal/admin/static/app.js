@@ -244,6 +244,11 @@ function initDashboard() {
 // a no-op.
 function applyStats(s) {
   if (!s) return;
+  // Duplicates page: a full scan completing means the stamping pass just
+  // re-evaluated serving — refresh that page's data on the true→false
+  // edge (no dedicated SSE event; the Diagnostics-page precedent).
+  if (dupesLastIsScanning && !s.isScanning) refreshDuplicatesPage();
+  dupesLastIsScanning = !!s.isScanning;
   setText("tracks-indexed", s.tracksIndexed);
   setText("device-count", s.deviceCount);
   // Library composition tiles (dashboard only; no-op elsewhere).
@@ -6304,6 +6309,7 @@ function initJobs() {
   wireJobButton("jobs-scan-now", () => API.post("/api/scan"), "Scan started");
   wireJobButton("jobs-analyze-now", () => API.post("/api/analysis/sweep"), "Sweep queued");
   wireJobButton("jobs-fp-now", () => API.post("/api/fingerprint/sweep"), "Sweep queued");
+  wireJobButton("jobs-dupes-restamp", () => API.post("/api/duplicates/sweep"), "Re-evaluate queued");
 
   // Fingerprint Enable: a settings PATCH rather than a job trigger, so it
   // gets its own handler instead of wireJobButton — the post-click state
@@ -6504,6 +6510,14 @@ function renderJobCards(j) {
       ? `${fp.last.candidates} examined · ${fp.last.resolved} identified · ${fp.last.requeued} re-queued`
       : "—");
   }
+
+  // Duplicate serving.
+  const dup = j.duplicates || {};
+  if (dup.policy === "off") setBadge("job-dupes-state", "idle", "off");
+  else setBadge("job-dupes-state", "running", dup.policy || "—");
+  setText("job-dupes-groups", dup.stamped ? String(dup.groups) : "—");
+  setText("job-dupes-suppressed", dup.stamped ? `${dup.suppressed} copies excluded from serving` : "not yet evaluated");
+  setText("job-dupes-last", dup.run?.running ? "re-evaluating now" : agoOrDash(dup.stampedAt));
 
   // Smart mixes.
   const mix = j.smartMixes || {};
@@ -7545,6 +7559,208 @@ function initLogout() {
   });
 }
 
+// ---------------- Duplicates page ----------------
+//
+// Data flow: summary tiles + tier table read GET /api/duplicates/summary
+// (the persisted stamping-pass document — cheap, no polling); the group
+// list pages GET /api/duplicates/groups. Refreshes happen on explicit
+// edges only: policy save, "Re-evaluate now", and the SSE stats event's
+// isScanning true→false edge (see applyStats) — no timers.
+let dupesLastIsScanning = false;
+let dupesGroupsCursor = "";
+let dupesRefreshTimers = [];
+
+function refreshDuplicatesPage() {
+  if (document.body.dataset.active !== "duplicates") return;
+  refreshDupesSummary();
+  loadDupeGroups(true);
+}
+
+// The restamp is asynchronous (a coalescing nudge to the sweeper), so a
+// policy save / re-evaluate schedules two refreshes: one for the fast
+// common case, one to converge if the pass took longer.
+function scheduleDupesRefresh() {
+  for (const t of dupesRefreshTimers) clearTimeout(t);
+  dupesRefreshTimers = [
+    setTimeout(refreshDuplicatesPage, 1200),
+    setTimeout(refreshDuplicatesPage, 5000),
+  ];
+}
+
+async function refreshDupesSummary() {
+  let sum;
+  try {
+    sum = await API.get("/api/duplicates/summary");
+  } catch (err) {
+    console.warn("duplicates summary", err);
+    return;
+  }
+  // Policy radio reflects the live setting (checked state only — never
+  // clobber a selection the user is mid-flight on: radios fire change
+  // immediately, so a mismatch here only exists on first paint or after
+  // an external change).
+  const radio = document.querySelector(`#dupes-policy input[value="${CSS.escape(sum.policy || "")}"]`);
+  if (radio && !radio.checked) radio.checked = true;
+
+  const stampLine = document.getElementById("dupes-stamp-line");
+  if (!sum.stamped) {
+    if (stampLine) {
+      stampLine.hidden = false;
+      stampLine.textContent = "No stamping pass has run yet — counts appear after the first full scan.";
+    }
+    return;
+  }
+  if (stampLine) {
+    if (sum.stampedPolicy && sum.policy && sum.stampedPolicy !== sum.policy) {
+      stampLine.hidden = false;
+      stampLine.textContent = `Re-evaluating under the new policy… (counts below still reflect “${sum.stampedPolicy}”)`;
+    } else {
+      stampLine.hidden = true;
+    }
+  }
+  setText("dupes-groups", sum.groups);
+  setText("dupes-suppressed", sum.suppressed);
+  setText("dupes-served", sum.served);
+  const foot = document.getElementById("dupes-groups-foot");
+  if (foot) foot.textContent = `across ${sum.scanned} scanned tracks`;
+  const stampedAt = document.getElementById("dupes-stamped-at");
+  if (stampedAt && sum.stampedAt) stampedAt.textContent = `as of ${formatTimeAgo(sum.stampedAt)}`;
+  document.getElementById("dupes-tiles")?.removeAttribute("hidden");
+
+  const rows = document.getElementById("dupes-tier-rows");
+  if (rows) {
+    rows.replaceChildren();
+    for (const t of sum.tiers || []) {
+      const tr = document.createElement("tr");
+      if (!t.groups) tr.classList.add("dupes-tier-empty");
+      const cells = [
+        t.tier,
+        String(t.groups),
+        String(t.redundantFiles),
+        humanBytes(t.bytesInNonLargestCopies || 0),
+        String(t.suppressed),
+      ];
+      for (const c of cells) {
+        const td = document.createElement("td");
+        td.textContent = c;
+        tr.appendChild(td);
+      }
+      rows.appendChild(tr);
+    }
+    document.getElementById("dupes-tier-panel")?.removeAttribute("hidden");
+  }
+  document.getElementById("dupes-groups-panel")?.removeAttribute("hidden");
+}
+
+function dupeMemberGeometry(m) {
+  const parts = [];
+  parts.push(m.codec || "unknown");
+  if (m.sampleRate > 0 && m.bitsPerSample > 0) parts.push(`${m.sampleRate}/${m.bitsPerSample}`);
+  if (m.isDSD) parts.push("DSD");
+  if (m.durationSec > 0) {
+    const mins = Math.floor(m.durationSec / 60);
+    const secs = String(Math.floor(m.durationSec % 60)).padStart(2, "0");
+    parts.push(`${mins}:${secs}`);
+  }
+  parts.push(humanBytes(m.sizeBytes || 0));
+  return parts.join(" · ");
+}
+
+async function loadDupeGroups(reset) {
+  const list = document.getElementById("dupes-groups-list");
+  if (!list) return;
+  if (reset) {
+    dupesGroupsCursor = "";
+    list.replaceChildren();
+  }
+  const tier = document.getElementById("dupes-tier-filter")?.value || "";
+  const params = new URLSearchParams();
+  if (tier) params.set("tier", tier);
+  if (dupesGroupsCursor) params.set("cursor", dupesGroupsCursor);
+  let resp;
+  try {
+    resp = await API.get(`/api/duplicates/groups${params.size ? "?" + params.toString() : ""}`);
+  } catch (err) {
+    console.warn("duplicates groups", err);
+    return;
+  }
+  for (const g of resp.groups || []) {
+    // All content rendered via createElement/textContent — titles,
+    // albums and paths are library-supplied strings.
+    const details = document.createElement("details");
+    details.className = "dupes-group";
+    const summary = document.createElement("summary");
+    const head = g.members?.[0] || {};
+    const title = head.title || g.members?.[0]?.path || g.groupID;
+    const who = [head.albumArtist, head.album].filter(Boolean).join(" — ");
+    summary.textContent = `${title}${who ? "  ·  " + who : ""}`;
+    const badge = document.createElement("span");
+    badge.className = "badge idle dupes-tier-badge";
+    badge.textContent = g.tier;
+    summary.appendChild(badge);
+    details.appendChild(summary);
+    for (const m of g.members || []) {
+      const row = document.createElement("div");
+      row.className = "dupes-member";
+      const geo = document.createElement("span");
+      geo.className = "dupes-geo";
+      geo.textContent = dupeMemberGeometry(m);
+      const path = document.createElement("span");
+      path.className = "dupes-path";
+      path.textContent = m.path;
+      const state = document.createElement("span");
+      state.className = m.suppressed ? "badge idle" : "badge running";
+      state.textContent = m.suppressed ? "suppressed" : "serving";
+      row.append(geo, path, state);
+      details.appendChild(row);
+    }
+    list.appendChild(details);
+  }
+  if (reset && !(resp.groups || []).length) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = tier
+      ? "No groups in this tier."
+      : "No duplicate groups detected — nothing to see here.";
+    list.appendChild(empty);
+  }
+  dupesGroupsCursor = resp.nextCursor || "";
+  const more = document.getElementById("dupes-load-more");
+  if (more) more.hidden = !dupesGroupsCursor;
+}
+
+function initDuplicates() {
+  if (!document.getElementById("duplicates-page-root")) return;
+  refreshDupesSummary();
+  loadDupeGroups(true);
+  document.getElementById("dupes-policy")?.addEventListener("change", async (e) => {
+    const v = e.target?.value;
+    if (!v) return;
+    try {
+      await API.patch("/api/settings", { duplicatesFilter: v });
+    } catch (err) {
+      alert(`Saving the policy failed: ${err.message || err}`);
+      refreshDupesSummary(); // snap the radio back to reality
+      return;
+    }
+    scheduleDupesRefresh();
+  });
+  document.getElementById("dupes-reevaluate")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      await API.post("/api/duplicates/sweep");
+      scheduleDupesRefresh();
+    } catch (err) {
+      alert(`Re-evaluate failed: ${err.message || err}`);
+    } finally {
+      setTimeout(() => { btn.disabled = false; }, 1500);
+    }
+  });
+  document.getElementById("dupes-tier-filter")?.addEventListener("change", () => loadDupeGroups(true));
+  document.getElementById("dupes-load-more")?.addEventListener("click", () => loadDupeGroups(false));
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   initMobileNav();
   initTheme();
@@ -7554,6 +7770,7 @@ document.addEventListener("DOMContentLoaded", () => {
     case "dashboard": initDashboard(); break;
     case "library": initLibrary(); break;
     case "library_inspector": initLibraryInspector(); break;
+    case "duplicates": initDuplicates(); break;
     case "jobs": initJobs(); break;
     case "devices": initDevices(); break;
     case "upnp": initUPnP(); break;

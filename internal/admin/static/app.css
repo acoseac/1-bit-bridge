@@ -3711,3 +3711,48 @@ ul.histogram li {
   .doctor-check { grid-template-columns: 1fr; gap: 2px; }
   .doctor-hint { padding-left: 0; }
 }
+
+/* ---------------- Duplicates page ---------------- */
+/* Policy radios: one option per row, description wraps under the label. */
+.dupes-policy { border: 0; padding: 0; margin: 0; display: grid; gap: 10px; }
+.dupes-policy label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  cursor: pointer;
+}
+.dupes-policy input { margin-top: 3px; }
+.dupes-policy span { line-height: 1.45; }
+
+.dupes-tier-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.dupes-tier-table th, .dupes-tier-table td {
+  text-align: left;
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--muted) 18%, transparent);
+}
+.dupes-tier-table th { color: var(--muted); font-weight: 600; font-size: 0.85em; }
+/* A tier with zero groups stays visible but recedes — "nothing in this
+ * tier" is information, not clutter. */
+.dupes-tier-empty { color: var(--muted); opacity: 0.6; }
+
+.dupes-group { padding: 6px 0; border-bottom: 1px solid color-mix(in srgb, var(--muted) 14%, transparent); }
+.dupes-group summary { cursor: pointer; display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+.dupes-tier-badge { margin-left: auto; flex-shrink: 0; }
+/* Member rows: geometry column, path (dominant, wraps), serving badge. */
+.dupes-member {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 0 4px 18px;
+  font-size: 0.92em;
+}
+.dupes-geo { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dupes-path { overflow-wrap: anywhere; }
+/* Phone: stack the member columns (the 375px tile-header lesson — a
+ * fixed geometry column would crush the path to a char per line). */
+@media (max-width: 560px) {
+  .dupes-member { grid-template-columns: 1fr; gap: 2px; }
+  .dupes-tier-table th:nth-child(4), .dupes-tier-table td:nth-child(4) { display: none; }
+}

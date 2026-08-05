@@ -1,0 +1,97 @@
+{{define "content"}}
+{{template "library-subnav" .}}
+<section class="page duplicates-page" id="duplicates-page-root">
+  <h1>Duplicates</h1>
+  <p class="lede">
+    Tracks the iOS app would collapse as copies of the same recording,
+    grouped by the client's own identity rule and tiered by evidence.
+    Suppression changes what is <em>served</em> — nothing is ever deleted
+    or moved; the bridge has no code path that modifies library files.
+  </p>
+
+  <div class="panel" id="dupes-policy-panel">
+    <div class="panel-head">
+      <h2>Serving policy</h2>
+      <button type="button" id="dupes-reevaluate" class="btn">Re-evaluate now</button>
+    </div>
+    <fieldset class="dupes-policy" id="dupes-policy">
+      <label>
+        <input type="radio" name="dupes-filter" value="highest-quality">
+        <span><strong>Highest quality</strong> — serve one copy per duplicate group: upload-accident
+        twins and same-format copies collapse, and cross-format groups serve their best master
+        <em>within</em> each DSD/PCM domain. DSD and PCM editions are never collapsed into each other.</span>
+      </label>
+      <label>
+        <input type="radio" name="dupes-filter" value="same-format">
+        <span><strong>Same format only</strong> — collapse upload-accident twins and identical-format
+        copies; groups whose members differ in rate, depth or codec serve every member.</span>
+      </label>
+      <label>
+        <input type="radio" name="dupes-filter" value="off">
+        <span><strong>Off</strong> — serve everything. Groups are still detected and counted here.</span>
+      </label>
+    </fieldset>
+    <p class="hint">
+      Applies immediately (no restart): saving re-runs the stamping pass. Copies that stop being
+      suppressed re-sync to devices on their next delta; copies that become suppressed disappear for
+      new pairings and full rescans, and stay hidden by the app's own de-duplication until then.
+      The inconclusive tier is never suppressed under any policy.
+    </p>
+    <p class="hint" id="dupes-stamp-line">No stamping pass has run yet — counts appear after the first full scan.</p>
+  </div>
+
+  <div class="cards" id="dupes-tiles" hidden>
+    <div class="card">
+      <div class="card-label">Duplicate groups</div>
+      <div class="card-value" id="dupes-groups">—</div>
+      <div class="card-foot" id="dupes-groups-foot">across the scanned library</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Suppressed from serving</div>
+      <div class="card-value" id="dupes-suppressed">—</div>
+      <div class="card-foot">copies excluded by the policy</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Tracks served</div>
+      <div class="card-value" id="dupes-served">—</div>
+      <div class="card-foot" id="dupes-stamped-at">—</div>
+    </div>
+  </div>
+
+  <div class="panel" id="dupes-tier-panel" hidden>
+    <div class="panel-head"><h2>By evidence tier</h2></div>
+    <table class="dupes-tier-table">
+      <thead>
+        <tr><th>Tier</th><th>Groups</th><th>Extra copies</th><th>Bytes in non-largest copies</th><th>Suppressed</th></tr>
+      </thead>
+      <tbody id="dupes-tier-rows"></tbody>
+    </table>
+    <p class="hint">
+      Tier names are evidence claims, not verdicts: <strong>different-format</strong> members have
+      different sample rates, bit depths or codecs — different masters, not redundant copies.
+      <strong>self-nested</strong> is the one pure filesystem fact (the same file uploaded at
+      multiple nesting depths, e.g. <code>CD&nbsp;01/CD&nbsp;01/CD&nbsp;01/…</code>) — fix those at
+      the storage source. <strong>inconclusive</strong> absorbs every uncertainty.
+    </p>
+  </div>
+
+  <div class="panel" id="dupes-groups-panel" hidden>
+    <div class="panel-head">
+      <h2>Groups</h2>
+      <select id="dupes-tier-filter" aria-label="Filter by tier">
+        <option value="">All tiers</option>
+        <option value="different-format">different-format</option>
+        <option value="same-format">same-format</option>
+        <option value="inconclusive">inconclusive</option>
+        <option value="self-nested">self-nested</option>
+      </select>
+    </div>
+    <div id="dupes-groups-list"></div>
+    <button type="button" id="dupes-load-more" class="btn" hidden>Load more</button>
+    <p class="hint">
+      Badges show the <em>live serving state</em>. The full machine-readable report is
+      <code>bridge duplicates --json</code> on the host.
+    </p>
+  </div>
+</section>
+{{end}}

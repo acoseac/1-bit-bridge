@@ -1165,7 +1165,7 @@ func TestUpscaleSoxAvailabilityCached(t *testing.T) {
 func TestPagesRenderWithoutError(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	h := srv.Handler()
-	for _, path := range []string{"/", "/library", "/devices", "/upnp", "/settings", "/jobs"} {
+	for _, path := range []string{"/", "/library", "/library/duplicates", "/devices", "/upnp", "/settings", "/jobs"} {
 		req := httptest.NewRequest("GET", path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
 		rw := httptest.NewRecorder()
