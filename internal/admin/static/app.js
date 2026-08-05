@@ -7624,7 +7624,7 @@ async function refreshDupesSummary() {
   const foot = document.getElementById("dupes-groups-foot");
   if (foot) foot.textContent = `across ${sum.scanned} scanned tracks`;
   const stampedAt = document.getElementById("dupes-stamped-at");
-  if (stampedAt && sum.stampedAt) stampedAt.textContent = `as of ${formatTimeAgo(sum.stampedAt)}`;
+  if (stampedAt && sum.stampedAt) stampedAt.textContent = `as of ${formatTimeAgo(new Date(sum.stampedAt))}`;
   document.getElementById("dupes-tiles")?.removeAttribute("hidden");
 
   const rows = document.getElementById("dupes-tier-rows");
