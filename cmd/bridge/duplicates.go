@@ -199,7 +199,12 @@ func buildDupeReport(scope string, scanned int, groups []dupes.Group, limit int)
 			tr.NonLargestBytes += g.RedundantBytes()
 		}
 		for i, g := range tg {
-			if limit > 0 && i >= limit {
+			// limit <= 0 is counts-only: the FIRST iteration trips the
+			// truncation break, so --limit 0 --json emits no samples at
+			// all (pre-fix the guard was `limit > 0 && i >= limit`,
+			// which inverted the flag's documented meaning and dumped
+			// EVERY group into the JSON; Gemini on the PR).
+			if i >= limit {
 				tr.SamplesTruncated = true
 				break
 			}

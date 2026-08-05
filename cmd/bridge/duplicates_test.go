@@ -118,3 +118,28 @@ func TestDuplicatesCmd_UnknownTierRefused(t *testing.T) {
 		t.Fatalf("stderr should name the flag: %s", stderr.String())
 	}
 }
+
+// TestBuildDupeReport_LimitZeroIsCountsOnly pins the --limit 0 contract
+// for the JSON path: counts only, zero samples, truncation marker set
+// (pre-fix the guard inverted and dumped every group into the JSON).
+func TestBuildDupeReport_LimitZeroIsCountsOnly(t *testing.T) {
+	groups := []dupes.Group{{
+		Key:  dupes.Key{AlbumID: "a|b|", Track: 1, NormTitle: "x"},
+		Tier: dupes.TierSameFormat,
+		Members: []dupes.Row{
+			{Path: "A/b/x.flac", Codec: "FLAC", SampleRate: 44100, BitsPerSample: 16, Size: 10},
+			{Path: "C/b/x.flac", Codec: "FLAC", SampleRate: 44100, BitsPerSample: 16, Size: 9},
+		},
+	}}
+	rep := buildDupeReport("", 2, groups, 0)
+	for _, tr := range rep.Tiers {
+		if len(tr.Samples) != 0 {
+			t.Fatalf("limit 0 must emit no samples, tier %s has %d", tr.Tier, len(tr.Samples))
+		}
+		if tr.Tier == string(dupes.TierSameFormat) {
+			if tr.Groups != 1 || !tr.SamplesTruncated {
+				t.Fatalf("counts + truncation marker must survive: %+v", tr)
+			}
+		}
+	}
+}

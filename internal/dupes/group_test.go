@@ -259,3 +259,16 @@ func TestGroupsAreDeterministicallyOrdered(t *testing.T) {
 		t.Fatalf("groups not key-ordered: %q, %q", groups[0].Key.AlbumID, groups[1].Key.AlbumID)
 	}
 }
+
+// TestClassify_DegeneratelySmallInputsAreInconclusive pins the defensive
+// floor: empty/singleton member sets (unreachable via Groups(), which
+// drops them) degrade DOWN rather than panicking on members[0] or
+// reaching a geometry verdict computed over nothing.
+func TestClassify_DegeneratelySmallInputsAreInconclusive(t *testing.T) {
+	if got := classify(nil); got != TierInconclusive {
+		t.Fatalf("classify(nil) = %s, want inconclusive", got)
+	}
+	if got := classify([]Row{flacRow("A/B/x.flac", 44100, 16, 200, 1)}); got != TierInconclusive {
+		t.Fatalf("classify(singleton) = %s, want inconclusive", got)
+	}
+}

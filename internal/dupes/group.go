@@ -84,6 +84,13 @@ func hasNestTwins(members []Row) bool {
 // demotes to inconclusive, and only fully-known groups reach the
 // same-/different-format verdicts.
 func classify(members []Row) Tier {
+	// Defensive floor: every real caller passes ≥2 members (Groups()
+	// drops smaller sets), but a hypothetical empty/singleton call must
+	// degrade DOWN like every other uncertainty, not fall through to a
+	// geometry verdict computed over nothing.
+	if len(members) < 2 {
+		return TierInconclusive
+	}
 	if hasNestTwins(members) {
 		return TierSelfNested
 	}

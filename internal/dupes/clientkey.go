@@ -415,6 +415,15 @@ func nonEmptyTrimmed(s string) string {
 //   - year:   ≤ 0 is absent.
 func KeyFor(r Row) Key {
 	sharePath := "/" + r.Path
+	// Filename mirrors `(bt.path as NSString).lastPathComponent`, which
+	// splits on "/" ONLY — deliberately NOT LastIndexAny("/\\"): the
+	// client computes ITS key from the manifest path verbatim, so if a
+	// backslash path ever reached the wire both sides would treat the
+	// whole string as the filename and the partitions would still agree
+	// (the mirror contract). In practice it can't: the scanner stores
+	// wire paths through filepath.ToSlash, so store paths are always
+	// forward-slash. The separator-agnostic helpers elsewhere in this
+	// package (pathSegments) serve DIFFERENT, bridge-side contracts.
 	filename := r.Path
 	if idx := strings.LastIndex(filename, "/"); idx >= 0 {
 		filename = filename[idx+1:]
