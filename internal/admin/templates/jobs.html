@@ -108,6 +108,7 @@
         <h2>Acoustic fingerprinting</h2>
         <span class="panel-actions">
           <span class="badge" id="job-fp-state">—</span>
+          <button type="button" id="jobs-fp-enable" class="btn" hidden>Enable</button>
           <button type="button" id="jobs-fp-now" class="btn" hidden>Sweep now</button>
         </span>
       </div>
@@ -123,8 +124,8 @@
         Identifies tracks whose tags no text match can fix by
         fingerprinting the audio (fpcalc → AcoustID), then hands the
         recovered names back to the enricher. Off by default — needs
-        <code>fingerprint.enabled</code> plus fpcalc and a free
-        AcoustID key on the bridge host.
+        fpcalc and a free AcoustID key on the bridge host.
+        <a href="/settings?tab=enrichment">Fingerprint settings</a>
       </p>
     </div>
 
