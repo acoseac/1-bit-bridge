@@ -7500,7 +7500,10 @@ function initSmartMixes() {
         input.type = "text";
         input.className = "smartmix-save-name";
         input.setAttribute("aria-label", "Playlist name");
-        const today = new Date().toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+        // en-US pinned so the prefill matches the server-side default name
+        // format ("Jan 2, 2006") when the operator clears the field — the
+        // admin console is English-only throughout (Gemini on PR #657).
+        const today = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
         input.value = `${card.dataset.title || slug} — ${today}`;
         const ok = document.createElement("button");
         ok.type = "submit";
