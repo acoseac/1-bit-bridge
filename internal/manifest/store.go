@@ -84,7 +84,16 @@ func OpenStore(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
 	}
-	uri := dsn.File(path, "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	// synchronous(NORMAL) is SQLite's documented pairing for WAL: commits
+	// stop fsyncing the WAL (only checkpoints sync), and corruption stays
+	// impossible — an app crash loses nothing, an OS crash / power cut can
+	// only roll back the most recent commits. Every table here self-heals
+	// from that (rescan, re-enrich, LWW playlist re-sync, variant GC), and
+	// tokens/pairings don't live in SQLite at all. The default (FULL)
+	// fsyncs EVERY commit, which on Windows means ~30 single-row writes/s
+	// (FlushFileBuffers) — a 29x test-suite penalty and a real tax on the
+	// per-track write paths (MarkEnriched, touchDevice) on Windows hosts.
+	uri := dsn.File(path, "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)")
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
