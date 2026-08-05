@@ -212,3 +212,31 @@ func TestDuplicatesPageRenders(t *testing.T) {
 		t.Error("library subnav missing the Duplicates link")
 	}
 }
+
+// TestAPIDuplicatesSweepAndSummaryReportScanInFlight pins the feedback
+// contract found live on the first production deploy: with a scan
+// running, the 202 body and the summary both say so, so the UI can
+// explain the deferred nudge instead of looking like a dead button.
+func TestAPIDuplicatesSweepAndSummaryReportScanInFlight(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.deps.TriggerDuplicatesPass = func() bool { return true }
+	h := srv.Handler()
+
+	var sum duplicatesSummaryResponse
+	if code := doJSON(t, h, "GET", "/api/duplicates/summary", nil, &sum); code != 200 {
+		t.Fatalf("summary: %d", code)
+	}
+	if sum.ScanInFlight {
+		t.Fatal("idle test scanner must report scanInFlight=false")
+	}
+	var ack struct {
+		Triggered    bool `json:"triggered"`
+		ScanInFlight bool `json:"scanInFlight"`
+	}
+	if code := doJSON(t, h, "POST", "/api/duplicates/sweep", nil, &ack); code != 202 {
+		t.Fatalf("sweep: %d", code)
+	}
+	if !ack.Triggered || ack.ScanInFlight {
+		t.Fatalf("idle sweep ack: %+v", ack)
+	}
+}
