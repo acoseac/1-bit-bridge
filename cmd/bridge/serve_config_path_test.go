@@ -158,7 +158,25 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 		// No --config: the whole point.
 		done <- run(ctx, []string{"serve", "--addr", "127.0.0.1:0"}, stdout, stderr)
 	}()
+	// The startup banner means the API listener is up. It says NOTHING
+	// about the admin console, and the two are independent: runServe
+	// spawns `adminSrv.Serve(adminCtx)` on its OWN goroutine and then
+	// proceeds to `net.Listen` + print the banner on the main goroutine,
+	// with no synchronisation between them. The admin bind therefore
+	// happens at an unsynchronised moment that may be after the banner.
+	//
+	// On macOS the goroutine reliably wins that race, which is why this
+	// read as green locally; on the Windows CI runner it did not, and the
+	// PATCH below dialled a socket nothing had bound yet:
+	//
+	//   dial tcp 127.0.0.1:51187: connectex: No connection could be made
+	//   because the target machine actively refused it.
+	//
+	// So wait for the admin socket itself. waitForListen is the repo's
+	// primitive for exactly this ("the process started" ≠ "the socket is
+	// bound", the PR #72 rationale behind actRestart's health probe).
 	waitForListening(t, stdout, 30*time.Second)
+	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
 
 	// Move the process off the config's directory now that the bridge is
 	// up. Everything below must still find bridge.yaml, which is only
@@ -240,6 +258,27 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	}
 }
 
+// waitForAdminReady blocks until the admin console's listener accepts on
+// addr. Delegates to waitForListen (200ms cadence, ctx-aware DialContext)
+// rather than sleeping, and reports a serve goroutine that already exited
+// instead of burning the whole deadline on a socket that will never bind.
+func waitForAdminReady(t *testing.T, addr string, done <-chan int, stderr *safeBuffer) {
+	t.Helper()
+	if waitForListen(addr, 30*time.Second) {
+		return
+	}
+	// Not up. If serve already returned, its exit code is the real story
+	// (a failed admin bind, a config refusal) — a bare timeout message
+	// would send the next reader hunting for a flake instead.
+	select {
+	case code := <-done:
+		t.Fatalf("serve exited with code %d before the admin console bound %s; stderr=%s",
+			code, addr, stderr.String())
+	default:
+		t.Fatalf("admin console never bound %s within 30s; stderr=%s", addr, stderr.String())
+	}
+}
+
 // snapshotCapturedBridgeYAML reports whether any snapshot under root
 // holds a bridge.yaml.
 func snapshotCapturedBridgeYAML(t *testing.T, root string) bool {
@@ -261,10 +300,23 @@ func snapshotCapturedBridgeYAML(t *testing.T, root string) bool {
 }
 
 // freeLoopbackPort reserves and immediately releases an ephemeral
-// loopback port, returning its number. Racy in principle; in practice
-// the kernel does not hand the same port straight back, and the
-// alternative (adminAddress: 127.0.0.1:0) is undiscoverable because
-// serve prints the CONFIGURED admin address, not the bound one.
+// loopback port, returning its number.
+//
+// This does pick the port BEFORE the bridge binds it, which is the
+// weaker half of this fixture — but `adminAddress: 127.0.0.1:0` is not
+// an option: serve prints the CONFIGURED admin address, not the bound
+// one, and the admin's own "console listening" line goes to slog's
+// default handler (the real stderr), not to the writers the test passes
+// in. There is no channel through which the bound admin port can be
+// discovered.
+//
+// Both failure modes of the gap are loud rather than silent. If nothing
+// takes the port, the bridge binds it and waitForAdminReady returns. If
+// something else grabs it first, the bridge's admin bind fails and
+// waitForAdminReady reports the serve exit; and in the pathological case
+// where the squatter is itself an HTTP listener, the test still fails —
+// its assertions are on THIS config file's contents and THIS data dir's
+// snapshots, which a stranger cannot produce.
 func freeLoopbackPort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
