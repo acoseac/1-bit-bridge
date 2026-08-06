@@ -291,3 +291,49 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 
 **Connection-issues hint** (re-stated for the post-merge loop): SSH and admin-port 7789 are whitelisted to the operator's public IP in ufw. A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Update ufw rules from the new IP.
 
+
+## Diagnosing client behavior from the journal
+
+`sudo journalctl -u 1-bit-bridge` logs every API request
+(`msg=http … method=GET path=/v1/… status=NNN duration_ms=N bytes=N`) and is
+the **ground truth for what an iOS client actually did and when** — device
+screenshots and user recollection routinely mislead. The 2026-08-06
+"Caching artwork ran for six hours" report was resolved entirely from
+status histograms here (the answer: hundreds of `202 pending` retries for
+permanently-imageless artists, fixed by the `no_image` terminal split).
+
+Grep mechanics that cost time to learn:
+
+- **`path=` carries NO query string** (slog logs `r.URL.Path`), so
+  `/v1/manifest?since=…` appears as plain `path=/v1/manifest`. Grep plain
+  paths — don't hunt for quoted query forms. journald only quotes paths
+  containing special characters (scanner probes).
+- **Public-deployment noise**: WARN 404s for `/`, `/.git/HEAD`, `/owa/…`,
+  `/robots.txt` etc. are internet scanners, not the app. Filter to
+  `path=/v1/` for client traffic.
+- **Timestamps are UTC and the phone's timezone is NOT safe to assume** —
+  anchor a user-reported timeline on distinctive request bursts (a manifest
+  page run, an artwork fan-out), never on an assumed offset.
+- Handy shape:
+  `journalctl -u 1-bit-bridge --since "<ts>" --no-pager | grep msg=http | grep -E 'path=/v1/(artist-image|artwork)' | grep -oE 'status=[0-9]+' | sort | uniq -c`
+- `/dlna/file/*` requests never appear here (TelemetryMiddleware, not the
+  access logger) — absence of those lines is not evidence a renderer
+  didn't fetch.
+
+## After a deploy: expect iOS syncs to quietly defer
+
+Restarting the service kicks off a **startup library scan** — minutes on a
+warm, fully-enriched library (~10 min on the VPS's rclone/B2 mount), hours
+only when an extractor/analysis backfill re-processes every track (the
+2026-08-05 wf3→wf4 pass ran ~18 h at ~85 % CPU). While
+`scanState.isScanning` is true, iOS **incremental** rescans silently no-op
+by design (the busy-defer): the user sees "rescan finished in a second and
+nothing changed", the journal shows zero `/v1/manifest` fetches. That is
+the deferral working, not a bug — tell users to retry once
+`/v1/health` shows `isScanning: false`.
+
+Related support pattern: server-side row REMOVALS (dedup suppression,
+deleted files) reach phones only via a **Full rescan** on the device —
+incremental delta syncs never delete rows, so a track-count change the
+server made will not appear from a plain Rescan no matter how many times
+it runs.
