@@ -382,8 +382,41 @@ func artistCacheKey(artist, albumArtist string) string {
 // artist alone would not produce. Shared by both builders and both keys, so a
 // key can never disagree with the ladder it is memoizing.
 func laddersUseAlbumArtist(artist, albumArtist string) bool {
+	artist = strings.TrimSpace(artist)
 	albumArtist = strings.TrimSpace(albumArtist)
-	return albumArtist != "" && foldName(albumArtist) != foldName(strings.TrimSpace(artist))
+	if albumArtist == "" {
+		return false
+	}
+	af, aaf := foldName(artist), foldName(albumArtist)
+	if af == "" && aaf == "" {
+		// Two symbol-only names both fold to "", so the folded compare
+		// calls "!!!" and "∆" the same artist — dropping the albumArtist
+		// rung AND collapsing the two cache keys onto one entry. Fall back
+		// to the raw compare, which is what pickBestArtist's A1 pass uses
+		// to resolve these names in the first place.
+		return !strings.EqualFold(artist, albumArtist)
+	}
+	return aaf != af
+}
+
+// ladderDedupKey is the dedup-map key for one ladder query component: its
+// fold, or a namespaced RAW form when the fold is empty.
+//
+// Folding is the right key almost always — it is what makes "Yael Naim" and
+// "Yael Naïm" cost one request instead of two. But foldForMatch maps every
+// non-alphanumeric rune away, so every symbol-only name folds to the SAME
+// empty string and distinct rungs would silently collapse onto one entry.
+//
+// The \x01 prefix keeps the two key spaces disjoint. It cannot collide with
+// a fold today (folds hold only letters, digits and single spaces) and it
+// cannot be confused with the \x00 that joins the release key's two
+// components — but the map must not depend on either of those, so the
+// namespace is explicit.
+func ladderDedupKey(raw, folded string) string {
+	if folded == "" {
+		return "\x01" + raw
+	}
+	return folded
 }
 
 // --- ladder assembly ---
@@ -436,7 +469,10 @@ func buildReleaseLadder(artist, albumArtist, album string) []releaseAttempt {
 		if isUnsearchableArtistFolded(foldedAr) {
 			return
 		}
-		key := foldedAr + "\x00" + foldTitle(al)
+		// Per-component ladderDedupKey, not a bare fold: a symbol-only
+		// artist or album folds to "" and would collapse distinct rungs
+		// onto one key. Same reason as buildArtistLadder's — see there.
+		key := ladderDedupKey(ar, foldedAr) + "\x00" + ladderDedupKey(al, foldTitle(al))
 		if _, dup := seen[key]; dup {
 			return
 		}
@@ -516,13 +552,28 @@ func buildArtistLadder(artist, albumArtist string) []string {
 		// buildArtistLadder's own test names the case: artist "CD 01",
 		// albumArtist "Abdullah Ibrahim". It kept passing because it drives
 		// this function directly; production never got here.
-		key := foldName(s)
-		if isUnsearchableArtistFolded(key) {
+		folded := foldName(s)
+		if isUnsearchableArtistFolded(folded) {
 			return
 		}
-		if key == "" {
-			return
-		}
+		// A name that folds to "" is NOT unsearchable, and this used to
+		// return here as if it were. isUnsearchableArtistFolded says so
+		// in as many words — it answers false for "" with the comment
+		// "may be a real name that folds away; let it search" — so the
+		// two lines directly contradicted each other, and the wrong one
+		// won because it ran second.
+		//
+		// foldForMatch drops every rune that is not a letter or digit, so
+		// "!!!", "†††", "∆" and "+/-" all fold to nothing. Dropping every
+		// rung left the ladder EMPTY, and resolveArtist returns before
+		// calling SearchArtist at all on an empty ladder — so those
+		// artists silently got no MBID and no portrait, with no log line.
+		// pickBestArtist's A1 pass is a RAW EqualFold, so they resolved
+		// correctly before the ladder existed.
+		//
+		// Dedup on the raw string in that case: every empty-folding name
+		// collapses onto one key otherwise, and only the first survives.
+		key := ladderDedupKey(s, folded)
 		if _, dup := seen[key]; dup {
 			return
 		}
@@ -569,15 +620,20 @@ func buildArtistLadder(artist, albumArtist string) []string {
 // Takes the ladder rather than building it, so resolveArtist can decide what
 // an empty one means before recording a cache miss for a track that will
 // issue no request.
-func (e *Enricher) searchArtistWithFallbacks(ctx context.Context, attempts []string, t *manifest.Track) (*SearchResult, error) {
+//
+// Returns the rung that matched alongside the result. The caller needs it:
+// the MBID belongs to whatever the ladder NARROWED the tag down to, not to
+// the tag, and the Deezer portrait is fetched by name — see
+// artistImageQueryName.
+func (e *Enricher) searchArtistWithFallbacks(ctx context.Context, attempts []string, t *manifest.Track) (*SearchResult, string, error) {
 	for i, name := range attempts {
 		// Pace EVERY rung — the politeness contract is per-request.
 		if !sleepCtx(ctx, e.MBMinInterval) {
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		}
 		res, err := e.mb.SearchArtist(ctx, name)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if res != nil {
 			// Gate on "we asked something other than the tag", not on the
@@ -590,8 +646,40 @@ func (e *Enricher) searchArtistWithFallbacks(ctx context.Context, attempts []str
 					"path", t.Path, "attempt", i,
 					"tagged", t.Artist, "searched", name)
 			}
-			return res, nil
+			return res, name, nil
 		}
 	}
-	return nil, nil
+	return nil, "", nil
+}
+
+// artistImageQueryName picks the name to hand Deezer for the portrait that
+// will be cached under a resolved artist MBID.
+//
+// It MUST NOT be the track's own tag. The artist ladder NARROWS a
+// multi-credit tag before querying — "Rachel Podger, Conductor, Brecon
+// Baroque, Ensemble" (34 tracks on the production library) resolves through
+// its role-truncated rung — so the MBID names Rachel Podger while the tag
+// names four entities. Handing that tag to Deezer is not merely a worse
+// query: pickDeezerArtist tries exact name, then either-direction substring
+// (under which a candidate literally named "Brecon Baroque" IS contained in
+// the query and wins), and failing both returns list[0] UNCONDITIONALLY. So
+// some artist's portrait gets hardlinked to Rachel Podger's MBID and served
+// by /v1/artist-image from then on.
+//
+// Before the ladder this could not happen: MusicBrainz was asked with the
+// same string, so a multi-credit tag got no MBID and Deezer was never
+// reached. The ladder converted "no portrait" into "possibly the WRONG
+// portrait", which is the worse failure — a missing image is visibly
+// missing.
+//
+// Preference order: MusicBrainz's canonical name for the entity it actually
+// matched, then the rung that was actually asked about, then the tag.
+func artistImageQueryName(res *SearchResult, matchedQuery, tagged string) string {
+	if res != nil && strings.TrimSpace(res.Title) != "" {
+		return res.Title
+	}
+	if strings.TrimSpace(matchedQuery) != "" {
+		return matchedQuery
+	}
+	return tagged
 }

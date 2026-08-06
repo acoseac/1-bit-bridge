@@ -253,7 +253,7 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("itunes: HTTP %d: %s", resp.StatusCode, string(b))
 	}
-	err = json.NewDecoder(resp.Body).Decode(out)
+	err = json.NewDecoder(limitJSONBody(resp.Body)).Decode(out)
 	// Drain any bytes past the decoded JSON document so the deferred Close
 	// returns the keep-alive connection to the idle pool — json.Decoder
 	// stops at the closing token, not EOF. Mirrors MusicBrainzClient.get.

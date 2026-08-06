@@ -214,3 +214,154 @@ func TestPickBestArtistCommaFoldingIsWhyTheLadderMustNotSplitOnCommas(t *testing
 		t.Fatalf("the full-string match must resolve without any split: %v", full)
 	}
 }
+
+// --- empty-fold acceptance ---
+//
+// foldForMatch maps every rune that is not a letter or digit to a space and
+// rejoins, so a symbol-only string folds to "". foldedTokenContains then
+// answers false on it BY DESIGN (an empty needle makes strings.Contains
+// trivially true). Composed, those two individually-correct rules reject
+// 100% of candidates for any query that folds away — and markSkipped STAMPS
+// enriched_at on the resulting no-match, so the album loses its release
+// MBID, cover, booklet and description permanently.
+
+// symbolTitlesThatFoldAway are real, released album/artist names whose fold
+// is the empty string. Kept as an explicit list because the whole class is
+// invisible otherwise — nothing about "÷" looks like an edge case.
+var symbolTitlesThatFoldAway = []string{
+	"+", "×", "÷", "=", "−", "†", "∆", "≠", "!!!", "±", "∞", "*",
+}
+
+func TestSymbolTitlesFoldToEmpty(t *testing.T) {
+	for _, s := range symbolTitlesThatFoldAway {
+		if got := foldTitle(s); got != "" {
+			t.Errorf("precondition changed: foldTitle(%q) = %q, want \"\" — "+
+				"the empty-fold fallbacks are keyed on this being true", s, got)
+		}
+	}
+}
+
+// TestPickBestReleaseAcceptsSymbolOnlyAlbumTitle is the F1 regression gate:
+// Ed Sheeran's ÷ (and his entire symbol-titled discography, and Justice's †)
+// could not resolve because R2's folded containment rejected every candidate.
+func TestPickBestReleaseAcceptsSymbolOnlyAlbumTitle(t *testing.T) {
+	for _, title := range symbolTitlesThatFoldAway {
+		t.Run(title, func(t *testing.T) {
+			cands := []releaseCandidate{rc("id-1", title, 100, "Ed Sheeran")}
+			// The PRE-FOLD picker matched these on the raw bytes. That is
+			// what makes this a regression the folding work introduced
+			// rather than deliberate strictness — assert it, so a future
+			// reader does not have to take the claim on trust.
+			if legacy := pickBestReleaseLegacy(cands, title, "Ed Sheeran"); legacy == nil {
+				t.Fatalf("precondition changed: the pre-fold picker rejects %q too", title)
+			}
+			if got := pickBestRelease(cands, title, "Ed Sheeran"); got == nil {
+				t.Fatalf("rejected album %q — every candidate is discarded and the "+
+					"album can never resolve", title)
+			}
+		})
+	}
+}
+
+// TestPickBestReleaseAcceptsSymbolOnlyArtistName is the same defect on R3's
+// artist-credit arm.
+func TestPickBestReleaseAcceptsSymbolOnlyArtistName(t *testing.T) {
+	cands := []releaseCandidate{rc("id-1", "Strange Weather, Isn't It?", 100, "!!!")}
+	if got := pickBestRelease(cands, "Strange Weather, Isn't It?", "!!!"); got == nil {
+		t.Fatal("rejected every candidate for artist \"!!!\" — R3's credit arm " +
+			"folds the query to \"\" and matches nothing")
+	}
+}
+
+// TestPickBestReleaseEmptyFoldFallbackStaysStrict is the negative control.
+// The fallback is EqualFold, NOT the pre-fold caseInsensitiveContains, so it
+// accepts a strict subset of what shipped before: a one-symbol query must
+// not substring-match an unrelated title, and two DIFFERENT symbol titles
+// must not be treated as the same album just because both fold to "".
+func TestPickBestReleaseEmptyFoldFallbackStaysStrict(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, candTitle string
+	}{
+		{"different symbol title", "÷", "×"},
+		{"symbol inside a real title", "+", "Songs + Stories"},
+		{"real title against a symbol", "Divide", "÷"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cands := []releaseCandidate{rc("id-1", tc.candTitle, 100, "Ed Sheeran")}
+			if got := pickBestRelease(cands, tc.query, "Ed Sheeran"); got != nil {
+				t.Fatalf("accepted %q for query %q", got.Title, tc.query)
+			}
+		})
+	}
+	// Same strictness on the credit arm.
+	cands := []releaseCandidate{rc("id-1", "Album", 100, "∆")}
+	if got := pickBestRelease(cands, "Album", "!!!"); got != nil {
+		t.Fatal("accepted credit \"∆\" for artist query \"!!!\" — two names that " +
+			"both fold to \"\" are not the same artist")
+	}
+}
+
+// TestPickBestReleaseFoldedBonusNeedsANonEmptyFold guards R4's scoring twin
+// of the same defect: `foldTitle(c.Title) == albumFold` is TRUE whenever
+// both sides fold to "", so a candidate would collect the +5 folded-exact
+// bonus for a title it does not share.
+//
+// Reachable only through R2's release-group arm, which is the one route
+// that admits a candidate whose OWN title did not match: with the fix in
+// place the release-title arm requires EqualFold, which already fires the
+// +10, so the +5 branch is unreachable for that leg.
+//
+// Both candidates here are admitted on the same release-group title "÷".
+// They differ only in whether their own title folds away, so the spurious
+// +5 is the ONLY thing that can separate them.
+func TestPickBestReleaseFoldedBonusNeedsANonEmptyFold(t *testing.T) {
+	// Admitted via its RG title; own title is the spelled-out album name,
+	// which folds to a non-empty string and earns no bonus.
+	spelled := rc("divide", "Divide", 90, "Ed Sheeran")
+	spelled.ReleaseGroup = &releaseGroup{ID: "rg-1", Title: "÷"}
+	// Admitted via the SAME RG title; own title is a DIFFERENT symbol that
+	// also folds to "". Without the guard it scores +5 for a match against
+	// "" and overtakes the candidate ahead of it.
+	otherSymbol := rc("times", "×", 90, "Ed Sheeran")
+	otherSymbol.ReleaseGroup = &releaseGroup{ID: "rg-1", Title: "÷"}
+
+	got := pickBestRelease([]releaseCandidate{spelled, otherSymbol}, "÷", "Ed Sheeran")
+	if got == nil {
+		t.Fatal("both candidates rejected")
+	}
+	if got.ID != "divide" {
+		t.Fatalf("picked %q; both were admitted on the same release-group title, so "+
+			"the first must win — a +5 folded-exact bonus for \"×\" against a query "+
+			"of \"÷\" is comparing \"\" to \"\"", got.ID)
+	}
+}
+
+// TestPickBestArtistEmptyFoldSkipsTheFoldedPasses is the F3 regression gate.
+//
+// A2 compared folds with no non-empty guard while A3 right below it had one,
+// so every name that folds to "" compared equal to every other: a query for
+// "!!!" would accept "???" or "†††". It was latent only because
+// buildArtistLadder dropped those rungs before SearchArtist was ever reached
+// — the two bugs masked each other, and fixing that one alone makes this one
+// live. Exercises pickBestArtist directly for exactly that reason.
+func TestPickBestArtistEmptyFoldSkipsTheFoldedPasses(t *testing.T) {
+	if foldName("!!!") != "" || foldName("???") != "" {
+		t.Fatal("precondition changed: these names no longer fold to \"\"")
+	}
+	// A2/A3 must not fire. Score 89 keeps A4 out of it, so a non-nil result
+	// can only have come from a folded pass.
+	if got := pickBestArtist([]artistCandidate{ac("wrong", "???", 89)}, "!!!"); got != nil {
+		t.Fatalf("accepted %q for artist query \"!!!\" — two names that both fold "+
+			"to \"\" are not the same artist", got.Name)
+	}
+	// A1's RAW EqualFold is what resolves these names, and it still does.
+	got := pickBestArtist([]artistCandidate{ac("wrong", "???", 89), ac("right", "!!!", 12)}, "!!!")
+	if got == nil || got.ID != "right" {
+		t.Fatalf("A1 raw-exact must still match \"!!!\": %v", got)
+	}
+	// A4 is unchanged — a >=90 top candidate is still the fuzzy fallback,
+	// even for a query that folds away.
+	if got := pickBestArtist([]artistCandidate{ac("fuzzy", "???", 90)}, "!!!"); got == nil {
+		t.Error("A4 must be unaffected by the empty-fold guard")
+	}
+}

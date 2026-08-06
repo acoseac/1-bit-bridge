@@ -596,6 +596,21 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	}
 	key := artistCacheKey(t.Artist, t.AlbumArtist)
 	var artistMBID string
+	// The name the Deezer portrait is searched by. Defaults to the tag and
+	// is replaced with the canonical name of whatever the ladder actually
+	// matched — see artistImageQueryName for why the tag is wrong.
+	//
+	// The cache-hit path keeps the tag, because artistCache stores only the
+	// MBID. That is almost always moot: a hit means a sibling track already
+	// resolved this artist, so either the portrait is on disk (
+	// ensureArtistImageCached stats the MBID-keyed path and returns before
+	// the name is read) or Deezer had none (deezerNegCache short-circuits
+	// above). The one gap is a sibling whose fetch failed TRANSIENTLY —
+	// neither the file nor the negative entry exists, and the retry goes out
+	// under the tag. Narrow, self-correcting on the next process start, and
+	// closing it properly means caching the canonical name alongside the
+	// MBID rather than widening this fallback.
+	imageName := t.Artist
 	if cached, ok := e.artistCache.Get(key); ok {
 		metrics.RecordMBCache("artist", true)
 		artistMBID = cached
@@ -629,7 +644,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// Pacing now lives inside searchArtistWithFallbacks, which paces
 		// EVERY rung — the politeness contract is per-request, and a
 		// ladder that paced only its first rung would burst.
-		res, err := e.searchArtistWithFallbacks(ctx, attempts, t)
+		res, matchedQuery, err := e.searchArtistWithFallbacks(ctx, attempts, t)
 		if err != nil {
 			// Don't cache transient errors session-wide — a network
 			// blip would otherwise block sibling-track retries until
@@ -700,6 +715,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// release-side validation above (F30).
 		if res != nil && isValidMBID(res.MBID) {
 			artistMBID = res.MBID
+			imageName = artistImageQueryName(res, matchedQuery, t.Artist)
 			e.artistCache.Set(key, artistMBID)
 		}
 	}
@@ -722,7 +738,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	if e.deezerNegCache.Has(artistMBID) {
 		return nil
 	}
-	found, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist)
+	found, err := e.ensureArtistImageCached(ctx, artistMBID, imageName)
 	if err != nil {
 		// Skip the Error log when the failure is just shutdown cancellation
 		// (ensureArtistImageCached returns ctx.Err() from its pacing

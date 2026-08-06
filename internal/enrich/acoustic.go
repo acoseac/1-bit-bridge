@@ -381,6 +381,21 @@ func (e *Enricher) fetchRecoveredArtistImage(ctx context.Context, t *manifest.Tr
 	if t.ArtistMBID == "" || e.deezer == nil || e.deezerNegCache.Has(t.ArtistMBID) {
 		return
 	}
+	// The name and the MBID must describe the SAME entity — the portrait is
+	// fetched by name and hardlinked under the MBID, so a mismatch caches
+	// one artist's face against another's id permanently.
+	//
+	// applyAcousticFallback deliberately does NOT overwrite an artist the
+	// text path already resolved (a real tag pickBestArtist accepted is at
+	// least as trustworthy as audio; the fingerprint is being consulted for
+	// the ALBUM in that case). So reaching here with the two differing means
+	// the MBID is the text path's and m.ArtistName is not its name. The text
+	// path already owns that MBID's portrait — it fetched it, neg-cached it,
+	// or hit a transient error worth retrying with the RIGHT name — and this
+	// function is for a RECOVERED artist. There is nothing here to do.
+	if t.ArtistMBID != m.ArtistMBID {
+		return
+	}
 	found, err := e.ensureArtistImageCached(ctx, t.ArtistMBID, m.ArtistName)
 	if err != nil {
 		if ctx.Err() == nil {
