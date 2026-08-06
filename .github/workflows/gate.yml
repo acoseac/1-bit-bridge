@@ -18,14 +18,20 @@ name: gate
 # GOTOOLCHAIN=local (it broke the first v0.1.7 image).
 #
 # A fifth job, `cross-platform`, runs the suite natively on Windows and
-# macOS, and is part of the `gate` fan-in like the rest.
+# macOS. It is NOT part of the `gate` fan-in, and is still
+# continue-on-error.
 #
-# It landed outside the fan-in and continue-on-error, because Windows had
-# 30 pre-existing failures the moment it was first run — the largest test
-# package had literally never been built for that platform. Those are
-# fixed (#624, #626, #629) and Windows is green, so it counts now. A
-# regression there is a real failure, not a footnote: both live bridges
-# this project deploys to are non-macOS, one of them Windows.
+# It landed that way because Windows had 30 pre-existing failures the
+# moment it was first run — the largest test package had literally never
+# been built for that platform. That COMPILE and CORRECTNESS backlog is
+# closed (#624, #626, #629); what remains is a TIMING backlog, and that
+# is why promotion hasn't happened. The comment on the job itself carries
+# the detail and the bar promotion has to clear.
+#
+# Until then a red X there is informational — but worth reading rather
+# than ignoring: every failure so far has been a real portability defect
+# in a test, and both live bridges this project deploys to are non-macOS,
+# one of them Windows.
 #
 # Cache: each job manages its own Go cache explicitly via actions/cache
 # rather than setup-go's built-in `cache: true`. The built-in cache keys
