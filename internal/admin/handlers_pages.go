@@ -221,9 +221,19 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 	tokens := s.deps.Auth.List()
 	rows := make([]tokenRow, 0, len(tokens))
 	for _, t := range tokens {
+		// ExpiresAt + RotatedAt are as load-bearing as the rest: the
+		// template renders "never" for a nil ExpiresAt, and `#tokens-body`
+		// is never repainted from /api/tokens — the only client-side write
+		// to `.expires-cell` is the in-session echo of the PATCH response.
+		// Omitting them here (as this did until 2026-08-06) meant an expiry
+		// set in one session reverted to "never" on the next page load,
+		// while auth.Store went on enforcing it and the device stopped
+		// working. apiTokensList already populates both; keep the two
+		// projections in step.
 		rows = append(rows, tokenRow{
 			ID: t.ID, Name: t.Name,
 			CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt,
+			RotatedAt: t.RotatedAt, ExpiresAt: t.ExpiresAt,
 		})
 	}
 	data := map[string]any{

@@ -733,8 +733,17 @@ func (s *Server) trackSourceCounts() (total, routed int) {
 }
 
 // getSourcesSnapshot assembles the dashboard "Sources" breakdown from the
-// cached track counts + the already-assembled per-server ConfiguredServers
-// state — no new store query. filesystem = total - routedTotal.
+// cached track counts plus the per-server ConfiguredServers state.
+// filesystem = total - routedTotal.
+//
+// COST: this is NOT query-free. trackSourceCounts() is cached, but
+// ConfiguredServers issues one routed-track COUNT(*) per configured
+// upstream. (This comment claimed "no new store query" until 2026-08-06;
+// it was wrong, and it was the claim a reader would have trusted when
+// deciding what cadence to call this at.) The caller's ctx is threaded
+// through and additionally bounded by snapshotDBTimeout so a slow query
+// can neither outlive a disconnected SSE client nor pin the publisher —
+// the same treatment the sibling snapshots get.
 //
 // Reconciliation: the upnp_track_routing.source_path -> tracks.path FK
 // makes routedTotal <= total in a consistent snapshot, so filesystem is
@@ -747,7 +756,7 @@ func (s *Server) trackSourceCounts() (total, routed int) {
 // breakdown never over-sums. Any leftover budget is the orphan remainder
 // (rows whose upstream was just removed, pre-reap) that app.js renders as
 // "Other UPnP sources".
-func (s *Server) getSourcesSnapshot() sourcesResponse {
+func (s *Server) getSourcesSnapshot(ctx context.Context) sourcesResponse {
 	total, routed := s.trackSourceCounts()
 	if routed > total {
 		routed = total
@@ -760,7 +769,9 @@ func (s *Server) getSourcesSnapshot() sourcesResponse {
 	}
 	if s.deps.UPnPUpstream != nil {
 		resp.UPnPEnabled = true
-		configured := s.deps.UPnPUpstream.ConfiguredServers()
+		dbCtx, cancel := context.WithTimeout(ctx, snapshotDBTimeout)
+		configured := s.deps.UPnPUpstream.ConfiguredServers(dbCtx)
+		cancel()
 		resp.Servers = make([]sourceServerRow, 0, len(configured))
 		budget := routed
 		for _, srv := range configured {
@@ -786,8 +797,8 @@ func (s *Server) getSourcesSnapshot() sourcesResponse {
 // apiSources serves GET /api/sources — the REST twin of the SSE `sources`
 // event, for curl / tests / debugging. Loopback + csrfGuard apply via the
 // shared middleware chain (registered alongside /api/stats).
-func (s *Server) apiSources(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.getSourcesSnapshot())
+func (s *Server) apiSources(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.getSourcesSnapshot(r.Context()))
 }
 
 // --- enrichment progress (dashboard legibility) ---

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -99,9 +100,15 @@ func (st *upnpAdminState) snapshot() map[string]upnpingest.ServerIngestResult {
 
 // ConfiguredServers merges the YAML config with the live discovery
 // cache + the last-known ingest result + the manifest's per-server
-// track count into the admin DTO. Cheap reads — safe under the
-// dashboard's polling cadence.
-func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
+// track count into the admin DTO.
+//
+// The per-server track count is a DB read (one COUNT(*) per configured
+// upstream), so the caller's ctx is threaded all the way through to
+// lookupUPnPServerRuntime. It used to pass context.Background() on the
+// reasoning that "admin polling is operator-driven" — true of the page
+// handlers, but this is also on the SSE `sources` slow tick, where the
+// connection ctx is exactly the signal that matters.
+func (a *upnpAdminAdapter) ConfiguredServers(ctx context.Context) []admin.UPnPUpstreamServerState {
 	cfg := a.cfgHolder.Load()
 	if cfg == nil {
 		return nil
@@ -113,22 +120,30 @@ func (a *upnpAdminAdapter) ConfiguredServers() []admin.UPnPUpstreamServerState {
 			Name:          srv.Name,
 			ConfiguredUDN: srv.UDN,
 			ManualURL:     srv.ManualDescriptionURL,
+			// The three editable YAML fields, echoed verbatim so the
+			// admin edit modal prefills what is actually stored and a
+			// save round-trips. Emitting the STORED value (not the
+			// EffectiveRootObjectID() / normalizePrefix() fallback) is
+			// deliberate: a blank here means "unset, let the loader
+			// default it", and PATCHing back a materialised default
+			// would freeze today's fallback into bridge.yaml.
+			// Cloned, not aliased: the slice belongs to the live
+			// config snapshot and this DTO escapes to handlers.
+			PathPrefix:             srv.PathPrefix,
+			RootObjectID:           srv.RootObjectID,
+			SkipTopLevelContainers: slices.Clone(srv.SkipTopLevelContainers),
 		}
 		// Per-server runtime state (FriendlyName + RoutedTracks)
 		// routes through the shared helper so the admin row and the
 		// public /v1/health row can't diverge on the cache lookup
 		// gate (UDN-only — manual entries don't get into the cache)
 		// AND the StableServerKey count keying (UDN OR manual hash —
-		// both routed through one column). The admin path passes
-		// `context.Background()` because admin polling is operator-
-		// driven (no inbound HTTP request context to thread — the
-		// prior implementation used Background here for the same
-		// reason); the public path propagates `r.Context()` so a
-		// client disconnect cancels.
+		// both routed through one column). Both paths now propagate a
+		// real ctx so a client disconnect cancels the COUNT(*).
 		// The admin DTO surfaces liveness via its own `Discovered` field
 		// (cache.Get below), so the shared helper's `online` is discarded
 		// here — only the public /v1/health DTO carries `online`.
-		row.FriendlyName, row.RoutedTracks, _ = lookupUPnPServerRuntime(context.Background(), srv, a.cache, a.store)
+		row.FriendlyName, row.RoutedTracks, _ = lookupUPnPServerRuntime(ctx, srv, a.cache, a.store)
 		// The admin DTO carries operator-internal fields the public
 		// DTO deliberately omits (Discovered / ResolvedUDN /
 		// Manufacturer / ControlURL / LastSeenAt). FriendlyName is

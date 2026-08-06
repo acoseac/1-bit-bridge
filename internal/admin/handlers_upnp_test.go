@@ -21,6 +21,11 @@ type stubUPnPProvider struct {
 	rescanLastUDN atomic.Value // string
 	rescanErr     error
 
+	// configuredCtx records the ctx the last ConfiguredServers call was
+	// handed, so tests can assert the caller's cancellation actually
+	// reaches the DB work instead of a context.Background().
+	configuredCtx atomic.Pointer[context.Context]
+
 	// CRUD spy fields — tests assert the last call's payload + can
 	// inject the next return value for each verb.
 	addCalls    atomic.Int32
@@ -35,7 +40,8 @@ type stubUPnPProvider struct {
 	updateErr   error
 }
 
-func (s *stubUPnPProvider) ConfiguredServers() []UPnPUpstreamServerState {
+func (s *stubUPnPProvider) ConfiguredServers(ctx context.Context) []UPnPUpstreamServerState {
+	s.configuredCtx.Store(&ctx)
 	return s.servers
 }
 

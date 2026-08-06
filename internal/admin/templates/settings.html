@@ -592,7 +592,16 @@
       </div>
     </div>
 
-    <div class="actions">
+    {{/*
+      id="restart-actions" is the anchor the UPnP page's "Restart
+      required" banner links to. It used to link to `#danger`, which
+      exists in no template — the operator landed on Settings with
+      nothing highlighted and no visible Restart button. `#restart-btn`
+      itself can't be the anchor target because it's `hidden` until a
+      restart is actually pending, and the browser won't scroll to a
+      hidden element.
+    */}}
+    <div class="actions" id="restart-actions">
       <button type="submit" class="btn primary">Save</button>
       <button type="button" id="restart-btn" class="btn" hidden data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">{{if .Data.IsSupervised}}Restart now{{else}}Stop now{{end}}</button>
     </div>
