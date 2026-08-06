@@ -518,8 +518,13 @@ func (s *fingerprintSweeper) fingerprintFile(ctx context.Context, absPath string
 // behind a worker already sleeping out an earlier pause, and computing it
 // afterwards would push it further out than the upstream actually asked for.
 func (s *fingerprintSweeper) noteLookupErr(err error) {
+	// Typed-nil guard: errors.As can report true with a nil pointer, and
+	// reading RetryAfter off it would panic. Mirrors the *net.DNSError arm in
+	// acoustid.IsTransient. Not reachable from this repo today — get() only
+	// ever builds &RateLimitError{...} — but it costs nothing and the deref is
+	// one custom wrapper away.
 	var rle *acoustid.RateLimitError
-	if !errors.As(err, &rle) {
+	if !errors.As(err, &rle) || rle == nil {
 		return
 	}
 	d := rle.RetryAfter

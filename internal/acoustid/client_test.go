@@ -375,6 +375,39 @@ func TestIsTransientPinsClassification(t *testing.T) {
 	}
 }
 
+// nilCarrier stages a typed nil inside an error chain.
+//
+// It cannot be done with fmt.Errorf("…: %w", (*T)(nil)): that formats its
+// operand at CONSTRUCTION time, so the nil receiver's Error() panics there
+// rather than at the site under test. A wrapper that keeps the value without
+// rendering it is the only way to reach the guard.
+type nilCarrier struct{ inner error }
+
+func (nilCarrier) Error() string   { return "wrapped" }
+func (w nilCarrier) Unwrap() error { return w.inner }
+
+// TestIsTransientSurvivesATypedNilEnvelope pins the guard on the envelope arm.
+//
+// errors.As matches on the CONCRETE TYPE, so a chain carrying a typed-nil
+// *upstreamError makes it report true while leaving the target nil; reading
+// Code off that panics. Not reachable from this repo today — Lookup only ever
+// builds &upstreamError{...} — so what this pins is the guard itself against a
+// future wrapper, which is the same bet the *net.DNSError arm already makes.
+func TestIsTransientSurvivesATypedNilEnvelope(t *testing.T) {
+	err := nilCarrier{inner: (*upstreamError)(nil)}
+
+	// Fixture self-check: if this ever stops staging a typed nil, the
+	// assertion below would pass for the wrong reason and pin nothing.
+	var probe *upstreamError
+	if !errors.As(err, &probe) || probe != nil {
+		t.Fatal("fixture does not stage a typed nil, so the guard is not being exercised")
+	}
+
+	if IsTransient(err) {
+		t.Error("a typed nil carries no code, so it must not read as transient")
+	}
+}
+
 // TestStatusFromMessageIsAnchored — the fallback path parses the status out of
 // httpError's own stable prefix. It must never read a number that merely
 // appears inside an upstream body.

@@ -188,6 +188,40 @@ func TestSweeperNoteLookupErrOnlyPausesForARateLimit(t *testing.T) {
 	}
 }
 
+// nilCarrier stages a typed nil inside an error chain. fmt.Errorf("…: %w",
+// (*T)(nil)) cannot: it formats its operand at CONSTRUCTION time, so the nil
+// receiver's Error() panics there rather than at the site under test. Twin of
+// the helper in internal/acoustid's tests.
+type nilCarrier struct{ inner error }
+
+func (nilCarrier) Error() string   { return "wrapped" }
+func (w nilCarrier) Unwrap() error { return w.inner }
+
+// TestSweeperNoteLookupErrSurvivesATypedNil pins the guard.
+//
+// errors.As matches on the CONCRETE TYPE, so a chain carrying a typed-nil
+// *acoustid.RateLimitError makes it report true while leaving the target nil,
+// and reading RetryAfter off that panics — inside a sweep worker, where the
+// per-iteration recover the SCANNER has no equivalent of. Not reachable from
+// this repo today (get() only ever builds &RateLimitError{...}), so what this
+// pins is the guard against a future wrapper.
+func TestSweeperNoteLookupErrSurvivesATypedNil(t *testing.T) {
+	err := nilCarrier{inner: (*acoustid.RateLimitError)(nil)}
+
+	// Fixture self-check: if this stops staging a typed nil, the assertion
+	// below passes for the wrong reason.
+	var probe *acoustid.RateLimitError
+	if !errors.As(err, &probe) || probe != nil {
+		t.Fatal("fixture does not stage a typed nil, so the guard is not being exercised")
+	}
+
+	s := &fingerprintSweeper{}
+	s.noteLookupErr(err)
+	if !s.notBefore.IsZero() {
+		t.Error("a typed nil carries no Retry-After, so it must not pause the pool")
+	}
+}
+
 // TestSweeperPacerHonoursCancellation — a shutting-down sweep must not sit out
 // the full interval.
 func TestSweeperPacerHonoursCancellation(t *testing.T) {

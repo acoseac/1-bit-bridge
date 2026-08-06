@@ -503,8 +503,12 @@ func IsTransient(err error) bool {
 	// not "HTTP <status>", so statusFromMessage cannot see it — and matching
 	// the text instead of the field would reintroduce exactly the
 	// body-mentions-a-number trap that fallback is written to avoid.
+	//
+	// Typed-nil guard: errors.As can report true with a nil pointer, and
+	// reading Code off it would panic. Falls THROUGH rather than returning, so
+	// the arms below still get a look — same shape as the *net.DNSError arm.
 	var uerr *upstreamError
-	if errors.As(err, &uerr) {
+	if errors.As(err, &uerr) && uerr != nil {
 		return uerr.Code == errCodeInternalError || uerr.Code == errCodeTooManyRequests
 	}
 	// Fall back to the stable message prefix for an httpError that reached us
