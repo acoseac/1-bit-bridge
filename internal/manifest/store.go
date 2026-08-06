@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -1401,18 +1402,43 @@ var migrations = []migration{
 		// at its default. Getting this backwards is safe in the
 		// expensive direction only — a missed row retries once more
 		// than needed; a wrongly-capped row silently loses its heal.
+		//
+		// The backfill runs on EVERY attempt at this migration, NOT only
+		// on the one that adds the column — the column-exists guard
+		// covers the ALTER alone.
+		//
+		// migrate() runs `sql`, then `post`, then bumps user_version, all
+		// OUTSIDE a transaction, and the ALTER autocommits on its own. So
+		// a backfill that fails (SQLITE_BUSY from a second process in
+		// OpenStore — a `bridge duplicates` / `bridge status` run against
+		// a live DB — disk full, or the process being killed between the
+		// two statements) leaves the column present at user_version 29.
+		// With the backfill inside the guard, the next start found the
+		// column, returned nil without touching a row, and stamped 30
+		// over unbackfilled data: every non-FLAC row parked at 0 with a
+		// NULL audio_md5_state, which is exactly what
+		// AnalysisRow.WantsAudioMD5Retry reads as "worth another
+		// attempt" — the whole non-FLAC library re-enqueued for a full
+		// decode, the outcome the docblock above says this backfill
+		// exists to prevent.
+		//
+		// Re-running it is safe: it assigns a constant, the bridge
+		// refuses to start while migrate fails so no other code touches
+		// these rows between attempts, and once user_version reaches 30
+		// the ladder never revisits this migration at all. Same shape as
+		// v25, whose backfillFormatColumns is likewise unconditional
+		// after its per-column ALTER loop.
 		post: func(db *sql.DB) error {
 			exists, err := atlasColumnExists(db, "track_analysis", "audio_md5_attempts")
 			if err != nil {
 				return fmt.Errorf("inspect track_analysis.audio_md5_attempts: %w", err)
 			}
-			if exists {
-				return nil
-			}
-			if _, err := db.Exec(
-				`ALTER TABLE track_analysis ADD COLUMN audio_md5_attempts INTEGER NOT NULL DEFAULT 0`,
-			); err != nil {
-				return fmt.Errorf("add track_analysis.audio_md5_attempts: %w", err)
+			if !exists {
+				if _, err := db.Exec(
+					`ALTER TABLE track_analysis ADD COLUMN audio_md5_attempts INTEGER NOT NULL DEFAULT 0`,
+				); err != nil {
+					return fmt.Errorf("add track_analysis.audio_md5_attempts: %w", err)
+				}
 			}
 			if _, err := db.Exec(
 				`UPDATE track_analysis SET audio_md5_attempts = ?
@@ -4613,26 +4639,75 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	// threshold-delete a routed row — its lifecycle is the ingest's
 	// last_seen_at reap, which has its own offline / truncated-walk
 	// protections.
-	missingBlob, err := json.Marshal(missingPaths)
-	if err != nil {
-		return 0, err
+	// A path that isn't valid UTF-8 can't travel through the JSON array
+	// at all, so it takes a per-path fallback below. See
+	// splitIllFormedUTF8Paths: encoding/json substitutes U+FFFD and
+	// reports no error, so such a path re-emerges from json_each as a
+	// DIFFERENT string and `path IN (…)` never matches the row. The
+	// per-row increment above binds each path directly, so it DOES
+	// match — missing_count climbs, the "did not match any row"
+	// diagnostic stays quiet, and the row is simply never reaped:
+	// a phantom track in /v1/manifest forever, permanently inflating
+	// PendingDeletions, with no log line.
+	//
+	// The fallback is a loop over just those paths rather than moving
+	// the whole DELETE per-path, because the JSON array is a deliberate
+	// choice (one static statement, no placeholder construction, no
+	// bind-ceiling chunking) for the whole-root-outage case that puts
+	// tens of thousands of paths in this list, and ill-formed names are
+	// rare. It carries BOTH of the batch form's guards — the threshold
+	// AND the routed anti-join, which no caller may ever bypass.
+	valid, illFormed := splitIllFormedUTF8Paths(missingPaths)
+	var deleted int64
+	if len(valid) > 0 {
+		missingBlob, err := json.Marshal(valid)
+		if err != nil {
+			return 0, err
+		}
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM tracks
+			 WHERE missing_count >= ?
+			   AND path IN (SELECT value FROM json_each(?))
+			   AND path NOT IN (SELECT source_path FROM upnp_track_routing)
+		`, threshold, string(missingBlob))
+		if err != nil {
+			return 0, err
+		}
+		n, raErr := res.RowsAffected()
+		if raErr != nil {
+			// The DELETE ran; only the count read failed (modernc/sqlite
+			// permits it though it shouldn't in practice). Surface it rather
+			// than silently returning a 0 the scanner logs as an undercount,
+			// and still commit the reap. Matches RecoverInterruptedBatches.
+			logger.Warn("IncrementMissingTracks: RowsAffected after threshold delete failed", "err", raErr)
+		}
+		deleted += n
 	}
-	res, err := tx.ExecContext(ctx, `
-		DELETE FROM tracks
-		 WHERE missing_count >= ?
-		   AND path IN (SELECT value FROM json_each(?))
-		   AND path NOT IN (SELECT source_path FROM upnp_track_routing)
-	`, threshold, string(missingBlob))
-	if err != nil {
-		return 0, err
-	}
-	deleted, raErr := res.RowsAffected()
-	if raErr != nil {
-		// The DELETE ran; only the count read failed (modernc/sqlite
-		// permits it though it shouldn't in practice). Surface it rather
-		// than silently returning a 0 the scanner logs as an undercount,
-		// and still commit the reap. Matches RecoverInterruptedBatches.
-		logger.Warn("IncrementMissingTracks: RowsAffected after threshold delete failed", "err", raErr)
+	if len(illFormed) > 0 {
+		delStmt, err := tx.PrepareContext(ctx, `
+			DELETE FROM tracks
+			 WHERE path = ?
+			   AND missing_count >= ?
+			   AND path NOT IN (SELECT source_path FROM upnp_track_routing)
+		`)
+		if err != nil {
+			return 0, err
+		}
+		defer delStmt.Close()
+		for _, p := range illFormed {
+			res, err := delStmt.ExecContext(ctx, p, threshold)
+			if err != nil {
+				return 0, err
+			}
+			// n is 0 when raErr is non-nil, so the accumulation is
+			// the same undercount-and-commit policy as the batch arm.
+			n, raErr := res.RowsAffected()
+			if raErr != nil {
+				logger.Warn("IncrementMissingTracks: RowsAffected after ill-formed-path delete failed",
+					"err", raErr)
+			}
+			deleted += n
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -4688,28 +4763,108 @@ func (s *Store) IncrementMissingFoldersAndDeleteAtThreshold(ctx context.Context,
 	//
 	// Folders are filesystem-only (UPnP ingest never writes this
 	// table), so there is deliberately no routing anti-join to mirror.
-	missingBlob, err := json.Marshal(missingPaths)
-	if err != nil {
-		return 0, err
+	//
+	// Same ill-formed-UTF-8 split as the tracks twin, and for the same
+	// reason: json.Marshal substitutes U+FFFD without erroring, so such
+	// a path can never match `json_each`'s value and the folder row
+	// lingers in the listing surface forever. A directory name is an
+	// arbitrary byte string on Linux exactly as a filename is; the
+	// fallback carries the threshold guard, which is the only guard
+	// this twin has.
+	valid, illFormed := splitIllFormedUTF8Paths(missingPaths)
+	var deleted int64
+	if len(valid) > 0 {
+		missingBlob, err := json.Marshal(valid)
+		if err != nil {
+			return 0, err
+		}
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM folders
+			 WHERE missing_count >= ?
+			   AND path IN (SELECT value FROM json_each(?))
+		`, threshold, string(missingBlob))
+		if err != nil {
+			return 0, err
+		}
+		n, raErr := res.RowsAffected()
+		if raErr != nil {
+			// See IncrementMissingTracks: surface the count-read failure
+			// rather than logging a silent 0-row undercount, still commit.
+			logger.Warn("IncrementMissingFolders: RowsAffected after threshold delete failed", "err", raErr)
+		}
+		deleted += n
 	}
-	res, err := tx.ExecContext(ctx, `
-		DELETE FROM folders
-		 WHERE missing_count >= ?
-		   AND path IN (SELECT value FROM json_each(?))
-	`, threshold, string(missingBlob))
-	if err != nil {
-		return 0, err
-	}
-	deleted, raErr := res.RowsAffected()
-	if raErr != nil {
-		// See IncrementMissingTracks: surface the count-read failure
-		// rather than logging a silent 0-row undercount, still commit.
-		logger.Warn("IncrementMissingFolders: RowsAffected after threshold delete failed", "err", raErr)
+	if len(illFormed) > 0 {
+		delStmt, err := tx.PrepareContext(ctx, `
+			DELETE FROM folders
+			 WHERE path = ?
+			   AND missing_count >= ?
+		`)
+		if err != nil {
+			return 0, err
+		}
+		defer delStmt.Close()
+		for _, p := range illFormed {
+			res, err := delStmt.ExecContext(ctx, p, threshold)
+			if err != nil {
+				return 0, err
+			}
+			n, raErr := res.RowsAffected()
+			if raErr != nil {
+				logger.Warn("IncrementMissingFolders: RowsAffected after ill-formed-path delete failed",
+					"err", raErr)
+			}
+			deleted += n
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return deleted, nil
+}
+
+// splitIllFormedUTF8Paths partitions paths into those that survive a
+// json.Marshal round-trip and those that do not. Shared by both
+// threshold-delete twins above.
+//
+// encoding/json replaces every ill-formed UTF-8 byte with U+FFFD and
+// returns no error, so such a path comes back out of json_each as a
+// different string than the one stored in the `path` PRIMARY KEY. These
+// rows genuinely exist: on Linux a filename is an arbitrary byte
+// string, nothing between filepath.WalkDir and UpsertTrackBatch
+// validates it, and SQLite does not validate TEXT either — the
+// utf8.ValidString fallback in sqlfunc.go's nfcCompose is in the
+// codebase for the same reason.
+//
+// Callers must route `illFormed` through a per-path bound predicate
+// (`path = ?`), which matches because the driver binds the raw bytes.
+//
+// The common case allocates nothing: when every path is well-formed the
+// input slice is returned as-is and illFormed is nil. The caller's
+// slice is never mutated — an in-place `paths[:0]` filter would clobber
+// the scanner's own slice, which it still holds and logs from.
+func splitIllFormedUTF8Paths(paths []string) (valid, illFormed []string) {
+	first := -1
+	for i, p := range paths {
+		if !utf8.ValidString(p) {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return paths, nil
+	}
+	valid = make([]string, 0, len(paths)-1)
+	valid = append(valid, paths[:first]...)
+	illFormed = append(illFormed, paths[first])
+	for _, p := range paths[first+1:] {
+		if utf8.ValidString(p) {
+			valid = append(valid, p)
+		} else {
+			illFormed = append(illFormed, p)
+		}
+	}
+	return valid, illFormed
 }
 
 // PendingDeletions returns the total count of rows across `tracks` and
