@@ -351,6 +351,15 @@ func (m *Manager) Get(hello *cryptotls.ClientHelloInfo) (*cryptotls.Certificate,
 // cert; else → self-signed. Returns "" only when the matched branch has
 // no cert yet AND the self-signed leaf is somehow empty (never in
 // practice — self-signed is loaded before NewManager).
+//
+// **Because the routing is duplicated rather than shared, every gate
+// Get applies has to be RESTATED here — both LE branches carry their
+// own NotAfter check.** A branch that routes like Get but serves a cert
+// Get would have rejected advertises a pin the listener never presents,
+// which is the one failure mode this function exists to prevent.
+// TestFingerprintForServerName_AgreesWithGet is the structural pin:
+// it asserts the two agree across fresh and expired certs on BOTH LE
+// branches, so a gate that lands in Get alone fails there.
 func (m *Manager) FingerprintForServerName(serverName string) string {
 	sni := normalizeSNIHost(serverName)
 
@@ -362,10 +371,26 @@ func (m *Manager) FingerprintForServerName(serverName string) string {
 	// cert the iOS client never captures (the cause of the first
 	// public-pairing fix's residual mismatch). No cached cert yet → fall
 	// through to self-signed rather than to a synthetic-hello mint.
+	//
+	// The EXPIRY GATE is the same restatement the Tailscale branch below
+	// carries, and it is needed here for a sharper reason: this branch
+	// reads a DIFFERENT source than Get. Get delegates to
+	// autocert.Manager.GetCertificate, which refuses to serve a cached
+	// leaf past NotAfter and attempts a renewal — so once the cert has
+	// expired and ACME cannot renew (expired account, DNS moved,
+	// :443 unreachable), Get falls through to self-signed while the
+	// on-disk cache this branch reads still holds the stale leaf. The
+	// pairing QR would then advertise a fingerprint the listener never
+	// presents, and every join fails a pin check with no way to explain
+	// itself.
 	if domain, _ := m.autocertDomain.Load().(string); domain != "" && sni == domain {
 		if p := m.autocertCachedCert.Load(); p != nil && p.fn != nil {
-			if fp := fingerprintLeaf(p.fn()); fp != "" {
-				return fp
+			if cert := p.fn(); cert != nil {
+				if notAfter, err := CertNotAfter(cert); err == nil && !time.Now().After(notAfter) {
+					if fp := fingerprintLeaf(cert); fp != "" {
+						return fp
+					}
+				}
 			}
 		}
 	}

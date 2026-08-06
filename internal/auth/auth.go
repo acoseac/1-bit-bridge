@@ -424,12 +424,28 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 				// sibling token (or resurrect a revoked one). reload's
 				// per-token merge preserves the LastUsedAt bump above, so
 				// the reload can't lose it. Mirrors RecordClientVersion.
-				_ = s.reloadIfStale()
-				if err := s.persist(); err != nil {
+				//
+				// A FAILED reload must ABORT the persist, on FlushLastUsed's
+				// rationale: dropping a debounced timestamp is recoverable
+				// (the bump stays in memory — reload leaves s.tokens
+				// untouched on every error path — and lands at the next
+				// successful flush, or at shutdown); an overwrite that
+				// deletes a sibling's freshly-minted token is not. The
+				// realistic trigger is Windows, where a sibling
+				// `bridge pair` replacing tokens.json can hand this
+				// process's ReadFile an ERROR_SHARING_VIOLATION inside the
+				// AV / indexer scan-on-close window — the exact window
+				// atomicwrite.RenameWithRetry exists for. Ignoring the
+				// error there erased the just-paired device's token and
+				// 401'd it from the next reload on.
+				if err := s.reloadIfStale(); err != nil {
+					logger.Error("reload before persisting LastUsedAt; skipping persist to avoid clobbering a sibling write", "err", err)
+				} else if err := s.persist(); err != nil {
 					logger.Error("persist LastUsedAt", "err", err)
 				}
 				// persist() stamps `lastUsedFlush` on success; nothing to
-				// do here on either branch.
+				// do here on any branch. The validation verdict below is
+				// unaffected either way — it is already decided.
 			}
 			return matched, true
 		}
@@ -533,8 +549,16 @@ func (s *Store) RecordClientVersion(id, ver string) {
 			// (above) preserves our in-memory LastClientVersion
 			// bump, so a successful reload still ends up writing
 			// the new value.
-			_ = s.reloadIfStale()
-			if err := s.persist(); err != nil {
+			//
+			// A FAILED reload ABORTS the persist — same contract as
+			// Validate and FlushLastUsed. The in-memory bump above
+			// survives (reload mutates nothing on its error paths) and
+			// lands at the next successful flush or at shutdown; writing
+			// the stale slice over a sibling's file would not be
+			// recoverable.
+			if err := s.reloadIfStale(); err != nil {
+				logger.Error("reload before persisting client-version; skipping persist to avoid clobbering a sibling write", "err", err)
+			} else if err := s.persist(); err != nil {
 				logger.Error("persist client-version", "err", err)
 			}
 		}

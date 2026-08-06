@@ -7,13 +7,16 @@ import (
 	cryptotls "crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
 )
 
-// mintExpiredTailscaleCert builds a leaf whose NotAfter is already in
-// the past.
+// mintExpiredCert builds a leaf whose NotAfter is already in the past.
+// Used for BOTH LE branches (Tailscale magic-DNS and autocert) — an
+// expired leaf is an expired leaf, and the routing under test differs
+// only in which store it is read from.
 //
 // The sibling mintTestCert deliberately has no lifetime override —
 // its docblock explains that in-memory expiry mutation isn't
@@ -23,7 +26,7 @@ import (
 // branch on CertNotAfter, so a genuinely-expired leaf exercises the
 // real code path. Built directly rather than through
 // GenerateWithOptions, which pins a 397-day forward window by design.
-func mintExpiredTailscaleCert(t *testing.T, dnsName string) *cryptotls.Certificate {
+func mintExpiredCert(t *testing.T, dnsName string) *cryptotls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -69,7 +72,7 @@ func mintExpiredTailscaleCert(t *testing.T, dnsName string) *cryptotls.Certifica
 // pin mismatch it has no way to explain.
 func TestFingerprintForServerName_ExpiredTailscaleCertFallsBackToSelfSigned(t *testing.T) {
 	self := mintTestCert(t, []string{"host.local"})
-	expired := mintExpiredTailscaleCert(t, "home-pc.sable-eagle.ts.net")
+	expired := mintExpiredCert(t, "home-pc.sable-eagle.ts.net")
 
 	mgr := NewManager(self)
 	mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
@@ -93,39 +96,114 @@ func TestFingerprintForServerName_ExpiredTailscaleCertFallsBackToSelfSigned(t *t
 }
 
 // The real invariant: whatever Get SERVES for an SNI is what
-// FingerprintForServerName ADVERTISES for it. Asserted across the
-// fresh and expired cases together, since the two functions duplicate
-// the routing rather than sharing it.
+// FingerprintForServerName ADVERTISES for it.
+//
+// The two functions duplicate the routing rather than sharing it, so
+// this has to be asserted per BRANCH and in both the fresh and the
+// expired state — a freshness gate added to Get alone leaves the other
+// side advertising a pin the listener never presents. The autocert
+// branch is the sharper case of the two: it doesn't merely duplicate
+// Get's routing, it reads a DIFFERENT store (the on-disk autocert
+// cache, vs. autocert.Manager.GetCertificate), so the two can disagree
+// about the same cert.
 func TestFingerprintForServerName_AgreesWithGet(t *testing.T) {
-	const sni = "home-pc.sable-eagle.ts.net"
+	const (
+		tsSNI    = "home-pc.sable-eagle.ts.net"
+		tsSuffix = "sable-eagle.ts.net"
+		acmeSNI  = "bridge.example.com"
+	)
 	cases := []struct {
 		name string
-		cert *cryptotls.Certificate
+		sni  string
+		// setup stages one branch and returns the LE leaf it staged.
+		setup func(t *testing.T, mgr *Manager) *cryptotls.Certificate
+		// wantSelfSigned asserts the fixture really did fall back, so a
+		// passing agreement can't be vacuous.
+		wantSelfSigned bool
 	}{
-		{"fresh tailscale cert", nil}, // filled below (needs t)
-		{"expired tailscale cert", nil},
+		{
+			name: "fresh tailscale cert",
+			sni:  tsSNI,
+			setup: func(t *testing.T, mgr *Manager) *cryptotls.Certificate {
+				le := mintTestCert(t, []string{tsSNI})
+				mgr.SetMagicDNSSuffix(tsSuffix)
+				mgr.SetTailscaleCert(le)
+				return le
+			},
+		},
+		{
+			name: "expired tailscale cert",
+			sni:  tsSNI,
+			setup: func(t *testing.T, mgr *Manager) *cryptotls.Certificate {
+				le := mintExpiredCert(t, tsSNI)
+				mgr.SetMagicDNSSuffix(tsSuffix)
+				mgr.SetTailscaleCert(le)
+				return le
+			},
+			wantSelfSigned: true,
+		},
+		{
+			name: "fresh autocert cert",
+			sni:  acmeSNI,
+			setup: func(t *testing.T, mgr *Manager) *cryptotls.Certificate {
+				le := mintTestCert(t, []string{acmeSNI})
+				mgr.SetAutocertProvider(acmeSNI,
+					func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) { return le, nil },
+					nil)
+				mgr.SetAutocertCachedCertFn(func() *cryptotls.Certificate { return le })
+				return le
+			},
+		},
+		{
+			// autocert.Manager.GetCertificate refuses to serve a cached
+			// leaf past NotAfter and attempts a renewal instead; once
+			// that renewal keeps failing (expired ACME account, DNS
+			// moved, :443 unreachable) it returns an error and Get falls
+			// through to self-signed — while the on-disk cache this
+			// branch reads still holds the stale leaf. That divergence
+			// is the whole reason the gate has to be restated.
+			name: "expired autocert cert with failing renewal",
+			sni:  acmeSNI,
+			setup: func(t *testing.T, mgr *Manager) *cryptotls.Certificate {
+				stale := mintExpiredCert(t, acmeSNI)
+				mgr.SetAutocertProvider(acmeSNI,
+					func(*cryptotls.ClientHelloInfo) (*cryptotls.Certificate, error) {
+						return nil, errors.New("acme: renewal failed")
+					}, nil)
+				mgr.SetAutocertCachedCertFn(func() *cryptotls.Certificate { return stale })
+				return stale
+			},
+			wantSelfSigned: true,
+		},
 	}
-	for i, tc := range cases {
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			self := mintTestCert(t, []string{"host.local"})
-			var le *cryptotls.Certificate
-			if i == 0 {
-				le = mintTestCert(t, []string{sni})
-			} else {
-				le = mintExpiredTailscaleCert(t, sni)
-			}
 			mgr := NewManager(self)
-			mgr.SetMagicDNSSuffix("sable-eagle.ts.net")
-			mgr.SetTailscaleCert(le)
+			staged := tc.setup(t, mgr)
 
-			served, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: sni})
+			selfFP := fingerprintLeaf(self)
+			stagedFP := fingerprintLeaf(staged)
+			if selfFP == "" || stagedFP == "" || selfFP == stagedFP {
+				t.Fatalf("fixture: fingerprints must be non-empty and distinct (self=%q staged=%q)",
+					selfFP, stagedFP)
+			}
+
+			served, err := mgr.Get(&cryptotls.ClientHelloInfo{ServerName: tc.sni})
 			if err != nil {
 				t.Fatalf("Get: %v", err)
 			}
 			wantFP := fingerprintLeaf(served)
-			if got := mgr.FingerprintForServerName(sni); got != wantFP {
-				t.Fatalf("advertised %q but the listener serves a cert with fingerprint %q",
-					got, wantFP)
+			if tc.wantSelfSigned && wantFP != selfFP {
+				t.Fatalf("fixture: Get should have fallen back to self-signed, got %q", wantFP)
+			}
+			if !tc.wantSelfSigned && wantFP != stagedFP {
+				t.Fatalf("fixture: Get should serve the staged LE cert, got %q", wantFP)
+			}
+
+			if got := mgr.FingerprintForServerName(tc.sni); got != wantFP {
+				t.Fatalf("advertised %q but the listener serves a cert with fingerprint %q — "+
+					"the pairing QR bakes a pin no device can ever match", got, wantFP)
 			}
 		})
 	}
