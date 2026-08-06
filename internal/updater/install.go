@@ -422,17 +422,18 @@ var removeFunc = os.Remove
 // writeProbeName is the FIXED basename preflightWritable creates in the
 // binary's directory. Fixed, not os.CreateTemp's random suffix, because
 // the case this probe exists to detect — "can create but not delete"
-// (a Windows FILE_ADD_FILE-without-FILE_DELETE_CHILD ACL, a POSIX
-// sticky-bit dir owned by another user) — is exactly the case where the
-// probe file is left behind. A random name leaked a fresh undeletable
-// file per attempt, and Install runs the preflight on EVERY attempt, so
-// auto-install at the 6 h cadence accumulated ~4/day in e.g.
-// /usr/local/bin, forever. With a fixed name the leak is capped at one.
+// (a Windows FILE_ADD_FILE-without-FILE_DELETE_CHILD ACL) — is exactly
+// the case where the probe file is left behind. A random name leaked a
+// fresh undeletable file per attempt, and Install runs the preflight on
+// EVERY attempt, so auto-install at the 6 h cadence accumulated ~4/day
+// in e.g. /usr/local/bin, forever. With a fixed name the leak is capped
+// at one.
 //
-// Deliberately NOT O_EXCL: a leftover probe from a previous failure
-// would then fail every subsequent preflight. Two processes probing
-// concurrently is fine too — the loser's Remove gets ENOENT, which the
-// retry loop treats as success (the directory is demonstrably
+// A fixed name is only safe BECAUSE of the stale-probe recovery in
+// preflightWritable — see there. Deliberately NOT O_EXCL: a leftover
+// probe would then fail every subsequent preflight. Two processes
+// probing concurrently is fine too — the loser's Remove gets ENOENT,
+// which the retry loop treats as success (the directory is demonstrably
 // deletable).
 const writeProbeName = ".bridge-write-test"
 
@@ -445,7 +446,31 @@ func preflightWritable(binaryPath string) error {
 	name := filepath.Join(dir, writeProbeName)
 	tmp, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("%w (path=%s, err=%v)", ErrPathNotWritable, dir, err)
+		// A stale probe left by ANOTHER user is root-owned 0600 (the
+		// documented `sudo bridge update` vs unprivileged-service split
+		// on bridge.ars.md), so opening it for writing is EACCES even
+		// when the DIRECTORY is perfectly writable — which would turn a
+		// bounded one-file leak into a PERMANENT false "not writable"
+		// that blocks every future update. Clear it and retry once.
+		//
+		// This is a permission proof, not a bypass: unlinking needs
+		// write+execute on the DIRECTORY and not ownership of the file,
+		// and directory write permission is exactly what this function
+		// is testing. If the unlink fails too, the directory genuinely
+		// can't be managed and the original create error — the
+		// informative one — is what surfaces.
+		//
+		// A sticky-bit (+t) directory holding another user's probe
+		// resolves correctly rather than as an edge case: the unlink
+		// fails, and so would the swap's own rename of the root-owned
+		// live binary, so "not writable" is the true answer there.
+		if rmErr := removeFunc(name); rmErr != nil {
+			return fmt.Errorf("%w (path=%s, err=%v)", ErrPathNotWritable, dir, err)
+		}
+		tmp, err = os.OpenFile(name, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("%w (path=%s, err=%v)", ErrPathNotWritable, dir, err)
+		}
 	}
 	tmp.Close()
 	// Verify we can DELETE here too, not just create — a "create file

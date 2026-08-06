@@ -730,6 +730,44 @@ func Test_preflightWritable_LeavesAtMostOneProbeFile(t *testing.T) {
 	}
 }
 
+// Test_preflightWritable_RecoversFromAnotherUsersStaleProbe is the
+// round-1 review regression. Capping the probe leak with a FIXED name
+// only works alongside this recovery: `sudo bridge update` leaves a
+// root-owned 0600 .bridge-write-test, and the unprivileged service's
+// next probe then gets EACCES opening it for writing even though the
+// DIRECTORY is fine — a permanent false "not writable" that blocks
+// every future update, which is strictly worse than the bounded leak
+// the fixed name was introduced to stop.
+//
+// Mode 0000 reproduces the failing syscall exactly (a file this process
+// cannot open for writing but CAN unlink, because unlink permission
+// comes from the directory).
+func Test_preflightWritable_RecoversFromAnotherUsersStaleProbe(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses the file permission bits this test depends on")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bridge")
+	stale := filepath.Join(dir, writeProbeName)
+	if err := os.WriteFile(stale, nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Sanity-check the fixture actually reproduces the condition.
+	if f, err := os.OpenFile(stale, os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		f.Close()
+		t.Skip("filesystem ignores mode 0000; cannot stage the stale-probe condition")
+	}
+
+	if err := preflightWritable(bin); err != nil {
+		t.Errorf("preflightWritable with another user's stale probe = %v; want nil "+
+			"(the directory is writable and the stale probe is unlinkable)", err)
+	}
+	// The probe replaced the stale file and cleaned up after itself.
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("probe file still present after a successful preflight: stat err = %v", err)
+	}
+}
+
 // parkedInstall is an Install parked mid-flight holding the
 // installInFlight try-lock, arranged so concurrency tests can
 // exercise a second caller against the held lock.
