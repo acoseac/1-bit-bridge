@@ -511,6 +511,16 @@ const passwordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456
 // site) makes the divides-evenly case land on 256 — "reject nothing",
 // which is exactly right, since an alphabet that divides 256 has no
 // modulo bias to correct.
+// **Domain: 1..256.** A return of 0 means "no single-byte draw can serve
+// this alphabet" and the caller MUST refuse rather than enter the loop —
+// `b[0] < 0` is false for every byte, so a 0 limit spins forever. Two
+// inputs produce it: alphabetLen <= 0 (guarded below, since it would also
+// divide by zero), and alphabetLen > 256, where `256 % alphabetLen` is
+// 256 and the subtraction lands on 0. The latter is not a defect in this
+// arithmetic — the largest multiple of 300 that fits in a byte genuinely
+// is zero, and an alphabet wider than a byte cannot be sampled from one
+// byte without bias anyway. generateFromAlphabet is where that gets
+// rejected.
 func rejectionLimit(alphabetLen int) int {
 	if alphabetLen <= 0 {
 		// Not reachable from generatePassword (passwordAlphabet is a
@@ -539,15 +549,24 @@ func generatePassword() (string, error) {
 // positions ~25 % (5/4) more likely than the last 29; we discard any
 // byte ≥ 228 (= 4 × 57) and resample, an ≈ 11 % rejection rate.
 // The limit is derived from len(alphabet) at runtime, so the sampling
-// stays unbiased for any alphabet — see rejectionLimit for the one
-// arithmetic subtlety that makes that true.
+// stays unbiased for **any alphabet this function accepts** — see
+// rejectionLimit for the arithmetic subtlety that makes that true, and
+// for why the accepted range stops at 256.
+//
+// **An alphabet wider than 256 bytes is REFUSED, not sampled.** One
+// byte cannot address more than 256 positions without bias, so there is
+// no correct draw to attempt: `rejectionLimit` returns 0 for that range
+// and the loop below would accept no byte and spin forever. Refusing is
+// the whole fix — the same shape as the byte-overflow this rejection
+// limit was rewritten to cure, just approached from above rather than
+// from a divisor.
 //
 // Split out from generatePassword so a test can exercise the sampler
 // against alphabet sizes the production const doesn't use.
 func generateFromAlphabet(alphabet string, length int) (string, error) {
 	alphabetLen := len(alphabet)
-	if alphabetLen == 0 || length <= 0 {
-		return "", errors.New("adminauth: generateFromAlphabet needs a non-empty alphabet and a positive length")
+	if alphabetLen == 0 || alphabetLen > 256 || length <= 0 {
+		return "", errors.New("adminauth: generateFromAlphabet needs an alphabet of 1..256 bytes and a positive length")
 	}
 	limit := rejectionLimit(alphabetLen)
 	out := make([]byte, length)
