@@ -68,7 +68,7 @@ func TestPortCheck_LivePIDUnattributableWarns(t *testing.T) {
 	withPortOwner(t, false, nil) // can't tell who owns it
 	port := bindPort(t)
 
-	c := checkPort("port-test", port, writePIDFile(t, 4242))
+	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
 	if c.Status != Warn {
 		t.Errorf("bound port, recorded pid alive, owner unattributable: got %v (%s / %s), want warn",
 			c.Status, c.Summary, c.Hint)
@@ -86,7 +86,7 @@ func TestPortCheck_DeadPIDStillFails(t *testing.T) {
 	withPortOwner(t, false, nil)
 	port := bindPort(t)
 
-	c := checkPort("port-test", port, writePIDFile(t, 4242))
+	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
 	if c.Status != Fail {
 		t.Errorf("bound port with a STALE pidfile: got %v (%s), want fail — "+
 			"the liveness check is what separates 'probably ours' from a real conflict",
@@ -103,7 +103,7 @@ func TestPortCheck_LivePIDOwnedByThisUserIsOK(t *testing.T) {
 	withPortOwner(t, true, nil)
 	port := bindPort(t)
 
-	c := checkPort("port-test", port, writePIDFile(t, 4242))
+	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
 	if c.Status != OK {
 		t.Errorf("bound port owned by this user: got %v (%s / %s), want ok", c.Status, c.Summary, c.Hint)
 	}
@@ -118,7 +118,7 @@ func TestPortCheck_OwnerProbeErrorFallsBackToWarn(t *testing.T) {
 	withPortOwner(t, true, os.ErrPermission) // owned=true but errored
 	port := bindPort(t)
 
-	c := checkPort("port-test", port, writePIDFile(t, 4242))
+	c := checkPort(t.Context(), "port-test", port, writePIDFile(t, 4242))
 	if c.Status != Warn {
 		t.Errorf("owner probe errored: got %v (%s), want warn — an errored probe is not a match",
 			c.Status, c.Summary)

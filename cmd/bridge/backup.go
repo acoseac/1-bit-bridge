@@ -55,13 +55,21 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 
 	if *keep > 0 {
 		backupsRoot := filepath.Join(cfg.DataDir, backup.BackupsDirName)
-		deleted, err := backup.Prune(backupsRoot, *keep)
+		res, err := backup.Prune(backupsRoot, *keep)
+		// The orphan sweep's outcome is a WARNING, never the command's
+		// exit status: a directory it can't classify (an unreadable
+		// manifest it deliberately refuses to delete) is permanent, so
+		// treating it as failure made every subsequent `bridge backup`
+		// exit 1 even though the snapshot and the prune both worked.
+		if res.ReapErr != nil {
+			fmt.Fprintf(stderr, "prune: orphan sweep reported a problem (snapshot and prune are unaffected): %v\n", res.ReapErr)
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "prune: %v\n", err)
 			return 1
 		}
-		if deleted > 0 {
-			fmt.Fprintf(stdout, "Pruned %d older snapshot(s) (kept %d most recent).\n", deleted, *keep)
+		if res.Deleted > 0 {
+			fmt.Fprintf(stdout, "Pruned %d older snapshot(s) (kept %d most recent).\n", res.Deleted, *keep)
 		}
 	}
 	return 0
@@ -172,13 +180,19 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		defer status.sweepFinished(&struct{}{})
 		fmt.Fprintf(stdout, "backup (%s): wrote %s\n", triggered, dst)
 		if keep > 0 {
-			deleted, err := backup.Prune(backupsRoot, keep)
+			res, err := backup.Prune(backupsRoot, keep)
+			// Warning, not a failure — see the same handling in
+			// backupCmd. Pre-split this early-returned and suppressed
+			// the "pruned N" line on every tick, forever.
+			if res.ReapErr != nil {
+				fmt.Fprintf(stderr, "backup (%s): orphan sweep reported a problem (prune unaffected): %v\n", triggered, res.ReapErr)
+			}
 			if err != nil {
 				fmt.Fprintf(stderr, "backup (%s): prune failed: %v\n", triggered, err)
 				return
 			}
-			if deleted > 0 {
-				fmt.Fprintf(stdout, "backup (%s): pruned %d older snapshot(s)\n", triggered, deleted)
+			if res.Deleted > 0 {
+				fmt.Fprintf(stdout, "backup (%s): pruned %d older snapshot(s)\n", triggered, res.Deleted)
 			}
 		}
 	}

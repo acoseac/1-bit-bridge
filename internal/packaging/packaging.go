@@ -255,13 +255,26 @@ func uninstallSystemd() (string, error) {
 
 // --- template rendering ---
 
-// systemd unit-value escapers. systemd applies TWO distinct expansions to
-// unit-file values, and their scopes differ:
+// systemd unit-value escapers. systemd applies THREE distinct layers of
+// processing to unit-file values, and their scopes differ — which is why
+// there are two escapers and why only ONE of the two settings families is
+// written between double quotes:
 //
 //   - Specifier expansion (%h, %u, …) applies to nearly every setting,
 //     including WorkingDirectory / StandardOutput / ExecStart. A literal
 //     `%` must always be doubled to `%%` or systemd fails specifier
-//     expansion at unit parse.
+//     expansion at unit parse. BOTH escapers double it.
+//   - Shell-style quote removal + C-escape unescaping applies ONLY to the
+//     settings documented as taking a quoted command line — systemd.syntax(5)
+//     is explicit that "this style of quoting is not used for all settings,
+//     but only for those documented as such", and systemd.exec(5) documents
+//     it for Exec*=, not for WorkingDirectory=/StandardOutput=/StandardError=.
+//     Those three parsers (config_parse_working_directory,
+//     config_parse_exec_output's `append:` branch) hand the RAW rvalue to
+//     path_simplify_and_warn(…, PATH_CHECK_ABSOLUTE|PATH_CHECK_FATAL), so a
+//     leading `"` makes the value non-absolute and the unit FAILS TO LOAD.
+//     They are therefore written UNQUOTED, and their escaper must not emit
+//     in-quote escapes that would land verbatim in the path.
 //   - Environment-variable substitution ($FOO / ${FOO}) applies ONLY to
 //     the arguments of the Exec* command lines (ExecStart=, ExecStop=, …)
 //     and is NOT suppressed by the surrounding double quotes. A literal
@@ -270,28 +283,46 @@ func uninstallSystemd() (string, error) {
 //     service fails to start. A `$` in a NON-Exec path setting must be
 //     left alone — doubling it there would corrupt the path to `$$`.
 //
-// Both variants also escape `\` and `"` (the in-quote escapes systemd's
-// parser expects) and strip CR/LF/NUL, which would terminate the
-// double-quoted value early. Backslash is listed first so the escape it
-// introduces isn't itself reconsidered (strings.NewReplacer is single-pass,
-// so this is belt-and-braces). A path like `/Users/Bob's "Music"` or
-// `C:\Users\bob` round-trips intact.
+// Unquoted is correct for the path settings whether or not a given systemd
+// build would have stripped the quotes: a path setting takes the rest of
+// the line VERBATIM, including spaces, so there is nothing the quotes were
+// buying. `systemd-analyze verify` on a real Linux host is the confirmation
+// step for the quote-removal half of the reasoning above.
 var (
 	// systemdEscapePathReplacer is for path-valued, NON-Exec settings
-	// (WorkingDirectory, StandardOutput=append:, StandardError=append:).
-	// It deliberately does NOT double `$`: those settings undergo no
-	// env-var substitution, so a `$` in the path must survive verbatim.
+	// (WorkingDirectory, StandardOutput=append:, StandardError=append:),
+	// which the template writes UNQUOTED.
+	//
+	// It doubles `%` (specifier expansion reaches these settings) and
+	// strips CR/LF/NUL. The strip is the load-bearing guard: the unit file
+	// is line-based, so a raw newline in a path would end the directive and
+	// let the remainder of the value be parsed as a SECOND unit directive.
+	// Emitting `\n` instead would be worse than useless here — with no
+	// unescaping layer on these settings it would land as a literal
+	// backslash-n inside the path.
+	//
+	// It deliberately does NOT touch `$` (no env-var substitution on these
+	// settings — doubling would corrupt the path to `$$`), nor `\` and `"`
+	// (with no quote removal / C-unescaping, both are ordinary path bytes
+	// and must survive verbatim). Residual, documented rather than guessed
+	// at: a path ENDING in `\` is a systemd line continuation and would
+	// swallow the following directive. No POSIX music-library path ends in
+	// a backslash, and mangling the operator's path to dodge it would be
+	// the worse trade.
 	systemdEscapePathReplacer = strings.NewReplacer(
-		`\`, `\\`,
-		`"`, `\"`,
 		`%`, `%%`,
-		"\n", `\n`,
-		"\r", `\r`,
+		"\n", "",
+		"\r", "",
 		"\x00", "",
 	)
-	// systemdEscapeExecReplacer is for the Exec* command lines. Same as the
-	// path replacer PLUS `$`→`$$`, because Exec arguments undergo env-var
-	// substitution after quote removal.
+	// systemdEscapeExecReplacer is for the Exec* command lines, which the
+	// template writes BETWEEN double quotes. Those DO get quote removal and
+	// C-escape unescaping, so `\` and `"` need the in-quote escapes systemd's
+	// parser expects, and `$` is doubled because Exec arguments undergo
+	// env-var substitution after quote removal. Backslash is listed first so
+	// the escape it introduces isn't itself reconsidered (strings.NewReplacer
+	// is single-pass, so this is belt-and-braces). A path like
+	// `/Users/Bob's "Music"` or `C:\Users\bob` round-trips intact.
 	systemdEscapeExecReplacer = strings.NewReplacer(
 		`\`, `\\`,
 		`"`, `\"`,
@@ -322,10 +353,10 @@ func render(name string, p Params) ([]byte, error) {
 			}
 			return b.String()
 		},
-		// systemd applies two DISTINCT expansions to unit values, so the
-		// template uses two escapers — see systemdEscape{Exec,Path}Replacer.
-		// Exec* command lines (ExecStart=/ExecStop=) additionally undergo
-		// environment-variable substitution, so `$` is doubled ONLY there.
+		// systemd processes Exec* command lines and plain path settings
+		// differently, so the template uses two escapers AND quotes only
+		// the Exec* form — see systemdEscape{Exec,Path}Replacer for the
+		// full rationale.
 		"systemdEscapeExec": systemdEscapeExecReplacer.Replace,
 		"systemdEscapePath": systemdEscapePathReplacer.Replace,
 		"cmdEscape":         func(s string) string { return CmdEscape(s) },

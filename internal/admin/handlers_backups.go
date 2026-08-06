@@ -111,13 +111,23 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		keep = *body.Keep
 	}
 	if keep > 0 {
-		if _, err := backup.Prune(filepath.Join(src.DataDir, backup.BackupsDirName), keep); err != nil {
-			// Snapshot already landed; surface the prune error but
-			// don't roll back the snapshot — operator can re-prune
-			// from CLI.
+		res, err := backup.Prune(filepath.Join(src.DataDir, backup.BackupsDirName), keep)
+		// Two distinct conditions, both non-fatal here because the
+		// snapshot already landed. The orphan sweep's outcome is
+		// reported separately from the prune's own so a directory it
+		// can't classify (permanent, and not the operator's doing)
+		// doesn't read as "your prune failed" on every single backup.
+		switch {
+		case err != nil:
 			writeJSON(w, http.StatusOK, map[string]any{
 				"snapshotDir":  dst,
 				"pruneWarning": err.Error(),
+			})
+			return
+		case res.ReapErr != nil:
+			writeJSON(w, http.StatusOK, map[string]any{
+				"snapshotDir":  dst,
+				"pruneWarning": "orphan sweep: " + res.ReapErr.Error(),
 			})
 			return
 		}

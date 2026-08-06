@@ -3,6 +3,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -35,7 +36,7 @@ const checkNameInotifyWatchLimit = "inotify-watch-limit"
 //   - We can't read /proc/sys/fs/inotify/max_user_watches (rare on
 //     a real Linux box; unit tests in container with /proc mounted
 //     ro might trip this — non-fatal)
-func checkInotifyLimit(d Deps) Check {
+func checkInotifyLimit(_ context.Context, d Deps) Check {
 	if !d.LibraryWatchEnabled {
 		return ok(checkNameInotifyWatchLimit, "library watcher disabled — check skipped")
 	}

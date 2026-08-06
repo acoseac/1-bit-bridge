@@ -6,11 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart="{{.BinaryPath | systemdEscapeExec}}" serve --config "{{.ConfigPath | systemdEscapeExec}}"
-WorkingDirectory="{{.WorkingDir | systemdEscapePath}}"
+WorkingDirectory={{.WorkingDir | systemdEscapePath}}
 Restart=always
 RestartSec=2
-StandardOutput=append:"{{.LogPath | systemdEscapePath}}"
-StandardError=append:"{{.LogPath | systemdEscapePath}}"
+StandardOutput=append:{{.LogPath | systemdEscapePath}}
+StandardError=append:{{.LogPath | systemdEscapePath}}
 
 [Install]
 WantedBy=default.target

@@ -25,7 +25,7 @@ func TestOwnedPortsShortCircuitsTheProbe(t *testing.T) {
 
 	withPortProbe(t, true)
 	d := Deps{APIPort: port, AdminPort: port + 1, OwnedPorts: []int{port}}
-	if c := checkAPIPort(d); c.Status != OK {
+	if c := checkAPIPort(t.Context(), d); c.Status != OK {
 		t.Errorf("api port claimed as ours: got %v (%s / %s), want ok", c.Status, c.Summary, c.Hint)
 	}
 }
@@ -45,7 +45,7 @@ func TestOwnedPortsDoesNotLeakAcrossChecks(t *testing.T) {
 	withPortProbe(t, true)
 	// Admin port is the bound one; only the API port is claimed.
 	d := Deps{APIPort: port + 1, AdminPort: port, OwnedPorts: []int{port + 1}}
-	if c := checkAdminPort(d); c.Status == OK {
+	if c := checkAdminPort(t.Context(), d); c.Status == OK {
 		t.Errorf("admin port %d is bound by someone else and unclaimed, but got ok (%s)", port, c.Summary)
 	}
 }
@@ -63,7 +63,7 @@ func TestOwnedPortsEmptyKeepsExistingBehaviour(t *testing.T) {
 	withPortProbe(t, true)
 	withPIDAlive(t, false)
 	withPortOwner(t, false, nil)
-	if c := checkAPIPort(Deps{APIPort: port}); c.Status != Fail {
+	if c := checkAPIPort(t.Context(), Deps{APIPort: port}); c.Status != Fail {
 		t.Errorf("bound port with no OwnedPorts and no pidfile: got %v, want fail", c.Status)
 	}
 }
@@ -71,7 +71,7 @@ func TestOwnedPortsEmptyKeepsExistingBehaviour(t *testing.T) {
 // TestOwnedPortsIgnoresZero — a config with no port parsed leaves the
 // field at 0, and 0 must never match a claim (it is "unset", not a port).
 func TestOwnedPortsIgnoresZero(t *testing.T) {
-	if c := checkAPIPort(Deps{APIPort: 0, OwnedPorts: []int{0}}); c.Status == OK {
+	if c := checkAPIPort(t.Context(), Deps{APIPort: 0, OwnedPorts: []int{0}}); c.Status == OK {
 		t.Errorf("port 0 claimed as owned returned ok (%s); 0 means unset", c.Summary)
 	}
 }
