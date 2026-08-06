@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
@@ -29,6 +30,24 @@ type duplicatesSweepCounts struct {
 	Changed int
 }
 
+// duplicatesRestamper is the sweeper's view of the scanner: whether a
+// scan is in flight, and the stamping pass itself. An interface rather
+// than *manifest.Scanner because the deferral branch below has to be
+// drivable from a test, and Scanner's scanning flag is an unexported
+// atomic with no setter (nor should it have one).
+type duplicatesRestamper interface {
+	IsScanning() bool
+	RestampDuplicates(context.Context) (int, error)
+}
+
+var _ duplicatesRestamper = (*manifest.Scanner)(nil)
+
+// duplicatesDeferRetry is how long the sweeper waits before re-checking
+// a scan it deferred behind. Long enough that a multi-minute scan costs
+// a handful of atomic loads, short enough that the operator's flip lands
+// promptly once the scan ends.
+const duplicatesDeferRetry = 5 * time.Second
+
 // runDuplicatesSweeper applies the duplicates policy ON DEMAND — it is
 // the hot-apply half of the settings PATCH (Deps.TriggerDuplicatesPass →
 // nudge). Unlike the analysis/fingerprint sweepers it has NO periodic
@@ -36,15 +55,22 @@ type duplicatesSweepCounts struct {
 // success tail, so the sweeper exists solely for the operator flipping
 // duplicates.filter between scans.
 //
-// A nudge that lands while a scan is in flight is deliberately DROPPED,
-// not deferred: the running scan's own tail pass reads the policy
-// closure at its runtime and therefore already applies the new value —
-// running here too would just double-stamp behind the scanner's back.
+// A nudge that lands while a scan is in flight is RE-ARMED, not dropped.
+// The former behaviour rested on "the running scan's tail already
+// applies the new value", which is not something the sweeper can know:
+// RestampDuplicates snapshots the policy ONCE at the top of the pass,
+// before two full-library streaming walks, so a PATCH that commits after
+// that read and before the scan ends is simply lost — and the tail may
+// not run at all, because Scan early-returns when the routed-exclusion
+// fetch fails. Either way nothing would re-stamp until the next periodic
+// scan (6h by default) while the admin UI claims the new policy is being
+// applied. Re-arming costs one redundant pass in the common case, which
+// is idempotent and diff-guarded to zero writes.
 //
 // Joined on bgWriters (the pass writes the store; it must drain before
 // Store.Close), which is why the ctx.Canceled outcome logs at Info, not
 // Error.
-func runDuplicatesSweeper(ctx context.Context, scanner *manifest.Scanner, nudge <-chan struct{}, status *sweepStatus[duplicatesSweepCounts]) {
+func runDuplicatesSweeper(ctx context.Context, scanner duplicatesRestamper, nudge chan struct{}, status *sweepStatus[duplicatesSweepCounts], deferRetry time.Duration) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -52,7 +78,23 @@ func runDuplicatesSweeper(ctx context.Context, scanner *manifest.Scanner, nudge 
 		case <-nudge:
 		}
 		if scanner.IsScanning() {
-			logger.Info("duplicates restamp deferred: scan in flight (its tail applies the current policy)")
+			logger.Info("duplicates restamp deferred: scan in flight — re-arming")
+			// Put the intent back. The channel is buffered-1, so a full
+			// buffer means another nudge is already pending and carries
+			// the same intent (the pass reads the LIVE policy when it
+			// runs) — dropping ours there is correct, not a loss.
+			select {
+			case nudge <- struct{}{}:
+			default:
+			}
+			// Back off before looping, or the re-armed nudge would be
+			// received immediately and spin this goroutine for the whole
+			// duration of the scan.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(deferRetry):
+			}
 			continue
 		}
 		status.sweepStarted()

@@ -141,17 +141,18 @@ func readPasswordTwice(stdin io.Reader, stdout, stderr io.Writer) (string, error
 	return string(a), nil
 }
 
-// loadConfigForAdminCmd resolves the bridge.yaml location and
-// loads it. Mirrors the discovery logic the other CLI subcommands
-// use (override flag wins, else the default config path constant).
+// loadConfigForAdminCmd resolves the bridge.yaml location and loads it,
+// via the SHARED CLI resolver — override flag wins, then ./bridge.yaml,
+// then the platform config dir.
+//
+// That last hop is what makes this command usable at all on the
+// deployment it exists for. It used to fall back to the bare relative
+// `defaultConfigPath`, so it could only ever find a config in the
+// current directory — while `runServe`'s public-mode refuse-to-start
+// prints "run `bridge admin reset-password`" to an operator whose config
+// lives in the platform dir. Following that instruction from anywhere
+// else died with `read config "bridge.yaml": no such file or directory`,
+// dead-ending the documented recovery path.
 func loadConfigForAdminCmd(override string) (*config.Config, string, error) {
-	path := override
-	if path == "" {
-		path = defaultConfigPath
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		return nil, "", fmt.Errorf("load %s: %w", path, err)
-	}
-	return cfg, path, nil
+	return loadCLIConfig(override)
 }

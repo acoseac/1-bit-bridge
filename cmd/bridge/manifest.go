@@ -9,9 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
-	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
 
 // manifestCmd dispatches `bridge manifest <subcommand>`. The single
@@ -53,29 +51,47 @@ func manifestCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // `bridge init` / `bridge cert rotate` already established.
 //
 // `--config <path>` is honored so an operator with a non-default config
-// can target a specific bridge install. Defaults to the shared default
-// config dir, same shape `bridge status` etc. use.
+// can target a specific bridge install. Without it, resolution follows
+// the shared CLI precedence — ./bridge.yaml first, THEN the platform
+// config dir. It used to jump straight to the platform dir, the exact
+// inversion resolveConfigPath's docblock warns about: an operator with
+// both a platform install and a local fixture running this from the
+// fixture directory silently opened the PRODUCTION database and deleted
+// rows there. The resolved config + DB paths are printed before anything
+// is touched (on the --yes path too, so a scripted run leaves a record
+// of which database it hit).
 func manifestClearMissingCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("manifest clear-missing", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var yes bool
 	fs.BoolVar(&yes, "yes", false, "skip the WIPE confirmation prompt")
 	fs.BoolVar(&yes, "y", false, "short alias for --yes")
-	cfgPath := fs.String("config", "", "path to bridge.yaml (default: <default config dir>/bridge.yaml)")
+	cfgPath := fs.String("config", "", "path to bridge.yaml (default: ./bridge.yaml, else the platform config dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, _, err := loadConfigForCLI(*cfgPath)
+	cfg, resolvedCfgPath, err := loadCLIConfig(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "load config: %v\n", err)
 		return 1
 	}
+	dbPath := manifest.DefaultDBPath(cfg.DataDir)
+	// Absolute, because the whole point of printing it is to say WHICH
+	// install: the local-first resolver hands back a bare relative
+	// "bridge.yaml", which names the very ambiguity this line exists to
+	// resolve. Abs failure (an unreadable CWD) falls back to the raw
+	// value rather than losing the line entirely.
+	if abs, absErr := filepath.Abs(resolvedCfgPath); absErr == nil {
+		resolvedCfgPath = abs
+	}
+	fmt.Fprintf(stdout, "Config:   %s\n", resolvedCfgPath)
+	fmt.Fprintf(stdout, "Database: %s\n", dbPath)
 
 	if !yes {
 		fmt.Fprintln(stdout, "This will delete every track / folder row whose `missing_count > 0`")
-		fmt.Fprintln(stdout, "in the manifest DB. Use this only when you KNOW a mount has been")
-		fmt.Fprintln(stdout, "permanently removed (decommissioned NAS, moved data dir, etc.).")
+		fmt.Fprintln(stdout, "in the manifest DB above. Use this only when you KNOW a mount has")
+		fmt.Fprintln(stdout, "been permanently removed (decommissioned NAS, moved data dir, etc.).")
 		fmt.Fprintln(stdout, "Library files on disk are unaffected.")
 		fmt.Fprint(stdout, "Type WIPE to confirm: ")
 		scanner := bufio.NewScanner(stdin)
@@ -89,7 +105,7 @@ func manifestClearMissingCmd(args []string, stdin io.Reader, stdout, stderr io.W
 		}
 	}
 
-	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
+	store, err := manifest.OpenStore(dbPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "open manifest store: %v\n", err)
 		return 1
@@ -103,23 +119,4 @@ func manifestClearMissingCmd(args []string, stdin io.Reader, stdout, stderr io.W
 	}
 	fmt.Fprintf(stdout, "Purged %d rows (missing_count > 0) from manifest.\n", n)
 	return 0
-}
-
-// loadConfigForCLI is a thin wrapper around config.Load that honors
-// `--config <path>` overrides. Other manifest subcommands can share it
-// once they exist.
-func loadConfigForCLI(path string) (*config.Config, string, error) {
-	resolved := path
-	if resolved == "" {
-		dir, err := packaging.DefaultConfigDir()
-		if err != nil {
-			return nil, "", fmt.Errorf("resolve default config dir: %w", err)
-		}
-		resolved = filepath.Join(dir, "bridge.yaml")
-	}
-	cfg, err := config.Load(resolved)
-	if err != nil {
-		return nil, resolved, err
-	}
-	return cfg, resolved, nil
 }

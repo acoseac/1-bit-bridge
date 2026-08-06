@@ -1,0 +1,246 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// serve's --config default is "" (PR #639, so loadCLIConfig can fall
+// back to the platform config dir). Everything in runServe that touches
+// a config PATH must therefore use the RESOLVED value, never the raw
+// flag — filepath.Abs("") is the process CWD and os.Stat("") reports
+// IsNotExist, so the raw value is not merely wrong, it is wrong in ways
+// that look plausible.
+//
+// This file pins the two consequences that are cheap to reach directly;
+// TestServeWiresResolvedConfigPathIntoAdminAndBackups pins the rest by
+// booting the real server.
+
+// `serve --init-if-missing` without --config must NOT re-init when a
+// perfectly good ./bridge.yaml is sitting right there.
+//
+// os.Stat("") returns IsNotExist, so the raw-flag version took the
+// auto-init branch on EVERY flag-less invocation, then called
+// writeAutoInitConfig("") → Save("") → rename to "": no such file or
+// directory → exit 2. The bridge could not start at all that way, with
+// an error naming neither the config it ignored nor the one it failed to
+// write.
+//
+// The fixture's library root deliberately does not exist, so a run that
+// gets PAST the auto-init branch still exits 2 — at the library-root
+// accessibility check, with a different message. That keeps the test
+// about which branch was taken rather than about booting a server.
+func TestServeInitIfMissingUsesResolvedConfigNotRawFlag(t *testing.T) {
+	cwd, _ := isolateConfigEnv(t)
+	cfgPath := filepath.Join(cwd, "bridge.yaml")
+	body := "libraryRoots:\n  - " + filepath.Join(cwd, "does-not-exist") +
+		"\ndataDir: " + filepath.Join(cwd, "data") + "\nadminAddress: 127.0.0.1:0\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var so, se bytes.Buffer
+	code := runServe(context.Background(),
+		serveOpts{initIfMissing: true}, &so, &se)
+
+	if strings.Contains(se.String(), "auto-init") {
+		t.Fatalf("flag-less `serve --init-if-missing` took the auto-init branch "+
+			"despite %s existing — it is stat-ing the raw \"\" flag, which always "+
+			"reports IsNotExist.\nexit %d, stderr: %s", cfgPath, code, se.String())
+	}
+	// It must have reached the config it was supposed to read.
+	if !strings.Contains(se.String(), "does-not-exist") {
+		t.Errorf("stderr does not mention the fixture's library root, so the run "+
+			"never loaded %s:\nexit %d, stderr: %s", cfgPath, code, se.String())
+	}
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("the operator's bridge.yaml was rewritten by the auto-init path:\n%s", after)
+	}
+}
+
+// With genuinely no config anywhere, --init-if-missing still seeds one —
+// and at the resolver's answer for "where a config should live", not at
+// the empty string.
+func TestServeInitIfMissingSeedsAtResolvedLocation(t *testing.T) {
+	cwd, platform := isolateConfigEnv(t)
+
+	var so, se bytes.Buffer
+	// Exits non-zero: the seed points at /library, which does not exist
+	// here. The seeding is what this pins.
+	_ = runServe(context.Background(), serveOpts{initIfMissing: true}, &so, &se)
+
+	if strings.Contains(se.String(), "auto-init") {
+		t.Fatalf("auto-init failed outright: %s", se.String())
+	}
+	seeded := filepath.Join(platform, "bridge.yaml")
+	if _, err := os.Stat(seeded); err != nil {
+		t.Fatalf("no seed config at the resolved location %s: %v\nstderr: %s",
+			seeded, err, se.String())
+	}
+	// Nothing may be created from the empty-string path — the CWD itself
+	// is what filepath.Dir("") resolves to.
+	if _, err := os.Stat(filepath.Join(cwd, "bridge.yaml")); err == nil {
+		t.Errorf("a config was also written into the CWD")
+	}
+}
+
+// The real wiring assertion: boot `serve` with NO --config from a
+// directory holding bridge.yaml, then drive the two consumers that read
+// the path afterwards.
+//
+//   - admin.Deps.CfgPath is filepath.Abs(*configPath). With the raw flag
+//     that is the CWD — a DIRECTORY — which passes admin.New's only
+//     guard (CfgPath == "") and reaches Config.Save, whose temp-file
+//     rename onto a directory fails. Every admin config mutation
+//     (settings PATCH, roots add/remove, variants-dir PATCH, the UPnP
+//     upstream CRUD adapter) errored, with the admin console the only
+//     place that surfaced it.
+//   - buildBackupSources(cfg, *configPath) yields BridgeYAML: "", which
+//     backup.Snapshot silently skips — so the periodic snapshot, the
+//     thing an operator restores a broken install from, contained no
+//     bridge.yaml at all.
+func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
+	cwd, _ := isolateConfigEnv(t)
+	lib := filepath.Join(cwd, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The admin port has to be known up front: `serve` prints the
+	// configured admin address, not the bound one, so :0 would be
+	// undiscoverable.
+	adminPort := freeLoopbackPort(t)
+	cfgPath := filepath.Join(cwd, "bridge.yaml")
+	body := fmt.Sprintf("libraryName: Before\nlibraryRoots:\n  - %s\ndataDir: %s\nadminAddress: 127.0.0.1:%d\n",
+		lib, filepath.Join(cwd, "data"), adminPort)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stdout, stderr := &safeBuffer{}, &safeBuffer{}
+	done := make(chan int, 1)
+	go func() {
+		// No --config: the whole point.
+		done <- run(ctx, []string{"serve", "--addr", "127.0.0.1:0"}, stdout, stderr)
+	}()
+	waitForListening(t, stdout, 30*time.Second)
+
+	adminBase := fmt.Sprintf("http://127.0.0.1:%d", adminPort)
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// (1) A config mutation through the admin console must persist.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+		adminBase+"/api/settings", strings.NewReader(`{"libraryName":"After"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH /api/settings: %v; stderr=%s", err, stderr.String())
+	}
+	patchBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH /api/settings = %d: %s\n\nadmin.Deps.CfgPath is not the "+
+			"resolved bridge.yaml — with the raw \"\" flag it is filepath.Abs(\"\") = "+
+			"the CWD, and Config.Save cannot rename its temp file onto a directory. "+
+			"Every admin config mutation fails this way.", resp.StatusCode, patchBody)
+	}
+	saved, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "After") {
+		t.Errorf("the settings PATCH reported success but %s still reads:\n%s", cfgPath, saved)
+	}
+
+	// (2) A snapshot must capture bridge.yaml — buildBackupSources got a
+	// real path, not "".
+	req, err = http.NewRequestWithContext(ctx, http.MethodPost, adminBase+"/api/backups", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/backups: %v; stderr=%s", err, stderr.String())
+	}
+	backupBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated &&
+		resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /api/backups = %d: %s", resp.StatusCode, backupBody)
+	}
+	if !snapshotCapturedBridgeYAML(t, filepath.Join(cwd, "data", "backups")) {
+		t.Errorf("no snapshot captured bridge.yaml — buildBackupSources received the "+
+			"raw \"\" flag, and backup.Snapshot silently skips an empty source path, so "+
+			"the config is missing from every snapshot.\nresponse: %s", backupBody)
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
+		}
+	case <-time.After(shutdownGrace + 5*time.Second):
+		t.Fatalf("serve did not shut down within grace window; stderr=%s", stderr.String())
+	}
+}
+
+// snapshotCapturedBridgeYAML reports whether any snapshot under root
+// holds a bridge.yaml.
+func snapshotCapturedBridgeYAML(t *testing.T, root string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Logf("read backups dir %s: %v", root, err)
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, e.Name(), "bridge.yaml")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// freeLoopbackPort reserves and immediately releases an ephemeral
+// loopback port, returning its number. Racy in principle; in practice
+// the kernel does not hand the same port straight back, and the
+// alternative (adminAddress: 127.0.0.1:0) is undiscoverable because
+// serve prints the CONFIGURED admin address, not the bound one.
+func freeLoopbackPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
+}

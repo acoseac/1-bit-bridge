@@ -1655,6 +1655,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 	configPath := &opts.configPath
 	addrOverride := &opts.addrOverride
+	// Resolve the config location ONCE, before anything reads it — and
+	// keep the resolved value in *configPath, because every later
+	// consumer of the path (the auto-init stat just below, the admin
+	// console's Save target via filepath.Abs, the backup source set, the
+	// doctor runner) reads that same variable.
+	//
+	// The flag's default is "" (an explicit value still wins), so the raw
+	// value is NOT a usable path: filepath.Abs("") returns the process
+	// CWD — a DIRECTORY — which silently became admin.Deps.CfgPath and
+	// made every admin config mutation fail its temp-file rename, put
+	// BridgeYAML: "" in the backup set (bridge.yaml silently absent from
+	// every snapshot), and had the admin Diagnostics page load a
+	// directory as YAML. os.Stat("") likewise reports IsNotExist, which
+	// sent every flag-less `serve --init-if-missing` down the auto-init
+	// branch even with a perfectly good ./bridge.yaml sitting there.
+	//
+	// resolveConfigPath returns the location a config SHOULD live at even
+	// when none exists yet (ok=false), which is exactly what the
+	// auto-init writer needs.
+	resolved, _ := resolveConfigPath(*configPath)
+	*configPath = resolved
 	// Container convenience: if --init-if-missing is set (the Docker CMD
 	// sets it) and no config exists yet, write a sparse default so the
 	// image needs only a single `docker run` / `docker compose up`. A bare
@@ -1670,11 +1691,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				"path", *configPath, "libraryRoots", autoInitDefaultRoot)
 		}
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgFile, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
+	// Identical to `resolved` by construction (resolveConfigPath echoes a
+	// non-empty explicit path back), but taking the loader's own answer
+	// keeps the two from drifting if that ever stops being true — this is
+	// the file whose contents `cfg` came from, and the file the admin
+	// console must write back to.
+	*configPath = cfgFile
 	if err := bridgefs.ValidateRoots(cfg.LibraryRoots); err != nil {
 		fmt.Fprintf(stderr, "config: %v\n", err)
 		return 2
@@ -2592,7 +2619,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
-		runDuplicatesSweeper(scanCtx, scanner, duplicatesNudge, duplicatesSweepState)
+		runDuplicatesSweeper(scanCtx, scanner, duplicatesNudge, duplicatesSweepState, duplicatesDeferRetry)
 	}()
 
 	// Smart-playlist regenerator (shares scanCtx). analysisActive (the
@@ -3889,6 +3916,19 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// enumeration under a manual `bridge scan` reaps rows that the
 	// documented 3-scan grace period exists to spare.
 	scanner.SetDeleteThreshold(cfg.Scanner.DeleteAfterMissingScans)
+	// Same duplicates policy `bridge serve` wires. Scan's success tail
+	// ALWAYS runs the stamping pass, and an unwired scanner reports
+	// FilterOff — so a single `bridge scan` under the default
+	// `duplicates.filter: highest-quality` would clear every suppression
+	// in the library, strict-advance indexed_at on each cleared row (a
+	// full-library delta to every paired device), and rewrite the
+	// dupe_summary document with `policy: "off"`. Exactly the failure
+	// SetDupePolicy's "wire it BEFORE the scan starts" contract exists to
+	// prevent, reached through the other entry point.
+	//
+	// The CLI has no live config holder — it loads once and exits — so a
+	// closure over the loaded cfg is the whole story here.
+	scanner.SetDupePolicy(func() dupes.Policy { return dupePolicyFromConfig(cfg) })
 
 	fmt.Fprintf(stdout, "Scanning %v ...\n", cfg.LibraryRoots)
 	start := time.Now()
