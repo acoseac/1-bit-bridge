@@ -74,7 +74,7 @@ func TestAdmin_ConfiguredServers_IncludesManualURLServers(t *testing.T) {
 		cfgHolder: rt, cache: cache, store: store,
 		state: newUPnPAdminState(),
 	}
-	got := a.ConfiguredServers()
+	got := a.ConfiguredServers(context.Background())
 	if len(got) != 2 {
 		t.Fatalf("got %d server rows; want 2", len(got))
 	}
@@ -388,5 +388,113 @@ func TestAdmin_UPnPCRUDConcurrentWithSettingsUpdate(t *testing.T) {
 	if len(reloaded.UPnPUpstream.Servers) != len(live.UPnPUpstream.Servers) {
 		t.Errorf("disk servers = %d, live = %d — last Save dropped a concurrent write",
 			len(reloaded.UPnPUpstream.Servers), len(live.UPnPUpstream.Servers))
+	}
+}
+
+// TestAdmin_EditRoundTripPreservesFieldsTheModalDidNotChange replays the
+// exact sequence the admin edit modal performs — READ a row, PATCH it
+// back with one field changed — and asserts the other three survive.
+//
+// This is the regression pin for a silent config wipe. The modal builds
+// its PATCH from the row it was given and sends all four editable fields
+// unconditionally; JSON.stringify preserves "" and [] (only `undefined`
+// is dropped), and on the server every non-nil pointer is an assignment.
+// So while `ConfiguredServers` omitted PathPrefix / RootObjectID /
+// SkipTopLevelContainers, the modal had nothing to send but blanks and a
+// plain rename cleared all three. Next ingest: EffectiveRootObjectID()
+// falls back to "64" (the wrong subtree for any non-MiniDLNA upstream)
+// and normalizePrefix falls back to the raw Name, moving every routed
+// track's manifest path into a new namespace — the reconcile sweep reaps
+// the old rows and the re-inserted ones return with enriched_at = 0, so
+// the whole upstream re-crawls MB/CAA/Deezer and re-syncs to every
+// paired device.
+//
+// The existing handler test asserted only that UpdateServer was CALLED.
+// That gap is why this shipped, so this one asserts the PAYLOAD and the
+// persisted result.
+func TestAdmin_EditRoundTripPreservesFieldsTheModalDidNotChange(t *testing.T) {
+	const (
+		udn      = "uuid:2go"
+		prefix   = "chord-2go"
+		rootObj  = "0"
+		skipJunk = "System Volume Information"
+	)
+	cfg := newUPnPTestCfg(t, config.UPnPUpstreamServerConfig{
+		Name:                   "2Go",
+		UDN:                    udn,
+		PathPrefix:             prefix,
+		RootObjectID:           rootObj,
+		SkipTopLevelContainers: []string{skipJunk, "$RECYCLE.BIN"},
+	})
+	a, rt, _ := upnpAdapterForPersistTest(t, cfg)
+	// The persist helper wires only holder + cfgPath; ConfiguredServers
+	// also reads the last-walk state.
+	a.state = newUPnPAdminState()
+
+	// --- READ: what the modal can see. ---
+	rows := a.ConfiguredServers(context.Background())
+	if len(rows) != 1 {
+		t.Fatalf("ConfiguredServers returned %d rows, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.PathPrefix != prefix {
+		t.Errorf("row.PathPrefix = %q, want %q — the modal cannot round-trip "+
+			"a field the read surface hides", row.PathPrefix, prefix)
+	}
+	if row.RootObjectID != rootObj {
+		t.Errorf("row.RootObjectID = %q, want %q", row.RootObjectID, rootObj)
+	}
+	if !slices.Equal(row.SkipTopLevelContainers, []string{skipJunk, "$RECYCLE.BIN"}) {
+		t.Errorf("row.SkipTopLevelContainers = %v, want the configured pair",
+			row.SkipTopLevelContainers)
+	}
+
+	// --- PATCH: exactly what wireUpnpEditModal submits. Every editable
+	// field is sent, sourced from the row above; only Name was typed. ---
+	renamed := "Chord 2Go"
+	patch := admin.UPnPServerUpdateRequest{
+		Name:                   &renamed,
+		PathPrefix:             &row.PathPrefix,
+		RootObjectID:           &row.RootObjectID,
+		SkipTopLevelContainers: &row.SkipTopLevelContainers,
+	}
+	if err := a.UpdateServer(context.Background(), udn, patch); err != nil {
+		t.Fatalf("UpdateServer: %v", err)
+	}
+
+	// --- ASSERT: the rename landed and nothing else moved. ---
+	saved := rt.Load().UPnPUpstream.Servers[0]
+	if saved.Name != renamed {
+		t.Errorf("Name = %q, want %q", saved.Name, renamed)
+	}
+	if saved.PathPrefix != prefix {
+		t.Errorf("PathPrefix = %q after a rename, want %q — every routed "+
+			"track's manifest path just moved namespace", saved.PathPrefix, prefix)
+	}
+	if saved.RootObjectID != rootObj {
+		t.Errorf("RootObjectID = %q after a rename, want %q — the next walk "+
+			"browses the wrong subtree", saved.RootObjectID, rootObj)
+	}
+	if !slices.Contains(saved.SkipTopLevelContainers, skipJunk) {
+		t.Errorf("SkipTopLevelContainers = %v after a rename, want %q retained",
+			saved.SkipTopLevelContainers, skipJunk)
+	}
+}
+
+// TestAdmin_ConfiguredServers_ClonesSkipList guards the DTO against
+// aliasing the live config's slice — the row escapes to handlers, and a
+// mutation there would reach into the running config.
+func TestAdmin_ConfiguredServers_ClonesSkipList(t *testing.T) {
+	cfg := newUPnPTestCfg(t, config.UPnPUpstreamServerConfig{
+		Name: "2Go", UDN: "uuid:2go", SkipTopLevelContainers: []string{"junk"},
+	})
+	a := &upnpAdminAdapter{cfgHolder: runtimeCfgFor(t, cfg), state: newUPnPAdminState()}
+
+	rows := a.ConfiguredServers(context.Background())
+	rows[0].SkipTopLevelContainers[0] = "clobbered"
+
+	if got := cfg.UPnPUpstream.Servers[0].SkipTopLevelContainers[0]; got != "junk" {
+		t.Errorf("live config skip list = %q after mutating the DTO copy; "+
+			"the row aliases the running config", got)
 	}
 }

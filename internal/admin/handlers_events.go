@@ -190,11 +190,15 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// sources (dashboard filesystem-vs-UPnP-upstream track breakdown) rides
-	// the slow tick; getSourcesSnapshot reads the cached stats counts (no
-	// DB, no os.Stat) + the already-assembled ConfiguredServers state, so it
-	// stays cheap and diff-suppressed.
+	// the slow tick. The stats counts are cached, but ConfiguredServers
+	// runs one routed-track COUNT(*) per configured upstream — so pass the
+	// connection `ctx` (getSourcesSnapshot bounds it with snapshotDBTimeout
+	// on top). This comment claimed "no DB, no os.Stat" until 2026-08-06,
+	// which was wrong and paired with an uncancellable Background() ctx:
+	// a disconnected client's queries ran to completion and every other
+	// slow-tick publisher queued behind them.
 	publishSources := func() error {
-		return marshalAndPublish("sources", s.getSourcesSnapshot(), &lastSources)
+		return marshalAndPublish("sources", s.getSourcesSnapshot(ctx), &lastSources)
 	}
 
 	// enrichment (dashboard enrichment-progress card) rides the slow tick and is

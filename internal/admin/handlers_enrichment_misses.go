@@ -166,11 +166,39 @@ func computeEnrichmentMisses(ctx context.Context, store missTrackLister, prefix 
 }
 
 // narrowMisses filters a cached full snapshot down to one facet and/or a
-// smaller sample limit. Counts are left intact — narrowing the sample must
-// not make the library look smaller than it is.
+// smaller sample limit.
+//
+// Scanned / Missing are left intact — they describe the library, and
+// narrowing the VIEW must not make the problem look smaller than it is.
+// Two things DO have to be recomputed, or the response contradicts its
+// own documented contract:
+//
+//   - Truncated must name every facet whose sample no longer covers its
+//     count, whether it was cut by the walk's own cap or by this call's
+//     smaller limit. It was carried over verbatim until 2026-08-06, so
+//     `?limit=5` against a 50-miss facet returned five rows, a count of
+//     50, and no truncation marker — and the renderer keys its "showing
+//     the first N" note off exactly that marker, so a short list read as
+//     the complete set.
+//   - Facets must drop the facets the caller filtered out. Reporting a
+//     count for a facet whose sample isn't in the response leaves the
+//     renderer (which decides what to draw from Facets, then reads
+//     Sample) painting an empty section.
+//
+// Every map and slice is rebuilt rather than shared: `in` is the CACHED
+// snapshot, so appending to its Truncated or writing to its Facets would
+// mutate what the next caller reads.
 func narrowMisses(in enrichmentMissesResponse, facet string, limit int) enrichmentMissesResponse {
 	out := in
 	out.Sample = make(map[string][]enrichmentMissRow, len(in.Sample))
+	out.Facets = make(map[string]int, len(in.Facets))
+	out.Truncated = nil
+	for f, n := range in.Facets {
+		if facet != "" && f != facet {
+			continue
+		}
+		out.Facets[f] = n
+	}
 	for f, rows := range in.Sample {
 		if facet != "" && f != facet {
 			continue
@@ -179,6 +207,10 @@ func narrowMisses(in enrichmentMissesResponse, facet string, limit int) enrichme
 			rows = rows[:limit]
 		}
 		out.Sample[f] = rows
+		if len(rows) < in.Facets[f] {
+			out.Truncated = append(out.Truncated, f)
+		}
 	}
+	sort.Strings(out.Truncated)
 	return out
 }

@@ -1764,14 +1764,19 @@ function upnpConfiguredRowHTML(s) {
   const identity = udn || manualURL;
   // Edit payload — stashed on the button's data attr so the modal
   // can prefill without a second fetch.
+  //
+  // pathPrefix / rootObjectID / skipTopLevelContainers MUST carry the
+  // server's real stored values. The submit handler PATCHes all four
+  // editable fields unconditionally, and JSON.stringify preserves ""
+  // and [] (only `undefined` is dropped) — so hardcoding blanks here,
+  // as this did until 2026-08-06, meant a plain rename silently
+  // cleared all three on save. They now come from
+  // GET /api/upnp/servers, which echoes them for exactly this reason.
   const editPayload = JSON.stringify({
     identity, name: s.name, udn, manualURL,
-    pathPrefix: "", rootObjectID: "", skipTopLevelContainers: [],
-    // ↑ PathPrefix/RootObjectID/SkipTopLevelContainers aren't in the
-    // GET /api/upnp/servers response shape (they're internal to the
-    // YAML row). The modal renders them blank and the PATCH only sends
-    // the fields the operator actually edits, so leaving them blank
-    // here doesn't accidentally clear them on save.
+    pathPrefix: s.pathPrefix || "",
+    rootObjectID: s.rootObjectID || "",
+    skipTopLevelContainers: s.skipTopLevelContainers || [],
   });
   return `
     <div class="upnp-upstream-row" data-name="${escapeHTML(s.name)}">
@@ -2007,11 +2012,43 @@ async function onUpnpRemoveClick(btn) {
   }
 }
 
+// RESTART_PENDING_KEY carries "a config change needs a restart" across a
+// page navigation. There is no server-side pending-restart state — the
+// `restartRequired` flag lives only on a PATCH response, and GET
+// /api/settings doesn't carry one — so the browser is where this has to
+// live. sessionStorage (not localStorage) scopes it to the tab session:
+// a restart the operator never performed shouldn't haunt them next week.
+const RESTART_PENDING_KEY = "bridge.restartPending";
+
+function markRestartPending(pending) {
+  try {
+    if (pending) sessionStorage.setItem(RESTART_PENDING_KEY, "1");
+    else sessionStorage.removeItem(RESTART_PENDING_KEY);
+  } catch { /* private-mode / disabled storage — degrade to no memory */ }
+}
+
+function restartPending() {
+  try {
+    return sessionStorage.getItem(RESTART_PENDING_KEY) === "1";
+  } catch { return false; }
+}
+
 // showUpnpRestartBanner injects (or refreshes) a one-time "Restart
 // required" banner above the configured panel so the operator knows
 // their CRUD action won't take effect until the next bridge restart.
 // Idempotent — calling it twice doesn't stack banners.
+//
+// The link used to target an anchor named `danger` that exists in no
+// template, and the Settings page's only restart affordance
+// (`#restart-btn`) is `hidden` until a restart-requiring save reveals it
+// — so following the banner landed the operator on a page with no
+// Restart button at all. The flag below is what lets Settings reveal it
+// on load; `#restart-actions` is a real anchor.
+// (TestAppJSSettingsAnchorsExistInTheRenderedPage pins that pairing, and
+// it scans this file's raw text — don't write a settings-anchor URL in a
+// comment here or it reads as a live link.)
 function showUpnpRestartBanner() {
+  markRestartPending(true);
   const host = document.querySelector(".page.upnp");
   if (!host) return;
   let banner = document.getElementById("upnp-restart-banner");
@@ -2022,7 +2059,7 @@ function showUpnpRestartBanner() {
     banner.innerHTML = `
       <strong>Restart required</strong> — changes to the upstream
       server list don't take effect until the bridge restarts.
-      Use the <a href="/settings#danger">Restart</a> button on the
+      Use the <a href="/settings#restart-actions">Restart</a> button on the
       Settings page when you're ready.`;
     host.insertBefore(banner, host.firstChild.nextSibling); // after h1
   }
@@ -2267,6 +2304,22 @@ function initSettings() {
   const restartBtn = document.getElementById("restart-btn");
   if (!form) return;
 
+  // Reveal the Restart button on load when a restart is already pending
+  // from an earlier action in this session — a settings save, or a UPnP
+  // upstream add/remove/edit on the /upnp page (whose banner links here).
+  // Without this the button stays `hidden` until the operator happens to
+  // make another restart-requiring save on this page, so following that
+  // banner led to a page with no way to restart.
+  if (restartBtn && restartPending()) {
+    restartBtn.hidden = false;
+    // The hash lands before this runs, and the browser won't scroll to
+    // an element that was hidden at that moment — do it ourselves.
+    if (location.hash === "#restart-actions") {
+      document.getElementById("restart-actions")
+        ?.scrollIntoView({ block: "center" });
+    }
+  }
+
   // Snapshot the customEndpoints textarea at page-load so the submit
   // handler can detect operator-driven changes and warn before
   // submitting. The bridge doesn't auto-rotate the cert when this list
@@ -2385,7 +2438,16 @@ function initSettings() {
         r.restartRequired
           ? "Saved. Some fields need a restart to take effect."
           : "Saved.");
-      restartBtn.hidden = !r.restartRequired;
+      // Sticky across navigation: a save that needs a restart must still
+      // be pending when the operator comes back to this page. Never
+      // CLEAR it here — an unrelated hot-applied save doesn't undo a
+      // restart another change is still waiting on.
+      if (r.restartRequired) {
+        markRestartPending(true);
+        restartBtn.hidden = false;
+      } else if (!restartPending()) {
+        restartBtn.hidden = true;
+      }
     } catch (err) {
       showMsg(msg, "err", "Save failed: " + err.message);
     }
@@ -2407,6 +2469,8 @@ function initSettings() {
     if (!confirm(prompt)) return;
     try {
       await API.post("/api/restart");
+      // Honoured — the pending-restart debt is settled.
+      markRestartPending(false);
       const post = supervised
         ? "Restart signalled. Reload the page in a few seconds."
         : "Stop signalled. Start the bridge again manually, then reload.";
@@ -2418,6 +2482,7 @@ function initSettings() {
         // when the connection drops mid-read, or `SyntaxError`
         // when the empty body fails JSON.parse). Both mean
         // "request was honoured, server is on its way out."
+        markRestartPending(false);
         const post = supervised
           ? "Restart signalled (server went away)."
           : "Stop signalled (server went away). Start it again manually.";

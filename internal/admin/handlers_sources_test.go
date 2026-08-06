@@ -1,6 +1,9 @@
 package admin
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 type sourcesCase struct {
 	name        string
@@ -88,7 +91,7 @@ func TestGetSourcesSnapshot(t *testing.T) {
 			s := &Server{deps: Deps{UPnPUpstream: tc.provider}}
 			s.statsDB = statsDBPart{tracks: tc.total, upnpRouted: tc.routed}
 			s.statsDBValid = true
-			assertSourcesSnapshot(t, tc, s.getSourcesSnapshot())
+			assertSourcesSnapshot(t, tc, s.getSourcesSnapshot(context.Background()))
 		})
 	}
 }

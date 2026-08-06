@@ -16,8 +16,10 @@ import (
 // admin handlers all surface 404 with a stable error code so the
 // frontend can hide the surface cleanly.
 //
-// **Read vs write semantics**: `ConfiguredServers` and
-// `DiscoveredServers` are cheap reads safe under polling cadence.
+// **Read vs write semantics**: `DiscoveredServers` is a cheap in-memory
+// read. `ConfiguredServers` is NOT free — it issues one routed-track
+// COUNT(*) per configured upstream — so it takes a ctx and every caller
+// must pass one that cancels (see the method's own doc).
 // `ForceRescan` debounces concurrent calls via inFlight. The CRUD
 // trio (`AddServer` / `RemoveServer` / `UpdateServer`) writes
 // bridge.yaml via the same `Config.Save` path the rest of the admin
@@ -29,7 +31,15 @@ type UPnPUpstreamProvider interface {
 	// ConfiguredServers returns the operator-configured servers
 	// merged with their live discovery state. Order is the YAML
 	// config order so the UI is deterministic.
-	ConfiguredServers() []UPnPUpstreamServerState
+	//
+	// This hits the DB: one `SELECT COUNT(*) FROM upnp_track_routing`
+	// per configured upstream. It is reached from the SSE `sources`
+	// publisher on the 30 s tick, once per open connection, so the ctx
+	// must be the caller's real one — an uncancellable
+	// context.Background() (what this used before 2026-08-06) keeps a
+	// disconnected client's queries running to completion and serialises
+	// every other slow-tick publisher behind them.
+	ConfiguredServers(ctx context.Context) []UPnPUpstreamServerState
 
 	// DiscoveredServers returns SSDP-cached MediaServers that are
 	// NOT in the operator's configured list — i.e. candidates the
@@ -116,10 +126,28 @@ type UPnPServerUpdateRequest struct {
 // UPnPUpstreamServerState is one row in the per-server status surface.
 // Wire fields mirror the operator's mental model: "did the bridge see
 // my 2Go? did the last walk succeed? how many tracks did it ingest?"
+//
+// PathPrefix / RootObjectID / SkipTopLevelContainers are the EDITABLE
+// YAML fields, echoed here so the admin edit modal can prefill them.
+// They are deliberately named to match `UPnPServerUpdateRequest` — the
+// modal reads a row, shows those values, and PATCHes them back. Before
+// they were exposed the modal rendered them blank and its submit
+// handler PATCHed the blanks, so a plain rename silently cleared all
+// three: RootObjectID fell back to "64" (the wrong subtree for any
+// non-MiniDLNA upstream) and PathPrefix fell back to the raw Name,
+// moving every routed track's manifest path into a new namespace — the
+// reconcile sweep reaps the old rows and the re-inserted ones come back
+// with enriched_at = 0, i.e. a full MB/CAA/Deezer re-crawl of the whole
+// upstream plus a full re-sync to every paired device. Keep them on the
+// DTO: a modal that cannot see a field must not be allowed to write it.
 type UPnPUpstreamServerState struct {
-	Name             string    `json:"name"`
-	ConfiguredUDN    string    `json:"configuredUDN,omitempty"`
-	ManualURL        string    `json:"manualDescriptionURL,omitempty"`
+	Name                   string   `json:"name"`
+	ConfiguredUDN          string   `json:"configuredUDN,omitempty"`
+	ManualURL              string   `json:"manualDescriptionURL,omitempty"`
+	PathPrefix             string   `json:"pathPrefix,omitempty"`
+	RootObjectID           string   `json:"rootObjectID,omitempty"`
+	SkipTopLevelContainers []string `json:"skipTopLevelContainers,omitempty"`
+
 	Discovered       bool      `json:"discovered"`
 	ResolvedUDN      string    `json:"resolvedUDN,omitempty"`
 	FriendlyName     string    `json:"friendlyName,omitempty"`
@@ -146,14 +174,14 @@ type upnpServersResponse struct {
 // return 200 with enabled=false so the frontend can render an
 // informational empty state — a 404 here would force every visit to
 // the Devices page to swallow a console error.
-func (s *Server) apiUPnPServers(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) apiUPnPServers(w http.ResponseWriter, r *http.Request) {
 	resp := upnpServersResponse{Servers: []UPnPUpstreamServerState{}}
 	if s.deps.UPnPUpstream != nil {
 		resp.Enabled = true
 		// Keep the pre-initialized [] when the provider returns nil — a
 		// nil slice marshals to `"servers": null`, which breaks the
 		// frontend's array iteration. Empty (non-nil) marshals to `[]`.
-		if servers := s.deps.UPnPUpstream.ConfiguredServers(); servers != nil {
+		if servers := s.deps.UPnPUpstream.ConfiguredServers(r.Context()); servers != nil {
 			resp.Servers = servers
 		}
 	}
