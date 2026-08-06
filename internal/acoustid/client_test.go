@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -136,6 +138,66 @@ func TestLookupErrorUnderHTTP200(t *testing.T) {
 	}
 }
 
+// TestLookupErrorEnvelopeClassifiesFromItsCode pins the fix for the one error
+// shape the structured classifier could not see.
+//
+// The envelope path returned a plain fmt.Errorf, which discarded the code. Walk
+// IsTransient with it: not a context error, not a RateLimitError, not an
+// httpError, and statusFromMessage misses because the message reads "upstream
+// error <code>" rather than "HTTP <status>" — so it came out persistent, every
+// time. A transient upstream condition delivered that way (AcoustID answers
+// with a 200 and an error body) therefore made the sweeper cache a permanent
+// "no match" for the batch in flight: the PR #74 poisoning class.
+//
+// Driven through the real Lookup against a stub rather than by handing
+// IsTransient a hand-built error, because the defect was in what Lookup
+// PRODUCES; a test that constructed the typed error itself would have passed
+// before the fix.
+func TestLookupErrorEnvelopeClassifiesFromItsCode(t *testing.T) {
+	cases := []struct {
+		name          string
+		code          int
+		message       string
+		wantTransient bool
+	}{
+		{"internal error", 5, "internal error", true},
+		{"too many requests", 14, "too many requests", true},
+		{"invalid api key", 4, "invalid API key", false},
+		{"invalid fingerprint", 7, "invalid fingerprint", false},
+		{"unknown code", 999, "something new", false},
+		{"no error object at all", 0, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"status":"error","error":{"code":` + strconv.Itoa(tc.code) +
+				`,"message":"` + tc.message + `"}}`
+			if tc.code == 0 {
+				body = `{"status":"error"}` // envelope with no error object
+			}
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, body)
+			})
+
+			_, err := c.Lookup(context.Background(), testFP())
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if errors.Is(err, ErrNoMatch) {
+				t.Fatal("an error envelope must not be mistaken for a clean no-match")
+			}
+			if got := IsTransient(err); got != tc.wantTransient {
+				t.Errorf("IsTransient(%v) = %v, want %v — the sweeper caches a permanent "+
+					"miss for anything it reads as persistent", err, got, tc.wantTransient)
+			}
+			// The operator-facing half must survive the retyping.
+			if tc.message != "" && !strings.Contains(err.Error(), tc.message) {
+				t.Errorf("err = %v, want the upstream message %q", err, tc.message)
+			}
+		})
+	}
+}
+
 func TestLookupRateLimitCarriesRetryAfter(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "30")
@@ -189,6 +251,78 @@ func TestLookupNeverLeaksTheAPIKey(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), testKey) {
 			t.Fatalf("error leaked the API key: %v", err)
+		}
+	})
+}
+
+// TestLookupRedirectGuard — this was the only outbound client in the repo
+// following redirects to arbitrary hosts (enrich/deezer, updater/github,
+// upnp/discovery and dlna/discovery all pin theirs). Defence in depth rather
+// than a live hole — the production base URL is a constant, no Authorization
+// header travels, and a redirect does not carry the query string that holds the
+// key — but "the base is a constant" stops being true the first time someone
+// points it at a proxy.
+func TestLookupRedirectGuard(t *testing.T) {
+	// NOTE both servers are on 127.0.0.1 and differ only by PORT, which is the
+	// realistic shape of the thing being guarded against — a redirect naming
+	// another service on the same host — and the reason the comparison is on
+	// the whole origin rather than the hostname alone. A hostname-only guard
+	// (the shape enrich/deezer uses, correctly, for its named CDN hosts) passes
+	// this redirect straight through.
+	t.Run("refuses a hop to another origin", func(t *testing.T) {
+		var elsewhere atomic.Int32
+		sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			elsewhere.Add(1)
+			fmt.Fprint(w, `{"status":"ok","results":[]}`)
+		}))
+		defer sink.Close()
+
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, sink.URL+"/v2/lookup", http.StatusFound)
+		})
+
+		_, err := c.Lookup(context.Background(), testFP())
+		if err == nil {
+			t.Fatal("expected the redirect to be refused")
+		}
+		if n := elsewhere.Load(); n != 0 {
+			t.Fatalf("followed the redirect off-host %d time(s)", n)
+		}
+		// The refusal travels back through *url.Error, which stringifies with
+		// the full URL — the same leak TestLookupNeverLeaksTheAPIKey guards.
+		if strings.Contains(err.Error(), testKey) {
+			t.Fatalf("the refusal leaked the API key: %v", err)
+		}
+	})
+
+	t.Run("still follows a hop within the base host", func(t *testing.T) {
+		// Host-scoped, not a blanket ban: a same-host redirect is ordinary
+		// server behaviour and must keep working.
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/moved") {
+				http.Redirect(w, r, r.URL.Path+"/moved?"+r.URL.RawQuery, http.StatusFound)
+				return
+			}
+			fmt.Fprint(w, `{"status":"ok","results":[{"id":"x","score":0.9}]}`)
+		})
+		res, err := c.Lookup(context.Background(), testFP())
+		if err != nil {
+			t.Fatalf("Lookup across a same-host redirect: %v", err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("got %d results, want 1", len(res))
+		}
+	})
+
+	t.Run("does not mutate the caller's http.Client", func(t *testing.T) {
+		// *http.Client values are routinely shared across services; installing
+		// the guard on the caller's would apply this package's host restriction
+		// to every redirect in the process (the trap enrich.NewDeezerClient
+		// copies to avoid).
+		shared := &http.Client{}
+		_ = NewClient("https://api.acoustid.org/v2", testKey, "ua", shared)
+		if shared.CheckRedirect != nil {
+			t.Error("NewClient installed its redirect guard on the caller's client")
 		}
 	})
 }
@@ -289,13 +423,13 @@ func TestParseRetryAfter(t *testing.T) {
 		{"garbage", 0},
 		// Capped in the SECONDS domain before multiplying: 2^33 seconds would
 		// overflow time.Duration's int64 nanoseconds and bypass the cap.
-		{"8589934592", maxRetryAfter},
+		{"8589934592", MaxRetryAfter},
 		// Beyond int64 → ErrRange → clamp, not fall through to 0.
-		{"99999999999999999999", maxRetryAfter},
+		{"99999999999999999999", MaxRetryAfter},
 		{"-99999999999999999999", 0},
 		// Non-compliant fractional: honour the integer prefix rather than
 		// dropping the backoff entirely.
-		{"86400.5", maxRetryAfter},
+		{"86400.5", MaxRetryAfter},
 		{"30.7", 30 * time.Second},
 		// HTTP-date forms contain no '.', so the truncation never mis-slices.
 		{"Thu, 30 Jul 2026 12:01:00 GMT", time.Minute},

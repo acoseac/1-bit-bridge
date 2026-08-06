@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +60,134 @@ func TestSweeperPacerSerialisesAcrossWorkers(t *testing.T) {
 	}
 }
 
+// TestSweeperRateLimitStallsTheWholePool pins the consumer that
+// acoustid.RateLimitError did not have.
+//
+// The type shipped with a docblock saying it exists "so the sweeper can pause
+// its WHOLE pool", and nothing ever read it: the lookup-error branch classified
+// a 429 as transient (it is) and returned, so the worker took the next
+// candidate and ran a full fpcalc decode — about a CPU second, plus a
+// whole-object read on a network-backed root — before pacing at 350ms and
+// hitting the same wall. On a sustained limit that is up to maxPerRun (500)
+// rejected requests and 500 wasted decodes against a service that asked us to
+// stop for a minute.
+//
+// The assertion that matters is on the EARLIEST of the two follow-up requests.
+// A fix that only stalled the worker which saw the 429 would still let its
+// sibling straight through, and a test that looked at one worker — or at the
+// last request — would pass anyway.
+func TestSweeperRateLimitStallsTheWholePool(t *testing.T) {
+	var mu sync.Mutex
+	var hits []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		first := len(hits) == 0
+		hits = append(hits, time.Now())
+		mu.Unlock()
+		if first {
+			// 1s is the shortest honourable advice — Retry-After's
+			// delta-seconds form is an integer.
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"status":"error","error":{"code":14,"message":"rate limit exceeded"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"status":"ok","results":[]}`)
+	}))
+	defer srv.Close()
+
+	// A duration inside the gate's window, matching the canned fingerprint's,
+	// so the pre-lookup screen passes and the request actually goes out.
+	const dur = 243.55
+	s := &fingerprintSweeper{
+		// A local base URL resolves to the self-hosted interval (150ms), which
+		// is what the pause has to be distinguishable FROM.
+		client: acoustid.NewClient(srv.URL, "k", "ua", srv.Client()),
+		cache:  acoustid.NewCache(16),
+		length: time.Minute,
+		compute: func(context.Context, string, time.Duration) (acoustid.Fingerprint, error) {
+			return acoustid.Fingerprint{Value: "AQABz0mUaEkSRZEG", Duration: dur, DistinctB64: 40}, nil
+		},
+	}
+	base := candidate{absPath: "/nonexistent/a.flac", durationS: dur, artist: "Some Artist"}
+
+	// One worker takes the 429.
+	first := base
+	first.path = "a.flac"
+	if s.fingerprintOne(context.Background(), first) {
+		t.Fatal("a rate-limited lookup must not report a match")
+	}
+
+	// Two MORE workers, concurrently. Both must be held.
+	var wg sync.WaitGroup
+	for i := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := base
+			c.path = fmt.Sprintf("b-%d.flac", i)
+			s.fingerprintOne(context.Background(), c)
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) != 3 {
+		t.Fatalf("server saw %d requests, want 3", len(hits))
+	}
+	// Well inside the 1s advice, and well outside the 150ms pacing interval the
+	// unfixed code would have produced — separated enough not to be fragile.
+	const wantPause = 900 * time.Millisecond
+	for i, h := range hits[1:] {
+		if gap := h.Sub(hits[0]); gap < wantPause {
+			t.Errorf("follow-up request %d reached AcoustID %v after the 429, want at least %v — "+
+				"Retry-After is not stalling the whole pool", i+1, gap, wantPause)
+		}
+	}
+}
+
+// TestSweeperNoteLookupErrOnlyPausesForARateLimit — the pause is a real stall
+// of every worker, so it must fire on exactly the error that asks for it.
+func TestSweeperNoteLookupErrOnlyPausesForARateLimit(t *testing.T) {
+	s := &fingerprintSweeper{}
+
+	for _, err := range []error{
+		errors.New("acoustid: decoding response: unexpected EOF"),
+		context.Canceled,
+		// A rate limit with no usable advice says nothing about how long to
+		// wait; the ordinary pacer already covers the next request.
+		&acoustid.RateLimitError{},
+	} {
+		s.noteLookupErr(err)
+		if !s.notBefore.IsZero() {
+			t.Fatalf("%v paused the pool; only a Retry-After may", err)
+		}
+	}
+
+	// Wrapped, which is the shape a caller that annotates the error produces.
+	s.noteLookupErr(fmt.Errorf("lookup: %w", &acoustid.RateLimitError{RetryAfter: 30 * time.Second}))
+	if d := time.Until(s.notBefore); d < 25*time.Second {
+		t.Fatalf("pause remaining = %v, want ~30s from a wrapped RateLimitError", d)
+	}
+
+	// Later, shorter advice must not cut an in-force pause short: several
+	// workers can be in flight when the limit is hit.
+	held := s.notBefore
+	s.noteLookupErr(&acoustid.RateLimitError{RetryAfter: time.Second})
+	if !s.notBefore.Equal(held) {
+		t.Errorf("a 1s Retry-After shortened a 30s pause to %v", time.Until(s.notBefore))
+	}
+
+	// Clamped to the client's own bound rather than honoured verbatim —
+	// RetryAfter is exported and the type is constructible outside that
+	// package, so the parse-time cap is not a guarantee about what arrives.
+	s.noteLookupErr(&acoustid.RateLimitError{RetryAfter: 999 * time.Hour})
+	if d := time.Until(s.notBefore); d > acoustid.MaxRetryAfter {
+		t.Errorf("pause remaining = %v, want no more than %v", d, acoustid.MaxRetryAfter)
+	}
+}
+
 // TestSweeperPacerHonoursCancellation — a shutting-down sweep must not sit out
 // the full interval.
 func TestSweeperPacerHonoursCancellation(t *testing.T) {
@@ -70,6 +201,24 @@ func TestSweeperPacerHonoursCancellation(t *testing.T) {
 	s.wait(ctx)
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Fatalf("wait took %v on a cancelled context, want a prompt return", elapsed)
+	}
+}
+
+// TestSweeperPauseHonoursCancellation — an hour-long Retry-After must not
+// become an hour-long shutdown. The sweeper is joined to bgWriters, so a pause
+// that ignored cancellation would hold process exit open behind it.
+func TestSweeperPauseHonoursCancellation(t *testing.T) {
+	s := &fingerprintSweeper{client: acoustid.NewClient("https://api.acoustid.org/v2", "k", "ua", nil)}
+	s.noteLookupErr(&acoustid.RateLimitError{RetryAfter: time.Hour})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	s.awaitPause(ctx) // gates the decode
+	s.wait(ctx)       // gates the request
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("a paused sweeper took %v to unwind on a cancelled context", elapsed)
 	}
 }
 
