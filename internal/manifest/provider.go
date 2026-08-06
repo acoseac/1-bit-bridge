@@ -178,6 +178,16 @@ func (p *Provider) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool
 	return p.store.HasTrackWithArtistMBID(ctx, mbid)
 }
 
+// ArtworkMBIDEnrichmentPending satisfies api.MBIDProbe.
+func (p *Provider) ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) bool {
+	return p.store.ArtworkMBIDEnrichmentPending(ctx, mbid)
+}
+
+// ArtistMBIDEnrichmentPending satisfies api.MBIDProbe.
+func (p *Provider) ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) bool {
+	return p.store.ArtistMBIDEnrichmentPending(ctx, mbid)
+}
+
 // LookupVariant returns the cached metadata for one (sourcePath,
 // variantID) pair, or `nil` if no such row exists. The api-side
 // caller does the freshness check against its already-validated

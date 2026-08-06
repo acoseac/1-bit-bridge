@@ -328,9 +328,23 @@ type ManifestProvider interface {
 }
 
 // MBIDProbe is an optional interface the artwork + artist-image
-// handlers use to distinguish "MBID known to the server but not
-// cached yet" (return 202 + Retry-After so iOS retries) from
-// "genuinely unknown MBID" (return 404 so iOS treats as terminal).
+// handlers use to distinguish three cache-miss states:
+//
+//   - "MBID known + enrichment still pending" → 202 + Retry-After so
+//     iOS retries with backoff (the image may land any moment);
+//   - "MBID known + enrichment COMPLETE, no image exists" → terminal
+//     404 (`no_image`) so clients stop retrying — pre-fix this state
+//     answered 202 forever, and every iOS coverage-sweep pass paid a
+//     multi-minute retry ladder per imageless artist for bytes that
+//     can never arrive (field-diagnosed 2026-08-06 on bridge.ars.md:
+//     78 artists whose portraits Deezer simply doesn't have);
+//   - "genuinely unknown MBID" → 404 (`not_found`).
+//
+// The pending check keys on `enriched_at = 0` on ANY track carrying
+// the MBID: `MarkEnriched` stamps it on success AND on skip, and the
+// enricher's IsTransient guard deliberately leaves it 0 on transient
+// upstream failures — so "no track pending + no file on disk" means
+// the enricher took every turn it will ever take.
 //
 // Nil-safe — when `s.mbidProbe` is nil the handlers fall back to the
 // pre-v1.1 behaviour of 404-on-miss. `internal/manifest.Provider`
@@ -338,6 +352,12 @@ type ManifestProvider interface {
 type MBIDProbe interface {
 	HasTrackWithArtworkMBID(ctx context.Context, mbid string) bool
 	HasTrackWithArtistMBID(ctx context.Context, mbid string) bool
+	// ArtworkMBIDEnrichmentPending reports whether at least one track
+	// carrying the MBID in `artworkMBID` still awaits enrichment.
+	// Only consulted after HasTrackWithArtworkMBID returned true.
+	ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) bool
+	// ArtistMBIDEnrichmentPending mirrors the above for `artistMBID`.
+	ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) bool
 }
 
 // UpdaterStatus is the optional interface the /v1/health handler uses

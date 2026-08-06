@@ -455,13 +455,15 @@ Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBI
 
 **Response** (`200 OK`): JPEG body, `Content-Type: image/jpeg`, `Cache-Control: public, max-age=86400`.
 
-**Response** (`202 Accepted`): the server has seen the MBID in a track but hasn't cached the image yet — enrichment is pending (cold cache on first scan, background re-fetch in progress, or cache file was trimmed). Carries `Retry-After: <seconds>` (30 s today); clients SHOULD retry with jittered backoff up to a small cap (iOS uses 5 attempts). Body is the standard JSON error shape with `error: "pending"`.
+**Response** (`202 Accepted`): the server has seen the MBID in a track AND enrichment for it is still pending — at least one track carrying the MBID has not been processed by the enricher yet (cold cache on first scan, background re-fetch in progress). Carries `Retry-After: <seconds>` (30 s today); clients SHOULD retry with jittered backoff up to a small cap (iOS uses 5 attempts). Body is the standard JSON error shape with `error: "pending"`.
 
-**Response** (`404 Not Found`): the MBID is unknown — no track in the manifest references it. Clients SHOULD treat as terminal and render a placeholder rather than retrying.
+**Response** (`404 Not Found`, `error: "no_image"`): the MBID is known but enrichment has COMPLETED for every track carrying it and no image was found upstream (Deezer has no portrait for the artist / CAA + iTunes have no cover for the release). Terminal — clients SHOULD render a placeholder and stop retrying; a later re-scan or forced re-enrichment (`enriched_at = 0`) flips the answer back to 202 if the upstream ever gains an image. Added 2026-08-06; before this, the known-but-imageless state answered `202` forever and retry-capped clients paid a full backoff ladder per item per sync.
+
+**Response** (`404 Not Found`, `error: "not_found"`): the MBID is unknown — no track in the manifest references it. Clients SHOULD treat as terminal and render a placeholder rather than retrying.
 
 **Response** (`400 Bad Request`): MBID is not a valid UUID, or `size` parameter is out of range.
 
-Backwards compatibility: the 202 branch is a v1.1 addition. Servers that don't have an MBID probe wired (e.g. tests, legacy) fall back to 404 on any cache miss, matching the v1.0 behavior. No protocol version bump is required — iOS clients that ignore 202 still work (they just see a transient-looking failure).
+Backwards compatibility: the 202 branch is a v1.1 addition; the `no_image` terminal split is additive on top of it. Servers that don't have an MBID probe wired (e.g. tests, legacy) fall back to 404 on any cache miss, matching the v1.0 behavior. No protocol version bump is required — iOS clients that ignore 202 still work (they just see a transient-looking failure), and clients have treated 404 on these endpoints as terminal since v1.0, so the pending→no_image reclassification only stops futile retries.
 
 ### Upscaling (offline PCM variants, additive since v1.2)
 
@@ -894,6 +896,7 @@ All errors are JSON:
 | Status | `error` code             | When                                              |
 |-------:|--------------------------|---------------------------------------------------|
 |    202 | `pending`                | Artwork / artist-image enrichment not yet cached  |
+|    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream (terminal) |
 |    400 | `bad_request`            | Malformed path, missing required query param     |
 |    400 | `range_required`         | `/v1/read` called without a `Range` header        |
 |    401 | `unauthorized`           | Missing / invalid bearer token (or pollSecret)    |

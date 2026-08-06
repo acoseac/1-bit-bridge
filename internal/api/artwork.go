@@ -67,17 +67,24 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Distinguish "known MBID, not cached yet" from
-			// "genuinely unknown MBID" so iOS can tell pending-
-			// enrichment (retry with backoff) apart from a permanent
-			// miss (render placeholder, stop asking). Pre-v1.1 both
-			// collapsed into 404 and iOS treated it as terminal,
-			// orphaning artwork that would have been cached a few
-			// seconds later on a cold-cache first scan.
+			// Three-way miss split (see MBIDProbe): 202 only while
+			// enrichment is genuinely pending — the cold-cache first
+			// scan where the portrait may land any moment. Once every
+			// track carrying the MBID is enriched and there's still no
+			// file, no image exists upstream (Deezer has nothing for
+			// this artist): answer a TERMINAL 404 so clients stop
+			// asking. Pre-fix this state answered 202 forever and iOS
+			// rode a multi-minute retry ladder per imageless artist on
+			// every coverage sweep.
 			if s.mbidProbe != nil && s.mbidProbe.HasTrackWithArtistMBID(r.Context(), mbid) {
-				w.Header().Set("Retry-After", strconv.Itoa(artworkPendingRetryAfterSeconds))
-				writeError(w, http.StatusAccepted, "pending",
-					"artist image enrichment pending; retry after the Retry-After window")
+				if s.mbidProbe.ArtistMBIDEnrichmentPending(r.Context(), mbid) {
+					w.Header().Set("Retry-After", strconv.Itoa(artworkPendingRetryAfterSeconds))
+					writeError(w, http.StatusAccepted, "pending",
+						"artist image enrichment pending; retry after the Retry-After window")
+					return
+				}
+				writeError(w, http.StatusNotFound, "no_image",
+					"enrichment complete; no artist image available for this MBID")
 				return
 			}
 			writeError(w, http.StatusNotFound, "not_found",
@@ -127,13 +134,20 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// See artistImage handler for the full rationale — 202 +
-			// Retry-After signals "enrichment pending, try later"
-			// while 404 is "we've never heard of this MBID".
+			// See artistImage handler for the full rationale — the
+			// same three-way split: 202 while enrichment is pending,
+			// terminal 404 `no_image` once enrichment completed with
+			// nothing cached (CAA/iTunes had no cover), plain 404 for
+			// an MBID no track references.
 			if s.mbidProbe != nil && s.mbidProbe.HasTrackWithArtworkMBID(r.Context(), mbid) {
-				w.Header().Set("Retry-After", strconv.Itoa(artworkPendingRetryAfterSeconds))
-				writeError(w, http.StatusAccepted, "pending",
-					"artwork enrichment pending; retry after the Retry-After window")
+				if s.mbidProbe.ArtworkMBIDEnrichmentPending(r.Context(), mbid) {
+					w.Header().Set("Retry-After", strconv.Itoa(artworkPendingRetryAfterSeconds))
+					writeError(w, http.StatusAccepted, "pending",
+						"artwork enrichment pending; retry after the Retry-After window")
+					return
+				}
+				writeError(w, http.StatusNotFound, "no_image",
+					"enrichment complete; no artwork available for this MBID")
 				return
 			}
 			writeError(w, http.StatusNotFound, "not_found",
