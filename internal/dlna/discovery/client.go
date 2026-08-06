@@ -88,6 +88,25 @@ func HandleReadErr(ctx context.Context, err error, streak *int, log *slog.Logger
 // (Gemini consult — bridge-12.)
 var structuralStubLastSeen = time.Date(2999, time.January, 1, 0, 0, 0, 0, time.UTC)
 
+// maxTrackedLocations caps how many distinct SSDP Locations a single UDN may
+// hold in lastLocations. A real renderer has one address per interface it is
+// attached to, so 4 covers dual-homed hardware with room to spare while
+// keeping a buggy or spoofed source that announces a fresh host every packet
+// from growing the map without bound. On overflow the LEAST-recently-observed
+// record is dropped — the one least likely to still be live.
+const maxTrackedLocations = 4
+
+// locationRecord is one SSDP Location observed for a UDN, plus when it was
+// last seen. The timestamp is what separates "this renderer answers from two
+// addresses" (both keep being announced, so both stay live and neither reads
+// as a move) from "this renderer moved away and later came back" (the old
+// address stops being announced, ages out after RendererTTL, and IS treated
+// as a move when it reappears).
+type locationRecord struct {
+	url  string
+	seen time.Time
+}
+
 // SSDPDiscoveryClient is the orchestrator that drives SSDP M-SEARCH
 // + per-renderer detail-fetch + cache lifecycle.
 //
@@ -176,33 +195,46 @@ type SSDPDiscoveryClient struct {
 	// triggers full cleanup").
 	wg sync.WaitGroup
 
-	// locMu guards lastLocation + inFlight. A DEDICATED mutex, not
+	// locMu guards lastLocations + inFlight. A DEDICATED mutex, not
 	// runMu: runMu's scope is the conn / runCtx lifecycle and Stop()
 	// holds it across cache.Clear(), so borrowing it for the per-packet
 	// bookkeeping below would widen a lock whose ordering contract is
 	// already load-bearing.
 	locMu sync.Mutex
 
-	// lastLocation maps UDN → the SSDP `Location` most recently FETCHED
-	// (or attempted) for that renderer. It's the host-change reference
-	// for entries whose cached ControlURL is empty — a failed-fetch stub
-	// carries no URL to compare a fresh announcement against, so without
-	// this map a renderer that failed at address A and moved to address B
-	// would never be re-fetched (a structural stub carries the year-2999
-	// sentinel and never ages out).
+	// lastLocations maps UDN → the SSDP `Location`s this client currently
+	// believes are live for that renderer, most recently observed at the
+	// recorded time. It is the host-change reference, and the reason it is a
+	// SET rather than a single value is that one UDN legitimately announces
+	// from more than one address: a dual-homed renderer (Wi-Fi + Ethernet)
+	// answers an M-SEARCH on both, and duplicate responses within a single
+	// cycle are expected (see fetchAndCacheDetails' stub rationale). Against
+	// a single remembered Location, an A/B/A/B sequence read as a move on
+	// EVERY packet and re-fetched forever at the M-SEARCH cadence.
+	//
+	// It also covers entries whose cached ControlURL is empty — a
+	// failed-fetch stub carries no URL to compare a fresh announcement
+	// against, so without this map a renderer that failed at address A and
+	// moved to address B would never be re-fetched (a structural stub
+	// carries the year-2999 sentinel and never ages out).
+	//
+	// Bounded three ways: at most maxTrackedLocations records per UDN,
+	// records unseen within RendererTTL are dropped on the next touch, and
+	// pruneLocations reaps whole UDNs that are neither cached nor mid-fetch.
 	//
 	// Deliberately NOT a field on RendererInfo: that struct IS the
 	// `/v1/renderers` wire shape (see renderer_dto.go) and this is
 	// client-side bookkeeping the protocol has no business carrying.
-	lastLocation map[string]string
+	lastLocations map[string][]locationRecord
 
 	// inFlight holds the UDNs with a detail fetch currently running, so
 	// a burst of announcements for the same renderer dispatches exactly
-	// one fetch. Load-bearing for the host-change path: it Removes the
-	// cache entry, so every FURTHER packet for that UDN lands in the
-	// first-time-UDN branch and would spawn another fetch until the
-	// first one finally writes. (It also fixes the pre-existing case of
-	// a new renderer sending a burst of ssdp:alive NOTIFYs.)
+	// one fetch. Two paths depend on it, both because a fetch publishes
+	// nothing until it finishes: a NEW renderer sending a burst of packets
+	// has no cache entry yet, so every one of them lands in the
+	// first-time-UDN branch; and a MOVED renderer's new Location isn't
+	// recorded until its fetch completes, so every further packet from that
+	// address still reads as a move.
 	//
 	// Self-cleaning: every claim is released by the spawned fetch's
 	// defer, so the map can't grow past the number of concurrent
@@ -315,7 +347,7 @@ func NewSSDPDiscoveryClient(
 		dispatcher:     cfg.Dispatcher,
 		detailFetchSem: make(chan struct{}, 4), // see field docblock
 		nowFunc:        nowFunc,
-		lastLocation:   make(map[string]string),
+		lastLocations:  make(map[string][]locationRecord),
 		inFlight:       make(map[string]struct{}),
 	}, nil
 }
@@ -525,34 +557,36 @@ func (c *SSDPDiscoveryClient) evictStaleEntries() {
 	c.pruneLocations()
 }
 
-// pruneLocations drops lastLocation entries for UDNs that are neither cached
+// pruneLocations drops lastLocations entries for UDNs that are neither cached
 // nor mid-fetch. Without it the map retains one entry per distinct UDN ever
 // observed: ssdp:byebye is the only other removal path, and this client is
 // M-SEARCH-only in production (see the lifecycle docblock) so byebye is
 // rarely received. A buggy or spoofed LAN source announcing many distinct
-// UDNs would otherwise grow it without bound.
+// UDNs would otherwise grow it without bound. (Per-UDN growth is bounded
+// separately by maxTrackedLocations + the RendererTTL freshness window.)
 //
-// The in-flight half of the predicate is load-bearing: the host-change path
-// Removes the cache entry and THEN fetches, so there's a legitimate window
-// where a UDN has no cache entry but its recorded Location must survive for
-// the fetch to compare against.
+// The in-flight half of the predicate is load-bearing: a fetch records its
+// Location just BEFORE it writes the cache entry, so between those two calls
+// a UDN legitimately has a recorded Location and no cache entry. A tick
+// landing in that window would otherwise drop the reference the very next
+// announcement needs.
 //
 // Lock order is locMu → cache.mu (via Get). Safe: RendererCache never calls
-// back into the client, and handlePacket's cache.Get / previousLocation
-// calls are sequential, never nested — so the inverse order doesn't exist
+// back into the client, and handlePacket's cache.Get / locationMoved calls
+// are sequential, never nested — so the inverse order doesn't exist
 // anywhere. Holding locMu across the lookups is also what makes the decision
 // race-free: a concurrent fetch can neither record nor release mid-prune.
 func (c *SSDPDiscoveryClient) pruneLocations() {
 	c.locMu.Lock()
 	defer c.locMu.Unlock()
-	for udn := range c.lastLocation {
+	for udn := range c.lastLocations {
 		if _, busy := c.inFlight[udn]; busy {
 			continue
 		}
 		if _, cached := c.cache.Get(udn); cached {
 			continue
 		}
-		delete(c.lastLocation, udn)
+		delete(c.lastLocations, udn)
 	}
 }
 
@@ -635,42 +669,41 @@ func (c *SSDPDiscoveryClient) handlePacket(
 	// fetch; known UDNs just refresh lastSeenAt.
 	now := c.nowFunc()
 	if existing, exists := c.cache.Get(udn); exists {
-		// Known UDN announcing from a NEW host:port (DHCP lease renew,
-		// Wi-Fi ↔ Ethernet move). The cached ControlURL points at the old
-		// address, and because LastSeenAt keeps advancing on every packet
-		// EvictStale never ages the entry out — iOS would dispatch
-		// SetAVTransportURI to a dead address until the bridge restarts.
+		// Known UDN announcing from a host we do NOT believe is live for it
+		// (DHCP lease renew, Wi-Fi ↔ Ethernet move). The cached ControlURL
+		// points at the old address, and because LastSeenAt keeps advancing
+		// on every packet EvictStale never ages the entry out — iOS would
+		// dispatch SetAVTransportURI to a dead address until the bridge
+		// restarts. So re-fetch the description at the new address.
 		//
-		// REMOVE the entry, then re-fetch as a fresh discovery. Removal is
-		// load-bearing and is where this diverges from the server-side twin
-		// in internal/upnp/discovery.go (which re-fetches in place): here
-		// mergeRendererInfo is non-empty-wins and a failed re-fetch upserts
-		// a stub with an EMPTY ControlURL, so an in-place re-fetch would
-		// merge into the ghost — KEEPING the dead ControlURL while
-		// refreshing LastSeenAt, i.e. pinning the bad entry forever (and
-		// with the year-2999 structural sentinel, immortally). Removing
-		// first means a failed re-fetch writes a genuine stub: hidden from
-		// Snapshot, aged out + retried by EvictStale. It also resets a
-		// structural sentinel that was earned by the HTTP server at the OLD
-		// address and says nothing about the new one.
+		// The re-fetch happens IN PLACE: the cached entry keeps serving
+		// /v1/renderers while it runs. The old shape Removed the entry
+		// first, which left the renderer missing from the output picker
+		// between the Remove and the fetch's write — and Snapshot hides
+		// ControlURL-less stubs, so a failed fetch widened that hole to a
+		// whole M-SEARCH cycle. Combined with a single remembered Location,
+		// a UDN that answers from two addresses re-triggered on every packet
+		// and blinked out of the picker at the M-SEARCH cadence forever.
 		//
-		// A same-UDN fetch already in flight (for the old address) blocks
-		// the dispatch below; that fetch re-adds the dead entry + records
-		// its location, and the NEXT announcement re-detects the change
-		// with the dispatch slot free — self-healing within one M-SEARCH
-		// cycle.
-		if hdr.Location != "" {
-			// prev == "" means we have nothing to compare against — treat
-			// as "no change" rather than guessing (a false positive here
-			// is a re-fetch storm).
-			if prev := c.previousLocation(udn, existing.ControlURL); prev != "" &&
-				!sameURLHost(hdr.Location, prev) {
-				packageLogger.Debug("renderer moved; re-fetching description",
-					"udn", udn, "from", prev, "to", hdr.Location)
-				c.cache.Remove(udn)
-				c.spawnDetailFetch(ctx, udn, hdr.Location, now)
-				return
-			}
+		// What made the pre-emptive Remove load-bearing was
+		// mergeRendererInfo's non-empty-wins merge: a failed re-fetch
+		// upserting a ControlURL-less stub merged into the live entry,
+		// KEEPING the dead ControlURL while refreshing LastSeenAt — pinning
+		// the bad entry forever (immortally, with the year-2999 structural
+		// sentinel). fetchAndCacheDetails now REPLACES rather than merges,
+		// which enforces that invariant at the write instead of by
+		// pre-deleting, so a failed re-fetch still leaves a genuine stub:
+		// hidden from Snapshot, aged out + retried by EvictStale, and with a
+		// structural sentinel earned at the NEW address rather than the old.
+		//
+		// A same-UDN fetch already in flight blocks the dispatch below; the
+		// NEXT announcement re-detects the change with the slot free —
+		// self-healing within one M-SEARCH cycle.
+		if c.locationMoved(udn, hdr.Location, existing.ControlURL, now) {
+			packageLogger.Debug("renderer moved; re-fetching description",
+				"udn", udn, "from", existing.ControlURL, "to", hdr.Location)
+			c.spawnDetailFetch(ctx, udn, hdr.Location, now)
+			return
 		}
 		// Incomplete stub (no AVTransport ControlURL) = residue of a
 		// failed detail fetch. Do NOT refresh its LastSeenAt and do NOT
@@ -720,32 +753,142 @@ func sameURLHost(a, b string) bool {
 	return ua.Host == ub.Host
 }
 
-// previousLocation returns the SSDP Location this client last fetched for
-// udn, falling back to the cached ControlURL (same host in every real
-// device description) when no fetch has been recorded — e.g. an entry
-// seeded by a caller other than the fetch path. Returns "" when neither is
-// known, which callers MUST treat as "no change" rather than guessing: a
-// false positive here dispatches a re-fetch storm.
-func (c *SSDPDiscoveryClient) previousLocation(udn, cachedControlURL string) string {
-	c.locMu.Lock()
-	loc := c.lastLocation[udn]
-	c.locMu.Unlock()
-	if loc != "" {
-		return loc
+// locationMoved reports whether loc announces a host this client does NOT
+// currently believe is live for udn — the signal that the renderer actually
+// moved, rather than simply answering from a second address it has been
+// answering from all along.
+//
+// A match REFRESHES that record's freshness, and that is what makes a
+// dual-homed renderer settle: both of its addresses stay live for as long as
+// both keep announcing, so neither reads as a move and no re-fetch is
+// dispatched. An address that stops announcing ages out after RendererTTL, so
+// a renderer that really does move away and later returns IS re-fetched.
+//
+// Returns false when there is nothing to compare against — no live record and
+// no cached ControlURL to fall back on (same host as the description Location
+// in every real device description). Callers MUST treat that as "no change"
+// rather than guessing: a false positive here dispatches a re-fetch storm.
+func (c *SSDPDiscoveryClient) locationMoved(udn, loc, cachedControlURL string, now time.Time) bool {
+	if loc == "" {
+		return false
 	}
-	return cachedControlURL
+	c.locMu.Lock()
+	defer c.locMu.Unlock()
+	recs, anyFresh := c.dropStaleLocationsLocked(udn, now)
+	// Nothing observed within RendererTTL: prefer the cached ControlURL — the
+	// address we are actually DRIVING — over the last-known record, which
+	// dropStaleLocationsLocked retains only so a ControlURL-less stub keeps
+	// some reference at all. Without this preference a renderer that had
+	// announced from two addresses, went quiet, and came back at the one we
+	// are NOT driving would read as "already known" and keep the entry
+	// pointing at an address it has left.
+	if !anyFresh && cachedControlURL != "" {
+		return !sameURLHost(loc, cachedControlURL)
+	}
+	if len(recs) == 0 {
+		return cachedControlURL != "" && !sameURLHost(loc, cachedControlURL)
+	}
+	for i := range recs {
+		if sameURLHost(loc, recs[i].url) {
+			// recs shares its backing array with the map's slice, so this
+			// writes through — the record is live, keep it live.
+			recs[i].seen = now
+			return false
+		}
+	}
+	return true
 }
 
 // recordLocation stamps the Location a fetch resolved against, so the next
 // announcement for udn has a reference to compare hosts with even when the
 // fetch produced a ControlURL-less stub.
 func (c *SSDPDiscoveryClient) recordLocation(udn, location string) {
+	c.noteLocation(udn, location, c.nowFunc())
+}
+
+// noteLocation records (or refreshes) location among udn's live addresses.
+// A location whose HOST already appears is refreshed in place rather than
+// appended, so the set holds one record per distinct address.
+func (c *SSDPDiscoveryClient) noteLocation(udn, location string, now time.Time) {
 	if udn == "" || location == "" {
 		return
 	}
 	c.locMu.Lock()
-	c.lastLocation[udn] = location
-	c.locMu.Unlock()
+	defer c.locMu.Unlock()
+	recs, _ := c.dropStaleLocationsLocked(udn, now)
+	for i := range recs {
+		if sameURLHost(location, recs[i].url) {
+			recs[i].url = location
+			recs[i].seen = now
+			c.lastLocations[udn] = recs
+			return
+		}
+	}
+	recs = append(recs, locationRecord{url: location, seen: now})
+	if len(recs) > maxTrackedLocations {
+		// One record was just added, so dropping one restores the cap.
+		i := oldestLocationIndex(recs)
+		recs = append(recs[:i], recs[i+1:]...)
+	}
+	c.lastLocations[udn] = recs
+}
+
+// dropStaleLocationsLocked removes udn's records that haven't been observed
+// within RendererTTL, returning what survives and whether ANY record was
+// fresh. Caller MUST hold locMu.
+//
+// It never empties a known UDN's set: when every record is stale the single
+// most-recently-observed one is retained (and anyFresh is false, so callers
+// can tell a live set from that floor). The floor restores the old "remember
+// one Location, forever" behaviour and is load-bearing for a ControlURL-less
+// stub — the recorded Location is then the ONLY reference a later
+// announcement can be compared against, and a STRUCTURAL stub never ages out
+// of the cache on its own (year-2999 sentinel), so dropping the reference
+// would make it immortal. That is the case
+// TestHandlePacket_StructuralStubRecoversAfterHostChange guards, extended
+// into the time domain: a renderer that failed structurally, went quiet for
+// longer than RendererTTL, and came back at a new address must still be
+// recognised as moved.
+//
+// Never creates a map entry for an unknown udn — pruneLocations is the sole
+// whole-UDN reaper and this must not resurrect one behind its back.
+func (c *SSDPDiscoveryClient) dropStaleLocationsLocked(udn string, now time.Time) (kept []locationRecord, anyFresh bool) {
+	recs, ok := c.lastLocations[udn]
+	if !ok || len(recs) == 0 {
+		return nil, false
+	}
+	// Captured by VALUE before the in-place filter below overwrites elements.
+	newest := recs[0]
+	for _, r := range recs[1:] {
+		if r.seen.After(newest.seen) {
+			newest = r
+		}
+	}
+	kept = recs[:0] // filter in place; writes only ever land at or behind the read index
+	for _, r := range recs {
+		if IsStaleRenderer(r.seen, now, c.cfg.RendererTTL) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	anyFresh = len(kept) > 0
+	if !anyFresh {
+		kept = append(kept, newest)
+	}
+	c.lastLocations[udn] = kept
+	return kept, anyFresh
+}
+
+// oldestLocationIndex returns the index of the least-recently-observed
+// record. Callers guarantee a non-empty slice.
+func oldestLocationIndex(recs []locationRecord) int {
+	oldest := 0
+	for i := 1; i < len(recs); i++ {
+		if recs[i].seen.Before(recs[oldest].seen) {
+			oldest = i
+		}
+	}
+	return oldest
 }
 
 // forgetLocation drops udn's recorded Location — called when ssdp:byebye
@@ -756,7 +899,7 @@ func (c *SSDPDiscoveryClient) recordLocation(udn, location string) {
 // a packet arriving mid-fetch spawn a duplicate.
 func (c *SSDPDiscoveryClient) forgetLocation(udn string) {
 	c.locMu.Lock()
-	delete(c.lastLocation, udn)
+	delete(c.lastLocations, udn)
 	c.locMu.Unlock()
 }
 
@@ -874,8 +1017,13 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		// ControlURL, so this map is the ONLY way a later announcement
 		// from a new address can be recognised as a move (which matters
 		// most for a structural stub: it never ages out on its own).
+		//
+		// Replace, NOT Upsert: on a re-fetch of an entry that is still
+		// cached with a live ControlURL, merging this stub would keep that
+		// (now unreachable) URL and refresh LastSeenAt, pinning an
+		// undrivable renderer forever. See RendererCache.Replace.
 		c.recordLocation(udn, location)
-		c.cache.Upsert(RendererInfo{UDN: udn, LastSeenAt: stubLastSeen})
+		c.cache.Replace(RendererInfo{UDN: udn, LastSeenAt: stubLastSeen})
 		return
 	}
 
@@ -905,8 +1053,11 @@ func (c *SSDPDiscoveryClient) fetchAndCacheDetails(
 		return
 	}
 
+	// Replace, NOT Upsert — a completed fetch is the whole truth about this
+	// renderer, so nothing from the pre-move entry (a stale
+	// RenderingControlURL at the old address, say) may survive by merge.
 	c.recordLocation(udn, location)
-	c.cache.Upsert(RendererInfo{
+	c.cache.Replace(RendererInfo{
 		UDN:                 udn,
 		FriendlyName:        desc.FriendlyName,
 		Manufacturer:        desc.Manufacturer,

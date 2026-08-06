@@ -108,6 +108,31 @@ func mergeRendererInfo(cached, fresh RendererInfo) RendererInfo {
 	return out
 }
 
+// Replace stores info as THE entry for its UDN, discarding whatever was
+// cached rather than merging into it — atomically, so no observer ever sees
+// the UDN absent.
+//
+// This is the detail-fetch path's writer: a fetch produces the complete truth
+// about a renderer, so merging is not just unnecessary but actively wrong.
+// mergeRendererInfo is non-empty-wins, so a FAILED fetch's ControlURL-less
+// stub merged into a live entry would KEEP the dead ControlURL while
+// refreshing LastSeenAt — pinning an undrivable renderer in the cache forever
+// (EvictStale can't reach it: LastSeenAt advances on every announcement).
+// That invariant used to be enforced by Removing the entry BEFORE the fetch,
+// which left the renderer missing from /v1/renderers for the fetch's whole
+// duration; enforcing it at the write instead keeps the entry visible.
+//
+// Callers holding only a PARTIAL observation — the LastSeenAt refresh on an
+// ssdp:alive, which carries no service URLs — MUST use Upsert.
+func (c *RendererCache) Replace(info RendererInfo) {
+	if info.UDN == "" {
+		return // defensive — every legitimate entry has a UDN
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[info.UDN] = info
+}
+
 // Remove drops the entry for the given UDN. Idempotent — removing
 // a non-existent UDN is a no-op.
 func (c *RendererCache) Remove(udn string) {

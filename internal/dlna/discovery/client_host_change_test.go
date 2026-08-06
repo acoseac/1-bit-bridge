@@ -133,7 +133,16 @@ func TestHandlePacket_HostChangeRefetchesControlURL(t *testing.T) {
 
 	c.handlePacket(context.Background(), alivePacket(movedUDN, "http://192.0.2.99:8080/description.xml"), nil)
 
-	info := waitForCacheEntry(t, c, movedUDN, "Chord 2go", 2*time.Second)
+	// Join the re-fetch. NOT waitForCacheEntry: the re-fetch now runs IN
+	// PLACE, so the pre-move entry (same FriendlyName) is still cached while
+	// it does — polling for "an entry named Chord 2go" would return the OLD
+	// one immediately and assert nothing. spawnDetailFetch's wg.Add is
+	// synchronous, and the run loops aren't started, so this Wait is exact.
+	c.wg.Wait()
+	info, ok := c.cache.Get(movedUDN)
+	if !ok {
+		t.Fatal("entry must exist after the re-fetch")
+	}
 	want := "http://192.0.2.99:8080/avtransport/control"
 	if info.ControlURL != want {
 		t.Errorf("ControlURL = %q, want %q (re-fetch must adopt the new host)", info.ControlURL, want)
@@ -149,9 +158,11 @@ func TestHandlePacket_HostChangeRefetchesControlURL(t *testing.T) {
 func TestHandlePacket_HostChangeTransientFailureDropsDeadControlURL(t *testing.T) {
 	// THE regression guard for the trap this fix exists to avoid: a re-fetch
 	// that fails TRANSIENTLY must leave a genuine stub, NOT a merge into the
-	// old entry. mergeRendererInfo is non-empty-wins, so an in-place re-fetch
-	// (the shape the server-side twin uses) would keep the DEAD ControlURL
-	// while refreshing LastSeenAt — pinning the bad entry forever.
+	// old entry. mergeRendererInfo is non-empty-wins, so a re-fetch that
+	// UPSERTED its stub (the shape the server-side twin uses) would keep the
+	// DEAD ControlURL while refreshing LastSeenAt — pinning the bad entry
+	// forever. The fetch REPLACES, which is what lets it re-fetch in place
+	// without pre-deleting the entry.
 	c := newTestClient(t, &boomDispatcher{err: errors.New("connection refused")})
 	dead := "http://192.0.2.7:8080/avtransport/control"
 	c.cache.Upsert(RendererInfo{
@@ -163,12 +174,19 @@ func TestHandlePacket_HostChangeTransientFailureDropsDeadControlURL(t *testing.T
 
 	c.handlePacket(context.Background(), alivePacket(movedUDN, "http://192.0.2.99:8080/description.xml"), nil)
 
-	info := waitForStub(t, c, movedUDN, 2*time.Second)
+	// Join the failing re-fetch — the pre-move entry is still cached while it
+	// runs, so waitForStub ("any entry") would return that one and assert
+	// nothing.
+	c.wg.Wait()
+	info, ok := c.cache.Get(movedUDN)
+	if !ok {
+		t.Fatal("a failed re-fetch must still leave a stub")
+	}
 	if info.ControlURL != "" {
 		t.Fatalf("ControlURL = %q, want empty — the dead URL must not survive a failed re-fetch", info.ControlURL)
 	}
 	if info.FriendlyName != "" {
-		t.Errorf("FriendlyName = %q, want empty (entry was removed before the re-fetch)", info.FriendlyName)
+		t.Errorf("FriendlyName = %q, want empty (the stub REPLACES the pre-move entry, it must not merge into it)", info.FriendlyName)
 	}
 	// Hidden from /v1/renderers …
 	if n := len(c.cache.Snapshot()); n != 0 {
@@ -204,7 +222,13 @@ func TestHandlePacket_HostChangeStructuralFailureUsesFreshSentinel(t *testing.T)
 
 	c.handlePacket(context.Background(), alivePacket(movedUDN, "http://192.0.2.99:8080/description.xml"), nil)
 
-	info := waitForStub(t, c, movedUDN, 2*time.Second)
+	// Join the failing re-fetch — the pre-move entry is still cached while it
+	// runs (the re-fetch is in place), so "any entry" would be the old one.
+	c.wg.Wait()
+	info, ok := c.cache.Get(movedUDN)
+	if !ok {
+		t.Fatal("a failed re-fetch must still leave a stub")
+	}
 	if !info.LastSeenAt.Equal(structuralStubLastSeen) {
 		t.Errorf("LastSeenAt = %v, want the far-future sentinel %v", info.LastSeenAt, structuralStubLastSeen)
 	}
@@ -214,7 +238,7 @@ func TestHandlePacket_HostChangeStructuralFailureUsesFreshSentinel(t *testing.T)
 }
 
 func TestHandlePacket_StructuralStubRecoversAfterHostChange(t *testing.T) {
-	// The case that makes lastLocation load-bearing rather than a nicety: a
+	// The case that makes lastLocations load-bearing rather than a nicety: a
 	// renderer that failed STRUCTURALLY at address A holds a stub with NO
 	// ControlURL and the never-ages-out sentinel. When it reappears at
 	// address B, the cached entry offers nothing to compare hosts against —
@@ -344,10 +368,11 @@ func (d *gateDispatcher) Do(_ context.Context, req *http.Request) (*http.Respons
 func (d *gateDispatcher) open() { d.closeOnce.Do(func() { close(d.release) }) }
 
 func TestHandlePacket_BurstDuringInFlightFetchDispatchesOnce(t *testing.T) {
-	// The host-change path Removes the cache entry, so every FURTHER packet
-	// for that UDN lands in the first-time-UDN branch — without the in-flight
-	// guard a bursty renderer (or a LAN-wide power-up NOTIFY storm) fans out
-	// one fetch per packet until the first one writes.
+	// A fetch publishes nothing until it finishes, so a brand-new UDN has no
+	// cache entry and every packet in a burst lands in the first-time-UDN
+	// branch — without the in-flight guard a bursty renderer (or a LAN-wide
+	// power-up NOTIFY storm) fans out one fetch per packet until the first
+	// one writes.
 	disp := &gateDispatcher{release: make(chan struct{})}
 	t.Cleanup(disp.open) // failure-path net: never leave the fetch parked
 	c := newTestClient(t, disp)
@@ -379,7 +404,7 @@ func TestHandlePacket_BurstDuringInFlightFetchDispatchesOnce(t *testing.T) {
 }
 
 func TestEvictStaleEntries_PrunesLastLocation(t *testing.T) {
-	// lastLocation must not accumulate one entry per distinct UDN ever seen:
+	// lastLocations must not accumulate one entry per distinct UDN ever seen:
 	// byebye is the only other removal path and this client is M-SEARCH-only
 	// in production, so a buggy/spoofed source announcing many UDNs would
 	// grow it without bound. The eviction sweep is the reaper — it keeps only
@@ -421,19 +446,19 @@ func TestEvictStaleEntries_PrunesLastLocation(t *testing.T) {
 
 	want := map[string]bool{"uuid:live-full": true, "uuid:live-stub": true, "uuid:inflight": true}
 	c.locMu.Lock()
-	got := make(map[string]bool, len(c.lastLocation))
-	for udn := range c.lastLocation {
+	got := make(map[string]bool, len(c.lastLocations))
+	for udn := range c.lastLocations {
 		got[udn] = true
 	}
 	c.locMu.Unlock()
 	for udn := range want {
 		if !got[udn] {
-			t.Errorf("lastLocation dropped %q; live + in-flight UDNs must be retained", udn)
+			t.Errorf("lastLocations dropped %q; live + in-flight UDNs must be retained", udn)
 		}
 	}
 	for udn := range got {
 		if !want[udn] {
-			t.Errorf("lastLocation retained %q; it is neither cached nor in-flight", udn)
+			t.Errorf("lastLocations retained %q; it is neither cached nor in-flight", udn)
 		}
 	}
 	// The stale entry's cache row went in the same pass — the prune must run
@@ -460,7 +485,7 @@ func TestHandlePacket_ByeByeForgetsRecordedLocation(t *testing.T) {
 	c.handlePacket(context.Background(), byebye, nil)
 
 	c.locMu.Lock()
-	_, still := c.lastLocation[movedUDN]
+	_, still := c.lastLocations[movedUDN]
 	c.locMu.Unlock()
 	if still {
 		t.Error("byebye must drop the recorded Location")
