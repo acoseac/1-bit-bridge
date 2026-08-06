@@ -32,8 +32,9 @@ type BookletSink interface {
 	BookletsToCheck(ctx context.Context, candidates []string, maxAttempts int) ([]string, error)
 	UpsertBookletAvailability(ctx context.Context, mbid string, available bool, etag string, size int64) error
 	SetBookletTagAndBumpIndex(ctx context.Context, releaseMBID, tag string) (int64, error)
-	BookletsToFetch(ctx context.Context, limit int) ([]BookletFetchItem, error)
+	BookletsToFetch(ctx context.Context, limit, maxAttempts int) ([]BookletFetchItem, error)
 	MarkBookletFetched(ctx context.Context, mbid string) error
+	MarkBookletFetchFailed(ctx context.Context, mbid string) error
 	MarkBookletUnavailable(ctx context.Context, mbid string) error
 	DeleteBookletsNotIn(ctx context.Context, universe []string) ([]string, error)
 }
@@ -53,12 +54,26 @@ type BookletFileStore interface {
 }
 
 const (
-	// maxBookletCheckAttempts bounds how many check cycles keep asking about
-	// a release Atlas keeps answering "no booklet" for. At the 6h cadence,
-	// 8 ≈ 2 days — enough for Atlas's name-match ingest to link a freshly
-	// submitted library and fetch its goodies. A library rescan that mints
-	// new MBIDs naturally re-seeds candidates.
-	maxBookletCheckAttempts = 8
+	// maxBookletAttempts bounds BOTH per-release attempt budgets, which
+	// share the booklets.check_attempts column in disjoint states (see
+	// Store.MarkBookletFetchFailed):
+	//
+	//   - CHECK (available = 0): how many cycles keep asking Atlas about a
+	//     release it answers "no booklet" for. At the 6h cadence, 8 ≈ 2 days
+	//     — enough for Atlas's name-match ingest to link a freshly submitted
+	//     library and fetch its goodies. A library rescan that mints new
+	//     MBIDs naturally re-seeds candidates.
+	//   - FETCH (available = 1, not yet downloaded): how many failed
+	//     downloads a release tolerates before it stops entering the sweep,
+	//     so a permanently-failing PDF can't burn the budget forever.
+	//
+	// A capped-out release is only out of the BACKGROUND sweep: both
+	// on-demand paths reach fetchOneBooklet through NudgeBookletFetch's
+	// priority channel, which never consults BookletsToFetch — the
+	// /v1/booklet 202 (a user opening that album) and the admin About-card
+	// folder retry, which nudges every available-but-unfetched release in
+	// scope. So the cap bounds unattended waste, not recovery.
+	maxBookletAttempts = 8
 	// bookletCheckChunk mirrors Atlas's per-request MBID cap headroom
 	// (submit uses 500 against the server's 2000 cap).
 	bookletCheckChunk = 500
@@ -103,7 +118,7 @@ func (c *Client) checkBooklets(ctx context.Context, st State) error {
 	if err != nil {
 		return fmt.Errorf("enumerate booklet universe: %w", err)
 	}
-	candidates, err := c.Booklets.BookletsToCheck(ctx, universe, maxBookletCheckAttempts)
+	candidates, err := c.Booklets.BookletsToCheck(ctx, universe, maxBookletAttempts)
 	if err != nil {
 		return fmt.Errorf("filter booklet candidates: %w", err)
 	}
@@ -247,7 +262,7 @@ func (c *Client) fetchBooklets(ctx context.Context) error {
 		break
 	}
 	if budget > len(seen) {
-		items, err := c.Booklets.BookletsToFetch(ctx, budget-len(seen))
+		items, err := c.Booklets.BookletsToFetch(ctx, budget-len(seen), maxBookletAttempts)
 		if err != nil {
 			c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_list", "error", err)
 			return nil
@@ -276,8 +291,14 @@ func (c *Client) fetchBooklets(ctx context.Context) error {
 // for errUnauthorized — a rejected token that MUST abort the sweep so the
 // caller wipes the credential (mirrors the check leg + do()). An upstream 404
 // flips the row unavailable AND clears the wire tag (a real state change iOS
-// must see); other transient errors just log, leaving the row pending for the
-// next tick.
+// must see); any other failure records the attempt via MarkBookletFetchFailed,
+// which rotates the row to the back of BookletsToFetch's checked_at ordering
+// and burns one of its maxBookletAttempts. Recording the attempt is NOT
+// optional bookkeeping: pre-fix this branch only logged, so a failing row kept
+// its frozen checked_at, stayed at the head of the queue, and three of them
+// consumed the whole bookletFetchPerTick budget on every tick — the background
+// pre-cache sweep stopped making progress across the entire library while
+// re-downloading the same failing bytes every minute.
 func (c *Client) fetchOneBooklet(ctx context.Context, st State, mbid string, seen map[string]struct{}) (bool, error) {
 	if _, dup := seen[mbid]; dup {
 		return false, nil
@@ -296,7 +317,26 @@ func (c *Client) fetchOneBooklet(ctx context.Context, st State, mbid string, see
 		case errors.Is(err, errUnauthorized):
 			return false, err
 		default:
-			c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_failed", "mbid", mbid, "error", err)
+			// A cancelled ctx here is a normal shutdown, not a fault: the
+			// in-flight PDF fetch fails with context.Canceled and the stamp
+			// below fails the same way, so an ungated pair would put TWO
+			// misleading warnings per in-flight booklet in the journal every
+			// time the bridge stops mid-sweep.
+			//
+			// Gate the LOGS ONLY. The stamp itself is still attempted
+			// unconditionally, and the `return false, nil` still runs —
+			// skipping the stamp is exactly what leaves this row pinned at
+			// the head of the fetch queue. (During shutdown the stamp write
+			// fails anyway, which is fine: nothing is recorded, and the row
+			// is retried on the next tick as before.)
+			if ctx.Err() == nil {
+				c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_failed", "mbid", mbid, "error", err)
+			}
+			if ferr := c.Booklets.MarkBookletFetchFailed(ctx, mbid); ferr != nil {
+				if ctx.Err() == nil {
+					c.log().WarnContext(ctx, "atlasharvest.booklet_mark_fetch_failed", "mbid", mbid, "error", ferr)
+				}
+			}
 			return false, nil
 		}
 	}
@@ -312,7 +352,13 @@ var errBookletGone = errors.New("atlasharvest: booklet gone upstream")
 
 // fetchBookletPDF streams one PDF from Atlas into the file store, capped at
 // maxBookletBytes.
+//
+// The deadline is c.bulkTimeout(), NOT the ack-sized c.requestTimeout(): this
+// body can legitimately run to 64 MiB, and the deferred cancel must outlive
+// WriteBooklet because the transfer happens inside it.
 func (c *Client) fetchBookletPDF(ctx context.Context, st State, mbid string) error {
+	ctx, cancel := context.WithTimeout(ctx, c.bulkTimeout())
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		joinURL(st.AtlasBaseURL, "/v1/atlas/release/"+mbid+"/booklet"), nil)
 	if err != nil {

@@ -73,7 +73,9 @@ const libraryMetaRetryMinInterval = 60 * time.Second
 
 // bookletNudgeCap bounds fetch nudges per retry to the harvest
 // client's priority-channel buffer — extra nudges would be dropped
-// anyway (rows still drain via BookletsToFetch in order).
+// anyway (rows still drain via BookletsToFetch in order, unless they
+// have exhausted maxBookletAttempts, in which case re-running this
+// retry is what re-tries them).
 const bookletNudgeCap = 32
 
 type libraryChildRef struct {

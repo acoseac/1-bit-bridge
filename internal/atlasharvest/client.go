@@ -119,6 +119,15 @@ type Client struct {
 	PollInterval   time.Duration // tick cadence
 	SubmitChunk    int           // artist GIDs per submit POST
 	ResultsLimit   int           // results page size
+
+	// RequestTimeout / BulkTimeout are the PER-REQUEST deadlines, one tier
+	// per payload size: RequestTimeout for the bounded JSON exchanges,
+	// BulkTimeout for a results page or a booklet PDF. Zero = the
+	// defaultHarvest*Timeout defaults, which is what production uses — see
+	// defaultHarvestHTTPClient for why this is two context deadlines rather
+	// than one http.Client.Timeout.
+	RequestTimeout time.Duration
+	BulkTimeout    time.Duration
 }
 
 func (c *Client) now() time.Time {
@@ -135,15 +144,56 @@ func (c *Client) log() *slog.Logger {
 	return slog.Default()
 }
 
-// defaultHarvestHTTPClient carries a finite timeout so the background harvester
-// can't hang forever on an unresponsive Atlas (http.DefaultClient has none).
-var defaultHarvestHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// defaultHarvestHTTPClient deliberately carries NO overall timeout, and must
+// not regain one.
+//
+// http.Client.Timeout caps the ENTIRE exchange INCLUDING the body read, so a
+// single value cannot serve both a small ack and this package's large-payload
+// legs (a results page up to resultsDecodeMaxBytes, a booklet PDF up to
+// maxBookletBytes). Sized for the ack it kills every large transfer
+// permanently — the exact failure internal/updater hit in PR #374, where a 10s
+// poll timeout killed multi-MiB downloads on any link slower than ~1.5 MB/s and
+// the retry walked into the same wall forever. Here it also compounds the
+// booklet queue: a fetch that can't finish inside the cap re-enters the sweep,
+// and a results page approaching its 32 MiB cap stalls the cursor exactly as
+// that constant's own comment warns.
+//
+// Each leg sets its own context.WithTimeout instead, sized to its payload —
+// requestTimeout for the bounded JSON exchanges, bulkTimeout for the two large
+// ones. Mirrors internal/updater's timeout-free download client.
+var defaultHarvestHTTPClient = &http.Client{Timeout: 0}
+
+const (
+	// defaultHarvestRequestTimeout bounds one small JSON exchange (a submit
+	// ack, a booklet-availability verdict — the defaultDecodeMaxBytes legs).
+	defaultHarvestRequestTimeout = 30 * time.Second
+	// defaultHarvestBulkTimeout bounds one large-payload exchange: a harvest
+	// results page (resultsDecodeMaxBytes, 32 MiB) or a booklet PDF
+	// (maxBookletBytes, 64 MiB). 15 min ⇒ a ~73 KB/s floor on the largest
+	// payload — matches the updater's download budget, and is a hang guard
+	// rather than a throughput expectation.
+	defaultHarvestBulkTimeout = 15 * time.Minute
+)
 
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
 	return defaultHarvestHTTPClient
+}
+
+func (c *Client) requestTimeout() time.Duration {
+	if c.RequestTimeout > 0 {
+		return c.RequestTimeout
+	}
+	return defaultHarvestRequestTimeout
+}
+
+func (c *Client) bulkTimeout() time.Duration {
+	if c.BulkTimeout > 0 {
+		return c.BulkTimeout
+	}
+	return defaultHarvestBulkTimeout
 }
 
 func (c *Client) submitInterval() time.Duration {
@@ -430,7 +480,7 @@ func (c *Client) pollResults(ctx context.Context) error {
 		q.Set("since", strconv.FormatInt(st.ResultCursor, 10))
 		q.Set("limit", strconv.Itoa(limit))
 		var resp resultsResponse
-		if err := c.getJSONCapped(ctx, st, "/v1/atlas/harvest/results?"+q.Encode(), &resp, resultsDecodeMaxBytes); err != nil {
+		if err := c.getJSONCapped(ctx, st, "/v1/atlas/harvest/results?"+q.Encode(), &resp, resultsDecodeMaxBytes, c.bulkTimeout()); err != nil {
 			return err
 		}
 		var pendingReleases []string
@@ -513,11 +563,16 @@ const (
 	resultsDecodeMaxBytes = 32 << 20
 )
 
+// postJSON runs one bounded JSON exchange (submit ack, booklet-availability
+// verdict). The deadline covers the body read too, and must therefore outlive
+// c.do — hence the cancel deferred here rather than inside the helper.
 func (c *Client) postJSON(ctx context.Context, st State, path string, body, out any) error {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout())
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, joinURL(st.AtlasBaseURL, path), bytes.NewReader(b))
 	if err != nil {
 		return err
@@ -526,13 +581,16 @@ func (c *Client) postJSON(ctx context.Context, st State, path string, body, out 
 	return c.do(st, req, out)
 }
 
-func (c *Client) getJSON(ctx context.Context, st State, path string, out any) error {
-	return c.getJSONCapped(ctx, st, path, out, defaultDecodeMaxBytes)
-}
-
-// getJSONCapped is getJSON with an explicit decode cap — the results endpoint
-// passes resultsDecodeMaxBytes (a page of full bios can exceed the default).
-func (c *Client) getJSONCapped(ctx context.Context, st State, path string, out any, maxDecodeBytes int64) error {
+// getJSONCapped GETs with an explicit decode cap and a matching deadline. The
+// two travel TOGETHER on purpose: a bigger permitted body needs proportionally
+// longer to arrive. Its one caller today is the results page, which passes
+// resultsDecodeMaxBytes with c.bulkTimeout(); a future small-payload GET
+// should pass defaultDecodeMaxBytes with c.requestTimeout(). (The former
+// getJSON wrapper that paired those defaults had no callers and was dropped
+// rather than widened.)
+func (c *Client) getJSONCapped(ctx context.Context, st State, path string, out any, maxDecodeBytes int64, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(st.AtlasBaseURL, path), nil)
 	if err != nil {
 		return err

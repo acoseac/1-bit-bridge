@@ -24,6 +24,7 @@ type fakeBookletSink struct {
 	missed    map[string]int    // mbid → miss count
 	tags      map[string]string // mbid → last stamped tag
 	fetched   []string
+	failed    []string // MarkBookletFetchFailed calls, in order
 	unavail   []string
 	gcSeen    []string // universes DeleteBookletsNotIn saw
 	gcOrphans []string // what it returns
@@ -34,6 +35,10 @@ type fakeBookletSink struct {
 	// release is left un-marked (and so stays in the check queue).
 	calls        []string
 	failTagStamp bool
+
+	// markFetchFailedErr is returned by MarkBookletFetchFailed under a LIVE
+	// ctx, so a test can prove a genuine stamp failure is still logged.
+	markFetchFailedErr error
 }
 
 func newFakeBookletSink() *fakeBookletSink {
@@ -70,7 +75,7 @@ func (f *fakeBookletSink) SetBookletTagAndBumpIndex(_ context.Context, mbid, tag
 	f.tags[mbid] = tag
 	return 1, nil
 }
-func (f *fakeBookletSink) BookletsToFetch(_ context.Context, limit int) ([]BookletFetchItem, error) {
+func (f *fakeBookletSink) BookletsToFetch(_ context.Context, limit, _ int) ([]BookletFetchItem, error) {
 	if limit < len(f.toFetch) {
 		return f.toFetch[:limit], nil
 	}
@@ -79,6 +84,16 @@ func (f *fakeBookletSink) BookletsToFetch(_ context.Context, limit int) ([]Bookl
 func (f *fakeBookletSink) MarkBookletFetched(_ context.Context, mbid string) error {
 	f.fetched = append(f.fetched, mbid)
 	return nil
+}
+func (f *fakeBookletSink) MarkBookletFetchFailed(ctx context.Context, mbid string) error {
+	f.failed = append(f.failed, mbid)
+	// Mirror the real store: SQLite's ExecContext surfaces the ctx error, so
+	// during shutdown this write fails for every in-flight booklet — which is
+	// exactly what the log-gating branch exists to keep out of the journal.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return f.markFetchFailedErr
 }
 func (f *fakeBookletSink) MarkBookletUnavailable(_ context.Context, mbid string) error {
 	f.unavail = append(f.unavail, mbid)

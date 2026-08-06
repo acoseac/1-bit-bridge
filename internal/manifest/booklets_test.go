@@ -209,7 +209,7 @@ func TestBookletsToCheckAttemptCapAndFetchQueue(t *testing.T) {
 		t.Errorf("under cap 5, to-check = %v, want rel1", got)
 	}
 
-	fetch, err := s.BookletsToFetch(ctx, 10)
+	fetch, err := s.BookletsToFetch(ctx, 10, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestBookletsToCheckAttemptCapAndFetchQueue(t *testing.T) {
 	if err := s.MarkBookletFetched(ctx, bkRel2); err != nil {
 		t.Fatal(err)
 	}
-	fetch, _ = s.BookletsToFetch(ctx, 10)
+	fetch, _ = s.BookletsToFetch(ctx, 10, 8)
 	if len(fetch) != 0 {
 		t.Errorf("to-fetch after mark = %+v, want empty", fetch)
 	}
