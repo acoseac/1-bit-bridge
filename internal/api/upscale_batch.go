@@ -156,6 +156,34 @@ func (s *Server) WithBatchCoordinator(c BatchCoordinator) *Server {
 	return s
 }
 
+// validateUpscaleTarget checks a client-supplied (targetRate,
+// targetBits) pair and returns a user-facing message when it is
+// unusable, or "" when it is fine. It is a LOCKSTEP MIRROR of the
+// guards at the top of `transcode.Coordinator.Submit` — change those
+// and change this, or a rejected value goes back to surfacing as a 500.
+//
+// **Zero means "use the bridge's configured default"**: the cmd/bridge
+// coordinator adapter substitutes the stored admin Settings value for
+// exactly 0, and only for 0. That asymmetry is why an out-of-range
+// value ever reached the coordinator — it is neither the sentinel nor
+// valid.
+//
+// Deliberately NOT applied to `kind: "optimize"`, where PROTOCOL.md
+// documents both fields as ignored (the coordinator derives a
+// family-preserving target per track). Rejecting a field that is
+// documented as ignored would be a behaviour change beyond this fix.
+func validateUpscaleTarget(rate, bits int) string {
+	if rate < 0 {
+		return "targetRate must be a positive sample rate in Hz (or omitted to use the bridge default)"
+	}
+	switch bits {
+	case 0, 16, 24, 32:
+	default:
+		return "targetBits must be 16, 24 or 32 (or omitted to use the bridge default)"
+	}
+	return ""
+}
+
 // upscaleBatchSubmit handles POST /v1/upscale/batch.
 func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	if s.batchCoordinator == nil {
@@ -208,6 +236,16 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	)
 	switch kind {
 	case "", "upscale":
+		// Client-supplied targets are validated HERE, before dispatch.
+		// The coordinator rejects them too, but only with a plain
+		// error, which this handler's single typed arm (disk space)
+		// funnels into a 500 logged at Error — so any authed client
+		// could drive ERROR lines into the operator's log with a
+		// value it can't diagnose from the sanitized response.
+		if msg := validateUpscaleTarget(req.TargetRate, req.TargetBits); msg != "" {
+			writeError(w, http.StatusBadRequest, "bad_request", msg)
+			return
+		}
 		res, err = s.batchCoordinator.Submit(r.Context(), libraryRel, req.TargetRate, req.TargetBits)
 	case "optimize":
 		res, err = s.batchCoordinator.SubmitOptimize(r.Context(), libraryRel)

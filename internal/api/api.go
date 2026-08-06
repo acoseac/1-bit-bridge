@@ -346,18 +346,26 @@ type ManifestProvider interface {
 // upstream failures — so "no track pending + no file on disk" means
 // the enricher took every turn it will ever take.
 //
+// **Every method returns `(bool, error)`, and the error is load-bearing.**
+// A database fault is not an answer — folding it into the bool made the
+// Has* gate fail CLOSED (terminal 404 for artwork sitting on disk) in
+// front of a pending probe that deliberately fails OPEN. Both faults are
+// now classified in one place, `classifyArtworkMiss`, which answers 202
+// on either: a wrong "pending" costs one bounded retry, a wrong terminal
+// 404 costs the image for good.
+//
 // Nil-safe — when `s.mbidProbe` is nil the handlers fall back to the
 // pre-v1.1 behaviour of 404-on-miss. `internal/manifest.Provider`
 // satisfies this interface in production.
 type MBIDProbe interface {
-	HasTrackWithArtworkMBID(ctx context.Context, mbid string) bool
-	HasTrackWithArtistMBID(ctx context.Context, mbid string) bool
+	HasTrackWithArtworkMBID(ctx context.Context, mbid string) (bool, error)
+	HasTrackWithArtistMBID(ctx context.Context, mbid string) (bool, error)
 	// ArtworkMBIDEnrichmentPending reports whether at least one track
 	// carrying the MBID in `artworkMBID` still awaits enrichment.
 	// Only consulted after HasTrackWithArtworkMBID returned true.
-	ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) bool
+	ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error)
 	// ArtistMBIDEnrichmentPending mirrors the above for `artistMBID`.
-	ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) bool
+	ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error)
 }
 
 // UpdaterStatus is the optional interface the /v1/health handler uses

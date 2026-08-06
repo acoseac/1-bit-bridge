@@ -307,6 +307,23 @@ func TestStreamTracksCancelledCtxStopsIteration(t *testing.T) {
 	}
 }
 
+// mbidProbeAsserter returns a helper that unwraps a `(bool, error)`
+// MBID-probe result. Every call below runs against a healthy store, so
+// a non-nil error is a test failure — but the error ARM is the point of
+// the two-value signature: the api's classifyArtworkMiss answers a
+// bounded 202 on a database fault instead of a terminal 404, which a
+// bool-only probe could not express.
+func mbidProbeAsserter(t *testing.T) func(bool, error) bool {
+	t.Helper()
+	return func(got bool, err error) bool {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("MBID probe errored against a healthy store: %v", err)
+		}
+		return got
+	}
+}
+
 // TestStoreHasTrackWithArtworkMBID pins the SQL contract the
 // /v1/artwork 202-vs-404 handler depends on. A track tagged with a
 // given ArtworkMBID reports true; an arbitrary MBID that no track
@@ -315,6 +332,7 @@ func TestStreamTracksCancelledCtxStopsIteration(t *testing.T) {
 func TestStoreHasTrackWithArtworkMBID(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
+	ok := mbidProbeAsserter(t)
 
 	known := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	unknown := "99999999-9999-4999-8999-999999999999"
@@ -324,13 +342,13 @@ func TestStoreHasTrackWithArtworkMBID(t *testing.T) {
 		Artist: "A", Album: "B", ArtworkMBID: known,
 	})
 
-	if !s.HasTrackWithArtworkMBID(context.Background(), known) {
+	if !ok(s.HasTrackWithArtworkMBID(context.Background(), known)) {
 		t.Errorf("known MBID should report true")
 	}
-	if s.HasTrackWithArtworkMBID(context.Background(), unknown) {
+	if ok(s.HasTrackWithArtworkMBID(context.Background(), unknown)) {
 		t.Errorf("unknown MBID should report false")
 	}
-	if s.HasTrackWithArtworkMBID(context.Background(), "") {
+	if ok(s.HasTrackWithArtworkMBID(context.Background(), "")) {
 		t.Errorf("empty MBID should short-circuit to false")
 	}
 }
@@ -338,6 +356,7 @@ func TestStoreHasTrackWithArtworkMBID(t *testing.T) {
 func TestStoreHasTrackWithArtistMBID(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
+	ok := mbidProbeAsserter(t)
 
 	known := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
@@ -346,10 +365,10 @@ func TestStoreHasTrackWithArtistMBID(t *testing.T) {
 		Artist: "A", Album: "B", ArtistMBID: known,
 	})
 
-	if !s.HasTrackWithArtistMBID(context.Background(), known) {
+	if !ok(s.HasTrackWithArtistMBID(context.Background(), known)) {
 		t.Errorf("known artist MBID should report true")
 	}
-	if s.HasTrackWithArtistMBID(context.Background(), "not-a-uuid") {
+	if ok(s.HasTrackWithArtistMBID(context.Background(), "not-a-uuid")) {
 		t.Errorf("unknown artist MBID should report false")
 	}
 }
@@ -365,6 +384,7 @@ func TestStoreMBIDEnrichmentPending(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	defer s.Close()
 	ctx := context.Background()
+	ok := mbidProbeAsserter(t)
 
 	artist := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	release := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -380,34 +400,34 @@ func TestStoreMBIDEnrichmentPending(t *testing.T) {
 	s.UpsertTrack(ctx, t1)
 	s.UpsertTrack(ctx, t2)
 
-	if !s.ArtistMBIDEnrichmentPending(ctx, artist) {
+	if !ok(s.ArtistMBIDEnrichmentPending(ctx, artist)) {
 		t.Errorf("freshly-upserted tracks: artist MBID should report pending")
 	}
-	if !s.ArtworkMBIDEnrichmentPending(ctx, release) {
+	if !ok(s.ArtworkMBIDEnrichmentPending(ctx, release)) {
 		t.Errorf("freshly-upserted tracks: artwork MBID should report pending")
 	}
 
 	if err := s.MarkEnriched(ctx, t1); err != nil {
 		t.Fatalf("MarkEnriched(t1): %v", err)
 	}
-	if !s.ArtistMBIDEnrichmentPending(ctx, artist) {
+	if !ok(s.ArtistMBIDEnrichmentPending(ctx, artist)) {
 		t.Errorf("one of two tracks enriched: should STILL report pending")
 	}
 
 	if err := s.MarkEnriched(ctx, t2); err != nil {
 		t.Fatalf("MarkEnriched(t2): %v", err)
 	}
-	if s.ArtistMBIDEnrichmentPending(ctx, artist) {
+	if ok(s.ArtistMBIDEnrichmentPending(ctx, artist)) {
 		t.Errorf("all tracks enriched: artist MBID should report complete")
 	}
-	if s.ArtworkMBIDEnrichmentPending(ctx, release) {
+	if ok(s.ArtworkMBIDEnrichmentPending(ctx, release)) {
 		t.Errorf("all tracks enriched: artwork MBID should report complete")
 	}
 
-	if s.ArtistMBIDEnrichmentPending(ctx, "99999999-9999-4999-8999-999999999999") {
+	if ok(s.ArtistMBIDEnrichmentPending(ctx, "99999999-9999-4999-8999-999999999999")) {
 		t.Errorf("unreferenced MBID should report not-pending")
 	}
-	if s.ArtistMBIDEnrichmentPending(ctx, "") {
+	if ok(s.ArtistMBIDEnrichmentPending(ctx, "")) {
 		t.Errorf("empty MBID should short-circuit to not-pending")
 	}
 }
