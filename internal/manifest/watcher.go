@@ -119,7 +119,7 @@ func (wt *Watcher) Run(ctx context.Context) error {
 
 	roots := wt.scanner.Roots()
 	for _, root := range roots {
-		if err := wt.addTree(root); err != nil {
+		if err := wt.addTree(root, true); err != nil {
 			watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
 				"root", root, "err", err)
 		}
@@ -148,9 +148,21 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // once per directory — the operator gets one clear signal that
 // the kernel limit needs raising.
 //
-// The dot-directory skip applies to DISCOVERED DESCENDANTS only,
-// never to `root` itself — an operator who configures
-// `/mnt/storage/.music` as a library root means it.
+// `isConfiguredRoot` says whether `root` is an operator-configured
+// library root (Run's startup pass) or a directory the watcher just
+// saw appear at runtime (handleEvent's Create branch). It gates the
+// dot-directory carve-out, and the distinction is load-bearing: the
+// exemption exists so an operator who configures
+// `/mnt/storage/.music` as a library root gets it watched, and it must
+// apply to THAT decision only. Keyed on `path != root` alone it also
+// exempted every runtime-created directory from itself, so a
+// freshly-appeared `.Trashes` / `.stversions` got a watch, a later
+// event under it dispatched ScanSubtree INSIDE it (whose own walker
+// exempts the directory it was pointed at), and its files were indexed
+// as `.Trashes/501/Album/track.flac`. The full Scan never sees those
+// paths — shouldSkipDir prunes them as descendants — so they accrued
+// missing_count and were reaped three scans later, then reappeared:
+// deleted albums cycling in and out of /v1/manifest.
 //
 // **Root-level walk failure surfaces** (CodeRabbit Major post-merge
 // on PR #83): a permission/missing/IO error AT the root path
@@ -161,7 +173,7 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // Now we surface it as an error, and the caller in `Run()` logs
 // "initial watch add failed (partial coverage)" so the operator
 // at least knows.
-func (wt *Watcher) addTree(root string) error {
+func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 	limitHit := false
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -180,16 +192,16 @@ func (wt *Watcher) addTree(root string) error {
 		if !d.IsDir() {
 			return nil
 		}
-		// `path != root` exempts the walk root itself — the same
-		// carve-out the error branch above already makes, one branch
-		// over. Without it a configured root whose basename starts
-		// with a dot (`/mnt/storage/.music`) registers ZERO watches
-		// and addTree returns nil, so the caller's "initial watch add
-		// failed (partial coverage)" warning never fires either: the
-		// library silently loses instant-update coverage with no
-		// operator signal at all. WalkDir hands the callback the
-		// `root` string verbatim, so string identity is exact.
-		if path != root && shouldSkipDir(d.Name()) {
+		// `isConfiguredRoot && path == root` is the ONLY exemption.
+		// Without it a configured root whose basename starts with a dot
+		// (`/mnt/storage/.music`) registers ZERO watches and addTree
+		// returns nil, so the caller's "initial watch add failed
+		// (partial coverage)" warning never fires either: the library
+		// silently loses instant-update coverage with no operator
+		// signal at all. WalkDir hands the callback the `root` string
+		// verbatim, so string identity is exact. A runtime-discovered
+		// directory gets no exemption — see the docblock.
+		if (!isConfiguredRoot || path != root) && shouldSkipDir(d.Name()) {
 			return filepath.SkipDir
 		}
 		if limitHit {
@@ -243,7 +255,11 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 		if info, err := dirStat(ev.Name); err == nil && info.IsDir() {
 			// New subtree under a watched root — start watching it.
 			// Failures are non-fatal (logged inside addTree).
-			_ = wt.addTree(ev.Name)
+			// isConfiguredRoot=false: this directory just appeared, so
+			// it gets no dot-name carve-out — a `.Trashes` that shows
+			// up at runtime must be pruned exactly like one discovered
+			// by the startup walk.
+			_ = wt.addTree(ev.Name, false)
 		}
 	}
 	dir := filepath.Dir(ev.Name)

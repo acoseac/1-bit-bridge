@@ -105,6 +105,25 @@ type Scanner struct {
 	lastFull atomic.Int64 // UnixNano of last successful full scan
 	progress atomic.Int64 // tracks indexed so far during the current scan
 
+	// activeScans counts the Scan / ScanSubtree invocations currently
+	// executing. Both hold s.mu for their whole body so the value is 0
+	// or 1 in practice, but a counter (rather than a bool) keeps the
+	// increment/decrement pairing obvious under the defer.
+	//
+	// It exists because the duplicates sweeper calls RestampDuplicates
+	// WITHOUT s.mu, so its two full-library streams can straddle a scan
+	// that starts after the sweeper's own IsScanning() pre-check passed
+	// — the classic check-then-act gap. The stamping pass re-reads this
+	// immediately before committing and abandons rather than writing a
+	// pre-scan snapshot over the scan's own fresher tail pass.
+	//
+	// Deliberately NOT `scanning` (the public IsScanning): that one is
+	// full-Scan-only and drives the admin badge / SSE gating / booklet
+	// GC skip, and widening it to subtree scans would churn all three.
+	// ScanSubtree writes duplicate stamps too, so the guard needs a
+	// predicate that covers it.
+	activeScans atomic.Int64
+
 	// panickedCnt counts files whose extraction panicked and was
 	// recovered by the per-iteration `defer recover()` in
 	// runScanWorker. Surfaced in the admin Library dashboard
@@ -318,6 +337,38 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		if fn := s.postScanHook.Load(); fn != nil {
 			(*fn)()
 		}
+	}()
+
+	// Marks a scan in flight for the duplicates sweeper's commit-time
+	// guard (see Scanner.activeScans / restampDuplicates).
+	s.activeScans.Add(1)
+	defer s.activeScans.Add(-1)
+
+	// Duplicate stamping is pass #6 of the success tail and runs from a
+	// DEFER rather than inline at the bottom, because "the tail" has
+	// three successful exits, not one: the ctx-done skip and the
+	// routed-exclusion-set failure both `return count, nil` AFTER the
+	// deletion pass has already committed. Reached inline, a reaped
+	// winner would leave its twin stamped `dupe_suppressed = 1` with no
+	// served copy in its group — invisible to every client until the next
+	// full scan. LIFO puts this before the post-scan hook above (stamps
+	// land, then the analysis sweeper is nudged) and before
+	// scanning/unlock (registered earlier), so it still runs inside the
+	// scan's critical section with activeScans held — which is why it
+	// takes the insideScan path and cannot abandon.
+	//
+	// It still runs LAST among the tail passes, so the client-key
+	// grouping sees post-reconciliation tags — that invariant is
+	// structural here rather than positional.
+	//
+	// The ctx-done exit is the one leg this cannot cover: a cancelled
+	// context cannot write, so its stamps stay stale until the next scan
+	// (the startup scan, in the shutdown case that produces it).
+	defer func() {
+		if !scanOK || ctx.Err() != nil {
+			return
+		}
+		s.restampDuplicatesNonFatal(ctx)
 	}()
 
 	// Snapshot of paths we knew about BEFORE this scan. At the end we drop
@@ -704,18 +755,12 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		scanLogger.Info("track-number reconciliation filled missing track numbers", "tracks", n)
 	}
 	// Duplicate stamping runs LAST, after every metadata reconciliation,
-	// so the client-key grouping sees post-reconciliation tags. It does
-	// not take routedSet — its ref stream anti-joins UPnP-routed rows in
-	// SQL — but it deliberately sits behind the same fail-closed early
-	// returns above (ctx done / routed-set failure skip the whole tail;
-	// stamps go stale for one scan, which only ever fails open: unstamped
-	// and stale-served rows are still served). Same non-fatal contract.
-	if n, rErr := s.RestampDuplicates(ctx); rErr != nil {
-		scanLogger.Error("duplicate stamping", "err", rErr)
-	} else if n > 0 {
-		scanLogger.Info("duplicate stamping updated serving stamps", "tracks", n)
-	}
-
+	// so the client-key grouping sees post-reconciliation tags. It is
+	// dispatched by the defer registered at the top of Scan, NOT inline
+	// here — the routed-set failure above returns before this point and
+	// must still restamp, because the deletion pass it already ran can
+	// have reaped a group's served winner. The pass does not take
+	// routedSet: its ref stream anti-joins UPnP-routed rows in SQL.
 	scanOK = true
 	return count, nil
 }
@@ -1204,8 +1249,10 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 // row onto a fresh re-extract, old-wins-only-where-fresh-is-zero. The
 // set is DERIVED from the writers that mutate tags_json after the
 // scanner: MarkEnriched (MusicBrainzAlbumID / ArtworkMBID / ArtistMBID —
-// incl. its markSkipped resolveArtist leg) and the four
-// applyReconciledTracks passes (Album / AlbumArtist / Year /
+// incl. its markSkipped resolveArtist leg), the enricher's acoustic
+// fallback (applyAcousticFallback stamps MusicBrainzTrackID from the
+// AcoustID recording id and commits through the same MarkEnriched), and
+// the four applyReconciledTracks passes (Album / AlbumArtist / Year /
 // TrackNumber). Do NOT pad it with fields no post-scan writer touches
 // (Genre, Composer, DiscNumber, …): those are extractor-owned, and
 // copying old values for them would mask the very extractor changes an
@@ -1214,8 +1261,13 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 // Fresh-non-zero WINS: a re-extract that now finds a `local-` cover
 // overrides a stored CAA UUID (the curated-art-outranks-remote
 // contract), and a tag the file genuinely carries beats a reconciler
-// fill. (MusicBrainzTrackID is deliberately absent: its only writer is
-// the extractor itself — tag-derived, never post-scan.)
+// fill. MusicBrainzTrackID follows the same rule and is NOT
+// extractor-exclusive: the tag path fills it when the file carries a
+// MUSICBRAINZ_TRACKID, and the fingerprint path fills it when the file
+// does not — so omitting it (as this list did until the arm below
+// landed) made every fingerprint-recovered row differ from its stored
+// twin, take the full-upsert leg on an ExtractorVersion bump, and lose
+// the recording MBID plus its enriched_at stamp.
 //
 // Maintenance contract: a future post-scan writer that gains a NEW
 // field must be added here. Missing it makes the merged row DIFFER
@@ -1234,6 +1286,9 @@ func mergePostScanFields(fresh, old *Track) {
 	}
 	if fresh.MusicBrainzAlbumID == "" {
 		fresh.MusicBrainzAlbumID = old.MusicBrainzAlbumID
+	}
+	if fresh.MusicBrainzTrackID == "" {
+		fresh.MusicBrainzTrackID = old.MusicBrainzTrackID
 	}
 	if fresh.Album == "" {
 		fresh.Album = old.Album
@@ -1354,6 +1409,14 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// Same per-scan reset rationale as Scan(): each subtree scan starts
 	// with a fresh folder-art single-flight cache.
 	s.folderArt = sync.Map{}
+
+	// Marks a scan in flight for the duplicates sweeper's commit-time
+	// guard. ScanSubtree deliberately does NOT set `scanning` (that is
+	// full-Scan-only and drives operator-facing surfaces), but it does
+	// write duplicate stamps in its tail, so the sweeper must be able to
+	// see it. See Scanner.activeScans.
+	s.activeScans.Add(1)
+	defer s.activeScans.Add(-1)
 
 	rootsPtr := s.roots.Load()
 	var roots []string
@@ -1639,9 +1702,16 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		}
 		missingTracks = append(missingTracks, p)
 	}
-	deletedTracks, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
-	if derr != nil {
-		scanLogger.Error("subtree missing-count tracks pass", "err", derr, "missing", len(missingTracks))
+	// tracksDelErr / foldersDelErr are deliberately DISTINCT names. They
+	// were both `derr`, and because a short declaration only introduces
+	// the variables that are new, the folders pass below RE-ASSIGNED the
+	// tracks pass's error in the same block — so the restamp gate at the
+	// tail read the wrong one and skipped the pass whenever the tracks
+	// pass failed while the folders pass succeeded. Separate names make
+	// that class of clobber impossible rather than merely fixed.
+	deletedTracks, tracksDelErr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
+	if tracksDelErr != nil {
+		scanLogger.Error("subtree missing-count tracks pass", "err", tracksDelErr, "missing", len(missingTracks))
 	}
 	if len(renamed) > 0 {
 		if err := s.store.DeleteTracksBatch(ctx, renamed); err != nil {
@@ -1662,9 +1732,9 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		}
 		missingFolders = append(missingFolders, p)
 	}
-	deletedFolders, derr := s.store.IncrementMissingFoldersAndDeleteAtThreshold(ctx, missingFolders, threshold)
-	if derr != nil {
-		scanLogger.Error("subtree missing-count folders pass", "err", derr, "missing", len(missingFolders))
+	deletedFolders, foldersDelErr := s.store.IncrementMissingFoldersAndDeleteAtThreshold(ctx, missingFolders, threshold)
+	if foldersDelErr != nil {
+		scanLogger.Error("subtree missing-count folders pass", "err", foldersDelErr, "missing", len(missingFolders))
 	}
 	if sparedTracks > 0 || sparedFolders > 0 {
 		scanLogger.Warn("subtree scan spared rows from deletion pass (parent walk error)",
@@ -1675,6 +1745,41 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			"tracks_missing", len(missingTracks), "tracks_deleted", deletedTracks,
 			"folders_missing", len(missingFolders), "folders_deleted", deletedFolders,
 			"threshold", threshold)
+	}
+
+	// Duplicate stamping, same tail position as the full Scan. A subtree
+	// scan mutates exactly the two inputs the stamps are derived from:
+	// its upserts can retag a row out of (or into) a group — and the
+	// upserts deliberately leave the v31 dupe columns alone, on the
+	// stated premise that "the full-scan tail runs in the SAME scan as
+	// these upserts", which is true of Scan and was never true here — and
+	// its bounded deletion pass can reap a group's served winner. Without
+	// this pass a row that stopped being a duplicate kept
+	// `dupe_suppressed = 1` and stayed invisible to every client until
+	// the next full scan, up to ScanIntervalSec (6h by default) away.
+	//
+	// Whole-library, like Scan's, NOT subtree-scoped: duplicates group
+	// ACROSS directories, so an election run inside one subtree cannot
+	// see the twin that lives in another. But the pass is two full-table
+	// json_extract streams (the StreamTrackDupeRefsUnderPrefix cost
+	// class), and unlike Scan this runs per debounced watcher event — so
+	// it is gated on the scan having actually touched a row. The stamps
+	// derive only from `tracks`: if this scan committed nothing and reaped
+	// nothing, no input to them moved, and the periodic full Scan remains
+	// the safety net for staleness from anywhere else.
+	//
+	// The error term is the TRACKS pass's specifically. The folders pass
+	// writes a different table that is not an input to the stamps at all,
+	// so its failure says nothing about their staleness — and it is the
+	// one the gate used to read, back when both errors shared the name
+	// `derr`. A tracks-pass error opens the gate because this caller
+	// cannot see how far that pass got: today it is one transaction that
+	// rolls back whole, but the gate must not depend on the store keeping
+	// that shape, and the cost of being wrong in this direction is one
+	// DB-only pass against leaving a group with no served member.
+	// Non-fatal.
+	if committed.Load() > 0 || deletedTracks > 0 || len(renamed) > 0 || tracksDelErr != nil {
+		s.restampDuplicatesNonFatal(ctx)
 	}
 
 	return int(committed.Load()), nil

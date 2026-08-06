@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // newWatcherFixture stands up a library directory, a store, and a
@@ -320,4 +323,60 @@ func TestWatcherWatchesDotNamedLibraryRoot(t *testing.T) {
 
 	waitForTrack(t, store, "no watch registered for a dot-named library root: "+
 		"the dropped file never reached the manifest")
+}
+
+// A dot-directory that appears at RUNTIME gets no carve-out — the
+// exemption belongs to operator-configured roots only.
+//
+// handleEvent's Create branch calls addTree with the just-created
+// directory as its `root`, so the old `path != root` form exempted every
+// such directory from itself: a `.Trashes` / `.stversions` that showed up
+// under a watched library got a watch, a later event under it dispatched
+// ScanSubtree INSIDE it (whose own walker exempts the directory it was
+// pointed at), and its files were indexed as
+// `.Trashes/501/Album/track.flac`. The full Scan never sees those paths —
+// shouldSkipDir prunes them as descendants — so they accrued
+// missing_count, were reaped three scans later, and reappeared on the
+// next drop: deleted albums cycling in and out of /v1/manifest.
+//
+// Driven through handleEvent rather than a raw addTree call so the
+// wiring (which caller passes which intent) is what's pinned. WatchList
+// is the assertion because "is a watch registered here" is exactly the
+// decision under test; everything downstream follows from it.
+func TestWatcherRuntimeDotDirGetsNoRootExemption(t *testing.T) {
+	libDir, _, w := newWatcherFixture(t, "Music", time.Hour)
+	t.Cleanup(func() {
+		w.cancelAllPending()
+		_ = w.w.Close()
+	})
+
+	trash := filepath.Join(libDir, ".Trashes")
+	if err := os.MkdirAll(filepath.Join(trash, "501"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The watcher sees the directory appear under an already-watched root.
+	w.handleEvent(context.Background(), fsnotify.Event{Name: trash, Op: fsnotify.Create})
+
+	for _, p := range w.w.WatchList() {
+		if p == trash || strings.HasPrefix(p, trash+string(os.PathSeparator)) {
+			t.Fatalf("watch registered inside a runtime-created dot-directory: %q "+
+				"— events from there dispatch ScanSubtree into it and index its files", p)
+		}
+	}
+
+	// Contrast, and the reason the parameter exists rather than a blanket
+	// skip: the same directory AS a configured root is still watched.
+	if err := w.addTree(trash, true); err != nil {
+		t.Fatalf("addTree(configured root): %v", err)
+	}
+	var watched bool
+	for _, p := range w.w.WatchList() {
+		if p == trash {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Error("a dot-named CONFIGURED root must still be watched")
+	}
 }
