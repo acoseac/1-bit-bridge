@@ -19,7 +19,7 @@ import (
 // TestPlatformCheck — we only ship darwin/linux/windows × amd64/arm64.
 // The host we run on should always match.
 func TestPlatformCheck(t *testing.T) {
-	c := checkPlatform(Deps{})
+	c := checkPlatform(t.Context(), Deps{})
 	if c.Status != OK {
 		t.Errorf("platform %s/%s should be ok, got %v: %s",
 			runtime.GOOS, runtime.GOARCH, c.Status, c.Summary)
@@ -28,7 +28,7 @@ func TestPlatformCheck(t *testing.T) {
 
 func TestConfigDirCheck_Writable(t *testing.T) {
 	dir := t.TempDir()
-	c := checkConfigDir(Deps{ConfigDir: dir})
+	c := checkConfigDir(t.Context(), Deps{ConfigDir: dir})
 	if c.Status != OK {
 		t.Errorf("writable temp dir: %v %s", c.Status, c.Hint)
 	}
@@ -47,7 +47,7 @@ func TestConfigDirCheck_ReadOnlyFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
-	c := checkConfigDir(Deps{ConfigDir: ro})
+	c := checkConfigDir(t.Context(), Deps{ConfigDir: ro})
 	if c.Status != Fail {
 		t.Errorf("read-only dir should fail, got %v", c.Status)
 	}
@@ -55,7 +55,7 @@ func TestConfigDirCheck_ReadOnlyFails(t *testing.T) {
 
 func TestTLSCertCheck_Absent(t *testing.T) {
 	// Fresh DataDir — no cert exists yet. That's ok (init mints).
-	c := checkTLSCert(Deps{DataDir: t.TempDir()})
+	c := checkTLSCert(t.Context(), Deps{DataDir: t.TempDir()})
 	if c.Status != OK {
 		t.Errorf("absent cert should be ok (init mints), got %v %s", c.Status, c.Summary)
 	}
@@ -73,7 +73,7 @@ func TestTLSCertCheck_PartialStateFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "server.crt"), []byte("stub"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := checkTLSCert(Deps{DataDir: dir})
+	c := checkTLSCert(t.Context(), Deps{DataDir: dir})
 	if c.Status != Fail {
 		t.Errorf("partial cert state should fail, got %v %s", c.Status, c.Summary)
 	}
@@ -82,7 +82,7 @@ func TestTLSCertCheck_PartialStateFails(t *testing.T) {
 func TestPortCheck_FreePasses(t *testing.T) {
 	// Find a free port, tell doctor about it, expect ok.
 	port := mustFreePort(t)
-	c := checkPort("port-test", port, "")
+	c := checkPort(t.Context(), "port-test", port, "")
 	if c.Status != OK {
 		t.Errorf("free port %d: %v %s", port, c.Status, c.Summary)
 	}
@@ -100,7 +100,7 @@ func TestPortCheck_BusyFailsWithoutOwnPID(t *testing.T) {
 	}
 	defer lis.Close()
 	addr := lis.Addr().(*net.TCPAddr)
-	c := checkPort("port-test", addr.Port, "")
+	c := checkPort(t.Context(), "port-test", addr.Port, "")
 	if c.Status != Fail {
 		t.Errorf("bound port %d without own-pidfile (probe available): got %v, want fail", addr.Port, c.Status)
 	}
@@ -128,7 +128,7 @@ func TestPortCheck_BusyProbeUnavailableWarns(t *testing.T) {
 	}
 	defer lis.Close()
 	addr := lis.Addr().(*net.TCPAddr)
-	c := checkPort("port-test", addr.Port, "")
+	c := checkPort(t.Context(), "port-test", addr.Port, "")
 	if c.Status != Warn {
 		t.Errorf("bound port %d with probe unavailable: got %v, want warn", addr.Port, c.Status)
 	}
@@ -146,7 +146,7 @@ func TestPortCheck_NonAddrInUseErrorWarns(t *testing.T) {
 	listenFunc = func(network, address string) (net.Listener, error) {
 		return nil, &net.OpError{Op: "listen", Net: network, Err: os.NewSyscallError("bind", syscall.EACCES)}
 	}
-	c := checkPort("port-test", 443, "")
+	c := checkPort(t.Context(), "port-test", 443, "")
 	if c.Status != Warn {
 		t.Errorf("non-EADDRINUSE bind error: got %q (%s / %s), want warn", c.Status, c.Summary, c.Hint)
 	}
@@ -199,7 +199,7 @@ func TestPortCheck_AddrInUseStillReachesOwnerProbe(t *testing.T) {
 	listenFunc = func(network, address string) (net.Listener, error) {
 		return nil, &net.OpError{Op: "listen", Net: network, Err: os.NewSyscallError("bind", syscall.EADDRINUSE)}
 	}
-	c := checkPort("port-test", 7788, "")
+	c := checkPort(t.Context(), "port-test", 7788, "")
 	if c.Status != Fail {
 		t.Errorf("EADDRINUSE (probe available, no ownPID): got %q (%s), want fail", c.Status, c.Summary)
 	}
@@ -229,14 +229,14 @@ func TestPortCheck_OwnPIDMatches(t *testing.T) {
 	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := checkPort("port-test", addr.Port, pidFile)
+	c := checkPort(t.Context(), "port-test", addr.Port, pidFile)
 	if c.Status != OK {
 		t.Errorf("own-pid bind should be ok, got %v %s (hint: %s)", c.Status, c.Summary, c.Hint)
 	}
 }
 
 func TestLibraryRootsCheck_MissingFails(t *testing.T) {
-	c := checkLibraryRoots(Deps{LibraryRoots: []string{"/does/not/exist"}})
+	c := checkLibraryRoots(t.Context(), Deps{LibraryRoots: []string{"/does/not/exist"}})
 	if c.Status != Fail {
 		t.Errorf("missing root should fail, got %v", c.Status)
 	}
@@ -244,7 +244,7 @@ func TestLibraryRootsCheck_MissingFails(t *testing.T) {
 
 func TestLibraryRootsCheck_EmptyWarns(t *testing.T) {
 	dir := t.TempDir() // freshly-empty
-	c := checkLibraryRoots(Deps{LibraryRoots: []string{dir}})
+	c := checkLibraryRoots(t.Context(), Deps{LibraryRoots: []string{dir}})
 	if c.Status != Warn {
 		t.Errorf("empty root should warn, got %v", c.Status)
 	}
@@ -258,7 +258,7 @@ func TestLibraryRootsCheck_PopulatedOK(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "track.flac"), []byte{0}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c := checkLibraryRoots(Deps{LibraryRoots: []string{dir}})
+	c := checkLibraryRoots(t.Context(), Deps{LibraryRoots: []string{dir}})
 	if c.Status != OK {
 		t.Errorf("populated root should be ok, got %v: %s", c.Status, c.Hint)
 	}
@@ -267,7 +267,7 @@ func TestLibraryRootsCheck_PopulatedOK(t *testing.T) {
 func TestLibraryRootsCheck_SkipsWhenEmpty(t *testing.T) {
 	// No roots configured → ok (init will prompt). This matters for
 	// first-run: `bridge doctor` is useful even before init.
-	c := checkLibraryRoots(Deps{})
+	c := checkLibraryRoots(t.Context(), Deps{})
 	if c.Status != OK {
 		t.Errorf("no roots should be ok, got %v", c.Status)
 	}
@@ -278,7 +278,7 @@ func TestLibraryRootsCheck_SkipsWhenEmpty(t *testing.T) {
 // the check is a quiet OK and never probes for sox. This is the load-bearing
 // guarantee that a minimal install isn't told to install an optional dep.
 func TestCheckAudioToolchain_NotEnabled(t *testing.T) {
-	c := checkAudioToolchain(Deps{})
+	c := checkAudioToolchain(t.Context(), Deps{})
 	if c.Status != OK {
 		t.Errorf("disabled features should be ok, got %v: %s", c.Status, c.Summary)
 	}
@@ -296,7 +296,7 @@ func TestCheckAudioToolchain_NotEnabled(t *testing.T) {
 // parse/probe logic itself is pinned deterministically in
 // internal/transcode (probe_sox_test.go).
 func TestCheckAudioToolchain_EnabledReflectsHostSox(t *testing.T) {
-	c := checkAudioToolchain(Deps{UpscaleEnabled: true})
+	c := checkAudioToolchain(t.Context(), Deps{UpscaleEnabled: true})
 	if strings.Contains(c.Summary, "not enabled") {
 		t.Errorf("enabled feature must produce a real verdict, got no-op: %q", c.Summary)
 	}
@@ -315,7 +315,7 @@ func TestRun_FullReportShape(t *testing.T) {
 	_ = os.MkdirAll(lib, 0o755)
 	_ = os.WriteFile(filepath.Join(lib, "a.flac"), []byte{0}, 0o644)
 
-	r := Run(Deps{
+	r := Run(t.Context(), Deps{
 		ConfigDir:    filepath.Join(dir, "cfg"),
 		DataDir:      filepath.Join(dir, "data"),
 		LibraryRoots: []string{lib},
@@ -362,7 +362,7 @@ func mustFreePort(t *testing.T) int {
 // anywhere saying why.
 func TestCheckFingerprintToolchain(t *testing.T) {
 	t.Run("disabled is a no-op", func(t *testing.T) {
-		c := checkFingerprintToolchain(Deps{FingerprintEnabled: false})
+		c := checkFingerprintToolchain(t.Context(), Deps{FingerprintEnabled: false})
 		if c.Status != OK {
 			t.Fatalf("status = %v, want OK — a host that will never fingerprint must not be nagged", c.Status)
 		}
@@ -375,7 +375,7 @@ func TestCheckFingerprintToolchain(t *testing.T) {
 		if _, err := acoustid.Probe(context.Background()); err != nil {
 			t.Skip("fpcalc not installed; this case needs a working binary to reach the key check")
 		}
-		c := checkFingerprintToolchain(Deps{FingerprintEnabled: true, FingerprintHasAPIKey: false})
+		c := checkFingerprintToolchain(t.Context(), Deps{FingerprintEnabled: true, FingerprintHasAPIKey: false})
 		if c.Status != Fail {
 			t.Fatalf("status = %v, want Fail", c.Status)
 		}
@@ -392,7 +392,7 @@ func TestCheckFingerprintToolchain(t *testing.T) {
 		if _, err := acoustid.Probe(context.Background()); err != nil {
 			t.Skip("fpcalc not installed")
 		}
-		c := checkFingerprintToolchain(Deps{FingerprintEnabled: true, FingerprintHasAPIKey: true})
+		c := checkFingerprintToolchain(t.Context(), Deps{FingerprintEnabled: true, FingerprintHasAPIKey: true})
 		if c.Status != OK {
 			t.Fatalf("status = %v, want OK: %s / %s", c.Status, c.Summary, c.Hint)
 		}
@@ -417,7 +417,7 @@ func TestCheckPortDetectsIPv6OnlyBinding(t *testing.T) {
 		return prev(network, "127.0.0.1:0") // IPv4 is free
 	}
 
-	c := checkPort("api", 7788, "")
+	c := checkPort(t.Context(), "api", 7788, "")
 	if c.Status == OK {
 		t.Fatalf("checkPort = %s (%q), want not-OK — the port is held on "+
 			"IPv6 and binding only 127.0.0.1 cannot see it", c.Status, c.Summary)
@@ -439,7 +439,7 @@ func TestCheckPortIPv6UnavailableIsStillFree(t *testing.T) {
 		return prev(network, "127.0.0.1:0")
 	}
 
-	c := checkPort("api", 7788, "")
+	c := checkPort(t.Context(), "api", 7788, "")
 	if c.Status != OK {
 		t.Errorf("checkPort = %s (%q), want OK — a v4-only host must not "+
 			"report its free port as a problem", c.Status, c.Summary)

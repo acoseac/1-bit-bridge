@@ -3,6 +3,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -140,7 +141,14 @@ var (
 // listener tables natively via iphlpapi.dll (no shell-out). The error
 // return signals a probe-MECHANISM failure (DLL/proc can't load, or the
 // API errors) so checkPort degrades to Warn rather than a hard Fail.
-func isPIDListeningOnPort(port, targetPID int) (bool, error) {
+//
+// The context is accepted for signature parity with the unix twin and goes
+// unused: there is no subprocess to bound here, and GetExtendedTcpTable is
+// an in-memory kernel table read with no blocking failure mode to guard
+// against. Keeping the parameter means the caller has one shape to reason
+// about — and means a future Windows probe that DOES block has the context
+// already in hand.
+func isPIDListeningOnPort(_ context.Context, port, targetPID int) (bool, error) {
 	// Resolve the proc explicitly: LazyProc.Call panics if Find fails, so
 	// a missing/blocked iphlpapi.dll must be turned into an error here.
 	if err := procGetExtendedTcp.Find(); err != nil {

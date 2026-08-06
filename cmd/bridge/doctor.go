@@ -38,7 +38,13 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	d := buildDoctorDeps(*cfgPath)
-	report := doctor.Run(d)
+	// The CLI is a short-lived foreground process with no signal-wired
+	// scope to inherit, so Background is honest here — what actually
+	// bounds this run is doctor's own per-subprocess deadline, which is
+	// the fix that matters for the CLI: pre-deadline, `bridge doctor` on
+	// a host with a wedged network mount hung in lsof with no output.
+	ctx := context.Background()
+	report := doctor.Run(ctx, d)
 
 	if *doFix {
 		// Best-effort remediation. The set of safely auto-fixable
@@ -56,7 +62,7 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 		}
 		runFixes(fixOut, &report, d)
 		// Re-run the checks so the displayed status matches reality.
-		report = doctor.Run(d)
+		report = doctor.Run(ctx, d)
 	}
 
 	if *jsonOut {
@@ -316,7 +322,10 @@ func badgeForStatus(s doctor.Status) string {
 //
 // Caller decides the exit action — we just return the code.
 func ensureDoctorClean(w io.Writer, d doctor.Deps) int {
-	report := doctor.Run(d)
+	// Background for the same reason as doctorCmd: `bridge init` is a
+	// short-lived foreground process, and the per-subprocess deadline
+	// inside doctor is what keeps a wedged mount from hanging preflight.
+	report := doctor.Run(context.Background(), d)
 	if report.HasFail() {
 		printReport(w, report)
 		return 1
@@ -339,10 +348,10 @@ var _ = os.Stdin
 // probe — which is not merely faster: in-process the probe can only
 // fail, because the port really is in use, by us.
 func adminDoctorRunner(cfgPath string, ownedPorts []int) func(context.Context) *admin.DoctorReport {
-	return func(_ context.Context) *admin.DoctorReport {
+	return func(ctx context.Context) *admin.DoctorReport {
 		d := buildDoctorDeps(cfgPath)
 		d.OwnedPorts = ownedPorts
-		rep := doctor.Run(d)
+		rep := doctor.Run(ctx, d)
 		out := &admin.DoctorReport{
 			Checks: make([]admin.DoctorCheck, 0, len(rep.Checks)),
 			OK:     rep.OKCount(),

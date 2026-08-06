@@ -18,11 +18,28 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
+
+// probeTimeout bounds every subprocess this package spawns, wrapped around
+// the INCOMING context so a caller's cancellation aborts early while the cap
+// still applies to a background-context caller.
+//
+// The two toolchain checks already had this via transcode.ProbeSox /
+// acoustid.Probe (both 2 s, both ctx-wrapping); the value is repeated here
+// for the two sites that shell out directly — `systemctl --user
+// show-environment` and lsof. Neither had ANY bound: a user systemd/DBus
+// session that stops answering blocked `GET /api/doctor`'s goroutine past
+// client disconnect (the admin http.Server deliberately sets no
+// WriteTimeout, so nothing reaps it), and lsof stat()s mount points while
+// building its device cache, so a wedged network mount — the shape of the
+// rclone FUSE mount on the production VPS — hung `bridge doctor` with no
+// output at all.
+const probeTimeout = 2 * time.Second
 
 // Status is the outcome of a single check.
 type Status string
@@ -146,8 +163,16 @@ func (r *Report) count(s Status) int {
 func (r *Report) HasFail() bool { return r.FailCount() > 0 }
 
 // Run executes every check against d and returns the report.
-func Run(d Deps) Report {
-	checks := []func(Deps) Check{
+//
+// EVERY check takes the context, including the ones that have nothing to do
+// with it today. The alternative — ctx only where it's currently needed —
+// makes adding a check that shells out a two-step change, and the step
+// that's easy to miss is the one that matters: half the checks here exec
+// something, and the failure mode of forgetting is an unbounded hang on a
+// request-path goroutine, which is exactly the bug this signature exists to
+// close.
+func Run(ctx context.Context, d Deps) Report {
+	checks := []func(context.Context, Deps) Check{
 		checkPlatform,
 		checkConfigDir,
 		checkTLSCert,
@@ -162,14 +187,14 @@ func Run(d Deps) Report {
 	}
 	out := make([]Check, 0, len(checks))
 	for _, fn := range checks {
-		out = append(out, fn(d))
+		out = append(out, fn(ctx, d))
 	}
 	return Report{Checks: out}
 }
 
 // --- individual checks ---
 
-func checkPlatform(d Deps) Check {
+func checkPlatform(_ context.Context, d Deps) Check {
 	// Everything we ship a binary for.
 	supportedOS := map[string]bool{"darwin": true, "linux": true, "windows": true}
 	supportedArch := map[string]bool{"amd64": true, "arm64": true}
@@ -181,7 +206,7 @@ func checkPlatform(d Deps) Check {
 		"bridge ships binaries for darwin/linux/windows on amd64 or arm64; other combos must build from source")
 }
 
-func checkConfigDir(d Deps) Check {
+func checkConfigDir(_ context.Context, d Deps) Check {
 	dir := d.ConfigDir
 	if dir == "" {
 		return warn(checkNameConfigDir, "no config dir set", "pass Deps.ConfigDir so doctor can verify write access")
@@ -203,7 +228,7 @@ func checkConfigDir(d Deps) Check {
 	return ok(checkNameConfigDir, dir)
 }
 
-func checkTLSCert(d Deps) Check {
+func checkTLSCert(_ context.Context, d Deps) Check {
 	if d.DataDir == "" {
 		return warn(checkNameTLSCert, "no data dir set",
 			"pass Deps.DataDir so doctor can inspect cert state")
@@ -227,18 +252,18 @@ func checkTLSCert(d Deps) Check {
 	}
 }
 
-func checkAPIPort(d Deps) Check {
+func checkAPIPort(ctx context.Context, d Deps) Check {
 	if owned := ownedPortCheck("port-api", d.APIPort, d.OwnedPorts); owned != nil {
 		return *owned
 	}
-	return checkPort("port-api", d.APIPort, d.OwnPIDFile)
+	return checkPort(ctx, "port-api", d.APIPort, d.OwnPIDFile)
 }
 
-func checkAdminPort(d Deps) Check {
+func checkAdminPort(ctx context.Context, d Deps) Check {
 	if owned := ownedPortCheck("port-admin", d.AdminPort, d.OwnedPorts); owned != nil {
 		return *owned
 	}
-	return checkPort("port-admin", d.AdminPort, d.OwnPIDFile)
+	return checkPort(ctx, "port-admin", d.AdminPort, d.OwnPIDFile)
 }
 
 // ownedPortCheck short-circuits a port check the caller has told us it
@@ -301,7 +326,7 @@ func probeBind(addr string) error {
 // wildcard bind. The loopback-only probe is deliberate: the admin port
 // binds loopback, so a wildcard probe here would false-fail it whenever
 // any unrelated service holds the same port on another interface.
-func checkPort(name string, port int, ownPIDFile string) Check {
+func checkPort(ctx context.Context, name string, port int, ownPIDFile string) Check {
 	if port == 0 {
 		return warn(name, "no port set", "pass Deps."+name+"Port")
 	}
@@ -354,7 +379,7 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 	// Port is in use. Is it us?
 	if ownPIDFile != "" {
 		if ownPID, readErr := readPID(ownPIDFile); readErr == nil && ownPID > 0 {
-			found, probeErr := isPIDListeningOnPort(port, ownPID)
+			found, probeErr := isPIDListeningOnPort(ctx, port, ownPID)
 			switch {
 			case probeErr != nil:
 				// The probe MECHANISM failed (e.g. an antivirus blocked
@@ -416,7 +441,7 @@ func checkPort(name string, port int, ownPIDFile string) Check {
 		"another process owns this port; stop it or pick a different address in bridge.yaml")
 }
 
-func checkLibraryRoots(d Deps) Check {
+func checkLibraryRoots(_ context.Context, d Deps) Check {
 	if len(d.LibraryRoots) == 0 {
 		return ok(checkNameLibraryRoots, "none configured (init will prompt)")
 	}
@@ -454,7 +479,7 @@ func checkLibraryRoots(d Deps) Check {
 	return ok(checkNameLibraryRoots, fmt.Sprintf("%d root(s) reachable", len(d.LibraryRoots)))
 }
 
-func checkServiceManager(d Deps) Check {
+func checkServiceManager(ctx context.Context, d Deps) Check {
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("launchctl"); err != nil {
@@ -466,8 +491,32 @@ func checkServiceManager(d Deps) Check {
 		// A user-level systemd install needs a DBus session. Detect by
 		// running `systemctl --user show-environment`; it prints
 		// something only if the user-bus is reachable.
-		cmd := exec.Command("systemctl", "--user", "show-environment")
+		//
+		// CommandContext-bounded: an unresponsive (as opposed to absent)
+		// systemd/DBus session leaves this blocked indefinitely, and the
+		// admin console reaches it from a request goroutine that nothing
+		// else reaps.
+		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(probeCtx, "systemctl", "--user", "show-environment")
 		if err := cmd.Run(); err != nil {
+			// THREE distinct outcomes, not two. `probeCtx.Err()` is
+			// non-nil for a caller cancellation as well as for the local
+			// deadline, so keying the message off it alone reports a
+			// wedged DBus session "after 2s" when the admin client
+			// actually disconnected at 50ms. Check the INCOMING ctx
+			// first — an aborted probe learned nothing about systemd and
+			// must not claim otherwise.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return warn(checkNameServiceManager, "systemd probe aborted",
+					"the probe was cancelled before it finished ("+ctxErr.Error()+
+						"); this says nothing about the systemd session — re-run when the caller isn't going away")
+			}
+			if probeCtx.Err() != nil {
+				return warn(checkNameServiceManager, "systemd probe timed out",
+					"`systemctl --user show-environment` did not answer within "+probeTimeout.String()+
+						"; the user DBus session may be wedged — check `systemctl --user status`")
+			}
 			return warn(checkNameServiceManager, "no user systemd session",
 				"headless session? use `bridge init --no-service` and run `bridge serve` yourself")
 		}
@@ -489,7 +538,7 @@ func checkServiceManager(d Deps) Check {
 	}
 }
 
-func checkBrowserOpener(d Deps) Check {
+func checkBrowserOpener(_ context.Context, d Deps) Check {
 	var candidates []string
 	switch runtime.GOOS {
 	case "darwin":
@@ -520,11 +569,11 @@ func checkBrowserOpener(d Deps) Check {
 // hard-to-diagnose failure. ProbeSox's FormatsKnown lets us stay
 // conservative: a confirmed FLAC-absence fails the check; an unparseable
 // `sox --help` is treated as "FLAC present" rather than crying wolf.
-func checkAudioToolchain(d Deps) Check {
+func checkAudioToolchain(ctx context.Context, d Deps) Check {
 	if !d.UpscaleEnabled && !d.AnalysisEnabled {
 		return ok(checkNameAudioToolchain, "not enabled (sox not required)")
 	}
-	info, err := transcode.ProbeSox(context.Background())
+	info, err := transcode.ProbeSox(ctx)
 	if err != nil {
 		if errors.Is(err, transcode.ErrSoxMissing) {
 			return fail(checkNameAudioToolchain, "sox not found",
@@ -555,11 +604,11 @@ func checkAudioToolchain(d Deps) Check {
 // Mirrors checkAudioToolchain's shape, including the no-op when the feature is
 // off — a host that will never fingerprint should not be nagged about a binary
 // it does not need.
-func checkFingerprintToolchain(d Deps) Check {
+func checkFingerprintToolchain(ctx context.Context, d Deps) Check {
 	if !d.FingerprintEnabled {
 		return ok(checkNameFingerprint, "not enabled (fpcalc not required)")
 	}
-	info, err := acoustid.Probe(context.Background())
+	info, err := acoustid.Probe(ctx)
 	if err != nil {
 		if errors.Is(err, acoustid.ErrFpcalcMissing) {
 			return fail(checkNameFingerprint, "fpcalc not found",
@@ -670,6 +719,11 @@ func windowsStartupDir() string {
 // the native iphlpapi.dll implementation in doctor_windows.go. The "is it
 // us?" branch of checkPort calls them; see their per-platform docs for the
 // (found, error) contract.
+//
+// isPIDListeningOnPort takes the context on BOTH platforms even though only
+// the unix one spawns a subprocess to bound. One signature keeps the caller
+// from having to know which platform can hang, and hands the next
+// implementation the context already.
 
 // pidAliveFunc and portOwnerFunc indirect the two platform-provided probes
 // that back checkPort's last-resort attribution arms, so tests can drive

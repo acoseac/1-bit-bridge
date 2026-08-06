@@ -56,7 +56,7 @@ func TestIsPIDListeningOnPort_Windows(t *testing.T) {
 	defer lis.Close()
 	port := lis.Addr().(*net.TCPAddr).Port
 
-	found, perr := isPIDListeningOnPort(port, os.Getpid())
+	found, perr := isPIDListeningOnPort(t.Context(), port, os.Getpid())
 	if perr != nil {
 		t.Fatalf("probe errored: %v", perr)
 	}
@@ -77,7 +77,7 @@ func TestIsPIDListeningOnPort_WindowsFreePort(t *testing.T) {
 	port := lis.Addr().(*net.TCPAddr).Port
 	_ = lis.Close()
 
-	found, perr := isPIDListeningOnPort(port, os.Getpid())
+	found, perr := isPIDListeningOnPort(t.Context(), port, os.Getpid())
 	if perr != nil {
 		t.Fatalf("probe errored: %v", perr)
 	}

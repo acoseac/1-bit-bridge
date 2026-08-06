@@ -337,12 +337,15 @@ func TestPruneKeepsMostRecent(t *testing.T) {
 		time.Sleep(1100 * time.Millisecond)
 	}
 
-	deleted, err := backup.Prune(backupsRoot, 3)
+	res, err := backup.Prune(backupsRoot, 3)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if deleted != 2 {
-		t.Errorf("Prune deleted %d, want 2", deleted)
+	if res.ReapErr != nil {
+		t.Errorf("Prune orphan sweep: %v", res.ReapErr)
+	}
+	if res.Deleted != 2 {
+		t.Errorf("Prune deleted %d, want 2", res.Deleted)
 	}
 
 	remaining, err := backup.List(backupsRoot)
@@ -378,12 +381,12 @@ func TestPruneNonPositiveKeepIsNoOp(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	for _, keep := range []int{0, -1, -100} {
-		deleted, err := backup.Prune(backupsRoot, keep)
+		res, err := backup.Prune(backupsRoot, keep)
 		if err != nil {
 			t.Fatalf("Prune(keep=%d): %v", keep, err)
 		}
-		if deleted != 0 {
-			t.Errorf("Prune(keep=%d) deleted %d, want 0", keep, deleted)
+		if res.Deleted != 0 {
+			t.Errorf("Prune(keep=%d) deleted %d, want 0", keep, res.Deleted)
 		}
 	}
 }
@@ -423,7 +426,7 @@ func TestPruneIsBestEffortPastALockedDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 
-	deleted, err := backup.Prune(backupsRoot, 1)
+	res, err := backup.Prune(backupsRoot, 1)
 
 	// Root bypasses the perm bits — if the removal succeeded anyway the
 	// failure injection didn't take; skip rather than assert falsely (same
@@ -434,8 +437,8 @@ func TestPruneIsBestEffortPastALockedDir(t *testing.T) {
 
 	// Best-effort: the other eligible dir was still reclaimed even though
 	// the locked one failed.
-	if deleted != 1 {
-		t.Errorf("Prune deleted %d, want 1 (the removable old dir)", deleted)
+	if res.Deleted != 1 {
+		t.Errorf("Prune deleted %d, want 1 (the removable old dir)", res.Deleted)
 	}
 	if !pathExists(t, locked) {
 		t.Errorf("locked dir %q should have survived the failed removal", locked)
@@ -608,6 +611,138 @@ func TestPruneReapsCrashOrphans(t *testing.T) {
 	}
 	if !pathExists(t, valid) {
 		t.Error("Prune reaped a valid snapshot")
+	}
+}
+
+// TestPruneReportsOrphanSweepFailureSeparately pins the split between
+// "the prune failed" and "the orphan sweep saw something it can't act on".
+//
+// A directory whose manifest.json is unreadable (here: truncated, the exact
+// residue a crash partway through a non-atomic manifest write used to leave)
+// is one ReapOrphans deliberately keeps and reports. That condition is
+// PERMANENT for as long as the directory exists, so folding it into Prune's
+// error return made every subsequent `bridge backup` exit 1 and made the
+// serve-side ticker skip its "pruned N" line — even though the snapshot AND
+// the keep-policy prune had both succeeded, and even though nothing the
+// operator does through the bridge can clear it.
+//
+// So: err must stay nil, the condition must still surface via
+// PruneResult.ReapErr, and the directory must be kept (its bridge.db is
+// hand-recoverable; deleting it is not the sweeper's call to make).
+func TestPruneReportsOrphanSweepFailureSeparately(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+
+	valid, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	corrupt := filepath.Join(backupsRoot, "2020-01-01T00-00-00Z")
+	if err := os.MkdirAll(corrupt, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corrupt, backup.ManifestDBFileName), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Truncated mid-JSON: readable, but not decodable — neither "present"
+	// nor os.ErrNotExist.
+	if err := os.WriteFile(filepath.Join(corrupt, backup.ManifestFile),
+		[]byte(`{"schemaVersion":1,"fil`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// keep=5 (> the one valid snapshot) so the keep-policy has nothing to
+	// do and the only possible error source is the orphan sweep.
+	res, err := backup.Prune(backupsRoot, 5)
+	if err != nil {
+		t.Fatalf("Prune must not fail over a directory the orphan sweep can't classify; "+
+			"that error is permanent and would fail every future `bridge backup`: %v", err)
+	}
+	if res.ReapErr == nil {
+		t.Error("the undecodable manifest must still be REPORTED, via PruneResult.ReapErr")
+	}
+	if !pathExists(t, corrupt) {
+		t.Error("a dir with an unreadable manifest must be kept, not reaped")
+	}
+	if !pathExists(t, valid) {
+		t.Error("Prune reaped a valid snapshot")
+	}
+}
+
+// TestPruneReapsOrphansWhenRetentionDisabled pins that `keep <= 0` turns
+// off the KEEP-POLICY, not the crash-orphan sweep.
+//
+// An orphan is never a snapshot worth retaining — it has no manifest, so
+// `List` can't see it and the keep-policy could never select it anyway —
+// and it carries a near-full bridge.db copy. An operator who disabled
+// retention still needs those reclaimed, so callers must invoke Prune
+// unconditionally rather than guarding on keep > 0.
+func TestPruneReapsOrphansWhenRetentionDisabled(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+
+	valid, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	orphan := filepath.Join(backupsRoot, "2020-01-01T00-00-00Z")
+	if err := os.MkdirAll(orphan, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, backup.ManifestDBFileName), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, keep := range []int{0, -1} {
+		res, err := backup.Prune(backupsRoot, keep)
+		if err != nil {
+			t.Fatalf("Prune(keep=%d): %v", keep, err)
+		}
+		if res.Deleted != 0 {
+			t.Errorf("Prune(keep=%d) deleted %d snapshots; retention is disabled", keep, res.Deleted)
+		}
+		if keep == 0 && res.Reaped != 1 {
+			t.Errorf("Prune(keep=0) reaped %d, want 1 — retention off must not disable the orphan sweep", res.Reaped)
+		}
+	}
+	if pathExists(t, orphan) {
+		t.Error("crash orphan survived a keep<=0 prune; it can never be reclaimed by anything else")
+	}
+	if !pathExists(t, valid) {
+		t.Error("Prune reaped a valid snapshot")
+	}
+}
+
+// TestPruneContextHonoursCancellation pins the cancellation the serve-side
+// ticker depends on: it calls Prune from a ctx-bound goroutine that
+// shutdown joins under a bounded grace, so a prune walking a stalled mount
+// must stop when asked rather than burn the whole window.
+func TestPruneContextHonoursCancellation(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+
+	if _, err := backup.Snapshot(t.Context(), src); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res, err := backup.PruneContext(ctx, backupsRoot, 1)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("PruneContext on a cancelled ctx: err = %v, want context.Canceled", err)
+	}
+	if res.Deleted != 0 {
+		t.Errorf("a cancelled prune deleted %d snapshots", res.Deleted)
 	}
 }
 

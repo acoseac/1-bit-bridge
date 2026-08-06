@@ -3,7 +3,9 @@
 package doctor
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -13,12 +15,20 @@ import (
 	"syscall"
 )
 
+// lsofCommand is the test seam for the lsof spawn — production points it at
+// exec.CommandContext. Tests substitute a long-running stub so the
+// cancellation contract can be driven deterministically (a real lsof on a
+// wedged mount is not something a test can conjure). Same convention as
+// transcode.soxProbeCommand / acoustid.fpcalcCommand / tailscale.commandContext.
+// Production code MUST NOT mutate it.
+var lsofCommand = exec.CommandContext
+
 // isPIDListeningOnPort reports whether targetPID is among the processes
 // listening on the given local TCP port. The bool answers "is it us?" for
 // checkPort's own-bridge branch; the error reports a probe-MECHANISM
-// failure (lsof is resolved but the invocation couldn't even start) so
-// checkPort can degrade to Warn rather than a hard Fail — a broken probe
-// must never break a healthy install.
+// failure (lsof is resolved but the invocation couldn't even start, or was
+// cut short) so checkPort can degrade to Warn rather than a hard Fail — a
+// broken probe must never break a healthy install.
 //
 // Returns (false, nil) when the probe is simply unavailable (no usable
 // lsof on this host): portProbeAvailable() already gates that case in
@@ -29,12 +39,46 @@ import (
 // so a dual-stack / multi-interface listener set can't mask our own PID
 // behind another process's row. Exec'ing the resolved ABSOLUTE path (not
 // the bare "lsof" name) defends against a PATH-injected binary.
-func isPIDListeningOnPort(port, targetPID int) (bool, error) {
+//
+// **Bounded by probeTimeout wrapped around the INCOMING ctx.** lsof stat()s
+// mount points while building its device cache, so a wedged network mount —
+// the rclone FUSE mount the production VPS runs its library on is exactly
+// that shape — used to hang `bridge doctor` indefinitely, and hold the admin
+// console's `GET /api/doctor` goroutine past client disconnect.
+//
+// **Deliberately NOT invoked with `-b`.** That flag is lsof's own "avoid
+// kernel calls that might block" mode and looks like the targeted fix, but
+// it is the narrower one: the deadline bounds EVERY blocking cause, `-b`
+// only the subset it knows about. Against that it carries a real risk —
+// under `-b` lsof skips what it cannot identify without blocking, and a
+// skipped listener flips a correct "ok, that's our own bridge" into a Warn
+// on a healthy install. Confirming it doesn't is not something this repo
+// can do without a wedged mount to test against, so the deadline stands
+// alone until someone can.
+func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, error) {
 	if lsofPath == "" {
 		return false, nil
 	}
-	out, err := exec.Command(lsofPath, "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	out, err := lsofCommand(probeCtx, lsofPath, "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
 	if err != nil {
+		// Check the context FIRST. A killed process can surface as any
+		// exit status, including 1, and misreading a cut-short probe as
+		// lsof's "ran, matched nothing" would silently claim the port
+		// isn't ours — the one answer we have no evidence for.
+		//
+		// The INCOMING ctx is checked before the timeout child, because
+		// the child's Err() is non-nil in both cases: keying off it alone
+		// reports "timed out after 2s" for a caller that cancelled at
+		// 50ms, which sends whoever reads the hint hunting a wedged mount
+		// that was never involved.
+		if callerErr := ctx.Err(); callerErr != nil {
+			return false, fmt.Errorf("lsof port probe aborted by caller: %w", callerErr)
+		}
+		if ctxErr := probeCtx.Err(); ctxErr != nil {
+			return false, fmt.Errorf("lsof port probe timed out after %s: %w", probeTimeout, ctxErr)
+		}
 		// lsof exit code 1 means it ran but matched nothing (the common
 		// case when the port's owner isn't visible to us) — that's "not
 		// us", not a mechanism failure. ANY OTHER outcome (a different

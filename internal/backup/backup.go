@@ -281,37 +281,92 @@ func Restore(snapshotDir string, dst Targets) error {
 	return nil
 }
 
-// Prune deletes the oldest snapshots in `backupsRoot`, keeping at
+// PruneResult reports what a Prune call did.
+//
+// `ReapOrphans`'s outcome is carried HERE rather than folded into Prune's
+// error return, and that separation is the point. The orphan sweep can
+// report a directory it could not classify — most importantly one whose
+// `manifest.json` is unreadable rather than absent, which it deliberately
+// refuses to delete — and that condition is (a) permanent for as long as
+// the directory exists and (b) not a failure of the prune the caller
+// actually asked for. Joined into the error return it made `bridge backup`
+// exit 1 on EVERY run thereafter, and made `runBackupTicker` skip its
+// "pruned N" line, even though the snapshot AND the keep-policy prune had
+// both succeeded. Callers should surface ReapErr as a warning and keep
+// going.
+type PruneResult struct {
+	// Deleted counts snapshot dirs removed by the keep-policy.
+	Deleted int
+	// Reaped counts manifest-less orphan dirs removed by the sweep.
+	Reaped int
+	// ReapErr is the orphan sweep's non-fatal outcome. Never nil-checked
+	// as a prune failure — see the type docblock.
+	ReapErr error
+}
+
+// Prune is PruneContext with a background context. Kept for the CLI and
+// any caller with no scope to inherit.
+func Prune(backupsRoot string, keep int) (PruneResult, error) {
+	return PruneContext(context.Background(), backupsRoot, keep)
+}
+
+// PruneContext deletes the oldest snapshots in `backupsRoot`, keeping at
 // most `keep` most recent. A `keep` of zero or below is treated as
 // "retain everything"; the caller is responsible for clamping if
-// they want a different floor. Returns the count of dirs deleted.
-func Prune(backupsRoot string, keep int) (int, error) {
+// they want a different floor.
+//
+// **`keep <= 0` disables the KEEP-POLICY, not the orphan sweep.** Callers
+// must therefore invoke this unconditionally rather than guarding it with
+// their own `keep > 0` check — an operator who has turned retention off
+// still needs crash orphans reclaimed (they carry a near-full DB copy and
+// nothing else in this package can ever remove them), and still needs the
+// sweep's warnings surfaced.
+//
+// The context bounds the two genuinely unbounded loops: the per-directory
+// manifest reads (`ListContext` exists precisely because a root with many
+// snapshots — or one on a stalled network mount — takes arbitrarily long)
+// and the delete loop. The serve-side ticker calls this from a ctx-bound
+// goroutine that is joined at shutdown, so a prune stuck on a wedged mount
+// would otherwise burn the whole shutdown grace.
+//
+// The returned error covers only the keep-policy prune (plus cancellation).
+// Orphan-sweep problems ride on PruneResult.ReapErr — see PruneResult.
+func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResult, error) {
 	// Reap crash-orphaned partial snapshots first — dirs with no
 	// manifest.json that `List` (and therefore the keep-policy below)
 	// can never see, so the keep-policy would leave them forever. Runs
 	// regardless of `keep` (an orphan is never a snapshot worth
-	// retaining). Best-effort: a reap error is joined into the return
-	// but doesn't block the keep-policy prune. Prune is the natural
-	// wiring point — every snapshot path (ticker, admin, CLI) calls it
-	// right after Snapshot.
-	_, reapErr := ReapOrphans(backupsRoot, orphanReapGrace)
+	// retaining). Best-effort: a reap error is REPORTED but never blocks
+	// the keep-policy prune. Prune is the natural wiring point — every
+	// snapshot path (ticker, admin, CLI) calls it right after Snapshot.
+	reaped, reapErr := reapOrphans(ctx, backupsRoot, orphanReapGrace)
+	res := PruneResult{Reaped: reaped, ReapErr: reapErr}
 	if keep <= 0 {
-		return 0, reapErr
+		return res, nil
 	}
-	manifests, err := List(backupsRoot)
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+	manifests, err := ListContext(ctx, backupsRoot)
 	if err != nil {
-		return 0, errors.Join(reapErr, err)
+		return res, err
 	}
 	if len(manifests) <= keep {
-		return 0, reapErr
+		return res, nil
 	}
 	// `manifests` is newest-first; the trailing entries are the
 	// oldest and the ones to delete. Use the on-disk DirName so the
 	// dedup suffix from `uniqueDir` is preserved (rebuilding from
 	// CreatedAt would miss "<stamp>-1" / "<stamp>-2" collisions).
-	deleted := 0
 	var errs []error
 	for _, m := range manifests[keep:] {
+		// Between removals, not mid-removal: os.RemoveAll isn't
+		// interruptible, and abandoning a half-removed snapshot dir would
+		// manufacture exactly the manifest-less orphan the sweep above
+		// exists to clean up.
+		if err := ctx.Err(); err != nil {
+			return res, errors.Join(errors.Join(errs...), err)
+		}
 		full := filepath.Join(backupsRoot, m.DirName)
 		if err := os.RemoveAll(full); err != nil {
 			// Best-effort: a single locked / permission-drifted snapshot
@@ -322,9 +377,9 @@ func Prune(backupsRoot string, keep int) (int, error) {
 			errs = append(errs, fmt.Errorf("remove %s: %w", full, err))
 			continue
 		}
-		deleted++
+		res.Deleted++
 	}
-	return deleted, errors.Join(reapErr, errors.Join(errs...))
+	return res, errors.Join(errs...)
 }
 
 // ReapOrphans deletes snapshot subdirectories under backupsRoot that
@@ -340,7 +395,28 @@ func Prune(backupsRoot string, keep int) (int, error) {
 // doesn't block the others (errors are joined). A `grace` of zero or
 // below reaps every manifest-less dir regardless of age (test
 // affordance; production passes orphanReapGrace via Prune).
+//
+// A dir whose manifest is UNREADABLE (as opposed to absent) is REPORTED
+// AND KEPT — permanently, with no "eventually reap it anyway" escape
+// hatch. That is a deliberate choice, not an omission: an unreadable
+// manifest is not evidence of a crash orphan (the AV-handle window above
+// produces it on a perfectly good backup), the directory still holds a
+// full bridge.db an operator can recover by hand, and a persistent EACCES
+// would otherwise turn a healthy backup into a scheduled deletion. Since
+// writeManifest is now atomic, a truncated manifest is no longer a state
+// this package can produce; a persistent read error means something
+// outside it needs the operator's attention, which is exactly what
+// surfacing it through PruneResult.ReapErr does — where it is visible on
+// every prune without failing the prune.
 func ReapOrphans(backupsRoot string, grace time.Duration) (int, error) {
+	return reapOrphans(context.Background(), backupsRoot, grace)
+}
+
+// reapOrphans is ReapOrphans bounded by ctx. Cancellation is checked
+// BETWEEN directories — os.RemoveAll isn't interruptible, and stopping
+// part-way through one would leave behind exactly the manifest-less
+// residue this function exists to reclaim.
+func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (int, error) {
 	// Refuse an empty root: os.ReadDir("") reads the process's CURRENT WORKING
 	// DIRECTORY, and this function DELETES the subdirectories it finds without a
 	// manifest.json. A misconfigured/empty backupsRoot would therefore reap
@@ -360,6 +436,9 @@ func ReapOrphans(backupsRoot string, grace time.Duration) (int, error) {
 	reaped := 0
 	var errs []error
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return reaped, errors.Join(errors.Join(errs...), err)
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -551,12 +630,69 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 	return nil
 }
 
+// writeManifest commits the snapshot metadata ATOMICALLY — temp file in
+// the same directory, then rename — rather than truncating the
+// destination in place.
+//
+// This is load-bearing, not hygiene. `manifest.json` is the file that
+// distinguishes a complete snapshot from a crash orphan, and it is written
+// LAST, after a possibly-multi-GB DB copy. A hard crash (SIGKILL,
+// power-loss) partway through a plain `os.WriteFile` leaves a TRUNCATED
+// file: `readManifest` then returns a decode error, which is neither
+// "present" nor `os.ErrNotExist`, so `List` skips the dir, `Prune`'s
+// keep-policy can never select it, and `ReapOrphans` deliberately refuses
+// to delete it (a read error is not evidence of a crash orphan — see its
+// docblock). Nothing in this package could ever remove that directory, and
+// every subsequent `Prune` returned its error forever, which the CLI
+// reports as a failed `bridge backup` (exit 1) on every run thereafter.
+//
+// With the rename, a crash leaves either NO manifest (a genuine orphan,
+// reaped after the grace) or a complete one. There is no truncated state
+// to produce.
+//
+// Mirrors copyFile's shape in this package (CreateTemp → write → Sync →
+// Chmod → atomicwrite.RenameWithRetry, which absorbs the Windows
+// AV-scan-on-close rename window). The distinct temp prefix makes a stray
+// temp identifiable as manifest-side rather than file-copy-side.
 func writeManifest(path string, m Manifest) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".bridge-bak-manifest-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	// Panic-safety FD close (LIFO order — runs before Remove). See
+	// internal/auth/auth.go for the rationale.
+	defer func() { _ = tmp.Close() }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func readManifest(path string) (Manifest, error) {
