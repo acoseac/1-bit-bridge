@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -133,5 +134,55 @@ func TestStartupSnapshotShouldSkip_MissingBackupsRootIsNotAnError(t *testing.T) 
 	}
 	if skip {
 		t.Errorf("skip = true, want false (no snapshots → MUST write the first one)")
+	}
+}
+
+// TestBackupCmdReapsOrphansWithRetentionDisabled pins that `--keep 0`
+// disables the KEEP-POLICY, not the crash-orphan sweep.
+//
+// The command used to wrap its whole prune in `if *keep > 0`, so an
+// operator who turned retention off also silently turned off orphan
+// reclamation — and orphans are the one thing nothing else in the backup
+// package can ever remove (no manifest.json means `List` skips them, so the
+// keep-policy could never select them either). Each one carries a near-full
+// bridge.db copy, so they accumulate unbounded across hard crashes.
+//
+// Driven through the public `backupCmd` entry point, because the defect was
+// in the CALL SITE's guard rather than in backup.Prune — which reaped at
+// keep<=0 all along, and was simply never invoked.
+func TestBackupCmdReapsOrphansWithRetentionDisabled(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "library")
+	if err := os.MkdirAll(lib, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	cfgYAML := "dataDir: " + yamlStr(dir) + "\nlibraryRoots:\n  - " + yamlStr(lib) + "\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A crash orphan: a well-aged snapshot dir carrying a partial DB copy
+	// and no manifest.
+	backupsRoot := filepath.Join(dir, backup.BackupsDirName)
+	orphan := filepath.Join(backupsRoot, "2020-01-01T00-00-00Z")
+	if err := os.MkdirAll(orphan, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, backup.ManifestDBFileName), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if rc := backupCmd([]string{"--config", cfgPath, "--keep", "0"}, &stdout, &stderr); rc != 0 {
+		t.Fatalf("backupCmd rc=%d, stderr=%s", rc, stderr.String())
+	}
+
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("crash orphan survived `--keep 0`; nothing else can ever reclaim it (stat err = %v)", err)
 	}
 }

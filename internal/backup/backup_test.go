@@ -671,6 +671,81 @@ func TestPruneReportsOrphanSweepFailureSeparately(t *testing.T) {
 	}
 }
 
+// TestPruneReapsOrphansWhenRetentionDisabled pins that `keep <= 0` turns
+// off the KEEP-POLICY, not the crash-orphan sweep.
+//
+// An orphan is never a snapshot worth retaining — it has no manifest, so
+// `List` can't see it and the keep-policy could never select it anyway —
+// and it carries a near-full bridge.db copy. An operator who disabled
+// retention still needs those reclaimed, so callers must invoke Prune
+// unconditionally rather than guarding on keep > 0.
+func TestPruneReapsOrphansWhenRetentionDisabled(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+
+	valid, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	orphan := filepath.Join(backupsRoot, "2020-01-01T00-00-00Z")
+	if err := os.MkdirAll(orphan, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, backup.ManifestDBFileName), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, keep := range []int{0, -1} {
+		res, err := backup.Prune(backupsRoot, keep)
+		if err != nil {
+			t.Fatalf("Prune(keep=%d): %v", keep, err)
+		}
+		if res.Deleted != 0 {
+			t.Errorf("Prune(keep=%d) deleted %d snapshots; retention is disabled", keep, res.Deleted)
+		}
+		if keep == 0 && res.Reaped != 1 {
+			t.Errorf("Prune(keep=0) reaped %d, want 1 — retention off must not disable the orphan sweep", res.Reaped)
+		}
+	}
+	if pathExists(t, orphan) {
+		t.Error("crash orphan survived a keep<=0 prune; it can never be reclaimed by anything else")
+	}
+	if !pathExists(t, valid) {
+		t.Error("Prune reaped a valid snapshot")
+	}
+}
+
+// TestPruneContextHonoursCancellation pins the cancellation the serve-side
+// ticker depends on: it calls Prune from a ctx-bound goroutine that
+// shutdown joins under a bounded grace, so a prune walking a stalled mount
+// must stop when asked rather than burn the whole window.
+func TestPruneContextHonoursCancellation(t *testing.T) {
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+
+	if _, err := backup.Snapshot(t.Context(), src); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res, err := backup.PruneContext(ctx, backupsRoot, 1)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("PruneContext on a cancelled ctx: err = %v, want context.Canceled", err)
+	}
+	if res.Deleted != 0 {
+		t.Errorf("a cancelled prune deleted %d snapshots", res.Deleted)
+	}
+}
+
 // List on a missing or empty backups dir must not error — it's a
 // fresh-install state, not a corruption signal.
 func TestListAcceptsMissingDir(t *testing.T) {

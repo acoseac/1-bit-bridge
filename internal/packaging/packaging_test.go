@@ -248,6 +248,64 @@ func TestRenderSystemdTemplate_EscapesDollarInExecOnly(t *testing.T) {
 	}
 }
 
+// TestRenderSystemdTemplate_RejectsTrailingBackslashPath pins the one path
+// shape the unquoted form cannot represent. systemd joins a line ending in
+// `\` with the next one, replacing the backslash with a space, so
+// `WorkingDirectory=/srv/x\` would absorb the `Restart=always` beneath it:
+// the unit loads, the working directory is wrong, and auto-restart is gone
+// with no diagnostic at all.
+//
+// No escape exists — these settings get no unquoting layer, so `\\` still
+// ends the line with a backslash — and silently trimming would hand systemd
+// a path the operator never configured. Rendering must fail instead, which
+// aborts `installSystemd` before it writes the file.
+func TestRenderSystemdTemplate_RejectsTrailingBackslashPath(t *testing.T) {
+	base := Params{
+		BinaryPath: "/usr/local/bin/bridge",
+		ConfigPath: "/home/me/.config/1-bit-bridge/bridge.yaml",
+		WorkingDir: "/home/me/.config/1-bit-bridge/data",
+		LogPath:    "/var/log/bridge.log",
+	}
+
+	for _, tc := range []struct {
+		name  string
+		apply func(*Params)
+	}{
+		{"WorkingDirectory", func(p *Params) { p.WorkingDir = `/home/me/data\` }},
+		{"StandardOutput/StandardError", func(p *Params) { p.LogPath = `/var/log/bridge\` }},
+		// A doubled backslash is NOT an escape here — the line still ends
+		// in one, so systemd still continues it.
+		{"doubled backslash", func(p *Params) { p.WorkingDir = `/home/me/data\\` }},
+		// Stripping CR/LF happens first, so a trailing backslash hiding
+		// behind a newline must still be caught.
+		{"backslash then newline", func(p *Params) { p.WorkingDir = "/home/me/data\\\n" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := base
+			tc.apply(&p)
+			body, err := render("systemd.service.tmpl", p)
+			if err == nil {
+				t.Fatalf("render accepted a trailing-backslash path; the unit would swallow its next directive\n--\n%s", body)
+			}
+			if !strings.Contains(err.Error(), "backslash") {
+				t.Errorf("error should name the cause, got %v", err)
+			}
+		})
+	}
+
+	// An interior backslash is an ordinary path byte and must still pass
+	// through verbatim — only the line-ending case is dangerous.
+	p := base
+	p.WorkingDir = `/home/me/we\ird/data`
+	body, err := render("systemd.service.tmpl", p)
+	if err != nil {
+		t.Fatalf("interior backslash must be accepted: %v", err)
+	}
+	if !strings.Contains(string(body), `WorkingDirectory=/home/me/we\ird/data`) {
+		t.Errorf("interior backslash should survive verbatim\n--\n%s", body)
+	}
+}
+
 func TestRenderStartupCmd_Windows(t *testing.T) {
 	body, err := render("startup.cmd.tmpl", Params{
 		BinaryPath: `C:\Program Files\1-bit-bridge\bridge.exe`,

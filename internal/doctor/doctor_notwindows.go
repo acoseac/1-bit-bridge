@@ -59,16 +59,25 @@ func isPIDListeningOnPort(ctx context.Context, port, targetPID int) (bool, error
 	if lsofPath == "" {
 		return false, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	out, err := lsofCommand(ctx, lsofPath, "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
+	out, err := lsofCommand(probeCtx, lsofPath, "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
 	if err != nil {
 		// Check the context FIRST. A killed process can surface as any
 		// exit status, including 1, and misreading a cut-short probe as
 		// lsof's "ran, matched nothing" would silently claim the port
 		// isn't ours — the one answer we have no evidence for.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return false, fmt.Errorf("lsof port probe aborted after %s: %w", probeTimeout, ctxErr)
+		//
+		// The INCOMING ctx is checked before the timeout child, because
+		// the child's Err() is non-nil in both cases: keying off it alone
+		// reports "timed out after 2s" for a caller that cancelled at
+		// 50ms, which sends whoever reads the hint hunting a wedged mount
+		// that was never involved.
+		if callerErr := ctx.Err(); callerErr != nil {
+			return false, fmt.Errorf("lsof port probe aborted by caller: %w", callerErr)
+		}
+		if ctxErr := probeCtx.Err(); ctxErr != nil {
+			return false, fmt.Errorf("lsof port probe timed out after %s: %w", probeTimeout, ctxErr)
 		}
 		// lsof exit code 1 means it ran but matched nothing (the common
 		// case when the port's owner isn't visible to us) — that's "not

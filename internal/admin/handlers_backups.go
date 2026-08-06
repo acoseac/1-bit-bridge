@@ -3,6 +3,7 @@ package admin
 import (
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 )
@@ -71,6 +72,26 @@ func (s *Server) apiBackupsList(w http.ResponseWriter, r *http.Request) {
 // Note: this handler does NOT implement download/export — see the
 // list-response comment for why. Operators who need to move
 // snapshots offsite use `scp`/`rsync` against `<dataDir>/backups/`.
+// pruneWarningText renders the operator-facing warning for a completed
+// snapshot whose prune reported something.
+//
+// Both conditions are surfaced when BOTH occur. They are independent —
+// `PruneResult.ReapErr` is split out from the error return precisely
+// because an un-classifiable orphan directory is permanent and is not a
+// failure of the keep-policy prune — so returning on the first one would
+// hide the other. Neither is fatal here: the snapshot already landed, and
+// the operator can re-prune from the CLI.
+func pruneWarningText(pruneErr, reapErr error) string {
+	var warnings []string
+	if pruneErr != nil {
+		warnings = append(warnings, pruneErr.Error())
+	}
+	if reapErr != nil {
+		warnings = append(warnings, "orphan sweep: "+reapErr.Error())
+	}
+	return strings.Join(warnings, "; ")
+}
+
 func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	if s.deps.BackupSources.DataDir == "" {
@@ -110,27 +131,16 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 	if body.Keep != nil {
 		keep = *body.Keep
 	}
-	if keep > 0 {
-		res, err := backup.Prune(filepath.Join(src.DataDir, backup.BackupsDirName), keep)
-		// Two distinct conditions, both non-fatal here because the
-		// snapshot already landed. The orphan sweep's outcome is
-		// reported separately from the prune's own so a directory it
-		// can't classify (permanent, and not the operator's doing)
-		// doesn't read as "your prune failed" on every single backup.
-		switch {
-		case err != nil:
-			writeJSON(w, http.StatusOK, map[string]any{
-				"snapshotDir":  dst,
-				"pruneWarning": err.Error(),
-			})
-			return
-		case res.ReapErr != nil:
-			writeJSON(w, http.StatusOK, map[string]any{
-				"snapshotDir":  dst,
-				"pruneWarning": "orphan sweep: " + res.ReapErr.Error(),
-			})
-			return
-		}
+	// Unconditional (keep <= 0 disables the keep-policy, not the
+	// crash-orphan sweep) and ctx-bound so a browser disconnect doesn't
+	// leave the prune running — same rationale as backupCmd / the ticker.
+	res, pruneErr := backup.PruneContext(r.Context(), filepath.Join(src.DataDir, backup.BackupsDirName), keep)
+	if warning := pruneWarningText(pruneErr, res.ReapErr); warning != "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"snapshotDir":  dst,
+			"pruneWarning": warning,
+		})
+		return
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{

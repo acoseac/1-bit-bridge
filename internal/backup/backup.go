@@ -304,14 +304,34 @@ type PruneResult struct {
 	ReapErr error
 }
 
-// Prune deletes the oldest snapshots in `backupsRoot`, keeping at
+// Prune is PruneContext with a background context. Kept for the CLI and
+// any caller with no scope to inherit.
+func Prune(backupsRoot string, keep int) (PruneResult, error) {
+	return PruneContext(context.Background(), backupsRoot, keep)
+}
+
+// PruneContext deletes the oldest snapshots in `backupsRoot`, keeping at
 // most `keep` most recent. A `keep` of zero or below is treated as
 // "retain everything"; the caller is responsible for clamping if
 // they want a different floor.
 //
-// The returned error covers only the keep-policy prune. Orphan-sweep
-// problems ride on PruneResult.ReapErr — see PruneResult.
-func Prune(backupsRoot string, keep int) (PruneResult, error) {
+// **`keep <= 0` disables the KEEP-POLICY, not the orphan sweep.** Callers
+// must therefore invoke this unconditionally rather than guarding it with
+// their own `keep > 0` check — an operator who has turned retention off
+// still needs crash orphans reclaimed (they carry a near-full DB copy and
+// nothing else in this package can ever remove them), and still needs the
+// sweep's warnings surfaced.
+//
+// The context bounds the two genuinely unbounded loops: the per-directory
+// manifest reads (`ListContext` exists precisely because a root with many
+// snapshots — or one on a stalled network mount — takes arbitrarily long)
+// and the delete loop. The serve-side ticker calls this from a ctx-bound
+// goroutine that is joined at shutdown, so a prune stuck on a wedged mount
+// would otherwise burn the whole shutdown grace.
+//
+// The returned error covers only the keep-policy prune (plus cancellation).
+// Orphan-sweep problems ride on PruneResult.ReapErr — see PruneResult.
+func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResult, error) {
 	// Reap crash-orphaned partial snapshots first — dirs with no
 	// manifest.json that `List` (and therefore the keep-policy below)
 	// can never see, so the keep-policy would leave them forever. Runs
@@ -319,12 +339,15 @@ func Prune(backupsRoot string, keep int) (PruneResult, error) {
 	// retaining). Best-effort: a reap error is REPORTED but never blocks
 	// the keep-policy prune. Prune is the natural wiring point — every
 	// snapshot path (ticker, admin, CLI) calls it right after Snapshot.
-	reaped, reapErr := ReapOrphans(backupsRoot, orphanReapGrace)
+	reaped, reapErr := reapOrphans(ctx, backupsRoot, orphanReapGrace)
 	res := PruneResult{Reaped: reaped, ReapErr: reapErr}
 	if keep <= 0 {
 		return res, nil
 	}
-	manifests, err := List(backupsRoot)
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+	manifests, err := ListContext(ctx, backupsRoot)
 	if err != nil {
 		return res, err
 	}
@@ -337,6 +360,13 @@ func Prune(backupsRoot string, keep int) (PruneResult, error) {
 	// CreatedAt would miss "<stamp>-1" / "<stamp>-2" collisions).
 	var errs []error
 	for _, m := range manifests[keep:] {
+		// Between removals, not mid-removal: os.RemoveAll isn't
+		// interruptible, and abandoning a half-removed snapshot dir would
+		// manufacture exactly the manifest-less orphan the sweep above
+		// exists to clean up.
+		if err := ctx.Err(); err != nil {
+			return res, errors.Join(errors.Join(errs...), err)
+		}
 		full := filepath.Join(backupsRoot, m.DirName)
 		if err := os.RemoveAll(full); err != nil {
 			// Best-effort: a single locked / permission-drifted snapshot
@@ -379,6 +409,14 @@ func Prune(backupsRoot string, keep int) (PruneResult, error) {
 // surfacing it through PruneResult.ReapErr does — where it is visible on
 // every prune without failing the prune.
 func ReapOrphans(backupsRoot string, grace time.Duration) (int, error) {
+	return reapOrphans(context.Background(), backupsRoot, grace)
+}
+
+// reapOrphans is ReapOrphans bounded by ctx. Cancellation is checked
+// BETWEEN directories — os.RemoveAll isn't interruptible, and stopping
+// part-way through one would leave behind exactly the manifest-less
+// residue this function exists to reclaim.
+func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (int, error) {
 	// Refuse an empty root: os.ReadDir("") reads the process's CURRENT WORKING
 	// DIRECTORY, and this function DELETES the subdirectories it finds without a
 	// manifest.json. A misconfigured/empty backupsRoot would therefore reap
@@ -398,6 +436,9 @@ func ReapOrphans(backupsRoot string, grace time.Duration) (int, error) {
 	reaped := 0
 	var errs []error
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return reaped, errors.Join(errors.Join(errs...), err)
+		}
 		if !e.IsDir() {
 			continue
 		}

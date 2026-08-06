@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -82,10 +83,49 @@ func TestIsPIDListeningOnPortHonoursCallerCancellation(t *testing.T) {
 		t.Errorf("probe took %s after the caller cancelled at ~50ms; the context is not reaching the subprocess", elapsed)
 	}
 	if err == nil {
-		t.Error("a cancelled probe must return an error (a Warn for checkPort), not a silent 'not us'")
+		t.Fatal("a cancelled probe must return an error (a Warn for checkPort), not a silent 'not us'")
 	}
 	if found {
 		t.Error("a cancelled probe cannot have found anything")
+	}
+	// The message must not blame the local deadline. probeCtx.Err() is
+	// non-nil for BOTH a caller cancellation and the 2s timeout, so
+	// reporting off it alone claims "timed out after 2s" for a probe the
+	// caller abandoned at 50ms — sending whoever reads it hunting a wedged
+	// mount that was never involved.
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("caller cancellation reported as a local timeout: %v", err)
+	}
+	if !strings.Contains(err.Error(), "caller") {
+		t.Errorf("error should attribute the abort to the caller, got %v", err)
+	}
+}
+
+// TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly is the other side
+// of the same split: when the CALLER is still live and only the local
+// probeTimeout fires, the message must say so — that is the case where a
+// wedged mount really is the likely cause.
+func TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly(t *testing.T) {
+	stubLsofWithSleep(t, "10")
+
+	// A live, never-cancelled caller context; only the internal
+	// probeTimeout can end this.
+	start := time.Now()
+	_, err := isPIDListeningOnPort(context.Background(), 7788, os.Getpid())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a timed-out probe must return an error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("local timeout should be reported as such, got %v", err)
+	}
+	if strings.Contains(err.Error(), "caller") {
+		t.Errorf("local timeout wrongly attributed to the caller: %v", err)
+	}
+	// Bounded by probeTimeout, nowhere near the stub's 10s.
+	if elapsed > 5*time.Second {
+		t.Errorf("probe took %s; the local probeTimeout should have ended it", elapsed)
 	}
 }
 

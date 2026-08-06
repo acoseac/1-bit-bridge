@@ -304,11 +304,8 @@ var (
 	// It deliberately does NOT touch `$` (no env-var substitution on these
 	// settings — doubling would corrupt the path to `$$`), nor `\` and `"`
 	// (with no quote removal / C-unescaping, both are ordinary path bytes
-	// and must survive verbatim). Residual, documented rather than guessed
-	// at: a path ENDING in `\` is a systemd line continuation and would
-	// swallow the following directive. No POSIX music-library path ends in
-	// a backslash, and mangling the operator's path to dodge it would be
-	// the worse trade.
+	// and must survive verbatim). A path that ENDS in `\` is handled
+	// separately, by rejection — see systemdEscapePath.
 	systemdEscapePathReplacer = strings.NewReplacer(
 		`%`, `%%`,
 		"\n", "",
@@ -334,6 +331,36 @@ var (
 	)
 )
 
+// systemdEscapePath escapes a value for an UNQUOTED systemd path setting,
+// and REFUSES one that would change the meaning of the unit file.
+//
+// systemd joins a line ending in `\` with the line that follows it,
+// replacing the backslash with a space — line continuation, and it applies
+// to every setting, path settings included. So `WorkingDirectory=/srv/x\`
+// silently absorbs the `Restart=always` beneath it: the unit loads, the
+// working directory is wrong, and auto-restart is gone with no diagnostic.
+//
+// There is no escape available. The path settings get no unquoting layer
+// (that is the whole reason they are written unquoted), so a doubled `\\`
+// still ends the line with a backslash and continues just the same.
+// Silently trimming it would hand systemd a path the operator didn't
+// configure. Refusing is the only option that neither corrupts the unit nor
+// lies about the path — and it surfaces at `bridge init --service` time,
+// where the operator can fix the path, rather than as a mystery at boot.
+//
+// Returning an error from a template func aborts template.Execute, so
+// `render` surfaces it and `installSystemd` never writes the file.
+// Trailing CR/LF/NUL are stripped by the replacer first, so the check sees
+// the bytes that would actually land on the line.
+func systemdEscapePath(s string) (string, error) {
+	escaped := systemdEscapePathReplacer.Replace(s)
+	if strings.HasSuffix(escaped, `\`) {
+		return "", fmt.Errorf(
+			"path %q ends in a backslash: systemd would treat it as a line continuation and swallow the next unit directive; rename the directory", s)
+	}
+	return escaped, nil
+}
+
 func render(name string, p Params) ([]byte, error) {
 	// The launchd plist is XML; the systemd unit is INI-like. Each template
 	// picks the right escape func for its own fields — both escapes are
@@ -358,7 +385,7 @@ func render(name string, p Params) ([]byte, error) {
 		// the Exec* form — see systemdEscape{Exec,Path}Replacer for the
 		// full rationale.
 		"systemdEscapeExec": systemdEscapeExecReplacer.Replace,
-		"systemdEscapePath": systemdEscapePathReplacer.Replace,
+		"systemdEscapePath": systemdEscapePath,
 		"cmdEscape":         func(s string) string { return CmdEscape(s) },
 	}
 	t, err := template.New(name).Funcs(funcs).ParseFS(tmplFS, name)

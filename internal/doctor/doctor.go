@@ -500,10 +500,18 @@ func checkServiceManager(ctx context.Context, d Deps) Check {
 		defer cancel()
 		cmd := exec.CommandContext(probeCtx, "systemctl", "--user", "show-environment")
 		if err := cmd.Run(); err != nil {
-			// Distinguish "the session isn't there" from "the session
-			// never answered". Both are Warn, but they send the operator
-			// to completely different places, and reporting a wedged bus
-			// as "headless session?" is a wrong diagnosis, not a vague one.
+			// THREE distinct outcomes, not two. `probeCtx.Err()` is
+			// non-nil for a caller cancellation as well as for the local
+			// deadline, so keying the message off it alone reports a
+			// wedged DBus session "after 2s" when the admin client
+			// actually disconnected at 50ms. Check the INCOMING ctx
+			// first — an aborted probe learned nothing about systemd and
+			// must not claim otherwise.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return warn(checkNameServiceManager, "systemd probe aborted",
+					"the probe was cancelled before it finished ("+ctxErr.Error()+
+						"); this says nothing about the systemd session — re-run when the caller isn't going away")
+			}
 			if probeCtx.Err() != nil {
 				return warn(checkNameServiceManager, "systemd probe timed out",
 					"`systemctl --user show-environment` did not answer within "+probeTimeout.String()+

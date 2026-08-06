@@ -126,8 +126,15 @@ func TestWriteManifestCommitsByRenameNotInPlaceTruncation(t *testing.T) {
 	// 0666, which is what windows-latest returned here. Confidentiality
 	// there comes from the per-user-profile NTFS ACLs on %LOCALAPPDATA%,
 	// the same position CLAUDE.md records for the init-permissions work.
+	// A stat failure here is a real problem, not a reason to quietly skip
+	// the assertion — an `err == nil &&` guard would let the mode check
+	// vanish on any future breakage of the path itself.
 	if runtime.GOOS != "windows" {
-		if fi, err := os.Stat(path); err == nil && fi.Mode().Perm() != 0o600 {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat committed manifest: %v", err)
+		}
+		if fi.Mode().Perm() != 0o600 {
 			t.Errorf("manifest mode = %v, want 0600 (it names the bundle's secret-grade contents)", fi.Mode().Perm())
 		}
 	}
