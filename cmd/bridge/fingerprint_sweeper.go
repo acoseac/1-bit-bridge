@@ -68,6 +68,16 @@ type fingerprintSweeper struct {
 	// would burst by exactly its worker count.
 	pacer sync.Mutex
 	last  time.Time
+	// notBefore is a pool-wide floor on the next request, set from an
+	// upstream Retry-After. Guarded by pacer. See noteLookupErr.
+	notBefore time.Time
+
+	// compute is the fpcalc seam — nil means acoustid.Compute. Production
+	// never sets it; tests inject canned fingerprints so the lookup path is
+	// exercisable without an fpcalc spawn, which is what lets the rate-limit
+	// wiring below be tested where it actually lives rather than only as an
+	// isolated helper. Mirrors transcode.Pool.runner and manifest.Store.now.
+	compute func(ctx context.Context, absPath string, length time.Duration) (acoustid.Fingerprint, error)
 }
 
 // candidate is one track worth fingerprinting.
@@ -406,7 +416,17 @@ const sweeperDrainGrace = 30 * time.Second
 func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bool {
 	key := acoustid.Key{Path: c.path, Size: c.size, MTimeNS: c.mtimeNS}
 
-	fp, err := acoustid.Compute(ctx, c.absPath, s.length)
+	// The rate-limit pause gates the DECODE, not just the lookup. fpcalc costs
+	// roughly a CPU second per track and, on a network-backed library, a
+	// whole-object read — so a pool that kept fingerprinting through a pause
+	// would burn exactly what RateLimitError's docblock says the pause exists
+	// to save, and arrive at the wall anyway.
+	s.awaitPause(ctx)
+	if ctx.Err() != nil {
+		return false
+	}
+
+	fp, err := s.fingerprintFile(ctx, c.absPath)
 	if err != nil {
 		if ctx.Err() == nil && !errors.Is(err, acoustid.ErrUnreadable) {
 			logger.Warn("fingerprint: decode", "path", c.path, "err", err)
@@ -445,6 +465,11 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 			s.cache.Set(key, acoustid.Outcome{})
 			return false
 		}
+		// A 429 tells the whole pool to stand down, not just this worker.
+		// Must run BEFORE the classification below returns: a rate limit IS
+		// transient, so that branch is a bare `return false` and the worker
+		// would otherwise go straight back to decoding the next candidate.
+		s.noteLookupErr(err)
 		// TRANSIENT failures are not cached: the next sweep must retry them,
 		// or a brief outage would permanently mark a whole batch unmatched.
 		if ctx.Err() == nil && !acoustid.IsTransient(err) {
@@ -471,7 +496,88 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 	return true
 }
 
-// wait applies the AcoustID pacing interval across ALL workers.
+// fingerprintFile decodes one file. The indirection is the fpcalc test seam;
+// production leaves s.compute nil.
+func (s *fingerprintSweeper) fingerprintFile(ctx context.Context, absPath string) (acoustid.Fingerprint, error) {
+	if s.compute != nil {
+		return s.compute(ctx, absPath, s.length)
+	}
+	return acoustid.Compute(ctx, absPath, s.length)
+}
+
+// noteLookupErr honours an upstream Retry-After by stalling the WHOLE pool.
+//
+// acoustid.RateLimitError existed with no consumer: its own docblock says it
+// is there "so the sweeper can pause its WHOLE pool", and nothing read it. The
+// consequence is worse here than for a plain metadata client because the
+// expensive half happens BEFORE the request — a sweep that ignores a 429 with
+// Retry-After: 60 burns up to maxPerRun decodes, and on a network-backed
+// library the egress for them, against a service that asked us to stop.
+//
+// The deadline is anchored to now BEFORE the lock is taken: this may block
+// behind a worker already sleeping out an earlier pause, and computing it
+// afterwards would push it further out than the upstream actually asked for.
+func (s *fingerprintSweeper) noteLookupErr(err error) {
+	// Typed-nil guard: errors.As can report true with a nil pointer, and
+	// reading RetryAfter off it would panic. Mirrors the *net.DNSError arm in
+	// acoustid.IsTransient. Not reachable from this repo today — get() only
+	// ever builds &RateLimitError{...} — but it costs nothing and the deref is
+	// one custom wrapper away.
+	var rle *acoustid.RateLimitError
+	if !errors.As(err, &rle) || rle == nil {
+		return
+	}
+	d := rle.RetryAfter
+	if d <= 0 {
+		return
+	}
+	// Clamped to the same bound the client applies when it parses the header,
+	// rather than to a second one that could drift from it. Worth doing even
+	// though the parse already caps: RetryAfter is an exported field on a type
+	// constructible from outside that package, so the parsed cap is not a
+	// guarantee about what arrives here.
+	if d > acoustid.MaxRetryAfter {
+		d = acoustid.MaxRetryAfter
+	}
+	deadline := time.Now().Add(d)
+
+	s.pacer.Lock()
+	// Only ever EXTEND. Several workers can be in flight when the limit is
+	// hit, and a later, shorter piece of advice must not cut an earlier pause
+	// short.
+	extended := deadline.After(s.notBefore)
+	if extended {
+		s.notBefore = deadline
+	}
+	s.pacer.Unlock()
+
+	if extended {
+		logger.Warn("fingerprint: AcoustID rate limited; pausing the sweep pool", "retryAfter", d)
+	}
+}
+
+// awaitPause blocks while a pool-wide rate-limit pause is in effect, and is
+// what makes the pause cover the decode rather than only the request.
+//
+// Holds the pacer across the sleep for the same reason wait does, and here that
+// is the mechanism itself: the siblings queued behind this lock are the "whole
+// pool" part of pausing the whole pool.
+//
+// Sharing wait's mutex rather than taking a second one does mean a worker can
+// block here while a sibling sleeps out the pacing interval inside wait — but
+// only when the pool is already REQUEST-bound, since that sleep is
+// `MinInterval - since(last)` and is zero whenever decoding is the slower half.
+// So it costs decode parallelism exactly in the regime where another decode
+// would have had nowhere to go anyway. Two mutexes would buy nothing and would
+// have to be ordered against each other.
+func (s *fingerprintSweeper) awaitPause(ctx context.Context) {
+	s.pacer.Lock()
+	defer s.pacer.Unlock()
+	sleepOrDone(ctx, time.Until(s.notBefore))
+}
+
+// wait applies the AcoustID pacing interval across ALL workers, and honours any
+// pool-wide pause a 429 has imposed since this worker started decoding.
 //
 // Per-worker pacing would burst by exactly the worker count, because the
 // politeness contract belongs to the API key rather than to any one goroutine.
@@ -489,17 +595,37 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 func (s *fingerprintSweeper) wait(ctx context.Context) {
 	s.pacer.Lock()
 	defer s.pacer.Unlock()
-	// No IsZero guard: time.Since on the zero Time saturates at ~292 years, so
-	// the first call's `wait` is hugely negative and the branch is already
-	// skipped. The conjunct that used to be here could never change the
-	// outcome.
-	if wait := s.client.MinInterval() - time.Since(s.last); wait > 0 {
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-		}
+	// The longer of the two floors: ordinary politeness pacing, and whatever
+	// remains of a pause imposed while this worker was busy elsewhere.
+	//
+	// No IsZero guard on either: time.Since / time.Until saturate at ~292 years
+	// on the zero Time, so on the first call both terms are hugely negative and
+	// the sleep is already skipped. The conjunct that used to be here could
+	// never change the outcome.
+	d := s.client.MinInterval() - time.Since(s.last)
+	if pause := time.Until(s.notBefore); pause > d {
+		d = pause
 	}
+	sleepOrDone(ctx, d)
 	s.last = time.Now()
+}
+
+// sleepOrDone sleeps for d, returning early if ctx is cancelled. A non-positive
+// d returns immediately.
+//
+// time.NewTimer with a Stop rather than time.After: d can be as long as
+// acoustid.MaxRetryAfter, and an abandoned hour-long timer per cancelled worker
+// is exactly the accumulation the PR #290 convention exists to avoid.
+func sleepOrDone(ctx context.Context, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 // acousticLookupAdapter bridges the cache to the enricher's interface. The

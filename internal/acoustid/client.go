@@ -45,9 +45,18 @@ const maxResponseBytes = 8 << 20
 // enrich.maxDrainBytes — keep in lockstep.
 const maxDrainBytes = 64 << 10
 
-// maxRetryAfter caps an upstream's advisory wait so a hostile or
+// MaxRetryAfter caps an upstream's advisory wait so a hostile or
 // misconfigured header can't park a sweep for arbitrary durations.
-const maxRetryAfter = time.Hour
+//
+// Exported because the sweeper honours RateLimitError.RetryAfter by stalling
+// its whole pool, and that field is settable from outside this package — so the
+// consumer needs the same bound rather than inventing a second one that could
+// drift from the one applied at parse time.
+const MaxRetryAfter = time.Hour
+
+// maxRedirects bounds the redirect chain the guard below will follow. Matches
+// net/http's own default and enrich.DeezerClient's guard.
+const maxRedirects = 10
 
 // sharedHTTPTransport mirrors internal/enrich.sharedHTTPTransport's tuning.
 // Duplicated rather than imported because internal/enrich will import THIS
@@ -149,6 +158,40 @@ func (e *httpError) Error() string {
 // without re-parsing the message.
 func (e *httpError) Status() int { return e.StatusCode }
 
+// upstreamError carries an AcoustID error ENVELOPE's code, so IsTransient can
+// classify it the same structural way httpError's status is classified.
+//
+// This exists because the envelope is the one failure shape a status-based
+// classifier cannot see: AcoustID reports failure in the body's `status` field
+// and can do so under an HTTP 200 (which is why Lookup checks the field on
+// every response). A plain fmt.Errorf here discarded the code, so a transient
+// upstream condition arriving that way — code 5 "internal error", code 14 "too
+// many requests" — walked every arm of IsTransient and came out persistent. The
+// sweeper then cached a permanent "no match" for whatever batch was in flight:
+// the PR #74 poisoning class, through the one door the structured classifier
+// had no key for.
+type upstreamError struct {
+	Code    int
+	Message string
+}
+
+func (e *upstreamError) Error() string {
+	return fmt.Sprintf("acoustid: upstream error %d: %s", e.Code, e.Message)
+}
+
+// AcoustID's documented error codes. Only these two describe a condition that
+// can clear on its own; everything else in the set (invalid key, invalid
+// fingerprint, missing parameter, unknown format …) fails identically on retry.
+//
+// Note a genuine rate limit normally arrives as an HTTP 429 carrying
+// Retry-After, which get() turns into a RateLimitError so the sweeper can stall
+// its whole pool. A code-14 envelope under a 200 carries no such advice, so all
+// that can be said about it is that it is worth retrying later.
+const (
+	errCodeInternalError   = 5
+	errCodeTooManyRequests = 14
+)
+
 // ErrNoMatch reports that AcoustID answered cleanly and knows nothing about
 // this fingerprint. Distinct from an error: it is a fact about the audio, and
 // callers record it rather than retrying.
@@ -187,13 +230,88 @@ func NewClient(baseURL, apiKey, userAgent string, httpClient *http.Client) *Clie
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second, Transport: sharedHTTPTransport}
 	}
-	return &Client{
+	// Shallow-copy before installing the redirect guard: CheckRedirect is a
+	// field on the client, *http.Client instances are routinely shared across
+	// services in Go, and a caller passing http.DefaultClient must not find this
+	// package's origin restriction applied to every redirect in the process. Same
+	// reasoning as enrich.NewDeezerClient's copy.
+	clientCopy := *httpClient
+	c := &Client{
 		base:        baseURL,
 		apiKey:      apiKey,
 		userAgent:   userAgent,
-		http:        httpClient,
+		http:        &clientCopy,
 		minInterval: minIntervalForBase(baseURL),
 	}
+	c.installRedirectGuard()
+	return c
+}
+
+// installRedirectGuard refuses any redirect that would leave the configured
+// base origin.
+//
+// Defence in depth rather than a live hole: the base URL is a compile-time
+// constant in production, no Authorization header travels, and a redirect does
+// not carry the query string that holds the key. But this was the only outbound
+// client in the repo following redirects to arbitrary hosts — enrich/deezer,
+// updater/github, upnp/discovery and dlna/discovery all pin theirs — and "the
+// URL is a constant" stops being true the first time someone points the base at
+// a proxy.
+//
+// Derived from the client's own base rather than hardcoded to
+// api.acoustid.org, because the base is configurable (tests point it at
+// httptest, an operator could point it at a caching proxy) and a hardcoded host
+// would refuse every legitimate redirect there while permitting one away from
+// it. FAILS CLOSED: a base with no parseable origin refuses every hop.
+//
+// Compares the whole ORIGIN, not just the hostname as enrich/deezer's does.
+// That guard protects a set of named CDN hosts, where the host is the identity;
+// here the base names one service, and a redirect to a different port or a
+// downgraded scheme on the same host reaches a different one. Two loopback
+// listeners are the everyday case: same host, different service.
+func (c *Client) installRedirectGuard() {
+	prev := c.http.CheckRedirect
+	var allowed string
+	if u, err := url.Parse(c.base); err == nil {
+		allowed = originOf(u)
+	}
+	c.http.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("acoustid: stopped after %d redirects", maxRedirects)
+		}
+		origin := originOf(req.URL)
+		if allowed == "" || origin != allowed {
+			return fmt.Errorf("acoustid: refusing redirect to unexpected origin %q", origin)
+		}
+		if prev != nil {
+			return prev(req, via)
+		}
+		return nil
+	}
+}
+
+// originOf renders a URL's scheme/host/port in a comparable form, making the
+// scheme's default port explicit so https://h/x and https://h:443/x match.
+// Returns "" for anything it cannot reduce to an origin, which the caller
+// treats as "refuse".
+func originOf(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if scheme == "" || host == "" {
+		return ""
+	}
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return ""
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
 }
 
 // MinInterval is the minimum spacing the caller must leave between requests.
@@ -266,7 +384,10 @@ func (c *Client) Lookup(ctx context.Context, fp Fingerprint) ([]Result, error) {
 		if payload.Error != nil {
 			code, msg = payload.Error.Code, payload.Error.Message
 		}
-		return nil, fmt.Errorf("acoustid: upstream error %d: %s", code, msg)
+		// Typed, not fmt.Errorf: the CODE is the only thing that says whether
+		// this is worth retrying, and discarding it made every envelope error
+		// look persistent. See upstreamError.
+		return nil, &upstreamError{Code: code, Message: msg}
 	}
 	if len(payload.Results) == 0 {
 		return nil, ErrNoMatch
@@ -377,6 +498,19 @@ func IsTransient(err error) bool {
 	if errors.As(err, &herr) {
 		return herr.StatusCode >= 500 || herr.StatusCode == http.StatusTooManyRequests
 	}
+	// The envelope arm. Placed here rather than left to the message fallback
+	// below deliberately: upstreamError's message says "upstream error <code>",
+	// not "HTTP <status>", so statusFromMessage cannot see it — and matching
+	// the text instead of the field would reintroduce exactly the
+	// body-mentions-a-number trap that fallback is written to avoid.
+	//
+	// Typed-nil guard: errors.As can report true with a nil pointer, and
+	// reading Code off it would panic. Falls THROUGH rather than returning, so
+	// the arms below still get a look — same shape as the *net.DNSError arm.
+	var uerr *upstreamError
+	if errors.As(err, &uerr) && uerr != nil {
+		return uerr.Code == errCodeInternalError || uerr.Code == errCodeTooManyRequests
+	}
 	// Fall back to the stable message prefix for an httpError that reached us
 	// through a formatting wrap rather than %w.
 	if code, ok := statusFromMessage(err.Error()); ok {
@@ -467,7 +601,7 @@ func drainBody(body io.Reader) {
 //     header of 2^33 would otherwise overflow time.Duration's int64 nanoseconds
 //     and silently bypass it;
 //   - ParseInt(..., 64) so 32-bit platforms don't lose [2^31, 2^63);
-//   - a value exceeding int64 returns ErrRange, which clamps to maxRetryAfter
+//   - a value exceeding int64 returns ErrRange, which clamps to MaxRetryAfter
 //     rather than falling through to 0 (which would defeat the cap entirely);
 //   - a non-compliant fractional value ("86400.5") is truncated at the '.', so
 //     the integer prefix is honoured instead of the whole header being dropped.
@@ -482,7 +616,7 @@ func parseRetryAfter(header string, now time.Time) time.Duration {
 	}
 	secs, err := strconv.ParseInt(header, 10, 64)
 	if err == nil && secs >= 0 {
-		maxSecs := int64(maxRetryAfter / time.Second)
+		maxSecs := int64(MaxRetryAfter / time.Second)
 		if secs > maxSecs {
 			secs = maxSecs
 		}
@@ -492,15 +626,15 @@ func parseRetryAfter(header string, now time.Time) time.Duration {
 	if errors.As(err, &numErr) &&
 		errors.Is(numErr.Err, strconv.ErrRange) &&
 		!strings.HasPrefix(header, "-") {
-		return maxRetryAfter
+		return MaxRetryAfter
 	}
 	if t, err := http.ParseTime(header); err == nil {
 		d := t.Sub(now)
 		if d <= 0 {
 			return 0
 		}
-		if d > maxRetryAfter {
-			d = maxRetryAfter
+		if d > MaxRetryAfter {
+			d = MaxRetryAfter
 		}
 		return d
 	}
