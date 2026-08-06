@@ -317,9 +317,25 @@ func (c *Client) fetchOneBooklet(ctx context.Context, st State, mbid string, see
 		case errors.Is(err, errUnauthorized):
 			return false, err
 		default:
-			c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_failed", "mbid", mbid, "error", err)
+			// A cancelled ctx here is a normal shutdown, not a fault: the
+			// in-flight PDF fetch fails with context.Canceled and the stamp
+			// below fails the same way, so an ungated pair would put TWO
+			// misleading warnings per in-flight booklet in the journal every
+			// time the bridge stops mid-sweep.
+			//
+			// Gate the LOGS ONLY. The stamp itself is still attempted
+			// unconditionally, and the `return false, nil` still runs —
+			// skipping the stamp is exactly what leaves this row pinned at
+			// the head of the fetch queue. (During shutdown the stamp write
+			// fails anyway, which is fine: nothing is recorded, and the row
+			// is retried on the next tick as before.)
+			if ctx.Err() == nil {
+				c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_failed", "mbid", mbid, "error", err)
+			}
 			if ferr := c.Booklets.MarkBookletFetchFailed(ctx, mbid); ferr != nil {
-				c.log().WarnContext(ctx, "atlasharvest.booklet_mark_fetch_failed", "mbid", mbid, "error", ferr)
+				if ctx.Err() == nil {
+					c.log().WarnContext(ctx, "atlasharvest.booklet_mark_fetch_failed", "mbid", mbid, "error", ferr)
+				}
 			}
 			return false, nil
 		}

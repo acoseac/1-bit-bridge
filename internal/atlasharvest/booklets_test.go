@@ -35,6 +35,10 @@ type fakeBookletSink struct {
 	// release is left un-marked (and so stays in the check queue).
 	calls        []string
 	failTagStamp bool
+
+	// markFetchFailedErr is returned by MarkBookletFetchFailed under a LIVE
+	// ctx, so a test can prove a genuine stamp failure is still logged.
+	markFetchFailedErr error
 }
 
 func newFakeBookletSink() *fakeBookletSink {
@@ -81,9 +85,15 @@ func (f *fakeBookletSink) MarkBookletFetched(_ context.Context, mbid string) err
 	f.fetched = append(f.fetched, mbid)
 	return nil
 }
-func (f *fakeBookletSink) MarkBookletFetchFailed(_ context.Context, mbid string) error {
+func (f *fakeBookletSink) MarkBookletFetchFailed(ctx context.Context, mbid string) error {
 	f.failed = append(f.failed, mbid)
-	return nil
+	// Mirror the real store: SQLite's ExecContext surfaces the ctx error, so
+	// during shutdown this write fails for every in-flight booklet — which is
+	// exactly what the log-gating branch exists to keep out of the journal.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return f.markFetchFailedErr
 }
 func (f *fakeBookletSink) MarkBookletUnavailable(_ context.Context, mbid string) error {
 	f.unavail = append(f.unavail, mbid)

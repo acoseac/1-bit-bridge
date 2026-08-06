@@ -1,10 +1,14 @@
 package atlasharvest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -140,5 +144,103 @@ func TestBookletOversizedPDFRecordsAFetchFailure(t *testing.T) {
 	files.mu.Unlock()
 	if present {
 		t.Error("oversized PDF left a partial file, want removed — a truncated PDF is corrupt")
+	}
+}
+
+// failingBookletServer answers the booklet fetch with a 500 and the check
+// endpoint with an empty verdict list.
+func failingBookletServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if quietResults(w, r) {
+			return
+		}
+		if r.URL.Path == "/v1/atlas/harvest/booklets/check" {
+			_ = json.NewEncoder(w).Encode(bookletsCheckResponse{})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// captureLogs points the client's logger at a buffer at Debug level, so ANY
+// emitted record is visible to the assertion.
+func captureLogs(c *Client) *bytes.Buffer {
+	var buf bytes.Buffer
+	c.Log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return &buf
+}
+
+// TestBookletFetchFailureOnShutdownIsQuietButStillStamps pins BOTH halves of
+// the shutdown-noise fix, and the second half is the one that matters.
+//
+// A cancelled ctx makes the in-flight PDF fetch fail with context.Canceled and
+// the progress stamp fail the same way, so an ungated pair of Warn logs would
+// put two misleading lines per in-flight booklet in the journal on every clean
+// stop. Both are gated on ctx.Err() == nil.
+//
+// But the gate covers the LOGS ONLY: MarkBookletFetchFailed is still CALLED,
+// and the return value is unchanged. Gating the call instead would skip the
+// progress record that keeps a failing row from pinning the head of the fetch
+// queue — reintroducing the head-of-line block this PR exists to fix.
+//
+// Negative controls, all verified:
+//   - drop either `if ctx.Err() == nil` → the "no log" assertion fails;
+//   - move the gate around the MarkBookletFetchFailed CALL → the "stamp still
+//     attempted" assertion fails.
+func TestBookletFetchFailureOnShutdownIsQuietButStillStamps(t *testing.T) {
+	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	srv := failingBookletServer(t)
+
+	sink := newFakeBookletSink()
+	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+	logs := captureLogs(c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the bridge is stopping mid-sweep
+
+	landed, err := c.fetchOneBooklet(ctx, c.State.Snapshot(), rel, map[string]struct{}{})
+
+	// Control flow is untouched by the gate.
+	if landed || err != nil {
+		t.Fatalf("fetchOneBooklet = (%v, %v), want (false, nil) — the ctx gate must "+
+			"not change what this branch returns", landed, err)
+	}
+	// The stamp is still ATTEMPTED. This is the load-bearing assertion: skipping
+	// it is what leaves the row pinned at the head of BookletsToFetch.
+	if len(sink.failed) != 1 || sink.failed[0] != rel {
+		t.Fatalf("fetch-failure stamp calls = %v, want [%s] — gate the LOG, never "+
+			"the progress record", sink.failed, rel)
+	}
+	// And nothing was logged.
+	if logs.Len() != 0 {
+		t.Fatalf("logged during shutdown, want silence:\n%s", logs.String())
+	}
+}
+
+// TestBookletFetchFailureUnderLiveCtxStillLogs is the companion: the gate is
+// specific to a cancelled ctx, not a blanket removal of the warnings. A real
+// upstream failure and a real stamp failure both still reach the journal.
+func TestBookletFetchFailureUnderLiveCtxStillLogs(t *testing.T) {
+	const rel = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	srv := failingBookletServer(t)
+
+	sink := newFakeBookletSink()
+	sink.markFetchFailedErr = errors.New("disk full")
+	c := bookletTestClient(t, srv.URL, sink, newFakeBookletFiles())
+	logs := captureLogs(c)
+
+	if _, err := c.fetchOneBooklet(context.Background(), c.State.Snapshot(), rel, map[string]struct{}{}); err != nil {
+		t.Fatalf("fetchOneBooklet: %v", err)
+	}
+
+	out := logs.String()
+	for _, want := range []string{"booklet_fetch_failed", "booklet_mark_fetch_failed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q under a live ctx — the gate must suppress "+
+				"shutdown noise only, never a genuine failure:\n%s", want, out)
+		}
 	}
 }
