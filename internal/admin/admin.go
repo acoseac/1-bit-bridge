@@ -869,6 +869,14 @@ type UpdateStatus struct {
 	// X"); future gates can extend the same field. Surfaced in
 	// the dashboard as a yellow "held update" card.
 	DeferredReason string `json:"deferredReason,omitempty"`
+	// RejectedVersion is a release the operator rolled back on this
+	// host. The auto-installer refuses to re-install it (only a
+	// strictly newer release gets through), so surfacing it is what
+	// explains a bridge that sees an update and deliberately never
+	// takes it. Empty when nothing has been rolled back. Filled by the
+	// cmd/bridge adapter from the updater's on-disk marker — the same
+	// place the auto-install gate reads it, so the two can't disagree.
+	RejectedVersion string `json:"rejectedVersion,omitempty"`
 }
 
 // Server owns the admin listener + mux. One per process.

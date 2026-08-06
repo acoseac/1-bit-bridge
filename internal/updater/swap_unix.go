@@ -66,8 +66,18 @@ var (
 // / network mounts) and across filesystems (EXDEV). There we fall back to
 // the original two-rename swap (swapBinaryViaRename) — it reintroduces the
 // tiny no-file window but is the best a link-less filesystem allows.
-func swapBinary(dst, newBinary, backupExt string) error {
+//
+// markSwapStarted (nil in tests) is invoked immediately before the first
+// filesystem mutation and aborts the swap on error; see State.SwapStarted.
+// The window it closes is a Windows one — this path reaches its first
+// mutation in microseconds — but the hook fires on both platforms so the
+// marker's meaning is identical everywhere.
+func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) error {
 	bak := dst + backupExt
+
+	if err := armSwap(markSwapStarted); err != nil {
+		return err
+	}
 
 	// os.Link refuses to create bak if it already exists (EEXIST), so a
 	// stale .bak from a previous cycle has to go — but ONLY once we know

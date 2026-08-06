@@ -57,7 +57,7 @@ func TestSwapBinaryPreservesExistingBackupWhenSwapFails(t *testing.T) {
 	}
 
 	// The swap is expected to fail; what matters is what it left behind.
-	_ = swapBinary(dst, newBin, ".bak")
+	_ = swapBinary(dst, newBin, ".bak", nil)
 
 	got, err := os.ReadFile(bak)
 	if err != nil {
@@ -104,7 +104,7 @@ func TestSwapBinaryClearsStaleBackupOnEEXIST(t *testing.T) {
 	}
 	defer func() { linkFunc = origLink }()
 
-	if err := swapBinary(dst, newBin, ".bak"); err != nil {
+	if err := swapBinary(dst, newBin, ".bak", nil); err != nil {
 		t.Fatalf("swap with a stale backup present: %v", err)
 	}
 	if calls < 2 {

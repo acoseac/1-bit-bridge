@@ -352,6 +352,15 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	if !st.UpdateAvailable || st.LatestVersion == "" {
 		return
 	}
+	// Operator-rollback gate, ahead of every other gate INCLUDING the
+	// pending-restart fast path: a rejected release must not be
+	// re-installed, and a restart still pending for one must not fire.
+	if rejected := u.rejectedCandidate(st.LatestVersion); rejected != "" {
+		reason := fmt.Sprintf("%s was rolled back on this host; auto-install resumes at the next newer release", rejected)
+		u.recordDeferredReason(reason)
+		logger.Info(autoInstallDeferredMessage, "reason", "operator rolled this release back", "version", rejected)
+		return
+	}
 	if !u.inAllowedWindow(u.now()) {
 		logger.Info(autoInstallDeferredMessage, "reason", "outside quiet-hours window")
 		return
@@ -410,6 +419,50 @@ func (u *Updater) inflightSessions() int64 {
 	return u.autoInstallOpts.Sessions.Inflight()
 }
 
+// rejectedCandidate reports the rolled-back release blocking
+// `candidate`, or "" when nothing blocks it. The rejection lives in
+// update-state.json (State.RejectedVersion) because it has to survive
+// the restart the rollback needs to take effect.
+//
+// Read at the gate rather than cached on the Updater: the gate runs at
+// most once per poll interval (6 h by default), so the cost is one tiny
+// file read, and there is no cache to go stale against a rollback
+// performed by the `bridge update` CLI in another process.
+func (u *Updater) rejectedCandidate(candidate string) string {
+	if u.autoInstallOpts == nil || u.autoInstallOpts.DataDir == "" {
+		return ""
+	}
+	st, err := LoadState(u.autoInstallOpts.DataDir)
+	if err != nil || st.RejectedVersion == "" {
+		return ""
+	}
+	if !rejectionBlocks(candidate, st.RejectedVersion) {
+		return ""
+	}
+	return st.RejectedVersion
+}
+
+// rejectionBlocks reports whether an operator rollback of `rejected`
+// should hold `candidate` back. Only a STRICTLY NEWER candidate gets
+// through — the operator rejected one build, not every future one, and
+// a bare string equality would leave the auto-installer re-installing
+// vN+1 forever the moment vN+2 published nothing.
+//
+// Exact-string equality is checked first so the block holds even for a
+// rejected version semver can't parse (semverGreater deliberately treats
+// an unparseable "current" as v0.0.0, which would otherwise let
+// everything through).
+func rejectionBlocks(candidate, rejected string) bool {
+	if rejected == "" {
+		return false
+	}
+	c, r := normalizeTag(candidate), normalizeTag(rejected)
+	if c == r {
+		return true
+	}
+	return !semverGreater(c, r)
+}
+
 // restartWhenDrained fires the auto-install restart, or — when
 // downloads are inflight — logs and defers to the next poll cycle.
 // Shared by the pending-restart fast path and the tail of a fresh
@@ -419,8 +472,40 @@ func (u *Updater) restartWhenDrained() {
 		logger.Info("auto-install restart deferred", "reason", activeDownloadsReason, "inflight", n)
 		return
 	}
+	u.refreshInstallAttemptedAt()
 	logger.Info("auto-install complete; restarting to load new binary")
 	u.autoInstallRestart()
+}
+
+// refreshInstallAttemptedAt re-stamps the pending install marker so the
+// boot-time recency window is measured from the RESTART rather than from
+// the swap.
+//
+// A restart deferred for an in-flight download waits a full poll
+// interval, and DefaultCheckInterval (6 h) EQUALS recencyWindow — with
+// quiet hours configured the next in-window tick can be a day later. The
+// marker would then read as abandoned on the very boot it was armed
+// for: BootClearAbandoned only clears it, so InstalledAt is never
+// stamped, BootCleanupBak never fires, and a ~30 MiB bridge.bak is never
+// reclaimed (the install also silently loses its boot-time rollback
+// protection).
+//
+// Best-effort and narrow: only an "installing" marker is touched, and a
+// failure just leaves the pre-existing behaviour.
+func (u *Updater) refreshInstallAttemptedAt() {
+	if u.autoInstallOpts == nil || u.autoInstallOpts.DataDir == "" {
+		return
+	}
+	dir := u.autoInstallOpts.DataDir
+	st, err := LoadState(dir)
+	if err != nil || st.Status != "installing" {
+		return
+	}
+	st.AttemptedAt = time.Now().UTC()
+	if err := SaveState(dir, st); err != nil {
+		logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
+			"err", err)
+	}
 }
 
 // recordDeferredReason persists a single-line explanation of why

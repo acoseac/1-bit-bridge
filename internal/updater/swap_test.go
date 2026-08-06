@@ -26,7 +26,7 @@ func TestSwapBinaryAtomicallyReplacesAndKeepsBak(t *testing.T) {
 	live := fakeBinary(t, dir, "bridge", "OLD")
 	newBin := fakeBinary(t, dir, "bridge.new", "NEW")
 
-	if err := swapBinary(live, newBin, ".bak"); err != nil {
+	if err := swapBinary(live, newBin, ".bak", nil); err != nil {
 		t.Fatalf("swapBinary: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestSwapBinaryFallsBackToRenameWhenHardlinkUnsupported(t *testing.T) {
 	live := fakeBinary(t, dir, "bridge", "OLD")
 	newBin := fakeBinary(t, dir, "bridge.new", "NEW")
 
-	if err := swapBinary(live, newBin, ".bak"); err != nil {
+	if err := swapBinary(live, newBin, ".bak", nil); err != nil {
 		t.Fatalf("swapBinary (fallback path): %v", err)
 	}
 	got, _ := os.ReadFile(live)
@@ -90,7 +90,7 @@ func TestSwapBinaryFallsBackToCopyOnCrossDeviceRename(t *testing.T) {
 	live := fakeBinary(t, dir, "bridge", "OLD")
 	newBin := fakeBinary(t, dir, "bridge.new", "NEW")
 
-	if err := swapBinary(live, newBin, ".bak"); err != nil {
+	if err := swapBinary(live, newBin, ".bak", nil); err != nil {
 		t.Fatalf("swapBinary (EXDEV copy fallback): %v", err)
 	}
 	if got, _ := os.ReadFile(live); string(got) != "NEW" {
@@ -121,7 +121,7 @@ func TestSwapBinaryOverwritesStaleBak(t *testing.T) {
 	_ = fakeBinary(t, dir, "bridge.bak", "very-old")
 	newBin := fakeBinary(t, dir, "bridge.new", "v3")
 
-	if err := swapBinary(live, newBin, ".bak"); err != nil {
+	if err := swapBinary(live, newBin, ".bak", nil); err != nil {
 		t.Fatalf("swapBinary: %v", err)
 	}
 	bak, _ := os.ReadFile(live + ".bak")

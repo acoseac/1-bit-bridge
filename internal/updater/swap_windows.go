@@ -48,7 +48,15 @@ const scmStopWait = 15 * time.Second
 // works for non-service installs (Startup-folder shortcut from
 // `installWindowsStartup`, which doesn't take an SCM file lock) and
 // for any future user-mode install layouts.
-func swapBinary(dst, newBinary, backupExt string) error {
+//
+// **markSwapStarted** (nil in tests) is invoked immediately before the
+// first rename — deliberately AFTER the SCM stop, which is where this
+// platform's marker-armed-but-nothing-mutated window lives: the stop can
+// block for scmStopWait (15 s), and a kill in there used to leave the
+// next boot renaming a two-versions-old .bak over a healthy binary. See
+// State.SwapStarted. A non-nil error aborts before any rename; the
+// deferred svc.Start still brings the service back.
+func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) error {
 	bak := dst + backupExt
 
 	// SCM coordination: try to stop the service first. If we can't
@@ -101,6 +109,12 @@ func swapBinary(dst, newBinary, backupExt string) error {
 	// NTFS metadata journaling ($LogFile) keeps each individual rename
 	// crash-consistent, and the boot-time rollback marker + SCM restart
 	// recover the rare crash-in-window case.
+	//
+	// Everything above this line is non-destructive, so the marker only
+	// becomes restorable-from here.
+	if err := armSwap(markSwapStarted); err != nil {
+		return err
+	}
 	if err := os.Rename(dst, bak); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
 	}

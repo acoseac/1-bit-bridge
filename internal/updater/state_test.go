@@ -97,14 +97,45 @@ func TestDecideBootAction(t *testing.T) {
 			want:      BootInstallSucceeded,
 		},
 		{
-			name: "installing + version-mismatch → failed",
+			name: "installing + swapped + version-mismatch → failed",
+			st: State{
+				Status:        "installing",
+				TargetVersion: "0.2.0",
+				AttemptedAt:   now.Add(-time.Minute),
+				SwapStarted:   true,
+			},
+			serverVer: "0.1.0",
+			want:      BootInstallFailed,
+		},
+		{
+			// F2: the marker is armed BEFORE swapBinary, and on Windows
+			// swapBinary opens with an SCM stop that can hold for 15 s
+			// before any rename. A kill in there leaves this exact state
+			// — and .bak still holds the version BEFORE the one running,
+			// so the blind restore silently downgraded by two versions.
+			name: "installing + never swapped + version-mismatch → clear, no restore",
 			st: State{
 				Status:        "installing",
 				TargetVersion: "0.2.0",
 				AttemptedAt:   now.Add(-time.Minute),
 			},
 			serverVer: "0.1.0",
-			want:      BootInstallFailed,
+			want:      BootClearNotSwapped,
+		},
+		{
+			// Upgrade-boundary guard: a marker written by a pre-fix
+			// binary has no swapStarted field (false after unmarshal),
+			// but if we're demonstrably RUNNING TargetVersion the swap
+			// obviously happened — the success stamp must still fire, or
+			// InstalledAt is never set and .bak is never reclaimed.
+			name: "installing + never swapped + version-match → success",
+			st: State{
+				Status:        "installing",
+				TargetVersion: "0.2.0",
+				AttemptedAt:   now.Add(-time.Minute),
+			},
+			serverVer: "0.2.0",
+			want:      BootInstallSucceeded,
 		},
 		{
 			name: "installing + abandoned (older than recency window) → clear",

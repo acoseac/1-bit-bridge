@@ -193,6 +193,36 @@ func TestInstallReplacesBinaryAndArmsMarker(t *testing.T) {
 	if st.TargetVersion != "0.2.0" {
 		t.Errorf("state.TargetVersion = %q, want 0.2.0", st.TargetVersion)
 	}
+	// F2: the marker has to say the swap actually happened, or the
+	// boot-time rollback can't tell a real failed install from one that
+	// died before touching the filesystem — and refuses the restore.
+	if !st.SwapStarted {
+		t.Error("state.SwapStarted = false after a completed swap; the boot rollback would refuse to restore .bak")
+	}
+}
+
+// TestInstallSwapAbortsBeforeMutatingWhenMarkerWriteFails pins the
+// hook's placement: it fires BEFORE the first destructive filesystem
+// operation, so a failure there leaves the binary and any pre-existing
+// .bak exactly as they were. That ordering is what makes SwapStarted
+// mean "restoring .bak is a rollback, not a downgrade".
+func TestInstallSwapAbortsBeforeMutatingWhenMarkerWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	live := fakeBinary(t, dir, "bridge", "CURRENT")
+	_ = fakeBinary(t, dir, "bridge.bak", "PREVIOUS")
+	newBin := fakeBinary(t, dir, "bridge.new", "NEW")
+
+	wantErr := errors.New("simulated marker write failure")
+	err := swapBinary(live, newBin, ".bak", func() error { return wantErr })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("swapBinary with a failing swap-started hook: err = %v, want it to wrap %v", err, wantErr)
+	}
+	if got, _ := os.ReadFile(live); string(got) != "CURRENT" {
+		t.Errorf("live = %q after an aborted swap, want CURRENT (untouched)", string(got))
+	}
+	if got, _ := os.ReadFile(live + ".bak"); string(got) != "PREVIOUS" {
+		t.Errorf(".bak = %q after an aborted swap, want PREVIOUS (untouched)", string(got))
+	}
 }
 
 func TestInstallRefusesWithActiveSessions(t *testing.T) {
@@ -659,6 +689,82 @@ func Test_preflightWritable_SucceedsAfterTransientRemoveFailure(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Errorf("expected a retry after the first failure, got %d call(s)", calls)
+	}
+}
+
+// Test_preflightWritable_LeavesAtMostOneProbeFile pins the F4 fix: the
+// probe's whole purpose is to detect a "can create but not delete"
+// directory, and in exactly that case the probe file stays on disk. With
+// os.CreateTemp's random suffix every attempt leaked a fresh undeletable
+// file — and Install runs the preflight on EVERY attempt, so auto-install
+// at the 6 h cadence accumulated ~4/day in e.g. /usr/local/bin,
+// indefinitely. A fixed name caps the leak at one.
+func Test_preflightWritable_LeavesAtMostOneProbeFile(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bridge")
+	orig := removeFunc
+	t.Cleanup(func() { removeFunc = orig })
+	removeFunc = func(string) error { return os.ErrPermission } // never deletable
+
+	for i := 0; i < 3; i++ {
+		if err := preflightWritable(bin); !errors.Is(err, ErrPathNotWritable) {
+			t.Fatalf("attempt %d: err = %v, want ErrPathNotWritable", i, err)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probes []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), writeProbeName) {
+			probes = append(probes, e.Name())
+		}
+	}
+	if len(probes) != 1 {
+		t.Errorf("3 failed preflights left %d probe file(s) %v; want exactly 1", len(probes), probes)
+	}
+	if len(probes) > 0 && probes[0] != writeProbeName {
+		t.Errorf("probe file = %q, want the fixed name %q", probes[0], writeProbeName)
+	}
+}
+
+// Test_preflightWritable_RecoversFromAnotherUsersStaleProbe is the
+// round-1 review regression. Capping the probe leak with a FIXED name
+// only works alongside this recovery: `sudo bridge update` leaves a
+// root-owned 0600 .bridge-write-test, and the unprivileged service's
+// next probe then gets EACCES opening it for writing even though the
+// DIRECTORY is fine — a permanent false "not writable" that blocks
+// every future update, which is strictly worse than the bounded leak
+// the fixed name was introduced to stop.
+//
+// Mode 0000 reproduces the failing syscall exactly (a file this process
+// cannot open for writing but CAN unlink, because unlink permission
+// comes from the directory).
+func Test_preflightWritable_RecoversFromAnotherUsersStaleProbe(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses the file permission bits this test depends on")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bridge")
+	stale := filepath.Join(dir, writeProbeName)
+	if err := os.WriteFile(stale, nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Sanity-check the fixture actually reproduces the condition.
+	if f, err := os.OpenFile(stale, os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		f.Close()
+		t.Skip("filesystem ignores mode 0000; cannot stage the stale-probe condition")
+	}
+
+	if err := preflightWritable(bin); err != nil {
+		t.Errorf("preflightWritable with another user's stale probe = %v; want nil "+
+			"(the directory is writable and the stale probe is unlinkable)", err)
+	}
+	// The probe replaced the stale file and cleaned up after itself.
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("probe file still present after a successful preflight: stat err = %v", err)
 	}
 }
 
