@@ -218,6 +218,40 @@ type MediaServerDiscoveryClient struct {
 	// freshly-cleared cache (the Stop()/Upsert race). Mirrors the sibling
 	// internal/dlna/discovery.SSDPDiscoveryClient invariant.
 	wg sync.WaitGroup
+
+	// locMu guards lastLocation. A DEDICATED mutex, not runMu: runMu's
+	// scope is the conn / runCtx lifecycle and Stop() holds it across
+	// cache.Clear(), so borrowing it for per-packet bookkeeping would
+	// widen a lock whose ordering contract is already load-bearing.
+	// Lock order is runMu → locMu → cache.mu; nothing takes them the
+	// other way round.
+	locMu sync.Mutex
+
+	// lastLocation maps UDN → the SSDP `Location` the last SUCCESSFUL
+	// detail fetch resolved against. It is the host-change reference for
+	// handlePacket.
+	//
+	// The cached ContentDirectoryControlURL is NOT a substitute:
+	// ParseDeviceDescription resolves <controlURL> through
+	// base.ResolveReference, which returns an ABSOLUTE control URL
+	// verbatim — so a device that advertises its control endpoint on a
+	// different host:port than its description endpoint compared as
+	// "moved" on EVERY announcement. That branch re-fetches and returns,
+	// so the entry's LastSeenAt advanced only when the description fetch
+	// succeeded: a description endpoint flaky for longer than ServerTTL
+	// evicted a live, M-SEARCH-answering server, after which
+	// ResolveControlURL returns "" and every play of its tracks 503s.
+	// Steady-state it also meant one description GET per announcement,
+	// forever.
+	//
+	// Deliberately a client-side map rather than a ServerInfo field: that
+	// struct is the shape the admin/API surfaces render, and this is
+	// discovery bookkeeping they have no business carrying. Mirrors the
+	// sibling renderer client's lastLocation — the previous-Location
+	// tracking ONLY; that client's Remove-then-refetch + stub semantics
+	// are deliberately NOT copied (the server twin re-fetches in place,
+	// and a stub-clobber there would pin a dead controlURL forever).
+	lastLocation map[string]string
 }
 
 // NewMediaServerDiscoveryClient validates the config and returns a
@@ -265,6 +299,7 @@ func NewMediaServerDiscoveryClient(cfg DiscoveryConfig, cache *ServerCache) (*Me
 		dispatcher:     cfg.Dispatcher,
 		nowFunc:        nowFunc,
 		detailFetchSem: make(chan struct{}, 2),
+		lastLocation:   make(map[string]string),
 	}, nil
 }
 
@@ -347,6 +382,12 @@ func (c *MediaServerDiscoveryClient) Stop() {
 	// hazard, and all loops have already exited (wg.Wait above) so no reader is
 	// blocked on runMu here. (Gemini HIGH on PR #469.)
 	c.cache.Clear()
+	// The location map shadows the cache, so it must not outlive it: a
+	// restarted client comparing a fresh announcement against a pre-Stop
+	// address would mis-classify it. Lock order runMu → locMu holds.
+	c.locMu.Lock()
+	c.lastLocation = make(map[string]string)
+	c.locMu.Unlock()
 	c.runMu.Unlock()
 }
 
@@ -409,7 +450,11 @@ func (c *MediaServerDiscoveryClient) runTickLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			c.sendMSearch()
+			// Prune the shadow bookkeeping in the SAME step as the cache
+			// eviction so the two can't drift — an entry that ages out
+			// must not leave its recorded Location behind.
 			c.cache.EvictStale(c.nowFunc(), c.cfg.ServerTTL)
+			c.pruneLocations()
 		}
 	}
 }
@@ -457,24 +502,42 @@ func (c *MediaServerDiscoveryClient) handlePacket(ctx context.Context, packet []
 	}
 	if hdr.NTS == "ssdp:byebye" {
 		c.cache.Remove(udn)
+		c.forgetLocation(udn)
 		return
 	}
 	now := c.nowFunc()
 	if existing, exists := c.cache.Get(udn); exists {
-		// Known UDN announcing from a NEW host:port (DHCP renew, Wi-Fi
-		// ↔ Ethernet move): the cached controlURL points at the old
-		// address, so the bare LastSeenAt refresh would keep a dead URL
-		// alive forever (TTL eviction never fires while the server keeps
-		// answering M-SEARCH). Re-fetch the description instead — the
-		// fetch upserts the fresh controlURL + LastSeenAt on success;
-		// on failure the entry ages out via the staleness window, which
-		// is correct for a server that moved somewhere unreachable.
-		if hdr.Location != "" &&
-			!sameURLHost(hdr.Location, existing.ContentDirectoryControlURL) {
-			c.spawnDetailFetch(ctx, udn, hdr.Location, now)
-			return
-		}
+		// The device just announced itself, so it is alive: refresh
+		// LastSeenAt on EVERY announcement, INCLUDING the moved-host
+		// branch below. Pre-fix that branch returned without refreshing,
+		// so LastSeenAt advanced only when a description fetch succeeded
+		// and a flaky description endpoint got a live server evicted
+		// (ResolveControlURL then returns "" → 503 on every play).
+		// Upsert merges: only UDN + LastSeenAt are set here, so the
+		// cached descriptive fields and controlURL survive untouched.
 		c.cache.Upsert(ServerInfo{UDN: udn, LastSeenAt: now})
+		// Known UDN announcing from a NEW host:port (DHCP renew, Wi-Fi ↔
+		// Ethernet move): the cached controlURL points at the old address,
+		// so without a re-fetch it would stay dead forever (TTL eviction
+		// never fires while the server keeps answering M-SEARCH). The
+		// fetch upserts the fresh controlURL on success; on failure the
+		// old entry stays and the NEXT announcement re-detects the move
+		// and retries, because lastLocation is only stamped by a
+		// SUCCESSFUL fetch.
+		//
+		// Compare Location-to-Location, NOT Location-to-controlURL: see
+		// the lastLocation field docblock. prev == "" means we have no
+		// recorded reference and the cached controlURL is absent too —
+		// treat as "no change" rather than guessing, since a false
+		// positive here is a re-fetch storm.
+		if hdr.Location != "" {
+			if prev := c.previousLocation(udn, existing.ContentDirectoryControlURL); prev != "" &&
+				!sameURLHost(hdr.Location, prev) {
+				logger.Debug("upstream server moved; re-fetching description",
+					"udn", udn, "from", prev, "to", hdr.Location)
+				c.spawnDetailFetch(ctx, udn, hdr.Location, now)
+			}
+		}
 		return
 	}
 	if hdr.Location == "" {
@@ -493,6 +556,73 @@ func sameURLHost(a, b string) bool {
 		return true
 	}
 	return ua.Host == ub.Host
+}
+
+// previousLocation returns the SSDP Location this client last fetched for
+// udn, falling back to the cached controlURL when no fetch has been
+// recorded — e.g. an entry seeded by a caller other than the fetch path, or
+// one carried over from before this process recorded anything. That
+// fallback is the pre-fix approximation and is only ever reached when
+// there is nothing better; see the lastLocation docblock for why it is not
+// good enough on its own. Returns "" when neither is known, which callers
+// MUST treat as "no change" rather than guessing.
+func (c *MediaServerDiscoveryClient) previousLocation(udn, cachedControlURL string) string {
+	c.locMu.Lock()
+	loc := c.lastLocation[udn]
+	c.locMu.Unlock()
+	if loc != "" {
+		return loc
+	}
+	return cachedControlURL
+}
+
+// recordLocation stamps the Location a fetch resolved against, so the next
+// announcement for udn has a same-kind reference to compare hosts with.
+//
+// Called ONLY after a fetch has successfully upserted the entry. Recording
+// a FAILED (or merely attempted) fetch would silence the move detector for
+// a server that genuinely moved but whose description endpoint is down: the
+// next announcement would compare equal, no retry would be dispatched, and
+// the cache would keep its dead controlURL indefinitely.
+func (c *MediaServerDiscoveryClient) recordLocation(udn, location string) {
+	if udn == "" || location == "" {
+		return
+	}
+	c.locMu.Lock()
+	c.lastLocation[udn] = location
+	c.locMu.Unlock()
+}
+
+// forgetLocation drops udn's recorded Location — called when ssdp:byebye
+// removes the server, so the map tracks live devices only.
+func (c *MediaServerDiscoveryClient) forgetLocation(udn string) {
+	c.locMu.Lock()
+	delete(c.lastLocation, udn)
+	c.locMu.Unlock()
+}
+
+// pruneLocations drops recorded Locations for UDNs no longer in the cache.
+// Without it the map retains one entry per distinct UDN ever fetched:
+// ssdp:byebye is the only other removal path and this client listens on an
+// ephemeral unicast port (M-SEARCH responses only), so byebye is rarely
+// received. A buggy or spoofed LAN source announcing many distinct UDNs
+// would otherwise grow it without bound.
+//
+// Safe against an in-flight first fetch because recordLocation runs AFTER
+// that fetch's cache.Upsert — so a recorded UDN is always a cached one
+// unless it has since been evicted, and the move path re-fetches IN PLACE
+// (the entry is never removed for the duration of a fetch).
+//
+// Lock order is locMu → cache.mu (via Get); ServerCache never calls back
+// into the client, so the inverse order does not exist.
+func (c *MediaServerDiscoveryClient) pruneLocations() {
+	c.locMu.Lock()
+	defer c.locMu.Unlock()
+	for udn := range c.lastLocation {
+		if _, cached := c.cache.Get(udn); !cached {
+			delete(c.lastLocation, udn)
+		}
+	}
 }
 
 // spawnDetailFetch tracks the fetch in the WaitGroup before launching it.
@@ -558,6 +688,9 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 		ContentDirectoryControlURL: ctrlURL,
 		LastSeenAt:                 lastSeenAt,
 	})
+	// Stamp AFTER the Upsert, so a recorded UDN is always a cached one and
+	// pruneLocations can use "not in cache" as its sole predicate.
+	c.recordLocation(udn, location)
 }
 
 // lookupContentDirectoryControlURL walks the parsed service map for the

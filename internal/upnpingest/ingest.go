@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 )
+
+var logger = logging.Component("upnpingest")
 
 // ServerResolver looks up a configured server's live ContentDirectory
 // controlURL. The production implementation consults the
@@ -109,6 +112,35 @@ type Options struct {
 
 const defaultTimeBackstop = 24 * time.Hour
 
+// minPlausibleWalkFraction is the share of the stored baseline a walk must
+// reach before its result is trusted as authoritative for the reconcile
+// sweep. A walk that yielded LESS than this is treated as a partial view of
+// the upstream and MUST NOT drive deletions — see reapAuthorized.
+//
+// Deliberately loose (half the library): the guard exists to catch the
+// catastrophic shapes (an empty root, a whole subtree that browsed empty),
+// not to second-guess ordinary churn. Any legitimate bulk deletion larger
+// than this still reaps once implausibleWalkGrace has elapsed, so a
+// too-loose threshold costs stale rows for a while and a too-tight one
+// would let the treadmill through.
+const minPlausibleWalkFraction = 0.5
+
+// implausibleWalkGrace bounds how long a server may keep reporting an
+// implausibly small library before the reconcile sweep is allowed to act on
+// it anyway. Without it a genuinely-emptied (or bulk-pruned) upstream would
+// keep its rows FOREVER: the baseline is re-read from the store on every
+// walk, so the same suspicious ratio would recur on every tick and the
+// operator's only recourse would be removing the server from config.
+//
+// This is elapsed WALL TIME, not a tick count, on purpose: the admin
+// "Rescan now" button calls Run(ForceWalk) directly, so a count-based
+// debounce could be burned through with three clicks during exactly the
+// upstream DB rebuild it is meant to survive. It matches the default
+// ScanIntervalSec (6h), so in the default configuration this reads as "at
+// least one extra tick"; the first observation never reaps regardless of
+// the clock, so a fast-ticking bridge still gets a real time window.
+const implausibleWalkGrace = 6 * time.Hour
+
 // Ingester orchestrates one pass per scan tick. Construct once + reuse
 // for the lifetime of the bridge.
 type Ingester struct {
@@ -126,6 +158,18 @@ type Ingester struct {
 	// cutoff). A queued second run is cheap: the SystemUpdateID skip
 	// gate short-circuits it unless the upstream actually changed.
 	runMu sync.Mutex
+
+	// implausibleSince records, per StableServerKey, when the CURRENT run
+	// of implausible walks began (see reapAuthorized). Cleared as soon as a
+	// walk looks plausible again, so it only holds entries for servers
+	// actively reporting a suspect library shape.
+	//
+	// Guarded by runMu: every access is inside ingestOne, which is only
+	// ever reached from Run — and Run holds runMu for its whole body.
+	// In-memory ONLY: a restart resets the grace window, which is the safe
+	// direction (it delays a reap, never authorises one early). Bounded by
+	// the number of distinct servers configured in this process lifetime.
+	implausibleSince map[string]time.Time
 }
 
 // NewIngester wires the orchestrator. None of the args may be nil
@@ -154,6 +198,7 @@ func NewIngester(
 	return &Ingester{
 		cfg: cfg, cdsClient: cdsClient, resolver: resolver,
 		store: store, idStore: idStore,
+		implausibleSince: make(map[string]time.Time),
 	}, nil
 }
 
@@ -394,6 +439,28 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 		return
 	}
 
+	// An error-free walk is NOT the same as an authoritative one. A
+	// container that Browses EMPTY without an error terminates BrowseAll
+	// (client.go's `pageLen == 0` break) and the walker just yields
+	// nothing for that subtree — no error, no stats.Truncated — so the
+	// sweep below would delete every row underneath it with none of the
+	// debounce the filesystem scanner's missing_count pass provides. The
+	// upstream family this ingests is documented as doing exactly that
+	// while its DB rebuilds (see pager.go on MiniDLNA's inaccurate
+	// TotalMatches), and the SystemUpdateID gate FORCES a walk during a
+	// rebuild precisely because the ID moved. Same class for a NAS share
+	// unmounting under a still-answering server: the root browses empty.
+	//
+	// Skipping the idStore.Set below is deliberate and mirrors the
+	// truncated-walk branch above: a tick we refused to trust must re-walk
+	// next tick rather than settle on this SystemUpdateID.
+	if allowed, suspectFor := i.reapAuthorized(udn, res.Walked, len(baseline), baselineErr == nil, now()); !allowed {
+		logger.Warn("upstream walk yielded implausibly little; skipping reconcile sweep",
+			"server", udn, "walked", res.Walked, "baseline", len(baseline),
+			"baselineKnown", baselineErr == nil, "suspectFor", suspectFor.String())
+		return
+	}
+
 	// Reconcile: anything not refreshed in this walk generation goes.
 	// last_seen_at < walk-start is the cutoff: every row touched THIS
 	// pass has last_seen_at == walk-start. DeleteTracksBatch keeps the
@@ -416,6 +483,67 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	// Stash the SystemUpdateID + walk-time for next tick's skip gate.
 	// Same StableServerKey (`udn`) the Get/LastWalkedAt above use.
 	i.idStore.Set(udn, currentID, walkStart)
+}
+
+// walkLooksImplausible reports whether a SUCCESSFUL walk yielded so much
+// less than the stored baseline that its result must not be treated as
+// authoritative for the reconcile sweep. Pure — the grace-window
+// bookkeeping lives in reapAuthorized.
+//
+//   - baseline unknown (the ListUPnPTracksByServer load failed): ALWAYS
+//     implausible. The guard is otherwise disarmed by exactly the query
+//     failure that hides how much we are about to delete, and skipping one
+//     reconcile tick costs nothing.
+//   - baseline empty: never implausible. Nothing is stored, so there is
+//     nothing to protect and nothing for the sweep to delete — this is the
+//     normal first-ingest shape (walked=N, baseline=0).
+//   - walked zero against a non-empty baseline: implausible. A server that
+//     answered SSDP, answered GetSystemUpdateID, and browsed without error
+//     but holds none of the N tracks we have recorded for it is reporting
+//     an empty root, not a library the operator deleted between ticks.
+//   - otherwise: implausible below minPlausibleWalkFraction of the
+//     baseline. This is the partial case — an empty page MID-TREE truncates
+//     one subtree and leaves the rest of the walk looking clean.
+func walkLooksImplausible(walked, baseline int, baselineKnown bool) bool {
+	if !baselineKnown {
+		return true
+	}
+	if baseline <= 0 {
+		return false
+	}
+	if walked <= 0 {
+		return true
+	}
+	return float64(walked) < minPlausibleWalkFraction*float64(baseline)
+}
+
+// reapAuthorized decides whether this walk's result may drive the reconcile
+// sweep, and updates the per-server grace bookkeeping. Returns how long the
+// server has been reporting an implausible shape, for the caller's log.
+//
+// A plausible walk clears the window immediately. The FIRST implausible walk
+// always refuses (so a transient rebuild costs at most stale rows for one
+// tick); further ones refuse until implausibleWalkGrace of wall time has
+// elapsed, after which the shape is accepted as the real library and the
+// window resets. A clock that jumps backwards only ever delays the reap.
+//
+// Caller MUST hold runMu (see Ingester.implausibleSince).
+func (i *Ingester) reapAuthorized(udn string, walked, baseline int, baselineKnown bool, now time.Time) (bool, time.Duration) {
+	if !walkLooksImplausible(walked, baseline, baselineKnown) {
+		delete(i.implausibleSince, udn)
+		return true, 0
+	}
+	since, seen := i.implausibleSince[udn]
+	if !seen {
+		i.implausibleSince[udn] = now
+		return false, 0
+	}
+	elapsed := now.Sub(since)
+	if elapsed >= implausibleWalkGrace {
+		delete(i.implausibleSince, udn)
+		return true, elapsed
+	}
+	return false, elapsed
 }
 
 // effectiveWalkErr folds the walker's stats into the walk error. A
