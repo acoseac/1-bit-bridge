@@ -1683,6 +1683,47 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 	configPath := &opts.configPath
 	addrOverride := &opts.addrOverride
+	// Resolve the config location ONCE, before anything reads it — and
+	// keep the resolved value in *configPath, because every later
+	// consumer of the path (the auto-init stat just below, the admin
+	// console's Save target via filepath.Abs, the backup source set, the
+	// doctor runner) reads that same variable.
+	//
+	// The flag's default is "" (an explicit value still wins), so the raw
+	// value is NOT a usable path: filepath.Abs("") returns the process
+	// CWD — a DIRECTORY — which silently became admin.Deps.CfgPath and
+	// made every admin config mutation fail its temp-file rename, put
+	// BridgeYAML: "" in the backup set (bridge.yaml silently absent from
+	// every snapshot), and had the admin Diagnostics page load a
+	// directory as YAML. os.Stat("") likewise reports IsNotExist, which
+	// sent every flag-less `serve --init-if-missing` down the auto-init
+	// branch even with a perfectly good ./bridge.yaml sitting there.
+	//
+	// resolveConfigPath returns the location a config SHOULD live at even
+	// when none exists yet (ok=false), which is exactly what the
+	// auto-init writer needs.
+	//
+	// ABSOLUTE, because resolving is only half the job: two of
+	// resolveConfigPath's four branches hand back the bare relative
+	// "bridge.yaml" (the local-first hit and the no-config-anywhere
+	// fallback), and an explicit relative --config is echoed verbatim.
+	// The path is then STORED and read much later by consumers that do
+	// their own file I/O — the backup ticker's first snapshot can be 24h
+	// after boot — so a relative value silently means "wherever the
+	// process CWD happens to be by then". That is not hypothetical here:
+	// the installed service units set WorkingDirectory to the DATA dir,
+	// so a relative "bridge.yaml" resolves under <cfgDir>/data, where
+	// backup.Snapshot's os.Stat misses and it SKIPS the config with no
+	// error — the same silently-configless snapshot this commit is
+	// fixing, reintroduced through a different door.
+	//
+	// filepath.Abs only fails when os.Getwd does; keep the relative value
+	// in that case rather than losing the path entirely.
+	resolved, _ := resolveConfigPath(*configPath)
+	if abs, absErr := filepath.Abs(resolved); absErr == nil {
+		resolved = abs
+	}
+	*configPath = resolved
 	// Container convenience: if --init-if-missing is set (the Docker CMD
 	// sets it) and no config exists yet, write a sparse default so the
 	// image needs only a single `docker run` / `docker compose up`. A bare
@@ -1698,11 +1739,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				"path", *configPath, "libraryRoots", autoInitDefaultRoot)
 		}
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgFile, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
 	}
+	// Identical to `resolved` by construction (resolveConfigPath echoes a
+	// non-empty explicit path back), but taking the loader's own answer
+	// keeps the two from drifting if that ever stops being true — this is
+	// the file whose contents `cfg` came from, and the file the admin
+	// console must write back to.
+	*configPath = cfgFile
 	if err := bridgefs.ValidateRoots(cfg.LibraryRoots); err != nil {
 		fmt.Fprintf(stderr, "config: %v\n", err)
 		return 2
@@ -2620,7 +2667,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
-		runDuplicatesSweeper(scanCtx, scanner, duplicatesNudge, duplicatesSweepState)
+		runDuplicatesSweeper(scanCtx, scanner, duplicatesNudge, duplicatesSweepState, duplicatesDeferRetry)
 	}()
 
 	// Smart-playlist regenerator (shares scanCtx). analysisActive (the
@@ -2991,9 +3038,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// 127.0.0.1:7789). Shares the api server's Resolver so hot-add/remove
 	// of library roots lands on both sides in lockstep.
 	//
-	// We resolve the config file path to absolute here so admin.Cfg.Save
-	// writes to the right file even if the operator changes cwd post-boot
-	// (shouldn't happen, but let's not trip them up).
+	// *configPath was already resolved AND absolutised at the top of
+	// runServe, so this is a no-op Clean rather than a second resolution.
+	// It stays as the belt-and-braces path for the one case that skips
+	// the earlier absolutise — filepath.Abs failing on a broken Getwd.
 	absCfgPath, _ := filepath.Abs(*configPath)
 	// Shared instance across the admin tile AND the api server: the
 	// api layer's `/v1/health.endpoints` advertising in tsnet mode
@@ -3917,6 +3965,19 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// enumeration under a manual `bridge scan` reaps rows that the
 	// documented 3-scan grace period exists to spare.
 	scanner.SetDeleteThreshold(cfg.Scanner.DeleteAfterMissingScans)
+	// Same duplicates policy `bridge serve` wires. Scan's success tail
+	// ALWAYS runs the stamping pass, and an unwired scanner reports
+	// FilterOff — so a single `bridge scan` under the default
+	// `duplicates.filter: highest-quality` would clear every suppression
+	// in the library, strict-advance indexed_at on each cleared row (a
+	// full-library delta to every paired device), and rewrite the
+	// dupe_summary document with `policy: "off"`. Exactly the failure
+	// SetDupePolicy's "wire it BEFORE the scan starts" contract exists to
+	// prevent, reached through the other entry point.
+	//
+	// The CLI has no live config holder — it loads once and exits — so a
+	// closure over the loaded cfg is the whole story here.
+	scanner.SetDupePolicy(func() dupes.Policy { return dupePolicyFromConfig(cfg) })
 
 	fmt.Fprintf(stdout, "Scanning %v ...\n", cfg.LibraryRoots)
 	start := time.Now()
