@@ -93,6 +93,81 @@ func TestScanSubtree_RestampsAfterReapingTheServedWinner(t *testing.T) {
 	}
 }
 
+// TestScanSubtree_RestampGateKeysOnTheTracksDeleteError pins WHICH
+// deletion-pass error the restamp gate reads.
+//
+// The two passes' errors were both named `derr` in one block, so the
+// folders pass's short declaration re-assigned the tracks pass's error
+// (a short declaration only introduces the variables that are new).
+// The gate therefore read the folders error — and the duplicate stamps
+// derive only from `tracks`, so it was reading the one error that says
+// nothing about them while discarding the one that does.
+//
+// Isolated so ONLY the tracks error can open the gate: the walked file
+// takes the size+mtime fast-skip (nothing committed), the threshold
+// DELETE aborts (nothing reaped), and no path fold-matches (no renames).
+// The trigger fails the tracks pass alone — the folders pass writes a
+// different table and the stamping pass only ever SELECTs.
+func TestScanSubtree_RestampGateKeysOnTheTracksDeleteError(t *testing.T) {
+	root := t.TempDir()
+	store, sc := newScanFixture(t, root)
+	ctx := context.Background()
+
+	dir := filepath.Join(root, "Dir")
+	seedFileBackedTrack(t, store, "Dir/CopyA/01 Song.flac",
+		filepath.Join(dir, "CopyA", "01 Song.flac"), 900)
+
+	// A row with no file on disk, so the tracks deletion pass has work
+	// and reaches its threshold DELETE (default threshold is 1).
+	gone := &Track{
+		Path: "Dir/Gone/02 Gone.flac", Size: 1, ModTime: time.Unix(0, 0).UTC(),
+		Title: "Gone", Artist: "Artist", Album: "Album",
+	}
+	if err := store.UpsertTrack(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	// ...and a folder row that is also missing, so the FOLDERS pass runs
+	// and SUCCEEDS. That success is what used to close the gate.
+	if err := store.UpsertFolder(ctx, &Folder{Path: "Dir/Gone", ModTime: time.Unix(0, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.db.Exec(`CREATE TRIGGER refuse_track_delete BEFORE DELETE ON tracks
+		BEGIN SELECT RAISE(ABORT, 'tracks delete refused'); END;`); err != nil {
+		t.Fatalf("stage the failing tracks delete: %v", err)
+	}
+
+	passes := 0
+	beforeApplyDupeStampsHookForTests = func() { passes++ }
+	t.Cleanup(func() { beforeApplyDupeStampsHookForTests = nil })
+
+	if _, err := sc.ScanSubtree(ctx, dir); err != nil {
+		t.Fatalf("ScanSubtree: %v", err)
+	}
+
+	// Preconditions: the tracks pass really failed (its row survives) and
+	// the folders pass really succeeded (its row is gone). Without both,
+	// the assertion below would not be about the error the gate reads.
+	if got, _ := store.GetTrack(ctx, "Dir/Gone/02 Gone.flac"); got == nil {
+		t.Fatal("precondition: the tracks delete must have been refused, leaving the row")
+	}
+	folders, err := store.FolderPathsUnder(ctx, "Dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range folders {
+		if p == "Dir/Gone" {
+			t.Fatal("precondition: the folders pass must have succeeded and reaped its row")
+		}
+	}
+
+	if passes != 1 {
+		t.Errorf("restamp ran %d times, want 1 — the gate must key on the TRACKS "+
+			"deletion error; reading the folders error skips the pass exactly when "+
+			"the pass that touches the stamps' only input failed", passes)
+	}
+}
+
 // TestScan_RestampsWhenTheReconciliationTailBailsEarly pins the duplicate
 // stamping onto EVERY successful exit of Scan, not just the bottom one.
 //

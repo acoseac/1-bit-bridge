@@ -1702,9 +1702,16 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		}
 		missingTracks = append(missingTracks, p)
 	}
-	deletedTracks, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
-	if derr != nil {
-		scanLogger.Error("subtree missing-count tracks pass", "err", derr, "missing", len(missingTracks))
+	// tracksDelErr / foldersDelErr are deliberately DISTINCT names. They
+	// were both `derr`, and because a short declaration only introduces
+	// the variables that are new, the folders pass below RE-ASSIGNED the
+	// tracks pass's error in the same block — so the restamp gate at the
+	// tail read the wrong one and skipped the pass whenever the tracks
+	// pass failed while the folders pass succeeded. Separate names make
+	// that class of clobber impossible rather than merely fixed.
+	deletedTracks, tracksDelErr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
+	if tracksDelErr != nil {
+		scanLogger.Error("subtree missing-count tracks pass", "err", tracksDelErr, "missing", len(missingTracks))
 	}
 	if len(renamed) > 0 {
 		if err := s.store.DeleteTracksBatch(ctx, renamed); err != nil {
@@ -1725,9 +1732,9 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 		}
 		missingFolders = append(missingFolders, p)
 	}
-	deletedFolders, derr := s.store.IncrementMissingFoldersAndDeleteAtThreshold(ctx, missingFolders, threshold)
-	if derr != nil {
-		scanLogger.Error("subtree missing-count folders pass", "err", derr, "missing", len(missingFolders))
+	deletedFolders, foldersDelErr := s.store.IncrementMissingFoldersAndDeleteAtThreshold(ctx, missingFolders, threshold)
+	if foldersDelErr != nil {
+		scanLogger.Error("subtree missing-count folders pass", "err", foldersDelErr, "missing", len(missingFolders))
 	}
 	if sparedTracks > 0 || sparedFolders > 0 {
 		scanLogger.Warn("subtree scan spared rows from deletion pass (parent walk error)",
@@ -1759,11 +1766,19 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// it is gated on the scan having actually touched a row. The stamps
 	// derive only from `tracks`: if this scan committed nothing and reaped
 	// nothing, no input to them moved, and the periodic full Scan remains
-	// the safety net for staleness from anywhere else. A delete-pass
-	// ERROR opens the gate too — a partial reap is indistinguishable from
-	// none here, and paying one pass beats leaving a winner-less group.
+	// the safety net for staleness from anywhere else.
+	//
+	// The error term is the TRACKS pass's specifically. The folders pass
+	// writes a different table that is not an input to the stamps at all,
+	// so its failure says nothing about their staleness — and it is the
+	// one the gate used to read, back when both errors shared the name
+	// `derr`. A tracks-pass error opens the gate because this caller
+	// cannot see how far that pass got: today it is one transaction that
+	// rolls back whole, but the gate must not depend on the store keeping
+	// that shape, and the cost of being wrong in this direction is one
+	// DB-only pass against leaving a group with no served member.
 	// Non-fatal.
-	if committed.Load() > 0 || deletedTracks > 0 || len(renamed) > 0 || derr != nil {
+	if committed.Load() > 0 || deletedTracks > 0 || len(renamed) > 0 || tracksDelErr != nil {
 		s.restampDuplicatesNonFatal(ctx)
 	}
 
