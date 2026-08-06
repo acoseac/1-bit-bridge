@@ -25,7 +25,9 @@ package transcode
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -37,6 +39,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -69,12 +72,93 @@ var logger = logging.Component("transcode")
 // `bridge upscale --gc` pass cleans them up.
 const VariantSchemaVersion = "v2"
 
-// sidecarTmpSuffix is appended to the sidecar path for the
-// atomic-rename temp file sox writes (SoxArgs output argument +
-// RunSox's rename source). safeVariantFilename reserves these bytes
-// in its basename budget so the TEMP name fits the 255-byte
-// filesystem cap too — keep all three sites on this constant.
+// sidecarTmpSuffix terminates the atomic-rename temp file sox writes
+// (SoxArgs output argument + RunSox's rename source). Kept as the visible
+// trailing extension so a stale temp on disk still reads as a temp — the
+// same operator-debuggability convention internal/atomicwrite documents.
 const sidecarTmpSuffix = ".tmp"
+
+// sidecarTmpTokenHexLen is the width of the per-job uniqueness token that
+// sits between the sidecar path and sidecarTmpSuffix:
+//
+//	<sidecar>.<token>.tmp
+//
+// The token exists because the temp path used to be a pure function of the
+// JobSpec — and two workers can legitimately hold the SAME spec at the same
+// time. `DropInflight` frees a dedup key for a job that is still RUNNING (by
+// design: DELETE /v1/upscale/variants calls it so a re-submit isn't coalesced
+// against a worker about to write the sidecar the caller means to delete), and
+// the delete also removes the `track_variants` row so `finalizeAndEnqueue`'s
+// LookupVariant no longer refuses. With workers >= 2 (the default is
+// min(NumCPU-1, 4)) job B then starts while job A's sox is still writing.
+//
+// On a shared deterministic temp path that corrupts the published variant:
+// RunSox opens every job by `os.Remove`-ing its temp to clear crash debris, so
+// B unlinks A's in-progress output; A's sox exits first (it started earlier)
+// and A's rename therefore publishes B's still-being-written file, stats it,
+// fsyncs it, and commits a track_variants row. `/v1/download?variant=` then
+// serves a partially-written FLAC behind a committed row for as long as B keeps
+// writing (serveVariant's freshness check compares the SOURCE's mtime/size, not
+// the sidecar's), the row's SizeBytes is permanently wrong (it feeds freedBytes
+// and the admin cached-bytes tile), and B is counted a failed job even though
+// the variant exists. POSIX-only — on Windows both the unlink and the re-open
+// fail with a sharing violation and B fails cleanly.
+//
+// 8 hex digits: see sidecarTmpCounter for why that is more than enough.
+const sidecarTmpTokenHexLen = 8
+
+// sidecarTmpReserve is the total number of bytes a temp basename adds over its
+// final basename: "." + token + sidecarTmpSuffix. safeVariantFilename reserves
+// exactly these bytes out of the 255-byte cap so the TEMP name fits too —
+// **that reservation is the load-bearing part, not the literal suffix length**.
+// If the temp shape ever changes again, change this with it.
+const sidecarTmpReserve = 1 + sidecarTmpTokenHexLen + len(sidecarTmpSuffix)
+
+// sidecarTmpCounter is seeded once from crypto/rand and incremented per
+// nextSidecarTmpToken call. The random base makes two independently-started
+// processes writing the same sidecar (the `bridge upscale` CLI alongside a
+// running `bridge serve`) collide with probability ~2^-32 per pair; the
+// monotonic increment makes an in-process collision impossible until 2^32
+// jobs. A bare counter would be process-local and a bare random draw would
+// need a call per job — this shape has neither problem.
+//
+// math/rand is deliberately NOT used (repo-wide convention).
+var sidecarTmpCounter = newSidecarTmpCounter()
+
+// newSidecarTmpCounter returns a counter seeded from crypto/rand. Split out of
+// the package var so a test can build independent instances and assert the seed
+// really is randomised — a constant seed would put two processes on identical
+// temp paths for the same sidecar, which is precisely the collision the token
+// exists to prevent (see sidecarTmpTokenHexLen).
+//
+// **The seed is unconditional on purpose — do NOT add an error branch here.**
+// `crypto/rand.Read` never returns an error: since Go 1.24 it is documented to
+// always fill b entirely, and it crashes the program irrecoverably rather than
+// reporting a failure (go1.26's implementation is
+// `if err != nil { fatal(…); panic("unreachable") }`, with `return len(b), nil`
+// as its only return — and that fatal covers a replaced `rand.Reader` too).
+// go.mod pins `go 1.26.4`, a hard minimum, so this holds for every build of
+// this module.
+//
+// A fallback for that branch would therefore be unreachable code, and the
+// obvious fallbacks are worse than nothing: a zero seed makes two processes
+// start from the SAME counter and derive IDENTICAL temp paths — reaching the
+// exact bug through a different door — while a time-based one implies the
+// unreachable state is real and invites the next reader to trust it.
+func newSidecarTmpCounter() *atomic.Uint64 {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	var c atomic.Uint64
+	c.Store(binary.BigEndian.Uint64(b[:]))
+	return &c
+}
+
+// nextSidecarTmpToken returns a fresh fixed-width token. Always exactly
+// sidecarTmpTokenHexLen hex digits (%08x of a uint32), which is what lets
+// sidecarTmpReserve be a compile-time constant.
+func nextSidecarTmpToken() string {
+	return fmt.Sprintf("%0*x", sidecarTmpTokenHexLen, uint32(sidecarTmpCounter.Add(1)))
+}
 
 // Variant ID prefixes. Two transcode classes coexist today:
 //
@@ -382,13 +466,13 @@ func VariantSidecarBasename(srcBase, variantID string) string {
 //
 // Pure helper — testable in isolation; table-tested across cases.
 func safeVariantFilename(srcBase, variantID string) string {
-	// 255 is the ext4 / NTFS / exFAT basename limit — minus the
-	// atomic-rename temp suffix RunSox appends (sidecarTmpSuffix).
-	// Without the reserve, a basename at exactly 255 bytes makes the
-	// `<sidecar>.flac.tmp` write target 259 bytes and sox fails with
-	// ENAMETOOLONG — precisely for the long-classical-filename inputs
-	// this sanitizer exists to handle.
-	const fsBasenameCap = 255 - len(sidecarTmpSuffix)
+	// 255 is the ext4 / NTFS / exFAT basename limit — minus everything the
+	// atomic-rename temp name adds on top of the final one (sidecarTmpReserve
+	// = "." + per-job token + sidecarTmpSuffix). Without the reserve, a
+	// basename at exactly 255 bytes makes the `<sidecar>.flac.<token>.tmp`
+	// write target longer still and sox fails with ENAMETOOLONG — precisely
+	// for the long-classical-filename inputs this sanitizer exists to handle.
+	const fsBasenameCap = 255 - sidecarTmpReserve
 	raw := srcBase
 	sanitized := fsutil.SanitiseForFAT(srcBase)
 
@@ -466,10 +550,23 @@ func safeVariantFilename(srcBase, variantID string) string {
 
 // SoxArgs builds the argv for the sox invocation. Returns the
 // exact slice exec.Command will receive (including the leading
-// input/output sentinels) and a JSON-friendly settings string for
+// input/output sentinels), a JSON-friendly settings string for
 // `track_variants.sox_settings` (forensic record of what produced
-// this sidecar). Pure function — no I/O — so unit tests can pin
-// the exact command shape without invoking sox.
+// this sidecar), and the two paths the run works with: the FINAL
+// sidecar path and the temp path sox is told to write.
+//
+// **Not idempotent in its temp path**: each call mints a fresh
+// per-job token (see sidecarTmpTokenHexLen). A caller that needs the
+// temp path MUST use the value returned by the SAME call that produced
+// the argv it runs — never re-derive it from a second call. Returning
+// finalPath alongside is what lets RunSox honour that: it re-derives
+// nothing, so the rename target is exactly the path sox was told to
+// write, minus a token RunSox never has to know about. The two
+// settings-only callers (`Pool.processJob`, `cmd/bridge` upscale) discard
+// both paths.
+//
+// Everything except the temp token is a pure function of the JobSpec, so
+// unit tests can still pin the exact command shape without invoking sox.
 //
 // Quality preset → `rate` flag mapping:
 //
@@ -505,7 +602,7 @@ func safeVariantFilename(srcBase, variantID string) string {
 // phase" truthfully. Because the deterministic output is unchanged, NO
 // VariantSchemaVersion bump / regeneration is required — existing
 // sidecars stay valid.
-func (j JobSpec) SoxArgs() ([]string, string, string) {
+func (j JobSpec) SoxArgs() (args []string, settings string, finalPath string, tmpPath string) {
 	rateFlag := "-v"
 	switch j.Quality {
 	case QualityHigh:
@@ -513,7 +610,7 @@ func (j JobSpec) SoxArgs() ([]string, string, string) {
 	case QualityMedium:
 		rateFlag = "-m"
 	}
-	// Output goes to `<sidecar>.flac.tmp` so the rename(2) at the
+	// Output goes to `<sidecar>.<token>.tmp` so the rename(2) at the
 	// end of `RunSox` is atomic. Sox normally picks the encoder
 	// from the output filename's last extension — which here is
 	// `.tmp`, not `.flac`, and sox bombs with
@@ -522,14 +619,17 @@ func (j JobSpec) SoxArgs() ([]string, string, string) {
 	// argument so sox ignores the filename and writes FLAC. (Bug
 	// found post-merge of PR #126: enqueue worked but every sox
 	// invocation failed during the worker pool's actual run.)
-	// Compute the sidecar tmp path ONCE and return it: RunSox reuses it as
-	// both the sox output target and (suffix-stripped) the rename destination,
-	// so it never re-derives SidecarPath() (which re-hashes an over-cap /
-	// FAT-sanitised filename) and the rename target is GUARANTEED to match the
-	// exact path sox was told to write — no independent recomputation to drift
-	// (Q2).
-	tmpPath := j.SidecarPath() + sidecarTmpSuffix
-	args := []string{
+	//
+	// Compute BOTH paths from the SINGLE SidecarPath() call and return
+	// them: RunSox re-derives nothing, so it never re-hashes an over-cap /
+	// FAT-sanitised filename and the rename target is GUARANTEED to match
+	// the exact path sox was told to write — no independent recomputation
+	// to drift (Q2). The token is what keeps two workers holding the same
+	// spec off one temp path (see sidecarTmpTokenHexLen); it is also why
+	// RunSox can no longer recover finalPath by trimming the suffix.
+	finalPath = j.SidecarPath()
+	tmpPath = finalPath + "." + nextSidecarTmpToken() + sidecarTmpSuffix
+	args = []string{
 		"-G",
 		j.SourceAbsPath,
 		"-b", strconv.Itoa(j.TargetBits),
@@ -538,10 +638,10 @@ func (j JobSpec) SoxArgs() ([]string, string, string) {
 		"rate", rateFlag, "-L", strconv.Itoa(j.TargetSampleRate),
 		"dither", "-s",
 	}
-	settings := fmt.Sprintf(
+	settings = fmt.Sprintf(
 		`{"resampler":"sox","quality":%q,"rateFlag":%q,"phase":"linear","targetRate":%d,"targetBits":%d,"guard":true,"schemaVersion":%q}`,
 		j.Quality, rateFlag, j.TargetSampleRate, j.TargetBits, VariantSchemaVersion)
-	return args, settings, tmpPath
+	return args, settings, finalPath, tmpPath
 }
 
 // PickTargetRate decides the output sample rate from the source
@@ -689,9 +789,15 @@ func ResolveTargetRate(flagValue string, sourceRate int) (int, error) {
 
 // RunSox executes one JobSpec, writes the sidecar to disk, and
 // returns the on-disk size on success. Atomic-rename pattern: the
-// sox output goes to `<sidecar>.tmp`, then we `os.Rename` to the
-// final path on success — a crash mid-conversion leaves at most a
-// `.tmp` file behind (cleaned up by `bridge upscale --gc`).
+// sox output goes to `<sidecar>.<token>.tmp`, then we `os.Rename` to
+// the final path on success — a crash mid-conversion leaves at most a
+// `.tmp` file behind (cleaned up by `bridge upscale --gc`, which reaps
+// by "not a known sidecar path" and so is name-shape-agnostic).
+//
+// The token makes the temp path per-JOB rather than per-SPEC, which is
+// what lets two workers legitimately holding the same spec (DropInflight
+// + re-submit) run concurrently without unlinking or publishing each
+// other's in-progress output. See sidecarTmpTokenHexLen.
 //
 // The `sox` binary is located via PATH. Caller is expected to have
 // already probed for it via PrecheckSox; we don't repeat the probe
@@ -708,11 +814,11 @@ func ResolveTargetRate(flagValue string, sourceRate int) (int, error) {
 // Output directory created if missing — `bridge upscale` only
 // guarantees DataDir exists, not the `transcoded` subdir.
 func RunSox(ctx context.Context, j JobSpec) (int64, error) {
-	args, _, tmpPath := j.SoxArgs()
-	// finalPath = the sox output path minus the tmp suffix. Derived from
-	// SoxArgs's single SidecarPath() computation (Q2) — no re-hash, and the
-	// rename target below is exactly the path sox wrote.
-	finalPath := strings.TrimSuffix(tmpPath, sidecarTmpSuffix)
+	// Both paths come from SoxArgs's single SidecarPath() computation (Q2) —
+	// no re-hash here, and the rename target below is exactly the path sox
+	// wrote. tmpPath carries a per-job token, so it MUST be the value from
+	// THIS call (a second SoxArgs() would mint a different one).
+	args, _, finalPath, tmpPath := j.SoxArgs()
 	// v1.4 source-mirrored layout: sidecars land under
 	// <OutputDir>/<libRel-dirname>/<filename>. The parent of
 	// finalPath may NOT exist yet (first variant in a new album

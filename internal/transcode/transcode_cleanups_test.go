@@ -36,7 +36,7 @@ func TestProjectedSizeNoNegativeWrapAtBoundary(t *testing.T) {
 // "drop the suffix" alternative would have collided variants. The fix
 // hashes the variantID into the short name.
 func TestSafeVariantFilenameFallbackBoundedAndUnique(t *testing.T) {
-	const fsBasenameCap = 255 - len(sidecarTmpSuffix)
+	const fsBasenameCap = 255 - sidecarTmpReserve
 	longVariant := strings.Repeat("x", 260) // > 228 → forces the budget<8 fallback
 	a := safeVariantFilename("Some Track.flac", longVariant)
 	if len(a) > fsBasenameCap {

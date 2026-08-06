@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -184,13 +185,13 @@ func TestSoxArgsShape(t *testing.T) {
 		Quality:          QualityVeryHigh,
 		OutputDir:        "/tmp/transcoded",
 	}
-	args, settings, tmpPath := j.SoxArgs()
+	args, settings, finalPath, tmpPath := j.SoxArgs()
 	want := []string{
 		"-G",
 		"/lib/Music/Album/01.flac",
 		"-b", "24",
 		"-t", "flac",
-		j.SidecarPath() + ".tmp",
+		tmpPath, // per-job token — pinned by shape below, not by literal
 		"rate", "-v", "-L", "176400",
 		"dither", "-s",
 	}
@@ -202,13 +203,19 @@ func TestSoxArgsShape(t *testing.T) {
 			t.Errorf("args[%d]: got %q, want %q", i, args[i], want[i])
 		}
 	}
-	// Q2: the returned tmpPath IS the sox output argument, so RunSox renames
-	// exactly the file sox wrote — no independent SidecarPath recomputation.
+	// Q2: the returned tmpPath IS the sox output argument, and finalPath is the
+	// rename target — so RunSox renames exactly the file sox wrote, with no
+	// independent SidecarPath recomputation.
 	if tmpPath != args[6] {
 		t.Errorf("tmpPath %q != sox output arg args[6] %q", tmpPath, args[6])
 	}
-	if tmpPath != j.SidecarPath()+".tmp" {
-		t.Errorf("tmpPath = %q, want %q", tmpPath, j.SidecarPath()+".tmp")
+	if finalPath != j.SidecarPath() {
+		t.Errorf("finalPath = %q, want %q", finalPath, j.SidecarPath())
+	}
+	// tmpPath shape: <finalPath>.<8 hex>.tmp
+	tokenRe := regexp.MustCompile(`^` + regexp.QuoteMeta(j.SidecarPath()) + `\.[0-9a-f]{8}\.tmp$`)
+	if !tokenRe.MatchString(tmpPath) {
+		t.Errorf("tmpPath = %q, want %q + .<8 hex>.tmp", tmpPath, j.SidecarPath())
 	}
 	// Settings JSON must mention the rate flag, phase, target rate,
 	// guard flag, and schema version so a future post-mortem can
@@ -236,7 +243,7 @@ func TestSoxArgsIncludesGuardFlag(t *testing.T) {
 		Quality:          QualityVeryHigh,
 		OutputDir:        "/tmp/transcoded",
 	}
-	args, _, _ := j.SoxArgs()
+	args, _, _, _ := j.SoxArgs()
 	if len(args) == 0 {
 		t.Fatal("SoxArgs returned empty slice")
 	}
@@ -264,7 +271,7 @@ func TestSoxArgsForcesFlacEncoder(t *testing.T) {
 		Quality:          QualityVeryHigh,
 		OutputDir:        "/tmp/transcoded",
 	}
-	args, _, _ := j.SoxArgs()
+	args, _, _, _ := j.SoxArgs()
 	// Find `-t flac` and assert it comes immediately before an
 	// argument that ends in `.tmp` (the output path).
 	tIdx := -1
@@ -303,7 +310,7 @@ func TestSoxArgsRespectsQualityPreset(t *testing.T) {
 			TargetBits:       24,
 			Quality:          c.q,
 		}
-		args, _, _ := j.SoxArgs()
+		args, _, _, _ := j.SoxArgs()
 		// Find "rate" in the args; the next token is the rate flag.
 		rateIdx := -1
 		for i, a := range args {
