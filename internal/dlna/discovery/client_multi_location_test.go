@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -246,28 +247,107 @@ func TestHandlePacket_StructuralStubStillRecoversAfterLongSilence(t *testing.T) 
 	}
 }
 
-func TestNoteLocation_BoundedPerUDN(t *testing.T) {
-	// A buggy or spoofed source announcing a fresh host every packet must not
-	// grow one UDN's record set without bound. Bounded independently of the
-	// freshness window (all records here share one timestamp) and of
-	// pruneLocations (which reaps whole UDNs, not records within one).
-	c := newTestClient(t, &countingDispatcher{})
-	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
-
-	for i := 0; i < maxTrackedLocations*3; i++ {
-		// Distinct host per call, oldest first, so the drop-the-oldest rule
-		// has a well-defined victim each time.
-		c.noteLocation(movedUDN, "http://192.0.2.7:8080/d.xml", now.Add(time.Duration(i)*time.Second))
-		c.noteLocation(movedUDN, "http://198.51.100."+string(rune('0'+i%10))+":8080/d.xml", now.Add(time.Duration(i)*time.Second))
-	}
-
+// trackedLocationURLs snapshots the URLs currently recorded for udn. Reads the
+// field directly under locMu, matching how TestEvictStaleEntries_PrunesLastLocation
+// inspects the same state.
+func trackedLocationURLs(c *SSDPDiscoveryClient, udn string) []string {
 	c.locMu.Lock()
-	got := len(c.lastLocations[movedUDN])
-	c.locMu.Unlock()
-	if got > maxTrackedLocations {
-		t.Errorf("tracked locations = %d, want <= %d", got, maxTrackedLocations)
+	defer c.locMu.Unlock()
+	recs := c.lastLocations[udn]
+	out := make([]string, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, r.url)
 	}
-	if got == 0 {
-		t.Error("tracked locations = 0; the cap must not empty the set")
+	return out
+}
+
+func trackedLocationHost(n int) string {
+	return fmt.Sprintf("http://198.51.100.%d:8080/desc.xml", n)
+}
+
+func TestNoteLocation_CapKeepsTheNewestAndEvictsTheOldest(t *testing.T) {
+	// Bounding the set is not enough on its own: an implementation that
+	// collapsed to ONE record on overflow would also be "bounded", and would
+	// silently re-create the single-remembered-Location flap this whole change
+	// exists to fix. So pin the real contract — after overflow the set sits AT
+	// the cap, holding the most recently observed addresses, oldest evicted.
+	//
+	// Every observation here lands inside RendererTTL (60s) of the last, so
+	// the freshness sweep never fires and the CAP is the only thing removing
+	// records. That separation is deliberate: "exactly at the cap" is NOT true
+	// in general — once every record ages out, the floor keeps exactly one
+	// (the sibling test below).
+	c := newTestClient(t, &countingDispatcher{})
+	base := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+
+	const overflow = 3
+	inserted := make([]string, 0, maxTrackedLocations+overflow)
+	for i := 0; i < maxTrackedLocations+overflow; i++ {
+		// One distinct host per call, strictly increasing observation time, so
+		// "the oldest" has a well-defined victim at every eviction.
+		loc := trackedLocationHost(i + 1)
+		inserted = append(inserted, loc)
+		c.noteLocation(movedUDN, loc, base.Add(time.Duration(i)*time.Second))
+	}
+
+	got := trackedLocationURLs(c, movedUDN)
+	if len(got) != maxTrackedLocations {
+		t.Fatalf("tracked locations = %d, want exactly %d — the set must stay FULL at the cap, not collapse", len(got), maxTrackedLocations)
+	}
+	gotSet := make(map[string]bool, len(got))
+	for _, u := range got {
+		if gotSet[u] {
+			t.Errorf("duplicate record %q; the set holds one record per distinct host", u)
+		}
+		gotSet[u] = true
+	}
+	for _, u := range inserted[overflow:] { // the newest maxTrackedLocations
+		if !gotSet[u] {
+			t.Errorf("recently-observed %q was evicted; the cap must drop the OLDEST", u)
+		}
+	}
+	for _, u := range inserted[:overflow] { // the ones that overflowed
+		if gotSet[u] {
+			t.Errorf("oldest record %q survived the cap", u)
+		}
+	}
+
+	// Re-announcing an address that is already tracked REFRESHES it in place —
+	// it must not append and push a live sibling out.
+	c.noteLocation(movedUDN, inserted[len(inserted)-1], base.Add(time.Duration(len(inserted))*time.Second))
+	if after := trackedLocationURLs(c, movedUDN); len(after) != maxTrackedLocations {
+		t.Errorf("tracked locations = %d after re-announcing a known host, want %d (a match refreshes, it must not append)", len(after), maxTrackedLocations)
+	}
+}
+
+func TestDropStaleLocations_FloorKeepsExactlyTheNewestWhenAllAreStale(t *testing.T) {
+	// The floor is the deliberate exception to "the set holds the most
+	// recently observed addresses": when EVERY record has aged past
+	// RendererTTL the sweep keeps exactly one — the newest — instead of
+	// emptying the set. A ControlURL-less structural stub never ages out of
+	// the cache, so its recorded Location is the only host-change reference it
+	// has; dropping it strands the renderer forever
+	// (TestHandlePacket_StructuralStubStillRecoversAfterLongSilence is the
+	// end-to-end half of this).
+	c := newTestClient(t, &countingDispatcher{})
+	base := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < maxTrackedLocations; i++ {
+		c.noteLocation(movedUDN, trackedLocationHost(i+1), base.Add(time.Duration(i)*time.Second))
+	}
+	newest := trackedLocationHost(maxTrackedLocations)
+
+	// Well past RendererTTL (60s) — every record is stale.
+	c.locMu.Lock()
+	kept, anyFresh := c.dropStaleLocationsLocked(movedUDN, base.Add(10*time.Minute))
+	c.locMu.Unlock()
+
+	if anyFresh {
+		t.Error("anyFresh = true, want false — every record is past RendererTTL")
+	}
+	if len(kept) != 1 {
+		t.Fatalf("kept %d records, want exactly 1 — the floor keeps one, and only one", len(kept))
+	}
+	if kept[0].url != newest {
+		t.Errorf("floor kept %q, want the newest %q", kept[0].url, newest)
 	}
 }
