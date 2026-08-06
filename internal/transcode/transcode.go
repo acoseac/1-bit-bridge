@@ -120,19 +120,38 @@ const sidecarTmpReserve = 1 + sidecarTmpTokenHexLen + len(sidecarTmpSuffix)
 // running `bridge serve`) collide with probability ~2^-32 per pair; the
 // monotonic increment makes an in-process collision impossible until 2^32
 // jobs. A bare counter would be process-local and a bare random draw would
-// need an error path on every job — this shape has neither problem.
+// need a call per job — this shape has neither problem.
 //
-// math/rand is deliberately NOT used (repo-wide convention); a crypto/rand
-// failure at init degrades to a plain zero-based counter, which still gives
-// full in-process uniqueness.
-var sidecarTmpCounter = func() *atomic.Uint64 {
-	var c atomic.Uint64
+// math/rand is deliberately NOT used (repo-wide convention).
+var sidecarTmpCounter = newSidecarTmpCounter()
+
+// newSidecarTmpCounter returns a counter seeded from crypto/rand. Split out of
+// the package var so a test can build independent instances and assert the seed
+// really is randomised — a constant seed would put two processes on identical
+// temp paths for the same sidecar, which is precisely the collision the token
+// exists to prevent (see sidecarTmpTokenHexLen).
+//
+// **The seed is unconditional on purpose — do NOT add an error branch here.**
+// `crypto/rand.Read` never returns an error: since Go 1.24 it is documented to
+// always fill b entirely, and it crashes the program irrecoverably rather than
+// reporting a failure (go1.26's implementation is
+// `if err != nil { fatal(…); panic("unreachable") }`, with `return len(b), nil`
+// as its only return — and that fatal covers a replaced `rand.Reader` too).
+// go.mod pins `go 1.26.4`, a hard minimum, so this holds for every build of
+// this module.
+//
+// A fallback for that branch would therefore be unreachable code, and the
+// obvious fallbacks are worse than nothing: a zero seed makes two processes
+// start from the SAME counter and derive IDENTICAL temp paths — reaching the
+// exact bug through a different door — while a time-based one implies the
+// unreachable state is real and invites the next reader to trust it.
+func newSidecarTmpCounter() *atomic.Uint64 {
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err == nil {
-		c.Store(binary.BigEndian.Uint64(b[:]))
-	}
+	_, _ = rand.Read(b[:])
+	var c atomic.Uint64
+	c.Store(binary.BigEndian.Uint64(b[:]))
 	return &c
-}()
+}
 
 // nextSidecarTmpToken returns a fresh fixed-width token. Always exactly
 // sidecarTmpTokenHexLen hex digits (%08x of a uint32), which is what lets

@@ -82,6 +82,44 @@ func TestSidecarTmpTokenIsFixedWidth(t *testing.T) {
 	}
 }
 
+// TestSidecarTmpCounterSeedIsRandomised pins the CROSS-PROCESS half of the
+// uniqueness guarantee: the counter's starting point must come from
+// crypto/rand, never a constant.
+//
+// The monotonic increment alone only buys uniqueness WITHIN one process. Two
+// processes legitimately write the same sidecar — the `bridge upscale` CLI
+// alongside a running `bridge serve` — and if both counters started from the
+// same value they would derive identical temp paths for the same file,
+// deterministically, reaching the collision the token exists to prevent
+// through a different door. A zero seed (the shape a "fall back to 0 if
+// crypto/rand fails" branch would produce) is exactly that regression, and it
+// is invisible in single-process tests.
+//
+// Distinctness is asserted on the full 64-bit seed rather than the 32-bit
+// token so the test carries no birthday-collision flake: 64 draws from 2^64
+// collide with probability ~1e-16, versus ~1e-7 from 2^32.
+func TestSidecarTmpCounterSeedIsRandomised(t *testing.T) {
+	const n = 64
+	seen := make(map[uint64]bool, n)
+	zeroSeeded := 0
+	for i := 0; i < n; i++ {
+		v := newSidecarTmpCounter().Add(1)
+		if v == 1 {
+			zeroSeeded++ // Add(1) on a zero-valued counter
+		}
+		if seen[v] {
+			t.Fatalf("instance %d repeated first value %d — the counter is not "+
+				"randomly seeded, so two processes writing the same sidecar would "+
+				"derive identical temp paths", i, v)
+		}
+		seen[v] = true
+	}
+	if zeroSeeded == n {
+		t.Fatalf("all %d counters started from zero — the crypto/rand seed is not "+
+			"being applied", n)
+	}
+}
+
 // TestSoxArgsTmpBasenameFitsFilesystemCap is the end-to-end budget pin: a
 // pathological source basename must still produce a TEMP basename within the
 // 255-byte ext4 / NTFS / exFAT cap, because that is the name sox is actually
