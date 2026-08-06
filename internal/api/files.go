@@ -135,12 +135,19 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		if len(ri.Name()) > 0 && ri.Name()[0] == '.' {
 			continue
 		}
+		// Readdir yields Lstat-shaped info, so a symlinked album
+		// directory would report IsDir:false + the link's own byte
+		// length here while /v1/stat (which goes through the
+		// resolver's os.Stat) calls the same path a directory. Resolve
+		// the link so one listing can't disagree with the endpoints
+		// that act on its rows.
+		fi := followSymlink(abs, ri)
 		entries = append(entries, Entry{
 			Name:    ri.Name(),
 			Path:    childPath(clientPath, ri.Name()),
-			IsDir:   ri.IsDir(),
-			Size:    ri.Size(),
-			ModTime: ri.ModTime().UTC(),
+			IsDir:   fi.IsDir(),
+			Size:    fi.Size(),
+			ModTime: fi.ModTime().UTC(),
 		})
 	}
 	sortEntriesByName(entries)
@@ -457,6 +464,47 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// followSymlink resolves a directory entry that is itself a symlink to
+// the metadata of its TARGET, matching what `/v1/stat` and
+// `/v1/download` see. `os.File.Readdir` documents its values as "as
+// would be returned by Lstat", while both of those endpoints reach the
+// file through `bridgefs.Resolver.ResolveChecked` → `os.Stat`, which
+// follows. Without this, a symlinked album directory listed as
+// `{"isDir": false, "size": 31}` (the link's own byte length) is called
+// a directory by /v1/stat and rejected as one by /v1/download.
+//
+// Following is the right call rather than the reverse: `internal/fs`'s
+// package doc states that symlinked content inside a configured root is
+// trusted and served, so the divergence is an oversight, not a carve-out.
+// The traversal guard is unaffected — it runs on the request path, and
+// this only re-stats an entry the walk already reached.
+//
+// Non-symlinks return the Readdir info untouched (no extra syscall). A
+// stat failure — a dangling link, or a target on a mount that just went
+// away — falls back to the same info, so a broken link still appears in
+// the listing instead of vanishing from it.
+//
+// **CodeQL `go/path-injection` on the Join below is a false positive of
+// the class dismissed for alerts #1-4** (see CLAUDE.md v0.1.4). Both
+// components are safe, for different reasons: `dir` is the resolver's
+// own output — `Resolve` rejects NUL bytes, rejects any `..` on the RAW
+// segments BEFORE `path.Clean` canonicalizes, joins against the trusted
+// root, and prefix-checks the absolute result — a barrier CodeQL's taint
+// analysis cannot model; and `ri.Name()` is not client-supplied at all,
+// it is a bare basename from `os.File.Readdir` on that already-validated
+// directory. Don't contort this into a lexical re-check to appease the
+// scanner — the caller two lines up already `os.Open`s the same `dir`.
+func followSymlink(dir string, ri os.FileInfo) os.FileInfo {
+	if ri.Mode()&os.ModeSymlink == 0 {
+		return ri
+	}
+	target, err := os.Stat(filepath.Join(dir, ri.Name()))
+	if err != nil {
+		return ri
+	}
+	return target
 }
 
 // childPath returns the library-relative path of a child given its parent's

@@ -3334,9 +3334,13 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 // '$.artworkMBID')` (added in `migrate`) so the lookup is O(log n)
 // instead of a full table scan on a 50k-track library. The `LIMIT 1`
 // lets SQLite stop at first match.
-func (s *Store) HasTrackWithArtworkMBID(ctx context.Context, mbid string) bool {
+//
+// Returns `(false, err)` on a database fault — the caller decides what
+// an unanswerable probe means (the artwork handler treats it as
+// "pending", never as "unknown").
+func (s *Store) HasTrackWithArtworkMBID(ctx context.Context, mbid string) (bool, error) {
 	if mbid == "" {
-		return false
+		return false, nil
 	}
 	return s.hasTrackWithJSONField(ctx, artworkMBIDField, mbid)
 }
@@ -3344,9 +3348,9 @@ func (s *Store) HasTrackWithArtworkMBID(ctx context.Context, mbid string) bool {
 // HasTrackWithArtistMBID mirrors HasTrackWithArtworkMBID for the
 // `/v1/artist-image/{mbid}` handler. Same 202-vs-404 distinction.
 // Also indexed (see `migrate`).
-func (s *Store) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool {
+func (s *Store) HasTrackWithArtistMBID(ctx context.Context, mbid string) (bool, error) {
 	if mbid == "" {
-		return false
+		return false, nil
 	}
 	return s.hasTrackWithJSONField(ctx, artistMBIDField, mbid)
 }
@@ -3363,18 +3367,21 @@ func (s *Store) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool {
 // Same functional index as the Has* probes: SQLite seeks on the
 // json_extract expression, then filters `enriched_at` over the
 // handful of rows sharing the MBID — the miss path stays O(log n).
-func (s *Store) ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) bool {
+//
+// Returns `(false, err)` on a database fault; the handler's fail-open
+// policy turns that into a 202.
+func (s *Store) ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error) {
 	if mbid == "" {
-		return false
+		return false, nil
 	}
 	return s.pendingEnrichmentWithJSONField(ctx, artworkMBIDField, mbid)
 }
 
 // ArtistMBIDEnrichmentPending mirrors ArtworkMBIDEnrichmentPending
 // for `/v1/artist-image`.
-func (s *Store) ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) bool {
+func (s *Store) ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error) {
 	if mbid == "" {
-		return false
+		return false, nil
 	}
 	return s.pendingEnrichmentWithJSONField(ctx, artistMBIDField, mbid)
 }
@@ -3472,7 +3479,7 @@ const (
 	artistMBIDField  jsonField = "artistMBID"
 )
 
-func (s *Store) hasTrackWithJSONField(ctx context.Context, field jsonField, value string) bool {
+func (s *Store) hasTrackWithJSONField(ctx context.Context, field jsonField, value string) (bool, error) {
 	var q string
 	switch field {
 	case artworkMBIDField:
@@ -3482,27 +3489,43 @@ func (s *Store) hasTrackWithJSONField(ctx context.Context, field jsonField, valu
 	default:
 		// Unknown field — by construction unreachable, but refusing
 		// quietly is safer than compiling a bogus query.
-		return false
+		return false, nil
 	}
 	// SELECT EXISTS(...) always yields exactly one row (0 or 1), so there's
 	// no sql.ErrNoRows outcome to special-case — any error here is a genuine
 	// database fault (disk I/O, connection closed, migration mid-flight).
+	// The error is RETURNED, not folded into the bool: a DB fault is not
+	// "this MBID is unknown", and the caller (the /v1/artwork handler)
+	// answers a bounded 202 rather than a terminal 404 for it. Folding it
+	// here is what made the gate in front of the deliberately fail-open
+	// pending probe fail CLOSED.
 	var found bool
 	if err := s.db.QueryRowContext(ctx, q, value).Scan(&found); err != nil {
-		logger.Error("hasTrackWithJSONField", "field", field, "err", err)
-		return false
+		// The ctx check gates the LOG ONLY — a cancelled context during
+		// shutdown or a client hang-up would otherwise emit a burst of
+		// misleading Errors (repo convention; see scanner.go, enricher's
+		// negative-cache guard). The error still RETURNS unchanged, so
+		// the handler's fail-open-to-202 classification is untouched.
+		if ctx.Err() == nil {
+			logger.Error("hasTrackWithJSONField", "field", field, "err", err)
+		}
+		return false, err
 	}
-	return found
+	return found, nil
 }
 
 // pendingEnrichmentWithJSONField is hasTrackWithJSONField narrowed to
 // rows the enricher hasn't stamped yet. Same whitelist discipline —
-// each supported field's query is a pre-built literal. On a database
-// fault it returns TRUE (pending), the fail-open direction: a wrongly
-// "pending" answer costs the client one more bounded 202 retry, while
-// a wrongly "complete" answer would terminal-404 an image that was
-// about to land.
-func (s *Store) pendingEnrichmentWithJSONField(ctx context.Context, field jsonField, value string) bool {
+// each supported field's query is a pre-built literal, and a database
+// fault is returned rather than folded into the bool.
+//
+// The fail-open-to-pending policy the handlers apply on that error
+// lives in `internal/api` (`classifyArtworkMiss`), so BOTH probes'
+// fault directions are decided in one place. The direction itself is
+// unchanged and load-bearing: a wrongly "pending" answer costs the
+// client one more bounded 202 retry, while a wrongly "complete" answer
+// would terminal-404 an image that was about to land.
+func (s *Store) pendingEnrichmentWithJSONField(ctx context.Context, field jsonField, value string) (bool, error) {
 	var q string
 	switch field {
 	case artworkMBIDField:
@@ -3510,14 +3533,19 @@ func (s *Store) pendingEnrichmentWithJSONField(ctx context.Context, field jsonFi
 	case artistMBIDField:
 		q = `SELECT EXISTS(SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artistMBID') = ? AND enriched_at = 0)`
 	default:
-		return false
+		return false, nil
 	}
 	var pending bool
 	if err := s.db.QueryRowContext(ctx, q, value).Scan(&pending); err != nil {
-		logger.Error("pendingEnrichmentWithJSONField", "field", field, "err", err)
-		return true
+		// Log-only ctx gate — see hasTrackWithJSONField. The returned
+		// error is what drives the handler's fail-open, so suppressing
+		// the log must never short-circuit the return.
+		if ctx.Err() == nil {
+			logger.Error("pendingEnrichmentWithJSONField", "field", field, "err", err)
+		}
+		return false, err
 	}
-	return pending
+	return pending, nil
 }
 
 // CountTracks returns the total number of track rows. /v1/health polls

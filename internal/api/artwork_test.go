@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,19 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
+
+// decodeErrorCode reads the stable machine-readable `error` field off a
+// JSON error body. The status alone doesn't discriminate the two 404s
+// (`not_found` vs the terminal `no_image`), and that distinction is the
+// whole contract under test.
+func decodeErrorCode(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	var e ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	return e.Error
+}
 
 type fakeArtworkDirs struct{ dir string }
 
@@ -271,31 +286,50 @@ func TestArtistImageRequiresAuth(t *testing.T) {
 // returns false so the 404 branch stays exercised. `pending` mirrors
 // the enrichment-pending split: known + pending → 202, known +
 // !pending → terminal 404 `no_image`.
+// `knownErr` / `pendingErr` populate the database-fault arm of the
+// respective probe pair — the arm that must classify as "pending", not
+// as "unknown"/"complete".
 type fakeMBIDProbe struct {
-	known   map[string]bool
-	pending map[string]bool
+	known      map[string]bool
+	pending    map[string]bool
+	knownErr   error
+	pendingErr error
 }
 
-func (f fakeMBIDProbe) HasTrackWithArtworkMBID(ctx context.Context, m string) bool { return f.known[m] }
-func (f fakeMBIDProbe) HasTrackWithArtistMBID(ctx context.Context, m string) bool  { return f.known[m] }
-func (f fakeMBIDProbe) ArtworkMBIDEnrichmentPending(ctx context.Context, m string) bool {
-	return f.pending[m]
+func (f fakeMBIDProbe) HasTrackWithArtworkMBID(ctx context.Context, m string) (bool, error) {
+	return f.known[m], f.knownErr
 }
-func (f fakeMBIDProbe) ArtistMBIDEnrichmentPending(ctx context.Context, m string) bool {
-	return f.pending[m]
+func (f fakeMBIDProbe) HasTrackWithArtistMBID(ctx context.Context, m string) (bool, error) {
+	return f.known[m], f.knownErr
+}
+func (f fakeMBIDProbe) ArtworkMBIDEnrichmentPending(ctx context.Context, m string) (bool, error) {
+	return f.pending[m], f.pendingErr
+}
+func (f fakeMBIDProbe) ArtistMBIDEnrichmentPending(ctx context.Context, m string) (bool, error) {
+	return f.pending[m], f.pendingErr
 }
 
-// artworkFixtureWithProbe layers an MBIDProbe onto the base artwork
-// fixture. `present` is still about whether the cache file exists on
-// disk; `probeKnown` is about whether the MBIDProbe says the server
-// has seen the MBID in a track; `enrichPending` is whether any track
-// carrying it still awaits the enricher (the 202-vs-no_image axis).
-func artworkFixtureWithProbe(t *testing.T, present, probeKnown, enrichPending bool) (*httptest.Server, string, string) {
+// artworkProbeOpts is the general shape of the probe-backed artwork
+// fixture: the caller picks the MBID (so the `local-<sha256>` sentinel
+// branch is reachable) and every axis of the probe's answers.
+type artworkProbeOpts struct {
+	mbid       string // defaults to the UUID form when empty
+	present    bool   // cache file on disk at the canonical 500 size
+	probeKnown bool
+	pending    bool
+	knownErr   error
+	pendingErr error
+}
+
+func artworkFixtureOpts(t *testing.T, o artworkProbeOpts) (*httptest.Server, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	artDir := filepath.Join(dir, "artwork")
-	mbid := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	if present {
+	mbid := o.mbid
+	if mbid == "" {
+		mbid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
+	if o.present {
 		os.MkdirAll(artDir, 0o755)
 		os.WriteFile(filepath.Join(artDir, mbid+"-500.jpg"), []byte{0xFF, 0xD8, 0xFF, 0xE0}, 0o644)
 	}
@@ -303,11 +337,16 @@ func artworkFixtureWithProbe(t *testing.T, present, probeKnown, enrichPending bo
 	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
 	raw, _, _ := store.Mint("probe")
 
-	probe := fakeMBIDProbe{known: map[string]bool{}, pending: map[string]bool{}}
-	if probeKnown {
+	probe := fakeMBIDProbe{
+		known:      map[string]bool{},
+		pending:    map[string]bool{},
+		knownErr:   o.knownErr,
+		pendingErr: o.pendingErr,
+	}
+	if o.probeKnown {
 		probe.known[mbid] = true
 	}
-	if enrichPending {
+	if o.pending {
 		probe.pending[mbid] = true
 	}
 
@@ -317,6 +356,20 @@ func artworkFixtureWithProbe(t *testing.T, present, probeKnown, enrichPending bo
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw, mbid
+}
+
+// artworkFixtureWithProbe layers an MBIDProbe onto the base artwork
+// fixture. `present` is still about whether the cache file exists on
+// disk; `probeKnown` is about whether the MBIDProbe says the server
+// has seen the MBID in a track; `enrichPending` is whether any track
+// carrying it still awaits the enricher (the 202-vs-no_image axis).
+func artworkFixtureWithProbe(t *testing.T, present, probeKnown, enrichPending bool) (*httptest.Server, string, string) {
+	t.Helper()
+	return artworkFixtureOpts(t, artworkProbeOpts{
+		present:    present,
+		probeKnown: probeKnown,
+		pending:    enrichPending,
+	})
 }
 
 // Cache miss + probe says "known + enrichment pending": 202 +
@@ -470,5 +523,178 @@ func TestArtistImageReturns404WhenProbeDoesNotKnow(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// --- scanner-owned `local-` sentinels are never "no image" ---
+
+// A `local-<sha256>` artworkMBID names bytes the SCANNER extracted from
+// an embedded APIC frame or a folder-level cover.jpg. The enricher
+// stamps `enriched_at` for those rows without ever fetching anything,
+// so "enrichment complete" carries no information about them — yet it
+// was the discriminator, so a missing cache file answered a TERMINAL
+// 404 `no_image` for a cover the bridge is guaranteed to restore
+// (`Scanner.needsLocalArtworkRecovery` re-extracts it on the next
+// scan). Reachable through a first-class workflow: `internal/backup`
+// snapshots the DB, tokens, certs and bridge.yaml but NOT
+// <dataDir>/artwork/, so every `bridge restore` lands in exactly this
+// state — and on a well-tagged library nearly every cover is a
+// `local-` sentinel.
+func TestArtworkLocalSentinelStaysPendingWhenEnrichmentComplete(t *testing.T) {
+	const hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	hs, tok, mbid := artworkFixtureOpts(t, artworkProbeOpts{
+		mbid:       "local-" + hash,
+		present:    false, // artwork cache wiped, e.g. post-restore
+		probeKnown: true,
+		pending:    false, // enricher took its (no-op) turn on this row
+	})
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (scanner re-extracts local- art; "+
+			"a terminal no_image would strand a cover that IS coming back)",
+			resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Errorf("Retry-After header missing on local- pending response")
+	}
+}
+
+// The UUID form is unaffected — enrichment IS the right discriminator
+// for MBIDs whose bytes the enricher owns. Guards against "fixing" the
+// above by blanket-pending every miss, which would restore the futile-
+// ladder bug the three-way split exists to kill.
+func TestArtworkUUIDStillTerminalWhenEnrichmentComplete(t *testing.T) {
+	hs, tok, mbid := artworkFixtureOpts(t, artworkProbeOpts{
+		present: false, probeKnown: true, pending: false,
+	})
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if code := decodeErrorCode(t, resp); code != "no_image" {
+		t.Errorf("error = %q, want no_image", code)
+	}
+}
+
+// --- probe faults classify as pending, never as terminal ---
+
+// The pending probe documents itself as failing OPEN on a database
+// fault ("a wrongly pending answer costs one bounded retry, a wrongly
+// complete answer would terminal-404 an image that was about to
+// land") — but the known-probe checked FIRST in the same chain folded
+// its error into `false`, so a DB fault produced a terminal `404
+// not_found` and the fail-open below it never ran. Both arms now
+// answer 202.
+func TestArtworkProbeFaultAnswersPending(t *testing.T) {
+	dbDown := errors.New("database is locked")
+	tests := []struct {
+		name string
+		opts artworkProbeOpts
+	}{
+		{
+			// Pre-fix: Has* swallowed the error → not known → 404 not_found.
+			name: "known-probe fault",
+			opts: artworkProbeOpts{probeKnown: true, knownErr: dbDown},
+		},
+		{
+			// Pre-existing fail-open, re-pinned at its new home in the api.
+			name: "pending-probe fault",
+			opts: artworkProbeOpts{probeKnown: true, pendingErr: dbDown},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hs, tok, mbid := artworkFixtureOpts(t, tc.opts)
+			resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202 — an unanswerable probe is "+
+					"not an answer, and a terminal 404 is unrecoverable",
+					resp.StatusCode)
+			}
+		})
+	}
+}
+
+// Same contract on the artist-image twin, which shares the classifier.
+func TestArtistImageProbeFaultAnswersPending(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	mbid := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("probe")
+	probe := fakeMBIDProbe{
+		known:    map[string]bool{mbid: true},
+		pending:  map[string]bool{},
+		knownErr: errors.New("database is locked"),
+	}
+	srv := New(cfg, store, nil, "fp").
+		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
+		WithMBIDProbe(probe)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artist-image/"+mbid, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("status = %d, want 202 on a probe fault", resp.StatusCode)
+	}
+}
+
+// --- off-canonical `size` is a size-specific miss, not "no image" ---
+
+// `enrich.ParseSize` admits 250 / 500 / 1200, but every writer in the
+// bridge caches at 500 only — so `?size=1200` builds a path that never
+// exists even for a release whose cover IS cached, and answering
+// `no_image` ("enrichment complete; no image exists upstream —
+// terminal") told the client to stop asking for an image sitting on
+// disk one size away. `not_found` keeps the answer inside the
+// documented vocabulary and scoped to what it means: not cached under
+// this key.
+func TestArtworkOffCanonicalSizeMissIsNotFound(t *testing.T) {
+	tests := []struct {
+		name     string
+		size     string
+		present  bool // 500 variant on disk
+		wantCode string
+	}{
+		{
+			name: "1200 with 500 cached", size: "1200", present: true,
+			wantCode: "not_found",
+		},
+		{
+			name: "250 with 500 cached", size: "250", present: true,
+			wantCode: "not_found",
+		},
+		{
+			// Nothing cached at any size + enrichment complete: the
+			// terminal answer is still correct and must not be widened
+			// away by the size branch.
+			name: "1200 with nothing cached", size: "1200", present: false,
+			wantCode: "no_image",
+		},
+		{
+			// The canonical size keeps the full three-way split.
+			name: "500 with nothing cached", size: "500", present: false,
+			wantCode: "no_image",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hs, tok, mbid := artworkFixtureOpts(t, artworkProbeOpts{
+				present: tc.present, probeKnown: true,
+			})
+			resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid+"?size="+tc.size, tok)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", resp.StatusCode)
+			}
+			if code := decodeErrorCode(t, resp); code != tc.wantCode {
+				t.Errorf("error = %q, want %q", code, tc.wantCode)
+			}
+		})
 	}
 }

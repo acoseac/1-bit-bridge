@@ -459,7 +459,9 @@ Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBI
 
 **Response** (`404 Not Found`, `error: "no_image"`): the MBID is known but enrichment has COMPLETED for every track carrying it and no image was found upstream (Deezer has no portrait for the artist / CAA + iTunes have no cover for the release). Terminal — clients SHOULD render a placeholder and stop retrying; a later re-scan or forced re-enrichment (`enriched_at = 0`) flips the answer back to 202 if the upstream ever gains an image. Added 2026-08-06; before this, the known-but-imageless state answered `202` forever and retry-capped clients paid a full backoff ladder per item per sync.
 
-**Response** (`404 Not Found`, `error: "not_found"`): the MBID is unknown — no track in the manifest references it. Clients SHOULD treat as terminal and render a placeholder rather than retrying.
+**Never returned for a `local-<sha256>` artwork MBID.** Those bytes are extracted by the server's library scanner (embedded cover art, or a `cover.jpg` / `folder.jpg` beside the audio file), not fetched from any upstream, so "enrichment complete" carries no information about them — and the scanner restores a missing one on its next pass. A cache miss on a `local-` MBID is therefore always `202`.
+
+**Response** (`404 Not Found`, `error: "not_found"`): the image is not cached under the requested key. Either the MBID is unknown — no track in the manifest references it — or the request asked for a `size` this server has not cached: covers are written at **500 px only**, so `size=250` / `size=1200` can miss for a release whose cover IS cached. Clients SHOULD treat it as terminal *for that key* and render a placeholder rather than re-requesting the same URL; a client that asked for an off-500 size MAY retry once at `size=500`.
 
 **Response** (`400 Bad Request`): MBID is not a valid UUID, or `size` parameter is out of range.
 
@@ -529,7 +531,7 @@ When the feature is enabled AND the bridge has a cached waveform for a track, th
 
 Returns the binary waveform sidecar for the track at `path` (the same library-relative form `/v1/download` accepts; iOS-shaped lowercase/leading-slash paths resolve case-insensitively).
 
-- `200 OK`, `Content-Type: application/octet-stream`, `ETag: "<waveformTag>"`, `Cache-Control: public, max-age=31536000, immutable`. The response is content-addressed by tag (the client only ever requests a tag it learned from the manifest), so immutable caching is safe — the client downloads each distinct waveform exactly once.
+- `200 OK`, `Content-Type: application/octet-stream`, `ETag: "<waveformTag>"`, `Cache-Control: private, no-cache`. The request carries **no content tag** — `path` is its only key — so re-analysis rewrites the body under a stable URL. `no-cache` means "store it, but revalidate", so a client that already holds this sidecar pays one conditional request (`If-None-Match: "<waveformTag>"`) and gets a `304 Not Modified`. Corrected 2026-08-06: this previously advertised `max-age=31536000, immutable`, which instructs a conforming client never to revalidate — pinning a stale waveform and making the `ETag` unusable.
 - `400 bad_request` — missing/invalid `path`.
 - `404 waveform_not_found` — analysis disabled, or no waveform cached for this track yet.
 - `410 waveform_stale` — the source file drifted (mtime beyond a 2 s tolerance, or size changed) since the waveform was computed; the client falls through to on-device analysis until re-analysis catches up. `410 waveform_missing_on_disk` — the row exists but the sidecar file is gone (manual wipe / partial GC); same client handling.
@@ -901,7 +903,7 @@ All errors are JSON:
 |    400 | `range_required`         | `/v1/read` called without a `Range` header        |
 |    401 | `unauthorized`           | Missing / invalid bearer token (or pollSecret)    |
 |    403 | `forbidden`              | Valid token, insufficient scope (reserved)        |
-|    404 | `not_found`              | Path does not exist in any library root           |
+|    404 | `not_found`              | Path does not exist in any library root; or artwork is not cached under the requested MBID + `size` |
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
 |    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |

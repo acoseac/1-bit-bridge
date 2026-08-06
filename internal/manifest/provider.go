@@ -169,22 +169,22 @@ func (p *Provider) PendingDeletions(ctx context.Context) int64 {
 // HasTrackWithArtworkMBID satisfies api.MBIDProbe. Delegates straight
 // to the Store so the api package doesn't need a direct dependency on
 // internal/manifest.
-func (p *Provider) HasTrackWithArtworkMBID(ctx context.Context, mbid string) bool {
+func (p *Provider) HasTrackWithArtworkMBID(ctx context.Context, mbid string) (bool, error) {
 	return p.store.HasTrackWithArtworkMBID(ctx, mbid)
 }
 
 // HasTrackWithArtistMBID satisfies api.MBIDProbe.
-func (p *Provider) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool {
+func (p *Provider) HasTrackWithArtistMBID(ctx context.Context, mbid string) (bool, error) {
 	return p.store.HasTrackWithArtistMBID(ctx, mbid)
 }
 
 // ArtworkMBIDEnrichmentPending satisfies api.MBIDProbe.
-func (p *Provider) ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) bool {
+func (p *Provider) ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error) {
 	return p.store.ArtworkMBIDEnrichmentPending(ctx, mbid)
 }
 
 // ArtistMBIDEnrichmentPending satisfies api.MBIDProbe.
-func (p *Provider) ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) bool {
+func (p *Provider) ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error) {
 	return p.store.ArtistMBIDEnrichmentPending(ctx, mbid)
 }
 

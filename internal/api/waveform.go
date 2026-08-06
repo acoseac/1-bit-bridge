@@ -47,10 +47,20 @@ type AnalysisRecord struct {
 // (iOS drops the waveform until re-analysis catches up); a genuinely
 // missing sidecar also yields 410 vs a permission/I-O fault's 5xx.
 //
-// The response is content-addressed by tag: iOS fetches with the tag it
-// learned from the manifest, and a regenerated waveform gets a new tag,
-// so `Cache-Control: immutable` is safe and the client downloads each
-// distinct waveform exactly once.
+// **The response is NOT content-addressed.** The only request key is
+// `?path=`, so the URL is stable while the body is not: re-analysis
+// (an edited source, a schema bump) rewrites the sidecar under the same
+// URL. The waveform's content tag exists — iOS learns it from the
+// manifest and keys its own disk cache on it — but it is not part of
+// the request, so the tag can only be served BACK as an ETag, never
+// used to route. Hence `Cache-Control: private, no-cache`: cache it,
+// but revalidate, and let the ETag turn the revalidation into a 304.
+//
+// Deferred: adding `&tag=<waveformTag>` to the request would make the
+// URL genuinely content-addressed and re-earn `immutable`. That is a
+// wire-shape change (new query parameter documented in PROTOCOL.md +
+// the iOS `docs/BridgeProtocol.md` mirror + the client's fetch), so it
+// belongs in a Mirror-PR pair, not here.
 func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
 	if s.analysisStore == nil {
 		writeError(w, http.StatusNotFound, "waveform_not_found", "audio analysis is not enabled on this bridge")
@@ -122,8 +132,18 @@ func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if rec.WaveformTag != "" {
+		// `no-cache` means "store it, but revalidate before reuse" —
+		// NOT "don't store". Paired with the ETag, a client that
+		// already holds this waveform pays one conditional request and
+		// gets a 304 (http.ServeContent handles If-None-Match below).
+		//
+		// It must not be `immutable`: nothing in the URL identifies the
+		// body (see the handler docblock), and a conforming client
+		// never revalidates an immutable response — so a re-analysed
+		// waveform would be pinned stale for the full max-age, and the
+		// ETag one line above would be dead code.
 		w.Header().Set("ETag", `"`+rec.WaveformTag+`"`)
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", "private, no-cache")
 	}
 	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
 }
