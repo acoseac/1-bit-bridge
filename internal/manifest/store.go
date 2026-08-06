@@ -2242,9 +2242,12 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- The v31 dupe stamps (dupe_group_id / dupe_tier /
 			-- dupe_suppressed) are deliberately NOT touched here: a
 			-- changed file keeps its stamps until the next stamping pass
-			-- re-evaluates (the full-scan tail runs in the SAME scan as
-			-- these upserts), and a fresh INSERT defaults to served —
-			-- fail-open in both directions.
+			-- re-evaluates, and a fresh INSERT defaults to served. That
+			-- rests on every writer of these rows running a stamping pass
+			-- in its own tail — true of Scan, and true of ScanSubtree only
+			-- since the tail was added there; a future upsert caller
+			-- without one leaves a retagged row suppressed with no served
+			-- twin, which is NOT fail-open.
 			extractor_version = excluded.extractor_version,
 			-- audio_md5 is UNCONDITIONAL (excluded, empty included): this
 			-- row runs because size or mtime CHANGED, so a stale hash
