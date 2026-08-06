@@ -1232,10 +1232,74 @@ func TestValidatePort(t *testing.T) {
 		{"99999", true}, // above range
 		{"abc", true},   // non-numeric
 		{"-1", true},    // parses but negative
+		// Service names resolve in a real bind address, so net.Listen
+		// accepts these — we do not. See TestValidatePortRejectsServiceName.
+		{"https", true},
+		{"ipp", true},
 	}
 	for _, tc := range cases {
 		if err := validatePort(tc.port); (err != nil) != tc.wantErr {
 			t.Errorf("validatePort(%q) err=%v, wantErr=%v", tc.port, err, tc.wantErr)
+		}
+	}
+}
+
+// TestValidatePortRejectsServiceName pins the ONE shape where this check is
+// deliberately stricter than net.Listen.
+//
+// Go resolves service names in a bind address — net.Listen("tcp",
+// "127.0.0.1:https") reaches port 443 — so `listenAddress: ":https"` loaded
+// and served before the port check existed. Keeping it rejected is a real
+// behaviour choice, not an oversight, because three separate paths re-split
+// the listen address and strconv.Atoi the port, and each degrades SILENTLY:
+// api.reachableEndpoints returns nil, admin.pairAlternates drops every
+// alternate, config.listenAddrIsPort443 stops recognising :443. A bridge that
+// binds but advertises nothing is worse than one that refuses to start.
+//
+// The message assertion is the point: this is the only rejection an operator
+// can hit on a previously-working config, so it has to say WHY rather than
+// insisting the value "must be a number".
+func TestValidatePortRejectsServiceName(t *testing.T) {
+	err := validatePort("https")
+	if err == nil {
+		t.Fatal("validatePort(\"https\") = nil; service names are deliberately not accepted")
+	}
+	if !strings.Contains(err.Error(), "service name") {
+		t.Errorf("error %q should name the service-name case — an operator whose ':https' config just stopped loading needs to be told that, not that it 'must be a number'", err)
+	}
+
+	// End-to-end: the shape really is refused at load, on the bind that
+	// matters.
+	cfg := mkLoopbackConfig(t)
+	cfg.ListenAddress = ":https"
+	if verr := cfg.Validate(); verr == nil || !strings.Contains(verr.Error(), "listenAddress") {
+		t.Fatalf("Validate() with listenAddress ':https' = %v, want a listenAddress error", verr)
+	}
+}
+
+// TestLooksLikeServiceName pins the lexical classifier that picks the
+// service-name wording. It must never claim a mistyped NUMBER is a service
+// name — that would send an operator looking up a port for "77 88".
+func TestLooksLikeServiceName(t *testing.T) {
+	cases := []struct {
+		port string
+		want bool
+	}{
+		{"https", true},
+		{"ipp", true},
+		{"x11-ssn", true},
+		{"iso-tsap", true},
+		{"", false},
+		{"7788", false},
+		{"77 88", false},
+		{"+7788", false},
+		{"-1", false},
+		{"7788x", false}, // leading digit: a typoed number, not a name
+		{"ht/ps", false},
+	}
+	for _, tc := range cases {
+		if got := looksLikeServiceName(tc.port); got != tc.want {
+			t.Errorf("looksLikeServiceName(%q) = %v, want %v", tc.port, got, tc.want)
 		}
 	}
 }

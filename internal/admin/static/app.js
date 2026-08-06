@@ -7731,6 +7731,10 @@ async function refreshDupesSummary() {
   const stampedAt = document.getElementById("dupes-stamped-at");
   if (stampedAt && sum.stampedAt) stampedAt.textContent = `as of ${formatTimeAgo(new Date(sum.stampedAt))}`;
   document.getElementById("dupes-tiles")?.removeAttribute("hidden");
+  // Rides the tiles: the scope note is only meaningful once there are
+  // numbers to scope, and every one of them counts the scanned filesystem
+  // library rather than the bridge-wide served total.
+  document.getElementById("dupes-scope-note")?.removeAttribute("hidden");
   // Audio-checksum evidence coverage — the identical/different-audio
   // tiers need FULL per-group coverage, so while the ExtractorVersion-3
   // re-extract backfills, say the evidence is still arriving.

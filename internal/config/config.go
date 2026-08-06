@@ -2458,8 +2458,24 @@ func IsInQuietHours(startMin, endMin, now int) bool {
 // The accepted range is 0-65535, NOT 1-65535: port 0 is the codebase's
 // documented "OS picks an ephemeral port" mode (see the port-zero handling
 // in internal/admin/handlers_api.go and the many `ListenAddress: ":0"` test
-// fixtures), so rejecting it would break both. Only negatives, out-of-range
-// values, and non-numeric text are rejected — exactly what net.Listen faults.
+// fixtures), so rejecting it would break both.
+//
+// The accept-set is DELIBERATELY NARROWER than net.Listen's, and the one
+// shape where they differ is a SERVICE NAME. Go resolves those in a bind
+// address — `net.Listen("tcp", "127.0.0.1:https")` really does reach port
+// 443 — so ":https" loaded and served before this check existed, and now
+// fails config.Load outright. That is intentional, because a service-name
+// port is only half-supported by the rest of the bridge: several paths
+// re-split the listen address and parse the port with strconv.Atoi, and
+// every one of them degrades SILENTLY rather than erroring —
+// api.reachableEndpoints returns nil (so /v1/health advertises no
+// endpoints at all and iOS clients cannot find the bridge),
+// admin.pairAlternates drops every alternate from the pairing QR, and
+// config.listenAddrIsPort443 stops recognising :443 for the autocert
+// path. Refusing the shape at load is strictly better than binding
+// correctly and then being undiscoverable. If a numeric port is ever
+// genuinely insufficient, the fix is to teach those three call sites
+// net.LookupPort — not to widen this check alone.
 func validatePort(port string) error {
 	// An explicitly-empty port ("127.0.0.1:" / ":") is almost certainly a typo:
 	// SplitHostPort accepts it, but the bind then either fails or lands on an
@@ -2471,10 +2487,51 @@ func validatePort(port string) error {
 		return errors.New("port must not be empty")
 	}
 	p, err := strconv.Atoi(port)
-	if err != nil || p < 0 || p > 65535 {
+	if err != nil {
+		if looksLikeServiceName(port) {
+			// Named separately because this is the one rejection an
+			// operator can hit on a config that USED to work: without
+			// saying so, "must be a number" reads like the bridge simply
+			// cannot count.
+			return fmt.Errorf("port %q is a service name; use its number instead (the bridge requires a numeric port even where net.Listen would resolve the name)", port)
+		}
+		return fmt.Errorf("port %q must be a number between 0 and 65535", port)
+	}
+	if p < 0 || p > 65535 {
 		return fmt.Errorf("port %q must be a number between 0 and 65535", port)
 	}
 	return nil
+}
+
+// looksLikeServiceName reports whether a non-numeric port component has the
+// shape of an IANA service name ("https", "ipp", "x11-ssn").
+//
+// Deliberately LEXICAL, not a net.LookupPort call: the answer feeds an error
+// message, and resolving against the host's services database would make the
+// message differ between a developer's machine and a CI runner (Windows keeps
+// its own %SystemRoot%\System32\drivers\etc\services). A lexical test is the
+// same everywhere and cannot fail. Both branches reject either way — only the
+// wording depends on this.
+func looksLikeServiceName(port string) bool {
+	if port == "" {
+		return false
+	}
+	for i := 0; i < len(port); i++ {
+		c := port[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9', c == '-', c == '_', c == '+', c == '.':
+			// Allowed, but never as the first character: a leading digit
+			// or punctuation means the operator meant a number and typoed
+			// it ("77 88", "+7788"), not that they named a service.
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // validateBindAddress checks that addr parses as host:port and that its port

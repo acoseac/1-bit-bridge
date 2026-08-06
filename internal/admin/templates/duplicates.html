@@ -52,11 +52,17 @@
       <div class="card-foot">copies excluded by the policy</div>
     </div>
     <div class="card">
-      <div class="card-label">Tracks served</div>
+      <div class="card-label">Scanned tracks served</div>
       <div class="card-value" id="dupes-served">—</div>
       <div class="card-foot" id="dupes-stamped-at">—</div>
     </div>
   </div>
+  <p class="hint" id="dupes-scope-note" hidden>
+    All counts above cover the scanned filesystem library only — scanned minus suppressed. UPnP
+    upstream tracks are never grouped or suppressed (their lifecycle belongs to the upstream
+    reconcile), so on a bridge with an upstream configured these numbers are lower than the
+    library total on the dashboard.
+  </p>
 
   <div class="panel" id="dupes-tier-panel" hidden>
     <div class="panel-head"><h2>By evidence tier</h2></div>

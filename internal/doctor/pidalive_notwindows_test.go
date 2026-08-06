@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 )
@@ -15,7 +16,7 @@ import (
 // on each errno, independent of who is running the test.
 //
 // This exists because the integration assertion in
-// TestPIDAlive_SelfAndReaped — pidAlive(1) must be true — reaches the
+// TestPIDAlive_SelfAndBounds — pidAlive(1) must be true — reaches the
 // EPERM branch only when UNPRIVILEGED. As root, signalling init just
 // succeeds, so on a root CI runner (the common container case) that
 // assertion passes through the nil-error path and would keep passing if
@@ -73,6 +74,32 @@ func TestSignal0Alive(t *testing.T) {
 				t.Errorf("signal0Alive(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPIDAliveReapedChildReadsDead pins the direction checkPort's Fail
+// verdict rests on: a stale pidfile naming a process that is really gone
+// must NOT read as live, or a genuine port conflict is softened to a Warn
+// on the strength of a crashed bridge's leftovers.
+//
+// Unix-only, and not for portability plumbing — the assertion is only TRUE
+// here. kill(pid,0) against a reaped pid answers ESRCH, a kernel contract.
+// Windows has no equivalent: a process object outlives termination for as
+// long as anything holds a handle to it, so OpenProcess keeps succeeding
+// and pidAlive keeps saying alive — which doctor_windows.go documents as
+// the deliberate fail-soft choice, and which made this exact assertion
+// flake on windows-latest across four unrelated PRs. Recycling compounds
+// it: Windows hands PIDs back out quickly, unix allocates them
+// sequentially, so the reaped pid is not re-issued mid-test here.
+func TestPIDAliveReapedChildReadsDead(t *testing.T) {
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("could not spawn a probe process on this host: %v", err)
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Wait()
+	if pidAlive(pid) {
+		t.Errorf("pidAlive(%d) = true for a reaped child; a stale pidfile must not read as live", pid)
 	}
 }
 

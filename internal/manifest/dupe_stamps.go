@@ -131,14 +131,31 @@ type DupeTierSummary struct {
 }
 
 // DupeSummary is the persisted output of one stamping pass.
+//
+// EVERY count here describes the population the STAMPING PASS WALKED,
+// which is the filesystem library only: RestampDuplicates streams
+// StreamTrackDupeRefsUnderPrefix with includeRouted=false, so UPnP-routed
+// upstream rows are excluded — they are never grouped, stamped or
+// suppressed, and their lifecycle belongs to the ingest reconcile.
+//
+// So these are NOT the /v1 served-track numbers, and on a hybrid
+// deployment (filesystem roots plus a UPnP upstream) they differ by the
+// whole routed catalogue: 122 filesystem tracks here against ~15.4k in
+// health.tracksIndexed. Anything rendering them has to say which
+// population it means. Do not "fix" that gap by sourcing Served from
+// CountServedTracks — this is a stamp-time document whose whole value is
+// describing applied state, and mixing a live cross-population count in
+// would break Served + Suppressed == Scanned.
 type DupeSummary struct {
 	SchemaVersion int       `json:"schemaVersion"`
 	StampedAt     time.Time `json:"stampedAt"`
 	Policy        string    `json:"policy"`
-	Scanned       int       `json:"scanned"`
-	Groups        int       `json:"groups"`
-	Suppressed    int       `json:"suppressed"`
-	Served        int       `json:"served"`
+	// Scanned is the row count the pass observed; Served is
+	// Scanned - Suppressed. Both are scanned-library-scoped (see above).
+	Scanned    int `json:"scanned"`
+	Groups     int `json:"groups"`
+	Suppressed int `json:"suppressed"`
+	Served     int `json:"served"`
 	// MD5Known/MD5Total: audio-MD5 evidence coverage across group
 	// MEMBERS — the "evidence still arriving" signal while the
 	// ExtractorVersion-3 re-extract backfills the library.

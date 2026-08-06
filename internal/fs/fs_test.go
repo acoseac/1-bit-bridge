@@ -2,10 +2,12 @@ package fs
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -309,6 +311,62 @@ func TestFoldRootBasenameIsSharedAcrossGuards(t *testing.T) {
 	}
 	if FoldRootBasename("/srv/Music") != FoldRootBasename("/other/music") {
 		t.Error("case-twin basenames must fold to the same key")
+	}
+}
+
+// TestFoldRootBasenameIsConcurrencySafe guards the ONE edit that would make
+// the package-level caser unsafe.
+//
+// basenameFolder is shared, which is fine only because cases.Lower(und) with
+// no options resolves to x/text's stateless `undLower` singleton. Adding an
+// option or naming a locale silently switches makeLower to a `&lowerCaser{}`
+// that embeds a context Transform overwrites on entry — a one-word change,
+// invisible in review, that would turn ValidateRoots and both remove-root
+// guards into a data race. Those run concurrently from admin request
+// handling and gate a DESTRUCTIVE root removal, so a corrupted fold is a
+// wrong collision verdict on a delete.
+//
+// The assertions are what give this teeth beyond -race: a shared stateful
+// caser interleaves two calls' contexts and returns garbage, so the
+// per-input equality check fails even in a non-race run. Distinct non-ASCII
+// inputs per goroutine make that interleaving observable — identical ASCII
+// inputs could corrupt into each other unnoticed.
+func TestFoldRootBasenameIsConcurrencySafe(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/srv/MÚSICA", "música"},
+		{"/srv/Ärchiv", "ärchiv"},
+		{"/srv/ØRESUND", "øresund"},
+		{"/srv/ÅKERFELDT", "åkerfeldt"},
+		{"/srv/Ægir", "ægir"},
+		{"/srv/ΣΊΣΥΦΟΣ", "σίσυφος"},
+		{"/srv/Żółw", "żółw"},
+		{"/srv/Music", "music"},
+	}
+
+	const goroutines = 32
+	const iterations = 3000
+	var wg sync.WaitGroup
+	errs := make(chan string, goroutines)
+	for g := 0; g < goroutines; g++ {
+		c := cases[g%len(cases)]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if got := FoldRootBasename(c.in); got != c.want {
+					select {
+					case errs <- fmt.Sprintf("FoldRootBasename(%q) = %q, want %q — the shared caser is not stateless", c.in, got, c.want):
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for msg := range errs {
+		t.Error(msg)
 	}
 }
 
