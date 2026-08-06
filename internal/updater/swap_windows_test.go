@@ -26,7 +26,7 @@ func TestSwapWindows_RenameTrick(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := swapBinary(dst, new, ".bak"); err != nil {
+	if err := swapBinary(dst, new, ".bak", nil); err != nil {
 		t.Fatalf("swapBinary: %v", err)
 	}
 
@@ -64,7 +64,7 @@ func TestSwapWindows_RollbackOverwritesExistingBak(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := swapBinary(dst, new, ".bak"); err != nil {
+	if err := swapBinary(dst, new, ".bak", nil); err != nil {
 		t.Fatalf("swapBinary: %v", err)
 	}
 	bakBytes, _ := os.ReadFile(bak)

@@ -274,6 +274,12 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	// Marker first (see method-doc rationale). This is the boot
 	// contract: Status="installing" + TargetVersion → next boot
 	// expects to be running TargetVersion or rolls back.
+	//
+	// A fresh State value here is also what CLEARS a prior
+	// RejectedVersion: SaveState persists the whole struct, so
+	// installing anything (including, deliberately, a manual re-install
+	// of the rejected build) retires the operator's rollback. Don't
+	// switch this to a load-modify-save without re-deciding that.
 	state := State{
 		Status:          "installing",
 		TargetVersion:   status.LatestVersion,
@@ -284,7 +290,16 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		return status, fmt.Errorf("save state: %w", err)
 	}
 
-	if err := swapBinary(opts.BinaryPath, extracted, ".bak"); err != nil {
+	// swapBinary calls this immediately before its first destructive
+	// filesystem operation — AFTER the Windows SCM stop, which can hold
+	// the marker armed over an untouched filesystem for up to 15 s. See
+	// State.SwapStarted for why a boot-time restore must not fire until
+	// this has landed.
+	markSwapStarted := func() error {
+		state.SwapStarted = true
+		return SaveState(opts.DataDir, state)
+	}
+	if err := swapBinary(opts.BinaryPath, extracted, ".bak", markSwapStarted); err != nil {
 		// Swap failed — clear the marker so the next boot doesn't
 		// roll back something that didn't actually change.
 		_ = ClearState(opts.DataDir)
@@ -315,6 +330,13 @@ var (
 // version is broken AFTER a successful install (the boot-time
 // rollback only fires on truly unbootable builds).
 //
+// The rejected version is RECORDED (State.RejectedVersion) rather than
+// the marker simply being cleared: a rollback only takes effect on
+// restart, and the poller on that restart sees the still-latest
+// candidate against the now-older running version and would re-install
+// it within seconds — the operator's only escape being to hand-edit
+// bridge.yaml. A strictly newer release still installs normally.
+//
 // Errors: ErrInstallInFlight when an Install (or another Rollback)
 // is already running on this Updater, ErrActiveSessions when Force
 // is false and Sessions.Inflight() is nonzero.
@@ -335,10 +357,58 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 		return fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
 	}
+	// Read the marker BEFORE the swap undoes it — TargetVersion is the
+	// release being rejected in both reachable rollback windows (marker
+	// "installing", still running the old binary; and marker
+	// "installed", running the new one).
+	rejected := rejectedVersionFor(opts.DataDir)
 	if err := RollbackBinary(opts.BinaryPath, ".bak"); err != nil {
 		return err
 	}
-	_ = ClearState(opts.DataDir)
+	// A restart deferred by the auto-installer would now bounce the
+	// process for a binary that is no longer on disk. Nothing is
+	// pending any more.
+	u.pendingRestart.Store(false)
+	// Status "" so DecideBootAction reads this as BootNoop — the marker
+	// survives purely to carry the rejection.
+	if err := SaveState(opts.DataDir, State{RejectedVersion: rejected}); err != nil {
+		// Falling back to the pre-rejection behaviour is strictly no
+		// worse than before: the auto-installer may re-install, but a
+		// stale "installing" marker must not be left behind to drive a
+		// spurious boot-time rollback.
+		logger.Warn("could not record the rolled-back version; auto-install may re-install it",
+			"version", rejected, "err", err)
+		_ = ClearState(opts.DataDir)
+	}
+	return nil
+}
+
+// rejectedVersionFor names the release a rollback is rejecting. The
+// install marker's TargetVersion is authoritative — version.ServerVersion
+// is only correct once the operator has already restarted onto the new
+// binary, and the admin "Roll back" button is reachable before that too.
+// Falls back to the running version when no marker survives (a
+// hand-staged .bak, or a rollback after BootCleanupBak retired the
+// marker).
+func rejectedVersionFor(dataDir string) string {
+	if st, err := LoadState(dataDir); err == nil && st.TargetVersion != "" {
+		return normalizeTag(st.TargetVersion)
+	}
+	return normalizeTag(version.ServerVersion)
+}
+
+// armSwap invokes swapBinary's swap-started hook, if the caller wired
+// one. Shared by both platform implementations so the nil-tolerance and
+// the error wrapping can't drift between them. A non-nil return MUST
+// abort the swap before anything is mutated — that is the whole point
+// of the hook.
+func armSwap(markSwapStarted func() error) error {
+	if markSwapStarted == nil {
+		return nil
+	}
+	if err := markSwapStarted(); err != nil {
+		return fmt.Errorf("record swap-started marker: %w", err)
+	}
 	return nil
 }
 
@@ -349,17 +419,34 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 // as renameFunc in internal/manifest/extractors.go).
 var removeFunc = os.Remove
 
+// writeProbeName is the FIXED basename preflightWritable creates in the
+// binary's directory. Fixed, not os.CreateTemp's random suffix, because
+// the case this probe exists to detect — "can create but not delete"
+// (a Windows FILE_ADD_FILE-without-FILE_DELETE_CHILD ACL, a POSIX
+// sticky-bit dir owned by another user) — is exactly the case where the
+// probe file is left behind. A random name leaked a fresh undeletable
+// file per attempt, and Install runs the preflight on EVERY attempt, so
+// auto-install at the 6 h cadence accumulated ~4/day in e.g.
+// /usr/local/bin, forever. With a fixed name the leak is capped at one.
+//
+// Deliberately NOT O_EXCL: a leftover probe from a previous failure
+// would then fail every subsequent preflight. Two processes probing
+// concurrently is fine too — the loser's Remove gets ENOENT, which the
+// retry loop treats as success (the directory is demonstrably
+// deletable).
+const writeProbeName = ".bridge-write-test"
+
 // preflightWritable checks the directory the binary lives in is both
 // writable AND deletable by this process. Better-message-than-
 // permission-denied: we ask the operator to run sudo / re-install in
 // user mode, with a concrete remediation path.
 func preflightWritable(binaryPath string) error {
 	dir := filepath.Dir(binaryPath)
-	tmp, err := os.CreateTemp(dir, ".bridge-write-test-*")
+	name := filepath.Join(dir, writeProbeName)
+	tmp, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("%w (path=%s, err=%v)", ErrPathNotWritable, dir, err)
 	}
-	name := tmp.Name()
 	tmp.Close()
 	// Verify we can DELETE here too, not just create — a "create file
 	// but not delete child" ACL (Windows) or a sticky-bit dir (POSIX)

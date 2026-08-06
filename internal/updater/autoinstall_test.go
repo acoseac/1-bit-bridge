@@ -277,3 +277,84 @@ func TestMaybeAutoInstallDefersRestartWhenSessionStartsMidInstall(t *testing.T) 
 		t.Errorf("archive fetched %d time(s) across the deferred-restart cycles; want 1 (no re-download)", got)
 	}
 }
+
+// TestDeferredRestartRefreshesInstallRecency is the F3 regression. A
+// restart deferred for an in-flight download waits a whole poll
+// interval, and DefaultCheckInterval (6 h) EQUALS recencyWindow — with
+// quiet hours configured the next in-window tick can be a day out. The
+// marker was stamped at swap time and never re-stamped, so the boot it
+// was armed for read it as abandoned: BootClearAbandoned only clears the
+// marker, so InstalledAt is never set, BootCleanupBak never fires, and a
+// ~30 MiB bridge.bak is never reclaimed (the install also silently loses
+// its boot-time rollback protection).
+func TestDeferredRestartRefreshesInstallRecency(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "bridge")
+	if err := os.WriteFile(livePath, []byte("bridge-binary-0.1.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := NewTracker()
+	restartCalls := &atomic.Int32{}
+	var beginOnce atomic.Bool
+	upd := New(Options{
+		RepoOverride: "fake/repo",
+		Client:       NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL),
+		AutoInstall:  true,
+		AutoInstallOpts: &InstallOptions{
+			DataDir:    dir,
+			BinaryPath: livePath,
+			Sessions:   tracker,
+			Force:      false,
+			Verifier: func(context.Context, string) error {
+				// A stream starts mid-install, so the restart defers.
+				if beginOnce.CompareAndSwap(false, true) {
+					tracker.Begin()
+				}
+				return nil
+			},
+		},
+		AutoInstallRestart: func() { restartCalls.Add(1) },
+	})
+	upd.mu.Lock()
+	upd.status.CurrentVersion = "0.1.0"
+	upd.status.LatestVersion = fix.latestVersion
+	upd.status.UpdateAvailable = true
+	upd.mu.Unlock()
+
+	upd.maybeAutoInstall(context.Background())
+	if restartCalls.Load() != 0 {
+		t.Fatalf("restart fired during the deferring cycle")
+	}
+
+	// Age the marker past the recency window — the real elapsed time
+	// between the swap and the next in-window poll tick.
+	st, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.AttemptedAt = time.Now().UTC().Add(-recencyWindow - time.Hour)
+	if err := SaveState(dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stream drains; the pending-restart fast path finally restarts.
+	tracker.End()
+	upd.maybeAutoInstall(context.Background())
+	if got := restartCalls.Load(); got != 1 {
+		t.Fatalf("restarts = %d after the session drained, want 1", got)
+	}
+
+	// The boot this restart leads into must still confirm the install.
+	reloaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := DecideBootAction(reloaded, fix.latestVersion, time.Now().UTC())
+	if got != BootInstallSucceeded {
+		t.Errorf("DecideBootAction after a deferred restart = %v, want BootInstallSucceeded "+
+			"(a marker stamped at swap time reads as abandoned by the time the restart lands)", got)
+	}
+}

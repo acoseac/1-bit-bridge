@@ -1234,7 +1234,25 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		CanInstall:       a.canInstall,
 		CanRollback:      a.canRollback(),
 		DeferredReason:   s.DeferredReason,
+		RejectedVersion:  a.rejectedVersion(),
 	}
+}
+
+// rejectedVersion reads the release the operator rolled back on this
+// host, so the dashboard can explain a bridge that reports an available
+// update and never installs it. Read from the same on-disk marker the
+// auto-install gate consults — deriving it any other way would let the
+// two disagree. Same per-call-read shape as canRollback's stat, and on
+// the same 30 s SSE cadence.
+func (a updateInfoAdapter) rejectedVersion() string {
+	if a.dataDir == "" {
+		return ""
+	}
+	st, err := updater.LoadState(a.dataDir)
+	if err != nil {
+		return ""
+	}
+	return st.RejectedVersion
 }
 
 // canRollback reports whether the installer's backup of the previous
@@ -1376,6 +1394,16 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 			fmt.Fprintf(stderr, "updater: rollback failed: %v (manual recovery needed at %s)\n",
 				err, binaryPath)
 		}
+		if err := updater.ClearState(dataDir); err != nil {
+			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
+		}
+	case updater.BootClearNotSwapped:
+		// The marker was armed but the install never reached its first
+		// destructive step (killed during the Windows SCM stop, say), so
+		// .bak predates the binary we're running — restoring it would
+		// downgrade the host rather than roll it back. Clear only.
+		fmt.Fprintf(stderr, "updater: install of %s never reached the binary swap; leaving %s.bak alone\n",
+			st.TargetVersion, binaryPath)
 		if err := updater.ClearState(dataDir); err != nil {
 			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}

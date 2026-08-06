@@ -193,6 +193,36 @@ func TestInstallReplacesBinaryAndArmsMarker(t *testing.T) {
 	if st.TargetVersion != "0.2.0" {
 		t.Errorf("state.TargetVersion = %q, want 0.2.0", st.TargetVersion)
 	}
+	// F2: the marker has to say the swap actually happened, or the
+	// boot-time rollback can't tell a real failed install from one that
+	// died before touching the filesystem — and refuses the restore.
+	if !st.SwapStarted {
+		t.Error("state.SwapStarted = false after a completed swap; the boot rollback would refuse to restore .bak")
+	}
+}
+
+// TestInstallSwapAbortsBeforeMutatingWhenMarkerWriteFails pins the
+// hook's placement: it fires BEFORE the first destructive filesystem
+// operation, so a failure there leaves the binary and any pre-existing
+// .bak exactly as they were. That ordering is what makes SwapStarted
+// mean "restoring .bak is a rollback, not a downgrade".
+func TestInstallSwapAbortsBeforeMutatingWhenMarkerWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	live := fakeBinary(t, dir, "bridge", "CURRENT")
+	_ = fakeBinary(t, dir, "bridge.bak", "PREVIOUS")
+	newBin := fakeBinary(t, dir, "bridge.new", "NEW")
+
+	wantErr := errors.New("simulated marker write failure")
+	err := swapBinary(live, newBin, ".bak", func() error { return wantErr })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("swapBinary with a failing swap-started hook: err = %v, want it to wrap %v", err, wantErr)
+	}
+	if got, _ := os.ReadFile(live); string(got) != "CURRENT" {
+		t.Errorf("live = %q after an aborted swap, want CURRENT (untouched)", string(got))
+	}
+	if got, _ := os.ReadFile(live + ".bak"); string(got) != "PREVIOUS" {
+		t.Errorf(".bak = %q after an aborted swap, want PREVIOUS (untouched)", string(got))
+	}
 }
 
 func TestInstallRefusesWithActiveSessions(t *testing.T) {
@@ -659,6 +689,44 @@ func Test_preflightWritable_SucceedsAfterTransientRemoveFailure(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Errorf("expected a retry after the first failure, got %d call(s)", calls)
+	}
+}
+
+// Test_preflightWritable_LeavesAtMostOneProbeFile pins the F4 fix: the
+// probe's whole purpose is to detect a "can create but not delete"
+// directory, and in exactly that case the probe file stays on disk. With
+// os.CreateTemp's random suffix every attempt leaked a fresh undeletable
+// file — and Install runs the preflight on EVERY attempt, so auto-install
+// at the 6 h cadence accumulated ~4/day in e.g. /usr/local/bin,
+// indefinitely. A fixed name caps the leak at one.
+func Test_preflightWritable_LeavesAtMostOneProbeFile(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bridge")
+	orig := removeFunc
+	t.Cleanup(func() { removeFunc = orig })
+	removeFunc = func(string) error { return os.ErrPermission } // never deletable
+
+	for i := 0; i < 3; i++ {
+		if err := preflightWritable(bin); !errors.Is(err, ErrPathNotWritable) {
+			t.Fatalf("attempt %d: err = %v, want ErrPathNotWritable", i, err)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probes []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), writeProbeName) {
+			probes = append(probes, e.Name())
+		}
+	}
+	if len(probes) != 1 {
+		t.Errorf("3 failed preflights left %d probe file(s) %v; want exactly 1", len(probes), probes)
+	}
+	if len(probes) > 0 && probes[0] != writeProbeName {
+		t.Errorf("probe file = %q, want the fixed name %q", probes[0], writeProbeName)
 	}
 }
 
