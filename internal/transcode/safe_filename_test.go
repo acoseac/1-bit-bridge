@@ -179,30 +179,35 @@ func TestSafeVariantFilenameOverLength(t *testing.T) {
 }
 
 // TestSafeVariantFilenameReservesTmpSuffix pins the temp-file budget:
-// the output basename plus sidecarTmpSuffix must fit the 255-byte
-// filesystem cap, because sox writes to `<sidecar>.tmp` before the
-// atomic rename. Pre-fix the budget was a bare 255, so an input that
-// produced a 255-byte name made the temp target 259 bytes —
-// ENAMETOOLONG on every common filesystem, exactly for the
-// long-classical-filename inputs the sanitizer exists to handle.
+// the output basename plus everything the TEMP name adds on top of it
+// (sidecarTmpReserve = "." + per-job token + sidecarTmpSuffix) must fit
+// the 255-byte filesystem cap, because sox writes to
+// `<sidecar>.<token>.tmp` before the atomic rename. Originally the budget
+// was a bare 255, so an input that produced a 255-byte name made the temp
+// target overflow — ENAMETOOLONG on every common filesystem, exactly for
+// the long-classical-filename inputs the sanitizer exists to handle.
+//
+// The reservation — not the literal suffix length — is the invariant:
+// when the temp shape gained its per-job uniqueness token the reserve
+// grew with it, and this assertion is what keeps the two in step.
 func TestSafeVariantFilenameReservesTmpSuffix(t *testing.T) {
 	const variantID = "upscaled-v2-176400-24"
 	cases := []struct {
 		name    string
 		srcBase string
 	}{
-		// Clean name sized so the candidate landed at exactly 255
-		// bytes under the pre-fix budget: len(srcBase) + len(".") +
+		// Clean name sized so the candidate lands at exactly 255 bytes
+		// with no reserve at all: len(srcBase) + len(".") +
 		// len(variantID) + len(".flac") = 228 + 1 + 21 + 5 = 255.
-		{"exact-pre-fix-cap", strings.Repeat("x", 223) + ".flac"},
+		{"exact-unreserved-cap", strings.Repeat("x", 223) + ".flac"},
 		{"well-over-cap", strings.Repeat("x", 300) + ".flac"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := safeVariantFilename(c.srcBase, variantID)
-			if len(got)+len(sidecarTmpSuffix) > 255 {
-				t.Errorf("len(%q) = %d; +%q overflows the 255-byte basename cap",
-					got, len(got), sidecarTmpSuffix)
+			if len(got)+sidecarTmpReserve > 255 {
+				t.Errorf("len(%q) = %d; + %d reserved temp bytes overflows the 255-byte basename cap",
+					got, len(got), sidecarTmpReserve)
 			}
 		})
 	}
@@ -233,7 +238,7 @@ func TestSafeVariantFilenameOverLengthDeterministic(t *testing.T) {
 // is always `(head + ".." + tail) + suffix == budget + len(suffix) ==
 // fsBasenameCap` once the head absorbs the odd byte.
 func TestSafeVariantFilenameOverLengthUsesFullBudget(t *testing.T) {
-	fsBasenameCap := 255 - len(sidecarTmpSuffix)
+	fsBasenameCap := 255 - sidecarTmpReserve
 	long := strings.Repeat("x", 400) + ".flac" // pure ASCII, far over the cap
 	for _, vid := range []string{"upscaled-v2-176400-24", "upscaled-v2-176400-241"} {
 		got := safeVariantFilename(long, vid)

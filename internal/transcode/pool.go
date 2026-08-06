@@ -819,9 +819,14 @@ func (p *Pool) ActiveWorkers() []ActiveJobView {
 // job later completes and asks to release a key that a resubmission
 // may already have re-claimed; the generation comparison turns that
 // into a no-op. Without it the dropped job released the NEW job's
-// claim, a third enqueue passed the dedup check, and two workers ran
-// the same (source, variant) against one deterministic `.tmp` path —
-// see releaseDedup for the full sequence.
+// claim and a third enqueue passed the dedup check — see releaseDedup
+// for the full sequence.
+//
+// Note the concurrency this method deliberately CREATES (job B running
+// while job A holds the same spec) is safe on the filesystem: each job's
+// sox temp path carries a per-job token (see sidecarTmpTokenHexLen), so
+// two workers on one (source, variant) cannot unlink or publish each
+// other's in-progress output.
 //
 // Lock discipline: `p.mu` held only for the iteration window.
 // Predicate is called synchronously under the lock; predicate
@@ -1133,7 +1138,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		return
 	}
 
-	_, settings, _ := job.spec.SoxArgs()
+	_, settings, _, _ := job.spec.SoxArgs()
 	sidecarPath := job.spec.SidecarPath()
 
 	// Durability: flush the freshly-renamed sidecar (and its parent
@@ -1385,15 +1390,23 @@ func (p *Pool) finishJob(workerID int, job poolJob) {
 //	A finishes -> delete(k)           inflight{}   <- released B's claim
 //	C enqueued: dedup check passes    two workers on the same (source, variant)
 //
-// B and C then share one deterministic `SidecarPath() + ".tmp"`, and
-// RunSox opens each job by `os.Remove`-ing that path to clear crash
-// debris — so the later starter unlinks the earlier's in-progress
-// output from under it, and they race the rename. The visible result is
-// a truncated or interleaved sidecar published as a complete variant.
-//
 // Comparing the generation makes a stale release a no-op: a missing key
 // reads 0, a re-claimed key reads a higher number, and neither equals
 // the caller's claim.
+//
+// **What this check does and does not buy.** It used to be the only thing
+// standing between that sequence and a corrupted variant, because B and C
+// would then share one deterministic `SidecarPath() + ".tmp"` — RunSox
+// opens every job by `os.Remove`-ing its temp to clear crash debris, so
+// the later starter unlinked the earlier's in-progress output and the
+// earlier renamed the later's partial file into place. That is no longer
+// true: the temp path carries a per-job token (see sidecarTmpTokenHexLen),
+// so concurrent workers on one (source, variant) write to distinct files
+// and the loser's rename simply overwrites the winner's finished sidecar
+// with an equally complete one. The ownership check still earns its keep —
+// it keeps the dedup map honest, so `C` is refused rather than admitted and
+// the pool doesn't burn a worker slot re-rendering work already in flight.
+// **Don't drop it on the grounds that the corruption it named is fixed.**
 func (p *Pool) releaseDedup(key string, claim uint64) {
 	p.mu.Lock()
 	if p.inflight[key] == claim {
