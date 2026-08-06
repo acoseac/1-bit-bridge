@@ -30,6 +30,21 @@ const genaInitialNotifyTimeout = 5 * time.Second
 // PR #303.
 var packageLogger = logging.Component("dlna")
 
+// serveGoroutineHookForTests, when non-nil, is invoked by the HTTP serve
+// goroutine BEFORE it touches the *http.Server captured at spawn time. It
+// receives a channel that the same goroutine closes when it returns, so a
+// test can join the goroutine deterministically.
+//
+// Test-only seam — nil in production, where the cost is one nil check per
+// Start. It exists because the window the capture above guards (Start spawns
+// the goroutine, every SSDP advertiser then fails, and the caller's defensive
+// Stop() lands before the goroutine is first scheduled) is otherwise
+// reachable only by scheduler luck, and a test that cannot pin the interleave
+// pins nothing. Production code MUST NOT set it; only tests, which restore it
+// via t.Cleanup. Same convention as afterExtractHookForTests in
+// internal/manifest and renameFunc in internal/manifest/extractors.go.
+var serveGoroutineHookForTests func(exited <-chan struct{})
+
 // ServerConfig configures a DLNAServer. All fields are required EXCEPT
 // where noted. The caller (cmd/bridge/main.go via PR 1 task #12) is
 // responsible for computing the ServerURL from the live interface IP
@@ -246,8 +261,35 @@ func (s *Server) Start(ctx context.Context) error {
 	// Run HTTP server in a goroutine. Serve() blocks until Shutdown()
 	// is called externally; the returned ErrServerClosed is expected
 	// and silently consumed by the goroutine.
+	//
+	// The server is captured into a local BEFORE the `go` statement and the
+	// goroutine MUST NOT read s.httpServer. Stop() writes that field
+	// (`s.httpServer = nil`) from another goroutine with no synchronization,
+	// and the window is real rather than theoretical: when EVERY SSDP
+	// advertiser fails to bind — the documented "no multicast permission on
+	// that NIC" case, and the class of environment behind the 2026-05-27
+	// Windows+Tailscale incident — Start returns an error and
+	// cmd/bridge/dlna_wiring.go's defensive srv.Stop(...) runs, possibly
+	// before this goroutine has been scheduled at all. A field read would
+	// then hand Serve a nil *http.Server, which nil-derefs inside
+	// shouldConfigureHTTP2ForServe — a panic in a bare goroutine, so the
+	// whole bridge process dies instead of DLNA merely degrading. Even when
+	// the goroutine wins the race, the read/write pair is an unsynchronized
+	// data race by the Go memory model; the capture removes both problems,
+	// because httpSrv is written and read on this goroutine before the spawn.
+	//
+	// s.httpServer is the ONLY field Stop writes that a spawned goroutine
+	// could observe: s.ssdps is touched solely by Start/Stop on the caller's
+	// goroutine, and Stop never writes notifyCtx / notifyClient (it calls
+	// notifyCancel, it does not reassign the fields).
+	httpSrv := s.httpServer
 	go func() {
-		if err := s.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if hook := serveGoroutineHookForTests; hook != nil {
+			exited := make(chan struct{})
+			defer close(exited)
+			hook(exited)
+		}
+		if err := httpSrv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.log.Error("DLNA HTTP server failed", slog.String("err", err.Error()))
 		}
 	}()
