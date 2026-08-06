@@ -112,9 +112,23 @@ func TestUpscaleBatchRejectsInvalidTargetWith400(t *testing.T) {
 			wantStatus:  http.StatusAccepted,
 			wantSubmits: 1,
 		},
+		// All three accepted depths, so the client contract is pinned and
+		// a narrowed switch can't silently start 400-ing 16 or 32.
 		{
-			name:        "valid explicit target",
+			name:        "valid explicit target 16-bit",
+			body:        BatchRequest{TargetRate: 96000, TargetBits: 16},
+			wantStatus:  http.StatusAccepted,
+			wantSubmits: 1,
+		},
+		{
+			name:        "valid explicit target 24-bit",
 			body:        BatchRequest{TargetRate: 96000, TargetBits: 24},
+			wantStatus:  http.StatusAccepted,
+			wantSubmits: 1,
+		},
+		{
+			name:        "valid explicit target 32-bit",
+			body:        BatchRequest{TargetRate: 96000, TargetBits: 32},
 			wantStatus:  http.StatusAccepted,
 			wantSubmits: 1,
 		},

@@ -113,6 +113,22 @@ const (
 // `mbidPattern` admits strict UUIDs only; it lives here rather than in
 // the artwork handler so that a future relaxation of that pattern
 // inherits the correct behaviour instead of silently regressing.
+// logProbeFault records an unanswerable MBID probe. The `ctx.Err()` gate
+// is the repo-wide convention for database / context-driven operations:
+// a cancelled request (client hang-up, shutdown) would otherwise emit a
+// burst of misleading Errors that describe normal teardown, not a fault.
+//
+// It gates the LOG ONLY. The caller has already decided to answer 202 by
+// the time it gets here, and that decision must not depend on whether the
+// line was written — suppressing a log is cosmetic, suppressing the
+// fail-open would terminal-404 an image that exists.
+func logProbeFault(ctx context.Context, msg, mbid string, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	LoggerFromContext(ctx).Error(msg, "mbid", mbid, "err", err)
+}
+
 func classifyArtworkMiss(ctx context.Context, mbid string, hasTrack, pending mbidPredicate) artworkMissOutcome {
 	if hasTrack == nil || pending == nil {
 		// No probe wired (tests, legacy) — pre-v1.1 behaviour: every
@@ -121,7 +137,7 @@ func classifyArtworkMiss(ctx context.Context, mbid string, hasTrack, pending mbi
 	}
 	known, err := hasTrack(ctx, mbid)
 	if err != nil {
-		LoggerFromContext(ctx).Error("mbid known-probe failed", "mbid", mbid, "err", err)
+		logProbeFault(ctx, "mbid known-probe failed", mbid, err)
 		return missPending
 	}
 	if !known {
@@ -132,7 +148,7 @@ func classifyArtworkMiss(ctx context.Context, mbid string, hasTrack, pending mbi
 	}
 	stillPending, err := pending(ctx, mbid)
 	if err != nil {
-		LoggerFromContext(ctx).Error("mbid enrichment-pending probe failed", "mbid", mbid, "err", err)
+		logProbeFault(ctx, "mbid enrichment-pending probe failed", mbid, err)
 		return missPending
 	}
 	if stillPending {

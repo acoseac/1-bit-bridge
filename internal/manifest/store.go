@@ -3472,7 +3472,14 @@ func (s *Store) hasTrackWithJSONField(ctx context.Context, field jsonField, valu
 	// pending probe fail CLOSED.
 	var found bool
 	if err := s.db.QueryRowContext(ctx, q, value).Scan(&found); err != nil {
-		logger.Error("hasTrackWithJSONField", "field", field, "err", err)
+		// The ctx check gates the LOG ONLY — a cancelled context during
+		// shutdown or a client hang-up would otherwise emit a burst of
+		// misleading Errors (repo convention; see scanner.go, enricher's
+		// negative-cache guard). The error still RETURNS unchanged, so
+		// the handler's fail-open-to-202 classification is untouched.
+		if ctx.Err() == nil {
+			logger.Error("hasTrackWithJSONField", "field", field, "err", err)
+		}
 		return false, err
 	}
 	return found, nil
@@ -3501,7 +3508,12 @@ func (s *Store) pendingEnrichmentWithJSONField(ctx context.Context, field jsonFi
 	}
 	var pending bool
 	if err := s.db.QueryRowContext(ctx, q, value).Scan(&pending); err != nil {
-		logger.Error("pendingEnrichmentWithJSONField", "field", field, "err", err)
+		// Log-only ctx gate — see hasTrackWithJSONField. The returned
+		// error is what drives the handler's fail-open, so suppressing
+		// the log must never short-circuit the return.
+		if ctx.Err() == nil {
+			logger.Error("pendingEnrichmentWithJSONField", "field", field, "err", err)
+		}
 		return false, err
 	}
 	return pending, nil

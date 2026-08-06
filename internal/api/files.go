@@ -485,6 +485,17 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 // stat failure — a dangling link, or a target on a mount that just went
 // away — falls back to the same info, so a broken link still appears in
 // the listing instead of vanishing from it.
+//
+// **CodeQL `go/path-injection` on the Join below is a false positive of
+// the class dismissed for alerts #1-4** (see CLAUDE.md v0.1.4). Both
+// components are safe, for different reasons: `dir` is the resolver's
+// own output — `Resolve` rejects NUL bytes, rejects any `..` on the RAW
+// segments BEFORE `path.Clean` canonicalizes, joins against the trusted
+// root, and prefix-checks the absolute result — a barrier CodeQL's taint
+// analysis cannot model; and `ri.Name()` is not client-supplied at all,
+// it is a bare basename from `os.File.Readdir` on that already-validated
+// directory. Don't contort this into a lexical re-check to appease the
+// scanner — the caller two lines up already `os.Open`s the same `dir`.
 func followSymlink(dir string, ri os.FileInfo) os.FileInfo {
 	if ri.Mode()&os.ModeSymlink == 0 {
 		return ri

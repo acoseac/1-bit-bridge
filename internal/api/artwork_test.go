@@ -555,7 +555,7 @@ func TestArtworkLocalSentinelStaysPendingWhenEnrichmentComplete(t *testing.T) {
 			"a terminal no_image would strand a cover that IS coming back)",
 			resp.StatusCode)
 	}
-	if ra := resp.Header.Get("Retry-After"); ra == "" {
+	if resp.Header.Get("Retry-After") == "" {
 		t.Errorf("Retry-After header missing on local- pending response")
 	}
 }

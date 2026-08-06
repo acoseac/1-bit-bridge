@@ -90,6 +90,12 @@ func TestWaveformIsRevalidatedNotImmutable(t *testing.T) {
 	if !strings.Contains(cc, "no-cache") {
 		t.Errorf("Cache-Control = %q, want no-cache so the ETag is actually used", cc)
 	}
+	// Without this the test also passes for `public, no-cache`, which
+	// permits a shared cache to store the body of a bearer-authenticated
+	// response. `private` is the half that keeps it per-client.
+	if !strings.Contains(cc, "private") {
+		t.Errorf("Cache-Control = %q, want private for an authenticated endpoint", cc)
+	}
 	if et := resp.Header.Get("ETag"); et == "" {
 		t.Errorf("ETag missing — it is the revalidation key")
 	}

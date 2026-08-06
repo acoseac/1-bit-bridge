@@ -62,12 +62,20 @@ func TestListFollowsSymlinksMatchingStat(t *testing.T) {
 			"and /v1/download 400s it as one (entry: %+v)", linkedDir)
 	}
 
+	// `targetEntry`, not `real` — the latter shadows a Go predeclared
+	// identifier (golangci-lint `predeclared`).
 	linkedFile := findEntry(t, entries, "LinkedSingle.flac")
-	real := findEntry(t, entries, "Single.flac")
-	if linkedFile.Size != real.Size {
+	targetEntry := findEntry(t, entries, "Single.flac")
+	if linkedFile.Size != targetEntry.Size {
 		t.Errorf("LinkedSingle.flac size = %d, want %d (the TARGET's size; "+
 			"an Lstat size is the length of the link's path string)",
-			linkedFile.Size, real.Size)
+			linkedFile.Size, targetEntry.Size)
+	}
+	// ModTime comes off the same stat, so a regression that resolved only
+	// IsDir/Size would pass without this.
+	if !linkedFile.ModTime.Equal(targetEntry.ModTime) {
+		t.Errorf("LinkedSingle.flac mtime = %s, want the target's %s",
+			linkedFile.ModTime, targetEntry.ModTime)
 	}
 	if linkedFile.IsDir {
 		t.Errorf("LinkedSingle.flac should not be a directory: %+v", linkedFile)
