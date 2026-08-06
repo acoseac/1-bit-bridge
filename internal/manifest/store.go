@@ -3322,6 +3322,34 @@ func (s *Store) HasTrackWithArtistMBID(ctx context.Context, mbid string) bool {
 	return s.hasTrackWithJSONField(ctx, artistMBIDField, mbid)
 }
 
+// ArtworkMBIDEnrichmentPending reports whether at least one track
+// carrying the MBID in `artworkMBID` still has `enriched_at = 0` —
+// i.e. the enricher hasn't taken its turn yet, so a missing cache
+// file may still appear. The `/v1/artwork` handler uses this to split
+// its cache-miss 202 ("pending, retry") from the terminal 404
+// (`no_image`: enrichment complete, nothing exists upstream). Only
+// called after HasTrackWithArtworkMBID returned true, so the answer
+// distinguishes states rather than existence.
+//
+// Same functional index as the Has* probes: SQLite seeks on the
+// json_extract expression, then filters `enriched_at` over the
+// handful of rows sharing the MBID — the miss path stays O(log n).
+func (s *Store) ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) bool {
+	if mbid == "" {
+		return false
+	}
+	return s.pendingEnrichmentWithJSONField(ctx, artworkMBIDField, mbid)
+}
+
+// ArtistMBIDEnrichmentPending mirrors ArtworkMBIDEnrichmentPending
+// for `/v1/artist-image`.
+func (s *Store) ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) bool {
+	if mbid == "" {
+		return false
+	}
+	return s.pendingEnrichmentWithJSONField(ctx, artistMBIDField, mbid)
+}
+
 // DistinctArtistMBIDs returns every distinct, non-empty MusicBrainz artist GID
 // present in the library — the set the Atlas bulk-harvest client submits for
 // enrichment. Reads are un-mutexed (WAL handles concurrent readers). The artist
@@ -3436,6 +3464,31 @@ func (s *Store) hasTrackWithJSONField(ctx context.Context, field jsonField, valu
 		return false
 	}
 	return found
+}
+
+// pendingEnrichmentWithJSONField is hasTrackWithJSONField narrowed to
+// rows the enricher hasn't stamped yet. Same whitelist discipline —
+// each supported field's query is a pre-built literal. On a database
+// fault it returns TRUE (pending), the fail-open direction: a wrongly
+// "pending" answer costs the client one more bounded 202 retry, while
+// a wrongly "complete" answer would terminal-404 an image that was
+// about to land.
+func (s *Store) pendingEnrichmentWithJSONField(ctx context.Context, field jsonField, value string) bool {
+	var q string
+	switch field {
+	case artworkMBIDField:
+		q = `SELECT EXISTS(SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artworkMBID') = ? AND enriched_at = 0)`
+	case artistMBIDField:
+		q = `SELECT EXISTS(SELECT 1 FROM tracks WHERE json_extract(tags_json, '$.artistMBID') = ? AND enriched_at = 0)`
+	default:
+		return false
+	}
+	var pending bool
+	if err := s.db.QueryRowContext(ctx, q, value).Scan(&pending); err != nil {
+		logger.Error("pendingEnrichmentWithJSONField", "field", field, "err", err)
+		return true
+	}
+	return pending
 }
 
 // CountTracks returns the total number of track rows. /v1/health polls

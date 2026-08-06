@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -267,17 +268,29 @@ func TestArtistImageRequiresAuth(t *testing.T) {
 // fakeMBIDProbe stubs the optional MBIDProbe interface so the handler
 // can pretend a given MBID is known (or unknown) without wiring a
 // real manifest store. `known` is a closed set — anything not in it
-// returns false so the 404 branch stays exercised.
-type fakeMBIDProbe struct{ known map[string]bool }
+// returns false so the 404 branch stays exercised. `pending` mirrors
+// the enrichment-pending split: known + pending → 202, known +
+// !pending → terminal 404 `no_image`.
+type fakeMBIDProbe struct {
+	known   map[string]bool
+	pending map[string]bool
+}
 
 func (f fakeMBIDProbe) HasTrackWithArtworkMBID(ctx context.Context, m string) bool { return f.known[m] }
 func (f fakeMBIDProbe) HasTrackWithArtistMBID(ctx context.Context, m string) bool  { return f.known[m] }
+func (f fakeMBIDProbe) ArtworkMBIDEnrichmentPending(ctx context.Context, m string) bool {
+	return f.pending[m]
+}
+func (f fakeMBIDProbe) ArtistMBIDEnrichmentPending(ctx context.Context, m string) bool {
+	return f.pending[m]
+}
 
 // artworkFixtureWithProbe layers an MBIDProbe onto the base artwork
 // fixture. `present` is still about whether the cache file exists on
 // disk; `probeKnown` is about whether the MBIDProbe says the server
-// has seen the MBID in a track.
-func artworkFixtureWithProbe(t *testing.T, present, probeKnown bool) (*httptest.Server, string, string) {
+// has seen the MBID in a track; `enrichPending` is whether any track
+// carrying it still awaits the enricher (the 202-vs-no_image axis).
+func artworkFixtureWithProbe(t *testing.T, present, probeKnown, enrichPending bool) (*httptest.Server, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	artDir := filepath.Join(dir, "artwork")
@@ -290,9 +303,12 @@ func artworkFixtureWithProbe(t *testing.T, present, probeKnown bool) (*httptest.
 	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
 	raw, _, _ := store.Mint("probe")
 
-	probe := fakeMBIDProbe{known: map[string]bool{}}
+	probe := fakeMBIDProbe{known: map[string]bool{}, pending: map[string]bool{}}
 	if probeKnown {
 		probe.known[mbid] = true
+	}
+	if enrichPending {
+		probe.pending[mbid] = true
 	}
 
 	srv := New(cfg, store, nil, "fp").
@@ -303,10 +319,11 @@ func artworkFixtureWithProbe(t *testing.T, present, probeKnown bool) (*httptest.
 	return hs, raw, mbid
 }
 
-// Cache miss + probe says "known": 202 + Retry-After. iOS uses this
-// to drive its backoff retry loop instead of giving up on first call.
+// Cache miss + probe says "known + enrichment pending": 202 +
+// Retry-After. iOS uses this to drive its backoff retry loop instead
+// of giving up on first call.
 func TestArtworkReturns202WhenProbeKnowsMBID(t *testing.T) {
-	hs, tok, mbid := artworkFixtureWithProbe(t, false, true)
+	hs, tok, mbid := artworkFixtureWithProbe(t, false, true, true)
 	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
@@ -317,10 +334,32 @@ func TestArtworkReturns202WhenProbeKnowsMBID(t *testing.T) {
 	}
 }
 
+// Cache miss + probe says "known, enrichment COMPLETE": terminal 404
+// with the `no_image` code — the enricher took its turn and nothing
+// exists upstream, so a 202 would have clients ladder-retry forever
+// (the 2026-08-06 bridge.ars.md field case: 78 imageless artists ×
+// a 4-5 minute iOS retry ladder per sync, for bytes that can never
+// arrive).
+func TestArtworkReturns404NoImageWhenEnrichmentComplete(t *testing.T) {
+	hs, tok, mbid := artworkFixtureWithProbe(t, false, true, false)
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		t.Errorf("Retry-After = %q on terminal miss; must be absent so clients don't retry", ra)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"no_image"`) {
+		t.Errorf("body = %s, want error code no_image (distinct from not_found for diagnostics)", body)
+	}
+}
+
 // Cache miss + probe says "unknown": 404. Preserves v1.0 behaviour
 // for MBIDs nobody's ever referenced — iOS can stop asking.
 func TestArtworkReturns404WhenProbeDoesNotKnow(t *testing.T) {
-	hs, tok, mbid := artworkFixtureWithProbe(t, false, false)
+	hs, tok, mbid := artworkFixtureWithProbe(t, false, false, false)
 	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
@@ -341,7 +380,7 @@ func TestArtworkReturns404WhenNoProbeAttached(t *testing.T) {
 
 // Cache hit wins regardless of probe state — fast path is not touched.
 func TestArtworkCacheHitIgnoresProbe(t *testing.T) {
-	hs, tok, mbid := artworkFixtureWithProbe(t, true, true)
+	hs, tok, mbid := artworkFixtureWithProbe(t, true, true, true)
 	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
@@ -357,7 +396,10 @@ func TestArtistImageReturns202WhenProbeKnows(t *testing.T) {
 	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
 	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
 	raw, _, _ := store.Mint("probe")
-	probe := fakeMBIDProbe{known: map[string]bool{mbid: true}}
+	probe := fakeMBIDProbe{
+		known:   map[string]bool{mbid: true},
+		pending: map[string]bool{mbid: true},
+	}
 	srv := New(cfg, store, nil, "fp").
 		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
 		WithMBIDProbe(probe)
@@ -371,6 +413,39 @@ func TestArtistImageReturns202WhenProbeKnows(t *testing.T) {
 	}
 	if ra := resp.Header.Get("Retry-After"); ra == "" {
 		t.Errorf("Retry-After header missing on artist-image 202")
+	}
+}
+
+// Cache miss + known MBID + enrichment complete on /v1/artist-image →
+// terminal 404 `no_image`. The artist twin of
+// TestArtworkReturns404NoImageWhenEnrichmentComplete — this is the
+// exact state the 78 portrait-less bridge.ars.md artists were stuck
+// in, each answering 202 forever.
+func TestArtistImageReturns404NoImageWhenEnrichmentComplete(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	mbid := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("probe")
+	probe := fakeMBIDProbe{known: map[string]bool{mbid: true}} // nil pending map — enrichment done
+	srv := New(cfg, store, nil, "fp").
+		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
+		WithMBIDProbe(probe)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artist-image/"+mbid, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		t.Errorf("Retry-After = %q on terminal miss; must be absent", ra)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"no_image"`) {
+		t.Errorf("body = %s, want error code no_image", body)
 	}
 }
 

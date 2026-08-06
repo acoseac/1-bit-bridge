@@ -354,6 +354,64 @@ func TestStoreHasTrackWithArtistMBID(t *testing.T) {
 	}
 }
 
+// TestStoreMBIDEnrichmentPending pins the SQL contract behind the
+// /v1/artwork + /v1/artist-image 202-vs-terminal-404 split: an
+// upserted track (enriched_at = 0) reports pending; after
+// MarkEnriched it reports complete; an MBID nobody references and
+// the empty MBID both report not-pending. A second still-unenriched
+// track sharing the MBID keeps it pending — the answer is "ANY track
+// awaiting the enricher", not "the first one".
+func TestStoreMBIDEnrichmentPending(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+	ctx := context.Background()
+
+	artist := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	release := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+	t1 := &Track{
+		Path: "a/1.flac", Size: 1, ModTime: time.Now(),
+		Artist: "A", Album: "B", ArtistMBID: artist, ArtworkMBID: release,
+	}
+	t2 := &Track{
+		Path: "a/2.flac", Size: 1, ModTime: time.Now(),
+		Artist: "A", Album: "B", ArtistMBID: artist, ArtworkMBID: release,
+	}
+	s.UpsertTrack(ctx, t1)
+	s.UpsertTrack(ctx, t2)
+
+	if !s.ArtistMBIDEnrichmentPending(ctx, artist) {
+		t.Errorf("freshly-upserted tracks: artist MBID should report pending")
+	}
+	if !s.ArtworkMBIDEnrichmentPending(ctx, release) {
+		t.Errorf("freshly-upserted tracks: artwork MBID should report pending")
+	}
+
+	if err := s.MarkEnriched(ctx, t1); err != nil {
+		t.Fatalf("MarkEnriched(t1): %v", err)
+	}
+	if !s.ArtistMBIDEnrichmentPending(ctx, artist) {
+		t.Errorf("one of two tracks enriched: should STILL report pending")
+	}
+
+	if err := s.MarkEnriched(ctx, t2); err != nil {
+		t.Fatalf("MarkEnriched(t2): %v", err)
+	}
+	if s.ArtistMBIDEnrichmentPending(ctx, artist) {
+		t.Errorf("all tracks enriched: artist MBID should report complete")
+	}
+	if s.ArtworkMBIDEnrichmentPending(ctx, release) {
+		t.Errorf("all tracks enriched: artwork MBID should report complete")
+	}
+
+	if s.ArtistMBIDEnrichmentPending(ctx, "99999999-9999-4999-8999-999999999999") {
+		t.Errorf("unreferenced MBID should report not-pending")
+	}
+	if s.ArtistMBIDEnrichmentPending(ctx, "") {
+		t.Errorf("empty MBID should short-circuit to not-pending")
+	}
+}
+
 // TestEnrichmentCountsCorrectness pins the basic contract: number of
 // rows with `enriched_at != 0`, and the MAX of those timestamps. The
 // query was rewritten to two scalar subqueries (per Gemini A9 / iOS
