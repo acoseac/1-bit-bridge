@@ -596,9 +596,27 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	}
 	key := artistCacheKey(t.Artist, t.AlbumArtist)
 	var artistMBID string
+	// The name the Deezer portrait is searched by. Defaults to the tag and
+	// is replaced with the canonical name of whatever the ladder actually
+	// matched — see artistImageQueryName for why the tag is wrong.
+	//
+	// The cache stores `<mbid>\x00<canonicalName>` so a HIT carries the
+	// canonical name too. Without it the hit path fell back to the raw tag,
+	// which re-opens this function's own bug for the one case the on-disk
+	// file doesn't already cover: a sibling whose portrait fetch failed
+	// TRANSIENTLY leaves neither the cached file nor a deezerNegCache entry,
+	// so the retry would query Deezer under the multi-credit tag and
+	// pickDeezerArtist's unconditional list[0] fallback could file some
+	// other artist's portrait under this MBID — permanently.
+	//
+	// NUL is the separator because it cannot occur in an MBID (hex+dashes)
+	// and the sibling cache-KEY builders already rely on the same property.
+	// A value with no NUL is read as a bare MBID so the decode is robust to
+	// any entry written by a different path.
+	imageName := t.Artist
 	if cached, ok := e.artistCache.Get(key); ok {
 		metrics.RecordMBCache("artist", true)
-		artistMBID = cached
+		artistMBID, imageName = decodeArtistCacheValue(cached, imageName)
 	} else {
 		// A tag MusicBrainz cannot answer is not worth asking about, and
 		// buildArtistLadder drops those rungs. An EMPTY ladder means every
@@ -629,7 +647,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// Pacing now lives inside searchArtistWithFallbacks, which paces
 		// EVERY rung — the politeness contract is per-request, and a
 		// ladder that paced only its first rung would burst.
-		res, err := e.searchArtistWithFallbacks(ctx, attempts, t)
+		res, matchedQuery, err := e.searchArtistWithFallbacks(ctx, attempts, t)
 		if err != nil {
 			// Don't cache transient errors session-wide — a network
 			// blip would otherwise block sibling-track retries until
@@ -700,7 +718,10 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// release-side validation above (F30).
 		if res != nil && isValidMBID(res.MBID) {
 			artistMBID = res.MBID
-			e.artistCache.Set(key, artistMBID)
+			imageName = artistImageQueryName(res, matchedQuery, t.Artist)
+			// Store the canonical name alongside the MBID — see the
+			// decode above for why a bare-MBID value is not enough.
+			e.artistCache.Set(key, artistMBID+"\x00"+imageName)
 		}
 	}
 	if artistMBID != "" {
@@ -722,7 +743,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	if e.deezerNegCache.Has(artistMBID) {
 		return nil
 	}
-	found, err := e.ensureArtistImageCached(ctx, artistMBID, t.Artist)
+	found, err := e.ensureArtistImageCached(ctx, artistMBID, imageName)
 	if err != nil {
 		// Skip the Error log when the failure is just shutdown cancellation
 		// (ensureArtistImageCached returns ctx.Err() from its pacing
@@ -1500,4 +1521,23 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 		}
 		return false
 	}
+}
+
+// decodeArtistCacheValue splits an artistCache value into its MBID and the
+// canonical artist name the MusicBrainz search matched. Values are written
+// as `<mbid>\x00<canonicalName>` by resolveArtist.
+//
+// NUL is the separator because it cannot occur in an MBID (hex + dashes) and
+// the sibling cache-KEY builders already rely on that property. A value with
+// no separator — or with an empty name half — yields the caller's fallback
+// name, so the decode is total over anything the cache could hold.
+func decodeArtistCacheValue(cached, fallbackName string) (mbid, imageName string) {
+	sep := strings.IndexByte(cached, 0)
+	if sep < 0 {
+		return cached, fallbackName
+	}
+	if name := cached[sep+1:]; name != "" {
+		return cached[:sep], name
+	}
+	return cached[:sep], fallbackName
 }

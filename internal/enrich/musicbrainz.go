@@ -232,7 +232,7 @@ func (c *MusicBrainzClient) get(ctx context.Context, u string, out any) error {
 		drainBody(resp.Body)
 		return &httpError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
-	err = json.NewDecoder(resp.Body).Decode(out)
+	err = json.NewDecoder(limitJSONBody(resp.Body)).Decode(out)
 	// Drain any bytes past the decoded JSON document so the deferred Close
 	// returns the keep-alive HTTP/1.1 connection to the idle pool.
 	// json.Decoder stops at the closing token, not EOF, so an undrained
@@ -510,6 +510,10 @@ type artistCandidate struct {
 // 96.8% identical release, 0.5% a sibling pressing of the same
 // release-group, 0% a different release-group) — not a claim of
 // impossibility.
+//
+// R2 and R3 fall back to RAW equality when the query side folds away to
+// nothing — see acceptFolded. Without that, a symbol-only album title or
+// artist name rejects 100% of candidates and can never resolve.
 func pickBestRelease(candidates []releaseCandidate, album, artist string) *releaseCandidate {
 	// Hoist the query-side folding out of the candidate loop — album and
 	// artist are fixed across every candidate.
@@ -528,32 +532,39 @@ func pickBestRelease(candidates []releaseCandidate, album, artist string) *relea
 		}
 		// R2. Title, folded. Try the release title, then the
 		// release-group title the upstream actually matched on.
-		titleOK := foldedTokenContains(foldTitle(c.Title), albumFold)
+		titleOK := acceptFolded(c.Title, foldTitle(c.Title), album, albumFold)
 		if !titleOK && c.ReleaseGroup != nil {
-			titleOK = foldedTokenContains(foldTitle(c.ReleaseGroup.Title), albumFold)
+			rg := c.ReleaseGroup.Title
+			titleOK = acceptFolded(rg, foldTitle(rg), album, albumFold)
 		}
 		if !titleOK {
 			continue
 		}
 		// R3.
-		if !anyArtistCreditMatches(c.ArtistCredit, artistFold) {
+		if !anyArtistCreditMatches(c.ArtistCredit, artist, artistFold) {
 			continue
 		}
 		// R4. Weight: MB score + exact-match bonuses. The raw +10s are
 		// unchanged; the folded +5s only fire where the raw one did not,
 		// so a byte-exact match always outranks a folded-equal one.
+		//
+		// The folded arms are gated on a NON-EMPTY query fold for the same
+		// reason R2/R3 are: two strings that both fold to "" are not the
+		// same title. Reachable via R2's release-group arm — a candidate
+		// admitted on its release-group title would otherwise collect a +5
+		// for a release title that merely also happens to be symbol-only.
 		s := c.Score
 		switch {
 		case strings.EqualFold(c.Title, album):
 			s += 10
-		case foldTitle(c.Title) == albumFold:
+		case albumFold != "" && foldTitle(c.Title) == albumFold:
 			s += 5
 		}
 		if len(c.ArtistCredit) > 0 {
 			switch {
 			case strings.EqualFold(c.ArtistCredit[0].Name, artist):
 				s += 10
-			case foldName(c.ArtistCredit[0].Name) == artistFold:
+			case artistFold != "" && foldName(c.ArtistCredit[0].Name) == artistFold:
 				s += 5
 			}
 		}
@@ -571,7 +582,7 @@ func pickBestRelease(candidates []releaseCandidate, album, artist string) *relea
 // pickBestArtist selects the best artist candidate, in order:
 //
 //	A1  raw case-insensitive name equality, ANY score
-//	A2  folded name equality, ANY score
+//	A2  folded name equality, ANY score          (skipped if the query folds to "")
 //	A3  folded name equality after stripping a leading article, ANY score
 //	A4  top candidate with score >= 90 (UNCHANGED fuzzy fallback)
 //
@@ -607,35 +618,49 @@ func pickBestArtist(candidates []artistCandidate, artist string) *artistCandidat
 			return &candidates[i]
 		}
 	}
-	// Fold each candidate ONCE, lazily — A1 is the common case and must
-	// not pay for this. A3's form is derived from A2's rather than
-	// re-folded: foldNameNoArticle(x) is stripLeadingArticle(foldName(x))
-	// by construction, because the article strip is the last stage of the
-	// pipeline.
-	folds := make([]string, len(candidates))
-	for i := range candidates {
-		folds[i] = foldName(candidates[i].Name)
-	}
-	// A2 — folded exact, any score.
-	artistFold := foldName(artist)
-	for i := range folds {
-		if folds[i] == artistFold {
-			return &candidates[i]
-		}
-	}
-	// A3 — folded exact ignoring a leading article, any score.
+	// A2 and A3 both compare against the FOLDED query, and a query that
+	// folds to "" makes both meaningless: foldForMatch drops every rune
+	// that is not a letter or digit, so "!!!" (a real band), "†††", "∆"
+	// and "+/-" all fold to nothing and would compare equal to each other
+	// — A2 would hand back "???" for a query of "!!!". A3 already carries
+	// this guard; A2 never did.
 	//
-	// Kept as its OWN pass rather than merged into A2. The passes are
-	// ordered strictest-first and that order is the safety mechanism: it
-	// guarantees the loosest rule can only ever apply to candidates every
-	// stricter rule rejected. Collapsing them into one loop with two
-	// "best so far" pointers would preserve the behaviour but hide the
-	// property, and this is the function where the property matters.
-	artistNoArt := foldNameNoArticle(artist)
-	if artistNoArt != "" {
+	// Latent until now only because buildArtistLadder dropped every
+	// empty-folding rung, so no such name ever reached SearchArtist. The
+	// two bugs masked each other; fixing that one without this one makes
+	// this one live. A1's raw EqualFold is what resolves these names, and
+	// it has already run.
+	artistFold := foldName(artist)
+	if artistFold != "" {
+		// Fold each candidate ONCE, lazily — A1 is the common case and must
+		// not pay for this. A3's form is derived from A2's rather than
+		// re-folded: foldNameNoArticle(x) is stripLeadingArticle(foldName(x))
+		// by construction, because the article strip is the last stage of the
+		// pipeline.
+		folds := make([]string, len(candidates))
+		for i := range candidates {
+			folds[i] = foldName(candidates[i].Name)
+		}
+		// A2 — folded exact, any score.
 		for i := range folds {
-			if stripLeadingArticle(folds[i]) == artistNoArt {
+			if folds[i] == artistFold {
 				return &candidates[i]
+			}
+		}
+		// A3 — folded exact ignoring a leading article, any score.
+		//
+		// Kept as its OWN pass rather than merged into A2. The passes are
+		// ordered strictest-first and that order is the safety mechanism: it
+		// guarantees the loosest rule can only ever apply to candidates every
+		// stricter rule rejected. Collapsing them into one loop with two
+		// "best so far" pointers would preserve the behaviour but hide the
+		// property, and this is the function where the property matters.
+		artistNoArt := foldNameNoArticle(artist)
+		if artistNoArt != "" {
+			for i := range folds {
+				if stripLeadingArticle(folds[i]) == artistNoArt {
+					return &candidates[i]
+				}
 			}
 		}
 	}
@@ -648,14 +673,51 @@ func pickBestArtist(candidates []artistCandidate, artist string) *artistCandidat
 }
 
 // anyArtistCreditMatches reports whether any credit name overlaps the
-// already-folded artist query on token boundaries, symmetrically.
-func anyArtistCreditMatches(credits []artistCredit, artistFold string) bool {
+// artist query on token boundaries, symmetrically. Takes both the raw and
+// the already-folded query so it can honour acceptFolded's empty-fold
+// fallback without re-folding per credit.
+func anyArtistCreditMatches(credits []artistCredit, artist, artistFold string) bool {
 	for _, c := range credits {
-		if foldedTokenContains(foldName(c.Name), artistFold) {
+		if acceptFolded(c.Name, foldName(c.Name), artist, artistFold) {
 			return true
 		}
 	}
 	return false
+}
+
+// acceptFolded is the acceptance comparison for one field of a release
+// candidate: folded token containment, falling back to RAW case-insensitive
+// equality when the query side folds away to nothing.
+//
+// The fallback is not a nicety. foldForMatch maps every rune that is not a
+// letter or digit to a space and rejoins on whitespace, so a symbol-only
+// string folds to "" — and foldedTokenContains returns false on an empty
+// argument BY DESIGN, because an empty needle makes strings.Contains
+// trivially true and would accept every candidate. Composed, those two
+// correct rules reject 100% of candidates for any query that folds away —
+// `+`, `×`, `÷`, `=`, `−`, `†`, `∆`, `≠`, `!!!`, `±`, `∞`, `*`, which is Ed
+// Sheeran's entire symbol-titled discography and Justice's `†`.
+//
+// The album then exhausts every ladder rung, markSkipped STAMPS
+// enriched_at, and the track has no release MBID, cover, booklet or
+// description permanently — "Retry missing" re-runs the identical query
+// and fails identically. The pre-fold picker matched these (its EqualFold
+// arm fires on the raw "÷"), so this is a regression the folding work
+// introduced, not deliberate strictness.
+//
+// EqualFold — not the pre-fold caseInsensitiveContains — so the fallback
+// accepts a strict SUBSET of what shipped before. It is also the raw
+// analogue of shortTitleExactRunes: substring containment is meaningless
+// for a one-symbol query ("+" sits inside "Songs + Stories"), which is
+// exactly the class that folds away.
+//
+// Both candidate arguments must describe the SAME string (raw and its
+// fold); the caller passes them together so the fold is computed once.
+func acceptFolded(cand, candFold, query, queryFold string) bool {
+	if queryFold == "" {
+		return strings.EqualFold(cand, query)
+	}
+	return foldedTokenContains(candFold, queryFold)
 }
 
 // luceneSpecialChars are the characters MusicBrainz's Lucene-style query

@@ -83,3 +83,30 @@ func drainBody(body io.Reader) {
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDrainBytes))
 }
+
+// maxJSONResponseBytes caps the JSON search/metadata bodies the enrich
+// clients decode, alongside the cover-art (MaxCoverArtBytes) and Deezer
+// image (maxDeezerImageBytes) caps that already bound the binary reads.
+//
+// The JSON decoders were the one unbounded read left in the package.
+// http.Client{Timeout} bounds DURATION, not memory, so an endless body
+// arriving at a healthy rate is decoded until the process dies. That is
+// not hypothetical here: enrich.musicbrainzBaseURL is operator-configurable
+// (Atlas, or any self-hosted mirror), and the package's own comments name
+// "a hostile or misconfigured endpoint" as a real input channel — it is why
+// search-result MBIDs are regex-validated before they reach a URL or a
+// cache path.
+//
+// 8 MiB is ~2 orders of magnitude above the real bodies: the largest is a
+// MusicBrainz artist search at artistSearchLimit=25, tens of KiB. A body
+// past the cap decodes as an unexpected-EOF error, which every caller
+// already handles as a decode failure.
+const maxJSONResponseBytes = 8 << 20
+
+// limitJSONBody wraps a response body for JSON decoding at
+// maxJSONResponseBytes. Bounds only what the DECODER sees — callers still
+// drainBody(resp.Body) afterwards against the unwrapped body so a normal
+// short response returns its keep-alive connection to the idle pool.
+func limitJSONBody(body io.Reader) io.Reader {
+	return io.LimitReader(body, maxJSONResponseBytes)
+}

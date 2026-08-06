@@ -252,6 +252,15 @@ func foldedTokenContains(a, b string) bool {
 	if a == "" || b == "" {
 		// An empty needle makes strings.Contains trivially true, which
 		// would accept every candidate.
+		//
+		// CALLERS MUST HANDLE THIS THEMSELVES. This rule is correct in
+		// isolation and catastrophic composed with the fold, which maps
+		// every non-alphanumeric rune away: a symbol-only query ("÷",
+		// "†", "!!!") folds to "" and then matches NOTHING, so the album
+		// or artist can never resolve. See acceptFolded in musicbrainz.go
+		// for the raw-equality fallback, and pickBestArtist's A2/A3 for
+		// the passes that must be skipped outright. Returning true here
+		// instead is not the fix — that accepts everything.
 		return false
 	}
 	if a == b {

@@ -436,3 +436,90 @@ func ladderHas(l []releaseAttempt, artist, album string) bool {
 	}
 	return false
 }
+
+// --- symbol-only names (fold to "") ---
+
+// TestBuildArtistLadderKeepsSymbolOnlyNames is the F2 regression gate.
+//
+// buildArtistLadder dropped every rung whose fold was "" — which is every
+// symbol-only band name: "!!!", "†††", "∆", "+/-". The ladder came back
+// EMPTY, and resolveArtist returns before calling SearchArtist at all on an
+// empty ladder, so those artists silently got no MBID and no portrait with
+// no log line to show for it.
+//
+// The drop also contradicted isUnsearchableArtistFolded, which answers
+// FALSE for "" precisely because a name may be real and still fold away —
+// and pickBestArtist's A1 pass is a RAW EqualFold, so these names resolve
+// correctly once the query is actually issued.
+func TestBuildArtistLadderKeepsSymbolOnlyNames(t *testing.T) {
+	for _, name := range []string{"!!!", "†††", "∆", "+/-", "×"} {
+		t.Run(name, func(t *testing.T) {
+			if foldName(name) != "" {
+				t.Fatalf("precondition changed: %q no longer folds to \"\"", name)
+			}
+			got := buildArtistLadder(name, "")
+			if len(got) == 0 {
+				t.Fatalf("empty ladder for %q — resolveArtist issues NO request and "+
+					"the artist can never resolve", name)
+			}
+			if got[0] != name {
+				t.Errorf("first rung = %q, want the tag verbatim %q", got[0], name)
+			}
+		})
+	}
+}
+
+// TestBuildArtistLadderDoesNotCollapseDistinctSymbolNames: every
+// empty-folding name shares one dedup key unless the key falls back to the
+// raw string, so "∆" would be swallowed as a duplicate of "!!!".
+func TestBuildArtistLadderDoesNotCollapseDistinctSymbolNames(t *testing.T) {
+	got := buildArtistLadder("!!!", "∆")
+	if len(got) != 2 {
+		t.Fatalf("ladder = %q, want both distinct symbol-only names", got)
+	}
+	if got[0] != "!!!" || got[1] != "∆" {
+		t.Errorf("ladder = %q, want [\"!!!\" \"∆\"]", got)
+	}
+	// A genuine duplicate must still dedup.
+	if dup := buildArtistLadder("!!!", "!!!"); len(dup) != 1 {
+		t.Errorf("ladder = %q, want the identical albumArtist deduped away", dup)
+	}
+}
+
+// TestBuildReleaseLadderDoesNotCollapseSymbolOnlyRungs is the release-side
+// twin: the dedup key joins two folds, so a symbol-only artist AND a
+// symbol-only album collapse distinct rungs onto one entry.
+func TestBuildReleaseLadderDoesNotCollapseSymbolOnlyRungs(t *testing.T) {
+	got := buildReleaseLadder("!!!", "∆", "÷")
+	if !ladderHas(got, "!!!", "÷") {
+		t.Errorf("missing the (artist, album) rung: %v", got)
+	}
+	if !ladderHas(got, "∆", "÷") {
+		t.Errorf("missing the (albumArtist, album) rung — it collapsed onto the "+
+			"first because both artists fold to \"\": %v", got)
+	}
+}
+
+// TestLaddersUseAlbumArtistComparesRawWhenBothFoldAway: the folded compare
+// calls every symbol-only name equal, so it reported "albumArtist adds
+// nothing" for two genuinely different artists — dropping the rung AND
+// collapsing the two cache keys onto one entry.
+func TestLaddersUseAlbumArtistComparesRawWhenBothFoldAway(t *testing.T) {
+	if !laddersUseAlbumArtist("!!!", "∆") {
+		t.Error("\"!!!\" and \"∆\" are different artists that both fold to \"\"; " +
+			"the albumArtist rung must still be built")
+	}
+	// Genuinely identical, and case/whitespace variants of it, still collapse.
+	for _, aa := range []string{"!!!", "  !!!  "} {
+		if laddersUseAlbumArtist("!!!", aa) {
+			t.Errorf("albumArtist %q adds no rung over \"!!!\"", aa)
+		}
+	}
+	// And the keys follow the ladder, which is the invariant the two share.
+	if artistCacheKey("!!!", "∆") == artistCacheKey("!!!", "") {
+		t.Error("artistCacheKey collapsed two distinct symbol-only artists onto one entry")
+	}
+	if releaseCacheKey("!!!", "∆", "Album") == releaseCacheKey("!!!", "", "Album") {
+		t.Error("releaseCacheKey collapsed two distinct symbol-only artists onto one entry")
+	}
+}
