@@ -769,9 +769,17 @@ func (s *Server) getSourcesSnapshot(ctx context.Context) sourcesResponse {
 	}
 	if s.deps.UPnPUpstream != nil {
 		resp.UPnPEnabled = true
+		// defer, not a manual cancel() after the call: ConfiguredServers
+		// can panic (it walks the config + hits the DB), and a skipped
+		// cancel leaves this child registered on the SSE connection ctx —
+		// which lives for the whole connection, so the entry would sit
+		// there until the 2s deadline fired. Deferring is safe because
+		// the only work left after the call is the pure in-memory budget
+		// loop below and then the return; nothing here blocks, so the
+		// context is not held meaningfully longer than the manual form.
 		dbCtx, cancel := context.WithTimeout(ctx, snapshotDBTimeout)
+		defer cancel()
 		configured := s.deps.UPnPUpstream.ConfiguredServers(dbCtx)
-		cancel()
 		resp.Servers = make([]sourceServerRow, 0, len(configured))
 		budget := routed
 		for _, srv := range configured {

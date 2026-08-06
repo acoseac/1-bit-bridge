@@ -25,6 +25,10 @@ type stubUPnPProvider struct {
 	// handed, so tests can assert the caller's cancellation actually
 	// reaches the DB work instead of a context.Background().
 	configuredCtx atomic.Pointer[context.Context]
+	// configuredPanic makes ConfiguredServers panic AFTER recording the
+	// ctx — the seam for asserting the caller released that ctx on the
+	// panic path rather than only on the success path.
+	configuredPanic bool
 
 	// CRUD spy fields — tests assert the last call's payload + can
 	// inject the next return value for each verb.
@@ -42,6 +46,9 @@ type stubUPnPProvider struct {
 
 func (s *stubUPnPProvider) ConfiguredServers(ctx context.Context) []UPnPUpstreamServerState {
 	s.configuredCtx.Store(&ctx)
+	if s.configuredPanic {
+		panic("stub: ConfiguredServers panicked")
+	}
 	return s.servers
 }
 

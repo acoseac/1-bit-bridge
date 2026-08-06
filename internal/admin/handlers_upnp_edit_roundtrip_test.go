@@ -115,6 +115,43 @@ func TestGetSourcesSnapshot_PropagatesCallerCancellation(t *testing.T) {
 	}
 }
 
+// TestGetSourcesSnapshot_ReleasesTheQueryCtxOnPanic pins the `defer cancel()`
+// (Gemini MEDIUM on #669). A manual cancel() placed after the call is skipped
+// when ConfiguredServers panics, and the parent here is the SSE CONNECTION
+// ctx — which lives for the whole connection — so the abandoned child stays
+// registered on it until its 2 s deadline fires. Deferring releases it on
+// every path.
+//
+// This is the one path where defer and a manual call differ observably; the
+// success path is identical either way, which is why the other two cases
+// don't distinguish them.
+func TestGetSourcesSnapshot_ReleasesTheQueryCtxOnPanic(t *testing.T) {
+	provider := &stubUPnPProvider{
+		servers:         []UPnPUpstreamServerState{{Name: "2Go", ConfiguredUDN: "uuid:a"}},
+		configuredPanic: true,
+	}
+	s := newSourcesCtxTestServer(provider)
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("stub did not panic; the test is not exercising the panic path")
+			}
+		}()
+		s.getSourcesSnapshot(context.Background())
+	}()
+
+	got := provider.configuredCtx.Load()
+	if got == nil {
+		t.Fatal("ConfiguredServers was never called")
+	}
+	if (*got).Err() == nil {
+		t.Error("the query ctx was not released when ConfiguredServers panicked — " +
+			"it stays registered on the long-lived SSE connection ctx until its " +
+			"deadline fires")
+	}
+}
+
 // TestGetSourcesSnapshot_BoundsTheQueryDeadline — even under a live caller ctx
 // a slow query must not pin the SSE publisher past snapshotDBTimeout, matching
 // the treatment the sibling snapshots already get.
