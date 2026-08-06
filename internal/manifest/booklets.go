@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"time"
 )
 
@@ -193,18 +194,27 @@ func (s *Store) BookletsToCheck(ctx context.Context, candidates []string, maxAtt
 }
 
 // BookletsToFetch returns available-but-not-yet-downloaded rows,
-// oldest-checked first, bounded by limit. Read-only, no s.mu.
-func (s *Store) BookletsToFetch(ctx context.Context, limit int) ([]BookletRow, error) {
+// oldest-checked first, bounded by limit and by the per-release download
+// attempt cap (see MarkBookletFetchFailed, which burns the attempts).
+// Without the cap a release whose download keeps failing — an oversized
+// PDF the size guard refuses, a persistent upstream 5xx, a write error —
+// would re-enter every sweep forever. A non-positive maxAttempts means
+// "unbounded": fail OPEN, so a mis-wired caller keeps the pre-cap
+// behaviour instead of silently fetching nothing. Read-only, no s.mu.
+func (s *Store) BookletsToFetch(ctx context.Context, limit, maxAttempts int) ([]BookletRow, error) {
 	if limit <= 0 {
 		limit = 10
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = math.MaxInt32
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT release_mbid, available, etag, bytes, check_attempts, checked_at, fetched_at
 		  FROM booklets
-		 WHERE available = 1 AND fetched_at IS NULL
+		 WHERE available = 1 AND fetched_at IS NULL AND check_attempts < ?
 		 ORDER BY checked_at ASC
 		 LIMIT ?
-	`, limit)
+	`, maxAttempts, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -231,16 +241,60 @@ func (s *Store) MarkBookletFetched(ctx context.Context, mbid string) error {
 	return err
 }
 
+// MarkBookletFetchFailed records one FAILED (non-404) download attempt:
+// it burns an attempt AND advances checked_at. Both halves are
+// load-bearing.
+//
+// BookletsToFetch orders by checked_at ASC, and the only other checked_at
+// writers can never touch an available-but-unfetched row: the check cycle
+// calls UpsertBookletAvailability only for MBIDs BookletsToCheck returned,
+// and that filter skips available = 1 rows; MarkBookletUnavailable is the
+// 404 path, which takes the row out of the queue anyway. So without this
+// advance such a row's checked_at is frozen forever and it stays pinned at
+// the head of the ordering — a handful of permanently-failing releases
+// (one PDF over the size cap, a persistent upstream 5xx, a disk error)
+// consume the whole per-tick budget on every tick and no other booklet in
+// the library ever downloads. Burning an attempt then takes a
+// persistently-failing row out of contention at the cap
+// (BookletsToFetch's maxAttempts), so it also stops re-downloading the
+// same failing bytes forever.
+//
+// Sharing check_attempts with the check leg is safe because the two
+// budgets apply in DISJOINT states: BookletsToCheck gates on
+// `!available && attempts < cap`, so an available row's tally is invisible
+// to it, and both UpsertBookletAvailability(available=true) and
+// MarkBookletUnavailable zero the counter on the state transitions — so
+// neither leg can inherit the other's tally. The `available = 1 AND
+// fetched_at IS NULL` guard keeps a stale failure from burning a CHECK
+// attempt on a row that has meanwhile flipped. Holds s.mu.
+func (s *Store) MarkBookletFetchFailed(ctx context.Context, mbid string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE booklets SET check_attempts = check_attempts + 1, checked_at = ?
+		 WHERE release_mbid = ? AND available = 1 AND fetched_at IS NULL
+	`, s.now().UnixNano(), mbid)
+	return err
+}
+
 // MarkBookletUnavailable flips a row unavailable (Atlas 404'd the fetch —
 // e.g. the asset was evicted upstream between check and fetch). The caller
 // clears the wire tag separately via SetBookletTagAndBumpIndex(mbid, "").
+//
+// check_attempts is RESET so the row re-enters the check rotation with a
+// full budget. That preserves the historical behaviour exactly — an
+// available row always carried attempts = 0, since
+// UpsertBookletAvailability(available=true) zeroes it — but is now load-
+// bearing: MarkBookletFetchFailed can leave a non-zero tally on an
+// available row, and carrying that into available = 0 would silently
+// consume the CHECK cap and strand the release outside BookletsToCheck.
 // Holds s.mu.
 func (s *Store) MarkBookletUnavailable(ctx context.Context, mbid string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE booklets SET available = 0, etag = '', bytes = 0, fetched_at = NULL,
-		       checked_at = ?
+		       check_attempts = 0, checked_at = ?
 		 WHERE release_mbid = ?
 	`, s.now().UnixNano(), mbid)
 	return err

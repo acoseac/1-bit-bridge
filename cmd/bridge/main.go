@@ -187,8 +187,8 @@ func (b bookletSinkAdapter) SetBookletTagAndBumpIndex(ctx context.Context, relea
 	return b.store.SetBookletTagAndBumpIndex(ctx, releaseMBID, tag)
 }
 
-func (b bookletSinkAdapter) BookletsToFetch(ctx context.Context, limit int) ([]atlasharvest.BookletFetchItem, error) {
-	rows, err := b.store.BookletsToFetch(ctx, limit)
+func (b bookletSinkAdapter) BookletsToFetch(ctx context.Context, limit, maxAttempts int) ([]atlasharvest.BookletFetchItem, error) {
+	rows, err := b.store.BookletsToFetch(ctx, limit, maxAttempts)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +201,10 @@ func (b bookletSinkAdapter) BookletsToFetch(ctx context.Context, limit int) ([]a
 
 func (b bookletSinkAdapter) MarkBookletFetched(ctx context.Context, mbid string) error {
 	return b.store.MarkBookletFetched(ctx, mbid)
+}
+
+func (b bookletSinkAdapter) MarkBookletFetchFailed(ctx context.Context, mbid string) error {
+	return b.store.MarkBookletFetchFailed(ctx, mbid)
 }
 
 func (b bookletSinkAdapter) MarkBookletUnavailable(ctx context.Context, mbid string) error {

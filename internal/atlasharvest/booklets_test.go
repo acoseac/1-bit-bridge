@@ -24,6 +24,7 @@ type fakeBookletSink struct {
 	missed    map[string]int    // mbid → miss count
 	tags      map[string]string // mbid → last stamped tag
 	fetched   []string
+	failed    []string // MarkBookletFetchFailed calls, in order
 	unavail   []string
 	gcSeen    []string // universes DeleteBookletsNotIn saw
 	gcOrphans []string // what it returns
@@ -70,7 +71,7 @@ func (f *fakeBookletSink) SetBookletTagAndBumpIndex(_ context.Context, mbid, tag
 	f.tags[mbid] = tag
 	return 1, nil
 }
-func (f *fakeBookletSink) BookletsToFetch(_ context.Context, limit int) ([]BookletFetchItem, error) {
+func (f *fakeBookletSink) BookletsToFetch(_ context.Context, limit, _ int) ([]BookletFetchItem, error) {
 	if limit < len(f.toFetch) {
 		return f.toFetch[:limit], nil
 	}
@@ -78,6 +79,10 @@ func (f *fakeBookletSink) BookletsToFetch(_ context.Context, limit int) ([]Bookl
 }
 func (f *fakeBookletSink) MarkBookletFetched(_ context.Context, mbid string) error {
 	f.fetched = append(f.fetched, mbid)
+	return nil
+}
+func (f *fakeBookletSink) MarkBookletFetchFailed(_ context.Context, mbid string) error {
+	f.failed = append(f.failed, mbid)
 	return nil
 }
 func (f *fakeBookletSink) MarkBookletUnavailable(_ context.Context, mbid string) error {
