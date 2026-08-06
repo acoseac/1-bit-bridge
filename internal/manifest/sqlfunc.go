@@ -45,16 +45,30 @@ import (
 // NFD input.
 //
 // The Caser is constructed PER CALL, not cached at package init.
-// `cases.Lower()` returns a stateful Caser that the docs explicitly
-// warn must not be shared across goroutines (only `cases.Fold()`
-// carries the documented concurrent-safety guarantee — which we
-// can't use because Fold semantics differ from iOS's `lowercased()`).
 // Under `database/sql`'s default connection pool the SQLite scalar
-// runs on whichever goroutine is driving the connection, so a
-// shared Caser would land concurrent calls on the same instance.
-// Per-call construction is a cheap struct allocation — acceptable
-// for the path-lookup hot path and unambiguously safe per the
-// library's documented contract. (Greptile P1 on PR #182.)
+// runs on whichever goroutine is driving the connection, so anything
+// shared here is shared across goroutines.
+//
+// The rationale this comment used to give — "cases.Lower() returns a
+// stateful Caser that must not be shared" — is TOO STRONG, and
+// contradicted `internal/fs`, which caches exactly this expression at
+// package level. For the `und` tag with no options x/text's makeLower
+// returns the `undLower` SINGLETON, an empty struct whose Transform
+// builds its context as a local; caching it is safe, and fs.go's
+// comment now states the precise condition. Corrected here rather than
+// on that side, because that side was right.
+//
+// Per-call construction is KEPT anyway, and not merely from inertia:
+// this function is embedded in three functional indexes, so a
+// concurrency fault would not surface as a crash but as silently
+// mismatched lookup keys, and unpicking that needs a migration (v26
+// already rebuilt those indexes once). The allocation is a cheap empty
+// struct on a path already doing SQLite work — the wrong thing to
+// optimise against a failure that expensive. If you do hoist it, hoist
+// ONLY the `language.Und` form: naming a locale x/text special-cases
+// (az, lt, tr) switches makeLower to a caser that embeds mutable state,
+// and then sharing really is a race. (Original note: Greptile P1 on
+// PR #182.)
 func unicodeLowerScalar(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("unicode_lower: expected 1 argument, got %d", len(args))

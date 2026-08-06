@@ -157,9 +157,28 @@ func ValidateRoots(roots []string) error {
 	return nil
 }
 
-// basenameFolder is the shared caser. Package-level because
-// cases.Lower allocates a fresh caser per call otherwise, and this runs
-// per-root inside admin request handling.
+// basenameFolder is the shared caser. Package-level because cases.Lower
+// allocates a fresh caser per call otherwise, and this runs per-root
+// inside admin request handling.
+//
+// SHARING THIS IS SAFE ONLY BECAUSE OF THE TAG. x/text's makeLower
+// consults lowerFunc[tag], which is nil for `und`, and then returns one
+// of two package-level SINGLETONS (`undLower` / `undLowerIgnoreSigma`)
+// — empty structs whose Transform builds its context as a local. There
+// is nothing to race on, with or without options.
+//
+// Name a locale x/text special-cases the lowering of, though — az, lt,
+// tr, and whatever the tag matcher resolves to them — and makeLower
+// returns `&lowerCaser{...}` (or `&simpleCaser{...}` under
+// HandleFinalSigma) instead. Both EMBED a context that Transform
+// overwrites on entry, so a shared one corrupts its own output under
+// concurrency. That edit is one word long and looks harmless, and the
+// callers here (ValidateRoots, and both remove-root guards) run
+// concurrently from admin request handling and decide whether a
+// DESTRUCTIVE root removal is unambiguous — a wrong collision verdict
+// there deletes the wrong root's rows. So: if this ever needs a locale,
+// it goes back to per-call construction inside FoldRootBasename.
+// TestFoldRootBasenameIsConcurrencySafe is the guard.
 var basenameFolder = cases.Lower(language.Und)
 
 // FoldRootBasename returns the comparison key for a library root's

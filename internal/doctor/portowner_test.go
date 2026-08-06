@@ -4,7 +4,6 @@ import (
 	"math"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -125,15 +124,23 @@ func TestPortCheck_OwnerProbeErrorFallsBackToWarn(t *testing.T) {
 	}
 }
 
-// TestPIDAlive_SelfAndReaped exercises the REAL platform helper rather than
-// the seam. Our own PID is alive by construction; a child we have waited
-// on is definitively gone.
+// TestPIDAlive_SelfAndBounds exercises the REAL platform helper rather than
+// the seam, across the assertions that hold on every supported OS: our own
+// PID is alive by construction, and the pid-range guards reject values that
+// would otherwise truncate into a live process.
 //
-// PID recycling could in principle reassign the reaped PID between Wait
-// and the check, which would make this flake — vanishingly unlikely inside
-// one test, and the alternative (asserting against a hardcoded PID) tests
-// nothing.
-func TestPIDAlive_SelfAndReaped(t *testing.T) {
+// The opposite direction — "a reaped child reads dead" — is NOT here,
+// because the two implementations do not promise the same thing. On unix
+// kill(pid,0) answers ESRCH and the assertion is a kernel contract, so it
+// lives in pidalive_notwindows_test.go. On Windows it is neither promised
+// nor true: a process object survives as long as ANY handle to it is open,
+// so a terminated child stays openable — which doctor_windows.go documents
+// as the deliberate fail-soft direction ("erring towards alive costs a
+// hint"), and Windows recycles PIDs aggressively on top of that. Asserting
+// it there was asserting against the implementation's own contract; it
+// failed on windows-latest across four unrelated PRs (#660/#661/#662/#672),
+// green on every re-run.
+func TestPIDAlive_SelfAndBounds(t *testing.T) {
 	if !pidAlive(os.Getpid()) {
 		t.Error("pidAlive(self) = false; our own process is alive by construction")
 	}
@@ -162,21 +169,5 @@ func TestPIDAlive_SelfAndReaped(t *testing.T) {
 	if runtime.GOOS != "windows" && !pidAlive(1) {
 		t.Error("pidAlive(1) = false; a process that exists but cannot be signalled must read as ALIVE, " +
 			"or a capability-bound bridge is reported dead and its own port reads as a conflict")
-	}
-
-	// A trivially short-lived child, reaped so the PID is genuinely free.
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/c", "exit")
-	} else {
-		cmd = exec.Command("true")
-	}
-	if err := cmd.Start(); err != nil {
-		t.Skipf("could not spawn a probe process on this host: %v", err)
-	}
-	pid := cmd.Process.Pid
-	_ = cmd.Wait()
-	if pidAlive(pid) {
-		t.Errorf("pidAlive(%d) = true for a reaped child; a stale pidfile must not read as live", pid)
 	}
 }

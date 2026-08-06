@@ -37,14 +37,20 @@ type duplicatesSummaryResponse struct {
 	// anyway) — without this flag, "Re-evaluate now" during a long scan
 	// reads as a dead button (found live minutes after the v0.1.8
 	// deploy, mid ExtractorVersion-backfill scan).
-	ScanInFlight bool                `json:"scanInFlight"`
-	Scanned      int                 `json:"scanned"`
-	Groups       int                 `json:"groups"`
-	Suppressed   int                 `json:"suppressed"`
-	Served       int                 `json:"served"`
-	MD5Known     int                 `json:"md5Known"`
-	MD5Total     int                 `json:"md5Total"`
-	Tiers        []duplicatesTierRow `json:"tiers"`
+	ScanInFlight bool `json:"scanInFlight"`
+	// Scanned / Groups / Suppressed / Served are all scoped to the
+	// population the stamping pass walked — the FILESYSTEM library.
+	// UPnP-routed upstream rows are excluded from that walk, so on a
+	// hybrid deployment `served` is far below health.tracksIndexed and
+	// the page must label it as scanned-library-scoped rather than
+	// implying a bridge-wide total. See manifest.DupeSummary.
+	Scanned    int                 `json:"scanned"`
+	Groups     int                 `json:"groups"`
+	Suppressed int                 `json:"suppressed"`
+	Served     int                 `json:"served"`
+	MD5Known   int                 `json:"md5Known"`
+	MD5Total   int                 `json:"md5Total"`
+	Tiers      []duplicatesTierRow `json:"tiers"`
 }
 
 type duplicatesTierRow struct {

@@ -24,6 +24,27 @@ import (
 // guard tests need.
 func pairingTestSetup(t *testing.T) (*httptest.Server, *auth.Store, *pairing.Store) {
 	t.Helper()
+	return pairingTestSetupTTL(t, 100*time.Millisecond)
+}
+
+// pairingTestSetupTTL is pairingTestSetup with the request TTL chosen by
+// the caller.
+//
+// The default 100 ms exists so timer-driven cases don't make the suite
+// slow, but it makes the store's own sweeper a participant in every
+// test: pending rows expire on a REAL time.AfterFunc armed at
+// CreateRequest, and an expired row no longer counts toward MaxPending.
+// Any test whose subject is the cap rather than the timer has to opt out
+// of that, or it silently becomes a race between the test's HTTP round
+// trips and the sweeper.
+//
+// Note the store's injectable clock (pairing.Options.Now) does NOT help
+// here: the expiry timer is a real AfterFunc on s.ttl and onTimer's
+// Pending branch transitions unconditionally, without consulting s.now.
+// Freezing the clock leaves the sweeper firing on wall time exactly as
+// before. The TTL is the only knob that moves it.
+func pairingTestSetupTTL(t *testing.T, ttl time.Duration) (*httptest.Server, *auth.Store, *pairing.Store) {
+	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{
 		LibraryRoots:  []string{dir},
@@ -36,8 +57,8 @@ func pairingTestSetup(t *testing.T) (*httptest.Server, *auth.Store, *pairing.Sto
 	}
 
 	pairingStore := pairing.NewStore(pairing.Options{
-		TTL:        100 * time.Millisecond,
-		Grace:      300 * time.Millisecond,
+		TTL:        ttl,
+		Grace:      3 * ttl,
 		MaxPending: 4,
 		RevokeToken: func(id string) error {
 			return authStore.Revoke(id)
@@ -303,8 +324,29 @@ func TestPairingCreateMissingDeviceName(t *testing.T) {
 	}
 }
 
+// TestPairingCreateQueueFull pins the bridge-wide pending cap: with
+// MaxPending requests outstanding, the next create is refused.
+//
+// The cap is the ONLY bound on this endpoint — there is deliberately no
+// per-IP rate limit, because under double-NAT and mesh routers every LAN
+// device presents the same address and per-IP throttling would block
+// legitimate joins. So this test guards the whole spam surface.
+//
+// It used to share the fixture's 100 ms TTL and was therefore a race
+// against the store's own sweeper: each create is a full HTTP round trip
+// through httptest, and on a slow runner an earlier request aged out of
+// Pending — freeing a slot — before the overflow create arrived, so the
+// 5th was accepted with 201. Observed on windows-latest (PR #670);
+// always green on re-run, which is the signature. A long TTL takes the
+// sweeper out of the picture entirely.
+//
+// The deliberate gap between the last create and the overflow create is
+// what makes that independence an ASSERTION rather than a hope: it is
+// comfortably longer than the TTL this test used to run under, so the
+// pre-fix version fails here every time instead of once a fortnight on
+// CI.
 func TestPairingCreateQueueFull(t *testing.T) {
-	hs, _, _ := pairingTestSetup(t) // MaxPending = 4
+	hs, _, _ := pairingTestSetupTTL(t, time.Minute) // MaxPending = 4
 	for i := 0; i < 4; i++ {
 		_, hashHex := makePollSecret(t, "q"+string(rune('a'+i)))
 		r := postPairing(t, hs, map[string]string{
@@ -316,6 +358,12 @@ func TestPairingCreateQueueFull(t *testing.T) {
 			t.Fatalf("create #%d: status = %d", i, r.StatusCode)
 		}
 	}
+
+	// Sleeping only ever makes this test SAFER: at a one-minute TTL
+	// nothing can expire, so a longer wait cannot turn a 503 into a 201.
+	// It is exactly the elapsed time that broke the old fixture.
+	time.Sleep(150 * time.Millisecond)
+
 	_, hashHex := makePollSecret(t, "overflow")
 	r := postPairing(t, hs, map[string]string{
 		"deviceName":     "x",
@@ -323,7 +371,7 @@ func TestPairingCreateQueueFull(t *testing.T) {
 	})
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("overflow status = %d, want 503", r.StatusCode)
+		t.Errorf("overflow status = %d, want 503 — the pending cap must not depend on how long the earlier requests took to arrive", r.StatusCode)
 	}
 }
 

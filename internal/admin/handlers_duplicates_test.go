@@ -198,6 +198,16 @@ func TestDuplicatesPageRenders(t *testing.T) {
 		"dupes-tier-filter",
 		"dupes-groups-list",
 		"nothing is ever deleted",
+		// The served tile is scanned-library-scoped, and says so. Every
+		// count on this page comes from the stamping pass, which walks
+		// StreamTrackDupeRefsUnderPrefix with includeRouted=false — so on
+		// the hybrid deployment (122 filesystem tracks beside ~15.3k UPnP
+		// routed rows) an unqualified "Tracks served" contradicted both
+		// health.tracksIndexed and the dashboard by two orders of
+		// magnitude. The sibling foot already says "across N scanned
+		// tracks"; this tile has to agree with it.
+		"Scanned tracks served",
+		"dupes-scope-note",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/library/duplicates body missing %q", want)
