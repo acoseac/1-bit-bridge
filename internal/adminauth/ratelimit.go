@@ -39,24 +39,38 @@ const (
 	// (Gemini medium review on PR #290): without a cap, an
 	// attacker spraying random usernames + spoofed IPs could
 	// grow the map unbounded between janitor sweeps. When the
-	// map hits maxBuckets, RecordFailure aggressively evicts
-	// the oldest entries (by lastAttemptAt) to make room.
+	// map hits maxBuckets, the insert paths evict a batch of
+	// entries to make room — see evictOldestLocked for WHICH
+	// entries, which is the security-relevant half.
 	//
-	// Trade-off: at the cap, recently-failed attackers whose
-	// buckets were evicted lose their throttle. Verify() still
-	// rejects bad credentials at bcrypt-cost speed (~250 ms
-	// each), so the attacker gets no speed advantage from the
-	// eviction — they pay bcrypt's serial cost regardless.
+	// **The eviction order is load-bearing, and the original
+	// rationale for ignoring it was false.** That rationale read
+	// "an evicted attacker gets no speed advantage — they pay
+	// bcrypt's serial cost regardless". Store.Verify returns
+	// ErrInvalidCredentials on a username mismatch BEFORE it
+	// reaches bcrypt.CompareHashAndPassword, so filler requests
+	// carrying random usernames cost microseconds, not ~250 ms.
+	// A plain oldest-first eviction therefore handed an attacker
+	// a cheap unlock: a throttled bucket does not bump
+	// lastAttemptAt (AllowAndReserve refuses without recording),
+	// so its timestamp freezes and it becomes the OLDEST entry —
+	// first out on the next overflow. maxBuckets cheap requests
+	// with distinct random usernames then cleared the throttle
+	// on the real (ip, "admin") bucket, and the ceiling stopped
+	// meaning anything.
 	//
-	// Sizing: each bucket is ~120 bytes including map overhead;
-	// 10 000 entries ≈ 1.2 MB worst-case. Generous headroom for
-	// any realistic home / small-team deployment.
+	// Sizing: each bucket is ~120 bytes including map overhead
+	// (the username component of the key is length-capped at the
+	// handler — see admin.maxLoginUsernameLen); 10 000 entries
+	// ≈ 1.2 MB worst-case. Generous headroom for any realistic
+	// home / small-team deployment.
 	maxBuckets = 10_000
 
-	// evictBatch is the number of stale-oldest buckets dropped
-	// per overflow event. Larger than 1 to amortise the O(N)
-	// scan cost — a sustained attack landing one bucket per
-	// request would otherwise scan the full map on every call.
+	// evictBatch is the number of buckets dropped per overflow
+	// event (which ones is evictOldestLocked's call). Larger than
+	// 1 to amortise the scan cost — a sustained attack landing one
+	// bucket per request would otherwise scan the full map on
+	// every call.
 	evictBatch = 100
 )
 
@@ -67,6 +81,18 @@ type bucket struct {
 	attempts      int
 	firstAttempt  time.Time
 	lastAttemptAt time.Time
+}
+
+// liveThrottle reports whether this bucket is CURRENTLY refusing
+// attempts: at or past the ceiling, with its window still open.
+//
+// Single predicate shared by Allow (which returns its negation) and
+// evictOldestLocked (which protects the buckets it selects). Those two
+// must not drift: an eviction scan whose idea of "throttled" is looser
+// than Allow's would evict a bucket that is still locking an attacker
+// out, which is exactly the bug the two-tier eviction exists to stop.
+func (b *bucket) liveThrottle(now time.Time) bool {
+	return b.attempts >= RateLimitMaxAttempts && now.Sub(b.firstAttempt) <= RateLimitWindow
 }
 
 // bucketKey derives the map key for a (clientIP, username) pair.
@@ -165,13 +191,12 @@ func (rl *RateLimiter) Allow(clientIP, username string) bool {
 	if !ok {
 		return true
 	}
-	if rl.now().Sub(b.firstAttempt) > RateLimitWindow {
-		// Window expired; the limiter no longer holds this
-		// bucket against the caller. RecordFailure will reset
-		// the window if a fresh failure lands.
-		return true
-	}
-	return b.attempts < RateLimitMaxAttempts
+	// Expressed as the negation of liveThrottle so the eviction scan
+	// cannot end up with a different notion of "currently throttled".
+	// Identical to the previous form: an expired window (which
+	// RecordFailure / AllowAndReserve reset on the next attempt)
+	// admits regardless of the accumulated count.
+	return !b.liveThrottle(rl.now())
 }
 
 // RecordFailure increments the failed-attempt counter for the
@@ -180,10 +205,21 @@ func (rl *RateLimiter) Allow(clientIP, username string) bool {
 // next attempt.
 //
 // Map-size guard: when len(buckets) ≥ maxBuckets AND the key
-// isn't already present, we evict a batch of the
-// oldest-by-lastAttemptAt entries before adding the new one. This
-// bounds the map's memory footprint under a high-cardinality
-// attack — see maxBuckets docstring for the threat model.
+// isn't already present, we evict a batch before adding the new
+// one. This bounds the map's memory footprint under a
+// high-cardinality attack — see the maxBuckets docstring for the
+// threat model and evictOldestLocked for the two-tier order that
+// keeps a spray from evicting live throttles.
+//
+// **Note for any future caller** — unlike AllowAndReserve, this
+// method bumps lastAttemptAt even for a bucket already past the
+// ceiling. evictOldestLocked's tier 2 spends the NEWEST live
+// throttle, so a caller that hammers one key through here keeps
+// re-marking it as the next throttle to sacrifice. Harmless today:
+// the admin login handler uses AllowAndReserve + RecordSuccess and
+// nothing in production calls this. Give it the same
+// don't-bump-at-the-ceiling treatment before wiring it to a
+// request path again.
 func (rl *RateLimiter) RecordFailure(clientIP, username string) {
 	key := bucketKey(clientIP, username)
 	now := rl.now()
@@ -234,7 +270,10 @@ func (rl *RateLimiter) AllowAndReserve(clientIP, username string) bool {
 		// Fresh window (new key, or the previous window expired):
 		// admit and open a bucket with one reserved attempt. Mirror
 		// RecordFailure's map-size guard so a high-cardinality spray
-		// can't grow the map without bound.
+		// can't grow the map without bound — and note this is the
+		// path a spray actually takes, so evictOldestLocked's
+		// throttle-sparing tiers are what stop the spray from
+		// clearing the ceiling it just ran into.
 		if !ok && len(rl.buckets) >= maxBuckets {
 			rl.evictOldestLocked(evictBatch)
 		}
@@ -248,6 +287,13 @@ func (rl *RateLimiter) AllowAndReserve(clientIP, username string) bool {
 	// At the ceiling: refuse WITHOUT reserving or bumping lastAttemptAt
 	// — a throttled request isn't an attempt and must not slide the
 	// bucket's liveness forward. Predicate matches Allow's `< max`.
+	//
+	// The frozen timestamp is why evictOldestLocked cannot rank by
+	// lastAttemptAt alone: it makes a bucket look stalest exactly while
+	// it is doing its job. Don't "fix" that by bumping the timestamp
+	// here — an attacker could then keep a bucket alive past the
+	// janitor forever with their own traffic, and the ordering fix
+	// belongs in the eviction scan, which is where it now lives.
 	if b.attempts >= RateLimitMaxAttempts {
 		return false
 	}
@@ -256,40 +302,78 @@ func (rl *RateLimiter) AllowAndReserve(clientIP, username string) bool {
 	return true
 }
 
-// evictOldestLocked drops the n oldest entries (by lastAttemptAt)
-// from the map. Caller MUST hold rl.mu. O(N) where N is the
-// current map size; called only at the maxBuckets boundary so the
-// amortised cost is O(N / evictBatch) per RecordFailure.
+// evictOldestLocked frees up to n slots in the map. Caller MUST hold
+// rl.mu. O(N log N) where N is the current map size; called only at
+// the maxBuckets boundary so the amortised cost is O(N log N /
+// evictBatch) per insert. For small N relative to the cap (the common
+// case — the map is usually nowhere near full) it never runs.
 //
-// For small N relative to the cap (the common case — the map is
-// usually nowhere near full), this never runs. At the cap, the
-// batch eviction amortises the scan: one O(N) walk drops
-// `evictBatch` entries, so the next evictBatch RecordFailure calls
-// pay nothing.
+// **Two tiers, and the order between them is the security property.**
+//
+//	Tier 1 — buckets that are NOT currently throttling anyone
+//	         (below the ceiling, or past their window), oldest
+//	         lastAttemptAt first. These carry no protection, so
+//	         dropping them costs nothing.
+//	Tier 2 — live throttles, NEWEST lastAttemptAt first, and only
+//	         once tier 1 is exhausted.
+//
+// A flat oldest-first scan over both tiers is what made the ceiling
+// bypassable. AllowAndReserve deliberately refuses at the ceiling
+// WITHOUT bumping lastAttemptAt, so a throttled bucket's timestamp
+// freezes the moment it starts protecting something — which makes it
+// the oldest entry in the map and the FIRST one a flat scan drops.
+// Spraying maxBuckets distinct random usernames (microseconds each:
+// Store.Verify rejects an unknown username before bcrypt) evicted the
+// real (ip, "admin") throttle and reopened the ceiling on demand.
+//
+// Tier 2's reversed order is the same reasoning applied to the case
+// where every bucket is a live throttle: the newest throttle is the
+// one an attacker most likely just created, and the oldest is the one
+// that has been holding someone off the longest — so the newest is
+// what we spend. An attacker cannot make their target bucket the
+// newest, because reaching the ceiling is what freezes its timestamp
+// and every later throttle they create sorts ahead of it.
+//
+// The memory bound stays ABSOLUTE — tier 2 guarantees an eviction
+// whenever the map is non-empty, so the insert paths always have room
+// and no caller can wedge. The cost of reaching tier 2 at all is
+// maxBuckets × RateLimitMaxAttempts requests inside one
+// RateLimitWindow (50 000 per 15 min against a single bridge), versus
+// the maxBuckets requests the flat scan needed, and it still does not
+// let an attacker choose which throttle dies.
 func (rl *RateLimiter) evictOldestLocked(n int) {
 	if n <= 0 || len(rl.buckets) == 0 {
 		return
 	}
-	// Gather all entries, sort oldest-first, drop the first n.
-	// slices.SortFunc is O(N log N) vs. the prior manual O(n·N)
-	// selection loop, with a smaller algorithmic surface. Still
-	// amortised over evictBatch RecordFailure calls (see doc above).
+	now := rl.now()
 	type kv struct {
 		key string
 		at  time.Time
 	}
-	all := make([]kv, 0, len(rl.buckets))
+	// Sized for the common shape (a spray fills the map with
+	// unthrottled buckets); throttled starts empty and grows only
+	// under a sustained multi-key attack.
+	evictable := make([]kv, 0, len(rl.buckets))
+	var throttled []kv
 	for k, b := range rl.buckets {
-		all = append(all, kv{k, b.lastAttemptAt})
+		if b.liveThrottle(now) {
+			throttled = append(throttled, kv{k, b.lastAttemptAt})
+			continue
+		}
+		evictable = append(evictable, kv{k, b.lastAttemptAt})
 	}
-	if n > len(all) {
-		n = len(all)
-	}
-	slices.SortFunc(all, func(a, b kv) int {
-		return a.at.Compare(b.at)
-	})
-	for i := 0; i < n; i++ {
-		delete(rl.buckets, all[i].key)
+	slices.SortFunc(evictable, func(a, b kv) int { return a.at.Compare(b.at) })
+	// Reversed: newest live throttle first. See the docblock.
+	slices.SortFunc(throttled, func(a, b kv) int { return b.at.Compare(a.at) })
+
+	for _, tier := range [][]kv{evictable, throttled} {
+		for _, e := range tier {
+			if n == 0 {
+				return
+			}
+			delete(rl.buckets, e.key)
+			n--
+		}
 	}
 }
 

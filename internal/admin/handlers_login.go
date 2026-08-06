@@ -16,6 +16,27 @@ import (
 // server validates via adminauth.Store.ValidateSession.
 const sessionCookieName = "bridge_admin_session"
 
+// maxLoginUsernameLen bounds the username a login attempt may carry.
+//
+// The value is attacker-controlled and is concatenated verbatim into
+// the rate limiter's map key (adminauth.bucketKey), so without a cap
+// the limiter's memory bound is stated in ENTRIES while an attacker
+// controls the BYTES: maxBuckets (10 000) keys × the ~4 KB the body
+// reader allows ≈ 40 MB pinned until the hourly janitor sweep, against
+// the ~1.2 MB the maxBuckets docstring budgets for. Unauthenticated,
+// and it composes with the eviction spray the two-tier scan defends.
+//
+// The bound also covers the two logger.Warn lines below, which echo
+// req.Username verbatim: uncapped, every rejected attempt writes up to
+// ~4 KB of attacker-chosen text into the operator's log.
+//
+// Bounded here rather than inside bucketKey so the client gets a clean
+// 400 instead of a silently-truncated key, and so nothing over-long
+// reaches the limiter or the log at all. 64 bytes is well past any real
+// admin username (the store is single-user; the field pre-fills from
+// Store.Username()). Bytes, not runes — the memory is what's at stake.
+const maxLoginUsernameLen = 64
+
 // loginPageData is the template envelope for login.html. Username
 // pre-fills the field (single-user system; not a secret); Next is
 // the (sanitised) post-login redirect target.
@@ -105,6 +126,14 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	req.Username = strings.TrimSpace(req.Username)
 	if req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "username and password are required")
+		return
+	}
+	// Bound BEFORE the value reaches the rate limiter — see
+	// maxLoginUsernameLen. Not a credentials check, so it's a 400 and
+	// not the generic 401: refusing a structurally invalid request
+	// discloses nothing about which account exists.
+	if len(req.Username) > maxLoginUsernameLen {
+		writeError(w, http.StatusBadRequest, "bad_request", "username is too long")
 		return
 	}
 

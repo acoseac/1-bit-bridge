@@ -488,34 +488,78 @@ func (s *Store) persist() error {
 // entropy / rejection-sampling math below.
 const passwordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 
+// rejectionLimit returns the smallest byte value that must be
+// REJECTED to keep a `% alphabetLen` draw unbiased: the largest
+// multiple of alphabetLen that is ≤ 256. Bytes in [limit, 256) are
+// resampled; the returned value is in 1..256, never 0.
+//
+// **The int return type is load-bearing.** The original form was
+//
+//	limit := byte(256 - (256 % int(alphabetLen)))
+//
+// which is correct only while alphabetLen does NOT divide 256: for
+// any divisor (1, 2, 4, … 64, 128) the expression is byte(256), and
+// byte(256) is 0 — so `b[0] < limit` is never true and the draw loop
+// spins forever. With 57 characters that was latent, but the
+// docblock on passwordAlphabet explicitly invites editing the
+// alphabet, and 64 is about the most natural size anyone would pick.
+// The failure mode is the worst kind: `bridge init --public` and
+// `bridge admin reset-password` hang with no output and no CPU
+// diagnosis, on the one path that mints the operator's credentials.
+//
+// Keeping the arithmetic in int (and comparing in int at the call
+// site) makes the divides-evenly case land on 256 — "reject nothing",
+// which is exactly right, since an alphabet that divides 256 has no
+// modulo bias to correct.
+func rejectionLimit(alphabetLen int) int {
+	if alphabetLen <= 0 {
+		// Not reachable from generatePassword (passwordAlphabet is a
+		// non-empty const), but a zero would be a division by zero in
+		// the caller's `%`. Return 0 so a caller that ignores this
+		// draws nothing rather than panicking or spinning.
+		return 0
+	}
+	return 256 - (256 % alphabetLen)
+}
+
 // generatePassword returns a 16-character alphanumeric string
 // drawn from passwordAlphabet using crypto/rand. 16 chars from a
 // 57-character alphabet ≈ 93 bits of entropy — well above what
 // bcrypt's design comfortably handles.
+func generatePassword() (string, error) {
+	return generateFromAlphabet(passwordAlphabet, 16)
+}
+
+// generateFromAlphabet draws length characters uniformly from
+// alphabet using crypto/rand.
 //
 // Uses rejection sampling to eliminate modulo bias (Gemini medium
-// review on PR #290). 256 % 57 = 28, so a naive `b[0] % 57` would
-// make the first 28 alphabet positions ~25 % (5/4) more likely than
-// the last 29. We discard any byte ≥ 228 (= 4 × 57, the largest
-// multiple of 57 that fits in a byte) and resample. Average
-// rejection rate ≈ 11 % (28/256) — cheap. The `limit` below is
-// computed from len(passwordAlphabet) at runtime, so the sampling
-// stays unbiased even if the alphabet is edited; only these
-// illustrative numbers would need updating.
-func generatePassword() (string, error) {
-	const length = 16
-	alphabetLen := byte(len(passwordAlphabet))
-	// Largest multiple of alphabetLen that fits in a byte. Bytes
-	// in [limit, 256) are rejected and resampled.
-	limit := byte(256 - (256 % int(alphabetLen)))
+// review on PR #290). For the 57-character passwordAlphabet,
+// 256 % 57 = 28, so a naive `b[0] % 57` would make the first 28
+// positions ~25 % (5/4) more likely than the last 29; we discard any
+// byte ≥ 228 (= 4 × 57) and resample, an ≈ 11 % rejection rate.
+// The limit is derived from len(alphabet) at runtime, so the sampling
+// stays unbiased for any alphabet — see rejectionLimit for the one
+// arithmetic subtlety that makes that true.
+//
+// Split out from generatePassword so a test can exercise the sampler
+// against alphabet sizes the production const doesn't use.
+func generateFromAlphabet(alphabet string, length int) (string, error) {
+	alphabetLen := len(alphabet)
+	if alphabetLen == 0 || length <= 0 {
+		return "", errors.New("adminauth: generateFromAlphabet needs a non-empty alphabet and a positive length")
+	}
+	limit := rejectionLimit(alphabetLen)
 	out := make([]byte, length)
 	for i := 0; i < length; {
 		var b [1]byte
 		if _, err := rand.Read(b[:]); err != nil {
 			return "", err
 		}
-		if b[0] < limit {
-			out[i] = passwordAlphabet[b[0]%alphabetLen]
+		// Compared in int: a `byte` comparison could not express the
+		// "reject nothing" limit of 256.
+		if int(b[0]) < limit {
+			out[i] = alphabet[int(b[0])%alphabetLen]
 			i++
 		}
 	}

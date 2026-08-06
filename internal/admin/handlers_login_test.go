@@ -463,3 +463,59 @@ func TestLoginCookieAttributes(t *testing.T) {
 		t.Errorf("session cookie SameSite = %v, want Strict", sess.SameSite)
 	}
 }
+
+// An over-long username must be refused BEFORE it reaches the rate
+// limiter, which concatenates it verbatim into its map key.
+//
+// The limiter's memory bound is stated in ENTRIES (maxBuckets, budgeted
+// at ~1.2 MB) while the username decides the BYTES, so an
+// unauthenticated caller could pin roughly 40 MB of keys — the body cap
+// allows ~4 KB per attempt — until the hourly janitor sweep. Asserted
+// two ways: the wire status, and the limiter itself, which must not
+// hold a bucket for a request the handler should have rejected outright.
+func TestLoginRejectsOverlongUsername(t *testing.T) {
+	srv, _, limiter := newPublicTestServer(t, "test-password-123")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	post := func(t *testing.T, username string) int {
+		t.Helper()
+		body, err := json.Marshal(loginRequest{Username: username, Password: "irrelevant"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, _ := http.NewRequest("POST", ts.URL+"/login", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://bridge.example.com")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Comfortably over the cap but under the 4 KB body reader, so the
+	// handler's own bound is what has to reject it.
+	long := strings.Repeat("a", 2000)
+	// Stop at exactly the ceiling: one more would trip the limiter's
+	// deliberate 5 s throttle sleep and slow the pre-fix (RED) run.
+	for i := 0; i < adminauth.RateLimitMaxAttempts; i++ {
+		if got := post(t, long); got != http.StatusBadRequest {
+			t.Fatalf("over-long username attempt %d: status %d, want 400", i+1, got)
+		}
+	}
+
+	clientIP := mustParseURL(t, ts.URL).Hostname()
+	if !limiter.Allow(clientIP, long) {
+		t.Error("the over-long username reached the rate limiter and filled a bucket — " +
+			"an unauthenticated caller controls the key bytes the limiter's memory bound ignores")
+	}
+
+	// Boundary: a username AT the cap is a normal credential attempt,
+	// so it must reach the credential check and fail there (401), not
+	// be rejected as malformed. Guards an off-by-one to `>=`.
+	if got := post(t, strings.Repeat("a", maxLoginUsernameLen)); got != http.StatusUnauthorized {
+		t.Errorf("username at exactly the cap: status %d, want 401 (it should reach the credential check)", got)
+	}
+}
