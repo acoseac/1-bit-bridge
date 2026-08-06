@@ -13,7 +13,8 @@ import (
 // flag is an unexported atomic with no setter, which is why the sweeper
 // takes the duplicatesRestamper interface.
 type fakeRestamper struct {
-	scanning atomic.Bool
+	scanning  atomic.Bool
+	scanCalls atomic.Int64 // IsScanning invocations — the spin detector
 
 	mu       sync.Mutex
 	restamps int
@@ -24,7 +25,10 @@ func newFakeRestamper() *fakeRestamper {
 	return &fakeRestamper{fired: make(chan struct{}, 8)}
 }
 
-func (f *fakeRestamper) IsScanning() bool { return f.scanning.Load() }
+func (f *fakeRestamper) IsScanning() bool {
+	f.scanCalls.Add(1)
+	return f.scanning.Load()
+}
 
 func (f *fakeRestamper) RestampDuplicates(context.Context) (int, error) {
 	f.mu.Lock()
@@ -106,6 +110,55 @@ func TestDuplicatesSweeperReArmsNudgeDeferredBehindAScan(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("sweeper did not exit on ctx cancellation")
+	}
+}
+
+// A non-positive deferRetry must NOT turn the re-arm branch into a spin.
+//
+// time.After(0) fires immediately, so an unclamped zero makes the loop
+// put the nudge back and receive it again with no wait — a tight cycle
+// that burns a core for the entire duration of a scan while logging at
+// Info every iteration. No production caller passes zero today, which is
+// precisely why a regression here would go unnoticed: the only signal is
+// CPU.
+//
+// Asserting "the clamp returns the default" would pin almost nothing —
+// this counts actual loop iterations instead, by watching IsScanning
+// calls over a window. Clamped, the loop parks for 5s and checks once.
+func TestDuplicatesSweeperZeroDeferRetryDoesNotSpin(t *testing.T) {
+	r := newFakeRestamper()
+	r.scanning.Store(true) // never clears: the sweeper stays in the defer branch
+
+	nudge := make(chan struct{}, 1)
+	nudge <- struct{}{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runDuplicatesSweeper(ctx, r, nudge, nil, 0) // the clamp's input
+	}()
+
+	const window = 300 * time.Millisecond
+	time.Sleep(window)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweeper did not exit on cancel")
+	}
+
+	// Clamped to 5s, exactly one iteration fits in the window (the
+	// initial nudge). The bound is generous — a real spin runs this into
+	// the tens of thousands.
+	const maxIterations = 5
+	if n := r.scanCalls.Load(); n > maxIterations {
+		t.Fatalf("IsScanning called %d times in %v: a non-positive deferRetry is "+
+			"not clamped, so the scan-in-flight re-arm branch spins at full CPU "+
+			"for as long as the scan runs", n, window)
+	}
+	if r.count() != 0 {
+		t.Fatalf("restamped %d times while scanning", r.count())
 	}
 }
 

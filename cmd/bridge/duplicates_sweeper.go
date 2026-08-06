@@ -71,6 +71,16 @@ const duplicatesDeferRetry = 5 * time.Second
 // Store.Close), which is why the ctx.Canceled outcome logs at Info, not
 // Error.
 func runDuplicatesSweeper(ctx context.Context, scanner duplicatesRestamper, nudge chan struct{}, status *sweepStatus[duplicatesSweepCounts], deferRetry time.Duration) {
+	// A non-positive retry makes time.After fire immediately, which turns
+	// the re-arm branch below into a tight spin for the whole duration of
+	// a scan — the nudge is put back and received again with no wait in
+	// between. No production caller can pass one today (serve passes the
+	// const), but this is exactly the loop where a spin would be
+	// invisible: it logs at Info once per iteration and burns a core
+	// silently until the scan ends. Clamp rather than trust the caller.
+	if deferRetry <= 0 {
+		deferRetry = duplicatesDeferRetry
+	}
 	for {
 		select {
 		case <-ctx.Done():

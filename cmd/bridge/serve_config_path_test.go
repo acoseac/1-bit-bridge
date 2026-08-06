@@ -52,9 +52,11 @@ func TestServeInitIfMissingUsesResolvedConfigNotRawFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var so, se bytes.Buffer
+	// safeBuffer for the same reason as the sibling test below: runServe
+	// may reach its concurrent writers before returning.
+	so, se := &safeBuffer{}, &safeBuffer{}
 	code := runServe(context.Background(),
-		serveOpts{initIfMissing: true}, &so, &se)
+		serveOpts{initIfMissing: true}, so, se)
 
 	if strings.Contains(se.String(), "auto-init") {
 		t.Fatalf("flag-less `serve --init-if-missing` took the auto-init branch "+
@@ -81,10 +83,25 @@ func TestServeInitIfMissingUsesResolvedConfigNotRawFlag(t *testing.T) {
 func TestServeInitIfMissingSeedsAtResolvedLocation(t *testing.T) {
 	cwd, platform := isolateConfigEnv(t)
 
-	var so, se bytes.Buffer
-	// Exits non-zero: the seed points at /library, which does not exist
-	// here. The seeding is what this pins.
-	_ = runServe(context.Background(), serveOpts{initIfMissing: true}, &so, &se)
+	// The seed's own default root is `/library`, and on a case-INSENSITIVE
+	// volume (every stock macOS boot disk) that resolves to /Library — so
+	// the accessibility check passes, runServe boots a COMPLETE bridge,
+	// and it scans /Library for the rest of the package run with nothing
+	// ever cancelling it. On Linux the same test exits early. Overriding
+	// the root through env (which applyEnvOverrides applies at load, and
+	// which wins over the seeded YAML) makes the run exit at the
+	// accessibility check on every platform, deterministically, while
+	// still writing the seed first — which is the only thing this pins.
+	t.Setenv("BRIDGE_LIBRARY_ROOTS", filepath.Join(cwd, "no-such-library"))
+
+	// safeBuffer, not bytes.Buffer: runServe fans out to concurrent
+	// writers (the backup ticker and the Tailscale auto-pilot both
+	// Fprintf to these streams), so an unsynchronised buffer is a race
+	// the moment the run gets far enough to spawn them.
+	so, se := &safeBuffer{}, &safeBuffer{}
+	// Exits non-zero at the library-root check. The seeding is what this
+	// pins.
+	_ = runServe(context.Background(), serveOpts{initIfMissing: true}, so, se)
 
 	if strings.Contains(se.String(), "auto-init") {
 		t.Fatalf("auto-init failed outright: %s", se.String())
@@ -143,6 +160,21 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	}()
 	waitForListening(t, stdout, 30*time.Second)
 
+	// Move the process off the config's directory now that the bridge is
+	// up. Everything below must still find bridge.yaml, which is only
+	// true if the path each consumer holds is ABSOLUTE — and two of
+	// resolveConfigPath's branches (including the ./bridge.yaml hit this
+	// test takes) return the bare relative "bridge.yaml". Nothing else in
+	// the run depends on the CWD: the config is already loaded and its
+	// dataDir was resolved to an absolute path at load time.
+	//
+	// This is not a contrived stress: the installed service units set
+	// WorkingDirectory to the DATA dir, and the backup ticker's first
+	// snapshot can fire 24h after boot.
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+
 	adminBase := fmt.Sprintf("http://127.0.0.1:%d", adminPort)
 	client := &http.Client{Timeout: 30 * time.Second}
 
@@ -191,9 +223,10 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 		t.Fatalf("POST /api/backups = %d: %s", resp.StatusCode, backupBody)
 	}
 	if !snapshotCapturedBridgeYAML(t, filepath.Join(cwd, "data", "backups")) {
-		t.Errorf("no snapshot captured bridge.yaml — buildBackupSources received the "+
-			"raw \"\" flag, and backup.Snapshot silently skips an empty source path, so "+
-			"the config is missing from every snapshot.\nresponse: %s", backupBody)
+		t.Errorf("no snapshot captured bridge.yaml — buildBackupSources did not receive "+
+			"an absolute, resolved path. backup.Snapshot skips a source that is empty "+
+			"OR that os.Stat cannot find, both silently, so the config goes missing "+
+			"from every snapshot with no error anywhere.\nresponse: %s", backupBody)
 	}
 
 	cancel()

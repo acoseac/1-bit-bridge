@@ -1674,7 +1674,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// resolveConfigPath returns the location a config SHOULD live at even
 	// when none exists yet (ok=false), which is exactly what the
 	// auto-init writer needs.
+	//
+	// ABSOLUTE, because resolving is only half the job: two of
+	// resolveConfigPath's four branches hand back the bare relative
+	// "bridge.yaml" (the local-first hit and the no-config-anywhere
+	// fallback), and an explicit relative --config is echoed verbatim.
+	// The path is then STORED and read much later by consumers that do
+	// their own file I/O — the backup ticker's first snapshot can be 24h
+	// after boot — so a relative value silently means "wherever the
+	// process CWD happens to be by then". That is not hypothetical here:
+	// the installed service units set WorkingDirectory to the DATA dir,
+	// so a relative "bridge.yaml" resolves under <cfgDir>/data, where
+	// backup.Snapshot's os.Stat misses and it SKIPS the config with no
+	// error — the same silently-configless snapshot this commit is
+	// fixing, reintroduced through a different door.
+	//
+	// filepath.Abs only fails when os.Getwd does; keep the relative value
+	// in that case rather than losing the path entirely.
 	resolved, _ := resolveConfigPath(*configPath)
+	if abs, absErr := filepath.Abs(resolved); absErr == nil {
+		resolved = abs
+	}
 	*configPath = resolved
 	// Container convenience: if --init-if-missing is set (the Docker CMD
 	// sets it) and no config exists yet, write a sparse default so the
@@ -2990,9 +3010,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// 127.0.0.1:7789). Shares the api server's Resolver so hot-add/remove
 	// of library roots lands on both sides in lockstep.
 	//
-	// We resolve the config file path to absolute here so admin.Cfg.Save
-	// writes to the right file even if the operator changes cwd post-boot
-	// (shouldn't happen, but let's not trip them up).
+	// *configPath was already resolved AND absolutised at the top of
+	// runServe, so this is a no-op Clean rather than a second resolution.
+	// It stays as the belt-and-braces path for the one case that skips
+	// the earlier absolutise — filepath.Abs failing on a broken Getwd.
 	absCfgPath, _ := filepath.Abs(*configPath)
 	// Shared instance across the admin tile AND the api server: the
 	// api layer's `/v1/health.endpoints` advertising in tsnet mode
