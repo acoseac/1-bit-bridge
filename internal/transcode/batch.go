@@ -456,7 +456,6 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			"err", err)
 	}
 	enqueued := 0
-	deduped := 0
 	for _, ca := range cands {
 		spec := JobSpec{
 			SourceAbsPath:    ca.absPath,
@@ -479,7 +478,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			// in-flight job produces the variant. Without this, an overlapping
 			// re-submit sat `running` forever.
 			c.dropDedupedPath(batchID, ca.path)
-			deduped++
+			afterEnqueueIteration(ca.path)
 			continue
 		}
 		if err != nil {
@@ -570,6 +569,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 			break
 		}
 		enqueued++
+		afterEnqueueIteration(ca.path)
 	}
 
 	// The 202 response reports `enqueued` — TotalFiles converges to exactly
@@ -587,19 +587,12 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 	// column under a monotonic guard.
 	finalTotal := enqueued
 
-	// Every candidate deduped against in-flight jobs (a fully-overlapping
-	// re-submit) → no callback will fire for this batch; transition it now so it
-	// doesn't sit `running` forever (the overlapping batch produces the variants).
-	// Gate on `deduped == len(cands)`, NOT `enqueued == 0 && deduped > 0`: a
-	// queue-full break can also leave enqueued == 0 with deduped > 0, and that
-	// path already set a terminal (failed) status — completing it here would
-	// clobber the failure (CodeRabbit).
-	if deduped == len(cands) {
-		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
-			c.logger.Warn("submit: transition fully-deduped batch",
-				"batchID", batchID.String(), "err", err)
-		}
-	}
+	// Nothing left to report back (every candidate deduped against in-flight
+	// jobs owned by an overlapping batch, and/or the jobs this batch DID enqueue
+	// already called back mid-loop) → transition now so the row doesn't sit
+	// `running` forever. See completeIfDrained for why the predicate is
+	// "still live AND remaining set empty" rather than `deduped == len(cands)`.
+	c.completeIfDrained(batchID, "submit")
 
 	c.publishProgress(batchID)
 	return &SubmitResult{
@@ -619,6 +612,12 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 // (ErrDuplicateInflight) from the batch's remaining set + total, so allDone can
 // still fire — the in-flight job (owned by an overlapping batch) produces the
 // variant and never calls back into this batch.
+//
+// NOTE: this deliberately does NOT evaluate the "batch drained" terminal
+// condition itself. It runs under `c.mu`, and completing from here would mean
+// calling transitionStatus (which takes `c.mu`) while holding it. The
+// post-enqueue-loop `completeIfDrained` check is the single place that decision
+// is made, with its own lock acquisition.
 func (c *Coordinator) dropDedupedPath(batchID uuid.UUID, path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -627,6 +626,67 @@ func (c *Coordinator) dropDedupedPath(batchID uuid.UUID, path string) {
 		if st.Row.TotalFiles > 0 {
 			st.Row.TotalFiles--
 		}
+	}
+}
+
+// completeIfDrained transitions a still-live batch to `completed` when its
+// remaining set is empty. Called once by each enqueue loop after the loop ends.
+//
+// **Why "still live AND empty", not `deduped == len(cands)`.** `RemainingIDs`
+// shrinks from two independent places: the job callbacks (OnJobComplete /
+// OnJobFailed, which each evaluate `allDone` and terminate the batch
+// themselves) and `dropDedupedPath` (which does not). A job callback that lands
+// while the enqueue loop is still running therefore removes its path WITHOUT
+// terminating — `allDone` is false at that moment because later candidates are
+// still in the set — and a subsequent dedup drop can then empty the set with
+// nobody left to notice. The old `deduped == len(cands)` gate only fired for a
+// FULLY-deduped batch, so this partial-dedup interleave
+//
+//	[enqueue P1] → P1's callback lands mid-loop → [dedup P2]
+//
+// left the row `running` forever: the in-flight job for P2 carries the OTHER
+// batch's ID, so no further callback will ever arrive for this batchID. There
+// is no stale-batch reaper (only `RecoverInterruptedBatches` at next boot), so
+// the row sat `running` on the admin Jobs page and the `liveBatches` entry
+// leaked for the process lifetime, inflating `Throughput().EtaSeconds`.
+//
+// Emptiness is the correct predicate because by the time the loop ends every
+// candidate has been enqueued, deduped, or dropped by the queue-full
+// truncation — so an empty remaining set means nothing can still call back.
+//
+// This is also strictly SAFER than the old gate w.r.t. the concern its comment
+// cited (a queue-full break clobbering an already-set terminal status): the
+// truncation path deletes the batch from `liveBatches` when it sets a terminal
+// status, so the liveness check makes this a no-op rather than an overwrite.
+func (c *Coordinator) completeIfDrained(batchID uuid.UUID, tag string) {
+	c.mu.Lock()
+	st, ok := c.liveBatches[batchID]
+	drained := ok && len(st.RemainingIDs) == 0
+	c.mu.Unlock()
+	if !drained {
+		return
+	}
+	if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
+		c.logger.Warn(tag+": transition drained batch",
+			"batchID", batchID.String(), "err", err)
+	}
+}
+
+// afterEnqueueHookForTests runs at the end of every enqueue-loop iteration
+// (both the upscale and optimize paths) with the candidate path just handled.
+// nil in production — file-scope test seam, same convention as
+// `afterExtractHookForTests` in internal/manifest and `Pool.runner` here.
+//
+// It exists because the completeIfDrained bug above is an INTERLEAVING: it
+// needs a job callback to land between two specific loop iterations, and a
+// regression test that relies on wall-clock timing for that would be a
+// flaky pin (green on broken code whenever the runner is loaded). Production
+// cost is one nil check per candidate.
+var afterEnqueueHookForTests func(path string)
+
+func afterEnqueueIteration(path string) {
+	if afterEnqueueHookForTests != nil {
+		afterEnqueueHookForTests(path)
 	}
 }
 
@@ -866,7 +926,6 @@ func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath stri
 // successfully enqueued.
 func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCandidate, outputDir string) int {
 	enqueued := 0
-	deduped := 0
 	for _, ca := range cands {
 		spec := JobSpec{
 			SourceAbsPath:    ca.absPath,
@@ -885,7 +944,7 @@ func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCan
 		err := c.pool.Enqueue(spec)
 		if errors.Is(err, ErrDuplicateInflight) {
 			c.dropDedupedPath(batchID, ca.path)
-			deduped++
+			afterEnqueueIteration(ca.path)
 			continue
 		}
 		if err != nil {
@@ -893,15 +952,12 @@ func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCan
 			break
 		}
 		enqueued++
+		afterEnqueueIteration(ca.path)
 	}
-	// Fully deduped → complete now (mirrors Submit); gate on deduped == len(cands)
-	// so a queue-full break doesn't spuriously complete a truncated batch.
-	if deduped == len(cands) {
-		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
-			c.logger.Warn("optimize: transition fully-deduped batch",
-				"batchID", batchID.String(), "err", err)
-		}
-	}
+	// Nothing left to report back → complete now (mirrors Submit). The liveness
+	// half of the predicate is what keeps a queue-full break that already set a
+	// terminal status from being clobbered — see completeIfDrained.
+	c.completeIfDrained(batchID, "optimize")
 	return enqueued
 }
 
