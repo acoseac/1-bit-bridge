@@ -187,6 +187,12 @@ type Result struct {
 	// confident estimate. Surfaced only when the source has no BPM tag.
 	BPM *int
 
+	// Spectrum is the whole-track averaged frequency spectrum (see
+	// spectrum.go), or nil when too few windows were seen to average one.
+	// Its BandwidthHz is itself often nil — a file whose content reaches
+	// this package's own 24 kHz ceiling gets no bandwidth, deliberately.
+	Spectrum *SpectrumResult
+
 	// TruePeakDB is the BS.1770-style 4x-oversampled true peak in dB
 	// relative to full scale — of the 48 kHz ANALYSIS RENDERING (the
 	// package's one-decode invariant; see truepeak.go's honesty note).
@@ -315,6 +321,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	if bpm, ok := kt.estimateTempo(); ok {
 		res.BPM = &bpm
 	}
+	res.Spectrum = kt.estimateSpectrum()
 	if peak, ok := tp.truePeakDB(); ok {
 		res.TruePeakDB = &peak
 	}
@@ -337,6 +344,8 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 		"loudness", res.HasLoudness,
 		"hasKey", res.KeyRoot != nil,
 		"hasTempo", res.BPM != nil,
+		"hasSpectrum", res.Spectrum != nil,
+		"bandwidthHz", spectrumBandwidthForLog(res.Spectrum),
 		"hasTruePeak", res.TruePeakDB != nil,
 		"hasDR", res.DRScore != nil,
 		"md5", res.AudioMD5State,

@@ -357,3 +357,18 @@ func clampNonNegative(v int) int {
 	}
 	return v
 }
+
+// spectrumBandwidthForLog renders the measured bandwidth for the analysis log
+// line: -1 for "no spectrum", 0 for "measured, but past our own ceiling so
+// deliberately unreported" (see the file docblock), otherwise the value.
+// Distinguishing the two zeros in the log is what makes a field report about
+// a missing bandwidth diagnosable.
+func spectrumBandwidthForLog(r *SpectrumResult) int {
+	if r == nil {
+		return -1
+	}
+	if r.BandwidthHz == nil {
+		return 0
+	}
+	return *r.BandwidthHz
+}
