@@ -110,6 +110,28 @@ sqlite3 /tmp/bridge-live/data/bridge.db "UPDATE tracks SET enriched_at = 0;"
 
 **`docs/` is a PUBLIC WEBSITE — internal operator docs go in `ops/`.** GitHub Pages serves `main:/docs` at `acoseac.github.io/1-bit-bridge/` and the repo is public, so anything under `docs/` is on the open web (indexable, scrapeable, no login). The deployment runbook and the codebase audits were published there until 2026-07-20 — the runbook exposing live SSH coordinates, the router port-forward endpoint, and the ufw posture; the audits amounting to an exploit index for unreleased fixes. They now live in `ops/` (see `ops/README.md`). **Don't move them back, and don't add a new doc naming a live host / IP / port-forward / key path — or enumerating unfixed weaknesses — under `docs/`.** Deploy scripts in `deploy/` are not Pages-served but ARE public: keep host coordinates in env vars with placeholder defaults (`BRIDGE_WAN_URL`, `HOMEPC`), never hardcoded. Moving a file out of `docs/` stops future serving but does NOT purge git history or caches — a published secret still needs rotating.
 
+## Agent memory — write it to the repo, not (only) to private memory
+
+The user works across **multiple Claude accounts and machines**. Per-account private memory (`~/.claude/projects/<project>/memory/`) does **not** travel between them, so anything durable that lives only there is invisible to the next agent — including a session launched directly from `~/dev/1-bit-bridge` rather than from the iOS repo. **The repo is the shared brain; private memory is the personal notebook.** The same policy is mirrored in the iOS repo's `CLAUDE.md`.
+
+**The repo is the default destination.** Before saving a memory, ask: *would a fresh agent on another account need this?* If yes:
+
+| What | Where |
+|---|---|
+| Invariants, "don't undo this", rejected-and-why decisions | `CLAUDE.md` — "## Things that have bitten before" below, or the matching per-version subsection |
+| Wire-protocol / cross-repo contracts | `PROTOCOL.md` (repo root — **not** `docs/`) + the iOS repo's mirror entry, bumped in lockstep |
+| Deploy procedures, journal diagnostics, host-specific ops | **`ops/deployment-runbook.md`** — `## Production deployments` above already tells every agent to read it before a deploy, so it reaches sessions that never open `CLAUDE.md` |
+| Build/test commands and their gotchas | `## Build` above |
+
+**`ops/`, never `docs/`, for anything operational** — see the warning in `## Production deployments`: `docs/` is served as a public website from a public repo, so live hosts, key paths and unfixed-weakness enumerations must not go there. This makes the repo-vs-private line *three*-way here: public `docs/` → internal `ops/` → private memory.
+
+**Stays in private memory — and only this:** secrets-adjacent coordinates (SSH key paths, private hosts — these can't go in `ops/` either if the repo is public); the user's personal working preferences; and perishable state ("deployed vX on `<date>`, rollback at …") that would rot in git — anything *actionable* belongs in `~/Desktop/to-do/` instead.
+
+**Three rules that make this hold:**
+1. **Don't commit the memory *files*** into a `.claude/memory/` folder — the harness doesn't auto-load them from there, so they'd be inert paper. Fold the **content** into files that do auto-load.
+2. **Never cite a private memory from a repo file** — it's a dangling reference for every other account. If a repo file needs the fact, put the **fact** in the repo.
+3. **Repo first, then the pointer.** When something is both shareable and worth a personal reminder, write the repo entry first and leave the private memory as a one-line pointer.
+
 ## Things that have bitten before
 
 - **Byte-by-byte async iteration kills throughput.** Early `BridgeSourceClient` on the iOS side used `URLSession.bytes(for:)` which yields one `UInt8` per async step — 20M yields for a 20 MB file stalled the pipeline and surfaced as "Network connection lost" even over localhost. Fixed by switching to `URLSession.download(for:)`. Don't regress the iOS side back to byte-wise async reads; and don't add a server-side chunked-encoding mode that assumes byte-wise client consumption.
