@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1537,6 +1538,49 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 33,
+		name:    "track_analysis.bandwidth_hz/spectrum (file provenance)",
+		// The whole-track frequency spectrum measured by internal/analyze
+		// (see spectrum.go): `bandwidth_hz` is the highest frequency the
+		// file actually carries, `spectrum` is the ~80-byte `1BSP` curve
+		// served by GET /v1/spectrum.
+		//
+		// BOTH NULLABLE, and the NULLs mean different things — neither is
+		// "zero":
+		//
+		//   - spectrum NULL: this row predates the measurement, or the
+		//     track was too short to average. The scan-skip gate's schema
+		//     stamp is what backfills it, not this migration.
+		//   - bandwidth_hz NULL: no answer, INCLUDING the common case
+		//     where the file's content reaches the analyser's own 24 kHz
+		//     ceiling. A row can legitimately have a spectrum and no
+		//     bandwidth, and that is not a partial write — reporting
+		//     24 kHz there would read as 48 kHz's Nyquist and accuse a
+		//     hi-res master of being an upsample. See the spectrum.go
+		//     docblock.
+		//
+		// Deliberately NO backfill in post(): neither value is derivable
+		// from anything already stored — they need the audio — and the
+		// WaveformSchemaVersion bump's re-analysis is exactly that
+		// backfill.
+		//
+		// Idempotency: ALTERs in post() with the precise "duplicate column
+		// name"-only swallow, per the v16 docblock.
+		sql: `-- columns added in post() for idempotency; see migration v16`,
+		post: func(db *sql.DB) error {
+			for _, stmt := range []string{
+				`ALTER TABLE track_analysis ADD COLUMN bandwidth_hz INTEGER`,
+				`ALTER TABLE track_analysis ADD COLUMN spectrum BLOB`,
+			} {
+				if _, err := db.Exec(stmt); err != nil &&
+					!strings.Contains(err.Error(), "duplicate column name") {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
@@ -1835,6 +1879,7 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// them into tags_json.
 	clone.TruePeakDB = nil
 	clone.DRScore = nil
+	clone.BandwidthHz = nil
 	clone.AudioMD5State = ""
 	return json.Marshal(&clone)
 }
@@ -2919,7 +2964,8 @@ func spliceAnalysisReplayGain(t *Track, rg sql.NullFloat64) {
 // but a value is absent. Decoded + spliced by spliceAnalysisScalars.
 // (Renamed from the old keyTempo splice when the quality scalars joined the bundle.)
 const analysisScalarsSQL = `(SELECT json_object('root', key_root, 'mode', key_mode, 'bpm', bpm,
-	 'tp', true_peak_db, 'dr', dr_score, 'md5', audio_md5_state)
+	 'tp', true_peak_db, 'dr', dr_score, 'md5', audio_md5_state,
+	 'bw', bandwidth_hz)
 	 FROM track_analysis WHERE source_path = tracks.path) AS analysis_scalars`
 
 // analysisScalars is the decode target for analysisScalarsSQL's json_object.
@@ -2930,6 +2976,7 @@ type analysisScalars struct {
 	TruePeak *float64 `json:"tp"`
 	DR       *int     `json:"dr"`
 	MD5      *string  `json:"md5"`
+	BW       *int     `json:"bw"`
 }
 
 // spliceAnalysisScalars fills Track.KeyRoot/KeyMode (always — no tag
@@ -2973,6 +3020,10 @@ func spliceAnalysisScalars(t *Track, raw sql.NullString) {
 	}
 	if kt.MD5 != nil {
 		t.AudioMD5State = *kt.MD5
+	}
+	if kt.BW != nil && *kt.BW > 0 {
+		b := *kt.BW
+		t.BandwidthHz = &b
 	}
 }
 
@@ -7039,6 +7090,18 @@ type AnalysisRow struct {
 	DRScore       *int
 	AudioMD5State string
 
+	// BandwidthHz is the highest frequency the file actually carries, or
+	// nil for NO ANSWER — which includes the routine case where the
+	// content reaches the analyser's own 24 kHz ceiling. A row with a
+	// Spectrum and a nil BandwidthHz is complete, not partial. Spliced
+	// onto Track.BandwidthHz at read time.
+	BandwidthHz *int
+
+	// Spectrum is the ~80-byte `1BSP` curve (60 log-spaced bands + the
+	// measured scalars), served verbatim by GET /v1/spectrum. nil when the
+	// row predates the measurement or the track was too short to average.
+	Spectrum []byte
+
 	// AudioMD5Attempts counts MD5 passes that failed for a reason that
 	// says nothing about the file. READ-ONLY on the row: producers
 	// leave it zero and UpsertAnalysis computes the stored value from
@@ -7121,6 +7184,12 @@ type analysisScalarScan struct {
 	// which reads as "eligible for a retry" rather than erroring the
 	// whole analysis lookup.
 	md5Attempts sql.NullInt64
+	bandwidthHz sql.NullInt64
+	// spectrum is a []byte rather than sql.RawBytes: RawBytes aliases the
+	// driver's own buffer and is only valid until the next Scan, and this
+	// value outlives the row on AnalysisRow (the /v1/spectrum handler
+	// serves it after the read returns).
+	spectrum []byte
 }
 
 func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
@@ -7132,6 +7201,8 @@ func (n *analysisScalarScan) applyTo(a *AnalysisRow) {
 	a.DRScore = nullIntPtr(n.drScore)
 	a.AudioMD5State = n.md5State.String
 	a.AudioMD5Attempts = int(n.md5Attempts.Int64)
+	a.BandwidthHz = nullIntPtr(n.bandwidthHz)
+	a.Spectrum = n.spectrum
 }
 
 // float64PtrEqual compares two optional float64s by value: both nil is
@@ -7178,7 +7249,9 @@ func analysisRowsEqual(a, b *AnalysisRow) bool {
 		intPtrEqual(a.BPM, b.BPM) &&
 		float64PtrEqual(a.TruePeakDB, b.TruePeakDB) &&
 		intPtrEqual(a.DRScore, b.DRScore) &&
-		a.AudioMD5State == b.AudioMD5State
+		a.AudioMD5State == b.AudioMD5State &&
+		intPtrEqual(a.BandwidthHz, b.BandwidthHz) &&
+		bytes.Equal(a.Spectrum, b.Spectrum)
 }
 
 // audioMD5AttemptsEqual is deliberately NOT folded into
@@ -7300,6 +7373,16 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 	if a.AudioMD5State != "" {
 		md5StateArg = a.AudioMD5State
 	}
+	// Both stay NULL when absent, and their absence is meaningful — see
+	// the AnalysisRow docblocks. A zero bandwidth would read as a real
+	// measurement of 0 Hz.
+	var bandwidthArg, spectrumArg interface{}
+	if a.BandwidthHz != nil {
+		bandwidthArg = *a.BandwidthHz
+	}
+	if len(a.Spectrum) > 0 {
+		spectrumArg = a.Spectrum
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -7311,8 +7394,9 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			(source_path, waveform_path, waveform_tag, waveform_size,
 			 source_mtime_ns, source_size, schema_version, created_at,
 			 replaygain_track_db, key_root, key_mode, bpm,
-			 true_peak_db, dr_score, audio_md5_state, audio_md5_attempts)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			 true_peak_db, dr_score, audio_md5_state, audio_md5_attempts,
+			 bandwidth_hz, spectrum)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (source_path) DO UPDATE SET
 			waveform_path       = excluded.waveform_path,
 			waveform_tag        = excluded.waveform_tag,
@@ -7328,11 +7412,14 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 			true_peak_db        = excluded.true_peak_db,
 			dr_score            = excluded.dr_score,
 			audio_md5_state     = excluded.audio_md5_state,
-			audio_md5_attempts  = excluded.audio_md5_attempts
+			audio_md5_attempts  = excluded.audio_md5_attempts,
+			bandwidth_hz        = excluded.bandwidth_hz,
+			spectrum            = excluded.spectrum
 	`, a.SourcePath, a.WaveformPath, a.WaveformTag, a.WaveformSize,
 		a.SourceMTimeNS, a.SourceSize, a.SchemaVersion, a.CreatedAt,
 		rgArg, keyRootArg, keyModeArg, bpmArg,
-		truePeakArg, drScoreArg, md5StateArg, a.AudioMD5Attempts); err != nil {
+		truePeakArg, drScoreArg, md5StateArg, a.AudioMD5Attempts,
+		bandwidthArg, spectrumArg); err != nil {
 		return err
 	}
 	// Bump only when something a client can see changed — see the
@@ -7370,14 +7457,16 @@ func (s *Store) getAnalysisLocked(ctx context.Context, sourcePath string) (*Anal
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
 		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts
+		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts,
+		       bandwidth_hz, spectrum
 		FROM track_analysis
 		WHERE source_path = ?
 	`, sourcePath).Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
-		&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts)
+		&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts,
+		&sc.bandwidthHz, &sc.spectrum)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

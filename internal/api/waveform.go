@@ -35,6 +35,12 @@ type AnalysisRecord struct {
 	WaveformTag   string
 	SourceMTimeNS int64
 	SourceSize    int64
+
+	// Spectrum is the `1BSP` file-provenance curve served by
+	// /v1/spectrum, or nil when the row carries none. Bytes rather than a
+	// path because it is ~80 bytes and lives on the analysis row itself —
+	// there is no sidecar to open.
+	Spectrum []byte
 }
 
 // waveform: GET /v1/waveform?path=<rel>
@@ -61,49 +67,76 @@ type AnalysisRecord struct {
 // wire-shape change (new query parameter documented in PROTOCOL.md +
 // the iOS `docs/BridgeProtocol.md` mirror + the client's fetch), so it
 // belongs in a Mirror-PR pair, not here.
-func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
+// analysisSourceMTimeToleranceNS is how far a source's mtime may drift before
+// a cached analysis is considered stale — the same 2 s serveVariant uses
+// (covers FAT32 / SMB granularity; a real edit jumps far more).
+const analysisSourceMTimeToleranceNS int64 = 2_000_000_000
+
+// lookupAnalysisForRequest performs the request handling /v1/waveform and
+// /v1/spectrum share: feature gate, `?path=` presence, the traversal-guarded
+// resolve whose canonical `os.FileInfo` the freshness check needs, and the row
+// lookup.
+//
+// Shared rather than copied because the two endpoints describe the SAME source
+// file — they must agree on which row a path resolves to and on what "the
+// source drifted" means, and two copies of that is a divergence waiting to
+// happen. `kind` supplies the error-code prefix ("waveform" / "spectrum") so
+// each endpoint keeps its own vocabulary.
+//
+// Returns (nil, nil, false) when it has already written a response. The
+// PAYLOAD check stays with the caller: what counts as "present" differs (a
+// sidecar path vs. bytes on the row), and it is deliberately made BEFORE the
+// freshness gate so a row with no payload reads 404 rather than 410.
+func (s *Server) lookupAnalysisForRequest(w http.ResponseWriter, r *http.Request, kind string) (*AnalysisRecord, os.FileInfo, bool) {
 	if s.analysisStore == nil {
-		writeError(w, http.StatusNotFound, "waveform_not_found", "audio analysis is not enabled on this bridge")
-		return
+		writeError(w, http.StatusNotFound, kind+"_not_found", "audio analysis is not enabled on this bridge")
+		return nil, nil, false
 	}
-	q := safeQuery(r)
-	clientPath := q.Get("path")
+	clientPath := safeQuery(r).Get("path")
 	if clientPath == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing path parameter")
-		return
+		return nil, nil, false
 	}
-
-	// Validate the SOURCE path (traversal guard + canonical stat the
-	// freshness check uses). The sidecar itself lives under the
-	// bridge's own data dir, not a user-controlled path.
+	// Validate the SOURCE path (traversal guard + the canonical stat the
+	// freshness check uses). Neither payload is at a user-controlled path.
 	_, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, r, err); ok {
-		return
+		return nil, nil, false
 	}
 	if info.IsDir() {
 		writeError(w, http.StatusBadRequest, "bad_request", "path is a directory")
-		return
+		return nil, nil, false
 	}
-
 	rec, err := s.analysisStore.LookupAnalysis(r.Context(), clientPath)
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge couldn't look up this waveform", err)
+			"the bridge couldn't look up this "+kind, err)
+		return nil, nil, false
+	}
+	return rec, info, true
+}
+
+// analysisSourceDrifted reports whether the source has changed since the
+// analysis was computed. A cached measurement of different bytes is worse than
+// none — it is evidence about a file that no longer exists.
+func analysisSourceDrifted(rec *AnalysisRecord, info os.FileInfo) bool {
+	delta := rec.SourceMTimeNS - info.ModTime().UnixNano()
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta > analysisSourceMTimeToleranceNS || rec.SourceSize != info.Size()
+}
+
+func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
+	rec, info, ok := s.lookupAnalysisForRequest(w, r, "waveform")
+	if !ok {
 		return
 	}
 	if rec == nil || rec.WaveformPath == "" {
 		writeError(w, http.StatusNotFound, "waveform_not_found", "no waveform for this track yet")
 		return
 	}
-
-	// Freshness gate — same mtime tolerance as serveVariant (2 s covers
-	// FAT32 / SMB granularity; real edits jump far more).
-	const mtimeToleranceNS int64 = 2_000_000_000
-	mtimeDelta := rec.SourceMTimeNS - info.ModTime().UnixNano()
-	if mtimeDelta < 0 {
-		mtimeDelta = -mtimeDelta
-	}
-	if mtimeDelta > mtimeToleranceNS || rec.SourceSize != info.Size() {
+	if analysisSourceDrifted(rec, info) {
 		writeError(w, http.StatusGone, "waveform_stale",
 			"waveform is out of date relative to source")
 		return

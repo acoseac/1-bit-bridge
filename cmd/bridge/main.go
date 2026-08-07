@@ -339,6 +339,7 @@ func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath st
 		WaveformTag:   al.WaveformTag,
 		SourceMTimeNS: al.SourceMTimeNS,
 		SourceSize:    al.SourceSize,
+		Spectrum:      al.Spectrum,
 	}, nil
 }
 

@@ -588,6 +588,46 @@ The same offline decode also measures two dynamics scalars, and FLAC sources get
 
 Advertised via the `trackQuality` flag in `/v1/health.features`, present alongside `waveform`/`loudness`/`keyTempo` when analysis is active. All three ride the same analysis pass and surface via `indexed_at` deltas like the other scalars. A bridge upgraded to v1.9 re-analyzes once to backfill (the `wf4` schema stamp); waveform bytes, loudness, key and tempo are unchanged, so clients re-fetch no sidecars — only the new scalars sync.
 
+#### File provenance — `Track.bandwidthHz` + `GET /v1/spectrum` (additive, v1.10)
+
+A whole-track, time-averaged **frequency spectrum**, measured in the same decode as the waveform. It answers one question: *is this file genuinely hi-res, or a CD upsampled to look like one?*
+
+```json
+{ "path": "Music/Album/01.flac", "size": 12345678, "mtime": "…", "bandwidthHz": 22050 }
+```
+
+- `bandwidthHz` is the **highest frequency the file actually carries**, in Hz — the top of the highest FFT bin within 60 dB of the loudest bin, averaged across the whole track. `omitempty`.
+
+**An absent `bandwidthHz` means NO ANSWER — never "no content up there".** Beyond the ordinary cases (analysis hasn't reached the track; it was too short to average), there is one routine and important reason for absence: the bridge decodes at **48 kHz**, so it can only see to **24 kHz**. When a file's content reaches that ceiling, the bridge reports nothing rather than `24000`. It must: 24 kHz is exactly 48 kHz's Nyquist, so a `24000` would let a client conclude "consistent with a 48 kHz source" and accuse a genuinely 96 kHz-native master on the strength of the *bridge's own analysis rate*. A track can therefore carry a spectrum and no `bandwidthHz`, and that pairing is complete, not partial.
+
+This bounds what the field can be used for, and the bound is deliberate: it is sufficient to identify a **CD-sourced upsample** (which cliffs at 22.05 kHz, comfortably inside the ceiling) and insufficient to distinguish 96 kHz-native from 48 kHz-native. Clients must not present an absent value as evidence of anything.
+
+#### `GET /v1/spectrum?path=<rel>` (bearer-authenticated)
+
+Returns the binary spectrum curve for the track at `path` (the same library-relative form `/v1/download` accepts; iOS-shaped lowercase/leading-slash paths resolve case-insensitively).
+
+- `200 OK`, `Content-Type: application/octet-stream`, `ETag: "<8 hex>"`, `Cache-Control: no-cache`. The ETag is over the curve's own bytes. As with `/v1/waveform`, `path` is the URL's only key, so re-analysis rewrites the body under a stable URL — `no-cache` means "store it, but revalidate", and a client holding the curve pays one conditional request for a `304`.
+- `404 spectrum_not_found` — analysis disabled, or no spectrum for this track yet.
+- `410 spectrum_stale` — the source drifted (mtime beyond a 2 s tolerance, or size changed) since the spectrum was computed.
+
+**Body format — `1BSP`, 80 bytes**, little-endian:
+
+| offset | size | field |
+|---|---|---|
+| 0 | 4 | magic `1BSP` |
+| 4 | 1 | format version (`1`) |
+| 5 | 1 | reserved (`0`) |
+| 6 | 4 | analysis sample rate, Hz (`48000`) |
+| 10 | 4 | STFT windows averaged |
+| 14 | 4 | band count (`60`) |
+| 18 | 4 | `bandwidthHz`, or `0` for absent |
+| 22 | 2 | cliff depth in tenths of a dB, `0xFFFF` for absent |
+| 24 | 60 | one band per byte: dB **below** full scale, floored at 90 |
+
+The **60 bands are log-spaced from 20 Hz to the analysis Nyquist** by the same construction the iOS live meter uses for its own bars, so the two are drawn on one axis. **A client MUST position the curve using the sample rate in the header, not its own file rate** — the bridge's bands span 20 Hz → 24 kHz regardless of the file's rate, so a 96 kHz file's curve covers only the lower half of a 48 kHz axis.
+
+Advertised via the `spectrum` flag in `/v1/health.features`, present alongside `waveform` when analysis is active. Pre-feature bridges omit the flag, omit `bandwidthHz`, and return `404` from `/v1/spectrum` — clients treat all three identically. A bridge upgraded to v1.10 re-analyzes its cache once to backfill (the `wf6` schema stamp); waveform bytes, loudness, key, tempo and the quality scalars are all unchanged, so clients re-fetch no waveform sidecars — only the spectrum and `bandwidthHz` are new. `ProtocolVersion` stays `1`.
+
 #### `GET /v1/analysis/stats` (bearer-authenticated)
 
 Authenticated read-only snapshot of the analysis feature, mirroring the admin tile. Cheap (one SQL `COUNT` + a TTL-cached sox precheck).

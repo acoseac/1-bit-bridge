@@ -110,7 +110,22 @@ const (
 	// deliberately narrower mechanism, and stays: it caps non-FLAC rows
 	// precisely so that migration cannot itself trigger a library-wide
 	// re-decode. This bump is the one that is meant to.)
-	WaveformSchemaVersion = "wf5"
+	//
+	// wf5 → wf6: the same decode now also measures a whole-track frequency
+	// spectrum off the STFT that key/tempo already runs (spectrum.go), and
+	// stores its 60-band curve plus the file's measured bandwidth. Nothing
+	// prior changes — waveform bytes, loudness, key, tempo, true peak, DR
+	// and the audio-MD5 verdict are all untouched — so iOS re-fetches no
+	// waveform sidecars; existing rows re-analyse once to backfill the
+	// spectrum and stamp wf6.
+	//
+	// The bump IS the backfill: bandwidth and the curve are not derivable
+	// from anything already stored (they need the audio), so migration v33
+	// deliberately adds its two columns empty and leaves filling them to
+	// this. A track whose content reaches the analyser's own 24 kHz
+	// ceiling gets a curve and NO bandwidth, and stamps wf6 all the same
+	// so it isn't re-enqueued forever.
+	WaveformSchemaVersion = "wf6"
 
 	// WaveformDirSubdir is the fixed subdir under cfg.DataDir where
 	// waveform sidecars land (source-path-mirrored beneath it).
@@ -186,6 +201,12 @@ type Result struct {
 	// BPM is the estimated tempo (onset autocorrelation), or nil when no
 	// confident estimate. Surfaced only when the source has no BPM tag.
 	BPM *int
+
+	// Spectrum is the whole-track averaged frequency spectrum (see
+	// spectrum.go), or nil when too few windows were seen to average one.
+	// Its BandwidthHz is itself often nil — a file whose content reaches
+	// this package's own 24 kHz ceiling gets no bandwidth, deliberately.
+	Spectrum *SpectrumResult
 
 	// TruePeakDB is the BS.1770-style 4x-oversampled true peak in dB
 	// relative to full scale — of the 48 kHz ANALYSIS RENDERING (the
@@ -315,6 +336,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	if bpm, ok := kt.estimateTempo(); ok {
 		res.BPM = &bpm
 	}
+	res.Spectrum = kt.estimateSpectrum()
 	if peak, ok := tp.truePeakDB(); ok {
 		res.TruePeakDB = &peak
 	}
@@ -337,6 +359,8 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 		"loudness", res.HasLoudness,
 		"hasKey", res.KeyRoot != nil,
 		"hasTempo", res.BPM != nil,
+		"hasSpectrum", res.Spectrum != nil,
+		"bandwidthHz", spectrumBandwidthForLog(res.Spectrum),
 		"hasTruePeak", res.TruePeakDB != nil,
 		"hasDR", res.DRScore != nil,
 		"md5", res.AudioMD5State,

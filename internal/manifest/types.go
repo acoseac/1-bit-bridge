@@ -214,6 +214,20 @@ type Track struct {
 	DRScore       *int     `json:"drScore,omitempty"`
 	AudioMD5State string   `json:"audioMD5State,omitempty"`
 
+	// BandwidthHz is the highest frequency the file actually carries, in
+	// Hz — the file-provenance measurement. Analysis-only, spliced from
+	// `track_analysis` at read time and never persisted into `tags_json`
+	// (marshalForStorage zeroes it). Additive; ProtocolVersion stays 1.
+	//
+	// **Absent means NO ANSWER, never "no content up there".** The most
+	// common reason is that the file's content reaches the bridge's own
+	// 24 kHz analysis ceiling, where the honest answer is silence:
+	// 24 kHz is exactly 48 kHz's Nyquist, so reporting it would let a
+	// client read a genuinely 96 kHz-native master as "consistent with a
+	// 48 kHz source". A track can carry a spectrum (GET /v1/spectrum)
+	// and no bandwidth, and that pairing is complete, not partial.
+	BandwidthHz *int `json:"bandwidthHz,omitempty"`
+
 	// WaveformTag signals that an offline-computed peak/RMS waveform
 	// sidecar is available for this track (the audio-analysis feature,
 	// `bridge analyze`). Non-empty ⇒ iOS can fetch

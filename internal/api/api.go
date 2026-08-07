@@ -1469,8 +1469,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistsCrossDevice +
 	// pushEventsSupported + rendererDiscovery + smartPlaylists +
-	// upscaleCompleteEvents + variantBumpsIndex + waveform).
-	feats := make([]string, 0, 20)
+	// spectrum + upscaleCompleteEvents + variantBumpsIndex + waveform).
+	feats := make([]string, 0, 21)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1573,6 +1573,16 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// upscaleCompleteEvents (r < s < u).
 	if s.smartPlaylistStore != nil {
 		feats = append(feats, "smartPlaylists")
+	}
+	// `spectrum` advertises GET /v1/spectrum?path=… plus the additive
+	// `bandwidthHz` field on the manifest Track — the file-provenance
+	// measurement. Gated on the SAME analysis switch as `waveform`, because
+	// they are two products of one decode; a bridge advertising one always
+	// has the machinery for the other, though an individual track may carry
+	// a waveform and no spectrum (analysis predating wf6). Alpha-sorted
+	// between smartPlaylists and trackQuality (sm < sp < t).
+	if s.analysisEnabled {
+		feats = append(feats, "spectrum")
 	}
 	// `trackQuality` advertises the wf4 quality scalars —
 	// Track.truePeakDB (48 kHz-rendering true peak), Track.drScore

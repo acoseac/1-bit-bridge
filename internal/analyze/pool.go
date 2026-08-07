@@ -363,6 +363,13 @@ func (p *Pool) processJob(job poolJob) {
 	row.DRScore = res.DRScore
 	row.AudioMD5State = res.AudioMD5State
 	row.AudioMD5Retryable = res.AudioMD5Retryable
+	if res.Spectrum != nil {
+		// BandwidthHz is copied straight through INCLUDING its nil: a
+		// spectrum with no bandwidth is the routine ceiling-limited case,
+		// not a partial measurement (see spectrum.go).
+		row.BandwidthHz = res.Spectrum.BandwidthHz
+		row.Spectrum = EncodeSpectrum(res.Spectrum)
+	}
 	if err := p.store.UpsertAnalysis(jobCtx, row); err != nil {
 		// Same as the fsync branch: don't remove the sidecar (path is
 		// reused per source, so a prior row could already point at it);
