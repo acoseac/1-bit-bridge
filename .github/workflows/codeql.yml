@@ -55,7 +55,7 @@ jobs:
       # of which fails on its own branch and would break CodeQL on main
       # if merged alone. Bump all three in ONE commit and close the
       # singles — do not merge a partial set to "make progress".
-      - uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+      - uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           languages: ${{ matrix.language }}
           # The `security-extended` suite adds taint-flow + data-flow
