@@ -141,6 +141,12 @@ type keyTempoAnalyzer struct {
 	onset    []float64 // spectral flux per hop (the onset envelope)
 	windows  int
 	havePrev bool
+
+	// spectrum rides the SAME magnitudes chroma and flux are taken from —
+	// see spectrum.go. Folding 60 bands out of a buffer that was about to
+	// be discarded is the whole reason the file-provenance measurement
+	// costs no second decode and no second FFT.
+	spectrum *spectrumAccumulator
 }
 
 func newKeyTempoAnalyzer() *keyTempoAnalyzer {
@@ -155,9 +161,20 @@ func newKeyTempoAnalyzer() *keyTempoAnalyzer {
 		prevMag:  make([]float64, n/2+1),
 	}
 	// Hann window.
+	var hannSum float64
 	for i := 0; i < n; i++ {
 		a.hann[i] = 0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(n-1))
+		hannSum += a.hann[i]
 	}
+	// The spectrum reuses this window rather than its own Blackman-Harris
+	// (which is what iOS's live meter uses, for its -92 dB sidelobes). A
+	// second window would mean a second FFT per hop, against a measurement
+	// whose whole premise is that it is free. Hann's -31.5 dB first sidelobe
+	// rolls off at 18 dB/octave, so leakage from loud low content reaches
+	// the 20+ kHz bins far below the -60 dB-relative content floor —
+	// verified against fixtures rather than assumed, in
+	// TestSpectrumHannLeakageDoesNotInventBandwidth.
+	a.spectrum = newSpectrumAccumulator(hannSum, n/2+1)
 	// Precompute the midrange bin → pitch-class split.
 	binHz := float64(AnalysisSampleRate) / float64(n)
 	for bin := 1; bin <= n/2; bin++ {
@@ -217,6 +234,8 @@ func (a *keyTempoAnalyzer) processWindow() {
 		a.chroma[bc.pc1] += m * bc.w1
 		a.chroma[bc.pc2] += m * bc.w2
 	}
+	// Same magnitudes, one more consumer. Reads a.mag, never retains it.
+	a.spectrum.add(a.mag)
 	// Spectral flux: sum of positive bin-to-bin magnitude increases. The
 	// first window has no predecessor, so it seeds prevMag only.
 	if a.havePrev {
@@ -231,6 +250,12 @@ func (a *keyTempoAnalyzer) processWindow() {
 	copy(a.prevMag, a.mag)
 	a.havePrev = true
 	a.windows++
+}
+
+// estimateSpectrum returns the whole-track averaged spectrum, or nil when too
+// few windows were seen to average one.
+func (a *keyTempoAnalyzer) estimateSpectrum() *SpectrumResult {
+	return a.spectrum.finish()
 }
 
 // estimateKey returns the best-correlating key as (root 0..11 with C=0,
