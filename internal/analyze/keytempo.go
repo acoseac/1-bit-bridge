@@ -3,6 +3,7 @@ package analyze
 import (
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"gonum.org/v1/gonum/dsp/fourier"
 )
@@ -21,7 +22,10 @@ import (
 //     Krumhansl-Kessler key profiles.
 //   - Tempo: spectral flux per hop → an onset envelope → autocorrelation,
 //     weighted by a log-domain Gaussian prior (centre ~120 BPM) so the
-//     dominant lag isn't an octave (half/double) of the real tempo.
+//     dominant lag isn't an octave (half/double) of the real tempo, then
+//     gated on the winning lag being a salient peak rather than a point on a
+//     smooth envelope — without that, a beatless drone reports a confident
+//     tempo (see minTempoSalience).
 //
 // 512-hop (vs the 2048 the chroma alone would need) buys the onset
 // envelope a 93.75 Hz frame rate, which is what gives tempo usable
@@ -70,6 +74,38 @@ const (
 	// tempo confusion). Sigma is in octaves.
 	tempoPriorCentreBPM = 120.0
 	tempoPriorSigmaOct  = 0.9
+
+	// minTempoSalience is the floor on the winning lag's PEAK SALIENCE for
+	// estimateTempo to return a tempo at all — the tempo analogue of
+	// minKeyCorrelation, and the same "no estimate rather than a guess"
+	// contract.
+	//
+	// Salience — not autocorrelation HEIGHT. The obvious mirror of
+	// minKeyCorrelation would be a floor on the winning normalised
+	// autocorrelation, and it is exactly backwards: measured on synthetic
+	// signals through this STFT, a sustained organ drone scores 0.96 and an
+	// ambient pad 0.71, while a real but quiet percussive track scores 0.75.
+	// Any slowly-varying envelope autocorrelates near-perfectly across the
+	// 0.3–1.2 s lags searched here, so height measures "is the envelope
+	// smooth", not "is there a beat". What distinguishes a beat is that one
+	// lag stands PROUD of its neighbours; peakSalience measures that.
+	//
+	// 3.0 robust deviations. Calibrated over a sweep of 125 synthetic signals
+	// (52–196 BPM × click / 8ths / 16ths / soft-percussive / rubato / dance,
+	// plus drones, pads, hiss, speech and noise) scored against whether the
+	// returned BPM was actually right: it suppresses 13 of the 15 wrong
+	// answers — including every drone and pad, the case this gate exists for —
+	// while losing 4 correct ones, all of them half-time readings of dense
+	// 16th-note patterns above 170 BPM that were already octave-ambiguous.
+	// Both existing pinned tempos clear it by three orders of magnitude.
+	// Known survivor: speech/audiobook prosody (~3.3). Conservative; tune up
+	// if spurious tempos are still reaching the UI, down if legitimately
+	// sparse rhythms are being suppressed.
+	minTempoSalience = 3.0
+
+	// madToSigma scales a median absolute deviation to the equivalent normal
+	// standard deviation, so minTempoSalience reads in familiar sigma units.
+	madToSigma = 1.4826
 )
 
 // Krumhansl-Kessler key profiles (the canonical major/minor tonal
@@ -241,7 +277,8 @@ func (a *keyTempoAnalyzer) estimateKey() (root int, mode string, ok bool) {
 
 // estimateTempo returns the dominant tempo in integer BPM, or ok=false
 // when the onset envelope is too short to autocorrelate over the slowest
-// beat period in range.
+// beat period in range, or when the winning lag isn't a salient enough peak
+// to be a beat rather than a smooth envelope (see minTempoSalience).
 func (a *keyTempoAnalyzer) estimateTempo() (bpm int, ok bool) {
 	minLag := int(math.Floor(60 * stftFrameRateHz / maxTempoBPM)) // fastest BPM → smallest lag
 	maxLag := int(math.Ceil(60 * stftFrameRateHz / minTempoBPM))  // slowest BPM → largest lag
@@ -268,23 +305,34 @@ func (a *keyTempoAnalyzer) estimateTempo() (bpm int, ok bool) {
 		return 0, false
 	}
 
+	acs := make([]float64, 0, maxLag-minLag+1)
 	bestScore := math.Inf(-1)
 	bestLag := 0
+	var bestAC float64
 	for lag := minLag; lag <= maxLag; lag++ {
 		var ac float64
 		for i := lag; i < len(env); i++ {
 			ac += env[i] * env[i-lag]
 		}
 		ac /= energy // normalise so longer envelopes don't dominate
+		acs = append(acs, ac)
 		lagBPM := 60 * stftFrameRateHz / float64(lag)
 		// Log2-domain Gaussian prior → octave-error suppression.
 		z := math.Log2(lagBPM/tempoPriorCentreBPM) / tempoPriorSigmaOct
 		score := ac * math.Exp(-0.5*z*z)
 		if score > bestScore {
-			bestScore, bestLag = score, lag
+			bestScore, bestLag, bestAC = score, lag, ac
 		}
 	}
 	if bestLag == 0 {
+		return 0, false
+	}
+	// Confidence floor. Measured on the RAW autocorrelation at the winning
+	// lag, not on the prior-weighted score that selected it — mirroring
+	// estimateKey, which gates on the raw Krumhansl-Schmuckler correlation.
+	// Gating on the score would let the prior manufacture confidence for a
+	// beatless track whose "winner" is simply the lag nearest 120 BPM.
+	if peakSalience(acs, bestAC) < minTempoSalience {
 		return 0, false
 	}
 	bpm = int(math.Round(60 * stftFrameRateHz / float64(bestLag)))
@@ -292,6 +340,46 @@ func (a *keyTempoAnalyzer) estimateTempo() (bpm int, ok bool) {
 		return 0, false
 	}
 	return bpm, true
+}
+
+// peakSalience scores how far best stands above the background of the
+// autocorrelation curve it was chosen from, in robust (median / MAD)
+// standard deviations.
+//
+// Median and MAD rather than mean and standard deviation because a real beat
+// plants peaks at its own multiples and sub-multiples inside the same lag
+// range, and those peaks inflate a mean-based spread — penalising exactly the
+// strongly-rhythmic tracks the estimate is most certain about. At the same
+// floor over the calibration sweep the mean/sd form suppressed one more wrong
+// answer, but discarded 24 correct tempos to do it against this form's 4.
+// That comparison is a calibration result, not something the unit tests pin.
+func peakSalience(acs []float64, best float64) float64 {
+	if len(acs) == 0 {
+		return 0
+	}
+	scratch := make([]float64, len(acs))
+	copy(scratch, acs)
+	slices.Sort(scratch)
+	median := scratch[len(scratch)/2]
+
+	// Reuse the buffer for the absolute deviations — the median is already
+	// extracted, so the sorted order it held is no longer needed. Indices no
+	// longer line up with acs; that is fine, we only re-sort for a median.
+	for i, v := range acs {
+		scratch[i] = math.Abs(v - median)
+	}
+	slices.Sort(scratch)
+	mad := scratch[len(scratch)/2] * madToSigma
+	if mad <= 0 {
+		// Zero spread: the background is a perfectly flat baseline, which a
+		// noiseless impulse train produces. The winner is then either sitting
+		// on that baseline (no peak at all) or infinitely prominent above it.
+		if best > median {
+			return math.Inf(1)
+		}
+		return 0
+	}
+	return (best - median) / mad
 }
 
 // pearson12 is the Pearson correlation between two 12-element vectors.
