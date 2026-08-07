@@ -245,6 +245,10 @@ type AnalysisLookup struct {
 	WaveformTag   string
 	SourceMTimeNS int64
 	SourceSize    int64
+	// Spectrum is the `1BSP` file-provenance curve, or nil when the row
+	// carries none (analysis predating wf6, or a track too short to
+	// average).
+	Spectrum []byte
 }
 
 // LookupAnalysis returns the cached waveform metadata for one source
@@ -266,5 +270,6 @@ func (p *Provider) LookupAnalysis(ctx context.Context, sourcePath string) (*Anal
 		WaveformTag:   a.WaveformTag,
 		SourceMTimeNS: a.SourceMTimeNS,
 		SourceSize:    a.SourceSize,
+		Spectrum:      a.Spectrum,
 	}, nil
 }

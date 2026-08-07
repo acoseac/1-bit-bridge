@@ -35,6 +35,12 @@ type AnalysisRecord struct {
 	WaveformTag   string
 	SourceMTimeNS int64
 	SourceSize    int64
+
+	// Spectrum is the `1BSP` file-provenance curve served by
+	// /v1/spectrum, or nil when the row carries none. Bytes rather than a
+	// path because it is ~80 bytes and lives on the analysis row itself —
+	// there is no sidecar to open.
+	Spectrum []byte
 }
 
 // waveform: GET /v1/waveform?path=<rel>
