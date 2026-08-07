@@ -232,9 +232,12 @@ func TestPeakSalience(t *testing.T) {
 	if math.Abs(got-want) > 0.05 {
 		t.Errorf("spread baseline: salience = %.4f, want ~%.4f", got, want)
 	}
-	// Empty input must not panic or claim confidence.
-	if got := peakSalience(nil, 1.0); got != 0 {
-		t.Errorf("empty acs: salience = %v, want 0", got)
+	// Too few lags to estimate a background at all must not claim confidence —
+	// distinct from the measured-zero-spread case above, where many lags agree.
+	for _, degenerate := range [][]float64{nil, {}, {0.2}} {
+		if got := peakSalience(degenerate, 1.0); got != 0 {
+			t.Errorf("acs=%v: salience = %v, want 0", degenerate, got)
+		}
 	}
 }
 

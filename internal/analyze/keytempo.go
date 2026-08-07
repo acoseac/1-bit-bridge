@@ -354,7 +354,12 @@ func (a *keyTempoAnalyzer) estimateTempo() (bpm int, ok bool) {
 // answer, but discarded 24 correct tempos to do it against this form's 4.
 // That comparison is a calibration result, not something the unit tests pin.
 func peakSalience(acs []float64, best float64) float64 {
-	if len(acs) == 0 {
+	// Fewer than two lags cannot ESTIMATE a background — distinct from the
+	// measured-zero-spread case below, where many lags agree on a baseline and
+	// a peak above it is real. Unreachable from estimateTempo (its lag range is
+	// fixed at 86 entries by the tempo bounds), but the helper must not answer
+	// "certain" from a single observation if it ever gains another caller.
+	if len(acs) < 2 {
 		return 0
 	}
 	scratch := make([]float64, len(acs))
