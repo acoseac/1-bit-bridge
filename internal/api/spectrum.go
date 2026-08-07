@@ -23,33 +23,11 @@ import (
 // distinction matters because the client renders this as evidence about a
 // file's provenance, and "no data" must never render as "no bandwidth".
 func (s *Server) spectrum(w http.ResponseWriter, r *http.Request) {
-	if s.analysisStore == nil {
-		writeError(w, http.StatusNotFound, "spectrum_not_found",
-			"audio analysis is not enabled on this bridge")
-		return
-	}
-	q := safeQuery(r)
-	clientPath := q.Get("path")
-	if clientPath == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "missing path parameter")
-		return
-	}
-
-	// Validate the SOURCE path (traversal guard + the canonical stat the
-	// freshness check needs). The curve itself never touches the filesystem.
-	_, info, err := s.resolver.ResolveChecked(clientPath)
-	if ok := writeResolveError(w, r, err); ok {
-		return
-	}
-	if info.IsDir() {
-		writeError(w, http.StatusBadRequest, "bad_request", "path is a directory")
-		return
-	}
-
-	rec, err := s.analysisStore.LookupAnalysis(r.Context(), clientPath)
-	if err != nil {
-		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
-			"the bridge couldn't look up this spectrum", err)
+	// Feature gate, path validation and the row lookup are shared with
+	// /v1/waveform — the two describe the same source file, so they must
+	// agree on which row a path resolves to and on what "drifted" means.
+	rec, info, ok := s.lookupAnalysisForRequest(w, r, "spectrum")
+	if !ok {
 		return
 	}
 	if rec == nil || len(rec.Spectrum) == 0 {
@@ -57,17 +35,9 @@ func (s *Server) spectrum(w http.ResponseWriter, r *http.Request) {
 			"no spectrum for this track yet")
 		return
 	}
-
-	// Freshness gate — identical tolerance to /v1/waveform (2 s covers
-	// FAT32 / SMB granularity; a real edit jumps far more). A spectrum
-	// measured from different bytes is worse than no spectrum: it is
+	// A curve measured from different bytes is worse than no curve: it is
 	// evidence about a file that no longer exists.
-	const mtimeToleranceNS int64 = 2_000_000_000
-	mtimeDelta := rec.SourceMTimeNS - info.ModTime().UnixNano()
-	if mtimeDelta < 0 {
-		mtimeDelta = -mtimeDelta
-	}
-	if mtimeDelta > mtimeToleranceNS || rec.SourceSize != info.Size() {
+	if analysisSourceDrifted(rec, info) {
 		writeError(w, http.StatusGone, "spectrum_stale",
 			"spectrum is out of date relative to source")
 		return

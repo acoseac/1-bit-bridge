@@ -91,8 +91,14 @@ type BandRange struct{ Lo, Hi int }
 // single next unclaimed bin, which pushes its neighbours up.
 func MakeBandMap(sampleRate float64, fftSize, bandCount int, minimumHz float64) []BandRange {
 	lastBin := fftSize/2 - 1
+	// minimumHz is validated too: this is exported, and a non-positive or
+	// non-finite floor makes `fMin` non-positive, which makes `logStep` NaN
+	// or Inf and silently degrades every band into a single-bin range. A
+	// degenerate map is worse than none — it would draw a curve that looks
+	// plausible and means nothing.
 	if !(sampleRate > 0) || math.IsInf(sampleRate, 0) || math.IsNaN(sampleRate) ||
-		lastBin < bandCount || bandCount <= 0 {
+		lastBin < bandCount || bandCount <= 0 ||
+		!(minimumHz > 0) || math.IsInf(minimumHz, 0) {
 		return nil
 	}
 	binHz := sampleRate / float64(fftSize)
@@ -307,11 +313,11 @@ func EncodeSpectrum(r *SpectrumResult) []byte {
 	out := make([]byte, 0, spectrumHeaderLen+len(r.Bands))
 	out = append(out, '1', 'B', 'S', 'P', SpectrumSchemaVersion, 0)
 	out = binary.LittleEndian.AppendUint32(out, uint32(AnalysisSampleRate))
-	out = binary.LittleEndian.AppendUint32(out, uint32(clampNonNegative(r.Windows)))
+	out = binary.LittleEndian.AppendUint32(out, clampU32(r.Windows))
 	out = binary.LittleEndian.AppendUint32(out, uint32(SpectrumBandCount))
 	bw := uint32(0)
 	if r.BandwidthHz != nil && *r.BandwidthHz > 0 {
-		bw = uint32(clampNonNegative(*r.BandwidthHz))
+		bw = clampU32(*r.BandwidthHz)
 	}
 	out = binary.LittleEndian.AppendUint32(out, bw)
 	out = binary.LittleEndian.AppendUint16(out, encodeCliff(r.CliffDepthDB))
@@ -348,14 +354,22 @@ func quantiseBandDB(db float64) byte {
 	return byte(math.Min(255, math.Max(0, math.Round(-clamped))))
 }
 
-func clampNonNegative(v int) int {
+// clampU32 narrows an int to the wire's uint32.
+//
+// The comparison goes through uint64 because `v > math.MaxUint32` does not
+// COMPILE on a 32-bit platform — the untyped constant overflows `int` — and
+// the package genuinely failed `GOARCH=386` before this. Nothing ships 32-bit
+// today (all six cross-compile targets are amd64/arm64), which is exactly why
+// it went unnoticed; a Pi-class 32-bit host is not far-fetched for this
+// codebase.
+func clampU32(v int) uint32 {
 	if v < 0 {
 		return 0
 	}
-	if v > math.MaxUint32 {
+	if uint64(v) > math.MaxUint32 {
 		return math.MaxUint32
 	}
-	return v
+	return uint32(v)
 }
 
 // spectrumBandwidthForLog renders the measured bandwidth for the analysis log

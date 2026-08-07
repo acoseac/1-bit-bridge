@@ -213,14 +213,22 @@ func TestMakeBandMapRefusesDegenerateInput(t *testing.T) {
 		name               string
 		rate               float64
 		fftSize, bandCount int
+		minimumHz          float64
 	}{
-		{"zero rate", 0, 4096, 60},
-		{"negative rate", -48000, 4096, 60},
-		{"NaN rate", math.NaN(), 4096, 60},
-		{"fft too small for band count", 48000, 64, 60},
-		{"zero bands", 48000, 4096, 0},
+		{"zero rate", 0, 4096, 60, 20},
+		{"negative rate", -48000, 4096, 60, 20},
+		{"NaN rate", math.NaN(), 4096, 60, 20},
+		{"fft too small for band count", 48000, 64, 60, 20},
+		{"zero bands", 48000, 4096, 0, 20},
+		// A non-positive or non-finite floor makes logStep NaN/Inf and
+		// degrades every band to a single bin — a curve that looks
+		// plausible and means nothing, which is worse than no curve.
+		{"zero minimumHz", 48000, 4096, 60, 0},
+		{"negative minimumHz", 48000, 4096, 60, -20},
+		{"NaN minimumHz", 48000, 4096, 60, math.NaN()},
+		{"Inf minimumHz", 48000, 4096, 60, math.Inf(1)},
 	} {
-		if got := MakeBandMap(c.rate, c.fftSize, c.bandCount, 20); got != nil {
+		if got := MakeBandMap(c.rate, c.fftSize, c.bandCount, c.minimumHz); got != nil {
 			t.Errorf("%s: got %d bands, want nil", c.name, len(got))
 		}
 	}
@@ -368,7 +376,7 @@ func TestEncodeSpectrumSurvivesHostileValues(t *testing.T) {
 	nan := math.NaN()
 	huge := 1e300
 	for _, cliff := range []*float64{nil, &inf, &nan, &huge} {
-		hz := math.MaxInt64
+		hz := math.MaxInt
 		blob := EncodeSpectrum(&SpectrumResult{
 			Bands: bands, BandwidthHz: &hz, CliffDepthDB: cliff, Windows: -5,
 		})
