@@ -256,6 +256,72 @@ func TestSpectrumHannLeakageDoesNotInventBandwidth(t *testing.T) {
 	}
 }
 
+// TestSpectrumCliffSurvivesQuietContent is the regression pin for the bug the
+// live library exposed, and the one property the original fixtures could not
+// test: the cliff must not saturate against the display floor.
+//
+// The cliff is `below - above`, so clamping `above` at the -90 dB DISPLAY
+// floor caps it at `below - floor` — a bound that depends entirely on how loud
+// the content is. Every original fixture was LOUD (content near -5 dBFS just
+// under the wall), leaving ~85 dB of headroom, so a wall measured 92-96 dB and
+// the bug was invisible. Real music at 20 kHz sits at -57…-85 dBFS, leaving
+// 5-30 dB — so on bridge.ars.md, 317 hi-res tracks sat in the 44.1 kHz window
+// and NOT ONE could be flagged, because 177 of 180 bins above the ceiling were
+// pinned at the floor.
+//
+// This fixture is the same hard wall at REAL-WORLD level. Against the display
+// floor it measures ~25 dB (no threshold worth having is reachable); against
+// the measurement floor it measures ~95 dB.
+func TestSpectrumCliffSurvivesQuietContent(t *testing.T) {
+	// -20 dB, putting the content just under the wall at ~-75 dBFS — the
+	// middle of the range MEASURED on real files (-57 to -85). An earlier
+	// draft used -60 dB, which lands at -114 dBFS: below any real file's
+	// noise floor, and quiet enough to saturate even the -160 measurement
+	// floor (max achievable cliff there is `below - floor` = 45 dB). The
+	// fixture was unrealistic, not the code — the same mistake, one floor
+	// down, and worth stating because it bounds the metric honestly.
+	const quietGain = 0.1
+	samples := synth(6, 20_500, 48, 22_050, 0x5EED)
+	for i := range samples {
+		samples[i] *= quietGain
+	}
+	res := analyzeSpectrum(t, samples)
+	if res.BandwidthHz == nil {
+		t.Fatal("no bandwidth measured on a quiet walled fixture")
+	}
+	if res.CliffDepthDB == nil {
+		t.Fatal("no cliff measured")
+	}
+	// 60 dB is the threshold clients apply; a real upsample measures ~99.
+	if *res.CliffDepthDB < 60 {
+		t.Errorf("cliff = %.1f dB on a hard wall at realistic level — the "+
+			"measurement is saturating against the display floor again, and "+
+			"no upsample can ever be detected", *res.CliffDepthDB)
+	}
+	// And the quiet fixture must still find the wall where it is.
+	if got := *res.BandwidthHz; got < 21_400 || got > 22_500 {
+		t.Errorf("bandwidth = %d Hz, want ~22050", got)
+	}
+}
+
+// TestSpectrumBandsKeepTheDisplayFloor: the stored CURVE still uses the -90 dB
+// display floor, because it is drawn on the same axis as iOS's live meter. The
+// measurement floor must not leak into it.
+func TestSpectrumBandsKeepTheDisplayFloor(t *testing.T) {
+	samples := synth(4, 20_500, 48, 22_050, 0x5EED)
+	for i := range samples {
+		samples[i] *= 0.0001
+	}
+	res := analyzeSpectrum(t, samples)
+	for i, db := range res.Bands {
+		if db < spectrumFloorDB {
+			t.Fatalf("band %d = %.1f dB, below the %.0f dB display floor — the "+
+				"curve would no longer share a scale with the live meter",
+				i, db, spectrumFloorDB)
+		}
+	}
+}
+
 // TestSpectrumGroundTruth is the §6.2 table.
 func TestSpectrumGroundTruth(t *testing.T) {
 	cases := []struct {

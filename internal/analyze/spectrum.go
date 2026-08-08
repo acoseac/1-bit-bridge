@@ -42,8 +42,11 @@ const (
 	// `makeBandMap(minimumHz:)` default.
 	spectrumMinHz = 20.0
 
-	// SpectrumSchemaVersion versions the `1BSP` blob's layout.
-	SpectrumSchemaVersion = 1
+	// SpectrumSchemaVersion versions the `1BSP` blob. Bumped to 2 when the
+	// cliff's measurement floor changed: a v1 blob's cliff is clamped at
+	// ~32 dB and would read as "no wall" against any useful threshold, so
+	// the two are not comparable and a consumer must not mix them.
+	SpectrumSchemaVersion = 2
 
 	// spectrumContentFloorDB is how far below the loudest bin a bin may sit
 	// and still count as carrying content — the same rule iOS applies, and
@@ -61,9 +64,47 @@ const (
 	// edge, without eating into the 22.05 kHz case that matters.
 	bandwidthCeilingGuardHz = 500.0
 
-	// spectrumFloorDB is the level a band or bin is clamped to, matching
+	// spectrumFloorDB is the level a stored BAND is clamped to, matching
 	// iOS's `MeterAnalysis.meterFloorDB` so the two curves share a scale.
+	// Display only — see spectrumMeasurementFloorDB for why the bandwidth
+	// and cliff must not use it.
 	spectrumFloorDB = -90.0
+
+	// spectrumMeasurementFloorDB is the floor for the BIN-domain
+	// measurements (bandwidth + cliff), and it is deliberately far below
+	// the display floor.
+	//
+	// **-90 dB destroys the cliff measurement, and the failure is silent.**
+	// The cliff is `below - above`, so clamping `above` caps it at
+	// `below - floor`. At 20 kHz real music sits at -57…-85 dBFS, leaving
+	// 5-30 dB of headroom — so every real file, wall or not, measured
+	// 10-32 dB and NOTHING could ever reach a 60 dB threshold. Measured on
+	// the live bridge.ars.md library: 317 hi-res tracks sat in the 44.1 kHz
+	// window and not one was flagged, because 177 of 180 bins above the
+	// ceiling were pinned at the floor.
+	//
+	// Synthetic fixtures hid it: theirs were loud (content near -5 dBFS
+	// just under the wall), so `below - floor` was ~85 dB and a wall
+	// measured 92-96 dB. The fixture and reality differed in ABSOLUTE
+	// LEVEL, which silently changed the metric's dynamic range.
+	//
+	// Unclamped, the populations separate decisively — a real sox upsample
+	// of a real CD rip measures 99.2 dB while the library's most extreme
+	// genuine in-window track measures 45.7 dB. See minCliffDB.
+	//
+	// -160 is below any real 24-bit noise floor, so it is "unclamped" in
+	// practice while still bounding log(0).
+	//
+	// The calibration behind the 60 dB threshold clients apply (documented
+	// in PROTOCOL.md — the bridge itself renders no verdict):
+	//
+	//   real sox upsample of a real CD rip .............. 99.2 dB
+	//   its CD original (declares 44.1; the rate gate excludes it) 92.6 dB
+	//   live library, hi-res in the 44.1 kHz window ..... 25.2-45.7 dB
+	//   live library, genuinely band-limited masters ....  9.7-20.3 dB
+	//
+	// Sampled from bridge.ars.md, 2026-08-08.
+	spectrumMeasurementFloorDB = -160.0
 
 	// minSpectrumWindows is the fewest STFT windows worth averaging — about
 	// a second of audio. Below it the top bands are empty because barely
@@ -232,11 +273,22 @@ func (s *spectrumAccumulator) finish() *SpectrumResult {
 	return res
 }
 
+// powerToDB converts to dB against the BAND display floor.
 func powerToDB(power float64) float64 {
+	return powerToDBFloor(power, spectrumFloorDB)
+}
+
+// powerToDBMeasured converts against the much lower measurement floor — the
+// bandwidth and cliff must not saturate against the display scale.
+func powerToDBMeasured(power float64) float64 {
+	return powerToDBFloor(power, spectrumMeasurementFloorDB)
+}
+
+func powerToDBFloor(power, floorDB float64) float64 {
 	if power <= 0 {
-		return spectrumFloorDB
+		return floorDB
 	}
-	return math.Max(spectrumFloorDB, 10*math.Log10(power))
+	return math.Max(floorDB, 10*math.Log10(power))
 }
 
 // measureCeiling finds the highest bin carrying content and how steeply the
@@ -247,7 +299,7 @@ func (s *spectrumAccumulator) measureCeiling(div float64) (hz int, cliffDB float
 	binHz := float64(AnalysisSampleRate) / float64(stftWindow)
 	peakDB := math.Inf(-1)
 	for bin := 1; bin < len(s.binPower); bin++ {
-		if db := powerToDB(s.binPower[bin] / div); db > peakDB {
+		if db := powerToDBMeasured(s.binPower[bin] / div); db > peakDB {
 			peakDB = db
 		}
 	}
@@ -258,7 +310,7 @@ func (s *spectrumAccumulator) measureCeiling(div float64) (hz int, cliffDB float
 
 	topBin := 0
 	for bin := len(s.binPower) - 1; bin >= 1; bin-- {
-		if powerToDB(s.binPower[bin]/div) >= floorDB {
+		if powerToDBMeasured(s.binPower[bin]/div) >= floorDB {
 			topBin = bin
 			break
 		}
@@ -295,7 +347,7 @@ func (s *spectrumAccumulator) meanBinDB(fromHz, toHz, binHz, div float64) (float
 	}
 	total := 0.0
 	for bin := lo; bin < hi; bin++ {
-		total += powerToDB(s.binPower[bin] / div)
+		total += powerToDBMeasured(s.binPower[bin] / div)
 	}
 	return total / float64(hi-lo), true
 }

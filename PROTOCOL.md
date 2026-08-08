@@ -543,7 +543,7 @@ A 22‑byte little-endian header followed by `count` × `[int8 min, int8 max]` p
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 4 | magic `"1BWF"` |
-| 4 | 1 | format version (`1`) |
+| 4 | 1 | format version (`2`) |
 | 5 | 1 | flags (`0`) |
 | 6 | 4 | `uint32` sample rate (Hz; `48000`) |
 | 10 | 4 | `uint32` samples per bucket (`4800` = 0.1 s) |
@@ -626,7 +626,19 @@ Returns the binary spectrum curve for the track at `path` (the same library-rela
 
 The **60 bands are log-spaced from 20 Hz to the analysis Nyquist** by the same construction the iOS live meter uses for its own bars, so the two are drawn on one axis. **A client MUST position the curve using the sample rate in the header, not its own file rate** — the bridge's bands span 20 Hz → 24 kHz regardless of the file's rate, so a 96 kHz file's curve covers only the lower half of a 48 kHz axis.
 
-Advertised via the `spectrum` flag in `/v1/health.features`, present alongside `waveform` when analysis is active. Pre-feature bridges omit the flag, omit `bandwidthHz`, and return `404` from `/v1/spectrum` — clients treat all three identically. A bridge upgraded to v1.10 re-analyzes its cache once to backfill (the `wf6` schema stamp); waveform bytes, loudness, key, tempo and the quality scalars are all unchanged, so clients re-fetch no waveform sidecars — only the spectrum and `bandwidthHz` are new. `ProtocolVersion` stays `1`.
+**Format version 2 is not comparable with version 1.** A v1 blob's cliff was measured against the −90 dB display floor, which capped it at `below − floor`; since real music at 20 kHz sits at −57…−85 dBFS, every v1 cliff reads 10–32 dB and no useful threshold is reachable. v2 measures against −160 dB. A client MUST reject a version it does not know rather than compare across the two.
+
+**Reading the cliff.** It is how far the spectrum falls across the measured ceiling, in dB. Calibrated against real material rather than synthetic signals:
+
+| material | cliff |
+|---|---|
+| a real resampler wall (CD upsampled to 96 kHz with `sox`) | **99 dB** |
+| a genuine hi-res file whose content stops in the 44.1 kHz window | 25–46 dB |
+| a genuinely band-limited master (16–20 kHz) | 10–20 dB |
+
+**≥ 60 dB** is the recommended threshold for calling a ceiling a resampler's wall — it sits in the gap between the most extreme genuine file measured and a real upsample. The metric's own bound is `below − (−160)`, so content quieter than about −100 dBFS saturates and reads shallow; that is far below anything a real file carries as content, and the failure direction is a missed detection, never a false one.
+
+Advertised via the `spectrum` flag in `/v1/health.features`, present alongside `waveform` when analysis is active. Pre-feature bridges omit the flag, omit `bandwidthHz`, and return `404` from `/v1/spectrum` — clients treat all three identically. A bridge upgraded to v1.10 re-analyzes its cache once to backfill (the `wf7` schema stamp); waveform bytes, loudness, key, tempo and the quality scalars are all unchanged, so clients re-fetch no waveform sidecars — only the spectrum and `bandwidthHz` are new. `ProtocolVersion` stays `1`.
 
 #### `GET /v1/analysis/stats` (bearer-authenticated)
 
