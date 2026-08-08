@@ -543,7 +543,7 @@ A 22‑byte little-endian header followed by `count` × `[int8 min, int8 max]` p
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 4 | magic `"1BWF"` |
-| 4 | 1 | format version (`2`) |
+| 4 | 1 | format version (`1`) |
 | 5 | 1 | flags (`0`) |
 | 6 | 4 | `uint32` sample rate (Hz; `48000`) |
 | 10 | 4 | `uint32` samples per bucket (`4800` = 0.1 s) |
@@ -615,7 +615,7 @@ Returns the binary spectrum curve for the track at `path` (the same library-rela
 | offset | size | field |
 |---|---|---|
 | 0 | 4 | magic `1BSP` |
-| 4 | 1 | format version (`1`) |
+| 4 | 1 | format version (`2`) |
 | 5 | 1 | reserved (`0`) |
 | 6 | 4 | analysis sample rate, Hz (`48000`) |
 | 10 | 4 | STFT windows averaged |
