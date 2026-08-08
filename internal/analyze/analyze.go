@@ -125,7 +125,19 @@ const (
 	// this. A track whose content reaches the analyser's own 24 kHz
 	// ceiling gets a curve and NO bandwidth, and stamps wf6 all the same
 	// so it isn't re-enqueued forever.
-	WaveformSchemaVersion = "wf6"
+	//
+	// wf6 → wf7: the spectrum's CLIFF was measured against the -90 dB
+	// display floor, which capped it at `below - floor` — and since real
+	// music at 20 kHz sits at -57…-85 dBFS, every file measured 10-32 dB
+	// and no threshold worth having could ever be reached. Caught on the
+	// live library: 317 hi-res tracks in the 44.1 kHz window, zero flagged,
+	// 177 of 180 bins above the ceiling pinned at the floor. The cliff now
+	// measures against -160 dB, where a real upsample reads 99 dB and a
+	// genuine band-limited master reads 10-20. Bandwidth is UNCHANGED by
+	// this (it is peak-relative, not floor-bound) — but the cliff lives in
+	// the spectrum blob, so the blob must be regenerated, and only a stamp
+	// bump does that.
+	WaveformSchemaVersion = "wf7"
 
 	// WaveformDirSubdir is the fixed subdir under cfg.DataDir where
 	// waveform sidecars land (source-path-mirrored beneath it).
