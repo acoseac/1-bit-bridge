@@ -304,6 +304,39 @@ func TestSpectrumCliffSurvivesQuietContent(t *testing.T) {
 	}
 }
 
+// TestSpectrumQuietFileStillReportsItsRealBandwidth is the mirror-image trap
+// to the one above, one floor down: having moved the MEASUREMENT off the
+// display floor, the fix must not then apply the measurement floor to a
+// THRESHOLD comparison.
+//
+// The floor belongs to the average. Clamping a mean is right — one near-zero
+// bin would otherwise drag it somewhere meaningless. Clamping a comparison can
+// only ever inflate: on a quiet file (peak -110 dB, so the content floor sits
+// at -170) every bin below -160 is lifted to -160, passes the guard, and the
+// top bin becomes the LAST bin. Here that trips the ceiling guard, so the
+// bandwidth is reported as absent rather than as a wrong number — the safe
+// direction, but still a real measurement silently lost. iOS, whose Nyquist
+// follows the file rather than a fixed 48 kHz, reports the full Nyquist
+// instead; same bug, louder symptom.
+func TestSpectrumQuietFileStillReportsItsRealBandwidth(t *testing.T) {
+	// Quiet enough that the content floor lands below the measurement floor,
+	// which is the only condition under which the clamp can bite.
+	const veryQuietGain = 0.00002
+	samples := synth(6, 19_000, 96, 20_000, 0x5EED)
+	for i := range samples {
+		samples[i] *= veryQuietGain
+	}
+	res := analyzeSpectrum(t, samples)
+	if res.BandwidthHz == nil {
+		t.Fatal("no bandwidth on a very quiet file walled at 20 kHz — the " +
+			"content-floor scan is clamping, so every bin passes, the top bin " +
+			"becomes the last bin and the ceiling guard suppresses the answer")
+	}
+	if got := *res.BandwidthHz; got < 18_500 || got > 21_000 {
+		t.Errorf("bandwidth = %d Hz on a file walled at 20 kHz, want ~20000", got)
+	}
+}
+
 // TestSpectrumBandsKeepTheDisplayFloor: the stored CURVE still uses the -90 dB
 // display floor, because it is drawn on the same axis as iOS's live meter. The
 // measurement floor must not leak into it.

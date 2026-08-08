@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
@@ -33,8 +34,27 @@ func spectrumFixture(t *testing.T, mutate func(*AnalysisRecord)) (*httptest.Serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	// An 80-byte `1BSP` blob — the real shape, not a placeholder.
-	curve := append([]byte("1BSP"), make([]byte, 76)...)
+	// A real `1BSP` blob, built by the real encoder.
+	//
+	// This is the only place `internal/api` reaches into `internal/analyze`,
+	// and it is a TEST-ONLY import, deliberately: production keeps the two
+	// apart (see the note in waveform.go — cmd/bridge's wiring closure
+	// translates). Here the coupling is the point. A hand-rolled fixture
+	// asserts what its author BELIEVES the wire shape is, which is how this
+	// one came to claim "the real shape, not a placeholder" while being
+	// 80 bytes against an 84-byte contract — the doc and the fixture were
+	// wrong together, so nothing could catch it. Going through
+	// `EncodeSpectrum` means a future header change breaks this test by
+	// construction. Same reasoning as `internal/admin`'s eligibility
+	// lockstep tests importing `internal/transcode`.
+	curve := analyze.EncodeSpectrum(&analyze.SpectrumResult{
+		Bands: make([]float64, analyze.SpectrumBandCount),
+	})
+	if want := 24 + analyze.SpectrumBandCount; len(curve) != want {
+		t.Fatalf("1BSP blob is %d bytes, want %d (a 24-byte header plus one "+
+			"byte per band) — PROTOCOL.md documents this length and clients "+
+			"validate against it", len(curve), want)
+	}
 	rec := &AnalysisRecord{
 		SourcePath:    srcRel,
 		SourceMTimeNS: info.ModTime().UnixNano(),

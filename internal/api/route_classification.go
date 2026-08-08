@@ -224,7 +224,7 @@ func (s *Server) routeRegistry() []route {
 		// 2 s ctx-timeout like /v1/upscale/stats so a wedged
 		// CountAnalysis query surfaces as 5xx fast.
 		{pattern: "GET /v1/waveform", kind: boundedRoute, handler: s.authed(s.waveform)},
-		// The spectrum is ~80 bytes — boundedRoute like its waveform
+		// The spectrum is ~84 bytes — boundedRoute like its waveform
 		// sibling, never a streamingRoute.
 		{pattern: "GET /v1/spectrum", kind: boundedRoute, handler: s.authed(s.spectrum)},
 		{pattern: "GET /v1/analysis/stats", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.analysisStats))},

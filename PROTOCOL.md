@@ -610,7 +610,7 @@ Returns the binary spectrum curve for the track at `path` (the same library-rela
 - `404 spectrum_not_found` — analysis disabled, or no spectrum for this track yet.
 - `410 spectrum_stale` — the source drifted (mtime beyond a 2 s tolerance, or size changed) since the spectrum was computed.
 
-**Body format — `1BSP`, 80 bytes**, little-endian:
+**Body format — `1BSP`, 84 bytes**, little-endian:
 
 | offset | size | field |
 |---|---|---|
