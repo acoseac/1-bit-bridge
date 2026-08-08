@@ -279,9 +279,26 @@ func powerToDB(power float64) float64 {
 }
 
 // powerToDBMeasured converts against the much lower measurement floor — the
-// bandwidth and cliff must not saturate against the display scale.
+// cliff must not saturate against the display scale.
+//
+// APPLIES TO THE AVERAGE ONLY, NEVER TO A THRESHOLD COMPARISON. Clamping a
+// mean is right: one near-zero bin would otherwise drag it somewhere
+// meaningless. Clamping a comparison can only ever inflate — on a quiet file
+// (peak −110 dB, so the content floor sits at −170) every bin below −160 is
+// lifted to −160, passes the guard, and the top bin becomes the last bin.
+// Threshold scans use binDB.
 func powerToDBMeasured(power float64) float64 {
 	return powerToDBFloor(power, spectrumMeasurementFloorDB)
+}
+
+// binDB is a bin's level with NO floor — for the scans that COMPARE a bin
+// against a threshold, where a floor is not a safety net but a thumb on the
+// scale. Silence reads as −Inf, which is what "no content here" means.
+func binDB(power float64) float64 {
+	if power <= 0 {
+		return math.Inf(-1)
+	}
+	return 10 * math.Log10(power)
 }
 
 func powerToDBFloor(power, floorDB float64) float64 {
@@ -299,7 +316,7 @@ func (s *spectrumAccumulator) measureCeiling(div float64) (hz int, cliffDB float
 	binHz := float64(AnalysisSampleRate) / float64(stftWindow)
 	peakDB := math.Inf(-1)
 	for bin := 1; bin < len(s.binPower); bin++ {
-		if db := powerToDBMeasured(s.binPower[bin] / div); db > peakDB {
+		if db := binDB(s.binPower[bin] / div); db > peakDB {
 			peakDB = db
 		}
 	}
@@ -310,7 +327,7 @@ func (s *spectrumAccumulator) measureCeiling(div float64) (hz int, cliffDB float
 
 	topBin := 0
 	for bin := len(s.binPower) - 1; bin >= 1; bin-- {
-		if powerToDBMeasured(s.binPower[bin]/div) >= floorDB {
+		if binDB(s.binPower[bin]/div) >= floorDB {
 			topBin = bin
 			break
 		}
@@ -357,7 +374,8 @@ func (s *spectrumAccumulator) meanBinDB(fromHz, toHz, binHz, div float64) (float
 //
 // Layout: magic(4) "1BSP" + version(1) + reserved(1) + sampleRate u32 +
 // windows u32 + bandCount u32 + bandwidthHz u32 + cliff u16 (tenths of a dB,
-// 0xFFFF = absent) + one quantised band per byte. 80 bytes at 60 bands.
+// 0xFFFF = absent) + one quantised band per byte. 84 bytes at 60 bands
+// (a 24-byte header plus one byte per band).
 func EncodeSpectrum(r *SpectrumResult) []byte {
 	if r == nil || len(r.Bands) != SpectrumBandCount {
 		return nil

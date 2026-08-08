@@ -38,7 +38,7 @@ type AnalysisRecord struct {
 
 	// Spectrum is the `1BSP` file-provenance curve served by
 	// /v1/spectrum, or nil when the row carries none. Bytes rather than a
-	// path because it is ~80 bytes and lives on the analysis row itself —
+	// path because it is ~84 bytes and lives on the analysis row itself —
 	// there is no sidecar to open.
 	Spectrum []byte
 }
