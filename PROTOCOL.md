@@ -566,7 +566,7 @@ The same offline decode also estimates the **musical key** (Krumhansl-Schmuckler
 Two new `Track` fields carry the key:
 
 ```json
-{ "path": "Music/Album/01.flac", "size": 12345678, "mtime": "…", "keyRoot": 7, "keyMode": "major", "bpm": 120 }
+{ "path": "Music/Album/01.flac", "size": 12345678, "mtime": "…", "keyRoot": 7, "keyMode": "major", "bpm": 120, "bpmEstimated": true }
 ```
 
 - `keyRoot` is the tonic as an integer **0–11 with C=0** (0=C, 1=C♯/D♭, … 9=A, 11=B); `keyMode` is `"major"` or `"minor"`. There is no curated key tag today, so these are **analysis-only** — present only when the bridge estimated a key, absent (`omitempty`) otherwise.
