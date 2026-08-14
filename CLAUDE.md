@@ -192,6 +192,56 @@ The whole-track spectrum (`1BSP`, 84 bytes = 24-byte header + 60 band bytes; `Tr
 - **`Track.BPMEstimated` is set ONLY at the tag-absent splice and zeroed unconditionally in `marshalForStorage`** (PR #689, the full-tier batch's wire half; iOS mirror in the key/tempo-chips PR). It is the wire form of `bpmFromAnalysis`, and its contract is asymmetric on purpose: **only a positively-marked estimate may be labelled "estimated" by a client — absence makes NO claim** (a curated tag, a pre-#689 bridge, and no bpm at all are indistinguishable without it, and all three must render unlabelled; mislabelling a user's curated tag is the failure the field exists to prevent). Don't set it anywhere but the `t.BPM == nil && kt.BPM != nil` branch of `spliceAnalysisScalars`, and don't drop the `marshalForStorage` zero — frozen into `tags_json` it would label a LATER curated tag as an estimate. Both directions negative-control-verified (`TestManifestSplicesKeyTempo` red without the splice marker; `TestSplicedKeyTempoNotPersistedOnRoundTrip` red without the zero). Additive omitempty; ProtocolVersion stays 1.
 - **DSD stays OUT of the spectrum pipeline — measured, not assumed (2026-08-14; keep the `.dsf`/`.dff` skip in `collectAnalysisCandidates`).** 240 real DSFs from bridge.ars.md (232 DSD64) were decoded through the pipeline's own ffmpeg shape at 48 kHz AND at 176.4 kHz (one-off probe; ground-truth-validated first — a synthetic CD upsample read cliff 105 dB). Result: the 48 kHz view puts **49/240 inside the 44.1 kHz candidate window** with a cliff CONTINUUM to 58.9 dB and **no gap anywhere** (the PCM library has a clean 56.9→62.2 gap); the wide view proves 16 of those are genuinely PCM-heritage (wall-drop ≥20 dB at exactly the CD band, troughs pinned 22.7–24 kHz vs native p50 27 kHz) — but their cliffs (26.1–57.7) OVERLAP files with no wall evidence (up to 37.0). **The DSD64 noise shelf back-fills a ~100 dB PCM wall into the same 26–58 dB range native rolloffs occupy: the populations do not separate, so no threshold is defensible — one that catches known PCM-heritage SACDs accuses native DSD.** Routing DSD through the ffmpeg fallback works mechanically and was deliberately NOT shipped (the curve would carry a verdict-shaped, verdict-meaningless bandwidth/cliff). iOS carries the structural guard (`SignalPathTrackQuality.sourceIsDSD` gates both accusation surfaces) so even a future DSD-curve producer can't re-open the path. The remaining distribution facts: guard fires on 22/240 (9%); bw48 p50 = 20.1 kHz (the music's own ceiling, below the shelf at DSD64); cliff p50/p90/p99 = 13.4/36.8/51.6. Revisit only with a measurement that separates the populations (shelf-model subtraction at a wide analysis rate — research, not a retune); re-run a fresh probe rather than trusting stale CSVs.
 
+### Favorites — singleton LWW document + the `favorites` smart-mix family (PRs #695 / #697, iOS #1347/#1351–#1353, 2026-08-14)
+
+Per-device favorite tracks + albums, backed up per-bridge (iOS opt-in, default OFF).
+Design source of truth: iOS repo `docs/FavoritesDesign.md`; wire section in
+PROTOCOL.md is byte-mirrored to the iOS repo's `docs/BridgeProtocol.md`. Additive —
+`ProtocolVersion` stays 1; `favorites` health feature flag gates the iOS toggle.
+
+- **ONE document, LWW by `last_modified_at`.** `favorites_meta` (CHECK(id=1)) +
+  `favorite_tracks`/`favorite_albums`; PUT is a wholesale replace inside one
+  transaction; a strictly-OLDER stamp gets **409 carrying the FULL server doc**
+  (the iOS union-merge depends on the whole doc riding the 409 — if the post-409
+  re-read fails, return 500, never a doc-less 409); an EQUAL stamp is accepted
+  (idempotent re-push). No DELETE route — an empty PUT is the delete.
+- **Local-XOR-foreign identity is enforced at THREE layers** and all must stay:
+  API validation (`favorites.go` rejects mixed/partial rows), store validation
+  (`UpsertFavorites` re-checks per row — the API is not the only conceivable
+  caller), and the `favorite_tracks` table CHECK in **migration v36** (edited
+  INTO v36 rather than a v37 because v36 never shipped in a release — don't
+  repeat that move once a tag exists). Local rows = `path` set; foreign rows =
+  `origin_fingerprint` + `origin_path` set, stored VERBATIM (opaque — another
+  bridge's identity, never normalized here).
+- **Local paths normalize with `strings.TrimPrefix(p, "/")` — exactly ONE
+  leading slash, deliberately.** This is the `DLNATrackIDHasher` single-slash
+  convention (iOS stores bridge paths slash-prefixed; the manifest stores them
+  slashless). A bot-suggested `TrimLeft` would collapse structurally distinct
+  paths (`//x` vs `/x`) — declined, don't re-apply.
+- **Reads are snapshot reads.** `GetFavorites` AND `ListFavoritesForAdmin` each
+  wrap meta + tracks + albums queries in one `BeginTx(ReadOnly: true)` so a
+  concurrent PUT can't produce a torn meta-vs-entries view. The admin listing
+  LEFT JOINs `tracks` for display metadata (falls back to the raw path when the
+  row is gone); surfaced on the admin data page's Favorites panel.
+- **Body decode is strict**: caps enforced during streaming decode
+  (`decodeCappedArray`), trailing top-level JSON rejected via `dec.Token()` ==
+  `io.EOF` (`dec.More()` cannot see a stray `]`), dedup keys are comparable
+  STRUCTS (`trackKey{path, originFingerprint, originPath}`) — never
+  NUL-joined strings, since JSON strings may contain escaped NULs.
+- **The `favorites` smart-mix family pools ONLY bridge-local favorites.**
+  `FavoritedTrackFeatures` rides `trackFeatureSelect` with an IN-subselect on
+  `favorite_tracks WHERE path IS NOT NULL` — dupe-suppressed + deleted rows are
+  excluded for free, and foreign refs can never satisfy the floor. The query is
+  a true Go `const` (`const q = trackFeatureSelect + …`) — the shape that keeps
+  SonarCloud `go:S2077` quiet; don't rebuild it with fmt.Sprintf. `MinFavorites`
+  (5) floor-defaults on a zero-value Options (the `buildOnRepeat` convention —
+  an un-configured engine must not emit an empty family; this exact bug shipped
+  in the first draft and broke `TestGenerate_AllFamiliesInOrder`). Weekly
+  `WeekSeed^offset` shuffle; Camelot-harmonic arm when `AnalysisEnabled` and ≥5
+  hearts carry a key, with un-keyed hearts APPENDED (never dropped). Registered
+  right after Heavy Rotation; hydration in `smartplaylistgen` is NOT
+  analysis-gated (hearts without analysis still mix, un-harmonically).
+
 ### Launcher menu + shell-aware handoff (PRs #63 / #64 / #65 / #66)
 
 A captured PowerShell transcript showed a fresh user running `bridge init`, getting a `bridge serve --config <path>` command in the post-init handoff, typing it back unchanged, and hitting `CommandNotFound` three times before guessing `.\bridge serve --config ...` (PowerShell doesn't search CWD by default). The four-PR sequence below fixed the underlying class of failure and added a context-aware launcher menu for first-time operators.
