@@ -1636,12 +1636,17 @@ func healTransitionBandBandwidths(db *sql.DB) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const affected = `SELECT source_path FROM track_analysis
-		WHERE schema_version = 'wf7' AND bandwidth_hz >= 22800`
+	// The `schema_version = 'wf7' AND bandwidth_hz >= 22800` predicate is
+	// written VERBATIM in both statements rather than assembled from a
+	// shared const — a compile-time-folded concat is equally safe but
+	// trips go:S2077 and reads as an assembled query (the PR #495
+	// enrichmentMissPredicateSQL convention). Both copies live in this
+	// one frozen function; the byte-fixture test pins their agreement.
 	now := time.Now().UnixNano()
 	if _, err := tx.Exec(`UPDATE tracks SET indexed_at = CASE
 			WHEN indexed_at >= ?1 THEN indexed_at + 1 ELSE ?1 END
-		WHERE path IN (`+affected+`)`, now); err != nil {
+		WHERE path IN (SELECT source_path FROM track_analysis
+			WHERE schema_version = 'wf7' AND bandwidth_hz >= 22800)`, now); err != nil {
 		return fmt.Errorf("bump indexed_at: %w", err)
 	}
 	res, err := tx.Exec(`UPDATE track_analysis SET
