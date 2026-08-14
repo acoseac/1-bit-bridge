@@ -304,6 +304,39 @@ func TestSpectrumCliffSurvivesQuietContent(t *testing.T) {
 	}
 }
 
+// TestSpectrumTransitionBandIsNotAMeasurement: a "wall" inside the decode
+// resampler's transition band must be reported as NOTHING, not as a bandwidth.
+//
+// The decode is `sox … -r 48000`, whose rate filter passes only 95% of
+// Nyquist — so a file genuinely carrying content past 24 kHz has its measured
+// stop placed at 23.0–23.5 kHz BY OUR OWN FILTER, with a "cliff" that is the
+// filter's slope. On the full 18k-track wf7 library that manufactured 469
+// phantom walls and put 12 all-analog jazz recordings (Blue Train, Moanin')
+// over the 60 dB threshold as "consistent with a 48 kHz source" — the false
+// accusation the ceiling guard exists to prevent, entering one transition
+// band below the Nyquist it was guarding.
+//
+// This fixture rolls off steeply through the transition band the way those
+// files measured (stop ≈ 23.2 kHz — inside [22800, 23500), the sliver the
+// old guard left exposed): under the old 500 Hz guard it reported a bandwidth
+// + a large cliff; the widened guard reports neither.
+func TestSpectrumTransitionBandIsNotAMeasurement(t *testing.T) {
+	res := analyzeSpectrum(t, synth(6, 23_100, 96, 23_200, 0x5EED))
+	if res.BandwidthHz != nil {
+		t.Errorf("bandwidth = %d Hz — inside the decode filter's transition "+
+			"band [22800, 24000), where the measured value is the resampler's "+
+			"crossing, not the file's; must be absent", *res.BandwidthHz)
+	}
+	if res.CliffDepthDB != nil {
+		t.Errorf("cliff = %.1f dB reported for a transition-band stop — that "+
+			"number is the slope of sox's filter, not the file's", *res.CliffDepthDB)
+	}
+	if res.Bands == nil {
+		t.Fatal("the display curve must still be produced — only the " +
+			"measurement is unavailable, not the spectrum")
+	}
+}
+
 // TestSpectrumQuietFileStillReportsItsRealBandwidth is the mirror-image trap
 // to the one above, one floor down: having moved the MEASUREMENT off the
 // display floor, the fix must not then apply the measurement floor to a

@@ -170,3 +170,37 @@ func TestSpectrumRequiresAuth(t *testing.T) {
 		t.Errorf("status = %d, want 401 without a token", resp.StatusCode)
 	}
 }
+
+// TestMigrationV34PatchMatchesTheEncoder pins the byte surgery in
+// manifest.healTransitionBandBandwidths against the REAL encoder — the
+// promise made in that migration's test file, which cannot import
+// internal/analyze itself (analyze imports manifest).
+//
+// The migration rewrites blob bytes [18:22) to 0 and [22:24) to 0xFFFF to
+// turn a measured bandwidth+cliff into "absent". This asserts that surgery
+// produces byte-for-byte what EncodeSpectrum emits for the same result with
+// no measurement — so the healed rows are indistinguishable from rows the
+// fixed analyzer would have written, and a future header-layout change
+// breaks THIS test rather than silently mis-patching.
+func TestMigrationV34PatchMatchesTheEncoder(t *testing.T) {
+	bands := make([]float64, analyze.SpectrumBandCount)
+	for i := range bands {
+		bands[i] = -30 - float64(i%7)
+	}
+	hz, cliff := 23414, 63.8
+	measured := analyze.EncodeSpectrum(&analyze.SpectrumResult{
+		Bands: bands, Windows: 500, BandwidthHz: &hz, CliffDepthDB: &cliff,
+	})
+	absent := analyze.EncodeSpectrum(&analyze.SpectrumResult{
+		Bands: bands, Windows: 500,
+	})
+
+	patched := append([]byte(nil), measured...)
+	copy(patched[18:22], []byte{0, 0, 0, 0})
+	patched[22], patched[23] = 0xFF, 0xFF
+
+	if string(patched) != string(absent) {
+		t.Fatalf("the migration's byte patch does not reproduce the encoder's "+
+			"absent form:\n patched: % x\n encoder: % x", patched[:24], absent[:24])
+	}
+}

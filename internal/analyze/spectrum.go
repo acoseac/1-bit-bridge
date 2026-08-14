@@ -56,13 +56,37 @@ const (
 	spectrumContentFloorDB = -60.0
 
 	// bandwidthCeilingGuardHz is how far below the analysis Nyquist a
-	// measured bandwidth must sit to be reported at all.
+	// measured bandwidth must sit to be reported at all — and it is the
+	// width of the DECODE RESAMPLER'S TRANSITION BAND, because that is the
+	// real hazard, not the Nyquist itself.
 	//
-	// At or above it the file's real ceiling is somewhere ≥ 24 kHz and this
-	// package cannot say where — so it says nothing. 500 Hz of margin covers
-	// the top band's own width plus resampler ringing at the decode's own
-	// edge, without eating into the 22.05 kHz case that matters.
-	bandwidthCeilingGuardHz = 500.0
+	// The decode pipeline is `sox … -r 48000` (decode.go), which
+	// auto-inserts sox's `rate` effect at its default quality, whose
+	// default passband is 95% of Nyquist. So everything a file genuinely
+	// carries above 0.95 × 24 kHz = 22.8 kHz is reshaped by OUR OWN filter
+	// before the accumulator ever sees it, and the measured "wall" of any
+	// such file lands wherever that filter crosses the content floor —
+	// with a "cliff" that is the filter's slope. (The ffmpeg fallback's
+	// swresample defaults to a 97% cutoff — inside this margin.)
+	//
+	// The original 500 Hz guard protected only the Nyquist itself, and the
+	// full wf7 library measured what that misses: 469 of 3,220 hi-res
+	// files (14.6%) "stopped" at 23.0–23.5 kHz — all-analog Blue Note
+	// tape transfers among them, uniformly walled at the same place
+	// because the place was sox's filter — and 12 of them crossed the
+	// 60 dB threshold, staged as false "consistent with a 48 kHz source"
+	// accusations. Only 2 were guarded.
+	//
+	// 1200 = 24 kHz × (1 − 0.95). Consequence, and it is the documented
+	// contract (PROTOCOL.md): the 48 kHz candidate window [22.8k, 24.4k]
+	// is entirely inside this guard, so THIS package can never support a
+	// "48 kHz source" claim — it was never supposed to ("insufficient to
+	// distinguish 96 kHz-native from 48 kHz-native"). The 44.1 kHz window
+	// tops out at 22.45 kHz and is untouched. iOS's local analyzer
+	// decodes at the file's native rate with no resampler, so the 48 kHz
+	// candidate remains valid THERE — this constant is about our decode,
+	// not about the physics.
+	bandwidthCeilingGuardHz = 1200.0
 
 	// spectrumFloorDB is the level a stored BAND is clamped to, matching
 	// iOS's `MeterAnalysis.meterFloorDB` so the two curves share a scale.
