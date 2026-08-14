@@ -7613,7 +7613,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
 		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts
+		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts,
+		       bandwidth_hz, spectrum
 		FROM track_analysis
 		WHERE unicode_lower(source_path) = unicode_lower(?)
 		LIMIT 2
@@ -7634,7 +7635,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
-		&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts); err != nil {
+		&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts,
+		&sc.bandwidthHz, &sc.spectrum); err != nil {
 		return nil, err
 	}
 	sc.applyTo(&a)
@@ -7662,7 +7664,8 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 		SELECT source_path, waveform_path, waveform_tag, waveform_size,
 		       source_mtime_ns, source_size, schema_version, created_at,
 		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts
+		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts,
+		       bandwidth_hz, spectrum
 		FROM track_analysis
 	`)
 	if err != nil {
@@ -7677,7 +7680,8 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 			&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 			&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
-			&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts); err != nil {
+			&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts,
+			&sc.bandwidthHz, &sc.spectrum); err != nil {
 			return nil, err
 		}
 		sc.applyTo(&a)

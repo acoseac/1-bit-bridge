@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -176,6 +177,81 @@ func TestLookupAnalysisCaseInsensitive(t *testing.T) {
 	}
 	if row == nil || row.SourcePath != "Artist/Album/01.flac" {
 		t.Fatalf("lookup mismatch: %+v", row)
+	}
+}
+
+// TestLookupAnalysisCaseFoldCarriesSpectrum: the unicode_lower fallback
+// SELECT must mirror the exact-path column list. Pre-fix it stopped at
+// audio_md5_attempts — a row that resolved ONLY via the case fold (the
+// iOS-shaped lowercase path PROTOCOL.md promises to resolve) came back
+// with Spectrum == nil / BandwidthHz == nil, so /v1/spectrum answered
+// 404 spectrum_not_found while /v1/waveform worked for the same track.
+func TestLookupAnalysisCaseFoldCarriesSpectrum(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	upsertParent(t, s, "Artist/Album/01.flac")
+	blob := []byte("1BSP-test-spectrum-blob")
+	if err := s.UpsertAnalysis(ctx, AnalysisRow{
+		SourcePath: "Artist/Album/01.flac", WaveformPath: "/w/x.bin", WaveformTag: "t",
+		SourceMTimeNS: 1, SourceSize: 1, SchemaVersion: "wf7", CreatedAt: 1,
+		BandwidthHz: intptr(21500), Spectrum: blob,
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis: %v", err)
+	}
+
+	// Control: the exact-path read carries both fields.
+	exact, err := s.GetAnalysis(ctx, "Artist/Album/01.flac")
+	if err != nil || exact == nil {
+		t.Fatalf("GetAnalysis: row=%v err=%v", exact, err)
+	}
+	if !bytes.Equal(exact.Spectrum, blob) || exact.BandwidthHz == nil {
+		t.Fatalf("exact-path read lost spectrum fields: %+v", exact)
+	}
+
+	// The case-differing iOS shape resolves only via the folded fallback
+	// — it must carry the same spectrum fields as the exact-path read.
+	row, err := s.LookupAnalysis(ctx, "/artist/album/01.flac")
+	if err != nil {
+		t.Fatalf("LookupAnalysis: %v", err)
+	}
+	if row == nil || row.SourcePath != "Artist/Album/01.flac" {
+		t.Fatalf("lookup mismatch: %+v", row)
+	}
+	if !bytes.Equal(row.Spectrum, blob) {
+		t.Fatalf("case-folded lookup Spectrum = %q, want the seeded blob", row.Spectrum)
+	}
+	if row.BandwidthHz == nil || *row.BandwidthHz != 21500 {
+		t.Fatalf("case-folded lookup BandwidthHz = %v, want 21500", row.BandwidthHz)
+	}
+}
+
+// TestAllAnalysisRowsCarriesSpectrum: AllAnalysisRows is aligned with
+// the other two read sites (same column list). Its only caller today
+// (`bridge analyze --gc`) reads just waveform_path, but a silently
+// narrower SELECT here is how the LookupAnalysis fallback bug happened.
+func TestAllAnalysisRowsCarriesSpectrum(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	upsertParent(t, s, "A/1.flac")
+	blob := []byte("1BSP-test-spectrum-blob")
+	if err := s.UpsertAnalysis(ctx, AnalysisRow{
+		SourcePath: "A/1.flac", WaveformPath: "/w/a.bin", WaveformTag: "t",
+		SourceMTimeNS: 1, SourceSize: 1, SchemaVersion: "wf7", CreatedAt: 1,
+		BandwidthHz: intptr(21500), Spectrum: blob,
+	}); err != nil {
+		t.Fatalf("UpsertAnalysis: %v", err)
+	}
+	rows, err := s.AllAnalysisRows(ctx)
+	if err != nil {
+		t.Fatalf("AllAnalysisRows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("AllAnalysisRows returned %d rows, want 1", len(rows))
+	}
+	if !bytes.Equal(rows[0].Spectrum, blob) || rows[0].BandwidthHz == nil {
+		t.Fatalf("AllAnalysisRows lost spectrum fields: %+v", rows[0])
 	}
 }
 
