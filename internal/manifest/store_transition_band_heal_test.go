@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"encoding/binary"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -222,5 +223,83 @@ func TestHealTransitionBandShortBlob(t *testing.T) {
 	}
 	if idx <= idx0 {
 		t.Errorf("indexed_at did not advance (%d -> %d)", idx0, idx)
+	}
+}
+
+// TestMigrationLadderHealsAndRetypes drives migrations v34+v35 through the
+// REAL runner rather than through copies of their statements (CodeRabbit on
+// PR #688 — a test executing its own copy of the SQL passes even if the
+// registered migration differs or is absent; the third instance of the
+// wrong-together class on this feature, so this closes the last link).
+//
+// Mechanics: seed on a head-version store, rewind `PRAGMA user_version` to
+// 33, close, and let OpenStore walk the ladder. Legitimate because
+// migrations are REQUIRED to be idempotent ("a crash mid-migration and
+// restart should re-run cleanly" — the ladder docblock): re-running 34+35
+// over a head-schema DB is exactly the crash-recovery path. v34's predicate
+// matches only the seeded artifact row; v35 retypes what 34 produced.
+func TestMigrationLadderHealsAndRetypes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ladder.db")
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedWF7SpectrumRow(t, s, "Jazz/Blue Train/01.flac", 23414, wf7MeasuredBlob)
+	controlBlob := heal1BSPBlob(21891, 864)
+	seedWF7SpectrumRow(t, s, "Rock/Get A Grip/03.flac", 21891, controlBlob)
+	if _, err := s.db.Exec(`PRAGMA user_version = 33`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := OpenStore(dbPath) // the ladder runs 34 then 35 here
+	if err != nil {
+		t.Fatalf("reopen at v33 (runs migrations 34+35): %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	var ty string
+	var bw *int
+	var blob []byte
+	if err := s2.db.QueryRow(`SELECT typeof(spectrum), bandwidth_hz, spectrum
+			FROM track_analysis WHERE source_path = 'Jazz/Blue Train/01.flac'`).
+		Scan(&ty, &bw, &blob); err != nil {
+		t.Fatal(err)
+	}
+	// Length before any field read (the round-1 Gemini rule).
+	if len(blob) != len(wf7AbsentBlob) {
+		t.Fatalf("blob is %d bytes after the ladder, want %d", len(blob), len(wf7AbsentBlob))
+	}
+	if ty != "blob" {
+		t.Errorf("typeof(spectrum) = %q after the ladder, want blob — v35's retype "+
+			"did not run or did not stick; SQL string functions NUL-truncate "+
+			"text-typed values", ty)
+	}
+	if bw != nil {
+		t.Errorf("bandwidth = %d after the ladder, want NULL", *bw)
+	}
+	if string(blob) != string(wf7AbsentBlob) {
+		t.Errorf("ladder end-state blob != the encoder's measurement-absent form:\n"+
+			" got: % x\nwant: % x", blob[:24], wf7AbsentBlob[:24])
+	}
+
+	// Control row: BYTES compared, not just type and bandwidth — a ladder
+	// that corrupted the blob while preserving both would otherwise pass
+	// (CodeRabbit on PR #688).
+	var cty string
+	var cbw *int
+	var cblob []byte
+	if err := s2.db.QueryRow(`SELECT typeof(spectrum), bandwidth_hz, spectrum
+			FROM track_analysis WHERE source_path = 'Rock/Get A Grip/03.flac'`).
+		Scan(&cty, &cbw, &cblob); err != nil {
+		t.Fatal(err)
+	}
+	if cty != "blob" || cbw == nil || *cbw != 21891 {
+		t.Errorf("control row disturbed by the ladder: typeof=%q bw=%v", cty, cbw)
+	}
+	if string(cblob) != string(controlBlob) {
+		t.Error("control row's blob bytes changed across the ladder")
 	}
 }

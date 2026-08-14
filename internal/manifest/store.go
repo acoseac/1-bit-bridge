@@ -1611,6 +1611,29 @@ var migrations = []migration{
 		sql:  `-- data fix in post(); see healTransitionBandBandwidths`,
 		post: healTransitionBandBandwidths,
 	},
+	{
+		version: 35,
+		name:    "restore blob typing on v34-healed spectrum values",
+		// v34's blob surgery produced byte-perfect values with the WRONG
+		// TYPE AFFINITY: the substr/concat expression yields a TEXT-typed
+		// value in this SQLite build (observed on the live deploy and
+		// reproduced in the heal tests), so the healed rows stored `text`
+		// where every other row stores `blob`. The BYTES are correct and
+		// Go's Scan returns them in full — the wire was never affected —
+		// but SQLite's string functions NUL-truncate on text (a 1BSP
+		// header has a NUL at byte 6), so any future SQL-side
+		// length()/substr() over a text-typed spectrum silently reads 5
+		// bytes. CAST(text AS BLOB) is a lossless retype (asserted
+		// byte-for-byte in TestHealTransitionBandBandwidths).
+		//
+		// v34 itself stays frozen per the append-only rule — on a DB that
+		// has not run it yet, 34 produces the text rows and 35 retypes
+		// them in the same ladder walk. No indexed_at bump: nothing
+		// client-visible changes. Idempotent: after the retype no row is
+		// typeof text.
+		sql: `UPDATE track_analysis SET spectrum = CAST(spectrum AS BLOB)
+			WHERE spectrum IS NOT NULL AND typeof(spectrum) = 'text'`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
