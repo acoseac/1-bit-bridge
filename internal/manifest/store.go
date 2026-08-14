@@ -7280,11 +7280,11 @@ func nullIntPtr(n sql.NullInt64) *int {
 	return &v
 }
 
-// analysisScalarScan holds the nullable signal-derived columns
-// (replaygain / key / bpm) for the three AnalysisRow read sites, so the
-// NULL→pointer lifting lives in one place. Its four fields are passed to
-// Scan in SELECT column order (replaygain_track_db, key_root, key_mode,
-// bpm), then applyTo lifts them onto the row.
+// analysisScalarScan holds the nullable signal-derived columns for the
+// three AnalysisRow read sites, so the NULL→pointer lifting lives in
+// one place. Its fields are passed to Scan in analysisRowSelectSQL's
+// column order (replaygain_track_db onward), then applyTo lifts them
+// onto the row.
 type analysisScalarScan struct {
 	rg       sql.NullFloat64
 	keyRoot  sql.NullInt64
@@ -7562,21 +7562,30 @@ func (s *Store) GetAnalysis(ctx context.Context, sourcePath string) (*AnalysisRo
 	return s.getAnalysisLocked(ctx, sourcePath)
 }
 
+// analysisRowSelectSQL is the one SELECT shared by the three AnalysisRow
+// read sites (getAnalysisLocked, LookupAnalysis's case-folded fallback,
+// AllAnalysisRows) — same shape as childTrackRowSelect. A single column
+// list so the sites can't drift: the pre-#690 fallback omitted
+// bandwidth_hz/spectrum precisely because the list was triplicated, and
+// /v1/spectrum 404'd for case-fold-resolved tracks. Scan targets stay
+// per-site; a column added here without its scan target fails loudly at
+// query time (Scan arg-count mismatch), never as a silently-nil field.
+const analysisRowSelectSQL = `
+	SELECT source_path, waveform_path, waveform_tag, waveform_size,
+	       source_mtime_ns, source_size, schema_version, created_at,
+	       replaygain_track_db, key_root, key_mode, bpm,
+	       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts,
+	       bandwidth_hz, spectrum
+	FROM track_analysis`
+
 // getAnalysisLocked is the shared row-fetch used by both the public
 // GetAnalysis and the under-lock read inside UpsertAnalysis. It issues
 // only a SELECT, so it's safe to call whether or not s.mu is held.
 func (s *Store) getAnalysisLocked(ctx context.Context, sourcePath string) (*AnalysisRow, error) {
 	var a AnalysisRow
 	var sc analysisScalarScan
-	err := s.db.QueryRowContext(ctx, `
-		SELECT source_path, waveform_path, waveform_tag, waveform_size,
-		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts,
-		       bandwidth_hz, spectrum
-		FROM track_analysis
-		WHERE source_path = ?
-	`, sourcePath).Scan(
+	err := s.db.QueryRowContext(ctx,
+		analysisRowSelectSQL+` WHERE source_path = ?`, sourcePath).Scan(
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
@@ -7609,15 +7618,10 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 			return a, err
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_path, waveform_path, waveform_tag, waveform_size,
-		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts
-		FROM track_analysis
+	rows, err := s.db.QueryContext(ctx,
+		analysisRowSelectSQL+`
 		WHERE unicode_lower(source_path) = unicode_lower(?)
-		LIMIT 2
-	`, cleaned)
+		LIMIT 2`, cleaned)
 	if err != nil {
 		return nil, err
 	}
@@ -7634,7 +7638,8 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 		&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 		&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 		&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
-		&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts); err != nil {
+		&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts,
+		&sc.bandwidthHz, &sc.spectrum); err != nil {
 		return nil, err
 	}
 	sc.applyTo(&a)
@@ -7658,13 +7663,7 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 // --gc` to reconcile the on-disk waveform tree against the DB
 // (mark-and-sweep of orphan sidecars). Reads are un-mutexed.
 func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_path, waveform_path, waveform_tag, waveform_size,
-		       source_mtime_ns, source_size, schema_version, created_at,
-		       replaygain_track_db, key_root, key_mode, bpm,
-		       true_peak_db, dr_score, audio_md5_state, audio_md5_attempts
-		FROM track_analysis
-	`)
+	rows, err := s.db.QueryContext(ctx, analysisRowSelectSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -7677,7 +7676,8 @@ func (s *Store) AllAnalysisRows(ctx context.Context) ([]AnalysisRow, error) {
 			&a.SourcePath, &a.WaveformPath, &a.WaveformTag, &a.WaveformSize,
 			&a.SourceMTimeNS, &a.SourceSize, &a.SchemaVersion, &a.CreatedAt,
 			&sc.rg, &sc.keyRoot, &sc.keyMode, &sc.bpm,
-			&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts); err != nil {
+			&sc.truePeak, &sc.drScore, &sc.md5State, &sc.md5Attempts,
+			&sc.bandwidthHz, &sc.spectrum); err != nil {
 			return nil, err
 		}
 		sc.applyTo(&a)
