@@ -2394,6 +2394,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}).
 		WithDeviceRegistrar(manifestStore).
 		WithPlaylistStore(manifestStore).
+		WithFavoritesStore(manifestStore).
 		WithHistoryStore(manifestStore).
 		WithAtlasMeta(cfg.Atlas.Enabled, cfg.Atlas.EffectiveMetaTTL(), manifestStore).
 		WithPlaylistCoverStore(manifestStore)

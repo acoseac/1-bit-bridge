@@ -270,6 +270,12 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "PUT /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.putPlaylist)},
 		{pattern: "DELETE /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.deletePlaylist)},
 
+		// Favorites — user-wide singleton backup document (any paired
+		// device reads/replaces the whole set; LWW-guarded). Small JSON
+		// on GET; PUT carries a (capped) document body. Both bounded.
+		{pattern: "GET /v1/favorites", kind: boundedRoute, handler: s.authed(s.getFavorites)},
+		{pattern: "PUT /v1/favorites", kind: boundedRoute, handler: s.authed(s.putFavorites)},
+
 		// Playback telemetry — bulk insert from the iOS offline queue,
 		// plus the cursor-paged all-devices read feed (user-wide
 		// listening history; 2 s ctx-timeout matches the other
