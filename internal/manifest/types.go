@@ -183,6 +183,19 @@ type Track struct {
 	// Pointer + omitempty; presence-gated.
 	BPM *int `json:"bpm,omitempty"`
 
+	// BPMEstimated marks a BPM that came from the analyzer's estimate
+	// rather than a curated tag — the wire form of bpmFromAnalysis, set at
+	// the same splice. It exists because the two sources are otherwise
+	// indistinguishable on the wire, and a client that wants to label
+	// estimates "estimated" must never put that label on a tag the user
+	// curated: only a POSITIVELY-marked value gets the treatment; absence
+	// (a curated tag, a pre-feature bridge, no BPM at all) makes no claim
+	// and gets NO label. Read-derived only — never persisted into
+	// tags_json (marshalForStorage zeroes it unconditionally, like the
+	// other splice-derived fields). Additive + omitempty; ProtocolVersion
+	// stays 1.
+	BPMEstimated bool `json:"bpmEstimated,omitempty"`
+
 	// KeyRoot / KeyMode are the estimated musical key from offline
 	// analysis (additive since v1.8): KeyRoot is the tonic 0..11 (C=0),
 	// KeyMode is "major"/"minor". There's no curated key tag today, so
