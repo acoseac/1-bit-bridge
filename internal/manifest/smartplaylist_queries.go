@@ -486,7 +486,9 @@ func (s *Store) TrackFeaturesForPaths(ctx context.Context, paths []string) ([]Tr
 // surface in a persisted mix) and drops favorites whose track has been
 // deleted since the heart was stored. Read path — no s.mu.
 func (s *Store) FavoritedTrackFeatures(ctx context.Context) ([]TrackFeatureRow, error) {
-	q := trackFeatureSelect + `
+	// A true Go const (const + const concatenation) — no dynamic SQL, no
+	// user input; go:S2077 keys on runtime-formatted queries.
+	const q = trackFeatureSelect + `
 	   AND t.path IN (SELECT path FROM favorite_tracks WHERE path IS NOT NULL)
 	 ORDER BY (SELECT f.favorited_at FROM favorite_tracks f WHERE f.path = t.path) DESC`
 	rows, err := s.db.QueryContext(ctx, q)
