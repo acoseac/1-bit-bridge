@@ -18,12 +18,43 @@ import (
 // column over an unhealed blob would have the manifest and the curve
 // disagreeing about the same measurement.
 
-// heal1BSPBlob builds an 84-byte 1BSP v2 blob the way the wf7 encoder
-// laid it out. Hand-built because package manifest cannot import
-// internal/analyze (analyze imports manifest); offsets pinned by the
-// byte assertions below, and the healed form is additionally asserted
-// against the live encoder from internal/api's tests, which CAN import
-// both.
+// wf7MeasuredBlob / wf7AbsentBlob are CAPTURED from the real encoder —
+// `analyze.EncodeSpectrum` run 2026-08-14 with bands[i] = -30-(i%7),
+// windows 500, and (bandwidth 23414 Hz, cliff 63.8 dB) vs no measurement
+// — NOT hand-derived (the iOS band-map fixture pattern: an earlier
+// hand-built blob here pinned only its author's beliefs about the
+// layout, which is how #686's 80-byte fixture happened; CodeRabbit on
+// #687). Package manifest cannot import internal/analyze (analyze
+// imports manifest), so captured bytes are the only way to pin the
+// migration against the ENCODER rather than against a second copy of
+// the offsets. Deliberately frozen: v34 heals rows written by the
+// wf7-era encoder, so these bytes are the frozen contract even if the
+// encoder later changes — while the api-side
+// TestMigrationV34PatchMatchesTheEncoder fails if the live encoder's
+// layout drifts, flagging that a NEW migration (not an edit to v34)
+// would be needed for post-drift rows.
+var wf7MeasuredBlob = []byte{
+	0x31, 0x42, 0x53, 0x50, 0x02, 0x00, 0x80, 0xbb, 0x00, 0x00, 0xf4, 0x01,
+	0x00, 0x00, 0x3c, 0x00, 0x00, 0x00, 0x76, 0x5b, 0x00, 0x00, 0x7e, 0x02,
+	0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22,
+	0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20,
+	0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e,
+	0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23,
+	0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21,
+}
+var wf7AbsentBlob = []byte{
+	0x31, 0x42, 0x53, 0x50, 0x02, 0x00, 0x80, 0xbb, 0x00, 0x00, 0xf4, 0x01,
+	0x00, 0x00, 0x3c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+	0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22,
+	0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20,
+	0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e,
+	0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23,
+	0x24, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x1e, 0x1f, 0x20, 0x21,
+}
+
+// heal1BSPBlob builds an 84-byte 1BSP v2 blob for rows where only the
+// VALUES matter (the boundary cases and the untouched control row) —
+// the captured fixtures above are the layout authority.
 func heal1BSPBlob(bandwidthHz uint32, cliffTenths uint16) []byte {
 	out := make([]byte, 0, 84)
 	out = append(out, '1', 'B', 'S', 'P', 2, 0)
@@ -76,8 +107,9 @@ func TestHealTransitionBandBandwidths(t *testing.T) {
 	s := openTestStore(t)
 
 	// The Blue Train shape: an all-analog master whose "wall" at 23.4 kHz
-	// was sox's filter, cliff 63.8 dB (the filter's slope).
-	artifactBlob := heal1BSPBlob(23414, 638)
+	// was sox's filter, cliff 63.8 dB (the filter's slope) — seeded with
+	// the REAL encoder's bytes for that measurement.
+	artifactBlob := wf7MeasuredBlob
 	seedWF7SpectrumRow(t, s, "Jazz/Blue Train/01.flac", 23414, artifactBlob)
 	// A REAL wall, safely below the transition band — the Aerosmith case.
 	realBlob := heal1BSPBlob(21891, 864)
@@ -95,6 +127,15 @@ func TestHealTransitionBandBandwidths(t *testing.T) {
 	// message, not panic in the field reads below (Gemini on PR #687).
 	if len(blob) != len(artifactBlob) {
 		t.Fatalf("blob length changed: %d -> %d", len(artifactBlob), len(blob))
+	}
+	// THE pin: the healed blob must equal what the real encoder emits for
+	// the same result with no measurement — migration and encoder agree
+	// through captured bytes, not through two copies of the offsets
+	// (CodeRabbit Major on PR #687). The per-field checks below only
+	// localise a failure.
+	if string(blob) != string(wf7AbsentBlob) {
+		t.Errorf("healed blob != the encoder's measurement-absent form:\n got: % x\nwant: % x",
+			blob[:24], wf7AbsentBlob[:24])
 	}
 	if bw != nil {
 		t.Errorf("artifact row still carries bandwidth %d — the column was not healed", *bw)
