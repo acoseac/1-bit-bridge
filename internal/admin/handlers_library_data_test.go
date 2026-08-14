@@ -37,6 +37,73 @@ func seedDataFixture(t *testing.T, srv *Server) {
 	}
 }
 
+// GET /api/favorites: never-stored → {stored:false, empty sets}; once a
+// device pushes a document, the panel rows resolve local display metadata
+// through the track index and flag foreign entries.
+func TestAPIFavorites(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	var empty struct {
+		Stored bool             `json:"stored"`
+		Tracks []map[string]any `json:"tracks"`
+		Albums []map[string]any `json:"albums"`
+	}
+	if code := doJSON(t, h, "GET", "/api/favorites", nil, &empty); code != 200 {
+		t.Fatalf("GET /api/favorites (never stored): %d", code)
+	}
+	if empty.Stored || len(empty.Tracks) != 0 || len(empty.Albums) != 0 {
+		t.Fatalf("never-stored shape wrong: %+v", empty)
+	}
+
+	ctx := context.Background()
+	if err := srv.deps.Manifest.UpsertFavorites(ctx, testDeviceToken, 1_700_000_000_000_000_000,
+		[]manifest.FavoriteTrackRow{
+			{Path: "Artist/Album/01.flac", FavoritedAt: 1_700_000_000_000_000_000},
+			{OriginFingerprint: "smb", OriginPath: "/other/x.flac",
+				Title: "Foreign", Artist: "FA", FavoritedAt: 1_600_000_000_000_000_000},
+		},
+		[]manifest.FavoriteAlbumRow{
+			{AlbumArtist: "AA", Album: "AL", Year: 2001, FavoritedAt: 1_500_000_000_000_000_000},
+		}); err != nil {
+		t.Fatalf("UpsertFavorites: %v", err)
+	}
+
+	var got struct {
+		Stored            bool   `json:"stored"`
+		LastModifiedAt    string `json:"lastModifiedAt"`
+		DeviceTokenPrefix string `json:"deviceTokenPrefix"`
+		Tracks            []struct {
+			Title   string `json:"title"`
+			Path    string `json:"path"`
+			Foreign bool   `json:"foreign"`
+		} `json:"tracks"`
+		Albums []struct {
+			Album string `json:"album"`
+			Year  int    `json:"year"`
+		} `json:"albums"`
+	}
+	if code := doJSON(t, h, "GET", "/api/favorites", nil, &got); code != 200 {
+		t.Fatalf("GET /api/favorites (stored): %d", code)
+	}
+	if !got.Stored || got.LastModifiedAt == "" || got.DeviceTokenPrefix == "" {
+		t.Fatalf("stored meta missing: %+v", got)
+	}
+	if len(got.Tracks) != 2 || len(got.Albums) != 1 {
+		t.Fatalf("want 2 tracks + 1 album, got %d + %d", len(got.Tracks), len(got.Albums))
+	}
+	// Newest heart first; local vs foreign flags survive the wire.
+	if got.Tracks[0].Path != "Artist/Album/01.flac" || got.Tracks[0].Foreign {
+		t.Errorf("local row mangled: %+v", got.Tracks[0])
+	}
+	if !got.Tracks[1].Foreign || got.Tracks[1].Title != "Foreign" {
+		t.Errorf("foreign row mangled: %+v", got.Tracks[1])
+	}
+	if got.Albums[0].Album != "AL" || got.Albums[0].Year != 2001 {
+		t.Errorf("album row mangled: %+v", got.Albums[0])
+	}
+}
+
 func TestDataPageRenders(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/data", nil)

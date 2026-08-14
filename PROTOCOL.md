@@ -827,6 +827,7 @@ The bridge regenerates the families on a daily cadence into a server-side cache 
 | `kind` | Source | Notes |
 |---|---|---|
 | `heavyRotation` | history (last ~14d) | most-played, qualifying plays only (≥ 30s listened) |
+| `favorites` | iOS favorites backup | the tracks the user hearted (bridge-**local** entries only — foreign references never count toward the ≥ 5 floor); Camelot-harmonic flow when `analysis.enabled` and enough of the pool carries a key, else a deterministic weekly shuffle |
 | `driveMix` | history (CarPlay-only, last ~60d) | most-played over CarPlay (`iface_type = "CarPlay"`); a wider window than Heavy Rotation so occasional drives still populate it |
 | `onRepeat` | history (last ~30d) | "sustained obsession" — paths played on ≥ 3 distinct days that each carried ≥ 2 qualifying plays (so ≥ 6 in total); **carries hysteresis** (surfaces at ≥ 12 tracks, stays visible while ≥ 8) |
 | `forgottenFavorites` | history | loved long ago, untouched in the last ~30d |

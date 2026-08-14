@@ -226,3 +226,107 @@ func (s *Store) GetFavorites(ctx context.Context) (*FavoritesMeta, []FavoriteTra
 	}
 	return &meta, tracks, albums, nil
 }
+
+// AdminFavoriteTrack is the admin-console projection of one favorited
+// track: the stored row plus display fields resolved from the local track
+// index (LEFT JOIN — a foreign entry has no local row and renders from its
+// own stored title/artist render-fallback; a local entry whose track has
+// since been deleted degrades the same way).
+type AdminFavoriteTrack struct {
+	Path        string // local slashless path ("" for foreign entries)
+	OriginPath  string // foreign origin path ("" for local entries)
+	Foreign     bool
+	Title       string
+	Artist      string
+	Album       string
+	FavoritedAt int64 // client wall-clock UnixNano
+}
+
+// AdminFavoriteAlbum mirrors FavoriteAlbumRow for the admin console.
+type AdminFavoriteAlbum struct {
+	AlbumArtist string
+	Album       string
+	Year        int
+	FavoritedAt int64
+}
+
+// ListFavoritesForAdmin returns the stored favorites document shaped for
+// the loopback admin console: nil meta = never stored; tracks
+// newest-heart-first with display metadata resolved from the local track
+// index for bridge-local entries; albums newest-first. Read path — no s.mu;
+// one read-only transaction spans the three queries so a PUT committing
+// mid-read can't produce a torn document (the GetFavorites snapshot rule).
+func (s *Store) ListFavoritesForAdmin(ctx context.Context) (*FavoritesMeta, []AdminFavoriteTrack, []AdminFavoriteAlbum, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var meta FavoritesMeta
+	err = tx.QueryRowContext(ctx, `
+		SELECT last_modified_at, device_token, updated_at
+		  FROM favorites_meta WHERE id = 1
+	`).Scan(&meta.LastModifiedAt, &meta.DeviceToken, &meta.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Local entries resolve display metadata from tags_json; the stored
+	// title/artist render-fallback wins only when the join misses (foreign
+	// entry, or a local track deleted since the favorite was stored).
+	trackRows, err := tx.QueryContext(ctx, `
+		SELECT COALESCE(f.path, ''), COALESCE(f.origin_path, ''),
+		       CASE WHEN f.origin_fingerprint IS NOT NULL THEN 1 ELSE 0 END,
+		       COALESCE(json_extract(t.tags_json, '$.title'),  COALESCE(f.title,  '')),
+		       COALESCE(json_extract(t.tags_json, '$.artist'), COALESCE(f.artist, '')),
+		       COALESCE(json_extract(t.tags_json, '$.album'),  ''),
+		       f.favorited_at
+		  FROM favorite_tracks f
+		  LEFT JOIN tracks t ON t.path = f.path
+		 ORDER BY f.favorited_at DESC
+	`)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer trackRows.Close()
+	var tracks []AdminFavoriteTrack
+	for trackRows.Next() {
+		var t AdminFavoriteTrack
+		var foreign int
+		if err := trackRows.Scan(&t.Path, &t.OriginPath, &foreign,
+			&t.Title, &t.Artist, &t.Album, &t.FavoritedAt); err != nil {
+			return nil, nil, nil, err
+		}
+		t.Foreign = foreign != 0
+		tracks = append(tracks, t)
+	}
+	if err := trackRows.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+
+	albumRows, err := tx.QueryContext(ctx, `
+		SELECT album_artist, album, year, favorited_at
+		  FROM favorite_albums
+		 ORDER BY favorited_at DESC
+	`)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer albumRows.Close()
+	var albums []AdminFavoriteAlbum
+	for albumRows.Next() {
+		var a AdminFavoriteAlbum
+		if err := albumRows.Scan(&a.AlbumArtist, &a.Album, &a.Year, &a.FavoritedAt); err != nil {
+			return nil, nil, nil, err
+		}
+		albums = append(albums, a)
+	}
+	if err := albumRows.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	return &meta, tracks, albums, nil
+}

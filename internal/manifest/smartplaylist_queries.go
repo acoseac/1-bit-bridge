@@ -476,6 +476,28 @@ func (s *Store) TrackFeaturesForPaths(ctx context.Context, paths []string) ([]Tr
 	return out, nil
 }
 
+// FavoritedTrackFeatures hydrates features for every BRIDGE-LOCAL favorited
+// track (the "favorites" smart-mix family's pool), newest heart first.
+// Local-only by construction: the sub-select keeps `path IS NOT NULL` rows,
+// so foreign favorites (other bridges / SMB / local / UPnP — opaque
+// references this bridge can't resolve) never enter the pool and can never
+// satisfy the family's MinFavorites gate. Riding trackFeatureSelect also
+// bakes in the dupe_suppressed exclusion (a suppressed duplicate must not
+// surface in a persisted mix) and drops favorites whose track has been
+// deleted since the heart was stored. Read path — no s.mu.
+func (s *Store) FavoritedTrackFeatures(ctx context.Context) ([]TrackFeatureRow, error) {
+	// A true Go const (const + const concatenation) — no dynamic SQL, no
+	// user input; go:S2077 keys on runtime-formatted queries.
+	const q = trackFeatureSelect + `
+	   AND t.path IN (SELECT path FROM favorite_tracks WHERE path IS NOT NULL)
+	 ORDER BY (SELECT f.favorited_at FROM favorite_tracks f WHERE f.path = t.path) DESC`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return scanTrackFeatures(rows)
+}
+
 // PlayStatsByInterfaceInWindow returns the most-played track paths in
 // [sinceNS, now) filtered to a SPECIFIC iface_type (e.g. "CarPlay" for the
 // Drive Mix family). Same "30s rule" + plays-desc / last-played-tiebreak shape
