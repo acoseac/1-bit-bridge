@@ -245,7 +245,8 @@ func TestMigrationLadderHealsAndRetypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedWF7SpectrumRow(t, s, "Jazz/Blue Train/01.flac", 23414, wf7MeasuredBlob)
-	seedWF7SpectrumRow(t, s, "Rock/Get A Grip/03.flac", 21891, heal1BSPBlob(21891, 864))
+	controlBlob := heal1BSPBlob(21891, 864)
+	seedWF7SpectrumRow(t, s, "Rock/Get A Grip/03.flac", 21891, controlBlob)
 	if _, err := s.db.Exec(`PRAGMA user_version = 33`); err != nil {
 		t.Fatal(err)
 	}
@@ -284,15 +285,21 @@ func TestMigrationLadderHealsAndRetypes(t *testing.T) {
 			" got: % x\nwant: % x", blob[:24], wf7AbsentBlob[:24])
 	}
 
-	// Control row: byte-identical, still blob-typed.
+	// Control row: BYTES compared, not just type and bandwidth — a ladder
+	// that corrupted the blob while preserving both would otherwise pass
+	// (CodeRabbit on PR #688).
 	var cty string
 	var cbw *int
-	if err := s2.db.QueryRow(`SELECT typeof(spectrum), bandwidth_hz
+	var cblob []byte
+	if err := s2.db.QueryRow(`SELECT typeof(spectrum), bandwidth_hz, spectrum
 			FROM track_analysis WHERE source_path = 'Rock/Get A Grip/03.flac'`).
-		Scan(&cty, &cbw); err != nil {
+		Scan(&cty, &cbw, &cblob); err != nil {
 		t.Fatal(err)
 	}
 	if cty != "blob" || cbw == nil || *cbw != 21891 {
 		t.Errorf("control row disturbed by the ladder: typeof=%q bw=%v", cty, cbw)
+	}
+	if string(cblob) != string(controlBlob) {
+		t.Error("control row's blob bytes changed across the ladder")
 	}
 }
