@@ -197,3 +197,30 @@ func TestHealTransitionBandBoundary(t *testing.T) {
 		t.Errorf("22799 was healed away — below the edge is a real measurement, got %v", bw)
 	}
 }
+
+// The defensive branch: a row whose bandwidth is in the band but whose blob
+// is too short to carry the fields (unreachable from the real analyzer —
+// every wf7 row with a bandwidth has an 84-byte blob — but the migration
+// guards it, so the guard is pinned). The COLUMN is still healed and
+// indexed_at still advances; the blob is left verbatim rather than sliced
+// out of range. (CodeRabbit on PR #687.)
+func TestHealTransitionBandShortBlob(t *testing.T) {
+	s := openTestStore(t)
+	short := []byte("1BSP-too-short")
+	seedWF7SpectrumRow(t, s, "A/short.flac", 23000, short)
+	_, _, idx0 := readHealState(t, s, "A/short.flac")
+
+	if err := healTransitionBandBandwidths(s.db); err != nil {
+		t.Fatalf("heal errored on a short blob: %v", err)
+	}
+	bw, blob, idx := readHealState(t, s, "A/short.flac")
+	if bw != nil {
+		t.Errorf("column not healed for the short-blob row: %d", *bw)
+	}
+	if string(blob) != string(short) {
+		t.Errorf("short blob was rewritten: % x", blob)
+	}
+	if idx <= idx0 {
+		t.Errorf("indexed_at did not advance (%d -> %d)", idx0, idx)
+	}
+}
