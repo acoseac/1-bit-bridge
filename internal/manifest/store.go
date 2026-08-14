@@ -1634,6 +1634,70 @@ var migrations = []migration{
 		sql: `UPDATE track_analysis SET spectrum = CAST(spectrum AS BLOB)
 			WHERE spectrum IS NOT NULL AND typeof(spectrum) = 'text'`,
 	},
+	{
+		version: 36,
+		name:    "favorites (user-wide track + album favorites backup)",
+		// The iOS Favorites feature's backup safe — a SINGLETON document
+		// (one favorites set per bridge, user-wide like playlists /
+		// history: every paired device belongs to the operator), replaced
+		// wholesale on each PUT /v1/favorites under the same client
+		// wall-clock LWW guard the playlists table uses.
+		//
+		// `favorites_meta` is a one-row table (CHECK (id = 1)) carrying
+		// the document's `last_modified_at` (client UnixNano, the LWW
+		// key) + last-writer provenance (`device_token`, admin display
+		// only — reads are user-wide). No meta row ≡ never stored (GET
+		// serves an empty doc with lastModifiedAt 0).
+		//
+		// `favorite_tracks` rows are EITHER local (`path` set, slashless
+		// — joins the `tracks` PK for the admin display + the smart-mix
+		// family) OR foreign (`origin_fingerprint`+`origin_path`, opaque
+		// references iOS re-resolves on restore; fingerprint is the
+		// owning bridge's cert fp or a 'local'/'smb'/'upnp' sentinel).
+		// Local-XOR-foreign means no always-non-NULL column, so the
+		// table is a bare rowid table with PARTIAL UNIQUE indexes as the
+		// DB-level integrity backstop — the handler's last-wins dedup
+		// keeps duplicate payloads from ever reaching them, so a
+		// constraint failure indicates a handler regression, not bad
+		// client data.
+		//
+		// `favorite_albums` keys on the iOS album identity triple
+		// (album_artist, album, year); `year` 0 ≡ absent so it can sit
+		// in the composite PK (the dhowden/tag year-0 sentinel iOS's
+		// MetadataNormalizer.albumID already canonicalizes).
+		//
+		// Append-only / idempotent per the ladder contract.
+		sql: `
+		CREATE TABLE IF NOT EXISTS favorites_meta (
+			id               INTEGER PRIMARY KEY CHECK (id = 1),
+			last_modified_at INTEGER NOT NULL,
+			device_token     TEXT NOT NULL,
+			updated_at       INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS favorite_tracks (
+			path               TEXT,
+			origin_fingerprint TEXT,
+			origin_path        TEXT,
+			title              TEXT,
+			artist             TEXT,
+			favorited_at       INTEGER NOT NULL
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_fav_tracks_local
+			ON favorite_tracks(path) WHERE path IS NOT NULL;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_fav_tracks_foreign
+			ON favorite_tracks(origin_fingerprint, origin_path)
+			WHERE origin_fingerprint IS NOT NULL;
+
+		CREATE TABLE IF NOT EXISTS favorite_albums (
+			album_artist TEXT NOT NULL DEFAULT '',
+			album        TEXT NOT NULL,
+			year         INTEGER NOT NULL DEFAULT 0,
+			favorited_at INTEGER NOT NULL,
+			PRIMARY KEY (album_artist, album, year)
+		);
+		`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7

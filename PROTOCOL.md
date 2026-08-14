@@ -869,6 +869,42 @@ Each family MAY carry **`imageHash`** (additive, omitted when absent) — the SH
 
 Each family MAY also carry **`energy`** + **`modalRateHz`** (both additive, omitted when absent) — the server-derived inputs for a client's "waveform-signed cover" halo. `energy` is the mix's normalized **0…1** loudness contour: one element per member track (down-sampled to ≤48), mapped **linearly** from each track's ReplayGain across a clamped `[−24 dB, 0 dB]` window (`−12 dB → 0.5`); it is omitted when fewer than half the members are analyzed (the client renders its own seeded waveform instead). `modalRateHz` is the mix's modal sample rate (ties broken toward the **highest** rate, biasing the halo's glow color toward high-res); `0`/absent means "unknown — use a fixed family color". Both are decorative — a client that ignores them renders a plain cover. **Additive — no `ProtocolVersion` bump.**
 
+### Favorites (additive, since v1.10)
+
+A user-wide **singleton** backup document for the iOS Favorites feature (favorited tracks + albums). The bridge is a safe, NOT a player of this data: foreign entries (tracks living on another bridge / SMB / local / UPnP) are stored as opaque references the bridge never resolves or serves — iOS re-resolves them locally on restore. Advertised via the `favorites` flag in `/v1/health.features`; pre-feature bridges return `404` (`favorites_not_supported`) from both routes. Both routes require the `X-Device-Token` header (writer provenance on PUT; keeps the device-registration binding fresh). `ProtocolVersion` stays `1` — **additive, no `ProtocolVersion` bump.**
+
+**`GET /v1/favorites`** — the full document, readable from ANY paired device (user-wide, like playlists). A bridge that has never stored favorites returns an **empty document with `lastModifiedAt: 0`** (singleton semantics — never a 404-as-missing; 404 is reserved for feature-off).
+
+**`PUT /v1/favorites`** — replaces the document **wholesale** under a last-write-wins guard on `lastModifiedAt` (client wall-clock UnixNano): a stored value **strictly newer** than the incoming one is rejected `409 stale`; **equal is accepted** (idempotent re-push after a partial multi-bridge flush). An **empty set is a valid document** ("no favorites") — unfavorites propagate via full-set replace, and there is deliberately **no DELETE route**. Body cap 16 MiB; entry caps 50,000 tracks / 10,000 albums (enforced during decode). `200 {"stored": true}` on success.
+
+**Document shape** (both directions):
+
+```json
+{
+  "lastModifiedAt": 1754500000000000000,
+  "tracks": [
+    { "path": "Artist/Album/01 Song.flac", "favoritedAt": 1754400000000000000 },
+    { "originFingerprint": "smb", "originPath": "/music/x.flac",
+      "title": "X", "artist": "Y", "favoritedAt": 1754300000000000000 } ],
+  "albums": [
+    { "albumArtist": "Artist", "album": "Album", "year": 2001,
+      "favoritedAt": 1754200000000000000 } ]
+}
+```
+
+Track entries are **strictly local-XOR-foreign** (the playlist-item predicate): a local entry sets ONLY `path`; a foreign entry sets BOTH `originFingerprint` (the owning bridge's cert fingerprint, or a `local`/`smb`/`upnp` sentinel) AND `originPath`, with optional `title`/`artist` render fallback. Every entry carries `favoritedAt` (UnixNano > 0 — doubles as the client's recency sort key). Album entries key on the display triple (`albumArtist`, `album`, `year`); `year` 0/absent means "no year". The server normalizes on PUT: backslashes become slashes on both path fields, then a single leading `/` is stripped from **local** `path` values only (they join the bridge's slashless track index; foreign `originPath` stays opaque). Duplicate entries within one payload are deduplicated last-wins, keyed `path` | (`originFingerprint`, `originPath`) | (`albumArtist`, `album`, `year`).
+
+**The `409 stale` body carries the FULL server document** (the playlists 409 shape) — load-bearing for the client contract:
+
+```json
+{ "error": "stale", "message": "server copy is newer",
+  "server": { "lastModifiedAt": 1754600000000000000, "tracks": [], "albums": [] } }
+```
+
+**Client merge-on-409 convention** (what iOS does, and what any future client should do): a `409` means another device replaced the document since this device last synced. The client **union-merges** the returned server copy into its local set (earliest non-nil `favoritedAt` wins per entry), re-stamps its `lastModifiedAt` monotonically past the server's, and re-pushes — at most one immediate retry per flush cycle. Never accept-stale-as-done (favorites are a singleton set; accepting would silently strand the losing device's offline favorites) and never let a restore/merge REMOVE entries (restore is additive by contract; unfavorites propagate only via the full-set replace of a normal PUT).
+
+**Multi-device residual** (documented, accepted): conflict-FREE push-over-push leaves the server holding the last writer's snapshot — the other device's local truth is untouched, and its next push (409 → union) or restore re-converges. Detected conflicts converge automatically via the 409 union-merge.
+
 ### `POST /v1/pairing/requests` (additive, since v1.2)
 
 Submit a join request that surfaces in the bridge admin web console as a pending entry. The admin reads the verification code off the iOS device's waiting screen, then approves or declines. iOS polls `/v1/pairing/{requestId}` for the verdict.
@@ -961,6 +997,8 @@ All errors are JSON:
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
 |    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |
 |    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (or pre-v1.9 build) — no `/v1/smart-playlists` |
+|    404 | `favorites_not_supported` | Bridge build doesn't store favorites backups (pre-v1.10) — no `/v1/favorites` |
+|    409 | `stale`                  | PUT `/v1/playlists/{id}` or `/v1/favorites` carried a `lastModifiedAt` strictly older than the stored copy; body includes the full server copy |
 |    429 | `rate_limited`           | Per-IP pairing-create rate-limit OR per-token `/v1/manifest` rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |

@@ -163,6 +163,11 @@ type Server struct {
 	deviceSeen      map[string]deviceSeenEntry
 	deviceInflight  map[deviceInflightKey]struct{} // (device,token) upserts in flight (stampede guard)
 
+	// favoritesStore backs the /v1/favorites backup endpoints + the
+	// "favorites" health-feature flag. Nil unless WithFavoritesStore
+	// wired it (production passes the manifest store).
+	favoritesStore FavoritesStore
+
 	// playlistStore backs the /v1/playlists backup endpoints + the
 	// "playlistBackup" health-feature flag. Nil unless WithPlaylistStore
 	// is wired; when nil the routes return 404 (feature-off) and the flag
@@ -1463,14 +1468,14 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 20 covers the current maximum
+	// appends in lex order. Capacity 22 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
-	// diagnosticsSummary + dlnaServer + keyTempo + loudness +
+	// diagnosticsSummary + dlnaServer + favorites + keyTempo + loudness +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistsCrossDevice +
 	// pushEventsSupported + rendererDiscovery + smartPlaylists +
 	// spectrum + upscaleCompleteEvents + variantBumpsIndex + waveform).
-	feats := make([]string, 0, 21)
+	feats := make([]string, 0, 22)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1508,6 +1513,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// to start in public deployment mode regardless of this flag.
 	if s.dlnaEnabled {
 		feats = append(feats, "dlnaServer")
+	}
+	// `favorites` advertises GET/PUT /v1/favorites (the user-wide track +
+	// album favorites backup singleton). Gated on the store being wired so
+	// a deploy without it advertises honestly and iOS hides the backup
+	// toggle. Alpha-sorted between `dlnaServer` and `keyTempo` (d < f < k).
+	if s.favoritesStore != nil {
+		feats = append(feats, "favorites")
 	}
 	if s.analysisEnabled {
 		// `keyTempo` advertises that this bridge fills Track.keyRoot /
