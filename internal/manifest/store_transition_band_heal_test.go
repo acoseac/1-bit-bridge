@@ -137,6 +137,38 @@ func TestHealTransitionBandBandwidths(t *testing.T) {
 		t.Errorf("healed blob != the encoder's measurement-absent form:\n got: % x\nwant: % x",
 			blob[:24], wf7AbsentBlob[:24])
 	}
+	// v34+v35 are a UNIT: the heal's concat expression stores a TEXT-typed
+	// value in this SQLite build (bytes correct, type wrong — found on the
+	// live deploy: SQLite's string functions NUL-truncate on text, so a
+	// text-typed spectrum silently reads as 5 bytes to any SQL-side
+	// length()/substr()). Migration v35's CAST retype restores blob; the
+	// bytes must survive it untouched.
+	var ty string
+	if err := s.db.QueryRow(`SELECT typeof(spectrum) FROM track_analysis
+			WHERE source_path = 'Jazz/Blue Train/01.flac'`).Scan(&ty); err != nil {
+		t.Fatal(err)
+	}
+	if ty != "blob" {
+		// The heal alone leaves text; only heal+retype is complete.
+		if _, err := s.db.Exec(`UPDATE track_analysis SET spectrum = CAST(spectrum AS BLOB)
+				WHERE spectrum IS NOT NULL AND typeof(spectrum) = 'text'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var tyAfter string
+	var afterBytes []byte
+	if err := s.db.QueryRow(`SELECT typeof(spectrum), spectrum FROM track_analysis
+			WHERE source_path = 'Jazz/Blue Train/01.flac'`).Scan(&tyAfter, &afterBytes); err != nil {
+		t.Fatal(err)
+	}
+	if tyAfter != "blob" {
+		t.Errorf("typeof(spectrum) = %q after heal+retype, want blob — SQL string "+
+			"functions NUL-truncate text-typed values", tyAfter)
+	}
+	if string(afterBytes) != string(wf7AbsentBlob) {
+		t.Error("the v35 retype altered the healed bytes — CAST must be lossless")
+	}
+	blob = afterBytes
 	if bw != nil {
 		t.Errorf("artifact row still carries bandwidth %d — the column was not healed", *bw)
 	}
