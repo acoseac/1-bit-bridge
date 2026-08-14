@@ -7,7 +7,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -279,7 +278,10 @@ func TestManifestSplicesKeyTempo(t *testing.T) {
 	// The wire shape itself: `bpmEstimated` is an omitempty additive, so
 	// the estimated row carries the key and the curated + absent rows OMIT
 	// it entirely (absence makes no claim — pre-feature clients and
-	// curated tags both read identically).
+	// curated tags both read identically). Key-EXISTENCE via a map, not a
+	// substring match: a substring probe for `"bpmEstimated":true` would
+	// falsely pass if the field ever serialized as `"bpmEstimated":false`
+	// (Gemini on PR #689) — the claim under test is that the KEY is absent.
 	for path, wantKey := range map[string]bool{
 		"A/1.flac": true, "A/2.flac": false, "A/3.flac": false,
 	} {
@@ -287,9 +289,16 @@ func TestManifestSplicesKeyTempo(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal %s: %v", path, err)
 		}
-		if got := strings.Contains(string(blob), `"bpmEstimated":true`); got != wantKey {
-			t.Fatalf("%s wire form bpmEstimated presence = %v, want %v (blob %s)",
+		var m map[string]any
+		if err := json.Unmarshal(blob, &m); err != nil {
+			t.Fatalf("unmarshal %s: %v", path, err)
+		}
+		if _, got := m["bpmEstimated"]; got != wantKey {
+			t.Fatalf("%s wire form bpmEstimated key presence = %v, want %v (blob %s)",
 				path, got, wantKey, blob)
+		}
+		if wantKey && m["bpmEstimated"] != true {
+			t.Fatalf("%s bpmEstimated = %v, want true", path, m["bpmEstimated"])
 		}
 	}
 }
