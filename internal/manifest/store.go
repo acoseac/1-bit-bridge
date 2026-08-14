@@ -1543,7 +1543,7 @@ var migrations = []migration{
 		name:    "track_analysis.bandwidth_hz/spectrum (file provenance)",
 		// The whole-track frequency spectrum measured by internal/analyze
 		// (see spectrum.go): `bandwidth_hz` is the highest frequency the
-		// file actually carries, `spectrum` is the ~80-byte `1BSP` curve
+		// file actually carries, `spectrum` is the 84-byte `1BSP` curve
 		// served by GET /v1/spectrum.
 		//
 		// BOTH NULLABLE, and the NULLs mean different things — neither is
@@ -1581,6 +1581,88 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 34,
+		name:    "null out transition-band bandwidths (decode-filter artifacts)",
+		// The wf7 analyzer's ceiling guard (500 Hz) did not cover the
+		// decode resampler's TRANSITION BAND: sox's `rate` effect passes
+		// only 95% of Nyquist, so any file genuinely carrying content past
+		// 24 kHz had its measured "wall" placed at 22.8–23.5 kHz by the
+		// bridge's own filter — 469 of 3,220 hi-res files on the reference
+		// library, a dozen of them staged as false "consistent with a
+		// 48 kHz source" verdicts. internal/analyze now suppresses the
+		// whole band (bandwidthCeilingGuardHz = 1200); this heals the rows
+		// the old code already wrote.
+		//
+		// A DATA FIX, NOT A RE-ANALYSIS — and that only works because the
+		// corrected output is deterministic from the stored one: the new
+		// guard maps every bandwidth ≥ 22800 to "absent", touching nothing
+		// else (the display bands are unaffected; measureCeiling's
+		// guard path returns no cliff either). So this rewrites exactly
+		// what a full WaveformSchemaVersion bump would have produced for
+		// these rows, for ~38 fewer hours of CPU. The healing is done here
+		// rather than at serve time so the DB, the manifest splice and the
+		// verbatim-served 1BSP blob can never disagree.
+		//
+		// 22800 is FROZEN — it is the passband edge of the code that WROTE
+		// these rows (0.95 × 24 kHz, sox `rate` default), not a reference
+		// to the live analyze constant. A later change to the analyzer
+		// must not retroactively change what this migration did.
+		sql:  `-- data fix in post(); see healTransitionBandBandwidths`,
+		post: healTransitionBandBandwidths,
+	},
+}
+
+// healTransitionBandBandwidths is migration v34's post(): every wf7
+// analysis row whose stored bandwidth sits in the decode filter's
+// transition band becomes "no measurement", in BOTH places the value
+// lives — the queryable column AND the verbatim-served `1BSP` blob —
+// plus the parent track's strict-advance `indexed_at` bump so paired
+// clients' delta-syncs pick up the cleared value (the same bump
+// UpsertAnalysis performs for any visible change; without it the wrong
+// readout survives on every synced device until an unrelated change
+// happens to touch the row).
+//
+// The blob patch writes what analyze.EncodeSpectrum emits for an absent
+// measurement: bandwidth u32 = 0 (bytes 19–22, 1-based) and cliff
+// u16 = 0xFFFF (bytes 23–24), leaving the 24-byte header's other fields
+// and the 60 display bands untouched. Bump BEFORE null-out — the
+// affected set is identified by the very values being cleared.
+// Idempotent: after the first run no row matches the predicate.
+func healTransitionBandBandwidths(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// The `schema_version = 'wf7' AND bandwidth_hz >= 22800` predicate is
+	// written VERBATIM in both statements rather than assembled from a
+	// shared const — a compile-time-folded concat is equally safe but
+	// trips go:S2077 and reads as an assembled query (the PR #495
+	// enrichmentMissPredicateSQL convention). Both copies live in this
+	// one frozen function; the byte-fixture test pins their agreement.
+	now := time.Now().UnixNano()
+	if _, err := tx.Exec(`UPDATE tracks SET indexed_at = CASE
+			WHEN indexed_at >= ?1 THEN indexed_at + 1 ELSE ?1 END
+		WHERE path IN (SELECT source_path FROM track_analysis
+			WHERE schema_version = 'wf7' AND bandwidth_hz >= 22800)`, now); err != nil {
+		return fmt.Errorf("bump indexed_at: %w", err)
+	}
+	res, err := tx.Exec(`UPDATE track_analysis SET
+			bandwidth_hz = NULL,
+			spectrum = CASE
+				WHEN spectrum IS NOT NULL AND length(spectrum) >= 24
+				THEN substr(spectrum, 1, 18) || x'00000000' || x'ffff' || substr(spectrum, 25)
+				ELSE spectrum END
+		WHERE schema_version = 'wf7' AND bandwidth_hz >= 22800`)
+	if err != nil {
+		return fmt.Errorf("null transition-band bandwidths: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		logger.Info("migration v34 healed transition-band bandwidths", "rows", n)
+	}
+	return tx.Commit()
 }
 
 // backfillFormatColumns derives the v25 format-fact columns from
@@ -7097,7 +7179,7 @@ type AnalysisRow struct {
 	// onto Track.BandwidthHz at read time.
 	BandwidthHz *int
 
-	// Spectrum is the ~80-byte `1BSP` curve (60 log-spaced bands + the
+	// Spectrum is the 84-byte `1BSP` curve (60 log-spaced bands + the
 	// measured scalars), served verbatim by GET /v1/spectrum. nil when the
 	// row predates the measurement or the track was too short to average.
 	Spectrum []byte

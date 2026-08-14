@@ -9,7 +9,7 @@ import (
 )
 
 // GET /v1/spectrum?path=… — the whole-track frequency spectrum measured by
-// `bridge analyze`, as the ~80-byte `1BSP` curve.
+// `bridge analyze`, as the 84-byte `1BSP` curve.
 //
 // A `boundedRoute` sibling of /v1/waveform, and deliberately shaped like it:
 // same auth, same path validation, same source-freshness gate, same
