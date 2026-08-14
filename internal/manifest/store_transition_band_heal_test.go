@@ -91,6 +91,11 @@ func TestHealTransitionBandBandwidths(t *testing.T) {
 	}
 
 	bw, blob, artIdx := readHealState(t, s, "Jazz/Blue Train/01.flac")
+	// Length FIRST — a heal that truncated the blob must fail with this
+	// message, not panic in the field reads below (Gemini on PR #687).
+	if len(blob) != len(artifactBlob) {
+		t.Fatalf("blob length changed: %d -> %d", len(artifactBlob), len(blob))
+	}
 	if bw != nil {
 		t.Errorf("artifact row still carries bandwidth %d — the column was not healed", *bw)
 	}
@@ -101,9 +106,6 @@ func TestHealTransitionBandBandwidths(t *testing.T) {
 	if got := binary.LittleEndian.Uint16(blob[22:24]); got != 0xFFFF {
 		t.Errorf("blob cliff field = %#x, want 0xFFFF (absent) — a filter-slope "+
 			"cliff would survive on the wire", got)
-	}
-	if len(blob) != len(artifactBlob) {
-		t.Fatalf("blob length changed: %d -> %d", len(artifactBlob), len(blob))
 	}
 	for i := 24; i < len(blob); i++ {
 		if blob[i] != artifactBlob[i] {
