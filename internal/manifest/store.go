@@ -1979,6 +1979,11 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	if clone.bpmFromAnalysis {
 		clone.BPM = nil
 	}
+	// BPMEstimated is read-derived ONLY (set at the same splice as
+	// bpmFromAnalysis) — zero unconditionally so a round-tripped read
+	// Track can never freeze the marker into tags_json, where it would
+	// label a later curated tag as an estimate.
+	clone.BPMEstimated = false
 	// The wf4 quality scalars are analysis-only like KeyRoot/KeyMode —
 	// zero unconditionally so a round-tripped read Track never freezes
 	// them into tags_json.
@@ -3114,6 +3119,11 @@ func spliceAnalysisScalars(t *Track, raw sql.NullString) {
 		b := *kt.BPM
 		t.BPM = &b
 		t.bpmFromAnalysis = true
+		// The wire form of the same provenance: only a POSITIVELY-marked
+		// estimate may be labelled "estimated" by a client — a curated tag
+		// (the t.BPM != nil case above) never reaches this branch and so
+		// never carries the marker.
+		t.BPMEstimated = true
 	}
 	if kt.TruePeak != nil && !math.IsNaN(*kt.TruePeak) && !math.IsInf(*kt.TruePeak, 0) {
 		v := *kt.TruePeak

@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -253,17 +254,52 @@ func TestManifestSplicesKeyTempo(t *testing.T) {
 	for _, tr := range tracks {
 		by[tr.Path] = tr
 	}
-	// A/1: key + tempo both from analysis.
+	// A/1: key + tempo both from analysis — and the tempo is POSITIVELY
+	// marked estimated on the wire.
 	if a1 := by["A/1.flac"]; a1.KeyRoot == nil || *a1.KeyRoot != 2 || a1.KeyMode != "minor" || a1.BPM == nil || *a1.BPM != 140 {
 		t.Fatalf("A/1 = (%v,%q,%v), want analysis (2, minor, 140)", a1.KeyRoot, a1.KeyMode, a1.BPM)
+	} else if !a1.BPMEstimated {
+		t.Fatalf("A/1 spliced an estimated BPM without marking it — the client would have no way to label it")
 	}
-	// A/2: curated BPM tag wins; key still from analysis (no key tag).
+	// A/2: curated BPM tag wins; key still from analysis (no key tag) —
+	// and the curated value MUST NOT carry the estimate marker: labelling
+	// a user's own tag "estimated" is the mislabel the field exists to
+	// prevent.
 	if a2 := by["A/2.flac"]; a2.BPM == nil || *a2.BPM != 90 || a2.KeyRoot == nil || *a2.KeyRoot != 2 {
 		t.Fatalf("A/2 = (key=%v, bpm=%v), want curated bpm 90 + analysis key 2", a2.KeyRoot, a2.BPM)
+	} else if a2.BPMEstimated {
+		t.Fatalf("A/2's curated BPM tag is marked estimated — a curated tag must never carry the marker")
 	}
 	// A/3: nothing.
-	if a3 := by["A/3.flac"]; a3.KeyRoot != nil || a3.KeyMode != "" || a3.BPM != nil {
-		t.Fatalf("A/3 = (%v,%q,%v), want all empty", a3.KeyRoot, a3.KeyMode, a3.BPM)
+	if a3 := by["A/3.flac"]; a3.KeyRoot != nil || a3.KeyMode != "" || a3.BPM != nil || a3.BPMEstimated {
+		t.Fatalf("A/3 = (%v,%q,%v,%v), want all empty", a3.KeyRoot, a3.KeyMode, a3.BPM, a3.BPMEstimated)
+	}
+
+	// The wire shape itself: `bpmEstimated` is an omitempty additive, so
+	// the estimated row carries the key and the curated + absent rows OMIT
+	// it entirely (absence makes no claim — pre-feature clients and
+	// curated tags both read identically). Key-EXISTENCE via a map, not a
+	// substring match: a substring probe for `"bpmEstimated":true` would
+	// falsely pass if the field ever serialized as `"bpmEstimated":false`
+	// (Gemini on PR #689) — the claim under test is that the KEY is absent.
+	for path, wantKey := range map[string]bool{
+		"A/1.flac": true, "A/2.flac": false, "A/3.flac": false,
+	} {
+		blob, err := json.Marshal(by[path])
+		if err != nil {
+			t.Fatalf("marshal %s: %v", path, err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(blob, &m); err != nil {
+			t.Fatalf("unmarshal %s: %v", path, err)
+		}
+		if _, got := m["bpmEstimated"]; got != wantKey {
+			t.Fatalf("%s wire form bpmEstimated key presence = %v, want %v (blob %s)",
+				path, got, wantKey, blob)
+		}
+		if wantKey && m["bpmEstimated"] != true {
+			t.Fatalf("%s bpmEstimated = %v, want true", path, m["bpmEstimated"])
+		}
 	}
 }
 
@@ -303,14 +339,17 @@ func TestSplicedKeyTempoNotPersistedOnRoundTrip(t *testing.T) {
 	}
 
 	// GetTrack reads tags_json only: key always gone; A/1 analysis-BPM gone,
-	// A/2 curated BPM preserved.
+	// A/2 curated BPM preserved. The estimate marker must be gone from BOTH
+	// — frozen into tags_json it would label a later curated tag as an
+	// estimate.
 	a1, _ := s.GetTrack(ctx, "A/1.flac")
-	if a1.KeyRoot != nil || a1.KeyMode != "" || a1.BPM != nil {
-		t.Fatalf("A/1 leaked analysis values: key=(%v,%q) bpm=%v, want all nil", a1.KeyRoot, a1.KeyMode, a1.BPM)
+	if a1.KeyRoot != nil || a1.KeyMode != "" || a1.BPM != nil || a1.BPMEstimated {
+		t.Fatalf("A/1 leaked analysis values: key=(%v,%q) bpm=%v est=%v, want all nil",
+			a1.KeyRoot, a1.KeyMode, a1.BPM, a1.BPMEstimated)
 	}
 	a2, _ := s.GetTrack(ctx, "A/2.flac")
-	if a2.KeyRoot != nil || a2.KeyMode != "" {
-		t.Fatalf("A/2 leaked analysis key: (%v,%q), want nil", a2.KeyRoot, a2.KeyMode)
+	if a2.KeyRoot != nil || a2.KeyMode != "" || a2.BPMEstimated {
+		t.Fatalf("A/2 leaked analysis key/marker: (%v,%q,%v), want nil", a2.KeyRoot, a2.KeyMode, a2.BPMEstimated)
 	}
 	if a2.BPM == nil || *a2.BPM != 90 {
 		t.Fatalf("A/2 curated BPM = %v, want 90 (preserved)", a2.BPM)
