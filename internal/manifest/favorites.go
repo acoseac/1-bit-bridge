@@ -253,10 +253,18 @@ type AdminFavoriteAlbum struct {
 // ListFavoritesForAdmin returns the stored favorites document shaped for
 // the loopback admin console: nil meta = never stored; tracks
 // newest-heart-first with display metadata resolved from the local track
-// index for bridge-local entries; albums newest-first. Read path — no s.mu.
+// index for bridge-local entries; albums newest-first. Read path — no s.mu;
+// one read-only transaction spans the three queries so a PUT committing
+// mid-read can't produce a torn document (the GetFavorites snapshot rule).
 func (s *Store) ListFavoritesForAdmin(ctx context.Context) (*FavoritesMeta, []AdminFavoriteTrack, []AdminFavoriteAlbum, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var meta FavoritesMeta
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT last_modified_at, device_token, updated_at
 		  FROM favorites_meta WHERE id = 1
 	`).Scan(&meta.LastModifiedAt, &meta.DeviceToken, &meta.UpdatedAt)
@@ -270,7 +278,7 @@ func (s *Store) ListFavoritesForAdmin(ctx context.Context) (*FavoritesMeta, []Ad
 	// Local entries resolve display metadata from tags_json; the stored
 	// title/artist render-fallback wins only when the join misses (foreign
 	// entry, or a local track deleted since the favorite was stored).
-	trackRows, err := s.db.QueryContext(ctx, `
+	trackRows, err := tx.QueryContext(ctx, `
 		SELECT COALESCE(f.path, ''), COALESCE(f.origin_path, ''),
 		       CASE WHEN f.origin_fingerprint IS NOT NULL THEN 1 ELSE 0 END,
 		       COALESCE(json_extract(t.tags_json, '$.title'),  COALESCE(f.title,  '')),
@@ -300,7 +308,7 @@ func (s *Store) ListFavoritesForAdmin(ctx context.Context) (*FavoritesMeta, []Ad
 		return nil, nil, nil, err
 	}
 
-	albumRows, err := s.db.QueryContext(ctx, `
+	albumRows, err := tx.QueryContext(ctx, `
 		SELECT album_artist, album, year, favorited_at
 		  FROM favorite_albums
 		 ORDER BY favorited_at DESC
