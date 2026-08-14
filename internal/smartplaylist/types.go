@@ -30,6 +30,10 @@ const (
 	KindArtistDeepCuts Kind = "artistDeepCuts"
 	KindWindDown       Kind = "windDown"
 	KindLiftOff        Kind = "liftOff"
+	// Favorites: the tracks the user hearted (the iOS favorites backup,
+	// F4/B2). Explicit taste, not play-derived — the only family whose
+	// source is a deliberate user signal.
+	KindFavorites Kind = "favorites"
 )
 
 // TrackFeature is the metadata + analysis a track contributes to generation.
@@ -132,6 +136,11 @@ type Inputs struct {
 	QuietSlowPool []TrackFeature
 	LoudFastPool  []TrackFeature
 
+	// Favorites: the BRIDGE-LOCAL favorited tracks (hydrated by the
+	// manifest's FavoritedTrackFeatures — foreign favorites never enter,
+	// so the MinFavorites gate counts only what this bridge can serve).
+	Favorites []TrackFeature
+
 	// PlayedPaths is the set of paths with any qualifying play (Daily Mix
 	// discovery anti-join).
 	PlayedPaths map[string]bool
@@ -199,6 +208,13 @@ type Options struct {
 	// Mood band thresholds (Wind Down + Lift Off share both).
 	MinMoodBand      int
 	MaxMoodBandItems int
+
+	// Favorites thresholds. MinFavorites gates on the BRIDGE-LOCAL joined
+	// pool (foreign favorites never reach Inputs.Favorites); the cap is
+	// deliberately generous — favorites are explicit curation, so the mix
+	// carries much more of the set than the play-derived families do.
+	MinFavorites      int
+	MaxFavoritesItems int
 }
 
 // DefaultOptions returns the tuned production thresholds. These are the
@@ -231,5 +247,8 @@ func DefaultOptions(analysisEnabled bool) Options {
 		// Mood bands.
 		MinMoodBand:      15,
 		MaxMoodBandItems: 25,
+		// Favorites (explicit curation — low floor, high cap).
+		MinFavorites:      5,
+		MaxFavoritesItems: 100,
 	}
 }

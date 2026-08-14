@@ -1136,6 +1136,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/playlists", s.apiPlaylistsList)
 	mux.HandleFunc("GET /api/playlists/detail", s.apiPlaylistDetail)
 	mux.HandleFunc("GET /api/playlists/export", s.apiPlaylistExport)
+	mux.HandleFunc("GET /api/favorites", s.apiFavorites)
 	mux.HandleFunc("GET /api/history", s.apiHistorySummary)
 	mux.HandleFunc("GET /api/history/events", s.apiHistoryEvents)
 	mux.HandleFunc("GET /api/history/export", s.apiHistoryExport)

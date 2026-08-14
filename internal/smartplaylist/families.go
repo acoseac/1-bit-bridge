@@ -472,6 +472,82 @@ func buildDriveMix(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	}, true
 }
 
+// --- Favorites (the hearted tracks — explicit curation, F4/B2) ---
+
+// favoritesSeedOffset keeps the Favorites weekly shuffle independent of the
+// mood bands' (same WeekSeed-XOR convention as moodSeedOffset*).
+const favoritesSeedOffset uint64 = 0x46415645_5f484554 // "FAVE_HET"
+
+func buildFavorites(in Inputs, opts Options) (GeneratedPlaylist, bool) {
+	// Defensive floor default (the buildOnRepeat convention): a zero-value
+	// Options must not let an EMPTY favorites family through — `0 >= 0`
+	// would populate a zero-item mix for every caller that doesn't tune
+	// MinFavorites.
+	minN := opts.MinFavorites
+	if minN <= 0 {
+		minN = 5
+	}
+	if len(in.Favorites) < minN {
+		return GeneratedPlaylist{}, false
+	}
+	capN := opts.MaxFavoritesItems
+	if capN <= 0 {
+		capN = opts.MaxItems
+	}
+
+	// Deterministic weekly rotation of the whole pool first, so BOTH arms
+	// below rotate on Monday-UTC: the harmonic arm's seed track (and thus
+	// its whole flow) changes weekly, and the fallback arm is the shuffle
+	// itself. Without the rotation a large favorites set past the cap
+	// would render the same prefix forever.
+	shuffled := shuffleFeaturesByWeek(in.Favorites, in.WeekSeed^favoritesSeedOffset)
+
+	// Harmonic when analysis is on and enough of the pool carries a key —
+	// the Auto Mix treatment applied to the user's own curation. Un-keyed
+	// favorites append after the harmonic run (week-shuffled) so a heart
+	// is never dropped just because its track wasn't analyzable.
+	var ordered []TrackFeature
+	if opts.AnalysisEnabled {
+		keyed := make([]TrackFeature, 0, len(shuffled))
+		for _, f := range shuffled {
+			if f.KeyRoot != nil {
+				keyed = append(keyed, f)
+			}
+		}
+		if len(keyed) >= 5 {
+			seq := sequenceHarmonic(keyed[0], keyed, capN)
+			if len(seq) >= 5 {
+				used := make(map[string]bool, len(seq))
+				for _, f := range seq {
+					used[f.Path] = true
+				}
+				ordered = seq
+				for _, f := range shuffled {
+					if len(ordered) >= capN {
+						break
+					}
+					if !used[f.Path] {
+						ordered = append(ordered, f)
+					}
+				}
+			}
+		}
+	}
+	if ordered == nil {
+		ordered = shuffled
+	}
+
+	items := itemsFromFeatures(ordered, capN)
+	if len(items) < minN {
+		return GeneratedPlaylist{}, false
+	}
+	return GeneratedPlaylist{
+		Slug: "favorites", Kind: KindFavorites,
+		Title: "Favorites", Subtitle: "The tracks you hearted",
+		Items: items,
+	}, true
+}
+
 // --- On Repeat (per-day repeat behaviour, with hysteresis) ---
 
 // onRepeatSlug is the cache-cached slug for the On Repeat family AND the key

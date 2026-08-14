@@ -289,6 +289,15 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		}
 	}
 
+	// Favorites: the bridge-local hearted tracks (F4 favorites backup).
+	// NOT gated on AnalysisEnabled — the pool hydrates from tags_json
+	// regardless; analysis only upgrades the family's ordering to the
+	// harmonic arm inside the builder.
+	favRows, err := store.FavoritedTrackFeatures(ctx)
+	if err != nil {
+		return smartplaylist.Inputs{}, err
+	}
+
 	// Hysteresis: load the prior cache and build the "was visible last
 	// regeneration" map. The regenerator only writes populated families, so
 	// presence in the cache (slug exists) = visible last run. Hysteresis-
@@ -366,6 +375,17 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 			features[r.Path] = f
 		}
 	}
+	// Favorites rows come back fully hydrated; map them and add to Features
+	// (the mood-band pattern — signEnergy resolves loudness through
+	// Inputs.Features when stamping the family's halo envelope).
+	favFeats := make([]smartplaylist.TrackFeature, 0, len(favRows))
+	for _, r := range favRows {
+		f := toFeature(r)
+		favFeats = append(favFeats, f)
+		if _, ok := features[r.Path]; !ok {
+			features[r.Path] = f
+		}
+	}
 
 	return smartplaylist.Inputs{
 		HeavyRotation:     toStats(heavy),
@@ -380,6 +400,7 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		ArtistDeepCuts:    toStats(deepCuts),
 		QuietSlowPool:     quietPoolFeats,
 		LoudFastPool:      loudPoolFeats,
+		Favorites:         favFeats,
 		PlayedPaths:       toBoolSet(played),
 		Features:          features,
 		PreviouslyVisible: previouslyVisible,

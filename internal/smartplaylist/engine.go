@@ -17,6 +17,9 @@ func Generate(in Inputs, opts Options) []GeneratedPlaylist {
 	// Down) are interleaved per the plan in
 	// ~/.claude/plans/we-now-have-some-playful-sedgewick.md.
 	add(buildHeavyRotation(in, opts))
+	// Favorites sits high — it is the one family sourced from an EXPLICIT
+	// user signal (hearts), so it outranks the play-derived shelves.
+	add(buildFavorites(in, opts))
 	add(buildDriveMix(in, opts))
 	add(buildOnRepeat(in, opts))
 	add(buildAutoMix(in, opts))
