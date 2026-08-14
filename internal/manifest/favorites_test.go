@@ -160,4 +160,34 @@ func TestFavoriteTracksPartialIndexIntegrity(t *testing.T) {
 		 VALUES ('other-fp', '/x.flac', 3)`); err != nil {
 		t.Fatalf("distinct foreign fingerprint must insert cleanly: %v", err)
 	}
+	// The v36 CHECK rejects rows with no identity, both identities, or a
+	// partial foreign identity — even via direct SQL that bypasses
+	// UpsertFavorites' own validation.
+	for name, stmt := range map[string]string{
+		"no identity":      `INSERT INTO favorite_tracks (favorited_at) VALUES (9)`,
+		"both identities":  `INSERT INTO favorite_tracks (path, origin_fingerprint, origin_path, favorited_at) VALUES ('b/c.flac', 'fp', '/y.flac', 9)`,
+		"partial foreign":  `INSERT INTO favorite_tracks (origin_fingerprint, favorited_at) VALUES ('fp-only', 9)`,
+		"empty local path": `INSERT INTO favorite_tracks (path, favorited_at) VALUES ('', 9)`,
+	} {
+		if _, err := s.db.Exec(stmt); err == nil {
+			t.Errorf("%s must violate the local-XOR-foreign CHECK", name)
+		}
+	}
+}
+
+// UpsertFavorites mirrors the table CHECK at the store layer so a future
+// caller that bypasses the API validation still can't persist a row with a
+// broken identity.
+func TestUpsertFavoritesRejectsBrokenIdentity(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+	for name, row := range map[string]FavoriteTrackRow{
+		"no identity":     {FavoritedAt: 1},
+		"both identities": {Path: "a.flac", OriginFingerprint: "fp", OriginPath: "/x.flac", FavoritedAt: 1},
+		"partial foreign": {OriginFingerprint: "fp", FavoritedAt: 1},
+	} {
+		if err := s.UpsertFavorites(ctx, "devA", 1, []FavoriteTrackRow{row}, nil); err == nil {
+			t.Errorf("%s must be rejected by UpsertFavorites", name)
+		}
+	}
 }

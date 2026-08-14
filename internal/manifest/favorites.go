@@ -120,6 +120,17 @@ func (s *Store) UpsertFavorites(ctx context.Context, deviceToken string, lastMod
 	}
 	defer trackStmt.Close()
 	for _, t := range tracks {
+		// Store-level local-XOR-foreign validation, mirroring the v36
+		// table CHECK — the API handler already enforces this on the wire,
+		// but a future store caller must not be able to persist a row with
+		// no identity, both identities, or a partial foreign identity
+		// (CodeRabbit on PR #695).
+		local := t.Path != ""
+		foreign := t.OriginFingerprint != "" && t.OriginPath != ""
+		partialForeign := (t.OriginFingerprint != "") != (t.OriginPath != "")
+		if local == foreign || partialForeign {
+			return errors.New("manifest: favorite track must be strictly local (path) XOR foreign (originFingerprint + originPath)")
+		}
 		if _, err := trackStmt.ExecContext(ctx, nullable(t.Path),
 			nullable(t.OriginFingerprint), nullable(t.OriginPath),
 			nullable(t.Title), nullable(t.Artist), t.FavoritedAt); err != nil {
@@ -146,10 +157,19 @@ func (s *Store) UpsertFavorites(ctx context.Context, deviceToken string, lastMod
 // GetFavorites returns the stored favorites document. A nil meta means
 // "never stored" — the handler serves an empty doc with lastModifiedAt 0
 // (singleton semantics: never a 404-as-missing). Entries come back
-// newest-favorited first. Read path — no s.mu.
+// newest-favorited first. Read path — no s.mu; the three queries run in ONE
+// read-only transaction so a PUT committing between them can't produce a
+// torn document (an old lastModifiedAt over new entry sets — CodeRabbit on
+// PR #695).
 func (s *Store) GetFavorites(ctx context.Context) (*FavoritesMeta, []FavoriteTrackRow, []FavoriteAlbumRow, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var meta FavoritesMeta
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT last_modified_at, device_token, updated_at
 		  FROM favorites_meta WHERE id = 1
 	`).Scan(&meta.LastModifiedAt, &meta.DeviceToken, &meta.UpdatedAt)
@@ -160,7 +180,7 @@ func (s *Store) GetFavorites(ctx context.Context) (*FavoritesMeta, []FavoriteTra
 		return nil, nil, nil, err
 	}
 
-	trackRows, err := s.db.QueryContext(ctx, `
+	trackRows, err := tx.QueryContext(ctx, `
 		SELECT COALESCE(path, ''), COALESCE(origin_fingerprint, ''),
 		       COALESCE(origin_path, ''), COALESCE(title, ''), COALESCE(artist, ''),
 		       favorited_at
@@ -184,7 +204,7 @@ func (s *Store) GetFavorites(ctx context.Context) (*FavoritesMeta, []FavoriteTra
 		return nil, nil, nil, err
 	}
 
-	albumRows, err := s.db.QueryContext(ctx, `
+	albumRows, err := tx.QueryContext(ctx, `
 		SELECT album_artist, album, year, favorited_at
 		  FROM favorite_albums
 		 ORDER BY favorited_at DESC

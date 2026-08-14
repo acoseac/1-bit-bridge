@@ -175,6 +175,10 @@ func TestFavoritesPutValidation(t *testing.T) {
 		"zero album favoritedAt": `{"lastModifiedAt": 1, "tracks": [], "albums": [{"album": "A", "favoritedAt": 0}]}`,
 		"slash-only local path":  `{"lastModifiedAt": 1, "tracks": [{"path": "/", "favoritedAt": 1}], "albums": []}`,
 		"items not an array":     `{"lastModifiedAt": 1, "tracks": {"a": 1}, "albums": []}`,
+		// Decode reads only the FIRST top-level value — trailing documents
+		// must be rejected, not silently ignored (CodeRabbit on PR #695).
+		"trailing JSON object": `{"lastModifiedAt": 1, "tracks": [], "albums": []} {}`,
+		"trailing token":       `{"lastModifiedAt": 1, "tracks": [], "albums": []} null`,
 	} {
 		resp := doReq(t, srv, http.MethodPut, "/v1/favorites", token, dt, body)
 		if resp.StatusCode != http.StatusBadRequest {

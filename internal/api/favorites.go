@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -118,7 +118,12 @@ func decodeCappedArray[T any](data []byte, cap int, capErr error) ([]T, error) {
 	if d, ok := closeTok.(json.Delim); !ok || d != ']' {
 		return nil, errFavoritesNotArray
 	}
-	if dec.More() {
+	// Trailing-garbage guard: `dec.More()` only answers "more elements in
+	// the CURRENT array/object", so at the top level it misses e.g. a stray
+	// `]` — asserting the next token is io.EOF is the robust form (Gemini
+	// on PR #695). Defensive here (the outer object decode hands this
+	// exactly one JSON value), load-bearing hygiene nonetheless.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errFavoritesNotArray
 	}
 	return items, nil
@@ -256,6 +261,14 @@ func (s *Server) putFavorites(w http.ResponseWriter, r *http.Request) {
 			"request body must be a favorites JSON object", err)
 		return
 	}
+	// Reject trailing top-level JSON values (`{...} {}`): Decode reads only
+	// the FIRST value, so without this a body carrying extra documents would
+	// be silently accepted (CodeRabbit on PR #695).
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"request body must be a single favorites JSON object")
+		return
+	}
 	if body.LastModifiedAt <= 0 {
 		writeError(w, http.StatusBadRequest, "bad_request",
 			"lastModifiedAt must be a positive UnixNano value")
@@ -266,7 +279,12 @@ func (s *Server) putFavorites(w http.ResponseWriter, r *http.Request) {
 	// even with the DB's partial UNIQUE indexes — a duplicate-bearing
 	// payload must store cleanly (200), never constraint-fail into a 500;
 	// the indexes are the integrity backstop for handler regressions.
-	trackByKey := make(map[string]int, len(body.Tracks))
+	// Comparable STRUCT keys, never delimiter-joined strings — JSON permits
+	// escaped NULs, so two distinct user-controlled fields could collide a
+	// "\x00"-joined key and silently overwrite each other (CodeRabbit on
+	// PR #695).
+	type trackKey struct{ path, originFingerprint, originPath string }
+	trackByKey := make(map[trackKey]int, len(body.Tracks))
 	tracks := make([]manifest.FavoriteTrackRow, 0, len(body.Tracks))
 	for _, t := range body.Tracks {
 		// Strict local-XOR-foreign — the playlist-item predicate.
@@ -303,11 +321,12 @@ func (s *Server) putFavorites(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		var key string
+		var key trackKey
 		if row.Path != "" {
-			key = "p\x00" + row.Path
+			key.path = row.Path
 		} else {
-			key = "f\x00" + row.OriginFingerprint + "\x00" + row.OriginPath
+			key.originFingerprint = row.OriginFingerprint
+			key.originPath = row.OriginPath
 		}
 		if idx, dup := trackByKey[key]; dup {
 			tracks[idx] = row // last-wins
@@ -317,7 +336,11 @@ func (s *Server) putFavorites(w http.ResponseWriter, r *http.Request) {
 		tracks = append(tracks, row)
 	}
 
-	albumByKey := make(map[string]int, len(body.Albums))
+	type albumKey struct {
+		albumArtist, album string
+		year               int
+	}
+	albumByKey := make(map[albumKey]int, len(body.Albums))
 	albums := make([]manifest.FavoriteAlbumRow, 0, len(body.Albums))
 	for _, a := range body.Albums {
 		if a.Album == "" {
@@ -336,7 +359,7 @@ func (s *Server) putFavorites(w http.ResponseWriter, r *http.Request) {
 		row := manifest.FavoriteAlbumRow{
 			AlbumArtist: a.AlbumArtist, Album: a.Album, Year: a.Year, FavoritedAt: a.FavoritedAt,
 		}
-		key := row.AlbumArtist + "\x00" + row.Album + "\x00" + strconv.Itoa(row.Year)
+		key := albumKey{albumArtist: row.AlbumArtist, album: row.Album, year: row.Year}
 		if idx, dup := albumByKey[key]; dup {
 			albums[idx] = row // last-wins
 			continue
@@ -348,9 +371,20 @@ func (s *Server) putFavorites(w http.ResponseWriter, r *http.Request) {
 	switch err := s.favoritesStore.UpsertFavorites(r.Context(), dt, body.LastModifiedAt, tracks, albums); {
 	case errors.Is(err, manifest.ErrFavoritesStale):
 		// Re-read the server copy so iOS can union-merge in one round-trip
-		// (the load-bearing half of the 409 contract).
+		// (the load-bearing half of the 409 contract). A FAILED re-read is a
+		// database error, not a conflict — 500 it honestly rather than
+		// emitting a 409 whose body violates the full-server-copy contract
+		// (Gemini + CodeRabbit on PR #695). meta == nil (stale yet nothing
+		// stored — practically unreachable) degrades to a body-less 409;
+		// iOS treats the undecodable stale body as a transport failure and
+		// stays dirty for the next sweep.
 		meta, sTracks, sAlbums, gerr := s.favoritesStore.GetFavorites(r.Context())
-		if gerr != nil || meta == nil {
+		if gerr != nil {
+			writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+				"failed to read favorites for conflict resolution", gerr)
+			return
+		}
+		if meta == nil {
 			writeError(w, http.StatusConflict, "stale", "server copy is newer")
 			return
 		}

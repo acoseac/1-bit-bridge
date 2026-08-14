@@ -1681,7 +1681,21 @@ var migrations = []migration{
 			origin_path        TEXT,
 			title              TEXT,
 			artist             TEXT,
-			favorited_at       INTEGER NOT NULL
+			favorited_at       INTEGER NOT NULL,
+			-- Strict local-XOR-foreign identity (the wire contract): a local
+			-- row carries ONLY a non-empty path; a foreign row carries BOTH a
+			-- non-empty fingerprint AND origin_path. Edited INTO v36 rather
+			-- than a follow-up migration because v36 has never shipped in a
+			-- release — no deployed database has run it (CodeRabbit on
+			-- PR #695 asked for a v37 rebuild; unnecessary pre-release).
+			CHECK (
+				(path IS NOT NULL AND path <> ''
+					AND origin_fingerprint IS NULL AND origin_path IS NULL)
+				OR
+				(path IS NULL
+					AND origin_fingerprint IS NOT NULL AND origin_fingerprint <> ''
+					AND origin_path IS NOT NULL AND origin_path <> '')
+			)
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_fav_tracks_local
 			ON favorite_tracks(path) WHERE path IS NOT NULL;
