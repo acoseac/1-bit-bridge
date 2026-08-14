@@ -49,6 +49,39 @@
 
   <div class="panel">
     <div class="panel-head">
+      <h2>Favorites</h2>
+    </div>
+    <p class="muted">
+      The favorites document paired devices back up here — hearted tracks and
+      albums. Foreign entries live on another source (bridge / SMB / on-device)
+      and are stored as opaque references this bridge never serves.
+      <span id="favorites-meta"></span>
+    </p>
+    <table class="rows">
+      <thead>
+        <tr>
+          <th>Title</th><th>Artist</th><th>Album</th><th>Source</th><th>Favorited</th>
+        </tr>
+      </thead>
+      <tbody id="favorites-tracks-body">
+        <tr><td colspan="5"><em>Loading…</em></td></tr>
+      </tbody>
+    </table>
+    <h3>Albums</h3>
+    <table class="rows">
+      <thead>
+        <tr>
+          <th>Album</th><th>Album artist</th><th class="num">Year</th><th>Favorited</th>
+        </tr>
+      </thead>
+      <tbody id="favorites-albums-body">
+        <tr><td colspan="4"><em>Loading…</em></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
       <h2>Listening history</h2>
       <div class="export-actions">
         <span class="muted">Export:</span>

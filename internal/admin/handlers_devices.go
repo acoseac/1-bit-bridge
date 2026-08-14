@@ -94,6 +94,79 @@ func (s *Server) apiPlaylistsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"playlists": out})
 }
 
+// favoriteTrackAdminRow / favoriteAlbumAdminRow are the admin-wire DTOs for
+// the iOS favorites backup document (GET /api/favorites).
+type favoriteTrackAdminRow struct {
+	Title       string `json:"title"`
+	Artist      string `json:"artist"`
+	Album       string `json:"album"`
+	Path        string `json:"path,omitempty"`
+	OriginPath  string `json:"originPath,omitempty"`
+	Foreign     bool   `json:"foreign"`
+	FavoritedAt string `json:"favoritedAt"`
+}
+
+type favoriteAlbumAdminRow struct {
+	AlbumArtist string `json:"albumArtist"`
+	Album       string `json:"album"`
+	Year        int    `json:"year,omitempty"`
+	FavoritedAt string `json:"favoritedAt"`
+}
+
+// apiFavorites handles GET /api/favorites — the stored favorites backup
+// document (hearted tracks + albums), newest heart first. `stored: false`
+// with empty sets when no device has pushed favorites yet (the singleton
+// never-stored state). Loopback-only, read-only.
+func (s *Server) apiFavorites(w http.ResponseWriter, r *http.Request) {
+	empty := map[string]any{
+		"stored": false,
+		"tracks": []favoriteTrackAdminRow{},
+		"albums": []favoriteAlbumAdminRow{},
+	}
+	if s.deps.Manifest == nil {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	meta, tracks, albums, err := s.deps.Manifest.ListFavoritesForAdmin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if meta == nil {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	trackRows := make([]favoriteTrackAdminRow, 0, len(tracks))
+	for _, t := range tracks {
+		trackRows = append(trackRows, favoriteTrackAdminRow{
+			Title:       t.Title,
+			Artist:      t.Artist,
+			Album:       t.Album,
+			Path:        t.Path,
+			OriginPath:  t.OriginPath,
+			Foreign:     t.Foreign,
+			FavoritedAt: time.Unix(0, t.FavoritedAt).UTC().Format(time.RFC3339),
+		})
+	}
+	albumRows := make([]favoriteAlbumAdminRow, 0, len(albums))
+	for _, a := range albums {
+		albumRows = append(albumRows, favoriteAlbumAdminRow{
+			AlbumArtist: a.AlbumArtist,
+			Album:       a.Album,
+			Year:        a.Year,
+			FavoritedAt: time.Unix(0, a.FavoritedAt).UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stored":            true,
+		"lastModifiedAt":    time.Unix(0, meta.LastModifiedAt).UTC().Format(time.RFC3339),
+		"updatedAt":         time.Unix(0, meta.UpdatedAt).UTC().Format(time.RFC3339),
+		"deviceTokenPrefix": redactDeviceToken(meta.DeviceToken),
+		"tracks":            trackRows,
+		"albums":            albumRows,
+	})
+}
+
 // historyBucketRow is the admin-wire DTO for a (label, count) aggregate.
 type historyBucketRow struct {
 	Label string `json:"label"`

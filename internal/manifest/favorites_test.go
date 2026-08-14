@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -189,5 +190,117 @@ func TestUpsertFavoritesRejectsBrokenIdentity(t *testing.T) {
 		if err := s.UpsertFavorites(ctx, "devA", 1, []FavoriteTrackRow{row}, nil); err == nil {
 			t.Errorf("%s must be rejected by UpsertFavorites", name)
 		}
+	}
+}
+
+// seedFavTrack inserts a minimal tracks row so favorites queries can join
+// display metadata.
+func seedFavTrack(t *testing.T, s *Store, path, title string) {
+	t.Helper()
+	tags := `{"title":"` + title + `","artist":"Artist","album":"Album"}`
+	if _, err := s.db.Exec(`
+		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
+		VALUES (?,?,?,?,?)`, path, int64(100), int64(1), tags, int64(1)); err != nil {
+		t.Fatalf("insert track %q: %v", path, err)
+	}
+}
+
+// The favorites smart-mix pool is BRIDGE-LOCAL only: foreign favorites
+// (however many) never enter it, so they can never satisfy the family's
+// MinFavorites floor; dupe-suppressed and since-deleted local favorites are
+// excluded too; the survivors come back newest heart first.
+func TestFavoritedTrackFeatures_LocalServedOnly(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+	seedFavTrack(t, s, "a/keep.flac", "Keep")
+	seedFavTrack(t, s, "a/keep2.flac", "Keep2")
+	seedFavTrack(t, s, "a/suppressed.flac", "Sup")
+	if _, err := s.db.Exec(`UPDATE tracks SET dupe_suppressed = 1 WHERE path = 'a/suppressed.flac'`); err != nil {
+		t.Fatalf("suppress: %v", err)
+	}
+	tracks := []FavoriteTrackRow{
+		{Path: "a/keep.flac", FavoritedAt: 100},
+		{Path: "a/keep2.flac", FavoritedAt: 300}, // newest heart
+		{Path: "a/suppressed.flac", FavoritedAt: 250},
+		{Path: "a/deleted-since.flac", FavoritedAt: 200}, // no tracks row
+	}
+	// A pile of foreign favorites that must never enter the pool.
+	for i := 0; i < 10; i++ {
+		tracks = append(tracks, FavoriteTrackRow{
+			OriginFingerprint: "smb", OriginPath: fmt.Sprintf("/f%d.flac", i),
+			FavoritedAt: int64(400 + i)})
+	}
+	if err := s.UpsertFavorites(ctx, "devA", 1000, tracks, nil); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	rows, err := s.FavoritedTrackFeatures(ctx)
+	if err != nil {
+		t.Fatalf("FavoritedTrackFeatures: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want exactly the 2 served local favorites, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Path != "a/keep2.flac" || rows[1].Path != "a/keep.flac" {
+		t.Errorf("want newest heart first, got %q then %q", rows[0].Path, rows[1].Path)
+	}
+	if rows[0].Title != "Keep2" {
+		t.Errorf("features must hydrate from tags_json, got title %q", rows[0].Title)
+	}
+}
+
+// ListFavoritesForAdmin resolves local entries' display metadata from the
+// track index and falls back to the stored render-fallback for foreign
+// entries; nil meta = never stored.
+func TestListFavoritesForAdmin_JoinAndFallback(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+
+	meta, _, _, err := s.ListFavoritesForAdmin(ctx)
+	if err != nil || meta != nil {
+		t.Fatalf("never-stored must be (nil, nil err), got meta=%v err=%v", meta, err)
+	}
+
+	seedFavTrack(t, s, "a/local.flac", "Local Title")
+	tracks := []FavoriteTrackRow{
+		{Path: "a/local.flac", FavoritedAt: 300},
+		{OriginFingerprint: "smb", OriginPath: "/x.flac",
+			Title: "Foreign Title", Artist: "FA", FavoritedAt: 200},
+		{Path: "a/vanished.flac", FavoritedAt: 100}, // local, track deleted since
+	}
+	albums := []FavoriteAlbumRow{
+		{AlbumArtist: "AA", Album: "AL", Year: 2001, FavoritedAt: 50},
+	}
+	if err := s.UpsertFavorites(ctx, "devA", 1000, tracks, albums); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	meta, gotTracks, gotAlbums, err := s.ListFavoritesForAdmin(ctx)
+	if err != nil || meta == nil {
+		t.Fatalf("list: %v (meta=%v)", err, meta)
+	}
+	if meta.LastModifiedAt != 1000 || meta.DeviceToken != "devA" {
+		t.Errorf("meta mismatch: %+v", meta)
+	}
+	if len(gotTracks) != 3 || len(gotAlbums) != 1 {
+		t.Fatalf("want 3 tracks + 1 album, got %d + %d", len(gotTracks), len(gotAlbums))
+	}
+	// Newest first; local resolves display fields through the join.
+	if gotTracks[0].Path != "a/local.flac" || gotTracks[0].Foreign ||
+		gotTracks[0].Title != "Local Title" || gotTracks[0].Album != "Album" {
+		t.Errorf("local admin row mangled: %+v", gotTracks[0])
+	}
+	// Foreign renders from the stored fallback and flags Foreign.
+	if !gotTracks[1].Foreign || gotTracks[1].Title != "Foreign Title" ||
+		gotTracks[1].OriginPath != "/x.flac" || gotTracks[1].Path != "" {
+		t.Errorf("foreign admin row mangled: %+v", gotTracks[1])
+	}
+	// A local favorite whose track vanished degrades to empty display
+	// fields rather than being dropped (the safe is still holding it).
+	if gotTracks[2].Foreign || gotTracks[2].Path != "a/vanished.flac" || gotTracks[2].Title != "" {
+		t.Errorf("vanished-local admin row mangled: %+v", gotTracks[2])
+	}
+	if gotAlbums[0].Album != "AL" || gotAlbums[0].Year != 2001 {
+		t.Errorf("album admin row mangled: %+v", gotAlbums[0])
 	}
 }

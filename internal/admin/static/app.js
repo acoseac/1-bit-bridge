@@ -7109,6 +7109,7 @@ let historyLoading = false;
 
 function initData() {
   loadPlaylists();
+  loadFavorites();
   loadHistorySummary();
   historyCursor = 0;
   loadHistoryEvents(true);
@@ -7202,6 +7203,53 @@ async function loadPlaylists() {
     });
   } catch (err) {
     body.innerHTML = `<tr><td colspan="5" class="error">Failed to load playlists: ${escapeHTML(String(err.message || err))}</td></tr>`;
+  }
+}
+
+// loadFavorites renders the backed-up favorites document (hearted tracks +
+// albums) on the data page. Never-stored → friendly empty states; a fetch
+// failure takes only this panel down (the playlists/history loaders are
+// independent by the same rule).
+async function loadFavorites() {
+  const tracksBody = document.getElementById("favorites-tracks-body");
+  const albumsBody = document.getElementById("favorites-albums-body");
+  if (!tracksBody || !albumsBody) return;
+  try {
+    const data = await API.get("/api/favorites");
+    const metaEl = document.getElementById("favorites-meta");
+    if (metaEl && data.stored) {
+      const names = await loadDeviceNames();
+      const dev = names.get(data.deviceTokenPrefix) || data.deviceTokenPrefix || "";
+      const when = data.lastModifiedAt ? formatTimeAgo(new Date(data.lastModifiedAt)) : "";
+      metaEl.textContent = `Last updated ${when}${dev ? ` by ${dev}` : ""}.`;
+    }
+    const tracks = data.tracks || [];
+    tracksBody.innerHTML = tracks.length === 0
+      ? `<tr><td colspan="5"><em>No favorite tracks backed up yet.</em></td></tr>`
+      : tracks.map((t) => `
+        <tr>
+          <td data-label="Title">${escapeHTML(t.title || "—")}</td>
+          <td data-label="Artist">${escapeHTML(t.artist || "—")}</td>
+          <td data-label="Album">${escapeHTML(t.album || "—")}</td>
+          <td data-label="Source">${t.foreign
+            ? `<span class="badge idle" title="${escapeHTML(t.originPath || "")}">foreign</span>`
+            : `<code>${escapeHTML(t.path || "")}</code>`}</td>
+          <td data-label="Favorited">${t.favoritedAt ? formatTimeAgo(new Date(t.favoritedAt)) : "—"}</td>
+        </tr>`).join("");
+    const albums = data.albums || [];
+    albumsBody.innerHTML = albums.length === 0
+      ? `<tr><td colspan="4"><em>No favorite albums backed up yet.</em></td></tr>`
+      : albums.map((a) => `
+        <tr>
+          <td data-label="Album">${escapeHTML(a.album || "—")}</td>
+          <td data-label="Album artist">${escapeHTML(a.albumArtist || "—")}</td>
+          <td class="num" data-label="Year">${a.year ? a.year : "—"}</td>
+          <td data-label="Favorited">${a.favoritedAt ? formatTimeAgo(new Date(a.favoritedAt)) : "—"}</td>
+        </tr>`).join("");
+  } catch (err) {
+    const msg = `<em>Failed to load favorites: ${escapeHTML(String(err.message || err))}</em>`;
+    tracksBody.innerHTML = `<tr><td colspan="5" class="error">${msg}</td></tr>`;
+    albumsBody.innerHTML = `<tr><td colspan="4" class="error">${msg}</td></tr>`;
   }
 }
 
