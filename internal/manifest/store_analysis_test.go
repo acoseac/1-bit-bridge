@@ -250,7 +250,7 @@ func TestAllAnalysisRowsCarriesSpectrum(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("AllAnalysisRows returned %d rows, want 1", len(rows))
 	}
-	if !bytes.Equal(rows[0].Spectrum, blob) || rows[0].BandwidthHz == nil {
+	if !bytes.Equal(rows[0].Spectrum, blob) || rows[0].BandwidthHz == nil || *rows[0].BandwidthHz != 21500 {
 		t.Fatalf("AllAnalysisRows lost spectrum fields: %+v", rows[0])
 	}
 }
