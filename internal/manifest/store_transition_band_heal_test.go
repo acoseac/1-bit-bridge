@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"encoding/binary"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -137,38 +138,6 @@ func TestHealTransitionBandBandwidths(t *testing.T) {
 		t.Errorf("healed blob != the encoder's measurement-absent form:\n got: % x\nwant: % x",
 			blob[:24], wf7AbsentBlob[:24])
 	}
-	// v34+v35 are a UNIT: the heal's concat expression stores a TEXT-typed
-	// value in this SQLite build (bytes correct, type wrong — found on the
-	// live deploy: SQLite's string functions NUL-truncate on text, so a
-	// text-typed spectrum silently reads as 5 bytes to any SQL-side
-	// length()/substr()). Migration v35's CAST retype restores blob; the
-	// bytes must survive it untouched.
-	var ty string
-	if err := s.db.QueryRow(`SELECT typeof(spectrum) FROM track_analysis
-			WHERE source_path = 'Jazz/Blue Train/01.flac'`).Scan(&ty); err != nil {
-		t.Fatal(err)
-	}
-	if ty != "blob" {
-		// The heal alone leaves text; only heal+retype is complete.
-		if _, err := s.db.Exec(`UPDATE track_analysis SET spectrum = CAST(spectrum AS BLOB)
-				WHERE spectrum IS NOT NULL AND typeof(spectrum) = 'text'`); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var tyAfter string
-	var afterBytes []byte
-	if err := s.db.QueryRow(`SELECT typeof(spectrum), spectrum FROM track_analysis
-			WHERE source_path = 'Jazz/Blue Train/01.flac'`).Scan(&tyAfter, &afterBytes); err != nil {
-		t.Fatal(err)
-	}
-	if tyAfter != "blob" {
-		t.Errorf("typeof(spectrum) = %q after heal+retype, want blob — SQL string "+
-			"functions NUL-truncate text-typed values", tyAfter)
-	}
-	if string(afterBytes) != string(wf7AbsentBlob) {
-		t.Error("the v35 retype altered the healed bytes — CAST must be lossless")
-	}
-	blob = afterBytes
 	if bw != nil {
 		t.Errorf("artifact row still carries bandwidth %d — the column was not healed", *bw)
 	}
@@ -254,5 +223,76 @@ func TestHealTransitionBandShortBlob(t *testing.T) {
 	}
 	if idx <= idx0 {
 		t.Errorf("indexed_at did not advance (%d -> %d)", idx0, idx)
+	}
+}
+
+// TestMigrationLadderHealsAndRetypes drives migrations v34+v35 through the
+// REAL runner rather than through copies of their statements (CodeRabbit on
+// PR #688 — a test executing its own copy of the SQL passes even if the
+// registered migration differs or is absent; the third instance of the
+// wrong-together class on this feature, so this closes the last link).
+//
+// Mechanics: seed on a head-version store, rewind `PRAGMA user_version` to
+// 33, close, and let OpenStore walk the ladder. Legitimate because
+// migrations are REQUIRED to be idempotent ("a crash mid-migration and
+// restart should re-run cleanly" — the ladder docblock): re-running 34+35
+// over a head-schema DB is exactly the crash-recovery path. v34's predicate
+// matches only the seeded artifact row; v35 retypes what 34 produced.
+func TestMigrationLadderHealsAndRetypes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ladder.db")
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedWF7SpectrumRow(t, s, "Jazz/Blue Train/01.flac", 23414, wf7MeasuredBlob)
+	seedWF7SpectrumRow(t, s, "Rock/Get A Grip/03.flac", 21891, heal1BSPBlob(21891, 864))
+	if _, err := s.db.Exec(`PRAGMA user_version = 33`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := OpenStore(dbPath) // the ladder runs 34 then 35 here
+	if err != nil {
+		t.Fatalf("reopen at v33 (runs migrations 34+35): %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	var ty string
+	var bw *int
+	var blob []byte
+	if err := s2.db.QueryRow(`SELECT typeof(spectrum), bandwidth_hz, spectrum
+			FROM track_analysis WHERE source_path = 'Jazz/Blue Train/01.flac'`).
+		Scan(&ty, &bw, &blob); err != nil {
+		t.Fatal(err)
+	}
+	// Length before any field read (the round-1 Gemini rule).
+	if len(blob) != len(wf7AbsentBlob) {
+		t.Fatalf("blob is %d bytes after the ladder, want %d", len(blob), len(wf7AbsentBlob))
+	}
+	if ty != "blob" {
+		t.Errorf("typeof(spectrum) = %q after the ladder, want blob — v35's retype "+
+			"did not run or did not stick; SQL string functions NUL-truncate "+
+			"text-typed values", ty)
+	}
+	if bw != nil {
+		t.Errorf("bandwidth = %d after the ladder, want NULL", *bw)
+	}
+	if string(blob) != string(wf7AbsentBlob) {
+		t.Errorf("ladder end-state blob != the encoder's measurement-absent form:\n"+
+			" got: % x\nwant: % x", blob[:24], wf7AbsentBlob[:24])
+	}
+
+	// Control row: byte-identical, still blob-typed.
+	var cty string
+	var cbw *int
+	if err := s2.db.QueryRow(`SELECT typeof(spectrum), bandwidth_hz
+			FROM track_analysis WHERE source_path = 'Rock/Get A Grip/03.flac'`).
+		Scan(&cty, &cbw); err != nil {
+		t.Fatal(err)
+	}
+	if cty != "blob" || cbw == nil || *cbw != 21891 {
+		t.Errorf("control row disturbed by the ladder: typeof=%q bw=%v", cty, cbw)
 	}
 }
