@@ -32,7 +32,7 @@
       <tbody id="tokens-body">
         {{range .Data.Tokens}}
         <tr data-id="{{.ID}}" data-name="{{.Name}}">
-          <td data-label="Name">{{.Name}}</td>
+          <td data-label="Name">{{.Name}}{{if .ClientVersion}} <small class="muted">app {{.ClientVersion}}</small>{{end}}</td>
           <td data-label="ID"><code>{{.ID}}</code></td>
           <td data-label="Created">{{timeAgo .CreatedAt}}</td>
           <td data-label="Last used">{{timeAgo .LastUsedAt}}</td>

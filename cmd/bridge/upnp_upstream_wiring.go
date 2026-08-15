@@ -257,7 +257,10 @@ func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv confi
 	}
 	// TODO (Bridge PR-D follow-up): support srv.ManualDescriptionURL —
 	// fetch + parse the description here and cache its controlURL. v1
-	// is SSDP-only.
+	// is SSDP-only. Until this lands, a UDN-less manual-URL entry can
+	// never resolve; the ingester reports it as "not yet supported"
+	// (not "not discoverable") and the admin form's field hint says
+	// the same. tracked: 2026-08-14 feature review P2-29.
 	return "", nil
 }
 

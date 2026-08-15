@@ -1277,6 +1277,47 @@ func TestWriteManifestParityWithBuildManifest(t *testing.T) {
 	}
 }
 
+// TestManifestDeltaOmitsFolders pins P2-41 (2026-08-14 review): a
+// delta sync (`since` set) must NOT walk + marshal the entire folders
+// table — the array only ships on the full-manifest leg, and both the
+// streaming writer and the builder agree. iOS decodes the field
+// optionally and merges, so absence on a delta is additive-safe.
+func TestManifestDeltaOmitsFolders(t *testing.T) {
+	root, _ := tempLibrary(t)
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	defer s.Close()
+	sc := NewScanner([]string{root}, s, "")
+	sc.Scan(context.Background())
+
+	since := time.Now().Add(-24 * time.Hour)
+
+	var buf bytes.Buffer
+	if err := WriteManifest(context.Background(), &buf, s, []string{root}, since); err != nil {
+		t.Fatalf("WriteManifest(since): %v", err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte(`"folders"`)) {
+		t.Errorf("delta stream must omit the folders array; body=%s", buf.String()[:min(400, buf.Len())])
+	}
+
+	built, err := BuildManifest(context.Background(), s, []string{root}, since)
+	if err != nil {
+		t.Fatalf("BuildManifest(since): %v", err)
+	}
+	if len(built.Folders) != 0 {
+		t.Errorf("delta builder must omit folders; got %d", len(built.Folders))
+	}
+
+	// The FULL leg still carries them (the negative control for this
+	// test's own gate).
+	full, err := BuildManifest(context.Background(), s, []string{root}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Folders) == 0 {
+		t.Error("full manifest must still carry folders")
+	}
+}
+
 // TestWriteManifestStreamsLargeLibraryWithoutOOM exercises the legacy
 // path with enough synthetic tracks that the prior in-memory builder
 // would noticeably allocate. Verifies the streamed JSON parses and

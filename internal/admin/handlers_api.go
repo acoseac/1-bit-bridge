@@ -126,6 +126,11 @@ type libraryPageData struct {
 	OptimizedVariants int
 	UpscaledBytes     int64
 	OptimizedBytes    int64
+	// FilesUnreadable is the scanner's cumulative recovered-panic count
+	// (Scanner.PanickedCount — files whose tag extraction crashed and
+	// were skipped). Process-lifetime monotonic, not per-scan; the
+	// template renders it only when > 0.
+	FilesUnreadable int64
 }
 
 type tokenRow struct {
@@ -135,6 +140,12 @@ type tokenRow struct {
 	LastUsedAt time.Time  `json:"lastUsedAt,omitempty"`
 	RotatedAt  time.Time  `json:"rotatedAt,omitempty"`
 	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+	// ClientVersion is the device's most recent self-reported
+	// X-Client-Version (auth.Token.LastClientVersion). Empty for
+	// devices that have never presented the header (older iOS builds,
+	// freshly-minted tokens). Display-only — the updater's compat gate
+	// reads the auth store directly, not this DTO.
+	ClientVersion string `json:"clientVersion,omitempty"`
 }
 
 type pairResult struct {
@@ -199,6 +210,16 @@ type settingsResponse struct {
 	// restart-required contract — the daily regenerator is wired at
 	// `bridge serve` startup.
 	SmartPlaylistsEnabled bool `json:"smartPlaylistsEnabled"`
+	// OptimizeEnabled is the RESOLVED CarPlay-optimize gate
+	// (cfg.Upscale.EffectiveOptimizeEnabled() — YAML nil defaults to
+	// true; only active while UpscaleEnabled). Restart-required: the
+	// optimize eligibility closures + the /v1/health advertisement are
+	// resolved once at `bridge serve` startup.
+	OptimizeEnabled bool `json:"optimizeEnabled"`
+	// LibraryWatchEnabled is the fsnotify instant-update watcher opt-in
+	// (cfg.LibraryWatch.Enabled, default false). Restart-required: the
+	// watcher goroutine is spawned once at `bridge serve` startup.
+	LibraryWatchEnabled bool `json:"libraryWatchEnabled"`
 	// Enrich upstream base-URL overrides (from the `enrich` config block).
 	// Empty = public MusicBrainz / Cover Art Archive defaults; point both at
 	// a self-hosted Atlas mirror to keep enrichment on-network.
@@ -1627,12 +1648,13 @@ func (s *Server) apiTokensList(w http.ResponseWriter, r *http.Request) {
 	out := make([]tokenRow, 0, len(tokens))
 	for _, t := range tokens {
 		out = append(out, tokenRow{
-			ID:         t.ID,
-			Name:       t.Name,
-			CreatedAt:  t.CreatedAt,
-			LastUsedAt: t.LastUsedAt,
-			RotatedAt:  t.RotatedAt,
-			ExpiresAt:  t.ExpiresAt,
+			ID:            t.ID,
+			Name:          t.Name,
+			CreatedAt:     t.CreatedAt,
+			LastUsedAt:    t.LastUsedAt,
+			RotatedAt:     t.RotatedAt,
+			ExpiresAt:     t.ExpiresAt,
+			ClientVersion: t.LastClientVersion,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -1745,6 +1767,8 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		AnalysisEnabled:          cfg.Analysis.Enabled,
 		SmartPlaylistsEnabled:    cfg.SmartPlaylists.Enabled,
+		OptimizeEnabled:          cfg.Upscale.EffectiveOptimizeEnabled(),
+		LibraryWatchEnabled:      cfg.LibraryWatch.Enabled,
 		EnrichMusicBrainzBaseURL: cfg.Enrich.MusicBrainzBaseURL,
 		EnrichCoverArtBaseURL:    cfg.Enrich.CoverArtBaseURL,
 		AtlasEnabled:             cfg.Atlas.Enabled,
@@ -1862,6 +1886,17 @@ type settingsPatch struct {
 	// regenerator goroutine is launched once at `bridge serve` startup
 	// (same rationale as UpscaleEnabled / AnalysisEnabled).
 	SmartPlaylistsEnabled *bool `json:"smartPlaylistsEnabled,omitempty"`
+	// OptimizeEnabled sets the CarPlay-optimize gate. The config field
+	// is a *bool whose nil defaults to true (EffectiveOptimizeEnabled),
+	// so the patch compares against the RESOLVED value — a same-value
+	// submit against an unset YAML field skips the restart banner.
+	// Restart-required: the optimize closures + health advertisement
+	// are resolved once at `bridge serve` startup.
+	OptimizeEnabled *bool `json:"optimizeEnabled,omitempty"`
+	// LibraryWatchEnabled toggles the fsnotify instant-update watcher.
+	// Restart-required: the watcher goroutine is spawned once at
+	// `bridge serve` startup (same startup-wired shape as UpscaleEnabled).
+	LibraryWatchEnabled *bool `json:"libraryWatchEnabled,omitempty"`
 	// Enrich upstream base-URL overrides. Restart-required: the enricher's
 	// MB / Cover Art clients are constructed once at `bridge serve` startup.
 	// Config.Validate normalizes (trailing slash) + validates (absolute
@@ -2047,6 +2082,33 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// once at startup (cmd/bridge/main.go), so a runtime flip
 				// needs a restart. Idempotent same-value submissions skip the
 				// banner.
+				restart = true
+			}
+		}
+		if p.OptimizeEnabled != nil {
+			// Compare against the RESOLVED value (nil YAML pointer
+			// defaults to true) so a same-value submit against an
+			// unset field doesn't flag a spurious restart. Store a
+			// fresh copy, never the decoded patch pointer (mirrors
+			// the MDNSEnabled pointer-copy idiom below).
+			if *p.OptimizeEnabled != next.Upscale.EffectiveOptimizeEnabled() {
+				v := *p.OptimizeEnabled
+				next.Upscale.OptimizeEnabled = &v
+				// The optimize eligibility closures + the /v1/health
+				// carPlayOptimize advertisement are resolved once at
+				// `bridge serve` startup, so a runtime flip needs a
+				// restart (same shape as UpscaleEnabled).
+				restart = true
+			}
+		}
+		if p.LibraryWatchEnabled != nil {
+			if *p.LibraryWatchEnabled != next.LibraryWatch.Enabled {
+				next.LibraryWatch.Enabled = *p.LibraryWatchEnabled
+				// The fsnotify watcher goroutine is spawned once at
+				// `bridge serve` startup; there is no runtime
+				// start/stop hook, so a flip needs a restart in both
+				// directions. Idempotent same-value submissions skip
+				// the banner.
 				restart = true
 			}
 		}

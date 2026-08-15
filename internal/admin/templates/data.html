@@ -3,8 +3,11 @@
 <section class="page data">
   <h1>Playlists &amp; history</h1>
   <p class="lede">
-    Per-device playlist backups and listening telemetry the bridge has stored.
-    {{if not .IsPublic}}Owner-visible only — this never leaves the loopback admin console.{{end}}
+    Playlist backups and listening telemetry the bridge has stored, aggregated
+    across every paired device (user-wide since v1.7 — not per-device silos).
+    Owner-visible: this console, plus your own paired devices and tooling over
+    the token-authenticated <code>/v1/playlists</code> and
+    <code>/v1/history</code> API — it never leaves your host otherwise.
   </p>
 
   <div class="panel">

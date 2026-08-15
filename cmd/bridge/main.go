@@ -1578,8 +1578,13 @@ Subcommands:
   stop     Stop the installed service.
   restart  Bounce the installed service.
   status   Probe the running bridge — track count, endpoints, uptime.
+  health   Container liveness probe: exit 0 iff the API listener accepts TCP on the
+           configured listen address (the Docker HEALTHCHECK; no auth, no TLS probe).
   logs     Tail the per-OS bridge log file. -f to follow.
   library  Manage library roots: bridge library add|remove <path>.
+  manifest Library-index maintenance: bridge manifest clear-missing purges tracks +
+           folders rows marked missing across recent scans (typed-WIPE confirmation;
+           --yes for scripts).
   admin    Manage admin console credentials (public-mode deployments).
   pair     Generate a new bearer token for an iOS client.
   scan     Force a full library rescan.
@@ -1591,6 +1596,8 @@ Subcommands:
            → 44.1k; 96/192k → 48k. Shrinks 100 MB hi-res FLAC to ~15-20 MB for fast
            CarPlay / cellular streaming with zero fidelity loss vs. what the head unit
            accepts.
+  variants Manage the transcoded-variant cache: bridge variants move --to <path>
+           relocates every cached sidecar (and its DB row) onto another disk.
   artwork  Maintain on-disk artwork cache: bridge artwork --gc removes orphans.
   enrichment
            Inspect and re-queue metadata gaps: bridge enrichment misses lists tracks

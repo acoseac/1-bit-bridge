@@ -241,6 +241,12 @@ PROTOCOL.md is byte-mirrored to the iOS repo's `docs/BridgeProtocol.md`. Additiv
   hearts carry a key, with un-keyed hearts APPENDED (never dropped). Registered
   right after Heavy Rotation; hydration in `smartplaylistgen` is NOT
   analysis-gated (hearts without analysis still mix, un-harmonically).
+- **The three device→bridge upload stores (playlists / favorites / history)
+  are deliberately UNGATED bridge-side** — no config kill switch, unlike every
+  other data feature (decided 2026-08-14 feature review, P2-38): the
+  single-operator trust model holds (the operator controls pairing, and each
+  store is opt-in per-device on iOS), so a bridge-side gate would only shadow
+  the iOS toggles. A future multi-tenant posture would need config gates here.
 
 ### Launcher menu + shell-aware handoff (PRs #63 / #64 / #65 / #66)
 

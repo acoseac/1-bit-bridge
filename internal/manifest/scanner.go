@@ -2301,9 +2301,15 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 	if err != nil {
 		return nil, err
 	}
-	folders, err := store.ListFolders(ctx)
-	if err != nil {
-		return nil, err
+	// Full-manifest leg only — parity with writeManifestGated's delta
+	// omission (P2-41): a delta response never carries the folders
+	// array, so the builder and the streamer can't disagree.
+	var folders []Folder
+	if since.IsZero() {
+		folders, err = store.ListFolders(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	basenames := make([]string, len(roots))
 	for i, r := range roots {
@@ -2388,9 +2394,20 @@ func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []strin
 // running to EOF. The check returns ctx.Err() which propagates up
 // through `streamErr` and surfaces in the caller's log line.
 func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, withVariants bool) (err error) {
-	folders, err := store.ListFolders(ctx)
-	if err != nil {
-		return fmt.Errorf("list folders: %w", err)
+	// Folders ship ONLY on the full-manifest leg. A delta sync
+	// (`since` set) used to walk + marshal the ENTIRE folders table on
+	// every foreground sync — a per-sync DB query + payload cost on
+	// large libraries for an array the delta consumer never reads
+	// (iOS decodes, merges, never reads it; the documented
+	// directory-mtime use is a full-scan concern). Additive-safe: the
+	// key is `omitempty` and clients treat an absent array as "no
+	// folder update". P2-41, 2026-08-14 feature review.
+	var folders []Folder
+	if since.IsZero() {
+		folders, err = store.ListFolders(ctx)
+		if err != nil {
+			return fmt.Errorf("list folders: %w", err)
+		}
 	}
 
 	// EnrichmentProgress block: same best-effort behaviour as

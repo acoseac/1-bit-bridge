@@ -1394,10 +1394,24 @@ func TestRenderPage_LoopbackModeSecurityChromeUnchanged(t *testing.T) {
 		t.Error("loopback mode MUST NOT render the sign-out button (no session to end)")
 	}
 
+	// /data's lede was corrected in the 2026-08-14 feature review
+	// (P2-10): "per-device … never leaves the loopback admin console"
+	// had been stale since v1.7 — playlists + history are user-wide
+	// and readable by paired devices over the token-authenticated
+	// /v1 API. The honest copy is posture-independent, so the old
+	// loopback-only conditional is gone; pin the new copy AND the
+	// absence of both stale claims.
 	rw2 := httptest.NewRecorder()
 	srv.pageData(rw2, httptest.NewRequest("GET", "/data", nil))
-	if !strings.Contains(rw2.Body.String(), "never leaves the loopback admin console") {
-		t.Error("loopback-mode /data should keep the owner-visible copy")
+	body := rw2.Body.String()
+	if strings.Contains(body, "never leaves the loopback admin console") {
+		t.Error("/data still carries the pre-v1.7 loopback-only claim — history is readable via GET /v1/history")
+	}
+	if strings.Contains(body, "Per-device playlist backups") {
+		t.Error("/data still calls the stores per-device — they are user-wide since v1.7")
+	}
+	if !strings.Contains(body, "aggregated") || !strings.Contains(body, "/v1/history") {
+		t.Error("/data should carry the honest user-wide + API-readable copy")
 	}
 }
 

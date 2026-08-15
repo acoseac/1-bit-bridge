@@ -141,9 +141,10 @@
         Manual description URL <small class="muted">(optional)</small>
         <input name="manualDescriptionURL" type="url" placeholder="http://192.168.0.62:8200/rootDesc.xml">
         <small class="muted">
-          Use this when SSDP doesn't reach the bridge — the upstream's
-          <code>/rootDesc.xml</code> URL is what you'd paste into a
-          web-browser address bar.
+          <strong>Not yet supported.</strong> The bridge resolves servers via
+          SSDP discovery only for now — an entry configured with just this URL
+          (no UDN) is saved but never walked. Intended for networks where SSDP
+          can't reach the bridge; until that ships, configure the UDN instead.
         </small>
       </label>
       <label>

@@ -2383,6 +2383,13 @@ function initSettings() {
       upscaleEnabled: fd.get("upscaleEnabled") === "on",
       analysisEnabled: fd.get("analysisEnabled") === "on",
       smartPlaylistsEnabled: fd.get("smartPlaylistsEnabled") === "on",
+      // CarPlay-optimize gate (default ON in YAML; only active while
+      // upscaleEnabled). Restart-required — the optimize closures are
+      // resolved once at `bridge serve` startup.
+      optimizeEnabled: fd.get("optimizeEnabled") === "on",
+      // fsnotify library watcher opt-in. Restart-required — the
+      // watcher goroutine starts at `bridge serve` startup.
+      libraryWatchEnabled: fd.get("libraryWatchEnabled") === "on",
       // Enrich upstream base URLs, resolved from the source picker above
       // (blank = public MusicBrainz / Cover Art defaults; atlas = derived
       // <url>/ws/2 + <url>; custom = the raw Advanced fields). Server
@@ -2506,6 +2513,7 @@ function initSettings() {
   // clear-all-variants modal still does a one-shot refresh for immediate
   // post-delete feedback.
   initUpscaleClearAllModal();
+  initUpscaleTarget();
 }
 
 // Required typed phrase for the "Clear all upscaled variants"
@@ -2640,6 +2648,67 @@ function applyUpscaleStats(r) {
   if (clearBtn) {
     clearBtn.disabled = !(r.cachedVariants > 0);
   }
+}
+
+// initUpscaleTarget seeds the Settings → Audio "Upscale target" picker
+// from GET /api/upscale/target and wires the Apply button to the
+// existing PATCH /api/upscale/target endpoint (the same one the batch
+// coordinator reads per submission — hot-applied, no restart). The
+// selects are deliberately name-less so they never serialise into the
+// surrounding settings <form>'s Save payload; this control owns its
+// own apply path. No-op on pages without the picker.
+function initUpscaleTarget() {
+  const rateSel = document.getElementById("upscale-target-rate");
+  const bitsSel = document.getElementById("upscale-target-bits");
+  const applyBtn = document.getElementById("upscale-target-apply");
+  const msg = document.getElementById("upscale-target-msg");
+  if (!rateSel || !bitsSel || !applyBtn) return;
+
+  // Select `value` on a <select> silently no-ops when no <option>
+  // matches — a bootstrap-seeded or hand-PATCHed off-list value would
+  // then render as whatever option happens to be first, and Apply
+  // would silently rewrite the stored target. Inject the live value
+  // as an option instead so the picker always shows reality.
+  const selectValue = (sel, value) => {
+    const v = String(value);
+    if (![...sel.options].some((o) => o.value === v)) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = sel === rateSel ? `${(value / 1000).toFixed(1)} kHz` : `${v}-bit`;
+      sel.appendChild(opt);
+    }
+    sel.value = v;
+  };
+
+  (async () => {
+    try {
+      const t = await API.get("/api/upscale/target");
+      if (t.targetRate > 0) selectValue(rateSel, t.targetRate);
+      if (t.targetBits > 0) selectValue(bitsSel, t.targetBits);
+      applyBtn.disabled = false;
+    } catch (err) {
+      // 503 = manifest store not wired (test harness) — leave the
+      // button disabled so Apply can't fire against a dead endpoint.
+      showMsg(msg, "err", `Couldn’t load the current target: ${err.message}`);
+    }
+  })();
+
+  applyBtn.addEventListener("click", async () => {
+    const body = {
+      targetRate: parseInt(rateSel.value, 10),
+      targetBits: parseInt(bitsSel.value, 10),
+    };
+    applyBtn.disabled = true;
+    try {
+      const r = await API.patch("/api/upscale/target", body);
+      showMsg(msg, "ok",
+        `Target set to ${(r.targetRate / 1000).toFixed(1)} kHz / ${r.targetBits}-bit — applies to the next generation request.`);
+    } catch (err) {
+      showMsg(msg, "err", `Couldn’t set the target: ${err.message}`);
+    } finally {
+      applyBtn.disabled = false;
+    }
+  });
 }
 
 // refreshUpscaleStats does a one-shot fetch + render — used by the

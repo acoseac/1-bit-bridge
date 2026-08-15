@@ -57,6 +57,7 @@ func TestBuildTrackAndRouting_MapsFields(t *testing.T) {
 		Title:         "Title",
 		Artist:        "Artist",
 		Album:         "Album",
+		Genre:         "Jazz",
 		TrackNumber:   1,
 		Date:          "2019-01-01",
 		AlbumPath:     "Chord/Music/Artist/Album",
@@ -67,6 +68,12 @@ func TestBuildTrackAndRouting_MapsFields(t *testing.T) {
 	}
 	if tr.Title != "Title" || tr.Artist != "Artist" || tr.Album != "Album" {
 		t.Errorf("metadata: %+v", tr)
+	}
+	// P1-8 regression pin (2026-08-14 review): the walker always parsed
+	// <upnp:genre> but this constructor dropped it, emptying the whole
+	// iOS genre axis for proxied libraries.
+	if tr.Genre != "Jazz" {
+		t.Errorf("Genre = %q; want Jazz", tr.Genre)
 	}
 	if tr.Codec != "FLAC" {
 		t.Errorf("Codec = %q; want FLAC", tr.Codec)
