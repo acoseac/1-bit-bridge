@@ -753,27 +753,15 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 		resp.ResetTracks = n
 	}
 
-	// Facet 1b: fingerprint no-match verdicts under the folder, in BOTH
-	// layers, so a scoped "try again" reaches the files AcoustID has already
-	// declined rather than only the ones the enricher alone could fix. The
-	// in-process cache is scoped to the same prefix rather than dropped
-	// wholesale: this feature exists to avoid needless whole-object reads, and
-	// clearing unrelated folders would force them to re-decode for a retry
-	// that never named them. Best-effort, ctx-cancellation quiet, and
-	// deliberately NOT counted in ResetTracks — that field reports rows
-	// re-queued for the ENRICHER; these re-enter the fingerprint sweep.
-	if n, err := s.deps.Manifest.ClearAcoustIDNoMatchesUnderPrefix(ctx, normalised); err != nil {
-		if ctx.Err() == nil {
-			logger.Warn("library retry: clear fingerprint no-match verdicts", "path", normalised, "err", err)
-		}
-	} else if n > 0 {
-		logger.Info("library retry: cleared fingerprint no-match verdicts", "path", normalised, "rows", n)
-	}
-	if s.deps.FingerprintForget != nil {
-		if n := s.deps.FingerprintForget(normalised); n > 0 {
-			logger.Info("library retry: dropped in-process fingerprint outcomes", "path", normalised, "entries", n)
-		}
-	}
+	// Facet 1b: fingerprint no-match verdicts under the folder, so a scoped
+	// "try again" reaches the files AcoustID has already declined rather than
+	// only the ones the enricher alone could fix. Scoped to this prefix rather
+	// than clearing everything: the feature exists to avoid needless
+	// whole-object reads, and re-opening unrelated folders would force them to
+	// re-decode for a retry that never named them. Deliberately NOT counted in
+	// ResetTracks — that field reports rows re-queued for the ENRICHER; these
+	// re-enter the fingerprint sweep.
+	s.clearFingerprintNoMatch(ctx, "library retry", normalised)
 
 	// Facet 2: artist images — MBIDs under the folder minus the
 	// on-disk image set (resetArtistImageGaps shape, scoped).

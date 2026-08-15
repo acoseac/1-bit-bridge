@@ -224,13 +224,7 @@ func (s *Store) FreshAcoustIDNoMatches(ctx context.Context, notBefore int64) (ma
 // the retry to whatever the enricher alone could fix. Touches no timestamp
 // column: clearing a verdict is not a change to what the row says.
 func (s *Store) ClearAcoustIDNoMatches(ctx context.Context) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, clearNoMatchAllSQL)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return s.execClearNoMatch(ctx, clearNoMatchAllSQL)
 }
 
 // ClearAcoustIDNoMatchesUnderPrefix is the folder-scoped twin, for the
@@ -247,9 +241,15 @@ func (s *Store) ClearAcoustIDNoMatchesUnderPrefix(ctx context.Context, prefix st
 	if !scoped {
 		return s.ClearAcoustIDNoMatches(ctx)
 	}
+	return s.execClearNoMatch(ctx, clearNoMatchUnderPrefixSQL, base, base)
+}
+
+// execClearNoMatch runs one of the two clear statements under the writer lock.
+// Shared so the scope is the ONLY thing that differs between them.
+func (s *Store) execClearNoMatch(ctx context.Context, stmt string, args ...any) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, clearNoMatchUnderPrefixSQL, base, base)
+	res, err := s.db.ExecContext(ctx, stmt, args...)
 	if err != nil {
 		return 0, err
 	}

@@ -368,10 +368,15 @@ func TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged(t *testing.T) {
 		}
 	}
 
-	// The unscoped form is the library-wide clear, which is what makes
-	// "Retry missing" mean try again.
-	if _, err := s.ClearAcoustIDNoMatches(ctx); err != nil {
+	// An UNSCOPED prefix must delegate to the library-wide clear. The admin
+	// helper routes both retries through the prefix form and passes "" for the
+	// global one, so if this stopped delegating, "Retry missing" would clear
+	// nothing at all while still reporting success.
+	if n, err := s.ClearAcoustIDNoMatchesUnderPrefix(ctx, ""); err != nil {
 		t.Fatal(err)
+	} else if n != 2 {
+		t.Fatalf("unscoped clear affected %d rows, want the 2 survivors — an empty "+
+			"prefix must mean the whole library, not an empty range", n)
 	}
 	after, err := s.FreshAcoustIDNoMatches(ctx, time.Now().Add(-time.Hour).UnixNano())
 	if err != nil {
