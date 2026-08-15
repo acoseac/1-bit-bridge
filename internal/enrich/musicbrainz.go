@@ -317,7 +317,13 @@ func parseRetryAfter(header string, now time.Time) time.Duration {
 		}
 		return time.Duration(secs) * time.Second
 	}
-	if numErr, ok := err.(*strconv.NumError); ok &&
+	// errors.As, not a bare type assertion: ParseInt returns *NumError
+	// unwrapped today, so this is behaviour-identical — but a wrapped one
+	// would slip past and silently disarm the overflow cap below, which is
+	// the guard that stops a hostile "Retry-After: 9e99" from parking the
+	// enricher (the failure the cap exists for).
+	var numErr *strconv.NumError
+	if errors.As(err, &numErr) &&
 		errors.Is(numErr.Err, strconv.ErrRange) &&
 		!strings.HasPrefix(header, "-") {
 		return maxRetryAfter
