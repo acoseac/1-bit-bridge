@@ -1798,24 +1798,12 @@ var migrations = []migration{
 		name:    "tracks acoustid apply-time tag veto (versioned + TTL-stamped)",
 		sql:     `-- columns added idempotently in post(); see v38 docblock`,
 		post: func(db *sql.DB) error {
-			for _, col := range []struct{ name, ddl string }{
-				{"acoustid_veto_at", "ALTER TABLE tracks ADD COLUMN acoustid_veto_at INTEGER NOT NULL DEFAULT 0"},
-				{"acoustid_veto_size", "ALTER TABLE tracks ADD COLUMN acoustid_veto_size INTEGER NOT NULL DEFAULT 0"},
-				{"acoustid_veto_mtime_ns", "ALTER TABLE tracks ADD COLUMN acoustid_veto_mtime_ns INTEGER NOT NULL DEFAULT 0"},
-				{"acoustid_veto_artist", "ALTER TABLE tracks ADD COLUMN acoustid_veto_artist TEXT NOT NULL DEFAULT ''"},
-			} {
-				exists, err := atlasColumnExists(db, "tracks", col.name)
-				if err != nil {
-					return fmt.Errorf("inspect tracks.%s: %w", col.name, err)
-				}
-				if exists {
-					continue
-				}
-				if _, err := db.Exec(col.ddl); err != nil {
-					return fmt.Errorf("add tracks.%s: %w", col.name, err)
-				}
-			}
-			return nil
+			return addColumnsIfMissing(db, "tracks",
+				tableColumn{"acoustid_veto_at", "ALTER TABLE tracks ADD COLUMN acoustid_veto_at INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"acoustid_veto_size", "ALTER TABLE tracks ADD COLUMN acoustid_veto_size INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"acoustid_veto_mtime_ns", "ALTER TABLE tracks ADD COLUMN acoustid_veto_mtime_ns INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"acoustid_veto_artist", "ALTER TABLE tracks ADD COLUMN acoustid_veto_artist TEXT NOT NULL DEFAULT ''"},
+			)
 		},
 	},
 }
@@ -1918,6 +1906,45 @@ func atlasColumnExists(db *sql.DB, table, col string) (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+// tableColumn is one column a migration may need to add: the name to probe for,
+// and the DDL that adds it.
+type tableColumn struct{ name, ddl string }
+
+// addColumnsIfMissing adds each column that `table` does not already have.
+//
+// SQLite has no ADD COLUMN IF NOT EXISTS, and a migration must be re-runnable
+// (the ladder's own crash-recovery contract), so every site that adds a column
+// has to probe first — and must NOT simply swallow the ALTER error, or a real
+// failure would let migrate() advance user_version over a partial schema. This
+// names that loop once so a new migration does not restate it.
+//
+// SHIPPED MIGRATIONS DEPEND ON THIS, so treat it like a migration body: the
+// behaviour is frozen. Changing what it does retroactively changes what an
+// already-authored migration does on a database that has not run it yet.
+//
+// Earlier migrations deliberately keep their inline copies rather than being
+// converted. The append-only rule forbids rewriting a shipped migration, and a
+// behaviour-preserving edit is still an edit somebody has to re-verify against
+// every database that has already run it. New ones should call this.
+//
+// Every `ddl` is a compile-time constant at the call site — ALTER does not
+// accept a bound identifier, so no user input reaches it.
+func addColumnsIfMissing(db *sql.DB, table string, cols ...tableColumn) error {
+	for _, col := range cols {
+		exists, err := atlasColumnExists(db, table, col.name)
+		if err != nil {
+			return fmt.Errorf("inspect %s.%s: %w", table, col.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.Exec(col.ddl); err != nil {
+			return fmt.Errorf("add %s.%s: %w", table, col.name, err)
+		}
+	}
+	return nil
 }
 
 // NOTE (r1 review #49, dropped): a covering index on
