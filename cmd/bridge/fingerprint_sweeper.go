@@ -214,21 +214,31 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 		if t.ArtistMBID != "" && t.MusicBrainzAlbumID != "" {
 			return nil
 		}
-		// ...and not tracks it ALREADY supplied. Matched + artist MBID present
-		// means the verdict was accepted AND consumed; what is still missing —
-		// the release MBID, on ~1,300 of the production bridge's 1,456 matched
-		// rows — is the text ladder's to find, and the write-target discipline
-		// means a fingerprint can never supply it. Because the dedup cache is
-		// in-memory, before this check every restart re-decoded these rows
-		// (whole-object reads on a network-backed library), re-ran the
-		// lookups, and re-stamped indexed_at into a no-op delta for every
-		// paired device.
+		// ...and not tracks a fingerprint has already had its say on. Matched
+		// AND holding an artist MBID means there is nothing left for another
+		// decode to add: what is still missing — the release MBID, on ~1,300
+		// of the production bridge's 1,456 matched rows — is the text ladder's
+		// to find, and the write-target discipline means a fingerprint can
+		// never supply it. Because the dedup cache is in-memory, before this
+		// check every restart re-decoded these rows (whole-object reads on a
+		// network-backed library), re-ran the lookups, and re-stamped
+		// indexed_at into a no-op delta for every paired device.
 		//
 		// Deliberately NOT keyed on membership alone: matched-but-artistless
 		// rows are verdicts vetoed at apply time, or lost to a restart between
 		// re-queue and enrichment — provenance records acceptance, not
 		// application (see SetAcoustIDMatch) — and those are exactly the rows
 		// a sweep can still advance.
+		//
+		// The converse is deliberately approximate, and the approximation is
+		// the safe direction. An artist MBID here may be TEXT-derived on a row
+		// whose fingerprint verdict was then vetoed, which this reads as
+		// settled. Re-sweeping it is deterministic — same file, same
+		// fingerprint, same decision, same veto against the same tags — so the
+		// skip costs nothing until the FILE itself changes, and the column
+		// deliberately does not record which MBID came from audio, so no exact
+		// test exists. Clearing acoustid_match (the undo path the column exists
+		// for) is what re-opens such a row.
 		if t.ArtistMBID != "" {
 			if _, ok := matched[t.Path]; ok {
 				return nil
