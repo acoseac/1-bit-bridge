@@ -213,6 +213,32 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]PlaylistSummary, error) {
 	return out, rows.Err()
 }
 
+// ListPlaylistTombstoneIDs returns the id of every tombstoned playlist —
+// ids deleted via TombstonePlaylist and not since revived by an upsert.
+// Served as `deletedIds` on GET /v1/playlists so a delete initiated on one
+// device propagates to the user's other devices on their next sweep
+// (absence from the live list alone is NOT a delete signal — clients must
+// never infer deletion from a missing summary). Newest-deleted first.
+// Read path — no s.mu.
+func (s *Store) ListPlaylistTombstoneIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM playlists WHERE deleted = 1 ORDER BY updated_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // TombstonePlaylist marks a playlist deleted (so the delete propagates
 // instead of the row reappearing on the next backup sweep). User-wide:
 // any paired device can delete any playlist. Returns false when no live

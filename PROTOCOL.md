@@ -750,8 +750,10 @@ All four routes require the `X-Device-Token` header (the durable recovery token)
 **`GET /v1/playlists`** — summaries across all of the user's devices (caller-scoped on pre-`playlistsCrossDevice` bridges):
 
 ```json
-{ "playlists": [ { "id": "5d9a…", "name": "High-Res Favorites", "trackCount": 42, "lastModifiedAt": 1730000000000000000 } ] }
+{ "playlists": [ { "id": "5d9a…", "name": "High-Res Favorites", "trackCount": 42, "lastModifiedAt": 1730000000000000000 } ], "deletedIds": ["7c1b…"] }
 ```
+
+`deletedIds` *(additive, `omitempty`, since v1.10)* lists the ids of **tombstoned** playlists — deleted via `DELETE /v1/playlists/{id}` and not since revived by a newer `PUT`. It is the explicit delete-propagation signal: on its next sweep a client removes its local copy of a listed id **only when that copy is in the synced state** (the client knows this bridge had it); a locally-edited copy wins, stays, and re-uploads on its next flush — reviving the row (LWW decides, per the tombstone-revive rule above). Clients must **never infer deletion from a summary's absence** — an id missing from `playlists` and from `deletedIds` means nothing. Pre-feature bridges omit the field; older clients ignore it. **Additive — no `ProtocolVersion` bump.**
 
 **`GET /v1/playlists/{id}`** — the full playlist (same shape as the `PUT` body) for restore, regardless of which device backed it up. `404 not_found` if the id is unknown or was deleted (on pre-`playlistsCrossDevice` bridges, also when it's owned by another device).
 

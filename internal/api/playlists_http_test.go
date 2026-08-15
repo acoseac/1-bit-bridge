@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -122,6 +123,71 @@ func TestPlaylistHTTPRoundTrip(t *testing.T) {
 		t.Errorf("GET after delete = %d, want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestPlaylistHTTPListCarriesDeletedIds pins the sweep-propagation wire
+// contract on GET /v1/playlists: a tombstoned playlist's id rides
+// `deletedIds` and is absent from `playlists`; with nothing deleted the
+// field is omitted entirely (`omitempty` — older clients never see it).
+func TestPlaylistHTTPListCarriesDeletedIds(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	live := "aaaaaaaa-1111-0000-0000-000000000001"
+	doomed := "aaaaaaaa-1111-0000-0000-000000000002"
+	for _, id := range []string{live, doomed} {
+		body := `{"id":"` + id + `","name":"P","lastModifiedAt":100,"items":[{"position":0,"path":"a.flac"}]}`
+		resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT %s = %d, want 200", id, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Nothing deleted → the deletedIds KEY is absent from the JSON
+	// (omitempty). Unmarshal into a map rather than substring-scan the
+	// body (Gemini + CodeRabbit on #699); the GET status is asserted so
+	// a 500-with-no-body cannot pass vacuously.
+	resp := doReq(t, srv, http.MethodGet, "/v1/playlists", token, dt, "")
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("initial GET = %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read initial GET body: %v", err)
+	}
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatalf("decode initial GET body: %v", err)
+	}
+	if _, present := asMap["deletedIds"]; present {
+		t.Errorf("no-tombstones list body should omit the deletedIds key: %s", raw)
+	}
+
+	// Tombstone one → it moves from playlists into deletedIds.
+	resp = doReq(t, srv, http.MethodDelete, "/v1/playlists/"+doomed, token, dt, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doReq(t, srv, http.MethodGet, "/v1/playlists", token, dt, "")
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("post-tombstone GET = %d, want 200", resp.StatusCode)
+	}
+	var list playlistsListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		resp.Body.Close()
+		t.Fatalf("decode post-tombstone GET body: %v", err)
+	}
+	resp.Body.Close()
+	if len(list.Playlists) != 1 || list.Playlists[0].ID != live {
+		t.Errorf("live playlists = %+v, want only %s", list.Playlists, live)
+	}
+	if len(list.DeletedIds) != 1 || list.DeletedIds[0] != doomed {
+		t.Errorf("deletedIds = %v, want [%s]", list.DeletedIds, doomed)
+	}
 }
 
 func TestPlaylistHTTPStale409CarriesServerCopy(t *testing.T) {
