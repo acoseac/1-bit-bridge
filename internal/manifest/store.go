@@ -1712,6 +1712,50 @@ var migrations = []migration{
 		);
 		`,
 	},
+	{
+		// v37: the persisted no-match verdict — AcoustID answered cleanly
+		// and knew nothing about this file version.
+		//
+		// Column-only, like acoustid_match (v28) and the v25 format facts:
+		// never a `json:` tag, never spliced onto wire output, so the
+		// feature stays off the protocol entirely.
+		//
+		// THREE columns because the verdict is only valid for the exact
+		// bytes it was computed from AND only for a while. `_at` is the
+		// UnixNano stamp the TTL is measured against; `_size` / `_mtime_ns`
+		// pin the file version, mirroring acoustid.Key. A row whose current
+		// size+mtime disagree with the recorded pair is re-fingerprinted
+		// even inside the TTL, which is what makes a re-encode or a tag
+		// edit self-healing WITHOUT any change to the upsert path — the
+		// scanner rewrites tags_json, the pair stops matching, and the row
+		// re-enters the pool on its own.
+		//
+		// All-zero (the default) means "no verdict recorded", so existing
+		// rows need no backfill: they simply look un-answered, which they
+		// are.
+		version: 37,
+		name:    "tracks acoustid no-match verdict (versioned + TTL-stamped)",
+		sql:     `-- columns added idempotently in post(); see v37 docblock`,
+		post: func(db *sql.DB) error {
+			for _, col := range []struct{ name, ddl string }{
+				{"acoustid_nomatch_at", "ALTER TABLE tracks ADD COLUMN acoustid_nomatch_at INTEGER NOT NULL DEFAULT 0"},
+				{"acoustid_nomatch_size", "ALTER TABLE tracks ADD COLUMN acoustid_nomatch_size INTEGER NOT NULL DEFAULT 0"},
+				{"acoustid_nomatch_mtime_ns", "ALTER TABLE tracks ADD COLUMN acoustid_nomatch_mtime_ns INTEGER NOT NULL DEFAULT 0"},
+			} {
+				exists, err := atlasColumnExists(db, "tracks", col.name)
+				if err != nil {
+					return fmt.Errorf("inspect tracks.%s: %w", col.name, err)
+				}
+				if exists {
+					continue
+				}
+				if _, err := db.Exec(col.ddl); err != nil {
+					return fmt.Errorf("add tracks.%s: %w", col.name, err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7

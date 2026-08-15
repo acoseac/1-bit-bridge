@@ -95,6 +95,21 @@ type candidate struct {
 // (not const) purely as the test seam — production never mutates.
 var fingerprintSweeperSettleDelay = 90 * time.Second
 
+// fingerprintNoMatchTTL is how long a persisted no-match suppresses
+// re-fingerprinting a file whose bytes have not changed.
+//
+// It exists because AcoustID's database GROWS: a track nobody had submitted
+// when we asked may be there months later, so a permanent negative would
+// quietly freeze the library's ceiling at whatever AcoustID knew on the day
+// each file was first swept. That objection is the reason the outcome cache
+// was deliberately in-memory only (see acoustid.Cache); the TTL is what makes
+// persisting it defensible rather than a regression.
+//
+// Thirty days trades a ~30x reduction in repeat decodes for re-asking about
+// each unanswerable file once a month. A file-version change re-opens a row
+// immediately regardless, and "Retry missing" clears these outright.
+const fingerprintNoMatchTTL = 30 * 24 * time.Hour
+
 // runFingerprintSweeper is the loop. Modelled on runAnalysisSweeper —
 // settle delay, then ticker OR nudge (the admin "Sweep now" button
 // non-blocking-sends on the buffered-1 channel; a pending nudge
@@ -199,6 +214,14 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 	if err != nil {
 		return nil, err
 	}
+	// Persisted no-match verdicts still inside the TTL. Same fail-the-sweep
+	// posture as the matched set, for the same reason: degrading to empty
+	// would re-decode every unanswerable row, which is the cost this exists
+	// to avoid.
+	noMatch, err := s.store.FreshAcoustIDNoMatches(ctx, time.Now().Add(-fingerprintNoMatchTTL).UnixNano())
+	if err != nil {
+		return nil, err
+	}
 	var out []candidate
 	// StreamTracks reuses ONE Track allocation across iterations, so the
 	// callback must not retain the pointer. Everything below is copied by
@@ -243,6 +266,21 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 			if _, ok := matched[t.Path]; ok {
 				return nil
 			}
+		}
+		// ...and not a file AcoustID has already said it does not know.
+		//
+		// The in-memory cache covers a repeat within one process; this covers
+		// a restart, which is where the cost actually landed — the decode is
+		// a whole-object read on a network-backed library, and an unanswerable
+		// row is unanswerable every time.
+		//
+		// Gated on the RECORDED file version, not merely on the path: a
+		// re-encode or tag edit makes the scanner rewrite size+mtime, the pair
+		// stops matching, and the row re-enters the pool. The map is already
+		// TTL-bounded by the query, so membership here means "recent AND still
+		// the same bytes".
+		if rec, ok := noMatch[t.Path]; ok && rec.Size == t.Size && rec.MTimeNS == t.ModTime.UnixNano() {
+			return nil
 		}
 		// ...and only after the text ladder has actually had its turn.
 		// Enriched is spliced from enriched_at at read time, so false means
@@ -503,8 +541,23 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 	if err != nil {
 		if errors.Is(err, acoustid.ErrNoMatch) {
 			// AcoustID answered cleanly and knows nothing. A fact about the
-			// audio, so cache it.
+			// audio, so cache it — and persist it, so the next restart does
+			// not buy the same answer with another whole-object read.
+			//
+			// ONLY this branch persists. The neighbours look similar and are
+			// not: a lookup ERROR is a fact about the upstream, not the file,
+			// and the gate rejections below additionally depend on the row's
+			// own artist tag (HasLocalArtistWitness), so a tag fix — exactly
+			// what an operator would do to resolve one — must re-open them.
+			// Persisting either would sideline rows for a reason that has
+			// nothing to do with their audio.
 			s.cache.Set(key, acoustid.Outcome{})
+			if err := s.store.SetAcoustIDNoMatch(ctx, c.path, c.size, c.mtimeNS); err != nil && ctx.Err() == nil {
+				// Best-effort, exactly like the provenance write: failing to
+				// remember a negative costs one future decode, and must not
+				// turn a clean answer into a retryable failure.
+				logger.Warn("fingerprint: record no-match", "path", c.path, "err", err)
+			}
 			return false
 		}
 		// A 429 tells the whole pool to stand down, not just this worker.

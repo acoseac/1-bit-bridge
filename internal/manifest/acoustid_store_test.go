@@ -260,3 +260,124 @@ func TestAcoustIDMatchedPaths(t *testing.T) {
 			"default must not read as matched")
 	}
 }
+
+// TestAcoustIDNoMatchRecordsVersionAndRespectsTTL covers the persisted
+// no-match verdict.
+//
+// Two properties, and the feature is unsafe without either. The verdict must
+// carry the file version it was computed from, or a re-encode would never be
+// re-checked; and it must fall out of the fresh set once the TTL cutoff moves
+// past it, because AcoustID's database grows and a permanent negative would
+// freeze the library's ceiling at whatever it knew that day.
+func TestAcoustIDNoMatchRecordsVersionAndRespectsTTL(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	seedEnrichedTrack(t, s, "a.flac")
+	seedEnrichedTrack(t, s, "b.flac")
+
+	beforeEnr := enrichedAt(t, s, "a.flac")
+	beforeIdx := indexedAt(t, s, "a.flac")
+
+	const size, mtime = int64(4242), int64(1_700_000_000_000_000_000)
+	if err := s.SetAcoustIDNoMatch(ctx, "a.flac", size, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recording what AcoustID does not know is not a change to what the row
+	// says — a bump would push a delta for a column no client receives.
+	if now := enrichedAt(t, s, "a.flac"); now != beforeEnr {
+		t.Errorf("enriched_at moved %d -> %d", beforeEnr, now)
+	}
+	if now := indexedAt(t, s, "a.flac"); now != beforeIdx {
+		t.Errorf("indexed_at moved %d -> %d — a no-match is not a wire change", beforeIdx, now)
+	}
+
+	// Well inside the TTL: present, carrying the exact version it was
+	// computed from.
+	fresh, err := s.FreshAcoustIDNoMatches(ctx, time.Now().Add(-time.Hour).UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := fresh["a.flac"]
+	if !ok {
+		t.Fatalf("a.flac absent from the fresh set = %v", fresh)
+	}
+	if rec.Size != size || rec.MTimeNS != mtime {
+		t.Errorf("recorded version = (%d, %d), want (%d, %d) — without the exact "+
+			"pair a re-encode could never re-open the row", rec.Size, rec.MTimeNS, size, mtime)
+	}
+	if _, ok := fresh["b.flac"]; ok {
+		t.Error("b.flac in the fresh set despite no verdict — the all-zero default must " +
+			"not read as a recorded no-match")
+	}
+
+	// Cutoff moved past the stamp: the row must fall out, so the sweep
+	// re-asks AcoustID about it.
+	stale, err := s.FreshAcoustIDNoMatches(ctx, time.Now().Add(time.Hour).UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stale["a.flac"]; ok {
+		t.Error("a.flac still fresh past the cutoff — an expired verdict would suppress " +
+			"re-checking forever, which is the objection the TTL answers")
+	}
+}
+
+// TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged pins the scope of the
+// folder-scoped clear.
+//
+// This is a WRITE keyed on a path prefix, so it must use the byte range rather
+// than LIKE: nothing sets case_sensitive_like, so `path LIKE 'Album/%'` also
+// matches `album/…`, which on a case-sensitive filesystem is a different
+// directory. Clearing a neighbour's verdicts is not corruption, but it
+// silently re-decodes an unrelated folder — and the same predicate shape is
+// what deletes rows elsewhere, so the habit is the thing being pinned.
+func TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	for _, p := range []string{"Album/x.flac", "album/y.flac", "Other/z.flac"} {
+		seedEnrichedTrack(t, s, p)
+		if err := s.SetAcoustIDNoMatch(ctx, p, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := s.ClearAcoustIDNoMatchesUnderPrefix(ctx, "Album")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("cleared %d rows, want exactly 1 — the case-twin sibling and the "+
+			"unrelated folder must be untouched", n)
+	}
+
+	fresh, err := s.FreshAcoustIDNoMatches(ctx, time.Now().Add(-time.Hour).UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fresh["Album/x.flac"]; ok {
+		t.Error("Album/x.flac still carries a verdict — the scoped clear missed its target")
+	}
+	for _, p := range []string{"album/y.flac", "Other/z.flac"} {
+		if _, ok := fresh[p]; !ok {
+			t.Errorf("%s lost its verdict — the prefix write reached outside its folder", p)
+		}
+	}
+
+	// The unscoped form is the library-wide clear, which is what makes
+	// "Retry missing" mean try again.
+	if _, err := s.ClearAcoustIDNoMatches(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.FreshAcoustIDNoMatches(ctx, time.Now().Add(-time.Hour).UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 0 {
+		t.Errorf("verdicts survived the library-wide clear: %v", after)
+	}
+}

@@ -99,12 +99,22 @@ func TestSweeperRateLimitStallsTheWholePool(t *testing.T) {
 	// A duration inside the gate's window, matching the canned fingerprint's,
 	// so the pre-lookup screen passes and the request actually goes out.
 	const dur = 243.55
+	// A real store even though this test is about pacing: fingerprintOne
+	// PERSISTS a no-match verdict, so every path through it now needs one.
+	// Empty is fine — the UPDATE simply matches no row.
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
 	s := &fingerprintSweeper{
 		// A local base URL resolves to the self-hosted interval (150ms), which
 		// is what the pause has to be distinguishable FROM.
 		client: acoustid.NewClient(srv.URL, "k", "ua", srv.Client()),
 		cache:  acoustid.NewCache(16),
 		length: time.Minute,
+		store:  store,
 		compute: func(context.Context, string, time.Duration) (acoustid.Fingerprint, error) {
 			return acoustid.Fingerprint{Value: "AQABz0mUaEkSRZEG", Duration: dur, DistinctB64: 40}, nil
 		},
@@ -463,6 +473,89 @@ func TestCollectCandidatesSkipsMatchedAndConsumedRows(t *testing.T) {
 	if !paths["text.flac"] {
 		t.Errorf("text.flac not collected — an artist MBID alone must not skip; only " +
 			"matched AND consumed rows leave the pool")
+	}
+}
+
+// TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged pins the
+// restart half of the dedup.
+//
+// The in-memory outcome cache stops a repeat decode inside one process and
+// nothing more, so before the persisted verdict every restart re-decoded every
+// file AcoustID had already declined — on a network-backed library that is a
+// whole-object read each, bought again for the same answer.
+//
+// The discriminator is the recorded file VERSION, because that is what keeps
+// the suppression from becoming permanent. Two rows, identical but for it:
+//
+//   - settled.flac: verdict recorded against the row's own size+mtime → must
+//     NOT be collected.
+//   - reencoded.flac: verdict recorded against a DIFFERENT size → must still
+//     be collected, because the bytes it described are gone.
+func TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	dur := 240.0
+	mtime := time.Now().Truncate(time.Nanosecond)
+	const size = int64(5)
+	seed := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tr := &manifest.Track{Path: name, Size: size, ModTime: mtime, Duration: &dur}
+		if err := store.UpsertTrack(ctx, tr); err != nil {
+			t.Fatalf("UpsertTrack %q: %v", name, err)
+		}
+		if err := store.MarkEnriched(ctx, tr); err != nil {
+			t.Fatalf("MarkEnriched %q: %v", name, err)
+		}
+	}
+	seed("settled.flac")
+	seed("reencoded.flac")
+	seed("never-asked.flac")
+
+	// Recorded against the version the row actually carries.
+	if err := store.SetAcoustIDNoMatch(ctx, "settled.flac", size, mtime.UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	// Recorded against a version that no longer exists — the file has been
+	// replaced since AcoustID was asked.
+	if err := store.SetAcoustIDNoMatch(ctx, "reencoded.flac", size+9999, mtime.UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &fingerprintSweeper{
+		store:     store,
+		resolver:  bridgefs.New([]string{root}),
+		cache:     acoustid.NewCache(16),
+		maxPerRun: 100,
+	}
+	got, err := s.collectCandidates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make(map[string]bool, len(got))
+	for _, c := range got {
+		paths[c.path] = true
+	}
+	if paths["settled.flac"] {
+		t.Errorf("settled.flac re-collected — a file AcoustID has already declined " +
+			"re-decodes on every restart for an answer that will not differ")
+	}
+	if !paths["reencoded.flac"] {
+		t.Errorf("reencoded.flac not collected — the verdict describes bytes that are " +
+			"gone, so suppressing on the path alone would freeze it forever")
+	}
+	if !paths["never-asked.flac"] {
+		t.Errorf("never-asked.flac not collected — a row with no verdict at all must " +
+			"stay a candidate")
 	}
 }
 

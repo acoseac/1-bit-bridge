@@ -753,6 +753,17 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 		resp.ResetTracks = n
 	}
 
+	// Facet 1b: persisted fingerprint no-match verdicts under the folder, so
+	// a scoped "try again" reaches the files AcoustID has already declined
+	// rather than only the ones the enricher alone could fix. Best-effort and
+	// deliberately NOT counted in ResetTracks — that field reports rows
+	// re-queued for the ENRICHER; these re-enter the fingerprint sweep.
+	if n, err := s.deps.Manifest.ClearAcoustIDNoMatchesUnderPrefix(ctx, normalised); err != nil {
+		logger.Warn("library retry: clear fingerprint no-match verdicts", "path", normalised, "err", err)
+	} else if n > 0 {
+		logger.Info("library retry: cleared fingerprint no-match verdicts", "path", normalised, "rows", n)
+	}
+
 	// Facet 2: artist images — MBIDs under the folder minus the
 	// on-disk image set (resetArtistImageGaps shape, scoped).
 	if s.deps.ArtistImageMBIDs != nil {

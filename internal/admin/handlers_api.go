@@ -1208,6 +1208,18 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	// Facet 2: artist image gaps (extracted helper — see its doc).
 	reset += s.resetArtistImageGaps(ctx)
+	// Facet 3: persisted fingerprint no-match verdicts. Without this the
+	// button would silently exclude every file AcoustID has already declined,
+	// which is the objection that kept those verdicts in memory in the first
+	// place — "Retry missing" has to mean try again. Best-effort: the
+	// enrichment reset above already landed, so a failure here must not turn a
+	// partial success into a 500. Not added to `reset`, which counts rows
+	// re-queued for the ENRICHER; these re-enter the fingerprint sweep.
+	if n, err := s.deps.Manifest.ClearAcoustIDNoMatches(ctx); err != nil {
+		logger.Warn("enrichment retry: clear fingerprint no-match verdicts", "err", err)
+	} else if n > 0 {
+		logger.Info("enrichment retry: cleared fingerprint no-match verdicts", "rows", n)
+	}
 	resubmitted := false
 	if s.deps.HarvestForceSubmit != nil {
 		resubmitted = s.deps.HarvestForceSubmit()
