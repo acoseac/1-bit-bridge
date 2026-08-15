@@ -860,6 +860,50 @@ for) is what re-opens it. Locked by `TestCollectCandidatesSkipsMatchedAndConsume
 (three-row discriminator: consumed / vetoed / text-resolved),
 negative-control-verified against the pre-fix collector.
 
+**A no-match is PERSISTED, version-gated, with a 30-day TTL — and this
+deliberately overrides `acoustid.Cache`'s recorded rejection of the idea**
+(PR #701, migration v37). That docblock still says a persistent marker "fights
+the operator's Retry missing button" and that "AcoustID's database grows, so a
+six-month-old no-match is worth re-checking" — both true, and both now
+ANSWERED rather than ignored; read this entry before treating the docblock as
+current. What reopened it was production: the cache is per-process, so on
+bridge.ars.md every restart re-decoded ~500 candidates, and because a no-match
+wrote nothing the same unanswerable files were bought again forever. **The
+saving is not the AcoustID call, it is the whole-object read** through the
+rclone/B2 VFS mount. `tracks.acoustid_nomatch_{at,size,mtime_ns}` are
+column-only (v28/v25 rule — no `json:` tags, never wire-spliced, so no
+`ProtocolVersion` bump and no iOS mirror). **The size+mtime pair is what keeps
+suppression from becoming permanent**: it pins the file version the verdict
+describes, so a re-encode or tag edit makes the scanner rewrite `tags_json`,
+the pair stops matching, and the row re-enters the pool — self-healing with no
+upsert-path change and no backfill (all-zero = "never asked", so existing rows
+need none). `fingerprintNoMatchTTL` (30 days) is the answer to the
+growing-database objection; don't remove it to "save more reads". **ONLY
+`ErrNoMatch` persists** — a lookup ERROR is a fact about the upstream, and the
+gate rejections additionally depend on the row's own artist tag
+(`HasLocalArtistWitness`), so a tag fix, exactly the operator's natural remedy,
+must re-open them; persisting either would sideline files for reasons unrelated
+to their audio. **Retry clears BOTH layers or it clears nothing that matters**:
+the sweeper reads the in-process cache FIRST, so clearing only the SQLite rows
+leaves everything answered this session suppressed until a restart — the button
+would look like it worked for exactly the files the operator just watched fail.
+`Server.clearFingerprintNoMatch` is the single place that does both;
+`Cache.Forget(prefix)` is boundary-anchored (so "Album" can't reach
+"AlbumOther") and sweeps BOTH generations, since a survivor demoted into `prev`
+keeps answering `Get`. The folder-scoped retry forgets only its own prefix —
+dropping the whole cache would force unrelated folders to re-decode, defeating
+the point. The prefix-scoped SQL clear uses the BYTE RANGE, not `LIKE`
+(path-keyed write; the `LIKE` form measurably clears the case twin), and an
+unscoped prefix MUST keep delegating library-wide — without that the global
+retry silently affects 0 rows while reporting success. Locked by
+`TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged` (settled /
+re-encoded / retagged / never-asked),
+`TestAcoustIDNoMatchRecordsVersionAndRespectsTTL`,
+`TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged` and
+`TestCacheForgetScopesToPrefixAndSweepsBothGenerations` — every one
+negative-control-verified, including the both-generations case, which at
+capacity 2 drops ZERO under a current-generation-only sweep.
+
 **Measured on home-pc** (18,429 tracks, 60 sampled from the 7,375
 release-missing FLACs): 50 accepted (83.3%), ~155ms decode and ~75ms lookup per
 track on local disk. FLAC-only in practice, because the gate needs a
