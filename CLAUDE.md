@@ -192,6 +192,31 @@ The whole-track spectrum (`1BSP`, 84 bytes = 24-byte header + 60 band bytes; `Tr
 - **`Track.BPMEstimated` is set ONLY at the tag-absent splice and zeroed unconditionally in `marshalForStorage`** (PR #689, the full-tier batch's wire half; iOS mirror in the key/tempo-chips PR). It is the wire form of `bpmFromAnalysis`, and its contract is asymmetric on purpose: **only a positively-marked estimate may be labelled "estimated" by a client — absence makes NO claim** (a curated tag, a pre-#689 bridge, and no bpm at all are indistinguishable without it, and all three must render unlabelled; mislabelling a user's curated tag is the failure the field exists to prevent). Don't set it anywhere but the `t.BPM == nil && kt.BPM != nil` branch of `spliceAnalysisScalars`, and don't drop the `marshalForStorage` zero — frozen into `tags_json` it would label a LATER curated tag as an estimate. Both directions negative-control-verified (`TestManifestSplicesKeyTempo` red without the splice marker; `TestSplicedKeyTempoNotPersistedOnRoundTrip` red without the zero). Additive omitempty; ProtocolVersion stays 1.
 - **DSD stays OUT of the spectrum pipeline — measured, not assumed (2026-08-14; keep the `.dsf`/`.dff` skip in `collectAnalysisCandidates`).** 240 real DSFs from bridge.ars.md (232 DSD64) were decoded through the pipeline's own ffmpeg shape at 48 kHz AND at 176.4 kHz (one-off probe; ground-truth-validated first — a synthetic CD upsample read cliff 105 dB). Result: the 48 kHz view puts **49/240 inside the 44.1 kHz candidate window** with a cliff CONTINUUM to 58.9 dB and **no gap anywhere** (the PCM library has a clean 56.9→62.2 gap); the wide view proves 16 of those are genuinely PCM-heritage (wall-drop ≥20 dB at exactly the CD band, troughs pinned 22.7–24 kHz vs native p50 27 kHz) — but their cliffs (26.1–57.7) OVERLAP files with no wall evidence (up to 37.0). **The DSD64 noise shelf back-fills a ~100 dB PCM wall into the same 26–58 dB range native rolloffs occupy: the populations do not separate, so no threshold is defensible — one that catches known PCM-heritage SACDs accuses native DSD.** Routing DSD through the ffmpeg fallback works mechanically and was deliberately NOT shipped (the curve would carry a verdict-shaped, verdict-meaningless bandwidth/cliff). iOS carries the structural guard (`SignalPathTrackQuality.sourceIsDSD` gates both accusation surfaces) so even a future DSD-curve producer can't re-open the path. The remaining distribution facts: guard fires on 22/240 (9%); bw48 p50 = 20.1 kHz (the music's own ceiling, below the shelf at DSD64); cliff p50/p90/p99 = 13.4/36.8/51.6. Revisit only with a measurement that separates the populations (shelf-model subtraction at a wide analysis rate — research, not a retune); re-run a fresh probe rather than trusting stale CSVs.
 
+### 2026-08-15 — the 2026-08-14 feature-review fix batch, bridge half (PRs #698 / #699)
+
+The bridge side of the batch iOS shipped as PRs #1355–#1370 (its CLAUDE.md carries the
+full record). Two PRs here, both additive — `ProtocolVersion` stays 1:
+
+- **Playlist tombstone ids ride the list response** (#699, the B2 delete-propagation
+  half): `GET /v1/playlists` gains `deletedPlaylistIDs` (omitempty), listing tombstoned
+  playlist ids so a second device's pull sweep can delete locally instead of resurrecting.
+  `ListPlaylistTombstoneIDs` reads from the same read-only transaction as the summaries
+  (no torn list-vs-tombstones view). A revived playlist (same id re-PUT) drops off the
+  tombstone list — the revive query is error-checked, not `_`-swallowed. The iOS consumer
+  (#1370) additionally records ITS OWN deletes durably (`PendingPlaylistDeleteStore`) and
+  retries the wire DELETE per bridge (404 = landed), so a failed best-effort DELETE
+  converges instead of resurrecting.
+- **B9 batch** (#698): UPnP-upstream tracks route genre through the same normalization
+  as local scans (genre lands on the NEXT upstream walk's re-upsert — existing rows
+  don't heal in place); delta manifests omit the `folders` block (full-sync-only, the
+  documented shape); admin Data page surfaces upstream-vs-local provenance.
+- **Test-hardening lesson repeated** (#699 round 2): omitempty absence is asserted by
+  `json.Unmarshal` into `map[string]any` + key-absence — never a substring probe on the
+  raw body (a substring match can't distinguish `"deletedPlaylistIDs":[]` from absent).
+- Deploy reminders (operator-driven, NONE made from the fix sessions): bridge.ars.md
+  wants a build with #698+#699; home-pc's favorites deploy is ungated once an app build
+  with iOS #1355 (favorites first-sync adopt) is on the user's devices.
+
 ### Favorites — singleton LWW document + the `favorites` smart-mix family (PRs #695 / #697, iOS #1347/#1351–#1353, 2026-08-14)
 
 Per-device favorite tracks + albums, backed up per-bridge (iOS opt-in, default OFF).
