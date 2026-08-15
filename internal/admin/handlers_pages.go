@@ -201,6 +201,10 @@ func (s *Server) pageLibrary(w http.ResponseWriter, r *http.Request) {
 	data := libraryPageData{
 		Roots:       rows,
 		VariantsDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+		// Cumulative recovered-panic count from the scanner — the
+		// "N files unreadable" hint PanickedCount's docblock promises
+		// this page surfaces. Zero renders nothing.
+		FilesUnreadable: s.deps.Scanner.PanickedCount(),
 	}
 	// Global per-kind cache summary for the "Transcoded cache" header.
 	if byKind, err := s.deps.Manifest.VariantStatsByKind(r.Context()); err != nil {
@@ -234,6 +238,7 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 			ID: t.ID, Name: t.Name,
 			CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt,
 			RotatedAt: t.RotatedAt, ExpiresAt: t.ExpiresAt,
+			ClientVersion: t.LastClientVersion,
 		})
 	}
 	data := map[string]any{

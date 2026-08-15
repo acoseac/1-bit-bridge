@@ -80,10 +80,25 @@
       </div>
 
       <div class="field">
-        <label>Scan interval (seconds)
+        <label>Scan interval (seconds) <span class="badge warn">restart</span>
           <input name="scanIntervalSec" type="number" min="1" value="{{.Data.ScanIntervalSec}}">
         </label>
-        <small class="hint">How often the full walk runs. Defaults to 3600 (1 h).</small>
+        <small class="hint">How often the full walk runs. Defaults to 21600 (6 h).</small>
+      </div>
+
+      <div class="field">
+        <label class="checkbox">
+          <input name="libraryWatchEnabled" type="checkbox" role="switch" {{if .Data.LibraryWatchEnabled}}checked{{end}}>
+          Watch library folders for changes <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          Adds an fsnotify-based watcher so newly-dropped files appear within
+          seconds instead of waiting for the next periodic scan (which stays on
+          as the safety net either way). Off by default — best for local-disk
+          libraries; NAS mounts on a flaky network can thrash incremental scans.
+          The watcher starts at <code>bridge serve</code> startup, so a change
+          takes effect after a restart.
+        </small>
       </div>
 
       <div class="field read-only">
@@ -199,8 +214,15 @@
           <input name="adminAddress" type="text" value="{{.Data.AdminAddress}}">
         </label>
         <small class="hint">
+          {{if .Data.IsPublic}}
+          Public mode: any parseable <code>host:port</code> is accepted — the
+          admin login (plus autocert or reverse-proxy TLS) is the trust
+          boundary, not the bind address.
+          {{else}}
           Must be a loopback address (127.0.0.1, ::1, or localhost). Non-loopback
-          values are rejected — the admin console has no auth.
+          values are rejected — the admin console has no auth in loopback mode,
+          so the loopback bind IS the security boundary.
+          {{end}}
         </small>
       </div>
 
@@ -442,6 +464,21 @@
         {{end}}
       </div>
 
+      <div class="field">
+        <label class="checkbox">
+          <input name="optimizeEnabled" type="checkbox" role="switch" {{if .Data.OptimizeEnabled}}checked{{end}}>
+          CarPlay-optimized variants <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          Generates 16-bit family-preserving downsamples (44.1 / 48 kHz) from
+          hi-res PCM so CarPlay / cellular streams start fast. On by default;
+          only active while PCM upscaling (above) is enabled — the optimize
+          pipeline shares its sox worker pool. Advertised to iOS on
+          <code>/v1/health</code>; wired at startup, so a change takes effect
+          after a restart.
+        </small>
+      </div>
+
       <div id="upscale-stats" class="upscale-stats" hidden>
         <h3>Upscale stats</h3>
         <dl class="status-grid">
@@ -457,6 +494,46 @@
           <dt>Lifetime failed</dt><dd id="upscale-failed">…</dd>
         </dl>
         <p class="panel-note">Refreshes every 5 s while this page is open. Lifetime counters reset on bridge restart; cached-variant count survives.</p>
+
+        {{/*
+          Upscale target picker (PR 4 follow-through — the PATCH
+          /api/upscale/target endpoint shipped without a console
+          control; only the Library Inspector DISPLAYED the target).
+          The selects deliberately carry NO `name` attribute: this
+          panel lives inside the settings <form> for layout reasons,
+          and a named control would serialise into the form's Save
+          payload — the target is DB-backed (scan_state), not YAML,
+          and applies through its own PATCH below. Hot-applied: the
+          batch coordinator reads the target per submission, so no
+          restart badge. JS: initUpscaleTarget() in app.js seeds the
+          selects from GET /api/upscale/target and wires Apply.
+        */}}
+        <div class="field upscale-target-row">
+          <label for="upscale-target-rate">Upscale target</label>
+          <div class="kv-row">
+            <select id="upscale-target-rate" aria-label="Target sample rate">
+              <option value="88200">88.2 kHz</option>
+              <option value="96000">96 kHz</option>
+              <option value="176400">176.4 kHz</option>
+              <option value="192000">192 kHz</option>
+              <option value="352800">352.8 kHz</option>
+              <option value="384000">384 kHz</option>
+            </select>
+            <select id="upscale-target-bits" aria-label="Target bit depth">
+              <option value="16">16-bit</option>
+              <option value="24">24-bit</option>
+              <option value="32">32-bit</option>
+            </select>
+            <button type="button" id="upscale-target-apply" class="btn" disabled>Apply</button>
+          </div>
+          <small class="hint">
+            Output rate + bit depth for newly-generated upscaled variants.
+            Applies immediately to the next generation request — existing
+            cached variants are untouched. Sources at or above the target
+            rate are skipped (never downsampled).
+          </small>
+          <p id="upscale-target-msg" class="status" hidden></p>
+        </div>
 
         {{/*
           Clear-all-variants affordance. Gated behind a typed-phrase

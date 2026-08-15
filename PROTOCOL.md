@@ -103,8 +103,7 @@ Pairing probe and liveness check. No auth token required for this endpoint (so t
     { "name": "Music", "reachable": true },
     { "name": "Audiobooks", "reachable": false, "reason": "offline" }
   ],
-  "pushEventsSupported": true,
-  "pairingEventsSupported": true
+  "features": ["pairingEventsSupported", "pushEventsSupported"]
 }
 ```
 
@@ -126,7 +125,7 @@ The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `
 
 `endpoints` (additive since v1, optional, may be absent or empty) is the full list of URLs the server is currently reachable at — LAN IPv4/IPv6 (global unicast only; link-local is filtered because it's not reachable across devices), the `<hostname>.local` mDNS form, and any Tailscale interface (CGNAT `100.64/10` for v4, `fd7a:115c:a1e0::/48` ULA for v6). Clients use this to learn new alternates at heartbeat time so they can roam between LAN and Tailscale without re-pairing.
 
-`pushEventsSupported` and `pairingEventsSupported` (both additive since v1.3, `*bool` with `omitempty`) are capability flags advertising that this bridge implements the SSE streams documented at `/v1/events` (`upscale.*` + generic push events) and `/v1/pairing/{id}/events` (per-pairing-request push) respectively. iOS uses them to decide whether to subscribe via SSE or fall back to the polling endpoints — pre-v1.3 bridges omit both fields, and iOS treats absence as "polling only". Splitting the two flags means a bridge can support generic push without pairing push (or vice versa) as separate rollout vectors.
+`features` (additive, `omitempty`) is an array of stable, alpha-sorted string capability keys — never top-level boolean fields. Pre-feature bridges omit the array entirely (and any given key may be absent on bridges where its underlying wiring is off); clients treat an absent key as "feature absent". The full key set is documented per feature throughout this spec (`waveform`, `loudness`, `playlistBackup`, `smartPlaylists`, …); two generic ones belong here: `pushEventsSupported` and `pairingEventsSupported` (both additive since v1.3) advertise that this bridge implements the SSE streams documented at `/v1/events` (`upscale.*` + generic push events) and `/v1/pairing/{id}/events` (per-pairing-request push) respectively. iOS uses them to decide whether to subscribe via SSE or fall back to the polling endpoints — bridges that omit them are treated as "polling only". Splitting the two keys means a bridge can support generic push without pairing push (or vice versa) as separate rollout vectors.
 
 **Ordering** (reflects the server's recommendation — clients pick the first URL they can reach):
 
@@ -355,7 +354,7 @@ Distinct from `upscale_disabled`. The pool's queue cap is operator-tunable via `
 
 **Idempotency**: the worker pool dedups jobs on `(source_path, variant_id)`. A duplicate request while a job is queued or running is a silent no-op (still counted in `enqueued`); the iOS app can mash "Generate" without server-side duplicate work.
 
-**Asynchronous completion**: the response returns as soon as the jobs are queued. iOS discovers completed variants via the next `/v1/manifest` sync (which advertises the new `Track.variants` entries). For pool-level visibility while jobs are in flight (queue depth, lifetime totals, failure counts) iOS calls the companion `GET /v1/upscale/stats` endpoint described below; for per-track completion the manifest is still the authoritative signal.
+**Asynchronous completion**: the response returns as soon as the jobs are queued. iOS discovers completed variants via the next `/v1/manifest` sync (which advertises the new `Track.variants` entries). For pool-level visibility while jobs are in flight (queue depth, lifetime totals, failure counts) the companion `GET /v1/upscale/stats` endpoint described below serves operators and third-party tooling; for per-track completion the manifest is still the authoritative signal.
 
 ### `GET /v1/events` (additive, since v1.2)
 
@@ -412,7 +411,7 @@ data: {"missed":3}
 
 ### `GET /v1/upscale/stats` (additive, since v1.2)
 
-Snapshot of the upscale feature's runtime + on-disk state. Designed for the iOS app's per-share "Upscaling" management section to show the operator how many jobs are queued, in flight, finished, or failed without surfacing the admin console externally. The wire shape is intentionally identical to the admin tile's `/api/upscale/stats` payload — same numbers in both places.
+Snapshot of the upscale feature's runtime + on-disk state: how many jobs are queued, in flight, finished, or failed, without surfacing the admin console externally. Originally designed for the iOS app's per-share "Upscaling" management section; that iOS surface was removed when upscaling became operator-driven (the `operatorDrivenUpscale` flag), so today the endpoint serves operators and third-party tooling. The wire shape is intentionally identical to the admin tile's `/api/upscale/stats` payload — same numbers in both places.
 
 **Authentication**: standard `Authorization: Bearer <token>` (same rule as every other `/v1/*` endpoint except `/v1/health` and the pairing routes).
 
@@ -447,7 +446,7 @@ Snapshot of the upscale feature's runtime + on-disk state. Designed for the iOS 
 
 **Empty / disabled bridge**: returns the zero-value response `{"enabled": false, "cachedVariants": 0, "cachedBytes": 0}`. iOS treats this identically to a 404 from a pre-v1.2 bridge — render "feature off" without distinguishing a missing endpoint from a disabled feature.
 
-**Polling cadence**: iOS polls every 5 s **only while the management page is foregrounded** (never in background). The handler is cheap enough — single SQL `COUNT` + a mutex-protected pool snapshot + a `sox` precheck — to absorb that cadence on Pi-class hosts.
+**Polling cadence**: there is no iOS poller of this endpoint (the iOS management surface that polled it at 5 s was removed with operator-driven upscaling). The handler is cheap regardless — single SQL `COUNT` + a mutex-protected pool snapshot + a `sox` precheck — so third-party tooling polling at a few-second cadence is fine on Pi-class hosts; the server additionally bounds a wedged query with a 2 s handler timeout.
 
 ### `GET /v1/artwork/{mbid}?size=<int>` and `GET /v1/artist-image/{mbid}`
 
@@ -760,7 +759,7 @@ All four routes require the `X-Device-Token` header (the durable recovery token)
 
 ### Playback history (additive, since v1.6; readable feed since v1.7)
 
-Opt-in, owner-visible playback telemetry. Uploads require the `X-Device-Token` header; each event is attributed to the uploading device. History is **user-wide**: it aggregates listening across every paired device and is surfaced in the loopback admin console plus — on bridges advertising the `playbackHistoryRead` flag — the authenticated `GET /v1/history` feed below, so any of the user's devices can read the combined history. It never leaves the operator's host except to the operator's own paired devices. Upload is advertised via the `playbackHistory` flag in `/v1/health.features`; pre-feature bridges return `404`. iOS queues events offline-first and drains them in batches.
+Opt-in, owner-visible playback telemetry. Uploads require the `X-Device-Token` header; each event is attributed to the uploading device. History is **user-wide**: it aggregates listening across every paired device and is surfaced in the admin console plus — on bridges advertising the `playbackHistoryRead` flag — the authenticated `GET /v1/history` feed below. The read feed is an **operator / third-party surface**: the iOS app uploads history but ships no listening-history reader, so today's consumers are the admin console's histograms and any bearer-holding tooling the operator points at the feed. It never leaves the operator's host except to the operator's own paired clients. Upload is advertised via the `playbackHistory` flag in `/v1/health.features`; pre-feature bridges return `404`. iOS queues events offline-first and drains them in batches.
 
 **`POST /v1/history/batch`** — bulk-insert events:
 
@@ -794,7 +793,7 @@ Opt-in, owner-visible playback telemetry. Uploads require the `X-Device-Token` h
 
 The handler **drops, never faults,** events with an empty `path`, a non-positive `startedAt`, or a non-finite / negative `durationUsed` — one corrupt event never rolls back the rest of the device's stats. `dropped` counts them.
 
-**`GET /v1/history?limit=&after=`** *(additive, since v1.7; advertised via the `playbackHistoryRead` flag)* — the cursor-paged, all-devices listening-history feed, newest first. Bearer-authenticated; the `X-Device-Token` header is **not** required (the feed is user-wide by design — every paired device belongs to the operator). `limit` defaults to 200, max 1000; `after` is the `nextCursor` from the prior page (omit for the first page).
+**`GET /v1/history?limit=&after=`** *(additive, since v1.7; advertised via the `playbackHistoryRead` flag)* — the cursor-paged, all-devices listening-history feed, newest first. Bearer-authenticated; the `X-Device-Token` header is **not** required (the feed is user-wide by design — every paired device belongs to the operator). Any paired client *can* read it, but the iOS app currently does not — this feed exists for operators and third-party tooling. `limit` defaults to 200, max 1000; `after` is the `nextCursor` from the prior page (omit for the first page).
 
 **Response** `200`:
 

@@ -39,6 +39,15 @@
       tracks that have at least one hi-res or CarPlay variant — they don't
       inflate the original count (variants live in the transcoded cache below).
     </p>
+    {{if .Data.FilesUnreadable}}
+    <p class="hint">
+      <strong>{{.Data.FilesUnreadable}} file{{if ne .Data.FilesUnreadable 1}}s{{end}} unreadable</strong>
+      — tag extraction crashed on {{if eq .Data.FilesUnreadable 1}}it{{else}}them{{end}}
+      and the scanner skipped {{if eq .Data.FilesUnreadable 1}}it{{else}}them{{end}}.
+      The affected paths are in the server log (search for
+      <code>panic extracting track</code>). Cumulative since the bridge started.
+    </p>
+    {{end}}
   </div>
 
   <div class="panel">

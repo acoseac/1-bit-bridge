@@ -307,6 +307,18 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 		return
 	}
 	if controlURL == "" {
+		// Honest split: a UDN-less manual-URL entry can NEVER resolve —
+		// the discovery-cache resolver only looks up by UDN, and the
+		// manual-URL fetch path is unimplemented (see the TODO in
+		// cmd/bridge/upnp_upstream_wiring.go's ResolveControlURL).
+		// Reporting it as "not discoverable this tick" implied SSDP
+		// might find it next tick, which sent operators debugging a
+		// discovery problem that doesn't exist. Feature-review P2-29
+		// (2026-08-14).
+		if strings.TrimSpace(srv.UDN) == "" && strings.TrimSpace(srv.ManualDescriptionURL) != "" {
+			res.Err = errors.New("manualDescriptionURL is not yet supported — the bridge resolves servers via SSDP only; configure the server's UDN")
+			return
+		}
 		res.Err = errors.New("server not discoverable this tick")
 		return
 	}
@@ -575,10 +587,10 @@ func buildTrackAndRouting(w upnp.Walked, serverUDN string, walkStart time.Time) 
 		// existing scanner uses missing_count for. Per-track mtime
 		// from the upstream's DIDL (date attr) is metadata, not a file
 		// mtime — surfaced separately if/when we extend the wire.
-		ModTime:     walkStart,
-		Title:       w.Title,
-		Artist:      w.Artist,
-		Album:       w.Album,
+		ModTime: walkStart,
+		Title:   w.Title,
+		Artist:  w.Artist,
+		Album:   w.Album,
 		// The walker parses <upnp:genre> (didl.go) and carried it all the
 		// way here — but this constructor (the ONLY manifest.Track
 		// producer outside the scanner) never assigned it, so every

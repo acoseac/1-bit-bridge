@@ -220,9 +220,11 @@ func (s *Server) routeRegistry() []route {
 
 		// Waveform — tiny binary peak-envelope sidecar (~1-25 KB).
 		// boundedRoute: it's a small file, no streaming exemption
-		// needed. /v1/analysis/stats is the management-section poller —
+		// needed. /v1/analysis/stats is a cheap stats snapshot for
+		// operators / third-party tooling (no iOS consumer) —
 		// 2 s ctx-timeout like /v1/upscale/stats so a wedged
-		// CountAnalysis query surfaces as 5xx fast.
+		// CountAnalysis query surfaces as 5xx fast instead of
+		// backing up the goroutine queue under repeated polling.
 		{pattern: "GET /v1/waveform", kind: boundedRoute, handler: s.authed(s.waveform)},
 		// The spectrum is ~84 bytes — boundedRoute like its waveform
 		// sibling, never a streamingRoute.
@@ -236,10 +238,13 @@ func (s *Server) routeRegistry() []route {
 		// on a big SMB/FUSE-mounted root takes minutes, so it gets the
 		// long-op write deadline instead of the 60 s default.
 		{pattern: "POST /v1/upscale", kind: boundedRoute, handler: s.authed(s.upscaleRequest), writeDeadline: upscaleLongOpWriteDeadline},
-		// 2 s ctx-timeout: /v1/upscale/stats is iOS's
-		// management-section poller — a wedged CountVariants
-		// query backs up at scary rates under high-frequency
-		// polling. Surface as 5xx within 2 s instead.
+		// 2 s ctx-timeout: /v1/upscale/stats is a cheap stats
+		// snapshot for operators / third-party tooling (the iOS
+		// management section that polled it at 5 s was removed
+		// with operator-driven upscaling; zero iOS consumers
+		// today). The bound stands on its own: a wedged
+		// CountVariants query backs up at scary rates under any
+		// repeated polling. Surface as 5xx within 2 s instead.
 		{pattern: "GET /v1/upscale/stats", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.upscaleStats))},
 		// Diagnostics summary — atomic-counter + sliding-window
 		// reads only; no SQLite queries, no subprocess spawns, no

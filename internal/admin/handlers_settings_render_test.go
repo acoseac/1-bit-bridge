@@ -120,3 +120,50 @@ func TestSettingsPageRendersEnrichmentTab(t *testing.T) {
 		t.Error("General pane still contains the enrichment fields — the move to the Enrichment tab regressed")
 	}
 }
+
+// TestSettingsPageRendersNewControls pins the console controls added by
+// the 2026-08-14 feature review: the upscale-target picker (P2-34 —
+// PATCH /api/upscale/target had no console control; initUpscaleTarget
+// in app.js looks these ids up) and the two formerly YAML-only toggles
+// (P2-37). The name-less target selects are load-bearing: a `name`
+// attribute would serialise them into the settings form's Save payload,
+// but the target is DB-backed and applies through its own PATCH.
+func TestSettingsPageRendersNewControls(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	gresp, err := http.Get(ts.URL + "/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gresp.Body.Close()
+	body, _ := io.ReadAll(gresp.Body)
+	page := string(body)
+
+	for _, want := range []string{
+		`id="upscale-target-rate"`,
+		`id="upscale-target-bits"`,
+		`id="upscale-target-apply"`,
+		`name="libraryWatchEnabled"`,
+		`name="optimizeEnabled"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("/settings missing %s", want)
+		}
+	}
+	if strings.Contains(page, `name="upscale-target-rate"`) ||
+		strings.Contains(page, `name="upscale-target-bits"`) {
+		t.Error("target selects must stay name-less — a named control would ride the settings form's Save payload")
+	}
+	// optimizeEnabled resolves true on an unset YAML pointer, so the
+	// fresh-install page must render the checkbox checked.
+	optIdx := strings.Index(page, `name="optimizeEnabled"`)
+	if optIdx < 0 {
+		t.Fatal("optimizeEnabled checkbox missing")
+	}
+	optTag := page[optIdx : strings.Index(page[optIdx:], ">")+optIdx]
+	if !strings.Contains(optTag, "checked") {
+		t.Errorf("optimizeEnabled renders unchecked on a fresh install (%q); the nil YAML pointer resolves true", optTag)
+	}
+}
