@@ -36,6 +36,25 @@ func indexedAt(t *testing.T, s *Store, path string) int64 {
 	return v
 }
 
+// mustResetEnrichedByPaths re-queues paths and requires exactly wantN rows to
+// have been affected, reporting why that number is the expected one.
+//
+// Extracted because every edge case below otherwise repeats the same
+// error-then-count pair inside its own subtest closure, where each branch also
+// pays a nesting penalty — eight of them are what put the caller over the
+// cognitive-complexity budget while saying nothing a reader did not already
+// know. Takes no ctx, matching seedEnrichedTrack and enrichedAt above.
+func mustResetEnrichedByPaths(t *testing.T, s *Store, paths []string, wantN int64, why string) {
+	t.Helper()
+	n, err := s.ResetEnrichedByPaths(context.Background(), paths)
+	if err != nil {
+		t.Fatalf("ResetEnrichedByPaths(%q): %v", paths, err)
+	}
+	if n != wantN {
+		t.Fatalf("RowsAffected = %d, want %d — %s", n, wantN, why)
+	}
+}
+
 // TestResetEnrichedByPathsIsScoped is the contract that justifies adding a new
 // enriched_at writer at all.
 //
@@ -89,17 +108,11 @@ func TestResetEnrichedByPathsEdgeCases(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("empty set is a no-op", func(t *testing.T) {
-		n, err := s.ResetEnrichedByPaths(ctx, nil)
-		if err != nil || n != 0 {
-			t.Fatalf("got (%d, %v), want (0, nil)", n, err)
-		}
+		mustResetEnrichedByPaths(t, s, nil, 0, "an empty set must reach no row")
 	})
 
 	t.Run("unknown paths affect nothing", func(t *testing.T) {
-		n, err := s.ResetEnrichedByPaths(ctx, []string{"nope.flac"})
-		if err != nil || n != 0 {
-			t.Fatalf("got (%d, %v), want (0, nil)", n, err)
-		}
+		mustResetEnrichedByPaths(t, s, []string{"nope.flac"}, 0, "no such row exists")
 	})
 
 	t.Run("an already-unenriched row is not counted", func(t *testing.T) {
@@ -108,13 +121,7 @@ func TestResetEnrichedByPathsEdgeCases(t *testing.T) {
 		if err := s.UpsertTrack(ctx, &Track{Path: "fresh.flac", Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
 			t.Fatal(err)
 		}
-		n, err := s.ResetEnrichedByPaths(ctx, []string{"fresh.flac"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Errorf("RowsAffected = %d, want 0 — the row was already queued", n)
-		}
+		mustResetEnrichedByPaths(t, s, []string{"fresh.flac"}, 0, "the row was already queued")
 	})
 
 	t.Run("a path containing SQL-ish characters is handled as data", func(t *testing.T) {
@@ -122,13 +129,7 @@ func TestResetEnrichedByPathsEdgeCases(t *testing.T) {
 		// quoting is never constructed. Real library paths carry apostrophes.
 		const odd = `Don't Stop/01 - "Quoted" & ; DROP.flac`
 		seedEnrichedTrack(t, s, odd)
-		n, err := s.ResetEnrichedByPaths(ctx, []string{odd})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if n != 1 {
-			t.Fatalf("RowsAffected = %d, want 1", n)
-		}
+		mustResetEnrichedByPaths(t, s, []string{odd}, 1, "the seeded row must be re-queued")
 		if got := enrichedAt(t, s, odd); got != 0 {
 			t.Errorf("enriched_at = %d, want 0", got)
 		}
@@ -215,5 +216,47 @@ func TestAcoustIDMatchSurvivesReEnrichment(t *testing.T) {
 	if got != acoustID {
 		t.Fatalf("provenance = %q after re-enrichment, want it preserved — "+
 			"a tags_json field would have been erased here", got)
+	}
+}
+
+// TestAcoustIDMatchedPaths pins the set the sweeper's candidate pass consumes.
+//
+// acoustid_match is column-only, so the Track rows StreamTracks yields cannot
+// carry it; this set is how the column reaches the sweep without the field
+// leaking toward tags_json or the wire type.
+func TestAcoustIDMatchedPaths(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	if got, err := s.AcoustIDMatchedPaths(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("empty store = (%v, %v), want an empty set", got, err)
+	}
+
+	seedEnrichedTrack(t, s, "a.flac")
+	seedEnrichedTrack(t, s, "b.flac")
+	seedEnrichedTrack(t, s, "c.flac")
+	if err := s.SetAcoustIDMatch(ctx, "a.flac", "9ff43b6a-4f16-427c-93c2-92307ca505e0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAcoustIDMatch(ctx, "c.flac", "1c0eee38-6dd2-4b8d-a5a4-ea0b441c30c6"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.AcoustIDMatchedPaths(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("set = %v, want exactly {a.flac, c.flac}", got)
+	}
+	for _, p := range []string{"a.flac", "c.flac"} {
+		if _, ok := got[p]; !ok {
+			t.Errorf("matched path %q missing from the set", p)
+		}
+	}
+	if _, ok := got["b.flac"]; ok {
+		t.Errorf("b.flac in the set despite carrying no provenance — the empty-string " +
+			"default must not read as matched")
 	}
 }

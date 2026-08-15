@@ -187,11 +187,23 @@ func (s *fingerprintSweeper) sweep(ctx context.Context) *admin.FingerprintSweepC
 // collectCandidates finds tracks the enricher gave up on that are worth the
 // decode, cheapest checks first.
 func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate, error) {
+	// Paths whose fingerprint verdict was ACCEPTED, fetched once per sweep:
+	// acoustid_match is column-only (migration v28), so the streamed Track
+	// below never carries it. An error fails the sweep rather than degrading
+	// to an empty set — empty here would mean re-fingerprinting the whole
+	// matched head, which on a network-backed library is hundreds of
+	// whole-object reads, the exact cost the set exists to avoid. A skipped
+	// background pass costs nothing and retries on the next tick, and a store
+	// this query fails against would fail the stream right below anyway.
+	matched, err := s.store.AcoustIDMatchedPaths(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var out []candidate
 	// StreamTracks reuses ONE Track allocation across iterations, so the
 	// callback must not retain the pointer. Everything below is copied by
 	// value into a candidate before the next row overwrites it.
-	err := s.store.StreamTracks(ctx, nil, func(t *manifest.Track) error {
+	err = s.store.StreamTracks(ctx, nil, func(t *manifest.Track) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -201,6 +213,36 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 		// Only tracks still missing what fingerprinting can supply.
 		if t.ArtistMBID != "" && t.MusicBrainzAlbumID != "" {
 			return nil
+		}
+		// ...and not tracks a fingerprint has already had its say on. Matched
+		// AND holding an artist MBID means there is nothing left for another
+		// decode to add: what is still missing — the release MBID, on ~1,300
+		// of the production bridge's 1,456 matched rows — is the text ladder's
+		// to find, and the write-target discipline means a fingerprint can
+		// never supply it. Because the dedup cache is in-memory, before this
+		// check every restart re-decoded these rows (whole-object reads on a
+		// network-backed library), re-ran the lookups, and re-stamped
+		// indexed_at into a no-op delta for every paired device.
+		//
+		// Deliberately NOT keyed on membership alone: matched-but-artistless
+		// rows are verdicts vetoed at apply time, or lost to a restart between
+		// re-queue and enrichment — provenance records acceptance, not
+		// application (see SetAcoustIDMatch) — and those are exactly the rows
+		// a sweep can still advance.
+		//
+		// The converse is deliberately approximate, and the approximation is
+		// the safe direction. An artist MBID here may be TEXT-derived on a row
+		// whose fingerprint verdict was then vetoed, which this reads as
+		// settled. Re-sweeping it is deterministic — same file, same
+		// fingerprint, same decision, same veto against the same tags — so the
+		// skip costs nothing until the FILE itself changes, and the column
+		// deliberately does not record which MBID came from audio, so no exact
+		// test exists. Clearing acoustid_match (the undo path the column exists
+		// for) is what re-opens such a row.
+		if t.ArtistMBID != "" {
+			if _, ok := matched[t.Path]; ok {
+				return nil
+			}
 		}
 		// ...and only after the text ladder has actually had its turn.
 		// Enriched is spliced from enriched_at at read time, so false means
