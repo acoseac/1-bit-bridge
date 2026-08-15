@@ -829,6 +829,37 @@ match carries a residual error rate text matching does not: without provenance a
 MBID written from audio is indistinguishable from one written from tags forever,
 so there is no way to audit or selectively undo the feature.
 
+**The candidate pool excludes rows the fingerprint has ALREADY answered — keyed on
+matched AND holding an artist MBID, never on `acoustid_match` alone** (PR #700). The
+dedup cache is in-memory and `collectCandidates` excluded only rows holding BOTH
+MBIDs, so a row whose verdict landed but whose release the text ladder still cannot
+find stayed a candidate forever: on bridge.ars.md **1,284 of the 1,456 matched rows**,
+re-fingerprinted at EVERY restart (~500 whole-object B2 reads through the rclone VFS
+mount, ~400 lookups) for an answer that cannot change — the write-target discipline
+above means a fingerprint can never supply the missing release MBID — then re-stamped
+via `ResetEnrichedByPaths` + `MarkEnriched` into a ~400-track no-op delta for every
+paired device. **The second half of the key is load-bearing**: 136 matched rows carry
+no artist MBID, because provenance records ACCEPTANCE, not application (see
+`SetAcoustIDMatch`) — the apply-time local-artist veto can refuse a verdict, and a
+restart between the re-queue and the enrichment loses it. Those are exactly the rows a
+later sweep can still advance, so a skip keyed on membership alone would strand them
+permanently, while one keyed on `ArtistMBID` alone would drop text-resolved artists
+that never had a match at all. `Store.AcoustIDMatchedPaths` fetches the set once per
+sweep (the `routedPathSet` shape) because the column never reaches the streamed
+`Track`; **it FAILS the sweep on error rather than degrading to an empty set** —
+unlike `routedPathSet`, whose empty degradation is merely permissive, an empty set
+here re-fingerprints the whole matched head, which is the cost it exists to avoid, and
+a skipped background pass costs nothing because the next tick retries. **Residual,
+accepted:** the converse is approximate in the SAFE direction — an artist MBID may be
+TEXT-derived on a row whose fingerprint verdict was then vetoed, which this reads as
+settled. Re-sweeping such a row is deterministic (same file → same fingerprint → same
+decision → same veto against the same tags), so the skip costs nothing until the FILE
+itself changes; the column deliberately does not record which MBID came from audio, so
+no exact test exists, and clearing `acoustid_match` (the undo path the column exists
+for) is what re-opens it. Locked by `TestCollectCandidatesSkipsMatchedAndConsumedRows`
+(three-row discriminator: consumed / vetoed / text-resolved),
+negative-control-verified against the pre-fix collector.
+
 **Measured on home-pc** (18,429 tracks, 60 sampled from the 7,375
 release-missing FLACs): 50 accepted (83.3%), ~155ms decode and ~75ms lookup per
 track on local disk. FLAC-only in practice, because the gate needs a
