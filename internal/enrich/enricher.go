@@ -353,7 +353,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	if t.Artist == "" || t.Album == "" {
 		// Nothing to search MusicBrainz by — this is the population acoustic
 		// fingerprinting exists for, so consult it before giving up.
-		m, outcome := e.applyAcousticFallback(t)
+		m, outcome := e.applyAcousticFallback(ctx, t)
 		if outcome == acousticApplied {
 			// The fingerprint supplied an artist; fall through so the artist
 			// image, the album ladder and MarkEnriched all run as normal.
@@ -512,7 +512,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 		// release-missing tracks sit under a generic disc folder.
 		// applyAcousticFallback will not overwrite an artist the text path
 		// already accepted.
-		m, outcome := e.applyAcousticFallback(t)
+		m, outcome := e.applyAcousticFallback(ctx, t)
 		if outcome == acousticApplied {
 			e.enrichWithRecoveredArtist(ctx, t, m)
 			return

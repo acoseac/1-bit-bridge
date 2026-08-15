@@ -272,7 +272,11 @@ const (
 // Writes ONLY the artist MBID, its name, and the recording MBID — never a
 // release or artwork MBID; see AcousticMatch for why that restriction is
 // structural rather than a policy.
-func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, acousticOutcome) {
+//
+// Takes a ctx solely for the veto record below; the consult itself is a pure
+// map read (see AcousticLookup), and keeping it that way is what lets the
+// fallback sit on the enricher's single goroutine.
+func (e *Enricher) applyAcousticFallback(ctx context.Context, t *manifest.Track) (AcousticMatch, acousticOutcome) {
 	if e.acoustic == nil {
 		return AcousticMatch{}, acousticNoVerdict
 	}
@@ -284,6 +288,13 @@ func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, acou
 	// F30 rationale the MusicBrainz results are held to. AcoustID is a
 	// third-party JSON source and ArtistMBID lands in ArtistImagePath's
 	// filepath.Join as a leading component.
+	//
+	// Deliberately NOT recorded as a veto below. This says the upstream answered
+	// with malformed data, which is a fact about AcoustID rather than about this
+	// file — nothing the row can change would fix it, and suppressing the row
+	// would also silence the Warn that is the only signal such responses are
+	// occurring. Same distinction that keeps lookup errors out of the persisted
+	// no-match verdict.
 	if !isValidMBID(m.ArtistMBID) {
 		logger.Warn("ignoring non-UUID fingerprint artist MBID",
 			"path", t.Path, "value", truncateForLog(m.ArtistMBID))
@@ -294,6 +305,7 @@ func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, acou
 	if acousticMatchContradictsTag(t.Artist, m) {
 		logger.Info("fingerprint match contradicts the local artist tag; ignoring",
 			"path", t.Path, "tagged", t.Artist, "fingerprinted", m.ArtistName)
+		e.recordAcousticTagVeto(ctx, t)
 		return AcousticMatch{}, acousticRefused
 	}
 
@@ -310,6 +322,26 @@ func (e *Enricher) applyAcousticFallback(t *manifest.Track) (AcousticMatch, acou
 	logger.Info("artist recovered by acoustic fingerprint",
 		"path", t.Path, "artist", m.ArtistName, "mbid", m.ArtistMBID, "acoustid", m.AcoustID)
 	return m, acousticApplied
+}
+
+// recordAcousticTagVeto persists the refusal so the sweeper stops buying the
+// same answer again.
+//
+// Without it the vetoed row is indistinguishable from one whose verdict was
+// merely LOST to a restart, so the candidate pool has to keep both — and every
+// restart re-decodes this file (a whole-object read on a network-backed
+// library), re-looks it up, re-accepts it, re-queues it, and lands back here
+// for the identical refusal. See Store.SetAcoustIDTagVeto for what pins the
+// marker and why a re-encode or a tag rewrite re-opens the row.
+//
+// Best-effort, exactly like the provenance and no-match writes: failing to
+// remember a refusal costs one future decode, and must not turn a settled
+// verdict into a retryable failure. A cancelled context is an ordinary
+// shutdown, not a fault.
+func (e *Enricher) recordAcousticTagVeto(ctx context.Context, t *manifest.Track) {
+	if err := e.store.SetAcoustIDTagVeto(ctx, t.Path, t.Size, t.ModTime.UnixNano(), t.Artist); err != nil && ctx.Err() == nil {
+		logger.Warn("fingerprint: record tag veto", "path", t.Path, "err", err)
+	}
 }
 
 // enrichWithRecoveredArtist finishes a track whose artist came from the audio

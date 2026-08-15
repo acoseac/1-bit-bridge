@@ -59,6 +59,13 @@ type Outcome struct {
 // cache's half of that; clearing only the database would leave everything
 // answered this session suppressed until a restart.
 //
+// A second durable marker later joined it on the same terms — the apply-time
+// tag veto in tracks.acoustid_veto_* (Store.SetAcoustIDTagVeto), which records
+// a verdict the ENRICHER refused rather than one AcoustID never had. It carries
+// its own TTL and is cleared by the same retry paths. This cache is agnostic to
+// the distinction: it stores what a fingerprint ATTEMPT concluded, and the veto
+// happens a layer above it.
+//
 // The clause that was actually WRONG was the last one — "for a saving the
 // per-run cap already bounds". The per-run cap bounds ONE sweep; it says
 // nothing about repeating that sweep, and repetition was the whole cost.

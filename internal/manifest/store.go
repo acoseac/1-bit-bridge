@@ -1756,6 +1756,56 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// v38: the persisted apply-time TAG VETO — a fingerprint verdict
+		// the enricher accepted at the gate and then refused because the
+		// row's own artist tag contradicted it.
+		//
+		// Column-only, exactly like the v37 no-match verdict and
+		// acoustid_match (v28): never a `json:` tag, never spliced onto
+		// wire output, so the whole feature stays off the protocol.
+		//
+		// WHY IT IS SEPARATE FROM v37. A no-match is a fact about the
+		// AUDIO alone; this is a fact about the audio AND one tag, so the
+		// two invalidate on different events. Folding them into one marker
+		// would mean either re-checking no-matches when a tag changed
+		// (waste) or keeping vetoes when it did (wrong).
+		//
+		// FOUR columns because the veto is a pure function of two inputs
+		// and both are pinned. `_at` is the UnixNano stamp the TTL is
+		// measured against; `_size` / `_mtime_ns` pin the file version, so
+		// a re-encode re-opens the row (different bytes may fingerprint to
+		// something the tag does not contradict); `_artist` pins the tag
+		// the answer was weighed against, so any rewrite of it re-opens
+		// the row too.
+		//
+		// The artist column is what makes this self-invalidating rather
+		// than merely probably-right. Track.Artist is written only by the
+		// extractors and fillFromPath — both scan-time, so a tag edit or a
+		// move already moves size+mtime or lands a fresh row. But
+		// reExtractUnchanged re-extracts version-stale rows whose bytes
+		// have NOT changed (the ExtractorVersion self-heal), so an
+		// extractor change to artist parsing would rewrite the tag under a
+		// matching size+mtime pair. Storing the tag closes that without
+		// anyone having to remember it: the check compares both inputs, so
+		// it cannot silently disagree with the veto it describes.
+		//
+		// All-zero / empty (the defaults) means "no veto recorded", so
+		// existing rows need no backfill. A recorded veto always carries a
+		// non-empty artist — acousticMatchContradictsTag cannot fire on a
+		// blank or junk tag — so `_at > 0` remains the sole presence test.
+		version: 38,
+		name:    "tracks acoustid apply-time tag veto (versioned + TTL-stamped)",
+		sql:     `-- columns added idempotently in post(); see v38 docblock`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "tracks",
+				tableColumn{"acoustid_veto_at", "ALTER TABLE tracks ADD COLUMN acoustid_veto_at INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"acoustid_veto_size", "ALTER TABLE tracks ADD COLUMN acoustid_veto_size INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"acoustid_veto_mtime_ns", "ALTER TABLE tracks ADD COLUMN acoustid_veto_mtime_ns INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"acoustid_veto_artist", "ALTER TABLE tracks ADD COLUMN acoustid_veto_artist TEXT NOT NULL DEFAULT ''"},
+			)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -1856,6 +1906,45 @@ func atlasColumnExists(db *sql.DB, table, col string) (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+// tableColumn is one column a migration may need to add: the name to probe for,
+// and the DDL that adds it.
+type tableColumn struct{ name, ddl string }
+
+// addColumnsIfMissing adds each column that `table` does not already have.
+//
+// SQLite has no ADD COLUMN IF NOT EXISTS, and a migration must be re-runnable
+// (the ladder's own crash-recovery contract), so every site that adds a column
+// has to probe first — and must NOT simply swallow the ALTER error, or a real
+// failure would let migrate() advance user_version over a partial schema. This
+// names that loop once so a new migration does not restate it.
+//
+// SHIPPED MIGRATIONS DEPEND ON THIS, so treat it like a migration body: the
+// behaviour is frozen. Changing what it does retroactively changes what an
+// already-authored migration does on a database that has not run it yet.
+//
+// Earlier migrations deliberately keep their inline copies rather than being
+// converted. The append-only rule forbids rewriting a shipped migration, and a
+// behaviour-preserving edit is still an edit somebody has to re-verify against
+// every database that has already run it. New ones should call this.
+//
+// Every `ddl` is a compile-time constant at the call site — ALTER does not
+// accept a bound identifier, so no user input reaches it.
+func addColumnsIfMissing(db *sql.DB, table string, cols ...tableColumn) error {
+	for _, col := range cols {
+		exists, err := atlasColumnExists(db, table, col.name)
+		if err != nil {
+			return fmt.Errorf("inspect %s.%s: %w", table, col.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.Exec(col.ddl); err != nil {
+			return fmt.Errorf("add %s.%s: %w", table, col.name, err)
+		}
+	}
+	return nil
 }
 
 // NOTE (r1 review #49, dropped): a covering index on

@@ -451,12 +451,21 @@ func newCandidateFixture(t *testing.T) *candidateFixture {
 // thing that can exclude it. artistMBID "" leaves the row without one.
 func (f *candidateFixture) seed(t *testing.T, name, artistMBID string) {
 	t.Helper()
+	f.seedTagged(t, name, artistMBID, "")
+}
+
+// seedTagged is seed with an artist TAG as well, for the tests that record an
+// apply-time veto — that marker is weighed against the tag, so a fixture that
+// could not set one would make the tag half of the check untestable.
+func (f *candidateFixture) seedTagged(t *testing.T, name, artistMBID, artist string) {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(f.root, name), []byte("audio"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	dur := 240.0
 	tr := &manifest.Track{
-		Path: name, Size: f.size, ModTime: f.mtime, Duration: &dur, ArtistMBID: artistMBID,
+		Path: name, Size: f.size, ModTime: f.mtime, Duration: &dur,
+		ArtistMBID: artistMBID, Artist: artist,
 	}
 	if err := f.store.UpsertTrack(context.Background(), tr); err != nil {
 		t.Fatalf("UpsertTrack %q: %v", name, err)
@@ -574,6 +583,75 @@ func TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged(t *testing.T) {
 	if !paths["never-asked.flac"] {
 		t.Errorf("never-asked.flac not collected — a row with no verdict at all must " +
 			"stay a candidate")
+	}
+}
+
+// TestCollectCandidatesSkipsPersistedTagVetoUnlessInputsChanged pins the
+// discriminator inside the matched-but-artistless population.
+//
+// That population is deliberately retryable (see the matched-and-consumed skip)
+// because it holds two shapes a fingerprint verdict can end in: REFUSED at
+// apply time by the local-artist veto, and merely LOST to a restart between the
+// re-queue and the enrichment. The first cannot change; the second is exactly
+// what a sweep is for. Provenance alone cannot tell them apart, so before the
+// persisted veto every restart re-decoded both — on a network-backed library, a
+// whole-object read each — re-looked them up, re-accepted them, and re-stamped
+// indexed_at into a no-op delta for every paired device.
+//
+// The marker separates them, and it is pinned to BOTH of the veto's inputs so
+// suppression cannot become permanent:
+//
+//   - vetoed.flac: marker matches the row's version and tag → NOT collected.
+//   - lost.flac: provenance, no marker → still collected, or the lost subset
+//     would be stranded forever, which is the bug PR #700 documented avoiding.
+//   - reencoded.flac: marker recorded against a different size → collected; the
+//     bytes it judged are gone.
+//   - retagged.flac: marker recorded against a different ARTIST → collected;
+//     reExtractUnchanged rewrites tags_json for version-stale rows whose bytes
+//     never moved, so a version-only check would outlive the tag it judged.
+func TestCollectCandidatesSkipsPersistedTagVetoUnlessInputsChanged(t *testing.T) {
+	ctx := context.Background()
+	f := newCandidateFixture(t)
+
+	const acoustID = "9ff43b6a-4f16-427c-93c2-92307ca505e0"
+	const tagged = "Some Other Band"
+	all := []string{"vetoed.flac", "lost.flac", "reencoded.flac", "retagged.flac"}
+	for _, p := range all {
+		f.seedTagged(t, p, "", tagged)
+		// Every one of them was ACCEPTED at the gate — that is what makes this
+		// a test about the veto marker rather than about provenance.
+		if err := f.store.SetAcoustIDMatch(ctx, p, acoustID); err != nil {
+			t.Fatalf("SetAcoustIDMatch %q: %v", p, err)
+		}
+	}
+
+	mtime := f.mtime.UnixNano()
+	if err := f.store.SetAcoustIDTagVeto(ctx, "vetoed.flac", f.size, mtime, tagged); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SetAcoustIDTagVeto(ctx, "reencoded.flac", f.size+9999, mtime, tagged); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SetAcoustIDTagVeto(ctx, "retagged.flac", f.size, mtime, "An Unknown Artist"); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := f.collect(t)
+	if paths["vetoed.flac"] {
+		t.Errorf("vetoed.flac re-collected — the refusal is a pure function of the same " +
+			"file and the same tag, so every restart buys the identical answer again")
+	}
+	if !paths["lost.flac"] {
+		t.Errorf("lost.flac not collected — a verdict with no marker was accepted but never " +
+			"applied; stranding that subset is the bug the marker exists to avoid")
+	}
+	if !paths["reencoded.flac"] {
+		t.Errorf("reencoded.flac not collected — the veto judged bytes that are gone, so " +
+			"suppressing on the path alone would freeze it forever")
+	}
+	if !paths["retagged.flac"] {
+		t.Errorf("retagged.flac not collected — the tag the veto was weighed against has " +
+			"been rewritten, and a version-only check cannot see that")
 	}
 }
 

@@ -753,15 +753,15 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 		resp.ResetTracks = n
 	}
 
-	// Facet 1b: fingerprint no-match verdicts under the folder, so a scoped
-	// "try again" reaches the files AcoustID has already declined rather than
-	// only the ones the enricher alone could fix. Scoped to this prefix rather
-	// than clearing everything: the feature exists to avoid needless
-	// whole-object reads, and re-opening unrelated folders would force them to
-	// re-decode for a retry that never named them. Deliberately NOT counted in
-	// ResetTracks — that field reports rows re-queued for the ENRICHER; these
-	// re-enter the fingerprint sweep.
-	s.clearFingerprintNoMatch(ctx, "library retry", normalised)
+	// Facet 1b: fingerprint suppression markers under the folder, so a scoped
+	// "try again" reaches the files AcoustID declined and the ones whose answer
+	// was vetoed against their tags, rather than only the ones the enricher
+	// alone could fix. Scoped to this prefix rather than clearing everything:
+	// the feature exists to avoid needless whole-object reads, and re-opening
+	// unrelated folders would force them to re-decode for a retry that never
+	// named them. Deliberately NOT counted in ResetTracks — that field reports
+	// rows re-queued for the ENRICHER; these re-enter the fingerprint sweep.
+	s.clearFingerprintSuppression(ctx, "library retry", normalised)
 
 	// Facet 2: artist images — MBIDs under the folder minus the
 	// on-disk image set (resetArtistImageGaps shape, scoped).

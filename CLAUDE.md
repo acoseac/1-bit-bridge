@@ -904,6 +904,43 @@ re-encoded / retagged / never-asked),
 negative-control-verified, including the both-generations case, which at
 capacity 2 drops ZERO under a current-generation-only sweep.
 
+**The apply-time TAG VETO is persisted too — narrower than the no-match, and
+pinned to BOTH of its inputs** (PR #703, migration v38). The candidate pool
+deliberately keeps matched-but-artistless rows (see PR #700 above) because that
+shape covers two populations: verdicts VETOED at apply time, and verdicts merely
+LOST to a restart between the re-queue and the enrichment. Only the second is
+advanceable, and without a marker they are indistinguishable — so on
+bridge.ars.md all 136 were re-decoded, re-looked-up, re-accepted, re-queued and
+re-stamped on every restart (11 of them in one folder, every one logging
+`tagged="JJ Cale" fingerprinted="J.J. Cale"`), for a refusal that is a pure
+function of inputs neither of which changed. `tracks.acoustid_veto_*` records it;
+a lost verdict has provenance and NO marker, which is the exact discriminator.
+**Only the tag-contradiction branch persists** — `applyAcousticFallback`'s other
+`acousticRefused` exit, a non-UUID artist MBID, is a fact about the UPSTREAM's
+data quality (nothing about the row can fix it, and suppressing would silence
+the Warn that is the only signal), the same distinction that keeps lookup errors
+out of the v37 marker. **The stored ARTIST is what makes the gate exact rather
+than probable**: the veto is a pure function of (fingerprint answer, artist tag),
+and while `Track.Artist` is written only by the extractors and `fillFromPath` —
+both scan-time, so an edit or a move already moves size+mtime or lands a fresh
+row — `reExtractUnchanged` rewrites `tags_json` for version-stale rows whose
+BYTES never moved, so an `ExtractorVersion` bump that alters artist parsing would
+otherwise leave the marker outliving the tag it judged. Comparing both inputs
+needs no maintenance contract. The **CLEAR is one statement covering both marker
+kinds** (`ClearAcoustIDSuppression{,UnderPrefix}`, renamed from the v37
+no-match-only pair) because a retry that cleared one and not the other makes
+"Retry missing" silently do nothing for half the population — that is the failure
+worth making structural; the two READERS stay separate methods, since forgetting
+to read one merely costs a decode. Same 30-day TTL as the no-match, as a
+SEPARATE const (`fingerprintTagVetoTTL`) — the number agrees, the reason does not
+(AcoustID's database grows vs. the resolved cluster gaining recordings). Locked by
+`TestCollectCandidatesSkipsPersistedTagVetoUnlessInputsChanged` (vetoed / lost /
+re-encoded / re-tagged), `TestApplyAcousticFallbackPersistsOnlyTheTagVeto`,
+`TestAcoustIDTagVetoRecordsBothInputsAndRespectsTTL` and
+`TestClearAcoustIDSuppressionUnderPrefixIsByteRanged` (each seeded row carries a
+different marker kind, so a one-sided statement fails) — all nine assertions
+negative-control-verified against the un-fixed code.
+
 **Measured on home-pc** (18,429 tracks, 60 sampled from the 7,375
 release-missing FLACs): 50 accepted (83.3%), ~155ms decode and ~75ms lookup per
 track on local disk. FLAC-only in practice, because the gate needs a
