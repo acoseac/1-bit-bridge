@@ -135,6 +135,151 @@ func (s *Store) AcoustIDMatchedPaths(ctx context.Context) (map[string]struct{}, 
 	return out, rows.Err()
 }
 
+// NoMatchRecord is the file version a persisted no-match verdict was computed
+// from. It is deliberately NOT a Track field: like acoustid_match, these are
+// columns only, so nothing here can reach tags_json or the wire.
+type NoMatchRecord struct {
+	Size    int64
+	MTimeNS int64
+}
+
+// SetAcoustIDNoMatch records that AcoustID answered cleanly and knew nothing
+// about this file version.
+//
+// # Why this is persisted at all
+//
+// The in-memory outcome cache already stops a repeat decode inside one
+// process, and the Cache docblock records that a persistent marker was
+// considered and REJECTED — it fights "Retry missing", and AcoustID's database
+// grows, so an old no-match deserves re-checking. Production measurement
+// reopened that decision: on a bridge whose library is an rclone/B2 FUSE mount,
+// every restart re-decoded ~500 candidates, and because a no-match wrote
+// nothing, the same unanswerable rows were paid for again on the next restart,
+// forever. The saving is not the HTTP call; it is the whole-object read.
+//
+// Both original objections are answered rather than ignored: the `_at` stamp is
+// what the TTL is measured against (see fingerprintNoMatchTTL), and the retry
+// paths clear these rows outright, so the button still MEANS "try again".
+//
+// The (size, mtimeNS) pair is the file version the verdict applies to. Storing
+// it — rather than trusting the row's current values — is what makes the marker
+// self-invalidating: after a re-encode or tag edit the scanner rewrites
+// tags_json, the pair no longer matches, and the row re-enters the candidate
+// pool with no upsert-path change and no migration backfill.
+//
+// Deliberately touches NEITHER enriched_at NOR indexed_at. This records what
+// was learned about a file, not a change to what the row says — a bump here
+// would push a delta to every paired device for a column they never receive.
+func (s *Store) SetAcoustIDNoMatch(ctx context.Context, path string, size, mtimeNS int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tracks
+		   SET acoustid_nomatch_at       = ?,
+		       acoustid_nomatch_size     = ?,
+		       acoustid_nomatch_mtime_ns = ?
+		 WHERE path = ?`,
+		s.now().UnixNano(), size, mtimeNS, path)
+	return err
+}
+
+// FreshAcoustIDNoMatches returns the no-match verdicts stamped at or after
+// notBefore, keyed by track path.
+//
+// Bounded by the TTL cutoff on purpose: a verdict older than that is due for
+// re-checking anyway, so fetching it would grow the map without ever
+// suppressing anything. The caller compares each record against the row's
+// CURRENT size+mtime — that comparison cannot be pushed into SQL cheaply,
+// because a track's live size and mtime live inside the tags_json blob (an
+// RFC3339Nano string for the time), not in comparable columns.
+//
+// Read-only, so no mutex — WAL handles concurrent readers.
+func (s *Store) FreshAcoustIDNoMatches(ctx context.Context, notBefore int64) (map[string]NoMatchRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT path, acoustid_nomatch_size, acoustid_nomatch_mtime_ns
+		  FROM tracks
+		 WHERE acoustid_nomatch_at >= ?
+		   AND acoustid_nomatch_at > 0`, notBefore)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: FreshAcoustIDNoMatches: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]NoMatchRecord)
+	for rows.Next() {
+		var p string
+		var rec NoMatchRecord
+		if err := rows.Scan(&p, &rec.Size, &rec.MTimeNS); err != nil {
+			return nil, fmt.Errorf("manifest: scan no-match verdict: %w", err)
+		}
+		out[p] = rec
+	}
+	return out, rows.Err()
+}
+
+// ClearAcoustIDNoMatches drops every persisted no-match verdict, putting those
+// rows back in the fingerprint candidate pool on the next sweep.
+//
+// This is what keeps the operator's "Retry missing" button honest — it MEANS
+// "try again", and a persisted negative that survived it would silently narrow
+// the retry to whatever the enricher alone could fix. Touches no timestamp
+// column: clearing a verdict is not a change to what the row says.
+func (s *Store) ClearAcoustIDNoMatches(ctx context.Context) (int64, error) {
+	return s.execClearNoMatch(ctx, clearNoMatchAllSQL)
+}
+
+// ClearAcoustIDNoMatchesUnderPrefix is the folder-scoped twin, for the
+// Inspector's per-folder retry.
+//
+// Uses the BYTE-RANGE bound, never LIKE: this is a WRITE, and SQLite's default
+// case-insensitive LIKE would reach a case-twin sibling directory, which on a
+// case-sensitive filesystem is a different directory entirely. An unscoped
+// prefix delegates to the library-wide form — decided AFTER the trim, so a
+// slash-only value cannot fall through to a range that silently clears
+// nothing.
+func (s *Store) ClearAcoustIDNoMatchesUnderPrefix(ctx context.Context, prefix string) (int64, error) {
+	base, scoped := subtreeRangeBase(prefix)
+	if !scoped {
+		return s.ClearAcoustIDNoMatches(ctx)
+	}
+	return s.execClearNoMatch(ctx, clearNoMatchUnderPrefixSQL, base, base)
+}
+
+// execClearNoMatch runs one of the two clear statements under the writer lock.
+// Shared so the scope is the ONLY thing that differs between them.
+func (s *Store) execClearNoMatch(ctx context.Context, stmt string, args ...any) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx, stmt, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// clearNoMatchSQL is the shared UPDATE head. Split out so the two statements
+// below cannot drift in WHICH columns they reset while differing only in
+// scope.
+//
+// The two full statements are compile-time `const`s rather than a
+// concatenation performed at the call site. That is deliberate: both forms are
+// equally static, but only this one keeps SonarCloud's go:S2077
+// ("dynamically formatted SQL query") quiet, and a suppression comment is not
+// honoured for Go. Same shape as trackFeatureSelect's callers. Neither carries
+// an interpolated value — the scope travels as bind parameters.
+const clearNoMatchSQL = `
+	UPDATE tracks
+	   SET acoustid_nomatch_at       = 0,
+	       acoustid_nomatch_size     = 0,
+	       acoustid_nomatch_mtime_ns = 0`
+
+const clearNoMatchAllSQL = clearNoMatchSQL + `
+	 WHERE acoustid_nomatch_at > 0`
+
+const clearNoMatchUnderPrefixSQL = clearNoMatchSQL + `
+	 WHERE acoustid_nomatch_at > 0
+	   AND path COLLATE BINARY >= ? || '/'
+	   AND path COLLATE BINARY <  ? || '0'`
+
 // CountAcoustIDMatches reports how many rows carry fingerprint provenance —
 // the number an operator wants when deciding whether the feature is pulling
 // its weight, and the number to check before undoing it.

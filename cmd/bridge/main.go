@@ -3244,6 +3244,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 			return true
 		},
+		// The in-process half of "Retry missing" for fingerprinting. The
+		// persisted no-match verdict and this cache suppress the same
+		// candidates, and the sweeper reads the cache first, so a retry that
+		// cleared only the database would not re-open a file answered this
+		// session. nil cache (fingerprinting disabled) reports nothing
+		// dropped, which is accurate — there is no sweeper to re-open it for.
+		FingerprintForget: func(prefix string) int {
+			if fingerprintCache == nil {
+				return 0
+			}
+			return fingerprintCache.Forget(prefix)
+		},
 		// Inspector byte-route path resolvers (loopback-only routes;
 		// ids are regex-validated in the handlers before these run).
 		// Cover + artist-image paths are wired unconditionally — the
