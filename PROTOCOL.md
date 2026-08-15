@@ -7,7 +7,7 @@ This is the **source of truth** for the wire contract between the `1-bit-bridge`
 - **Protocol version**: `1`.
 - Every response carries the header `X-Bridge-Protocol: 1`.
 - `GET /v1/health` returns the current protocol version and the server's build version (see below).
-- iOS checks `protocolVersion` at pairing and on each session's first request. A mismatch surfaces a clear error and refuses to connect rather than risk silent misbehavior.
+- iOS checks `protocolVersion` at pairing (from the `/v1/health` response body) and validates the `X-Bridge-Protocol` header on responses. A mismatch surfaces a clear error and refuses to connect rather than risk silent misbehavior. **The per-response header check enforces on presence only**: an absent or unparseable header passes — the bridge always emits it, so absence typically means an intermediate proxy stripped it (an operator misconfiguration, not a version mismatch). The authoritative version gate is the pairing-time body check; there is deliberately no per-request body fallback.
 - **Breaking wire changes bump `protocolVersion`.** Additive, backward-compatible changes (new optional fields, new endpoints) stay at the same version.
 
 ## Transport
@@ -264,7 +264,7 @@ Field-for-field, this is a serialization of the iOS `Track` / folder rows in [`L
 
 `enriched` is set on every track to `true` once the bridge's enrichment loop has processed the row (regardless of whether MusicBrainz / Cover Art Archive / Deezer returned matches — empty lookups still flip the bit, see `markSkipped` in `internal/enrich/enricher.go`). `false` means the row is still queued for the enricher.
 
-Pre-v1.1 servers omit the field. Clients MUST treat absence as "fully enriched" — the conservative back-compat assumption (matches the pre-flag behaviour where the iOS scanner unconditionally treated bridge tracks as parsed). Newer clients use `enriched: false` to suppress the permanent Deezer-miss stamp on artists whose MBID hasn't landed yet, so the eventual sync's bridge-cached image still wins over a premature negative cache.
+Pre-v1.1 servers omit the field. Clients MUST treat absence as "fully enriched" — the conservative back-compat assumption (matches the pre-flag behaviour where the iOS scanner unconditionally treated bridge tracks as parsed). **The per-track field is currently reserved on iOS**: it is decoded but not yet consumed. The Deezer-miss suppression it was designed for is implemented against the manifest's aggregate `enrichmentProgress` block instead (`tracksTotal` / `tracksEnriched` / `lastEnrichedAt`, with a 24 h freshness gate on the timestamp), which answers "is the bridge still enriching?" without a per-row signal. A future per-row consumer can adopt the field without any wire change.
 
 #### Deriving per-track enrichment state (no new field, since v1.1)
 
@@ -1158,16 +1158,16 @@ backup:
 
 ## Compatibility matrix
 
-The matrix below states what each side needs from the other. The hard `protocolVersion` integer (line 8 above) is the breaking-change boundary; this is the additive-feature recommendation.
+The matrix below states what each side needs from the other. The hard `protocolVersion` integer (line 8 above) is the breaking-change boundary; this is the additive-feature recommendation. **Current at the time of writing: bridge v0.1.8, iOS app v1.8** — both speak `protocolVersion 1`, and every pairing within protocol 1 interoperates. Additive features are gated by the health `features[]` capability keys (and per-endpoint `omitempty` fields), never by version comparisons.
 
 | Bridge version | Min iOS app version | Notes                                                  |
 |----------------|---------------------|--------------------------------------------------------|
 | `0.0.x`        | `1.0.0`             | Pre-Phase-A. No version-awareness UI.                  |
-| `0.1.x`        | `1.0.0`             | Phase A. iOS 1.2+ surfaces update hints; older clients still work. |
+| `0.1.x` (current) | `1.0.0`          | Phase A. iOS 1.2+ surfaces update hints; older clients still work. Feature availability within the line is capability-gated (health `features[]`) — favorites backup, smart playlists, playlist tombstones each light up only when the paired bridge advertises them. |
 
 | iOS app version | Min bridge version  | Notes                                                  |
 |-----------------|---------------------|--------------------------------------------------------|
 | `1.0.x` – `1.1.x` | `0.0.1`           | Pre-Phase-A. No update-aware UI.                       |
-| `1.2.0+`        | `0.0.1`             | Phase A. Will surface "bridge update recommended" when paired bridge is below `0.1.0`. |
+| `1.2.0+` (current: `1.8.x`) | `0.0.1` | Phase A. Will surface "bridge update recommended" when paired bridge is below `0.1.0`. Newer app features degrade gracefully against older bridges: absent capability keys read as "feature absent". |
 
 Pairings whose `protocolVersion` integers don't match are refused at `/v1/health`-check time. The compat-matrix rows above are advisory: operators see hints in the iOS app + admin console but the connection still works.
