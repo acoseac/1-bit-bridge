@@ -36,6 +36,25 @@ func indexedAt(t *testing.T, s *Store, path string) int64 {
 	return v
 }
 
+// mustResetEnrichedByPaths re-queues paths and requires exactly wantN rows to
+// have been affected, reporting why that number is the expected one.
+//
+// Extracted because every edge case below otherwise repeats the same
+// error-then-count pair inside its own subtest closure, where each branch also
+// pays a nesting penalty — eight of them are what put the caller over the
+// cognitive-complexity budget while saying nothing a reader did not already
+// know. Takes no ctx, matching seedEnrichedTrack and enrichedAt above.
+func mustResetEnrichedByPaths(t *testing.T, s *Store, paths []string, wantN int64, why string) {
+	t.Helper()
+	n, err := s.ResetEnrichedByPaths(context.Background(), paths)
+	if err != nil {
+		t.Fatalf("ResetEnrichedByPaths(%q): %v", paths, err)
+	}
+	if n != wantN {
+		t.Fatalf("RowsAffected = %d, want %d — %s", n, wantN, why)
+	}
+}
+
 // TestResetEnrichedByPathsIsScoped is the contract that justifies adding a new
 // enriched_at writer at all.
 //
@@ -89,17 +108,11 @@ func TestResetEnrichedByPathsEdgeCases(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("empty set is a no-op", func(t *testing.T) {
-		n, err := s.ResetEnrichedByPaths(ctx, nil)
-		if err != nil || n != 0 {
-			t.Fatalf("got (%d, %v), want (0, nil)", n, err)
-		}
+		mustResetEnrichedByPaths(t, s, nil, 0, "an empty set must reach no row")
 	})
 
 	t.Run("unknown paths affect nothing", func(t *testing.T) {
-		n, err := s.ResetEnrichedByPaths(ctx, []string{"nope.flac"})
-		if err != nil || n != 0 {
-			t.Fatalf("got (%d, %v), want (0, nil)", n, err)
-		}
+		mustResetEnrichedByPaths(t, s, []string{"nope.flac"}, 0, "no such row exists")
 	})
 
 	t.Run("an already-unenriched row is not counted", func(t *testing.T) {
@@ -108,13 +121,7 @@ func TestResetEnrichedByPathsEdgeCases(t *testing.T) {
 		if err := s.UpsertTrack(ctx, &Track{Path: "fresh.flac", Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
 			t.Fatal(err)
 		}
-		n, err := s.ResetEnrichedByPaths(ctx, []string{"fresh.flac"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Errorf("RowsAffected = %d, want 0 — the row was already queued", n)
-		}
+		mustResetEnrichedByPaths(t, s, []string{"fresh.flac"}, 0, "the row was already queued")
 	})
 
 	t.Run("a path containing SQL-ish characters is handled as data", func(t *testing.T) {
@@ -122,13 +129,7 @@ func TestResetEnrichedByPathsEdgeCases(t *testing.T) {
 		// quoting is never constructed. Real library paths carry apostrophes.
 		const odd = `Don't Stop/01 - "Quoted" & ; DROP.flac`
 		seedEnrichedTrack(t, s, odd)
-		n, err := s.ResetEnrichedByPaths(ctx, []string{odd})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if n != 1 {
-			t.Fatalf("RowsAffected = %d, want 1", n)
-		}
+		mustResetEnrichedByPaths(t, s, []string{odd}, 1, "the seeded row must be re-queued")
 		if got := enrichedAt(t, s, odd); got != 0 {
 			t.Errorf("enriched_at = %d, want 0", got)
 		}
