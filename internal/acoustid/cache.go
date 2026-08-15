@@ -43,11 +43,29 @@ type Outcome struct {
 
 // Cache holds fingerprint outcomes for the current process.
 //
-// Bounded and in-memory by design. A persistent marker was considered and
-// rejected: it fights the operator's "Retry missing" button, which MEANS "try
-// again", and AcoustID's database grows, so a six-month-old no-match is worth
-// re-checking. Persisting would need a TTL, a timestamp column and a sweeper
-// for it — for a saving the per-run cap already bounds.
+// Bounded and in-memory by design — that part still holds. What follows used
+// to end "so no persistent marker", and no longer does: a durable no-match
+// verdict now lives ALONGSIDE this cache, in tracks.acoustid_nomatch_* (see
+// Store.SetAcoustIDNoMatch). This paragraph is kept rather than deleted
+// because the original objections were right, and anyone tempted to remove
+// that persistence needs to see that they were answered rather than
+// overlooked.
+//
+// The objections: a persistent marker fights the operator's "Retry missing"
+// button, which MEANS "try again", and AcoustID's database grows, so a
+// six-month-old no-match is worth re-checking. Both stand, and the durable
+// verdict answers them — a TTL (fingerprintNoMatchTTL, 30 days) for the second,
+// and clearing BOTH layers on retry for the first. Forget below is this
+// cache's half of that; clearing only the database would leave everything
+// answered this session suppressed until a restart.
+//
+// The clause that was actually WRONG was the last one — "for a saving the
+// per-run cap already bounds". The per-run cap bounds ONE sweep; it says
+// nothing about repeating that sweep, and repetition was the whole cost.
+// Because this cache dies with the process and a no-match wrote nothing,
+// bridge.ars.md re-decoded ~500 candidates on every restart, forever, and on
+// a library backed by an rclone/B2 FUSE mount each decode is a whole-object
+// read. The expensive half was never the AcoustID call.
 //
 // Storing the Decision rather than the raw fingerprint keeps entries small
 // (~200 B against ~2 KB for the base64), because nothing re-queries AcoustID
