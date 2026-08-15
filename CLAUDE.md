@@ -7,6 +7,22 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 - `make build` — builds `./bin/bridge` for the host OS.
 - `make build-all` — cross-compiles to `dist/bridge-<os>-<arch>{.exe}`.
 - `make test` — pure-Go race-enabled suite; ~150 tests across 10 packages.
+- **Fuzz targets exist and are NOT run by `make test`** (PR #704, 2026-08-16). 24 targets in
+  `fuzz_*_test.go` across `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes}`,
+  covering the three untrusted-input surfaces: the audio extractors (whole-file + the pure
+  chunk-body parsers), the LAN-facing UNAUTHENTICATED parsers (SSDP / SOAP / DIDL / device
+  description), and `fs.Resolver`. Without `-fuzz` they run their seed corpora as ordinary
+  tests, so the normal suite absorbs them for free. To actually fuzz:
+  `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s` (one target at
+  a time — Go permits only one `-fuzz` per invocation). Three carry PROPERTY assertions worth
+  keeping green rather than merely not-crashing: `FuzzResolveContainment` (a successful
+  `Resolve` must land inside a root — asymmetric, so only a real escape fails it),
+  `FuzzFoldForMatch` (the documented
+  `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
+  and `FuzzParseRetryAfter` (the `maxRetryAfter` cap). **A crash found by the extractor
+  targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
+  a panicking file is skipped, so it silently never reaches the manifest. Baseline at
+  introduction: ~41M executions total, zero panics, zero escapes.
 - `make fmt vet test build-all` is the pre-push gate, now mirrored by CI (`.github/workflows/gofmt.yml` = the fmt check, `gate.yml` = vet + test + build-all). Run `make check` (fmt + vet + race test, skips build-all) in the inner loop; `make build-all` once before pushing. On a RAM-constrained box the `-race` + 6-target cross-compile peak can OOM — the Makefile caps Go's `-p` parallelism via `P` (default 4; `make test P=2` to go lower, `P=$(sysctl -n hw.ncpu)` for a roomy box). See `CONTRIBUTING.md`.
 - Pure-Go stack: `modernc.org/sqlite` (no cgo), `github.com/mewkiz/flac`, `github.com/dhowden/tag`, `github.com/hashicorp/mdns`. One static binary, no runtime deps.
 
@@ -200,8 +216,18 @@ full record). Two PRs here, both additive — `ProtocolVersion` stays 1:
 - **Playlist tombstone ids ride the list response** (#699, the B2 delete-propagation
   half): `GET /v1/playlists` gains `deletedPlaylistIDs` (omitempty), listing tombstoned
   playlist ids so a second device's pull sweep can delete locally instead of resurrecting.
-  `ListPlaylistTombstoneIDs` reads from the same read-only transaction as the summaries
-  (no torn list-vs-tombstones view). A revived playlist (same id re-PUT) drops off the
+  **Tombstones are read AFTER the live rows as a SECOND plain query — deliberately NOT a
+  shared read-only transaction** (corrected 2026-08-16; this entry claimed the opposite
+  since #699, and `internal/api/playlists.go`'s own comment has always said otherwise —
+  don't "restore" a transaction that was never there). A playlist tombstoned between the
+  two reads therefore appears in BOTH lists, and that is the accepted interleaving: a
+  client processing tombstones first self-heals, because the follow-up
+  `GET /v1/playlists/{id}` for a both-listed id 404s and is skipped. The reverse order
+  (revived between the reads → in neither list) costs one sweep. Contrast `GetFavorites` /
+  `ListFavoritesForAdmin`, which DO wrap their multi-query reads in one
+  `BeginTx(ReadOnly: true)` — favorites are a single LWW document whose meta and entries
+  would genuinely tear; playlist summaries and tombstones are independent lists.
+  A revived playlist (same id re-PUT) drops off the
   tombstone list — the revive query is error-checked, not `_`-swallowed. The iOS consumer
   (#1370) additionally records ITS OWN deletes durably (`PendingPlaylistDeleteStore`) and
   retries the wire DELETE per bridge (404 = landed), so a failed best-effort DELETE
