@@ -216,18 +216,133 @@ func (s *Store) FreshAcoustIDNoMatches(ctx context.Context, notBefore int64) (ma
 	return out, rows.Err()
 }
 
-// ClearAcoustIDNoMatches drops every persisted no-match verdict, putting those
-// rows back in the fingerprint candidate pool on the next sweep.
+// TagVetoRecord is what an apply-time tag veto was computed from: the file
+// version, and the artist tag the fingerprint's answer was weighed against.
 //
-// This is what keeps the operator's "Retry missing" button honest — it MEANS
-// "try again", and a persisted negative that survived it would silently narrow
-// the retry to whatever the enricher alone could fix. Touches no timestamp
-// column: clearing a verdict is not a change to what the row says.
-func (s *Store) ClearAcoustIDNoMatches(ctx context.Context) (int64, error) {
-	return s.execClearNoMatch(ctx, clearNoMatchAllSQL)
+// Both inputs, because the veto is a pure function of exactly those two — see
+// SetAcoustIDTagVeto. Columns only, like NoMatchRecord: nothing here can reach
+// tags_json or the wire.
+type TagVetoRecord struct {
+	Size    int64
+	MTimeNS int64
+	Artist  string
 }
 
-// ClearAcoustIDNoMatchesUnderPrefix is the folder-scoped twin, for the
+// SetAcoustIDTagVeto records that the enricher accepted a fingerprint verdict
+// at the gate and then REFUSED it because the row's own artist tag
+// contradicted it.
+//
+// # Why this is persisted
+//
+// The same waste the v37 no-match verdict addresses, reached a different way. A
+// vetoed row keeps its acoustid_match provenance but never gains an artist
+// MBID, and the candidate pool's matched-AND-consumed skip deliberately leaves
+// that shape retryable — provenance records acceptance, not application, and
+// the same shape also covers verdicts merely LOST to a restart between the
+// re-queue and the enrichment, which a sweep genuinely can still advance.
+// Without a marker the two are indistinguishable, so every restart re-decoded
+// both (a whole-object read each on a network-backed library), re-looked them
+// up, re-accepted them, re-wrote provenance, re-queued them, and re-stamped
+// indexed_at into a no-op delta for every paired device — for a refusal that
+// reproduces identically every time. Recording the veto separates them exactly:
+// a lost verdict has provenance and NO marker.
+//
+// # Why only THIS refusal
+//
+// applyAcousticFallback also refuses on a non-UUID artist MBID, and that one is
+// deliberately NOT persisted. It is a fact about the UPSTREAM's data quality,
+// not about this file — the same distinction that keeps lookup errors out of
+// the no-match marker. Persisting it would sideline a row for a reason nothing
+// about the row can fix, and would silence the Warn line that is the only
+// signal such responses are happening at all.
+//
+// # What pins it
+//
+// The (size, mtimeNS) pair pins the AUDIO, so a re-encode re-opens the row —
+// different bytes may fingerprint to something the tag does not contradict.
+// `artist` pins the OTHER input, so any rewrite of the tag re-opens it too.
+// Storing the tag rather than trusting the file version is what makes this
+// exact instead of merely probable: Track.Artist is written only by the
+// extractors and fillFromPath (both scan-time), but reExtractUnchanged
+// re-extracts version-stale rows whose bytes have not changed, so an
+// ExtractorVersion bump that alters artist parsing rewrites the tag under a
+// matching size+mtime pair. Comparing both inputs cannot disagree with the veto
+// it describes.
+//
+// Deliberately touches NEITHER enriched_at NOR indexed_at, for the reason
+// SetAcoustIDMatch gives: this records how a row was judged, not a change to
+// what it says, and a bump would push a delta for columns no client receives.
+func (s *Store) SetAcoustIDTagVeto(ctx context.Context, path string, size, mtimeNS int64, artist string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tracks
+		   SET acoustid_veto_at       = ?,
+		       acoustid_veto_size     = ?,
+		       acoustid_veto_mtime_ns = ?,
+		       acoustid_veto_artist   = ?
+		 WHERE path = ?`,
+		s.now().UnixNano(), size, mtimeNS, artist, path)
+	return err
+}
+
+// FreshAcoustIDTagVetoes returns the tag vetoes stamped at or after notBefore,
+// keyed by track path.
+//
+// TTL-bounded by the query for the same reason as FreshAcoustIDNoMatches: an
+// older marker is due for re-checking anyway, so fetching it would grow the map
+// without suppressing anything. The caller compares each record against the
+// row's CURRENT size, mtime and artist — none of which can be compared in SQL
+// cheaply, since all three live inside the tags_json blob.
+//
+// A SEPARATE query from the no-match reader, deliberately, even though both run
+// back to back in the same candidate pass. The two markers answer different
+// questions and match on different fields, and forgetting to read one merely
+// costs a decode — today's behaviour. The CLEAR side is the opposite: missing
+// one there makes "Retry missing" silently do nothing, which is why that half
+// is a single statement rather than a pair.
+//
+// Read-only, so no mutex — WAL handles concurrent readers.
+func (s *Store) FreshAcoustIDTagVetoes(ctx context.Context, notBefore int64) (map[string]TagVetoRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT path, acoustid_veto_size, acoustid_veto_mtime_ns, acoustid_veto_artist
+		  FROM tracks
+		 WHERE acoustid_veto_at >= ?
+		   AND acoustid_veto_at > 0`, notBefore)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: FreshAcoustIDTagVetoes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]TagVetoRecord)
+	for rows.Next() {
+		var p string
+		var rec TagVetoRecord
+		if err := rows.Scan(&p, &rec.Size, &rec.MTimeNS, &rec.Artist); err != nil {
+			return nil, fmt.Errorf("manifest: scan tag veto: %w", err)
+		}
+		out[p] = rec
+	}
+	return out, rows.Err()
+}
+
+// ClearAcoustIDSuppression drops every persisted fingerprint suppression
+// marker — both the no-match verdict and the apply-time tag veto — putting
+// those rows back in the candidate pool on the next sweep.
+//
+// ONE statement covering both kinds, on purpose. This is what keeps the
+// operator's "Retry missing" button honest: it MEANS "try again", and a marker
+// that survived it would silently narrow the retry to whatever the enricher
+// alone could fix. Clearing them together makes that structural rather than a
+// convention the caller has to remember — a future third marker belongs in this
+// statement, not in a third call site somebody has to find.
+//
+// Touches no timestamp column: clearing a marker is not a change to what the
+// row says.
+func (s *Store) ClearAcoustIDSuppression(ctx context.Context) (int64, error) {
+	return s.execClearSuppression(ctx, clearSuppressionAllSQL)
+}
+
+// ClearAcoustIDSuppressionUnderPrefix is the folder-scoped twin, for the
 // Inspector's per-folder retry.
 //
 // Uses the BYTE-RANGE bound, never LIKE: this is a WRITE, and SQLite's default
@@ -236,17 +351,17 @@ func (s *Store) ClearAcoustIDNoMatches(ctx context.Context) (int64, error) {
 // prefix delegates to the library-wide form — decided AFTER the trim, so a
 // slash-only value cannot fall through to a range that silently clears
 // nothing.
-func (s *Store) ClearAcoustIDNoMatchesUnderPrefix(ctx context.Context, prefix string) (int64, error) {
+func (s *Store) ClearAcoustIDSuppressionUnderPrefix(ctx context.Context, prefix string) (int64, error) {
 	base, scoped := subtreeRangeBase(prefix)
 	if !scoped {
-		return s.ClearAcoustIDNoMatches(ctx)
+		return s.ClearAcoustIDSuppression(ctx)
 	}
-	return s.execClearNoMatch(ctx, clearNoMatchUnderPrefixSQL, base, base)
+	return s.execClearSuppression(ctx, clearSuppressionUnderPrefixSQL, base, base)
 }
 
-// execClearNoMatch runs one of the two clear statements under the writer lock.
-// Shared so the scope is the ONLY thing that differs between them.
-func (s *Store) execClearNoMatch(ctx context.Context, stmt string, args ...any) (int64, error) {
+// execClearSuppression runs one of the two clear statements under the writer
+// lock. Shared so the scope is the ONLY thing that differs between them.
+func (s *Store) execClearSuppression(ctx context.Context, stmt string, args ...any) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	res, err := s.db.ExecContext(ctx, stmt, args...)
@@ -256,9 +371,9 @@ func (s *Store) execClearNoMatch(ctx context.Context, stmt string, args ...any) 
 	return res.RowsAffected()
 }
 
-// clearNoMatchSQL is the shared UPDATE head. Split out so the two statements
-// below cannot drift in WHICH columns they reset while differing only in
-// scope.
+// clearSuppressionSQL is the shared UPDATE head. Split out so the two
+// statements below cannot drift in WHICH columns they reset while differing
+// only in scope.
 //
 // The two full statements are compile-time `const`s rather than a
 // concatenation performed at the call site. That is deliberate: both forms are
@@ -266,17 +381,25 @@ func (s *Store) execClearNoMatch(ctx context.Context, stmt string, args ...any) 
 // ("dynamically formatted SQL query") quiet, and a suppression comment is not
 // honoured for Go. Same shape as trackFeatureSelect's callers. Neither carries
 // an interpolated value — the scope travels as bind parameters.
-const clearNoMatchSQL = `
+const clearSuppressionSQL = `
 	UPDATE tracks
 	   SET acoustid_nomatch_at       = 0,
 	       acoustid_nomatch_size     = 0,
-	       acoustid_nomatch_mtime_ns = 0`
+	       acoustid_nomatch_mtime_ns = 0,
+	       acoustid_veto_at          = 0,
+	       acoustid_veto_size        = 0,
+	       acoustid_veto_mtime_ns    = 0,
+	       acoustid_veto_artist      = ''`
 
-const clearNoMatchAllSQL = clearNoMatchSQL + `
-	 WHERE acoustid_nomatch_at > 0`
+// suppressedPredicateSQL matches a row carrying EITHER marker. Named so the two
+// statements below cannot come to disagree about what "suppressed" means.
+const suppressedPredicateSQL = `(acoustid_nomatch_at > 0 OR acoustid_veto_at > 0)`
 
-const clearNoMatchUnderPrefixSQL = clearNoMatchSQL + `
-	 WHERE acoustid_nomatch_at > 0
+const clearSuppressionAllSQL = clearSuppressionSQL + `
+	 WHERE ` + suppressedPredicateSQL
+
+const clearSuppressionUnderPrefixSQL = clearSuppressionSQL + `
+	 WHERE ` + suppressedPredicateSQL + `
 	   AND path COLLATE BINARY >= ? || '/'
 	   AND path COLLATE BINARY <  ? || '0'`
 

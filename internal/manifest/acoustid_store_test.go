@@ -325,46 +325,127 @@ func TestAcoustIDNoMatchRecordsVersionAndRespectsTTL(t *testing.T) {
 	}
 }
 
-// TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged pins the scope of the
-// folder-scoped clear.
+// TestAcoustIDTagVetoRecordsBothInputsAndRespectsTTL covers the persisted
+// apply-time veto.
 //
-// This is a WRITE keyed on a path prefix, so it must use the byte range rather
-// than LIKE: nothing sets case_sensitive_like, so `path LIKE 'Album/%'` also
-// matches `album/…`, which on a case-sensitive filesystem is a different
-// directory. Clearing a neighbour's verdicts is not corruption, but it
-// silently re-decodes an unrelated folder — and the same predicate shape is
-// what deletes rows elsewhere, so the habit is the thing being pinned.
-func TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged(t *testing.T) {
+// The veto is a pure function of two inputs — the audio, and the row's own
+// artist tag — so the marker has to carry both or it cannot say what it
+// describes. The file version alone would keep suppressing a row whose tag an
+// ExtractorVersion bump had since rewritten (reExtractUnchanged re-extracts
+// version-stale rows whose BYTES are unchanged), and no TTL at all would freeze
+// the verdict against an AcoustID cluster that can gain recordings later.
+func TestAcoustIDTagVetoRecordsBothInputsAndRespectsTTL(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 	ctx := context.Background()
 
-	for _, p := range []string{"Album/x.flac", "album/y.flac", "Other/z.flac"} {
+	seedEnrichedTrack(t, s, "a.flac")
+	seedEnrichedTrack(t, s, "b.flac")
+
+	beforeEnr := enrichedAt(t, s, "a.flac")
+	beforeIdx := indexedAt(t, s, "a.flac")
+
+	const size, mtime = int64(4242), int64(1_700_000_000_000_000_000)
+	const artist = "Some Other Band"
+	if err := s.SetAcoustIDTagVeto(ctx, "a.flac", size, mtime, artist); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recording how a row was JUDGED is not a change to what it says — a bump
+	// would push a delta for columns no client receives.
+	if now := enrichedAt(t, s, "a.flac"); now != beforeEnr {
+		t.Errorf("enriched_at moved %d -> %d", beforeEnr, now)
+	}
+	if now := indexedAt(t, s, "a.flac"); now != beforeIdx {
+		t.Errorf("indexed_at moved %d -> %d — a veto is not a wire change", beforeIdx, now)
+	}
+
+	fresh, err := s.FreshAcoustIDTagVetoes(ctx, time.Now().Add(-time.Hour).UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := fresh["a.flac"]
+	if !ok {
+		t.Fatalf("a.flac absent from the fresh set = %v", fresh)
+	}
+	if rec.Size != size || rec.MTimeNS != mtime {
+		t.Errorf("recorded version = (%d, %d), want (%d, %d) — without the exact pair a "+
+			"re-encode could never re-open the row", rec.Size, rec.MTimeNS, size, mtime)
+	}
+	if rec.Artist != artist {
+		t.Errorf("recorded artist = %q, want %q — the tag is the veto's other input, and a "+
+			"marker that omits it outlives the tag it was weighed against", rec.Artist, artist)
+	}
+	if _, ok := fresh["b.flac"]; ok {
+		t.Error("b.flac in the fresh set despite no veto — the all-zero default must not " +
+			"read as a recorded refusal")
+	}
+
+	stale, err := s.FreshAcoustIDTagVetoes(ctx, time.Now().Add(time.Hour).UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stale["a.flac"]; ok {
+		t.Error("a.flac still fresh past the cutoff — an expired veto would suppress " +
+			"re-checking forever, which is the objection the TTL answers")
+	}
+}
+
+// TestClearAcoustIDSuppressionUnderPrefixIsByteRanged pins the scope of the
+// folder-scoped clear, and that it reaches BOTH marker kinds.
+//
+// This is a WRITE keyed on a path prefix, so it must use the byte range rather
+// than LIKE: nothing sets case_sensitive_like, so `path LIKE 'Album/%'` also
+// matches `album/…`, which on a case-sensitive filesystem is a different
+// directory. Clearing a neighbour's markers is not corruption, but it silently
+// re-decodes an unrelated folder — and the same predicate shape is what deletes
+// rows elsewhere, so the habit is the thing being pinned.
+//
+// Both kinds ride ONE statement because a retry that cleared only one would
+// leave "Retry missing" silently doing nothing for the other half. Each seeded
+// row therefore carries a different kind, so a statement that dropped either
+// column group fails here.
+func TestClearAcoustIDSuppressionUnderPrefixIsByteRanged(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	// Album/ carries one of each kind, so the scoped clear has to reach both.
+	// The two survivors outside it likewise split across the kinds.
+	noMatch := []string{"Album/x.flac", "album/y.flac"}
+	vetoes := []string{"Album/v.flac", "Other/z.flac"}
+	for _, p := range append(append([]string{}, noMatch...), vetoes...) {
 		seedEnrichedTrack(t, s, p)
+	}
+	for _, p := range noMatch {
 		if err := s.SetAcoustIDNoMatch(ctx, p, 1, 1); err != nil {
 			t.Fatal(err)
 		}
 	}
+	for _, p := range vetoes {
+		if err := s.SetAcoustIDTagVeto(ctx, p, 1, 1, "Tagged Artist"); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	n, err := s.ClearAcoustIDNoMatchesUnderPrefix(ctx, "Album")
+	n, err := s.ClearAcoustIDSuppressionUnderPrefix(ctx, "Album")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("cleared %d rows, want exactly 1 — the case-twin sibling and the "+
-			"unrelated folder must be untouched", n)
+	if n != 2 {
+		t.Fatalf("cleared %d rows, want exactly 2 (one of each kind under Album/) — the "+
+			"case-twin sibling and the unrelated folder must be untouched", n)
 	}
 
-	fresh, err := s.FreshAcoustIDNoMatches(ctx, time.Now().Add(-time.Hour).UnixNano())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fresh["Album/x.flac"]; ok {
-		t.Error("Album/x.flac still carries a verdict — the scoped clear missed its target")
+	suppressed := suppressedPaths(t, s)
+	for _, p := range []string{"Album/x.flac", "Album/v.flac"} {
+		if suppressed[p] {
+			t.Errorf("%s still suppressed — the scoped clear missed its target", p)
+		}
 	}
 	for _, p := range []string{"album/y.flac", "Other/z.flac"} {
-		if _, ok := fresh[p]; !ok {
-			t.Errorf("%s lost its verdict — the prefix write reached outside its folder", p)
+		if !suppressed[p] {
+			t.Errorf("%s lost its marker — the prefix write reached outside its folder", p)
 		}
 	}
 
@@ -372,17 +453,40 @@ func TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged(t *testing.T) {
 	// helper routes both retries through the prefix form and passes "" for the
 	// global one, so if this stopped delegating, "Retry missing" would clear
 	// nothing at all while still reporting success.
-	if n, err := s.ClearAcoustIDNoMatchesUnderPrefix(ctx, ""); err != nil {
+	if n, err := s.ClearAcoustIDSuppressionUnderPrefix(ctx, ""); err != nil {
 		t.Fatal(err)
 	} else if n != 2 {
 		t.Fatalf("unscoped clear affected %d rows, want the 2 survivors — an empty "+
 			"prefix must mean the whole library, not an empty range", n)
 	}
-	after, err := s.FreshAcoustIDNoMatches(ctx, time.Now().Add(-time.Hour).UnixNano())
+	if after := suppressedPaths(t, s); len(after) != 0 {
+		t.Errorf("markers survived the library-wide clear: %v", after)
+	}
+}
+
+// suppressedPaths indexes every path still carrying either marker kind.
+//
+// Reads through BOTH public fresh-sets rather than querying the columns
+// directly, so a clear that zeroed a stamp while leaving its payload behind —
+// or vice versa — is still reported as cleared exactly when the sweeper would
+// see it as cleared.
+func suppressedPaths(t *testing.T, s *Store) map[string]bool {
+	t.Helper()
+	ctx, notBefore := context.Background(), time.Now().Add(-time.Hour).UnixNano()
+	out := map[string]bool{}
+	nm, err := s.FreshAcoustIDNoMatches(ctx, notBefore)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != 0 {
-		t.Errorf("verdicts survived the library-wide clear: %v", after)
+	for p := range nm {
+		out[p] = true
 	}
+	tv, err := s.FreshAcoustIDTagVetoes(ctx, notBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p := range tv {
+		out[p] = true
+	}
+	return out
 }

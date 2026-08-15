@@ -110,6 +110,17 @@ var fingerprintSweeperSettleDelay = 90 * time.Second
 // immediately regardless, and "Retry missing" clears these outright.
 const fingerprintNoMatchTTL = 30 * 24 * time.Hour
 
+// fingerprintTagVetoTTL is how long a persisted apply-time tag veto suppresses
+// re-fingerprinting a file whose bytes AND artist tag have not changed.
+//
+// Deliberately the same value as the no-match TTL, and deliberately a separate
+// constant rather than a reuse of it: the number agrees, the REASON does not. A
+// no-match expires because AcoustID's database grows; a veto expires because
+// the cluster this file resolves to can gain or lose recordings, so the answer
+// the tag contradicted today may not be the answer given next month. Naming
+// them apart is what lets one move without silently moving the other.
+const fingerprintTagVetoTTL = fingerprintNoMatchTTL
+
 // runFingerprintSweeper is the loop. Modelled on runAnalysisSweeper —
 // settle delay, then ticker OR nudge (the admin "Sweep now" button
 // non-blocking-sends on the buffered-1 channel; a pending nudge
@@ -222,6 +233,13 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 	if err != nil {
 		return nil, err
 	}
+	// Persisted apply-time tag vetoes still inside the TTL. Same posture again —
+	// this one covers a refusal that happens AFTER a successful lookup, so
+	// degrading to empty would re-buy the decode and the lookup both.
+	vetoed, err := s.store.FreshAcoustIDTagVetoes(ctx, time.Now().Add(-fingerprintTagVetoTTL).UnixNano())
+	if err != nil {
+		return nil, err
+	}
 	var out []candidate
 	// StreamTracks reuses ONE Track allocation across iterations, so the
 	// callback must not retain the pointer. Everything below is copied by
@@ -280,6 +298,25 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 		// TTL-bounded by the query, so membership here means "recent AND still
 		// the same bytes".
 		if rec, ok := noMatch[t.Path]; ok && rec.Size == t.Size && rec.MTimeNS == t.ModTime.UnixNano() {
+			return nil
+		}
+		// ...and not a file whose verdict the enricher already REFUSED because
+		// this row's own artist tag contradicted it.
+		//
+		// This is the other half of the matched-but-artistless population the
+		// skip above deliberately keeps. Without a marker a veto looks exactly
+		// like a verdict lost to a restart, so both had to stay retryable — and
+		// the vetoed ones were re-decoded, re-looked-up and re-refused on every
+		// restart, for a decision that is a pure function of inputs neither of
+		// which changed. A lost verdict has provenance and NO marker, so it
+		// still reaches the pool.
+		//
+		// Gated on the artist tag AS WELL as the file version, because the veto
+		// is a function of both: a tag rewrite must re-open the row even when
+		// the bytes are untouched, which is exactly what reExtractUnchanged
+		// does on an ExtractorVersion bump.
+		if rec, ok := vetoed[t.Path]; ok &&
+			rec.Size == t.Size && rec.MTimeNS == t.ModTime.UnixNano() && rec.Artist == t.Artist {
 			return nil
 		}
 		// ...and only after the text ladder has actually had its turn.

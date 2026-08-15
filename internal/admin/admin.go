@@ -204,12 +204,13 @@ type Deps struct {
 	// FingerprintForget drops the in-process AcoustID outcome cache for a
 	// path prefix ("" = the whole library), returning how many entries went.
 	//
-	// Paired with Store.ClearAcoustIDNoMatches*: the persisted verdict and
-	// this cache are two layers of the SAME suppression, and the sweeper
-	// consults the cache FIRST. Clearing only the database would leave every
-	// file answered during the current process suppressed until a restart, so
-	// "Retry missing" would appear to work while doing nothing for exactly the
-	// files the operator just watched fail.
+	// Paired with Store.ClearAcoustIDSuppression*: the persisted markers (a
+	// no-match verdict, or an apply-time tag veto) and this cache are two
+	// layers of the SAME suppression, and the sweeper consults the cache
+	// FIRST. Clearing only the database would leave every file answered during
+	// the current process suppressed until a restart, so "Retry missing" would
+	// appear to work while doing nothing for exactly the files the operator
+	// just watched fail.
 	//
 	// Wired in cmd/bridge/main.go only when fingerprinting is enabled; nil is
 	// a no-op, which is correct — with no sweeper there is no cache to clear.

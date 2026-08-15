@@ -1208,13 +1208,13 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	// Facet 2: artist image gaps (extracted helper — see its doc).
 	reset += s.resetArtistImageGaps(ctx)
-	// Facet 3: fingerprint no-match verdicts. Without this the button would
-	// silently exclude every file AcoustID has already declined, which is the
-	// objection that kept those verdicts in memory in the first place —
-	// "Retry missing" has to mean try again. Deliberately not added to
-	// `reset`, which counts rows re-queued for the ENRICHER; these re-enter
-	// the fingerprint sweep instead.
-	s.clearFingerprintNoMatch(ctx, "enrichment retry", "")
+	// Facet 3: fingerprint suppression markers — files AcoustID declined, and
+	// files whose answer the enricher vetoed against their own tags. Without
+	// this the button would silently exclude both, which is the objection that
+	// kept those verdicts in memory in the first place — "Retry missing" has to
+	// mean try again. Deliberately not added to `reset`, which counts rows
+	// re-queued for the ENRICHER; these re-enter the fingerprint sweep instead.
+	s.clearFingerprintSuppression(ctx, "enrichment retry", "")
 	resubmitted := false
 	if s.deps.HarvestForceSubmit != nil {
 		resubmitted = s.deps.HarvestForceSubmit()
@@ -1248,16 +1248,22 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 // both reads; Gemini on PR #495). Best-effort: any failure degrades to 0
 // (covers-only retry) rather than failing the caller's request.
 // ResetEnrichedByArtistMBIDs no-ops on an empty set.
-// clearFingerprintNoMatch re-opens files AcoustID has already declined, for a
-// scope — "" being the whole library.
+// clearFingerprintSuppression re-opens files the fingerprint path has already
+// settled — whether AcoustID declined them or the enricher vetoed the answer
+// against their own tags — for a scope, "" being the whole library.
 //
-// Shared by the global and folder-scoped retries because the two layers must
+// Shared by the global and folder-scoped retries because the two LAYERS must
 // be cleared TOGETHER and in this order-independent pair: the persisted
-// verdict in SQLite, and the in-process outcome cache the sweeper consults
+// markers in SQLite, and the in-process outcome cache the sweeper consults
 // before it. Clearing one without the other is the failure this centralises
 // away — the database alone leaves files answered this session suppressed
 // until a restart, and the cache alone forgets them only until the next sweep
 // re-reads the row.
+//
+// The two KINDS of persisted marker need no such coordination here: they are
+// cleared by a single statement (Store.ClearAcoustIDSuppression), so a future
+// third kind is added there rather than in another call site somebody has to
+// find.
 //
 // Best-effort throughout: the caller's own reset has already landed, so a
 // failure here must not turn a partial success into an error response. A
@@ -1266,21 +1272,21 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 //
 // `scope` names the caller for the journal ("enrichment retry" /
 // "library retry"); the folder, when there is one, rides the `path` attribute.
-func (s *Server) clearFingerprintNoMatch(ctx context.Context, scope, prefix string) {
+func (s *Server) clearFingerprintSuppression(ctx context.Context, scope, prefix string) {
 	attrs := func(extra ...any) []any {
 		if prefix == "" {
 			return extra
 		}
 		return append([]any{"path", prefix}, extra...)
 	}
-	n, err := s.deps.Manifest.ClearAcoustIDNoMatchesUnderPrefix(ctx, prefix)
+	n, err := s.deps.Manifest.ClearAcoustIDSuppressionUnderPrefix(ctx, prefix)
 	switch {
 	case err != nil:
 		if ctx.Err() == nil {
-			logger.Warn(scope+": clear fingerprint no-match verdicts", attrs("err", err)...)
+			logger.Warn(scope+": clear fingerprint suppression markers", attrs("err", err)...)
 		}
 	case n > 0:
-		logger.Info(scope+": cleared fingerprint no-match verdicts", attrs("rows", n)...)
+		logger.Info(scope+": cleared fingerprint suppression markers", attrs("rows", n)...)
 	}
 	if s.deps.FingerprintForget != nil {
 		if dropped := s.deps.FingerprintForget(prefix); dropped > 0 {

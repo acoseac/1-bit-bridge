@@ -2,8 +2,10 @@ package enrich
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -154,7 +156,7 @@ const (
 
 func TestApplyAcousticFallbackOffWhenNoLookup(t *testing.T) {
 	e := &Enricher{}
-	if _, o := e.applyAcousticFallback(&manifest.Track{Path: "a.flac"}); o != acousticNoVerdict {
+	if _, o := e.applyAcousticFallback(context.Background(), &manifest.Track{Path: "a.flac"}); o != acousticNoVerdict {
 		t.Fatalf("outcome = %v — a nil lookup must never recover anything", o)
 	}
 }
@@ -171,7 +173,7 @@ func TestApplyAcousticFallbackWritesArtistNeverRelease(t *testing.T) {
 	}}}
 	tr := &manifest.Track{Path: "a.flac", Artist: "An Unknown Artist"}
 
-	m, o := e.applyAcousticFallback(tr)
+	m, o := e.applyAcousticFallback(context.Background(), tr)
 	if o != acousticApplied {
 		t.Fatalf("outcome = %v, want applied", o)
 	}
@@ -197,11 +199,11 @@ func TestApplyAcousticFallbackWritesArtistNeverRelease(t *testing.T) {
 // and the skip-reason counters depend on telling those apart.
 func TestApplyAcousticFallbackRefusals(t *testing.T) {
 	t.Run("a contradicting tag refuses the whole match", func(t *testing.T) {
-		e := &Enricher{acoustic: fakeLookup{"a.flac": {
+		store, tr := seedVetoTrack(t, "Some Other Band")
+		e := &Enricher{store: store, acoustic: fakeLookup{"a.flac": {
 			ArtistMBID: fbArtistMBID, ArtistName: "M83", RecordingMBID: fbRecMBID,
 		}}}
-		tr := &manifest.Track{Path: "a.flac", Artist: "Some Other Band"}
-		if _, o := e.applyAcousticFallback(tr); o != acousticRefused {
+		if _, o := e.applyAcousticFallback(context.Background(), tr); o != acousticRefused {
 			t.Fatalf("outcome = %v, want refused", o)
 		}
 		if tr.ArtistMBID != "" || tr.MusicBrainzTrackID != "" {
@@ -212,15 +214,131 @@ func TestApplyAcousticFallbackRefusals(t *testing.T) {
 	t.Run("a non-UUID artist MBID is refused", func(t *testing.T) {
 		// AcoustID is a third-party JSON source and this value reaches
 		// ArtistImagePath's filepath.Join as a leading component.
+		//
+		// No store: reaching one here would mean this branch had started
+		// recording a veto, which it must not — see the next test.
 		e := &Enricher{acoustic: fakeLookup{"a.flac": {
 			ArtistMBID: "../../evil", ArtistName: "M83",
 		}}}
 		tr := &manifest.Track{Path: "a.flac"}
-		if _, o := e.applyAcousticFallback(tr); o != acousticRefused {
+		if _, o := e.applyAcousticFallback(context.Background(), tr); o != acousticRefused {
 			t.Fatalf("outcome = %v — a non-UUID MBID must not reach a path", o)
 		}
 		if tr.ArtistMBID != "" {
 			t.Errorf("ArtistMBID = %q", tr.ArtistMBID)
+		}
+	})
+}
+
+// vetoTrackVersion is the file version seedVetoTrack writes, named so the
+// assertions below can require the marker to carry the EXACT pair rather than
+// merely "something".
+var vetoTrackVersion = struct {
+	size  int64
+	mtime time.Time
+}{size: 4242, mtime: time.Unix(1_700_000_000, 123).UTC()}
+
+// seedVetoTrack builds a store holding one enriched row, and returns the Track
+// the enricher would be holding for it.
+//
+// The row has to exist for real: SetAcoustIDTagVeto is an UPDATE keyed on path,
+// so a test that skipped the seed would assert against a statement that
+// affected nothing and would pass either way.
+func seedVetoTrack(t *testing.T, artist string) (*manifest.Store, *manifest.Track) {
+	t.Helper()
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	tr := &manifest.Track{
+		Path: "a.flac", Size: vetoTrackVersion.size, ModTime: vetoTrackVersion.mtime, Artist: artist,
+	}
+	if err := store.UpsertTrack(context.Background(), tr); err != nil {
+		t.Fatal(err)
+	}
+	return store, tr
+}
+
+// freshVetoes reads back every marker inside a generous TTL window.
+func freshVetoes(t *testing.T, store *manifest.Store) map[string]manifest.TagVetoRecord {
+	t.Helper()
+	got, err := store.FreshAcoustIDTagVetoes(context.Background(), time.Now().Add(-time.Hour).UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// TestApplyAcousticFallbackPersistsOnlyTheTagVeto is the reason the marker
+// exists, and the reason it is narrow.
+//
+// A vetoed row keeps its acoustid_match provenance and never gains an artist
+// MBID, which is indistinguishable from a verdict merely LOST to a restart — so
+// the candidate pool has to keep both, and before this marker every restart
+// re-decoded the vetoed ones (a whole-object read each on a network-backed
+// library), re-looked them up, re-accepted them and landed back here for the
+// identical refusal.
+//
+// The narrowness is the other half. The sibling refusal — a non-UUID artist
+// MBID — is a fact about AcoustID's data, not about this file, so recording it
+// would sideline a row for something nothing about the row can fix, and would
+// silence the Warn that is the only signal such responses are happening.
+func TestApplyAcousticFallbackPersistsOnlyTheTagVeto(t *testing.T) {
+	t.Run("a tag veto is recorded against both of its inputs", func(t *testing.T) {
+		store, tr := seedVetoTrack(t, "Some Other Band")
+		e := &Enricher{store: store, acoustic: fakeLookup{"a.flac": {
+			ArtistMBID: fbArtistMBID, ArtistName: "M83",
+		}}}
+		if _, o := e.applyAcousticFallback(context.Background(), tr); o != acousticRefused {
+			t.Fatalf("outcome = %v, want refused", o)
+		}
+
+		rec, ok := freshVetoes(t, store)["a.flac"]
+		if !ok {
+			t.Fatal("no veto recorded — the sweeper cannot tell this row from one whose " +
+				"verdict was lost to a restart, so it re-decodes it on every restart forever")
+		}
+		if rec.Size != vetoTrackVersion.size || rec.MTimeNS != vetoTrackVersion.mtime.UnixNano() {
+			t.Errorf("recorded version = (%d, %d), want (%d, %d) — without the exact pair a "+
+				"re-encode could never re-open the row",
+				rec.Size, rec.MTimeNS, vetoTrackVersion.size, vetoTrackVersion.mtime.UnixNano())
+		}
+		// The tag is the veto's OTHER input. reExtractUnchanged rewrites
+		// tags_json for version-stale rows whose bytes have not changed, so
+		// pinning the file version alone would keep suppressing a row whose
+		// artist tag an ExtractorVersion bump had since corrected.
+		if rec.Artist != "Some Other Band" {
+			t.Errorf("recorded artist = %q, want the tag the verdict was weighed against", rec.Artist)
+		}
+	})
+
+	t.Run("a non-UUID artist MBID records nothing", func(t *testing.T) {
+		store, tr := seedVetoTrack(t, "Some Other Band")
+		e := &Enricher{store: store, acoustic: fakeLookup{"a.flac": {
+			ArtistMBID: "../../evil", ArtistName: "M83",
+		}}}
+		if _, o := e.applyAcousticFallback(context.Background(), tr); o != acousticRefused {
+			t.Fatalf("outcome = %v, want refused", o)
+		}
+		if rec, ok := freshVetoes(t, store)["a.flac"]; ok {
+			t.Errorf("recorded %+v — malformed upstream data is not a fact about this file, "+
+				"and suppressing the row would also silence the warning", rec)
+		}
+	})
+
+	t.Run("an applied match records nothing", func(t *testing.T) {
+		// The negative control for the branch placement: only the refusal
+		// writes, so a marker here would suppress rows that WORKED.
+		store, tr := seedVetoTrack(t, "M83")
+		e := &Enricher{store: store, acoustic: fakeLookup{"a.flac": {
+			ArtistMBID: fbArtistMBID, ArtistName: "M83",
+		}}}
+		if _, o := e.applyAcousticFallback(context.Background(), tr); o != acousticApplied {
+			t.Fatalf("outcome = %v, want applied", o)
+		}
+		if rec, ok := freshVetoes(t, store)["a.flac"]; ok {
+			t.Errorf("recorded %+v for a match that was APPLIED", rec)
 		}
 	})
 }
@@ -231,7 +349,7 @@ func TestApplyAcousticFallbackPartialData(t *testing.T) {
 			ArtistMBID: fbArtistMBID, ArtistName: "M83", RecordingMBID: "not-a-uuid",
 		}}}
 		tr := &manifest.Track{Path: "a.flac"}
-		if _, o := e.applyAcousticFallback(tr); o != acousticApplied {
+		if _, o := e.applyAcousticFallback(context.Background(), tr); o != acousticApplied {
 			t.Fatalf("outcome = %v — a bad recording MBID must not cost the artist", o)
 		}
 		if tr.ArtistMBID != fbArtistMBID {
@@ -244,7 +362,7 @@ func TestApplyAcousticFallbackPartialData(t *testing.T) {
 
 	t.Run("no verdict for this path", func(t *testing.T) {
 		e := &Enricher{acoustic: fakeLookup{}}
-		if _, o := e.applyAcousticFallback(&manifest.Track{Path: "a.flac"}); o != acousticNoVerdict {
+		if _, o := e.applyAcousticFallback(context.Background(), &manifest.Track{Path: "a.flac"}); o != acousticNoVerdict {
 			t.Fatalf("outcome = %v, want no-verdict", o)
 		}
 	})
@@ -332,7 +450,7 @@ func TestAcousticFallbackDoesNotOverwriteAResolvedArtist(t *testing.T) {
 	}}}
 	tr := &manifest.Track{Path: "a.flac", Artist: "M83", Album: "CD 01", ArtistMBID: fromText}
 
-	m, o := e.applyAcousticFallback(tr)
+	m, o := e.applyAcousticFallback(context.Background(), tr)
 	if o != acousticApplied {
 		t.Fatalf("outcome = %v — the fallback must still run, the album hint is the new information", o)
 	}
