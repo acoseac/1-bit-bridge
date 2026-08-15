@@ -1,6 +1,9 @@
 package acoustid
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // Key identifies a file version. Size and mtime are both present because a
 // tag edit changes the size and a re-encode changes both — either way the
@@ -128,6 +131,59 @@ func (c *Cache) Set(k Key, o Outcome) {
 	}
 	c.byKey[k] = o
 	c.byPath[k.Path] = o
+}
+
+// Forget drops cached outcomes so the next sweep asks about those files
+// again. An empty prefix drops everything; otherwise only paths at or beneath
+// it go. Returns how many keyed entries were removed.
+//
+// This exists because the persisted no-match verdict alone does not make
+// "Retry missing" mean try again. The sweeper's candidate scan consults THIS
+// cache before anything else, so clearing the database rows would still leave
+// every file answered during the current process suppressed until a restart —
+// the button would appear to work and quietly do nothing for exactly the files
+// the operator just watched fail. Both retry paths therefore clear both layers.
+//
+// Prefix matching is byte-exact and boundary-anchored, so "Album" does not
+// reach "AlbumOther". Case-SENSITIVE deliberately: the database twin of this
+// call bounds its scope with a BINARY range, and a case-folding cache would
+// silently clear a different set than the rows it is paired with.
+//
+// Both generations are swept (see Set) — a survivor in prev would keep
+// answering Get.
+func (c *Cache) Forget(prefix string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if prefix == "" {
+		n := len(c.byKey) + len(c.prevKey)
+		c.byKey, c.byPath = make(map[Key]Outcome), make(map[string]Outcome)
+		c.prevKey, c.prevPath = nil, nil
+		return n
+	}
+	n := 0
+	for _, m := range []map[Key]Outcome{c.byKey, c.prevKey} {
+		for k := range m {
+			if pathUnderPrefix(k.Path, prefix) {
+				delete(m, k)
+				n++
+			}
+		}
+	}
+	for _, m := range []map[string]Outcome{c.byPath, c.prevPath} {
+		for p := range m {
+			if pathUnderPrefix(p, prefix) {
+				delete(m, p)
+			}
+		}
+	}
+	return n
+}
+
+// pathUnderPrefix reports whether p is prefix itself or sits beneath it. The
+// separator check is what stops a prefix matching a longer sibling name.
+func pathUnderPrefix(p, prefix string) bool {
+	trimmed := strings.TrimSuffix(prefix, "/")
+	return p == trimmed || strings.HasPrefix(p, trimmed+"/")
 }
 
 // LookupPath returns the outcome for a client-relative path, ignoring the

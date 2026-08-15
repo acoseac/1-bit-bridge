@@ -519,6 +519,7 @@ func TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged(t *testing.T) {
 	}
 	seed("settled.flac")
 	seed("reencoded.flac")
+	seed("retagged.flac")
 	seed("never-asked.flac")
 
 	// Recorded against the version the row actually carries.
@@ -526,8 +527,14 @@ func TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Recorded against a version that no longer exists — the file has been
-	// replaced since AcoustID was asked.
+	// replaced since AcoustID was asked. Both halves of the pair get their own
+	// row, because either one moving on its own means different bytes: a
+	// re-encode changes the size, and a tag edit can leave the size identical
+	// while the mtime moves.
 	if err := store.SetAcoustIDNoMatch(ctx, "reencoded.flac", size+9999, mtime.UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAcoustIDNoMatch(ctx, "retagged.flac", size, mtime.UnixNano()-1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -552,6 +559,10 @@ func TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged(t *testing.T) {
 	if !paths["reencoded.flac"] {
 		t.Errorf("reencoded.flac not collected — the verdict describes bytes that are " +
 			"gone, so suppressing on the path alone would freeze it forever")
+	}
+	if !paths["retagged.flac"] {
+		t.Errorf("retagged.flac not collected — only the mtime moved, so a check that " +
+			"compared size alone would wrongly treat it as settled")
 	}
 	if !paths["never-asked.flac"] {
 		t.Errorf("never-asked.flac not collected — a row with no verdict at all must " +

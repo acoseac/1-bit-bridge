@@ -1208,17 +1208,30 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	// Facet 2: artist image gaps (extracted helper — see its doc).
 	reset += s.resetArtistImageGaps(ctx)
-	// Facet 3: persisted fingerprint no-match verdicts. Without this the
+	// Facet 3: fingerprint no-match verdicts, in BOTH layers. Without this the
 	// button would silently exclude every file AcoustID has already declined,
 	// which is the objection that kept those verdicts in memory in the first
-	// place — "Retry missing" has to mean try again. Best-effort: the
-	// enrichment reset above already landed, so a failure here must not turn a
-	// partial success into a 500. Not added to `reset`, which counts rows
-	// re-queued for the ENRICHER; these re-enter the fingerprint sweep.
+	// place — "Retry missing" has to mean try again. The in-process cache is
+	// cleared too because the sweeper consults it before anything else, so the
+	// database clear alone would not re-open a file answered this session.
+	//
+	// Best-effort: the enrichment reset above already landed, so a failure
+	// here must not turn a partial success into a 500. A cancelled context is
+	// an ordinary client disconnect or timeout, not a fault — logging it at
+	// Warn would put a misleading line in the journal on every abandoned
+	// request. Not added to `reset`, which counts rows re-queued for the
+	// ENRICHER; these re-enter the fingerprint sweep.
 	if n, err := s.deps.Manifest.ClearAcoustIDNoMatches(ctx); err != nil {
-		logger.Warn("enrichment retry: clear fingerprint no-match verdicts", "err", err)
+		if ctx.Err() == nil {
+			logger.Warn("enrichment retry: clear fingerprint no-match verdicts", "err", err)
+		}
 	} else if n > 0 {
 		logger.Info("enrichment retry: cleared fingerprint no-match verdicts", "rows", n)
+	}
+	if s.deps.FingerprintForget != nil {
+		if n := s.deps.FingerprintForget(""); n > 0 {
+			logger.Info("enrichment retry: dropped in-process fingerprint outcomes", "entries", n)
+		}
 	}
 	resubmitted := false
 	if s.deps.HarvestForceSubmit != nil {

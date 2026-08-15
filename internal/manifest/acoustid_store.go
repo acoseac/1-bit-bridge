@@ -226,7 +226,7 @@ func (s *Store) FreshAcoustIDNoMatches(ctx context.Context, notBefore int64) (ma
 func (s *Store) ClearAcoustIDNoMatches(ctx context.Context) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, clearNoMatchSQL+` WHERE acoustid_nomatch_at > 0`)
+	res, err := s.db.ExecContext(ctx, clearNoMatchAllSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -249,23 +249,36 @@ func (s *Store) ClearAcoustIDNoMatchesUnderPrefix(ctx context.Context, prefix st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, clearNoMatchSQL+`
-		 WHERE acoustid_nomatch_at > 0
-		   AND path COLLATE BINARY >= ? || '/'
-		   AND path COLLATE BINARY <  ? || '0'`, base, base)
+	res, err := s.db.ExecContext(ctx, clearNoMatchUnderPrefixSQL, base, base)
 	if err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()
 }
 
-// clearNoMatchSQL is the shared UPDATE head. Split out so the two callers
-// cannot drift in WHICH columns they reset while differing only in scope.
+// clearNoMatchSQL is the shared UPDATE head. Split out so the two statements
+// below cannot drift in WHICH columns they reset while differing only in
+// scope.
+//
+// The two full statements are compile-time `const`s rather than a
+// concatenation performed at the call site. That is deliberate: both forms are
+// equally static, but only this one keeps SonarCloud's go:S2077
+// ("dynamically formatted SQL query") quiet, and a suppression comment is not
+// honoured for Go. Same shape as trackFeatureSelect's callers. Neither carries
+// an interpolated value — the scope travels as bind parameters.
 const clearNoMatchSQL = `
 	UPDATE tracks
 	   SET acoustid_nomatch_at       = 0,
 	       acoustid_nomatch_size     = 0,
 	       acoustid_nomatch_mtime_ns = 0`
+
+const clearNoMatchAllSQL = clearNoMatchSQL + `
+	 WHERE acoustid_nomatch_at > 0`
+
+const clearNoMatchUnderPrefixSQL = clearNoMatchSQL + `
+	 WHERE acoustid_nomatch_at > 0
+	   AND path COLLATE BINARY >= ? || '/'
+	   AND path COLLATE BINARY <  ? || '0'`
 
 // CountAcoustIDMatches reports how many rows carry fingerprint provenance —
 // the number an operator wants when deciding whether the feature is pulling

@@ -201,6 +201,20 @@ type Deps struct {
 	// `harvestResubmitted: false` on the retry response.
 	HarvestForceSubmit func() bool
 
+	// FingerprintForget drops the in-process AcoustID outcome cache for a
+	// path prefix ("" = the whole library), returning how many entries went.
+	//
+	// Paired with Store.ClearAcoustIDNoMatches*: the persisted verdict and
+	// this cache are two layers of the SAME suppression, and the sweeper
+	// consults the cache FIRST. Clearing only the database would leave every
+	// file answered during the current process suppressed until a restart, so
+	// "Retry missing" would appear to work while doing nothing for exactly the
+	// files the operator just watched fail.
+	//
+	// Wired in cmd/bridge/main.go only when fingerprinting is enabled; nil is
+	// a no-op, which is correct — with no sweeper there is no cache to clear.
+	FingerprintForget func(prefix string) int
+
 	// EnrichSkipReasons returns the enricher's process-lifetime tally of
 	// why it stopped short, keyed by bounded reason (no_search_terms /
 	// no_mb_match / mb_error). Wired to enrich.Enricher.SkipReasons in

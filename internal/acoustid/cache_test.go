@@ -196,3 +196,54 @@ func TestCacheUnboundedWhenCapacityNonPositive(t *testing.T) {
 		t.Fatalf("Len = %d, want 50 — a non-positive capacity disables bounding", c.Len())
 	}
 }
+
+// TestCacheForgetScopesToPrefixAndSweepsBothGenerations covers the in-process
+// half of "Retry missing".
+//
+// The persisted no-match verdict and this cache suppress the same candidates,
+// and the sweeper reads the cache FIRST — so a retry that cleared only the
+// database would leave every file answered this session suppressed until a
+// restart, which is precisely the "it fights Retry missing" objection that
+// kept these verdicts in memory to begin with.
+//
+// Two properties beyond the obvious. The prefix must be boundary-anchored, or
+// a scoped retry on "Album" would also drop "AlbumOther" — the same
+// sibling-reach the database side uses a byte range to avoid. And BOTH
+// generations must be swept: a survivor demoted into prev keeps answering Get,
+// so a half-clear looks exactly like no clear at all.
+func TestCacheForgetScopesToPrefixAndSweepsBothGenerations(t *testing.T) {
+	// Capacity 2 guarantees a demotion, so prev is genuinely populated.
+	c := NewCache(2)
+	keys := []Key{
+		{Path: "Album/01.flac", Size: 1, MTimeNS: 1},
+		{Path: "Album/02.flac", Size: 1, MTimeNS: 1},
+		{Path: "AlbumOther/01.flac", Size: 1, MTimeNS: 1},
+		{Path: "Other/01.flac", Size: 1, MTimeNS: 1},
+	}
+	for _, k := range keys {
+		c.Set(k, Outcome{})
+	}
+
+	if n := c.Forget("Album"); n != 2 {
+		t.Fatalf("Forget(\"Album\") dropped %d entries, want 2 — it must reach both "+
+			"generations and neither sibling", n)
+	}
+	for _, k := range keys[:2] {
+		if _, ok := c.Get(k); ok {
+			t.Errorf("%s still cached — a survivor keeps the sweeper from re-asking", k.Path)
+		}
+	}
+	for _, k := range keys[2:] {
+		if _, ok := c.Get(k); !ok {
+			t.Errorf("%s was dropped — the prefix reached outside its folder", k.Path)
+		}
+	}
+
+	// Empty prefix is the library-wide form the global retry uses.
+	if n := c.Forget(""); n != 2 {
+		t.Fatalf("Forget(\"\") dropped %d entries, want the 2 survivors", n)
+	}
+	if c.Len() != 0 {
+		t.Errorf("Len = %d after a full Forget, want 0", c.Len())
+	}
+}
