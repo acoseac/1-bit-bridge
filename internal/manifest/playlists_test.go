@@ -237,6 +237,56 @@ func TestTombstoneCrossDevice(t *testing.T) {
 	}
 }
 
+// TestListPlaylistTombstoneIDs pins the sweep-propagation feed: a
+// tombstoned playlist's id appears in the tombstone list (and only
+// there), the list is empty when nothing was deleted, and a revive
+// (newer-clock upsert) removes the id again.
+func TestListPlaylistTombstoneIDs(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+
+	// Empty store → empty tombstone list.
+	ids, err := s.ListPlaylistTombstoneIDs(ctx)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("empty store: ids=%v err=%v, want none", ids, err)
+	}
+
+	a, ai := samplePlaylist("pl-live", "kept", 100)
+	b, bi := samplePlaylist("pl-doomed", "deleted", 100)
+	_ = s.UpsertPlaylist(ctx, "devA", a, ai)
+	_ = s.UpsertPlaylist(ctx, "devA", b, bi)
+
+	// Nothing deleted yet → still empty.
+	ids, _ = s.ListPlaylistTombstoneIDs(ctx)
+	if len(ids) != 0 {
+		t.Fatalf("pre-delete tombstones = %v, want none", ids)
+	}
+
+	if ok, err := s.TombstonePlaylist(ctx, "pl-doomed"); err != nil || !ok {
+		t.Fatalf("tombstone: ok=%v err=%v", ok, err)
+	}
+
+	// Exactly the tombstoned id — and it left the live list.
+	ids, err = s.ListPlaylistTombstoneIDs(ctx)
+	if err != nil || len(ids) != 1 || ids[0] != "pl-doomed" {
+		t.Fatalf("tombstones = %v err=%v, want [pl-doomed]", ids, err)
+	}
+	live, _ := s.ListPlaylists(ctx)
+	if len(live) != 1 || live[0].ID != "pl-live" {
+		t.Errorf("live list = %v, want only pl-live", live)
+	}
+
+	// Revive (LWW-newer upsert) → the id leaves the tombstone list.
+	rev, ri := samplePlaylist("pl-doomed", "revived", 200)
+	if err := s.UpsertPlaylist(ctx, "devB", rev, ri); err != nil {
+		t.Fatalf("revive upsert: %v", err)
+	}
+	ids, _ = s.ListPlaylistTombstoneIDs(ctx)
+	if len(ids) != 0 {
+		t.Errorf("post-revive tombstones = %v, want none", ids)
+	}
+}
+
 // TestUpsertPlaylistRevivesTombstone: a backup sweep PUT after a delete
 // (e.g. another device that still has the playlist re-uploads it with a
 // newer clock) revives the row — LWW decides, not the tombstone.

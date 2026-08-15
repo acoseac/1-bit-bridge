@@ -24,6 +24,7 @@ type PlaylistStore interface {
 	UpsertPlaylist(ctx context.Context, deviceToken string, p manifest.PlaylistRow, items []manifest.PlaylistItemRow) error
 	GetPlaylist(ctx context.Context, id string) (*manifest.PlaylistRow, []manifest.PlaylistItemRow, error)
 	ListPlaylists(ctx context.Context) ([]manifest.PlaylistSummary, error)
+	ListPlaylistTombstoneIDs(ctx context.Context) ([]string, error)
 	TombstonePlaylist(ctx context.Context, id string) (bool, error)
 }
 
@@ -158,6 +159,12 @@ type playlistSummaryDTO struct {
 
 type playlistsListResponse struct {
 	Playlists []playlistSummaryDTO `json:"playlists"`
+	// DeletedIds — ids of tombstoned playlists (deleted and not since
+	// revived). What makes a delete propagate: a client's sweep removes its
+	// local copy of a listed id it knows this bridge had, instead of ever
+	// inferring deletion from a summary's absence. Additive (`omitempty`,
+	// no ProtocolVersion bump); older clients ignore it.
+	DeletedIds []string `json:"deletedIds,omitempty"`
 }
 
 type playlistStoredResponse struct {
@@ -235,6 +242,18 @@ func (s *Server) listPlaylists(w http.ResponseWriter, r *http.Request) {
 			ImageHash: covers[p.ID],
 		})
 	}
+	// Tombstones are read AFTER the live rows (two plain reads, no shared
+	// txn — the ListPlaylists sibling convention). A playlist tombstoned
+	// between the two queries can therefore appear in BOTH lists; clients
+	// that process tombstones first self-heal (the follow-up
+	// GET /v1/playlists/{id} of a both-listed id 404s and is skipped).
+	tombstones, err := s.playlistStore.ListPlaylistTombstoneIDs(r.Context())
+	if err != nil {
+		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
+			"failed to list playlist tombstones", err)
+		return
+	}
+	resp.DeletedIds = tombstones
 	writeJSON(w, http.StatusOK, resp)
 }
 

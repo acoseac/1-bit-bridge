@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -122,6 +124,50 @@ func TestPlaylistHTTPRoundTrip(t *testing.T) {
 		t.Errorf("GET after delete = %d, want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestPlaylistHTTPListCarriesDeletedIds pins the sweep-propagation wire
+// contract on GET /v1/playlists: a tombstoned playlist's id rides
+// `deletedIds` and is absent from `playlists`; with nothing deleted the
+// field is omitted entirely (`omitempty` — older clients never see it).
+func TestPlaylistHTTPListCarriesDeletedIds(t *testing.T) {
+	token, dt, srv := newPlaylistTestServer(t)
+	live := "aaaaaaaa-1111-0000-0000-000000000001"
+	doomed := "aaaaaaaa-1111-0000-0000-000000000002"
+	for _, id := range []string{live, doomed} {
+		body := `{"id":"` + id + `","name":"P","lastModifiedAt":100,"items":[{"position":0,"path":"a.flac"}]}`
+		resp := doReq(t, srv, http.MethodPut, "/v1/playlists/"+id, token, dt, body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT %s = %d, want 200", id, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Nothing deleted → deletedIds omitted from the raw JSON (omitempty).
+	resp := doReq(t, srv, http.MethodGet, "/v1/playlists", token, dt, "")
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(raw), "deletedIds") {
+		t.Errorf("no-tombstones list body should omit deletedIds: %s", raw)
+	}
+
+	// Tombstone one → it moves from playlists into deletedIds.
+	resp = doReq(t, srv, http.MethodDelete, "/v1/playlists/"+doomed, token, dt, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doReq(t, srv, http.MethodGet, "/v1/playlists", token, dt, "")
+	var list playlistsListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Playlists) != 1 || list.Playlists[0].ID != live {
+		t.Errorf("live playlists = %+v, want only %s", list.Playlists, live)
+	}
+	if len(list.DeletedIds) != 1 || list.DeletedIds[0] != doomed {
+		t.Errorf("deletedIds = %v, want [%s]", list.DeletedIds, doomed)
+	}
 }
 
 func TestPlaylistHTTPStale409CarriesServerCopy(t *testing.T) {
