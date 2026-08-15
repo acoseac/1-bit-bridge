@@ -580,10 +580,11 @@ func isJunkAlbumTag(album string) bool {
 	if _, ok := junkAlbumTags[folded]; ok {
 		return true
 	}
-	for _, prefix := range []string{"cd ", "disc ", "disk ", "track "} {
-		if rest, ok := strings.CutPrefix(folded, prefix); ok && isAllDigits(rest) {
-			return true
-		}
-	}
-	return false
+	// The shared helper rather than a second copy of the prefix list: the
+	// disc/track-label shape is the one rule this predicate and the artist
+	// ones genuinely agree on, and two hand-maintained copies of it are
+	// exactly how they drift (isDiscOrTrackLabel's own docblock makes the
+	// point for the artist pair). Behaviour-identical — same four prefixes,
+	// same all-digits tail test.
+	return isDiscOrTrackLabel(folded)
 }

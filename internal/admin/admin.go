@@ -1393,7 +1393,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		return shutErr
 	case err := <-errCh:
-		if err != nil && err != http.ErrServerClosed {
+		// errors.Is, not ==: net/http returns ErrServerClosed unwrapped today,
+		// so this is behaviour-identical now — but a wrapped one would read as
+		// a real listener failure and turn a clean shutdown into an error
+		// return. Matches how cmd/bridge and internal/dlna already test for it.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
 		return nil
