@@ -579,6 +579,17 @@ func buildTrackAndRouting(w upnp.Walked, serverUDN string, walkStart time.Time) 
 		Title:       w.Title,
 		Artist:      w.Artist,
 		Album:       w.Album,
+		// The walker parses <upnp:genre> (didl.go) and carried it all the
+		// way here — but this constructor (the ONLY manifest.Track
+		// producer outside the scanner) never assigned it, so every
+		// UPnP-proxied library lost its genre axis end-to-end: the iOS
+		// genre browse/search/smart-playlist predicates were empty for
+		// proxied content AND the bridge's own DLNA re-serve dropped it
+		// for third-party renderers. Existing rows heal on the next walk
+		// (the field diff below now sees the change). P1-8, 2026-08-14
+		// feature review. NOTE: DiscNumber stays absent — DIDL-Lite has
+		// no standard disc element and `Walked` carries none.
+		Genre:       w.Genre,
 		Codec:       codecFromExtension(w.Path),
 		Enriched:    &enriched,
 		AlbumArtist: w.Artist, // best-effort fallback; the DIDL rarely separates
@@ -637,9 +648,16 @@ func buildTrackAndRouting(w upnp.Walked, serverUDN string, walkStart time.Time) 
 //     enrich → walk → wipe → re-enrich loop (the exact churn this
 //     helper exists to stop).
 //
-// Genre / DiscNumber / ReplayGain* are excluded for the same reason in
-// the other direction: the walker never sets them, so any stored value
+// DiscNumber / ReplayGain* are excluded for the same reason in the
+// other direction: the walker never sets them, so any stored value
 // (from a future enricher addition) must not read as a walk change.
+// Genre USED to sit in that list under the claim "the walker never
+// sets them" — false since the walker always parsed <upnp:genre>; the
+// stale comment is what hid the buildTrackAndRouting drop (P1-8,
+// 2026-08-14 review). Genre now participates: buildTrackAndRouting
+// sets it, no enricher path writes it (verified — the only other
+// writers are the file extractors, which never touch UPnP-routed
+// rows), so the diff can't treadmill.
 func walkFieldsEqual(existing, fresh *manifest.Track) bool {
 	if existing == nil || fresh == nil {
 		return false
@@ -649,6 +667,7 @@ func walkFieldsEqual(existing, fresh *manifest.Track) bool {
 		existing.Artist == fresh.Artist &&
 		existing.AlbumArtist == fresh.AlbumArtist &&
 		existing.Album == fresh.Album &&
+		existing.Genre == fresh.Genre &&
 		existing.Codec == fresh.Codec &&
 		ptrEqual(existing.TrackNumber, fresh.TrackNumber) &&
 		ptrEqual(existing.Year, fresh.Year) &&

@@ -90,6 +90,10 @@ func TestWalkFieldsEqual_ChangedFieldsDetected(t *testing.T) {
 		"isDSD":           func(x *manifest.Track) { b := true; x.IsDSD = &b },
 		"albumArtist":     func(x *manifest.Track) { x.AlbumArtist = "B" },
 		"bitsPerSample":   func(x *manifest.Track) { b := 24; x.BitsPerSample = &b },
+		// P1-8: Genre participates now that buildTrackAndRouting sets it
+		// — an existing genre-less row must heal on the first post-fix
+		// walk rather than skip.
+		"genre": func(x *manifest.Track) { x.Genre = "Rock" },
 	}
 	for name, mutate := range cases {
 		if walkFieldsEqual(mkTrack(), mkTrack(mutate)) {
