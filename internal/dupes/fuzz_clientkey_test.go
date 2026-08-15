@@ -16,10 +16,21 @@ package dupes
 import "testing"
 
 func FuzzKeyFor(f *testing.F) {
-	f.Add("Artist/Album/07 Song.flac", "Artist", "Album", "Song", 1, 7, 2020)
-	f.Add("Artist/Album/Album/07 Song.flac", "Artist", "Album", "Song", 1, 7, 2020)
-	f.Add("", "", "", "", 0, 0, 0)
-	f.Fuzz(func(t *testing.T, path, albumArtist, album, title string, disc, track, year int) {
+	f.Add("Artist/Album/07 Song.flac", "Artist", "Album", "Song", 1, 7)
+	f.Add("Artist/Album/Album/07 Song.flac", "Artist", "Album", "Song", 1, 7)
+	f.Add("", "", "", "", 0, 0)
+	// Year is DERIVED from track rather than taking a corpus dimension of its
+	// own. It still varies (it feeds AlbumID, so it must), but as a function
+	// of an existing input — six fuzz parameters plus *testing.T is the most
+	// Go's signature can carry before it stops being readable, and year is the
+	// field whose exact value matters least: KeyFor folds it into AlbumID as a
+	// plain component, so covering "several distinct years including 0" is all
+	// the coverage there is to have.
+	f.Fuzz(func(t *testing.T, path, albumArtist, album, title string, disc, track int) {
+		year := 0
+		if track != 0 {
+			year = 1900 + (track%200+200)%200
+		}
 		r := Row{
 			Path: path, AlbumArtist: albumArtist, Album: album, Title: title,
 			Disc: disc, Track: track, Year: year,

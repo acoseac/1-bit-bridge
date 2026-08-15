@@ -68,21 +68,32 @@ func FuzzResolveContainment(f *testing.F) {
 		if !filepath.IsAbs(abs) {
 			t.Fatalf("Resolve(%q) returned a non-absolute path %q", in, abs)
 		}
-		for _, root := range roots {
-			ra, aerr := filepath.Abs(root)
-			if aerr != nil {
-				continue
-			}
-			sep := string(filepath.Separator)
-			if abs == ra || strings.HasPrefix(abs, strings.TrimSuffix(ra, sep)+sep) {
-				return
-			}
+		if !underAnyRoot(abs, roots) {
+			t.Fatalf("ESCAPE: Resolve(%q) = %q, which is outside every root %v", in, abs, roots)
 		}
-		t.Fatalf("ESCAPE: Resolve(%q) = %q, which is outside every root %v", in, abs, roots)
 	}
 
 	f.Fuzz(func(t *testing.T, in string) {
 		check(t, rSingle, []string{single}, in)
 		check(t, rMulti, []string{m1, m2}, in)
 	})
+}
+
+// underAnyRoot reports whether abs is one of the roots or sits beneath it.
+//
+// Deliberately re-derived here from filepath primitives rather than reusing
+// the resolver's own rootInfo.prefix: a containment test that trusts the
+// containment logic it is testing proves nothing.
+func underAnyRoot(abs string, roots []string) bool {
+	sep := string(filepath.Separator)
+	for _, root := range roots {
+		ra, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		if abs == ra || strings.HasPrefix(abs, strings.TrimSuffix(ra, sep)+sep) {
+			return true
+		}
+	}
+	return false
 }
