@@ -411,50 +411,75 @@ func TestCollectCandidatesSkipsTracksTheEnricherHasNotTriedYet(t *testing.T) {
 //   - text.flac: artist MBID from the TEXT ladder, no match → a legitimate
 //     candidate (release still missing); a skip keyed on ArtistMBID alone
 //     would wrongly drop it.
-func TestCollectCandidatesSkipsMatchedAndConsumedRows(t *testing.T) {
-	root := t.TempDir()
-	ctx := context.Background()
+//
+// candidateFixture is the shared setup for the collectCandidates tests that
+// seed already-attempted rows and assert which ones survive into the pool.
+//
+// Extracted because those tests differ only in what they record ABOUT the
+// seeded rows — the store, the root, the eligible-track shape and the
+// collect-then-index step are identical, and repeating them made the actual
+// subject of each test harder to see. Mirrors the manifest package's
+// newScanFixture / scanOnce helpers.
+//
+// size and mtime are fields rather than locals because a test that records a
+// no-match verdict has to name the EXACT file version the row carries; a
+// helper that hid them would make the version-mismatch case untestable.
+type candidateFixture struct {
+	root  string
+	store *manifest.Store
+	size  int64
+	mtime time.Time
+}
 
+func newCandidateFixture(t *testing.T) *candidateFixture {
+	t.Helper()
 	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-
-	dur := 240.0
-	seed := func(name, artistMBID, acoustID string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		tr := &manifest.Track{Path: name, Size: 5, ModTime: time.Now(), Duration: &dur, ArtistMBID: artistMBID}
-		if err := store.UpsertTrack(ctx, tr); err != nil {
-			t.Fatalf("UpsertTrack %q: %v", name, err)
-		}
-		// The enricher commits an applied verdict through MarkEnriched, so the
-		// artist MBID rides tags_json exactly the way production rows carry it.
-		if err := store.MarkEnriched(ctx, tr); err != nil {
-			t.Fatalf("MarkEnriched %q: %v", name, err)
-		}
-		if acoustID != "" {
-			if err := store.SetAcoustIDMatch(ctx, name, acoustID); err != nil {
-				t.Fatalf("SetAcoustIDMatch %q: %v", name, err)
-			}
-		}
+	t.Cleanup(func() { _ = store.Close() })
+	return &candidateFixture{
+		root:  t.TempDir(),
+		store: store,
+		size:  int64(len("audio")),
+		mtime: time.Now(),
 	}
-	const acoustID = "9ff43b6a-4f16-427c-93c2-92307ca505e0"
-	const artistMBID = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
-	seed("consumed.flac", artistMBID, acoustID)
-	seed("vetoed.flac", "", acoustID)
-	seed("text.flac", artistMBID, "")
+}
 
+// seed writes a real file and an ENRICHED row for it — eligible in every
+// respect the candidate pass checks, so each test's own recording is the only
+// thing that can exclude it. artistMBID "" leaves the row without one.
+func (f *candidateFixture) seed(t *testing.T, name, artistMBID string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.root, name), []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dur := 240.0
+	tr := &manifest.Track{
+		Path: name, Size: f.size, ModTime: f.mtime, Duration: &dur, ArtistMBID: artistMBID,
+	}
+	if err := f.store.UpsertTrack(context.Background(), tr); err != nil {
+		t.Fatalf("UpsertTrack %q: %v", name, err)
+	}
+	// The enricher commits an applied verdict through MarkEnriched, so the
+	// artist MBID rides tags_json exactly the way production rows carry it.
+	// It also stamps enriched_at, which is what makes the row a candidate at
+	// all — the pass skips rows the text ladder has not yet tried.
+	if err := f.store.MarkEnriched(context.Background(), tr); err != nil {
+		t.Fatalf("MarkEnriched %q: %v", name, err)
+	}
+}
+
+// collect runs the candidate pass and indexes the result by path.
+func (f *candidateFixture) collect(t *testing.T) map[string]bool {
+	t.Helper()
 	s := &fingerprintSweeper{
-		store:     store,
-		resolver:  bridgefs.New([]string{root}),
+		store:     f.store,
+		resolver:  bridgefs.New([]string{f.root}),
 		cache:     acoustid.NewCache(16),
 		maxPerRun: 100,
 	}
-	got, err := s.collectCandidates(ctx)
+	got, err := s.collectCandidates(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,6 +487,25 @@ func TestCollectCandidatesSkipsMatchedAndConsumedRows(t *testing.T) {
 	for _, c := range got {
 		paths[c.path] = true
 	}
+	return paths
+}
+
+func TestCollectCandidatesSkipsMatchedAndConsumedRows(t *testing.T) {
+	ctx := context.Background()
+	f := newCandidateFixture(t)
+
+	const acoustID = "9ff43b6a-4f16-427c-93c2-92307ca505e0"
+	const artistMBID = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+	f.seed(t, "consumed.flac", artistMBID)
+	f.seed(t, "vetoed.flac", "")
+	f.seed(t, "text.flac", artistMBID)
+	for _, p := range []string{"consumed.flac", "vetoed.flac"} {
+		if err := f.store.SetAcoustIDMatch(ctx, p, acoustID); err != nil {
+			t.Fatalf("SetAcoustIDMatch %q: %v", p, err)
+		}
+	}
+
+	paths := f.collect(t)
 	if paths["consumed.flac"] {
 		t.Errorf("consumed.flac re-collected — a matched row whose artist MBID landed " +
 			"re-decodes on every restart for an answer that cannot change")
@@ -492,38 +536,14 @@ func TestCollectCandidatesSkipsMatchedAndConsumedRows(t *testing.T) {
 //   - reencoded.flac: verdict recorded against a DIFFERENT size → must still
 //     be collected, because the bytes it described are gone.
 func TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged(t *testing.T) {
-	root := t.TempDir()
 	ctx := context.Background()
-
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
+	f := newCandidateFixture(t)
+	for _, p := range []string{"settled.flac", "reencoded.flac", "retagged.flac", "never-asked.flac"} {
+		f.seed(t, p, "")
 	}
-	defer store.Close()
-
-	dur := 240.0
-	mtime := time.Now().Truncate(time.Nanosecond)
-	const size = int64(5)
-	seed := func(name string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		tr := &manifest.Track{Path: name, Size: size, ModTime: mtime, Duration: &dur}
-		if err := store.UpsertTrack(ctx, tr); err != nil {
-			t.Fatalf("UpsertTrack %q: %v", name, err)
-		}
-		if err := store.MarkEnriched(ctx, tr); err != nil {
-			t.Fatalf("MarkEnriched %q: %v", name, err)
-		}
-	}
-	seed("settled.flac")
-	seed("reencoded.flac")
-	seed("retagged.flac")
-	seed("never-asked.flac")
 
 	// Recorded against the version the row actually carries.
-	if err := store.SetAcoustIDNoMatch(ctx, "settled.flac", size, mtime.UnixNano()); err != nil {
+	if err := f.store.SetAcoustIDNoMatch(ctx, "settled.flac", f.size, f.mtime.UnixNano()); err != nil {
 		t.Fatal(err)
 	}
 	// Recorded against a version that no longer exists — the file has been
@@ -531,27 +551,14 @@ func TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged(t *testing.T) {
 	// row, because either one moving on its own means different bytes: a
 	// re-encode changes the size, and a tag edit can leave the size identical
 	// while the mtime moves.
-	if err := store.SetAcoustIDNoMatch(ctx, "reencoded.flac", size+9999, mtime.UnixNano()); err != nil {
+	if err := f.store.SetAcoustIDNoMatch(ctx, "reencoded.flac", f.size+9999, f.mtime.UnixNano()); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetAcoustIDNoMatch(ctx, "retagged.flac", size, mtime.UnixNano()-1); err != nil {
+	if err := f.store.SetAcoustIDNoMatch(ctx, "retagged.flac", f.size, f.mtime.UnixNano()-1); err != nil {
 		t.Fatal(err)
 	}
 
-	s := &fingerprintSweeper{
-		store:     store,
-		resolver:  bridgefs.New([]string{root}),
-		cache:     acoustid.NewCache(16),
-		maxPerRun: 100,
-	}
-	got, err := s.collectCandidates(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths := make(map[string]bool, len(got))
-	for _, c := range got {
-		paths[c.path] = true
-	}
+	paths := f.collect(t)
 	if paths["settled.flac"] {
 		t.Errorf("settled.flac re-collected — a file AcoustID has already declined " +
 			"re-decodes on every restart for an answer that will not differ")
