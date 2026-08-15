@@ -217,3 +217,45 @@ func TestAcoustIDMatchSurvivesReEnrichment(t *testing.T) {
 			"a tags_json field would have been erased here", got)
 	}
 }
+
+// TestAcoustIDMatchedPaths pins the set the sweeper's candidate pass consumes.
+//
+// acoustid_match is column-only, so the Track rows StreamTracks yields cannot
+// carry it; this set is how the column reaches the sweep without the field
+// leaking toward tags_json or the wire type.
+func TestAcoustIDMatchedPaths(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	if got, err := s.AcoustIDMatchedPaths(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("empty store = (%v, %v), want an empty set", got, err)
+	}
+
+	seedEnrichedTrack(t, s, "a.flac")
+	seedEnrichedTrack(t, s, "b.flac")
+	seedEnrichedTrack(t, s, "c.flac")
+	if err := s.SetAcoustIDMatch(ctx, "a.flac", "9ff43b6a-4f16-427c-93c2-92307ca505e0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAcoustIDMatch(ctx, "c.flac", "1c0eee38-6dd2-4b8d-a5a4-ea0b441c30c6"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.AcoustIDMatchedPaths(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("set = %v, want exactly {a.flac, c.flac}", got)
+	}
+	for _, p := range []string{"a.flac", "c.flac"} {
+		if _, ok := got[p]; !ok {
+			t.Errorf("matched path %q missing from the set", p)
+		}
+	}
+	if _, ok := got["b.flac"]; ok {
+		t.Errorf("b.flac in the set despite carrying no provenance — the empty-string " +
+			"default must not read as matched")
+	}
+}

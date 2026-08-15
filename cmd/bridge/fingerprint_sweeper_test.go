@@ -381,6 +381,91 @@ func TestCollectCandidatesSkipsTracksTheEnricherHasNotTriedYet(t *testing.T) {
 	}
 }
 
+// TestCollectCandidatesSkipsMatchedAndConsumedRows pins the restart cost fix.
+//
+// The dedup cache is in-memory, so before this check every restart re-collected
+// the rows whose fingerprint verdict had already been accepted AND applied — on
+// the production bridge ~1,300 rows whose artist MBID landed but whose release
+// the text ladder still cannot find. Each re-run pays a whole-object read on a
+// network-backed library plus an AcoustID lookup, reproduces the identical
+// artist (the write-target discipline means a fingerprint can never supply the
+// missing release MBID), and the re-queue then re-stamps indexed_at into a
+// no-op delta for every paired device. Per restart, forever.
+//
+// Three rows discriminate the shapes:
+//   - consumed.flac: matched + artist MBID present → the verdict landed; must
+//     NOT be re-collected.
+//   - vetoed.flac: matched + no artist MBID → accepted but never applied
+//     (apply-time veto, or a restart between re-queue and enrichment); MUST
+//     stay retryable.
+//   - text.flac: artist MBID from the TEXT ladder, no match → a legitimate
+//     candidate (release still missing); a skip keyed on ArtistMBID alone
+//     would wrongly drop it.
+func TestCollectCandidatesSkipsMatchedAndConsumedRows(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	dur := 240.0
+	seed := func(name, artistMBID, acoustID string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tr := &manifest.Track{Path: name, Size: 5, ModTime: time.Now(), Duration: &dur, ArtistMBID: artistMBID}
+		if err := store.UpsertTrack(ctx, tr); err != nil {
+			t.Fatalf("UpsertTrack %q: %v", name, err)
+		}
+		// The enricher commits an applied verdict through MarkEnriched, so the
+		// artist MBID rides tags_json exactly the way production rows carry it.
+		if err := store.MarkEnriched(ctx, tr); err != nil {
+			t.Fatalf("MarkEnriched %q: %v", name, err)
+		}
+		if acoustID != "" {
+			if err := store.SetAcoustIDMatch(ctx, name, acoustID); err != nil {
+				t.Fatalf("SetAcoustIDMatch %q: %v", name, err)
+			}
+		}
+	}
+	const acoustID = "9ff43b6a-4f16-427c-93c2-92307ca505e0"
+	const artistMBID = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+	seed("consumed.flac", artistMBID, acoustID)
+	seed("vetoed.flac", "", acoustID)
+	seed("text.flac", artistMBID, "")
+
+	s := &fingerprintSweeper{
+		store:     store,
+		resolver:  bridgefs.New([]string{root}),
+		cache:     acoustid.NewCache(16),
+		maxPerRun: 100,
+	}
+	got, err := s.collectCandidates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make(map[string]bool, len(got))
+	for _, c := range got {
+		paths[c.path] = true
+	}
+	if paths["consumed.flac"] {
+		t.Errorf("consumed.flac re-collected — a matched row whose artist MBID landed " +
+			"re-decodes on every restart for an answer that cannot change")
+	}
+	if !paths["vetoed.flac"] {
+		t.Errorf("vetoed.flac not collected — provenance records acceptance, not " +
+			"application; the vetoed/lost subset must stay retryable")
+	}
+	if !paths["text.flac"] {
+		t.Errorf("text.flac not collected — an artist MBID alone must not skip; only " +
+			"matched AND consumed rows leave the pool")
+	}
+}
+
 // countingResolver wraps a real resolver and counts the calls.
 type countingResolver struct {
 	inner pathResolver

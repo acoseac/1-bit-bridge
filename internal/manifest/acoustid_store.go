@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
 
 // ResetEnrichedByPaths re-queues the given tracks for enrichment.
@@ -99,6 +100,39 @@ func (s *Store) AcoustIDMatch(ctx context.Context, path string) (string, error) 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT acoustid_match FROM tracks WHERE path = ?`, path).Scan(&v)
 	return v, err
+}
+
+// AcoustIDMatchedPaths returns every track path carrying fingerprint
+// provenance (a non-empty acoustid_match), as a set.
+//
+// The consumer is the sweeper's candidate pass. acoustid_match is column-only
+// — never in tags_json — so the Track rows StreamTracks hands the sweeper
+// cannot carry it; the sweep fetches this set once up front instead (the
+// routedPathSet shape from the scanner's missing passes).
+//
+// Membership still means exactly what SetAcoustIDMatch's docblock says: a
+// fingerprint answer was ACCEPTED for this path, not that it was applied. The
+// apply-time veto can refuse the verdict, and a restart can lose the re-queue
+// before the enricher consumes it. Whether the answer actually LANDED is
+// therefore not this column's to say — the caller combines membership with row
+// state (ArtistMBID on the streamed Track) to tell the two apart.
+//
+// Read-only, so no mutex — WAL handles concurrent readers.
+func (s *Store) AcoustIDMatchedPaths(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM tracks WHERE acoustid_match != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: AcoustIDMatchedPaths: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("manifest: scan acoustid-matched path: %w", err)
+		}
+		out[p] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // CountAcoustIDMatches reports how many rows carry fingerprint provenance —
