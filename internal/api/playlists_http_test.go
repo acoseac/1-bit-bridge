@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -143,12 +142,26 @@ func TestPlaylistHTTPListCarriesDeletedIds(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Nothing deleted → deletedIds omitted from the raw JSON (omitempty).
+	// Nothing deleted → the deletedIds KEY is absent from the JSON
+	// (omitempty). Unmarshal into a map rather than substring-scan the
+	// body (Gemini + CodeRabbit on #699); the GET status is asserted so
+	// a 500-with-no-body cannot pass vacuously.
 	resp := doReq(t, srv, http.MethodGet, "/v1/playlists", token, dt, "")
-	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("initial GET = %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if strings.Contains(string(raw), "deletedIds") {
-		t.Errorf("no-tombstones list body should omit deletedIds: %s", raw)
+	if err != nil {
+		t.Fatalf("read initial GET body: %v", err)
+	}
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatalf("decode initial GET body: %v", err)
+	}
+	if _, present := asMap["deletedIds"]; present {
+		t.Errorf("no-tombstones list body should omit the deletedIds key: %s", raw)
 	}
 
 	// Tombstone one → it moves from playlists into deletedIds.
@@ -159,8 +172,15 @@ func TestPlaylistHTTPListCarriesDeletedIds(t *testing.T) {
 	resp.Body.Close()
 
 	resp = doReq(t, srv, http.MethodGet, "/v1/playlists", token, dt, "")
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("post-tombstone GET = %d, want 200", resp.StatusCode)
+	}
 	var list playlistsListResponse
-	json.NewDecoder(resp.Body).Decode(&list)
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		resp.Body.Close()
+		t.Fatalf("decode post-tombstone GET body: %v", err)
+	}
 	resp.Body.Close()
 	if len(list.Playlists) != 1 || list.Playlists[0].ID != live {
 		t.Errorf("live playlists = %+v, want only %s", list.Playlists, live)

@@ -281,7 +281,10 @@ func TestListPlaylistTombstoneIDs(t *testing.T) {
 	if err := s.UpsertPlaylist(ctx, "devB", rev, ri); err != nil {
 		t.Fatalf("revive upsert: %v", err)
 	}
-	ids, _ = s.ListPlaylistTombstoneIDs(ctx)
+	ids, err = s.ListPlaylistTombstoneIDs(ctx)
+	if err != nil {
+		t.Fatalf("post-revive tombstone query: %v", err)
+	}
 	if len(ids) != 0 {
 		t.Errorf("post-revive tombstones = %v, want none", ids)
 	}
