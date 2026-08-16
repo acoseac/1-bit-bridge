@@ -119,7 +119,13 @@ const fingerprintNoMatchTTL = 30 * 24 * time.Hour
 // the cluster this file resolves to can gain or lose recordings, so the answer
 // the tag contradicted today may not be the answer given next month. Naming
 // them apart is what lets one move without silently moving the other.
-const fingerprintTagVetoTTL = fingerprintNoMatchTTL
+//
+// Spelled as its own literal for that reason. It was written
+// `= fingerprintNoMatchTTL` until 2026-08-16, which is the reuse the paragraph
+// above rules out: retuning the no-match TTL would have dragged this one along
+// silently, so the separation the name promises existed only on paper.
+// TestFingerprintSuppressionTTLsAreIndependent pins it.
+const fingerprintTagVetoTTL = 30 * 24 * time.Hour
 
 // runFingerprintSweeper is the loop. Modelled on runAnalysisSweeper —
 // settle delay, then ticker OR nudge (the admin "Sweep now" button

@@ -1468,14 +1468,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 22 covers the current maximum
+	// appends in lex order. Capacity 23 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// diagnosticsSummary + dlnaServer + favorites + keyTempo + loudness +
 	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistsCrossDevice +
 	// pushEventsSupported + rendererDiscovery + smartPlaylists +
-	// spectrum + upscaleCompleteEvents + variantBumpsIndex + waveform).
-	feats := make([]string, 0, 22)
+	// spectrum + trackQuality + upscaleCompleteEvents + variantBumpsIndex +
+	// waveform). `trackQuality` was missing from this enumeration — and so
+	// from the count — until 2026-08-16; keep the list and the number in
+	// step when adding a flag, since the list is the only thing that makes
+	// the number checkable.
+	feats := make([]string, 0, 23)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
