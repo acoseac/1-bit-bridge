@@ -209,3 +209,24 @@ func followLog(ctx context.Context, f *os.File, pos int64, stdout, stderr io.Wri
 		pos = size
 	}
 }
+
+// adminLogPath resolves the log file the admin console's export offers,
+// wired into admin.Deps.LogPath.
+//
+// The SAME packaging.DefaultLogPath() the service unit templates point
+// StandardOutput/StandardError at and `bridge logs` reads, so the console and
+// the CLI can never disagree about which file is the log.
+//
+// Returns "" rather than an error on failure, and that empty is a real state
+// rather than a swallowed fault: DefaultLogPath only fails when the user's
+// home directory cannot be resolved, and in that case there is no log file to
+// offer either. admin.Deps documents "" as "this bridge logs to its terminal",
+// which is also the honest answer for a foreground `bridge serve` — the path
+// resolving says nothing about whether anything writes there.
+func adminLogPath() string {
+	p, err := packaging.DefaultLogPath()
+	if err != nil {
+		return ""
+	}
+	return p
+}

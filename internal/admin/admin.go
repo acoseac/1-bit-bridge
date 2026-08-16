@@ -124,6 +124,20 @@ type Deps struct {
 	// with backup wiring.
 	BackupSources backup.Sources
 
+	// LogPath is where this install's log file lives — the same
+	// `packaging.DefaultLogPath()` the service units point
+	// StandardOutput/StandardError at, and the same one `bridge logs`
+	// reads. Injected rather than resolved here so internal/admin needs
+	// no dependency on internal/packaging, matching how BackupSources
+	// carries the other state-file paths.
+	//
+	// Empty is a legitimate state, not a misconfiguration: logging.Init
+	// writes to stderr, and only a SERVICE install redirects that to a
+	// file. A foreground `bridge serve` has no log file at all, and the
+	// Diagnostics page says so instead of offering a download that
+	// cannot work.
+	LogPath string
+
 	// Tailscale is the read+refresh side of the Tailscale HTTPS
 	// auto-pilot. Nil-safe — when absent, the dashboard's Tailscale
 	// tile shows "not configured" and the /api/tailscale endpoints
@@ -1176,6 +1190,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.apiJobs)
 	mux.HandleFunc("GET /api/diagnostics", s.apiDiagnostics)
 	mux.HandleFunc("GET /api/doctor", s.apiDoctor)
+	// Log export. All GET: reads, not mutations, so csrfGuard passes them
+	// through as it does every other read on this listener. The exports are
+	// downloads rather than JSON a cross-origin page could read back.
+	mux.HandleFunc("GET /api/logs/status", s.apiLogStatus)
+	mux.HandleFunc("GET /api/logs/export", s.apiLogExport)
+	mux.HandleFunc("GET /api/logs/bundle", s.apiLogBundle)
 	mux.HandleFunc("POST /api/fingerprint/sweep", s.apiFingerprintSweep)
 	mux.HandleFunc("GET /api/duplicates/summary", s.apiDuplicatesSummary)
 	mux.HandleFunc("GET /api/duplicates/groups", s.apiDuplicatesGroups)
