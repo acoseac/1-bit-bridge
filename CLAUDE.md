@@ -1083,13 +1083,39 @@ counts become buttons that arm the export at that level.
   SERVICE install redirects stderr to a file; a foreground `bridge serve` has none, so
   `/api/logs/status` explains rather than offering a button that 404s.
 
-**Known, NOT fixed here (both real, both found by this work):**
-`internal/dlna/discovery.sendMSearch` logs a WARN on EVERY failed send with no
-streak/backoff/escalate-once — the policy the READ side got in PR #469
-(`HandleReadErr`) was never applied to the send side. On a host where the multicast
-send persistently fails (`can't assign requested address`) that is 12 lines/minute
-forever: **99.5% of the author's 301 MB log is that one line**. And nothing rotates
-the log at all, which is what let 72 days accumulate.
+**The two log-volume defects this work surfaced are fixed in the follow-up (below).**
+
+### Log volume: M-SEARCH send suppression + a log-size check (2026-08-16)
+
+The follow-up to the export work, which is what made the volume visible.
+
+- **`sendMSearch`'s failure log is STREAK-SUPPRESSED: first occurrence at Warn, one
+  Error at `ssdpSendErrEscalateAt` (20 ticks ≈ 10 min), silence until recovery, then
+  one Info carrying the suppressed count.** It runs on a ticker and its failure mode
+  is persistent by nature — "can't assign requested address" means the multicast
+  route is gone, not that one packet was unlucky — so it failed on every tick and
+  logged every one: 12 lines/minute unbroken, **199,078 of the author's last 200,000
+  log lines, ~99.5% of a 301 MB log spanning 72 days**. The cost is not disk, it is
+  that every other line becomes unfindable. `noteSendResult` holds the policy,
+  separate from the I/O, so the rule is testable without arranging a real multicast
+  failure (the `HandleReadErr` separation, for the same reason). Negative-controlled:
+  logging every failure turns one day of ticks into 2,881 lines vs 2.
+- **The READ side was deliberately left alone.** Its Warn-per-error is bounded by a
+  250 ms backoff, and it logged **zero** lines across those same 72 days — it is not
+  the bug, and rewriting shared policy used by two clients pre-release would be risk
+  without evidence. If it ever does spam, `noteSendResult` is the shape to copy.
+- **Rotation is a doctor WARNING, not a bridge feature — a deliberate call.** The
+  bridge does not own the log file: `logging.Init` writes to stderr and the service
+  units redirect it, so launchd/systemd/the Windows wrapper opens it and the bridge
+  holds no descriptor to roll. Rotating from inside would mean copy-truncate (races
+  the writer, drops lines) or taking ownership of the file, which changes the unit
+  templates on three platforms — neither belongs in a point release, and neither is
+  the real fix, since an unbounded log is a symptom of something logging on a timer.
+  `checkLogSize` (warn at 256 MiB) names the condition and points at the platform's
+  own tool (newsyslog / logrotate / a scheduled task). **`doctor.Deps.LogPath` empty
+  is a no-op, not a complaint** — a foreground `bridge serve` has no log file.
+  `TestRun_FullReportShape` enumerates check names in order, so adding a check is a
+  deliberate edit rather than a silent one.
 
 ## Repo clean-up
 

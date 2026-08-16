@@ -34,6 +34,16 @@ const ssdpReadErrBackoff = 250 * time.Millisecond
 // blip. ~20 × ssdpReadErrBackoff ≈ 5s of back-to-back failures.
 const ssdpReadErrEscalateAt = 20
 
+// ssdpSendErrEscalateAt is the consecutive M-SEARCH send failure count at
+// which sendMSearch logs once at Error and then goes quiet until recovery.
+//
+// Counted in TICKS, not in milliseconds like its read-side sibling: at the
+// default 30s MSearchInterval, 20 is ~10 minutes of unbroken failure — long
+// enough that a Wi-Fi transition or a sleep/wake cycle has resolved itself,
+// short enough that a genuinely dead multicast route is on record within one
+// coffee break.
+const ssdpSendErrEscalateAt = 20
+
 // HandleReadErr drives the shared read-loop resilience policy so BOTH SSDP
 // discovery read loops — this package's renderer client AND
 // internal/upnp's MediaServer client — stay byte-identical (they mirror each
@@ -184,6 +194,15 @@ type SSDPDiscoveryClient struct {
 	// nowFunc returns the current time. Injected via cfg.NowFunc
 	// for tests. Default: time.Now.
 	nowFunc func() time.Time
+
+	// sendErrStreak counts consecutive M-SEARCH send failures, so a
+	// persistently unsendable socket costs O(1) log lines per outage
+	// instead of one per tick forever. See sendMSearch.
+	//
+	// No mutex: sendMSearch is called only from runTickLoop, which Start
+	// spawns exactly once and refuses to spawn again while running, so this
+	// field is owned by that single goroutine.
+	sendErrStreak int
 
 	// wg tracks the two run-loop goroutines (runLoop, runTickLoop)
 	// AND every in-flight per-renderer detail fetch, so Stop() can
@@ -383,6 +402,15 @@ func (c *SSDPDiscoveryClient) Start(parent context.Context) error {
 		return fmt.Errorf("ListenUDP wildcard: %w", err)
 	}
 	c.conn = conn
+
+	// Fresh run, fresh streak. A client stopped mid-outage keeps a non-zero
+	// sendErrStreak, and carrying it across a restart makes the new run's
+	// FIRST failure land past both switch arms in noteSendResult — so a
+	// restarted-and-still-broken client would log nothing at all, which is the
+	// opposite of what the suppression is for. Safe under runMu: runTickLoop,
+	// the field's only other toucher, has not been spawned yet.
+	// (Gemini, PR #708.)
+	c.sendErrStreak = 0
 
 	// Pin outgoing M-SEARCH multicast to the operator-chosen
 	// interface. Without this, the kernel picks an outbound
@@ -593,6 +621,27 @@ func (c *SSDPDiscoveryClient) pruneLocations() {
 // sendMSearch broadcasts an M-SEARCH request for MediaRenderer
 // devices. Renderer responses come back on the same socket as
 // unicast HTTP responses + are handled in runLoop.
+//
+// # Why the failure log is streak-suppressed
+//
+// This runs on a ticker, so a send failure is not a one-off: when it fails it
+// fails on EVERY tick, forever, and it logged on every one of them. The
+// failure mode is persistent by nature — "can't assign requested address"
+// means the multicast route is gone, not that the packet was unlucky — so the
+// second line adds nothing the first did not say.
+//
+// Measured on the author's Mac before this change: 12 lines/minute, unbroken,
+// producing **199,078 of the last 200,000 log lines** and ~99.5% of a 301 MB
+// log spanning 72 days. That is not merely wasted disk: it buries every other
+// line, so the log stops being usable for the diagnosis it exists for.
+//
+// The policy mirrors HandleReadErr's escalation shape — first occurrence at
+// Warn, one Error once failures are sustained — but SUPPRESSES the repeats in
+// between, which the read side does not need: its errors are bounded by a
+// 250ms backoff and, empirically, it logged zero lines across those same 72
+// days. A ticker has no backoff to bound it, so suppression has to do that
+// job. Recovery logs once, carrying the suppressed count so the gap in the
+// log is explained rather than mysterious.
 func (c *SSDPDiscoveryClient) sendMSearch() {
 	conn := c.snapshotConn()
 	if conn == nil {
@@ -601,8 +650,43 @@ func (c *SSDPDiscoveryClient) sendMSearch() {
 	target := "urn:schemas-upnp-org:device:MediaRenderer:1"
 	packet := buildMSearchRequest(target)
 	dst := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900}
-	if _, err := conn.WriteToUDP(packet, dst); err != nil {
+	_, err := conn.WriteToUDP(packet, dst)
+	c.noteSendResult(err)
+}
+
+// noteSendResult applies the send-failure logging policy.
+//
+// Split from the I/O so the policy is testable without a socket — the same
+// separation HandleReadErr has from the read loop, and for the same reason:
+// what makes this correct is WHICH occurrences produce a line, and a test that
+// has to arrange a real multicast failure to check that is a test that will be
+// flaky in CI rather than one that pins the rule.
+func (c *SSDPDiscoveryClient) noteSendResult(err error) {
+	if err == nil {
+		if c.sendErrStreak > 0 {
+			// `consecutiveFailures`, not `suppressedFailures`: this is the
+			// whole streak, and up to two of those DID produce a line (the
+			// first, and the escalation), so calling it "suppressed" was off
+			// by two. Reporting the outage LENGTH is also the more useful
+			// number — it is what an operator wants — and it matches the
+			// `consecutive` key on the escalation line rather than inventing
+			// a second vocabulary. (CodeRabbit, PR #708.)
+			packageLogger.Info("M-SEARCH send recovered",
+				"consecutiveFailures", c.sendErrStreak)
+			c.sendErrStreak = 0
+		}
+		return
+	}
+	c.sendErrStreak++
+	switch c.sendErrStreak {
+	case 1:
 		packageLogger.Warn("M-SEARCH send failed", "err", err.Error())
+	case ssdpSendErrEscalateAt:
+		// One Error, then silence until recovery. Repeating it would
+		// reintroduce exactly the flood this exists to stop.
+		packageLogger.Error("M-SEARCH send failing persistently; renderer discovery is degraded",
+			"consecutive", c.sendErrStreak, "err", err.Error(),
+			"note", "further identical failures are suppressed until it recovers")
 	}
 }
 

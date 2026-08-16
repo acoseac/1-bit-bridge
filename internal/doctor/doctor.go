@@ -135,6 +135,12 @@ type Deps struct {
 	// is no reason for a diagnostic report to carry a credential, and reports
 	// get pasted into issues.
 	FingerprintHasAPIKey bool
+
+	// LogPath is the file the service unit redirects this bridge's stderr
+	// to — packaging.DefaultLogPath(). Empty (a foreground `bridge serve`,
+	// which logs to its terminal) makes checkLogSize a no-op rather than a
+	// complaint about a file that does not exist.
+	LogPath string
 }
 
 // Report is the collection of checks from a single doctor run.
@@ -184,6 +190,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkInotifyLimit,
 		checkAudioToolchain,
 		checkFingerprintToolchain,
+		checkLogSize,
 	}
 	out := make([]Check, 0, len(checks))
 	for _, fn := range checks {
