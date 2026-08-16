@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"strings"
@@ -103,8 +104,8 @@ func TestSendMSearchLogsRecoveryOnce(t *testing.T) {
 	if got := countLines(buf, "M-SEARCH send recovered"); got != 1 {
 		t.Fatalf("recovery logged %d times, want exactly 1", got)
 	}
-	if !strings.Contains(buf.String(), "suppressedFailures=50") {
-		t.Error("recovery line does not carry the suppressed count, so the silent " +
+	if !strings.Contains(buf.String(), "consecutiveFailures=50") {
+		t.Error("recovery line does not carry the outage length, so the silent " +
 			"stretch in the log is unexplained")
 	}
 	// A second success must be silent — the streak is reset.
@@ -139,5 +140,36 @@ func TestSendMSearchReFailsAfterRecovery(t *testing.T) {
 	if got := countLines(buf, "M-SEARCH send failed"); got != 3 {
 		t.Errorf("got %d first-failure Warns across 3 separate outages, want 3 — "+
 			"a recovered streak must re-arm", got)
+	}
+}
+
+// TestSendMSearchStreakResetsOnRestart pins the restart case, whose failure
+// mode is SILENCE — the worst kind for a diagnostic.
+//
+// A client stopped mid-outage keeps its streak. Carried into a new run, the
+// first failure lands past BOTH arms of noteSendResult's switch (it is neither
+// 1 nor exactly the threshold), so a restarted-and-still-broken client would
+// log nothing at all — the opposite of what the suppression exists for.
+// Reported by Gemini on PR #708.
+func TestSendMSearchStreakResetsOnRestart(t *testing.T) {
+	c := newTestClient(t, &stubDispatcher{})
+
+	// Fail through the escalation so both arms are already spent.
+	for i := 0; i < ssdpSendErrEscalateAt+5; i++ {
+		c.noteSendResult(errors.New("boom"))
+	}
+
+	// Restart. Start() is what re-arms the streak; capture only what the new
+	// run logs so the first run's lines cannot satisfy the assertion.
+	if err := c.Start(context.Background()); err != nil {
+		t.Skipf("cannot bind a UDP socket in this environment: %v", err)
+	}
+	buf := captureLogs(t)
+	c.noteSendResult(errors.New("boom"))
+	c.Stop()
+
+	if got := countLines(buf, "M-SEARCH send failed"); got != 1 {
+		t.Errorf("a restarted client logged %d first-failure Warns, want 1 — with a "+
+			"carried-over streak it logs NOTHING, so a still-broken bridge looks healthy", got)
 	}
 }

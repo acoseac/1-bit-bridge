@@ -54,6 +54,15 @@ func checkLogSize(_ context.Context, d Deps) Check {
 		}
 		return warn(checkNameLogSize, "cannot stat "+d.LogPath, err.Error())
 	}
+	if info.IsDir() {
+		// Stat succeeds on a directory and reports a small size, so without
+		// this the check would report OK for a path that can never hold a log
+		// — and the operator would be told their logging is fine while the
+		// service redirect fails. Mirrors resolveLogFile on the admin side.
+		// (Gemini, PR #708.)
+		return warn(checkNameLogSize, d.LogPath+" is a directory, not a log file",
+			"point the service's log redirect at a file path")
+	}
 	if info.Size() < logSizeWarnBytes {
 		return ok(checkNameLogSize, fmt.Sprintf("%s (%s)", humanBytes(info.Size()), d.LogPath))
 	}

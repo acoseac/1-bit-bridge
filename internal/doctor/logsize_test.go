@@ -98,3 +98,17 @@ func TestHumanBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckLogSizeWarnsOnDirectory: os.Stat succeeds on a directory and
+// reports a small size, so without an explicit IsDir test the check reports OK
+// for a path that can never hold a log — telling the operator logging is fine
+// while the service's redirect fails. Reported by Gemini on PR #708.
+func TestCheckLogSizeWarnsOnDirectory(t *testing.T) {
+	got := checkLogSize(context.Background(), Deps{LogPath: t.TempDir()})
+	if got.Status != Warn {
+		t.Fatalf("status = %v for a directory path, want Warn: %s", got.Status, got.Summary)
+	}
+	if !strings.Contains(got.Summary, "directory") {
+		t.Errorf("summary does not say the path is a directory: %q", got.Summary)
+	}
+}

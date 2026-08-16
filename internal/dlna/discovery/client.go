@@ -403,6 +403,15 @@ func (c *SSDPDiscoveryClient) Start(parent context.Context) error {
 	}
 	c.conn = conn
 
+	// Fresh run, fresh streak. A client stopped mid-outage keeps a non-zero
+	// sendErrStreak, and carrying it across a restart makes the new run's
+	// FIRST failure land past both switch arms in noteSendResult — so a
+	// restarted-and-still-broken client would log nothing at all, which is the
+	// opposite of what the suppression is for. Safe under runMu: runTickLoop,
+	// the field's only other toucher, has not been spawned yet.
+	// (Gemini, PR #708.)
+	c.sendErrStreak = 0
+
 	// Pin outgoing M-SEARCH multicast to the operator-chosen
 	// interface. Without this, the kernel picks an outbound
 	// interface for `239.255.255.250` based on default routes /
@@ -655,8 +664,15 @@ func (c *SSDPDiscoveryClient) sendMSearch() {
 func (c *SSDPDiscoveryClient) noteSendResult(err error) {
 	if err == nil {
 		if c.sendErrStreak > 0 {
+			// `consecutiveFailures`, not `suppressedFailures`: this is the
+			// whole streak, and up to two of those DID produce a line (the
+			// first, and the escalation), so calling it "suppressed" was off
+			// by two. Reporting the outage LENGTH is also the more useful
+			// number — it is what an operator wants — and it matches the
+			// `consecutive` key on the escalation line rather than inventing
+			// a second vocabulary. (CodeRabbit, PR #708.)
 			packageLogger.Info("M-SEARCH send recovered",
-				"suppressedFailures", c.sendErrStreak)
+				"consecutiveFailures", c.sendErrStreak)
 			c.sendErrStreak = 0
 		}
 		return
