@@ -199,6 +199,9 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 	d := doctor.Deps{
 		APIPort:   7788,
 		AdminPort: 7789,
+		// Same resolution the console's export and `bridge logs` use, so all
+		// three agree on which file is the log.
+		LogPath: adminLogPath(),
 	}
 	// Config dir: either derived from --config, or the OS default.
 	if cfgPath != "" {
