@@ -214,8 +214,12 @@ The bridge side of the batch iOS shipped as PRs #1355–#1370 (its CLAUDE.md car
 full record). Two PRs here, both additive — `ProtocolVersion` stays 1:
 
 - **Playlist tombstone ids ride the list response** (#699, the B2 delete-propagation
-  half): `GET /v1/playlists` gains `deletedPlaylistIDs` (omitempty), listing tombstoned
+  half): `GET /v1/playlists` gains `deletedIds` (omitempty), listing tombstoned
   playlist ids so a second device's pull sweep can delete locally instead of resurrecting.
+  **The wire field is `deletedIds`** — this entry said `deletedPlaylistIDs` until
+  2026-08-16, which matched nothing: the Go tag, PROTOCOL.md in both repos, and iOS's
+  `BridgePlaylistsListResponse.deletedIds` have always agreed on `deletedIds`. Verify a
+  field name against the tag before "fixing" code to match a doc.
   **Tombstones are read AFTER the live rows as a SECOND plain query — deliberately NOT a
   shared read-only transaction** (corrected 2026-08-16; this entry claimed the opposite
   since #699, and `internal/api/playlists.go`'s own comment has always said otherwise —
@@ -238,7 +242,7 @@ full record). Two PRs here, both additive — `ProtocolVersion` stays 1:
   documented shape); admin Data page surfaces upstream-vs-local provenance.
 - **Test-hardening lesson repeated** (#699 round 2): omitempty absence is asserted by
   `json.Unmarshal` into `map[string]any` + key-absence — never a substring probe on the
-  raw body (a substring match can't distinguish `"deletedPlaylistIDs":[]` from absent).
+  raw body (a substring match can't distinguish `"deletedIds":[]` from absent).
 - Deploy reminders (operator-driven, NONE made from the fix sessions): bridge.ars.md
   wants a build with #698+#699; home-pc's favorites deploy is ungated once an app build
   with iOS #1355 (favorites first-sync adopt) is on the user's devices.
@@ -959,7 +963,13 @@ no-match-only pair) because a retry that cleared one and not the other makes
 worth making structural; the two READERS stay separate methods, since forgetting
 to read one merely costs a decode. Same 30-day TTL as the no-match, as a
 SEPARATE const (`fingerprintTagVetoTTL`) — the number agrees, the reason does not
-(AcoustID's database grows vs. the resolved cluster gaining recordings). Locked by
+(AcoustID's database grows vs. the resolved cluster gaining recordings). **Spelled
+as its own literal, NOT `= fingerprintNoMatchTTL`** — it was written that way until
+2026-08-16, which made the separation nominal: retuning the no-match would have
+silently dragged the veto with it, the exact coupling the separate name exists to
+prevent. Don't "simplify" it back to an alias;
+`TestFingerprintSuppressionTTLsAreIndependent` fails BOTH cases (rather than one)
+when they are aliased, which is how the coupling announces itself. Locked by
 `TestCollectCandidatesSkipsPersistedTagVetoUnlessInputsChanged` (vetoed / lost /
 re-encoded / re-tagged), `TestApplyAcousticFallbackPersistsOnlyTheTagVeto`,
 `TestAcoustIDTagVetoRecordsBothInputsAndRespectsTTL` and

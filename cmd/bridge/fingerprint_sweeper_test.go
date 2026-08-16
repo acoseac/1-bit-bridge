@@ -886,3 +886,33 @@ func TestResolveCandidatesStopsAtTheWorkCap(t *testing.T) {
 			"stat'd at all", n)
 	}
 }
+
+// TestFingerprintSuppressionTTLsAreIndependent pins the two fingerprint
+// suppression TTLs SEPARATELY, which is the executable half of the reasoning in
+// fingerprintTagVetoTTL's docblock: the two windows agree on 30 days but expire
+// for unrelated reasons (AcoustID's database growing vs. the resolved cluster
+// gaining or losing recordings), so either must be retunable without moving the
+// other.
+//
+// The failure mode is the point. Asserted separately, retuning one constant
+// fails exactly one case and names which window moved. Were the veto TTL
+// written `= fingerprintNoMatchTTL` again — the aliasing this docblock rules
+// out, and how it actually stood until 2026-08-16 — retuning the no-match would
+// drag the veto with it and fail BOTH cases, surfacing the coupling instead of
+// letting it through silently.
+func TestFingerprintSuppressionTTLsAreIndependent(t *testing.T) {
+	const want = 30 * 24 * time.Hour
+	for _, tc := range []struct {
+		name string
+		got  time.Duration
+	}{
+		{"no-match verdict", fingerprintNoMatchTTL},
+		{"apply-time tag veto", fingerprintTagVetoTTL},
+	} {
+		if tc.got != want {
+			t.Errorf("%s TTL = %v, want %v — if this move was deliberate, change "+
+				"THIS case; if the other case failed too, the two constants have "+
+				"been aliased back together", tc.name, tc.got, want)
+		}
+	}
+}
