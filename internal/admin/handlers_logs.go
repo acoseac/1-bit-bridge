@@ -16,6 +16,7 @@
 package admin
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"os"
@@ -326,18 +327,35 @@ type tailRing struct {
 	partial strings.Builder
 }
 
+// Write splits p on newlines, retaining only the last `max` lines.
+//
+// Scans p in place rather than building one string per call. streamFilteredLog
+// writes through a 64 KiB bufio.Writer, so a call arrives per FLUSH, not per
+// line — concatenating `partial + string(p)` allocated (and immediately
+// discarded) a 64 KiB string on every one.
+//
+// Each retained line is also copied explicitly. The obvious alternative —
+// slicing lines out of one accumulated buffer — makes every retained line
+// ALIAS that buffer, so keeping a single line pins the whole 64 KiB behind it.
+// Copying costs exactly the bytes actually kept and lets the rest be collected.
 func (t *tailRing) Write(p []byte) (int, error) {
 	n := len(p)
-	s := t.partial.String() + string(p)
-	t.partial.Reset()
-	for {
-		line, rest, found := strings.Cut(s, "\n")
-		if !found {
-			t.partial.WriteString(s)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			// No terminator in this chunk: hold it for the next call.
+			t.partial.Write(p)
 			break
 		}
-		t.push(line)
-		s = rest
+		if t.partial.Len() > 0 {
+			// A line split across calls — finish it from the carry.
+			t.partial.Write(p[:i])
+			t.push(t.partial.String())
+			t.partial.Reset()
+		} else {
+			t.push(string(p[:i]))
+		}
+		p = p[i+1:]
 	}
 	return n, nil
 }
