@@ -3189,6 +3189,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		UPnPUpstream:    upnpLC.installAdminAdapter(ctx, cfgHolder, absCfgPath, manifestStore, upnpLC.ingester),
 		Updater:         updAdapter,
 		BackupSources:   backupSources,
+		LogPath:         adminLogPath(),
 		Tailscale:       tailscaleAdminSrc,
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),

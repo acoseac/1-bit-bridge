@@ -64,7 +64,23 @@ type diagnosticsResponse struct {
 // snapshot, so this returns in well under a millisecond and — unlike the
 // composition and coverage snapshots on this server — needs no TTL cache.
 // It touches no database.
-func (s *Server) apiDiagnostics(w http.ResponseWriter, r *http.Request) {
+func (s *Server) apiDiagnostics(w http.ResponseWriter, _ *http.Request) {
+	resp := s.diagnosticsSnapshot()
+
+	// No-store: these are point-in-time counters, and a browser cache hit
+	// would show an operator stale numbers while they are actively
+	// watching for a change.
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// diagnosticsSnapshot builds the counter set.
+//
+// Split out of the handler so the bug-report bundle embeds the SAME numbers
+// the page shows rather than reading the metrics package a second time. Two
+// readers of one set of counters is fine; two assemblies of them is how the
+// bundle and the page come to disagree about what the bridge reported.
+func (s *Server) diagnosticsSnapshot() diagnosticsResponse {
 	resp := diagnosticsResponse{
 		LogEventCounts: metrics.LogEventCountsSnapshot(),
 	}
@@ -95,12 +111,7 @@ func (s *Server) apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 	resp.TailscaleNodeState = tailscaleStateLabel(metrics.TsnetNodeStateSnapshot())
 	resp.TailscalePeersOnline = metrics.TsnetPeersOnlineSnapshot()
-
-	// No-store: these are point-in-time counters, and a browser cache hit
-	// would show an operator stale numbers while they are actively
-	// watching for a change.
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, resp)
+	return resp
 }
 
 // tailscaleStateLabel maps the tsnet collector's integer state to a

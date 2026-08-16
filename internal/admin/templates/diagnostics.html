@@ -2,11 +2,13 @@
 <section class="diagnostics-page">
   <h1>Diagnostics</h1>
   <p class="lede">
-    Operational counters from this bridge process. Everything here is a
-    number or a state — no log text, deliberately: paths, hostnames and
-    track titles are all identifying in some deployment, and this page is
-    the kind of thing that gets pasted into an issue. Use
-    <code>bridge logs</code> when you need the text.
+    Operational counters from this bridge process. Everything shown on the
+    page is a number or a state — no log text is rendered here,
+    deliberately: paths, hostnames and track titles are all identifying in
+    some deployment, and this page is the kind of thing that gets pasted
+    into an issue. The log itself is a <em>download</em> below, filtered and
+    optionally redacted, so sharing it stays a deliberate act.
+    <code>bridge logs</code> does the same job from a shell.
   </p>
 
   {{/* Preflight. Click-driven: the checks touch the filesystem and may
@@ -112,6 +114,65 @@
     <dl class="composition" id="diag-log-events">
       <dt>—</dt><dd>no events recorded yet</dd>
     </dl>
+    <p class="hint" id="diag-log-events-hint" hidden>
+      Select a level to prepare an export of it below.
+    </p>
+  </div>
+
+  {{/* Log export. The page renders no log text (see the lede) — this hands
+       the operator a FILE, which keeps sharing a deliberate act rather than
+       something that happens by pasting a screenshot.
+
+       Click-driven only, and never polled: an export reads the log from
+       disk, and the file is unbounded because nothing rotates it. */}}
+  <div class="panel" id="logs-panel">
+    <div class="panel-head">
+      <h2>Export logs</h2>
+    </div>
+    <p class="hint" id="logs-status">Checking for a log file…</p>
+
+    <div class="logs-controls" id="logs-controls" hidden>
+      <label class="logs-control">
+        <span>Level</span>
+        <select id="logs-level" aria-label="Minimum level to include">
+          <option value="all">Everything</option>
+          <option value="info">Info and above</option>
+          <option value="warn" selected>Warnings and above</option>
+          <option value="error">Errors only</option>
+        </select>
+      </label>
+      <label class="logs-control">
+        <span>Period</span>
+        <select id="logs-since" aria-label="How far back to include">
+          <option value="15m">Last 15 minutes</option>
+          <option value="1h" selected>Last hour</option>
+          <option value="24h">Last 24 hours</option>
+          <option value="7d">Last 7 days</option>
+          <option value="all">Everything on disk</option>
+        </select>
+      </label>
+      <label class="checkbox logs-control logs-control-wide">
+        <input type="checkbox" id="logs-redact">
+        Redact absolute paths and IP addresses
+      </label>
+    </div>
+
+    <p class="hint" id="logs-redact-hint" hidden>
+      Replaces absolute filesystem paths and non-loopback IPs. Library-relative
+      paths and loopback addresses are kept, because they identify nobody and
+      are usually the reason the line is being read. This is a courtesy pass,
+      not an anonymiser — read the file before posting it somewhere public.
+    </p>
+
+    <div class="panel-actions" id="logs-actions" hidden>
+      <button type="button" id="logs-download" class="btn">Download log</button>
+      <button type="button" id="logs-bundle" class="btn">Bug report bundle</button>
+    </div>
+    <p class="hint" id="logs-bundle-hint" hidden>
+      The bundle is one pasteable text file: version and platform, the counters
+      on this page, the preflight results, and the last 24 hours of log. It is
+      redacted by default — it exists to be sent somewhere.
+    </p>
   </div>
 
   <div class="panel">

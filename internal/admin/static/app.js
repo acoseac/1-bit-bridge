@@ -7020,13 +7020,113 @@ function renderLogEventCounts(counts) {
   const rank = { error: 0, warn: 1, info: 2, debug: 3 };
   const rankOf = (k) => rank[String(k).toLowerCase()] ?? 9;
   entries.sort((a, b) => rankOf(a[0]) - rankOf(b[0]) || a[0].localeCompare(b[0]));
+  // Each level is a button that arms the export below for that severity.
+  // The counts are the natural entry point — an operator who sees a
+  // climbing warn tally wants those lines, and making them click through
+  // to a pre-filled export saves re-deriving the filter by hand.
   for (const [level, n] of entries) {
     const dt = document.createElement("dt");
-    dt.textContent = String(level).toLowerCase();
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "level-link";
+    btn.textContent = String(level).toLowerCase();
+    btn.dataset.level = String(level).toLowerCase();
+    btn.title = `Prepare a log export at ${String(level).toLowerCase()} and above`;
+    btn.addEventListener("click", () => armLogExport(btn.dataset.level));
+    dt.appendChild(btn);
     const dd = document.createElement("dd");
     dd.textContent = Number(n).toLocaleString();
     dl.appendChild(dt);
     dl.appendChild(dd);
+  }
+  const hint = document.getElementById("diag-log-events-hint");
+  if (hint) hint.hidden = false;
+}
+
+// ---- Log export (Diagnostics page) ----
+
+// armLogExport points the export controls at one level and scrolls to them.
+//
+// Does NOT start a download. The operator still picks a period and decides
+// about redaction — clicking a count is "show me how to get these", not
+// "send these somewhere", and a click that immediately wrote a file
+// containing absolute paths would be the wrong default on a page whose
+// whole posture is that sharing should be deliberate.
+function armLogExport(level) {
+  const sel = document.getElementById("logs-level");
+  const panel = document.getElementById("logs-panel");
+  if (!sel || !panel) return;
+  // DEBUG has no "and above" of its own — it IS everything.
+  sel.value = level === "debug" ? "all" : level;
+  panel.scrollIntoView({ behavior: "smooth", block: "center" });
+  sel.focus({ preventScroll: true });
+}
+
+// logExportQuery serialises the three controls.
+function logExportQuery() {
+  const q = new URLSearchParams();
+  const level = document.getElementById("logs-level");
+  const since = document.getElementById("logs-since");
+  const redact = document.getElementById("logs-redact");
+  if (level) q.set("level", level.value);
+  if (since) q.set("since", since.value);
+  if (redact) q.set("redact", redact.checked ? "true" : "false");
+  return q;
+}
+
+// loadLogStatus asks whether this install has a log file at all.
+//
+// It often does not: the bridge logs to stderr, and only a SERVICE install
+// redirects that to a file. Rendering the reason beats offering a button
+// that 404s, which would read as a broken console rather than as the truth
+// about how this bridge was started.
+async function loadLogStatus() {
+  const status = document.getElementById("logs-status");
+  const controls = document.getElementById("logs-controls");
+  const actions = document.getElementById("logs-actions");
+  if (!status) return;
+  try {
+    const s = await API.get("/api/logs/status");
+    if (!s.available) {
+      status.textContent = s.reason || "no log file available";
+      if (controls) controls.hidden = true;
+      if (actions) actions.hidden = true;
+      return;
+    }
+    const size = formatBytes(s.sizeBytes || 0);
+    status.textContent = s.truncates
+      ? `${s.path} — ${size}. Larger than one export can scan; the most recent portion is exported and the file says so.`
+      : `${s.path} — ${size}.`;
+    if (controls) controls.hidden = false;
+    if (actions) actions.hidden = false;
+    for (const id of ["logs-redact-hint", "logs-bundle-hint"]) {
+      const el = document.getElementById(id);
+      if (el) el.hidden = false;
+    }
+  } catch (err) {
+    status.textContent = `could not check for a log file: ${err.message}`;
+  }
+}
+
+function initLogExport() {
+  loadLogStatus();
+  const dl = document.getElementById("logs-download");
+  if (dl) {
+    dl.addEventListener("click", () => {
+      globalThis.location = `/api/logs/export?${logExportQuery().toString()}`;
+    });
+  }
+  const bundle = document.getElementById("logs-bundle");
+  if (bundle) {
+    bundle.addEventListener("click", () => {
+      // Only `redact` is honoured by the bundle — it fixes its own window
+      // and level — so sending the rest would imply a control the endpoint
+      // deliberately ignores.
+      const redact = document.getElementById("logs-redact");
+      const q = new URLSearchParams();
+      q.set("redact", redact && !redact.checked ? "false" : "true");
+      globalThis.location = `/api/logs/bundle?${q.toString()}`;
+    });
   }
 }
 
@@ -7154,6 +7254,11 @@ function initDiagnostics() {
   // filesystem and may exec sox / fpcalc.
   const doctorBtn = document.getElementById("doctor-run");
   if (doctorBtn) doctorBtn.addEventListener("click", runDoctor);
+
+  // Log export. Status is fetched once on load, not polled: whether a log
+  // file exists is a property of how this bridge was STARTED, so it cannot
+  // change while the page is open.
+  initLogExport();
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {

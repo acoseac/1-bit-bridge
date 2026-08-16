@@ -1036,6 +1036,61 @@ Admin-only — no `/v1` wire change, no `ProtocolVersion` bump, no migration. `/
 - **Saved-mix playlist ids MUST be canonical lowercase UUID v4** (`newPlaylistUUID`): the iOS restore path parses ids with `UUID(uuidString:)` and SILENTLY SKIPS anything else (`PlaylistSyncCoordinator`), so any other scheme makes saved mixes invisible to every device. Pinned by `uuidV4Re` in `handlers_smartplaylists_test.go`. Hand-rolled RFC-4122 mint on purpose — **don't add `github.com/google/uuid`** (declined on PR #657 review; single-static-binary posture, same class as the declined bubbletea/x/term deps).
 - **Save re-indexes item positions 0..N-1 from display order** — the flattened time-of-day pools repeat their per-hour positions and `(playlist_id, position)` is the PK; original blob positions must never be persisted. `device_token` carries the `admin-console` provenance sentinel (column has no FK; renders as `admin-co…` on the Data page and resolves through `resolvePlaylistDeviceToken`; never exposed on `/v1`). A mix's operator-uploaded cover clones to the playlist scope best-effort (same bytes + imageHash; failure logs, never fails the save). Saves are frozen snapshots by design — the mix keeps regenerating, the saved playlist doesn't follow.
 
+### Diagnostics log export + bug-report bundle (2026-08-16)
+
+Admin-only — no `/v1` change, no `ProtocolVersion` bump, no migration. Diagnostics
+gains `GET /api/logs/{status,export,bundle}` plus an Export-logs panel; the Log-events
+counts become buttons that arm the export at that level.
+
+- **The log is parsed back from TEXT, because there is no structured copy.**
+  `logging.Init` installs slog's TEXT handler on stderr and the service units send
+  stdout AND stderr to one file, so the log interleaves structured records with the
+  CLI's unstructured startup banner. Parsing is a STRICT prefix (`time=` then
+  `level=`, the order TextHandler guarantees) — a whole-line search for `level=`
+  matches the text inside a quoted `msg`, and `TestParseLogLine` pins that case.
+- **Filtering is MINIMUM level, never exact match.** "warn only" as an exact match
+  omits every ERROR — the worst events missing from the file the operator is about to
+  attach to a bug report. `TestLogFilterMinLevelIncludesMoreSevere` fails on the
+  exact-match form (negative-control-verified). Banner lines carry no severity, so
+  they ride only the unfiltered "Everything" mode (`keepUnstructured`).
+- **The scan starts at the END minus `maxLogScanBytes` (64 MiB), not at byte zero.**
+  Nothing rotates this log — the author's own was **301 MB spanning 72 days** — and a
+  windowed export wants the tail. `TestStreamFilteredLogTruncatesFromTheEnd` pins it,
+  and needs SEVERAL early markers: with one, the partial-first-line skip ate it and
+  the test passed against a from-the-start scan (i.e. pinned nothing until
+  negative-controlled).
+- **Redaction covers EVERY section of the bundle, not just log lines.** The header
+  promises "absolute paths replaced"; the preflight section is free text carrying the
+  config dir, roots and cert path, and shipped that in full under `redacted: true`
+  until `bundleText` routed it through the redactor. **A bundle that claims redaction
+  and leaks is worse than one that claims nothing** — the operator trusts the label
+  and posts it. The handler tests missed this because their server had no `DoctorRun`
+  wired, so the section was empty; the fixture now wires one that returns paths.
+  Found by running the endpoint, not by review.
+- **Quoted values must redact to the CLOSING QUOTE.** TextHandler quotes any value
+  containing a space and music paths contain them constantly ("Album (Deluxe)"), so a
+  whitespace-terminated rule redacts `/Music/Album` and leaves ` (Deluxe)/track.flac`.
+  The unquoted rule's prefix class also needs `[`/`(`/`,` — the banner prints
+  `(roots: [/srv/Music])` and a whitespace-only class matched none of them. Both were
+  live-test findings. Documented residual: an unquoted path WITH a space keeps its
+  tail (banner only); widening past whitespace would swallow the log message itself.
+- **Defaults are asymmetric on purpose**: the plain export is raw (the operator
+  reading their own bridge on a loopback console, where absolute paths are the point);
+  the bundle redacts by default (it exists to be sent somewhere). Unknown `level` /
+  `since` / `redact` values are REJECTED, never defaulted — a typo that silently fell
+  back to "everything" hands back a larger, less-redacted file than was asked for.
+- **`Deps.LogPath` empty is a legitimate state, not a misconfiguration.** Only a
+  SERVICE install redirects stderr to a file; a foreground `bridge serve` has none, so
+  `/api/logs/status` explains rather than offering a button that 404s.
+
+**Known, NOT fixed here (both real, both found by this work):**
+`internal/dlna/discovery.sendMSearch` logs a WARN on EVERY failed send with no
+streak/backoff/escalate-once — the policy the READ side got in PR #469
+(`HandleReadErr`) was never applied to the send side. On a host where the multicast
+send persistently fails (`can't assign requested address`) that is 12 lines/minute
+forever: **99.5% of the author's 301 MB log is that one line**. And nothing rotates
+the log at all, which is what let 72 days accumulate.
+
 ## Repo clean-up
 
 Pre-push:

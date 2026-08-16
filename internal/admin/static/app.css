@@ -3851,3 +3851,51 @@ ul.histogram li {
   .dupes-member { grid-template-columns: 1fr; gap: 2px; }
   .dupes-tier-table th:nth-child(4), .dupes-tier-table td:nth-child(4) { display: none; }
 }
+
+/* ---- Log export (Diagnostics page) ---------------------------------- */
+
+/* The level tally doubles as the entry point to the export below, so each
+ * level renders as a button rather than plain text. Styled as a link so the
+ * <dl> still reads as a definition list rather than a row of controls. */
+.level-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.level-link:hover { text-decoration-thickness: 2px; }
+.level-link:focus-visible { outline: none; box-shadow: var(--glow); border-radius: 3px; }
+
+/* Controls wrap rather than scroll: on a phone the three of them stack, and
+ * the 375px tile-header lesson applies — a fixed column would crush the
+ * select to an unusable width. */
+.logs-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  align-items: end;
+  margin: 12px 0;
+}
+.logs-control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9rem;
+}
+.logs-control > span { color: var(--fg-muted); }
+.logs-control select { min-width: 11rem; }
+/* The redact checkbox is a row, not a column — its label sits beside the
+ * box, unlike the two selects whose labels sit above. */
+.logs-control-wide {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+@media (max-width: 560px) {
+  .logs-controls { flex-direction: column; align-items: stretch; }
+  .logs-control select { width: 100%; }
+}
