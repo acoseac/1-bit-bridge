@@ -106,8 +106,22 @@ func (f *autoOptimizeFixture) seedTrack(t *testing.T, rel string, sizeBytes int)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		t.Fatalf("mkdir for %q: %v", rel, err)
 	}
-	if err := os.WriteFile(abs, make([]byte, sizeBytes), 0o600); err != nil {
-		t.Fatalf("write %q: %v", rel, err)
+	// Sparse via Truncate rather than os.WriteFile(make([]byte, n)): the
+	// disk-floor test seeds three 30 MiB sources, which as real zero slices
+	// costs ~90 MB of allocation and disk write per run for bytes nothing
+	// reads. Only the SIZE matters here — the sweeper takes size/mtime from
+	// the track ROW, and the only filesystem access is ResolveChecked's
+	// os.Stat, since `enqueue` is a stub and no sox ever runs.
+	fh, err := os.OpenFile(abs, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("create %q: %v", rel, err)
+	}
+	if err := fh.Truncate(int64(sizeBytes)); err != nil {
+		_ = fh.Close()
+		t.Fatalf("truncate %q to %d: %v", rel, sizeBytes, err)
+	}
+	if err := fh.Close(); err != nil {
+		t.Fatalf("close %q: %v", rel, err)
 	}
 	rate, bits, dsd := 96000.0, 24, false
 	if err := f.store.UpsertTrack(context.Background(), &manifest.Track{

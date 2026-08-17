@@ -1209,6 +1209,13 @@ always been able to mint variants nobody asked for; only the trigger is new).
 - **A disabled sweep returns a `Disabled`-marked counts struct, not nil.** `nil` means
   "failed, keep the previous numbers" in `sweepStatus.sweepFinished`, which would freeze
   the card on a stale successful run right after the operator turned the feature off.
+- **A negative control MUST be gated on a successful build.** Twice during this PR the
+  disk-floor control was mutated to `if false {`, which makes `floor` unused — so `go test`
+  reported failure from the COMPILE ERROR and the control read as "good" while pinning
+  nothing. Mutate in a way that keeps the symbol used (here `< -floor`), and run
+  `go vet ./<pkg>/` first, treating a build break as *control invalid* rather than as
+  evidence. The same trap applies to any mutation that deletes the only use of a variable
+  — which is most "just disable this branch" edits.
 
 ## Repo clean-up
 
