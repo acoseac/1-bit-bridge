@@ -3,7 +3,8 @@
 # to current main. Run from the operator's macOS/Linux workstation, from the
 # repo root, ON main (the script checks).
 #
-# Mirrors docs/deployment-runbook.md "bridge.ars.md" exactly:
+# Mirrors ops/deployment-runbook.md "bridge.ars.md" exactly (the runbook moved
+# out of the Pages-served docs/ tree; see CLAUDE.md):
 #   cross-compile linux/amd64 -> scp as .new -> SHA-256 verify BEFORE swap
 #   -> two-step `sudo mv` swap (keeps a timestamped .old- backup for rollback)
 #   -> setcap cap_net_bind_service=+ep -> systemctl restart -> verify health.
@@ -12,17 +13,62 @@
 # (SHA gate), and the prior binary is retained as /usr/local/bin/bridge.old-<ts>.
 #
 # Usage:  ./deploy/linux/deploy-bridge-vps.sh
-# Env overrides: SSH_KEY, HOST, REMOTE_BIN, HEALTH_URL, KEEP_BACKUPS (below).
+#   First run: cp deploy/linux/.env.example deploy/linux/.env  (then fill it in)
+# Env vars: HOST, SSH_KEY (required); SSH_OPTS, HEALTH_URL, REMOTE_BIN,
+#           KEEP_BACKUPS, ENV_FILE (optional; see .env.example).
 #
 # If SSH to the host is filtered from this workstation while its :443 answers,
-# that is the allowlist, not the key -- see the runbook's SSH-flap note for the
-# `ssh -J` relay route (set HOST to a ProxyJump form to use it here).
+# that is the allowlist, not the key -- see the runbook's SSH-flap note. Route
+# around it through a host whose egress IS allowlisted by setting
+# SSH_OPTS="-J relay-user@relay-host": `-J` tunnels only TCP, so the key never
+# leaves this workstation and no binary transits the relay.
 set -euo pipefail
 
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/1bitbridge_key}"
-HOST="${HOST:-arsenie@bridge.ars.md}"
+# HOST COORDINATES ARE NOT HARDCODED HERE. deploy/ is public (CLAUDE.md: "keep
+# host coordinates in env vars with placeholder defaults, never hardcoded"), and
+# the runbook redacts the very two values this file used to carry -- so the
+# script contradicted its own runbook's posture. Its Windows sibling already
+# reads BRIDGE_WAN_URL from the environment for the same reason.
+#
+# Precedence: explicit env > $ENV_FILE > required-and-unset (hard error).
+# .env is already covered by .gitignore's `.env` pattern and .env.example is
+# un-ignored by `!.env.example`, so the template ships and real values cannot.
+#
+# NOTE this does not un-publish anything: the previous hardcoded values remain
+# in git history, so this is hygiene going forward, not remediation.
+ENV_FILE="${ENV_FILE:-$(cd "$(dirname "$0")" && pwd)/.env}"
+_cli_host="${HOST:-}"; _cli_key="${SSH_KEY:-}"
+_cli_health="${HEALTH_URL:-}"; _cli_opts="${SSH_OPTS:-}"
+# shellcheck source=/dev/null
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+HOST="${_cli_host:-${HOST:-}}"
+SSH_KEY="${_cli_key:-${SSH_KEY:-}}"
+HEALTH_URL="${_cli_health:-${HEALTH_URL:-}}"
+SSH_OPTS="${_cli_opts:-${SSH_OPTS:-}}"
+
+if [ -z "$HOST" ] || [ -z "$SSH_KEY" ]; then
+  {
+    echo "ERROR: HOST and SSH_KEY must be set (this script ships no host defaults)."
+    echo "  cp $(dirname "$0")/.env.example $ENV_FILE   # then fill in the coordinates"
+    echo "  or one-off: HOST=user@host SSH_KEY=~/.ssh/key $0"
+  } >&2
+  exit 1
+fi
+
 REMOTE_BIN="${REMOTE_BIN:-/usr/local/bin/bridge}"
-HEALTH_URL="${HEALTH_URL:-https://bridge.ars.md/v1/health}"
+# Defaults to the host's public :443, stripping any user@ -- the same shape
+# deploy/README.md uses for the Windows host's health URL.
+HEALTH_URL="${HEALTH_URL:-https://${HOST#*@}/v1/health}"
+
+# SSH_OPTS is word-split into an array so a relay route works. The +-guarded
+# expansion at the call sites is REQUIRED, not defensive: macOS ships bash 3.2,
+# where `set -u` plus a bare "${arr[@]}" on an EMPTY array aborts with "unbound
+# variable" (verified on 3.2.57) -- i.e. it would break every run that needs no
+# relay, which is all of them normally. Verified to pass 5 args when empty and 7
+# with `-J relay@host`, with no stray empty argument (an empty arg would be read
+# by ssh as a hostname). Simple word-splitting, so an option whose VALUE
+# contains spaces (a full ProxyCommand) needs ~/.ssh/config instead.
+read -ra SSH_OPT_ARR <<< "$SSH_OPTS"
 # Backups to retain after a VERIFIED-healthy deploy. Two keeps the immediate
 # rollback plus one behind it; the runbook's ~24h retention guidance is about
 # how long to wait before trusting a deploy, not about hoarding every build.
@@ -30,23 +76,23 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-2}"
 SVC="1-bit-bridge"
 LOCAL_BIN="dist/bridge-linux-amd64"
 
-ssh_vps() { ssh -i "$SSH_KEY" -o ConnectTimeout=15 "$HOST" "$@"; }
+ssh_vps() { ssh -i "$SSH_KEY" -o ConnectTimeout=15 "${SSH_OPT_ARR[@]+"${SSH_OPT_ARR[@]}"}" "$HOST" "$@"; }
 
-echo "==> 1/5 Verify on main + up to date"
+echo "==> 1/6 Verify on main + up to date"
 branch=$(git rev-parse --abbrev-ref HEAD)
 [ "$branch" = "main" ] || { echo "ERROR: on '$branch', not main. Aborting."; exit 1; }
 git pull --ff-only
 VER=$(git describe --tags --always)
 echo "    version: $VER"
 
-echo "==> 2/5 Cross-compile linux/amd64"
+echo "==> 2/6 Cross-compile linux/amd64"
 GOOS=linux GOARCH=amd64 go build \
   -ldflags "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$VER" \
   -o "$LOCAL_BIN" ./cmd/bridge
 echo "    built $LOCAL_BIN ($(wc -c < "$LOCAL_BIN") bytes)"
 
-echo "==> 3/5 Upload as .new + SHA-256 gate (no swap on mismatch)"
-scp -i "$SSH_KEY" -o ConnectTimeout=15 "$LOCAL_BIN" "$HOST:/tmp/bridge.new"
+echo "==> 3/6 Upload as .new + SHA-256 gate (no swap on mismatch)"
+scp -i "$SSH_KEY" -o ConnectTimeout=15 "${SSH_OPT_ARR[@]+"${SSH_OPT_ARR[@]}"}" "$LOCAL_BIN" "$HOST:/tmp/bridge.new"
 LOCAL_SHA=$(shasum -a 256 "$LOCAL_BIN" | awk '{print $1}')
 REMOTE_SHA=$(ssh_vps 'sha256sum /tmp/bridge.new | cut -d" " -f1')
 echo "    local : $LOCAL_SHA"

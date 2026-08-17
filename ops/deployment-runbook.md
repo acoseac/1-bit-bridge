@@ -18,7 +18,7 @@ cert-re-mint bug existed because the only copy lived on the host and drifted).
 See [`deploy/README.md`](../deploy/README.md) for the script index + sync
 contract. Routine update one-liners:
 - **home-pc**: `ssh <HOMEPC-SSH> 'pwsh -NoProfile -Command -' < deploy/windows/update-bridge-windows.ps1` (cert-preserving; never re-mints)
-- **bridge.ars.md**: `./deploy/linux/deploy-bridge-vps.sh`
+- **bridge.ars.md**: `./deploy/linux/deploy-bridge-vps.sh` (needs `deploy/linux/.env` — copy `.env.example` once and fill in the coordinates; the script ships no host defaults because `deploy/` is public)
 
 ## Production deployments
 
@@ -311,7 +311,7 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 
 - **Tell the classes apart by WHERE it fails.** `Operation timed out` on `:22` is a TCP-connect failure — it happens before any key is offered, so *no key can fix it*. A wrong key gives `Permission denied (publickey)` over an established connection instead. Confirm by probing ports: `:443` answering while `:22` is filtered on the same resolved IP is the allowlist.
 - **It can flap within seconds, and per-port.** Back-to-back probes gave timeout, then open, then twelve consecutive failures — while `:7789` stayed reachable throughout from the same workstation. So a single failed `ssh` proves nothing; probe twice before concluding anything, and re-run the deploy script (it is idempotent, and the SHA gate means a partial upload can never replace a working binary).
-- **A LAN host with its own allowlisted egress works as a pure TCP relay:** `ssh -J <RELAY-SSH> -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH>`. `-J` tunnels only TCP, so the key never leaves the workstation and no binary transits the relay — strictly better than copying either. Set `HOST` to a ProxyJump form to make the deploy script take the same route.
+- **A LAN host with its own allowlisted egress works as a pure TCP relay:** `ssh -J <RELAY-SSH> -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH>`. `-J` tunnels only TCP, so the key never leaves the workstation and no binary transits the relay — strictly better than copying either. To make the deploy script take that route, set **`SSH_OPTS="-J <RELAY-SSH>"`** (in `deploy/linux/.env` or inline). **Not `HOST`** — `HOST` is passed as ssh's target argument, so a ProxyJump form there cannot work; an earlier revision of this note said otherwise. An option whose *value* contains spaces (a full `ProxyCommand`) needs `~/.ssh/config` instead, since `SSH_OPTS` is word-split.
 - **Verification never needs SSH.** `/v1/health` on `:443` is open to everyone, so poll `serverVersion` there to confirm a deploy landed — which is what the script now does.
 
 
