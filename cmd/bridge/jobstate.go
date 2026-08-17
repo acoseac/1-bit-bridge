@@ -248,10 +248,17 @@ func autoOptimizeStateClosure(enabled func() bool, degradedReason string, status
 // the loop only arms `scheduleNext`, so a caller keeps whatever
 // counts-on-failure semantics it needs.
 func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDelay, interval time.Duration, nudge <-chan struct{}, sweep func()) {
+	// time.NewTimer + defer Stop, NOT time.After: `time.After` keeps its
+	// timer alive until it fires even when ctx.Done() wins the select, and
+	// runServe is re-entered every time the launcher menu restarts the
+	// bridge — so each restart would strand one settle-delay timer per
+	// sweeper. The PR #290 convention, same as main.go's shutdown grace.
+	settle := time.NewTimer(settleDelay)
+	defer settle.Stop()
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(settleDelay):
+	case <-settle.C:
 	}
 	select {
 	case <-nudge:

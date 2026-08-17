@@ -166,17 +166,27 @@ func TestAutoOptimizeSweepEnqueuesBackgroundJobs(t *testing.T) {
 		t.Errorf("SourceAbsPath = %q, want an absolute resolved path", job.SourceAbsPath)
 	}
 	// The variant must record the TRACK ROW's mtime/size, not a live stat —
-	// otherwise the staleness predicate re-selects it every sweep.
+	// otherwise the staleness predicate re-selects it on every sweep
+	// (autoOptimizeCandidateSQL's self-consistency contract).
+	//
+	// **The mtime assertion is the one that actually pins that**: the
+	// fixture writes the file NOW but stamps the row's ModTime at a fixed
+	// past instant, so only mtime distinguishes row-vs-stat. SourceSize
+	// cannot — the row size and the on-disk size are both 4096 here, so
+	// asserting it alone would pass either way.
+	if job.SourceMTimeNS != time.Unix(1700000000, 0).UnixNano() {
+		t.Errorf("SourceMTimeNS = %d, want the track row's %d — a live stat would re-select this row every sweep",
+			job.SourceMTimeNS, time.Unix(1700000000, 0).UnixNano())
+	}
 	if job.SourceSize != 4096 {
 		t.Errorf("SourceSize = %d, want the track row's 4096", job.SourceSize)
 	}
-	if counts.Remaining != 0 {
-		// The candidate is enqueued but its variant row doesn't exist yet,
-		// so the backlog legitimately still counts it. Assert the honest
-		// value rather than 0.
-		if counts.Remaining != 1 {
-			t.Errorf("Remaining = %d, want 1 (the in-flight candidate)", counts.Remaining)
-		}
+	// The candidate is enqueued but its variant row doesn't exist until the
+	// job completes, so the backlog still counts it. Asserted directly: a
+	// nested `if Remaining != 0` guard would let 0 — the one value the
+	// contract rules out — pass silently.
+	if counts.Remaining != 1 {
+		t.Errorf("Remaining = %d, want 1 (the still-uncovered in-flight candidate)", counts.Remaining)
 	}
 }
 

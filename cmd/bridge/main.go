@@ -2722,6 +2722,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// feature can't run (no upscale pool, or the optimize kind opted out).
 	var autoOptimizeNudge chan struct{}
 	var autoOptimizeSweepState *sweepStatus[admin.AutoOptimizeSweepCounts]
+	// autoOptimizeEnabledFn is the SHARED live predicate: the sweeper asks
+	// it whether to do work, and the admin card asks it what to report.
+	// One closure, deliberately — duplicating the three gates would let the
+	// card claim "active" while every sweep short-circuits, which is the
+	// same live-runtime-vs-persisted-config divergence /v1/upscale/stats
+	// exists to avoid.
+	var autoOptimizeEnabledFn func() bool
 	if upscaleActive {
 		upscalePool = transcode.NewPool(manifestStore, cfg.Upscale.EffectiveWorkers(), cfg.Upscale.EffectiveQueueCap())
 		defer upscalePool.Stop()
@@ -2812,6 +2819,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			autoOptimizeNudge = make(chan struct{}, 1)
 			autoOptimizeSweepState = &sweepStatus[admin.AutoOptimizeSweepCounts]{}
 			postScanNudges = append(postScanNudges, autoOptimizeNudge)
+			autoOptimizeEnabledFn = func() bool {
+				live := cfgHolder.Load()
+				if live == nil {
+					return false // defensive: never sweep on a nil snapshot
+				}
+				// All three gates: the master toggle, the optimize kind, and
+				// the pre-generation flag. `upscale.enabled` is included even
+				// though the pool is wired at boot — an operator can PATCH it
+				// off mid-flight, and the sweeper must stop with it.
+				return live.Upscale.Enabled &&
+					live.Upscale.EffectiveOptimizeEnabled() &&
+					live.Upscale.AutoOptimize.Enabled
+			}
 			sweeper := &autoOptimizeSweeper{
 				store: manifestStore,
 				// apiSrv.Resolver() is the hot-reloading resolver, so a
@@ -2820,15 +2840,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				resolver:  apiSrv.Resolver(),
 				enqueue:   upscalePool.Enqueue,
 				outputDir: liveVariantsDir,
-				enabled: func() bool {
-					live := cfgHolder.Load()
-					if live == nil {
-						return false // defensive: never sweep on a nil snapshot
-					}
-					return live.Upscale.Enabled &&
-						live.Upscale.EffectiveOptimizeEnabled() &&
-						live.Upscale.AutoOptimize.Enabled
-				},
+				enabled:   autoOptimizeEnabledFn,
 				maxPerSweep: func() int {
 					if live := cfgHolder.Load(); live != nil {
 						return live.Upscale.AutoOptimize.EffectiveMaxPerSweep()
@@ -3315,10 +3327,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// bridge that can't pre-generate renders no card rather than a
 		// permanently-inactive one. The `enabled` reader is live because
 		// the flag hot-applies.
-		AutoOptimizeState: autoOptimizeStateClosure(func() bool {
-			live := cfgHolder.Load()
-			return live != nil && live.Upscale.AutoOptimize.Enabled
-		}, "", autoOptimizeSweepState),
+		AutoOptimizeState:        autoOptimizeStateClosure(autoOptimizeEnabledFn, "", autoOptimizeSweepState),
 		TriggerAutoOptimizeSweep: nudgeTriggerClosure(autoOptimizeNudge),
 		TriggerDuplicatesPass:    nudgeTriggerClosure(duplicatesNudge),
 		DuplicatesSweepRun:       jobRunClosure(duplicatesSweepState),

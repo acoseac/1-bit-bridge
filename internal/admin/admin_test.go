@@ -1724,3 +1724,27 @@ func TestAutoOptimizeSweepEndpoint503sWhenUnwired(t *testing.T) {
 		t.Errorf("POST /api/upscale/auto-optimize/sweep with no sweeper = %d, want 503", code)
 	}
 }
+
+// TestSettingsPatchAutoOptimizeUnwiredRequiresRestart is the other half of
+// the hot-apply contract: with no sweeper wired (no upscale pool at boot,
+// or the optimize kind opted out) the persisted flag cannot take effect
+// until a restart, so the banner is the honest answer. Reporting a silent
+// success would have the operator flip the switch, see nothing happen, and
+// have nothing to act on.
+func TestSettingsPatchAutoOptimizeUnwiredRequiresRestart(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.deps.TriggerAutoOptimizeSweep = nil // no sweeper on this bridge
+	h := srv.Handler()
+
+	var resp settingsPatchResponse
+	if code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"autoOptimizeEnabled": true}, &resp); code != 200 {
+		t.Fatalf("patch: %d", code)
+	}
+	if !resp.RestartRequired {
+		t.Error("with no sweeper wired the flip cannot hot-apply, so restartRequired must be true")
+	}
+	if !srv.deps.CfgHolder.Load().Upscale.AutoOptimize.Enabled {
+		t.Error("the flag must still persist even when it needs a restart to take effect")
+	}
+}

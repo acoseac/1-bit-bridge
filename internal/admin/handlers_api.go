@@ -2183,12 +2183,21 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.AutoOptimizeEnabled != nil {
 			if *p.AutoOptimizeEnabled != next.Upscale.AutoOptimize.Enabled {
 				next.Upscale.AutoOptimize.Enabled = *p.AutoOptimizeEnabled
-				// Deliberately NOT restart-required. The sweeper reads this
-				// flag live on every sweep, so the only thing a flip needs is
-				// a nudge — fired after the config is persisted and published
-				// (see the nudge block at the end of this handler). Same
-				// hot-apply shape as duplicates.filter.
+				// Hot-applies WHEN A SWEEPER EXISTS: it reads this flag live on
+				// every sweep, so the only thing a flip needs is a nudge (fired
+				// after the config is persisted and published — see the nudge
+				// block at the end of this handler). Same shape as
+				// duplicates.filter.
+				//
+				// With no sweeper wired (no upscale pool at boot, or the
+				// optimize kind opted out) the persisted value cannot take
+				// effect until a restart, so the honest answer is the banner.
+				// Reporting a silent success there would have the operator flip
+				// the switch, see nothing happen, and have nothing to act on.
 				autoOptimizeFlipped = true
+				if s.deps.TriggerAutoOptimizeSweep == nil {
+					restart = true
+				}
 			}
 		}
 		if p.LibraryWatchEnabled != nil {
