@@ -112,8 +112,13 @@ func TestRestampDuplicates_PolicyFlipUnsuppressesViaDelta(t *testing.T) {
 	if _, err := sc.RestampDuplicates(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// A fully-synced client's cursor: the max indexed_at across the
-	// library after the first stamping pass.
+	// The STRICTEST cursor a fully-synced client could hold: the max
+	// indexed_at across the library after the first stamping pass. Real
+	// iOS sends its own wall clock (`syncStartedAt`) rather than a
+	// library-derived value — `indexed_at` is never on the wire — but this
+	// is the worst case the bump must clear, and asserting it here is what
+	// caught the bump only advancing past the row's OWN prior value (see
+	// indexedAtAdvanceSQL). Don't relax it to a wall-clock cursor.
 	var watermark int64
 	for _, p := range []string{"CopyA/Album/01 Song.flac", "CopyB/Album/01 Song.flac", "Other/Album/02 Other.flac"} {
 		if v := indexedAtOf(t, s, p); v > watermark {

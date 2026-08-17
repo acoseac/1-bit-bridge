@@ -41,10 +41,22 @@ type DupeStamp struct {
 // Contract (the StampExtractorVersionBatch / applyReconciledTracks
 // template): holds s.mu (writer contract), one tx, prepared statements;
 // touches ONLY the three v31 dupe columns plus — for BumpIndexed rows —
-// the strict-advance indexed_at CASE WHEN. NEVER touches enriched_at
+// the shared indexedAtAdvanceSQL bump, which advances past the
+// library-wide max rather than only past the row's own prior value (the
+// older CASE WHEN form let a bumped row land exactly ON a cursor equal to
+// another row's value; see indexedAtAdvanceSQL). NEVER touches enriched_at
 // (suppression is a serving decision, not (re-)enrichment — this is
 // deliberately NOT an enriched_at writer) and NEVER rewrites tags_json.
 // Returns the number of rows actually updated.
+// applyDupeStampBumpSQL binds (groupID, tier, suppressed, clock, path). The
+// indexed_at expression is indexedAtAdvanceSQL (store.go) verbatim — see its
+// docblock for why it is not concatenated in.
+const applyDupeStampBumpSQL = `
+		UPDATE tracks
+		   SET dupe_group_id = ?, dupe_tier = ?, dupe_suppressed = ?,
+		       indexed_at    = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		 WHERE path = ?`
+
 func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, error) {
 	if len(stamps) == 0 {
 		return 0, nil
@@ -68,15 +80,7 @@ func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, e
 		return 0, err
 	}
 	defer plain.Close()
-	bump, err := tx.PrepareContext(ctx, `
-		UPDATE tracks
-		SET dupe_group_id = ?, dupe_tier = ?, dupe_suppressed = ?,
-		    indexed_at = CASE
-		        WHEN indexed_at >= ? THEN indexed_at + 1
-		        ELSE ?
-		    END
-		WHERE path = ?
-	`)
+	bump, err := tx.PrepareContext(ctx, applyDupeStampBumpSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -90,7 +94,7 @@ func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, e
 		}
 		var res interface{ RowsAffected() (int64, error) }
 		if st.BumpIndexed {
-			res, err = bump.ExecContext(ctx, st.GroupID, st.Tier, suppressed, now, now, st.Path)
+			res, err = bump.ExecContext(ctx, st.GroupID, st.Tier, suppressed, now, st.Path)
 		} else {
 			res, err = plain.ExecContext(ctx, st.GroupID, st.Tier, suppressed, st.Path)
 		}

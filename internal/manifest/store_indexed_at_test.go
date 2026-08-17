@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -179,6 +180,206 @@ func TestUpsertTrackBatchFreshInsertUsesClock(t *testing.T) {
 		}
 		if got != t0 {
 			t.Errorf("fresh-insert indexed_at(%q) = %d, want %d", b.Path, got, t0)
+		}
+	}
+}
+
+// TestIndexedAtBumpsClearTheLibraryWideMax pins the property that
+// distinguishes indexedAtAdvanceSQL from the CASE WHEN form it replaced:
+// a bump must land STRICTLY ABOVE every row, not merely above the bumped
+// row's own prior value.
+//
+// Shape (the coarse-clock collision, which is why this failed only on the
+// windows-latest CI leg — ~15.6 ms granularity makes it routine, and
+// nanosecond clocks hide it): the target row is OLD, a sibling row holds
+// the library max, and the write clock reads exactly that max. The old
+// form's `ELSE ?` arm then assigned the raw clock, landing the bumped row
+// EXACTLY ON a cursor equal to the sibling's value, where
+// `indexed_at > since` filters it out.
+//
+// Covers every writer sharing the expression, because the guarantee
+// belongs to the SQL and not to any one caller. Deliberately excludes the
+// UpsertTrack / UpsertTrackBatch conflict arms (they write new content at
+// wall-clock time — see indexedAtAdvanceSQL) and migration v34's post()
+// (shipped migrations are not rewritten).
+func TestIndexedAtBumpsClearTheLibraryWideMax(t *testing.T) {
+	const (
+		target  = "Music/A/target.flac"
+		sibling = "Music/B/sibling.flac"
+	)
+	bumps := []struct {
+		name string
+		run  func(t *testing.T, s *Store)
+	}{
+		{"MarkEnriched", func(t *testing.T, s *Store) {
+			if err := s.MarkEnriched(context.Background(), &Track{
+				Path: target, Size: 100, ModTime: time.Unix(0, 0).UTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"applyReconciledTracks", func(t *testing.T, s *Store) {
+			if _, err := s.applyReconciledTracks(context.Background(), []Track{{
+				Path: target, Size: 100, ModTime: time.Unix(0, 0).UTC(), Album: "Reconciled",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"UpsertVariant", func(t *testing.T, s *Store) {
+			if err := s.UpsertVariant(context.Background(), VariantRow{
+				SourcePath: target, VariantID: "upscaled-v1-176400-24",
+				SidecarPath: "/tmp/x.flac", Format: "flac",
+				SampleRate: 176400, BitsPerSample: 24,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"DeleteVariant", func(t *testing.T, s *Store) {
+			ctx := context.Background()
+			if err := s.UpsertVariant(ctx, VariantRow{
+				SourcePath: target, VariantID: "upscaled-v1-176400-24",
+				SidecarPath: "/tmp/x.flac", Format: "flac",
+				SampleRate: 176400, BitsPerSample: 24,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// The UpsertVariant above advanced the target past the sibling;
+			// re-flatten so the DELETE is measured from the same shape.
+			flattenIndexedAt(t, s, target, indexedAtOf(t, s, sibling)-100)
+			if err := s.DeleteVariant(ctx, target, "upscaled-v1-176400-24"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"UpsertAnalysis", func(t *testing.T, s *Store) {
+			if err := s.UpsertAnalysis(context.Background(), AnalysisRow{
+				SourcePath: target, WaveformPath: "/tmp/x.wf", WaveformTag: "abcd1234",
+				WaveformSize: 10, SchemaVersion: "wf7",
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"DeleteAnalysis", func(t *testing.T, s *Store) {
+			ctx := context.Background()
+			if err := s.UpsertAnalysis(ctx, AnalysisRow{
+				SourcePath: target, WaveformPath: "/tmp/x.wf", WaveformTag: "abcd1234",
+				WaveformSize: 10, SchemaVersion: "wf7",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			flattenIndexedAt(t, s, target, indexedAtOf(t, s, sibling)-100)
+			if err := s.DeleteAnalysis(ctx, target); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"SetArtworkVersionAndBumpIndex", func(t *testing.T, s *Store) {
+			if _, err := s.SetArtworkVersionAndBumpIndex(context.Background(), "art-mbid", "v2"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"SetBookletTagAndBumpIndex", func(t *testing.T, s *Store) {
+			if _, err := s.SetBookletTagAndBumpIndex(context.Background(), "album-mbid", "tag2"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"ApplyDupeStamps", func(t *testing.T, s *Store) {
+			if _, err := s.ApplyDupeStamps(context.Background(), []DupeStamp{{
+				Path: target, GroupID: "g1", Tier: "same-format", BumpIndexed: true,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+
+	for _, b := range bumps {
+		t.Run(b.name, func(t *testing.T) {
+			s := openTempStore(t)
+			t.Cleanup(func() { _ = s.Close() })
+			ctx := context.Background()
+
+			// The target carries the MBIDs the album-wide writers key on.
+			if err := s.UpsertTrack(ctx, &Track{
+				Path: target, Size: 100, ModTime: time.Unix(0, 0).UTC(),
+				ArtworkMBID: "art-mbid", MusicBrainzAlbumID: "album-mbid",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			upsertParent(t, s, sibling)
+
+			// The collision shape: target OLD, sibling holds the max, and
+			// the clock reads EXACTLY that max.
+			max := indexedAtOf(t, s, sibling)
+			flattenIndexedAt(t, s, target, max-100)
+			s.now = func() time.Time { return time.Unix(0, max) }
+
+			b.run(t, s)
+
+			requireBumpClearedMax(t, s, b.name, target, max)
+		})
+	}
+}
+
+// requireBumpClearedMax asserts both halves of the contract: the bumped row
+// sits strictly above the pre-bump library max, AND it actually surfaces in
+// a since-delta taken at that max (the value check alone would pass for a
+// row the read path filters out for some other reason).
+func requireBumpClearedMax(t *testing.T, s *Store, writer, target string, max int64) {
+	t.Helper()
+	if got := indexedAtOf(t, s, target); got <= max {
+		t.Fatalf("%s left indexed_at at %d, not past the library max %d — "+
+			"a client whose cursor is %d never sees the change", writer, got, max, max)
+	}
+	since := time.Unix(0, max).UTC()
+	delta, err := s.ListTracks(context.Background(), &since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tr := range delta {
+		if tr.Path == target {
+			return
+		}
+	}
+	t.Fatalf("%s: target absent from the since-delta (got %d rows)", writer, len(delta))
+}
+
+// flattenIndexedAt forces a row's indexed_at to an exact value so a bump's
+// starting point is deterministic. Test-only: production writes always go
+// through indexedAtAdvanceSQL.
+func flattenIndexedAt(t *testing.T, s *Store, path string, v int64) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE tracks SET indexed_at = ? WHERE path = ?`, v, path); err != nil {
+		t.Fatalf("flattenIndexedAt(%q): %v", path, err)
+	}
+}
+
+// TestIndexedAtAdvanceIsShared is what keeps the six delta-visibility bump
+// statements in step.
+//
+// The advance expression is written out verbatim in each rather than
+// concatenated in (see indexedAtAdvanceSQL — a concatenated form trips
+// SonarCloud go:S2077 and reads as an assembled query), so nothing at the
+// language level stops them drifting. This test does. Mirrors
+// TestEnrichmentMissPredicateIsShared, which exists for the same reason.
+//
+// Drift here is not cosmetic: a statement that silently reverts to the old
+// `CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END` advances only
+// past its OWN row and can land exactly on a client's cursor.
+func TestIndexedAtAdvanceIsShared(t *testing.T) {
+	for name, stmt := range map[string]string{
+		"bumpIndexedAtByPathSQL":  bumpIndexedAtByPathSQL,
+		"markEnrichedSQL":         markEnrichedSQL,
+		"applyReconciledTrackSQL": applyReconciledTrackSQL,
+		"setArtworkVersionSQL":    setArtworkVersionSQL,
+		"setBookletTagSQL":        setBookletTagSQL,
+		"applyDupeStampBumpSQL":   applyDupeStampBumpSQL,
+	} {
+		// Whitespace-normalised: the statements nest the expression at
+		// different depths and align their SET columns differently, so
+		// forcing identical layout would couple the guard to formatting
+		// rather than to meaning. Any SEMANTIC edit still fails.
+		if !strings.Contains(squashSpace(stmt), squashSpace(indexedAtAdvanceSQL)) {
+			t.Errorf("%s no longer embeds the shared indexed_at advance —\n"+
+				"this writer's bump may no longer clear the library-wide max.\nStatement:\n%s\n\nwant it to contain:\n%s",
+				name, stmt, indexedAtAdvanceSQL)
 		}
 	}
 }
