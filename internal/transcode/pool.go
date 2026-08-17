@@ -427,13 +427,13 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	p.claimSeq++
 	claim := p.claimSeq
 	p.inflight[dedup] = claim
-	// Route per JobKind. `JobKindOptimize` → optimizeJobs (foreground);
-	// every other kind (`JobKindUpscale` AND empty-Kind legacy default)
-	// → upscaleJobs (background). Routing is pinned by a pure helper
-	// so the test suite can assert the routing contract without
-	// spinning a Pool.
+	// Route per JobKind, demoted by JobSpec.Background. `JobKindOptimize`
+	// → optimizeJobs (foreground); every other kind (`JobKindUpscale` AND
+	// empty-Kind legacy default) → upscaleJobs (background), as does ANY
+	// job flagged Background. Routing is pinned by a pure helper so the
+	// test suite can assert the routing contract without spinning a Pool.
 	jobsChan := p.upscaleJobs
-	if routesToOptimizeChannel(spec.Kind) {
+	if routesToOptimizeChannel(spec.Kind, spec.Background) {
 		jobsChan = p.optimizeJobs
 	}
 	select {
@@ -474,13 +474,20 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 // isRenderGap test-affordance convention used elsewhere in the project.
 //
 // **Contract**: `JobKindOptimize` is the only kind that routes to the
-// optimize/foreground channel. Every other kind (`JobKindUpscale` AND
-// the empty-Kind zero value) routes to upscale/background. The empty
-// default exists because many legacy test fixtures + the
-// pre-batch-feature `bridge upscale` CLI invoke `JobSpec{...}` without
-// setting Kind explicitly.
-func routesToOptimizeChannel(kind JobKind) bool {
-	return kind == JobKindOptimize
+// optimize/foreground channel, AND only when the job is not flagged
+// background. Every other kind (`JobKindUpscale` AND the empty-Kind
+// zero value) routes to upscale/background. The empty default exists
+// because many legacy test fixtures + the pre-batch-feature
+// `bridge upscale` CLI invoke `JobSpec{...}` without setting Kind
+// explicitly.
+//
+// The `background` demotion exists for the auto-optimize sweeper: its
+// jobs are `JobKindOptimize` (they must mint `optimized-*` variant
+// IDs) but nobody is waiting on them, so putting them on the
+// foreground lane would starve the on-demand CarPlay path they exist
+// to serve. See the `JobSpec.Background` docstring.
+func routesToOptimizeChannel(kind JobKind, background bool) bool {
+	return kind == JobKindOptimize && !background
 }
 
 // notifyStateChangeFn returns the current onStateChange callback

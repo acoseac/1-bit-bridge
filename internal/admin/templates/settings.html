@@ -479,6 +479,28 @@
         </small>
       </div>
 
+      <div class="field">
+        <label class="checkbox">
+          <input name="autoOptimizeEnabled" type="checkbox" role="switch" {{if .Data.AutoOptimizeEnabled}}checked{{end}}>
+          Pre-generate CarPlay variants
+        </label>
+        <small class="hint">
+          Builds the optimized variants above <em>ahead of time</em> instead of
+          waiting for a device to ask. Without this, the first time you play any
+          track in the car the app streams the full hi-res file — the optimized
+          copy only exists in time for the <em>next</em> play, so on shuffle the
+          saving rarely lands. Off by default: it spends disk and CPU on tracks
+          nobody has requested yet.
+          <br>
+          Sweeps newest-indexed tracks first, at most
+          <strong>{{.Data.AutoOptimizeMaxPerSweep}}</strong> per pass, and stops
+          if free space on the variants volume would fall below
+          <strong>{{bytesHuman .Data.AutoOptimizeMinFreeBytes}}</strong>. Runs on the
+          low-priority lane, so an on-demand request always jumps the queue.
+          Applies immediately — no restart.
+        </small>
+      </div>
+
       <div id="upscale-stats" class="upscale-stats" hidden>
         <h3>Upscale stats</h3>
         <dl class="status-grid">

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -191,6 +192,93 @@ func fingerprintStateClosure(enabled, active bool, degradedReason string, status
 			LastFinishedAt: timePtrIfSet(lastEnd),
 			NextDueAt:      timePtrIfSet(nextDue),
 			Last:           last,
+		}
+	}
+}
+
+// autoOptimizeStateClosure adapts the auto-optimize sweeper's recorder
+// to the admin's card DTO. `enabled` is a LIVE reader (not a snapshot):
+// the flag hot-applies via a settings PATCH, so a captured boolean would
+// leave the card claiming the opposite of reality until a restart.
+//
+// nil recorder → nil closure → the card is omitted entirely, which is
+// what a bridge with no upscale pool should render.
+func autoOptimizeStateClosure(enabled func() bool, degradedReason string, status *sweepStatus[admin.AutoOptimizeSweepCounts]) func() *admin.AutoOptimizeJobState {
+	if status == nil || enabled == nil {
+		return nil
+	}
+	return func() *admin.AutoOptimizeJobState {
+		running, lastStart, lastEnd, nextDue, last := status.snapshot()
+		on := enabled()
+		return &admin.AutoOptimizeJobState{
+			Enabled: on,
+			// Active means "the sweeper will do work on its next tick".
+			// The sweeper goroutine exists (status is non-nil) and the
+			// pool is wired, so the flag is the only remaining variable.
+			Active:         on,
+			DegradedReason: degradedReason,
+			Running:        running,
+			LastStartedAt:  timePtrIfSet(lastStart),
+			LastFinishedAt: timePtrIfSet(lastEnd),
+			NextDueAt:      timePtrIfSet(nextDue),
+			Last:           last,
+		}
+	}
+}
+
+// runSweepLoop is the shared cadence every background sweeper follows:
+// settle delay → one sweep → then a sweep per `interval` tick or per
+// `nudge`, until ctx is done. Extracted because the analysis, fingerprint
+// and auto-optimize loops were byte-identical, and the subtle part
+// deserves one home rather than three.
+//
+// **The single nudge drain is that subtle part.** A nudge that landed
+// DURING the settle window (typically the startup scan's post-scan hook)
+// is covered by the sweep about to run, so it is drained once. That is the
+// ONLY drain: a nudge arriving while a sweep is EXECUTING must stay
+// buffered, so the select below fires a follow-up for whatever the running
+// sweep was too early to see. Dropping it would lose exactly the
+// freshly-scanned files the nudge exists to catch.
+//
+// `interval <= 0 && nudge == nil` returns after the first sweep — the
+// single-shot call shape tests use. With a nudge wired the loop stays
+// parked for on-demand sweeps even without a periodic cadence.
+//
+// `sweep` owns its own status bookkeeping (sweepStarted / sweepFinished);
+// the loop only arms `scheduleNext`, so a caller keeps whatever
+// counts-on-failure semantics it needs.
+func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDelay, interval time.Duration, nudge <-chan struct{}, sweep func()) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(settleDelay):
+	}
+	select {
+	case <-nudge:
+	default:
+	}
+	if interval > 0 {
+		status.scheduleNext(time.Now().Add(interval))
+	}
+	sweep()
+	if interval <= 0 && nudge == nil {
+		return
+	}
+	var tickC <-chan time.Time
+	if interval > 0 {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		tickC = t.C
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tickC:
+			status.scheduleNext(time.Now().Add(interval))
+			sweep()
+		case <-nudge:
+			sweep()
 		}
 	}
 }

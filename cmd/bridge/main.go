@@ -2607,6 +2607,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// the admin Deps closures (wired further down) can read them; all stay
 	// nil when the feature is off, and the closures are only installed
 	// when analysisActive.
+	// postScanNudges collects every buffered-1 nudge channel that wants a
+	// non-blocking poke after each successful scan. ONE SetPostScanHook
+	// registration (below, once every sweeper has appended) fans out to
+	// all of them.
+	//
+	// **The single registration is load-bearing**: SetPostScanHook
+	// REPLACES the stored callback, so a second call silently unhooks the
+	// first sweeper. When the auto-optimize sweeper was added, registering
+	// its own hook here would have left freshly scanned tracks unanalysed
+	// with nothing failing anywhere. Append to the slice; never call
+	// SetPostScanHook a second time.
+	var postScanNudges []chan struct{}
+
 	var analysisPool *analyze.Pool
 	var analysisNudge chan struct{}
 	var analysisSweepState *sweepStatus[admin.AnalysisSweepCounts]
@@ -2618,16 +2631,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// coalesces (the sweep about to run covers it).
 		analysisNudge = make(chan struct{}, 1)
 		analysisSweepState = &sweepStatus[admin.AnalysisSweepCounts]{}
-		// Post-scan hook: analyse freshly indexed music right after every
+		// Post-scan nudge: analyse freshly indexed music right after every
 		// successful scan (periodic, startup, and admin-triggered — all
 		// route through Scanner.Scan) instead of waiting out the next
-		// sweep tick. Cheap non-blocking send; the scanner never blocks.
-		scanner.SetPostScanHook(func() {
-			select {
-			case analysisNudge <- struct{}{}:
-			default:
-			}
-		})
+		// sweep tick. Registered via postScanNudges rather than its own
+		// SetPostScanHook call — see that slice's docstring.
+		postScanNudges = append(postScanNudges, analysisNudge)
 		// Joined via bgWriters: the sweeper queries the store and enqueues
 		// analysis jobs whose completions write it back, so it must drain
 		// before Store.Close() like the other manifest writers.
@@ -2708,6 +2717,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 	var upscalePool *transcode.Pool
 	var upscaleCoordinator *transcode.Coordinator
+	// Auto-optimize sweeper handles, in runServe scope so the admin Deps
+	// closures wired further down can read them. Both stay nil when the
+	// feature can't run (no upscale pool, or the optimize kind opted out).
+	var autoOptimizeNudge chan struct{}
+	var autoOptimizeSweepState *sweepStatus[admin.AutoOptimizeSweepCounts]
 	if upscaleActive {
 		upscalePool = transcode.NewPool(manifestStore, cfg.Upscale.EffectiveWorkers(), cfg.Upscale.EffectiveQueueCap())
 		defer upscalePool.Stop()
@@ -2783,6 +2797,60 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		apiSrv.WithVariantDeleter(&variantDeleterAdapter{store: manifestStore})
 		apiSrv.WithInflightDropper(&inflightDropperAdapter{pool: upscalePool})
 
+		// Auto-optimize sweeper: pre-generates CarPlay `optimized-*`
+		// variants so iOS never has to play the hi-res source while it
+		// waits for one (see cmd/bridge/auto_optimize.go for why the lazy
+		// path structurally misses on first play). Wired only when the
+		// pool exists AND the optimize kind is enabled; the `enabled`
+		// flag itself is read LIVE per sweep so an admin Settings flip
+		// hot-applies on the next nudge.
+		//
+		// bgWriters-joined: completions call UpsertVariant, so the
+		// sweeper's work must drain before Store.Close() like every other
+		// manifest writer.
+		if cfg.Upscale.EffectiveOptimizeEnabled() {
+			autoOptimizeNudge = make(chan struct{}, 1)
+			autoOptimizeSweepState = &sweepStatus[admin.AutoOptimizeSweepCounts]{}
+			postScanNudges = append(postScanNudges, autoOptimizeNudge)
+			sweeper := &autoOptimizeSweeper{
+				store: manifestStore,
+				// apiSrv.Resolver() is the hot-reloading resolver, so a
+				// runtime root add/remove is honoured without a restart
+				// (same rationale as the upscale enqueuer's).
+				resolver:  apiSrv.Resolver(),
+				enqueue:   upscalePool.Enqueue,
+				outputDir: liveVariantsDir,
+				enabled: func() bool {
+					live := cfgHolder.Load()
+					if live == nil {
+						return false // defensive: never sweep on a nil snapshot
+					}
+					return live.Upscale.Enabled &&
+						live.Upscale.EffectiveOptimizeEnabled() &&
+						live.Upscale.AutoOptimize.Enabled
+				},
+				maxPerSweep: func() int {
+					if live := cfgHolder.Load(); live != nil {
+						return live.Upscale.AutoOptimize.EffectiveMaxPerSweep()
+					}
+					return config.DefaultAutoOptimizeMaxPerSweep
+				},
+				minFreeBytes: func() int64 {
+					if live := cfgHolder.Load(); live != nil {
+						return live.Upscale.AutoOptimize.EffectiveMinFreeBytes()
+					}
+					return config.DefaultAutoOptimizeMinFreeBytes
+				},
+				diskFree: transcode.AvailableDiskSpaceNearest,
+			}
+			bgWriters.Add(1)
+			go func() {
+				defer bgWriters.Done()
+				runAutoOptimizeSweeper(scanCtx, sweeper, cfg.AutoOptimizeInterval(),
+					autoOptimizeNudge, autoOptimizeSweepState)
+			}()
+		}
+
 		// Periodic integrity sweep: walks `track_variants` on the
 		// configured cadence (default 1 h, opt-out via
 		// `integrity.variantSweepIntervalSec: 0`) and reconciles
@@ -2838,6 +2906,33 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			stopOrphanSweeper := orphanSweeper.Start(scanCtx)
 			defer stopOrphanSweeper()
 		}
+	}
+
+	// THE post-scan hook — one registration fanning out to every sweeper
+	// that asked for a nudge (see postScanNudges). Registered here, after
+	// both the analysis and auto-optimize blocks have appended, because
+	// SetPostScanHook REPLACES rather than appends.
+	//
+	// Landing after RunPeriodic already started is the pre-existing,
+	// intended pattern: Scanner.postScanHook is an atomic.Pointer
+	// specifically so boot-time wiring can't race an in-flight startup
+	// scan, and each sweeper's settle-delay-then-sweep covers a startup
+	// scan that finished before this line ran.
+	//
+	// The sends are non-blocking on buffered-1 channels, so the hook
+	// stays cheap enough for the scanner goroutine as its contract
+	// requires — a pending nudge coalesces with the sweep it would have
+	// triggered.
+	if len(postScanNudges) > 0 {
+		nudges := postScanNudges // capture; the slice isn't appended to after this
+		scanner.SetPostScanHook(func() {
+			for _, ch := range nudges {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		})
 	}
 
 	// /v1/upscale/stats wiring. Always registered so paired iOS
@@ -3215,8 +3310,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		FingerprintState: fingerprintStateClosure(cfg.Fingerprint.Enabled,
 			fingerprintCache != nil, fingerprintDegraded, fingerprintSweepState),
 		TriggerFingerprintSweep: nudgeTriggerClosure(fingerprintNudge),
-		TriggerDuplicatesPass:   nudgeTriggerClosure(duplicatesNudge),
-		DuplicatesSweepRun:      jobRunClosure(duplicatesSweepState),
+		// Auto-optimize card + trigger. Both nil unless the sweeper is
+		// wired (upscale pool present AND the optimize kind enabled), so a
+		// bridge that can't pre-generate renders no card rather than a
+		// permanently-inactive one. The `enabled` reader is live because
+		// the flag hot-applies.
+		AutoOptimizeState: autoOptimizeStateClosure(func() bool {
+			live := cfgHolder.Load()
+			return live != nil && live.Upscale.AutoOptimize.Enabled
+		}, "", autoOptimizeSweepState),
+		TriggerAutoOptimizeSweep: nudgeTriggerClosure(autoOptimizeNudge),
+		TriggerDuplicatesPass:    nudgeTriggerClosure(duplicatesNudge),
+		DuplicatesSweepRun:       jobRunClosure(duplicatesSweepState),
 		// Last/next-run recorders for the smart-mix + backup cards (nil
 		// when the respective loop isn't running).
 		SmartMixRun: jobRunClosure(smartMixRunState),

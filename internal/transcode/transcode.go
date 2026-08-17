@@ -254,6 +254,24 @@ type JobSpec struct {
 	// `Coordinator.Submit`.
 	Kind JobKind
 
+	// Background marks work nobody is waiting on — today the
+	// auto-optimize sweeper's speculative pre-generation. It selects
+	// the Pool's LOW-priority channel while leaving `Kind` (and thus
+	// `VariantID()`) untouched.
+	//
+	// **Load-bearing**: `optimizeJobs` is the FOREGROUND lane, sized
+	// for the latency-sensitive CarPlay plug-in path. Routing a
+	// library-wide speculative sweep onto it would head-of-line block
+	// the very request the two-channel queue was built to protect —
+	// the pre-PR-#316-era regression in a new costume. Kind alone
+	// cannot express this: a swept job and an on-demand job are the
+	// same KIND of work with opposite urgency.
+	//
+	// Zero value false = foreground, so every existing caller
+	// (`POST /v1/upscale`, both CLIs, the Coordinator batch paths)
+	// keeps its current lane with no edit.
+	Background bool
+
 	// BatchID groups this JobSpec into one operator-initiated batch
 	// (v1.3 Coordinator). The zero-value uuid.UUID means the job was
 	// submitted outside the batch path — legacy `POST /v1/upscale`

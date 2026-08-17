@@ -216,6 +216,19 @@ type settingsResponse struct {
 	// optimize eligibility closures + the /v1/health advertisement are
 	// resolved once at `bridge serve` startup.
 	OptimizeEnabled bool `json:"optimizeEnabled"`
+
+	// AutoOptimizeEnabled is the CarPlay variant PRE-GENERATION gate
+	// (`upscale.autoOptimize.enabled`). Distinct from OptimizeEnabled,
+	// which gates whether the optimize KIND exists at all: this one only
+	// says whether the bridge builds those variants ahead of a request.
+	// Hot-applying — the sweeper reads the flag live — so a flip does
+	// NOT set restartRequired.
+	AutoOptimizeEnabled bool `json:"autoOptimizeEnabled"`
+	// AutoOptimizeMaxPerSweep / AutoOptimizeMinFreeBytes are the RESOLVED
+	// effective values (zero YAML → the package defaults), so the UI
+	// shows what the sweeper will actually do rather than a blank.
+	AutoOptimizeMaxPerSweep  int   `json:"autoOptimizeMaxPerSweep"`
+	AutoOptimizeMinFreeBytes int64 `json:"autoOptimizeMinFreeBytes"`
 	// LibraryWatchEnabled is the fsnotify instant-update watcher opt-in
 	// (cfg.LibraryWatch.Enabled, default false). Restart-required: the
 	// watcher goroutine is spawned once at `bridge serve` startup.
@@ -1822,6 +1835,9 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		AnalysisEnabled:          cfg.Analysis.Enabled,
 		SmartPlaylistsEnabled:    cfg.SmartPlaylists.Enabled,
 		OptimizeEnabled:          cfg.Upscale.EffectiveOptimizeEnabled(),
+		AutoOptimizeEnabled:      cfg.Upscale.AutoOptimize.Enabled,
+		AutoOptimizeMaxPerSweep:  cfg.Upscale.AutoOptimize.EffectiveMaxPerSweep(),
+		AutoOptimizeMinFreeBytes: cfg.Upscale.AutoOptimize.EffectiveMinFreeBytes(),
 		LibraryWatchEnabled:      cfg.LibraryWatch.Enabled,
 		EnrichMusicBrainzBaseURL: cfg.Enrich.MusicBrainzBaseURL,
 		EnrichCoverArtBaseURL:    cfg.Enrich.CoverArtBaseURL,
@@ -1947,6 +1963,12 @@ type settingsPatch struct {
 	// Restart-required: the optimize closures + health advertisement
 	// are resolved once at `bridge serve` startup.
 	OptimizeEnabled *bool `json:"optimizeEnabled,omitempty"`
+
+	// AutoOptimizeEnabled toggles background pre-generation of CarPlay
+	// variants. HOT-APPLYING (no restartRequired): the sweeper reads the
+	// flag on every sweep, and the PATCH nudges it so an off→on flip
+	// starts work immediately — the TriggerDuplicatesPass precedent.
+	AutoOptimizeEnabled *bool `json:"autoOptimizeEnabled,omitempty"`
 	// LibraryWatchEnabled toggles the fsnotify instant-update watcher.
 	// Restart-required: the watcher goroutine is spawned once at
 	// `bridge serve` startup (same startup-wired shape as UpscaleEnabled).
@@ -2044,6 +2066,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		mdnsWasEnabled       bool
 		mdnsNowEnabled       bool
 		duplicatesChanged    bool
+		// autoOptimizeFlipped: the pre-generation gate changed value.
+		// Hot-applies via a sweeper nudge instead of restartRequired.
+		autoOptimizeFlipped bool
 	)
 	updateErr := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
 		if p.LibraryName != nil {
@@ -2153,6 +2178,17 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// `bridge serve` startup, so a runtime flip needs a
 				// restart (same shape as UpscaleEnabled).
 				restart = true
+			}
+		}
+		if p.AutoOptimizeEnabled != nil {
+			if *p.AutoOptimizeEnabled != next.Upscale.AutoOptimize.Enabled {
+				next.Upscale.AutoOptimize.Enabled = *p.AutoOptimizeEnabled
+				// Deliberately NOT restart-required. The sweeper reads this
+				// flag live on every sweep, so the only thing a flip needs is
+				// a nudge — fired after the config is persisted and published
+				// (see the nudge block at the end of this handler). Same
+				// hot-apply shape as duplicates.filter.
+				autoOptimizeFlipped = true
 			}
 		}
 		if p.LibraryWatchEnabled != nil {
@@ -2336,6 +2372,14 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if duplicatesChanged && s.deps.TriggerDuplicatesPass != nil {
 		s.deps.TriggerDuplicatesPass()
+	}
+	// Nudge on BOTH directions of the auto-optimize flip. On→off matters
+	// as much as off→on: the sweeper re-reads the flag and records a
+	// disabled sweep, so the Jobs card reflects the operator's change
+	// immediately instead of showing frozen numbers from the last real
+	// run until the next tick (which can be hours away).
+	if autoOptimizeFlipped && s.deps.TriggerAutoOptimizeSweep != nil {
+		s.deps.TriggerAutoOptimizeSweep()
 	}
 
 	writeJSON(w, http.StatusOK, settingsPatchResponse{RestartRequired: restart})

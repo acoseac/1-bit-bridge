@@ -1117,6 +1117,82 @@ The follow-up to the export work, which is what made the volume visible.
   `TestRun_FullReportShape` enumerates check names in order, so adding a check is a
   deliberate edit rather than a silent one.
 
+### Auto-optimize: background pre-generation of CarPlay variants (2026-08-17)
+
+`upscale.autoOptimize.enabled` (default **off**) turns on a serve-side sweeper that
+builds `optimized-*` variants ahead of a request. **No wire change** — variants already
+ride `Track.variants`, so iOS discovers them on the next sync with no app-side edit, no
+`ProtocolVersion` bump, no PROTOCOL.md change and no Mirror-PR (`bridge optimize` has
+always been able to mint variants nobody asked for; only the trigger is new).
+
+- **The motivation is a structural miss, not latency.** iOS mints these lazily:
+  `PlayerService.resolveVariantID` tier 0 asks for an optimized variant when CarPlay is
+  the active output and, finding none, returns nil → plays the **hi-res source** while
+  firing a fire-and-forget `requestOptimize`, so only the NEXT play is cheap. On shuffle
+  nearly every play is a first play, and the bandwidth saving almost never lands. The
+  download path parks the job in `.generatingVariant` for up to **90 s** and falls back
+  to the source on timeout. Don't re-frame this as "saves a few seconds".
+- **`JobSpec.Background` is the load-bearing field, and `Kind` cannot express it.**
+  `optimizeJobs` is the Pool's FOREGROUND lane, added specifically so an on-demand
+  CarPlay request doesn't head-of-line block behind a batch. A swept job is the same
+  KIND of work with the opposite urgency, so `routesToOptimizeChannel(kind, background)`
+  demotes it to the low lane while `Kind` still drives `VariantID()`. Enqueuing a
+  library-wide sweep on the foreground lane re-opens the exact HOL blocking the
+  two-channel queue exists to prevent — with no symptom visible bridge-side. Pinned by
+  `TestRoutesToOptimizeChannel` + `TestPoolBackgroundOptimizeUsesUpscaleLane` (asserted
+  through the channels, not through timing) and by the sweeper's own
+  `TestAutoOptimizeSweepEnqueuesBackgroundJobs`.
+- **The candidate query is `ListAutoOptimizeCandidates`, deliberately NOT
+  `ListTrackProjectionsUnderPrefix`** ([manifest/auto_optimize.go](internal/manifest/auto_optimize.go)).
+  That one backs the admin Inspector, where operator-truth means showing everything;
+  a path that spends disk and CPU needs three things it lacks: **UPnP-routed rows
+  excluded** (measured on the author's hybrid fixture: 1,559 eligible rows, **1,525
+  routed from a Chord 2Go** — unfiltered, every tick resolve-fails them, the shape
+  `TrackPathsLocal` fixed for the analysis sweeper); **`dupe_suppressed = 0`** (a
+  suppressed row is never served, so its variant could never be requested);
+  and **stale variants selected, not just missing ones** — `HasVariant` is existence-only,
+  so a re-encoded source keeps its old sidecar forever, `serveVariant` answers
+  `410 variant_stale`, iOS silently falls back to the source and nothing ever
+  regenerates it. All three arms negative-control-verified.
+- **Staleness compares the variant against the TRACK ROW, and the sweeper stamps
+  `SourceMTimeNS`/`SourceSize` from that same row.** Self-consistency, not laziness: a
+  freshly written variant necessarily satisfies the predicate and cannot be re-selected.
+  Stamping a LIVE stat instead (which looks more correct) makes every variant read as
+  stale whenever the scanner hasn't caught up — a regenerate-every-sweep loop on exactly
+  the files that changed most recently. The scanner stays the authority on what a file
+  is; a drifted file heals on its next scan. Matches `Coordinator.buildOptimizeCandidates`,
+  so a swept variant is indistinguishable from an on-demand one.
+- **`maxPerSweep` is not just a queue guard.** `UpsertVariant` strict-advances the parent
+  track's `indexed_at`, so an uncapped first sweep pushes one delta row per variant to
+  every paired device at once. The cap turns that into a drip. `minFreeBytes` is a
+  RUNNING budget (accumulating `ProjectedSize` per candidate), because the on-demand
+  path's per-batch `diskPreflight` is a point check and cannot bound a loop that runs
+  forever. The disk probe **fails CLOSED** — no free-space reading means no way to honour
+  the floor, and a skipped sweep costs nothing while a wrong guess fills the operator's
+  volume. Both defaults resolve from zero AND negative input (a `-1` typed hoping to
+  disable a cap must not yield an unbounded sweep).
+- **Ordering is `indexed_at DESC`.** Newest-indexed first is both the literal ask and the
+  right spend order under a cap or a floor — the head of the queue is what actually gets
+  built. Considered and rejected: filtering to a *curated* scope (favorites / playlists /
+  CarPlay history). Those tables are opt-in per device on iOS and empty on both live
+  bridges, so a curated scope silently does nothing; ordering achieves the same
+  prioritisation without a config that can be wrong.
+- **`Scanner.SetPostScanHook` REPLACES — never call it twice.** `cmd/bridge` now collects
+  nudge channels in `postScanNudges` and registers ONE fan-out hook after every sweeper
+  has appended. Registering a second hook for this feature would have silently unhooked
+  the analysis sweeper, leaving freshly scanned tracks unanalysed with nothing failing
+  anywhere. Landing the registration after `RunPeriodic` has started is the pre-existing
+  intended pattern (`postScanHook` is an `atomic.Pointer` for exactly that reason).
+- **The settings toggle HOT-APPLIES — deliberately unlike every sibling audio flag.** The
+  sweeper reads `enabled` live per sweep, so the PATCH nudges it instead of setting
+  `RestartRequired` (the `duplicates.filter` precedent). The nudge fires in BOTH
+  directions: on→off is what makes the Jobs card stop showing numbers from the last real
+  run instead of waiting out a tick hours away. The outer `upscale.enabled` gate stays
+  restart-required (the Pool is wired at boot).
+- **A disabled sweep returns a `Disabled`-marked counts struct, not nil.** `nil` means
+  "failed, keep the previous numbers" in `sweepStatus.sweepFinished`, which would freeze
+  the card on a stale successful run right after the operator turned the feature off.
+
 ## Repo clean-up
 
 Pre-push:

@@ -2387,6 +2387,10 @@ function initSettings() {
       // upscaleEnabled). Restart-required — the optimize closures are
       // resolved once at `bridge serve` startup.
       optimizeEnabled: fd.get("optimizeEnabled") === "on",
+      // Background pre-generation of those optimize variants. NOT
+      // restart-required — the sweeper reads the flag live and the PATCH
+      // nudges it, so an off→on flip starts work immediately.
+      autoOptimizeEnabled: fd.get("autoOptimizeEnabled") === "on",
       // fsnotify library watcher opt-in. Restart-required — the
       // watcher goroutine starts at `bridge serve` startup.
       libraryWatchEnabled: fd.get("libraryWatchEnabled") === "on",
@@ -6444,6 +6448,7 @@ function initJobs() {
   wireJobButton("jobs-analyze-now", () => API.post("/api/analysis/sweep"), "Sweep queued");
   wireJobButton("jobs-fp-now", () => API.post("/api/fingerprint/sweep"), "Sweep queued");
   wireJobButton("jobs-dupes-restamp", () => API.post("/api/duplicates/sweep"), "Re-evaluate queued");
+  wireJobButton("jobs-ao-now", () => API.post("/api/upscale/auto-optimize/sweep"), "Sweep queued");
 
   // Fingerprint Enable: a settings PATCH rather than a job trigger, so it
   // gets its own handler instead of wireJobButton — the post-click state
@@ -6558,6 +6563,27 @@ function agoOrDash(iso) {
   return isAbsentTime(iso) ? "—" : formatTimeAgo(new Date(iso));
 }
 
+// formatAutoOptimizeResult renders one auto-optimize sweep's outcome.
+//
+// The two "stopped early" reasons are what an operator actually needs:
+// without them a sweep that enqueued nothing because the volume is nearly
+// full is indistinguishable from one that had nothing left to do.
+function formatAutoOptimizeResult(last) {
+  if (!last) return "—";
+  if (last.disabled) return "turned off";
+  const parts = [`${last.enqueued} queued`];
+  if (last.regenerated) parts.push(`${last.regenerated} refreshed (source changed)`);
+  if (last.alreadyInflight) parts.push(`${last.alreadyInflight} already building`);
+  if (last.unresolvable) parts.push(`${last.unresolvable} unreadable`);
+  let text = parts.join(" · ");
+  if (last.diskFloorReached) {
+    text += ` — paused, ${formatBytes(last.freeBytes)} free is at the ${formatBytes(last.minFreeBytes)} floor`;
+  } else if (last.queueSaturated) {
+    text += " — queue full, rest deferred";
+  }
+  return text;
+}
+
 function setBadge(id, cls, text) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -6643,6 +6669,25 @@ function renderJobCards(j) {
     setText("job-fp-counts", fp.last
       ? `${fp.last.candidates} examined · ${fp.last.resolved} identified · ${fp.last.requeued} re-queued`
       : "—");
+  }
+
+  // CarPlay pre-generation (auto-optimize). The whole card stays hidden
+  // when the field is absent — that means no upscale pool on this bridge,
+  // so a card explaining a feature that can't run would be noise.
+  const ao = j.autoOptimize;
+  const aoCard = document.getElementById("job-ao-card");
+  if (aoCard) aoCard.hidden = !ao;
+  if (ao) {
+    setBadge("job-ao-state", ao.active ? "running" : "idle", ao.active ? "on" : "off");
+    const aoBtn = document.getElementById("jobs-ao-now");
+    if (aoBtn) aoBtn.hidden = !ao.active;
+    const last = ao.last;
+    setText("job-ao-remaining", last && !last.disabled
+      ? (last.remaining > 0 ? `${last.remaining} tracks want a variant` : "all caught up")
+      : "—");
+    setText("job-ao-last", ao.running ? "sweeping now" : agoOrDash(ao.lastFinishedAt));
+    setText("job-ao-next", formatInFuture(ao.nextDueAt));
+    setText("job-ao-counts", formatAutoOptimizeResult(last));
   }
 
   // Duplicate serving.

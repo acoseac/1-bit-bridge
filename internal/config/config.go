@@ -1040,6 +1040,107 @@ type UpscaleConfig struct {
 	// mechanism — moves do NOT change the wire shape; iOS doesn't
 	// care.
 	VariantsDir string `yaml:"variantsDir,omitempty"`
+
+	// AutoOptimize pre-generates `optimized-*` variants in the
+	// background instead of waiting for a device to ask. Opt-in.
+	AutoOptimize AutoOptimizeConfig `yaml:"autoOptimize,omitempty"`
+}
+
+// AutoOptimizeConfig gates and bounds the serve-side sweeper that
+// pre-generates CarPlay-optimized variants.
+//
+// **Why it exists**: `optimized-*` variants are otherwise minted
+// lazily, on demand. iOS's CarPlay routing (`resolveVariantID` tier 0)
+// asks for one when the car is the active output and, finding none,
+// plays the hi-res SOURCE while firing a fire-and-forget generate
+// request — so only the NEXT play of that track is cheap. On a shuffle
+// across a large library nearly every play is a first play, and the
+// bandwidth saving the feature exists for almost never lands. The
+// download path is better but still stalls the job up to 90 s waiting
+// for the transcode, falling back to the source on timeout.
+//
+// Ignored unless `Upscale.Enabled` AND `EffectiveOptimizeEnabled()`
+// are both true — the sweeper rides the same pool and the same
+// eligibility gate as the on-demand path.
+type AutoOptimizeConfig struct {
+	// Enabled turns the sweeper on. Default false — pre-generating
+	// spends disk and CPU on tracks nobody has asked for yet, which
+	// is the operator's call to make.
+	//
+	// Read LIVE on every sweep (not snapshotted at startup), so an
+	// admin Settings flip hot-applies via a sweeper nudge — the
+	// `duplicates.filter` precedent. The POOL still needs
+	// `upscale.enabled` at boot, so that outer gate stays
+	// restart-required.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// IntervalSec is the periodic sweep cadence. Zero (the default)
+	// inherits `scanIntervalSec`, which is the right coupling: the
+	// scanner is what discovers new tracks, and the post-scan hook
+	// already nudges an immediate sweep, so the tick is only a
+	// safety net for candidates a nudge missed.
+	IntervalSec int `yaml:"intervalSec,omitempty"`
+
+	// MaxPerSweep caps how many jobs one sweep enqueues. Zero
+	// resolves to DefaultAutoOptimizeMaxPerSweep.
+	//
+	// **Not just a queue guard**: `UpsertVariant` strict-advances the
+	// parent track's `indexed_at`, which is what iOS delta-sync
+	// filters on. Without a cap, enabling this on a library with
+	// thousands of eligible tracks would push one delta row per
+	// generated variant to every paired device in a single burst.
+	// The cap turns that into a drip.
+	MaxPerSweep int `yaml:"maxPerSweep,omitempty"`
+
+	// MinFreeBytes is the free-space floor on the variants volume.
+	// A sweep stops enqueuing once the projected output would push
+	// available space below it. Zero resolves to
+	// DefaultAutoOptimizeMinFreeBytes (5 GiB).
+	//
+	// The per-batch `diskPreflight` the on-demand path uses is a
+	// point check; a sweeper that runs forever needs a running one,
+	// and the two live bridges differ by six orders of magnitude in
+	// headroom (a B2 mount vs. a Windows box's local disk), so this
+	// is the knob that makes one default safe on both.
+	MinFreeBytes int64 `yaml:"minFreeBytes,omitempty"`
+}
+
+// Auto-optimize sweeper defaults. Deliberately conservative: the
+// feature is speculative work, so its failure mode should be "slower
+// than the operator hoped", never "filled the disk" or "flooded every
+// paired device with a delta".
+const (
+	// DefaultAutoOptimizeMaxPerSweep bounds one sweep's enqueues.
+	// 200 tracks at typical optimize throughput is on the order of a
+	// few minutes of pool time — enough to make visible progress
+	// between sweeps without monopolising the queue.
+	DefaultAutoOptimizeMaxPerSweep = 200
+
+	// DefaultAutoOptimizeMinFreeBytes keeps 5 GiB free on the
+	// variants volume.
+	DefaultAutoOptimizeMinFreeBytes int64 = 5 << 30
+)
+
+// EffectiveMaxPerSweep resolves the per-sweep enqueue cap, defaulting
+// at zero. A negative value is treated as the default rather than as
+// "unlimited" — the cap is a safety property, so the ambiguous input
+// resolves to the safe reading.
+func (a AutoOptimizeConfig) EffectiveMaxPerSweep() int {
+	if a.MaxPerSweep > 0 {
+		return a.MaxPerSweep
+	}
+	return DefaultAutoOptimizeMaxPerSweep
+}
+
+// EffectiveMinFreeBytes resolves the free-space floor. Negative
+// resolves to the default for the same fail-safe reason as
+// EffectiveMaxPerSweep; an explicit 0 also takes the default, so
+// there is deliberately no YAML spelling for "ignore free space".
+func (a AutoOptimizeConfig) EffectiveMinFreeBytes() int64 {
+	if a.MinFreeBytes > 0 {
+		return a.MinFreeBytes
+	}
+	return DefaultAutoOptimizeMinFreeBytes
 }
 
 // EffectiveWorkers resolves the runtime worker count from the YAML
@@ -2197,6 +2298,17 @@ func (c *Config) Validate() error {
 	if c.Upscale.QueueCap < 0 {
 		return fmt.Errorf("upscale.queueCap: must be >= 0 (0 uses the default), got %d", c.Upscale.QueueCap)
 	}
+	// Auto-optimize cadence: ceiling-checked per the #529 overflow
+	// invariant — `time.Duration(n) * time.Second` wraps NEGATIVE past
+	// ~9.2e9 and `time.NewTicker` panics on a non-positive interval, so
+	// an absurd YAML value would crash `bridge serve` at startup rather
+	// than misbehave. Negatives are legal here (AutoOptimizeInterval
+	// clamps them to the inherited scan cadence) so only the ceiling
+	// needs refusing.
+	if c.Upscale.AutoOptimize.IntervalSec > maxIntervalSeconds {
+		return fmt.Errorf("upscale.autoOptimize.intervalSec: must be <= %d (0 inherits scanIntervalSec), got %d",
+			maxIntervalSeconds, c.Upscale.AutoOptimize.IntervalSec)
+	}
 	if c.Analysis.Workers < 0 {
 		return fmt.Errorf("analysis.workers: must be >= 0 (0 uses the computed default), got %d", c.Analysis.Workers)
 	}
@@ -2638,6 +2750,22 @@ func (c *Config) CheckLibraryRootsAccessible() []*LibraryRootError {
 // ScanInterval returns scanIntervalSec as a time.Duration.
 func (c *Config) ScanInterval() time.Duration {
 	return time.Duration(c.ScanIntervalSec) * time.Second
+}
+
+// AutoOptimizeInterval returns the auto-optimize sweep cadence.
+// Zero-or-unset in YAML inherits `scanIntervalSec` — the scanner is
+// what discovers new tracks, and the post-scan hook already nudges an
+// immediate sweep, so the periodic tick only needs to be a safety net
+// on the same rhythm. A negative value clamps to the inherited value
+// rather than disabling: the sweeper's off switch is
+// `upscale.autoOptimize.enabled`, and a cadence typo must not silently
+// become a second, invisible one.
+func (c *Config) AutoOptimizeInterval() time.Duration {
+	secs := c.Upscale.AutoOptimize.IntervalSec
+	if secs <= 0 {
+		secs = c.ScanIntervalSec
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // DefaultVariantSweepIntervalSec is the default cadence (1 h) for

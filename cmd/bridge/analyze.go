@@ -402,47 +402,8 @@ func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *br
 		}
 	}
 
-	// Settle delay so the sweep doesn't compete with startup work.
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(analysisSweeperSettleDelay):
-	}
-	// A nudge that landed DURING the settle window (e.g. the startup
-	// scan's post-scan hook) is covered by the sweep about to run —
-	// drain it once so we don't immediately re-sweep. This is the ONLY
-	// drain: a nudge arriving while a sweep is executing must stay
-	// buffered so the select below fires an immediate follow-up sweep
-	// for the freshly scanned files.
-	select {
-	case <-nudge:
-	default:
-	}
-	if interval > 0 {
-		status.scheduleNext(time.Now().Add(interval))
-	}
-	sweep()
-	if interval <= 0 && nudge == nil {
-		// Pre-nudge behaviour: single sweep, then done (CLI-ish call
-		// shapes / tests). With a nudge wired we stay parked for
-		// on-demand sweeps even without a periodic cadence.
-		return
-	}
-	var tickC <-chan time.Time
-	if interval > 0 {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		tickC = t.C
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tickC:
-			status.scheduleNext(time.Now().Add(interval))
-			sweep()
-		case <-nudge:
-			sweep()
-		}
-	}
+	// Cadence (settle delay, one-drain semantics, tick-or-nudge) lives in
+	// the shared runSweepLoop — see its docstring for why the nudge is
+	// drained exactly once.
+	runSweepLoop(ctx, status, analysisSweeperSettleDelay, interval, nudge, sweep)
 }
