@@ -490,18 +490,10 @@ type upscaleEnqueuerAdapter struct {
 	soxInfo func() (transcode.SoxInfo, error)
 }
 
-// soxCanDecode reports whether the installed sox can read absPath. Fails
-// OPEN on a nil closure or a probe error — the probe is an optimisation
-// for honest refusals, never a new way for enqueue to break.
+// soxCanDecode reports whether the installed sox can read absPath.
+// Fail-open policy lives in transcode.CanDecodeVia.
 func (a *upscaleEnqueuerAdapter) soxCanDecode(absPath string) bool {
-	if a.soxInfo == nil {
-		return true
-	}
-	info, err := a.soxInfo()
-	if err != nil {
-		return true
-	}
-	return info.CanDecode(absPath)
+	return transcode.CanDecodeVia(a.soxInfo, absPath)
 }
 
 // resolveAndLookupTrack is the shared scaffolding for `EnqueueOne`
@@ -3314,11 +3306,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// enqueue gates use, so a tile can't say "eligible" about a source
 		// the batch walk would refuse.
 		SoxCanDecode: func(p string) bool {
-			info, err := soxCache.snapshot()
-			if err != nil {
-				return true // fail open, as every other consumer does
-			}
-			return info.CanDecode(p)
+			return transcode.CanDecodeVia(soxCache.snapshot, p)
 		},
 		// Live runtime state of audio analysis (startup-computed gate),
 		// so the admin tile's `enabled` matches /v1/health's `waveform`

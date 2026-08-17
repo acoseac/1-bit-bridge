@@ -189,19 +189,9 @@ func (c *Coordinator) WithSoxInfo(fn func() (SoxInfo, error)) *Coordinator {
 }
 
 // canDecode reports whether the installed sox can read sourcePath.
-//
-// Fails OPEN on a nil closure or a probe error, matching
-// `upscaleEnqueuerAdapter.soxCanDecode`: the probe exists to make refusals
-// honest, never to become a new way for a batch to lose candidates.
+// Fail-open policy lives in CanDecodeVia.
 func (c *Coordinator) canDecode(sourcePath string) bool {
-	if c.soxInfo == nil {
-		return true
-	}
-	info, err := c.soxInfo()
-	if err != nil {
-		return true
-	}
-	return info.CanDecode(sourcePath)
+	return CanDecodeVia(c.soxInfo, sourcePath)
 }
 
 func NewCoordinator(

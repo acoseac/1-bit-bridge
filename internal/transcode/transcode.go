@@ -1127,6 +1127,29 @@ var soxFormatsForExt = map[string][]string{
 // the minimal-install case ProbeSox's HasFLAC field handles globally: an
 // apt sox without libsox-fmt-all can't read FLAC either, and this refuses
 // those per-source instead of only at feature-gate time.
+// CanDecodeVia reports whether the sox build described by `probe` can read
+// sourcePath, and is the single home for the FAIL-OPEN policy every consumer
+// of that verdict shares.
+//
+// Fails open on a nil closure AND on a probe error, on top of the two
+// fail-open cases CanDecode itself documents. The rule that matters: the probe
+// exists to make refusals HONEST — it must never become a new way for a
+// candidate walk to lose real work because sox couldn't be inspected.
+//
+// Exported and shared because this policy had been written out four times
+// (the per-track enqueuer, both batch walks, the auto-optimize sweeper) and
+// four copies of a safety default is four chances for one to drift.
+func CanDecodeVia(probe func() (SoxInfo, error), sourcePath string) bool {
+	if probe == nil {
+		return true
+	}
+	info, err := probe()
+	if err != nil {
+		return true
+	}
+	return info.CanDecode(sourcePath)
+}
+
 func (i SoxInfo) CanDecode(sourcePath string) bool {
 	if !i.FormatsKnown {
 		return true

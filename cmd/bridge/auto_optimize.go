@@ -82,18 +82,10 @@ type autoOptimizeSweeper struct {
 	soxInfo func() (transcode.SoxInfo, error)
 }
 
-// canDecode reports whether the installed sox can read path. Fails OPEN on
-// a nil closure or a probe error: the probe makes refusals honest, it must
-// never become a new way for the sweeper to skip real work.
+// canDecode reports whether the installed sox can read path.
+// Fail-open policy lives in transcode.CanDecodeVia.
 func (sw *autoOptimizeSweeper) canDecode(path string) bool {
-	if sw.soxInfo == nil {
-		return true
-	}
-	info, err := sw.soxInfo()
-	if err != nil {
-		return true
-	}
-	return info.CanDecode(path)
+	return transcode.CanDecodeVia(sw.soxInfo, path)
 }
 
 // sweepOnce enqueues up to `maxPerSweep` optimize jobs and returns the
