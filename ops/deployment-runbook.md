@@ -196,7 +196,7 @@ is actually being listened to. Hence `fingerprint.maxPerRun` (default 500) and
 
 **Helper scripts**: none on the host today — operator runs setup commands directly during install. Update flow uses the cross-compile + `scp .new` + two-step rename + `systemctl restart` pattern from "Step 2 — Windows production bridge" below, adapted for Linux (see canonical deploy procedure below).
 
-**Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR). The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deploy-bridge-vps.sh) (cross-compile → SHA-gated upload → two-step swap → `setcap` → restart → verify); the manual steps below are what it runs:
+**Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR). The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deploy-bridge-vps.sh) (cross-compile → SHA-gated upload → detached swap → `setcap` → restart → health-polled verify → prune); the manual steps below are what it runs. **Prefer the script** — it retries the health poll and prunes old backups; the manual form below is for when you need to drive a step by hand, and it must keep the same detached dispatch to be safe:
 
 ```sh
 # 1. Cross-compile against current main.
@@ -212,25 +212,41 @@ scp -i ~/.ssh/<VPS-SSH-KEY> dist/bridge-linux-amd64 \
 shasum -a 256 dist/bridge-linux-amd64                                                                 # local
 ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> 'sha256sum /tmp/bridge.new'                        # remote
 
-# 3. Two-step rename swap + restart (mirrors the Windows pattern;
-#    keeps the .old-<ts> backup for one-step rollback).
-ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> "
-  TS=\$(date +%Y%m%d-%H%M%S)
-  sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.old-\$TS
-  sudo mv /tmp/bridge.new /usr/local/bin/bridge
-  sudo setcap cap_net_bind_service=+ep /usr/local/bin/bridge
-  sudo systemctl restart 1-bit-bridge
-  sleep 2
-  systemctl is-active 1-bit-bridge
-"
+# 3. Two-step rename swap + restart, DISPATCHED DETACHED so a dropped SSH
+#    channel cannot kill the swap between the two `mv`s (see the note below —
+#    do NOT run these inline over the channel). Keeps the .old-<ts> backup.
+ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> "cat > /tmp/bridge-swap.sh" <<'EOS'
+set -e
+TS=$(date +%Y%m%d-%H%M%S)
+sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.old-$TS
+sudo mv /tmp/bridge.new /usr/local/bin/bridge
+sudo chmod +x /usr/local/bin/bridge
+sudo setcap cap_net_bind_service=+ep /usr/local/bin/bridge
+sudo systemctl restart 1-bit-bridge
+sleep 3
+echo "active: $(systemctl is-active 1-bit-bridge)"
+echo "SWAP_DONE backup=/usr/local/bin/bridge.old-$TS"
+EOS
+ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> \
+  'setsid nohup bash /tmp/bridge-swap.sh > /tmp/bridge-swap.log 2>&1 < /dev/null &'
 
-# 4. Verify version + LAN health (admin console requires the whitelisted IP).
+# 4. Verify over :443, which is open to everyone — so this works even if SSH
+#    is filtered right now, and needs no second SSH round trip.
 curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .leCertNotAfter'
 ```
 
 **Leave the `bridge.old-<ts>` backup ~24h** so a regression caught later has one-step rollback (`sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.broken && sudo mv /usr/local/bin/bridge.old-<ts> /usr/local/bin/bridge && sudo systemctl restart 1-bit-bridge`).
 
+**The script prunes those backups itself, but only AFTER health confirms the new binary serves traffic** (`KEEP_BACKUPS`, default 2 — the immediate rollback plus one behind it). Pruning earlier could delete the rollback path while it is still the thing you need. Two details are load-bearing:
+
+- **Sorted by the NAME's timestamp, never `ls -t`.** The name carries the *swap* time; mtime carries the local *build* time, and they disagree routinely (a binary built at 10:23 and deployed at 11:49). Verified against a fixture whose mtimes run opposite to its names: an `ls -t` prune deletes **exactly the two newest** backups and keeps the two oldest.
+- **A prune failure is a warning, not a deploy failure.** The deploy is already verified at that point, and this host's SSH flaps (below). Re-running the script prunes on the next pass.
+
+**Why this matters: the backups compete with the rclone VFS cache for the root disk.** They accumulate at ~44 MB per deploy and were never pruned before 2026-08-17, when 100 of them held **4.1 GB of the 29 GB root — 85% full, 4.3 GB free**. The mount runs `--vfs-cache-max-size 5G`, so the cache could not have reached its configured size, and the SQLite DB plus `data/backups/` share that same disk. Pruning to two took it to 71% / 8.2 GB free. If free space is under ~6 GB here, check for accumulated `bridge.old-*` before suspecting the library mount.
+
 **Don't `journalctl --vacuum-time` aggressively** during a debug loop — bridge logs are the only forensic surface (no separate log file path). 7-day default retention is fine; cut tighter only when disk pressure is real.
+
+**The swap is dispatched DETACHED (`setsid nohup`), and the verification polls `:443` rather than SSH.** Run inline over the SSH channel, the swap dies wherever the connection dies — and the window between the two `mv`s is the one state with **no binary at `/usr/local/bin/bridge`**. The running process survives on its held inode, so nothing looks wrong until the next restart, which then fails under `Restart=always` and takes the bridge down. On 2026-08-17 a deploy dropped exactly inside step 4; it happened to die *before* the first `mv`, which was luck. Diagnose an interrupted swap by comparing `/usr/local/bin/bridge version` against `/tmp/bridge.new version` and checking whether a `bridge.old-<today's ts>` exists — if the newest backup predates the attempt, the first `mv` never ran and nothing is broken. Progress lands in `/tmp/bridge-swap.log` on the host.
 
 **Cli-mode-only host.** Tailscale is NOT installed; `cfg.Tailscale.Mode` is `disabled`. The bridge advertises a single `https://bridge.ars.md/` endpoint and that's the only path iOS clients can use post-pairing. Adding Tailscale later is straightforward but currently out of scope.
 
@@ -290,6 +306,13 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 ```
 
 **Connection-issues hint** (re-stated for the post-merge loop): SSH and admin-port 7789 are whitelisted to the operator's public IP in ufw. A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Update ufw rules from the new IP.
+
+**SSH-flap note (2026-08-17): it is not the key, and it is not necessarily all-or-nothing.**
+
+- **Tell the classes apart by WHERE it fails.** `Operation timed out` on `:22` is a TCP-connect failure — it happens before any key is offered, so *no key can fix it*. A wrong key gives `Permission denied (publickey)` over an established connection instead. Confirm by probing ports: `:443` answering while `:22` is filtered on the same resolved IP is the allowlist.
+- **It can flap within seconds, and per-port.** Back-to-back probes gave timeout, then open, then twelve consecutive failures — while `:7789` stayed reachable throughout from the same workstation. So a single failed `ssh` proves nothing; probe twice before concluding anything, and re-run the deploy script (it is idempotent, and the SHA gate means a partial upload can never replace a working binary).
+- **A LAN host with its own allowlisted egress works as a pure TCP relay:** `ssh -J <RELAY-SSH> -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH>`. `-J` tunnels only TCP, so the key never leaves the workstation and no binary transits the relay — strictly better than copying either. Set `HOST` to a ProxyJump form to make the deploy script take the same route.
+- **Verification never needs SSH.** `/v1/health` on `:443` is open to everyone, so poll `serverVersion` there to confirm a deploy landed — which is what the script now does.
 
 
 ## Diagnosing client behavior from the journal
