@@ -119,7 +119,24 @@ type Store struct {
 //     are append-only and MUST NOT be rewritten once shipped (both live
 //     bridges ran it at v34/v35), so changing its SQL would alter only
 //     fresh installs while diverging from what deployed DBs actually did.
+//
+// Written out VERBATIM at each statement below rather than concatenated
+// in (`"… " + indexedAtAdvanceSQL + " …"`), following the
+// enrichmentMissPredicateSQL convention: a concatenated form is
+// compile-time-folded and equally safe, but it trips SonarCloud `go:S2077`
+// ("dynamically formatted SQL") and reads as an assembled query. Nothing at
+// the language level then stops the copies drifting —
+// TestIndexedAtAdvanceIsShared does.
 const indexedAtAdvanceSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)`
+
+// bumpIndexedAtByPathSQL is the whole statement for the four writers whose
+// ONLY job is the bump (UpsertVariant / DeleteVariant / UpsertAnalysis /
+// DeleteAnalysis) — one const, four callers, so those four cannot drift
+// from each other at all. Binds: (clock, path).
+const bumpIndexedAtByPathSQL = `
+		UPDATE tracks
+		   SET indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		 WHERE path = ?`
 
 // OpenStore opens (or creates) a SQLite DB at path and applies the schema.
 // The file and its parent directory are created if missing.
@@ -2254,6 +2271,16 @@ func marshalForStorage(t *Track) ([]byte, error) {
 // the contract documented on the Store type forbids them from
 // overlapping in SQLite. JSON marshalling stays outside the lock so
 // the critical section is one statement long.
+// markEnrichedSQL binds (tags_json, enriched_at, clock, path). The
+// indexed_at expression is indexedAtAdvanceSQL verbatim — see its docblock
+// for why it is not concatenated in.
+const markEnrichedSQL = `
+		UPDATE tracks
+		   SET tags_json   = ?,
+		       enriched_at = ?,
+		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		 WHERE path = ?`
+
 func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	raw, err := marshalForStorage(t)
 	if err != nil {
@@ -2280,13 +2307,7 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	// changes sampleRate / bitsPerSample / isDSD / codec, so the columns
 	// stamped at Upsert time can't drift.
 	now := s.now().UnixNano()
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE tracks
-		SET tags_json = ?,
-		    enriched_at = ?,
-		    indexed_at = `+indexedAtAdvanceSQL+`
-		WHERE path = ?
-	`, raw, now, now, t.Path)
+	_, err = s.db.ExecContext(ctx, markEnrichedSQL, raw, now, now, t.Path)
 	return err
 }
 
@@ -2474,6 +2495,14 @@ func (s *Store) ApplyAlbumTitleReconciliation(ctx context.Context, changed []Tra
 // applyReconciledTracks is the shared writer behind the post-scan
 // metadata-reconciliation passes (AlbumArtist, Year, TrackNumber). See
 // ApplyAlbumArtistReconciliation's docblock above for the full invariants.
+// applyReconciledTrackSQL binds (tags_json, clock, path). The indexed_at
+// expression is indexedAtAdvanceSQL verbatim — see its docblock.
+const applyReconciledTrackSQL = `
+		UPDATE tracks
+		   SET tags_json  = ?,
+		       indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		 WHERE path = ?`
+
 func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int, error) {
 	if len(changed) == 0 {
 		return 0, nil
@@ -2515,12 +2544,7 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	// The v25 format-fact columns are deliberately NOT re-stamped here:
 	// reconciliation edits AlbumArtist / Year only — never the format
 	// fields — so the columns stamped at Upsert time can't drift.
-	stmt, err := tx.PrepareContext(ctx, `
-		UPDATE tracks
-		SET tags_json = ?,
-		    indexed_at = `+indexedAtAdvanceSQL+`
-		WHERE path = ?
-	`)
+	stmt, err := tx.PrepareContext(ctx, applyReconciledTrackSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -6906,10 +6930,7 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 	//      under our `s.mu` writer-serialization contract anyway, but
 	//      keeping it atomic is also marginally faster.
 	now := s.now().UnixNano()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE tracks SET indexed_at = `+indexedAtAdvanceSQL+`
-		WHERE path = ?
-	`, now, v.SourcePath); err != nil {
+	if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, v.SourcePath); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -6932,6 +6953,15 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 // json_extract(tags_json,'$.artworkMBID'). Returns the number of track rows
 // updated (0 when unchanged or no track carries the MBID). Holds s.mu (SQLite
 // single-writer contract).
+// setArtworkVersionSQL binds (version, clock, artworkMBID, version). The
+// indexed_at expression is indexedAtAdvanceSQL verbatim — see its docblock.
+const setArtworkVersionSQL = `
+		UPDATE tracks
+		   SET artwork_version = ?,
+		       indexed_at      = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		 WHERE json_extract(tags_json, '$.artworkMBID') = ?
+		   AND COALESCE(artwork_version, '') <> ?`
+
 func (s *Store) SetArtworkVersionAndBumpIndex(ctx context.Context, artworkMBID, version string) (int64, error) {
 	if artworkMBID == "" || version == "" {
 		return 0, nil
@@ -6939,13 +6969,7 @@ func (s *Store) SetArtworkVersionAndBumpIndex(ctx context.Context, artworkMBID, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UnixNano()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE tracks SET
-			artwork_version = ?,
-			indexed_at = `+indexedAtAdvanceSQL+`
-		WHERE json_extract(tags_json, '$.artworkMBID') = ?
-		  AND COALESCE(artwork_version, '') <> ?
-	`, version, now, artworkMBID, version)
+	res, err := s.db.ExecContext(ctx, setArtworkVersionSQL, version, now, artworkMBID, version)
 	if err != nil {
 		return 0, err
 	}
@@ -7282,10 +7306,7 @@ func (s *Store) DeleteVariant(ctx context.Context, sourcePath, variantID string)
 		// strictly-greater indexed_at, keeping
 		// `delta-sync WHERE indexed_at > since` reliable.
 		now := s.now().UnixNano()
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE tracks SET indexed_at = `+indexedAtAdvanceSQL+`
-			WHERE path = ?
-		`, now, sourcePath); err != nil {
+		if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, sourcePath); err != nil {
 			return err
 		}
 	}
@@ -7780,10 +7801,7 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 	// visibleSame / counterSame split above.
 	if !visibleSame {
 		now := s.now().UnixNano()
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE tracks SET indexed_at = `+indexedAtAdvanceSQL+`
-			WHERE path = ?
-		`, now, a.SourcePath); err != nil {
+		if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, a.SourcePath); err != nil {
 			return err
 		}
 	}
@@ -7948,10 +7966,7 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 		return tx.Commit() // nothing deleted → no bump.
 	}
 	now := s.now().UnixNano()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE tracks SET indexed_at = `+indexedAtAdvanceSQL+`
-		WHERE path = ?
-	`, now, sourcePath); err != nil {
+	if _, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, sourcePath); err != nil {
 		return err
 	}
 	return tx.Commit()

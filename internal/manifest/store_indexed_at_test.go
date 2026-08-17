@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -312,29 +313,32 @@ func TestIndexedAtBumpsClearTheLibraryWideMax(t *testing.T) {
 
 			b.run(t, s)
 
-			got := indexedAtOf(t, s, target)
-			if got <= max {
-				t.Fatalf("%s left indexed_at at %d, not past the library max %d — "+
-					"a client whose cursor is %d never sees the change",
-					b.name, got, max, max)
-			}
-			// The bump must remain visible to a cursor at the old max.
-			since := time.Unix(0, max).UTC()
-			delta, err := s.ListTracks(ctx, &since)
-			if err != nil {
-				t.Fatal(err)
-			}
-			found := false
-			for _, tr := range delta {
-				if tr.Path == target {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("%s: target absent from the since-delta (got %d rows)", b.name, len(delta))
-			}
+			requireBumpClearedMax(t, s, b.name, target, max)
 		})
 	}
+}
+
+// requireBumpClearedMax asserts both halves of the contract: the bumped row
+// sits strictly above the pre-bump library max, AND it actually surfaces in
+// a since-delta taken at that max (the value check alone would pass for a
+// row the read path filters out for some other reason).
+func requireBumpClearedMax(t *testing.T, s *Store, writer, target string, max int64) {
+	t.Helper()
+	if got := indexedAtOf(t, s, target); got <= max {
+		t.Fatalf("%s left indexed_at at %d, not past the library max %d — "+
+			"a client whose cursor is %d never sees the change", writer, got, max, max)
+	}
+	since := time.Unix(0, max).UTC()
+	delta, err := s.ListTracks(context.Background(), &since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tr := range delta {
+		if tr.Path == target {
+			return
+		}
+	}
+	t.Fatalf("%s: target absent from the since-delta (got %d rows)", writer, len(delta))
 }
 
 // flattenIndexedAt forces a row's indexed_at to an exact value so a bump's
@@ -344,5 +348,38 @@ func flattenIndexedAt(t *testing.T, s *Store, path string, v int64) {
 	t.Helper()
 	if _, err := s.db.Exec(`UPDATE tracks SET indexed_at = ? WHERE path = ?`, v, path); err != nil {
 		t.Fatalf("flattenIndexedAt(%q): %v", path, err)
+	}
+}
+
+// TestIndexedAtAdvanceIsShared is what keeps the six delta-visibility bump
+// statements in step.
+//
+// The advance expression is written out verbatim in each rather than
+// concatenated in (see indexedAtAdvanceSQL — a concatenated form trips
+// SonarCloud go:S2077 and reads as an assembled query), so nothing at the
+// language level stops them drifting. This test does. Mirrors
+// TestEnrichmentMissPredicateIsShared, which exists for the same reason.
+//
+// Drift here is not cosmetic: a statement that silently reverts to the old
+// `CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END` advances only
+// past its OWN row and can land exactly on a client's cursor.
+func TestIndexedAtAdvanceIsShared(t *testing.T) {
+	for name, stmt := range map[string]string{
+		"bumpIndexedAtByPathSQL":  bumpIndexedAtByPathSQL,
+		"markEnrichedSQL":         markEnrichedSQL,
+		"applyReconciledTrackSQL": applyReconciledTrackSQL,
+		"setArtworkVersionSQL":    setArtworkVersionSQL,
+		"setBookletTagSQL":        setBookletTagSQL,
+		"applyDupeStampBumpSQL":   applyDupeStampBumpSQL,
+	} {
+		// Whitespace-normalised: the statements nest the expression at
+		// different depths and align their SET columns differently, so
+		// forcing identical layout would couple the guard to formatting
+		// rather than to meaning. Any SEMANTIC edit still fails.
+		if !strings.Contains(squashSpace(stmt), squashSpace(indexedAtAdvanceSQL)) {
+			t.Errorf("%s no longer embeds the shared indexed_at advance —\n"+
+				"this writer's bump may no longer clear the library-wide max.\nStatement:\n%s\n\nwant it to contain:\n%s",
+				name, stmt, indexedAtAdvanceSQL)
+		}
 	}
 }

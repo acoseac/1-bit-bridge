@@ -108,6 +108,16 @@ func (s *Store) UpsertBookletAvailability(ctx context.Context, mbid string, avai
 // same CASE-WHEN monotonic form, same no-op guard on an unchanged tag, and
 // deliberately NO enriched_at touch (this is not (re-)enrichment — touching
 // it would re-trigger the MB/CAA/Deezer treadmill). Holds s.mu.
+// setBookletTagSQL binds (tag, clock, releaseMBID, tag). The indexed_at
+// expression is indexedAtAdvanceSQL (store.go) verbatim — see its docblock
+// for why it is not concatenated in.
+const setBookletTagSQL = `
+		UPDATE tracks
+		   SET booklet_tag = ?,
+		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		 WHERE json_extract(tags_json, '$.musicBrainzAlbumID') = ?
+		   AND COALESCE(booklet_tag, '') <> COALESCE(?, '')`
+
 func (s *Store) SetBookletTagAndBumpIndex(ctx context.Context, releaseMBID, tag string) (int64, error) {
 	if releaseMBID == "" {
 		return 0, nil
@@ -115,13 +125,8 @@ func (s *Store) SetBookletTagAndBumpIndex(ctx context.Context, releaseMBID, tag 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UnixNano()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE tracks SET
-			booklet_tag = ?,
-			indexed_at = `+indexedAtAdvanceSQL+`
-		WHERE json_extract(tags_json, '$.musicBrainzAlbumID') = ?
-		  AND COALESCE(booklet_tag, '') <> COALESCE(?, '')
-	`, nullifyEmpty(tag), now, releaseMBID, nullifyEmpty(tag))
+	res, err := s.db.ExecContext(ctx, setBookletTagSQL,
+		nullifyEmpty(tag), now, releaseMBID, nullifyEmpty(tag))
 	if err != nil {
 		return 0, err
 	}
