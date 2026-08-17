@@ -79,6 +79,10 @@ type autoOptimizeSweeper struct {
 // sweepOnce enqueues up to `maxPerSweep` optimize jobs and returns the
 // counts for the admin card. Returns nil when the sweep failed or was
 // cancelled, so sweepStatus keeps the previous successful breakdown.
+//
+// Split into preflight / per-candidate plan / drain, the way
+// Coordinator.SubmitOptimize is split — the pipeline reads as its four
+// stages and each stays under the repo's cognitive-complexity gate.
 func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimizeSweepCounts {
 	if !sw.enabled() {
 		// Report the disabled state rather than returning nil: nil means
@@ -87,8 +91,7 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		return &admin.AutoOptimizeSweepCounts{Disabled: true}
 	}
 
-	limit := sw.maxPerSweep()
-	cands, err := sw.store.ListAutoOptimizeCandidates(ctx, limit)
+	cands, err := sw.store.ListAutoOptimizeCandidates(ctx, sw.maxPerSweep())
 	if err != nil {
 		// A cancelled context here is a normal shutdown, not a fault —
 		// the suppression the analysis + fingerprint sweepers apply.
@@ -116,100 +119,9 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		MinFreeBytes: sw.minFreeBytes(),
 		FreeBytes:    freeBytes,
 	}
-	floor := counts.MinFreeBytes
-	compression := transcode.DefaultCompressionFactor(optimizeTargetBits)
-	var projectedTotal int64
-
-	for _, c := range cands {
-		if ctx.Err() != nil {
-			return nil
-		}
-		// Re-run the GO gate. The SQL predicate that selected this row is
-		// a documented MIRROR of it (pinned by the admin package's
-		// lockstep test), and on a path that spends disk and CPU the Go
-		// gate stays authoritative — a mirror drift must under-generate,
-		// never mis-generate.
-		if !transcode.OptimizeEligible(c.Path, c.Codec, c.SampleRate, c.BitsPerSample) {
-			counts.Ineligible++
-			continue
-		}
-		targetRate, terr := transcode.ResolveTargetRateForOptimize(c.SampleRate)
-		if terr != nil {
-			counts.Ineligible++
-			continue
-		}
-
-		projected := transcode.ProjectedSize(c.Size, c.SampleRate, c.BitsPerSample,
-			targetRate, optimizeTargetBits, compression)
-		if freeBytes-(projectedTotal+projected) < floor {
-			// Running budget, not a point check: the on-demand path's
-			// per-batch diskPreflight can't bound a loop that runs
-			// forever. Stop rather than skip-and-continue — candidates are
-			// ordered newest-indexed-first, so everything after this point
-			// is lower priority anyway, and continuing would let a run of
-			// small files sneak past a floor a big one just hit.
-			counts.DiskFloorReached = true
-			break
-		}
-
-		abs, info, rerr := sw.resolver.ResolveChecked(c.Path)
-		if rerr != nil || info.IsDir() {
-			// Unresolvable: a deleted file the scanner's missing_count
-			// debounce hasn't reaped yet, or a dropped mount. Skip
-			// silently — every error is treated identically on purpose,
-			// since distinguishing them is the seed of a "mark this
-			// permanently un-optimizable" bug during a mount outage.
-			counts.Unresolvable++
-			continue
-		}
-
-		// SourceMTimeNS / SourceSize come from the TRACK ROW, not from
-		// `info`. Matches Coordinator.buildOptimizeCandidates so a swept
-		// variant is indistinguishable from an on-demand one — and it is
-		// what keeps the staleness predicate self-consistent (see the
-		// autoOptimizeCandidateSQL docblock: stamping a live stat would
-		// make freshly built variants read as stale on the next tick
-		// whenever the scanner hadn't caught up, regenerating them
-		// forever).
-		err := sw.enqueue(transcode.JobSpec{
-			SourceAbsPath:    abs,
-			SourceLibraryRel: c.Path,
-			SourceMTimeNS:    c.MTimeNS,
-			SourceSize:       c.Size,
-			SourceSampleRate: c.SampleRate,
-			SourceBits:       c.BitsPerSample,
-			TargetSampleRate: targetRate,
-			TargetBits:       optimizeTargetBits,
-			Quality:          transcode.QualityVeryHigh,
-			OutputDir:        outputDir,
-			Kind:             transcode.JobKindOptimize,
-			// Background demotes this to the Pool's LOW-priority lane.
-			// Without it a library-wide sweep would head-of-line block the
-			// on-demand CarPlay request the two-channel queue exists to
-			// protect. See the JobSpec.Background docstring.
-			Background: true,
-		})
-		switch {
-		case err == nil:
-			counts.Enqueued++
-			projectedTotal += projected
-			if c.StaleVariantID != "" {
-				counts.Regenerated++
-			}
-		case errors.Is(err, transcode.ErrDuplicateInflight):
-			// Already queued or running — an on-demand request for the
-			// same track beat us to it. Not a failure.
-			counts.AlreadyInflight++
-		case errors.Is(err, transcode.ErrQueueFull), errors.Is(err, transcode.ErrPoolClosed):
-			counts.QueueSaturated = true
-		default:
-			logger.Warn("auto-optimize sweep: enqueue failed", "path", c.Path, "err", err)
-		}
-		if counts.QueueSaturated {
-			break
-		}
+	if aborted := sw.drainCandidates(ctx, cands, outputDir, freeBytes, counts); aborted {
+		return nil
 	}
-	counts.ProjectedBytes = projectedTotal
 
 	// Remaining backlog for the admin card. A second pass over the same
 	// predicate — deliberately, so the card's number and the sweeper's
@@ -220,8 +132,150 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 	} else if ctx.Err() == nil {
 		logger.Warn("auto-optimize sweep: count remaining", "err", cerr)
 	}
+	logAutoOptimizeSweep(counts)
+	return counts
+}
 
-	if counts.Enqueued > 0 {
+// planVerdict is what planCandidate decided about one candidate.
+type planVerdict int
+
+const (
+	// planEnqueue: the spec is ready to submit.
+	planEnqueue planVerdict = iota
+	// planIneligible: the Go gate refused it (SQL-mirror drift, or a
+	// source rate the target resolver can't map).
+	planIneligible
+	// planUnresolvable: the file isn't readable right now.
+	planUnresolvable
+)
+
+// planCandidate turns one candidate row into a submittable JobSpec, or
+// says why it can't. No side effects — the caller owns the counters, so
+// the decision rules stay readable in one place.
+func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, outputDir string) (transcode.JobSpec, int64, planVerdict) {
+	// Re-run the GO gate. The SQL predicate that selected this row is a
+	// documented MIRROR of it (pinned by the admin package's lockstep
+	// test), and on a path that spends disk and CPU the Go gate stays
+	// authoritative — a mirror drift must under-generate, never
+	// mis-generate.
+	if !transcode.OptimizeEligible(c.Path, c.Codec, c.SampleRate, c.BitsPerSample) {
+		return transcode.JobSpec{}, 0, planIneligible
+	}
+	targetRate, terr := transcode.ResolveTargetRateForOptimize(c.SampleRate)
+	if terr != nil {
+		return transcode.JobSpec{}, 0, planIneligible
+	}
+	projected := transcode.ProjectedSize(c.Size, c.SampleRate, c.BitsPerSample,
+		targetRate, optimizeTargetBits, transcode.DefaultCompressionFactor(optimizeTargetBits))
+
+	abs, info, rerr := sw.resolver.ResolveChecked(c.Path)
+	if rerr != nil || info.IsDir() {
+		// Unresolvable: a deleted file the scanner's missing_count debounce
+		// hasn't reaped yet, or a dropped mount. Every error is treated
+		// identically on purpose — distinguishing them is the seed of a
+		// "mark this permanently un-optimizable" bug during a mount outage.
+		return transcode.JobSpec{}, projected, planUnresolvable
+	}
+
+	// SourceMTimeNS / SourceSize come from the TRACK ROW, not from `info`.
+	// Matches Coordinator.buildOptimizeCandidates so a swept variant is
+	// indistinguishable from an on-demand one — and it is what keeps the
+	// staleness predicate self-consistent (see the
+	// autoOptimizeCandidateSQL docblock: stamping a live stat would make
+	// freshly built variants read as stale on the next tick whenever the
+	// scanner hadn't caught up, regenerating them forever).
+	return transcode.JobSpec{
+		SourceAbsPath:    abs,
+		SourceLibraryRel: c.Path,
+		SourceMTimeNS:    c.MTimeNS,
+		SourceSize:       c.Size,
+		SourceSampleRate: c.SampleRate,
+		SourceBits:       c.BitsPerSample,
+		TargetSampleRate: targetRate,
+		TargetBits:       optimizeTargetBits,
+		Quality:          transcode.QualityVeryHigh,
+		OutputDir:        outputDir,
+		Kind:             transcode.JobKindOptimize,
+		// Background demotes this to the Pool's LOW-priority lane. Without
+		// it a library-wide sweep would head-of-line block the on-demand
+		// CarPlay request the two-channel queue exists to protect. See the
+		// JobSpec.Background docstring.
+		Background: true,
+	}, projected, planEnqueue
+}
+
+// drainCandidates submits the planned candidates, maintaining the running
+// disk budget. Returns true when the context was cancelled mid-drain, so
+// the caller can discard partial counts (shutdown is not a sweep result).
+func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []manifest.AutoOptimizeCandidate, outputDir string, freeBytes int64, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
+	floor := counts.MinFreeBytes
+	var projectedTotal int64
+	defer func() { counts.ProjectedBytes = projectedTotal }()
+
+	for _, c := range cands {
+		if ctx.Err() != nil {
+			return true
+		}
+		spec, projected, verdict := sw.planCandidate(c, outputDir)
+		switch verdict {
+		case planIneligible:
+			counts.Ineligible++
+			continue
+		case planUnresolvable:
+			counts.Unresolvable++
+			continue
+		}
+		if freeBytes-(projectedTotal+projected) < floor {
+			// Running budget, not a point check: the on-demand path's
+			// per-batch diskPreflight can't bound a loop that runs forever.
+			// Stop rather than skip-and-continue — candidates are ordered
+			// newest-indexed-first, so everything after this point is lower
+			// priority anyway, and continuing would let a run of small files
+			// sneak past a floor a big one just hit.
+			counts.DiskFloorReached = true
+			return false
+		}
+		if sw.submit(spec, c.StaleVariantID != "", counts) {
+			projectedTotal += projected
+		}
+		if counts.QueueSaturated {
+			return false
+		}
+	}
+	return false
+}
+
+// submit enqueues one spec and folds the outcome into counts. Returns
+// true only when the job was actually accepted, so the caller charges the
+// disk budget for real work and not for a dedup.
+func (sw *autoOptimizeSweeper) submit(spec transcode.JobSpec, isRegeneration bool, counts *admin.AutoOptimizeSweepCounts) bool {
+	switch err := sw.enqueue(spec); {
+	case err == nil:
+		counts.Enqueued++
+		if isRegeneration {
+			counts.Regenerated++
+		}
+		return true
+	case errors.Is(err, transcode.ErrDuplicateInflight):
+		// Already queued or running — an on-demand request for the same
+		// track beat us to it. Not a failure.
+		counts.AlreadyInflight++
+	case errors.Is(err, transcode.ErrQueueFull), errors.Is(err, transcode.ErrPoolClosed):
+		counts.QueueSaturated = true
+	default:
+		logger.Warn("auto-optimize sweep: enqueue failed",
+			"path", spec.SourceLibraryRel, "err", err)
+	}
+	return false
+}
+
+// logAutoOptimizeSweep emits the one operator-facing line per sweep.
+// A disk-floor stop is logged even with nothing enqueued: that is the
+// state an operator needs in order to know why pre-generation stalled,
+// and it is otherwise indistinguishable from "nothing left to do".
+func logAutoOptimizeSweep(counts *admin.AutoOptimizeSweepCounts) {
+	switch {
+	case counts.Enqueued > 0:
 		logger.Info("auto-optimize sweep enqueued variants",
 			"count", counts.Enqueued,
 			"regenerated", counts.Regenerated,
@@ -229,13 +283,12 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 			"projectedBytes", counts.ProjectedBytes,
 			"queueSaturated", counts.QueueSaturated,
 			"diskFloorReached", counts.DiskFloorReached)
-	} else if counts.DiskFloorReached {
-		// Worth a line even with nothing enqueued: this is the state an
-		// operator needs to see to know why pre-generation stalled.
+	case counts.DiskFloorReached:
 		logger.Warn("auto-optimize sweep stopped at the free-space floor",
-			"freeBytes", freeBytes, "minFreeBytes", floor, "remaining", counts.Remaining)
+			"freeBytes", counts.FreeBytes,
+			"minFreeBytes", counts.MinFreeBytes,
+			"remaining", counts.Remaining)
 	}
-	return counts
 }
 
 // optimizeTargetBits is the CarPlay bit-depth floor every optimize job

@@ -70,15 +70,6 @@ func candidatePaths(t *testing.T, s *Store, limit int) []string {
 	return out
 }
 
-func hasPath(paths []string, want string) bool {
-	for _, p := range paths {
-		if p == want {
-			return true
-		}
-	}
-	return false
-}
-
 // TestListAutoOptimizeCandidatesSelectionContract pins every arm of the
 // candidate predicate in one fixture, because the arms interact: an
 // over-broad predicate spends disk and CPU on tracks that can never be
@@ -146,63 +137,72 @@ func TestListAutoOptimizeCandidatesSelectionContract(t *testing.T) {
 	sm, ss := trackRowMTimeAndSize(t, s, staleVariant)
 	seedOptimizeVariant(t, s, staleVariant, "optimized-v2-48000-16", sm-1, ss-42)
 
-	got := candidatePaths(t, s, 100)
-
-	wantPresent := []string{eligible, staleVariant}
-	for _, w := range wantPresent {
-		if !hasPath(got, w) {
-			t.Errorf("candidate %q missing; got %v", w, got)
-		}
-	}
-	wantAbsent := map[string]string{
-		atFloor:    "already at the CarPlay floor (44.1/16)",
-		lossy:      "lossy source — not PCM",
-		dsd:        "DSD is structurally excluded",
-		routed:     "UPnP-routed: no local file to decode",
-		suppressed: "duplicate-suppressed: never served, so the variant could never be requested",
-		covered:    "fresh variant already covers it",
-		zeroByte:   "zero-byte source: sox cannot probe it",
-	}
-	for path, why := range wantAbsent {
-		if hasPath(got, path) {
-			t.Errorf("candidate %q should be excluded (%s); got %v", path, why, got)
-		}
-	}
-	if len(got) != len(wantPresent) {
-		t.Errorf("candidate count = %d (%v), want exactly %d", len(got), got, len(wantPresent))
-	}
-
-	// The stale row must announce itself as a regeneration so the
-	// sweeper can log it as such.
 	cands, err := s.ListAutoOptimizeCandidates(ctx, 100)
 	if err != nil {
 		t.Fatalf("ListAutoOptimizeCandidates: %v", err)
 	}
+	got := make([]string, 0, len(cands))
+	byPath := make(map[string]AutoOptimizeCandidate, len(cands))
 	for _, c := range cands {
-		switch c.Path {
-		case staleVariant:
-			if c.StaleVariantID != "optimized-v2-48000-16" {
-				t.Errorf("stale candidate StaleVariantID = %q, want the existing variant id", c.StaleVariantID)
+		got = append(got, c.Path)
+		byPath[c.Path] = c
+	}
+
+	// One row per fixture, each naming WHY it belongs (or doesn't) — the
+	// reason is the assertion's whole value when a predicate arm regresses.
+	selection := []struct {
+		path string
+		want bool
+		why  string
+	}{
+		{eligible, true, "hi-res PCM with no variant"},
+		{staleVariant, true, "variant recorded against an older version of the file"},
+		{atFloor, false, "already at the CarPlay floor (44.1/16)"},
+		{lossy, false, "lossy source — not PCM"},
+		{dsd, false, "DSD is structurally excluded"},
+		{routed, false, "UPnP-routed: no local file to decode"},
+		{suppressed, false, "duplicate-suppressed: never served, so the variant could never be requested"},
+		{covered, false, "a fresh variant already covers it"},
+		{zeroByte, false, "zero-byte source: sox cannot probe it"},
+	}
+	wantCount := 0
+	for _, c := range selection {
+		if _, present := byPath[c.path]; present != c.want {
+			verb := "should be selected"
+			if !c.want {
+				verb = "should be excluded"
 			}
-		case eligible:
-			if c.StaleVariantID != "" {
-				t.Errorf("first-generation candidate StaleVariantID = %q, want empty", c.StaleVariantID)
-			}
-			if c.SampleRate != 96000 || c.BitsPerSample != 24 || c.Codec != "FLAC" {
-				t.Errorf("candidate geometry = %d/%d %q, want 96000/24 FLAC",
-					c.SampleRate, c.BitsPerSample, c.Codec)
-			}
+			t.Errorf("%q %s (%s); candidates = %v", c.path, verb, c.why, got)
 		}
+		if c.want {
+			wantCount++
+		}
+	}
+	if len(cands) != wantCount {
+		t.Errorf("candidate count = %d (%v), want exactly %d", len(cands), got, wantCount)
+	}
+
+	// The stale row must announce itself as a regeneration so the sweeper
+	// can log it as such; the first-generation row must not.
+	if c := byPath[staleVariant]; c.StaleVariantID != "optimized-v2-48000-16" {
+		t.Errorf("stale candidate StaleVariantID = %q, want the existing variant id", c.StaleVariantID)
+	}
+	if c := byPath[eligible]; c.StaleVariantID != "" {
+		t.Errorf("first-generation candidate StaleVariantID = %q, want empty", c.StaleVariantID)
+	}
+	if c := byPath[eligible]; c.SampleRate != 96000 || c.BitsPerSample != 24 || c.Codec != "FLAC" {
+		t.Errorf("candidate geometry = %d/%d %q, want 96000/24 FLAC",
+			c.SampleRate, c.BitsPerSample, c.Codec)
 	}
 
 	// Count agrees with the (uncapped) listing — the card and the work
 	// must not be able to disagree.
-	n, err := s.CountAutoOptimizeCandidates(ctx)
-	if err != nil {
-		t.Fatalf("CountAutoOptimizeCandidates: %v", err)
+	n, cerr := s.CountAutoOptimizeCandidates(ctx)
+	if cerr != nil {
+		t.Fatalf("CountAutoOptimizeCandidates: %v", cerr)
 	}
-	if n != len(wantPresent) {
-		t.Errorf("CountAutoOptimizeCandidates = %d, want %d", n, len(wantPresent))
+	if n != wantCount {
+		t.Errorf("CountAutoOptimizeCandidates = %d, want %d", n, wantCount)
 	}
 }
 

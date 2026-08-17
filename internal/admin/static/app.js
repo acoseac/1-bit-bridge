@@ -6563,6 +6563,16 @@ function agoOrDash(iso) {
   return isAbsentTime(iso) ? "—" : formatTimeAgo(new Date(iso));
 }
 
+// formatAutoOptimizeRemaining renders the outstanding backlog. Absent /
+// disabled reads as unknown rather than "all caught up" — a turned-off
+// sweeper has no opinion about the backlog, and claiming zero would be a
+// lie the operator can act on.
+function formatAutoOptimizeRemaining(last) {
+  if (!last || last.disabled) return "—";
+  if (last.remaining > 0) return `${last.remaining} tracks want a variant`;
+  return "all caught up";
+}
+
 // formatAutoOptimizeResult renders one auto-optimize sweep's outcome.
 //
 // The two "stopped early" reasons are what an operator actually needs:
@@ -6682,9 +6692,7 @@ function renderJobCards(j) {
     const aoBtn = document.getElementById("jobs-ao-now");
     if (aoBtn) aoBtn.hidden = !ao.active;
     const last = ao.last;
-    setText("job-ao-remaining", last && !last.disabled
-      ? (last.remaining > 0 ? `${last.remaining} tracks want a variant` : "all caught up")
-      : "—");
+    setText("job-ao-remaining", formatAutoOptimizeRemaining(last));
     setText("job-ao-last", ao.running ? "sweeping now" : agoOrDash(ao.lastFinishedAt));
     setText("job-ao-next", formatInFuture(ao.nextDueAt));
     setText("job-ao-counts", formatAutoOptimizeResult(last));
