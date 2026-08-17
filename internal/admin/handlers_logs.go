@@ -64,7 +64,7 @@ func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return path, nil, "no log file at " + path + " — " + noLogFileHint(runtime.GOOS)
+			return path, nil, "no log file at " + path + " — " + noLogFileHint(runtime.GOOS, runningInContainer())
 		}
 		return path, nil, "cannot read " + path + ": " + err.Error()
 	}
@@ -85,15 +85,48 @@ func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
 // journal — no separate file"), and the old wording sent a live session
 // looking for a foreground process that did not exist.
 //
-// Takes the GOOS rather than reading it, so BOTH branches are testable from
-// whichever platform the suite runs on. The journal wording is the half that
-// matters, and it is exactly the half a `runtime.GOOS` check would skip on the
-// darwin box this is developed on.
-func noLogFileHint(goos string) string {
+// The CONTAINER case is separate and must come first, because a container is
+// Linux but has neither systemd nor journald — the official image runs
+// `bridge serve` in the foreground as PID 1, so its output is the container's
+// stdout. Verified by running the image on the Docker test host: HOME is set
+// (to /home/bridge, from the passwd entry), so DefaultLogPath returns a real
+// path, the not-exist branch fires, and the operator was told to run
+// `journalctl -u 1-bit-bridge` — a command that does NOT exist in the image,
+// about an init system that is not running. That is the same
+// plausible-but-wrong-message failure this whole endpoint's wording exists to
+// avoid, so it is worth a branch rather than a vaguer sentence covering both.
+//
+// Takes the GOOS and the container verdict rather than reading either, so ALL
+// branches are testable from whichever platform the suite runs on. The journal
+// and container wordings are the halves that matter, and they are exactly the
+// halves a `runtime.GOOS` check would skip on the darwin box this is developed
+// on.
+func noLogFileHint(goos string, inContainer bool) string {
+	if inContainer {
+		return "this bridge runs in a container, where `bridge serve` logs to the container's stdout rather than to a file — read it with `docker logs <container>` (there is no systemd or journald in the image)"
+	}
 	if goos == "linux" {
 		return "a foreground `bridge serve` logs to its terminal, and a systemd unit without `StandardOutput=append:` logs to the journal instead — read it with `journalctl -u 1-bit-bridge`"
 	}
 	return "the file is created by a service install; a foreground `bridge serve` logs to its terminal"
+}
+
+// runningInContainer reports whether this process is inside a container.
+//
+// Marker files, not cgroup parsing: `/.dockerenv` is created by Docker in every
+// container's root and `/run/.containerenv` is Podman's equivalent. Both were
+// verified on the test host to be present inside the image (readable by the
+// unprivileged `bridge` user) and absent on the host itself. cgroup-based
+// detection is famously brittle across cgroup v1/v2 and rootless runtimes, and
+// this only ever selects the wording of one diagnostic sentence — a wrong
+// answer costs a slightly-off hint, never behaviour, so the cheap check wins.
+func runningInContainer() bool {
+	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // apiLogStatus handles GET /api/logs/status.
