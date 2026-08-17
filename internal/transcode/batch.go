@@ -112,6 +112,16 @@ type Coordinator struct {
 	logger   *slog.Logger
 	clock    func() time.Time // dependency-injected for tests
 
+	// soxInfo returns the cached ProbeSox snapshot so the BATCH walks can
+	// refuse a source this sox build cannot decode, exactly as the
+	// per-track `EnqueueOne` path already does via its own adapter.
+	//
+	// Wired to the same 30s-TTL cache the admin tile reads, so all the
+	// surfaces agree and a whole-library walk costs no extra fork-exec.
+	// Nil-safe: an unwired closure (direct-construction tests) skips the
+	// check, matching the fail-open posture documented on SoxInfo.CanDecode.
+	soxInfo func() (SoxInfo, error)
+
 	mu sync.Mutex
 	// liveBatches is the in-memory mirror of pending+running rows so
 	// pool callbacks bump counters without re-reading SQLite on
@@ -166,6 +176,26 @@ type batchState struct {
 // JobSpec construction time. nil is permitted (test harness) but
 // Submit then refuses with an explicit error rather than enqueueing
 // broken JobSpecs.
+// WithSoxInfo wires the cached sox probe used by the candidate walks to
+// refuse sources this build cannot decode. Returns the receiver so it can
+// be chained onto NewCoordinator at the call site.
+//
+// A setter rather than a NewCoordinator parameter: every existing caller
+// (and a good number of tests) constructs the coordinator positionally, and
+// the guard is fail-open, so leaving it unwired must stay valid.
+func (c *Coordinator) WithSoxInfo(fn func() (SoxInfo, error)) *Coordinator {
+	c.soxInfo = fn
+	return c
+}
+
+// soxSnapshot takes ONE probe result for a whole candidate walk. Hoisted out
+// of the per-track loop for consistency, not speed: the cache TTL is 30s and a
+// whole-library walk can outlive it, which would let one batch judge different
+// tracks against different probe results.
+func (c *Coordinator) soxSnapshot() SoxInfo {
+	return SnapshotOrOpen(c.soxInfo)
+}
+
 func NewCoordinator(
 	pool *Pool,
 	store *manifest.Store,
@@ -292,6 +322,10 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		compressionFct = DefaultCompressionFactor(targetBits)
 		resolveErrors  int
 	)
+	// One probe result for the whole walk — see soxSnapshot: the TTL is 30s
+	// and a large walk can outlive it, so re-probing per track could apply two
+	// different policies within a single batch.
+	soxInfo := c.soxSnapshot()
 	for _, t := range projections {
 		if t.HasVariant {
 			alreadyCovered++
@@ -309,6 +343,26 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		// badge. manifest.IsLossyCodec is the single source of truth
 		// (SQL mirror: upscaleEligibleSQL).
 		if manifest.IsLossyCodec(t.Codec) {
+			continue
+		}
+		// Refuse what this sox build cannot decode, for the same reason
+		// `EnqueueOne` does (cmd/bridge/main.go, resolveAndLookupTrack):
+		// ALAC is lossless, so IsLossyCodec doesn't exclude it, and since
+		// PR #440 populated PCM geometry for M4A it clears the geometry
+		// gate too — so it reached a sox with no MP4 demuxer.
+		//
+		// That guard was only ever on the per-track path. Measured
+		// 2026-08-17 against the Docker image: a whole-library batch
+		// enqueued 13 ALAC files and every one failed with
+		// `sox FAIL formats: no handler for file extension 'm4a'`, after
+		// the operator had been shown them as eligible. Worse, a failed
+		// job writes no variant row, so the auto-optimize sweeper would
+		// re-select the same source on every sweep, forever.
+		//
+		// Checked on the RELATIVE path: CanDecode only reads the
+		// extension, so this needs no resolver call and can sit with the
+		// other cheap predicates, ahead of the resolve below.
+		if !soxInfo.CanDecode(t.Path) {
 			continue
 		}
 		// Eligibility for upscaling. The full skip predicate
@@ -834,6 +888,10 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 	// classification out of the loop body.
 	out.totalProjected = 0
 	out.projectionsSeen = len(projections)
+	// One probe result for the whole walk — see soxSnapshot: the TTL is 30s
+	// and a large walk can outlive it, so re-probing per track could apply two
+	// different policies within a single batch.
+	soxInfo := c.soxSnapshot()
 	for _, t := range projections {
 		if t.HasVariant {
 			out.alreadyCovered++
@@ -847,6 +905,19 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 			continue
 		}
 		if !OptimizeEligible(t.Path, t.Codec, t.SampleRate, t.BitsPerSample) {
+			continue
+		}
+		// Same live-sox refusal as the upscale walk above. OptimizeEligible
+		// deliberately treats .m4a as a PCM candidate ("ALAC-in-M4A is the
+		// common case"), which is correct as a FORMAT judgement and exactly
+		// why this second, build-dependent check is needed: whether the
+		// installed sox can actually open that container is a property of
+		// the build, not of the file.
+		//
+		// This is the arm that stops the auto-optimize treadmill: a hi-res
+		// ALAC would otherwise be re-selected and re-failed on every sweep,
+		// since a failed job writes no variant row to mark it covered.
+		if !soxInfo.CanDecode(t.Path) {
 			continue
 		}
 		targetRate, terr := ResolveTargetRateForOptimize(t.SampleRate)

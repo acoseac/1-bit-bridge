@@ -490,18 +490,10 @@ type upscaleEnqueuerAdapter struct {
 	soxInfo func() (transcode.SoxInfo, error)
 }
 
-// soxCanDecode reports whether the installed sox can read absPath. Fails
-// OPEN on a nil closure or a probe error — the probe is an optimisation
-// for honest refusals, never a new way for enqueue to break.
+// soxCanDecode reports whether the installed sox can read absPath.
+// Fail-open policy lives in transcode.CanDecodeVia.
 func (a *upscaleEnqueuerAdapter) soxCanDecode(absPath string) bool {
-	if a.soxInfo == nil {
-		return true
-	}
-	info, err := a.soxInfo()
-	if err != nil {
-		return true
-	}
-	return info.CanDecode(absPath)
+	return transcode.CanDecodeVia(a.soxInfo, absPath)
 }
 
 // resolveAndLookupTrack is the shared scaffolding for `EnqueueOne`
@@ -2754,6 +2746,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			fmt.Fprintf(stderr, "upscale coordinator: %v\n", err)
 			return 1
 		}
+		// Same cached probe the per-track enqueuer and the admin tile read,
+		// so the batch walk refuses sources this sox build cannot decode
+		// instead of enqueuing jobs that are certain to fail.
+		upscaleCoordinator.WithSoxInfo(soxCache.snapshot)
 		// Seed the DB-backed target settings from the YAML bootstrap
 		// on first run. Once seeded, admin Settings edits become
 		// authoritative; YAML stays the bootstrap-only path.
@@ -2841,6 +2837,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				enqueue:   upscalePool.Enqueue,
 				outputDir: liveVariantsDir,
 				enabled:   autoOptimizeEnabledFn,
+				// Same cached probe every other consumer reads, so a source
+				// this sox build can't decode is skipped instead of being
+				// re-enqueued and re-failed on every sweep.
+				soxInfo: soxCache.snapshot,
 				maxPerSweep: func() int {
 					if live := cfgHolder.Load(); live != nil {
 						return live.Upscale.AutoOptimize.EffectiveMaxPerSweep()
@@ -3302,6 +3302,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: soxCache.precheck,
 		UpscaleSoxFLAC:  soxCache.flac,
+		// Backs the Inspector's no_decoder badge from the SAME probe the
+		// enqueue gates use, so a tile can't say "eligible" about a source
+		// the batch walk would refuse.
+		SoxCanDecode: func() func(string) bool {
+			return transcode.SnapshotOrOpen(soxCache.snapshot).CanDecode
+		},
 		// Live runtime state of audio analysis (startup-computed gate),
 		// so the admin tile's `enabled` matches /v1/health's `waveform`
 		// flag rather than the persisted config flag.

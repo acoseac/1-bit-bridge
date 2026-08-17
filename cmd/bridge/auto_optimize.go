@@ -74,6 +74,18 @@ type autoOptimizeSweeper struct {
 	// existing ancestor — the variants dir is created lazily, so a bare
 	// statfs would ENOENT).
 	diskFree func(dir string) (int64, error)
+
+	// soxInfo returns the cached ProbeSox snapshot so planCandidate can
+	// refuse sources this build cannot decode. Wired to the same 30s-TTL
+	// cache the per-track enqueuer, the batch coordinator and the admin
+	// tile read. Nil-safe and fail-open, matching every other consumer.
+	soxInfo func() (transcode.SoxInfo, error)
+}
+
+// soxSnapshot takes ONE probe result per sweep. Hoisted for the same
+// consistency reason as the coordinator's walks, not for speed.
+func (sw *autoOptimizeSweeper) soxSnapshot() transcode.SoxInfo {
+	return transcode.SnapshotOrOpen(sw.soxInfo)
 }
 
 // sweepOnce enqueues up to `maxPerSweep` optimize jobs and returns the
@@ -152,13 +164,27 @@ const (
 // planCandidate turns one candidate row into a submittable JobSpec, or
 // says why it can't. No side effects — the caller owns the counters, so
 // the decision rules stay readable in one place.
-func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, outputDir string) (transcode.JobSpec, int64, planVerdict) {
+func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, outputDir string, soxInfo transcode.SoxInfo) (transcode.JobSpec, int64, planVerdict) {
 	// Re-run the GO gate. The SQL predicate that selected this row is a
 	// documented MIRROR of it (pinned by the admin package's lockstep
 	// test), and on a path that spends disk and CPU the Go gate stays
 	// authoritative — a mirror drift must under-generate, never
 	// mis-generate.
 	if !transcode.OptimizeEligible(c.Path, c.Codec, c.SampleRate, c.BitsPerSample) {
+		return transcode.JobSpec{}, 0, planIneligible
+	}
+	// Refuse what this sox build cannot decode. OptimizeEligible treats
+	// .m4a as a PCM candidate (ALAC-in-M4A is the common case), which is
+	// right as a FORMAT judgement — whether the installed sox can open that
+	// container is a property of the BUILD, and only the probe knows it.
+	//
+	// This arm is what keeps the sweeper from looping. A failed job writes
+	// no variant row, so the candidate query re-selects the same source on
+	// the next tick, forever — measured 2026-08-17, where a whole-library
+	// batch failed every ALAC file with `sox FAIL formats: no handler for
+	// file extension 'm4a'`. Counting it Ineligible (not Unresolvable) is
+	// deliberate: the file is fine, the toolchain simply cannot read it.
+	if !soxInfo.CanDecode(c.Path) {
 		return transcode.JobSpec{}, 0, planIneligible
 	}
 	targetRate, terr := transcode.ResolveTargetRateForOptimize(c.SampleRate)
@@ -212,11 +238,14 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 	var projectedTotal int64
 	defer func() { counts.ProjectedBytes = projectedTotal }()
 
+	// One probe result for the whole sweep — see soxSnapshot.
+	soxInfo := sw.soxSnapshot()
+
 	for _, c := range cands {
 		if ctx.Err() != nil {
 			return true
 		}
-		spec, projected, verdict := sw.planCandidate(c, outputDir)
+		spec, projected, verdict := sw.planCandidate(c, outputDir, soxInfo)
 		switch verdict {
 		case planIneligible:
 			counts.Ineligible++

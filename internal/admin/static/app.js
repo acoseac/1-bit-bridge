@@ -4458,6 +4458,10 @@ const SKIP_LABELS = {
   dsd_bitstream: { short: "DSD", full: "DSD bitstream — 1-bit, not PCM-resamplable" },
   lossy_source: { short: "Lossy", full: "Lossy source — upscaling adds no fidelity" },
   unknown_format: { short: "Unknown format", full: "Format unknown — the scanner couldn't read the sample rate / bit depth" },
+  // Toolchain-dependent, unlike the three above: the file is fine, this
+  // host's sox just has no handler for the container (ALAC in .m4a is the
+  // case that matters — sox has no MP4 demuxer in essentially any build).
+  no_decoder: { short: "No decoder", full: "This host's sox can't read this container — ALAC/M4A needs a sox build with an MP4 demuxer" },
 };
 
 function skipBadgeHTML(reason) {
