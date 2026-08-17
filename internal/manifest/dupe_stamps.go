@@ -41,7 +41,10 @@ type DupeStamp struct {
 // Contract (the StampExtractorVersionBatch / applyReconciledTracks
 // template): holds s.mu (writer contract), one tx, prepared statements;
 // touches ONLY the three v31 dupe columns plus — for BumpIndexed rows —
-// the strict-advance indexed_at CASE WHEN. NEVER touches enriched_at
+// the shared indexedAtAdvanceSQL bump, which advances past the
+// library-wide max rather than only past the row's own prior value (the
+// older CASE WHEN form let a bumped row land exactly ON a cursor equal to
+// another row's value; see indexedAtAdvanceSQL). NEVER touches enriched_at
 // (suppression is a serving decision, not (re-)enrichment — this is
 // deliberately NOT an enriched_at writer) and NEVER rewrites tags_json.
 // Returns the number of rows actually updated.
@@ -71,10 +74,7 @@ func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, e
 	bump, err := tx.PrepareContext(ctx, `
 		UPDATE tracks
 		SET dupe_group_id = ?, dupe_tier = ?, dupe_suppressed = ?,
-		    indexed_at = CASE
-		        WHEN indexed_at >= ? THEN indexed_at + 1
-		        ELSE ?
-		    END
+		    indexed_at = `+indexedAtAdvanceSQL+`
 		WHERE path = ?
 	`)
 	if err != nil {
@@ -90,7 +90,7 @@ func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, e
 		}
 		var res interface{ RowsAffected() (int64, error) }
 		if st.BumpIndexed {
-			res, err = bump.ExecContext(ctx, st.GroupID, st.Tier, suppressed, now, now, st.Path)
+			res, err = bump.ExecContext(ctx, st.GroupID, st.Tier, suppressed, now, st.Path)
 		} else {
 			res, err = plain.ExecContext(ctx, st.GroupID, st.Tier, suppressed, st.Path)
 		}

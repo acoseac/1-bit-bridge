@@ -80,6 +80,47 @@ type Store struct {
 	ftsAvailable bool
 }
 
+// indexedAtAdvanceSQL is the `SET indexed_at = …` expression EVERY
+// delta-visibility bump uses. It takes exactly ONE bind: the clock value
+// (`s.now().UnixNano()`).
+//
+// Both terms are load-bearing, and neither can be dropped:
+//
+//   - `?` (the clock) anchors the value to wall-clock time, because the
+//     delta cursor is wall-clock. iOS sends its OWN `Date.now` captured at
+//     sync start (`LibraryScanner.syncStartedAt` → `share.lastScanFinishedAt`),
+//     and `indexed_at` is never on the wire, so no client can derive a
+//     cursor from stored values. A purely counter-based value would drift
+//     arbitrarily far behind that cursor and break delta sync outright.
+//   - `MAX(indexed_at) + 1` raises the result past every OTHER row, which
+//     the older `CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END`
+//     form did not do. That CASE WHEN advances strictly relative to the
+//     row's OWN prior value only; its ELSE arm assigns the raw clock, so
+//     when the clock equals a value another row already holds the bumped
+//     row lands EXACTLY ON a cursor equal to that value and `indexed_at >
+//     since` excludes it. Windows' ~15.6 ms clock granularity makes that
+//     collision routine (it is why TestRestampDuplicates_PolicyFlipUnsuppressesViaDelta
+//     failed only on the windows-latest CI leg); nanosecond clocks hide it.
+//
+// Cost is one index seek: `idx_tracks_indexed` makes the subquery a
+// `SEARCH tracks USING COVERING INDEX` (SQLite's max-optimization), not a
+// scan. COALESCE guards the empty-table read — SQLite's `MAX(x, NULL)` is
+// NULL, which would write a NULL into a NOT NULL column.
+//
+// Deliberately NOT applied at two kinds of site:
+//
+//   - The `UpsertTrack` / `UpsertTrackBatch` conflict arms, which compare
+//     against `excluded.indexed_at`. Those write NEW content at wall-clock
+//     time on the hottest path in the codebase (500-row batches sharing one
+//     `now`, 50k-track libraries); a per-row subquery there would make each
+//     row's value depend on evaluation order for a gain no client can
+//     observe.
+//   - `healTransitionBandBandwidths`, migration v34's `post()`. Migrations
+//     are append-only and MUST NOT be rewritten once shipped (both live
+//     bridges ran it at v34/v35), so changing its SQL would alter only
+//     fresh installs while diverging from what deployed DBs actually did.
+const indexedAtAdvanceSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)`
+
 // OpenStore opens (or creates) a SQLite DB at path and applies the schema.
 // The file and its parent directory are created if missing.
 func OpenStore(path string) (*Store, error) {
@@ -2243,12 +2284,9 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 		UPDATE tracks
 		SET tags_json = ?,
 		    enriched_at = ?,
-		    indexed_at = CASE
-		        WHEN indexed_at >= ? THEN indexed_at + 1
-		        ELSE ?
-		    END
+		    indexed_at = `+indexedAtAdvanceSQL+`
 		WHERE path = ?
-	`, raw, now, now, now, t.Path)
+	`, raw, now, now, t.Path)
 	return err
 }
 
@@ -2480,10 +2518,7 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	stmt, err := tx.PrepareContext(ctx, `
 		UPDATE tracks
 		SET tags_json = ?,
-		    indexed_at = CASE
-		        WHEN indexed_at >= ? THEN indexed_at + 1
-		        ELSE ?
-		    END
+		    indexed_at = `+indexedAtAdvanceSQL+`
 		WHERE path = ?
 	`)
 	if err != nil {
@@ -2493,7 +2528,7 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 	now := s.now().UnixNano()
 	n := 0
 	for _, r := range rows {
-		res, err := stmt.ExecContext(ctx, r.raw, now, now, r.path)
+		res, err := stmt.ExecContext(ctx, r.raw, now, r.path)
 		if err != nil {
 			return 0, err
 		}
@@ -6851,31 +6886,30 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 	// implies an out-of-band parent delete in another transaction
 	// (impossible under our `s.mu` contract). Safe to ignore.
 	//
-	// Strictly-advancing indexed_at update via CASE WHEN form. Three
+	// Strictly-advancing indexed_at update via indexedAtAdvanceSQL. Three
 	// guarantees in one expression:
 	//   1. Monotonic — indexed_at can only advance, never regress
 	//      (defense against past-clock injection / NTP rewind).
 	//      (Qodo on PR #156, round 1.)
-	//   2. STRICTLY advancing — when the new clock value equals the
-	//      stored indexed_at (rapid back-to-back variant writes,
-	//      injected-clock test scenarios, low-resolution wall clocks),
-	//      we increment by 1 ns instead of leaving the value
-	//      unchanged. Without this, a real variant change can be
-	//      invisible to clients that already synced at the equal
-	//      timestamp (delta-sync filter is `indexed_at > since`).
-	//      (CodeRabbit on PR #156, round 2.)
+	//   2. STRICTLY advancing past EVERY row, not just this one — when
+	//      the clock value equals any stored indexed_at (rapid
+	//      back-to-back variant writes, injected-clock tests, the ~15.6 ms
+	//      Windows clock), the result clears the library-wide max instead
+	//      of landing on it. The original CASE WHEN form only cleared this
+	//      row's own prior value, so a bump could land exactly ON a cursor
+	//      equal to a SIBLING row's value and be filtered out by
+	//      `indexed_at > since`. (CodeRabbit on PR #156, round 2, for the
+	//      own-value half; the cross-row half came from the windows-latest
+	//      CI leg — see indexedAtAdvanceSQL.)
 	//   3. Single-statement / single round-trip — no read-then-write
 	//      pattern that would race with a concurrent variant write
 	//      under our `s.mu` writer-serialization contract anyway, but
 	//      keeping it atomic is also marginally faster.
 	now := s.now().UnixNano()
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE tracks SET indexed_at = CASE
-			WHEN indexed_at >= ? THEN indexed_at + 1
-			ELSE ?
-		END
+		UPDATE tracks SET indexed_at = `+indexedAtAdvanceSQL+`
 		WHERE path = ?
-	`, now, now, v.SourcePath); err != nil {
+	`, now, v.SourcePath); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -6908,13 +6942,10 @@ func (s *Store) SetArtworkVersionAndBumpIndex(ctx context.Context, artworkMBID, 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tracks SET
 			artwork_version = ?,
-			indexed_at = CASE
-				WHEN indexed_at >= ? THEN indexed_at + 1
-				ELSE ?
-			END
+			indexed_at = `+indexedAtAdvanceSQL+`
 		WHERE json_extract(tags_json, '$.artworkMBID') = ?
 		  AND COALESCE(artwork_version, '') <> ?
-	`, version, now, now, artworkMBID, version)
+	`, version, now, artworkMBID, version)
 	if err != nil {
 		return 0, err
 	}
@@ -7252,12 +7283,9 @@ func (s *Store) DeleteVariant(ctx context.Context, sourcePath, variantID string)
 		// `delta-sync WHERE indexed_at > since` reliable.
 		now := s.now().UnixNano()
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE tracks SET indexed_at = CASE
-				WHEN indexed_at >= ? THEN indexed_at + 1
-				ELSE ?
-			END
+			UPDATE tracks SET indexed_at = `+indexedAtAdvanceSQL+`
 			WHERE path = ?
-		`, now, now, sourcePath); err != nil {
+		`, now, sourcePath); err != nil {
 			return err
 		}
 	}
@@ -7753,12 +7781,9 @@ func (s *Store) UpsertAnalysis(ctx context.Context, a AnalysisRow) error {
 	if !visibleSame {
 		now := s.now().UnixNano()
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE tracks SET indexed_at = CASE
-				WHEN indexed_at >= ? THEN indexed_at + 1
-				ELSE ?
-			END
+			UPDATE tracks SET indexed_at = `+indexedAtAdvanceSQL+`
 			WHERE path = ?
-		`, now, now, a.SourcePath); err != nil {
+		`, now, a.SourcePath); err != nil {
 			return err
 		}
 	}
@@ -7924,12 +7949,9 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 	}
 	now := s.now().UnixNano()
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE tracks SET indexed_at = CASE
-			WHEN indexed_at >= ? THEN indexed_at + 1
-			ELSE ?
-		END
+		UPDATE tracks SET indexed_at = `+indexedAtAdvanceSQL+`
 		WHERE path = ?
-	`, now, now, sourcePath); err != nil {
+	`, now, sourcePath); err != nil {
 		return err
 	}
 	return tx.Commit()

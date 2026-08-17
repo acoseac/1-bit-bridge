@@ -118,13 +118,10 @@ func (s *Store) SetBookletTagAndBumpIndex(ctx context.Context, releaseMBID, tag 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tracks SET
 			booklet_tag = ?,
-			indexed_at = CASE
-				WHEN indexed_at >= ? THEN indexed_at + 1
-				ELSE ?
-			END
+			indexed_at = `+indexedAtAdvanceSQL+`
 		WHERE json_extract(tags_json, '$.musicBrainzAlbumID') = ?
 		  AND COALESCE(booklet_tag, '') <> COALESCE(?, '')
-	`, nullifyEmpty(tag), now, now, releaseMBID, nullifyEmpty(tag))
+	`, nullifyEmpty(tag), now, releaseMBID, nullifyEmpty(tag))
 	if err != nil {
 		return 0, err
 	}
