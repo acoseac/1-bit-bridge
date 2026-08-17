@@ -97,13 +97,16 @@ func TestLogStatusMissingFileDoesNotBlameTheForeground(t *testing.T) {
 	if !strings.Contains(got.Reason, s.deps.LogPath) {
 		t.Errorf("reason omits the path it looked at: %q", got.Reason)
 	}
-	if !strings.Contains(got.Reason, noLogFileHint(runtime.GOOS)) {
-		t.Errorf("reason %q does not carry this platform's hint", got.Reason)
+	if !strings.Contains(got.Reason, noLogFileHint(runtime.GOOS, runningInContainer())) {
+		t.Errorf("reason %q does not carry this environment's hint", got.Reason)
 	}
 
-	// The Linux branch is what bridge.ars.md renders, and it is asserted here
-	// rather than under a GOOS guard so it also runs on the darwin dev box.
-	linux := noLogFileHint("linux")
+	// Every branch asserted BY NAME rather than under a GOOS guard, so all three
+	// run on whichever platform the suite runs on. On the Linux CI runner a
+	// runtime.GOOS-driven assertion would exercise only the systemd branch and
+	// leave the other two — the ones macOS/Windows and container operators
+	// actually read — unpinned exactly where the tests execute.
+	linux := noLogFileHint("linux", false)
 	if !strings.Contains(linux, "journalctl") {
 		t.Errorf("linux hint never names the journal, so a systemd operator is sent hunting for a foreground process: %q", linux)
 	}
@@ -111,16 +114,24 @@ func TestLogStatusMissingFileDoesNotBlameTheForeground(t *testing.T) {
 		t.Errorf("linux hint still blames the absence on not being a service install: %q", linux)
 	}
 
-	// And the other branch by name, not via runtime.GOOS: on the Linux CI
-	// runner both this call and the one above would take the systemd path,
-	// leaving the wording every macOS and Windows operator reads unpinned
-	// wherever the suite actually runs.
-	other := noLogFileHint("darwin")
+	other := noLogFileHint("darwin", false)
 	if !strings.Contains(other, "created by a service install") {
 		t.Errorf("non-linux hint lost the service-install explanation: %q", other)
 	}
 	if strings.Contains(other, "journalctl") {
 		t.Errorf("non-linux hint offers journalctl, which exists on neither macOS nor Windows: %q", other)
+	}
+
+	// A container is Linux but has no systemd and no journalctl binary — the
+	// official image runs `bridge serve` in the foreground, so its output is the
+	// container's stdout. Verified against the real image on the Docker test
+	// host, where HOME is set and this exact branch is what renders.
+	container := noLogFileHint("linux", true)
+	if strings.Contains(container, "journalctl") {
+		t.Errorf("container hint offers journalctl, which is not installed in the image: %q", container)
+	}
+	if !strings.Contains(container, "docker logs") {
+		t.Errorf("container hint does not name where the logs actually are: %q", container)
 	}
 }
 
