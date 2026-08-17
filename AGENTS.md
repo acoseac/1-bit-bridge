@@ -254,7 +254,7 @@ mode). iOS never talks to the admin listener.
 ## Security considerations
 
 - Report vulnerabilities privately via GitHub Security Advisories or
-  `support@ars.md` — see [`SECURITY.md`](SECURITY.md) for scope/SLA. Never
+  `support@1-bit.app` — see [`SECURITY.md`](SECURITY.md) for scope/SLA. Never
   open public issues for vulnerabilities.
 - **`docs/` is a PUBLIC website** (GitHub Pages serves `main:/docs`; the repo
   is public). Internal operator docs live in [`ops/`](ops/README.md) —
