@@ -185,7 +185,13 @@ type Deps struct {
 	// UpscaleSoxFLAC (and, on the enqueue side, the batch coordinator, the
 	// per-track enqueuer and the auto-optimize sweeper) so every surface
 	// agrees. Nil-safe: absent → no badge, never a guessed one.
-	SoxCanDecode func(path string) bool
+	//
+	// Returns a CHECKER rather than being the check: the caller takes one
+	// per request and reuses it across the page's rows, so a listing can't
+	// straddle the cache TTL and badge two tracks by different probe
+	// results. (The saving is consistency, not speed — the cached probe
+	// measures ~35ns, so even a 2,000-row page would pay only ~70µs.)
+	SoxCanDecode func() func(path string) bool
 
 	// UpscaleStats returns a snapshot of the long-lived
 	// transcode pool's counters (workers, queue length, in-

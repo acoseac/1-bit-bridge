@@ -1140,14 +1140,28 @@ var soxFormatsForExt = map[string][]string{
 // (the per-track enqueuer, both batch walks, the auto-optimize sweeper) and
 // four copies of a safety default is four chances for one to drift.
 func CanDecodeVia(probe func() (SoxInfo, error), sourcePath string) bool {
+	return SnapshotOrOpen(probe).CanDecode(sourcePath)
+}
+
+// SnapshotOrOpen returns the probe's SoxInfo, or the ZERO value when the probe
+// is nil or fails. The zero value carries FormatsKnown=false, which CanDecode
+// already treats as fail-open — so the safety default stays expressed in
+// exactly one place rather than being re-derived per caller.
+//
+// Callers that judge MANY sources should take one snapshot for the whole pass
+// and reuse it. Not for speed — the cached probe measures ~35ns, so even a
+// 25k-track walk pays under a millisecond — but for CONSISTENCY: the cache TTL
+// is 30s, and a whole-library walk can outlive it, which would otherwise let
+// one batch judge different tracks against different probe results.
+func SnapshotOrOpen(probe func() (SoxInfo, error)) SoxInfo {
 	if probe == nil {
-		return true
+		return SoxInfo{}
 	}
 	info, err := probe()
 	if err != nil {
-		return true
+		return SoxInfo{}
 	}
-	return info.CanDecode(sourcePath)
+	return info
 }
 
 func (i SoxInfo) CanDecode(sourcePath string) bool {

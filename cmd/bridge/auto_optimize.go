@@ -82,10 +82,10 @@ type autoOptimizeSweeper struct {
 	soxInfo func() (transcode.SoxInfo, error)
 }
 
-// canDecode reports whether the installed sox can read path.
-// Fail-open policy lives in transcode.CanDecodeVia.
-func (sw *autoOptimizeSweeper) canDecode(path string) bool {
-	return transcode.CanDecodeVia(sw.soxInfo, path)
+// soxSnapshot takes ONE probe result per sweep. Hoisted for the same
+// consistency reason as the coordinator's walks, not for speed.
+func (sw *autoOptimizeSweeper) soxSnapshot() transcode.SoxInfo {
+	return transcode.SnapshotOrOpen(sw.soxInfo)
 }
 
 // sweepOnce enqueues up to `maxPerSweep` optimize jobs and returns the
@@ -164,7 +164,7 @@ const (
 // planCandidate turns one candidate row into a submittable JobSpec, or
 // says why it can't. No side effects — the caller owns the counters, so
 // the decision rules stay readable in one place.
-func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, outputDir string) (transcode.JobSpec, int64, planVerdict) {
+func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, outputDir string, soxInfo transcode.SoxInfo) (transcode.JobSpec, int64, planVerdict) {
 	// Re-run the GO gate. The SQL predicate that selected this row is a
 	// documented MIRROR of it (pinned by the admin package's lockstep
 	// test), and on a path that spends disk and CPU the Go gate stays
@@ -184,7 +184,7 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, o
 	// batch failed every ALAC file with `sox FAIL formats: no handler for
 	// file extension 'm4a'`. Counting it Ineligible (not Unresolvable) is
 	// deliberate: the file is fine, the toolchain simply cannot read it.
-	if !sw.canDecode(c.Path) {
+	if !soxInfo.CanDecode(c.Path) {
 		return transcode.JobSpec{}, 0, planIneligible
 	}
 	targetRate, terr := transcode.ResolveTargetRateForOptimize(c.SampleRate)
@@ -238,11 +238,14 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 	var projectedTotal int64
 	defer func() { counts.ProjectedBytes = projectedTotal }()
 
+	// One probe result for the whole sweep — see soxSnapshot.
+	soxInfo := sw.soxSnapshot()
+
 	for _, c := range cands {
 		if ctx.Err() != nil {
 			return true
 		}
-		spec, projected, verdict := sw.planCandidate(c, outputDir)
+		spec, projected, verdict := sw.planCandidate(c, outputDir, soxInfo)
 		switch verdict {
 		case planIneligible:
 			counts.Ineligible++

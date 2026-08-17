@@ -3305,8 +3305,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Backs the Inspector's no_decoder badge from the SAME probe the
 		// enqueue gates use, so a tile can't say "eligible" about a source
 		// the batch walk would refuse.
-		SoxCanDecode: func(p string) bool {
-			return transcode.CanDecodeVia(soxCache.snapshot, p)
+		SoxCanDecode: func() func(string) bool {
+			return transcode.SnapshotOrOpen(soxCache.snapshot).CanDecode
 		},
 		// Live runtime state of audio analysis (startup-computed gate),
 		// so the admin tile's `enabled` matches /v1/health's `waveform`

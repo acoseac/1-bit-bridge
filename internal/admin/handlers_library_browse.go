@@ -251,7 +251,7 @@ func (s *Server) soxCanDecode() func(string) bool {
 	if s.deps.SoxCanDecode == nil {
 		return nil
 	}
-	return s.deps.SoxCanDecode
+	return s.deps.SoxCanDecode()
 }
 
 // --- handlers ---
@@ -409,8 +409,12 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Folders = append(resp.Folders, row)
 	}
+	// One checker for the whole page: the probe cache has a 30s TTL, and
+	// re-deriving per row could badge two tracks in the same listing from
+	// different probe results.
+	canDecode := s.soxCanDecode()
 	for _, t := range tracks {
-		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t, s.soxCanDecode()))
+		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t, canDecode))
 	}
 	// Next-page cursors: a "full page" (len == limit) MIGHT have
 	// more; signal continuation via the last row's path. A
@@ -514,8 +518,12 @@ func (s *Server) browseByKey(w http.ResponseWriter, r *http.Request, camelot str
 	if isFirstPage {
 		resp.SubtreeTracks = total
 	}
+	// One checker for the whole page: the probe cache has a 30s TTL, and
+	// re-deriving per row could badge two tracks in the same listing from
+	// different probe results.
+	canDecode := s.soxCanDecode()
 	for _, t := range tracks {
-		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t, s.soxCanDecode()))
+		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t, canDecode))
 	}
 	if len(tracks) == limit {
 		resp.NextTrackCursor = tracks[len(tracks)-1].Path
@@ -645,6 +653,10 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 		unknownFormat  int
 		atTarget       int
 	)
+	// One checker for the whole page: the probe cache has a 30s TTL, and
+	// re-deriving per row could badge two tracks in the same listing from
+	// different probe results.
+	canDecode := s.soxCanDecode()
 	for _, t := range projections {
 		if t.HasVariant {
 			coveredFiles++
@@ -696,7 +708,7 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 				// classifier so the two surfaces can't disagree.
 				sr := float64(t.SampleRate)
 				bps := t.BitsPerSample
-				if fundamentalSkipReason(t.IsDSD, t.Codec, &sr, &bps, t.Path, s.soxCanDecode()) == "" {
+				if fundamentalSkipReason(t.IsDSD, t.Codec, &sr, &bps, t.Path, canDecode) == "" {
 					atTarget++
 				} else {
 					unknownFormat++

@@ -188,10 +188,12 @@ func (c *Coordinator) WithSoxInfo(fn func() (SoxInfo, error)) *Coordinator {
 	return c
 }
 
-// canDecode reports whether the installed sox can read sourcePath.
-// Fail-open policy lives in CanDecodeVia.
-func (c *Coordinator) canDecode(sourcePath string) bool {
-	return CanDecodeVia(c.soxInfo, sourcePath)
+// soxSnapshot takes ONE probe result for a whole candidate walk. Hoisted out
+// of the per-track loop for consistency, not speed: the cache TTL is 30s and a
+// whole-library walk can outlive it, which would let one batch judge different
+// tracks against different probe results.
+func (c *Coordinator) soxSnapshot() SoxInfo {
+	return SnapshotOrOpen(c.soxInfo)
 }
 
 func NewCoordinator(
@@ -320,6 +322,10 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		compressionFct = DefaultCompressionFactor(targetBits)
 		resolveErrors  int
 	)
+	// One probe result for the whole walk — see soxSnapshot: the TTL is 30s
+	// and a large walk can outlive it, so re-probing per track could apply two
+	// different policies within a single batch.
+	soxInfo := c.soxSnapshot()
 	for _, t := range projections {
 		if t.HasVariant {
 			alreadyCovered++
@@ -356,7 +362,7 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		// Checked on the RELATIVE path: CanDecode only reads the
 		// extension, so this needs no resolver call and can sit with the
 		// other cheap predicates, ahead of the resolve below.
-		if !c.canDecode(t.Path) {
+		if !soxInfo.CanDecode(t.Path) {
 			continue
 		}
 		// Eligibility for upscaling. The full skip predicate
@@ -882,6 +888,10 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 	// classification out of the loop body.
 	out.totalProjected = 0
 	out.projectionsSeen = len(projections)
+	// One probe result for the whole walk — see soxSnapshot: the TTL is 30s
+	// and a large walk can outlive it, so re-probing per track could apply two
+	// different policies within a single batch.
+	soxInfo := c.soxSnapshot()
 	for _, t := range projections {
 		if t.HasVariant {
 			out.alreadyCovered++
@@ -907,7 +917,7 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 		// This is the arm that stops the auto-optimize treadmill: a hi-res
 		// ALAC would otherwise be re-selected and re-failed on every sweep,
 		// since a failed job writes no variant row to mark it covered.
-		if !c.canDecode(t.Path) {
+		if !soxInfo.CanDecode(t.Path) {
 			continue
 		}
 		targetRate, terr := ResolveTargetRateForOptimize(t.SampleRate)
