@@ -10,7 +10,7 @@
 # SSH-safe: restarts via the `1-bit-bridge (home-pc)` scheduled task, NOT
 # `Start-Process -RedirectStandardOutput` — the latter makes the bridge a
 # child of the SSH-launched pwsh and it dies on disconnect (the documented
-# footgun in docs/deployment-runbook.md).
+# footgun in ops/deployment-runbook.md).
 
 $ErrorActionPreference = 'Stop'
 $exe      = 'C:\1-bit-bridge\bin\bridge.exe'
