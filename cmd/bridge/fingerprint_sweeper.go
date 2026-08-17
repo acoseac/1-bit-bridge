@@ -135,43 +135,10 @@ const fingerprintTagVetoTTL = 30 * 24 * time.Hour
 // an immediate follow-up. status (nil-safe) records the lifecycle for
 // the admin Jobs surface.
 func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, interval time.Duration, nudge <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
-	run := func() {
+	runSweepLoop(ctx, status, fingerprintSweeperSettleDelay, interval, nudge, func() {
 		status.sweepStarted()
 		status.sweepFinished(s.sweep(ctx))
-	}
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(fingerprintSweeperSettleDelay):
-	}
-	select {
-	case <-nudge:
-	default:
-	}
-	if interval > 0 {
-		status.scheduleNext(time.Now().Add(interval))
-	}
-	run()
-	if interval <= 0 && nudge == nil {
-		return
-	}
-	var tickC <-chan time.Time
-	if interval > 0 {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		tickC = t.C
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tickC:
-			status.scheduleNext(time.Now().Add(interval))
-			run()
-		case <-nudge:
-			run()
-		}
-	}
+	})
 }
 
 // sweep runs one pass: collect candidates, fingerprint them, then re-queue

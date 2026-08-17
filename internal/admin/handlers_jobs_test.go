@@ -174,3 +174,42 @@ func TestApiFingerprintSweep(t *testing.T) {
 		t.Errorf("trigger invoked %d times, want 1", triggered)
 	}
 }
+
+// TestJobsAutoOptimizeCard pins the card's presence contract: absent when
+// the sweeper isn't wired (no upscale pool on this bridge, so a card
+// explaining a feature that can't run would be noise), present with the
+// live state when it is.
+func TestJobsAutoOptimizeCard(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// Unwired → field omitted entirely.
+	var got jobsSnapshotResponse
+	if code := doJSON(t, h, "GET", "/api/jobs", nil, &got); code != 200 {
+		t.Fatalf("jobs: %d", code)
+	}
+	if got.AutoOptimize != nil {
+		t.Errorf("autoOptimize should be omitted when unwired: %+v", got.AutoOptimize)
+	}
+
+	now := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	srv.deps.AutoOptimizeState = func() *AutoOptimizeJobState {
+		return &AutoOptimizeJobState{
+			Enabled: true, Active: true, LastFinishedAt: &now,
+			Last: &AutoOptimizeSweepCounts{Enqueued: 12, Regenerated: 2, Remaining: 340},
+		}
+	}
+	got = jobsSnapshotResponse{}
+	if code := doJSON(t, h, "GET", "/api/jobs", nil, &got); code != 200 {
+		t.Fatalf("jobs wired: %d", code)
+	}
+	if got.AutoOptimize == nil {
+		t.Fatal("autoOptimize missing when wired")
+	}
+	if !got.AutoOptimize.Active || got.AutoOptimize.Last == nil {
+		t.Fatalf("autoOptimize not surfaced: %+v", got.AutoOptimize)
+	}
+	if got.AutoOptimize.Last.Enqueued != 12 || got.AutoOptimize.Last.Remaining != 340 {
+		t.Errorf("autoOptimize.last = %+v, want enqueued 12 / remaining 340", got.AutoOptimize.Last)
+	}
+}

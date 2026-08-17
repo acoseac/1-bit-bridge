@@ -129,6 +129,32 @@
       </p>
     </div>
 
+    <div class="panel job-card" id="job-ao-card" hidden>
+      <div class="panel-head">
+        <h2>CarPlay pre-generation</h2>
+        <span class="panel-actions">
+          <span class="badge" id="job-ao-state">—</span>
+          <button type="button" id="jobs-ao-now" class="btn" hidden>Sweep now</button>
+        </span>
+      </div>
+      <dl>
+        <dt>Remaining</dt>
+        <dd id="job-ao-remaining">—</dd>
+        <dt>Last sweep</dt>
+        <dd id="job-ao-last">—</dd>
+        <dt>Next sweep</dt>
+        <dd id="job-ao-next">—</dd>
+        <dt>Last result</dt>
+        <dd id="job-ao-counts">—</dd>
+      </dl>
+      <p class="hint" id="job-ao-hint">
+        Builds the CarPlay-optimized variants ahead of time so the car never
+        streams the hi-res source while it waits for one. Newest tracks first,
+        on the low-priority lane so an on-demand request always jumps ahead.
+        <a href="/settings?tab=audio">Audio settings</a>
+      </p>
+    </div>
+
     <div class="panel job-card" id="job-dupes-card">
       <div class="panel-head">
         <h2>Duplicate serving</h2>

@@ -12,25 +12,91 @@ import (
 
 // TestRoutesToOptimizeChannel pins the pure routing-decision helper.
 // Empty Kind (legacy default) and JobKindUpscale both route to the
-// background channel; JobKindOptimize is the only kind that routes
-// to the foreground channel.
+// background channel; JobKindOptimize routes to the foreground channel
+// UNLESS the job is flagged background (the auto-optimize sweeper's
+// speculative pre-generation, which must not head-of-line block the
+// on-demand CarPlay path).
 func TestRoutesToOptimizeChannel(t *testing.T) {
 	cases := []struct {
-		kind JobKind
-		want bool
+		name       string
+		kind       JobKind
+		background bool
+		want       bool
 	}{
-		{JobKindOptimize, true},
-		{JobKindUpscale, false},
-		{JobKind(""), false}, // legacy zero-value default
-		{JobKind("future-unknown-kind"), false},
+		{"optimize/foreground", JobKindOptimize, false, true},
+		{"optimize/background", JobKindOptimize, true, false},
+		{"upscale/foreground", JobKindUpscale, false, false},
+		{"upscale/background", JobKindUpscale, true, false},
+		{"legacy-zero-value", JobKind(""), false, false},
+		{"future-unknown-kind", JobKind("future-unknown-kind"), false, false},
 	}
 	for _, c := range cases {
-		t.Run(string(c.kind), func(t *testing.T) {
-			if got := routesToOptimizeChannel(c.kind); got != c.want {
-				t.Errorf("routesToOptimizeChannel(%q) = %v, want %v",
-					c.kind, got, c.want)
+		t.Run(c.name, func(t *testing.T) {
+			if got := routesToOptimizeChannel(c.kind, c.background); got != c.want {
+				t.Errorf("routesToOptimizeChannel(%q, background=%v) = %v, want %v",
+					c.kind, c.background, got, c.want)
 			}
 		})
+	}
+}
+
+// TestPoolBackgroundOptimizeUsesUpscaleLane is the end-to-end half of
+// the routing contract: a background-flagged optimize job must land in
+// the LOW-priority channel even though its Kind is JobKindOptimize.
+// Asserted through the channels directly (no workers draining) so the
+// observation is the lane itself, not a timing artefact.
+//
+// Negative control: with the `background` arm removed from
+// routesToOptimizeChannel this fails on the optimizeJobs length.
+func TestPoolBackgroundOptimizeUsesUpscaleLane(t *testing.T) {
+	store := openTempStoreForPool(t)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Zero workers is not allowed (NewPool floors at 1), so stop the
+	// pool's drain immediately and inspect the buffered channels.
+	p := NewPool(store, 1, 8)
+	p.fsyncFn = noopFsync
+	// Park the single worker on a runner that never returns until the
+	// test ends, so neither channel drains under us.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return 0, context.Canceled
+	}
+	t.Cleanup(p.Stop)
+
+	// One job to occupy the worker, then the two we actually measure.
+	if err := p.Enqueue(JobSpec{SourceLibraryRel: "occupy.flac", TargetSampleRate: 44100, TargetBits: 16, Kind: JobKindUpscale}); err != nil {
+		t.Fatalf("occupy enqueue: %v", err)
+	}
+	// Let the worker pull the occupier so it isn't counted below.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(p.upscaleJobs) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if err := p.Enqueue(JobSpec{
+		SourceLibraryRel: "fg.flac", TargetSampleRate: 44100, TargetBits: 16,
+		Kind: JobKindOptimize,
+	}); err != nil {
+		t.Fatalf("foreground enqueue: %v", err)
+	}
+	if err := p.Enqueue(JobSpec{
+		SourceLibraryRel: "bg.flac", TargetSampleRate: 44100, TargetBits: 16,
+		Kind: JobKindOptimize, Background: true,
+	}); err != nil {
+		t.Fatalf("background enqueue: %v", err)
+	}
+
+	if got := len(p.optimizeJobs); got != 1 {
+		t.Errorf("optimizeJobs (foreground lane) = %d, want 1", got)
+	}
+	if got := len(p.upscaleJobs); got != 1 {
+		t.Errorf("upscaleJobs (background lane) = %d, want 1 (the background optimize job)", got)
 	}
 }
 

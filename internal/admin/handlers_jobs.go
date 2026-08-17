@@ -136,13 +136,17 @@ type jobsSnapshotResponse struct {
 	Scanner     jobsScanner          `json:"scanner"`
 	Analysis    jobsAnalysis         `json:"analysis"`
 	Fingerprint *FingerprintJobState `json:"fingerprint,omitempty"`
-	Enrichment  jobsEnrichment       `json:"enrichment"`
-	Duplicates  jobsDuplicates       `json:"duplicates"`
-	SmartMixes  jobsSmartMixes       `json:"smartMixes"`
-	Backups     jobsBackups          `json:"backups"`
-	Updates     jobsUpdates          `json:"updates"`
-	Maintenance jobsMaintenance      `json:"maintenance"`
-	UPnP        jobsUPnP             `json:"upnp"`
+	// AutoOptimize is the CarPlay-variant pre-generation card. Pointer +
+	// omitempty so a bridge without an upscale pool renders no card at
+	// all rather than a permanently-inactive one.
+	AutoOptimize *AutoOptimizeJobState `json:"autoOptimize,omitempty"`
+	Enrichment   jobsEnrichment        `json:"enrichment"`
+	Duplicates   jobsDuplicates        `json:"duplicates"`
+	SmartMixes   jobsSmartMixes        `json:"smartMixes"`
+	Backups      jobsBackups           `json:"backups"`
+	Updates      jobsUpdates           `json:"updates"`
+	Maintenance  jobsMaintenance       `json:"maintenance"`
+	UPnP         jobsUPnP              `json:"upnp"`
 }
 
 // apiJobs: GET /api/jobs
@@ -192,6 +196,11 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	// Fingerprint.
 	if fp := s.deps.FingerprintState; fp != nil {
 		resp.Fingerprint = fp()
+	}
+
+	// Auto-optimize (CarPlay variant pre-generation).
+	if ao := s.deps.AutoOptimizeState; ao != nil {
+		resp.AutoOptimize = ao()
 	}
 
 	// Enrichment (always-on worker; the card links to Settings for the
@@ -420,6 +429,27 @@ func (s *Server) apiFingerprintSweep(w http.ResponseWriter, _ *http.Request) {
 	trigger := s.deps.TriggerFingerprintSweep
 	if trigger == nil {
 		writeError(w, http.StatusServiceUnavailable, "fingerprint_unavailable", "acoustic fingerprinting is not active on this bridge")
+		return
+	}
+	trigger()
+	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
+}
+
+// apiAutoOptimizeSweep: POST /api/upscale/auto-optimize/sweep — the
+// auto-optimize twin of apiAnalysisSweep. 202 = queued (the nudge
+// coalesces and is honored after the sweeper's settle window),
+// 503 = the sweeper isn't wired on this bridge (no upscale pool, or the
+// optimize kind is opted out in config).
+//
+// Deliberately does NOT check whether the feature FLAG is on: the
+// sweeper reads that live and reports a disabled sweep, which is more
+// useful to an operator than a 503 that can't distinguish "off" from
+// "unavailable".
+func (s *Server) apiAutoOptimizeSweep(w http.ResponseWriter, _ *http.Request) {
+	trigger := s.deps.TriggerAutoOptimizeSweep
+	if trigger == nil {
+		writeError(w, http.StatusServiceUnavailable, "auto_optimize_unavailable",
+			"CarPlay variant pre-generation is not available on this bridge")
 		return
 	}
 	trigger()

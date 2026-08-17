@@ -1643,3 +1643,108 @@ func TestPageSmartMixes(t *testing.T) {
 		}
 	}
 }
+
+// TestSettingsPatchAutoOptimizeEnabled pins the auto-optimize toggle's
+// HOT-APPLY contract, which is the opposite of every sibling audio flag:
+// it persists but must NOT set restartRequired, and it must nudge the
+// sweeper so an off→on flip starts work immediately.
+//
+// The nudge fires in BOTH directions on purpose — on→off is what makes
+// the Jobs card stop showing numbers from the last real run instead of
+// waiting out a tick that can be hours away.
+func TestSettingsPatchAutoOptimizeEnabled(t *testing.T) {
+	srv, _, cfgPath := newTestServer(t)
+	var nudges int
+	srv.deps.TriggerAutoOptimizeSweep = func() bool { nudges++; return true }
+	h := srv.Handler()
+
+	var resp settingsPatchResponse
+	code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"autoOptimizeEnabled": true}, &resp)
+	if code != 200 {
+		t.Fatalf("patch auto-optimize on: %d", code)
+	}
+	if resp.RestartRequired {
+		t.Error("autoOptimizeEnabled must hot-apply — the sweeper reads the flag live, " +
+			"so a restart banner here would be a lie")
+	}
+	if !srv.deps.CfgHolder.Load().Upscale.AutoOptimize.Enabled {
+		t.Error("in-memory cfg did not reflect upscale.autoOptimize.enabled=true")
+	}
+	if nudges != 1 {
+		t.Errorf("nudges after off→on = %d, want 1 (the hot-apply signal)", nudges)
+	}
+
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Upscale.AutoOptimize.Enabled {
+		t.Error("upscale.autoOptimize.enabled did not persist to disk")
+	}
+
+	// Flip off: still no restart, still nudged.
+	resp = settingsPatchResponse{}
+	code = doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"autoOptimizeEnabled": false}, &resp)
+	if code != 200 {
+		t.Fatalf("patch auto-optimize off: %d", code)
+	}
+	if resp.RestartRequired {
+		t.Error("autoOptimizeEnabled flip-off must not require restart either")
+	}
+	if nudges != 2 {
+		t.Errorf("nudges after on→off = %d, want 2", nudges)
+	}
+
+	// Idempotent re-submit: no nudge, no restart. A settings Save that
+	// didn't change this flag must not kick the sweeper.
+	resp = settingsPatchResponse{}
+	code = doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"autoOptimizeEnabled": false}, &resp)
+	if code != 200 {
+		t.Fatalf("patch idempotent: %d", code)
+	}
+	if resp.RestartRequired {
+		t.Error("idempotent autoOptimizeEnabled patch must not require restart")
+	}
+	if nudges != 2 {
+		t.Errorf("nudges after idempotent patch = %d, want 2 (unchanged)", nudges)
+	}
+}
+
+// TestAutoOptimizeSweepEndpoint503sWhenUnwired: a bridge with no upscale
+// pool has no sweeper to nudge, and the endpoint must say so rather than
+// pretending it queued something.
+func TestAutoOptimizeSweepEndpoint503sWhenUnwired(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.deps.TriggerAutoOptimizeSweep = nil
+	code := doJSON(t, srv.Handler(), "POST", "/api/upscale/auto-optimize/sweep", nil, nil)
+	if code != 503 {
+		t.Errorf("POST /api/upscale/auto-optimize/sweep with no sweeper = %d, want 503", code)
+	}
+}
+
+// TestSettingsPatchAutoOptimizeUnwiredRequiresRestart is the other half of
+// the hot-apply contract: with no sweeper wired (no upscale pool at boot,
+// or the optimize kind opted out) the persisted flag cannot take effect
+// until a restart, so the banner is the honest answer. Reporting a silent
+// success would have the operator flip the switch, see nothing happen, and
+// have nothing to act on.
+func TestSettingsPatchAutoOptimizeUnwiredRequiresRestart(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.deps.TriggerAutoOptimizeSweep = nil // no sweeper on this bridge
+	h := srv.Handler()
+
+	var resp settingsPatchResponse
+	if code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"autoOptimizeEnabled": true}, &resp); code != 200 {
+		t.Fatalf("patch: %d", code)
+	}
+	if !resp.RestartRequired {
+		t.Error("with no sweeper wired the flip cannot hot-apply, so restartRequired must be true")
+	}
+	if !srv.deps.CfgHolder.Load().Upscale.AutoOptimize.Enabled {
+		t.Error("the flag must still persist even when it needs a restart to take effect")
+	}
+}

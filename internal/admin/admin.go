@@ -332,6 +332,22 @@ type Deps struct {
 	// feature is inactive; the endpoint then 503s.
 	TriggerFingerprintSweep func() bool
 
+	// AutoOptimizeState returns the auto-optimize sweeper's admin
+	// snapshot: the live config flag, the runtime active/degraded verdict,
+	// and the sweeper's lifecycle recorder. Wired for every serve where
+	// an upscale pool exists (even flag-off — the card then explains why
+	// nothing is happening). Nil-safe: absent omits the field.
+	AutoOptimizeState func() *AutoOptimizeJobState
+
+	// TriggerAutoOptimizeSweep — the auto-optimize twin of
+	// TriggerAnalysisSweep. Serves BOTH the "Sweep now" button and the
+	// hot-apply half of the settings PATCH: flipping
+	// `upscale.autoOptimize.enabled` fires this instead of setting
+	// RestartRequired, because the sweeper reads the flag live (the
+	// TriggerDuplicatesPass precedent). Nil when the sweeper isn't wired
+	// — the PATCH then still persists and takes effect on restart.
+	TriggerAutoOptimizeSweep func() bool
+
 	// TriggerDuplicatesPass nudges the duplicates stamping sweeper
 	// (cmd/bridge runDuplicatesSweeper) to re-evaluate suppression under
 	// the CURRENT duplicates.filter policy — the hot-apply half of the
@@ -720,6 +736,51 @@ type AnalysisSweepCounts struct {
 	Missing        int  `json:"missing"`
 	Enqueued       int  `json:"enqueued"`
 	QueueSaturated bool `json:"queueSaturated,omitempty"`
+}
+
+// AutoOptimizeJobState is the auto-optimize sweeper's card on
+// /api/jobs. Enabled is the live config flag; Active the runtime
+// verdict (flag AND an upscale pool wired at startup AND the
+// optimize-kind gate). Lifecycle fields follow AnalysisSweepState's
+// shape and rules — pointer timestamps so omitempty genuinely drops
+// them, and no ticking countdowns.
+type AutoOptimizeJobState struct {
+	Enabled        bool                     `json:"enabled"`
+	Active         bool                     `json:"active"`
+	DegradedReason string                   `json:"degradedReason,omitempty"`
+	Running        bool                     `json:"running"`
+	LastStartedAt  *time.Time               `json:"lastStartedAt,omitempty"`
+	LastFinishedAt *time.Time               `json:"lastFinishedAt,omitempty"`
+	NextDueAt      *time.Time               `json:"nextDueAt,omitempty"`
+	Last           *AutoOptimizeSweepCounts `json:"last,omitempty"`
+}
+
+// AutoOptimizeSweepCounts is the last completed auto-optimize sweep's
+// outcome. Remaining is the whole-library backlog under the same
+// predicate the sweep selects on (so the card's number and the work
+// cannot drift); the rest are that run's own tallies.
+//
+// DiskFloorReached and QueueSaturated are the two "stopped early"
+// signals an operator needs in order to understand why pre-generation
+// stalled — without them a sweep that enqueued nothing because the
+// volume is nearly full is indistinguishable from one that had nothing
+// to do.
+type AutoOptimizeSweepCounts struct {
+	// Disabled marks a sweep that short-circuited because the feature
+	// is off. Reported rather than omitted so an operator who just
+	// toggled it sees the state reflected instead of frozen numbers.
+	Disabled         bool  `json:"disabled,omitempty"`
+	Enqueued         int   `json:"enqueued"`
+	Regenerated      int   `json:"regenerated,omitempty"`
+	AlreadyInflight  int   `json:"alreadyInflight,omitempty"`
+	Ineligible       int   `json:"ineligible,omitempty"`
+	Unresolvable     int   `json:"unresolvable,omitempty"`
+	Remaining        int   `json:"remaining"`
+	ProjectedBytes   int64 `json:"projectedBytes,omitempty"`
+	FreeBytes        int64 `json:"freeBytes,omitempty"`
+	MinFreeBytes     int64 `json:"minFreeBytes,omitempty"`
+	DiskFloorReached bool  `json:"diskFloorReached,omitempty"`
+	QueueSaturated   bool  `json:"queueSaturated,omitempty"`
 }
 
 // FingerprintJobState is the acoustic-fingerprint card's snapshot on
@@ -1197,6 +1258,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs/export", s.apiLogExport)
 	mux.HandleFunc("GET /api/logs/bundle", s.apiLogBundle)
 	mux.HandleFunc("POST /api/fingerprint/sweep", s.apiFingerprintSweep)
+	mux.HandleFunc("POST /api/upscale/auto-optimize/sweep", s.apiAutoOptimizeSweep)
 	mux.HandleFunc("GET /api/duplicates/summary", s.apiDuplicatesSummary)
 	mux.HandleFunc("GET /api/duplicates/groups", s.apiDuplicatesGroups)
 	mux.HandleFunc("POST /api/duplicates/sweep", s.apiDuplicatesSweep)
