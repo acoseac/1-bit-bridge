@@ -96,10 +96,15 @@ for _ in $(seq 1 20); do
   if [ "$live" = "$VER" ]; then deployed=yes; break; fi
 done
 if [ -z "$deployed" ]; then
-  echo "ERROR: $HEALTH_URL never reported $VER."
-  echo "  The swap runs detached, so it may still be mid-flight -- check /tmp/bridge-swap.log on the host."
-  echo "  If $REMOTE_BIN is missing, restore the newest backup BEFORE any restart:"
-  echo "    sudo mv $REMOTE_BIN.old-<ts> $REMOTE_BIN && sudo setcap cap_net_bind_service=+ep $REMOTE_BIN && sudo systemctl restart $SVC"
+  # Failure guidance goes to stderr so a caller piping stdout still sees it,
+  # and so success output stays separable -- same reason `bridge doctor
+  # --json --fix` keeps its progress lines off stdout.
+  {
+    echo "ERROR: $HEALTH_URL never reported $VER."
+    echo "  The swap runs detached, so it may still be mid-flight -- check /tmp/bridge-swap.log on the host."
+    echo "  If $REMOTE_BIN is missing, restore the newest backup BEFORE any restart:"
+    echo "    sudo mv $REMOTE_BIN.old-<ts> $REMOTE_BIN && sudo setcap cap_net_bind_service=+ep $REMOTE_BIN && sudo systemctl restart $SVC"
+  } >&2
   exit 1
 fi
 curl -s --max-time 15 "$HEALTH_URL" | python3 -c "
@@ -135,6 +140,6 @@ if ssh_vps "
   echo \"    pruned \$n; kept: \$(ls -1 \$base.old-* | sort -r | tr '\n' ' ')\"
   df -h / | awk 'NR==2{print \"    root disk: \"\$3\" / \"\$2\" (\"\$5\" full), \"\$4\" free\"}'
 "; then :; else
-  echo "    WARNING: prune did not run (SSH unreachable?). Deploy itself is verified; prune later."
+  echo "    WARNING: prune did not run (SSH unreachable?). Deploy itself is verified; prune later." >&2
 fi
 echo "Done. Rollback (within ~24h): sudo mv $REMOTE_BIN $REMOTE_BIN.broken && sudo mv $REMOTE_BIN.old-<ts> $REMOTE_BIN && sudo setcap cap_net_bind_service=+ep $REMOTE_BIN && sudo systemctl restart $SVC"

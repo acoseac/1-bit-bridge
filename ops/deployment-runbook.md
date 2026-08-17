@@ -196,7 +196,7 @@ is actually being listened to. Hence `fingerprint.maxPerRun` (default 500) and
 
 **Helper scripts**: none on the host today — operator runs setup commands directly during install. Update flow uses the cross-compile + `scp .new` + two-step rename + `systemctl restart` pattern from "Step 2 — Windows production bridge" below, adapted for Linux (see canonical deploy procedure below).
 
-**Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR). The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deploy-bridge-vps.sh) (cross-compile → SHA-gated upload → two-step swap → `setcap` → restart → verify); the manual steps below are what it runs:
+**Canonical update procedure** (from operator's macOS workstation, on every merged runtime-behavior PR). The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deploy-bridge-vps.sh) (cross-compile → SHA-gated upload → detached swap → `setcap` → restart → health-polled verify → prune); the manual steps below are what it runs. **Prefer the script** — it retries the health poll and prunes old backups; the manual form below is for when you need to drive a step by hand, and it must keep the same detached dispatch to be safe:
 
 ```sh
 # 1. Cross-compile against current main.
@@ -212,19 +212,26 @@ scp -i ~/.ssh/<VPS-SSH-KEY> dist/bridge-linux-amd64 \
 shasum -a 256 dist/bridge-linux-amd64                                                                 # local
 ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> 'sha256sum /tmp/bridge.new'                        # remote
 
-# 3. Two-step rename swap + restart (mirrors the Windows pattern;
-#    keeps the .old-<ts> backup for one-step rollback).
-ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> "
-  TS=\$(date +%Y%m%d-%H%M%S)
-  sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.old-\$TS
-  sudo mv /tmp/bridge.new /usr/local/bin/bridge
-  sudo setcap cap_net_bind_service=+ep /usr/local/bin/bridge
-  sudo systemctl restart 1-bit-bridge
-  sleep 2
-  systemctl is-active 1-bit-bridge
-"
+# 3. Two-step rename swap + restart, DISPATCHED DETACHED so a dropped SSH
+#    channel cannot kill the swap between the two `mv`s (see the note below —
+#    do NOT run these inline over the channel). Keeps the .old-<ts> backup.
+ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> "cat > /tmp/bridge-swap.sh" <<'EOS'
+set -e
+TS=$(date +%Y%m%d-%H%M%S)
+sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.old-$TS
+sudo mv /tmp/bridge.new /usr/local/bin/bridge
+sudo chmod +x /usr/local/bin/bridge
+sudo setcap cap_net_bind_service=+ep /usr/local/bin/bridge
+sudo systemctl restart 1-bit-bridge
+sleep 3
+echo "active: $(systemctl is-active 1-bit-bridge)"
+echo "SWAP_DONE backup=/usr/local/bin/bridge.old-$TS"
+EOS
+ssh -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH> \
+  'setsid nohup bash /tmp/bridge-swap.sh > /tmp/bridge-swap.log 2>&1 < /dev/null &'
 
-# 4. Verify version + LAN health (admin console requires the whitelisted IP).
+# 4. Verify over :443, which is open to everyone — so this works even if SSH
+#    is filtered right now, and needs no second SSH round trip.
 curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .leCertNotAfter'
 ```
 
