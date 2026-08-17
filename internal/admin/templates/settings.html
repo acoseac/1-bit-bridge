@@ -490,7 +490,10 @@
           track in the car the app streams the full hi-res file — the optimized
           copy only exists in time for the <em>next</em> play, so on shuffle the
           saving rarely lands. Off by default: it spends disk and CPU on tracks
-          nobody has requested yet.
+          nobody has requested yet. Only active while PCM upscaling and
+          CarPlay-optimized variants (both above) are enabled — it shares their
+          sox worker pool, so with either off nothing is pre-generated and the
+          Jobs card stays hidden.
           <br>
           Sweeps newest-indexed tracks first, at most
           <strong>{{.Data.AutoOptimizeMaxPerSweep}}</strong> per pass, and stops

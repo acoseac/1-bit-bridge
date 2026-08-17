@@ -23,6 +23,7 @@
 //     sidecar forever: `serveVariant` answers `410 variant_stale`,
 //     iOS silently falls back to the source, and nothing ever
 //     regenerates it. The sweeper is the natural place to close that.
+
 package manifest
 
 import (
@@ -45,13 +46,19 @@ type AutoOptimizeCandidate struct {
 	// `transcode.OptimizeEligible` — the SQL below is a MIRROR of that
 	// gate, and on a write path the Go gate stays authoritative.
 	Codec string
-	// StaleVariantID is non-empty when the candidate already has an
-	// `optimized-*` variant whose recorded source mtime/size no longer
-	// match the track row — i.e. this is a REGENERATION, not a first
-	// generation. Logging-only; the write path needs no special case
-	// because `UpsertVariant` is keyed on (source_path, variant_id) and
-	// a family-preserving target rate is stable for a given source, so
-	// the replacement lands on the same row and the same sidecar path.
+	// StaleVariantID is non-empty when the candidate already holds SOME
+	// `optimized-*` variant — i.e. this is a REGENERATION, not a first
+	// generation. A candidate by definition has no FRESH variant (see
+	// autoOptimizeCandidateSQL), so any row it does hold is stale or
+	// superseded; the subquery picks one deterministically for the log
+	// line rather than claiming to identify "the" stale row.
+	//
+	// Logging-only. The write path needs no special case: `UpsertVariant`
+	// is keyed on (source_path, variant_id) and a family-preserving
+	// target rate is stable for a given source, so the replacement lands
+	// on the same row and the same sidecar path. A SUPERSEDED row (older
+	// schema version, or a pre-re-rip target rate) is left alone here and
+	// reaped by the orphan-sidecar GC, which is its owner.
 	StaleVariantID string
 }
 
@@ -64,11 +71,31 @@ type AutoOptimizeCandidate struct {
 // of `transcode.OptimizeEligible` pinned by
 // `TestEligibilitySQLAgreesWithOptimizeEligible`.
 //
-// The LEFT JOIN is scoped to `optimized-%`: an upscaled variant must
-// not read as coverage here (the same kind-scoping mistake
+// Both variant lookups are scoped to `optimized-%`: an upscaled variant
+// must not read as coverage here (the same kind-scoping mistake
 // `ListTrackProjectionsUnderPrefix`'s docblock records).
 //
-// **Staleness compares the variant against the TRACK ROW, not against
+// **The coverage test is "NO FRESH variant exists", NOT "some variant
+// row is stale" — and it must not be a JOIN.** `track_variants` is keyed
+// on (source_path, variant_id) and an optimize id encodes the schema
+// version AND the target rate, so one track can hold SEVERAL
+// `optimized-%` rows: a `VariantSchemaVersion` bump leaves the old id
+// behind (which is exactly why `ListTrackProjectionsUnderPrefix`'s LIKE
+// is documented as "version-agnostic to cover both v1 and v2"), and so
+// does a re-rip that moves the source between the 44.1k and 48k
+// families. The sweeper only ever writes the CURRENT target's id, so a
+// superseded row's recorded source facts never advance — it is stale
+// forever. Asking "is some row stale" therefore re-selected the track on
+// EVERY sweep and regenerated an already-fresh variant, and since
+// `UpsertVariant` strict-advances `indexed_at`, every sweep pushed a
+// delta row to every paired device: precisely the
+// regenerate-every-sweep loop this design exists to avoid. A LEFT JOIN
+// also multiplies the row — one track came back once per stale variant,
+// double-spending `MaxPerSweep` and over-reporting the backlog — so the
+// stale-id lookup is a single-row correlated subquery instead.
+// Pinned by TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows.
+//
+// **Freshness compares the variant against the TRACK ROW, not against
 // a fresh stat of the file.** That is deliberate and self-consistent:
 // the sweeper stamps `JobSpec.SourceMTimeNS/SourceSize` from these same
 // track-row values (matching `Coordinator.buildOptimizeCandidates`), so
@@ -94,19 +121,22 @@ const autoOptimizeCandidateSQL = `
 	SELECT t.path, t.size, t.mtime_ns,
 	       COALESCE(t.sample_rate, 0), COALESCE(t.bits_per_sample, 0),
 	       COALESCE(t.codec, ''),
-	       COALESCE(v.variant_id, '') AS stale_variant_id
+	       COALESCE((SELECT sv.variant_id FROM track_variants sv
+	                  WHERE sv.source_path = t.path
+	                    AND sv.variant_id LIKE 'optimized-%'
+	                  ORDER BY sv.variant_id ASC
+	                  LIMIT 1), '') AS stale_variant_id
 	  FROM tracks t
-	  LEFT JOIN track_variants v
-	         ON v.source_path = t.path
-	        AND v.variant_id LIKE 'optimized-%'
 	 WHERE t.size > 0
 	   AND COALESCE(t.dupe_suppressed, 0) = 0
 	   AND NOT EXISTS (SELECT 1 FROM upnp_track_routing u
 	                    WHERE u.source_path = t.path)
 	   AND ` + optimizeEligibleSQL + `
-	   AND ( v.source_path IS NULL
-	         OR v.source_mtime_ns != t.mtime_ns
-	         OR v.source_size     != t.size )
+	   AND NOT EXISTS (SELECT 1 FROM track_variants fv
+	                    WHERE fv.source_path     = t.path
+	                      AND fv.variant_id      LIKE 'optimized-%'
+	                      AND fv.source_mtime_ns = t.mtime_ns
+	                      AND fv.source_size     = t.size)
 	 ORDER BY t.indexed_at DESC, t.path ASC
 	 LIMIT ?`
 

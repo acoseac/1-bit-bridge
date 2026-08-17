@@ -1150,10 +1150,27 @@ always been able to mint variants nobody asked for; only the trigger is new).
   routed from a Chord 2Go** — unfiltered, every tick resolve-fails them, the shape
   `TrackPathsLocal` fixed for the analysis sweeper); **`dupe_suppressed = 0`** (a
   suppressed row is never served, so its variant could never be requested);
-  and **stale variants selected, not just missing ones** — `HasVariant` is existence-only,
+  and **selection keyed on "NO FRESH variant exists"** — `HasVariant` is existence-only,
   so a re-encoded source keeps its old sidecar forever, `serveVariant` answers
   `410 variant_stale`, iOS silently falls back to the source and nothing ever
-  regenerates it. All three arms negative-control-verified.
+  regenerates it. All four arms negative-control-verified.
+
+  **The coverage test must be `NOT EXISTS (fresh variant)`, never "some row is stale",
+  and never a JOIN** (caught in review; the first draft was both). `track_variants` is
+  keyed on `(source_path, variant_id)` and an optimize id encodes the schema version AND
+  the target rate, so ONE track can hold several `optimized-%` rows — a
+  `VariantSchemaVersion` bump leaves the old id behind (which is why
+  `ListTrackProjectionsUnderPrefix`'s LIKE is documented as "version-agnostic to cover
+  both v1 and v2"), and so does a re-rip that moves the source between the 44.1k and 48k
+  families. The sweeper only ever writes the CURRENT target's id, so a superseded row's
+  recorded source facts never advance: it is stale forever. "Some row is stale" therefore
+  re-selects the track on EVERY sweep and regenerates an already-fresh variant, and since
+  `UpsertVariant` strict-advances `indexed_at`, every sweep pushes a delta row to every
+  paired device — the exact regenerate-every-sweep loop this design exists to avoid. The
+  JOIN additionally multiplied the row (one candidate per stale variant), double-spending
+  `maxPerSweep` and over-reporting the backlog, so `StaleVariantID` comes from a
+  single-row correlated subquery. Pinned by
+  `TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows`.
 - **Staleness compares the variant against the TRACK ROW, and the sweeper stamps
   `SourceMTimeNS`/`SourceSize` from that same row.** Self-consistency, not laziness: a
   freshly written variant necessarily satisfies the predicate and cannot be re-selected.

@@ -263,3 +263,68 @@ func TestListAutoOptimizeCandidatesOrderAndLimit(t *testing.T) {
 		t.Errorf("CountAutoOptimizeCandidates = %d, want %d", n, len(paths))
 	}
 }
+
+// TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows is the
+// multi-row case. `track_variants` is keyed on (source_path, variant_id)
+// and an optimize variant id encodes the schema version AND the target
+// rate, so ONE track can hold several `optimized-%` rows: a
+// VariantSchemaVersion bump leaves the old one behind (which is why
+// ListTrackProjectionsUnderPrefix's LIKE is documented as
+// "version-agnostic to cover both v1 and v2"), and so does a re-rip that
+// moves the source between the 44.1k and 48k families.
+//
+// The sweeper only ever writes the CURRENT target's id, so a superseded
+// row's source mtime/size never advance — it is stale forever. A
+// predicate asking "is SOME row stale" therefore re-selects the track on
+// every sweep and regenerates an already-fresh variant, and since
+// UpsertVariant strict-advances indexed_at, every sweep pushes a delta row
+// to every paired device. That is precisely the regenerate-every-sweep
+// loop autoOptimizeCandidateSQL's docblock claims the design avoids.
+//
+// The predicate must therefore ask "does NO fresh variant exist", and one
+// track must never yield two candidate rows (which would also double-spend
+// MaxPerSweep and over-report the backlog).
+func TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	const path = "Music/A/Album/reripped.flac"
+	seedOptimizeTrack(t, s, path, 96000, 24, "FLAC", false)
+	mtime, size := trackRowMTimeAndSize(t, s, path)
+
+	// The CURRENT target for a 96 kHz source is 48 kHz — fresh.
+	seedOptimizeVariant(t, s, path, "optimized-v2-48000-16", mtime, size)
+	// A superseded row from before the re-rip / schema bump. Its recorded
+	// source facts can never advance, because nothing writes this id again.
+	seedOptimizeVariant(t, s, path, "optimized-v1-44100-16", mtime-1, size-7)
+
+	got := candidatePaths(t, s, 100)
+	if len(got) != 0 {
+		t.Errorf("track with a FRESH current-target variant must not be a candidate, "+
+			"got %v — a superseded row is stale forever, so this re-generates every sweep "+
+			"and pushes a delta row to every paired device each time", got)
+	}
+	if n, err := s.CountAutoOptimizeCandidates(ctx); err != nil {
+		t.Fatalf("CountAutoOptimizeCandidates: %v", err)
+	} else if n != 0 {
+		t.Errorf("CountAutoOptimizeCandidates = %d, want 0", n)
+	}
+
+	// Now make the SOURCE genuinely drift: no variant matches it, so the
+	// track becomes a candidate — exactly ONCE, despite two variant rows.
+	if _, err := s.db.Exec(`UPDATE tracks SET mtime_ns = mtime_ns + 1000 WHERE path = ?`, path); err != nil {
+		t.Fatalf("drift source: %v", err)
+	}
+	got = candidatePaths(t, s, 100)
+	if len(got) != 1 || got[0] != path {
+		t.Errorf("drifted source = %v, want exactly one entry for %q "+
+			"(two variant rows must not yield two candidates — that double-spends "+
+			"MaxPerSweep and over-reports the backlog)", got, path)
+	}
+	if n, err := s.CountAutoOptimizeCandidates(ctx); err != nil {
+		t.Fatalf("CountAutoOptimizeCandidates: %v", err)
+	} else if n != 1 {
+		t.Errorf("CountAutoOptimizeCandidates = %d, want 1 (not double-counted)", n)
+	}
+}
