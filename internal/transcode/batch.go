@@ -342,6 +342,15 @@ func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targe
 		// bogus-bits-tag hole and matches the inspector's lossy_source
 		// badge. manifest.IsLossyCodec is the single source of truth
 		// (SQL mirror: upscaleEligibleSQL).
+		// Repeatedly-failed sources are skipped, or every submit re-enqueues
+		// work that cannot succeed: a failed job writes no variant row, so
+		// nothing else marks them done. Suppression needs several
+		// CONSECUTIVE failures on the same (size, mtime), expires on a TTL,
+		// and clears the moment the file changes — see
+		// manifest.variantFailureSuppressedSQL.
+		if t.Suppressed {
+			continue
+		}
 		if manifest.IsLossyCodec(t.Codec) {
 			continue
 		}
@@ -902,6 +911,15 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 		}
 		if t.IsDSD {
 			// DSD is structurally excluded from CarPlay routing.
+			continue
+		}
+		// Repeatedly-failed sources are skipped, or every submit re-enqueues
+		// work that cannot succeed: a failed job writes no variant row, so
+		// nothing else marks them done. Suppression needs several
+		// CONSECUTIVE failures on the same (size, mtime), expires on a TTL,
+		// and clears the moment the file changes — see
+		// manifest.variantFailureSuppressedSQL.
+		if t.Suppressed {
 			continue
 		}
 		if !OptimizeEligible(t.Path, t.Codec, t.SampleRate, t.BitsPerSample) {

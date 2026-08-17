@@ -1121,6 +1121,25 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 				logger.Warn("pool: sox failed",
 					"path", job.spec.SourceLibraryRel,
 					"err", err)
+				// One strike against this file version. Only HERE:
+				// shutdown is excluded by the enclosing !p.closed gate,
+				// and the timeout branch above is excluded because a
+				// deadline says as much about a hung mount as about the
+				// source. A failed job writes no variant row, so without
+				// this the candidate queries re-select the same doomed
+				// source on every sweep, forever. Suppression needs
+				// `variantFailureThreshold` CONSECUTIVE strikes on the
+				// same (size, mtime), so a transient fault costs a
+				// bounded retry rather than sidelining a good file.
+				//
+				// Best-effort: a bookkeeping write must never turn into a
+				// second failure. Uses context.WithoutCancel so a job ctx
+				// already cancelled underneath us still records the fact.
+				if rerr := p.store.RecordVariantFailure(context.WithoutCancel(jobCtx),
+					job.spec.SourceLibraryRel, job.spec.SourceSize, job.spec.SourceMTimeNS); rerr != nil {
+					logger.Warn("pool: record variant failure",
+						"path", job.spec.SourceLibraryRel, "err", rerr)
+				}
 			}
 		}
 		p.finishJob(workerID, job)
@@ -1211,6 +1230,14 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	// (extremely rare but possible under deep contention)
 	// would otherwise pin a worker indefinitely. CodeRabbit
 	// Major on PR #216.
+	// A success means the previous strikes (if any) described a transient
+	// condition, so the counter resets — it measures CONSECUTIVE failures.
+	// Before the upsert deliberately: the variant is on disk either way, and
+	// a stale strike record is the thing that could wrongly suppress later.
+	if cerr := p.store.ClearVariantFailure(context.WithoutCancel(jobCtx), job.spec.SourceLibraryRel); cerr != nil {
+		logger.Warn("pool: clear variant failure",
+			"path", job.spec.SourceLibraryRel, "err", cerr)
+	}
 	if err := p.store.UpsertVariant(jobCtx, row); err != nil {
 		// Suppress failure-counter increments + logging + event
 		// firing during graceful shutdown — `jobCtx` is derived

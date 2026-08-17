@@ -269,3 +269,53 @@ func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
 func (s *Server) pageJobs(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, "jobs", nil)
 }
+
+// variantFailureRetryRequest scopes the retry to a subtree ("" = whole
+// library), matching the batch-submit and enrichment-retry shapes.
+type variantFailureRetryRequest struct {
+	Path string `json:"path"`
+}
+
+type variantFailureRetryResponse struct {
+	Cleared int64 `json:"cleared"`
+}
+
+// apiVariantFailureRetry handles POST /api/upscale/failures/retry.
+//
+// The transcode-failure debounce (migration v39) sidelines a source after
+// repeated failures on the same file version, which is what stops the batch
+// walks and the auto-optimize sweeper looping on work that cannot succeed.
+// That suppression clears itself two ways — the file changes, or the TTL
+// expires — but an operator who has just fixed the underlying cause (installed
+// a codec, freed disk, replaced a mount) should not have to wait 30 days or
+// touch every file's mtime. This is that escape hatch.
+//
+// No rate guard, unlike the enrichment retry: this touches only local columns
+// and starts no upstream traffic, so the worst case of a double-click is one
+// redundant UPDATE. The re-attempt itself is still bounded by the debounce —
+// a genuinely broken file simply earns its strikes again.
+func (s *Server) apiVariantFailureRetry(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Manifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		return
+	}
+	defer r.Body.Close()
+	var req variantFailureRetryRequest
+	// decodeOptionalJSONBody writes its own 400 on malformed input, and
+	// tolerates an absent body — a bare POST means "whole library".
+	if !decodeOptionalJSONBody(w, r, &req) {
+		return
+	}
+	normalised, ok := normaliseBrowsePath(req.Path)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad-path", "path escapes the library root")
+		return
+	}
+	n, err := s.deps.Manifest.ClearVariantFailuresUnderPrefix(r.Context(), normalised)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	logger.Info("transcode-failure suppressions cleared", "path", normalised, "rows", n)
+	writeJSON(w, http.StatusOK, variantFailureRetryResponse{Cleared: n})
+}

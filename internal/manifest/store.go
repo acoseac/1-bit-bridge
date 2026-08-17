@@ -1864,6 +1864,19 @@ var migrations = []migration{
 			)
 		},
 	},
+	{
+		version: 39,
+		name:    "tracks transcode-failure debounce (versioned + TTL-stamped)",
+		sql:     `-- columns added idempotently in post(); see the docblock on variantFailureSuppressedSQL`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "tracks",
+				tableColumn{"variant_fail_count", "ALTER TABLE tracks ADD COLUMN variant_fail_count INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"variant_fail_at", "ALTER TABLE tracks ADD COLUMN variant_fail_at INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"variant_fail_size", "ALTER TABLE tracks ADD COLUMN variant_fail_size INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"variant_fail_mtime_ns", "ALTER TABLE tracks ADD COLUMN variant_fail_mtime_ns INTEGER NOT NULL DEFAULT 0"},
+			)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -6756,6 +6769,12 @@ type TrackProjection struct {
 	// inspector polish.
 	IsDSD      bool
 	HasVariant bool
+	// Suppressed marks a source that has failed conversion
+	// `variantFailureThreshold` consecutive times on THIS version of the
+	// file, recently enough to still count (migration v39). The batch walks
+	// skip it: a failed job writes no variant row, so nothing else would
+	// stop it being re-selected on every submit.
+	Suppressed bool
 }
 
 // ListTrackProjectionsUnderPrefix iterates every track under `prefix`
@@ -6815,11 +6834,12 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, var
 		       CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'),         0) AS INTEGER) AS is_dsd,
 		       EXISTS(SELECT 1 FROM track_variants tv
 		               WHERE tv.source_path = t.path
-		                 AND tv.variant_id LIKE ?) AS has_variant
+		                 AND tv.variant_id LIKE ?) AS has_variant,
+		       `+variantFailureSuppressedSQL+` AS suppressed
 		  FROM tracks t
 		 WHERE t.path LIKE ? ESCAPE '\'
 		 ORDER BY t.path ASC
-	`, variantLike, pattern)
+	`, variantLike, s.VariantFailureCutoff(), pattern)
 	if err != nil {
 		return nil, fmt.Errorf("list track projections %q: %w", prefix, err)
 	}
@@ -6827,12 +6847,13 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, var
 	out := []TrackProjection{}
 	for rows.Next() {
 		var tp TrackProjection
-		var isDSD, has int
-		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &tp.Codec, &isDSD, &has); err != nil {
+		var isDSD, has, suppressed int
+		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &tp.Codec, &isDSD, &has, &suppressed); err != nil {
 			return nil, err
 		}
 		tp.IsDSD = isDSD != 0
 		tp.HasVariant = has != 0
+		tp.Suppressed = suppressed != 0
 		out = append(out, tp)
 	}
 	return out, rows.Err()
