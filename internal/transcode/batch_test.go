@@ -640,6 +640,26 @@ func soxWithoutMP4() (SoxInfo, error) {
 	return SoxInfo{FormatsKnown: true, HasFLAC: true, Formats: []string{"flac", "wav", "aiff"}}, nil
 }
 
+// newALACGateFixture builds a coordinator over a store holding one ALAC and
+// one FLAC track — both lossless, both with real PCM geometry below the
+// upscale target — so a test only has to say what the sox probe returns and
+// then count what survived the walk.
+func newALACGateFixture(t *testing.T) *Coordinator {
+	t.Helper()
+	s := openTempStoreForBatch(t)
+	t.Cleanup(func() { _ = s.Close() })
+	seedALACAndFLAC(t, s)
+
+	p := NewPool(s, 1, 4)
+	t.Cleanup(p.Stop)
+	c, err := NewCoordinator(p, s, t.TempDir(), nil,
+		func(rel string) (string, error) { return filepath.Join(t.TempDir(), rel), nil })
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	return c
+}
+
 // TestBatchWalksRefuseUndecodableSources pins the gate that was missing.
 //
 // ALAC is lossless (IsLossyCodec doesn't exclude it) and carries real PCM
@@ -664,17 +684,7 @@ func TestBatchWalksRefuseUndecodableSources(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := openTempStoreForBatch(t)
-			t.Cleanup(func() { _ = s.Close() })
-			seedALACAndFLAC(t, s)
-
-			p := NewPool(s, 1, 4)
-			t.Cleanup(p.Stop)
-			c, err := NewCoordinator(p, s, t.TempDir(), nil,
-				func(rel string) (string, error) { return filepath.Join(t.TempDir(), rel), nil })
-			if err != nil {
-				t.Fatalf("NewCoordinator: %v", err)
-			}
+			c := newALACGateFixture(t)
 			c.WithSoxInfo(soxWithoutMP4)
 
 			b, err := tc.submit(c, t.TempDir())
@@ -706,17 +716,7 @@ func TestBatchWalkFailsOpenWithoutProbe(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := openTempStoreForBatch(t)
-			t.Cleanup(func() { _ = s.Close() })
-			seedALACAndFLAC(t, s)
-
-			p := NewPool(s, 1, 4)
-			t.Cleanup(p.Stop)
-			c, err := NewCoordinator(p, s, t.TempDir(), nil,
-				func(rel string) (string, error) { return filepath.Join(t.TempDir(), rel), nil })
-			if err != nil {
-				t.Fatalf("NewCoordinator: %v", err)
-			}
+			c := newALACGateFixture(t)
 			tc.wire(c)
 
 			b, err := c.Submit(context.Background(), "Mixed", 192000, 24, t.TempDir())
