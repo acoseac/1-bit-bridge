@@ -106,8 +106,8 @@ type browseTrackRow struct {
 	PathHash      string   `json:"pathHash"`
 	// SkipReason is the kind-agnostic, target-independent reason this
 	// track can never be upscaled/optimized (dsd_bitstream / lossy_source
-	// / unknown_format), or "" when it has no hard block. The inspector
-	// badges each tile with it inline — see fundamentalSkipReason.
+	// / unknown_format / no_decoder), or "" when it has no hard block. The
+	// inspector badges each tile with it inline — see fundamentalSkipReason.
 	SkipReason string `json:"skipReason,omitempty"`
 }
 
@@ -216,7 +216,20 @@ func isLossyCodecLabel(codec string) bool {
 //   - dsd_bitstream  : DSD (1-bit) — the SoX PCM pipeline rejects it
 //   - lossy_source   : a known lossy codec (MP3/AAC/OGG/OPUS/WMA)
 //   - unknown_format : extractor couldn't determine sample rate / bit depth
-func fundamentalSkipReason(isDSD bool, codec string, sampleRate *float64, bitsPerSample *int) string {
+//   - no_decoder     : lossless with valid geometry, but THIS sox build has
+//     no handler for the container (ALAC-in-M4A on a sox with no MP4 demuxer,
+//     which is essentially every build)
+//
+// `no_decoder` is last on purpose: it is the only branch that depends on the
+// host's toolchain rather than on the file, so a track is described by what
+// it IS wherever that is knowable. It ranks after unknown_format for the same
+// reason — a row with no geometry can't be judged decodable in the first
+// place.
+//
+// `canDecode` is nil-safe and fails OPEN (unwired ⇒ no badge), matching the
+// enqueue-side guards: the probe exists to explain refusals, never to invent
+// them.
+func fundamentalSkipReason(isDSD bool, codec string, sampleRate *float64, bitsPerSample *int, path string, canDecode func(string) bool) string {
 	switch {
 	case isDSD:
 		return "dsd_bitstream"
@@ -224,9 +237,21 @@ func fundamentalSkipReason(isDSD bool, codec string, sampleRate *float64, bitsPe
 		return "lossy_source"
 	case sampleRate == nil || *sampleRate <= 0 || bitsPerSample == nil || *bitsPerSample <= 0:
 		return "unknown_format"
+	case canDecode != nil && !canDecode(path):
+		return "no_decoder"
 	default:
 		return ""
 	}
+}
+
+// soxCanDecode adapts the wired probe into the shape fundamentalSkipReason
+// wants. Returns nil when unwired so the badge is simply absent rather than
+// asserting a guess about a toolchain this process cannot see.
+func (s *Server) soxCanDecode() func(string) bool {
+	if s.deps.SoxCanDecode == nil {
+		return nil
+	}
+	return s.deps.SoxCanDecode
 }
 
 // --- handlers ---
@@ -385,7 +410,7 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		resp.Folders = append(resp.Folders, row)
 	}
 	for _, t := range tracks {
-		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t))
+		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t, s.soxCanDecode()))
 	}
 	// Next-page cursors: a "full page" (len == limit) MIGHT have
 	// more; signal continuation via the last row's path. A
@@ -420,7 +445,7 @@ func camelotKeyName(keyRoot int, mode string) string {
 // toBrowseTrackRow projects a manifest.ChildTrack into the wire row shape.
 // Shared by the folder browse and the harmonic-key filter so the
 // skip-reason + pointer-field mapping lives in one place.
-func toBrowseTrackRow(t manifest.ChildTrack) browseTrackRow {
+func toBrowseTrackRow(t manifest.ChildTrack, canDecode func(string) bool) browseTrackRow {
 	return browseTrackRow{
 		Name:          path.Base(t.Path),
 		Path:          t.Path,
@@ -432,7 +457,7 @@ func toBrowseTrackRow(t manifest.ChildTrack) browseTrackRow {
 		IsUpscaled:    t.IsUpscaled,
 		IsOptimized:   t.IsOptimized,
 		PathHash:      pathHash(t.Path),
-		SkipReason:    fundamentalSkipReason(t.IsDSD != nil && *t.IsDSD, t.Codec, t.SampleRate, t.BitsPerSample),
+		SkipReason:    fundamentalSkipReason(t.IsDSD != nil && *t.IsDSD, t.Codec, t.SampleRate, t.BitsPerSample, t.Path, canDecode),
 	}
 }
 
@@ -490,7 +515,7 @@ func (s *Server) browseByKey(w http.ResponseWriter, r *http.Request, camelot str
 		resp.SubtreeTracks = total
 	}
 	for _, t := range tracks {
-		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t))
+		resp.Tracks = append(resp.Tracks, toBrowseTrackRow(t, s.soxCanDecode()))
 	}
 	if len(tracks) == limit {
 		resp.NextTrackCursor = tracks[len(tracks)-1].Path
@@ -671,7 +696,7 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 				// classifier so the two surfaces can't disagree.
 				sr := float64(t.SampleRate)
 				bps := t.BitsPerSample
-				if fundamentalSkipReason(t.IsDSD, t.Codec, &sr, &bps) == "" {
+				if fundamentalSkipReason(t.IsDSD, t.Codec, &sr, &bps, t.Path, s.soxCanDecode()) == "" {
 					atTarget++
 				} else {
 					unknownFormat++

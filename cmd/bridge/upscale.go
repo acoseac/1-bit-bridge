@@ -193,6 +193,13 @@ type runUpscaleParams struct {
 	force          bool
 	outputDir      string
 
+	// soxInfo is this run's ProbeSox snapshot, used to refuse sources the
+	// installed sox cannot decode. Probed ONCE per run (soxCLIReady already
+	// pays for it) rather than per track — the CLI is a one-shot process, so
+	// a TTL cache would buy nothing. Zero value (FormatsKnown false) fails
+	// OPEN via SoxInfo.CanDecode, matching the server-side gates.
+	soxInfo transcode.SoxInfo
+
 	// Kind discriminates upscale (zero-value / JobKindUpscale,
 	// legacy CLI behavior) from optimize (CarPlay-targeted
 	// downsample). Drives the classifier's eligibility predicate +
@@ -305,6 +312,17 @@ func classifyUpscaleTrack(
 	// OptimizeEligible below for kind=optimize) also counts lossy
 	// under the accurate `notPCM` bucket instead of alreadyAtTarget.
 	if manifest.IsLossyCodec(t.Codec) {
+		counters.notPCM++
+		return nil, 0
+	}
+	// Refuse what this sox build cannot decode, mirroring the server-side
+	// gates (Coordinator's walks, EnqueueOne, the auto-optimize sweeper).
+	// ALAC is the case that matters: lossless, so IsLossyCodec lets it
+	// through, and it carries real PCM geometry since PR #440 — so without
+	// this it reached a sox with no MP4 demuxer and failed per file.
+	// Counted under notPCM: the accurate bucket for "this pipeline cannot
+	// take it", the same one DSD and lossy use.
+	if !p.soxInfo.CanDecode(t.Path) {
 		counters.notPCM++
 		return nil, 0
 	}
@@ -502,6 +520,14 @@ func runUpscaleWorker(
 // `runUpscaleWorker`). Behaviour and exit codes are byte-identical;
 // locked by the existing cmd/bridge upscale test suite.
 func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, cfg *config.Config, resolver *bridgefs.Resolver, p runUpscaleParams) int {
+	// One probe for the whole run, feeding the classifier's decodability
+	// gate. A probe FAILURE leaves the zero value, whose FormatsKnown=false
+	// makes CanDecode fail open — the documented posture everywhere else.
+	// bootstrapTranscodeCmd's soxCLIReady has already run by here, so this
+	// is the second and last fork-exec of sox for the command.
+	if info, perr := transcode.ProbeSox(ctx); perr == nil {
+		p.soxInfo = info
+	}
 	allTracks, err := store.ListTracks(ctx, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "list tracks: %v\n", err)

@@ -12,6 +12,7 @@ import (
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
+	"strings"
 )
 
 // recordingEnqueuer stands in for transcode.Pool.Enqueue and records what
@@ -439,5 +440,86 @@ func TestRunAutoOptimizeSweeperSweepsOnNudge(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("runAutoOptimizeSweeper did not return on ctx cancel")
+	}
+}
+
+// seedALACTrack is seedTrack's ALAC twin: a real file plus a hi-res
+// ALAC-in-M4A row. Lossless with real PCM geometry, so it clears
+// OptimizeEligible exactly as a hi-res FLAC does — the only thing that can
+// exclude it is whether the installed sox can open the container.
+func (f *autoOptimizeFixture) seedALACTrack(t *testing.T, rel string, sizeBytes int) {
+	t.Helper()
+	f.seedTrack(t, rel, sizeBytes)
+	rate, bits, dsd := 96000.0, 24, false
+	if err := f.store.UpsertTrack(context.Background(), &manifest.Track{
+		Path:          rel,
+		Size:          int64(sizeBytes),
+		ModTime:       time.Unix(1700000000, 0),
+		SampleRate:    &rate,
+		BitsPerSample: &bits,
+		Codec:         "ALAC",
+		IsDSD:         &dsd,
+	}); err != nil {
+		t.Fatalf("UpsertTrack(%q): %v", rel, err)
+	}
+}
+
+// TestAutoOptimizeSweepSkipsUndecodableSources pins the arm that stops an
+// UNBOUNDED retry loop, which is what makes this more than a wasted job.
+//
+// A failed job writes no variant row, so ListAutoOptimizeCandidates re-selects
+// the same source on the very next tick — forever. Measured 2026-08-17 against
+// the Docker image: hi-res ALAC clears OptimizeEligible (lossless, real PCM
+// geometry since PR #440) and then fails with `sox FAIL formats: no handler
+// for file extension 'm4a'`, because sox has no MP4 demuxer in essentially any
+// build. Without this gate the sweeper would burn CPU on it every sweep.
+func TestAutoOptimizeSweepSkipsUndecodableSources(t *testing.T) {
+	f := newAutoOptimizeFixture(t)
+	f.seedTrack(t, "Artist/Album/01.flac", 30<<20)
+	f.seedALACTrack(t, "Artist/Album/02.m4a", 30<<20)
+	f.sweeper.soxInfo = func() (transcode.SoxInfo, error) {
+		// A build that reads FLAC but has no MP4 demuxer — i.e. ours.
+		return transcode.SoxInfo{FormatsKnown: true, HasFLAC: true, Formats: []string{"flac", "wav"}}, nil
+	}
+
+	counts := f.sweeper.sweepOnce(context.Background())
+	if counts == nil {
+		t.Fatal("sweepOnce returned nil, want counts")
+	}
+	if got := len(f.submitted.specs); got != 1 {
+		t.Fatalf("enqueued %d jobs, want 1 (the FLAC only)", got)
+	}
+	if got := f.submitted.specs[0].SourceLibraryRel; !strings.HasSuffix(got, "01.flac") {
+		t.Errorf("enqueued %q, want the FLAC — the ALAC would fail at sox and be re-selected forever", got)
+	}
+	if counts.Ineligible != 1 {
+		t.Errorf("Ineligible=%d, want 1: the file is fine, the toolchain just can't read it", counts.Ineligible)
+	}
+}
+
+// TestAutoOptimizeSweepFailsOpenWithoutProbe: an unwired or failing probe
+// must never cost the sweeper real work.
+func TestAutoOptimizeSweepFailsOpenWithoutProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wire func(*autoOptimizeSweeper)
+	}{
+		{"unwired", func(sw *autoOptimizeSweeper) { sw.soxInfo = nil }},
+		{"probe errors", func(sw *autoOptimizeSweeper) {
+			sw.soxInfo = func() (transcode.SoxInfo, error) { return transcode.SoxInfo{}, errors.New("boom") }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAutoOptimizeFixture(t)
+			f.seedALACTrack(t, "Artist/Album/02.m4a", 30<<20)
+			tc.wire(f.sweeper)
+
+			if counts := f.sweeper.sweepOnce(context.Background()); counts == nil {
+				t.Fatal("sweepOnce returned nil, want counts")
+			}
+			if got := len(f.submitted.specs); got != 1 {
+				t.Errorf("enqueued %d jobs, want 1 — an absent verdict must not drop candidates", got)
+			}
+		})
 	}
 }

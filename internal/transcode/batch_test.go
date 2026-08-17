@@ -604,3 +604,128 @@ func TestRedactSoxErr_WindowsSeparatorStillRedacted(t *testing.T) {
 		t.Errorf("leaked the absolute Windows variants path: %q", got)
 	}
 }
+
+// seedALACAndFLAC seeds one ALAC-in-M4A track and one FLAC track, both
+// lossless with real PCM geometry below the upscale target and above the
+// CarPlay floor — so both clear every gate except decodability.
+func seedALACAndFLAC(t *testing.T, s *manifest.Store) {
+	t.Helper()
+	if err := s.UpsertFolder(context.Background(), &manifest.Folder{Path: "Mixed"}); err != nil {
+		t.Fatal(err)
+	}
+	rate := float64(96000)
+	bits := 24
+	isDSD := false
+	for _, tr := range []struct{ path, codec string }{
+		{"Mixed/01.m4a", "ALAC"},
+		{"Mixed/02.flac", "FLAC"},
+	} {
+		if err := s.UpsertTrack(context.Background(), &manifest.Track{
+			Path:          tr.path,
+			Size:          10 << 20,
+			SampleRate:    &rate,
+			BitsPerSample: &bits,
+			Codec:         tr.codec,
+			IsDSD:         &isDSD,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// soxWithoutMP4 is a SoxInfo for a build that reads FLAC but has no MP4
+// demuxer — i.e. every sox build in practice, and the one in our own
+// container image (verified 2026-08-17).
+func soxWithoutMP4() (SoxInfo, error) {
+	return SoxInfo{FormatsKnown: true, HasFLAC: true, Formats: []string{"flac", "wav", "aiff"}}, nil
+}
+
+// TestBatchWalksRefuseUndecodableSources pins the gate that was missing.
+//
+// ALAC is lossless (IsLossyCodec doesn't exclude it) and carries real PCM
+// geometry since PR #440, so it cleared every candidate check and was
+// enqueued — then failed with `sox FAIL formats: no handler for file
+// extension 'm4a'`. Measured against the Docker image on 2026-08-17: a
+// whole-library batch enqueued 13 such files and failed all 13, after the
+// operator had been shown them as eligible.
+//
+// The per-track EnqueueOne path already had this guard; the batch walks did
+// not. Covers BOTH walks, since each has its own candidate loop.
+func TestBatchWalksRefuseUndecodableSources(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		submit func(*Coordinator, string) (*SubmitResult, error)
+	}{
+		{"upscale", func(c *Coordinator, out string) (*SubmitResult, error) {
+			return c.Submit(context.Background(), "Mixed", 192000, 24, out)
+		}},
+		{"optimize", func(c *Coordinator, out string) (*SubmitResult, error) {
+			return c.SubmitOptimize(context.Background(), "Mixed", out)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTempStoreForBatch(t)
+			t.Cleanup(func() { _ = s.Close() })
+			seedALACAndFLAC(t, s)
+
+			p := NewPool(s, 1, 4)
+			t.Cleanup(p.Stop)
+			c, err := NewCoordinator(p, s, t.TempDir(), nil,
+				func(rel string) (string, error) { return filepath.Join(t.TempDir(), rel), nil })
+			if err != nil {
+				t.Fatalf("NewCoordinator: %v", err)
+			}
+			c.WithSoxInfo(soxWithoutMP4)
+
+			b, err := tc.submit(c, t.TempDir())
+			if err != nil {
+				t.Fatalf("submit: %v", err)
+			}
+			// The FLAC survives, the ALAC does not: a count of 2 means the
+			// undecodable source was enqueued to fail, which is the bug.
+			if b.TotalFiles != 1 {
+				t.Errorf("enqueued %d files, want 1 (the FLAC only — the ALAC has no sox handler)", b.TotalFiles)
+			}
+		})
+	}
+}
+
+// TestBatchWalkFailsOpenWithoutProbe pins the nil-safe posture: an unwired
+// or failing probe must never cost the batch real candidates.
+func TestBatchWalkFailsOpenWithoutProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wire func(*Coordinator)
+	}{
+		{"unwired", func(c *Coordinator) {}},
+		{"probe errors", func(c *Coordinator) {
+			c.WithSoxInfo(func() (SoxInfo, error) { return SoxInfo{}, errors.New("sox exploded") })
+		}},
+		{"formats unparseable", func(c *Coordinator) {
+			c.WithSoxInfo(func() (SoxInfo, error) { return SoxInfo{FormatsKnown: false}, nil })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTempStoreForBatch(t)
+			t.Cleanup(func() { _ = s.Close() })
+			seedALACAndFLAC(t, s)
+
+			p := NewPool(s, 1, 4)
+			t.Cleanup(p.Stop)
+			c, err := NewCoordinator(p, s, t.TempDir(), nil,
+				func(rel string) (string, error) { return filepath.Join(t.TempDir(), rel), nil })
+			if err != nil {
+				t.Fatalf("NewCoordinator: %v", err)
+			}
+			tc.wire(c)
+
+			b, err := c.Submit(context.Background(), "Mixed", 192000, 24, t.TempDir())
+			if err != nil {
+				t.Fatalf("submit: %v", err)
+			}
+			if b.TotalFiles != 2 {
+				t.Errorf("enqueued %d files, want 2 — an absent verdict must not drop candidates", b.TotalFiles)
+			}
+		})
+	}
+}

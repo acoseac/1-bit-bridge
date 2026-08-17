@@ -176,6 +176,17 @@ type Deps struct {
 	// conservatively as "don't assert" rather than "FLAC missing".
 	UpscaleSoxFLAC func() (hasFLAC, known bool)
 
+	// SoxCanDecode reports whether the installed sox can read a given
+	// library-relative path. Backs the Inspector's `no_decoder` skip badge,
+	// so a track the enqueue gates now refuse says WHY on its tile instead
+	// of quietly never being processed.
+	//
+	// Wired to the same 30s-TTL ProbeSox cache as UpscalePrecheck /
+	// UpscaleSoxFLAC (and, on the enqueue side, the batch coordinator, the
+	// per-track enqueuer and the auto-optimize sweeper) so every surface
+	// agrees. Nil-safe: absent → no badge, never a guessed one.
+	SoxCanDecode func(path string) bool
+
 	// UpscaleStats returns a snapshot of the long-lived
 	// transcode pool's counters (workers, queue length, in-
 	// flight jobs, lifetime totals). Wired via a closure in

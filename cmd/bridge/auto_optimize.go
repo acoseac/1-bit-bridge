@@ -74,6 +74,26 @@ type autoOptimizeSweeper struct {
 	// existing ancestor — the variants dir is created lazily, so a bare
 	// statfs would ENOENT).
 	diskFree func(dir string) (int64, error)
+
+	// soxInfo returns the cached ProbeSox snapshot so planCandidate can
+	// refuse sources this build cannot decode. Wired to the same 30s-TTL
+	// cache the per-track enqueuer, the batch coordinator and the admin
+	// tile read. Nil-safe and fail-open, matching every other consumer.
+	soxInfo func() (transcode.SoxInfo, error)
+}
+
+// canDecode reports whether the installed sox can read path. Fails OPEN on
+// a nil closure or a probe error: the probe makes refusals honest, it must
+// never become a new way for the sweeper to skip real work.
+func (sw *autoOptimizeSweeper) canDecode(path string) bool {
+	if sw.soxInfo == nil {
+		return true
+	}
+	info, err := sw.soxInfo()
+	if err != nil {
+		return true
+	}
+	return info.CanDecode(path)
 }
 
 // sweepOnce enqueues up to `maxPerSweep` optimize jobs and returns the
@@ -159,6 +179,20 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, o
 	// authoritative — a mirror drift must under-generate, never
 	// mis-generate.
 	if !transcode.OptimizeEligible(c.Path, c.Codec, c.SampleRate, c.BitsPerSample) {
+		return transcode.JobSpec{}, 0, planIneligible
+	}
+	// Refuse what this sox build cannot decode. OptimizeEligible treats
+	// .m4a as a PCM candidate (ALAC-in-M4A is the common case), which is
+	// right as a FORMAT judgement — whether the installed sox can open that
+	// container is a property of the BUILD, and only the probe knows it.
+	//
+	// This arm is what keeps the sweeper from looping. A failed job writes
+	// no variant row, so the candidate query re-selects the same source on
+	// the next tick, forever — measured 2026-08-17, where a whole-library
+	// batch failed every ALAC file with `sox FAIL formats: no handler for
+	// file extension 'm4a'`. Counting it Ineligible (not Unresolvable) is
+	// deliberate: the file is fine, the toolchain simply cannot read it.
+	if !sw.canDecode(c.Path) {
 		return transcode.JobSpec{}, 0, planIneligible
 	}
 	targetRate, terr := transcode.ResolveTargetRateForOptimize(c.SampleRate)
