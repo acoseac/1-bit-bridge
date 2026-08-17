@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -316,6 +317,17 @@ func (s *Server) apiVariantFailureRetry(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	logger.Info("transcode-failure suppressions cleared", "path", normalised, "rows", n)
+	// Sub-component logger, and the operator-supplied path is scrubbed of
+	// control characters first.
+	//
+	// slog's TextHandler already quotes and escapes values (verified: a
+	// newline renders as a literal \n, so a forged `level=ERROR` line is not
+	// possible), so this is not closing an exploitable hole. It is worth
+	// doing anyway because this log is READ BACK AS TEXT by
+	// /api/logs/export, whose parser keys on a strict `time= level=` prefix
+	// — belt-and-braces for the one consumer that parses it, and it keeps
+	// the taint flow from reaching a sink at all.
+	logging.Component("admin.upscale-failures").Info("transcode-failure suppressions cleared",
+		"path", scrubForLog(normalised), "rows", n)
 	writeJSON(w, http.StatusOK, variantFailureRetryResponse{Cleared: n})
 }

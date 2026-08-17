@@ -59,3 +59,21 @@ func TestVariantFailureRetryClearsScoped(t *testing.T) {
 		t.Errorf("remaining suppressed = %d err=%v, want 1", n, err)
 	}
 }
+
+// TestScrubForLog pins the log-sink scrubbing. slog already escapes, so this
+// is not closing an exploitable hole — but /api/logs/export parses this log
+// back as text on a strict `time= level=` prefix, so control characters in an
+// operator-supplied path have no business reaching it.
+func TestScrubForLog(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Album/Disc 1", "Album/Disc 1"},
+		{"Album\nlevel=ERROR msg=\"forged\"", "Album?level=ERROR msg=\"forged\""},
+		{"a\r\nb", "a??b"},
+		{"tab\there", "tab?here"},
+		{"Édith Piaf/Non, je ne regrette rien", "Édith Piaf/Non, je ne regrette rien"},
+	} {
+		if got := scrubForLog(tc.in); got != tc.want {
+			t.Errorf("scrubForLog(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
