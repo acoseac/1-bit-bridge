@@ -110,6 +110,18 @@ func TestLogStatusMissingFileDoesNotBlameTheForeground(t *testing.T) {
 	if strings.Contains(linux, "created by a service install") {
 		t.Errorf("linux hint still blames the absence on not being a service install: %q", linux)
 	}
+
+	// And the other branch by name, not via runtime.GOOS: on the Linux CI
+	// runner both this call and the one above would take the systemd path,
+	// leaving the wording every macOS and Windows operator reads unpinned
+	// wherever the suite actually runs.
+	other := noLogFileHint("darwin")
+	if !strings.Contains(other, "created by a service install") {
+		t.Errorf("non-linux hint lost the service-install explanation: %q", other)
+	}
+	if strings.Contains(other, "journalctl") {
+		t.Errorf("non-linux hint offers journalctl, which exists on neither macOS nor Windows: %q", other)
+	}
 }
 
 func TestLogStatusReportsSizeAndPath(t *testing.T) {
