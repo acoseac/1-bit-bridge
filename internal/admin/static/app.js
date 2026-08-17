@@ -7046,6 +7046,27 @@ function applyDiagnostics(d) {
   setDiagText("diag-uptime", formatUptime(d.serverUptime));
 }
 
+// logExportAvailable caches the /api/logs/status verdict: null while the
+// answer is outstanding, then true / false.
+//
+// The level tally reads it to decide whether its entries are buttons at all.
+// It starts null and renders as plain text until proven otherwise, so the
+// unknown window never offers an affordance that cannot be honoured — the
+// safe direction, since the tally paints on the first diagnostics poll and
+// would otherwise spend that tick showing a dead button.
+let logExportAvailable = null;
+
+// lastLogEventCounts is the most recent tally, kept so the status answer can
+// repaint immediately instead of waiting out a poll interval.
+let lastLogEventCounts = null;
+
+// setLogExportAvailable records the verdict and repaints the tally.
+function setLogExportAvailable(available) {
+  if (logExportAvailable === available) return;
+  logExportAvailable = available;
+  if (lastLogEventCounts !== null) renderLogEventCounts(lastLogEventCounts);
+}
+
 // renderLogEventCounts paints the per-level tally. Built with
 // createElement/textContent — the level keys come from the logging
 // package rather than user input, but this is a list rendered from a
@@ -7053,6 +7074,8 @@ function applyDiagnostics(d) {
 function renderLogEventCounts(counts) {
   const dl = document.getElementById("diag-log-events");
   if (!dl) return;
+  lastLogEventCounts = counts || null;
+  const hint = document.getElementById("diag-log-events-hint");
   const entries = Object.entries(counts || {}).filter(([, n]) => n > 0);
   dl.replaceChildren();
   if (!entries.length) {
@@ -7062,6 +7085,7 @@ function renderLogEventCounts(counts) {
     dd.textContent = "no events recorded yet";
     dl.appendChild(dt);
     dl.appendChild(dd);
+    if (hint) hint.hidden = true;
     return;
   }
   // Severity order, not count order: an operator scanning this wants
@@ -7077,23 +7101,35 @@ function renderLogEventCounts(counts) {
   // The counts are the natural entry point — an operator who sees a
   // climbing warn tally wants those lines, and making them click through
   // to a pre-filled export saves re-deriving the filter by hand.
+  //
+  // A button ONLY when there is an export to arm. With no log file the
+  // controls below are hidden, so arming them sets a hidden <select> and
+  // scrolls to a panel already on screen — a click with no observable effect
+  // whatsoever, which reads as a broken console rather than as this install
+  // logging somewhere else. Reported live on bridge.ars.md, whose systemd
+  // unit sends output to the journal and therefore has no file at all.
   for (const [level, n] of entries) {
     const dt = document.createElement("dt");
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "level-link";
-    btn.textContent = String(level).toLowerCase();
-    btn.dataset.level = String(level).toLowerCase();
-    btn.title = `Prepare a log export at ${String(level).toLowerCase()} and above`;
-    btn.addEventListener("click", () => armLogExport(btn.dataset.level));
-    dt.appendChild(btn);
+    const label = String(level).toLowerCase();
+    if (logExportAvailable) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "level-link";
+      btn.textContent = label;
+      btn.dataset.level = label;
+      btn.title = `Prepare a log export at ${label} and above`;
+      btn.addEventListener("click", () => armLogExport(btn.dataset.level));
+      dt.appendChild(btn);
+    } else {
+      dt.textContent = label;
+    }
     const dd = document.createElement("dd");
     dd.textContent = Number(n).toLocaleString();
     dl.appendChild(dt);
     dl.appendChild(dd);
   }
-  const hint = document.getElementById("diag-log-events-hint");
-  if (hint) hint.hidden = false;
+  // The hint promises a control "below"; hide it when there is none.
+  if (hint) hint.hidden = !logExportAvailable;
 }
 
 // ---- Log export (Diagnostics page) ----
@@ -7140,6 +7176,7 @@ async function loadLogStatus() {
   if (!status) return;
   try {
     const s = await API.get("/api/logs/status");
+    setLogExportAvailable(s.available === true);
     if (!s.available) {
       status.textContent = s.reason || "no log file available";
       if (controls) controls.hidden = true;
@@ -7157,6 +7194,9 @@ async function loadLogStatus() {
       if (el) el.hidden = false;
     }
   } catch (err) {
+    // Unreachable status is not "available" — leave the tally as plain text
+    // rather than offering to arm controls that are still hidden.
+    setLogExportAvailable(false);
     status.textContent = `could not check for a log file: ${err.message}`;
   }
 }

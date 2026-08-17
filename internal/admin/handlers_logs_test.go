@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -72,6 +74,53 @@ func TestLogStatusUnavailableExplainsWhy(t *testing.T) {
 	}
 	if got.Reason == "" {
 		t.Error("no reason given; the UI would show a dead button with no explanation")
+	}
+}
+
+// TestLogStatusMissingFileDoesNotBlameTheForeground pins the wording for the
+// state bridge.ars.md is actually in: a systemd service install whose unit
+// omits `StandardOutput=append:`, so output goes to the journal and the
+// configured path holds no file. The old message said the file "is created by
+// a service install", which is the one explanation that install can rule out
+// by inspection — on Linux the journal has to be named.
+func TestLogStatusMissingFileDoesNotBlameTheForeground(t *testing.T) {
+	s := logTestServer(t, "")
+	s.deps.LogPath = filepath.Join(t.TempDir(), "bridge.log") // wired, never written
+
+	var got logStatusResponse
+	if err := json.Unmarshal(doGet(t, s, "/api/logs/status").Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Available {
+		t.Fatal("reported a log file that was never written")
+	}
+	if !strings.Contains(got.Reason, s.deps.LogPath) {
+		t.Errorf("reason omits the path it looked at: %q", got.Reason)
+	}
+	if !strings.Contains(got.Reason, noLogFileHint(runtime.GOOS)) {
+		t.Errorf("reason %q does not carry this platform's hint", got.Reason)
+	}
+
+	// The Linux branch is what bridge.ars.md renders, and it is asserted here
+	// rather than under a GOOS guard so it also runs on the darwin dev box.
+	linux := noLogFileHint("linux")
+	if !strings.Contains(linux, "journalctl") {
+		t.Errorf("linux hint never names the journal, so a systemd operator is sent hunting for a foreground process: %q", linux)
+	}
+	if strings.Contains(linux, "created by a service install") {
+		t.Errorf("linux hint still blames the absence on not being a service install: %q", linux)
+	}
+
+	// And the other branch by name, not via runtime.GOOS: on the Linux CI
+	// runner both this call and the one above would take the systemd path,
+	// leaving the wording every macOS and Windows operator reads unpinned
+	// wherever the suite actually runs.
+	other := noLogFileHint("darwin")
+	if !strings.Contains(other, "created by a service install") {
+		t.Errorf("non-linux hint lost the service-install explanation: %q", other)
+	}
+	if strings.Contains(other, "journalctl") {
+		t.Errorf("non-linux hint offers journalctl, which exists on neither macOS nor Windows: %q", other)
 	}
 }
 

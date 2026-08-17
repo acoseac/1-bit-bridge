@@ -64,7 +64,7 @@ func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return path, nil, "no log file at " + path + " — the file is created by a service install; a foreground `bridge serve` logs to its terminal"
+			return path, nil, "no log file at " + path + " — " + noLogFileHint(runtime.GOOS)
 		}
 		return path, nil, "cannot read " + path + ": " + err.Error()
 	}
@@ -72,6 +72,28 @@ func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
 		return path, nil, path + " is a directory, not a log file"
 	}
 	return path, info, ""
+}
+
+// noLogFileHint explains how an install ends up with no file at the path the
+// unit templates use.
+//
+// Naming only the foreground case is wrong on Linux: a hand-written systemd
+// unit that omits `StandardOutput=append:` sends the bridge's output to the
+// journal, which is a SERVICE install with no log file — so telling that
+// operator "the file is created by a service install" contradicts what they
+// can see. bridge.ars.md is exactly that unit (its runbook row reads "systemd
+// journal — no separate file"), and the old wording sent a live session
+// looking for a foreground process that did not exist.
+//
+// Takes the GOOS rather than reading it, so BOTH branches are testable from
+// whichever platform the suite runs on. The journal wording is the half that
+// matters, and it is exactly the half a `runtime.GOOS` check would skip on the
+// darwin box this is developed on.
+func noLogFileHint(goos string) string {
+	if goos == "linux" {
+		return "a foreground `bridge serve` logs to its terminal, and a systemd unit without `StandardOutput=append:` logs to the journal instead — read it with `journalctl -u 1-bit-bridge`"
+	}
+	return "the file is created by a service install; a foreground `bridge serve` logs to its terminal"
 }
 
 // apiLogStatus handles GET /api/logs/status.
