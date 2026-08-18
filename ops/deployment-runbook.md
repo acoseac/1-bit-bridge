@@ -263,6 +263,71 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .leCertNotAfter'
 **Measuring the effect (data-driven tuning gate).** Since the download-telemetry change (PR #363), every large transfer (≥ 2 MiB — the `downloadThroughputMinBytes` floor) on `/v1/download` and `/v1/read` emits a `download_complete` structured log line carrying `proto`, `bytes_sent`, `duration_ms`, and `throughput_mbps`, and feeds the `bridge_http_download_throughput_mbps{proto}` Prometheus histogram (loopback `/metrics`). To compare before/after a tuning change: `journalctl -u 1-bit-bridge | grep download_complete` and bucket by `proto=h2` vs `proto=h3`. Apply one tuning change at a time, let real traffic flow, compare the distribution, keep or revert. Note the value is *effective delivery speed* (network ⊕ the iOS client's read pacing / disk I/O), so the h2-vs-h3 comparison is the trustworthy signal — not the absolute number.
 
 
+### Demo bridge (`bridge.1-bit.app` — Linux VM, public read-only demo, SSH `<DEMO-SSH>`)
+
+Public read-only demo bridge behind the iOS app's **"Add demo bridge"** one-tap source (Sources → add menu). Exists for App Review and for users who want to see bridge features without running their own server. Stood up 2026-08-18. Two properties define it and both are load-bearing:
+
+- **`demo.enabled: true`** — playlist backup, favorites and playback-history uploads are structurally disabled (typed 404s; `/v1/health` drops their five feature flags and advertises `demoMode`), and demo clients leave no device rows. The bridge collects NOTHING from demo users; the iOS app locks its sync toggles off when it sees `demoMode`. **Never disable this in prod** — it is what makes the app's "collects nothing" claim true.
+- **`demo.tokenSHA256`** — the static bearer token every installed iOS app carries (`DemoBridgeConfiguration` in the iOS repo). The hash lives in bridge.yaml; the raw token lives only in the app + the iOS repo. **Never change or remove it** — a changed hash 401s every shipped app until its next App Store release. It survives a `tokens.json` / dataDir wipe by construction (config-seeded, in-memory).
+
+**Coordinates:**
+
+| Item | Value |
+|---|---|
+| SSH | `ssh -i <DEMO-SSH-KEY> <DEMO-SSH>` (Azure VM; key kept in the operator's `~/dev/`, perms 0600) |
+| Service manager | systemd (system unit, `User=azureuser`) |
+| Binary | `/usr/local/bin/bridge` (setcap `cap_net_bind_service=+ep`) |
+| Config | `/srv/onebit-demo/bridge.yaml` |
+| Data dir | `/srv/onebit-demo/data/` (adminauth.json, server.crt/.key, acme/, backups/, bridge.db) |
+| Library | `/srv/onebit-demo/library/` — local disk, GENERATED demo content only (see `tools/demo-library/`); never put real/licensed music here |
+| Log | `journalctl -u 1-bit-bridge` |
+| Public endpoint | `https://bridge.1-bit.app/` (autocert direct-TLS on :443, TLS-ALPN-01) |
+| Admin console | `https://127.0.0.1:7789/` — **loopback-bound, reach via SSH tunnel only** (`ssh -L 7789:127.0.0.1:7789 …`); credentials in `/srv/onebit-demo/ADMIN_CREDENTIALS.txt` on the host |
+
+**Azure NSG posture** (portal-managed, not ufw): `22/tcp` open (consider restricting to the operator IP), `443/tcp` open to the internet (API + ACME TLS-ALPN-01), `443/udp` optionally open for HTTP/3. Port 80 needs NOT be open — the bridge's ACME is TLS-ALPN-01 only. 7789 is never exposed (loopback bind is the second layer).
+
+**systemd unit** (`/etc/systemd/system/1-bit-bridge.service`; same `Restart=always` rationale as bridge.ars.md — the console Restart button exits 0):
+
+```ini
+[Unit]
+Description=1-bit-bridge demo (bridge.1-bit.app)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=azureuser
+ExecStart=/usr/local/bin/bridge serve --config /srv/onebit-demo/bridge.yaml
+WorkingDirectory=/srv/onebit-demo
+Restart=always
+RestartSec=2
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectSystem=full
+ReadWritePaths=/srv/onebit-demo
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Config shape** (`/srv/onebit-demo/bridge.yaml`): public mode + autocert for `bridge.1-bit.app` (email `ars@ars.md`), `adminAddress: 127.0.0.1:7789`, `libraryName: "1-bit Demo Library"`, `analysis.enabled: true` (waveforms / loudness / DR / spectrum / key+tempo are half the demo), and the `demo:` block with `enabled: true` + the pinned `tokenSHA256` (`798007f038402931d0d34cd15284d864fb6fdb728a23740af61674d369b66506`). Host audio toolchain (`sox libsox-fmt-all ffmpeg`) is installed like on bridge.ars.md.
+
+**Update per release** (this host is on the SAME cadence as the other production bridges — the iOS repo's release checklist points here):
+
+```sh
+ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh
+```
+
+`.env.demo` (untracked, covered by `.gitignore`'s `.env.*`) carries `HOST` / `SSH_KEY` / `HEALTH_URL=https://bridge.1-bit.app/v1/health`. The script's SHA-gate + two-step swap + setcap + restart + health-verify all apply unchanged. Verify afterwards:
+
+```sh
+curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .leCertNotAfter, (.features | index("demoMode") != null)'
+# Expect: the new version, an LE expiry ~90d out, and `true` (demoMode advertised).
+```
+
+**Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then `rsync -av --delete <out>/library/ <DEMO-SSH>:/srv/onebit-demo/library/` and trigger a **Full rescan** (admin console via tunnel, or `systemctl restart 1-bit-bridge` — startup scans). Remember the standing doctrine: delta scans never delete, so removals need the full rescan.
+
+**Do-nots:** never wipe `/srv/onebit-demo/data/acme/` (LE duplicate-cert rate limit); never rotate `demo.tokenSHA256` outside an iOS release cycle; never flip `demo.enabled` off; never bind the admin console off-loopback here (nobody but the operator ever needs it).
+
 ## Post-merge deployment
 
 After **any** main-branch merge that ships a runtime fix, regenerate the local test fixture AND the Windows production host's binary. The PR workflow above ends at "merge"; this section is what runs next so the visible bridges actually pick up the change. Skip this for docs-only / CLAUDE.md-only / test-only merges where no shipped binary changes behavior.
@@ -306,6 +371,12 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 ```
 
 **Connection-issues hint** (re-stated for the post-merge loop): SSH and admin-port 7789 are whitelisted to the operator's public IP in ufw. A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Update ufw rules from the new IP.
+
+### Step 4 — demo bridge (`bridge.1-bit.app`)
+
+Public read-only demo bridge (the iOS "Add demo bridge" target). Full coordinates + rationale live in the `Demo bridge` subsection under "Production deployments" above.
+
+**One-line summary**: `ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh`, then `curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, (.features | index("demoMode") != null)'` — expect the new version and `true`. If `demoMode` ever reads `false` on this host, STOP and fix the config before anything else: the read-only posture is what the iOS app's "collects nothing" demo claim rests on.
 
 **SSH-flap note (2026-08-17): it is not the key, and it is not necessarily all-or-nothing.**
 

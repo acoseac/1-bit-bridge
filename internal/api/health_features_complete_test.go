@@ -26,6 +26,7 @@ var wantAllHealthFeatures = []string{
 	"booklets",
 	"carPlayOptimize",
 	"deleteVariants",
+	"demoMode",
 	"diagnosticsSummary",
 	"dlnaServer",
 	"favorites",
@@ -90,6 +91,7 @@ func newAllFeaturesServer(t *testing.T) *Server {
 		WithHistoryStore(mstore).
 		WithPlaylistStore(mstore).
 		WithSmartPlaylistStore(mstore).
+		WithDemoMode(true).
 		WithPairing(newPairingStoreForFeaturesTest(t, authStore))
 	t.Cleanup(srv.StartEventBroker())
 	return srv

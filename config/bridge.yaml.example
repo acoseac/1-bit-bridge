@@ -92,3 +92,16 @@ libraryName: "My Music Library"
 #   are enabled, where whole-library 1200px covers can fill a small host disk.
 # artwork:
 #   cacheMaxBytes: 2147483648   # 2 GiB
+
+# demo: read-only public demo posture (the bridge.1-bit.app fixture the
+#   iOS app's "Add demo bridge" action points at). When enabled, playlist
+#   backup, favorites and playback-history uploads are DISABLED (their
+#   endpoints return typed 404s, /v1/health drops the five corresponding
+#   feature flags and advertises `demoMode` instead) and demo clients
+#   leave no device rows behind. tokenSHA256 optionally pins one static
+#   bearer token (the hex SHA-256 of the raw token, which itself lives
+#   only in the client) so a baked-in app credential survives a dataDir
+#   wipe. See ops/deployment-runbook.md "Demo bridge".
+# demo:
+#   enabled: true
+#   tokenSHA256: "0000000000000000000000000000000000000000000000000000000000000000"

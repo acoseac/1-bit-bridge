@@ -122,6 +122,7 @@ type Server struct {
 	pairingRateLimiter     *pairingRateLimiter
 	certNotAfter           time.Time                    // zero when not wired (test harnesses)
 	leCertNotAfterProvider func() time.Time             // public-mode autocert; nil unless WithLECertExpiry wired
+	demoMode               bool                         // read-only demo posture; /v1/health advertises `demoMode`
 	variantStore           VariantStore                 // nil unless WithUpscale(true, vs) called
 	upnpRouting            UPnPRoutingLookup            // nil unless WithUPnPRouting wired (UPnP upstream feature)
 	upnpHostResolver       UPnPServerHostResolver       // nil unless WithUPnPHostResolver wired (UPnP upstream feature)
@@ -506,6 +507,19 @@ func (s *Server) WithDeviceRegistrar(r DeviceRegistrar) *Server {
 	s.deviceRegistrar = r
 	s.deviceSeen = make(map[string]deviceSeenEntry)
 	s.deviceInflight = make(map[deviceInflightKey]struct{})
+	return s
+}
+
+// WithDemoMode marks this server as the read-only public demo posture.
+// The only behavior here is the `demoMode` flag in /v1/health.features —
+// clients use it to label the source as a demo and hard-lock their sync
+// UI. The actual read-only enforcement comes from the stores that were
+// deliberately NOT wired in cmd/bridge when demo mode is on (playlist /
+// favorites / history / device registrar), whose absence already yields
+// the typed 404s and drops their five feature flags. Returns the
+// receiver for chaining.
+func (s *Server) WithDemoMode(enabled bool) *Server {
+	s.demoMode = enabled
 	return s
 }
 
@@ -1468,18 +1482,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 23 covers the current maximum
+	// appends in lex order. Capacity 24 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
-	// diagnosticsSummary + dlnaServer + favorites + keyTempo + loudness +
-	// operatorDrivenUpscale + pairingEventsSupported + playbackHistory +
-	// playbackHistoryRead + playlistBackup + playlistsCrossDevice +
-	// pushEventsSupported + rendererDiscovery + smartPlaylists +
-	// spectrum + trackQuality + upscaleCompleteEvents + variantBumpsIndex +
-	// waveform). `trackQuality` was missing from this enumeration — and so
-	// from the count — until 2026-08-16; keep the list and the number in
-	// step when adding a flag, since the list is the only thing that makes
-	// the number checkable.
-	feats := make([]string, 0, 23)
+	// demoMode + diagnosticsSummary + dlnaServer + favorites + keyTempo +
+	// loudness + operatorDrivenUpscale + pairingEventsSupported +
+	// playbackHistory + playbackHistoryRead + playlistBackup +
+	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
+	// smartPlaylists + spectrum + trackQuality + upscaleCompleteEvents +
+	// variantBumpsIndex + waveform). `trackQuality` was missing from this
+	// enumeration — and so from the count — until 2026-08-16; keep the
+	// list and the number in step when adding a flag, since the list is
+	// the only thing that makes the number checkable.
+	feats := make([]string, 0, 24)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1502,6 +1516,16 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		if s.variantDeleter != nil {
 			feats = append(feats, "deleteVariants")
 		}
+	}
+	// `demoMode` advertises the read-only public demo posture: the
+	// user-data stores (playlists / favorites / history) are unwired, so
+	// their five flags are absent from this list and every user-data
+	// mutation 404s with its typed code. Clients use this to label the
+	// source as a demo and hard-lock their sync toggles rather than
+	// present controls the server would refuse. Alpha-sorts between
+	// `deleteVariants` and `diagnosticsSummary` (del < dem < dia).
+	if s.demoMode {
+		feats = append(feats, "demoMode")
 	}
 	// `diagnosticsSummary` advertises `/v1/diagnostics`. Always-on in
 	// this build — the endpoint is unconditionally wired. Lexically
