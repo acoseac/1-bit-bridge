@@ -2420,6 +2420,13 @@ type upscaleStatsResponse struct {
 	// Pool reports the live worker-pool snapshot. Nil when
 	// the feature is off (no pool to query).
 	Pool *UpscalePoolStats `json:"pool,omitempty"`
+	// SuppressedFailures counts sources sidelined by the transcode-failure
+	// debounce (migration v39): repeated failures on the same file version.
+	// Surfaced so a backlog that never reaches zero has a visible reason
+	// instead of looking stuck, and so the operator knows there is something
+	// to retry. Admin-only — the public /v1/upscale/stats DTO is a separate
+	// type and deliberately unchanged, so no protocol implications.
+	SuppressedFailures int `json:"suppressedFailures"`
 	// CachedVariants is the number of rows in `track_variants`
 	// — represents historical conversion work that survives
 	// across restarts and a feature-flag round trip. May be
@@ -2507,6 +2514,14 @@ func (s *Server) getUpscaleStatsSnapshot(ctx context.Context) upscaleStatsRespon
 		// Per-kind split drives both the combined totals (back-compat)
 		// and the honest "Upscaled / Optimized" breakdown. One query
 		// instead of the prior kind-agnostic CountVariants.
+		// Same bounded ctx: one cheap COUNT over the debounce columns, so a
+		// stuck backlog shows its reason rather than looking mysterious.
+		// Degrades to 0 on error like every other field in this snapshot.
+		if n, serr := s.deps.Manifest.SuppressedVariantFailureCount(dbCtx); serr != nil {
+			logger.Warn("upscale stats: suppressed failure count", "err", serr)
+		} else {
+			resp.SuppressedFailures = n
+		}
 		byKind, err := s.deps.Manifest.VariantStatsByKind(dbCtx)
 		if err != nil {
 			// Log + degrade: caller still gets the live fields. A SQL

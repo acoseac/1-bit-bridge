@@ -37,6 +37,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
+	"unicode"
 )
 
 // pathHash returns a stable 8-character lowercase hex digest of the
@@ -252,6 +253,18 @@ func (s *Server) soxCanDecode() func(string) bool {
 		return nil
 	}
 	return s.deps.SoxCanDecode()
+}
+
+// scrubForLog replaces control characters in an operator-supplied string with
+// '?' before it reaches a log line. See the call site in
+// apiVariantFailureRetry for why this exists even though slog escapes.
+func scrubForLog(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // --- handlers ---

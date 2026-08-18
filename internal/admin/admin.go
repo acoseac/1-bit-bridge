@@ -1292,6 +1292,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/library/artist-image/{mbid}", s.apiLibraryArtistImage)
 	mux.HandleFunc("GET /api/library/booklet/{mbid}", s.apiLibraryBooklet)
 	mux.HandleFunc("POST /api/upscale/batch", s.apiUpscaleBatchSubmit)
+	mux.HandleFunc("POST /api/upscale/failures/retry", s.apiVariantFailureRetry)
 	mux.HandleFunc("GET /api/upscale/batches", s.apiUpscaleBatchList)
 	mux.HandleFunc("DELETE /api/upscale/batches/{id}", s.apiUpscaleBatchCancel)
 	mux.HandleFunc("DELETE /api/upscale/variants", s.apiUpscaleVariantsDelete)

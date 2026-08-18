@@ -1012,6 +1012,31 @@ func (p *Pool) workerLoop(workerID int) {
 // `failedCnt` and fires the callback after `releaseDedup`, including
 // the new per-job timeout branch (logged distinctly so operators
 // can tell a hung-sox kill from an internal sox failure).
+// variantFailureWriteTimeout bounds the debounce bookkeeping writes.
+//
+// Long enough to clear SQLite's own busy_timeout(5000) plus the wait for
+// manifest.Store.mu, short enough that a wedged writer can't hold a worker
+// past shutdown.
+const variantFailureWriteTimeout = 8 * time.Second
+
+// variantFailureWriteCtx derives the context for a debounce bookkeeping write.
+//
+// WithoutCancel is deliberate: the write must survive the job context that was
+// JUST cancelled (a per-job timeout, or Stop() during shutdown) — recording
+// "this failed" is precisely what those cases produce, and inheriting their
+// cancellation would drop the fact on the floor.
+//
+// But WithoutCancel ALONE is unbounded, and both store methods take
+// `Store.mu` before touching SQLite, which `busy_timeout` does not govern.
+// `Pool.Stop` waits on every worker, so a worker parked on that mutex behind a
+// long batch write would hold shutdown open with no ceiling. The timeout is
+// that ceiling: worst case the bookkeeping is lost and the source earns its
+// strike on the next attempt — the failure mode this whole mechanism already
+// tolerates.
+func variantFailureWriteCtx(jobCtx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(jobCtx), variantFailureWriteTimeout)
+}
+
 func (p *Pool) processJob(workerID int, job poolJob) {
 	// `startedAt` feeds durationSeconds on every failure / completion
 	// path so the Coordinator's rolling-throughput average sees the
@@ -1121,6 +1146,28 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 				logger.Warn("pool: sox failed",
 					"path", job.spec.SourceLibraryRel,
 					"err", err)
+				// One strike against this file version. Only HERE:
+				// shutdown is excluded by the enclosing !p.closed gate,
+				// and the timeout branch above is excluded because a
+				// deadline says as much about a hung mount as about the
+				// source. A failed job writes no variant row, so without
+				// this the candidate queries re-select the same doomed
+				// source on every sweep, forever. Suppression needs
+				// `variantFailureThreshold` CONSECUTIVE strikes on the
+				// same (size, mtime), so a transient fault costs a
+				// bounded retry rather than sidelining a good file.
+				//
+				// Best-effort: a bookkeeping write must never turn into a
+				// second failure. Uses context.WithoutCancel so a job ctx
+				// already cancelled underneath us still records the fact.
+				bookCtx, bookCancel := variantFailureWriteCtx(jobCtx)
+				rerr := p.store.RecordVariantFailure(bookCtx,
+					job.spec.SourceLibraryRel, job.spec.SourceSize, job.spec.SourceMTimeNS)
+				bookCancel()
+				if rerr != nil {
+					logger.Warn("pool: record variant failure",
+						"path", job.spec.SourceLibraryRel, "err", rerr)
+				}
 			}
 		}
 		p.finishJob(workerID, job)
@@ -1211,6 +1258,17 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	// (extremely rare but possible under deep contention)
 	// would otherwise pin a worker indefinitely. CodeRabbit
 	// Major on PR #216.
+	// A success means the previous strikes (if any) described a transient
+	// condition, so the counter resets — it measures CONSECUTIVE failures.
+	// Before the upsert deliberately: the variant is on disk either way, and
+	// a stale strike record is the thing that could wrongly suppress later.
+	clearCtx, clearCancel := variantFailureWriteCtx(jobCtx)
+	cerr := p.store.ClearVariantFailure(clearCtx, job.spec.SourceLibraryRel)
+	clearCancel()
+	if cerr != nil {
+		logger.Warn("pool: clear variant failure",
+			"path", job.spec.SourceLibraryRel, "err", cerr)
+	}
 	if err := p.store.UpsertVariant(jobCtx, row); err != nil {
 		// Suppress failure-counter increments + logging + event
 		// firing during graceful shutdown — `jobCtx` is derived

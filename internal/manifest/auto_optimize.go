@@ -116,7 +116,9 @@ type AutoOptimizeCandidate struct {
 // spend order under a cap or a disk floor: the head of the queue is the
 // music most likely to be reached for next.
 //
-// BINDS (textual order): limit.
+// BINDS (textual order): the transcode-failure suppression cutoff, then
+// limit. Both callers — ListAutoOptimizeCandidates and the COUNT wrapper —
+// must bind both, in that order.
 const autoOptimizeCandidateSQL = `
 	SELECT t.path, t.size, t.mtime_ns,
 	       COALESCE(t.sample_rate, 0), COALESCE(t.bits_per_sample, 0),
@@ -137,6 +139,10 @@ const autoOptimizeCandidateSQL = `
 	                      AND fv.variant_id      LIKE 'optimized-%'
 	                      AND fv.source_mtime_ns = t.mtime_ns
 	                      AND fv.source_size     = t.size)
+	   -- Sources that have failed repeatedly on THIS version of the file are
+	   -- suppressed, or the sweeper re-selects them every tick forever: a
+	   -- failed job writes no variant row, so nothing else marks them done.
+	   AND NOT ` + variantFailureSuppressedSQL + `
 	 ORDER BY t.indexed_at DESC, t.path ASC
 	 LIMIT ?`
 
@@ -153,7 +159,7 @@ func (s *Store) ListAutoOptimizeCandidates(ctx context.Context, limit int) ([]Au
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, autoOptimizeCandidateSQL, limit)
+	rows, err := s.db.QueryContext(ctx, autoOptimizeCandidateSQL, s.VariantFailureCutoff(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("list auto-optimize candidates: %w", err)
 	}
@@ -177,6 +183,12 @@ func (s *Store) ListAutoOptimizeCandidates(ctx context.Context, limit int) ([]Au
 // The inner ORDER BY is redundant for a count and SQLite drops it;
 // binding -1 for the inner LIMIT is SQLite's "no limit", which is what
 // an uncapped count wants.
+//
+// TWO binds, and the order is load-bearing: the suppression cutoff comes
+// first (its `?` is in the WHERE clause) and the LIMIT second. Sharing the
+// statement is what keeps the card's number and the sweeper's selection in
+// agreement — but it also means a new bind has to be added at BOTH call
+// sites, which is how this broke when the debounce landed.
 const autoOptimizeCandidateCountSQL = `SELECT COUNT(*) FROM (` + autoOptimizeCandidateSQL + `)`
 
 // CountAutoOptimizeCandidates returns how many tracks currently want an
@@ -190,7 +202,11 @@ const autoOptimizeCandidateCountSQL = `SELECT COUNT(*) FROM (` + autoOptimizeCan
 // does cannot drift.
 func (s *Store) CountAutoOptimizeCandidates(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, autoOptimizeCandidateCountSQL, -1).Scan(&n)
+	// Same bind order as the listing it wraps: the suppression cutoff (its
+	// `?` sits in the WHERE) then the LIMIT. -1 is SQLite's "no limit",
+	// which is what an uncapped count wants.
+	err := s.db.QueryRowContext(ctx, autoOptimizeCandidateCountSQL,
+		s.VariantFailureCutoff(), -1).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count auto-optimize candidates: %w", err)
 	}
