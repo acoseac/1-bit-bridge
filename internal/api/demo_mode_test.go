@@ -5,10 +5,13 @@ import (
 	"encoding/hex"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // newDemoModeServer builds the demo posture exactly as cmd/bridge wires
@@ -159,4 +162,58 @@ func TestDemoModeStaticTokenClearsAuth(t *testing.T) {
 		t.Errorf("wrong token: want 401, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// Demo + Atlas: the content-push ingest is refused (403 demo_read_only)
+// for BOTH credentials — a demo bearer is effectively public, and an open
+// ingest would poison the bios served to every demo user — while the
+// read-only meta GETs and the harvest-credential endpoint are NOT
+// demo-refused (the credential carries a capability token, not content;
+// asserting != 403 pins that contract without caring whether harvest is
+// wired in this harness). A non-demo server with the same Atlas wiring is
+// the control: its ingest reaches validation instead of the guard.
+func TestDemoModeAtlasIngestForbidden(t *testing.T) {
+	srv, rawStatic, rawMinted := newDemoModeServer(t)
+	mstore, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mstore.Close() })
+	srv.WithAtlasMeta(true, 30*24*time.Hour, mstore)
+
+	ingestBody := `{"release":{"mbid":"` + atlasTestRelMBID + `","found":true,"description":"D"}}`
+	for name, tok := range map[string]string{"static": rawStatic, "minted": rawMinted} {
+		resp := doReq(t, srv, http.MethodPost, "/v1/atlas-ingest", tok, "", ingestBody)
+		body := readAllOrFail(t, resp)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s token: ingest want 403, got %d (%s)", name, resp.StatusCode, body)
+		}
+		if !strings.Contains(string(body), "demo_read_only") {
+			t.Fatalf("%s token: want demo_read_only, got %s", name, body)
+		}
+	}
+
+	// Read path + capability handoff stay reachable (never the demo 403).
+	for _, probe := range []struct{ method, path, body string }{
+		{http.MethodGet, "/v1/atlas-meta/release/" + atlasTestRelMBID, ""},
+		{http.MethodPost, "/v1/atlas-harvest/credential", `{"token":"x","atlasBaseURL":"https://a.example","expiresInSeconds":60}`},
+	} {
+		resp := doReq(t, srv, probe.method, probe.path, rawStatic, "", probe.body)
+		body := readAllOrFail(t, resp)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusForbidden && strings.Contains(string(body), "demo_read_only") {
+			t.Fatalf("%s %s: must not be demo-refused, got 403 %s", probe.method, probe.path, body)
+		}
+	}
+
+	// Non-demo control: same wiring, ingest reaches validation (200 here —
+	// the body is valid), never the demo guard.
+	ctrlToken, ctrl := newAtlasMetaTestServer(t, true)
+	resp := doReq(t, ctrl, http.MethodPost, "/v1/atlas-ingest", ctrlToken, "", ingestBody)
+	body := readAllOrFail(t, resp)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("non-demo control: ingest must not 403, got %d (%s)", resp.StatusCode, body)
+	}
 }
