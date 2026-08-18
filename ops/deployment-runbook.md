@@ -284,7 +284,9 @@ Public read-only demo bridge behind the iOS app's **"Add demo bridge"** one-tap 
 | Public endpoint | `https://bridge.1-bit.app/` (autocert direct-TLS on :443, TLS-ALPN-01) |
 | Admin console | `https://127.0.0.1:7789/` — **loopback-bound, reach via SSH tunnel only** (`ssh -L 7789:127.0.0.1:7789 …`); credentials in `/srv/onebit-demo/ADMIN_CREDENTIALS.txt` on the host |
 
-**Azure NSG posture** (portal-managed, not ufw): `22/tcp` open (consider restricting to the operator IP), `443/tcp` open to the internet (API + ACME TLS-ALPN-01), `443/udp` optionally open for HTTP/3. Port 80 needs NOT be open — the bridge's ACME is TLS-ALPN-01 only. 7789 is never exposed (loopback bind is the second layer).
+**Azure NSG posture** (portal-managed, not ufw): `22/tcp` open (consider restricting to the operator IP), `443/tcp` + `443/udp` open to the internet (API + ACME TLS-ALPN-01; UDP carries HTTP/3). Port 80 needs NOT be open — the bridge's ACME is TLS-ALPN-01 only. 7789 is never exposed (loopback bind is the second layer).
+
+**SSH: multiplex, don't burst.** The host temp-blocks rapid repeated SSH connections for minutes (observed 2026-08-18 — the deploy script's connection burst trips it). `deploy/linux/.env.demo` carries `SSH_OPTS="-o ControlMaster=auto -o ControlPath=/tmp/ssh-demo-cm -o ControlPersist=900"` so every script step rides ONE TCP connection; for ad-hoc commands reuse the socket (`ssh -S /tmp/ssh-demo-cm <DEMO-SSH> …`). If blocked: wait a few minutes with SPACED probes (45 s+), never hammer.
 
 **systemd unit** (`/etc/systemd/system/1-bit-bridge.service`; same `Restart=always` rationale as bridge.ars.md — the console Restart button exits 0):
 
@@ -325,6 +327,8 @@ curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .leCertNotAfter
 ```
 
 **Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then `rsync -av --delete <out>/library/ <DEMO-SSH>:/srv/onebit-demo/library/` and trigger a **Full rescan** (admin console via tunnel, or `systemctl restart 1-bit-bridge` — startup scans). Remember the standing doctrine: delta scans never delete, so removals need the full rescan.
+
+**Upscaling + CarPlay-optimized variants on the demo bridge** are deliberately allowed (they showcase the features against the hosted lossless content): `upscale.enabled: true` + `optimizeEnabled` / `autoOptimize` in the demo config. This is safe ONLY because demo mode 403s the four upscale MUTATION endpoints (`demo_read_only` — `POST /v1/upscale`, `POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`, `DELETE /v1/upscale/variants`): every bearer on this host is effectively public, and an open batch endpoint would let anyone burn its CPU. The operator generates variants via the loopback admin console's Library Inspector (SSH tunnel), which doesn't route through those handlers.
 
 **Do-nots:** never wipe `/srv/onebit-demo/data/acme/` (LE duplicate-cert rate limit); never rotate `demo.tokenSHA256` outside an iOS release cycle; never flip `demo.enabled` off; never bind the admin console off-loopback here (nobody but the operator ever needs it).
 

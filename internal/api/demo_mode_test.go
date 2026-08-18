@@ -92,6 +92,55 @@ func TestDemoModeMutationsReturnNotFound(t *testing.T) {
 	}
 }
 
+// Upscale MUTATIONS are 403 demo_read_only in the demo posture — for
+// every bearer, wired or not (the guard runs FIRST, before the
+// enablement nil-checks). Unlike the user-data 404s this is a refusal
+// on a feature that may be genuinely ON: a demo bridge can serve
+// pre-generated + auto-optimized variants, but its effectively-public
+// token must not be able to submit server work. The non-demo control
+// asserts the same routes do NOT 403 (they fall through to their normal
+// feature-off shapes), so the guard can't leak outside demo mode.
+func TestDemoModeUpscaleMutationsForbidden(t *testing.T) {
+	demoSrv, rawStatic, rawMinted := newDemoModeServer(t)
+	cases := []struct {
+		method, path string
+	}{
+		{http.MethodPost, "/v1/upscale"},
+		{http.MethodPost, "/v1/upscale/batch"},
+		{http.MethodDelete, "/v1/upscale/batches/5d9a2f4c-8e21-4c3a-9b77-0f1e2d3c4b5a"},
+		{http.MethodDelete, "/v1/upscale/variants"},
+	}
+	for _, token := range []string{rawStatic, rawMinted} {
+		for _, c := range cases {
+			resp := doReq(t, demoSrv, c.method, c.path, token, "", `{}`)
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("demo %s %s: want 403 demo_read_only, got %d", c.method, c.path, resp.StatusCode)
+			}
+			resp.Body.Close()
+		}
+	}
+
+	// Control: a NON-demo server never returns the demo 403 on these.
+	dir := t.TempDir()
+	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
+	authStore, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := authStore.Mint("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl := New(cfg, authStore, nil, "fp")
+	for _, c := range cases {
+		resp := doReq(t, ctrl, c.method, c.path, raw, "", `{}`)
+		if resp.StatusCode == http.StatusForbidden {
+			t.Errorf("non-demo %s %s: must not 403, got %d", c.method, c.path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
 // The config-seeded static token clears the AUTH layer: with it, a
 // feature-gated route reaches the feature check (404); without it, the
 // request dies at 401. This is what makes a baked-in app credential

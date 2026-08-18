@@ -160,6 +160,9 @@ var ErrVariantDeleteUnavailable = errors.New("variant deleter not wired")
 // event for whatever we DID delete (so iOS reconciles even when
 // the request gets cut short).
 func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
+	if s.refuseUpscaleMutationInDemoMode(w) {
+		return
+	}
 	if s.variantDeleter == nil {
 		writeError(w, http.StatusNotFound, "variant_not_found", errMsgUpscalingNotEnabled)
 		return
