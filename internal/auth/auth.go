@@ -148,6 +148,17 @@ type Store struct {
 	lastSize      int64
 	isEmpty       bool      // tokens file didn't exist when we last looked
 	lastUsedFlush time.Time // last persist() driven by a LastUsedAt update
+
+	// staticHash / staticTok hold the config-seeded demo token
+	// (SetStaticToken), nil/zero unless one was installed. Held OUTSIDE
+	// the JSON-backed token list on purpose: the static token must
+	// survive a tokens.json wipe (that is its whole reason to exist)
+	// and must never be persisted — the config file already owns it,
+	// and writing it into tokens.json would let `bridge token revoke`
+	// half-remove it (revoked on disk, resurrected from config at the
+	// next boot), a confusing split-brain.
+	staticHash []byte
+	staticTok  Token
 }
 
 // OpenStore opens (or initializes an empty) store at path. Missing file is
@@ -162,6 +173,34 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// SetStaticToken installs a single in-memory, config-seeded bearer token
+// alongside the JSON-backed ones (demo mode's `demo.tokenSHA256`).
+// sha256Hex is the hex SHA-256 of the raw token — the raw value never
+// reaches this process — and name labels the synthetic device in logs.
+// Malformed hex is rejected with an error so a typo'd config line fails
+// loudly at boot instead of silently never matching. Calling it again
+// replaces the previous static entry. Deliberately not persisted; see
+// the staticHash field docblock for why.
+func (s *Store) SetStaticToken(sha256Hex, name string) error {
+	decoded, err := hex.DecodeString(strings.ToLower(strings.TrimSpace(sha256Hex)))
+	if err != nil || len(decoded) != sha256.Size {
+		return fmt.Errorf("static token: want %d hex chars (a SHA-256 digest), got %d", sha256.Size*2, len(sha256Hex))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.staticHash = decoded
+	hexLower := hex.EncodeToString(decoded)
+	s.staticTok = Token{
+		// Same "first 12 hex chars of the hash" convention Mint uses,
+		// so admin/log surfaces render a familiar-shaped ID.
+		ID:        hexLower[:tokenIDLen],
+		Name:      name,
+		Hash:      hexLower,
+		CreatedAt: time.Now().UTC(),
+	}
+	return nil
 }
 
 // reload refreshes the in-memory view from disk unconditionally. Caller must
@@ -449,6 +488,14 @@ func (s *Store) Validate(rawToken string) (Token, bool) {
 			}
 			return matched, true
 		}
+	}
+	// Config-seeded static token (demo mode). Checked AFTER the
+	// JSON-backed list so the existing timing shape over the file
+	// tokens is untouched; the compare itself is constant-time. No
+	// LastUsedAt bump and no persist — the static entry lives only in
+	// memory and is re-seeded from config at every boot.
+	if s.staticHash != nil && subtle.ConstantTimeCompare(hashBytes[:], s.staticHash) == 1 {
+		return s.staticTok, true
 	}
 	return Token{}, false
 }

@@ -1,0 +1,77 @@
+{
+  "comment": "Recipe for the bridge.1-bit.app demo library. Every artist, album and track name is invented; all audio is generated (Lyria 3) and all cover art is generated (Gemini image models) — zero licensing exposure. generate.py consumes this file. Suffixes keep each album stylistically coherent across tracks.",
+  "albums": [
+    {
+      "artist": "Meridian Glass",
+      "album": "Slow Light",
+      "year": 2024,
+      "genre": "Ambient",
+      "styleSuffix": "ambient instrumental, soft felt piano, warm analog synth pads, spacious and peaceful, high fidelity studio recording, instrumental only, no vocals",
+      "artPrompt": "Album cover artwork, square format: minimalist abstract painting of pale morning light through frosted glass, soft gradients of ivory, ice blue and warm gold, subtle grain texture, calm and atmospheric. No text, no letters, no words, no typography.",
+      "tracks": [
+        {"n": 1, "title": "First Thaw", "prompt": "about 2 minutes 15 seconds; opening with sparse felt piano notes over a warm drone, gradually blooming with soft analog pads, hopeful and quiet like ice melting at dawn"},
+        {"n": 2, "title": "Paper Lanterns", "prompt": "about 2 minutes; delicate music-box-like piano motif floating over slow-breathing synth pads, faint night ambience, tender and nostalgic"},
+        {"n": 3, "title": "Halfway to Morning", "prompt": "about 2 minutes 20 seconds; drifting ambient piece with slow chord swells, airy choir-like pad, distant reversed piano echoes, deep calm before sunrise"},
+        {"n": 4, "title": "Tidal Memory", "prompt": "about 2 minutes 10 seconds; slow pulsing sub bass like a tide, shimmering granular textures, soft piano fragments, oceanic and meditative"},
+        {"n": 5, "title": "Slow Light", "prompt": "about 2 minutes 30 seconds; patient layered drones warming from dark to bright, felt piano melody entering midway, resolving into serene stillness"}
+      ]
+    },
+    {
+      "artist": "The Marlowe Trio",
+      "album": "Blue Hour Standards",
+      "year": 2023,
+      "genre": "Jazz",
+      "styleSuffix": "instrumental jazz trio, brushed drums, warm upright bass, intimate piano, late-night club atmosphere, high fidelity studio recording, instrumental only, no vocals",
+      "artPrompt": "Album cover artwork, square format: moody cinematic scene of an empty late-night jazz club, upright bass and piano silhouetted in deep blue dusk light from a window, film grain. No text, no letters, no words, no typography.",
+      "tracks": [
+        {"n": 1, "title": "Blue Hour", "prompt": "about 2 minutes 15 seconds; brushed drums, warm upright bass, intimate piano leading the melody, late-night club atmosphere, tasteful and understated"},
+        {"n": 2, "title": "Elevator Up", "prompt": "about 2 minutes; playful mid-tempo swing, walking upright bass, light brushed snare, witty call-and-answer piano phrases, cheerful late-night mood"},
+        {"n": 3, "title": "Brushes & Rain", "prompt": "about 2 minutes 20 seconds; slow ballad, soft brush work like gentle rainfall, sparse romantic piano chords, deep mellow bass, wistful and warm"},
+        {"n": 4, "title": "Last Call at the Marlowe", "prompt": "about 2 minutes 15 seconds; smoky slow-blues feel for jazz trio, lazy triplet piano lines, gentle ride cymbal, a short upright bass solo, closing-time atmosphere"}
+      ]
+    },
+    {
+      "artist": "Ada Novak",
+      "album": "Nocturnes for a Small Room",
+      "year": 2025,
+      "genre": "Classical",
+      "styleSuffix": "solo classical piano, intimate close-miked grand piano in a small room, romantic era influence, expressive rubato, high fidelity studio recording, instrumental only, no vocals",
+      "artPrompt": "Album cover artwork, square format: quiet oil painting of a small dim room with an upright piano beside a half-open window at night, muted greys with warm candlelight, intimate chiaroscuro. No text, no letters, no words, no typography.",
+      "tracks": [
+        {"n": 1, "title": "Nocturne No. 1 in Grey", "prompt": "about 2 minutes 20 seconds; melancholic nocturne in a minor key, singing right-hand melody over gently arpeggiated left hand, quiet dynamics"},
+        {"n": 2, "title": "A Window, Half Open", "prompt": "about 2 minutes; lyrical and lighter piece, major-key warmth with passing shadows of minor, flowing eighth-note accompaniment, tender"},
+        {"n": 3, "title": "Study for Left Hand and Rain", "prompt": "about 2 minutes 10 seconds; steady murmuring left-hand ostinato like rain, sparse pensive melody above, gradually building intensity then receding"},
+        {"n": 4, "title": "Berceuse for No One", "prompt": "about 2 minutes 30 seconds; slow lullaby with a rocking 6/8 feel, very soft and consoling, fading to near silence at the end"}
+      ]
+    },
+    {
+      "artist": "Northern Antenna",
+      "album": "Radio Silence Over the Valley",
+      "year": 2024,
+      "genre": "Post-Rock",
+      "styleSuffix": "instrumental post-rock band, shimmering electric guitars with reverb and tremolo, melodic bass, dynamic drums, cinematic build-ups, high fidelity studio recording, instrumental only, no vocals",
+      "artPrompt": "Album cover artwork, square format: wide dusk landscape with a lone radio transmission tower on a hill above a misty valley, dramatic sky, muted teal and rust tones, grainy analog film look. No text, no letters, no words, no typography.",
+      "tracks": [
+        {"n": 1, "title": "Transmitter Hill", "prompt": "about 2 minutes 20 seconds; opens with a lone tremolo guitar over drones, drums enter halfway, rising to a bright soaring climax"},
+        {"n": 2, "title": "Every Light in the House", "prompt": "about 2 minutes 10 seconds; mid-tempo hopeful piece, interlocking clean guitar arpeggios, driving floor toms, warm crescendo finish"},
+        {"n": 3, "title": "The Long Coast", "prompt": "about 2 minutes 30 seconds; expansive and slow, delay-soaked guitar swells like waves, patient build from quiet to wide open, cathartic"},
+        {"n": 4, "title": "Highway Reverb", "prompt": "about 2 minutes; propulsive motorik drum beat, chiming repeated guitar figure, steady momentum like night driving, gradually layering"},
+        {"n": 5, "title": "Signal Fade", "prompt": "about 2 minutes 15 seconds; fragile guitar harmonics like a music box, distant radio-static texture, one brief final swell then a long decay into silence"}
+      ]
+    },
+    {
+      "artist": "Velvet Circuitry",
+      "album": "Night Bus Frequencies",
+      "year": 2026,
+      "genre": "Electronic",
+      "styleSuffix": "downtempo electronic instrumental, dusty lo-fi drum groove, deep warm bass, vintage synthesizers, city-at-night mood, high fidelity studio production, instrumental only, no vocals",
+      "artPrompt": "Album cover artwork, square format: retro-futuristic illustration of a night bus moving through a rainy neon-lit city, reflections on wet asphalt, purple and cyan palette, subtle VHS grain. No text, no letters, no words, no typography.",
+      "tracks": [
+        {"n": 1, "title": "Neon Puddles", "prompt": "about 2 minutes 10 seconds; laid-back head-nod beat, glistening wet synth arpeggios, jazzy electric piano chords, reflective neon-lit streets feel"},
+        {"n": 2, "title": "Corner Store, 2 A.M.", "prompt": "about 2 minutes; sparse hip-hop-influenced groove, mellow electric piano, vinyl crackle, warm sub bass, small-hours calm"},
+        {"n": 3, "title": "Rain Check", "prompt": "about 2 minutes 20 seconds; melancholic downtempo, soft rain-like percussion textures, minor-key pad harmony, muted trumpet-like synth lead"},
+        {"n": 4, "title": "Loop of the Moon", "prompt": "about 2 minutes 30 seconds; hypnotic slow four-on-the-floor pulse, evolving analog sequence, airy pads rising and falling like moon phases, dreamy closer"}
+      ]
+    }
+  ]
+}

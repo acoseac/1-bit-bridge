@@ -7,6 +7,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -84,10 +85,40 @@ type Config struct {
 	Enrich          EnrichConfig         `yaml:"enrich,omitempty"`
 	Atlas           AtlasConfig          `yaml:"atlas,omitempty"`
 	Artwork         ArtworkConfig        `yaml:"artwork,omitempty"`
+	Demo            DemoConfig           `yaml:"demo,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
 	DisableHTTP3 bool `yaml:"disableHttp3,omitempty"`
+}
+
+// DemoConfig configures the read-only public demo posture (the
+// bridge.1-bit.app fixture the iOS app's "Add demo bridge" action points
+// at — see ops/deployment-runbook.md "Demo bridge"). When enabled, the
+// server deliberately does NOT wire the three user-data stores (playlist
+// backup, favorites, playback history) nor the device registrar: every
+// user-data mutation endpoint returns its existing typed 404, /v1/health
+// honestly drops the five corresponding feature flags (playlistBackup,
+// playlistsCrossDevice, favorites, playbackHistory, playbackHistoryRead)
+// and advertises `demoMode` instead, and demo clients leave no device
+// rows behind. Read surfaces (manifest, streaming, artwork, waveforms,
+// analysis scalars, smart playlists) are unaffected. ProtocolVersion
+// stays 1 — everything here is additive or an honest absence.
+//
+// RestartRequired: store wiring happens at boot.
+type DemoConfig struct {
+	// Enabled switches the bridge into the read-only demo posture.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// TokenSHA256 optionally seeds one config-pinned bearer token so a
+	// client can ship a baked-in credential that survives a dataDir /
+	// tokens.json wipe (a re-minted random token would strand every
+	// installed app until its next release — the reason this exists).
+	// The value is the lowercase hex SHA-256 of the raw token; the raw
+	// token itself never appears in the config. Empty means "no static
+	// token" — only `bridge pair`-minted tokens authenticate. Normal
+	// minted tokens keep working alongside the static one.
+	TokenSHA256 string `yaml:"tokenSHA256,omitempty"`
 }
 
 // UPnPUpstreamConfig governs the opt-in "ingest an upstream UPnP/DLNA
@@ -745,6 +776,16 @@ func listenAddrIsPort443(addr string) bool {
 		return false
 	}
 	return port == "443"
+}
+
+// isSHA256Hex reports whether s is exactly 64 hex characters — the
+// shape of a hex-encoded SHA-256 digest (demo.tokenSHA256).
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 // EffectiveAutocertCacheDir returns the autocert account + cert
@@ -2278,6 +2319,13 @@ func (c *Config) Validate() error {
 		}
 	} else if err := validateLoopbackAddress(c.AdminAddress); err != nil {
 		return fmt.Errorf("adminAddress %q: %w", c.AdminAddress, err)
+	}
+	// Demo-mode static token: must be a well-formed SHA-256 hex digest
+	// when set. Checked regardless of demo.enabled so a typo'd hash is
+	// caught the moment it lands in the file, not months later when the
+	// operator flips enabled and every baked-in client 401s.
+	if c.Demo.TokenSHA256 != "" && !isSHA256Hex(c.Demo.TokenSHA256) {
+		return errors.New("demo.tokenSHA256: must be 64 hex characters (the SHA-256 of the raw bearer token)")
 	}
 	if c.Update.QuietHours != "" {
 		if _, _, err := ParseQuietHours(c.Update.QuietHours); err != nil {

@@ -1897,6 +1897,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "open token store: %v\n", err)
 		return 1
 	}
+	if cfg.Demo.Enabled {
+		fmt.Fprintln(stdout, "demo mode: read-only posture — playlist backup, favorites, playback-history uploads and device registration are disabled")
+		if cfg.Demo.TokenSHA256 != "" {
+			// Config-seeded static bearer token (in-memory only; survives
+			// a tokens.json wipe by construction — see auth.SetStaticToken).
+			if err := store.SetStaticToken(cfg.Demo.TokenSHA256, "Demo access (config)"); err != nil {
+				fmt.Fprintf(stderr, "demo mode: %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(stdout, "demo mode: config-seeded bearer token active")
+		}
+	}
 	defer func() {
 		// Flush any LastUsedAt updates debounced by Validate so a
 		// just-before-exit hit doesn't lose its timestamp.
@@ -2391,12 +2403,24 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			enabled: func() bool { return analysisActive },
 			store:   manifestStore,
 		}).
-		WithDeviceRegistrar(manifestStore).
-		WithPlaylistStore(manifestStore).
-		WithFavoritesStore(manifestStore).
-		WithHistoryStore(manifestStore).
 		WithAtlasMeta(cfg.Atlas.Enabled, cfg.Atlas.EffectiveMetaTTL(), manifestStore).
-		WithPlaylistCoverStore(manifestStore)
+		WithPlaylistCoverStore(manifestStore).
+		WithDemoMode(cfg.Demo.Enabled)
+	// Demo mode (read-only public demo bridge): the three user-data
+	// stores + the device registrar are deliberately NOT wired, so
+	// PUT /v1/playlists/{id}, DELETE /v1/playlists/{id}, PUT /v1/favorites
+	// and POST /v1/history/batch return their existing typed 404s,
+	// /v1/health honestly drops playlistBackup / playlistsCrossDevice /
+	// favorites / playbackHistory / playbackHistoryRead (advertising
+	// `demoMode` instead), and demo clients leave no device rows behind.
+	// Everything read-side (manifest, streaming, artwork, waveforms,
+	// analysis scalars, smart playlists) is untouched.
+	if !cfg.Demo.Enabled {
+		apiSrv.WithDeviceRegistrar(manifestStore).
+			WithPlaylistStore(manifestStore).
+			WithFavoritesStore(manifestStore).
+			WithHistoryStore(manifestStore)
+	}
 	// Conditionally wire the smart-playlist feed so the health flag + the
 	// 404-when-off shape stay honest when cfg.SmartPlaylists.Enabled is false.
 	if smartPlaylistsActive {
