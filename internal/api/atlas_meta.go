@@ -104,11 +104,36 @@ type atlasMetaResponse struct {
 	SourceURL string `json:"sourceUrl,omitempty"`
 }
 
+// refuseAtlasIngestInDemoMode guards the one Atlas CONTENT-PUSH endpoint
+// in the demo posture. Rich-tier Atlas metadata is deliberately allowed on
+// a demo bridge (it serves harvested bios/descriptions and advertises the
+// feature), but /v1/atlas-ingest trusts the AUTHENTICATED CLIENT's payload
+// — and on a demo bridge every bearer is effectively public, so an open
+// ingest would let anyone poison the bios served to every demo user. The
+// sibling surfaces stay open on purpose: /v1/atlas-harvest/credential only
+// accepts a capability token (a bogus one just fails the harvest — no
+// content injection), and the /v1/atlas-meta/* GETs are read-only. Demo
+// bridges get their rich-tier data exclusively via the bridge's own
+// harvest pull from Atlas (authentic, server-to-server), bootstrapped by
+// the operator's attested client. Mirrors refuseUpscaleMutationInDemoMode.
+// Returns true when the request was refused.
+func (s *Server) refuseAtlasIngestInDemoMode(w http.ResponseWriter) bool {
+	if !s.demoMode {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "demo_read_only",
+		"this demo bridge is read-only — Atlas metadata ingest is disabled")
+	return true
+}
+
 // atlasIngest handles POST /v1/atlas-ingest. The iOS app (which holds the
 // Atlas read:bridge credential) pushes per-entity metadata here; the
 // open-source bridge caches + serves it to all the user's devices. UPSERT;
 // ingested_at is bridge-stamped. At least one of release / artist must be set.
 func (s *Server) atlasIngest(w http.ResponseWriter, r *http.Request) {
+	if s.refuseAtlasIngestInDemoMode(w) {
+		return
+	}
 	if !s.atlasMetaReady() {
 		writeError(w, http.StatusNotFound, "atlas_not_supported", "this bridge does not accept Atlas metadata")
 		return
