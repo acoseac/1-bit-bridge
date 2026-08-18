@@ -1218,6 +1218,54 @@ always been able to mint variants nobody asked for; only the trigger is new).
   evidence. The same trap applies to any mutation that deletes the only use of a variable
   — which is most "just disable this branch" edits.
 
+### CodeQL triage — the whole open queue was FP; log-injection is FP BY CONSTRUCTION (2026-08-18)
+
+Full sweep of Security → Code scanning: **58 open alerts dismissed, 0 left open** (62 dismissed
+total including the pre-existing #1–4; 7 already auto-fixed). No code change was warranted
+anywhere. The workflow runs `security-extended` deliberately (`.github/workflows/codeql.yml`),
+accepting "the occasional false positive" as the price of taint-flow coverage — this is what
+that trade looks like in practice. **Don't re-open any of these without reading the dismiss
+comment on the alert first**; each carries its own rationale.
+
+- **`go/log-injection` (51 alerts) is a false positive BY CONSTRUCTION, and it WILL regenerate.**
+  Every new slog call carrying request-derived data mints a fresh alert, so this triage recurs —
+  dismiss on the same grounds rather than re-deriving them from scratch. The grounds: Go's
+  `slog` **`TextHandler` AND `JSONHandler` quote the value and escape `\n` / `\r` inside it**, so
+  injected content can never start a new physical line and a forged entry is impossible.
+  **Verify empirically, not from memory** — a 10-line program logging
+  `"ok\ntime=… level=ERROR msg=…"` settles it in seconds. Two structural facts keep the class
+  closed: every flagged site passes its value as a structured ATTRIBUTE (never concatenated into
+  a raw writer), and `internal/` contains no `log.Printf` / `fmt.Fprintf(os.Stderr, …)` at all —
+  which is exactly what the `## Things that have bitten before` structured-logging entry
+  enforces, so that invariant is load-bearing for this dismissal too. The three sites that
+  concatenate into the MESSAGE (`logger.Info(scope+": …")`, `handlers_api.go`) are safe twice
+  over: `scope` is a caller-supplied literal at both call sites, and slog quotes the msg as well.
+  Corroboration from the other direction — `/api/logs/export`'s parser is anchored on a strict
+  `time=` + `level=` PREFIX precisely because a whole-line search would match text inside a
+  quoted `msg`; the codebase already assumes and depends on this escaping.
+- **`go/path-injection` (3: #7 `files.go:117`, #8 `files.go:314`, #69 `files.go:503`)** — same
+  class as #1–4 with the rationale unchanged: the path flows through `fs.Resolver.Resolve`.
+  #69's site already carries an in-code comment saying so. Don't contort any of them into a
+  lexical re-check to appease the scanner.
+- **`go/uncontrolled-allocation-size` (#9, `search.go:127`)** — `limit` is clamped to
+  `searchHardCap = 500` THREE LINES ABOVE the flagged `make()`, and that clamp was added for
+  this exact alert (PR #243). CodeQL doesn't model the reassignment as a sanitizer, so "fix it
+  again" isn't available — dismissal is the only disposition left.
+- **`go/cookie-secure-not-set` (#10 / #11)** — `Secure: s.cookieSecure()` = `cfg.IsPublic()`.
+  Correct by design, and **must NOT be "fixed" to a literal `true`**: loopback admin is plain
+  `http://127.0.0.1:7789`, a browser never returns a `Secure` cookie over http, so hardcoding it
+  breaks admin login outright.
+- **`go/request-forgery` (#12, `server.go:557`) — the only "critical", the only judgment call,
+  and its residual is real if bounded.** `callbackHostAllowed` rejects hostnames outright and
+  admits only loopback / RFC1918 / link-local IPs or the SUBSCRIBE source IP. **Loopback IS
+  admitted**, so an on-LAN control point can aim the GENA initial NOTIFY at the admin port —
+  contained three ways: the response body is never read (blind, no exfiltration), the body is a
+  fixed XML propertyset, and `csrfGuard` 415s it before any handler (NOTIFY misses the
+  GET/HEAD/OPTIONS pass-through, so it takes the must-be-`application/json` arm with a
+  `text/xml` body). Residual capability: a blind LAN-only trigger against a LAN/loopback
+  host:port. Tightening is a legitimate option (drop loopback, or pin to the source IP alone) —
+  reopen deliberately rather than by re-discovering the flow.
+
 ## Repo clean-up
 
 Pre-push:
