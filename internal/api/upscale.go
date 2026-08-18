@@ -135,7 +135,30 @@ type UpscaleResponse struct {
 // capped the same way).
 const upscaleMaxBodyBytes = 64 << 10
 
+// refuseUpscaleMutationInDemoMode guards the four upscale MUTATION
+// endpoints (request / batch submit / batch cancel / variant delete) in
+// the demo posture. Unlike the user-data features — whose stores are
+// simply unwired in demo mode, yielding feature-off 404s — upscaling is
+// deliberately ALLOWED to be enabled on a demo bridge (it serves
+// pre-generated + auto-optimized variants and advertises the features),
+// so the mutation surface needs its own refusal: every bearer on a demo
+// bridge is effectively public, and an open batch endpoint would let
+// anyone burn the host's CPU. The operator generates variants via the
+// loopback admin console's Library Inspector, which doesn't route
+// through these handlers. Returns true when the request was refused.
+func (s *Server) refuseUpscaleMutationInDemoMode(w http.ResponseWriter) bool {
+	if !s.demoMode {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "demo_read_only",
+		"this demo bridge is read-only — upscale requests are disabled")
+	return true
+}
+
 func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
+	if s.refuseUpscaleMutationInDemoMode(w) {
+		return
+	}
 	if s.upscaleEnqueuer == nil {
 		// Feature off (config flag false) OR sox precheck
 		// failed at startup. Both surface as the same wire code

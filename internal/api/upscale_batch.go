@@ -186,6 +186,9 @@ func validateUpscaleTarget(rate, bits int) string {
 
 // upscaleBatchSubmit handles POST /v1/upscale/batch.
 func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
+	if s.refuseUpscaleMutationInDemoMode(w) {
+		return
+	}
 	if s.batchCoordinator == nil {
 		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
 			errMsgUpscalingNotEnabled)
@@ -306,6 +309,9 @@ func (s *Server) upscaleBatchList(w http.ResponseWriter, r *http.Request) {
 
 // upscaleBatchCancel handles DELETE /v1/upscale/batches/{id}.
 func (s *Server) upscaleBatchCancel(w http.ResponseWriter, r *http.Request) {
+	if s.refuseUpscaleMutationInDemoMode(w) {
+		return
+	}
 	if s.batchCoordinator == nil {
 		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
 			errMsgUpscalingNotEnabled)
