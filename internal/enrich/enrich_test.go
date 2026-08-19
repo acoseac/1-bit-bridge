@@ -720,7 +720,7 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 
 	// Artwork cached on disk.
 	wantPath := ArtworkCachePath(filepath.Join(dir, "artwork"),
-		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 500)
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", DefaultCoverSize)
 	if _, err := os.Stat(wantPath); err != nil {
 		t.Errorf("artwork not cached at %q: %v", wantPath, err)
 	}
@@ -802,7 +802,7 @@ func TestEnrichOneRejectsNonUUIDEmbeddedAlbumMBID(t *testing.T) {
 		t.Errorf("MusicBrainzAlbumID = %q, want searched UUID %q (bad MBID should degrade to search)",
 			all[0].MusicBrainzAlbumID, validMBID)
 	}
-	if _, statErr := os.Stat(ArtworkCachePath(cacheDir, validMBID, 500)); statErr != nil {
+	if _, statErr := os.Stat(ArtworkCachePath(cacheDir, validMBID, DefaultCoverSize)); statErr != nil {
 		t.Errorf("artwork not cached at the valid path inside cacheDir: %v", statErr)
 	}
 }
@@ -1510,4 +1510,50 @@ func newOfflineEnricher(t *testing.T, mbHandler http.HandlerFunc) (*Enricher, *m
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
 		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
 	return e, store
+}
+
+// The right-sizing batch's enricher contract: new fetches default to
+// the 1200 tier, and a cover already cached at ANY supported tier is
+// never re-fetched (mass-CAA-re-crawl guard — the existing
+// TestEnricherSkipsNetworkCallIfCoverAlreadyCached exercises the
+// 500-file-satisfies-a-1200-config case end-to-end; this pins the
+// pieces directly).
+func TestEnricherCoverSizeDefaultsTo1200(t *testing.T) {
+	e := NewEnricher(nil, nil, nil, nil, t.TempDir())
+	if e.CoverSize != DefaultCoverSize || DefaultCoverSize != 1200 {
+		t.Errorf("CoverSize = %d (DefaultCoverSize %d), want 1200", e.CoverSize, DefaultCoverSize)
+	}
+	// Zero-value fallback for field-by-field construction.
+	zero := &Enricher{}
+	if zero.coverSize() != 1200 {
+		t.Errorf("zero-value coverSize() = %d, want 1200", zero.coverSize())
+	}
+}
+
+func TestEnsureArtworkCachedCountsAnySupportedTier(t *testing.T) {
+	artDir := t.TempDir()
+	const mbid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	// Only the legacy 500 tier on disk.
+	if err := os.WriteFile(ArtworkCachePath(artDir, mbid, 500), []byte("cached"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var caaCalls atomic.Int32
+	caaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caaCalls.Add(1)
+		w.Write([]byte{0xFF, 0xD8, 0xFF})
+	}))
+	defer caaSrv.Close()
+	e := NewEnricher(nil, nil, NewCoverArtClient(caaSrv.URL, "t", nil), nil, artDir)
+	e.CAAMinInterval = 0
+
+	cached, err := e.ensureArtworkCached(context.Background(), mbid, "", "A", "B", e.coverSize())
+	if err != nil {
+		t.Fatalf("ensureArtworkCached: %v", err)
+	}
+	if !cached {
+		t.Fatalf("500-tier file must satisfy a 1200-config cache check")
+	}
+	if n := caaCalls.Load(); n != 0 {
+		t.Errorf("CAA called %d times despite a cached tier on disk", n)
+	}
 }

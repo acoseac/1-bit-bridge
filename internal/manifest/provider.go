@@ -188,6 +188,12 @@ func (p *Provider) ArtistMBIDEnrichmentPending(ctx context.Context, mbid string)
 	return p.store.ArtistMBIDEnrichmentPending(ctx, mbid)
 }
 
+// ResolveArtworkVersionMBID satisfies api.MBIDProbe — the /v1/artwork
+// 16-hex alias resolver (see Store.ResolveArtworkVersionMBID).
+func (p *Provider) ResolveArtworkVersionMBID(ctx context.Context, version string) (string, error) {
+	return p.store.ResolveArtworkVersionMBID(ctx, version)
+}
+
 // LookupVariant returns the cached metadata for one (sourcePath,
 // variantID) pair, or `nil` if no such row exists. The api-side
 // caller does the freshness check against its already-validated

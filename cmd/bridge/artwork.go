@@ -46,11 +46,27 @@ import (
 // `artworkDirBridge` resolution in main.go.
 const artworkDirName = "artwork"
 
-// artworkCacheSuffix is the trailing portion of every cached file
-// (`-500.jpg`). Files in the artwork dir that don't end with this are
-// skipped — any future cache shape (`-300.jpg`, `-thumb.jpg`) gets
-// added here without touching the orphan-detection loop.
-const artworkCacheSuffix = "-500.jpg"
+// artworkCacheSuffixes are the trailing portions of every cached file
+// the GC recognises — one per supported cover tier
+// (enrich.SupportedCoverSizes: the scanner's historical `-500.jpg`
+// plus the enricher's configurable `-250.jpg` / `-1200.jpg`, default
+// 1200 since the right-sizing batch). Files in the artwork dir that
+// match none are skipped — any future cache shape gets added here
+// without touching the orphan-detection loop. Without the `-1200.jpg`
+// entry, every cover the enricher writes at the new default tier
+// would be invisible to orphan GC forever.
+var artworkCacheSuffixes = []string{"-250.jpg", "-500.jpg", "-1200.jpg"}
+
+// artworkCacheStem returns the filename minus its recognised cache
+// suffix, or ("", false) for out-of-scope files.
+func artworkCacheStem(base string) (string, bool) {
+	for _, suffix := range artworkCacheSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return strings.TrimSuffix(base, suffix), true
+		}
+	}
+	return "", false
+}
 
 // artworkGCConfirmPhrase is the exact string operators must pass via
 // `--confirm` to authorize a destructive `--gc` run. Typed-phrase
@@ -74,7 +90,7 @@ func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if !*gc {
 		fmt.Fprintln(stderr, "Usage: bridge artwork --gc [--dry-run | --confirm "+artworkGCConfirmPhrase+"] [--config bridge.yaml]")
 		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "Removes cached artwork files (local-<hash>-500.jpg, <mbid>-500.jpg) under")
+		fmt.Fprintln(stderr, "Removes cached artwork files (local-<hash>-500.jpg, <mbid>-{250,500,1200}.jpg) under")
 		fmt.Fprintln(stderr, "<dataDir>/artwork/ that no track row references. Use --dry-run to preview")
 		fmt.Fprintln(stderr, "or --confirm "+artworkGCConfirmPhrase+" to authorize destructive deletion.")
 		return 2
@@ -147,16 +163,16 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		if d.IsDir() {
 			return nil
 		}
-		// Only consider files matching the cache suffix. Anything
-		// else (a stray README, a partial download, an old-format
-		// thumb) is treated as out-of-scope and skipped — a
-		// future GC pass with broader coverage can extend this.
+		// Only consider files matching a recognised cache suffix.
+		// Anything else (a stray README, a partial download, an
+		// old-format thumb) is treated as out-of-scope and skipped —
+		// a future GC pass with broader coverage can extend this.
 		base := filepath.Base(path)
-		if !strings.HasSuffix(base, artworkCacheSuffix) {
+		stem, ok := artworkCacheStem(base)
+		if !ok {
 			skipped++
 			return nil
 		}
-		stem := strings.TrimSuffix(base, artworkCacheSuffix)
 		if known[stem] {
 			kept++
 			return nil

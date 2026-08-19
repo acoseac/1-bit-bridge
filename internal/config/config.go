@@ -343,6 +343,26 @@ type EnrichConfig struct {
 	// CoverArtBaseURL overrides the Cover Art Archive root.
 	// Default (empty): https://coverartarchive.org.
 	CoverArtBaseURL string `yaml:"coverArtBaseURL,omitempty"`
+	// CoverSize is the pixel tier the enricher fetches NEW album covers
+	// at (CAA's native tiers: 250 / 500 / 1200). Default (0): 1200 —
+	// matches the scan-time local-artwork ceiling so enriched and
+	// curated covers land in the same quality class (iPad hero / Now
+	// Playing surfaces want ~1200 px). Existing covers cached at
+	// another tier are NEVER re-fetched (ensureArtworkCached counts a
+	// cover at any supported size as cached; a mass CAA re-crawl is the
+	// failure this guard exists to prevent), and /v1/artwork's size
+	// ladder serves whichever tier exists.
+	CoverSize int `yaml:"coverSize,omitempty"`
+}
+
+// EffectiveCoverSize resolves CoverSize's zero default (1200). Values
+// are validated at load (Config.Validate) so this stays a pure default
+// resolver.
+func (e EnrichConfig) EffectiveCoverSize() int {
+	if e.CoverSize == 0 {
+		return 1200
+	}
+	return e.CoverSize
 }
 
 // AtlasConfig governs the optional rich-tier Atlas metadata integration
@@ -2235,6 +2255,13 @@ func (c *Config) Validate() error {
 	}
 	if _, err := normalizeBaseURL("enrich.coverArtBaseURL", c.Enrich.CoverArtBaseURL); err != nil {
 		return err
+	}
+	// Enrich cover size: 0 is the "default (1200)" sentinel; otherwise it
+	// must be one of CAA's native tiers or every cover fetch 404s.
+	switch c.Enrich.CoverSize {
+	case 0, 250, 500, 1200:
+	default:
+		return fmt.Errorf("enrich.coverSize: must be one of 250, 500, 1200 (or 0 for the default 1200), got %d", c.Enrich.CoverSize)
 	}
 	// Artwork cache cap: a negative value is almost certainly a typo. Zero
 	// is the valid "unbounded" sentinel; positive is a byte cap. Surface a

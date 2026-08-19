@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/enrich"
 )
 
 // decodeErrorCode reads the stable machine-readable `error` field off a
@@ -294,6 +296,15 @@ type fakeMBIDProbe struct {
 	pending    map[string]bool
 	knownErr   error
 	pendingErr error
+	// versionAliases maps a 16-hex artwork_version tag to the MBID it
+	// resolves to (the /v1/artwork alias path); resolveErr populates
+	// the database-fault arm (must classify as pending, never terminal).
+	versionAliases map[string]string
+	resolveErr     error
+}
+
+func (f fakeMBIDProbe) ResolveArtworkVersionMBID(ctx context.Context, version string) (string, error) {
+	return f.versionAliases[version], f.resolveErr
 }
 
 func (f fakeMBIDProbe) HasTrackWithArtworkMBID(ctx context.Context, m string) (bool, error) {
@@ -644,40 +655,39 @@ func TestArtistImageProbeFaultAnswersPending(t *testing.T) {
 	}
 }
 
-// --- off-canonical `size` is a size-specific miss, not "no image" ---
+// --- the size LADDER serves whatever tier exists ---
 
-// `enrich.ParseSize` admits 250 / 500 / 1200, but every writer in the
-// bridge caches at 500 only — so `?size=1200` builds a path that never
-// exists even for a release whose cover IS cached, and answering
-// `no_image` ("enrichment complete; no image exists upstream —
-// terminal") told the client to stop asking for an image sitting on
-// disk one size away. `not_found` keeps the answer inside the
-// documented vocabulary and scoped to what it means: not cached under
-// this key.
-func TestArtworkOffCanonicalSizeMissIsNotFound(t *testing.T) {
+// The on-disk tier is a server implementation detail (the enricher
+// writes at the configurable `enrich.coverSize`, the scanner under its
+// historical `-500` suffix), so a request for ANY supported size must
+// serve whichever right-sized file exists — requested size first, then
+// the artworkServeSizes ladder. Pre-ladder, `?size=1200` against a
+// release whose 500 px cover WAS cached answered a misleading per-size
+// 404; the total-miss terminal answers are unchanged.
+func TestArtworkSizeLadderServesExistingTier(t *testing.T) {
 	tests := []struct {
 		name     string
 		size     string
-		present  bool // 500 variant on disk
-		wantCode string
+		present  bool   // 500 variant on disk
+		wantCode string // "" = expect 200 with the cached bytes
 	}{
 		{
+			// Off-size request, 500 on disk → the ladder serves it.
 			name: "1200 with 500 cached", size: "1200", present: true,
-			wantCode: "not_found",
 		},
 		{
 			name: "250 with 500 cached", size: "250", present: true,
-			wantCode: "not_found",
+		},
+		{
+			name: "default with 500 cached", size: "", present: true,
 		},
 		{
 			// Nothing cached at any size + enrichment complete: the
-			// terminal answer is still correct and must not be widened
-			// away by the size branch.
+			// terminal answer survives the ladder.
 			name: "1200 with nothing cached", size: "1200", present: false,
 			wantCode: "no_image",
 		},
 		{
-			// The canonical size keeps the full three-way split.
 			name: "500 with nothing cached", size: "500", present: false,
 			wantCode: "no_image",
 		},
@@ -687,8 +697,18 @@ func TestArtworkOffCanonicalSizeMissIsNotFound(t *testing.T) {
 			hs, tok, mbid := artworkFixtureOpts(t, artworkProbeOpts{
 				present: tc.present, probeKnown: true,
 			})
-			resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid+"?size="+tc.size, tok)
+			url := hs.URL + "/v1/artwork/" + mbid
+			if tc.size != "" {
+				url += "?size=" + tc.size
+			}
+			resp := authedGET(t, url, tok)
 			defer resp.Body.Close()
+			if tc.wantCode == "" {
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("status = %d, want 200 (ladder must serve the cached tier)", resp.StatusCode)
+				}
+				return
+			}
 			if resp.StatusCode != http.StatusNotFound {
 				t.Fatalf("status = %d, want 404", resp.StatusCode)
 			}
@@ -696,5 +716,205 @@ func TestArtworkOffCanonicalSizeMissIsNotFound(t *testing.T) {
 				t.Errorf("error = %q, want %q", code, tc.wantCode)
 			}
 		})
+	}
+}
+
+// The other direction of the ladder: a file cached at the 1200 tier
+// (the enricher's new default) must serve a default-size request.
+func TestArtworkSizeLadderServes1200TierForDefaultRequest(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	if err := os.MkdirAll(artDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mbid := "abcdabcd-abcd-4bcd-8bcd-abcdabcdabcd"
+	payload := []byte{0xFF, 0xD8, 0xFF, 0xAA, 0xBB}
+	if err := os.WriteFile(enrich.ArtworkCachePath(artDir, mbid, 1200), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("ladder")
+	srv := New(cfg, store, nil, "fp").WithArtworkDirs(fakeArtworkDirs{dir: artDir})
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+mbid, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (default request must reach the 1200 tier)", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Errorf("body mismatch: got %x, want %x", body, payload)
+	}
+}
+
+// ---- 16-hex artwork-version ALIAS ----
+
+// iOS keys its cover fetches on `Album.artworkHash = artworkVersion ??
+// artworkMBID` (iOS PR #944), so an Atlas premium-refetched album's
+// clients request `/v1/artwork/<16hex>` — 400-rejected before the
+// alias, leaving those albums permanently coverless (64 on the
+// production library, measured 2026-08-19). The alias resolves the
+// version tag to the servable MBID server-side, fixing every existing
+// client with zero iOS change.
+func TestArtworkVersionAliasResolvesAndServes(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	if err := os.MkdirAll(artDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mbid := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	alias := "aa20c66194bcbe9e"
+	payload := []byte{0xFF, 0xD8, 0xFF, 0x11, 0x22}
+	if err := os.WriteFile(filepath.Join(artDir, mbid+"-500.jpg"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("alias")
+	probe := fakeMBIDProbe{
+		known:          map[string]bool{mbid: true},
+		versionAliases: map[string]string{alias: mbid},
+	}
+	srv := New(cfg, store, nil, "fp").
+		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
+		WithMBIDProbe(probe)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artwork/"+alias, raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (alias must resolve + serve)", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(body, payload) {
+		t.Errorf("alias served wrong bytes: got %x, want %x", body, payload)
+	}
+}
+
+func TestArtworkVersionAliasUnknownIs404NotFound(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("alias")
+	probe := fakeMBIDProbe{versionAliases: map[string]string{}}
+	srv := New(cfg, store, nil, "fp").
+		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
+		WithMBIDProbe(probe)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artwork/0123456789abcdef", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if code := decodeErrorCode(t, resp); code != "not_found" {
+		t.Errorf("error = %q, want not_found", code)
+	}
+}
+
+// A resolver database fault is not an answer: fail OPEN (202) like the
+// sibling miss probes — a wrong "pending" costs one bounded retry, a
+// wrong terminal 404 costs the cover for good.
+func TestArtworkVersionAliasResolverFaultAnswersPending(t *testing.T) {
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("alias")
+	probe := fakeMBIDProbe{resolveErr: errors.New("database is locked")}
+	srv := New(cfg, store, nil, "fp").
+		WithArtworkDirs(fakeArtworkDirs{dir: artDir}).
+		WithMBIDProbe(probe)
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artwork/0123456789abcdef", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 on a resolver fault", resp.StatusCode)
+	}
+}
+
+func TestArtworkVersionAliasWithoutProbeIs404(t *testing.T) {
+	// No probe wired (tests, legacy) — the pre-alias answer, never a 500.
+	dir := t.TempDir()
+	artDir := filepath.Join(dir, "artwork")
+	cfg := &config.Config{LibraryRoots: []string{dir}, ListenAddress: ":7788", LibraryName: "T"}
+	store, _ := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	raw, _, _ := store.Mint("alias")
+	srv := New(cfg, store, nil, "fp").WithArtworkDirs(fakeArtworkDirs{dir: artDir})
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	resp := authedGET(t, hs.URL+"/v1/artwork/0123456789abcdef", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// ---- ETag / If-None-Match ----
+
+// Without an ETag, a client whose 24 h Cache-Control window lapsed
+// re-downloads every cached image in full on the next coverage sweep
+// (166 MB of artist images per re-sync on the production library,
+// measured 2026-08-19). With it, net/http answers If-None-Match with a
+// bodyless 304.
+func TestArtworkETagAnswers304OnIfNoneMatch(t *testing.T) {
+	hs, tok, mbid, _ := artworkFixture(t, true)
+	first := authedGET(t, hs.URL+"/v1/artwork/"+mbid, tok)
+	etag := first.Header.Get("ETag")
+	io.Copy(io.Discard, first.Body)
+	first.Body.Close()
+	if etag == "" {
+		t.Fatal("200 response carries no ETag")
+	}
+
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/artwork/"+mbid, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("If-None-Match", etag)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304 for a matching If-None-Match", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Errorf("304 must be bodyless, got %d bytes", len(body))
+	}
+}
+
+func TestArtistImageETagAnswers304OnIfNoneMatch(t *testing.T) {
+	hs, tok, mbid := artistImageFixture(t, true)
+	first := authedGET(t, hs.URL+"/v1/artist-image/"+mbid, tok)
+	etag := first.Header.Get("ETag")
+	io.Copy(io.Discard, first.Body)
+	first.Body.Close()
+	if etag == "" {
+		t.Fatal("200 response carries no ETag")
+	}
+
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/artist-image/"+mbid, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("If-None-Match", etag)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304 for a matching If-None-Match", resp.StatusCode)
 	}
 }

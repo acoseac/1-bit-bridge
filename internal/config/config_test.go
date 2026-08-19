@@ -1562,3 +1562,39 @@ func TestNormalizeIsAtomicOnError(t *testing.T) {
 		t.Errorf("Normalize must be all-or-nothing; it partially mutated the receiver: %v", diff)
 	}
 }
+
+// enrich.coverSize: 0 defaults to 1200; only CAA's native tiers are
+// legal (anything else 404s every cover fetch — surface it at load).
+func TestValidate_EnrichCoverSize(t *testing.T) {
+	base := func() *Config {
+		return &Config{LibraryRoots: []string{"/nonexistent"}, ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600}
+	}
+	t.Run("zero defaults to 1200", func(t *testing.T) {
+		cfg := base()
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("zero coverSize should validate, got %v", err)
+		}
+		if got := cfg.Enrich.EffectiveCoverSize(); got != 1200 {
+			t.Errorf("EffectiveCoverSize() = %d, want 1200", got)
+		}
+	})
+	for _, valid := range []int{250, 500, 1200} {
+		t.Run(fmt.Sprintf("tier %d validates", valid), func(t *testing.T) {
+			cfg := base()
+			cfg.Enrich.CoverSize = valid
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("coverSize %d should validate, got %v", valid, err)
+			}
+			if got := cfg.Enrich.EffectiveCoverSize(); got != valid {
+				t.Errorf("EffectiveCoverSize() = %d, want %d", got, valid)
+			}
+		})
+	}
+	t.Run("off-tier rejected", func(t *testing.T) {
+		cfg := base()
+		cfg.Enrich.CoverSize = 300
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "enrich.coverSize") {
+			t.Fatalf("expected enrich.coverSize error, got %v", err)
+		}
+	})
+}
