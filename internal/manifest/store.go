@@ -2890,26 +2890,22 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		return err
 	}
 	defer stmt.Close()
-	// Tombstone clear (deletion_journal.go), per row after its upsert —
-	// a re-added path must stop reading as deleted. The
-	// `dupe_suppressed = 0` EXISTS guard keeps a
-	// content-changed-but-still-suppressed row's tombstone alive. A
-	// point DELETE on the (usually tiny) PK-indexed journal is
-	// negligible next to the row upsert itself.
-	clearStmt, err := tx.PrepareContext(ctx, clearTombstoneIfServedSQL)
-	if err != nil {
-		return err
-	}
-	defer clearStmt.Close()
 	now := s.now().UnixNano()
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
 			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5); err != nil {
 			return err
 		}
-		if _, err := clearStmt.ExecContext(ctx, r.path); err != nil {
-			return err
-		}
+	}
+	// Tombstone clear (deletion_journal.go): one served-tombstone sweep
+	// at the end of the transaction — a re-added path must stop reading
+	// as deleted. The batch form replaces a per-row point delete
+	// (O(1) statements instead of O(batch), Gemini on PR #727); the
+	// shared `clearTombstoneServedGuardSQL` keeps its
+	// `dupe_suppressed = 0` guard in lockstep with the single-row path,
+	// so a content-changed-but-still-suppressed row's tombstone stays.
+	if _, err := tx.ExecContext(ctx, clearAllServedTombstonesSQL); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
