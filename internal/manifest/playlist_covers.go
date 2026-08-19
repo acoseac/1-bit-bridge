@@ -181,9 +181,33 @@ func (s *Store) PlaylistCoversByScope(ctx context.Context, scope string) (map[st
 }
 
 // PrunePlaylistCoversExcept removes covers in `scope` whose key is NOT in the
-// keep set (retiring a smart-mix family that dropped out of regeneration, or a
-// deleted playlist). Returns the removed rows so the caller can unlink the
-// on-disk JPEGs. Writer contract — s.mu.
+// keep set. Returns the removed rows so the caller can unlink the on-disk
+// JPEGs. Writer contract — s.mu.
+//
+// **DELIBERATELY UNWIRED — do not "finish the job" by calling this from
+// regeneration or from playlist deletion.** It was written for those two
+// triggers (that is what this docblock used to say) and both turn out to be
+// unsafe, which is why it has no production caller. Reviewed 2026-08-19; the
+// reasoning, so it isn't re-derived as an oversight:
+//
+//   - **Smart-mix retirement is REVERSIBLE.** A family drops out of the engine
+//     output whenever its source signal dips below a floor — `favorites`
+//     returns `(GeneratedPlaylist{}, false)` at fewer than `MinFavorites` (5)
+//     hearts, and the time-of-day families behave the same way. Un-hearting one
+//     track would delete the cover; re-hearting brings the family back WITHOUT
+//     it. Covers are operator-uploaded through the admin console, so that is
+//     silently destroying authored content to reclaim a JPEG.
+//   - **Playlist deletion doesn't hard-delete.** `TombstonePlaylist` sets
+//     `deleted = 1`, and a newer-clock upsert REVIVES the same id (LWW). The
+//     cover is still live data for that id, and keeping it is what makes a
+//     revived playlist come back intact.
+//
+// The operator already has the precise tool: `DELETE /api/playlists/{id}/cover`
+// → DeletePlaylistCover. This function stays as the primitive for a future
+// EXPLICIT maintenance sweep (the `bridge upscale --gc` shape — operator-
+// triggered, with the live key set computed at that moment), never for an
+// automatic one. Any caller added here must be able to say why its keep-set is
+// authoritative and its exclusions are permanent.
 func (s *Store) PrunePlaylistCoversExcept(ctx context.Context, scope string, keep map[string]struct{}) ([]PlaylistCover, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

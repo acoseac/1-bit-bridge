@@ -2,7 +2,11 @@ package manifest
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -195,5 +199,70 @@ func TestSanitizeCoverKey(t *testing.T) {
 		if got := SanitizeCoverKey(in); got != want {
 			t.Errorf("SanitizeCoverKey(%q) = %q; want %q", in, got, want)
 		}
+	}
+}
+
+// TestPrunePlaylistCoversExceptStaysUnwired pins the 2026-08-19 decision that
+// this primitive has NO automatic caller.
+//
+// Both triggers it was written for are unsafe: smart-mix retirement is
+// reversible (a family below its floor returns later), and playlist deletion
+// is a tombstone whose id can be revived by a newer-clock upsert. Covers are
+// operator-uploaded, so an automatic prune silently destroys authored content
+// to reclaim a JPEG.
+//
+// The obvious "fix" for a reviewer who finds unwired-but-tested code is to
+// wire it. This is the guard that makes that a deliberate act instead of a
+// tidy-up: it fails the moment a production caller appears, pointing at the
+// docblock.
+func TestPrunePlaylistCoversExceptStaysUnwired(t *testing.T) {
+	// AST, not a substring scan over the bytes: the name appears in PROSE in
+	// this package (its own docblock explains why it is unwired, and so does
+	// this test), and a future comment elsewhere saying "deliberately does not
+	// call PrunePlaylistCoversExcept" would fail a text search. A guard that
+	// cries wolf gets deleted — which is the outcome this exists to prevent.
+	// (gemini-code-assist on PR #725.)
+	roots := []string{"..", "../../cmd"}
+	fset := token.NewFileSet()
+	var callers []string
+	for _, root := range roots {
+		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") {
+				return nil //nolint:nilerr // unreadable trees just aren't scanned
+			}
+			// Tests may reference it (the round-trip test calls it directly);
+			// playlist_covers.go is the DECLARATION site.
+			if strings.HasSuffix(p, "_test.go") || strings.HasSuffix(p, "playlist_covers.go") {
+				return nil
+			}
+			file, perr := parser.ParseFile(fset, p, nil, 0)
+			if perr != nil {
+				return nil //nolint:nilerr // unparseable files aren't callers
+			}
+			found := false
+			ast.Inspect(file, func(n ast.Node) bool {
+				if found {
+					return false
+				}
+				if id, ok := n.(*ast.Ident); ok && id.Name == "PrunePlaylistCoversExcept" {
+					found = true
+					return false
+				}
+				return true
+			})
+			if found {
+				callers = append(callers, p)
+			}
+			return nil
+		})
+	}
+	if len(callers) > 0 {
+		t.Errorf("PrunePlaylistCoversExcept gained production caller(s) %v.\n"+
+			"It is deliberately unwired — see its docblock. Smart-mix retirement is REVERSIBLE "+
+			"(a family below MinFavorites returns later) and playlist deletion is a revivable "+
+			"tombstone, so an automatic prune deletes operator-uploaded artwork that should "+
+			"still be there. If this call is intentional, it needs a keep-set that is "+
+			"authoritative and exclusions that are permanent — update the docblock and this test "+
+			"together.", callers)
 	}
 }
