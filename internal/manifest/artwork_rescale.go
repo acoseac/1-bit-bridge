@@ -81,7 +81,11 @@ func RunArtworkRescaleOnce(ctx context.Context, store *Store, artworkDir string)
 	log := scanLogger.With("pass", "artwork-rescale")
 	marker, err := store.GetScanState(ctx, artworkRescaleMarkerKey)
 	if err != nil {
-		log.Warn("read rescale marker; skipping pass", "err", err)
+		// A cancelled ctx during shutdown surfaces here as a DB error;
+		// don't turn a normal teardown into a misleading warning.
+		if ctx.Err() == nil {
+			log.Warn("read rescale marker; skipping pass", "err", err)
+		}
 		return
 	}
 	if marker != "" {
@@ -222,6 +226,9 @@ func markArtworkRescaleDone(ctx context.Context, store *Store, log interface {
 }) {
 	stamp := fmt.Sprintf("done@%s", time.Now().UTC().Format(time.RFC3339))
 	if err := store.SetScanState(ctx, artworkRescaleMarkerKey, stamp); err != nil {
-		log.Warn("write rescale marker (pass will re-run next boot)", "err", err)
+		// Shutdown-cancelled ctx → expected failure, not a warning.
+		if ctx.Err() == nil {
+			log.Warn("write rescale marker (pass will re-run next boot)", "err", err)
+		}
 	}
 }

@@ -917,4 +917,8 @@ func TestArtistImageETagAnswers304OnIfNoneMatch(t *testing.T) {
 	if resp.StatusCode != http.StatusNotModified {
 		t.Fatalf("status = %d, want 304 for a matching If-None-Match", resp.StatusCode)
 	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Errorf("304 must be bodyless, got %d bytes", len(body))
+	}
 }

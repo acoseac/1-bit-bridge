@@ -38,6 +38,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -47,15 +48,19 @@ import (
 const artworkDirName = "artwork"
 
 // artworkCacheSuffixes are the trailing portions of every cached file
-// the GC recognises — one per supported cover tier
-// (enrich.SupportedCoverSizes: the scanner's historical `-500.jpg`
-// plus the enricher's configurable `-250.jpg` / `-1200.jpg`, default
-// 1200 since the right-sizing batch). Files in the artwork dir that
-// match none are skipped — any future cache shape gets added here
-// without touching the orphan-detection loop. Without the `-1200.jpg`
-// entry, every cover the enricher writes at the new default tier
-// would be invisible to orphan GC forever.
-var artworkCacheSuffixes = []string{"-250.jpg", "-500.jpg", "-1200.jpg"}
+// the GC recognises — one per supported cover tier, DERIVED from
+// enrich.SupportedCoverSizes (the writer-side contract) so a future
+// tier added there is automatically visible to orphan GC. A hardcoded
+// second list here is how the `-1200.jpg` tier would have gone
+// invisible to GC forever. Files matching none are skipped — any
+// future non-size cache shape still gets an explicit entry.
+var artworkCacheSuffixes = func() []string {
+	suffixes := make([]string, 0, len(enrich.SupportedCoverSizes))
+	for _, s := range enrich.SupportedCoverSizes {
+		suffixes = append(suffixes, fmt.Sprintf("-%d.jpg", s))
+	}
+	return suffixes
+}()
 
 // artworkCacheStem returns the filename minus its recognised cache
 // suffix, or ("", false) for out-of-scope files.

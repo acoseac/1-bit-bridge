@@ -58,6 +58,22 @@ const localArtworkMBIDPrefix = "local-"
 // leaking to clients as a 404.
 var artworkServeSizes = []int{1200, 500, 250}
 
+// artworkLadderCandidates returns the requested size followed by the
+// serve-size ladder, with the requested size deduped out of the ladder
+// portion — when the request names a ladder size (500 is every current
+// client), a naive prepend would retry the same path twice on a full
+// cache miss (one redundant os.Open per miss).
+func artworkLadderCandidates(size int) []int {
+	candidates := make([]int, 0, len(artworkServeSizes)+1)
+	candidates = append(candidates, size)
+	for _, s := range artworkServeSizes {
+		if s != size {
+			candidates = append(candidates, s)
+		}
+	}
+	return candidates
+}
+
 // mbidPattern validates that a path segment looks like a MusicBrainz
 // UUID. Prevents traversal and filesystem abuse through the {mbid}
 // parameter. Used by the artist-image handler, which only accepts
@@ -326,7 +342,7 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	// size gets whichever right-sized file exists rather than a
 	// misleading per-size 404.
 	var f *os.File
-	for _, candidate := range append([]int{size}, artworkServeSizes...) {
+	for _, candidate := range artworkLadderCandidates(size) {
 		path := enrich.ArtworkCachePath(cacheDir, mbid, candidate)
 		f, err = os.Open(path)
 		if err == nil {
