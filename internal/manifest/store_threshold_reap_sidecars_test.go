@@ -210,34 +210,31 @@ func TestThresholdReapSparesRoutedRowSidecars(t *testing.T) {
 // Mirrors TestIndexedAtAdvanceIsShared / TestEnrichmentMissPredicateIsShared,
 // which exist for the same reason.
 func TestThresholdReapPredicatesAreShared(t *testing.T) {
-	src, err := os.ReadFile("store.go")
-	if err != nil {
-		t.Fatalf("read store.go: %v", err)
-	}
-	body := squashSpace(string(src))
-
-	for _, tc := range []struct {
-		name      string
-		predicate string
-		// wantUses counts the DELETE plus the doomedReapSidecarsTx call —
-		// both consumers must reference the same const.
-		wantUses int
-	}{
-		{"thresholdReapBatchWhereSQL", "thresholdReapBatchWhereSQL", 3},
-		{"thresholdReapOneWhereSQL", "thresholdReapOneWhereSQL", 3},
+	// Each DELETE and its two sidecar enumerations are DERIVED from one
+	// predicate const at compile time, so drift is a compile-time
+	// impossibility rather than a review question. This asserts the derivation
+	// still holds — i.e. nobody re-spelled a statement inline.
+	//
+	// Drift is not cosmetic in either direction: a DELETE that reaps rows the
+	// enumeration missed leaks their files forever, and an enumeration broader
+	// than the DELETE unlinks sidecars belonging to tracks still being served.
+	for _, tc := range []struct{ name, stmt, want string }{
+		{"deleteTracksAtThresholdBatchSQL", deleteTracksAtThresholdBatchSQL, thresholdReapBatchWhereSQL},
+		{"reapVariantSidecarsBatchSQL", reapVariantSidecarsBatchSQL, thresholdReapBatchWhereSQL},
+		{"reapWaveformWhereBatchSQL", reapWaveformWhereBatchSQL, thresholdReapBatchWhereSQL},
+		{"deleteTracksAtThresholdOneSQL", deleteTracksAtThresholdOneSQL, thresholdReapOneWhereSQL},
+		{"reapVariantSidecarsOneSQL", reapVariantSidecarsOneSQL, thresholdReapOneWhereSQL},
+		{"reapWaveformWhereOneSQL", reapWaveformWhereOneSQL, thresholdReapOneWhereSQL},
 	} {
-		// 1 declaration + 1 DELETE + 1 enumeration call.
-		if got := strings.Count(body, tc.predicate); got < tc.wantUses {
-			t.Errorf("%s referenced %d times in store.go, want >= %d "+
-				"(declaration + DELETE + sidecar enumeration) — a consumer stopped sharing the predicate, "+
-				"so the unlink set and the row set can now diverge",
-				tc.name, got, tc.wantUses)
+		if !strings.Contains(squashSpace(tc.stmt), squashSpace(tc.want)) {
+			t.Errorf("%s no longer embeds its reap predicate — the unlink set and the row set can now diverge.\nStatement:\n%s\n\nwant it to contain:\n%s",
+				tc.name, tc.stmt, tc.want)
 		}
 	}
 
 	// The routed anti-join is the guard no caller may bypass; it must live
-	// INSIDE the shared predicates so both consumers inherit it, not be
-	// re-stated per statement.
+	// INSIDE the shared predicates so every derived statement inherits it,
+	// rather than being re-stated per statement.
 	for _, want := range []string{
 		squashSpace(thresholdReapBatchWhereSQL),
 		squashSpace(thresholdReapOneWhereSQL),

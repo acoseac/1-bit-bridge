@@ -5023,6 +5023,26 @@ const thresholdReapOneWhereSQL = `path = ?
 			   AND missing_count >= ?
 			   AND path NOT IN (SELECT source_path FROM upnp_track_routing)`
 
+// The four statements below are derived from those predicates at COMPILE
+// time (const + const is a const), so the reap's DELETE and its sidecar
+// enumeration are the same rows by construction. Building them as consts
+// rather than concatenating a `where` parameter at call time is also what
+// keeps SonarCloud go:S2077 quiet — the `trackFeatureSelect` convention;
+// a runtime `+where+` reads as an assembled query even though every value
+// still flows through placeholders.
+const (
+	deleteTracksAtThresholdBatchSQL = `DELETE FROM tracks WHERE ` + thresholdReapBatchWhereSQL
+	deleteTracksAtThresholdOneSQL   = `DELETE FROM tracks WHERE ` + thresholdReapOneWhereSQL
+
+	reapVariantSidecarsBatchSQL = `SELECT sidecar_path FROM track_variants
+		  WHERE source_path IN (SELECT path FROM tracks WHERE ` + thresholdReapBatchWhereSQL + `)`
+	reapVariantSidecarsOneSQL = `SELECT sidecar_path FROM track_variants
+		  WHERE source_path IN (SELECT path FROM tracks WHERE ` + thresholdReapOneWhereSQL + `)`
+
+	reapWaveformWhereBatchSQL = `source_path IN (SELECT path FROM tracks WHERE ` + thresholdReapBatchWhereSQL + `)`
+	reapWaveformWhereOneSQL   = `source_path IN (SELECT path FROM tracks WHERE ` + thresholdReapOneWhereSQL + `)`
+)
+
 // doomedReapSidecarsTx enumerates the sidecar files owned by the rows
 // `where` is about to delete, so the caller can unlink them after the
 // commit. Reads run on `tx` so the whole enumerate-then-delete sequence
@@ -5038,15 +5058,22 @@ const thresholdReapOneWhereSQL = `path = ?
 // waveform is `bridge analyze --gc`'s problem and must never block a reap),
 // matching DeleteTracksByPrefix.
 //
-// `where` is a caller-side compile-time literal; every value flows through
-// `args` placeholders, so the concatenation is injection-safe.
-func (s *Store) doomedReapSidecarsTx(ctx context.Context, tx *sql.Tx, where string, args ...any) ([]string, error) {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT sidecar_path FROM track_variants
-		  WHERE source_path IN (SELECT path FROM tracks WHERE `+where+`)`, args...)
+// `variantQuery` / `waveformWhere` are the derived consts above — never
+// caller text — and every value flows through `args` placeholders. They are
+// passed in rather than concatenated here so both statements stay compile-time
+// constants.
+func (s *Store) doomedReapSidecarsTx(ctx context.Context, tx *sql.Tx, variantQuery, waveformWhere string, args ...any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, variantQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("manifest: threshold reap list variant sidecars: %w", err)
 	}
+	// Panic-safety net (the PrunePlaylistCoversExcept idiom). The explicit
+	// Close below still runs FIRST and is load-bearing: a *sql.Tx pins ONE
+	// connection, so these Rows must be closed before the waveform read runs
+	// on the same tx — DeleteTracksBatch documents that contract. sql.Rows.Close
+	// is idempotent, so the double-close is safe. Do NOT drop the explicit
+	// Close in favour of this defer alone.
+	defer rows.Close()
 	var out []string
 	for rows.Next() {
 		var sp string
@@ -5057,12 +5084,10 @@ func (s *Store) doomedReapSidecarsTx(ctx context.Context, tx *sql.Tx, where stri
 		out = append(out, sp)
 	}
 	if iterErr := rows.Err(); iterErr != nil {
-		rows.Close()
 		return nil, fmt.Errorf("manifest: threshold reap iter variant sidecars: %w", iterErr)
 	}
 	rows.Close()
-	out = append(out, s.listWaveformSidecarsTx(ctx, tx,
-		`source_path IN (SELECT path FROM tracks WHERE `+where+`)`, args...)...)
+	out = append(out, s.listWaveformSidecarsTx(ctx, tx, waveformWhere, args...)...)
 	return out, nil
 }
 
@@ -5229,14 +5254,12 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		// CASCADE takes the track_variants / track_analysis rows with the
 		// parent, and the on-disk files are then unreachable by path.
 		// Same predicate, same binds; see thresholdReapBatchWhereSQL.
-		sc, err := s.doomedReapSidecarsTx(ctx, tx, thresholdReapBatchWhereSQL, threshold, string(missingBlob))
+		sc, err := s.doomedReapSidecarsTx(ctx, tx, reapVariantSidecarsBatchSQL, reapWaveformWhereBatchSQL, threshold, string(missingBlob))
 		if err != nil {
 			return 0, err
 		}
 		doomedSidecars = append(doomedSidecars, sc...)
-		res, err := tx.ExecContext(ctx, `
-			DELETE FROM tracks
-			 WHERE `+thresholdReapBatchWhereSQL, threshold, string(missingBlob))
+		res, err := tx.ExecContext(ctx, deleteTracksAtThresholdBatchSQL, threshold, string(missingBlob))
 		if err != nil {
 			return 0, err
 		}
@@ -5251,9 +5274,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		deleted += n
 	}
 	if len(illFormed) > 0 {
-		delStmt, err := tx.PrepareContext(ctx, `
-			DELETE FROM tracks
-			 WHERE `+thresholdReapOneWhereSQL)
+		delStmt, err := tx.PrepareContext(ctx, deleteTracksAtThresholdOneSQL)
 		if err != nil {
 			return 0, err
 		}
@@ -5263,7 +5284,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			// paths can't ride the JSON array (see splitIllFormedUTF8Paths),
 			// so they can't ride its sidecar query either — without this
 			// they would be the one reaped population whose sidecars leak.
-			sc, err := s.doomedReapSidecarsTx(ctx, tx, thresholdReapOneWhereSQL, p, threshold)
+			sc, err := s.doomedReapSidecarsTx(ctx, tx, reapVariantSidecarsOneSQL, reapWaveformWhereOneSQL, p, threshold)
 			if err != nil {
 				return 0, err
 			}
