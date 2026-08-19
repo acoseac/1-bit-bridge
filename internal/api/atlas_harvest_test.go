@@ -25,6 +25,12 @@ func (f *fakeHarvestCred) SetCredential(token, baseURL string, expiresAt time.Ti
 }
 
 func newHarvestCredTestServer(t *testing.T, sink AtlasHarvestCredentialSink) (string, *Server) {
+	return newHarvestCredTestServerPinned(t, sink, "", false)
+}
+
+// newHarvestCredTestServerPinned builds the same fixture with an explicit
+// base-URL pin and demo posture, for the pin-enforcement cases.
+func newHarvestCredTestServerPinned(t *testing.T, sink AtlasHarvestCredentialSink, pinned string, demo bool) (string, *Server) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
@@ -36,9 +42,9 @@ func newHarvestCredTestServer(t *testing.T, sink AtlasHarvestCredentialSink) (st
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	srv := New(cfg, authStore, nil, "fp")
+	srv := New(cfg, authStore, nil, "fp").WithDemoMode(demo)
 	if sink != nil {
-		srv.WithAtlasHarvest(sink)
+		srv.WithAtlasHarvest(sink, pinned)
 	}
 	return raw, srv
 }

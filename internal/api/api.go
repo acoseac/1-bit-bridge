@@ -192,6 +192,10 @@ type Server struct {
 	// hands the bridge an App-Attest-minted bulk_harvest token here. Nil unless
 	// WithAtlasHarvest is wired (gated on cfg.Atlas.HarvestEnabled).
 	atlasHarvestCred AtlasHarvestCredentialSink
+	// atlasHarvestPinnedBase is cfg.Atlas.CanonicalHarvestBaseURL() — the only
+	// Atlas host POST /v1/atlas-harvest/credential accepts. "" = unpinned,
+	// which demo mode refuses. See refuseUnpinnedHarvestBaseURL.
+	atlasHarvestPinnedBase string
 
 	// smartPlaylistStore backs GET /v1/smart-playlists + the "smartPlaylists"
 	// health-feature flag. Nil unless WithSmartPlaylistStore is wired (gated

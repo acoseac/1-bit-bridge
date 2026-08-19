@@ -2439,6 +2439,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if cfg.Atlas.HarvestEnabled && !cfg.Atlas.Enabled {
 		fmt.Fprintln(stderr, "atlas harvest: harvestEnabled requires atlas.enabled (bios are served via /v1/atlas-meta) — harvest disabled")
 	}
+	// A demo bridge's bearer is public by construction (the static
+	// demo.tokenSHA256 ships inside every installed app), so an unpinned
+	// credential endpoint there lets anyone repoint the harvest pull at a
+	// host of their choosing and inject the bios /v1/atlas-meta serves.
+	// The endpoint refuses the write in this state; say so at startup so the
+	// operator finds out from the log rather than from a silent 403.
+	if cfg.Demo.Enabled && cfg.Atlas.HarvestEnabled && cfg.Atlas.CanonicalHarvestBaseURL() == "" {
+		fmt.Fprintln(stderr, "atlas harvest: demo mode requires atlas.harvestBaseUrl to be set — "+
+			"credential submissions will be refused until it is")
+	}
 	// bookletsDir is the PDF booklet cache path. Declared outside the
 	// harvest block: the admin inspector's loopback booklet route
 	// serves from it too (Deps.BookletPath below), and the path is
@@ -2448,7 +2458,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// cover fetcher before its worker started). Reuse it for the bulk-harvest
 	// client; nil = feature off or the state file failed to open.
 	if harvestState != nil {
-		apiSrv.WithAtlasHarvest(harvestState)
+		apiSrv.WithAtlasHarvest(harvestState, cfg.Atlas.CanonicalHarvestBaseURL())
 		harvestClient = &atlasharvest.Client{
 			State: harvestState,
 			MBIDs: manifestStore,

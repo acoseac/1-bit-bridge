@@ -370,6 +370,67 @@ type AtlasConfig struct {
 	// and delta-syncs the harvested bios into the artist_atlas overlay. Default
 	// false; the feature stays dormant until a credential is provisioned.
 	HarvestEnabled bool `yaml:"harvestEnabled,omitempty"`
+	// HarvestBaseURL pins the Atlas host POST /v1/atlas-harvest/credential
+	// will accept. Empty (the default) means unpinned.
+	//
+	// **A demo bridge that enables harvest MUST set this.** The credential
+	// body carries `atlasBaseUrl`, and the harvest client then dials it for
+	// both submit and fetch — so an unpinned endpoint lets whoever can reach
+	// it point the bridge's harvest pull at a host of their choosing, and the
+	// bios it returns land in `artist_atlas` and are served to every client
+	// by GET /v1/atlas-meta (with an attacker-chosen `SourceURL` that the app
+	// renders as a "Read more on …" link). On a demo bridge the bearer is
+	// public by construction — the static `demo.tokenSHA256` ships inside
+	// every installed app — so "authenticated" is not a barrier there. That
+	// is the same content-injection `refuseAtlasIngestInDemoMode` blocks on
+	// /v1/atlas-ingest; the sibling comment there reasoned about the TOKEN
+	// (a bogus one just fails the harvest) and not about the base URL, which
+	// travels in the same request. Found in the 2026-08-19 bug review.
+	//
+	// Unpinned is still permitted on a NON-demo bridge: there the bearer set
+	// is the operator's own paired devices, which is the trust model the rest
+	// of the device→bridge write surface already assumes.
+	//
+	// Compared verbatim against the handler's canonical `scheme://host` form,
+	// so a trailing slash or a `https://host/` spelling still matches.
+	// Validated at load as a plain https base URL — the same shape the
+	// handler enforces on the wire value.
+	HarvestBaseURL string `yaml:"harvestBaseUrl,omitempty"`
+}
+
+// CanonicalHTTPSBase reduces a plain https base URL to `scheme://host`, or
+// returns "" when it is empty, unparseable, not https, host-less, or carries
+// userinfo / path / query / fragment.
+//
+// **Both sides of the harvest pin MUST go through this one function.** The
+// config value and the wire value are compared for equality, so any reduction
+// applied to one and not the other silently turns a correct pin into a
+// mismatch — which fails CLOSED (the operator's own bootstrap is refused) and
+// therefore looks like a broken feature rather than a broken comparison. The
+// handler used to build `u.Scheme + "://" + u.Host` itself; that duplication
+// is exactly how the `:443` case below got missed.
+//
+// The default port is stripped so `https://host:443` and `https://host` are
+// the same pin — they address the same endpoint, and an operator may write
+// either (gemini-code-assist on PR #724).
+func CanonicalHTTPSBase(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+		(u.Path != "" && u.Path != "/") {
+		return ""
+	}
+	return u.Scheme + "://" + strings.TrimSuffix(u.Host, ":443")
+}
+
+// CanonicalHarvestBaseURL is the configured pin in canonical form, or "" when
+// unset/invalid (= unpinned). Shares CanonicalHTTPSBase with the handler.
+func (a AtlasConfig) CanonicalHarvestBaseURL() string {
+	return CanonicalHTTPSBase(a.HarvestBaseURL)
 }
 
 // DefaultAtlasMetaTTLHours is the metadata freshness window applied when
@@ -2189,6 +2250,13 @@ func (c *Config) Validate() error {
 	// end needs a bound (one year, expressed in hours).
 	if c.Atlas.MetaTTLHours > maxIntervalHours {
 		return fmt.Errorf("atlas.metaTtlHours: must be <= %d (one year); 0 uses the default, got %d", maxIntervalHours, c.Atlas.MetaTTLHours)
+	}
+	// atlas.harvestBaseUrl pins which Atlas host the credential endpoint will
+	// accept, so a malformed value must fail at load rather than silently
+	// reduce to "" and leave the endpoint unpinned — the failure mode this
+	// field exists to prevent. Same shape the handler enforces on the wire.
+	if strings.TrimSpace(c.Atlas.HarvestBaseURL) != "" && c.Atlas.CanonicalHarvestBaseURL() == "" {
+		return fmt.Errorf("atlas.harvestBaseUrl: must be a plain https base URL (https://host[:port]), got %q", c.Atlas.HarvestBaseURL)
 	}
 	// dlna.listenAddress: the DLNA HTTP server binds this value
 	// directly, so a bogus host:port (unparseable, or an
