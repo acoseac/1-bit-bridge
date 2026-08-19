@@ -398,20 +398,39 @@ type AtlasConfig struct {
 	HarvestBaseURL string `yaml:"harvestBaseUrl,omitempty"`
 }
 
-// CanonicalHarvestBaseURL returns HarvestBaseURL reduced to `scheme://host`,
-// or "" when unset or unparseable. Kept here so config validation and the
-// API handler agree on what "the same host" means without the API package
-// re-implementing the reduction.
-func (a AtlasConfig) CanonicalHarvestBaseURL() string {
-	raw := strings.TrimSpace(a.HarvestBaseURL)
+// CanonicalHTTPSBase reduces a plain https base URL to `scheme://host`, or
+// returns "" when it is empty, unparseable, not https, host-less, or carries
+// userinfo / path / query / fragment.
+//
+// **Both sides of the harvest pin MUST go through this one function.** The
+// config value and the wire value are compared for equality, so any reduction
+// applied to one and not the other silently turns a correct pin into a
+// mismatch — which fails CLOSED (the operator's own bootstrap is refused) and
+// therefore looks like a broken feature rather than a broken comparison. The
+// handler used to build `u.Scheme + "://" + u.Host` itself; that duplication
+// is exactly how the `:443` case below got missed.
+//
+// The default port is stripped so `https://host:443` and `https://host` are
+// the same pin — they address the same endpoint, and an operator may write
+// either (gemini-code-assist on PR #724).
+func CanonicalHTTPSBase(raw string) string {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+		(u.Path != "" && u.Path != "/") {
 		return ""
 	}
-	return u.Scheme + "://" + u.Host
+	return u.Scheme + "://" + strings.TrimSuffix(u.Host, ":443")
+}
+
+// CanonicalHarvestBaseURL is the configured pin in canonical form, or "" when
+// unset/invalid (= unpinned). Shares CanonicalHTTPSBase with the handler.
+func (a AtlasConfig) CanonicalHarvestBaseURL() string {
+	return CanonicalHTTPSBase(a.HarvestBaseURL)
 }
 
 // DefaultAtlasMetaTTLHours is the metadata freshness window applied when

@@ -3,9 +3,10 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // AtlasHarvestCredentialSink stores the iOS-provisioned bulk_harvest credential
@@ -24,7 +25,14 @@ type AtlasHarvestCredentialSink interface {
 // devices) but is REFUSED in demo mode; see refuseUnpinnedHarvestBaseURL.
 func (s *Server) WithAtlasHarvest(sink AtlasHarvestCredentialSink, pinnedBaseURL string) *Server {
 	s.atlasHarvestCred = sink
-	s.atlasHarvestPinnedBase = pinnedBaseURL
+	// Canonicalize here rather than trusting the caller. The pin is compared
+	// for EQUALITY against the wire value's canonical form, so a raw config
+	// string that merely LOOKS equivalent (`https://host:443`, a trailing
+	// slash) would produce a pin nothing can ever match — refusing the
+	// operator's own bootstrap, which reads as a broken feature rather than a
+	// broken comparison. Idempotent: cmd/bridge already passes
+	// cfg.Atlas.CanonicalHarvestBaseURL().
+	s.atlasHarvestPinnedBase = config.CanonicalHTTPSBase(pinnedBaseURL)
 	return s
 }
 
@@ -122,13 +130,15 @@ func (s *Server) atlasHarvestCredential(w http.ResponseWriter, r *http.Request) 
 	// userinfo/query/fragment/path avoids persisting a credential that would
 	// always dial the wrong endpoint. The canonical scheme://host form is stored
 	// so equivalent inputs (trailing slash) don't churn the sync state.
-	u, perr := url.Parse(req.AtlasBaseURL)
-	if perr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
-		u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	// Same reduction the configured pin goes through — config.CanonicalHTTPSBase
+	// is shared deliberately: these two values are compared for EQUALITY, so a
+	// reduction applied to one and not the other turns a correct pin into a
+	// mismatch that fails closed and reads as a broken feature.
+	canonicalBase := config.CanonicalHTTPSBase(req.AtlasBaseURL)
+	if canonicalBase == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "atlasBaseUrl must be a plain https base URL (https://host[:port])")
 		return
 	}
-	canonicalBase := u.Scheme + "://" + u.Host
 	// Pin check BEFORE any persistence: a refused request must not have
 	// reset the sync cursor or clobbered the operator's token on its way out
 	// (SetCredential does both when the base URL differs).

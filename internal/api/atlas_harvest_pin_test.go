@@ -136,3 +136,46 @@ func TestAtlasHarvestCredentialUnpinnedStillWorksOffDemo(t *testing.T) {
 		t.Errorf("sink.called = %d, want 1", sink.called)
 	}
 }
+
+// `https://host:443` and `https://host` address the same endpoint, and an
+// operator may write either in config while the client sends the other. The
+// pin compares for EQUALITY, so both sides must go through the same reduction
+// — config.CanonicalHTTPSBase — or a correct pin silently fails closed and
+// reads as a broken feature rather than a broken comparison.
+// (gemini-code-assist on PR #724; the duplication that hid it is now gone.)
+func TestAtlasHarvestCredentialPinIgnoresDefaultHTTPSPort(t *testing.T) {
+	for _, tc := range []struct{ name, pin, sent string }{
+		{"explicit :443 sent against a bare pin", "https://atlas.example", "https://atlas.example:443"},
+		{"bare host sent against an explicit :443 pin", "https://atlas.example:443", "https://atlas.example"},
+		{"both explicit", "https://atlas.example:443", "https://atlas.example:443"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &fakeHarvestCred{}
+			token, srv := newHarvestCredTestServerPinned(t, sink, tc.pin, true)
+			resp := postCredential(t, srv, token, tc.sent)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("pin=%q sent=%q -> %d, want 200 — same endpoint, same pin",
+					tc.pin, tc.sent, resp.StatusCode)
+			}
+			if sink.called != 1 {
+				t.Errorf("sink.called = %d, want 1", sink.called)
+			}
+		})
+	}
+}
+
+// A non-default port is part of the identity and must NOT be collapsed.
+func TestAtlasHarvestCredentialPinKeepsNonDefaultPort(t *testing.T) {
+	sink := &fakeHarvestCred{}
+	token, srv := newHarvestCredTestServerPinned(t, sink, "https://atlas.example:8443", true)
+
+	resp := postCredential(t, srv, token, "https://atlas.example")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 — :8443 and the default port are different endpoints", resp.StatusCode)
+	}
+	if sink.called != 0 {
+		t.Errorf("sink.called = %d, want 0", sink.called)
+	}
+}
