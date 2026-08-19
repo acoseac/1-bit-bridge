@@ -370,6 +370,21 @@ type Manifest struct {
 	// `?cursor=` on the next page request. Null means "this is the
 	// last page". Always absent on a full (non-paginated) response.
 	NextCursor *string `json:"nextCursor,omitempty"`
+
+	// Deleted lists library-relative track paths whose rows were removed
+	// (or dupe-suppressed out of the served set) since the client's
+	// `since` cursor — sourced from the deletion journal
+	// (deletion_journal.go). DELTA responses only; full + paginated
+	// manifests never carry it (their track list is authoritative).
+	// Additive (`omitempty`) — pre-journal clients ignore it;
+	// ProtocolVersion stays 1.
+	Deleted []string `json:"deleted,omitempty"`
+	// DeltaIncomplete tells a delta client its `since` cannot be
+	// answered with a complete deletion list (cursor predates journal
+	// coverage, the list overflowed the response cap, or the journal
+	// couldn't be read) — the client should escalate to a full sync.
+	// Delta responses only, `omitempty`.
+	DeltaIncomplete bool `json:"deltaIncomplete,omitempty"`
 	// Total is the full track count across all pages of the current
 	// pagination run. Pointer type so `0` distinguishes "paginated
 	// empty library" (Total = 0, present on the wire) from

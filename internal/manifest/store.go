@@ -1891,6 +1891,30 @@ var migrations = []migration{
 		sql: `CREATE INDEX IF NOT EXISTS idx_tracks_artwork_version
 			ON tracks(artwork_version) WHERE artwork_version IS NOT NULL;`,
 	},
+	{
+		// v41: the deletion journal — per-path tombstones every track-
+		// DELETE writer records inside its own transaction, so iOS
+		// delta syncs can apply removals (see deletion_journal.go for
+		// the coverage/retention/mass-op contract). post() seeds the
+		// coverage-start marker: the journal is complete from the
+		// instant the table exists, so it stamps ONLY when absent
+		// (INSERT OR IGNORE — a re-run after a mid-migration crash
+		// must not advance an already-seeded start).
+		version: 41,
+		name:    "manifest_deletions journal for delta-sync tombstones",
+		sql: `CREATE TABLE IF NOT EXISTS manifest_deletions (
+			path TEXT PRIMARY KEY,
+			deleted_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_manifest_deletions_deleted_at
+			ON manifest_deletions(deleted_at);`,
+		post: func(db *sql.DB) error {
+			_, err := db.Exec(`INSERT OR IGNORE INTO scan_state(k, v) VALUES(?, ?)`,
+				deletionJournalCoverageKey,
+				strconv.FormatInt(time.Now().UnixNano(), 10))
+			return err
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -2736,6 +2760,15 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			audio_md5 = excluded.audio_md5
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano(),
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5)
+	if err != nil {
+		return err
+	}
+	// Tombstone clear (deletion_journal.go): a re-added path must stop
+	// reading as deleted. Guarded on a SERVED row existing — a
+	// content-changed-but-still-suppressed upsert keeps its tombstone
+	// (the row is still absent from the served set). Runs AFTER the
+	// row write so a fresh INSERT satisfies the EXISTS.
+	_, err = s.db.ExecContext(ctx, clearTombstoneIfServedSQL, t.Path)
 	return err
 }
 
@@ -2864,6 +2897,16 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			return err
 		}
 	}
+	// Tombstone clear (deletion_journal.go): one served-tombstone sweep
+	// at the end of the transaction — a re-added path must stop reading
+	// as deleted. The batch form replaces a per-row point delete
+	// (O(1) statements instead of O(batch), Gemini on PR #727); the
+	// shared `clearTombstoneServedGuardSQL` keeps its
+	// `dupe_suppressed = 0` guard in lockstep with the single-row path,
+	// so a content-changed-but-still-suppressed row's tombstone stays.
+	if _, err := tx.ExecContext(ctx, clearAllServedTombstonesSQL); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -2919,6 +2962,14 @@ func (s *Store) DeleteTrack(ctx context.Context, path string) error {
 	}
 	// Also enumerate this track's waveform sidecar (track_analysis).
 	sidecars = append(sidecars, s.listWaveformSidecars(ctx, "source_path = ?", path)...)
+	// Journal before the delete (deletion_journal.go). Non-transactional
+	// like the rest of this method; a journal-then-failed-delete leaves a
+	// tombstone for a live row, which the next upsert's tombstone-clear
+	// heals — and the delta emission's NOT EXISTS served-row guard keeps
+	// it off the wire meanwhile.
+	if _, err := s.db.ExecContext(ctx, journalSinglePathSQL, s.now().UnixNano(), path); err != nil {
+		logger.Warn("delete-track: journal tombstone", "track", path, "err", err)
+	}
 	// Step 2: parent delete. CASCADE clears `track_variants`
 	// rows; sidecar files we just enumerated will be unlinked
 	// next.
@@ -2973,6 +3024,28 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 	}
 	defer tx.Rollback() // no-op after Commit; structural rollback guarantee.
 
+	// Mass-op guard (deletion_journal.go): a call reaping >10k paths or
+	// >25% of the library is a reorganization, not a deletion list —
+	// reset journal coverage (delta clients answer deltaIncomplete and
+	// full-sync) instead of writing a five-digit tombstone set.
+	journalPerChunk := true
+	if len(paths) > deletionJournalMassOpAbsolute {
+		journalPerChunk = false
+	} else {
+		var total int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks`).Scan(&total); err != nil {
+			return fmt.Errorf("manifest: DeleteTracksBatch count tracks: %w", err)
+		}
+		if total > 0 && len(paths)*deletionJournalMassOpLibraryDivisor > total {
+			journalPerChunk = false
+		}
+	}
+	if !journalPerChunk {
+		if err := resetDeletionJournalCoverageTx(ctx, tx, s.now().UnixNano()); err != nil {
+			return fmt.Errorf("manifest: DeleteTracksBatch reset journal coverage: %w", err)
+		}
+	}
+
 	// Chunk to keep the SQL parameter list (and the `IN (?, ?, ...)`
 	// expression) well under SQLite's defaults (999 params on most
 	// builds, modernc.org/sqlite raises this but staying conservative
@@ -3023,6 +3096,18 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 		// Waveform sidecars for the same chunk (track_analysis), on tx.
 		wfIn, wfArgs := buildPathInQuery("source_path", chunk)
 		allSidecars = append(allSidecars, s.listWaveformSidecarsTx(ctx, tx, wfIn, wfArgs...)...)
+
+		// Journal the chunk BEFORE its DELETE — same `path IN (…)`
+		// predicate via the same buildPathInQuery construction, same
+		// transaction (deletion_journal.go). Skipped when the mass-op
+		// guard above chose a coverage reset instead.
+		if journalPerChunk {
+			jSQL, jArgs := buildPathInQuery(journalInsertPrefixSQL+"path", chunk)
+			jSQL += journalInsertSuffixSQL
+			if _, err := tx.ExecContext(ctx, jSQL, append([]any{s.now().UnixNano()}, jArgs...)...); err != nil {
+				return fmt.Errorf("manifest: DeleteTracksBatch journal: %w", err)
+			}
+		}
 
 		// One DELETE for the whole chunk. FK CASCADE handles
 		// upnp_track_routing + track_variants + track_analysis in one
@@ -4392,8 +4477,14 @@ func (s *Store) DeleteTracksByPrefix(ctx context.Context, prefix string) (int64,
 		return 0, err
 	}
 	defer tx.Rollback()
+	// Journal before the DELETE — same byte-range predicate via
+	// deleteByPrefixWhereSQL (const + const), same tx, same binds.
+	if _, err := tx.ExecContext(ctx, journalDeleteByPrefixSQL,
+		s.now().UnixNano(), base, base); err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx,
-		`DELETE FROM tracks WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'`,
+		deleteTracksByPrefixSQL,
 		base, base,
 	)
 	if err != nil {
@@ -4593,6 +4684,12 @@ func (s *Store) WipeAllTracks(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
+	// Coverage reset, NOT per-path tombstones (deletion_journal.go): a
+	// whole-library wipe precedes a storage-form flip where every path
+	// changes shape — a full resync is the only correct client answer.
+	if err := resetDeletionJournalCoverageTx(ctx, tx, s.now().UnixNano()); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tracks`); err != nil {
 		return err
 	}
@@ -4648,6 +4745,12 @@ func (s *Store) WipeFilesystemTracks(ctx context.Context) error {
 	// (`source_path`) so it stays index-backed even on a 15k-row upstream.
 	// NOT EXISTS over NOT IN: idiomatic + NULL-safe should a future schema
 	// change ever make source_path nullable (Gemini on PR #404).
+	// Coverage reset — same rationale as WipeAllTracks (the surviving
+	// UPnP-routed rows keep serving; everything filesystem-shaped is
+	// about to change form).
+	if err := resetDeletionJournalCoverageTx(ctx, tx, s.now().UnixNano()); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM tracks
 		 WHERE NOT EXISTS (
@@ -5096,6 +5199,24 @@ const (
 	reapWaveformWhereOneSQL   = `source_path IN (SELECT path FROM tracks WHERE ` + thresholdReapOneWhereSQL + `)`
 )
 
+// deleteByPrefixWhereSQL is DeleteTracksByPrefix's byte-range predicate,
+// shared (const + const) with its journal INSERT in deletion_journal.go —
+// the enumeration, the tombstones and the DELETE must agree on the row
+// set (the thresholdReap convention). Binds: (base, base).
+const deleteByPrefixWhereSQL = `path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'`
+
+const deleteTracksByPrefixSQL = `DELETE FROM tracks WHERE ` + deleteByPrefixWhereSQL
+
+// clearMissingTracksWhereSQL is ClearMissingCounts' track predicate,
+// shared with its journal INSERT the same way.
+const clearMissingTracksWhereSQL = `missing_count > 0
+		   AND NOT EXISTS (
+			SELECT 1 FROM upnp_track_routing r WHERE r.source_path = tracks.path
+		   )`
+
+const clearMissingTracksDeleteSQL = `DELETE FROM tracks
+		 WHERE ` + clearMissingTracksWhereSQL
+
 // doomedReapSidecarsTx enumerates the sidecar files owned by the rows
 // `where` is about to delete, so the caller can unlink them after the
 // commit. Reads run on `tx` so the whole enumerate-then-delete sequence
@@ -5312,6 +5433,13 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			return 0, err
 		}
 		doomedSidecars = append(doomedSidecars, sc...)
+		// Journal the doomed paths BEFORE the DELETE, same predicate +
+		// binds, same transaction (deletion_journal.go) — delta clients
+		// learn about the reap on their next sync.
+		if _, err := tx.ExecContext(ctx, journalThresholdReapBatchSQL,
+			s.now().UnixNano(), threshold, string(missingBlob)); err != nil {
+			return 0, err
+		}
 		res, err := tx.ExecContext(ctx, deleteTracksAtThresholdBatchSQL, threshold, string(missingBlob))
 		if err != nil {
 			return 0, err
@@ -5342,6 +5470,13 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 				return 0, err
 			}
 			doomedSidecars = append(doomedSidecars, sc...)
+			// Journal (same predicate + binds as the DELETE below). The
+			// ill-formed path binds raw — the journal SELECT pulls it
+			// from `tracks` directly, no JSON array involved.
+			if _, err := tx.ExecContext(ctx, journalThresholdReapOneSQL,
+				s.now().UnixNano(), p, threshold); err != nil {
+				return 0, err
+			}
 			res, err := delStmt.ExecContext(ctx, p, threshold)
 			if err != nil {
 				return 0, err
@@ -5593,12 +5728,12 @@ func (s *Store) ClearMissingCounts(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	tRes, err := tx.ExecContext(ctx, `
-		DELETE FROM tracks
-		 WHERE missing_count > 0
-		   AND NOT EXISTS (
-			SELECT 1 FROM upnp_track_routing r WHERE r.source_path = tracks.path
-		   )`)
+	// Journal before the DELETE — same predicate via
+	// clearMissingTracksWhereSQL, same tx.
+	if _, err := tx.ExecContext(ctx, journalClearMissingSQL, s.now().UnixNano()); err != nil {
+		return 0, err
+	}
+	tRes, err := tx.ExecContext(ctx, clearMissingTracksDeleteSQL)
 	if err != nil {
 		return 0, err
 	}
