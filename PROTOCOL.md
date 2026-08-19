@@ -199,6 +199,14 @@ Query parameters:
 - `limit` (optional, **v1.1+**): positive integer. Server returns up to `limit` tracks in a single paginated page. Must NOT be combined with `since` (returns 400 — since-deltas are small by construction).
 - `cursor` (optional, **v1.1+**): opaque token from the previous page's `nextCursor`. On the first page, omit. Iterate until `nextCursor` is null in the response.
 
+Delta deletions (additive, since the deletion-journal batch — `protocolVersion` stays `1`):
+- A **delta** response (`since` set) MAY carry two additional top-level fields sourced from the server's deletion journal:
+  - `deleted` (`[string]`, `omitempty`): library-relative track paths whose rows were **removed** — or duplicate-suppressed out of the served set — since the client's `since` cursor. The client should delete its rows for these paths (its own remap/heal machinery applies first, exactly as on a full-scan prune). A path never appears in both `tracks` and `deleted` within one response. Paths use the same relative form `Track.path` uses (no leading slash).
+  - `deltaIncomplete` (`bool`, `omitempty`): `true` when the server cannot answer the cursor with a **complete** deletion list — the cursor predates the journal's coverage window (journal created after the client's last sync, a mass-delete coverage reset, or retention pruning — tombstones are kept ~180 days), the list overflowed the response cap (~20k), or the journal could not be read. When set, `deleted` is absent and the client SHOULD escalate to a full sync to reconcile removals. The delta's `tracks` remain valid either way.
+- **Full and paginated responses never carry either field** — their track list is authoritative and the client's full-scan diff owns deletions there.
+- Clients MUST NOT infer deletion from a path's absence in a delta (unchanged rows are legitimately absent); `deleted` is the only delta deletion signal. Pre-journal clients ignore both fields and keep the old behaviour (deletions arrive via full sync only).
+- Server-side, every track-DELETE writer journals its reaped paths in the same transaction (a threshold reap, an explicit batch/prefix delete, a clear-missing sweep, a duplicate-suppression transition), and re-adding a path — or a suppressed copy returning to the served set — clears its tombstone.
+
 Pagination semantics:
 - Pages are ordered by track `path` ASC; the cursor is the last path of the previous page.
 - **First-page-only fields.** `folders` and `total` are sent only on the first page (request has no `cursor`). Subsequent pages omit them to avoid ~250k rows of redundant JSON on a 50k-track library with 5k folders. `libraryRoots` and `generatedAt` are cheap scalars and ship on every page.
@@ -454,7 +462,11 @@ Snapshot of the upscale feature's runtime + on-disk state: how many jobs are que
 
 Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBID. `size` defaults to 500 px for album artwork.
 
-**Response** (`200 OK`): JPEG body, `Content-Type: image/jpeg`, `Cache-Control: public, max-age=86400`.
+**Artwork keys** (the `{mbid}` segment of `/v1/artwork/`) accept three shapes: a MusicBrainz release UUID, a `local-<sha256>` sentinel (scanner-extracted embedded/folder art), or — since the right-sizing batch — a bare **16-hex artwork content-version tag** (the manifest's `artworkVersion` field). The 16-hex ALIAS exists because clients key their cover caches on `artworkVersion ?? artworkMBID`; the server resolves the tag to the underlying MBID and serves the same bytes. An unresolvable tag answers `404 not_found`. `/v1/artist-image` stays strict-UUID.
+
+**Serving size** is decoupled from the requested `size`: the server stores each cover at ONE tier (scan-written local covers ≤1200 px under their historical `-500` key; enricher covers at the configured `enrich.coverSize`, default 1200) and a request for any supported `size` (250 / 500 / 1200) serves whichever tier exists — requested size first, then a fixed ladder. Clients SHOULD NOT infer pixel dimensions from the `size` parameter; the served JPEG's own dimensions are authoritative. (An earlier revision of this document said covers are "written at 500 px only" and off-size requests could 404 for a cached release; the ladder retires both behaviors.)
+
+**Response** (`200 OK`): JPEG body, `Content-Type: image/jpeg`, `Cache-Control: public, max-age=86400`, and an **`ETag`** (strong, content-stable — every artwork write is an atomic replace, so a changed validator means changed bytes). Clients SHOULD send `If-None-Match` on revalidation; a match answers a bodyless `304 Not Modified`. Both endpoints carry the ETag.
 
 **Response** (`202 Accepted`): the server has seen the MBID in a track AND enrichment for it is still pending — at least one track carrying the MBID has not been processed by the enricher yet (cold cache on first scan, background re-fetch in progress). Carries `Retry-After: <seconds>` (30 s today); clients SHOULD retry with jittered backoff up to a small cap (iOS uses 5 attempts). Body is the standard JSON error shape with `error: "pending"`.
 
@@ -462,7 +474,7 @@ Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBI
 
 **Never returned for a `local-<sha256>` artwork MBID.** Those bytes are extracted by the server's library scanner (embedded cover art, or a `cover.jpg` / `folder.jpg` beside the audio file), not fetched from any upstream, so "enrichment complete" carries no information about them — and the scanner restores a missing one on its next pass. A cache miss on a `local-` MBID is therefore always `202`.
 
-**Response** (`404 Not Found`, `error: "not_found"`): the image is not cached under the requested key. Either the MBID is unknown — no track in the manifest references it — or the request asked for a `size` this server has not cached: covers are written at **500 px only**, so `size=250` / `size=1200` can miss for a release whose cover IS cached. Clients SHOULD treat it as terminal *for that key* and render a placeholder rather than re-requesting the same URL; a client that asked for an off-500 size MAY retry once at `size=500`.
+**Response** (`404 Not Found`, `error: "not_found"`): the image is not cached under the requested key — the MBID (or 16-hex version tag) is unknown: no track in the manifest references it. Since the size ladder, a supported off-tier `size` can no longer produce this for a release whose cover IS cached. Clients SHOULD treat it as terminal *for that key* and render a placeholder rather than re-requesting the same URL.
 
 **Response** (`400 Bad Request`): MBID is not a valid UUID, or `size` parameter is out of range.
 

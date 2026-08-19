@@ -1275,6 +1275,20 @@ func TestWriteManifestParityWithBuildManifest(t *testing.T) {
 				got.EnrichmentProgress.TracksEnriched, want.EnrichmentProgress.TracksEnriched)
 		}
 	}
+	// The delta tombstone fields (deletion_journal.go) are since-leg-only —
+	// this parity run is the FULL leg, so BOTH legs must carry neither.
+	// Explicit because this test does not compare arbitrary new fields
+	// (a field added to only one leg would otherwise pass silently); the
+	// since-leg's own parity lives in
+	// TestManifest_DeltaCarriesDeletedPaths_BothLegs.
+	if len(got.Deleted) != 0 || got.DeltaIncomplete {
+		t.Errorf("streamed full manifest must not carry delta fields (deleted=%v incomplete=%v)",
+			got.Deleted, got.DeltaIncomplete)
+	}
+	if len(want.Deleted) != 0 || want.DeltaIncomplete {
+		t.Errorf("built full manifest must not carry delta fields (deleted=%v incomplete=%v)",
+			want.Deleted, want.DeltaIncomplete)
+	}
 }
 
 // TestManifestDeltaOmitsFolders pins P2-41 (2026-08-14 review): a
