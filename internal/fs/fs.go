@@ -294,9 +294,22 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	}
 
 	// Join via filepath.Join which also does final cleaning with native
-	// separators. The final check compares against the absolute root to
-	// catch any residual "../" that slipped through (shouldn't happen
-	// given path.Clean above, but belt-and-braces against Go version drift).
+	// separators. The final check compares against the absolute root.
+	//
+	// **On Windows this containment check is the PRIMARY defense, not
+	// belt-and-braces — do not remove it as redundant.** Both guards above
+	// are slash-based: the raw `..`-segment scan splits on '/' only, and
+	// `path.Clean` treats '\' as an ordinary character. So an input like
+	// `..\..\..\Windows\System32\config\SAM` contains no '/'-delimited ".."
+	// segment and passes BOTH untouched — and then `filepath.Join`, which
+	// Cleans with '\' as a separator on Windows, collapses it into a real
+	// escape. This prefix check is what refuses it. (On Unix '\' is an
+	// ordinary filename byte, nothing collapses, and the check is indeed
+	// only a backstop — which is why the comment used to say so.)
+	//
+	// FuzzResolveContainment seeds exactly this shape (`..\..\windows`) and
+	// asserts the containment property, so the guarantee is pinned rather
+	// than merely asserted here.
 	abs := filepath.Join(root, filepath.FromSlash(suffix))
 	absAbs, err := filepath.Abs(abs)
 	if err != nil {
