@@ -376,6 +376,14 @@ type MBIDProbe interface {
 	ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error)
 	// ArtistMBIDEnrichmentPending mirrors the above for `artistMBID`.
 	ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error)
+	// ResolveArtworkVersionMBID resolves a bare 16-hex artwork
+	// content-version tag (the `artworkVersion` manifest field) to the
+	// servable artworkMBID of a track carrying it, or ("", nil) when
+	// none does. Backs the /v1/artwork 16-hex alias: iOS keys its
+	// cover fetches on `artworkVersion ?? artworkMBID`, so a bare
+	// version tag must resolve server-side or those albums 400
+	// forever.
+	ResolveArtworkVersionMBID(ctx context.Context, version string) (string, error)
 }
 
 // UpdaterStatus is the optional interface the /v1/health handler uses

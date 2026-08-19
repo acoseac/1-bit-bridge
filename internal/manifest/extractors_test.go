@@ -202,14 +202,14 @@ func TestExtractLocalArtwork_FolderCaseInsensitive(t *testing.T) {
 }
 
 // TestExtractLocalArtwork_RejectsPNGCandidates asserts the V1
-// JPEG-only contract: cover.png / folder.png filenames are NOT
-// matched by the folder-level fallback. The cache scheme writes
-// `local-<hash>-500.jpg` and the API serves `Content-Type:
-// image/jpeg`; mixing PNG bytes into that scheme would produce a
-// misdeclared response. PR #98 originally accepted PNG candidates;
-// follow-up review (Qodo) flagged the mismatch and we restricted
-// to JPEG.
-func TestExtractLocalArtwork_RejectsPNGCandidates(t *testing.T) {
+// PNG acceptance (artwork right-sizing batch, reverses the PR #98
+// JPEG-only V1 restriction): cover.png / folder.png ARE matched by the
+// folder-level fallback, and their bytes are TRANSCODED to JPEG by
+// scaleLocalArtwork before landing in the `local-<hash>-500.jpg` cache
+// — so the path + `Content-Type: image/jpeg` contract stays honest.
+// The `local-<hash>` sentinel still hashes the ORIGINAL PNG bytes
+// (key stability).
+func TestExtractLocalArtwork_AcceptsPNGCandidates(t *testing.T) {
 	for _, name := range []string{"cover.png", "folder.png", "Cover.PNG", "FOLDER.PNG"} {
 		t.Run(name, func(t *testing.T) {
 			libDir := t.TempDir()
@@ -219,10 +219,7 @@ func TestExtractLocalArtwork_RejectsPNGCandidates(t *testing.T) {
 			}
 			audioPath := filepath.Join(libDir, "track.mp3")
 			writeMinimalMP3(t, audioPath, map[string]string{"artist": "A", "album": "B"})
-			// Write actual PNG bytes (89 50 4E 47 ...) so that even
-			// if the regex matched, the magic-byte sniff would
-			// reject. Belt-and-suspenders coverage.
-			pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+			pngBytes := encodeTestImage(t, 320, 320, -1) // real decodable PNG
 			if err := os.WriteFile(filepath.Join(libDir, name), pngBytes, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -232,26 +229,28 @@ func TestExtractLocalArtwork_RejectsPNGCandidates(t *testing.T) {
 				ArtworkCacheDir: cacheDir,
 				FolderArtCache:  &sync.Map{},
 			})
-			if tr.ArtworkMBID != "" {
-				t.Errorf("ArtworkMBID = %q, want empty (%q must not match the JPEG-only candidate set)",
-					tr.ArtworkMBID, name)
+			want := expectedLocalMBID(pngBytes)
+			if tr.ArtworkMBID != want {
+				t.Fatalf("ArtworkMBID = %q, want %q (PNG candidate %q must be accepted)",
+					tr.ArtworkMBID, want, name)
 			}
-			entries, _ := os.ReadDir(cacheDir)
-			for _, e := range entries {
-				if strings.HasSuffix(e.Name(), ".jpg") {
-					t.Errorf("PNG candidate %q leaked into cache: %s", name, e.Name())
-				}
+			cached, err := os.ReadFile(filepath.Join(cacheDir, want+"-500.jpg"))
+			if err != nil {
+				t.Fatalf("read cache file: %v", err)
+			}
+			if !looksLikeJPEG(cached) {
+				t.Errorf("cache file must hold TRANSCODED JPEG bytes, got prefix %x", cached[:4])
 			}
 		})
 	}
 }
 
-// TestExtractLocalArtwork_RejectsMisnamedPNG covers the "user named
-// a PNG `cover.jpg`" defense. The filename matches the JPEG-only
-// candidate set, but the magic-byte sniff catches the byte-level
-// mismatch before stamp commits to the cache. Without this guard,
-// the cache file would be PNG bytes served as image/jpeg.
-func TestExtractLocalArtwork_RejectsMisnamedPNG(t *testing.T) {
+// TestExtractLocalArtwork_AcceptsMisnamedPNG: a PNG named `cover.jpg`
+// used to be rejected (verbatim PNG bytes behind an image/jpeg label
+// were the hazard); with scaleLocalArtwork transcoding every accepted
+// candidate to JPEG output, the magic sniff can accept the bytes for
+// what they ARE and the served Content-Type stays truthful.
+func TestExtractLocalArtwork_AcceptsMisnamedPNG(t *testing.T) {
 	libDir := t.TempDir()
 	cacheDir := filepath.Join(t.TempDir(), "artwork")
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
@@ -259,9 +258,7 @@ func TestExtractLocalArtwork_RejectsMisnamedPNG(t *testing.T) {
 	}
 	audioPath := filepath.Join(libDir, "track.mp3")
 	writeMinimalMP3(t, audioPath, map[string]string{"artist": "A", "album": "B"})
-	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 'P', 'N', 'G'}
-	// Filename ends in .jpg — would match folderArtCandidates — but
-	// the bytes are PNG. Magic-byte sniff must reject.
+	pngBytes := encodeTestImage(t, 200, 200, -1)
 	if err := os.WriteFile(filepath.Join(libDir, "cover.jpg"), pngBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -271,16 +268,91 @@ func TestExtractLocalArtwork_RejectsMisnamedPNG(t *testing.T) {
 		ArtworkCacheDir: cacheDir,
 		FolderArtCache:  &sync.Map{},
 	})
-	if tr.ArtworkMBID != "" {
-		t.Errorf("ArtworkMBID = %q, want empty (PNG-bytes-in-jpg-file must be rejected)",
-			tr.ArtworkMBID)
+	want := expectedLocalMBID(pngBytes)
+	if tr.ArtworkMBID != want {
+		t.Fatalf("ArtworkMBID = %q, want %q (misnamed PNG must transcode, not reject)",
+			tr.ArtworkMBID, want)
+	}
+	cached, err := os.ReadFile(filepath.Join(cacheDir, want+"-500.jpg"))
+	if err != nil {
+		t.Fatalf("read cache file: %v", err)
+	}
+	if !looksLikeJPEG(cached) {
+		t.Errorf("cache file must hold transcoded JPEG bytes")
 	}
 }
 
-// TestExtractLocalArtwork_RejectsEmbeddedPNG covers the embedded-
-// APIC variant of the same defense: an APIC frame with MIME type
-// `image/png` (or correct type but PNG bytes) must not be cached.
-func TestExtractLocalArtwork_RejectsEmbeddedPNG(t *testing.T) {
+// TestExtractLocalArtwork_AcceptsEmbeddedPNG: the embedded-APIC
+// variant — `image/png` frames (the population the ExtractorVersion
+// 3→4 re-extract backfills) now stamp + transcode instead of being
+// silently skipped.
+func TestExtractLocalArtwork_AcceptsEmbeddedPNG(t *testing.T) {
+	libDir := t.TempDir()
+	cacheDir := filepath.Join(t.TempDir(), "artwork")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	audioPath := filepath.Join(libDir, "track.mp3")
+	pngBytes := encodeTestImage(t, 256, 256, -1)
+	writeMP3WithAPIC(t, audioPath, map[string]string{"artist": "A", "album": "B"},
+		"image/png", pngBytes)
+
+	tr := &Track{Path: "track.mp3", Size: 1, ModTime: time.Now()}
+	_ = ExtractWithContext(audioPath, tr, &ExtractContext{
+		ArtworkCacheDir: cacheDir,
+		FolderArtCache:  &sync.Map{},
+	})
+	want := expectedLocalMBID(pngBytes)
+	if tr.ArtworkMBID != want {
+		t.Fatalf("ArtworkMBID = %q, want %q (embedded image/png must be accepted)",
+			tr.ArtworkMBID, want)
+	}
+	cached, err := os.ReadFile(filepath.Join(cacheDir, want+"-500.jpg"))
+	if err != nil {
+		t.Fatalf("read cache file: %v", err)
+	}
+	if !looksLikeJPEG(cached) {
+		t.Errorf("cache file must hold transcoded JPEG bytes")
+	}
+}
+
+// TestExtractLocalArtwork_RejectsNonImageFolderArt: the magic-byte
+// sniff is still the load-bearing gate — GIF (or junk) named
+// cover.jpg is rejected exactly as before. This is what keeps the
+// PNG acceptance from degrading into accept-anything.
+func TestExtractLocalArtwork_RejectsNonImageFolderArt(t *testing.T) {
+	libDir := t.TempDir()
+	cacheDir := filepath.Join(t.TempDir(), "artwork")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	audioPath := filepath.Join(libDir, "track.mp3")
+	writeMinimalMP3(t, audioPath, map[string]string{"artist": "A", "album": "B"})
+	gifBytes := []byte("GIF89a\x01\x00\x01\x00\x80\x00\x00")
+	if err := os.WriteFile(filepath.Join(libDir, "cover.jpg"), gifBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := &Track{Path: "track.mp3", Size: 1, ModTime: time.Now()}
+	_ = ExtractWithContext(audioPath, tr, &ExtractContext{
+		ArtworkCacheDir: cacheDir,
+		FolderArtCache:  &sync.Map{},
+	})
+	if tr.ArtworkMBID != "" {
+		t.Errorf("ArtworkMBID = %q, want empty (GIF bytes must still be rejected)", tr.ArtworkMBID)
+	}
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jpg") {
+			t.Errorf("non-image bytes leaked into cache: %s", e.Name())
+		}
+	}
+}
+
+// TestExtractLocalArtwork_TruncatedPNGRejected: PNG magic with an
+// undecodable body (the old fixture shape) is refused — acceptance
+// requires a real decode, since PNG output must be transcoded.
+func TestExtractLocalArtwork_TruncatedPNGRejected(t *testing.T) {
 	libDir := t.TempDir()
 	cacheDir := filepath.Join(t.TempDir(), "artwork")
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
@@ -297,34 +369,7 @@ func TestExtractLocalArtwork_RejectsEmbeddedPNG(t *testing.T) {
 		FolderArtCache:  &sync.Map{},
 	})
 	if tr.ArtworkMBID != "" {
-		t.Errorf("ArtworkMBID = %q, want empty (embedded image/png must be rejected)",
-			tr.ArtworkMBID)
-	}
-}
-
-// TestExtractLocalArtwork_RejectsMisdeclaredJPEG covers a third
-// vector: APIC frame claims `image/jpeg` MIME type but the bytes
-// are PNG. The magic-byte sniff rejects regardless of declared
-// MIME — defense in depth against tag forgery.
-func TestExtractLocalArtwork_RejectsMisdeclaredJPEG(t *testing.T) {
-	libDir := t.TempDir()
-	cacheDir := filepath.Join(t.TempDir(), "artwork")
-	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	audioPath := filepath.Join(libDir, "track.mp3")
-	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 'P', 'N', 'G'}
-	writeMP3WithAPIC(t, audioPath, map[string]string{"artist": "A", "album": "B"},
-		"image/jpeg", pngBytes) // MIME claims JPEG, bytes are PNG
-
-	tr := &Track{Path: "track.mp3", Size: 1, ModTime: time.Now()}
-	_ = ExtractWithContext(audioPath, tr, &ExtractContext{
-		ArtworkCacheDir: cacheDir,
-		FolderArtCache:  &sync.Map{},
-	})
-	if tr.ArtworkMBID != "" {
-		t.Errorf("ArtworkMBID = %q, want empty (misdeclared JPEG MIME with non-JPEG bytes must be rejected)",
-			tr.ArtworkMBID)
+		t.Errorf("ArtworkMBID = %q, want empty (undecodable PNG must be rejected)", tr.ArtworkMBID)
 	}
 }
 

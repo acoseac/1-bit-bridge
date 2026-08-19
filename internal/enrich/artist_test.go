@@ -442,7 +442,7 @@ func TestCAAReleaseGroupFallbackSalvagesArtwork(t *testing.T) {
 
 	// The release-MBID-keyed path must contain the bytes the
 	// release-group endpoint served (transparent to iOS).
-	got, err := os.ReadFile(ArtworkCachePath(filepath.Join(dir, "artwork"), "11111111-1111-4111-8111-111111111111", 500))
+	got, err := os.ReadFile(ArtworkCachePath(filepath.Join(dir, "artwork"), "11111111-1111-4111-8111-111111111111", DefaultCoverSize))
 	if err != nil {
 		t.Fatalf("release-keyed artwork missing: %v", err)
 	}

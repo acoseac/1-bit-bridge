@@ -387,7 +387,7 @@ func (e *Enricher) applyAlbumHop(ctx context.Context, t *manifest.Track, m Acous
 	// The SAME album term the release search used: the iTunes fallback inside
 	// ensureArtworkCached searches by (artist, album), so a junk local title
 	// here would quietly lose that fallback.
-	cached, aerr := e.ensureArtworkCached(ctx, releaseMBID, rgMBID, m.ArtistName, albumSearchTerm(t, m), 500)
+	cached, aerr := e.ensureArtworkCached(ctx, releaseMBID, rgMBID, m.ArtistName, albumSearchTerm(t, m), e.coverSize())
 	if aerr != nil {
 		if ctx.Err() == nil {
 			logger.Error("artwork", "mbid", releaseMBID, "err", aerr)

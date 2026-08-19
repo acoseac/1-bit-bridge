@@ -17,6 +17,13 @@ const DefaultCoverArtBase = "https://coverartarchive.org"
 // size, 500 is the canonical "detail view" resolution, 250 is thumbnail.
 var SupportedCoverSizes = []int{250, 500, 1200}
 
+// DefaultCoverSize is the tier NEW cover fetches use when the enricher's
+// CoverSize is unset (see Enricher.CoverSize + config `enrich.coverSize`).
+// 1200 matches the scan-time local-artwork ceiling
+// (manifest.localArtMaxDimensionPx) so enriched and curated covers land
+// in the same quality class.
+const DefaultCoverSize = 1200
+
 // CoverArtClient fetches a release's front cover in one of the supported
 // sizes from Cover Art Archive.
 type CoverArtClient struct {

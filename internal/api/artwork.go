@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"regexp"
@@ -44,14 +45,34 @@ type ArtworkDirProvider interface {
 // certs and bridge.yaml but NOT <dataDir>/artwork/.
 const localArtworkMBIDPrefix = "local-"
 
-// canonicalCoverSize is the only size the bridge ever WRITES a cover
-// at. `enrich.SupportedCoverSizes` (and therefore `enrich.ParseSize`)
-// admits 250 / 500 / 1200, but every writer — the enricher's
-// `ensureArtworkCached`, the acoustic-match path, `bridge artwork`, and
-// the scanner's `local-<sha>-500.jpg` — hardcodes 500. A request for a
-// size no writer produces is a size-specific miss, NOT evidence that
-// the release has no cover.
-const canonicalCoverSize = 500
+// artworkServeSizes is the on-disk size LADDER the artwork handler
+// walks on a per-size miss: the requested size first, then each entry
+// here in order, first hit wins. Historically every writer hardcoded
+// 500; since the right-sizing batch the enricher writes at its
+// configured `enrich.coverSize` (default 1200) while the scanner's
+// `local-<sha>-500.jpg` files keep their historical suffix — so a
+// client requesting the default 500 must transparently receive the
+// 1200 file when that's what exists, and vice versa. A request for a
+// size no writer produced is a size-specific miss, NOT evidence that
+// the release has no cover — the ladder is what keeps that truth from
+// leaking to clients as a 404.
+var artworkServeSizes = []int{1200, 500, 250}
+
+// artworkLadderCandidates returns the requested size followed by the
+// serve-size ladder, with the requested size deduped out of the ladder
+// portion — when the request names a ladder size (500 is every current
+// client), a naive prepend would retry the same path twice on a full
+// cache miss (one redundant os.Open per miss).
+func artworkLadderCandidates(size int) []int {
+	candidates := make([]int, 0, len(artworkServeSizes)+1)
+	candidates = append(candidates, size)
+	for _, s := range artworkServeSizes {
+		if s != size {
+			candidates = append(candidates, s)
+		}
+	}
+	return candidates
+}
 
 // mbidPattern validates that a path segment looks like a MusicBrainz
 // UUID. Prevents traversal and filesystem abuse through the {mbid}
@@ -60,14 +81,30 @@ const canonicalCoverSize = 500
 var mbidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // artworkMBIDPattern validates the {mbid} segment for /v1/artwork/{mbid}.
-// Accepts either a MusicBrainz UUID (set by the enricher after a
-// successful Cover Art Archive fetch) OR a local-<sha256> sentinel set
-// by the scanner when it found embedded ID3 APIC art or a folder-level
-// cover.jpg / folder.jpg next to the audio file. The local- branch is
-// lowercase-only to match `hex.EncodeToString` output deterministically.
-// Same traversal protection as the strict UUID pattern: the alphabet
-// is bounded to [a-z0-9-] so no path-segment escape is possible.
-var artworkMBIDPattern = regexp.MustCompile(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|local-[0-9a-f]{64})$`)
+// Accepts a MusicBrainz UUID (set by the enricher after a successful
+// Cover Art Archive fetch), a local-<sha256> sentinel set by the
+// scanner when it found embedded/folder art next to the audio file, OR
+// a bare 16-hex artwork content-version tag (`hashFileShort` output —
+// the `artworkVersion` manifest field, which iOS reuses as its fetch
+// key; see artworkVersionAliasPattern). The local- + 16-hex branches
+// are lowercase-only to match `hex.EncodeToString` output
+// deterministically. Same traversal protection as the strict UUID
+// pattern: the alphabet is bounded to [a-z0-9-] so no path-segment
+// escape is possible.
+var artworkMBIDPattern = regexp.MustCompile(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|local-[0-9a-f]{64}|[0-9a-f]{16})$`)
+
+// artworkVersionAliasPattern picks out the 16-hex ALIAS shape from the
+// keys artworkMBIDPattern admits. iOS keys its cover fetches on
+// `Album.artworkHash = artworkVersion ?? artworkMBID` (iOS PR #944);
+// when an album carries an Atlas premium-cover `artworkVersion`, every
+// paired client requests `/v1/artwork/<16hex>` — which this route
+// 400-rejected until the alias landed, leaving those albums (64 on the
+// production library, measured 2026-08-19) permanently coverless.
+// Resolving server-side via MBIDProbe.ResolveArtworkVersionMBID fixes
+// every EXISTING client with zero iOS change. Unambiguous by shape: a
+// UUID carries dashes at fixed offsets, a local- key carries its
+// prefix, and neither is exactly 16 bare hex chars.
+var artworkVersionAliasPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // mbidPredicate is the shape of one MBIDProbe method: an answerable
 // yes/no about an MBID, plus the database fault that means "no answer".
@@ -231,7 +268,20 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("ETag", artworkETag(info))
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// artworkETag derives a strong validator from the served file's
+// mtime + size. Content-stable by construction: every artwork writer
+// goes through atomicwrite (tmp + rename), so a file's (mtime, size)
+// pair changes exactly when its bytes do. Setting the header BEFORE
+// ServeContent makes net/http answer If-None-Match with a bodyless
+// 304 — without it, a client whose 24 h `Cache-Control` window lapsed
+// re-downloads every cached image in full (166 MB of artist images
+// per re-sync on the production library, measured 2026-08-19).
+func artworkETag(info os.FileInfo) string {
+	return fmt.Sprintf("\"%x-%x\"", info.ModTime().UnixNano(), info.Size())
 }
 
 // artwork handles GET /v1/artwork/{mbid}?size=500.
@@ -249,8 +299,34 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	mbid := r.PathValue("mbid")
 	if !artworkMBIDPattern.MatchString(mbid) {
 		writeError(w, http.StatusBadRequest, "bad_request",
-			"mbid must be a MusicBrainz UUID or local-<sha256> hash")
+			"mbid must be a MusicBrainz UUID, local-<sha256> hash, or 16-hex artwork version")
 		return
+	}
+	if artworkVersionAliasPattern.MatchString(mbid) {
+		// 16-hex ALIAS: resolve the artworkVersion content tag to the
+		// servable MBID and continue as that key (see
+		// artworkVersionAliasPattern for why iOS sends these).
+		if s.mbidProbe == nil {
+			// No resolver wired (tests, legacy) — the pre-alias answer.
+			writeError(w, http.StatusNotFound, "not_found",
+				"artwork not cached (unknown MBID)")
+			return
+		}
+		resolved, err := s.mbidProbe.ResolveArtworkVersionMBID(r.Context(), mbid)
+		if err != nil {
+			// A database fault is not an answer — fail OPEN like the
+			// sibling miss probes: 202 costs the client one bounded
+			// retry, a terminal 404 costs the cover for good.
+			logProbeFault(r.Context(), "artwork-version alias resolve failed", mbid, err)
+			writeArtworkMiss(w, missPending, "artwork")
+			return
+		}
+		if resolved == "" {
+			writeError(w, http.StatusNotFound, "not_found",
+				"artwork not cached (unknown MBID)")
+			return
+		}
+		mbid = resolved
 	}
 	size, err := enrich.ParseSize(r.URL.Query().Get("size"))
 	if err != nil {
@@ -258,44 +334,41 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cacheDir := s.artworkDirs.ArtworkCacheDir()
-	path := enrich.ArtworkCachePath(cacheDir, mbid, size)
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Size-specific miss. `ParseSize` accepts 250 / 500 / 1200
-			// but nothing in the bridge WRITES anything but 500 (see
-			// canonicalCoverSize), so an off-size request builds a path
-			// that will never exist even for a release whose cover is
-			// cached. Answering `no_image` there would tell the client
-			// "no cover exists upstream — stop asking" about an image
-			// the very next request could serve. `not_found` keeps the
-			// answer inside the documented vocabulary and scoped to
-			// what it really means: not cached under this key.
-			if size != canonicalCoverSize {
-				if _, statErr := os.Stat(enrich.ArtworkCachePath(cacheDir, mbid, canonicalCoverSize)); statErr == nil {
-					writeError(w, http.StatusNotFound, "not_found",
-						"artwork is not cached at this size; retry with size="+
-							strconv.Itoa(canonicalCoverSize))
-					return
-				}
-			}
-			// See artistImage handler for the full rationale — the
-			// same three-way split: 202 while enrichment is pending,
-			// terminal 404 `no_image` once enrichment completed with
-			// nothing cached (CAA/iTunes had no cover), plain 404 for
-			// an MBID no track references.
-			var hasTrack, pending mbidPredicate
-			if s.mbidProbe != nil {
-				hasTrack = s.mbidProbe.HasTrackWithArtworkMBID
-				pending = s.mbidProbe.ArtworkMBIDEnrichmentPending
-			}
-			writeArtworkMiss(w,
-				classifyArtworkMiss(r.Context(), mbid, hasTrack, pending),
-				"artwork")
+	// Size LADDER: try the requested size, then each writer size in
+	// artworkServeSizes order, first hit wins. The on-disk size is a
+	// server implementation detail (enricher covers land at the
+	// configured `enrich.coverSize`, scanner covers under the
+	// historical `-500` suffix) — a client asking for any supported
+	// size gets whichever right-sized file exists rather than a
+	// misleading per-size 404.
+	var f *os.File
+	for _, candidate := range artworkLadderCandidates(size) {
+		path := enrich.ArtworkCachePath(cacheDir, mbid, candidate)
+		f, err = os.Open(path)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			logger.Error("open release artwork", "mbid", mbid, "size", candidate, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
 			return
 		}
-		logger.Error("open release artwork", "mbid", mbid, "size", size, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternalError)
+		f = nil
+	}
+	if f == nil {
+		// Cache miss at every ladder size. See artistImage handler for
+		// the full rationale — the same three-way split: 202 while
+		// enrichment is pending, terminal 404 `no_image` once
+		// enrichment completed with nothing cached (CAA/iTunes had no
+		// cover), plain 404 for an MBID no track references.
+		var hasTrack, pending mbidPredicate
+		if s.mbidProbe != nil {
+			hasTrack = s.mbidProbe.HasTrackWithArtworkMBID
+			pending = s.mbidProbe.ArtworkMBIDEnrichmentPending
+		}
+		writeArtworkMiss(w,
+			classifyArtworkMiss(r.Context(), mbid, hasTrack, pending),
+			"artwork")
 		return
 	}
 	defer f.Close()
@@ -307,5 +380,6 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("ETag", artworkETag(info))
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }

@@ -194,7 +194,17 @@ var Ext = map[string]bool{
 // re-opens every file once over its mount (the 1→2 bump's measured
 // precedent); per-file the MD5 read is free (the 34-byte STREAMINFO
 // body was already in hand, previously discarded).
-const ExtractorVersion = 3
+//
+// v4 (artwork right-sizing): PNG covers (embedded APIC + cover.png /
+// folder.png) are now accepted — transcoded to JPEG by
+// scaleLocalArtwork — where the JPEG-only V1 gate silently skipped
+// them. The bump's stamp-gated re-extract is what backfills those
+// PNG-cover albums; tracks whose merged re-extract is byte-identical
+// (the overwhelming majority) stay OUT of the iOS delta via the
+// version-stale diff-guard, and already-cached oversized JPEG covers
+// are handled by RunArtworkRescaleOnce, not this re-extract (the
+// stampLocalArtwork Stat hit skips them here).
+const ExtractorVersion = 4
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -2188,11 +2198,13 @@ func parsePropChunks(body []byte, t *Track) (dstCompressed bool) {
 
 // extractLocalArtwork stamps t.ArtworkMBID with `local-<sha256>` when
 // embedded artwork (preferred), folder-level art (cover.jpg /
-// folder.jpg, case-insensitive — JPEG-only), or — for tracks living in
-// a disc-style subfolder ("Disc 1" / "CD2" / "LP 1"…) — the PARENT
-// directory's folder art is found. The parent climb is exactly ONE
-// level and disc-name-gated; see the fallback block below. Caller must
-// guarantee ec != nil and ec.ArtworkCacheDir != "".
+// folder.jpg / cover.png / folder.png, case-insensitive — JPEG and
+// PNG, normalized to ≤1200 px JPEG by scaleLocalArtwork), or — for
+// tracks living in a disc-style subfolder ("Disc 1" / "CD2" /
+// "LP 1"…) — the PARENT directory's folder art is found. The parent
+// climb is exactly ONE level and disc-name-gated; see the fallback
+// block below. Caller must guarantee ec != nil and
+// ec.ArtworkCacheDir != "".
 //
 // The embedded branch wins on a per-track basis — two tracks in the
 // same album with different embedded APIC images each get their own
@@ -2207,14 +2219,16 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 	//    (no image support) and for any other format whose parser
 	//    didn't surface a picture frame — both safe to skip.
 	//
-	//    JPEG-only by design (PR #98 follow-up): MIME `image/jpeg`
-	//    or `image/jpg` (some taggers emit the variant), matched
-	//    case-insensitively (a non-standard `image/JPEG` is still a
-	//    JPEG label), AND the bytes must start with the JPEG SOI
-	//    marker so an APIC frame that misdeclares its MIME doesn't
-	//    smuggle PNG/GIF bytes into a `*-500.jpg` cache file. See
-	//    folderArtCandidates and looksLikeJPEG for the matching
-	//    contract on the folder-level branch.
+	//    Accepted by MAGIC BYTES, not MIME: JPEG (SOI) and PNG
+	//    (signature) both pass; everything else is skipped + warned.
+	//    The old two-layer MIME + magic gate existed because bytes
+	//    were written VERBATIM into a `*-500.jpg` path — with
+	//    `scaleLocalArtwork` normalizing every candidate to JPEG
+	//    output (PNG is transcoded, never written raw), the magic
+	//    sniff alone is the load-bearing check, and a MIME gate would
+	//    wrongly reject the PNG-cover population the ExtractorVersion
+	//    3→4 re-extract exists to backfill. MIME still rides the log
+	//    line for diagnosis.
 	if m != nil {
 		if pic := m.Picture(); pic != nil {
 			switch {
@@ -2223,11 +2237,8 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 					"path", absPath, "bytes", len(pic.Data), "cap", maxArtworkBytes)
 			case len(pic.Data) == 0:
 				// nothing to stamp
-			case !strings.EqualFold(pic.MIMEType, "image/jpeg") && !strings.EqualFold(pic.MIMEType, "image/jpg"):
-				scanLogger.Debug("embedded artwork non-JPEG MIME; skipping",
-					"path", absPath, "mime", pic.MIMEType)
-			case !looksLikeJPEG(pic.Data):
-				scanLogger.Warn("embedded artwork MIME claimed JPEG but bytes are not; skipping",
+			case !looksLikeLocalArtCandidate(pic.Data):
+				scanLogger.Warn("embedded artwork is neither JPEG nor PNG; skipping",
 					"path", absPath, "mime", pic.MIMEType)
 			default:
 				if mbid, ok := stampLocalArtwork(pic.Data, ec.ArtworkCacheDir); ok {
@@ -2333,15 +2344,14 @@ func isDiscFolderName(name string) bool {
 // `Cover.JPG`, `FOLDER.JPG`, etc. would silently miss a hardcoded
 // lowercase os.Stat).
 //
-// JPEG-only by design (PR #98 follow-up): the cache file path is
-// `<dir>/local-<hash>-500.jpg` and the API serves it with
-// `Content-Type: image/jpeg`. Mixing PNG bytes into that scheme
-// would force either a rename of the path convention OR a
-// per-request content-type sniff in the API handler — both
-// out-of-scope for V1. Operators with PNG-only artwork can
-// re-save as JPEG; PNG support is a follow-up that needs the
-// path-scheme + handler changes done together.
-var folderArtCandidates = []string{"cover.jpg", "folder.jpg"}
+// PNG candidates joined the set with `scaleLocalArtwork` (the
+// JPEG-only V1 restriction existed because bytes were written
+// VERBATIM into a `<dir>/local-<hash>-500.jpg` path served as
+// `Content-Type: image/jpeg`; the scaler transcodes PNG to JPEG so
+// the path + Content-Type contract stays honest). The magic-byte
+// sniff below (`looksLikeLocalArtCandidate`) remains the
+// authoritative gate — a GIF named cover.jpg is still skipped.
+var folderArtCandidates = []string{"cover.jpg", "folder.jpg", "cover.png", "folder.png"}
 
 // jpegSOI is the 3-byte JPEG Start-Of-Image marker (FF D8 FF). All
 // real JPEGs begin with these three bytes regardless of the APP0 /
@@ -2408,14 +2418,14 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 			scanLogger.Warn("folder-art read", "path", full, "err", err)
 			continue
 		}
-		// Magic-byte sniff: V1 cache scheme is JPEG-only. A user can
-		// name a PNG `cover.jpg` and the file will pass extension
-		// match — but committing those bytes to a `*-500.jpg` path
-		// served as `Content-Type: image/jpeg` would produce a
-		// misdeclared response. Skip + warn so the operator can
-		// re-save as JPEG.
-		if !looksLikeJPEG(data) {
-			scanLogger.Warn("folder-art bytes not JPEG; skipping",
+		// Magic-byte sniff: JPEG and PNG both pass (PNG is transcoded
+		// to JPEG inside stampLocalArtwork via scaleLocalArtwork, so
+		// the `*-500.jpg` path + `Content-Type: image/jpeg` contract
+		// holds regardless of the source container). Anything else —
+		// a GIF or junk named cover.jpg — is skipped + warned so the
+		// operator can re-save.
+		if !looksLikeLocalArtCandidate(data) {
+			scanLogger.Warn("folder-art bytes not JPEG/PNG; skipping",
 				"path", full, "first", fmt.Sprintf("%x", data[:min(len(data), 4)]))
 			continue
 		}
@@ -2429,10 +2439,23 @@ func scanFolderArtwork(dir, cacheDir string) folderArtResult {
 }
 
 // stampLocalArtwork hashes data, computes the local-<hash> sentinel,
-// and writes <cacheDir>/local-<hash>-500.jpg atomically. If the file
-// already exists (idempotent across re-scans / cache-dir wipe
-// recovery on the next pass), the write is skipped. Returns
-// (mbid, true) on success, ("", false) on any I/O error (logged).
+// scales the bytes via scaleLocalArtwork (longest side ≤ 1200 px,
+// JPEG output — PNG sources are transcoded), and writes
+// <cacheDir>/local-<hash>-500.jpg atomically. If the file already
+// exists (idempotent across re-scans / cache-dir wipe recovery on the
+// next pass), the write is skipped. Returns (mbid, true) on success,
+// ("", false) on any scale/I/O error (logged).
+//
+// The hash is over the ORIGINAL bytes, deliberately — key stability:
+// the same source file yields the same `local-<hash>` sentinel whether
+// this bridge version scales or an older one wrote raw bytes, so a
+// bridge upgrade neither churns iOS clients' artworkHash-keyed cover
+// caches nor re-writes already-cached files (the Stat below hits).
+// The one-shot RunArtworkRescaleOnce pass rewrites pre-existing
+// oversized files IN PLACE under their original names for the same
+// reason. The `-500` filename suffix is likewise historical (the
+// pre-scaling name); post-scaling the content is ≤ 1200 px and the
+// /v1/artwork size ladder serves it for any requested size.
 func stampLocalArtwork(data []byte, cacheDir string) (string, bool) {
 	sum := sha256.Sum256(data)
 	mbid := "local-" + hex.EncodeToString(sum[:])
@@ -2443,7 +2466,12 @@ func stampLocalArtwork(data []byte, cacheDir string) (string, bool) {
 		// transparently from a wiped cache-dir on the next scan.
 		return mbid, true
 	}
-	if err := writeArtworkAtomicScan(path, data); err != nil {
+	scaled, err := scaleLocalArtwork(data)
+	if err != nil {
+		scanLogger.Warn("scale local artwork; skipping", "err", err)
+		return "", false
+	}
+	if err := writeArtworkAtomicScan(path, scaled); err != nil {
 		scanLogger.Error("write local artwork", "path", path, "err", err)
 		return "", false
 	}

@@ -129,6 +129,15 @@ type Enricher struct {
 	// per wakeup. Keeps the worker responsive to cancellation.
 	BatchLimit int
 
+	// CoverSize is the pixel tier NEW cover fetches request from
+	// CAA/Atlas (250/500/1200 — CAA's native tiers). Zero falls back to
+	// DefaultCoverSize via coverSize(), so an Enricher constructed
+	// field-by-field in tests keeps working. Existing covers cached at
+	// another tier are never re-fetched (ensureArtworkCached counts any
+	// supported size as cached); /v1/artwork's size ladder serves
+	// whichever tier exists.
+	CoverSize int
+
 	// PollInterval is how long to wait between empty-batch checks.
 	PollInterval time.Duration
 
@@ -235,6 +244,7 @@ func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClie
 		ITunesMinInterval: 3 * time.Second,
 		DeezerMinInterval: 120 * time.Millisecond,
 		BatchLimit:        100,
+		CoverSize:         DefaultCoverSize,
 		PollInterval:      15 * time.Second,
 		albumCache:        lrucache.New[string, albumResolution](albumCacheCap),
 		releaseGroupCache: lrucache.New[string, string](releaseGroupCacheCap),
@@ -560,7 +570,7 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// `ensureArtworkCached("", ...)` call shape is structurally
 	// impossible from this site.
 	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
-		if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, 500); err != nil {
+		if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, e.coverSize()); err != nil {
 			// Suppress the Error log on a clean shutdown: ensureArtworkCached
 			// returns ctx.Err() when a pacing sleepCtx trips on cancel, which
 			// isn't a real artwork failure. Mirrors the ctx guard the album /
@@ -1047,10 +1057,34 @@ func (e *Enricher) SkipReasons() map[string]int64 {
 // on-disk path keyed by the RELEASE MBID, so iOS's existing
 // `/v1/artwork/{releaseMBID}` request flow serves it transparently —
 // no protocol change required.
+// coverSize resolves the zero default for CoverSize so Enrichers
+// constructed field-by-field (tests) behave like NewEnricher's.
+func (e *Enricher) coverSize() int {
+	if e.CoverSize == 0 {
+		return DefaultCoverSize
+	}
+	return e.CoverSize
+}
+
 func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist, album string, size int) (bool, error) {
 	path := ArtworkCachePath(e.CacheDir, mbid, size)
 	if _, err := os.Stat(path); err == nil {
 		return true, nil
+	}
+	// A cover cached at ANY supported tier counts as cached. This is
+	// what structurally prevents a mass CAA re-crawl when the
+	// configured `enrich.coverSize` changes (e.g. the 500→1200 default
+	// bump): the field's existing `<mbid>-500.jpg` population keeps
+	// satisfying this check forever, only genuinely-new releases fetch
+	// at the new tier, and /v1/artwork's size ladder serves whichever
+	// file exists. Don't "simplify" this into a single-size stat.
+	for _, s := range SupportedCoverSizes {
+		if s == size {
+			continue
+		}
+		if _, err := os.Stat(ArtworkCachePath(e.CacheDir, mbid, s)); err == nil {
+			return true, nil
+		}
 	}
 	// Phase B: try the authenticated Atlas premium cover first. A hit caches
 	// the cross-source premium canonical (Qobuz/Tidal-grade) under the same

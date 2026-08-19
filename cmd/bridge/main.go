@@ -260,24 +260,49 @@ func (b bookletDiskStore) RemoveBooklet(mbid string) error {
 
 // atlasCoverRefetcher adapts the enricher's authenticated premium-cover fetcher
 // to the harvest client's CoverRefetcher: it upgrades a release's cached cover
-// (<artworkDir>/<mbid>-500.jpg) to premium once Atlas has reverse-resolved one.
-// Size 500 matches what the enricher caches + what iOS requests.
+// (<artworkDir>/<mbid>-<coverSize>.jpg) to premium once Atlas has
+// reverse-resolved one. coverSize is the configured `enrich.coverSize`
+// (default 1200) — the same tier the enricher caches; /v1/artwork's size
+// ladder serves whichever tier exists for any requested size.
 type atlasCoverRefetcher struct {
 	premium    enrich.PremiumCoverFetcher
 	artworkDir string
 	store      *manifest.Store
+	coverSize  int
 }
 
 func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID string) (bool, error) {
 	if a.premium == nil {
 		return false, atlasharvest.ErrNoCredential
 	}
-	path := enrich.ArtworkCachePath(a.artworkDir, releaseMBID, 500)
-	got, err := a.premium.RefetchPremium(ctx, path, releaseMBID, 500)
+	size := a.coverSize
+	if size == 0 {
+		size = enrich.DefaultCoverSize
+	}
+	path := enrich.ArtworkCachePath(a.artworkDir, releaseMBID, size)
+	got, err := a.premium.RefetchPremium(ctx, path, releaseMBID, size)
 	if errors.Is(err, enrich.ErrNoCredential) {
 		// Translate the enrich-layer sentinel to the harvest client's contract
 		// sentinel (this adapter is the bridge between the two packages).
 		return got, atlasharvest.ErrNoCredential
+	}
+	if got {
+		// The premium bytes deliberately REPLACE the release's cover.
+		// Remove the same release's files at the OTHER tiers (the
+		// pre-upgrade CAA `-500.jpg`, typically): /v1/artwork's ladder
+		// tries the requested size first, so a stale sibling would keep
+		// serving the OLD cover to every default-size request. Best-
+		// effort — a lingering sibling only delays the upgrade until
+		// the next GC, never breaks serving.
+		for _, s := range enrich.SupportedCoverSizes {
+			if s == size {
+				continue
+			}
+			stale := enrich.ArtworkCachePath(a.artworkDir, releaseMBID, s)
+			if rmErr := os.Remove(stale); rmErr != nil && !os.IsNotExist(rmErr) {
+				logging.Component("atlasharvest").Warn("artwork upgrade: remove stale tier", "mbid", releaseMBID, "size", s, "err", rmErr)
+			}
+		}
 	}
 	if got && a.store != nil {
 		// The cover file was just overwritten with premium bytes. Record its
@@ -2026,6 +2051,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
 	}()
 
+	// One-shot in-place rescale of the pre-right-sizing local-artwork
+	// cache (raw scanner-written covers up to 19 MB on the production
+	// VPS). scan_state-marker-gated so completed deployments skip it in
+	// one GetScanState read; an interrupted pass resumes next boot.
+	// bgWriters-joined like every store writer (the marker write must
+	// not race shutdown); background + decode-semaphore-bounded, so it
+	// never blocks serving (see internal/manifest/artwork_rescale.go).
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		manifest.RunArtworkRescaleOnce(scanCtx, manifestStore, artworkDir)
+	}()
+
 	// Tailscale integration. Branched on cfg.Tailscale.EffectiveMode():
 	//
 	//   - `cli` (default): existing flow — tailscaleAutoPilot shells
@@ -2139,6 +2177,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// with the scanner so scanner-side `local-*` files and enricher-
 	// side `<mbid>-*` files cohabit one directory.
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
+	enricher.CoverSize = cfg.Enrich.EffectiveCoverSize()
 	// Phase B: when the harvest credential store is available, fetch the
 	// cross-source premium canonical (Qobuz/Tidal) from Atlas ahead of CAA,
 	// caching it under the MBID path /v1/artwork already serves — premium
@@ -2467,7 +2506,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// their cached covers to premium once Atlas resolves them. Reuses
 			// the enricher's authenticated premium fetcher (premiumCovers is
 			// non-nil whenever harvestState is, both gated on atlas.enabled).
-			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir, store: manifestStore},
+			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir, store: manifestStore, coverSize: cfg.Enrich.EffectiveCoverSize()},
 			Log:       logging.Component("atlasharvest"),
 			// Skip the booklet orphan-GC while a library (re)scan is in flight
 			// (B46): mid-rescan the album-release-MBID universe is transiently

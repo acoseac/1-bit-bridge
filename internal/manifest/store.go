@@ -1877,6 +1877,20 @@ var migrations = []migration{
 			)
 		},
 	},
+	{
+		// v40 backs the /v1/artwork 16-hex alias
+		// (Store.ResolveArtworkVersionMBID): iOS reuses
+		// `artworkVersion ?? artworkMBID` as its fetch key, so the
+		// handler must resolve a bare version tag to the servable
+		// MBID with an index seek, not a table scan. Partial — the
+		// column is NULL for every row except the Atlas
+		// premium-refetched minority (349 of 20,384 on the production
+		// VPS), so the index stays tiny.
+		version: 40,
+		name:    "index tracks.artwork_version for the 16-hex artwork-key alias",
+		sql: `CREATE INDEX IF NOT EXISTS idx_tracks_artwork_version
+			ON tracks(artwork_version) WHERE artwork_version IS NOT NULL;`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -3802,6 +3816,45 @@ func (s *Store) HasTrackWithArtistMBID(ctx context.Context, mbid string) (bool, 
 		return false, nil
 	}
 	return s.hasTrackWithJSONField(ctx, artistMBIDField, mbid)
+}
+
+// ResolveArtworkVersionMBID resolves a 16-hex `artwork_version` content
+// tag (hashFileShort output, stamped by the Atlas premium-cover
+// refetcher) back to the servable `artworkMBID` of a track carrying it.
+//
+// Exists for the /v1/artwork 16-hex ALIAS: iOS reuses
+// `Album.artworkHash = artworkVersion ?? artworkMBID` as its FETCH key
+// (iOS PR #944), so every client whose album carried an
+// `artworkVersion` requested `/v1/artwork/<16hex>` and got a 400 —
+// ~64 albums permanently coverless on the production library
+// (measured 2026-08-19). Resolving server-side fixes every EXISTING
+// client with zero iOS change.
+//
+// Returns ("", nil) when no track carries the version tag — the
+// handler answers `not_found`. Seeks on the v40 partial index
+// `idx_tracks_artwork_version`; LIMIT 1 because two tracks sharing a
+// version tag by construction share the cover file (the tag is a
+// content hash of those bytes).
+func (s *Store) ResolveArtworkVersionMBID(ctx context.Context, version string) (string, error) {
+	if version == "" {
+		return "", nil
+	}
+	var mbid sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT json_extract(tags_json, '$.artworkMBID')
+		  FROM tracks
+		 WHERE artwork_version = ?
+		 LIMIT 1`, version).Scan(&mbid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !mbid.Valid {
+		return "", nil
+	}
+	return mbid.String, nil
 }
 
 // ArtworkMBIDEnrichmentPending reports whether at least one track
