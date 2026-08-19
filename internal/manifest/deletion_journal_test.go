@@ -64,6 +64,11 @@ func TestDeletionJournalPredicatesAreShared(t *testing.T) {
 		{"deleteTracksByPrefixSQL", deleteTracksByPrefixSQL, deleteByPrefixWhereSQL},
 		{"journalClearMissingSQL", journalClearMissingSQL, clearMissingTracksWhereSQL},
 		{"clearMissingTracksDeleteSQL", clearMissingTracksDeleteSQL, clearMissingTracksWhereSQL},
+		// The two tombstone-clear forms share the served-row guard, so
+		// the per-path (UpsertTrack) and batch-sweep (UpsertTrackBatch)
+		// variants can't diverge on the `dupe_suppressed = 0` term.
+		{"clearTombstoneIfServedSQL", clearTombstoneIfServedSQL, clearTombstoneServedGuardSQL},
+		{"clearAllServedTombstonesSQL", clearAllServedTombstonesSQL, clearTombstoneServedGuardSQL},
 	} {
 		if !strings.Contains(squash(tc.stmt), squash(tc.want)) {
 			t.Errorf("%s no longer embeds its shared predicate — the tombstoned set and the deleted set can diverge.\nStatement:\n%s\n\nwant it to contain:\n%s",

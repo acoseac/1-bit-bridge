@@ -98,15 +98,32 @@ const (
 	journalSinglePathSQL = journalInsertPrefixSQL + `path = ?` + journalInsertSuffixSQL
 )
 
-// clearTombstoneIfServedSQL removes a path's tombstone when a SERVED row
-// exists for it. The `dupe_suppressed = 0` guard is load-bearing: a
-// content-changed-but-still-suppressed upsert must KEEP its tombstone
-// (the row is still absent from the served set).
-const clearTombstoneIfServedSQL = `DELETE FROM manifest_deletions
-	 WHERE path = ?
-	   AND EXISTS (SELECT 1 FROM tracks
+// clearTombstoneServedGuardSQL is the ONE spelling of "a served row
+// exists for this tombstone's path". The `dupe_suppressed = 0` term is
+// load-bearing: a content-changed-but-still-suppressed upsert must KEEP
+// its tombstone (the row is still absent from the served set). Both
+// clear forms below derive from it at compile time so the per-path and
+// batch variants cannot drift (the journal-INSERT const-derivation
+// convention).
+const clearTombstoneServedGuardSQL = `EXISTS (SELECT 1 FROM tracks
 	                WHERE tracks.path = manifest_deletions.path
 	                  AND tracks.dupe_suppressed = 0)`
+
+// clearTombstoneIfServedSQL removes a single path's tombstone when a
+// SERVED row exists for it — the single-row upsert path (UpsertTrack).
+const clearTombstoneIfServedSQL = `DELETE FROM manifest_deletions
+	 WHERE path = ?
+	   AND ` + clearTombstoneServedGuardSQL
+
+// clearAllServedTombstonesSQL sweeps EVERY tombstone whose path has a
+// served row — UpsertTrackBatch runs it once at the end of its
+// transaction instead of a per-row point delete (O(1) statements
+// instead of O(batch); the journal is usually tiny, so the correlated
+// EXISTS scan is cheap). Semantically a superset of the per-row clear:
+// it enforces the same invariant ("no served path carries a tombstone")
+// table-wide, which can only remove tombstones that should not exist.
+const clearAllServedTombstonesSQL = `DELETE FROM manifest_deletions
+	 WHERE ` + clearTombstoneServedGuardSQL
 
 // clearTombstoneSQL removes a path's tombstone unconditionally —
 // ApplyDupeStamps' served-transition leg, where the row's stamp write in
