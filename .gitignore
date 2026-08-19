@@ -49,3 +49,8 @@ ops/*.local.md
 # them; the repo is public, so tracked files stayed readable at
 # raw.githubusercontent.com. Keep them local — see ops/README.md.
 ops/*audit*.md
+# Same reasoning for review findings: a bug-review / findings doc enumerates
+# UNFIXED weaknesses, which is an exploit index for anything not yet shipped.
+ops/*bug-review*.md
+ops/*review*.md
+ops/*findings*.md

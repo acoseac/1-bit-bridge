@@ -5002,6 +5002,70 @@ func (s *Store) DeleteFolder(ctx context.Context, path string) error {
 	return err
 }
 
+// thresholdReapBatchWhereSQL and thresholdReapOneWhereSQL are the row
+// predicates the two arms of IncrementMissingTracksAndDeleteAtThreshold
+// reap by.
+//
+// They are consts because the DELETE is not their only consumer: the
+// sidecar enumeration immediately above each DELETE must select EXACTLY
+// the same rows, or the unlink set and the row set diverge — the failure
+// DeleteTracksByPrefix states as "these two MUST agree". Written out at
+// both consumers rather than assembled per call site;
+// TestThresholdReapPredicatesAreShared pins that neither drifts.
+//
+// Bind ORDER is part of the contract and differs between them:
+// batch takes (threshold, missingBlob); one takes (path, threshold).
+const thresholdReapBatchWhereSQL = `missing_count >= ?
+			   AND path IN (SELECT value FROM json_each(?))
+			   AND path NOT IN (SELECT source_path FROM upnp_track_routing)`
+
+const thresholdReapOneWhereSQL = `path = ?
+			   AND missing_count >= ?
+			   AND path NOT IN (SELECT source_path FROM upnp_track_routing)`
+
+// doomedReapSidecarsTx enumerates the sidecar files owned by the rows
+// `where` is about to delete, so the caller can unlink them after the
+// commit. Reads run on `tx` so the whole enumerate-then-delete sequence
+// stays on the transaction's single pinned connection (DeleteTracksBatch's
+// contract — a pooled read here would check out a second connection inside
+// the s.mu critical section).
+//
+// Variant enumeration is STRICT: a query failure or a truncated iterator
+// aborts, and the caller's deferred Rollback un-does the increment before
+// the CASCADE has run. Silently proceeding would delete rows whose files we
+// failed to list — the exact orphan this exists to prevent. Waveform
+// enumeration stays best-effort via listWaveformSidecarsTx (an orphan
+// waveform is `bridge analyze --gc`'s problem and must never block a reap),
+// matching DeleteTracksByPrefix.
+//
+// `where` is a caller-side compile-time literal; every value flows through
+// `args` placeholders, so the concatenation is injection-safe.
+func (s *Store) doomedReapSidecarsTx(ctx context.Context, tx *sql.Tx, where string, args ...any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT sidecar_path FROM track_variants
+		  WHERE source_path IN (SELECT path FROM tracks WHERE `+where+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: threshold reap list variant sidecars: %w", err)
+	}
+	var out []string
+	for rows.Next() {
+		var sp string
+		if scanErr := rows.Scan(&sp); scanErr != nil {
+			logger.Warn("threshold-reap: scan variant sidecar", "err", scanErr)
+			continue
+		}
+		out = append(out, sp)
+	}
+	if iterErr := rows.Err(); iterErr != nil {
+		rows.Close()
+		return nil, fmt.Errorf("manifest: threshold reap iter variant sidecars: %w", iterErr)
+	}
+	rows.Close()
+	out = append(out, s.listWaveformSidecarsTx(ctx, tx,
+		`source_path IN (SELECT path FROM tracks WHERE `+where+`)`, args...)...)
+	return out, nil
+}
+
 // IncrementMissingTracksAndDeleteAtThreshold bumps missing_count on
 // every row whose path is in `missingPaths` AND atomically deletes any
 // row whose new missing_count >= threshold. Returns the number of rows
@@ -5017,21 +5081,37 @@ func (s *Store) DeleteFolder(ctx context.Context, path string) error {
 // brownout, libsmb2 timeout returning an empty Readdir) that
 // errorSubtrees can't catch because no error surfaced to fire it.
 //
-// **Sidecar cleanup: this path does NOT proactively remove on-disk
-// sidecar files.** `DeleteTrack` (line 559) walks the `track_variants`
-// rows for its parent and `os.Remove`s each sidecar BEFORE issuing
-// the DELETE, maintaining the "no orphans on disk" invariant. This
-// bulk path is hot-loop in the scanner deletion pass and would pay
-// an N-row SELECT + Stat-cluster per scan to do the same — measured
-// to be the dominant scanner cost on a 50k-track library, so we
-// accept the trade-off of leaving orphan `.flac` sidecars in the
-// `transcoded/` directory until the next `bridge upscale --gc` run.
-// Operators running large-scale reaping events (decommissioning a
-// mount, mass library cleanup) should follow up with `bridge upscale
-// --gc` to reclaim the disk space. CASCADE on the parent track row
-// still cleans up the `track_variants` SQLite row itself; only the
-// on-disk file persists. Gemini bot review on PR #193 flagged this
-// docstring inaccuracy.
+// **Sidecar cleanup: this path DOES proactively remove on-disk sidecar
+// files**, via doomedReapSidecarsTx before each DELETE plus one
+// removeSidecarFiles after the commit — the same two-step every sibling
+// deletion path uses. CASCADE takes the `track_variants` /
+// `track_analysis` rows with the parent, so an unenumerated file is
+// unreachable by path from that moment on.
+//
+// PR #193 originally skipped it as a deliberate trade-off: "an N-row
+// SELECT + Stat-cluster per scan … measured to be the dominant scanner
+// cost on a 50k-track library". That was reversed in the 2026-08-19
+// review after each premise turned out not to hold for the SET-SCOPED
+// form the siblings use (the reasoning fit `DeleteTrack`-in-a-loop, one
+// SELECT per row):
+//
+//   - It is not "per scan". The `len(missingPaths) == 0` early return
+//     means a stable library never reaches the enumeration at all.
+//   - When it does run it is cheaper than the per-path
+//     `UPDATE … WHERE path = ?` loop that immediately precedes it, and
+//     index-backed via `PRIMARY KEY (source_path, variant_id)` /
+//     `idx_track_variants_source_path`.
+//   - Nothing stats: `removeSidecarFiles` calls `os.Remove` directly.
+//
+// The magnitude also changed: auto-optimize (2026-08-17) pre-generates
+// variants library-wide, so the accepted leak grew from a
+// manually-upscaled subset to potentially every track — while the
+// forward orphan sweeper that was the stated mitigation remains
+// opt-in and off by default.
+//
+// `bridge upscale --gc` / `bridge analyze --gc` remain the recovery
+// path for orphans stranded on disk BEFORE this shipped; they are no
+// longer the routine reclamation mechanism.
 //
 // Both the increment and the delete happen in a single SQLite
 // transaction so a crash between them can't leave the counter
@@ -5139,17 +5219,24 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	// AND the routed anti-join, which no caller may ever bypass.
 	valid, illFormed := splitIllFormedUTF8Paths(missingPaths)
 	var deleted int64
+	var doomedSidecars []string
 	if len(valid) > 0 {
 		missingBlob, err := json.Marshal(valid)
 		if err != nil {
 			return 0, err
 		}
+		// Enumerate the doomed rows' sidecars BEFORE the DELETE — the
+		// CASCADE takes the track_variants / track_analysis rows with the
+		// parent, and the on-disk files are then unreachable by path.
+		// Same predicate, same binds; see thresholdReapBatchWhereSQL.
+		sc, err := s.doomedReapSidecarsTx(ctx, tx, thresholdReapBatchWhereSQL, threshold, string(missingBlob))
+		if err != nil {
+			return 0, err
+		}
+		doomedSidecars = append(doomedSidecars, sc...)
 		res, err := tx.ExecContext(ctx, `
 			DELETE FROM tracks
-			 WHERE missing_count >= ?
-			   AND path IN (SELECT value FROM json_each(?))
-			   AND path NOT IN (SELECT source_path FROM upnp_track_routing)
-		`, threshold, string(missingBlob))
+			 WHERE `+thresholdReapBatchWhereSQL, threshold, string(missingBlob))
 		if err != nil {
 			return 0, err
 		}
@@ -5166,15 +5253,21 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if len(illFormed) > 0 {
 		delStmt, err := tx.PrepareContext(ctx, `
 			DELETE FROM tracks
-			 WHERE path = ?
-			   AND missing_count >= ?
-			   AND path NOT IN (SELECT source_path FROM upnp_track_routing)
-		`)
+			 WHERE `+thresholdReapOneWhereSQL)
 		if err != nil {
 			return 0, err
 		}
 		defer delStmt.Close()
 		for _, p := range illFormed {
+			// Per-path enumeration, mirroring the batch arm above. These
+			// paths can't ride the JSON array (see splitIllFormedUTF8Paths),
+			// so they can't ride its sidecar query either — without this
+			// they would be the one reaped population whose sidecars leak.
+			sc, err := s.doomedReapSidecarsTx(ctx, tx, thresholdReapOneWhereSQL, p, threshold)
+			if err != nil {
+				return 0, err
+			}
+			doomedSidecars = append(doomedSidecars, sc...)
 			res, err := delStmt.ExecContext(ctx, p, threshold)
 			if err != nil {
 				return 0, err
@@ -5192,6 +5285,12 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	// Files unlinked once, after the single commit and still UNDER s.mu —
+	// the SELECT-sidecars → DELETE-rows → os.Remove-files sequence is
+	// atomic per the writer contract (DeleteTracksBatch's rationale:
+	// releasing the lock first would let a concurrent UpsertVariant
+	// resurrect a row pointing at a content-hashed file we're removing).
+	removeSidecarFiles(doomedSidecars)
 	return deleted, nil
 }
 
