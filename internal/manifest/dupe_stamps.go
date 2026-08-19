@@ -34,6 +34,17 @@ type DupeStamp struct {
 	Tier        string
 	Suppressed  bool
 	BumpIndexed bool
+	// JournalDelete is set ONLY on a served→suppressed transition (the
+	// mirror of BumpIndexed's suppressed→served): the row leaves the
+	// SERVED set, so a deletion-journal tombstone is written in the same
+	// transaction and delta clients drop the copy on their next sync —
+	// before this, suppressed rows lingered on every synced client until
+	// a user-initiated full sync. `indexed_at` is still NEVER bumped on
+	// suppression (the standing rule); the tombstone is the delta signal.
+	// Symmetrically, ANY non-suppressed stamp clears the path's tombstone
+	// (serving and being tombstoned are mutually exclusive), which covers
+	// the 1→0 lift AND the stale-stamp clear without a second flag.
+	JournalDelete bool
 }
 
 // ApplyDupeStamps writes the changed stamps in one transaction.
@@ -85,6 +96,16 @@ func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, e
 		return 0, err
 	}
 	defer bump.Close()
+	journal, err := tx.PrepareContext(ctx, journalSinglePathSQL)
+	if err != nil {
+		return 0, err
+	}
+	defer journal.Close()
+	clearTombstone, err := tx.PrepareContext(ctx, clearTombstoneSQL)
+	if err != nil {
+		return 0, err
+	}
+	defer clearTombstone.Close()
 	now := s.now().UnixNano()
 	n := 0
 	for _, st := range stamps {
@@ -100,6 +121,23 @@ func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, e
 		}
 		if err != nil {
 			return 0, err
+		}
+		// Deletion-journal coupling (see DupeStamp.JournalDelete): a
+		// served→suppressed transition writes a tombstone; any
+		// non-suppressed stamp clears one. Same transaction as the
+		// stamp write, so the journal and the stamps can't diverge.
+		// The unconditional clear (not clearTombstoneIfServedSQL) is
+		// deliberate: THIS transaction's stamp write is what makes the
+		// row served, and the EXISTS-guarded form reads dupe_suppressed
+		// which this statement just set — same answer, one less join.
+		if st.JournalDelete {
+			if _, err := journal.ExecContext(ctx, now, st.Path); err != nil {
+				return 0, err
+			}
+		} else if !st.Suppressed {
+			if _, err := clearTombstone.ExecContext(ctx, st.Path); err != nil {
+				return 0, err
+			}
 		}
 		if affected, _ := res.RowsAffected(); affected > 0 {
 			n++

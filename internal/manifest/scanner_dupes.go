@@ -173,6 +173,11 @@ func (s *Scanner) restampDuplicates(ctx context.Context, insideScan bool) (int, 
 				continue // unchanged — the stable-library zero-write case
 			}
 			want.BumpIndexed = had && cur.Suppressed && !want.Suppressed
+			// Served→suppressed (the BumpIndexed mirror): the row leaves
+			// the served set, so journal a deletion tombstone for delta
+			// clients. `!had` counts — a first-ever stamp that suppresses
+			// hides a row clients may have synced while it was unstamped.
+			want.JournalDelete = want.Suppressed && !(had && cur.Suppressed)
 			stamps = append(stamps, want)
 		}
 	}

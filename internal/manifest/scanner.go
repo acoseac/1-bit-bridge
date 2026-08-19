@@ -677,6 +677,20 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	s.lastFull.Store(time.Now().UTC().UnixNano())
 	_ = s.store.SetScanState(ctx, "last_full_scan", time.Now().UTC().Format(time.RFC3339Nano))
 
+	// Deletion-journal retention (deletion_journal.go): drop tombstones
+	// past the window + advance the coverage start. Placed HERE — after
+	// the reap passes above committed this scan's new tombstones and on
+	// the path every successful exit passes through (the ctx-done early
+	// return below included, deliberately: retention is bookkeeping, not
+	// reconciliation). Best-effort like the scan-state stamp beside it.
+	if pruned, pruneErr := s.store.PruneDeletionJournal(ctx); pruneErr != nil {
+		if ctx.Err() == nil {
+			scanLogger.Warn("prune deletion journal", "err", pruneErr)
+		}
+	} else if pruned > 0 {
+		scanLogger.Info("pruned deletion journal", "tombstones", pruned)
+	}
+
 	// Skip reconciliation cleanly if the scan context is already done (shutdown
 	// / deadline) — the passes are best-effort and the next scan retries, so
 	// there's no point starting them (and no ERROR-log noise on a normal stop).
@@ -2322,6 +2336,13 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 		Folders:      folders,
 		Tracks:       tracks,
 	}
+	// Delta-only tombstone fields (deletion_journal.go) — parity with
+	// writeManifestGated's since-leg; full manifests never carry either.
+	if !since.IsZero() {
+		deleted, incomplete := deltaDeletionFields(ctx, store, since)
+		m.Deleted = deleted
+		m.DeltaIncomplete = incomplete
+	}
 	// Library-wide enrichment counters land on every non-paginated
 	// response. `EnrichmentCounts` query failure is non-fatal — the
 	// manifest stays useful even if the counter rollup hits a
@@ -2530,6 +2551,23 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	}
 	if _, err := bw.WriteString(`]`); err != nil {
 		return err
+	}
+	// Delta-only tombstone fields (deletion_journal.go) — resolution is
+	// SHARED with BuildManifest via deltaDeletionFields so the streaming
+	// and buffered legs cannot drift (the parity test compares both).
+	// Full + paginated legs never emit either field.
+	if !since.IsZero() {
+		deleted, incomplete := deltaDeletionFields(ctx, store, since)
+		if len(deleted) > 0 {
+			if err := writeField(`,"deleted":`, deleted); err != nil {
+				return err
+			}
+		}
+		if incomplete {
+			if _, err := bw.WriteString(`,"deltaIncomplete":true`); err != nil {
+				return err
+			}
+		}
 	}
 	if ep != nil {
 		if err := writeField(`,"enrichmentProgress":`, ep); err != nil {
