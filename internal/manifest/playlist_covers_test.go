@@ -2,6 +2,9 @@ package manifest
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,21 +216,41 @@ func TestSanitizeCoverKey(t *testing.T) {
 // tidy-up: it fails the moment a production caller appears, pointing at the
 // docblock.
 func TestPrunePlaylistCoversExceptStaysUnwired(t *testing.T) {
+	// AST, not a substring scan over the bytes: the name appears in PROSE in
+	// this package (its own docblock explains why it is unwired, and so does
+	// this test), and a future comment elsewhere saying "deliberately does not
+	// call PrunePlaylistCoversExcept" would fail a text search. A guard that
+	// cries wolf gets deleted — which is the outcome this exists to prevent.
+	// (gemini-code-assist on PR #725.)
 	roots := []string{"..", "../../cmd"}
+	fset := token.NewFileSet()
 	var callers []string
 	for _, root := range roots {
-		_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() || !strings.HasSuffix(p, ".go") {
+		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") {
 				return nil //nolint:nilerr // unreadable trees just aren't scanned
 			}
+			// Tests may reference it (the round-trip test calls it directly);
+			// playlist_covers.go is the DECLARATION site.
 			if strings.HasSuffix(p, "_test.go") || strings.HasSuffix(p, "playlist_covers.go") {
 				return nil
 			}
-			b, rerr := os.ReadFile(p)
-			if rerr != nil {
-				return nil //nolint:nilerr
+			file, perr := parser.ParseFile(fset, p, nil, 0)
+			if perr != nil {
+				return nil //nolint:nilerr // unparseable files aren't callers
 			}
-			if strings.Contains(string(b), "PrunePlaylistCoversExcept(") {
+			found := false
+			ast.Inspect(file, func(n ast.Node) bool {
+				if found {
+					return false
+				}
+				if id, ok := n.(*ast.Ident); ok && id.Name == "PrunePlaylistCoversExcept" {
+					found = true
+					return false
+				}
+				return true
+			})
+			if found {
 				callers = append(callers, p)
 			}
 			return nil
