@@ -1266,6 +1266,104 @@ comment on the alert first**; each carries its own rationale.
   host:port. Tightening is a legitimate option (drop loopback, or pin to the source IP alone) —
   reopen deliberately rather than by re-discovering the flow.
 
+### 2026-08-19 bug review — reap-time sidecar reclamation, harvest base-URL pin (PRs #723 / #724 / #725)
+
+Scope-selected review of the four highest-blast-radius areas (silent data loss >
+auth/token lifecycle > unauthenticated LAN parsers > path resolution +
+concurrency). **The three areas ranked most dangerous came back clean** — every
+past regression there already carries a pin and a comment. Both real defects were
+resource-reclamation gaps, and the one live-exploitable finding was in the
+NEWEST code, not the most dangerous-sounding.
+
+- **The threshold reap now unlinks its sidecars, reversing PR #193's documented
+  trade-off** (#723). `IncrementMissingTracksAndDeleteAtThreshold` deleted `tracks`
+  rows while CASCADE dropped the `track_variants` / `track_analysis` rows, leaving
+  the `.flac` variant and waveform FILES unreachable by path. It is the ONLY
+  track-deletion path that fires in normal operation — `DeleteTrack` has no
+  production caller at all, and `DeleteTracksBatch` serves only case-only renames
+  and the UPnP reap — while all five siblings already enumerated + unlinked.
+  PR #193 skipped it deliberately ("an N-row SELECT + Stat-cluster per scan …
+  the dominant scanner cost on a 50k-track library"); **every premise fails for
+  the SET-SCOPED form the siblings use** — the `len(missingPaths) == 0` early
+  return means a stable library never reaches it (so it is per-REAP-PASS, not per
+  scan), it is cheaper than the per-path `UPDATE … WHERE path = ?` loop
+  immediately above it, and nothing stats (`removeSidecarFiles` calls `os.Remove`
+  directly). The reasoning fit `DeleteTrack`-in-a-loop. Magnitude also changed:
+  auto-optimize (2026-08-17) pre-generates variants library-wide, and the forward
+  orphan sweeper that was the stated mitigation is still opt-in and off by
+  default. **Both DELETE arms and both sidecar enumerations are DERIVED at
+  compile time from `thresholdReapBatchWhereSQL` / `thresholdReapOneWhereSQL`**
+  (const + const is a const) so the unlink set and the row set cannot diverge —
+  the failure `DeleteTracksByPrefix` states as "these two MUST agree" — and that
+  const-derivation is also what keeps SonarCloud `go:S2077` quiet (the
+  `trackFeatureSelect` convention; a runtime `+where+` reads as an assembled
+  query). **The ill-formed-UTF-8 arm needs its OWN enumeration**: those paths
+  cannot ride the JSON array, so they could not ride its sidecar query either,
+  and would have been the one reaped population still leaking. Variant
+  enumeration is STRICT (abort + rollback before the CASCADE runs); waveform
+  stays best-effort. **Don't drop the explicit `rows.Close()` in favour of the
+  deferred one** — a `*sql.Tx` pins ONE connection, so the variant Rows must be
+  closed before the waveform read runs on the same tx; the defer is only a
+  panic-safety net (the `PrunePlaylistCoversExcept` idiom, `Close` being
+  idempotent). `--gc` remains the recovery path for orphans stranded BEFORE this
+  shipped; it is no longer the routine mechanism.
+- **`atlas.harvestBaseUrl` pins the Atlas host `POST /v1/atlas-harvest/credential`
+  accepts — a demo bridge that enables harvest MUST set it** (#724). The
+  credential body carries `atlasBaseUrl` and the harvest client dials it for BOTH
+  submit and fetch, so whoever sets it chooses where the bridge pulls bios from;
+  they land in `artist_atlas` and are served to every client by `/v1/atlas-meta`
+  with an attacker-chosen `SourceURL` the app renders as a "Read more on …" link.
+  That is the same content injection `refuseAtlasIngestInDemoMode` blocks on
+  `/v1/atlas-ingest` — **its comment deliberately left this sibling open, reasoning
+  about the TOKEN ("a bogus one just fails the harvest") and not about the base URL
+  travelling in the same request.** It was LIVE on `bridge.1-bit.app`:
+  `WithAtlasHarvest` and `WithBooklets` are wired in the SAME `if harvestState != nil`
+  block, `harvestState` opens only under `Atlas.HarvestEnabled && Atlas.Enabled`,
+  and the bridge advertises `booklets` — and a demo bearer is public by
+  construction (the static `demo.tokenSHA256` ships inside every installed app,
+  the stated premise of `refuseUpscaleMutationInDemoMode`). Rules: a pin binds in
+  EVERY mode; unpinned is refused in demo and still allowed off-demo (back-compat
+  — bridge.ars.md keeps working). **The check runs BEFORE persistence** because
+  `SetCredential` resets the sync cursor and clobbers the token when the base URL
+  differs. **Both sides of the comparison MUST go through
+  `config.CanonicalHTTPSBase`** — it is an equality test, so a reduction applied
+  to one side only (the `:443` case) turns a correct pin into a mismatch that
+  fails CLOSED and reads as a broken feature; `WithAtlasHarvest` canonicalizes its
+  argument rather than trusting the caller. Residual, accepted: a public demo
+  bearer can still overwrite the TOKEN for the pinned host (denial of function,
+  not injection). **`bridge.1-bit.app` must set `atlas.harvestBaseUrl` when it
+  next deploys**, or its credential submissions are refused.
+- **`PrunePlaylistCoversExcept` is deliberately unwired — don't "finish the job"**
+  (#725). Filed as a reclamation gap (written, documented, tested, zero callers),
+  and the obvious fix is wrong: smart-mix retirement is REVERSIBLE
+  (`buildFavorites` returns `(GeneratedPlaylist{}, false)` below `MinFavorites`,
+  and the time-of-day families behave the same), and playlist deletion is a
+  revivable tombstone. Covers are operator-UPLOADED, so either trigger silently
+  destroys authored content to reclaim a JPEG; the operator already has
+  `DELETE /api/playlists/{id}/cover`. An AST-based guard test fails if a
+  production caller appears — **substring scanning was wrong here** because the
+  natural way to record this decision is a comment mentioning the name, and a
+  guard that cries wolf gets deleted.
+- **`fs.Resolve`'s final containment check is the PRIMARY defense on Windows, not
+  belt-and-braces** (#724, comment only). Both guards above it are slash-based —
+  the raw `..`-segment scan splits on `/` and `path.Clean` treats `\` as ordinary
+  — so `..\..\..\Windows\System32\config\SAM` passes both untouched and it is
+  `filepath.Join`, Cleaning with `\`, that collapses it into a real escape. The
+  prefix check refuses it. `FuzzResolveContainment` seeds that exact shape. Don't
+  delete it as redundant.
+
+**Process (both worth repeating):** a review doc enumerating UNFIXED weaknesses is
+an exploit index, and this repo is PUBLIC — `.gitignore` covered `ops/*audit*.md`
+but not the new filename, so the findings doc reached a public branch before being
+force-pushed out (the blob stays fetchable by SHA regardless). The rule now covers
+`ops/*bug-review*.md` / `*review*.md` / `*findings*.md`. And **two of four findings
+changed materially after first write-up, both from acting on a first reading before
+finding the code that already reasoned about it** — F1's rationale was 28 lines
+above the function header, and F4's fix was nearly a blanket demo refusal until the
+sibling guard's comment showed demo bridges are MEANT to be credentialed there. In
+this codebase, starting to read at `func` is a reliable way to mis-file a
+deliberate decision as a bug.
+
 ## Repo clean-up
 
 Pre-push:
