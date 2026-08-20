@@ -117,11 +117,11 @@ See [`PROTOCOL.md`](PROTOCOL.md). Every client endpoint is prefixed `/v1/`. The 
 
 ## License
 
-[FSL-1.1-MIT](LICENSE) — the Functional Source License, with an automatic MIT future grant. In practice:
+[FSL-1.1-MIT](LICENSE) — the Functional Source License, with an automatic MIT future grant. In plain language (the [`LICENSE`](LICENSE) text governs):
 
 - **Self-hosting stays free, for everyone.** Running the bridge for your own library, personal and internal use, modification, and redistribution are all permitted — nothing changes for operators.
-- The only restricted use is **offering the bridge (or a derivative of it) commercially in competition with 1-bit** — for example shipping it as another app's companion server, or selling it as a hosted service.
-- **Every release automatically becomes MIT two years after it ships** (the Future License grant inside [`LICENSE`](LICENSE)).
+- The restricted use is a **Competing Use** as defined in the license: making the bridge available to others in a commercial product or service that substitutes for it (or for a product or service offered with it), or that offers substantially similar functionality — for example shipping it as another app's companion server, or selling it as a hosted service.
+- **Each version automatically becomes available under MIT on the second anniversary of the date that version is made available** (the Future License grant).
 - Releases up to and including **v0.1.9** were published under MIT and remain MIT.
 
 The wire protocol documentation ([`PROTOCOL.md`](PROTOCOL.md)) remains public.

@@ -1377,9 +1377,10 @@ free and the source public. What matters when touching license-adjacent surfaces
 - **Each FSL release auto-converts to MIT two years after it ships** (the Future
   License grant inside `LICENSE`). That grant is the goodwill half of the design —
   don't remove or weaken it.
-- The license name lives in FOUR places that must stay in sync: `LICENSE`, the README
-  badge + `## License` section, the Dockerfile's exec-boundary comment, and
-  `org.opencontainers.image.licenses` in `.github/workflows/docker.yml`.
+- The license name lives in FIVE places that must stay in sync: `LICENSE`, the README
+  badge + `## License` section, CONTRIBUTING.md's inbound=outbound note, the
+  Dockerfile's exec-boundary comment, and `org.opencontainers.image.licenses` in
+  `.github/workflows/docker.yml`.
 - **No per-file license headers** — the repo-level `LICENSE` governs; don't start
   adding them (CONTRIBUTING.md says the same to contributors, inbound = outbound,
   no CLA).
