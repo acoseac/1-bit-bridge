@@ -104,7 +104,7 @@ FROM alpine:${ALPINE_VERSION}
 # container still reports those ports in use.
 # sox, ffmpeg and fpcalc all run as separate executables invoked via
 # os/exec (aggregation, not linked into the Go binary), so their
-# GPL/LGPL terms don't affect the bridge's MIT license — chromaprint is
+# GPL/LGPL terms don't affect the bridge's own license (FSL-1.1-MIT) — chromaprint is
 # LGPL-2.1, the same arrangement. All four are inert unless
 # upscale/analysis/fingerprint are enabled in config.
 #

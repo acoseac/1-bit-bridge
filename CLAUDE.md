@@ -1364,6 +1364,32 @@ sibling guard's comment showed demo bridges are MEANT to be credentialed there. 
 this codebase, starting to read at `func` is a reliable way to mis-file a
 deliberate decision as a bug.
 
+## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
+
+The bridge is licensed under the Functional Source License 1.1 with the MIT future
+grant (SPDX: `FSL-1.1-MIT`). Rationale: block competing commercial use — another app
+shipping the bridge as its companion server, or a third party selling it as a hosted
+service — ahead of the planned first-party cloud offering, while keeping self-hosting
+free and the source public. What matters when touching license-adjacent surfaces:
+
+- **Prior releases (≤ v0.1.9) were published under MIT and remain MIT forever** — a
+  relicense is forward-only. Never claim otherwise in docs or release notes.
+- **Each FSL release auto-converts to MIT two years after it ships** (the Future
+  License grant inside `LICENSE`). That grant is the goodwill half of the design —
+  don't remove or weaken it.
+- The license name lives in FOUR places that must stay in sync: `LICENSE`, the README
+  badge + `## License` section, the Dockerfile's exec-boundary comment, and
+  `org.opencontainers.image.licenses` in `.github/workflows/docker.yml`.
+- **No per-file license headers** — the repo-level `LICENSE` governs; don't start
+  adding them (CONTRIBUTING.md says the same to contributors, inbound = outbound,
+  no CLA).
+- The licensor string is `acoseac`, kept for continuity with the original MIT notice;
+  revisit alongside the pending ars.md entity-name review if a legal-name change is
+  ever wanted.
+- GPL/LGPL tools (sox / ffmpeg / fpcalc) remain exec-boundary-separated processes —
+  the relicense changes nothing about that analysis; the Dockerfile comment documents
+  it.
+
 ## Repo clean-up
 
 Pre-push:

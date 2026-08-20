@@ -155,5 +155,5 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/acoseac/1-bit-bridge
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=FSL-1.1-MIT
             org.opencontainers.image.description=Cross-platform Go companion server for the 1-bit iOS music player
