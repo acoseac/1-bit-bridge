@@ -424,6 +424,26 @@ Grep mechanics that cost time to learn:
 
 ## After a deploy: expect iOS syncs to quietly defer
 
+**The v0.1.8 → v0.1.9 upgrade runs TWO one-time backfills, and they compound.**
+`manifest.ExtractorVersion` did **not exist at v0.1.8** — it was introduced
+within this release cycle (#586) and is now `4` — so the stamp reads 0 on every
+pre-existing row and the first scan **re-extracts tags for the entire library**.
+Independently, `analyze.WaveformSchemaVersion` moved **wf3 → wf7**, so every
+analysed track is **re-decoded** to backfill the spectrum and the track-quality
+scalars. Budget accordingly: the wf3→wf4 pass alone ran ~18 h at ~85 % CPU on
+bridge.ars.md, and this one is wider. Two things make it survivable rather than
+alarming: #606's version-stale diff-guard means re-extracted rows whose metadata
+did not actually change are stamped WITHOUT an `indexed_at` bump, so the client
+delta stays bounded; and no waveform sidecar is re-fetched (only the spectrum
+and `bandwidthHz` are new on the wire). Expect the busy-defer below for the
+duration, and don't read a long first scan on 0.1.9 as a regression.
+
+**Also expect the served track count to DROP on 0.1.9** — `duplicates.filter`
+defaults to `highest-quality`, and `/v1/health`'s `tracksIndexed` plus the
+manifest's `total` now describe the served set. Nothing was deleted; the admin
+Library → Duplicates page shows every group and its winner.
+
+
 Restarting the service kicks off a **startup library scan** — minutes on a
 warm, fully-enriched library (~10 min on the VPS's rclone/B2 mount), hours
 only when an extractor/analysis backfill re-processes every track (the

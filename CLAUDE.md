@@ -7,7 +7,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 - `make build` — builds `./bin/bridge` for the host OS.
 - `make build-all` — cross-compiles to `dist/bridge-<os>-<arch>{.exe}`.
 - `make test` — pure-Go race-enabled suite; ~150 tests across 10 packages.
-- **Fuzz targets exist and are NOT run by `make test`** (PR #704, 2026-08-16). 24 targets in
+- **Fuzz targets exist and are NOT run by `make test`** (PR #704, 2026-08-16). 29 targets in
   `fuzz_*_test.go` across `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes}`,
   covering the three untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers), the LAN-facing UNAUTHENTICATED parsers (SSDP / SOAP / DIDL / device
