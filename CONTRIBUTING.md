@@ -53,3 +53,7 @@ branch before requesting review.
 ## Golden fixtures
 
 If your PR changes the manifest JSON shape, regenerate fixtures via `make fixtures` (to be added) and copy them into the iOS repo as part of the companion PR.
+
+## Licensing of contributions
+
+The project is licensed under [FSL-1.1-MIT](LICENSE) (inbound = outbound): by submitting a pull request you agree that your contribution is licensed under the same terms, including the future MIT grant. There is no CLA. Do not add per-file license headers — the repository-level `LICENSE` governs.

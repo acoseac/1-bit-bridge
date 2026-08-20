@@ -1,7 +1,7 @@
 # 1-bit-bridge
 
 [![Latest release](https://img.shields.io/github/v/release/acoseac/1-bit-bridge?sort=semver&display_name=tag&label=release)](https://github.com/acoseac/1-bit-bridge/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/acoseac/1-bit-bridge)](LICENSE)
+[![License: FSL-1.1-MIT](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE)
 [![Go version](https://img.shields.io/github/go-mod/go-version/acoseac/1-bit-bridge)](go.mod)
 [![iOS app on App Store](https://img.shields.io/badge/iOS%20app-1--bit%20on%20App%20Store-0A84FF?logo=apple&logoColor=white)](https://apps.apple.com/us/app/1-bit/id6762529497)
 
@@ -117,4 +117,11 @@ See [`PROTOCOL.md`](PROTOCOL.md). Every client endpoint is prefixed `/v1/`. The 
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+[FSL-1.1-MIT](LICENSE) — the Functional Source License, with an automatic MIT future grant. In plain language (the [`LICENSE`](LICENSE) text governs):
+
+- **Self-hosting stays free, for everyone.** Running the bridge for your own library, personal and internal use, modification, and redistribution are all permitted — nothing changes for operators.
+- The restricted use is a **Competing Use** as defined in the license: making the bridge available to others in a commercial product or service that substitutes for it (or for a product or service offered with it), or that offers substantially similar functionality — for example shipping it as another app's companion server, or selling it as a hosted service.
+- **Each version automatically becomes available under MIT on the second anniversary of the date that version is made available** (the Future License grant).
+- Releases up to and including **v0.1.9** were published under MIT and remain MIT.
+
+The wire protocol documentation ([`PROTOCOL.md`](PROTOCOL.md)) remains public.
