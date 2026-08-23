@@ -18,6 +18,12 @@
   </aside>
 
   <div class="player-main">
+    <form class="player-search" role="search" id="player-search-form">
+      <input type="search" id="player-search-input" name="q"
+             placeholder="Search albums, artists, tracks…"
+             autocomplete="off" spellcheck="false"
+             aria-label="Search the library">
+    </form>
     <div class="player-toolbar" id="player-toolbar"></div>
     <h1 id="player-title" class="player-title" tabindex="-1">Library</h1>
     <div id="player-view" class="player-view"></div>

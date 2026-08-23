@@ -375,6 +375,34 @@ export function cycleRepeat() {
  * where one track plays three times in a row and turning shuffle off
  * loses your place.
  */
+// randomBelow returns a uniformly-distributed integer in [0, n).
+//
+// Uses crypto.getRandomValues rather than Math.random. A shuffle order
+// is a listening preference and not a security decision, so this is not
+// a threat-model change — it is that the CSPRNG is available
+// unconditionally here and costs nothing, which makes the argument
+// moot rather than won. Verified: 127.0.0.1 is a
+// potentially-trustworthy origin, so isSecureContext is true even over
+// plain http on loopback, and public-mode admin is always behind TLS
+// (directly or via a terminating proxy). There is no configuration the
+// bridge permits where crypto is absent.
+//
+// Rejection sampling rather than a plain modulo: 2^32 is not a multiple
+// of most n, so `value % n` would bias the low indices. The discarded
+// range is under one part in 2^32/n, so the loop effectively never
+// repeats.
+function randomBelow(n) {
+  if (n <= 1) return 0;
+  const limit = Math.floor(0x100000000 / n) * n;
+  const buf = new Uint32Array(1);
+  let v;
+  do {
+    crypto.getRandomValues(buf);
+    v = buf[0];
+  } while (v >= limit);
+  return v % n;
+}
+
 function reshuffle() {
   if (!state.shuffle || state.queue.length === 0) {
     state.shuffleOrder = null;
@@ -382,13 +410,7 @@ function reshuffle() {
   }
   const order = state.queue.map((_, i) => i);
   for (let i = order.length - 1; i > 0; i--) {
-    // Math.random is the right tool: a shuffle order is a listening
-    // preference, not a security decision, and nothing downstream
-    // treats it as unguessable. (Static analysis flags every
-    // Math.random as a possible weak-PRNG issue; the bridge does use a
-    // CSPRNG where it matters — see the pairing verification code in
-    // internal/pairing, where a predictable value WOULD be a downgrade.)
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = randomBelow(i + 1);
     [order[i], order[j]] = [order[j], order[i]];
   }
   if (state.index >= 0) {

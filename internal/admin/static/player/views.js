@@ -397,27 +397,73 @@ export async function renderSearch(view, { params, setToolbar }) {
   const q = (params.get("q") || "").trim();
   clear(view);
   if (q.length < 2) {
-    view.appendChild(emptyState("Search the library", "Type at least two characters."));
+    view.appendChild(emptyState("Search the library",
+      "Type at least two characters. Albums and artists match on a folded key, so " +
+      "\u201cbeatles\u201d finds \u201cThe Beatles\u201d."));
     return;
   }
   view.appendChild(spinner());
+  let r;
   try {
-    const r = await api.search(q);
-    clear(view);
-    const tracks = r.tracks || [];
-    if (!tracks.length) {
-      view.appendChild(emptyState(`Nothing matches “${q}”`));
-      return;
-    }
-    const list = el("div", { class: "rows" });
-    tracks.forEach((t) => list.appendChild(el("div", { class: "row" },
-      el("span", { class: "row-title", text: t.title || t.name }),
-      el("span", { class: "row-meta", text: [t.artist, t.album].filter(Boolean).join(" · ") }))));
-    view.appendChild(el("h3", { class: "section-head", text: `Tracks (${tracks.length})` }));
-    view.appendChild(list);
+    r = await api.search(q);
   } catch (e) {
     if (isAborted(e)) return;
     clear(view);
     view.appendChild(errorState(e));
+    return;
+  }
+  clear(view);
+
+  const albums = r.albums || [];
+  const artists = r.artists || [];
+  const tracks = r.tracks || [];
+  if (!albums.length && !artists.length && !tracks.length) {
+    view.appendChild(emptyState(`Nothing matches \u201c${q}\u201d`,
+      r.tracksAvailable === false
+        ? "Track search is unavailable on this bridge (SQLite built without FTS5), so only " +
+          "albums and artists were searched."
+        : null));
+    return;
+  }
+
+  if (albums.length) {
+    view.appendChild(el("h3", { class: "section-head", text: "Albums" }));
+    const grid = el("div", { class: "grid" });
+    albums.forEach((a) => grid.appendChild(
+      link(`/album/${a.id}`, { class: "tile" },
+        cover(coverURL(a, 500), a.name),
+        el("div", { class: "tile-body" },
+          el("span", { class: "tile-title", text: a.name }),
+          el("span", { class: "tile-sub", text: a.detail || "" })))));
+    view.appendChild(grid);
+  }
+
+  if (artists.length) {
+    view.appendChild(el("h3", { class: "section-head", text: "Artists" }));
+    const list = el("div", { class: "rows" });
+    artists.forEach((a) => list.appendChild(
+      link(`/artist/${a.id}`, { class: "row" },
+        el("span", { class: "row-title", text: a.name }),
+        el("span", { class: "row-meta", text: a.detail || "" }))));
+    view.appendChild(list);
+  }
+
+  if (tracks.length) {
+    view.appendChild(el("h3", { class: "section-head", text: "Tracks" }));
+    const list = el("div", { class: "rows" });
+    tracks.forEach((t) => {
+      const label = el("span", { class: "row-title", text: t.title || t.path });
+      const meta = el("span", { class: "row-meta",
+        text: [t.artist, t.album].filter(Boolean).join(" \u00b7 ") });
+      // A track hit links to its ALBUM: that is where it can be played,
+      // and the album view is what gives it context.
+      list.appendChild(t.albumId
+        ? link(`/album/${t.albumId}`, { class: "row" }, label, meta)
+        : el("div", { class: "row" }, label, meta));
+    });
+    view.appendChild(list);
+  } else if (r.tracksAvailable === false) {
+    view.appendChild(el("p", { class: "muted small",
+      text: "Track search is unavailable on this bridge (SQLite built without FTS5)." }));
   }
 }

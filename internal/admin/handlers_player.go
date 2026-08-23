@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // The web player's read surface.
@@ -609,6 +610,105 @@ func (s *Server) apiPlayerArtistDetail(w http.ResponseWriter, r *http.Request) {
 	if artist.ArtistMBID != "" && s.deps.ArtistImagePath != nil {
 		if _, err := os.Stat(s.deps.ArtistImagePath(artist.ArtistMBID)); err == nil {
 			resp.HasImage = true
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---- Search ----
+
+type playerSearchHitDTO struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Detail         string `json:"detail,omitempty"`
+	ArtworkMBID    string `json:"artworkMBID,omitempty"`
+	ArtworkVersion string `json:"artworkVersion,omitempty"`
+}
+
+type playerSearchTrackDTO struct {
+	Path    string `json:"path"`
+	Title   string `json:"title"`
+	Artist  string `json:"artist,omitempty"`
+	Album   string `json:"album,omitempty"`
+	AlbumID string `json:"albumId,omitempty"`
+}
+
+type playerSearchResponse struct {
+	Query           string                 `json:"query"`
+	Albums          []playerSearchHitDTO   `json:"albums"`
+	Artists         []playerSearchHitDTO   `json:"artists"`
+	Tracks          []playerSearchTrackDTO `json:"tracks"`
+	TracksAvailable bool                   `json:"tracksAvailable"`
+}
+
+// apiPlayerSearch is the player's one search surface, and it is
+// deliberately two-tier.
+//
+// Albums and artists come from the CACHED CATALOG — a linear scan over
+// a few thousand value structs, matched on the sort key so "beatles"
+// finds "The Beatles" and "eric" finds "Éric Serra". Tracks come from
+// FTS5, which is the right tool for a full-text match over 25k rows and
+// already exists.
+//
+// The catalog half is answered server-side rather than by shipping the
+// whole catalog to the browser and filtering there: on a large library
+// that payload is megabytes, and the scan is microseconds either way.
+// The client debounces, so the cost is one request per pause in typing.
+//
+// A bridge whose SQLite lacks FTS5 still gets album and artist results;
+// tracksAvailable tells the UI to say so rather than imply the library
+// has no matching tracks.
+func (s *Server) apiPlayerSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(safeQuery(r).Get("q"))
+	resp := playerSearchResponse{
+		Query:  q,
+		Albums: []playerSearchHitDTO{}, Artists: []playerSearchHitDTO{},
+		Tracks: []playerSearchTrackDTO{},
+	}
+	// Two runes, matching the FTS handler's floor — a one-character
+	// query matches most of a library and helps nobody.
+	if len([]rune(q)) < 2 {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	cat, ok := s.playerCatalog(w, r)
+	if !ok {
+		return
+	}
+	limit := 12
+	if v := safeQuery(r).Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = min(n, 50)
+		}
+	}
+
+	albums, artists := cat.Search(q, limit)
+	for _, h := range albums {
+		d := playerSearchHitDTO{ID: h.ID, Name: h.Name, Detail: h.Detail}
+		if h.Album != nil {
+			d.ArtworkMBID, d.ArtworkVersion = h.Album.ArtworkMBID, h.Album.ArtworkVersion
+		}
+		resp.Albums = append(resp.Albums, d)
+	}
+	for _, h := range artists {
+		resp.Artists = append(resp.Artists, playerSearchHitDTO{ID: h.ID, Name: h.Name, Detail: h.Detail})
+	}
+
+	hits, err := s.deps.Manifest.SearchTracks(r.Context(), q, limit)
+	switch {
+	case errors.Is(err, manifest.ErrSearchUnavailable):
+		// Not an error for this surface: the catalog half still
+		// answered. tracksAvailable=false is the UI's cue.
+	case err != nil:
+		logger.Error("player search: tracks", "err", err)
+	default:
+		resp.TracksAvailable = true
+		for _, h := range hits {
+			t := playerSearchTrackDTO{Path: h.Path, Title: h.Title, Artist: h.Artist, Album: h.Album}
+			if id, ok := cat.AlbumIDForPath(h.Path); ok {
+				t.AlbumID = id
+			}
+			resp.Tracks = append(resp.Tracks, t)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

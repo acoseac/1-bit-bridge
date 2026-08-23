@@ -48,7 +48,7 @@ function boot() {
 
   renderSections();
   wireLinks();
-  wireSearchShortcut();
+  wireSearch();
   window.addEventListener("popstate", () => route());
   window.addEventListener("player:rerender", () => route());
   route();
@@ -112,13 +112,60 @@ function wireLinks() {
   });
 }
 
-function wireSearchShortcut() {
+// wireSearch owns the search field: a debounced filter-as-you-type that
+// keeps the URL in step, plus the "/" shortcut to focus it.
+//
+// Navigation uses replaceState while typing and pushState only on the
+// first entry into /search — otherwise every keystroke would leave a
+// history entry and Back would walk the user backwards through their
+// own query one character at a time.
+function wireSearch() {
+  const form = document.getElementById("player-search-form");
+  const input = document.getElementById("player-search-input");
+  if (!form || !input) return;
+
+  if (location.pathname === "/search") {
+    input.value = new URLSearchParams(location.search).get("q") || "";
+  }
+
+  let timer = null;
+  const commit = () => {
+    const q = input.value.trim();
+    const entering = location.pathname !== "/search";
+    const url = q ? `/search?q=${encodeURIComponent(q)}` : "/search";
+    if (entering) history.pushState({ scrollY: 0 }, "", url);
+    else history.replaceState(history.state || {}, "", url);
+    route();
+  };
+
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    // 250 ms: long enough that a fast typist issues one request per
+    // pause, short enough to feel live. api.js aborts the in-flight
+    // request per keystroke, so a slow response can't overwrite a
+    // newer one.
+    timer = setTimeout(commit, 250);
+  });
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    clearTimeout(timer);
+    commit();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    input.value = "";
+    clearTimeout(timer);
+    input.blur();
+    navigate("/albums");
+  });
+
   document.addEventListener("keydown", (e) => {
     if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     e.preventDefault();
-    navigate("/search");
+    input.focus();
+    input.select();
   });
 }
 

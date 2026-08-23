@@ -1332,6 +1332,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/player/genres", s.apiPlayerGenres)
 	mux.HandleFunc("GET /api/player/composers", s.apiPlayerComposers)
 	mux.HandleFunc("GET /api/player/stats", s.apiPlayerStats)
+	mux.HandleFunc("GET /api/player/search", s.apiPlayerSearch)
 	// Byte routes. No separate HEAD registration is needed — Go's
 	// ServeMux matches a HEAD request against a GET pattern, verified
 	// empirically rather than assumed. The handlers still check the

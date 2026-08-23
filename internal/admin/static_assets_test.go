@@ -155,14 +155,20 @@ func TestAdminArtworkPatternMatchesV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read /v1 artwork source: %v", err)
 	}
+	// Normalise line endings before matching. Go's (?m) makes "$" match
+	// before a "\n", but a CRLF checkout leaves the "\r" INSIDE the
+	// line, so `\)$` never matches and the test fails with "could not
+	// find the pattern" — on Windows only, and invisible on a macOS or
+	// Linux dev box. That is exactly how it shipped red.
+	text := strings.ReplaceAll(string(src), "\r\n", "\n")
 	m := regexp.MustCompile("(?m)^var artworkMBIDPattern = regexp\\.MustCompile\\(`([^`]+)`\\)$").
-		FindSubmatch(src)
+		FindStringSubmatch(text)
 	if m == nil {
 		t.Fatal("could not find artworkMBIDPattern in internal/api/artwork.go — if it " +
 			"was renamed or reshaped, update this test rather than deleting it: it is " +
 			"the only thing keeping the admin twin in lockstep")
 	}
-	v1 := regexp.MustCompile(string(m[1]))
+	v1 := regexp.MustCompile(m[1])
 
 	for _, id := range []string{
 		"0007f5c9-27af-4221-9f1f-9dc3ef224875",

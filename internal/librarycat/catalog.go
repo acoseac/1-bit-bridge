@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -698,4 +699,91 @@ func commonDir(dirs []string) string {
 		}
 	}
 	return strings.Join(common, "/")
+}
+
+// SearchHit is one catalog-side match — an album or an artist.
+type SearchHit struct {
+	ID     string
+	Name   string
+	Detail string // album artist, or "N albums · M tracks" for an artist
+	Album  *Album // set for album hits so the caller can render a cover
+}
+
+// Search matches albums and artists against a query.
+//
+// Runs against the in-memory snapshot, so it is a map-free linear scan
+// over a few thousand entries — microseconds, and no SQL. Tracks are
+// NOT searched here: they live in the FTS5 index, which is the right
+// tool for a 25k-row full-text match and already exists.
+//
+// Matching is on the SORT KEY, not the display name, which is what
+// makes it behave the way a listener expects: the key is
+// diacritic-folded, punctuation-stripped and article-stripped, so
+// "beatles" finds "The Beatles", "eric" finds "Éric Serra", and "aha"
+// finds "a-ha". A display-name substring match would find none of them.
+//
+// Results are ordered by match quality — prefix beats interior — then
+// by the catalog's own order, so repeated searches are stable.
+func (c *Catalog) Search(query string, limit int) (albums, artists []SearchHit) {
+	key := sortKey(query)
+	if key == "" || limit <= 0 {
+		return nil, nil
+	}
+	albums = searchRanked(len(c.Albums), limit, func(i int) (string, bool) {
+		a := c.Albums[i]
+		if strings.Contains(a.SortTitle, key) {
+			return a.SortTitle, true
+		}
+		// An album also matches on its artist, so "krall" surfaces her
+		// records rather than only an album literally titled Krall.
+		return a.SortArtist, strings.Contains(a.SortArtist, key)
+	}, func(i int) SearchHit {
+		a := c.Albums[i]
+		return SearchHit{ID: a.ID, Name: a.Title, Detail: a.AlbumArtist, Album: &c.Albums[i]}
+	}, key)
+	artists = searchRanked(len(c.Artists), limit, func(i int) (string, bool) {
+		return c.Artists[i].SortName, strings.Contains(c.Artists[i].SortName, key)
+	}, func(i int) SearchHit {
+		ar := c.Artists[i]
+		return SearchHit{ID: ar.ID, Name: ar.Name,
+			Detail: plural(ar.AlbumCount, "album") + " · " + plural(ar.TrackCount, "track")}
+	}, key)
+	return albums, artists
+}
+
+// searchRanked collects matches, preferring prefix hits, and stops once
+// it has `limit` of them at the best available rank.
+func searchRanked(n, limit int, match func(int) (string, bool),
+	build func(int) SearchHit, key string) []SearchHit {
+	var prefix, interior []SearchHit
+	for i := 0; i < n; i++ {
+		field, ok := match(i)
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(field, key) {
+			if len(prefix) < limit {
+				prefix = append(prefix, build(i))
+			}
+			continue
+		}
+		if len(interior) < limit {
+			interior = append(interior, build(i))
+		}
+	}
+	out := prefix
+	for _, h := range interior {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
 }

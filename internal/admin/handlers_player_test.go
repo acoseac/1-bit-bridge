@@ -420,3 +420,67 @@ func TestPlayerAudioRefusesSidecarOutsideVariantsDir(t *testing.T) {
 		t.Error("the out-of-tree file's CONTENTS reached the client")
 	}
 }
+
+// TestPlayerSearchIsTwoTier pins the shape: albums and artists from the
+// cached catalog (matched on the folded sort key), tracks from FTS5.
+func TestPlayerSearchIsTwoTier(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	st := srv.deps.Manifest
+	_ = cfg
+	seedPlayerLibrary(t, st)
+
+	// "aardvarks" must find the album via the ARTICLE-STRIPPED key —
+	// the seeded artist is "The Aardvarks", so a display-name substring
+	// match on "aardvarks" would work but a naive prefix match on the
+	// display name would not.
+	w, body := playerGet(t, srv, "/api/player/search?q=aardvarks")
+	if w.Code != http.StatusOK {
+		t.Fatalf("search: status %d body %s", w.Code, w.Body.String())
+	}
+	albums, _ := body["albums"].([]any)
+	artists, _ := body["artists"].([]any)
+	if len(albums) == 0 {
+		t.Errorf("no album hits for 'aardvarks': %s", w.Body.String())
+	}
+	if len(artists) == 0 {
+		t.Errorf("no artist hits for 'aardvarks': %s", w.Body.String())
+	}
+
+	// A one-character query is refused before any work happens.
+	_, short := playerGet(t, srv, "/api/player/search?q=a")
+	for _, k := range []string{"albums", "artists", "tracks"} {
+		if v, _ := short[k].([]any); len(v) != 0 {
+			t.Errorf("single-character query returned %d %s", len(v), k)
+		}
+	}
+
+	// Empty arrays, never null — the client iterates them directly.
+	raw := w.Body.String()
+	for _, k := range []string{`"albums":`, `"artists":`, `"tracks":`} {
+		if strings.Contains(raw, k+"null") {
+			t.Errorf("%s serialised as null; the client iterates these", k)
+		}
+	}
+}
+
+// TestPlayerSearchTrackHitsCarryTheirAlbum — a track hit links to its
+// album, because that is where it can actually be played.
+func TestPlayerSearchTrackHitsCarryTheirAlbum(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedPlayerLibrary(t, srv.deps.Manifest)
+
+	_, body := playerGet(t, srv, "/api/player/search?q=three")
+	tracks, _ := body["tracks"].([]any)
+	if len(tracks) == 0 {
+		// FTS5 may be absent in this build; that is a supported state
+		// and the response says so rather than implying no matches.
+		if avail, _ := body["tracksAvailable"].(bool); avail {
+			t.Fatalf("FTS5 is available but 'three' matched no tracks: %s", body)
+		}
+		t.Skip("FTS5 unavailable in this build")
+	}
+	first, _ := tracks[0].(map[string]any)
+	if first["albumId"] == nil || first["albumId"] == "" {
+		t.Errorf("track hit carries no albumId, so it cannot link anywhere playable: %v", first)
+	}
+}

@@ -238,3 +238,14 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   .track { grid-template-columns: 2rem 1fr auto; }
   .track-meta, .track-dl { display: none; }
 }
+
+/* Search field. Sits above the toolbar so it is present in every
+ * section, not only on the search view — the whole point of a library
+ * search is that you reach for it from wherever you are. */
+.player-search { margin-bottom: var(--space-4); }
+.player-search input {
+  width: 100%; max-width: 460px; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  background: var(--bg-panel); color: var(--fg); font: inherit; font-size: 0.9rem;
+}
+.player-search input:focus-visible { outline: none; box-shadow: var(--glow); border-color: var(--accent); }

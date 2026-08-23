@@ -152,13 +152,19 @@ func TestID3GenreTableMatchesDhowden(t *testing.T) {
 	if err != nil {
 		t.Skipf("read dhowden id3v2.go (module cache may be cold): %v", err)
 	}
-	block := regexp.MustCompile(`(?s)var id3v2Genres = \[\.\.\.\]string\{(.*?)\n\}`).FindSubmatch(src)
+	// CRLF-normalised for the same reason the admin artwork-parity test
+	// is: an anchored source match against a CRLF file silently finds
+	// nothing. The module cache is LF today, but nothing guarantees it
+	// and the failure would look like "upstream reshaped the table".
+	srcText := strings.ReplaceAll(string(src), "\r\n", "\n")
+	block := regexp.MustCompile(`(?s)var id3v2Genres = \[\.\.\.\]string\{(.*?)\n\}`).
+		FindStringSubmatch(srcText)
 	if block == nil {
 		t.Fatal("could not locate id3v2Genres in dhowden/tag — if upstream reshaped it, " +
 			"update this test rather than deleting it: it is the only thing keeping " +
 			"our copy honest")
 	}
-	lits := regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`).FindAllStringSubmatch(string(block[1]), -1)
+	lits := regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`).FindAllStringSubmatch(block[1], -1)
 	if len(lits) != len(id3GenreTable) {
 		t.Fatalf("dhowden table has %d entries, ours has %d", len(lits), len(id3GenreTable))
 	}
