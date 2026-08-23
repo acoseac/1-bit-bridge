@@ -298,6 +298,12 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 	// atlas / mDNS / Tailscale fields, so the General tab rendered them blank
 	// and a Save would clobber them). Handler-specific sox hints layered below.
 	data := settingsResponseFromConfig(cfg, s.deps.IsSupervised)
+	// Live update status for the Updates panel (moved here from Stats).
+	// Same nil-safe accessor the dashboard used; a bridge with no
+	// updater wired renders the panel's empty state rather than
+	// failing.
+	upd := s.dashboardUpdateStatus()
+	data.Update = &upd
 	// v1.2 Audio quality section: pre-compute the boolean +
 	// install hint so the template doesn't need a `deref`
 	// helper or a runtime.GOOS switch. The hint is OS-aware

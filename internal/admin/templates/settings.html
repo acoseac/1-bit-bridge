@@ -620,6 +620,76 @@
           clamped to a 1 h floor at runtime.
         </small>
       </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Updates</h2>
+        <span class="panel-actions" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">
+          {{if and .Data.Update.UpdateAvailable .Data.Update.CanInstall}}
+            <button type="button" id="update-install" class="btn btn-primary" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">Install &amp; {{if .Data.IsSupervised}}restart{{else}}stop{{end}}</button>
+          {{end}}
+          <button type="button" id="update-check" class="btn">Check now</button>
+          {{/* Rollback: revealed by applyUpdates only when a .bak of the
+               previous binary is actually on disk. POST /api/updates/rollback
+               shipped with no caller, so a bad update was undoable only by
+               curl — but a button offered with nothing staged would turn a
+               recovery into an error, hence the CanRollback gate. */}}
+          <button type="button" id="update-rollback" class="btn" hidden>Roll back</button>
+        </span>
+      </div>
+      <dl>
+        <dt>Current version</dt>
+        <dd><code id="update-current">{{.Data.Update.CurrentVersion}}</code> (channel <code>{{.Data.Update.Channel}}</code>)</dd>
+        <dt>Status</dt>
+        <dd id="update-status">
+          {{if .Data.Update.UpdateAvailable}}
+            <span class="badge running">update available</span>
+            <span>· <code id="update-latest">{{.Data.Update.LatestVersion}}</code></span>
+            {{if .Data.Update.ReleaseNotesURL}}
+              <a id="update-notes" href="{{.Data.Update.ReleaseNotesURL}}" target="_blank" rel="noopener">release notes</a>
+            {{end}}
+          {{else if .Data.Update.LatestVersion}}
+            <span class="badge idle">up to date</span>
+            <span>· latest <code id="update-latest">{{.Data.Update.LatestVersion}}</code></span>
+            <a id="update-notes" {{if .Data.Update.ReleaseNotesURL}}href="{{.Data.Update.ReleaseNotesURL}}"{{end}} target="_blank" rel="noopener" hidden aria-hidden="true"></a>
+          {{else if .Data.Update.LastError}}
+            <span class="badge idle">check failed</span>
+            <code id="update-latest" hidden></code>
+            <a id="update-notes" hidden aria-hidden="true"></a>
+          {{else if .Data.Update.LastCheck.IsZero}}
+            {{/* No poll has fired yet (bridge just started, default
+                 check interval is 6h). Distinguish from the
+                 "in-flight check" case below — pre-fix the operator
+                 saw "checking…" persist for hours, which mis-suggested
+                 the check was hung. */}}
+            <span class="badge idle">scheduled</span>
+            <code id="update-latest" hidden></code>
+            <a id="update-notes" hidden aria-hidden="true"></a>
+          {{else}}
+            <span class="badge idle">checking…</span>
+            <code id="update-latest" hidden></code>
+            <a id="update-notes" hidden aria-hidden="true"></a>
+          {{end}}
+        </dd>
+        <dt>Last check</dt>
+        <dd id="update-last-check">{{if .Data.Update.LastCheck.IsZero}}never{{else}}{{timeAgo .Data.Update.LastCheck}}{{end}}</dd>
+        {{if .Data.Update.LastError}}
+        <dt>Last error</dt>
+        <dd id="update-last-error"><code>{{.Data.Update.LastError}}</code></dd>
+        {{else}}
+        <dt hidden>Last error</dt>
+        <dd id="update-last-error" hidden></dd>
+        {{end}}
+        {{if .Data.Update.DeferredReason}}
+        <dt>Held update</dt>
+        <dd id="update-deferred"><span class="badge running">deferred</span> {{.Data.Update.DeferredReason}}</dd>
+        {{else}}
+        <dt hidden>Held update</dt>
+        <dd id="update-deferred" hidden></dd>
+        {{end}}
+      </dl>
+      <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
+    </div>
     </div>
 
     <div id="settings-panel-backups" class="tab-pane" data-tab="backups">
