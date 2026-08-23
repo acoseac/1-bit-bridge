@@ -21,9 +21,10 @@ func (s stubUpdater) Install(context.Context, bool) (UpdateStatus, error) {
 func (s stubUpdater) Rollback(bool) error { return nil }
 
 // dtBeforeDD matches a <dt> immediately followed by the <dd> carrying the
-// given id, allowing only whitespace between them.
+// given id, allowing only whitespace between them. Group 1 is the <dt>'s
+// opening tag, so a caller can inspect the label's own attributes.
 func dtBeforeDD(id string) *regexp.Regexp {
-	return regexp.MustCompile(`<dt[^>]*>[^<]*</dt>\s*<dd id="` + regexp.QuoteMeta(id) + `"`)
+	return regexp.MustCompile(`(<dt[^>]*>)[^<]*</dt>\s*<dd id="` + regexp.QuoteMeta(id) + `"`)
 }
 
 // TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency pins the shape the
@@ -137,17 +138,32 @@ func assertUpdateRow(t *testing.T, body, id string, wantHidden bool) {
 			"and a repeat also trips SonarCloud Web:S7930", attr, n)
 		return
 	}
-	if !dtBeforeDD(id).MatchString(body) {
+
+	m := dtBeforeDD(id).FindStringSubmatch(body)
+	if m == nil {
 		t.Errorf("no <dt> immediately precedes <dd %s> — app.js hides and reveals "+
 			"the label via previousElementSibling, so an element slipped between "+
 			"them leaves the label stranded", attr)
+		return
 	}
 
-	// The `hidden` attribute has to track the data, or the empty state paints
-	// a blank labelled row and the populated state hides a real error.
-	tag := body[strings.Index(body, attr):]
-	tag = tag[:strings.Index(tag, ">")]
-	if got := strings.Contains(tag, "hidden"); got != wantHidden {
-		t.Errorf("<dd %s> hidden=%v, want %v (rendered tag: %q)", attr, got, wantHidden, tag)
+	// Both halves of the row have to track the data, and independently:
+	// the template sets `hidden` on the dt and the dd separately, so a
+	// change that hides only the value leaves an empty label sitting in the
+	// list. Checking the dd alone accepts that — verified by dropping the
+	// dt's condition, which passed until this assertion existed.
+	dd := body[strings.Index(body, attr):]
+	dd = dd[:strings.Index(dd, ">")]
+	for _, part := range []struct {
+		what string
+		tag  string
+	}{
+		{"<dt> label", m[1]},
+		{"<dd> value", dd},
+	} {
+		if got := strings.Contains(part.tag, "hidden"); got != wantHidden {
+			t.Errorf("%s of row %s: hidden=%v, want %v (rendered tag: %q)",
+				part.what, attr, got, wantHidden, part.tag)
+		}
 	}
 }
