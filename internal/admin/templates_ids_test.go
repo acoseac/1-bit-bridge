@@ -19,7 +19,27 @@ import (
 // occurrences sit in mutually exclusive {{if}}/{{else}} arms, and it does not
 // treat {{/* ... */}} as a comment — to an HTML parser that is ordinary text,
 // so markup quoted inside one is parsed as a real element.
-var idAttrRe = regexp.MustCompile(`\bid="([a-zA-Z0-9_:.-]+)"`)
+//
+// Both quote styles are accepted. Every id in the tree today is
+// double-quoted, so the single-quoted arm matches nothing right now — it is
+// there because the analyser this mirrors parses HTML properly and would
+// catch `id=\'x\'`, and a guard that misses what the gate catches is worse
+// than no guard: it reports green and the build still fails.
+var idAttrRe = regexp.MustCompile(`\bid\s*=\s*(?:"([a-zA-Z0-9_:.-]+)"|'([a-zA-Z0-9_:.-]+)')`)
+
+// idsIn returns every id attribute value in src, in order.
+func idsIn(src string) []string {
+	var out []string
+	for _, m := range idAttrRe.FindAllStringSubmatch(src, -1) {
+		// Exactly one of the two quote-style groups matches.
+		if m[1] != "" {
+			out = append(out, m[1])
+		} else {
+			out = append(out, m[2])
+		}
+	}
+	return out
+}
 
 // TestNoTemplateRepeatsAnID is the local mirror of SonarCloud's Web:S7930
 // ("Duplicate id found"), which is a RELIABILITY-rated bug and therefore fails
@@ -58,8 +78,8 @@ func TestNoTemplateRepeatsAnID(t *testing.T) {
 			t.Fatalf("read %s: %v", name, err)
 		}
 		seen := map[string]int{}
-		for _, m := range idAttrRe.FindAllStringSubmatch(string(src), -1) {
-			seen[m[1]]++
+		for _, id := range idsIn(string(src)) {
+			seen[id]++
 		}
 		var dups []string
 		for id, n := range seen {
@@ -114,8 +134,8 @@ func TestRenderedPagesHaveNoDuplicateIDs(t *testing.T) {
 			continue
 		}
 		seen := map[string]int{}
-		for _, m := range idAttrRe.FindAllStringSubmatch(string(body), -1) {
-			seen[m[1]]++
+		for _, id := range idsIn(string(body)) {
+			seen[id]++
 		}
 		var dups []string
 		for id, n := range seen {

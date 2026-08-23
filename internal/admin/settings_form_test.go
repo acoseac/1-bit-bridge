@@ -118,9 +118,38 @@ func TestPrimaryNavHighlightsEveryEntry(t *testing.T) {
 				"aria-current, so it renders unhighlighted and is announced to a screen "+
 				"reader as an ordinary link", tc.path, tc.tab)
 		}
-		// Exactly one entry may be current.
-		if n := strings.Count(body, `aria-current="page"`); n < 1 {
-			t.Errorf("GET %s: no nav entry marked current", tc.path)
+		// Exactly one PRIMARY nav entry may be current. The count has
+		// to be scoped to #primary-nav: the Server section also renders
+		// a .subnav whose active page carries its own aria-current, so
+		// every operator page legitimately yields two document-wide and
+		// a bare count of the whole body can only ever assert ">= 1".
+		// That weaker form would pass while two primary entries were
+		// lit at once, which is the actual defect worth catching —
+		// aria-current is what the CSS keys on AND what a screen reader
+		// announces, so two of them is both a visual and an a11y bug.
+		nav := primaryNavMarkup(t, tc.path, body)
+		if n := strings.Count(nav, `aria-current="page"`); n != 1 {
+			t.Errorf("GET %s: %d primary nav entries marked current, want exactly 1\n%s",
+				tc.path, n, nav)
 		}
 	}
+}
+
+// primaryNavMarkup returns just the <nav id="primary-nav"> element, so a
+// count of aria-current inside it is not confounded by the Server section's
+// .subnav, which marks its own active page the same way.
+func primaryNavMarkup(t *testing.T, path, body string) string {
+	t.Helper()
+	const open = `<nav id="primary-nav">`
+	i := strings.Index(body, open)
+	if i < 0 {
+		t.Fatalf("GET %s: no %s in the rendered page — layout.html moved and this "+
+			"assertion would otherwise silently scope to nothing", path, open)
+	}
+	rest := body[i:]
+	j := strings.Index(rest, "</nav>")
+	if j < 0 {
+		t.Fatalf("GET %s: primary nav is unclosed", path)
+	}
+	return rest[:j]
 }

@@ -84,28 +84,40 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 			body := string(raw)
 
 			for _, id := range []string{"update-last-error", "update-deferred"} {
-				attr := `id="` + id + `"`
-				if n := strings.Count(body, attr); n != 1 {
-					t.Errorf("%s appears %d times in the rendered page, want exactly 1 — "+
-						"app.js resolves it with getElementById, which sees only the first, "+
-						"and a repeat also trips SonarCloud Web:S7930", attr, n)
-					continue
-				}
-				if !dtBeforeDD(id).MatchString(body) {
-					t.Errorf("no <dt> immediately precedes <dd %s> — app.js hides and reveals "+
-						"the label via previousElementSibling, so an element slipped between "+
-						"them leaves the label stranded", attr)
-				}
-
-				// The `hidden` attribute has to track the data, or the empty
-				// state paints a blank labelled row and the populated state
-				// hides a real error.
-				dd := body[strings.Index(body, attr):]
-				dd = dd[:strings.Index(dd, ">")]
-				if got := strings.Contains(dd, "hidden"); got != tc.wantHidden {
-					t.Errorf("<dd %s> hidden=%v, want %v (rendered tag: %q)", attr, got, tc.wantHidden, dd)
-				}
+				assertUpdateRow(t, body, id, tc.wantHidden)
 			}
 		})
+	}
+}
+
+// assertUpdateRow checks one conditional Update row in a rendered page.
+//
+// Extracted from the table body rather than inlined: with two ids x three
+// assertions x a two-case table the loop measured cognitive complexity 16
+// against SonarCloud's limit of 15. That is a smell rather than a gate
+// failure on its own, but it is the kind that tips a gate later, when the
+// next edit to this file adds one more branch.
+func assertUpdateRow(t *testing.T, body, id string, wantHidden bool) {
+	t.Helper()
+
+	attr := `id="` + id + `"`
+	if n := strings.Count(body, attr); n != 1 {
+		t.Errorf("%s appears %d times in the rendered page, want exactly 1 — "+
+			"app.js resolves it with getElementById, which sees only the first, "+
+			"and a repeat also trips SonarCloud Web:S7930", attr, n)
+		return
+	}
+	if !dtBeforeDD(id).MatchString(body) {
+		t.Errorf("no <dt> immediately precedes <dd %s> — app.js hides and reveals "+
+			"the label via previousElementSibling, so an element slipped between "+
+			"them leaves the label stranded", attr)
+	}
+
+	// The `hidden` attribute has to track the data, or the empty state paints
+	// a blank labelled row and the populated state hides a real error.
+	tag := body[strings.Index(body, attr):]
+	tag = tag[:strings.Index(tag, ">")]
+	if got := strings.Contains(tag, "hidden"); got != wantHidden {
+		t.Errorf("<dd %s> hidden=%v, want %v (rendered tag: %q)", attr, got, wantHidden, tag)
 	}
 }
