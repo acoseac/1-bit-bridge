@@ -620,6 +620,96 @@
           clamped to a 1 h floor at runtime.
         </small>
       </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Updates</h2>
+        <span class="panel-actions" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">
+          {{if and .Data.Update.UpdateAvailable .Data.Update.CanInstall}}
+            <button type="button" id="update-install" class="btn btn-primary" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">Install &amp; {{if .Data.IsSupervised}}restart{{else}}stop{{end}}</button>
+          {{end}}
+          <button type="button" id="update-check" class="btn">Check now</button>
+          {{/* Rollback: revealed by applyUpdates only when a .bak of the
+               previous binary is actually on disk. POST /api/updates/rollback
+               shipped with no caller, so a bad update was undoable only by
+               curl — but a button offered with nothing staged would turn a
+               recovery into an error, hence the CanRollback gate. */}}
+          <button type="button" id="update-rollback" class="btn" hidden>Roll back</button>
+        </span>
+      </div>
+      <dl>
+        <dt>Current version</dt>
+        <dd><code id="update-current">{{.Data.Update.CurrentVersion}}</code> (channel <code>{{.Data.Update.Channel}}</code>)</dd>
+        <dt>Status</dt>
+        <dd id="update-status">
+          {{- /* First paint mirrors, branch for branch, exactly what
+              app.js renderUpdateTile emits — because the first
+              `updates` SSE frame REPLACES this element's innerHTML
+              wholesale. Anything here that app.js does not also emit
+              lives for one frame and then vanishes.
+
+              That is why the per-branch update-latest id and the
+              hidden release-notes anchor placeholders are gone. They
+              existed in only one of the two renderers, so they were
+              vestigial after the first frame; and being repeated across
+              five mutually-exclusive branches they read to any static
+              HTML analyser as duplicate ids (Web:S7930), which cannot
+              see through a Go template's exclusivity. Those hidden
+              anchors also carried aria-hidden while staying focusable —
+              a real a11y defect, since a keyboard user could tab to a
+              link no screen reader would announce. Not emitting the
+              element is the correct primitive.
+
+              Describing that markup in prose rather than quoting it is
+              deliberate too: a Go template comment is ordinary text to
+              an HTML parser, so a literal tag written inside one is
+              parsed as a real element and its id counted. */ -}}
+          {{if .Data.Update.UpdateAvailable}}
+            <span class="badge running">update available</span>
+            <span>· <code>{{.Data.Update.LatestVersion}}</code></span>
+            {{if .Data.Update.ReleaseNotesURL}}
+              <a id="update-notes" href="{{.Data.Update.ReleaseNotesURL}}" target="_blank" rel="noopener">release notes</a>
+            {{end}}
+          {{else if .Data.Update.LatestVersion}}
+            <span class="badge idle">up to date</span>
+            <span>· latest <code>{{.Data.Update.LatestVersion}}</code></span>
+          {{else if .Data.Update.LastError}}
+            <span class="badge idle">check failed</span>
+          {{else if .Data.Update.LastCheck.IsZero}}
+            {{/* No poll has fired yet (bridge just started, default
+                 check interval is 6h). Distinguish from the
+                 "in-flight check" case below — pre-fix the operator
+                 saw "checking…" persist for hours, which mis-suggested
+                 the check was hung. */}}
+            <span class="badge idle">scheduled</span>
+          {{else}}
+            <span class="badge idle">checking…</span>
+          {{end}}
+        </dd>
+        <dt>Last check</dt>
+        <dd id="update-last-check">{{if .Data.Update.LastCheck.IsZero}}never{{else}}{{timeAgo .Data.Update.LastCheck}}{{end}}</dd>
+        {{- /* These two rows are toggled in place by app.js, which
+               resolves each dd by id and then hides or reveals it
+               together with its previousElementSibling dt. So both
+               must exist on every first paint, and each id must be
+               emitted exactly once — an if/else that repeats the
+               element in both arms reads to a static HTML analyser as
+               a duplicate id (Web:S7930), which cannot see through a
+               Go template's exclusivity. The conditional-attribute
+               form below is the one layout.html already uses for
+               aria-current.
+
+               Keep each dt immediately before its dd: app.js reaches
+               it through previousElementSibling. Template comments and
+               whitespace are text, not elements, so they do not break
+               that adjacency. */ -}}
+        <dt{{if not .Data.Update.LastError}} hidden{{end}}>Last error</dt>
+        <dd id="update-last-error"{{if not .Data.Update.LastError}} hidden{{end}}>{{if .Data.Update.LastError}}<code>{{.Data.Update.LastError}}</code>{{end}}</dd>
+        <dt{{if not .Data.Update.DeferredReason}} hidden{{end}}>Held update</dt>
+        <dd id="update-deferred"{{if not .Data.Update.DeferredReason}} hidden{{end}}>{{if .Data.Update.DeferredReason}}<span class="badge running">deferred</span> {{.Data.Update.DeferredReason}}{{end}}</dd>
+      </dl>
+      <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
+    </div>
     </div>
 
     <div id="settings-panel-backups" class="tab-pane" data-tab="backups">
@@ -703,7 +793,7 @@
     </div><!-- /.settings-layout -->
 
     {{/*
-      id="restart-actions" is the anchor the UPnP page's "Restart
+      The restart-actions id is the anchor the UPnP page's "Restart
       required" banner links to. It used to link to `#danger`, which
       exists in no template — the operator landed on Settings with
       nothing highlighted and no visible Restart button. `#restart-btn`

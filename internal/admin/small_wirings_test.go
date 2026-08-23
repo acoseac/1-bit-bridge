@@ -46,17 +46,21 @@ func TestRollbackButtonIsGatedOnCanRollback(t *testing.T) {
 	if !strings.Contains(string(js), "canRollback") {
 		t.Error("app.js never reads canRollback; the Roll back button would show with nothing to roll back to")
 	}
-	html, err := templateFS.ReadFile("templates/dashboard.html")
+	// The Updates panel moved from the dashboard to Settings when the
+	// dashboard became Stats: it is an ACTION surface (Check / Install /
+	// Roll back), not a metric, and its IsSupervised caveat only makes
+	// sense next to the auto-install toggle it qualifies.
+	html, err := templateFS.ReadFile("templates/settings.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(html), `id="update-rollback"`) {
-		t.Error("dashboard.html has no rollback button for app.js to reveal")
+		t.Error("settings.html has no rollback button for app.js to reveal")
 	}
 	// Hidden at first paint: the server-rendered template cannot know
 	// whether a .bak exists, so the default must be invisible and the
 	// status frame must be what reveals it.
 	if !strings.Contains(string(html), `id="update-rollback" class="btn" hidden`) {
-		t.Error("the rollback button is not hidden by default; it would flash on every dashboard load")
+		t.Error("the rollback button is not hidden by default; it would flash on every Settings load")
 	}
 }

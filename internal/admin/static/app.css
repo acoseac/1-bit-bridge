@@ -365,23 +365,20 @@ header nav a:hover { color: var(--fg); }
 /* Active-tab indicator is a 2px gradient bar under the link instead
  * of a plain background, so the nav reads as a set of tuning-panel
  * tabs rather than a row of buttons. */
-/* Highlight the top-level nav entry by SECTION (body[data-section]),
- * so Library stays lit across Browse/Inspector/Jobs and Listening across
- * Playlists/Smart mixes. Each link's data-tab IS its section key. */
-body[data-section="dashboard"] #primary-nav a[data-tab="dashboard"],
-body[data-section="library"] #primary-nav a[data-tab="library"],
-body[data-section="devices"] #primary-nav a[data-tab="devices"],
-body[data-section="upnp"] #primary-nav a[data-tab="upnp"],
-body[data-section="listening"] #primary-nav a[data-tab="listening"],
-body[data-section="settings"] #primary-nav a[data-tab="settings"] {
+/* Highlight the active top-level nav entry.
+ *
+ * Keyed on aria-current, which layout.html emits server-side from
+ * ActiveSection — so the same attribute drives the paint AND the screen
+ * reader announcement, and they cannot disagree. This replaced a pair
+ * of hand-enumerated selector lists (one per nav entry, twice) that
+ * grew by two selectors every time a nav entry was added and silently
+ * left a new entry unhighlighted until someone remembered. The .subnav
+ * in this file already worked this way; now there is one convention
+ * rather than two. */
+#primary-nav a[aria-current="page"] {
   color: var(--accent);
 }
-body[data-section="dashboard"] #primary-nav a[data-tab="dashboard"]::after,
-body[data-section="library"] #primary-nav a[data-tab="library"]::after,
-body[data-section="devices"] #primary-nav a[data-tab="devices"]::after,
-body[data-section="upnp"] #primary-nav a[data-tab="upnp"]::after,
-body[data-section="listening"] #primary-nav a[data-tab="listening"]::after,
-body[data-section="settings"] #primary-nav a[data-tab="settings"]::after {
+#primary-nav a[aria-current="page"]::after {
   content: "";
   position: absolute;
   left: 12px;

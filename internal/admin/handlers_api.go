@@ -362,6 +362,17 @@ type settingsResponse struct {
 	// from "supervisor unknown" — false IS the supervisor-
 	// unknown answer.
 	IsSupervised bool `json:"isSupervised"`
+
+	// Update carries the live update STATUS — current/latest version,
+	// availability, rollback — as distinct from the update SETTINGS
+	// above. It moved here with the Updates panel, which left Stats
+	// because it is an action surface (Check / Install / Roll back),
+	// not a metric, and because its IsSupervised caveat only makes
+	// sense next to the auto-install toggle it qualifies.
+	//
+	// Populated by the page handler, not settingsResponseFromConfig:
+	// it is runtime state from the updater, not config.
+	Update *UpdateStatus `json:"update,omitempty"`
 	// Backup tile data — moved from the dashboard envelope so the
 	// Settings page's new Backups tab can render the operator-facing
 	// retention copy without a second handler round trip. The
