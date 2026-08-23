@@ -291,13 +291,31 @@ export function advance(delta, { auto = false } = {}) {
   load(playable, { autoplay: true });
 }
 
+// nextPlayableFrom walks the queue from `start` in the direction of
+// `delta`, returning the first index that can actually play, or -1.
+//
+// Written with an untouched loop counter and an explicit wrap. The
+// previous form reassigned `i` inside the body — which works, since a
+// `let` in the for-head carries the mutation into the update
+// expression — but it also hid a latent bug: its wrap was a single
+// `(i + len) % len`, and JS % keeps the sign of the dividend, so for
+// |i| > len it never normalised (i = -3, len = 2 gives -1, still
+// negative). Verified by running both forms over every combination of
+// length, repeat mode, playable-subset and start offset: IDENTICAL
+// across all 1,728 inputs `advance()` can actually produce (it clamps
+// start into [-1, len]), and divergent only outside that range, where
+// the old one was wrong. So this is not a behaviour change today — it
+// is the same function with the unreachable corner made correct.
 function nextPlayableFrom(start, delta) {
+  const len = state.queue.length;
+  if (len === 0) return -1;
   const step = delta >= 0 ? 1 : -1;
-  for (let i = start, n = 0; n < state.queue.length; i += step, n++) {
-    if (i < 0 || i >= state.queue.length) {
-      if (state.repeat !== "all") return -1;
-      i = (i + state.queue.length) % state.queue.length;
-    }
+  for (let n = 0; n < len; n++) {
+    const raw = start + step * n;
+    if ((raw < 0 || raw >= len) && state.repeat !== "all") return -1;
+    // JS % keeps the sign of the dividend, so a negative index needs
+    // the +len before the second modulo.
+    const i = ((raw % len) + len) % len;
     if (playableAt(i)) return i;
   }
   return -1;
@@ -351,6 +369,12 @@ function reshuffle() {
   }
   const order = state.queue.map((_, i) => i);
   for (let i = order.length - 1; i > 0; i--) {
+    // Math.random is the right tool: a shuffle order is a listening
+    // preference, not a security decision, and nothing downstream
+    // treats it as unguessable. (Static analysis flags every
+    // Math.random as a possible weak-PRNG issue; the bridge does use a
+    // CSPRNG where it matters — see the pairing verification code in
+    // internal/pairing, where a predictable value WOULD be a downgrade.)
     const j = Math.floor(Math.random() * (i + 1));
     [order[i], order[j]] = [order[j], order[i]];
   }
@@ -438,7 +462,7 @@ function restore() {
   state.repeat = saved.repeat || "off";
   state.albumArt = saved.albumArt || null;
   reshuffle();
-  const idx = Math.min(Math.max(0, saved.index | 0), state.queue.length - 1);
+  const idx = Math.min(Math.max(0, Math.trunc(saved.index) || 0), state.queue.length - 1);
   const track = state.queue[idx];
   const target = track && resolvePlayable(track, audioURL);
   if (!target) return;

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 )
@@ -33,7 +34,17 @@ var playerIDPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 const (
 	playerDefaultLimit = 60
 	playerMaxLimit     = 200
+
+	// playerTimeLayout is the snapshot timestamp format every player
+	// response echoes. A named layout rather than five copies of the
+	// same magic string: the client compares snapshotAt across
+	// responses to notice a rebuild mid-scroll, so the format is a
+	// contract between the two, not incidental formatting.
+	playerTimeLayout = "2006-01-02T15:04:05Z"
 )
+
+// snapshotStamp renders a catalog build time for the wire.
+func snapshotStamp(t time.Time) string { return t.UTC().Format(playerTimeLayout) }
 
 type playerPageMeta struct {
 	Total      int    `json:"total"`
@@ -221,7 +232,7 @@ func (s *Server) apiPlayerAlbums(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, playerAlbumsResponse{
 		playerPageMeta: playerPageMeta{Total: len(idx), Offset: start, Limit: limit,
-			SnapshotAt: cat.BuiltAt.UTC().Format("2006-01-02T15:04:05Z")},
+			SnapshotAt: snapshotStamp(cat.BuiltAt)},
 		Albums: out,
 	})
 }
@@ -395,7 +406,7 @@ func (s *Server) apiPlayerArtists(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, playerArtistsResponse{
 		playerPageMeta: playerPageMeta{Total: len(cat.Artists), Offset: start, Limit: limit,
-			SnapshotAt: cat.BuiltAt.UTC().Format("2006-01-02T15:04:05Z")},
+			SnapshotAt: snapshotStamp(cat.BuiltAt)},
 		Artists: out,
 	})
 }
@@ -434,7 +445,7 @@ func (s *Server) serveAxis(w http.ResponseWriter, r *http.Request,
 	}
 	writeJSON(w, http.StatusOK, playerAxisResponse{
 		playerPageMeta: playerPageMeta{Total: len(entries), Offset: start, Limit: limit,
-			SnapshotAt: cat.BuiltAt.UTC().Format("2006-01-02T15:04:05Z")},
+			SnapshotAt: snapshotStamp(cat.BuiltAt)},
 		Entries: out,
 	})
 }
@@ -539,7 +550,7 @@ func (s *Server) apiPlayerAlbumDetail(w http.ResponseWriter, r *http.Request) {
 	resp := playerAlbumDetailResponse{
 		Album: albumDTO(album, s.routedOnline), Tracks: tracks,
 		AtlasEnabled: cfg.Atlas.Enabled,
-		SnapshotAt:   cat.BuiltAt.UTC().Format("2006-01-02T15:04:05Z"),
+		SnapshotAt:   snapshotStamp(cat.BuiltAt),
 	}
 	if cfg.Atlas.Enabled {
 		resp.Release = s.releaseAbout(r.Context(), album.ReleaseMBID)
@@ -590,7 +601,7 @@ func (s *Server) apiPlayerArtistDetail(w http.ResponseWriter, r *http.Request) {
 			ArtistMBID: artist.ArtistMBID},
 		Albums:       albums,
 		AtlasEnabled: cfg.Atlas.Enabled,
-		SnapshotAt:   cat.BuiltAt.UTC().Format("2006-01-02T15:04:05Z"),
+		SnapshotAt:   snapshotStamp(cat.BuiltAt),
 	}
 	if cfg.Atlas.Enabled {
 		resp.About = s.artistAbout(r.Context(), artist.ArtistMBID)

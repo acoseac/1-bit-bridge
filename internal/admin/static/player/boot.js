@@ -49,9 +49,9 @@ function boot() {
   renderSections();
   wireLinks();
   wireSearchShortcut();
-  window.addEventListener("popstate", () => route({ push: false }));
-  window.addEventListener("player:rerender", () => route({ push: false }));
-  route({ push: false });
+  window.addEventListener("popstate", () => route());
+  window.addEventListener("player:rerender", () => route());
+  route();
 }
 
 function readSeed() {
@@ -94,7 +94,7 @@ function wireLinks() {
     e.preventDefault();
     if (url.href === location.href) return;
     history.pushState({ scrollY: 0 }, "", url);
-    route({ push: true });
+    route();
   });
 
   // Operator links leave the player, which is a full page load and
@@ -124,7 +124,21 @@ function wireSearchShortcut() {
 
 export function navigate(href) {
   history.pushState({ scrollY: 0 }, "", href);
-  route({ push: true });
+  route();
+}
+
+// splitPath turns a pathname into { path, head, rest } — trailing
+// slashes trimmed, leading slash dropped, split at the first remaining
+// separator. "/album/abc" → head "album", rest "abc".
+function splitPath(pathname) {
+  let end = pathname.length;
+  while (end > 1 && pathname.charCodeAt(end - 1) === 47 /* "/" */) end--;
+  const path = end > 0 ? pathname.slice(0, end) : "/";
+  const body = path.startsWith("/") ? path.slice(1) : path;
+  const slash = body.indexOf("/");
+  return slash === -1
+    ? { path, head: body, rest: "" }
+    : { path, head: body.slice(0, slash), rest: body.slice(slash + 1) };
 }
 
 function route() {
@@ -133,9 +147,12 @@ function route() {
   if (!view) return;
 
   generation += 1;
-  const path = location.pathname.replace(/\/+$/, "") || "/";
+  // Split the path with string ops rather than a regex. Both patterns
+  // this replaced were flagged for super-linear backtracking, and while
+  // a pathname is short enough that it never mattered, the manual form
+  // is linear and easier to read than /^\/([^/]*)\/?(.*)$/ was.
+  const { path, head, rest } = splitPath(location.pathname);
   const params = new URLSearchParams(location.search);
-  const [, head = "", rest = ""] = /^\/([^/]*)\/?(.*)$/.exec(path) || [];
   const section = path === "/" ? "albums" : head;
 
   for (const a of document.querySelectorAll(".player-section")) {

@@ -353,3 +353,70 @@ func TestPlayerDownloadSetsAttachment(t *testing.T) {
 			"quoted-string", cd)
 	}
 }
+
+// TestPlayerAudioRefusesSidecarOutsideVariantsDir pins the containment
+// check on the variant path.
+//
+// Not reachable from user input today — the sidecar path is
+// server-authored and the request only selects a row by a validated
+// (path, variantID) key — but the row is data, and data can come from a
+// hand edit, a DB restored from a host with a different variants dir,
+// or a future writer. The check is what makes "no caller can do that"
+// independent of who the callers turn out to be.
+func TestPlayerAudioRefusesSidecarOutsideVariantsDir(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	st := srv.deps.Manifest
+	dir := cfg.LibraryRoots[0]
+
+	rel := "Rock/Alpha/01.flac"
+	abs := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTrack(t.Context(), &manifest.Track{
+		Path: rel, Title: "One", Size: info.Size(), ModTime: info.ModTime(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sidecar that exists on disk but lives OUTSIDE the variants dir.
+	outside := filepath.Join(t.TempDir(), "escaped.flac")
+	// Distinctive content: "sidecar" would also match the legitimate
+	// 410 body ("the variant row exists but its sidecar does not"), so
+	// the first version of this assertion passed for the wrong reason.
+	const leakCanary = "ESCAPED-SIDECAR-CANARY"
+	if err := os.WriteFile(outside, []byte(leakCanary), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: rel, VariantID: "optimized-v2-44100-16", SidecarPath: outside,
+		Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 7,
+		SourceMTimeNS: info.ModTime().UnixNano(), SourceSize: info.Size(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/player/audio?path="+rel+"&variant=optimized-v2-44100-16", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code == http.StatusOK {
+		t.Fatalf("served a sidecar from outside the variants dir (status %d, %d bytes)",
+			w.Code, w.Body.Len())
+	}
+	if w.Code != http.StatusGone {
+		t.Errorf("status = %d, want 410 — the variant contract is \"was here, fall back "+
+			"to the source\"", w.Code)
+	}
+	if strings.Contains(w.Body.String(), leakCanary) {
+		t.Error("the out-of-tree file's CONTENTS reached the client")
+	}
+}
