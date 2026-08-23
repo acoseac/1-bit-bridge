@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -265,6 +266,31 @@ type Deps struct {
 	// /v1 twins BEFORE any path join, so the closures only ever see
 	// traversal-free values. Nil-safe: absent → the routes 404 and
 	// the UI falls back to icon-only tiles / no booklet links.
+	// UPnPHostOnline reports whether the SSDP cache currently has a
+	// live host for an upstream server UDN — a map lookup, no network.
+	// Feeds the player's routed-album badge so a tap on an offline
+	// upstream fails in the UI rather than inside an <audio> element.
+	//
+	// Nil-safe, and the nil case is deliberately reported as UNKNOWN
+	// rather than offline: greying out every routed album because the
+	// bridge couldn't ask would be worse than letting the user try.
+	UPnPHostOnline func(udn string) bool
+
+	// ProxyUPnPAudio streams an upstream UPnP MediaServer's bytes for a
+	// routed track, Range-preserving and bit-exact. Wired to the SAME
+	// upnpproxy.Proxy the /v1 download fast-path and the DLNA file
+	// handler use, so all three observe one SSDP cache.
+	//
+	// Nil when the upnpUpstream feature is off; the player then badges
+	// routed tracks unavailable and the audio route 503s.
+	ProxyUPnPAudio func(w http.ResponseWriter, r *http.Request, rt *manifest.UPnPRouting) *RoutedAudioError
+
+	// BeginPlaybackSession opens an updater session for the duration of
+	// a byte stream and returns its closer. /v1's serveFile takes the
+	// same lock so a self-update can't swap the binary mid-stream;
+	// without it, an auto-install kills playback mid-track.
+	BeginPlaybackSession func() (end func())
+
 	ArtworkPath     func(mbid string, size int) string
 	ArtistImagePath func(mbid string) string
 	BookletPath     func(mbid string) string
@@ -1153,11 +1179,15 @@ type Server struct {
 	// the AdminAddress value in the live config (which may have been
 	// updated via a PATCH before a restart).
 	boundAdminAddr string
+
+	// library catalog snapshot for /api/player/*; see catalog.go
+	catalogState
 }
 
 // pages maps the URL-friendly page name to its template filename.
 var pages = map[string]string{
-	"dashboard":         "dashboard.html",
+	"player":            "player.html",
+	"stats":             "dashboard.html",
 	"library":           "library.html",
 	"library_inspector": "library_inspector.html",
 	"duplicates":        "duplicates.html",
@@ -1211,7 +1241,18 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Pages.
-	mux.HandleFunc("GET /{$}", s.pageDashboard)
+	// The library player owns the root. Its sub-routes are handled
+	// client-side but registered here too, so a deep link works on a
+	// cold load and TestTemplateHrefsResolveToRegisteredRoutes keeps
+	// doing its job (a hash router would make that guard vacuous — it
+	// drops "#" hrefs).
+	mux.HandleFunc("GET /{$}", s.pagePlayer)
+	for _, p := range playerRoutes {
+		mux.HandleFunc("GET "+p, s.pagePlayer)
+	}
+	// The operator dashboard, retitled. Kept at a stable path of its
+	// own now that "/" is the player.
+	mux.HandleFunc("GET /stats", s.pageStats)
 	mux.HandleFunc("GET /library", s.pageLibrary)
 	mux.HandleFunc("GET /library/inspector", s.pageLibraryInspector)
 	mux.HandleFunc("GET /library/duplicates", s.pageDuplicates)
@@ -1280,6 +1321,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/duplicates/groups", s.apiDuplicatesGroups)
 	mux.HandleFunc("POST /api/duplicates/sweep", s.apiDuplicatesSweep)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
+
+	// --- Web player read surface (internal/admin/handlers_player.go).
+	// Every one of these is a slice of ONE cached catalog snapshot, so
+	// two panels on a screen can't disagree about the library.
+	mux.HandleFunc("GET /api/player/albums", s.apiPlayerAlbums)
+	mux.HandleFunc("GET /api/player/albums/{id}", s.apiPlayerAlbumDetail)
+	mux.HandleFunc("GET /api/player/artists", s.apiPlayerArtists)
+	mux.HandleFunc("GET /api/player/artists/{id}", s.apiPlayerArtistDetail)
+	mux.HandleFunc("GET /api/player/genres", s.apiPlayerGenres)
+	mux.HandleFunc("GET /api/player/composers", s.apiPlayerComposers)
+	mux.HandleFunc("GET /api/player/stats", s.apiPlayerStats)
+	// Byte routes. No separate HEAD registration is needed — Go's
+	// ServeMux matches a HEAD request against a GET pattern, verified
+	// empirically rather than assumed. The handlers still check the
+	// method, because that check is what rejects everything else.
+	// (<audio> probes with HEAD before it streams, so this path is
+	// load-bearing even though it needs no extra route.)
+	mux.HandleFunc("GET /api/player/audio", s.apiPlayerAudio)
+	mux.HandleFunc("GET /api/player/download", s.apiPlayerDownload)
+
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)
 	// Inspector metadata layer (handlers_library_meta.go): tile
@@ -1341,7 +1402,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.
-	mux.Handle("GET /static/", http.FileServerFS(staticFS))
+	mux.Handle("GET /static/", staticAssetHandler())
 
 	// Login routes. Registered on the same mux as the other pages —
 	// the sessionMiddleware's bypass list keeps /login reachable
@@ -1778,4 +1839,69 @@ func (s *Server) restart() {
 	// by default in the templates shipped via `bridge init`, so a plain
 	// exit-0 lands us back on our feet within a second or so.
 	os.Exit(0)
+}
+
+// staticAssetHandler wraps the embedded-FS file server with two
+// headers that native ES modules make load-bearing.
+//
+//  1. **Content-Type is forced from the extension.** http.FileServerFS
+//     derives it from mime.TypeByExtension, which seeds a builtin
+//     table and then consults OS sources — on Windows, the registry,
+//     where ".js" is routinely re-registered as "text/plain" by other
+//     installed software. A classic <script> survives a wrong MIME;
+//     a <script type="module"> is MIME-checked UNCONDITIONALLY and
+//     hard-fails. Windows is a supported target and this failure is
+//     invisible on a macOS dev box, so the type is pinned here rather
+//     than inherited. X-Content-Type-Options: nosniff goes with it —
+//     once we assert the type, we mean it.
+//
+//  2. **Cache-Control: no-cache.** The ?v=<version> query busts only
+//     the ENTRY module: relative `import` specifiers don't inherit a
+//     parent's query string, so a version bump can otherwise leave one
+//     module stale against another it imports. no-cache means
+//     revalidate, not don't-store — FileServerFS still answers 304
+//     from its ETag, and the console is loopback, so the round-trip is
+//     free and correctness isn't.
+func staticAssetHandler() http.Handler {
+	fileServer := http.FileServerFS(staticFS)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct := staticContentType(path.Ext(r.URL.Path)); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-cache")
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+// staticContentType pins the media type for every extension the admin
+// console actually ships. An unknown extension returns "" and falls
+// through to the file server's own sniffing — this is a correction for
+// known types, not a replacement content-type registry.
+func staticContentType(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".webmanifest":
+		return "application/manifest+json"
+	default:
+		return ""
+	}
+}
+
+// RoutedAudioError is the admin-local translation of upnpproxy's
+// pre-stream failure, so this package needs no upnpproxy import — the
+// adapter in cmd/bridge converts.
+type RoutedAudioError struct {
+	Status  int
+	Code    string
+	Message string
 }

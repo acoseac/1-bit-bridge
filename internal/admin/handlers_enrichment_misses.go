@@ -72,7 +72,7 @@ func (s *Server) apiEnrichmentMisses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
 		return
 	}
-	normalised, ok := normaliseBrowsePath(r.URL.Query().Get("path"))
+	normalised, ok := normaliseBrowsePath(safeQuery(r).Get("path"))
 	if !ok {
 		writeError(w, http.StatusBadRequest, "bad-path",
 			"path contains traversal segments or is otherwise invalid")

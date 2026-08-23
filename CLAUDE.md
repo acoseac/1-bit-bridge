@@ -1364,6 +1364,106 @@ sibling guard's comment showed demo bridges are MEANT to be credentialed there. 
 this codebase, starting to read at `func` is a reliable way to mis-file a
 deliberate decision as a bug.
 
+### Admin web player (2026-08-23) — `/` is a library player, Settings is one screen
+
+The admin console's root is a **music player** (album grid → artist/album
+detail → in-browser playback), Stats is the old dashboard, and every operator
+page moved verbatim behind one **Server** nav entry. Bridge-only: no `/v1`
+change, no `ProtocolVersion` bump, no `PROTOCOL.md` change, no iOS mirror, no
+migration.
+
+- **The catalog is computed, not stored** (`internal/librarycat`, cached on
+  `admin.Server` behind an `atomic.Pointer` + singleflight + epoch fence). Album
+  identity is `dupes.AlbumIDOf(dupes.Resolve(row))` — the SAME value the iOS
+  client computes — so the browser's album partition equals the phone's **by
+  construction**. `TestAlbumPartitionMatchesDupes` is the contract test.
+  **Don't add album/artist columns to `tracks` "for speed"**: genres and
+  composers are multi-value axes with fold rules SQL can't express, so the Go
+  pass is required either way, and the measured cost is a fraction of a second.
+- **`internal/dupes` gained `Resolve` / `AlbumIDOf` / `SortName` / `ArtistID`.**
+  The extraction is behaviour-preserving and `clientkey_test.go`'s Swift-lifted
+  literals passing UNMODIFIED is the proof. The catalog needs the RESOLVED
+  display values and the INFERRED disc/track, not just the keys — `discNumber`
+  is tagged on 38 of 15,370 rows on the reference library, so the folder rule
+  is what actually orders every box set.
+- **Invalidation is LAZY and that IS the debounce.** The post-scan nudge bumps
+  an epoch; the next reader rebuilds. `postScanNudges` fires after every scan
+  including watcher-driven `ScanSubtree`, so an eager rebuild would re-fold the
+  library dozens of times during a bulk import — and none of it matters if
+  nobody has the player open. **Append to `postScanNudges`; never call
+  `SetPostScanHook` a second time** (it replaces).
+- **The browser MIME table is NOT `dlna.defaultMIMEForExtension`**
+  (`internal/admin/player_audio.go`). That table maps `.flac → audio/x-flac`,
+  which is right for hardware renderers and wrong for browsers: measured in
+  Chromium, `canPlayType("audio/flac")` is `"probably"` and
+  `canPlayType("audio/x-flac")` is `""`. Reusing it would have made FLAC — 88%
+  of the reference library — look unplayable. Two tables, two contracts.
+- **Playability reports FACTS, not a verdict.** `canPlayType` answers `""` for
+  codec strings an engine doesn't RECOGNISE even when it can decode the file,
+  and ALAC/AIFF support diverges across engines — so the server says
+  `universal` / `engine-dependent` / `none`, offers a fresh FLAC variant when
+  the source isn't universal, and lets a decode attempt plus
+  `MEDIA_ERR_SRC_NOT_SUPPORTED` be the authority. **`none` is DSD only.**
+  Verified with bytes, not a capability string: a 192/24 FLAC decodes and seeks
+  in the browser.
+- **`safeQuery` now exists in `internal/admin` too, and the client must pair
+  with it.** `url.Values` decodes `+` as a space, so a track at
+  `Plus Test/A+B Song.flac` resolved to `A B Song.flac` and 404'd — the
+  documented `/v1` variant-delete trap, present in the PRE-EXISTING admin
+  browse / projection / enrichment / keyset-cursor handlers. **The client must
+  use `encodeURIComponent`, never `URLSearchParams`**: the latter form-encodes
+  a space as `+`, which broke every spaced path the moment `safeQuery` landed.
+  Pinned by `TestSafeQueryRoundTripsEncodeURIComponent`.
+- **Routed (UPnP) tracks are in scope** — 15,283 of 15,370 on the reference
+  library, 13,519 of them FLAC. Playback reuses `internal/upnpproxy`, but the
+  response goes through a writer that overrides `Content-Type` at
+  `WriteHeader` time, because that package relays with `Header().Add` and a
+  pre-set value emits TWO. **Don't change `upnpproxy`** — its verbatim relay is
+  the bit-exact contract for iOS and DLNA. The same writer reports whether the
+  upstream honoured `Range`, so the client can disable the scrubber instead of
+  binding it to a duration the upstream won't serve.
+- **`//go:embed static/*` recurses, but skips `.`/`_`-prefixed names inside
+  matched SUBDIRECTORIES.** `static/player/_util.js` would compile, embed
+  nothing, and 404 in a release build while working from a dev checkout.
+  `TestEmbeddedStaticTreeMatchesDisk` catches it. **Don't "fix" this with
+  `all:static`** — that pulls `.DS_Store` into every release binary.
+- **`/static/` forces `Content-Type` + `nosniff` + `Cache-Control: no-cache`.**
+  Module scripts are MIME-checked unconditionally and hard-fail, and on Windows
+  `mime.TypeByExtension` consults the registry where `.js` is routinely
+  `text/plain`. `no-cache` covers the other half: `?v=` busts only the ENTRY
+  module, since relative import specifiers don't inherit a parent's query.
+- **The admin artwork route had DRIFTED from its documented `/v1` mirror** and
+  is now fixed: three-arm pattern (incl. the 16-hex `artworkVersion` alias) and
+  the `{1200,500,250}` ladder. Before: `?size=1200` → 404, `?size=250` → 404,
+  alias → 400. `TestAdminArtworkPatternMatchesV1` reads the regex out of
+  `internal/api`'s SOURCE rather than importing it — `internal/api` imports
+  `internal/admin`, so any import is a cycle, and a hand-copied literal is two
+  copies that can be wrong together.
+- **Settings is one screen; the PATCH payload is an explicit ALLOWLIST.** A
+  field that renders but isn't mapped in `app.js` saves nothing while the page
+  still says "Saved." — worse than not offering it. Caught in a browser when
+  the backup fields were made editable.
+  `TestEverySettingsFieldIsMappedIntoThePatchPayload` walks the template and
+  requires a mapping, with an exemption list that must state a reason.
+- **The prerequisite chip beside each gated toggle is the highest-value part.**
+  It exists because of a live state: `analysis.enabled: true`, toggle reads on,
+  `/api/jobs` says `degradedReason: sox_missing` (boot precheck failed, pool
+  never wired), `/api/analysis/stats` says `enabled:false, soxAvailable:true`,
+  `/api/doctor` says `audio-toolchain ok`. Four endpoints, four true
+  statements, nine days of doing nothing, and nothing next to the switch.
+- **`smartPlaylists.enabled` now defaults ON** via the nil-means-on pointer
+  shape (`EffectiveEnabled()` — **never read the pointer directly**, a bare nil
+  check reads as off and silently restores the old default). It is pure SQL
+  over the existing manifest: no toolchain, no endpoint, no disk.
+  **`upscale`, `autoOptimize`, `analysis`, `fingerprint`, `atlas` and
+  `libraryWatch` stay OFF** — each commits the operator to gigabytes, CPU, a
+  third-party key, or an open endpoint. `TestOtherFeatureDefaultsUnchanged`
+  pins that; making them one glance away is the fix for "looks broken", not
+  changing the value under every install on upgrade.
+- **The web player is NOT a bit-exact path** and says so. Browsers resample to
+  the device rate; there is no exclusive mode and no DoP. iOS remains the
+  reference player.
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future

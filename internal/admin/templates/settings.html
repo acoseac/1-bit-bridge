@@ -44,32 +44,19 @@
       also gated on `.tabs-enabled` so the no-JS fallback shows
       every heading too.
     */}}
-    <nav class="tab-nav" role="tablist" aria-label="Settings sections">
-      <button id="settings-tab-general" type="button" class="tab-btn active" role="tab"
-              data-tab="general" aria-controls="settings-panel-general"
-              aria-selected="true">General</button>
-      <button id="settings-tab-enrichment" type="button" class="tab-btn" role="tab"
-              data-tab="enrichment" aria-controls="settings-panel-enrichment"
-              aria-selected="false">Enrichment</button>
-      <button id="settings-tab-networking" type="button" class="tab-btn" role="tab"
-              data-tab="networking" aria-controls="settings-panel-networking"
-              aria-selected="false">Networking</button>
-      <button id="settings-tab-endpoints" type="button" class="tab-btn" role="tab"
-              data-tab="endpoints" aria-controls="settings-panel-endpoints"
-              aria-selected="false">Server endpoints</button>
-      <button id="settings-tab-updates" type="button" class="tab-btn" role="tab"
-              data-tab="updates" aria-controls="settings-panel-updates"
-              aria-selected="false">Updates</button>
-      <button id="settings-tab-audio" type="button" class="tab-btn" role="tab"
-              data-tab="audio" aria-controls="settings-panel-audio"
-              aria-selected="false">Audio</button>
-      <button id="settings-tab-backups" type="button" class="tab-btn" role="tab"
-              data-tab="backups" aria-controls="settings-panel-backups"
-              aria-selected="false">Backups</button>
+    <div class="settings-layout">
+    <nav class="jump-nav" aria-label="Settings sections">
+      <a class="jump-link" data-tab="general" href="#settings-panel-general">Library</a>
+      <a class="jump-link" data-tab="enrichment" href="#settings-panel-enrichment">Metadata</a>
+      <a class="jump-link" data-tab="audio" href="#settings-panel-audio">Audio</a>
+      <a class="jump-link" data-tab="networking" href="#settings-panel-networking">Access</a>
+      <a class="jump-link" data-tab="updates" href="#settings-panel-updates">Updates</a>
+      <a class="jump-link" data-tab="backups" href="#settings-panel-backups">Backups</a>
+      <a class="jump-link" data-tab="endpoints" href="#settings-panel-endpoints">Status</a>
     </nav>
+    <div class="settings-sections">
 
-    <div id="settings-panel-general" class="tab-pane" data-tab="general"
-         role="tabpanel" aria-labelledby="settings-tab-general">
+    <div id="settings-panel-general" class="tab-pane" data-tab="general">
       <h2 class="section-head">General</h2>
 
       <div class="field">
@@ -110,8 +97,7 @@
 
     </div>
 
-    <div id="settings-panel-enrichment" class="tab-pane" data-tab="enrichment"
-         role="tabpanel" aria-labelledby="settings-tab-enrichment">
+    <div id="settings-panel-enrichment" class="tab-pane" data-tab="enrichment">
       <h2 class="section-head">Enrichment</h2>
       <p class="hint">
         The background enricher fills in cover art + MusicBrainz IDs. Choose
@@ -181,6 +167,7 @@
         <label class="checkbox">
           <input name="fingerprintEnabled" type="checkbox" role="switch" {{if .Data.FingerprintEnabled}}checked{{end}}>
           Identify untagged tracks by audio <span class="badge warn">restart</span>
+          <span class="prereq" id="prereq-fingerprint" data-state="off" hidden></span>
         </label>
       </div>
       <div class="field">
@@ -198,235 +185,7 @@
       </div>
     </div>
 
-    <div id="settings-panel-networking" class="tab-pane" data-tab="networking"
-         role="tabpanel" aria-labelledby="settings-tab-networking">
-      <h2 class="section-head">Networking</h2>
-
-      <div class="field">
-        <label>Listen address <span class="badge warn">restart</span>
-          <input name="listenAddress" type="text" value="{{.Data.ListenAddress}}">
-        </label>
-        <small class="hint">What iOS clients dial, e.g. <code>:7788</code>.</small>
-      </div>
-
-      <div class="field">
-        <label>Admin address <span class="badge warn">restart</span>
-          <input name="adminAddress" type="text" value="{{.Data.AdminAddress}}">
-        </label>
-        <small class="hint">
-          {{if .Data.IsPublic}}
-          Public mode: any parseable <code>host:port</code> is accepted — the
-          admin login (plus autocert or reverse-proxy TLS) is the trust
-          boundary, not the bind address.
-          {{else}}
-          Must be a loopback address (127.0.0.1, ::1, or localhost). Non-loopback
-          values are rejected — the admin console has no auth in loopback mode,
-          so the loopback bind IS the security boundary.
-          {{end}}
-        </small>
-      </div>
-
-      {{/*
-        PR 4 — Tailscale mode dropdown + mDNS checkbox. Both are
-        scope-limited by deployment posture:
-          - mDNS: hidden in public mode (no LAN to advertise on;
-            Validate refuses public+true anyway).
-          - Tailscale: kept enabled in public mode (tailnet-routed
-            public bridges are legitimate) but with a caption
-            noting the default-disabled posture.
-      */}}
-      <div class="field">
-        <label for="settings-tailscale-mode">Tailscale mode</label>
-        <select id="settings-tailscale-mode" name="tailscaleMode">
-          <option value="cli" {{if eq .Data.TailscaleMode "cli"}}selected{{end}}>cli (host Tailscale.app / tailscaled)</option>
-          <option value="tsnet" {{if eq .Data.TailscaleMode "tsnet"}}selected{{end}}>tsnet (embedded Tailscale node; restart required)</option>
-          <option value="disabled" {{if eq .Data.TailscaleMode "disabled"}}selected{{end}}>disabled</option>
-        </select>
-        <small class="hint">
-          {{if .Data.IsPublic}}Default <code>disabled</code> in public mode (VPS deployments rarely run Tailscale). {{end}}
-          Switching <em>away from disabled</em> requires a restart (auto-pilot + listener wiring need a clean boot). Switching <em>to disabled</em> hot-reloads — the auto-pilot stops and the LE cert is cleared from the SNI switcher.
-        </small>
-      </div>
-
-      <div class="field" {{if .Data.IsPublic}}hidden{{end}}>
-        <label class="checkbox">
-          <input type="checkbox" role="switch" name="mdnsEnabled" {{if .Data.MDNSEnabled}}checked{{end}}>
-          Advertise on mDNS / Bonjour
-        </label>
-        <small class="hint">
-          iOS clients on the same LAN auto-discover the bridge via Bonjour. Loopback installs default to ON; toggling hot-reloads without restart.
-          {{if .Data.IsPublic}}<em>(Public mode: not applicable.)</em>{{end}}
-        </small>
-      </div>
-
-      <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" role="switch" name="dlnaEnabled" {{if .Data.DLNAEnabled}}checked{{end}} {{if .Data.DLNABlockedByPublic}}disabled{{end}}>
-          Enable UPnP/DLNA server <span class="badge warn">restart</span>
-        </label>
-        <small class="hint">
-          Lets UPnP/DLNA renderers on the LAN (TVs, network players) discover and
-          stream from the bridge. Binds <code>{{.Data.DLNAListenAddress}}</code> plus
-          SSDP multicast. Off by default; the listener is wired at startup, so a
-          change takes effect after a restart.
-          {{if .Data.DLNABlockedByPublic}}<br><em>Not applicable in public mode — SSDP multicast has no meaning on a public VPS, so the bridge force-disables DLNA regardless of this toggle.</em>{{end}}
-        </small>
-      </div>
-
-      <div class="field">
-        <label>Custom endpoints
-          <textarea name="customEndpoints" rows="3"
-                    placeholder="https://bridge.example.com:7788">{{.Data.CustomEndpointsText}}</textarea>
-        </label>
-        <small class="hint">
-          One <code>https://</code> URL per line. Use this for reverse proxies,
-          port-forwarded WAN URLs, or Tailscale MagicDNS names the auto-detector
-          didn&rsquo;t pick up. Each line must be a complete URL including port.
-          Non-HTTPS or malformed entries are silently dropped on save.
-          <strong>For iOS clients to actually reach a custom URL, the TLS
-          certificate&rsquo;s SAN list must cover the URL&rsquo;s hostname or IP</strong>
-          — change the list, then rotate the cert and re-pair iOS devices.
-        </small>
-      </div>
-
-      {{/*
-        Tailscale HTTPS panel — moved from the dashboard. Hidden by
-        default; the SSE-driven `renderTailscaleTile` reveals it
-        when a tailscaled node is detected. Lives at the end of the
-        Networking tab because operator-side it's "another way iOS
-        clients reach this bridge", same conceptual bucket as
-        listen / admin / custom endpoints. (User feedback on PR
-        #129.)
-      */}}
-      <div class="panel telemetry-panel" id="tailscale-panel" hidden>
-        <div class="panel-head">
-          <h2>Tailscale HTTPS</h2>
-          <span class="panel-actions">
-            <button type="button" id="tailscale-refresh" class="btn">Re-mint cert</button>
-          </span>
-        </div>
-        <dl>
-          <dt>Status</dt>
-          <dd id="tailscale-status"><span class="badge idle">Detecting…</span></dd>
-          <dt>Node</dt>
-          <dd id="tailscale-node">—</dd>
-          <dt>Cert</dt>
-          <dd id="tailscale-cert">—</dd>
-        </dl>
-        <p class="panel-note" id="tailscale-note">Tailscale provisions a Let's Encrypt certificate for this bridge's MagicDNS hostname. iOS clients reach the bridge over Tailscale at <code id="tailscale-magicdns-url">—</code>.</p>
-      </div>
-
-      {{/*
-        Autocert (ACME / Let's Encrypt) panel — public-mode only.
-        Hidden until the /api/autocert/status poll surfaces a
-        non-empty Domain (= the cmd-side wired an
-        AutocertStatus closure, = `autocert.enabled: true`).
-        Same hidden-by-default + JS-reveal pattern as the
-        Tailscale tile above.
-      */}}
-      <div class="panel telemetry-panel" id="autocert-panel" hidden>
-        <div class="panel-head">
-          <h2>Public HTTPS (autocert)</h2>
-        </div>
-        <dl>
-          <dt>Status</dt>
-          <dd id="autocert-status"><span class="badge idle">Detecting…</span></dd>
-          <dt>Domain</dt>
-          <dd id="autocert-domain">—</dd>
-          <dt>Expires</dt>
-          <dd id="autocert-expiry">—</dd>
-        </dl>
-        <p class="panel-note">The bridge auto-mints a Let's Encrypt cert for the configured public domain. Renewal is automatic at ~60 days; iOS clients on this path do <strong>not</strong> pin the cert (LE chain validates standard ATS).</p>
-      </div>
-    </div>
-
-    <div id="settings-panel-endpoints" class="tab-pane" data-tab="endpoints"
-         role="tabpanel" aria-labelledby="settings-tab-endpoints">
-      <h2 class="section-head">Server endpoints</h2>
-      {{/*
-        Read-only telemetry panels — addresses iOS clients reach the
-        bridge on, plus the TLS fingerprint they pin against. Lives
-        inside <form> for layout reasons but contains no submit-
-        capable controls — DO NOT add <button> here without
-        type="button" or the form will submit on click.
-      */}}
-      <div class="telemetry-group">
-        <div class="panel telemetry-panel">
-          <div class="panel-head">
-            <h2>Reachable endpoints</h2>
-          </div>
-          <p class="muted">
-            Addresses this bridge advertises to paired iOS devices.
-            Devices try them in order and stick to whichever connects.
-            The list is recomputed live from network interfaces — bring a Tailscale
-            tunnel up and refresh to see the new entry.
-          </p>
-          <ul id="endpoints-list" class="endpoints-list">
-            <li class="endpoints-empty"><em>Loading…</em></li>
-          </ul>
-        </div>
-
-        <div class="panel telemetry-panel">
-          <h2>TLS fingerprint</h2>
-          <p>iOS clients pin this value during pairing. Don't rotate without re-pairing.</p>
-          <code class="fingerprint">{{.Fingerprint}}</code>
-          <dl>
-            <dt>Expires</dt>
-            <dd id="cert-expiry">…</dd>
-          </dl>
-          <p class="panel-note">Rotation is CLI-only: <code>bridge cert rotate</code>. After rotation, every paired device must re-pair from a fresh QR.</p>
-        </div>
-      </div>
-    </div>
-
-    <div id="settings-panel-updates" class="tab-pane" data-tab="updates"
-         role="tabpanel" aria-labelledby="settings-tab-updates">
-      <h2 class="section-head">Updates</h2>
-      <p class="lede">
-        The bridge polls the GitHub Releases API for new versions. Operator-triggered
-        install is always available on the dashboard; auto-install is opt-in.
-      </p>
-
-      <div class="field">
-        <label class="checkbox">
-          <input name="updateAutoInstall" type="checkbox" role="switch" {{if .Data.UpdateAutoInstall}}checked{{end}}>
-          Auto-install new releases <span class="badge warn">restart</span>
-        </label>
-        <small class="hint">
-          When enabled, every successful poll that surfaces an update triggers
-          download → verify → atomic swap → restart, subject to the same
-          active-stream gate as the manual Install button. <strong>Default off</strong>
-          — opt-in is recommended even on stable channels.
-        </small>
-      </div>
-
-      <div class="field">
-        <label>Quiet hours <span class="badge warn">restart</span>
-          <input name="updateQuietHours" type="text" placeholder="HH:MM-HH:MM (optional)"
-                 value="{{.Data.UpdateQuietHours}}" pattern="^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$">
-        </label>
-        <small class="hint">
-          Restricts auto-install to a daily window in server-local time.
-          Leave empty to permit any time. Wraps midnight (e.g.
-          <code>23:00-06:00</code>) for overnight schedules.
-        </small>
-      </div>
-
-      <div class="field">
-        <label>Check interval (hours) <span class="badge warn">restart</span>
-          <input name="updateCheckIntervalHours" type="number" min="0" placeholder="6"
-                 value="{{if gt .Data.UpdateCheckIntervalHours 0}}{{.Data.UpdateCheckIntervalHours}}{{end}}">
-        </label>
-        <small class="hint">
-          How often to poll the GitHub Releases API. Defaults to 6 (4 polls/day,
-          well under the 60/hr unauthenticated rate limit). Lower values are
-          clamped to a 1 h floor at runtime.
-        </small>
-      </div>
-    </div>
-
-    <div id="settings-panel-audio" class="tab-pane" data-tab="audio"
-         role="tabpanel" aria-labelledby="settings-tab-audio">
+    <div id="settings-panel-audio" class="tab-pane" data-tab="audio">
       <h2 class="section-head">Audio quality</h2>
       <p class="lede">
         Offline PCM upscaling renders high-rate FLAC sidecars from CD-rate sources via
@@ -439,6 +198,7 @@
         <label class="checkbox">
           <input name="upscaleEnabled" type="checkbox" role="switch" {{if .Data.UpscaleEnabled}}checked{{end}}>
           Enable PCM upscaling <span class="badge warn">restart</span>
+          <span class="prereq" id="prereq-upscale" data-state="off" hidden></span>
         </label>
         <small class="hint">
           When enabled, the bridge runs a long-lived sox worker pool inside
@@ -598,6 +358,8 @@
         <label class="checkbox">
           <input name="analysisEnabled" type="checkbox" role="switch" {{if .Data.AnalysisEnabled}}checked{{end}}>
           Enable audio analysis <span class="badge warn">restart</span>
+          <span class="recommended">recommended</span>
+          <span class="prereq" id="prereq-analysis" data-state="off" hidden></span>
         </label>
         <small class="hint">
           When enabled, the bridge advertises <code>waveform</code> on
@@ -674,8 +436,193 @@
       frequently than General / Networking / Updates / Audio. (User
       feedback on PR #129.)
     */}}
-    <div id="settings-panel-backups" class="tab-pane" data-tab="backups"
-         role="tabpanel" aria-labelledby="settings-tab-backups">
+    <div id="settings-panel-networking" class="tab-pane" data-tab="networking">
+      <h2 class="section-head">Networking</h2>
+
+      <div class="field">
+        <label>Listen address <span class="badge warn">restart</span>
+          <input name="listenAddress" type="text" value="{{.Data.ListenAddress}}">
+        </label>
+        <small class="hint">What iOS clients dial, e.g. <code>:7788</code>.</small>
+      </div>
+
+      <div class="field">
+        <label>Admin address <span class="badge warn">restart</span>
+          <input name="adminAddress" type="text" value="{{.Data.AdminAddress}}">
+        </label>
+        <small class="hint">
+          {{if .Data.IsPublic}}
+          Public mode: any parseable <code>host:port</code> is accepted — the
+          admin login (plus autocert or reverse-proxy TLS) is the trust
+          boundary, not the bind address.
+          {{else}}
+          Must be a loopback address (127.0.0.1, ::1, or localhost). Non-loopback
+          values are rejected — the admin console has no auth in loopback mode,
+          so the loopback bind IS the security boundary.
+          {{end}}
+        </small>
+      </div>
+
+      {{/*
+        PR 4 — Tailscale mode dropdown + mDNS checkbox. Both are
+        scope-limited by deployment posture:
+          - mDNS: hidden in public mode (no LAN to advertise on;
+            Validate refuses public+true anyway).
+          - Tailscale: kept enabled in public mode (tailnet-routed
+            public bridges are legitimate) but with a caption
+            noting the default-disabled posture.
+      */}}
+      <div class="field">
+        <label for="settings-tailscale-mode">Tailscale mode</label>
+        <select id="settings-tailscale-mode" name="tailscaleMode">
+          <option value="cli" {{if eq .Data.TailscaleMode "cli"}}selected{{end}}>cli (host Tailscale.app / tailscaled)</option>
+          <option value="tsnet" {{if eq .Data.TailscaleMode "tsnet"}}selected{{end}}>tsnet (embedded Tailscale node; restart required)</option>
+          <option value="disabled" {{if eq .Data.TailscaleMode "disabled"}}selected{{end}}>disabled</option>
+        </select>
+        <small class="hint">
+          {{if .Data.IsPublic}}Default <code>disabled</code> in public mode (VPS deployments rarely run Tailscale). {{end}}
+          Switching <em>away from disabled</em> requires a restart (auto-pilot + listener wiring need a clean boot). Switching <em>to disabled</em> hot-reloads — the auto-pilot stops and the LE cert is cleared from the SNI switcher.
+        </small>
+      </div>
+
+      <div class="field" {{if .Data.IsPublic}}hidden{{end}}>
+        <label class="checkbox">
+          <input type="checkbox" role="switch" name="mdnsEnabled" {{if .Data.MDNSEnabled}}checked{{end}}>
+          Advertise on mDNS / Bonjour
+        </label>
+        <small class="hint">
+          iOS clients on the same LAN auto-discover the bridge via Bonjour. Loopback installs default to ON; toggling hot-reloads without restart.
+          {{if .Data.IsPublic}}<em>(Public mode: not applicable.)</em>{{end}}
+        </small>
+      </div>
+
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" role="switch" name="dlnaEnabled" {{if .Data.DLNAEnabled}}checked{{end}} {{if .Data.DLNABlockedByPublic}}disabled{{end}}>
+          Enable UPnP/DLNA server <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          Lets UPnP/DLNA renderers on the LAN (TVs, network players) discover and
+          stream from the bridge. Binds <code>{{.Data.DLNAListenAddress}}</code> plus
+          SSDP multicast. Off by default; the listener is wired at startup, so a
+          change takes effect after a restart.
+          {{if .Data.DLNABlockedByPublic}}<br><em>Not applicable in public mode — SSDP multicast has no meaning on a public VPS, so the bridge force-disables DLNA regardless of this toggle.</em>{{end}}
+        </small>
+      </div>
+
+      <div class="field">
+        <label>Custom endpoints
+          <textarea name="customEndpoints" rows="3"
+                    placeholder="https://bridge.example.com:7788">{{.Data.CustomEndpointsText}}</textarea>
+        </label>
+        <small class="hint">
+          One <code>https://</code> URL per line. Use this for reverse proxies,
+          port-forwarded WAN URLs, or Tailscale MagicDNS names the auto-detector
+          didn&rsquo;t pick up. Each line must be a complete URL including port.
+          Non-HTTPS or malformed entries are silently dropped on save.
+          <strong>For iOS clients to actually reach a custom URL, the TLS
+          certificate&rsquo;s SAN list must cover the URL&rsquo;s hostname or IP</strong>
+          — change the list, then rotate the cert and re-pair iOS devices.
+        </small>
+      </div>
+
+      {{/*
+        Tailscale HTTPS panel — moved from the dashboard. Hidden by
+        default; the SSE-driven `renderTailscaleTile` reveals it
+        when a tailscaled node is detected. Lives at the end of the
+        Networking tab because operator-side it's "another way iOS
+        clients reach this bridge", same conceptual bucket as
+        listen / admin / custom endpoints. (User feedback on PR
+        #129.)
+      */}}
+      <div class="panel telemetry-panel" id="tailscale-panel" hidden>
+        <div class="panel-head">
+          <h2>Tailscale HTTPS</h2>
+          <span class="panel-actions">
+            <button type="button" id="tailscale-refresh" class="btn">Re-mint cert</button>
+          </span>
+        </div>
+        <dl>
+          <dt>Status</dt>
+          <dd id="tailscale-status"><span class="badge idle">Detecting…</span></dd>
+          <dt>Node</dt>
+          <dd id="tailscale-node">—</dd>
+          <dt>Cert</dt>
+          <dd id="tailscale-cert">—</dd>
+        </dl>
+        <p class="panel-note" id="tailscale-note">Tailscale provisions a Let's Encrypt certificate for this bridge's MagicDNS hostname. iOS clients reach the bridge over Tailscale at <code id="tailscale-magicdns-url">—</code>.</p>
+      </div>
+
+      {{/*
+        Autocert (ACME / Let's Encrypt) panel — public-mode only.
+        Hidden until the /api/autocert/status poll surfaces a
+        non-empty Domain (= the cmd-side wired an
+        AutocertStatus closure, = `autocert.enabled: true`).
+        Same hidden-by-default + JS-reveal pattern as the
+        Tailscale tile above.
+      */}}
+      <div class="panel telemetry-panel" id="autocert-panel" hidden>
+        <div class="panel-head">
+          <h2>Public HTTPS (autocert)</h2>
+        </div>
+        <dl>
+          <dt>Status</dt>
+          <dd id="autocert-status"><span class="badge idle">Detecting…</span></dd>
+          <dt>Domain</dt>
+          <dd id="autocert-domain">—</dd>
+          <dt>Expires</dt>
+          <dd id="autocert-expiry">—</dd>
+        </dl>
+        <p class="panel-note">The bridge auto-mints a Let's Encrypt cert for the configured public domain. Renewal is automatic at ~60 days; iOS clients on this path do <strong>not</strong> pin the cert (LE chain validates standard ATS).</p>
+      </div>
+    </div>
+
+    <div id="settings-panel-updates" class="tab-pane" data-tab="updates">
+      <h2 class="section-head">Updates</h2>
+      <p class="lede">
+        The bridge polls the GitHub Releases API for new versions. Operator-triggered
+        install is always available on the dashboard; auto-install is opt-in.
+      </p>
+
+      <div class="field">
+        <label class="checkbox">
+          <input name="updateAutoInstall" type="checkbox" role="switch" {{if .Data.UpdateAutoInstall}}checked{{end}}>
+          Auto-install new releases <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          When enabled, every successful poll that surfaces an update triggers
+          download → verify → atomic swap → restart, subject to the same
+          active-stream gate as the manual Install button. <strong>Default off</strong>
+          — opt-in is recommended even on stable channels.
+        </small>
+      </div>
+
+      <div class="field">
+        <label>Quiet hours <span class="badge warn">restart</span>
+          <input name="updateQuietHours" type="text" placeholder="HH:MM-HH:MM (optional)"
+                 value="{{.Data.UpdateQuietHours}}" pattern="^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$">
+        </label>
+        <small class="hint">
+          Restricts auto-install to a daily window in server-local time.
+          Leave empty to permit any time. Wraps midnight (e.g.
+          <code>23:00-06:00</code>) for overnight schedules.
+        </small>
+      </div>
+
+      <div class="field">
+        <label>Check interval (hours) <span class="badge warn">restart</span>
+          <input name="updateCheckIntervalHours" type="number" min="0" placeholder="6"
+                 value="{{if gt .Data.UpdateCheckIntervalHours 0}}{{.Data.UpdateCheckIntervalHours}}{{end}}">
+        </label>
+        <small class="hint">
+          How often to poll the GitHub Releases API. Defaults to 6 (4 polls/day,
+          well under the 60/hr unauthenticated rate limit). Lower values are
+          clamped to a 1 h floor at runtime.
+        </small>
+      </div>
+    </div>
+
+    <div id="settings-panel-backups" class="tab-pane" data-tab="backups">
       <h2 class="section-head">Backups</h2>
       <div class="panel telemetry-panel">
         <div class="panel-head">
@@ -690,9 +637,70 @@
           <dt>Most recent</dt>
           <dd id="backup-latest">…</dd>
         </dl>
-        <p class="panel-note">Snapshots capture <code>bridge.db</code>, <code>tokens.json</code>, the TLS cert + key, and <code>bridge.yaml</code> into <code id="backup-root">…</code>. The periodic ticker runs every {{.Data.BackupIntervalHours}} h, retaining {{.Data.BackupKeep}}. <strong>Backups contain the TLS private key and token hashes</strong> — store them with the same care as the live state. Restore from CLI: stop the bridge, then <code>bridge restore &lt;snapshot-dir&gt;</code>.</p>
+        <p class="panel-note">Snapshots capture <code>bridge.db</code>, <code>tokens.json</code>, the TLS cert + key, and <code>bridge.yaml</code> into <code id="backup-root">…</code>. <strong>Backups contain the TLS private key and token hashes</strong> — store them with the same care as the live state. Restore from CLI: stop the bridge, then <code>bridge restore &lt;snapshot-dir&gt;</code>.</p>
+      </div>
+
+      {{/*
+        These two were DISPLAY-ONLY until the settings consolidation:
+        the whole Backups tab consisted of two numbers you could read
+        and not change, which is the sharpest single example of the
+        seven-tab hunt this page replaced. They are in settingsPatch
+        now.
+      */}}
+      <div class="field">
+        <label for="backupIntervalHours">Snapshot every (hours) <span class="badge restart">restart</span></label>
+        <input type="number" id="backupIntervalHours" name="backupIntervalHours" min="0" max="8760"
+               value="{{.Data.BackupIntervalHours}}">
+        <p class="hint">0 disables the periodic snapshot; manual "Snapshot now" still works.</p>
+      </div>
+      <div class="field">
+        <label for="backupKeep">Snapshots to keep <span class="badge restart">restart</span></label>
+        <input type="number" id="backupKeep" name="backupKeep" min="1" max="365"
+               value="{{.Data.BackupKeep}}">
+        <p class="hint">Older snapshots are pruned after each successful run.</p>
       </div>
     </div>
+
+    <div id="settings-panel-endpoints" class="tab-pane" data-tab="endpoints">
+      <h2 class="section-head">Server endpoints</h2>
+      {{/*
+        Read-only telemetry panels — addresses iOS clients reach the
+        bridge on, plus the TLS fingerprint they pin against. Lives
+        inside <form> for layout reasons but contains no submit-
+        capable controls — DO NOT add <button> here without
+        type="button" or the form will submit on click.
+      */}}
+      <div class="telemetry-group">
+        <div class="panel telemetry-panel">
+          <div class="panel-head">
+            <h2>Reachable endpoints</h2>
+          </div>
+          <p class="muted">
+            Addresses this bridge advertises to paired iOS devices.
+            Devices try them in order and stick to whichever connects.
+            The list is recomputed live from network interfaces — bring a Tailscale
+            tunnel up and refresh to see the new entry.
+          </p>
+          <ul id="endpoints-list" class="endpoints-list">
+            <li class="endpoints-empty"><em>Loading…</em></li>
+          </ul>
+        </div>
+
+        <div class="panel telemetry-panel">
+          <h2>TLS fingerprint</h2>
+          <p>iOS clients pin this value during pairing. Don't rotate without re-pairing.</p>
+          <code class="fingerprint">{{.Fingerprint}}</code>
+          <dl>
+            <dt>Expires</dt>
+            <dd id="cert-expiry">…</dd>
+          </dl>
+          <p class="panel-note">Rotation is CLI-only: <code>bridge cert rotate</code>. After rotation, every paired device must re-pair from a fresh QR.</p>
+        </div>
+      </div>
+    </div>
+
+    </div><!-- /.settings-sections -->
+    </div><!-- /.settings-layout -->
 
     {{/*
       id="restart-actions" is the anchor the UPnP page's "Restart

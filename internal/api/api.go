@@ -199,7 +199,7 @@ type Server struct {
 
 	// smartPlaylistStore backs GET /v1/smart-playlists + the "smartPlaylists"
 	// health-feature flag. Nil unless WithSmartPlaylistStore is wired (gated
-	// on cfg.SmartPlaylists.Enabled). Same feature-off shape as the others;
+	// on cfg.SmartPlaylists.EffectiveEnabled()). Same feature-off shape as the others;
 	// read-only on the request path. *manifest.Store satisfies it.
 	smartPlaylistStore SmartPlaylistStore
 

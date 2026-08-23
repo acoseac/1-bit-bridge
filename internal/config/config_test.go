@@ -1598,3 +1598,53 @@ func TestValidate_EnrichCoverSize(t *testing.T) {
 		}
 	})
 }
+
+// TestSmartPlaylistsDefaultsOn pins the one shipped default the
+// settings consolidation changed, and — more importantly — pins the
+// nil-means-ON shape it uses.
+//
+// A bare `if cfg.SmartPlaylists.Enabled` on the pointer reads as "off"
+// for an unset config, which would silently restore the old default
+// while still compiling. Every reader goes through EffectiveEnabled;
+// this is what makes that a rule rather than a convention.
+func TestSmartPlaylistsDefaultsOn(t *testing.T) {
+	var unset SmartPlaylistsConfig
+	if !unset.EffectiveEnabled() {
+		t.Error("an unset smartPlaylists block must resolve to ENABLED — off-by-default " +
+			"left a permanently empty Smart Mixes section in both clients")
+	}
+	off := false
+	if (SmartPlaylistsConfig{Enabled: &off}).EffectiveEnabled() {
+		t.Error("an explicit `enabled: false` must be honoured; nil-means-on must not " +
+			"override a deliberate opt-out")
+	}
+	on := true
+	if !(SmartPlaylistsConfig{Enabled: &on}).EffectiveEnabled() {
+		t.Error("an explicit true must resolve true")
+	}
+}
+
+// TestOtherFeatureDefaultsUnchanged is the other half, and it is the
+// more valuable one: it asserts that the features which commit the
+// operator to a toolchain, to CPU, to disk, or to an open endpoint are
+// still OFF by default. The settings work makes them one click and one
+// glance away instead — discoverability, not a value change.
+func TestOtherFeatureDefaultsUnchanged(t *testing.T) {
+	var c Config
+	c.applyDefaults()
+	for name, on := range map[string]bool{
+		"upscale.enabled":              c.Upscale.Enabled,
+		"upscale.autoOptimize.enabled": c.Upscale.AutoOptimize.Enabled,
+		"analysis.enabled":             c.Analysis.Enabled,
+		"fingerprint.enabled":          c.Fingerprint.Enabled,
+		"atlas.enabled":                c.Atlas.Enabled,
+		"libraryWatch.enabled":         c.LibraryWatch.Enabled,
+		"update.autoInstall":           c.Update.AutoInstall,
+		"dlna.enabled":                 c.DLNA.Enabled,
+	} {
+		if on {
+			t.Errorf("%s defaults ON — each of these commits the operator to a toolchain, "+
+				"CPU, disk, or an open endpoint, and must stay an explicit choice", name)
+		}
+	}
+}

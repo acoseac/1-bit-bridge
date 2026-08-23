@@ -1,9 +1,10 @@
 package admin
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path"
 	"regexp"
 	"strings"
 	"testing"
@@ -20,16 +21,40 @@ var settingsAnchorRe = regexp.MustCompile(`/settings#([A-Za-z0-9_-]+)`)
 // restart-requiring save reveals it, no Restart button either.
 //
 // Neither file is wrong on its own; only the pair is. So assert the pair:
-// every anchor app.js links to must be an id the settings page actually
-// renders.
+// every anchor a static asset links to must be an id the settings page
+// actually renders.
+//
+// It walks the WHOLE embedded static tree, not just app.js. A link
+// checker that silently stops seeing links keeps passing, which is
+// worse than not having one — and the moment a player module under
+// static/player/ links to /settings#restart-actions, an app.js-only
+// regex would stop covering it without ever going red.
 func TestAppJSSettingsAnchorsExistInTheRenderedPage(t *testing.T) {
-	js, err := os.ReadFile("static/app.js")
+	var matches [][]string
+	err := fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		switch strings.ToLower(path.Ext(p)) {
+		case ".js", ".mjs", ".css", ".html":
+		default:
+			return nil
+		}
+		b, err := staticFS.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		matches = append(matches, settingsAnchorRe.FindAllStringSubmatch(string(b), -1)...)
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("read app.js: %v", err)
+		t.Fatalf("walk static: %v", err)
 	}
-	matches := settingsAnchorRe.FindAllStringSubmatch(string(js), -1)
 	if len(matches) == 0 {
-		t.Skip("app.js links to no /settings anchors")
+		t.Skip("no static asset links to a /settings anchor")
 	}
 
 	srv, _, _ := newTestServer(t)
@@ -50,7 +75,7 @@ func TestAppJSSettingsAnchorsExistInTheRenderedPage(t *testing.T) {
 		}
 		seen[anchor] = true
 		if !strings.Contains(page, `id="`+anchor+`"`) {
-			t.Errorf("app.js links to /settings#%s but the settings page renders no "+
+			t.Errorf("a static asset links to /settings#%s but the settings page renders no "+
 				"element with that id — the operator lands on the page with nothing "+
 				"to act on", anchor)
 		}

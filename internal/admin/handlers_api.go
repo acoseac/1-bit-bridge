@@ -1833,7 +1833,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		UpscaleEnabled:           cfg.Upscale.Enabled,
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		AnalysisEnabled:          cfg.Analysis.Enabled,
-		SmartPlaylistsEnabled:    cfg.SmartPlaylists.Enabled,
+		SmartPlaylistsEnabled:    cfg.SmartPlaylists.EffectiveEnabled(),
 		OptimizeEnabled:          cfg.Upscale.EffectiveOptimizeEnabled(),
 		AutoOptimizeEnabled:      cfg.Upscale.AutoOptimize.Enabled,
 		AutoOptimizeMaxPerSweep:  cfg.Upscale.AutoOptimize.EffectiveMaxPerSweep(),
@@ -1930,6 +1930,11 @@ func (s *Server) soxFLACStatus() (hasFLAC, known bool) {
 // supplied" from "supplied as empty/zero" so the operator can't
 // accidentally clear a field by omitting it.
 type settingsPatch struct {
+	// Backup cadence + retention. Display-only until the settings
+	// consolidation; both are pointers so an omitted field is
+	// "unchanged" and an explicit 0 (disable the ticker) is a value.
+	BackupIntervalHours      *int    `json:"backupIntervalHours"`
+	BackupKeep               *int    `json:"backupKeep"`
 	LibraryName              *string `json:"libraryName,omitempty"`
 	ListenAddress            *string `json:"listenAddress,omitempty"`
 	AdminAddress             *string `json:"adminAddress,omitempty"`
@@ -2097,6 +2102,25 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				restart = true
 			}
 		}
+		if p.BackupIntervalHours != nil {
+			// EffectiveIntervalHours resolves nil to 24 while an
+			// explicit 0 genuinely disables the ticker, so the compare
+			// has to be against the RESOLVED value or every save of an
+			// unset field would look like a change and raise the
+			// restart banner.
+			if *p.BackupIntervalHours != next.Backup.EffectiveIntervalHours() {
+				v := *p.BackupIntervalHours
+				next.Backup.IntervalHours = &v
+				// runBackupTicker builds its time.Ticker once at startup.
+				restart = true
+			}
+		}
+		if p.BackupKeep != nil {
+			if *p.BackupKeep != next.Backup.EffectiveKeep() {
+				next.Backup.Keep = *p.BackupKeep
+				restart = true
+			}
+		}
 		if p.UpdateAutoInstall != nil {
 			if *p.UpdateAutoInstall != next.Update.AutoInstall {
 				next.Update.AutoInstall = *p.UpdateAutoInstall
@@ -2155,8 +2179,13 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if p.SmartPlaylistsEnabled != nil {
-			if *p.SmartPlaylistsEnabled != next.SmartPlaylists.Enabled {
-				next.SmartPlaylists.Enabled = *p.SmartPlaylistsEnabled
+			// Compare against the RESOLVED value: the field is
+			// nil-means-on, so a bare nil compare would read an unset
+			// config as "off" and every save would look like a change.
+			if *p.SmartPlaylistsEnabled != next.SmartPlaylists.EffectiveEnabled() {
+				// Persist explicitly — either value is now a choice.
+				v := *p.SmartPlaylistsEnabled
+				next.SmartPlaylists.Enabled = &v
 				// The daily smart-playlist regenerator goroutine is launched
 				// once at startup (cmd/bridge/main.go), so a runtime flip
 				// needs a restart. Idempotent same-value submissions skip the

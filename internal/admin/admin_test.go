@@ -1278,12 +1278,13 @@ func TestUPnPPage_PublicModeShowsExplanationPanel(t *testing.T) {
 		}
 	}
 
-	// Nav-link suppression: layout.html `{{if not .IsPublic}}` wrap
-	// MUST omit the UPnP link. Asserted via the rendered /upnp body
-	// itself (layout.html is part of every page render, so the nav
-	// markup is in every body).
-	if strings.Contains(body, `data-tab="upnp"`) {
-		t.Errorf("public-mode nav MUST omit the UPnP link; body contains `data-tab=\"upnp\"`")
+	// Nav-link suppression: the `{{if not .IsPublic}}` wrap MUST omit
+	// the UPnP link. The link moved from the top-level nav into the
+	// Server sub-nav when the player took over the root, but the
+	// invariant is unchanged and the sub-nav renders on every operator
+	// page — including this one.
+	if strings.Contains(body, `href="/upnp"`) {
+		t.Errorf("public-mode nav MUST omit the UPnP link; body contains `href=\"/upnp\"`")
 	}
 }
 
@@ -1312,12 +1313,14 @@ func TestUPnPPage_LoopbackModeShowsActionPanels(t *testing.T) {
 	if strings.Contains(body, "upnp-public-mode-panel") {
 		t.Errorf("loopback-mode /upnp page MUST NOT render the public-mode panel")
 	}
-	// Nav link present.
-	req2 := httptest.NewRequest("GET", "/", nil)
+	// Nav link present. Probed on a Server page rather than "/": the
+	// root is the library player now, and UPnP lives in the Server
+	// sub-nav that every operator page renders.
+	req2 := httptest.NewRequest("GET", "/devices", nil)
 	req2.RemoteAddr = "127.0.0.1:54321"
 	rw2 := httptest.NewRecorder()
 	h.ServeHTTP(rw2, req2)
-	if !strings.Contains(rw2.Body.String(), `data-tab="upnp"`) {
+	if !strings.Contains(rw2.Body.String(), `href="/upnp"`) {
 		t.Errorf("loopback-mode nav MUST include the UPnP link")
 	}
 }
@@ -1564,34 +1567,54 @@ func TestSettingsPatchSmartPlaylistsEnabled(t *testing.T) {
 	srv, _, cfgPath := newTestServer(t)
 	h := srv.Handler()
 
+	// smartPlaylists now defaults ON, so patching `true` is a no-op and
+	// correctly raises no banner. The direction that IS a change is off.
 	var resp settingsPatchResponse
 	code := doJSON(t, h, "PATCH", "/api/settings",
-		map[string]any{"smartPlaylistsEnabled": true}, &resp)
+		map[string]any{"smartPlaylistsEnabled": false}, &resp)
 	if code != 200 {
-		t.Fatalf("patch smartPlaylists on: %d", code)
+		t.Fatalf("patch smartPlaylists off: %d", code)
 	}
 	if !resp.RestartRequired {
 		t.Error("smartPlaylistsEnabled change must mark restart required")
 	}
-	if !srv.deps.CfgHolder.Load().SmartPlaylists.Enabled {
-		t.Error("in-memory cfg did not reflect smartPlaylists.enabled=true")
+	if srv.deps.CfgHolder.Load().SmartPlaylists.EffectiveEnabled() {
+		t.Error("in-memory cfg did not reflect smartPlaylists.enabled=false")
+	}
+	// An idempotent re-submit of the same value must NOT raise it again.
+	var again settingsPatchResponse
+	if code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"smartPlaylistsEnabled": false}, &again); code != 200 {
+		t.Fatalf("idempotent re-patch: %d", code)
+	}
+	if again.RestartRequired {
+		t.Error("re-submitting an unchanged value must not raise the restart banner")
 	}
 	reloaded, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reloaded.SmartPlaylists.Enabled {
-		t.Error("smartPlaylists.enabled did not persist to disk")
+	// An explicit false must survive a round-trip through the YAML.
+	// The field is a POINTER precisely so nil-means-on can be told
+	// apart from a deliberate opt-out; omitempty drops a nil pointer,
+	// not a pointer to false, so `enabled: false` is written.
+	if reloaded.SmartPlaylists.EffectiveEnabled() {
+		t.Error("an explicit smartPlaylists.enabled=false did not persist to disk — " +
+			"nil-means-on would then silently re-enable it on the next load")
 	}
 
+	// Back on: also a change, also restart-required.
 	resp = settingsPatchResponse{}
 	code = doJSON(t, h, "PATCH", "/api/settings",
 		map[string]any{"smartPlaylistsEnabled": true}, &resp)
 	if code != 200 {
-		t.Fatalf("patch idempotent: %d", code)
+		t.Fatalf("patch back on: %d", code)
 	}
-	if resp.RestartRequired {
-		t.Error("idempotent smartPlaylistsEnabled patch must not require restart")
+	if !resp.RestartRequired {
+		t.Error("flipping smartPlaylistsEnabled back on must mark restart required")
+	}
+	if !srv.deps.CfgHolder.Load().SmartPlaylists.EffectiveEnabled() {
+		t.Error("in-memory cfg did not reflect smartPlaylists.enabled=true")
 	}
 }
 
@@ -1602,6 +1625,11 @@ func TestPageSmartMixes(t *testing.T) {
 
 	// Feature off (default) → disabled panel, no family content.
 	rw := httptest.NewRecorder()
+	// smartPlaylists defaults ON now, so reaching the disabled panel
+	// takes an explicit opt-out.
+	off := cfg
+	off.SmartPlaylists.Enabled = boolPtrT(false)
+	srv.deps.CfgHolder.Store(off)
 	srv.pageSmartMixes(rw, httptest.NewRequest("GET", "/smartmixes", nil))
 	if rw.Code != 200 {
 		t.Fatalf("/smartmixes status = %d; want 200", rw.Code)
@@ -1611,7 +1639,7 @@ func TestPageSmartMixes(t *testing.T) {
 	}
 
 	// Enable + seed families (flat, time-of-day, and a never-refreshed one).
-	cfg.SmartPlaylists.Enabled = true
+	cfg.SmartPlaylists.Enabled = boolPtrT(true)
 	srv.deps.CfgHolder.Store(cfg)
 	flat := []byte(`[{"position":0,"path":"/Abdullah/Water/01.flac","title":"Song For Sathima","artist":"Abdullah Ibrahim"}]`)
 	hourly := []byte(`{"hourly":{"8":[{"position":0,"path":"/x/commute.flac","title":"Morning Drive","artist":"AM"}]}}`)

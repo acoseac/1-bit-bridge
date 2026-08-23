@@ -1,0 +1,240 @@
+/* 1-bit bridge — web player.
+ *
+ * A SECOND stylesheet, loaded after app.css. Not one line of player CSS
+ * goes into app.css: that file is ~3,900 lines of operator-console
+ * rules, and keeping the blast radius at zero means a revert is deleting
+ * one <link>.
+ *
+ * Theming follows app.css's existing discipline exactly — dark values
+ * are single-sourced in --_dark-player-* and mapped in the SAME TWO
+ * selector contexts (the prefers-color-scheme media query for the
+ * unset/system case, and [data-theme="dark"] for an explicit choice).
+ * A third theming mechanism would make the existing keep-in-sync hazard
+ * unmanageable.
+ *
+ * The player does NOT force dark. Flipping the default would silently
+ * override an OS preference and regress the operator pages, which live
+ * in the same document. The Qobuz/Apple Music feel comes from
+ * cover-forward layout and a distinct now-playing material, not from
+ * dark chrome — so the bar gets a fixed dark ink in BOTH themes, the
+ * way a mini-player does, and the grid keeps respecting the theme.
+ *
+ * z-index ledger, restated once so it stays one list:
+ *   popovers 1–5 · now-playing bar 40 · sheets 60 · modals 100 · toast 9999
+ */
+
+:root {
+  --cover-radius: 8px;
+  --cover-ring: inset 0 0 0 1px rgb(0 0 0 / 0.10);
+  --cover-placeholder: linear-gradient(135deg, var(--bg-elev), var(--bg-panel));
+  --elev-1: 0 1px 2px rgb(0 0 0 / 0.06);
+  --elev-2: 0 4px 14px rgb(0 0 0 / 0.10);
+  --elev-3: 0 -2px 20px rgb(0 0 0 / 0.18);
+  --grid-min: 168px;
+  --nav-w: 200px;
+  --bar-h: 68px;
+  --player-bottom-inset: calc(var(--bar-h) + env(safe-area-inset-bottom, 0px));
+
+  /* Fixed dark ink for the now-playing material, in both themes. */
+  --np-bg: #10141c;
+  --np-fg: #f1f5f9;
+  --np-muted: #94a3b8;
+  --np-border: #1f2937;
+
+  --_dark-cover-ring: inset 0 0 0 1px rgb(255 255 255 / 0.10);
+  --_dark-cover-placeholder: linear-gradient(135deg, #1b2436, #141b28);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --cover-ring: var(--_dark-cover-ring);
+    --cover-placeholder: var(--_dark-cover-placeholder);
+  }
+}
+:root[data-theme="dark"] {
+  --cover-ring: var(--_dark-cover-ring);
+  --cover-placeholder: var(--_dark-cover-placeholder);
+}
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+/* The player owns the full width; operator pages keep their 1100px cap. */
+body[data-section="player"] main { max-width: none; }
+body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
+
+.player { display: grid; grid-template-columns: var(--nav-w) 1fr; gap: var(--space-5); }
+/* Grid items default to min-width:auto, so a track that is wider than
+ * its column pushes the COLUMN wider instead of shrinking. On phones
+ * that turned the horizontally-scrolling section strip into a
+ * horizontally-scrolling PAGE, and the album grid inherited the same
+ * inflated width — tiles ran off the right edge. min-width:0 is what
+ * lets the strip's own overflow-x:auto engage. */
+.player > * { min-width: 0; }
+.player[data-booting] { visibility: hidden; }
+.player-nav nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: var(--space-4); }
+.player-section {
+  padding: 8px 12px; border-radius: var(--radius-sm); color: var(--fg-muted);
+  text-decoration: none; font-size: 0.9rem;
+}
+.player-section:hover { background: var(--bg-elev); color: var(--fg); }
+.player-section.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.player-main { min-width: 0; }
+.player-title { font-size: 1.6rem; margin: 0 0 var(--space-4); letter-spacing: -0.01em; }
+.player-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.player-status { padding: var(--space-5) 0; }
+.player-empty { padding: var(--space-6) 0; text-align: center; }
+.player-empty h2 { margin: 0 0 var(--space-2); font-size: 1.1rem; }
+
+.toolbar { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-4); }
+.toolbar-select {
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-panel); color: var(--fg); font: inherit; font-size: 0.85rem;
+}
+
+/* ---- Grid ---- */
+
+.grid {
+  display: grid; gap: var(--space-4);
+  grid-template-columns: repeat(auto-fill, minmax(var(--grid-min), 1fr));
+}
+.tile { text-decoration: none; color: inherit; display: block; }
+.tile:hover .cover { transform: translateY(-2px); box-shadow: var(--elev-2), var(--cover-ring); }
+.cover {
+  aspect-ratio: 1; width: 100%; border-radius: var(--cover-radius);
+  background: var(--cover-placeholder);
+  /* The inset hairline is the single most load-bearing token here:
+   * without it a pale cover dissolves into a pale panel in light mode. */
+  box-shadow: var(--elev-1), var(--cover-ring);
+  overflow: hidden; position: relative; transition: transform .15s ease, box-shadow .15s ease;
+}
+.cover img { width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .2s ease; }
+.cover[data-loaded] img { opacity: 1; }
+.cover-empty::after {
+  content: "♪"; position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: 2rem; color: var(--fg-muted); opacity: .35;
+}
+.tile-body { display: flex; flex-direction: column; gap: 2px; margin-top: var(--space-2); }
+.tile-title { font-size: 0.88rem; font-weight: 600; line-height: 1.25; }
+.tile-sub, .tile-meta { font-size: 0.8rem; color: var(--fg-muted); }
+.tile-title, .tile-sub {
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.tile-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.sentinel { height: 1px; }
+
+/* ---- Rows (artists, genres, composers, folders, search) ---- */
+
+.rows { display: flex; flex-direction: column; content-visibility: auto; }
+.row {
+  display: flex; justify-content: space-between; gap: var(--space-4); align-items: baseline;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+  text-decoration: none; color: inherit;
+}
+.row:hover { background: var(--bg-elev); }
+.row-title { font-size: 0.92rem; }
+.row-meta { font-size: 0.8rem; color: var(--fg-muted); white-space: nowrap; }
+
+/* ---- Detail ---- */
+
+.detail { display: grid; grid-template-columns: 260px 1fr; gap: var(--space-5); margin-bottom: var(--space-5); }
+.detail-art-round .cover { border-radius: 50%; }
+.detail-title { font-size: 1.4rem; margin: 0 0 4px; }
+.detail-artist { color: var(--accent); text-decoration: none; font-size: 0.95rem; }
+.detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); flex-wrap: wrap; }
+
+.tracks { list-style: none; margin: 0; padding: 0; }
+.track {
+  display: grid; grid-template-columns: 2.2rem 1fr auto auto auto;
+  gap: var(--space-3); align-items: baseline;
+  padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 0.9rem;
+}
+.track:hover { background: var(--bg-elev); }
+.track-disc {
+  list-style: none; padding: var(--space-4) 10px 4px; font-size: 0.78rem;
+  text-transform: uppercase; letter-spacing: .06em; color: var(--fg-muted);
+}
+.track-num { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.track-title {
+  background: none; border: 0; padding: 0; font: inherit; color: inherit;
+  text-align: left; cursor: pointer;
+}
+.track-title:hover { color: var(--accent); }
+.track-unplayable .track-title { cursor: default; color: var(--fg-muted); }
+.track-unplayable .track-title:hover { color: var(--fg-muted); }
+.track-meta, .track-dur { color: var(--fg-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.track-dl { font-size: 0.78rem; color: var(--fg-muted); text-decoration: none; }
+.track-dl:hover { color: var(--accent); text-decoration: underline; }
+
+.about { margin-top: var(--space-6); max-width: 70ch; }
+.about-text { white-space: pre-wrap; line-height: 1.6; }
+.about-genres { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---- Now playing ---- */
+
+.npbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  min-height: var(--bar-h); padding: 10px var(--space-4);
+  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  display: grid; grid-template-columns: 48px minmax(0, 1fr) auto minmax(180px, 2fr) auto;
+  gap: var(--space-4); align-items: center;
+  background: var(--np-bg); color: var(--np-fg);
+  border-top: 1px solid var(--np-border); box-shadow: var(--elev-3);
+}
+.npbar[hidden] { display: none; }
+.np-art { width: 48px; height: 48px; border-radius: 6px; overflow: hidden; background: #1b2436; }
+.np-art img { width: 100%; height: 100%; object-fit: cover; }
+.np-meta { display: flex; flex-direction: column; min-width: 0; }
+.np-title { font-size: 0.9rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-title a { color: inherit; text-decoration: none; }
+.np-title a:hover { text-decoration: underline; }
+.np-sub, .np-notice { font-size: 0.78rem; color: var(--np-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-notice-error { color: #fca5a5; }
+.np-transport { display: flex; gap: 4px; }
+.np-btn {
+  background: none; border: 0; color: var(--np-fg); font-size: 1.1rem; cursor: pointer;
+  min-width: 44px; min-height: 44px; border-radius: 50%;
+}
+.np-btn:hover { background: rgb(255 255 255 / 0.08); }
+.np-btn[aria-pressed="true"] { color: var(--accent); }
+.np-scrub { display: flex; align-items: center; gap: var(--space-2); }
+.np-time { font-size: 0.75rem; color: var(--np-muted); font-variant-numeric: tabular-nums; min-width: 3.2em; }
+.np-seek, .np-vol { accent-color: var(--accent); width: 100%; }
+.np-seek:disabled { opacity: .35; }
+.np-vol { max-width: 90px; }
+.np-extra { display: flex; align-items: center; gap: var(--space-2); }
+.np-chip { font-size: 0.72rem; color: var(--np-muted); white-space: nowrap; }
+
+.chip-quality { background: var(--accent-soft); color: var(--accent); }
+.chip-warn { background: var(--accent-warm-tint); color: var(--accent-warm); }
+
+@media (prefers-reduced-motion: reduce) {
+  .cover, .tile:hover .cover { transition: none; transform: none; }
+  .cover img { transition: none; }
+}
+
+@media (max-width: 900px) {
+  .detail { grid-template-columns: 1fr; }
+  .detail-art { max-width: 240px; }
+}
+
+@media (max-width: 768px) {
+  .player { grid-template-columns: 1fr; }
+  .player-nav nav {
+    position: static; flex-direction: row; overflow-x: auto; gap: var(--space-2);
+    padding-bottom: var(--space-2); scrollbar-width: none;
+  }
+  .player-nav nav::-webkit-scrollbar { display: none; }
+  .player-section { white-space: nowrap; }
+  .npbar { grid-template-columns: 44px minmax(0, 1fr) auto; }
+  .np-scrub, .np-extra { display: none; }
+}
+
+@media (max-width: 640px) {
+  :root { --grid-min: 140px; --bar-h: 60px; }
+  .track { grid-template-columns: 2rem 1fr auto; }
+  .track-meta, .track-dl { display: none; }
+}

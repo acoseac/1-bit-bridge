@@ -34,7 +34,7 @@ func TestSmartMixRegenerateOne(t *testing.T) {
 		t.Fatalf("disabled regenerate = %d, want 404", code)
 	}
 
-	cfg.SmartPlaylists.Enabled = true
+	cfg.SmartPlaylists.Enabled = boolPtrT(true)
 	srv.deps.CfgHolder.Store(cfg)
 
 	// Unknown slug: not cached, not in fresh output → 404.
