@@ -642,20 +642,35 @@
         <dd><code id="update-current">{{.Data.Update.CurrentVersion}}</code> (channel <code>{{.Data.Update.Channel}}</code>)</dd>
         <dt>Status</dt>
         <dd id="update-status">
+          {{- /* First paint mirrors, branch for branch, exactly what
+              app.js renderUpdateTile emits — because the first
+              `updates` SSE frame REPLACES this element's innerHTML
+              wholesale. Anything here that app.js does not also emit
+              lives for one frame and then vanishes.
+
+              That is why the per-branch `id="update-latest"` and the
+              hidden `<a id="update-notes">` placeholders are gone.
+              They existed in only one of the two renderers, so they
+              were vestigial after the first frame; and being repeated
+              across five mutually-exclusive branches they read to any
+              static HTML analyser as duplicate ids (Web:S7930), which
+              a Go template's exclusivity cannot be seen through. The
+              hidden anchors also carried aria-hidden="true" while
+              staying focusable — a real a11y defect, since a keyboard
+              user could tab to a link no screen reader would announce.
+              `hidden` alone, or simply not emitting the element, is
+              the correct primitive. */ -}}
           {{if .Data.Update.UpdateAvailable}}
             <span class="badge running">update available</span>
-            <span>· <code id="update-latest">{{.Data.Update.LatestVersion}}</code></span>
+            <span>· <code>{{.Data.Update.LatestVersion}}</code></span>
             {{if .Data.Update.ReleaseNotesURL}}
               <a id="update-notes" href="{{.Data.Update.ReleaseNotesURL}}" target="_blank" rel="noopener">release notes</a>
             {{end}}
           {{else if .Data.Update.LatestVersion}}
             <span class="badge idle">up to date</span>
-            <span>· latest <code id="update-latest">{{.Data.Update.LatestVersion}}</code></span>
-            <a id="update-notes" {{if .Data.Update.ReleaseNotesURL}}href="{{.Data.Update.ReleaseNotesURL}}"{{end}} target="_blank" rel="noopener" hidden aria-hidden="true"></a>
+            <span>· latest <code>{{.Data.Update.LatestVersion}}</code></span>
           {{else if .Data.Update.LastError}}
             <span class="badge idle">check failed</span>
-            <code id="update-latest" hidden></code>
-            <a id="update-notes" hidden aria-hidden="true"></a>
           {{else if .Data.Update.LastCheck.IsZero}}
             {{/* No poll has fired yet (bridge just started, default
                  check interval is 6h). Distinguish from the
@@ -663,12 +678,8 @@
                  saw "checking…" persist for hours, which mis-suggested
                  the check was hung. */}}
             <span class="badge idle">scheduled</span>
-            <code id="update-latest" hidden></code>
-            <a id="update-notes" hidden aria-hidden="true"></a>
           {{else}}
             <span class="badge idle">checking…</span>
-            <code id="update-latest" hidden></code>
-            <a id="update-notes" hidden aria-hidden="true"></a>
           {{end}}
         </dd>
         <dt>Last check</dt>
