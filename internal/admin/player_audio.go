@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -24,6 +25,11 @@ import (
 //
 // Two tables, two contracts. TestPlayerMIMEDivergesFromDLNA enumerates
 // every delta so the divergence stays deliberate.
+// octetStream is the "opaque bytes" answer: what the audio route
+// announces for a format no browser decodes, and what a download always
+// announces regardless of format.
+const octetStream = "application/octet-stream"
+
 func playerContentType(ext string) string {
 	switch strings.ToLower(ext) {
 	case ".flac":
@@ -43,7 +49,7 @@ func playerContentType(ext string) string {
 	default:
 		// DSD included: no browser decodes a 1-bit stream, and
 		// announcing audio/x-dsf would only invite an engine to try.
-		return "application/octet-stream"
+		return octetStream
 	}
 }
 
@@ -193,22 +199,8 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 				Downloadable: true,
 			},
 		}
-		if dto.Play.Kind != playUniversal && len(variants[p]) > 0 {
-			// Only resolve the source when a variant might actually be
-			// offered — ResolveChecked stats, and doing that per track
-			// on every album row would put filesystem latency on the
-			// hot path for no gain. A routed track never resolves, and
-			// never has a sidecar, so it falls through with no variant.
-			var info os.FileInfo
-			if _, fi, err := s.deps.Resolver.ResolveChecked(p); err == nil {
-				info = fi
-			}
-			if v := pickPlayableVariant(variants[p], info); v != nil {
-				dto.Play.VariantID = v.VariantID
-				dto.Play.VariantContentType = playerContentType(".flac")
-				dto.Play.VariantRateHz = v.SampleRate
-				dto.Play.VariantBits = v.BitsPerSample
-			}
+		if dto.Play.Kind != playUniversal {
+			s.attachVariant(&dto.Play, p, variants[p])
 		}
 		out = append(out, dto)
 	}
@@ -301,6 +293,25 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 				"the variant is stale; request the source instead")
 			return
 		}
+		// Confine the sidecar to the variants directory before opening
+		// it. The path is server-authored — the transcode pool wrote it,
+		// and the request only SELECTS a row by a validated (path,
+		// variantID) key — so this is not reachable from user input
+		// today. It is enforced rather than argued because the check is
+		// two lines and turns "no caller can do that" into "no caller
+		// CAN do that": a hand-edited row, a restored DB from a host
+		// with a different variants dir, or a future writer that stores
+		// an absolute path from elsewhere would otherwise all end in an
+		// os.Open of whatever the row says.
+		cfg := s.deps.CfgHolder.Load()
+		variantsDir := cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
+		if fsutil.IsUnderAny(v.SidecarPath, []string{variantsDir}) == "" {
+			logger.Error("player audio: sidecar outside the variants dir",
+				"variantID", v.VariantID, "variantsDir", variantsDir)
+			writeError(w, http.StatusGone, "variant_missing_on_disk",
+				"the variant row exists but its sidecar does not")
+			return
+		}
 		vi, err := os.Stat(v.SidecarPath)
 		if err != nil {
 			writeError(w, http.StatusGone, "variant_missing_on_disk",
@@ -337,7 +348,7 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 // library is full of them, and a bare filename= would hand the browser
 // mojibake or nothing.
 func setAttachmentHeaders(w http.ResponseWriter, name string) {
-	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Type", octetStream)
 	w.Header().Set("Cache-Control", "private, max-age=0")
 	w.Header().Set("Content-Disposition",
 		"attachment; filename=\""+asciiFallbackName(name)+"\"; filename*=UTF-8''"+
@@ -397,7 +408,7 @@ func (s *Server) serveRoutedAudio(w http.ResponseWriter, r *http.Request,
 	if download {
 		wrapped.disposition = "attachment; filename=\"" + asciiFallbackName(path.Base(rel)) +
 			"\"; filename*=UTF-8''" + url.PathEscape(path.Base(rel))
-		wrapped.contentType = "application/octet-stream"
+		wrapped.contentType = octetStream
 	}
 	if err := s.deps.ProxyUPnPAudio(wrapped, r, rt); err != nil {
 		// Only safe to write an error if nothing went out yet.
@@ -447,4 +458,34 @@ func (w *routedAudioWriter) Write(b []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// attachVariant fills in the fresh-FLAC fallback for a track whose own
+// format this browser may not decode. No-op when the track has no
+// variants, which is the common case.
+//
+// Extracted from hydrateTracks to keep that function under the
+// cognitive-complexity budget, and because the "resolve, stat, pick"
+// sequence reads better named than inline.
+func (s *Server) attachVariant(play *playerPlayabilityDTO, relPath string, rows []manifest.VariantRow) {
+	if len(rows) == 0 {
+		return
+	}
+	// Only resolve the source when a variant might actually be offered —
+	// ResolveChecked stats, and doing that per track on every album row
+	// would put filesystem latency on the hot path for no gain. A routed
+	// track never resolves, and never has a sidecar, so it falls through
+	// with no variant.
+	var info os.FileInfo
+	if _, fi, err := s.deps.Resolver.ResolveChecked(relPath); err == nil {
+		info = fi
+	}
+	v := pickPlayableVariant(rows, info)
+	if v == nil {
+		return
+	}
+	play.VariantID = v.VariantID
+	play.VariantContentType = playerContentType(".flac")
+	play.VariantRateHz = v.SampleRate
+	play.VariantBits = v.BitsPerSample
 }

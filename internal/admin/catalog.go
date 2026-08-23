@@ -120,6 +120,15 @@ func (s *Server) libraryCatalog(ctx context.Context) (*librarycat.Catalog, error
 	return v.(*librarycat.Catalog), nil
 }
 
+// buildLibraryCatalog streams the whole served library through the fold.
+//
+// No nil check on s.deps.Manifest, deliberately: New() refuses to
+// construct a Server without it ("admin: Auth, Manifest, Scanner,
+// Resolver are required"), so the field cannot be nil on any Server
+// that exists. A defensive check here would be dead code that IMPLIES
+// the dependency is optional — which is worse than nothing, because
+// the next person to read it may make it optional and never notice the
+// constructor guard that says otherwise.
 func (s *Server) buildLibraryCatalog(ctx context.Context) (*librarycat.Catalog, error) {
 	if n, err := s.deps.Manifest.CountServedTracks(ctx); err == nil && n > catalogMaxTracks {
 		return nil, errCatalogTooLarge

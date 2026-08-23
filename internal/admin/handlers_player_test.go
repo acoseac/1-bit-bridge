@@ -353,3 +353,134 @@ func TestPlayerDownloadSetsAttachment(t *testing.T) {
 			"quoted-string", cd)
 	}
 }
+
+// TestPlayerAudioRefusesSidecarOutsideVariantsDir pins the containment
+// check on the variant path.
+//
+// Not reachable from user input today — the sidecar path is
+// server-authored and the request only selects a row by a validated
+// (path, variantID) key — but the row is data, and data can come from a
+// hand edit, a DB restored from a host with a different variants dir,
+// or a future writer. The check is what makes "no caller can do that"
+// independent of who the callers turn out to be.
+func TestPlayerAudioRefusesSidecarOutsideVariantsDir(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	st := srv.deps.Manifest
+	dir := cfg.LibraryRoots[0]
+
+	rel := "Rock/Alpha/01.flac"
+	abs := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTrack(t.Context(), &manifest.Track{
+		Path: rel, Title: "One", Size: info.Size(), ModTime: info.ModTime(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sidecar that exists on disk but lives OUTSIDE the variants dir.
+	outside := filepath.Join(t.TempDir(), "escaped.flac")
+	// Distinctive content: "sidecar" would also match the legitimate
+	// 410 body ("the variant row exists but its sidecar does not"), so
+	// the first version of this assertion passed for the wrong reason.
+	const leakCanary = "ESCAPED-SIDECAR-CANARY"
+	if err := os.WriteFile(outside, []byte(leakCanary), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: rel, VariantID: "optimized-v2-44100-16", SidecarPath: outside,
+		Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: 7,
+		SourceMTimeNS: info.ModTime().UnixNano(), SourceSize: info.Size(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/player/audio?path="+rel+"&variant=optimized-v2-44100-16", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code == http.StatusOK {
+		t.Fatalf("served a sidecar from outside the variants dir (status %d, %d bytes)",
+			w.Code, w.Body.Len())
+	}
+	if w.Code != http.StatusGone {
+		t.Errorf("status = %d, want 410 — the variant contract is \"was here, fall back "+
+			"to the source\"", w.Code)
+	}
+	if strings.Contains(w.Body.String(), leakCanary) {
+		t.Error("the out-of-tree file's CONTENTS reached the client")
+	}
+}
+
+// TestPlayerSearchIsTwoTier pins the shape: albums and artists from the
+// cached catalog (matched on the folded sort key), tracks from FTS5.
+func TestPlayerSearchIsTwoTier(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	st := srv.deps.Manifest
+	_ = cfg
+	seedPlayerLibrary(t, st)
+
+	// "aardvarks" must find the album via the ARTICLE-STRIPPED key —
+	// the seeded artist is "The Aardvarks", so a display-name substring
+	// match on "aardvarks" would work but a naive prefix match on the
+	// display name would not.
+	w, body := playerGet(t, srv, "/api/player/search?q=aardvarks")
+	if w.Code != http.StatusOK {
+		t.Fatalf("search: status %d body %s", w.Code, w.Body.String())
+	}
+	albums, _ := body["albums"].([]any)
+	artists, _ := body["artists"].([]any)
+	if len(albums) == 0 {
+		t.Errorf("no album hits for 'aardvarks': %s", w.Body.String())
+	}
+	if len(artists) == 0 {
+		t.Errorf("no artist hits for 'aardvarks': %s", w.Body.String())
+	}
+
+	// A one-character query is refused before any work happens.
+	_, short := playerGet(t, srv, "/api/player/search?q=a")
+	for _, k := range []string{"albums", "artists", "tracks"} {
+		if v, _ := short[k].([]any); len(v) != 0 {
+			t.Errorf("single-character query returned %d %s", len(v), k)
+		}
+	}
+
+	// Empty arrays, never null — the client iterates them directly.
+	raw := w.Body.String()
+	for _, k := range []string{`"albums":`, `"artists":`, `"tracks":`} {
+		if strings.Contains(raw, k+"null") {
+			t.Errorf("%s serialised as null; the client iterates these", k)
+		}
+	}
+}
+
+// TestPlayerSearchTrackHitsCarryTheirAlbum — a track hit links to its
+// album, because that is where it can actually be played.
+func TestPlayerSearchTrackHitsCarryTheirAlbum(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedPlayerLibrary(t, srv.deps.Manifest)
+
+	_, body := playerGet(t, srv, "/api/player/search?q=three")
+	tracks, _ := body["tracks"].([]any)
+	if len(tracks) == 0 {
+		// FTS5 may be absent in this build; that is a supported state
+		// and the response says so rather than implying no matches.
+		if avail, _ := body["tracksAvailable"].(bool); avail {
+			t.Fatalf("FTS5 is available but 'three' matched no tracks: %s", body)
+		}
+		t.Skip("FTS5 unavailable in this build")
+	}
+	first, _ := tracks[0].(map[string]any)
+	if first["albumId"] == nil || first["albumId"] == "" {
+		t.Errorf("track hit carries no albumId, so it cannot link anywhere playable: %v", first)
+	}
+}

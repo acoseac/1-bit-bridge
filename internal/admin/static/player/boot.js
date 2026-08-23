@@ -48,10 +48,10 @@ function boot() {
 
   renderSections();
   wireLinks();
-  wireSearchShortcut();
-  window.addEventListener("popstate", () => route({ push: false }));
-  window.addEventListener("player:rerender", () => route({ push: false }));
-  route({ push: false });
+  wireSearch();
+  window.addEventListener("popstate", () => route());
+  window.addEventListener("player:rerender", () => route());
+  route();
 }
 
 function readSeed() {
@@ -94,7 +94,7 @@ function wireLinks() {
     e.preventDefault();
     if (url.href === location.href) return;
     history.pushState({ scrollY: 0 }, "", url);
-    route({ push: true });
+    route();
   });
 
   // Operator links leave the player, which is a full page load and
@@ -112,19 +112,80 @@ function wireLinks() {
   });
 }
 
-function wireSearchShortcut() {
+// wireSearch owns the search field: a debounced filter-as-you-type that
+// keeps the URL in step, plus the "/" shortcut to focus it.
+//
+// Navigation uses replaceState while typing and pushState only on the
+// first entry into /search — otherwise every keystroke would leave a
+// history entry and Back would walk the user backwards through their
+// own query one character at a time.
+function wireSearch() {
+  const form = document.getElementById("player-search-form");
+  const input = document.getElementById("player-search-input");
+  if (!form || !input) return;
+
+  if (location.pathname === "/search") {
+    input.value = new URLSearchParams(location.search).get("q") || "";
+  }
+
+  let timer = null;
+  const commit = () => {
+    const q = input.value.trim();
+    const entering = location.pathname !== "/search";
+    const url = q ? `/search?q=${encodeURIComponent(q)}` : "/search";
+    if (entering) history.pushState({ scrollY: 0 }, "", url);
+    else history.replaceState(history.state || {}, "", url);
+    route();
+  };
+
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    // 250 ms: long enough that a fast typist issues one request per
+    // pause, short enough to feel live. api.js aborts the in-flight
+    // request per keystroke, so a slow response can't overwrite a
+    // newer one.
+    timer = setTimeout(commit, 250);
+  });
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    clearTimeout(timer);
+    commit();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    input.value = "";
+    clearTimeout(timer);
+    input.blur();
+    navigate("/albums");
+  });
+
   document.addEventListener("keydown", (e) => {
     if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     e.preventDefault();
-    navigate("/search");
+    input.focus();
+    input.select();
   });
 }
 
 export function navigate(href) {
   history.pushState({ scrollY: 0 }, "", href);
-  route({ push: true });
+  route();
+}
+
+// splitPath turns a pathname into { path, head, rest } — trailing
+// slashes trimmed, leading slash dropped, split at the first remaining
+// separator. "/album/abc" → head "album", rest "abc".
+function splitPath(pathname) {
+  let end = pathname.length;
+  while (end > 1 && pathname[end - 1] === "/") end--;
+  const path = end > 0 ? pathname.slice(0, end) : "/";
+  const body = path.startsWith("/") ? path.slice(1) : path;
+  const slash = body.indexOf("/");
+  return slash === -1
+    ? { path, head: body, rest: "" }
+    : { path, head: body.slice(0, slash), rest: body.slice(slash + 1) };
 }
 
 function route() {
@@ -133,9 +194,12 @@ function route() {
   if (!view) return;
 
   generation += 1;
-  const path = location.pathname.replace(/\/+$/, "") || "/";
+  // Split the path with string ops rather than a regex. Both patterns
+  // this replaced were flagged for super-linear backtracking, and while
+  // a pathname is short enough that it never mattered, the manual form
+  // is linear and easier to read than /^\/([^/]*)\/?(.*)$/ was.
+  const { path, head, rest } = splitPath(location.pathname);
   const params = new URLSearchParams(location.search);
-  const [, head = "", rest = ""] = /^\/([^/]*)\/?(.*)$/.exec(path) || [];
   const section = path === "/" ? "albums" : head;
 
   for (const a of document.querySelectorAll(".player-section")) {

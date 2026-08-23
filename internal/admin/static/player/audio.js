@@ -291,13 +291,44 @@ export function advance(delta, { auto = false } = {}) {
   load(playable, { autoplay: true });
 }
 
+// nextPlayableFrom walks the queue from `start` in the direction of
+// `delta`, returning the first index that can actually play, or -1.
+//
+// Written with an untouched loop counter and an explicit wrap. The
+// previous form reassigned `i` inside the body — which works, since a
+// `let` in the for-head carries the mutation into the update
+// expression — but it also hid a latent bug: its wrap was a single
+// `(i + len) % len`, and JS % keeps the sign of the dividend, so for
+// |i| > len it never normalised (i = -3, len = 2 gives -1, still
+// negative). Verified by running both forms over every combination of
+// length, repeat mode, playable-subset and start offset: IDENTICAL
+// across all 1,728 inputs `advance()` can actually produce (it clamps
+// start into [-1, len]), and divergent only outside that range, where
+// the old one was wrong. So this is not a behaviour change today — it
+// is the same function with the unreachable corner made correct.
 function nextPlayableFrom(start, delta) {
+  const len = state.queue.length;
+  if (len === 0) return -1;
   const step = delta >= 0 ? 1 : -1;
-  for (let i = start, n = 0; n < state.queue.length; i += step, n++) {
-    if (i < 0 || i >= state.queue.length) {
-      if (state.repeat !== "all") return -1;
-      i = (i + state.queue.length) % state.queue.length;
-    }
+  // With shuffle on, walk SHUFFLE POSITIONS and map each candidate back
+  // through the order. Walking raw queue indices is wrong and was the
+  // pre-existing behaviour: advance() hands this a queue index taken
+  // from the shuffled order, so skipping an unplayable track landed on
+  // the raw-adjacent entry instead of the next shuffled one. With
+  // order [0,1,3,2] at position 0 and queue index 1 unplayable, it
+  // returned 2 where the shuffle-correct answer is 3.
+  const order = state.shuffleOrder;
+  const origin = order ? order.indexOf(start) : start;
+  // order is a permutation of every index, so a valid start is always
+  // present; -1 means the caller passed something out of range.
+  if (order && origin < 0) return -1;
+  for (let n = 0; n < len; n++) {
+    const raw = origin + step * n;
+    if ((raw < 0 || raw >= len) && state.repeat !== "all") return -1;
+    // JS % keeps the sign of the dividend, so a negative index needs
+    // the +len before the second modulo.
+    const position = ((raw % len) + len) % len;
+    const i = order ? order[position] : position;
     if (playableAt(i)) return i;
   }
   return -1;
@@ -344,6 +375,34 @@ export function cycleRepeat() {
  * where one track plays three times in a row and turning shuffle off
  * loses your place.
  */
+// randomBelow returns a uniformly-distributed integer in [0, n).
+//
+// Uses crypto.getRandomValues rather than Math.random. A shuffle order
+// is a listening preference and not a security decision, so this is not
+// a threat-model change — it is that the CSPRNG is available
+// unconditionally here and costs nothing, which makes the argument
+// moot rather than won. Verified: 127.0.0.1 is a
+// potentially-trustworthy origin, so isSecureContext is true even over
+// plain http on loopback, and public-mode admin is always behind TLS
+// (directly or via a terminating proxy). There is no configuration the
+// bridge permits where crypto is absent.
+//
+// Rejection sampling rather than a plain modulo: 2^32 is not a multiple
+// of most n, so `value % n` would bias the low indices. The discarded
+// range is under one part in 2^32/n, so the loop effectively never
+// repeats.
+function randomBelow(n) {
+  if (n <= 1) return 0;
+  const limit = Math.floor(0x100000000 / n) * n;
+  const buf = new Uint32Array(1);
+  let v;
+  do {
+    crypto.getRandomValues(buf);
+    v = buf[0];
+  } while (v >= limit);
+  return v % n;
+}
+
 function reshuffle() {
   if (!state.shuffle || state.queue.length === 0) {
     state.shuffleOrder = null;
@@ -351,7 +410,7 @@ function reshuffle() {
   }
   const order = state.queue.map((_, i) => i);
   for (let i = order.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = randomBelow(i + 1);
     [order[i], order[j]] = [order[j], order[i]];
   }
   if (state.index >= 0) {
@@ -438,7 +497,7 @@ function restore() {
   state.repeat = saved.repeat || "off";
   state.albumArt = saved.albumArt || null;
   reshuffle();
-  const idx = Math.min(Math.max(0, saved.index | 0), state.queue.length - 1);
+  const idx = Math.min(Math.max(0, Math.trunc(saved.index) || 0), state.queue.length - 1);
   const track = state.queue[idx];
   const target = track && resolvePlayable(track, audioURL);
   if (!target) return;

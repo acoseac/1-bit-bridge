@@ -53,7 +53,10 @@ export const api = {
   genres: (params) => getJSON(`/api/player/genres?${qs(params)}`, { key: "axis" }),
   composers: (params) => getJSON(`/api/player/composers?${qs(params)}`, { key: "axis" }),
   stats: () => getJSON("/api/player/stats"),
-  search: (q) => getJSON(`/api/library/search?q=${encodeURIComponent(q)}&limit=50`, { key: "search" }),
+  // The player's own two-tier search: albums and artists from the
+  // cached catalog, tracks from FTS5. Not /api/library/search, which is
+  // the Inspector's track+folder view and knows nothing about albums.
+  search: (q) => getJSON(`/api/player/search?q=${encodeURIComponent(q)}&limit=12`, { key: "search" }),
   browse: (path, cursor) =>
     getJSON(`/api/library/browse?path=${encodeURIComponent(path || "")}` +
       (cursor ? `&afterFolder=${encodeURIComponent(cursor)}` : ""), { key: "browse" }),

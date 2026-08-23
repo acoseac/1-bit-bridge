@@ -94,7 +94,15 @@ func startCatalogInvalidator(ctx context.Context, nudge <-chan struct{}, srv *ad
 			select {
 			case <-ctx.Done():
 				return
-			case <-nudge:
+			case _, ok := <-nudge:
+				// A CLOSED channel makes this case succeed immediately
+				// and forever — a 100%-CPU spin, not a stall, which is
+				// the kind of failure that looks like a hardware
+				// problem. Nothing closes this channel today; the guard
+				// costs one line and removes the possibility.
+				if !ok {
+					return
+				}
 				srv.InvalidateLibraryCatalog()
 			}
 		}

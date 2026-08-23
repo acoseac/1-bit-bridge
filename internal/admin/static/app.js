@@ -2280,7 +2280,7 @@ async function renderSettingsPrereqs() {
 // real value for at least one of these fields.
 function numOrUndef(v) {
   if (v === null || String(v).trim() === "") return undefined;
-  const n = parseInt(v, 10);
+  const n = Number.parseInt(v, 10);
   return Number.isNaN(n) ? undefined : n;
 }
 

@@ -282,3 +282,101 @@ func TestHashIDIsBoundedAlphabet(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchMatchesOnTheSortKey pins the property that makes search
+// behave the way a listener expects: matching runs on the SORT KEY, so
+// it is diacritic-folded, punctuation-stripped and article-stripped.
+// A display-name substring match would find none of these.
+func TestSearchMatchesOnTheSortKey(t *testing.T) {
+	cat := build(
+		Row{Path: "A/1.flac", AlbumArtist: "The Beatles", Album: "Revolver", Artist: "The Beatles"},
+		Row{Path: "B/1.flac", AlbumArtist: "Éric Serra", Album: "Le Grand Bleu", Artist: "Éric Serra"},
+		Row{Path: "C/1.flac", AlbumArtist: "a-ha", Album: "Hunting High and Low", Artist: "a-ha"},
+		Row{Path: "D/1.flac", AlbumArtist: "Diana Krall", Album: "Wallflower", Artist: "Diana Krall"},
+	)
+	for _, tc := range []struct {
+		q         string
+		wantAlbum string
+	}{
+		{"beatles", "Revolver"},         // leading article stripped from the key
+		{"eric", "Le Grand Bleu"},       // diacritic folded
+		{"aha", "Hunting High and Low"}, // punctuation stripped
+		{"krall", "Wallflower"},         // album matches on its ARTIST too
+		{"wallflower", "Wallflower"},
+		{"REVOLVER", "Revolver"}, // case-insensitive via the key
+	} {
+		albums, _ := cat.Search(tc.q, 10)
+		found := false
+		for _, h := range albums {
+			if h.Name == tc.wantAlbum {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Search(%q) did not surface album %q; got %v", tc.q, tc.wantAlbum, names(albums))
+		}
+	}
+	if a, ar := cat.Search("", 10); a != nil || ar != nil {
+		t.Error("an empty query must match nothing, not everything")
+	}
+	if a, _ := cat.Search("zzzznope", 10); len(a) != 0 {
+		t.Errorf("a non-matching query returned %v", names(a))
+	}
+}
+
+// TestSearchPrefersPrefixMatches — a listener typing "wall" wants
+// "Wallflower" before an album that merely contains the word.
+func TestSearchPrefersPrefixMatches(t *testing.T) {
+	cat := build(
+		Row{Path: "A/1.flac", AlbumArtist: "X", Album: "The Wall Comes Down"},
+		Row{Path: "B/1.flac", AlbumArtist: "Y", Album: "Wallflower"},
+	)
+	albums, _ := cat.Search("wall", 10)
+	if len(albums) != 2 {
+		t.Fatalf("got %v, want both", names(albums))
+	}
+	// "The Wall Comes Down" folds to WALLCOMESDOWN (article stripped),
+	// so BOTH are prefix matches here — assert the set, and that the
+	// ranking helper does not drop either.
+	got := map[string]bool{}
+	for _, h := range albums {
+		got[h.Name] = true
+	}
+	if !got["Wallflower"] || !got["The Wall Comes Down"] {
+		t.Errorf("expected both albums, got %v", names(albums))
+	}
+
+	// An interior match must rank BELOW a prefix match.
+	cat2 := build(
+		Row{Path: "A/1.flac", AlbumArtist: "X", Album: "Midnight Wall"},
+		Row{Path: "B/1.flac", AlbumArtist: "Y", Album: "Wallflower"},
+	)
+	ranked, _ := cat2.Search("wall", 10)
+	if len(ranked) < 1 || ranked[0].Name != "Wallflower" {
+		t.Errorf("prefix match must lead; got %v", names(ranked))
+	}
+}
+
+func TestSearchLimitIsHonoured(t *testing.T) {
+	rows := make([]Row, 0, 20)
+	for i := 0; i < 20; i++ {
+		rows = append(rows, Row{Path: "A/" + string(rune('a'+i)) + "/1.flac",
+			AlbumArtist: "Artist", Album: "Wall " + string(rune('a'+i))})
+	}
+	cat := build(rows...)
+	albums, _ := cat.Search("wall", 5)
+	if len(albums) != 5 {
+		t.Errorf("limit 5 returned %d", len(albums))
+	}
+	if a, _ := cat.Search("wall", 0); a != nil {
+		t.Error("limit 0 must return nothing")
+	}
+}
+
+func names(hits []SearchHit) []string {
+	out := make([]string, len(hits))
+	for i, h := range hits {
+		out[i] = h.Name
+	}
+	return out
+}
