@@ -648,18 +648,22 @@
               wholesale. Anything here that app.js does not also emit
               lives for one frame and then vanishes.
 
-              That is why the per-branch `id="update-latest"` and the
-              hidden `<a id="update-notes">` placeholders are gone.
-              They existed in only one of the two renderers, so they
-              were vestigial after the first frame; and being repeated
-              across five mutually-exclusive branches they read to any
-              static HTML analyser as duplicate ids (Web:S7930), which
-              a Go template's exclusivity cannot be seen through. The
-              hidden anchors also carried aria-hidden="true" while
-              staying focusable — a real a11y defect, since a keyboard
-              user could tab to a link no screen reader would announce.
-              `hidden` alone, or simply not emitting the element, is
-              the correct primitive. */ -}}
+              That is why the per-branch update-latest id and the
+              hidden release-notes anchor placeholders are gone. They
+              existed in only one of the two renderers, so they were
+              vestigial after the first frame; and being repeated across
+              five mutually-exclusive branches they read to any static
+              HTML analyser as duplicate ids (Web:S7930), which cannot
+              see through a Go template's exclusivity. Those hidden
+              anchors also carried aria-hidden while staying focusable —
+              a real a11y defect, since a keyboard user could tab to a
+              link no screen reader would announce. Not emitting the
+              element is the correct primitive.
+
+              Describing that markup in prose rather than quoting it is
+              deliberate too: a Go template comment is ordinary text to
+              an HTML parser, so a literal tag written inside one is
+              parsed as a real element and its id counted. */ -}}
           {{if .Data.Update.UpdateAvailable}}
             <span class="badge running">update available</span>
             <span>· <code>{{.Data.Update.LatestVersion}}</code></span>
@@ -684,20 +688,25 @@
         </dd>
         <dt>Last check</dt>
         <dd id="update-last-check">{{if .Data.Update.LastCheck.IsZero}}never{{else}}{{timeAgo .Data.Update.LastCheck}}{{end}}</dd>
-        {{if .Data.Update.LastError}}
-        <dt>Last error</dt>
-        <dd id="update-last-error"><code>{{.Data.Update.LastError}}</code></dd>
-        {{else}}
-        <dt hidden>Last error</dt>
-        <dd id="update-last-error" hidden></dd>
-        {{end}}
-        {{if .Data.Update.DeferredReason}}
-        <dt>Held update</dt>
-        <dd id="update-deferred"><span class="badge running">deferred</span> {{.Data.Update.DeferredReason}}</dd>
-        {{else}}
-        <dt hidden>Held update</dt>
-        <dd id="update-deferred" hidden></dd>
-        {{end}}
+        {{- /* These two rows are toggled in place by app.js, which
+               resolves each dd by id and then hides or reveals it
+               together with its previousElementSibling dt. So both
+               must exist on every first paint, and each id must be
+               emitted exactly once — an if/else that repeats the
+               element in both arms reads to a static HTML analyser as
+               a duplicate id (Web:S7930), which cannot see through a
+               Go template's exclusivity. The conditional-attribute
+               form below is the one layout.html already uses for
+               aria-current.
+
+               Keep each dt immediately before its dd: app.js reaches
+               it through previousElementSibling. Template comments and
+               whitespace are text, not elements, so they do not break
+               that adjacency. */ -}}
+        <dt{{if not .Data.Update.LastError}} hidden{{end}}>Last error</dt>
+        <dd id="update-last-error"{{if not .Data.Update.LastError}} hidden{{end}}>{{if .Data.Update.LastError}}<code>{{.Data.Update.LastError}}</code>{{end}}</dd>
+        <dt{{if not .Data.Update.DeferredReason}} hidden{{end}}>Held update</dt>
+        <dd id="update-deferred"{{if not .Data.Update.DeferredReason}} hidden{{end}}>{{if .Data.Update.DeferredReason}}<span class="badge running">deferred</span> {{.Data.Update.DeferredReason}}{{end}}</dd>
       </dl>
       <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
     </div>
@@ -784,7 +793,7 @@
     </div><!-- /.settings-layout -->
 
     {{/*
-      id="restart-actions" is the anchor the UPnP page's "Restart
+      The restart-actions id is the anchor the UPnP page's "Restart
       required" banner links to. It used to link to `#danger`, which
       exists in no template — the operator landed on Settings with
       nothing highlighted and no visible Restart button. `#restart-btn`
