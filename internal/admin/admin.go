@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -1341,7 +1342,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.
-	mux.Handle("GET /static/", http.FileServerFS(staticFS))
+	mux.Handle("GET /static/", staticAssetHandler())
 
 	// Login routes. Registered on the same mux as the other pages —
 	// the sessionMiddleware's bypass list keeps /login reachable
@@ -1778,4 +1779,60 @@ func (s *Server) restart() {
 	// by default in the templates shipped via `bridge init`, so a plain
 	// exit-0 lands us back on our feet within a second or so.
 	os.Exit(0)
+}
+
+// staticAssetHandler wraps the embedded-FS file server with two
+// headers that native ES modules make load-bearing.
+//
+//  1. **Content-Type is forced from the extension.** http.FileServerFS
+//     derives it from mime.TypeByExtension, which seeds a builtin
+//     table and then consults OS sources — on Windows, the registry,
+//     where ".js" is routinely re-registered as "text/plain" by other
+//     installed software. A classic <script> survives a wrong MIME;
+//     a <script type="module"> is MIME-checked UNCONDITIONALLY and
+//     hard-fails. Windows is a supported target and this failure is
+//     invisible on a macOS dev box, so the type is pinned here rather
+//     than inherited. X-Content-Type-Options: nosniff goes with it —
+//     once we assert the type, we mean it.
+//
+//  2. **Cache-Control: no-cache.** The ?v=<version> query busts only
+//     the ENTRY module: relative `import` specifiers don't inherit a
+//     parent's query string, so a version bump can otherwise leave one
+//     module stale against another it imports. no-cache means
+//     revalidate, not don't-store — FileServerFS still answers 304
+//     from its ETag, and the console is loopback, so the round-trip is
+//     free and correctness isn't.
+func staticAssetHandler() http.Handler {
+	fileServer := http.FileServerFS(staticFS)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct := staticContentType(path.Ext(r.URL.Path)); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-cache")
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+// staticContentType pins the media type for every extension the admin
+// console actually ships. An unknown extension returns "" and falls
+// through to the file server's own sniffing — this is a correction for
+// known types, not a replacement content-type registry.
+func staticContentType(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".webmanifest":
+		return "application/manifest+json"
+	default:
+		return ""
+	}
 }

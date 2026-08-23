@@ -49,16 +49,50 @@ import (
 )
 
 // adminMBIDPattern / adminArtworkMBIDPattern mirror the /v1 twins in
-// internal/api/artwork.go (mbidPattern :37 / artworkMBIDPattern :47 —
-// keep in lockstep). The bounded alphabets ([0-9a-fA-F-] / plus the
-// lowercase local-<sha256> arm) are the traversal defense: no path
-// separator or dot can survive the match, so the values are safe to
-// join into cache-file paths. Never serve a byte off disk from an id
-// that hasn't passed one of these.
+// internal/api/artwork.go (mbidPattern / artworkMBIDPattern — keep in
+// lockstep; TestAdminArtworkPatternMatchesV1 fails the build of the
+// test when they diverge). The bounded alphabets ([0-9a-fA-F-] / plus
+// the lowercase local-<sha256> and 16-hex arms) are the traversal
+// defense: no path separator or dot can survive the match, so the
+// values are safe to join into cache-file paths. Never serve a byte
+// off disk from an id that hasn't passed one of these.
+//
+// The 16-hex arm and the size ladder below were MISSING until the
+// player work: this route documented itself as a /v1 mirror and had
+// silently drifted, so `?size=1200` and `?size=250` 404'd (no ladder)
+// and an `artworkVersion` alias 400'd. Cosmetic for an operator
+// dashboard, load-bearing for a cover-forward player.
 var (
 	adminMBIDPattern        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	adminArtworkMBIDPattern = regexp.MustCompile(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|local-[0-9a-f]{64})$`)
+	adminArtworkMBIDPattern = regexp.MustCompile(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|local-[0-9a-f]{64}|[0-9a-f]{16})$`)
+
+	// adminArtworkVersionAliasPattern picks the 16-hex ALIAS shape out
+	// of the keys adminArtworkMBIDPattern admits — the artworkVersion
+	// content tag iOS uses as its cover fetch key. Unambiguous by
+	// shape: a UUID carries dashes at fixed offsets, a local- key
+	// carries its prefix, and neither is exactly 16 bare hex chars.
+	adminArtworkVersionAliasPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 )
+
+// adminArtworkServeSizes mirrors /v1's artworkServeSizes. A request
+// for a size no writer produced is a size-specific miss, NOT evidence
+// that the release has no cover — the ladder is what stops that truth
+// leaking out as a 404.
+var adminArtworkServeSizes = []int{1200, 500, 250}
+
+// adminArtworkLadderCandidates returns the requested size followed by
+// the serve-size ladder with the request deduped out, so a full cache
+// miss doesn't re-stat the same path twice.
+func adminArtworkLadderCandidates(size int) []int {
+	candidates := make([]int, 0, len(adminArtworkServeSizes)+1)
+	candidates = append(candidates, size)
+	for _, s := range adminArtworkServeSizes {
+		if s != size {
+			candidates = append(candidates, s)
+		}
+	}
+	return candidates
+}
 
 // libMetaCacheTTL matches the composition/enrichment-meta snapshot
 // TTLs — the refs walk is the same json_extract cost class.
@@ -872,8 +906,11 @@ func artworkCacheControl(mbid string, hasVersionParam bool) string {
 }
 
 // apiLibraryArtwork handles GET /api/library/artwork/{mbid}?size=&v=.
-// Only size 500 exists in the cache (enrich.ArtworkCachePath's
-// default) — other sizes 404 naturally; don't invent a resize path.
+// The loopback twin of /v1/artwork: it accepts the same three id
+// shapes (UUID / local-<sha256> / 16-hex artworkVersion alias),
+// resolves the alias through the store, and walks the same size
+// ladder so a request for a tier this cache never wrote falls back
+// instead of reporting the release coverless.
 func (s *Server) apiLibraryArtwork(w http.ResponseWriter, r *http.Request) {
 	if s.deps.ArtworkPath == nil {
 		writeError(w, http.StatusNotFound, "not_found", "artwork cache not wired")
@@ -882,8 +919,33 @@ func (s *Server) apiLibraryArtwork(w http.ResponseWriter, r *http.Request) {
 	mbid := r.PathValue("mbid")
 	if !adminArtworkMBIDPattern.MatchString(mbid) {
 		writeError(w, http.StatusBadRequest, "bad_request",
-			"mbid must be a MusicBrainz UUID or local-<sha256> sentinel")
+			"mbid must be a MusicBrainz UUID, local-<sha256> sentinel, or artworkVersion tag")
 		return
+	}
+	// A 16-hex id is an artworkVersion content tag, not a cache key:
+	// resolve it to the owning release MBID before touching disk. A
+	// lookup failure is a real fault (500); an unresolvable tag is a
+	// clean miss (404) — the same split /v1 makes.
+	hasVersionParam := r.URL.Query().Get("v") != ""
+	if adminArtworkVersionAliasPattern.MatchString(mbid) {
+		if s.deps.Manifest == nil {
+			writeError(w, http.StatusNotFound, "not_found", "not cached")
+			return
+		}
+		resolved, err := s.deps.Manifest.ResolveArtworkVersionMBID(r.Context(), mbid)
+		if err != nil {
+			logger.Error("resolve artwork version", "version", mbid, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal", "internal error")
+			return
+		}
+		if resolved == "" {
+			writeError(w, http.StatusNotFound, "not_found", "not cached")
+			return
+		}
+		// The tag IS the content key, so the resolved response is
+		// immutable regardless of whether the caller sent ?v=.
+		hasVersionParam = true
+		mbid = resolved
 	}
 	size := 500
 	if v := r.URL.Query().Get("size"); v != "" {
@@ -894,8 +956,16 @@ func (s *Server) apiLibraryArtwork(w http.ResponseWriter, r *http.Request) {
 		}
 		size = n
 	}
-	cc := artworkCacheControl(mbid, r.URL.Query().Get("v") != "")
-	serveCacheFile(w, r, s.deps.ArtworkPath(mbid, size), "image/jpeg", cc)
+	cc := artworkCacheControl(mbid, hasVersionParam)
+	for _, candidate := range adminArtworkLadderCandidates(size) {
+		path := s.deps.ArtworkPath(mbid, candidate)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		serveCacheFile(w, r, path, "image/jpeg", cc)
+		return
+	}
+	writeError(w, http.StatusNotFound, "not_found", "not cached")
 }
 
 // apiLibraryArtistImage handles GET /api/library/artist-image/{mbid}.
