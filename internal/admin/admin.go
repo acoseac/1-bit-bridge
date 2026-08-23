@@ -266,6 +266,31 @@ type Deps struct {
 	// /v1 twins BEFORE any path join, so the closures only ever see
 	// traversal-free values. Nil-safe: absent → the routes 404 and
 	// the UI falls back to icon-only tiles / no booklet links.
+	// UPnPHostOnline reports whether the SSDP cache currently has a
+	// live host for an upstream server UDN — a map lookup, no network.
+	// Feeds the player's routed-album badge so a tap on an offline
+	// upstream fails in the UI rather than inside an <audio> element.
+	//
+	// Nil-safe, and the nil case is deliberately reported as UNKNOWN
+	// rather than offline: greying out every routed album because the
+	// bridge couldn't ask would be worse than letting the user try.
+	UPnPHostOnline func(udn string) bool
+
+	// ProxyUPnPAudio streams an upstream UPnP MediaServer's bytes for a
+	// routed track, Range-preserving and bit-exact. Wired to the SAME
+	// upnpproxy.Proxy the /v1 download fast-path and the DLNA file
+	// handler use, so all three observe one SSDP cache.
+	//
+	// Nil when the upnpUpstream feature is off; the player then badges
+	// routed tracks unavailable and the audio route 503s.
+	ProxyUPnPAudio func(w http.ResponseWriter, r *http.Request, rt *manifest.UPnPRouting) *RoutedAudioError
+
+	// BeginPlaybackSession opens an updater session for the duration of
+	// a byte stream and returns its closer. /v1's serveFile takes the
+	// same lock so a self-update can't swap the binary mid-stream;
+	// without it, an auto-install kills playback mid-track.
+	BeginPlaybackSession func() (end func())
+
 	ArtworkPath     func(mbid string, size int) string
 	ArtistImagePath func(mbid string) string
 	BookletPath     func(mbid string) string
@@ -1154,6 +1179,9 @@ type Server struct {
 	// the AdminAddress value in the live config (which may have been
 	// updated via a PATCH before a restart).
 	boundAdminAddr string
+
+	// library catalog snapshot for /api/player/*; see catalog.go
+	catalogState
 }
 
 // pages maps the URL-friendly page name to its template filename.
@@ -1281,6 +1309,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/duplicates/groups", s.apiDuplicatesGroups)
 	mux.HandleFunc("POST /api/duplicates/sweep", s.apiDuplicatesSweep)
 	mux.HandleFunc("GET /api/library/browse", s.apiLibraryBrowse)
+
+	// --- Web player read surface (internal/admin/handlers_player.go).
+	// Every one of these is a slice of ONE cached catalog snapshot, so
+	// two panels on a screen can't disagree about the library.
+	mux.HandleFunc("GET /api/player/albums", s.apiPlayerAlbums)
+	mux.HandleFunc("GET /api/player/albums/{id}", s.apiPlayerAlbumDetail)
+	mux.HandleFunc("GET /api/player/artists", s.apiPlayerArtists)
+	mux.HandleFunc("GET /api/player/artists/{id}", s.apiPlayerArtistDetail)
+	mux.HandleFunc("GET /api/player/genres", s.apiPlayerGenres)
+	mux.HandleFunc("GET /api/player/composers", s.apiPlayerComposers)
+	mux.HandleFunc("GET /api/player/stats", s.apiPlayerStats)
+	// Byte routes. No separate HEAD registration is needed — Go's
+	// ServeMux matches a HEAD request against a GET pattern, verified
+	// empirically rather than assumed. The handlers still check the
+	// method, because that check is what rejects everything else.
+	// (<audio> probes with HEAD before it streams, so this path is
+	// load-bearing even though it needs no extra route.)
+	mux.HandleFunc("GET /api/player/audio", s.apiPlayerAudio)
+	mux.HandleFunc("GET /api/player/download", s.apiPlayerDownload)
+
 	mux.HandleFunc("GET /api/library/browse-projection", s.apiLibraryBrowseProjection)
 	mux.HandleFunc("GET /api/library/search", s.apiLibrarySearch)
 	// Inspector metadata layer (handlers_library_meta.go): tile
@@ -1835,4 +1883,13 @@ func staticContentType(ext string) string {
 	default:
 		return ""
 	}
+}
+
+// RoutedAudioError is the admin-local translation of upnpproxy's
+// pre-stream failure, so this package needs no upnpproxy import — the
+// adapter in cmd/bridge converts.
+type RoutedAudioError struct {
+	Status  int
+	Code    string
+	Message string
 }

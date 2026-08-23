@@ -2685,6 +2685,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// SetPostScanHook a second time.
 	var postScanNudges []chan struct{}
 
+	// The player's library catalog is invalidated after every
+	// successful scan. Buffered-1 and coalescing like its siblings; the
+	// drain goroutine is started once adminSrv exists (see
+	// startCatalogInvalidator), and the buffer is what carries a nudge
+	// fired in the gap between here and there.
+	catalogNudge := make(chan struct{}, 1)
+	postScanNudges = append(postScanNudges, catalogNudge)
+
 	var analysisPool *analyze.Pool
 	var analysisNudge chan struct{}
 	var analysisSweepState *sweepStatus[admin.AnalysisSweepCounts]
@@ -3351,15 +3359,22 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// QR advertises the autocert LE fingerprint (what the device sees)
 		// instead of the self-signed LAN pin (which it never would).
 		FingerprintForHost: certManager.FingerprintForServerName,
-		AdminAuth:          adminAuthStore,
-		LoginLimiter:       loginLimiter,
-		TLSConfig:          adminTLSConfig,
-		AutocertStatus:     autocertStatusClosure,
-		MDNSToggle:         mdnsToggleCallback,
-		TailscaleDisable:   tailscaleDisableCallback,
-		StartedAt:          time.Now().UTC(),
-		ScanCtx:            scanCtx,
-		Restart:            cancel,
+		// Web player runtime deps (cmd/bridge/player_wiring.go). All
+		// three are nil-safe on the admin side; nil means the player
+		// degrades (no routed playback, unknown upstream state, no
+		// update interlock) rather than failing.
+		ProxyUPnPAudio:       playerUPnPAudioAdapter(upnpLC, logger),
+		UPnPHostOnline:       playerHostOnlineAdapter(upnpLC),
+		BeginPlaybackSession: playerSessionAdapter(sessions),
+		AdminAuth:            adminAuthStore,
+		LoginLimiter:         loginLimiter,
+		TLSConfig:            adminTLSConfig,
+		AutocertStatus:       autocertStatusClosure,
+		MDNSToggle:           mdnsToggleCallback,
+		TailscaleDisable:     tailscaleDisableCallback,
+		StartedAt:            time.Now().UTC(),
+		ScanCtx:              scanCtx,
+		Restart:              cancel,
 		// UPnP upstream admin surface (Bridge PR E). Nil when the
 		// feature is disabled — admin handlers return a clean 404 +
 		// the Devices page hides the card. ctx is passed so async
@@ -3636,6 +3651,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "admin: %v\n", err)
 		return 1
 	}
+
+	// Drain the post-scan nudge into the player's catalog invalidation.
+	// Started here, after adminSrv exists; the nudge channel's buffer
+	// carries anything fired in the gap.
+	startCatalogInvalidator(scanCtx, catalogNudge, adminSrv)
 	adminCtx, adminCancel := context.WithCancel(context.Background())
 	defer adminCancel()
 	adminErr := make(chan error, 1)

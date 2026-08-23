@@ -619,42 +619,10 @@ func (s *Server) computeLibraryMetaDetail(ctx context.Context, normalised string
 	}
 
 	if resp.AtlasEnabled && dominantArtist != "" {
-		dto := &aboutArtistDTO{MBID: dominantArtist, State: "unchecked"}
-		if meta, err := s.deps.Manifest.GetArtistAtlasMeta(ctx, dominantArtist); err != nil {
-			logger.Warn("meta detail: artist atlas read", "mbid", dominantArtist, "err", err)
-		} else if meta != nil {
-			if meta.Found && strings.TrimSpace(meta.Bio)+strings.TrimSpace(meta.BioSummary) != "" {
-				dto.State = "found"
-				dto.Bio = meta.Bio
-				dto.BioSummary = meta.BioSummary
-				dto.Genres = meta.Genres
-				dto.Source = meta.Source
-				dto.SourceURL = meta.SourceURL
-			} else {
-				// Tombstone, or found-with-empty-text: nothing the UI
-				// can show (the AtlasMetaBreakdownCounts rule).
-				dto.State = "missing"
-			}
-		}
-		resp.Artist = dto
+		resp.Artist = s.artistAbout(ctx, dominantArtist)
 	}
 	if resp.AtlasEnabled && dominantRelease != "" {
-		dto := &aboutReleaseDTO{MBID: dominantRelease, State: "unchecked"}
-		if meta, err := s.deps.Manifest.GetReleaseAtlasMeta(ctx, dominantRelease); err != nil {
-			logger.Warn("meta detail: release atlas read", "mbid", dominantRelease, "err", err)
-		} else if meta != nil {
-			if meta.Found && strings.TrimSpace(meta.Description) != "" {
-				dto.State = "found"
-				dto.Description = meta.Description
-				dto.RecordLabel = meta.RecordLabel
-				dto.Genres = meta.Genres
-				dto.Source = meta.Source
-				dto.SourceURL = meta.SourceURL
-			} else {
-				dto.State = "missing"
-			}
-		}
-		resp.Release = dto
+		resp.Release = s.releaseAbout(ctx, dominantRelease)
 	}
 
 	if dominantArtist != "" && s.deps.ArtistImageMBIDs != nil {
@@ -1036,4 +1004,70 @@ func (s *Server) apiLibraryBooklet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `inline; filename="booklet-`+mbid+`.pdf"`)
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// artistAbout / releaseAbout build the Atlas About DTOs for one MBID.
+//
+// Extracted so the web player's album and artist detail reuse the
+// EXACT rules rather than growing a second copy. The rule that must
+// not drift is the attribution one: Source/SourceURL are mandatory
+// whenever the text renders (CC-BY-SA / ToS), so the safest shape is
+// one builder that always fills them alongside the text. A second DTO
+// assembled elsewhere is precisely how a "Read more on <source>" link
+// goes missing.
+//
+// A nil return means "no Atlas answer to render at all". State
+// distinguishes the two ways that can happen: "unchecked" (Atlas was
+// never asked — the harvest will fill it in) from "missing" (a
+// tombstone, or found-with-empty-text — nothing the UI can show).
+func (s *Server) artistAbout(ctx context.Context, mbid string) *aboutArtistDTO {
+	if mbid == "" || s.deps.Manifest == nil {
+		return nil
+	}
+	dto := &aboutArtistDTO{MBID: mbid, State: "unchecked"}
+	meta, err := s.deps.Manifest.GetArtistAtlasMeta(ctx, mbid)
+	if err != nil {
+		logger.Warn("meta detail: artist atlas read", "mbid", mbid, "err", err)
+		return dto
+	}
+	if meta == nil {
+		return dto
+	}
+	if meta.Found && strings.TrimSpace(meta.Bio)+strings.TrimSpace(meta.BioSummary) != "" {
+		dto.State = "found"
+		dto.Bio = meta.Bio
+		dto.BioSummary = meta.BioSummary
+		dto.Genres = meta.Genres
+		dto.Source = meta.Source
+		dto.SourceURL = meta.SourceURL
+	} else {
+		dto.State = "missing"
+	}
+	return dto
+}
+
+func (s *Server) releaseAbout(ctx context.Context, mbid string) *aboutReleaseDTO {
+	if mbid == "" || s.deps.Manifest == nil {
+		return nil
+	}
+	dto := &aboutReleaseDTO{MBID: mbid, State: "unchecked"}
+	meta, err := s.deps.Manifest.GetReleaseAtlasMeta(ctx, mbid)
+	if err != nil {
+		logger.Warn("meta detail: release atlas read", "mbid", mbid, "err", err)
+		return dto
+	}
+	if meta == nil {
+		return dto
+	}
+	if meta.Found && strings.TrimSpace(meta.Description) != "" {
+		dto.State = "found"
+		dto.Description = meta.Description
+		dto.RecordLabel = meta.RecordLabel
+		dto.Genres = meta.Genres
+		dto.Source = meta.Source
+		dto.SourceURL = meta.SourceURL
+	} else {
+		dto.State = "missing"
+	}
+	return dto
 }
