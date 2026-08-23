@@ -132,7 +132,7 @@ export function navigate(href) {
 // separator. "/album/abc" → head "album", rest "abc".
 function splitPath(pathname) {
   let end = pathname.length;
-  while (end > 1 && pathname.charCodeAt(end - 1) === 47 /* "/" */) end--;
+  while (end > 1 && pathname[end - 1] === "/") end--;
   const path = end > 0 ? pathname.slice(0, end) : "/";
   const body = path.startsWith("/") ? path.slice(1) : path;
   const slash = body.indexOf("/");

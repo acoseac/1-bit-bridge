@@ -199,22 +199,8 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 				Downloadable: true,
 			},
 		}
-		if dto.Play.Kind != playUniversal && len(variants[p]) > 0 {
-			// Only resolve the source when a variant might actually be
-			// offered — ResolveChecked stats, and doing that per track
-			// on every album row would put filesystem latency on the
-			// hot path for no gain. A routed track never resolves, and
-			// never has a sidecar, so it falls through with no variant.
-			var info os.FileInfo
-			if _, fi, err := s.deps.Resolver.ResolveChecked(p); err == nil {
-				info = fi
-			}
-			if v := pickPlayableVariant(variants[p], info); v != nil {
-				dto.Play.VariantID = v.VariantID
-				dto.Play.VariantContentType = playerContentType(".flac")
-				dto.Play.VariantRateHz = v.SampleRate
-				dto.Play.VariantBits = v.BitsPerSample
-			}
+		if dto.Play.Kind != playUniversal {
+			s.attachVariant(&dto.Play, p, variants[p])
 		}
 		out = append(out, dto)
 	}
@@ -472,4 +458,34 @@ func (w *routedAudioWriter) Write(b []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// attachVariant fills in the fresh-FLAC fallback for a track whose own
+// format this browser may not decode. No-op when the track has no
+// variants, which is the common case.
+//
+// Extracted from hydrateTracks to keep that function under the
+// cognitive-complexity budget, and because the "resolve, stat, pick"
+// sequence reads better named than inline.
+func (s *Server) attachVariant(play *playerPlayabilityDTO, relPath string, rows []manifest.VariantRow) {
+	if len(rows) == 0 {
+		return
+	}
+	// Only resolve the source when a variant might actually be offered —
+	// ResolveChecked stats, and doing that per track on every album row
+	// would put filesystem latency on the hot path for no gain. A routed
+	// track never resolves, and never has a sidecar, so it falls through
+	// with no variant.
+	var info os.FileInfo
+	if _, fi, err := s.deps.Resolver.ResolveChecked(relPath); err == nil {
+		info = fi
+	}
+	v := pickPlayableVariant(rows, info)
+	if v == nil {
+		return
+	}
+	play.VariantID = v.VariantID
+	play.VariantContentType = playerContentType(".flac")
+	play.VariantRateHz = v.SampleRate
+	play.VariantBits = v.BitsPerSample
 }

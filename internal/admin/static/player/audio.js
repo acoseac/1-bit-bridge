@@ -310,12 +310,25 @@ function nextPlayableFrom(start, delta) {
   const len = state.queue.length;
   if (len === 0) return -1;
   const step = delta >= 0 ? 1 : -1;
+  // With shuffle on, walk SHUFFLE POSITIONS and map each candidate back
+  // through the order. Walking raw queue indices is wrong and was the
+  // pre-existing behaviour: advance() hands this a queue index taken
+  // from the shuffled order, so skipping an unplayable track landed on
+  // the raw-adjacent entry instead of the next shuffled one. With
+  // order [0,1,3,2] at position 0 and queue index 1 unplayable, it
+  // returned 2 where the shuffle-correct answer is 3.
+  const order = state.shuffleOrder;
+  const origin = order ? order.indexOf(start) : start;
+  // order is a permutation of every index, so a valid start is always
+  // present; -1 means the caller passed something out of range.
+  if (order && origin < 0) return -1;
   for (let n = 0; n < len; n++) {
-    const raw = start + step * n;
+    const raw = origin + step * n;
     if ((raw < 0 || raw >= len) && state.repeat !== "all") return -1;
     // JS % keeps the sign of the dividend, so a negative index needs
     // the +len before the second modulo.
-    const i = ((raw % len) + len) % len;
+    const position = ((raw % len) + len) % len;
+    const i = order ? order[position] : position;
     if (playableAt(i)) return i;
   }
   return -1;
