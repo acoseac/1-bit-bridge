@@ -46,15 +46,23 @@ func dtBeforeDD(id string) *regexp.Regexp {
 //     safe; slipping any real element between them would silently strand the
 //     label visible above a hidden value.
 func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
+	// Each row carries its OWN expectation, and the table includes the two
+	// one-sided cases. A shared want-hidden would let both rows be wired to
+	// the same field — a realistic copy-paste slip in a rewrite that made
+	// these two rows structurally identical — and the test would still pass:
+	// verified by pointing update-deferred at LastError, which the shared
+	// form accepted and this form rejects.
 	cases := []struct {
-		name       string
-		st         UpdateStatus
-		wantHidden bool // both rows hidden on first paint
+		name              string
+		st                UpdateStatus
+		wantErrorHidden   bool
+		wantDeferalHidden bool
 	}{
 		{
-			name:       "nothing to report",
-			st:         UpdateStatus{CurrentVersion: "v0.1.9", Channel: "stable"},
-			wantHidden: true,
+			name:              "nothing to report",
+			st:                UpdateStatus{CurrentVersion: "v0.1.9", Channel: "stable"},
+			wantErrorHidden:   true,
+			wantDeferalHidden: true,
 		},
 		{
 			name: "error and deferral present",
@@ -64,7 +72,30 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 				LastError:      "dial tcp: connection refused",
 				DeferredReason: "outside quiet hours",
 			},
-			wantHidden: false,
+			wantErrorHidden:   false,
+			wantDeferalHidden: false,
+		},
+		{
+			// Discriminates the two rows: only an error.
+			name: "error only",
+			st: UpdateStatus{
+				CurrentVersion: "v0.1.9",
+				Channel:        "stable",
+				LastError:      "dial tcp: connection refused",
+			},
+			wantErrorHidden:   false,
+			wantDeferalHidden: true,
+		},
+		{
+			// The mirror case: only a deferral.
+			name: "deferral only",
+			st: UpdateStatus{
+				CurrentVersion: "v0.1.9",
+				Channel:        "stable",
+				DeferredReason: "outside quiet hours",
+			},
+			wantErrorHidden:   true,
+			wantDeferalHidden: false,
 		},
 	}
 
@@ -83,9 +114,8 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 			raw, _ := io.ReadAll(resp.Body)
 			body := string(raw)
 
-			for _, id := range []string{"update-last-error", "update-deferred"} {
-				assertUpdateRow(t, body, id, tc.wantHidden)
-			}
+			assertUpdateRow(t, body, "update-last-error", tc.wantErrorHidden)
+			assertUpdateRow(t, body, "update-deferred", tc.wantDeferalHidden)
 		})
 	}
 }
