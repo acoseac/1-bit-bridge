@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -59,18 +60,23 @@ type pageData struct {
 	Data            any
 }
 
-// sectionForTab maps a page's ActiveTab to its top-level nav SECTION so the
-// header highlights the parent entry while the in-page sub-tab bar tracks the
-// specific page. Library groups Roots / Inspector / Jobs; Listening groups
-// Playlists & history / Smart mixes. Standalone pages are their own section.
+// sectionForTab maps a page's ActiveTab to its top-level nav SECTION so
+// the header highlights the parent entry while the in-page sub-tab bar
+// tracks the specific page.
 func sectionForTab(tab string) string {
 	switch tab {
-	case "library", "library_inspector", "duplicates", "jobs":
-		return "library"
-	case "data", "smartmixes":
-		return "listening"
-	default:
+	case "player":
+		return "player"
+	case "stats", "settings":
 		return tab
+	default:
+		// Everything else is an operator surface and lives under the
+		// single Server entry. Written as a default rather than an
+		// enumeration deliberately: a new operator page should appear
+		// under Server automatically, and the alternative — forgetting
+		// to add it — leaves its nav entry unhighlighted with nothing
+		// failing anywhere.
+		return "server"
 	}
 }
 
@@ -110,7 +116,11 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 	}
 }
 
-func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
+// pageStats renders the operator dashboard. It moved off "/" when the
+// library player took the root; the template and every element id are
+// unchanged, which is what lets applyStats / applyComposition /
+// applySources / applyEnrichment keep working with no JS edit.
+func (s *Server) pageStats(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
 	// Library composition for first paint (live updates come from the
@@ -154,7 +164,7 @@ func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
 		// operator to restart manually. (Qodo on PR #124.)
 		"IsSupervised": s.deps.IsSupervised,
 	}
-	s.renderPage(w, "dashboard", data)
+	s.renderPage(w, "stats", data)
 }
 
 // dashboardUpdateStatus returns the UpdateStatus the dashboard tile
@@ -453,4 +463,64 @@ func timeAgo(t time.Time) string {
 		return itoa(int64(d.Hours())) + "h ago"
 	}
 	return itoa(int64(d.Hours()/24)) + "d ago"
+}
+
+// playerRoutes are the player's client-side routes, registered
+// server-side so a deep link (a bookmark, a shared URL, a reload) works
+// on a cold load. Each renders the same shell; the module reads
+// location.pathname and mounts the matching view.
+//
+// Registered as real routes rather than served from a hash fragment on
+// purpose: TestTemplateHrefsResolveToRegisteredRoutes drops "#" hrefs,
+// so a hash router would silently disable the guard that catches dead
+// nav links.
+var playerRoutes = []string{
+	"/albums", "/artists", "/favorites", "/playlists", "/mixes",
+	"/composers", "/genres", "/folders", "/search",
+	"/album/{id}", "/artist/{id}", "/genre/{id}", "/composer/{id}",
+	"/playlist/{id}", "/mix/{slug}",
+}
+
+// playerPageData is the seed the shell hydrates from, so the first view
+// paints without a redundant round-trip for the parts that are cheap.
+type playerPageData struct {
+	Section      string `json:"section"`
+	ID           string `json:"id"`
+	Query        string `json:"query"`
+	AtlasEnabled bool   `json:"atlasEnabled"`
+	MixesEnabled bool   `json:"mixesEnabled"`
+	LibraryName  string `json:"libraryName"`
+}
+
+// pagePlayer renders the player shell for every player route.
+func (s *Server) pagePlayer(w http.ResponseWriter, r *http.Request) {
+	cfg := s.deps.CfgHolder.Load()
+	section, id := playerSectionFor(r)
+	s.renderPage(w, "player", playerPageData{
+		Section:      section,
+		ID:           id,
+		Query:        r.URL.Query().Get("q"),
+		AtlasEnabled: cfg.Atlas.Enabled,
+		MixesEnabled: cfg.SmartPlaylists.Enabled,
+		LibraryName:  cfg.LibraryName,
+	})
+}
+
+// playerSectionFor derives (section, id) from the request path. The
+// wildcard value comes from r.PathValue, which is already
+// percent-decoded per segment.
+func playerSectionFor(r *http.Request) (section, id string) {
+	p := strings.Trim(r.URL.Path, "/")
+	if p == "" {
+		return "albums", ""
+	}
+	head, _, _ := strings.Cut(p, "/")
+	switch head {
+	case "album", "artist", "genre", "composer", "playlist":
+		return head, r.PathValue("id")
+	case "mix":
+		return "mix", r.PathValue("slug")
+	default:
+		return head, ""
+	}
 }

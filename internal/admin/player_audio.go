@@ -244,12 +244,12 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET or HEAD only")
 		return
 	}
-	rel, ok := normaliseBrowsePath(r.URL.Query().Get("path"))
+	rel, ok := normaliseBrowsePath(safeQuery(r).Get("path"))
 	if !ok || rel == "" {
 		writeError(w, http.StatusBadRequest, "bad_path", "invalid path")
 		return
 	}
-	variantID := r.URL.Query().Get("variant")
+	variantID := safeQuery(r).Get("variant")
 	if variantID != "" && !variantIDPattern.MatchString(variantID) {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid variant id")
 		return

@@ -1186,7 +1186,8 @@ type Server struct {
 
 // pages maps the URL-friendly page name to its template filename.
 var pages = map[string]string{
-	"dashboard":         "dashboard.html",
+	"player":            "player.html",
+	"stats":             "dashboard.html",
 	"library":           "library.html",
 	"library_inspector": "library_inspector.html",
 	"duplicates":        "duplicates.html",
@@ -1240,7 +1241,18 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Pages.
-	mux.HandleFunc("GET /{$}", s.pageDashboard)
+	// The library player owns the root. Its sub-routes are handled
+	// client-side but registered here too, so a deep link works on a
+	// cold load and TestTemplateHrefsResolveToRegisteredRoutes keeps
+	// doing its job (a hash router would make that guard vacuous — it
+	// drops "#" hrefs).
+	mux.HandleFunc("GET /{$}", s.pagePlayer)
+	for _, p := range playerRoutes {
+		mux.HandleFunc("GET "+p, s.pagePlayer)
+	}
+	// The operator dashboard, retitled. Kept at a stable path of its
+	// own now that "/" is the player.
+	mux.HandleFunc("GET /stats", s.pageStats)
 	mux.HandleFunc("GET /library", s.pageLibrary)
 	mux.HandleFunc("GET /library/inspector", s.pageLibraryInspector)
 	mux.HandleFunc("GET /library/duplicates", s.pageDuplicates)

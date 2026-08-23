@@ -1278,12 +1278,13 @@ func TestUPnPPage_PublicModeShowsExplanationPanel(t *testing.T) {
 		}
 	}
 
-	// Nav-link suppression: layout.html `{{if not .IsPublic}}` wrap
-	// MUST omit the UPnP link. Asserted via the rendered /upnp body
-	// itself (layout.html is part of every page render, so the nav
-	// markup is in every body).
-	if strings.Contains(body, `data-tab="upnp"`) {
-		t.Errorf("public-mode nav MUST omit the UPnP link; body contains `data-tab=\"upnp\"`")
+	// Nav-link suppression: the `{{if not .IsPublic}}` wrap MUST omit
+	// the UPnP link. The link moved from the top-level nav into the
+	// Server sub-nav when the player took over the root, but the
+	// invariant is unchanged and the sub-nav renders on every operator
+	// page — including this one.
+	if strings.Contains(body, `href="/upnp"`) {
+		t.Errorf("public-mode nav MUST omit the UPnP link; body contains `href=\"/upnp\"`")
 	}
 }
 
@@ -1312,12 +1313,14 @@ func TestUPnPPage_LoopbackModeShowsActionPanels(t *testing.T) {
 	if strings.Contains(body, "upnp-public-mode-panel") {
 		t.Errorf("loopback-mode /upnp page MUST NOT render the public-mode panel")
 	}
-	// Nav link present.
-	req2 := httptest.NewRequest("GET", "/", nil)
+	// Nav link present. Probed on a Server page rather than "/": the
+	// root is the library player now, and UPnP lives in the Server
+	// sub-nav that every operator page renders.
+	req2 := httptest.NewRequest("GET", "/devices", nil)
 	req2.RemoteAddr = "127.0.0.1:54321"
 	rw2 := httptest.NewRecorder()
 	h.ServeHTTP(rw2, req2)
-	if !strings.Contains(rw2.Body.String(), `data-tab="upnp"`) {
+	if !strings.Contains(rw2.Body.String(), `href="/upnp"`) {
 		t.Errorf("loopback-mode nav MUST include the UPnP link")
 	}
 }

@@ -18,6 +18,10 @@
 (function(){try{var t=localStorage.getItem("bridge-theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t);}}catch(e){}})();
 </script>
 <link rel="stylesheet" href="/static/app.css?v={{.ServerVersion}}">
+{{- /* The player stylesheet, loaded on every page because the
+    now-playing bar persists across all of them. Second file, not an
+    edit to app.css — see its header for why. */ -}}
+<link rel="stylesheet" href="/static/player.css?v={{.ServerVersion}}">
 </head>
 <body data-active="{{.ActiveTab}}" data-section="{{.ActiveSection}}">
 <header>
@@ -27,26 +31,19 @@
   </div>
   <button id="nav-toggle" class="nav-toggle" type="button"
           aria-controls="primary-nav" aria-expanded="false" aria-label="Menu">☰</button>
-  {{- /* Top-level nav groups related pages into SECTIONS: Library
-      (Roots / Inspector / Jobs) and Listening (Playlists & history /
-      Smart mixes) each expand to an in-page sub-tab bar. `data-tab` on
-      each link is the SECTION key (matched against body[data-section]
-      for the active highlight); the section's landing page is its first
-      sub-tab. */ -}}
+  {{- /* Four top-level entries. The library player owns the root; the
+      operator surfaces keep their pages verbatim and move behind one
+      "Server" entry whose sub-tab bar is rendered by server-subnav.
+      `data-tab` is the SECTION key (matched against body[data-section]),
+      and each entry points at its section's landing page — Server's is
+      /devices, since pairing is the thing an operator most often comes
+      for. aria-current is emitted server-side so the active state is
+      announced to screen readers, not only painted. */ -}}
   <nav id="primary-nav">
-    <a href="/" data-tab="dashboard">Dashboard</a>
-    <a href="/library" data-tab="library">Library</a>
-    <a href="/devices" data-tab="devices">Devices</a>
-    {{- /* UPnP upstream ingest is config-Validate-rejected in public
-        mode (SSDP is LAN-only, upstream byte URLs are RFC1918
-        unreachable from a public VPS). Hide the nav entry so public
-        operators don't see a feature they can't enable. The /upnp
-        route itself still serves an explanatory page for bookmarked
-        URLs. */ -}}
-    {{if not .IsPublic}}<a href="/upnp" data-tab="upnp">UPnP</a>{{end}}
-    <a href="/data" data-tab="listening">Listening</a>
-    <a href="/diagnostics" data-tab="diagnostics">Diagnostics</a>
-    <a href="/settings" data-tab="settings">Settings</a>
+    <a href="/" data-tab="player"{{if eq .ActiveSection "player"}} aria-current="page"{{end}}>Library</a>
+    <a href="/stats" data-tab="stats"{{if eq .ActiveSection "stats"}} aria-current="page"{{end}}>Stats</a>
+    <a href="/settings" data-tab="settings"{{if eq .ActiveSection "settings"}} aria-current="page"{{end}}>Settings</a>
+    <a href="/devices" data-tab="server"{{if eq .ActiveSection "server"}} aria-current="page"{{end}}>Server</a>
   </nav>
   <div class="meta">
     bridge {{.ServerVersion}} · protocol v{{.ProtocolVersion}}
@@ -71,29 +68,32 @@
 {{template "content" .}}
 </main>
 <script src="/static/app.js?v={{.ServerVersion}}" defer></script>
+{{- /* The player module. Deferred classic scripts and module scripts
+    execute in DOCUMENT ORDER, so app.js has already run its page
+    dispatch and started the SSE stream by the time this boots — which
+    is what lets the player reuse that one stream instead of opening a
+    second. Loaded on every page: it owns the persistent <audio>
+    element, which must outlive a navigation away from the library. */ -}}
+<script type="module" src="/static/player/boot.js?v={{.ServerVersion}}"></script>
 </body>
 </html>
 {{end}}
 
-{{- /* Section sub-tab bars. Rendered at the top of each section's pages so
-    related surfaces (Roots/Inspector/Jobs, Playlists/Smart mixes) are one
-    click apart without bloating the top nav. The current page is marked
-    active via .ActiveTab (the full pageData envelope is passed through).
-    The first tab is labeled "Roots" (the page manages library roots +
-    the transcoded cache) — actual browsing lives in Inspector; the
-    ActiveTab KEY stays "library" (internal, keyed by sectionForTab). */ -}}
-{{define "library-subnav"}}
-<nav class="subnav" aria-label="Library sections">
+{{- /* The Server section's sub-tab bar. Every operator page is here
+    verbatim — this was a MOVE, not a reorganisation, so nothing an
+    operator relied on changed shape or lost a bookmark. UPnP stays
+    hidden on public deployments (the feature is Config.Validate-
+    rejected there) while its route still serves an explainer. */ -}}
+{{define "server-subnav"}}
+<nav class="subnav" aria-label="Server sections">
+  <a href="/devices"{{if eq .ActiveTab "devices"}} class="active" aria-current="page"{{end}}>Devices</a>
   <a href="/library"{{if eq .ActiveTab "library"}} class="active" aria-current="page"{{end}}>Roots</a>
   <a href="/library/inspector"{{if eq .ActiveTab "library_inspector"}} class="active" aria-current="page"{{end}}>Inspector</a>
   <a href="/library/duplicates"{{if eq .ActiveTab "duplicates"}} class="active" aria-current="page"{{end}}>Duplicates</a>
   <a href="/jobs"{{if eq .ActiveTab "jobs"}} class="active" aria-current="page"{{end}}>Jobs</a>
-</nav>
-{{end}}
-
-{{define "listening-subnav"}}
-<nav class="subnav" aria-label="Listening sections">
+  {{if not .IsPublic}}<a href="/upnp"{{if eq .ActiveTab "upnp"}} class="active" aria-current="page"{{end}}>UPnP</a>{{end}}
   <a href="/data"{{if eq .ActiveTab "data"}} class="active" aria-current="page"{{end}}>Playlists &amp; history</a>
   <a href="/smartmixes"{{if eq .ActiveTab "smartmixes"}} class="active" aria-current="page"{{end}}>Smart mixes</a>
+  <a href="/diagnostics"{{if eq .ActiveTab "diagnostics"}} class="active" aria-current="page"{{end}}>Diagnostics</a>
 </nav>
 {{end}}

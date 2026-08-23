@@ -282,7 +282,7 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		s.browseByKey(w, r, camelot)
 		return
 	}
-	rawPath := r.URL.Query().Get("path")
+	rawPath := safeQuery(r).Get("path")
 	normalised, ok := normaliseBrowsePath(rawPath)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "bad-path",
@@ -302,7 +302,11 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 	// side; the server skips that query entirely. Mirror logic for
 	// tracks. Initial-page request omits BOTH cursors → server
 	// fetches the first page of each (treat as exhausted-of-nothing).
-	q := r.URL.Query()
+	// safeQuery, not r.URL.Query(): the cursors ARE paths (keyset
+	// pagination runs on tracks.path), so a "+" in a folder or track
+	// name would otherwise decode to a space and the next page would
+	// resume from a position that does not exist.
+	q := safeQuery(r)
 	hasAfterFolder := q.Has("afterFolder")
 	hasAfterTrack := q.Has("afterTrack")
 	afterFolder := q.Get("afterFolder")
@@ -495,7 +499,7 @@ func (s *Server) browseByKey(w http.ResponseWriter, r *http.Request, camelot str
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
 		return
 	}
-	q := r.URL.Query()
+	q := safeQuery(r)
 	afterTrack := q.Get("afterTrack")
 	isFirstPage := !q.Has("afterTrack")
 	limit := 500
@@ -593,7 +597,7 @@ func (s *Server) resolveUpscaleTarget(ctx context.Context, cfg *config.Config) (
 // vice versa.
 func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
-	rawPath := r.URL.Query().Get("path")
+	rawPath := safeQuery(r).Get("path")
 	normalised, ok := normaliseBrowsePath(rawPath)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "bad-path",

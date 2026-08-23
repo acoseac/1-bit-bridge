@@ -1,0 +1,42 @@
+{{define "content"}}
+{{- /* The player shell.
+
+    One server-rendered page for every player route; the sub-views are
+    client-side so the <audio> element survives navigation within the
+    library. The seed below lets the first view know what it is without
+    a round-trip for the parts that are cheap — the grid still fetches,
+    because it pages.
+
+    Everything inside #player-root is built by static/player/*.js. The
+    markup here is only the mount points, the no-JS fallback, and the
+    seed. */ -}}
+<script type="application/json" id="player-seed">{{json .Data}}</script>
+
+<div id="player-root" class="player" data-booting="1">
+  <aside class="player-nav" aria-label="Library sections">
+    <nav id="player-sections"></nav>
+  </aside>
+
+  <div class="player-main">
+    <div class="player-toolbar" id="player-toolbar"></div>
+    <h1 id="player-title" class="player-title" tabindex="-1">Library</h1>
+    <div id="player-view" class="player-view"></div>
+  </div>
+</div>
+
+{{- /* Route announcements for screen readers. Client-side navigation is
+    otherwise silent: without this a keyboard user pressing Back has no
+    signal that anything happened. */ -}}
+<p id="player-live" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></p>
+
+<noscript>
+  <div class="panel">
+    <h2>JavaScript is required</h2>
+    <p class="muted">
+      The library player is a client-rendered view. Server pages —
+      <a href="/stats">Stats</a>, <a href="/settings">Settings</a> and
+      <a href="/devices">Server</a> — work without it.
+    </p>
+  </div>
+</noscript>
+{{end}}
