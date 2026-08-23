@@ -131,6 +131,10 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.DLNA.TelemetryEnabled
 		out.DLNA.TelemetryEnabled = &v
 	}
+	if cfg.SmartPlaylists.Enabled != nil {
+		v := *cfg.SmartPlaylists.Enabled
+		out.SmartPlaylists.Enabled = &v
+	}
 	// UPnPUpstream: the Servers slice + its per-element SkipTopLevelContainers
 	// slice both need deep copies so mutations on the clone don't leak back.
 	if cfg.UPnPUpstream.Servers != nil {

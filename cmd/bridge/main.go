@@ -2412,7 +2412,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// there's no sox precheck. The harmonic Auto Mix + Daily Mix discovery
 	// self-omit when analysis isn't active; the listening families work from
 	// history alone.
-	smartPlaylistsActive := cfg.SmartPlaylists.Enabled
+	smartPlaylistsActive := cfg.SmartPlaylists.EffectiveEnabled()
 
 	// LE-cert expiry provider for /v1/health (public mode). Live
 	// closure so background autocert renewals surface on the next
@@ -2461,7 +2461,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			WithHistoryStore(manifestStore)
 	}
 	// Conditionally wire the smart-playlist feed so the health flag + the
-	// 404-when-off shape stay honest when cfg.SmartPlaylists.Enabled is false.
+	// 404-when-off shape stay honest when cfg.SmartPlaylists.EffectiveEnabled() is false.
 	if smartPlaylistsActive {
 		apiSrv.WithSmartPlaylistStore(manifestStore)
 	}

@@ -228,10 +228,10 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 
 	// Smart mixes.
 	resp.SmartMixes = jobsSmartMixes{
-		Enabled:          cfg.SmartPlaylists.Enabled,
+		Enabled:          cfg.SmartPlaylists.EffectiveEnabled(),
 		AnalysisAssisted: resp.Analysis.Active,
 	}
-	if cfg.SmartPlaylists.Enabled {
+	if cfg.SmartPlaylists.EffectiveEnabled() {
 		resp.SmartMixes.IntervalSec = int(cfg.SmartPlaylists.EffectiveRegenerateInterval() / time.Second)
 	}
 	if run := s.deps.SmartMixRun; run != nil {

@@ -1606,8 +1606,38 @@ func (d DuplicatesConfig) EffectiveFilter() (string, error) {
 // cadence into the `smart_playlists` cache table and served by
 // GET /v1/smart-playlists.
 type SmartPlaylistsConfig struct {
-	// Enabled is the master toggle. Default false.
-	Enabled bool `yaml:"enabled,omitempty"`
+	// Enabled is the master toggle. Default ON — nil means on; only an
+	// explicit `enabled: false` turns it off.
+	//
+	// The only shipped default flipped by the settings consolidation,
+	// and the reasoning is what kept the others where they are. This
+	// one costs nothing an operator has to plan for: it is pure SQL
+	// over the manifest the bridge already maintains, needs no external
+	// toolchain, opens no endpoint, and writes one small table on a
+	// daily cadence. Off-by-default just meant a permanently empty
+	// Smart Mixes section in both clients, which reads as a broken
+	// feature rather than an unconfigured one.
+	//
+	// Deliberately NOT flipped, and why — because each of these
+	// commits the operator to something they should choose:
+	//
+	//   upscale.enabled       shells out to sox and writes GB of variants
+	//   analysis.enabled      needs sox; starts CPU-heavy background work
+	//   autoOptimize.enabled  writes GB of variants
+	//   fingerprint.enabled   needs fpcalc AND a third-party API key
+	//   atlas.enabled         opens two request-serving endpoints
+	//   libraryWatch.enabled  cheap, but an inotify budget is a real
+	//                         resource on Linux, and the periodic scan
+	//                         already covers correctness
+	//
+	// All of them are surfaced with their live prerequisite state next
+	// to the toggle instead, which is the actual fix for "the feature
+	// looks broken": discoverability, not a value change.
+	//
+	// Pointer so absent-means-on can be distinguished from an explicit
+	// false, the same shape upscale.optimizeEnabled uses. Read through
+	// EffectiveEnabled, never directly.
+	Enabled *bool `yaml:"enabled,omitempty"`
 
 	// RegenerateIntervalSec is the background-regeneration cadence. Zero
 	// (the default) resolves to 24h — these families move on a daily scale
@@ -1615,6 +1645,16 @@ type SmartPlaylistsConfig struct {
 	// snapshot keeps GET /v1/smart-playlists a single fast cache read while
 	// staying stable within the day so the homepage doesn't reshuffle.
 	RegenerateIntervalSec int `yaml:"regenerateIntervalSec,omitempty"`
+}
+
+// EffectiveEnabled resolves the nil-means-ON default. Every reader must
+// go through this rather than touching Enabled — a bare nil check reads
+// as "off" and would silently restore the old default.
+func (c SmartPlaylistsConfig) EffectiveEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 // EffectiveRegenerateInterval resolves the regeneration cadence, defaulting

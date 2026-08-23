@@ -2117,81 +2117,175 @@ function parseDurationShorthand(s) {
 
 // --- settings ---
 
-// Tabbed Settings sections (PR feat/admin-shell-tabs-and-theme).
-// The Settings page used to scroll forever — General / Networking /
-// Updates / Audio quality each as a section header on one long form.
-// Tabs flatten to one section visible at a time. Single shared form
-// is preserved so the bottom Save button still commits every pending
-// edit at once; switching tabs doesn't lose work.
+// Settings is ONE SCROLLING SCREEN with a sticky jump list.
 //
-// Active tab is persisted in sessionStorage so a save+restart bounce
-// returns the operator where they were. Validates the persisted id
-// against the live tab set so a future template that drops a tab
-// can't trap the user on a hidden pane.
+// It was seven tabs, which flattened a long form but made the operator
+// hunt: the General tab held three fields, the state that explains why
+// a feature is doing nothing lived on a different tab from its toggle,
+// and two of the seven were read-only. Everything is on one page now;
+// the old tab strip becomes an in-page jump list, and per-section
+// <details> carry the fields most operators never touch.
+//
+// The no-JS fallback is what made this cheap: the template never
+// marked panes hidden, so "every section visible" was already the
+// pre-init state. This function now only wires navigation — it never
+// hides anything, so a JS failure degrades to a plain long form rather
+// than an empty page.
+//
+// ?tab=<id> still works: the Jobs page deep-links into a section, and
+// that link now scrolls rather than switching. Same URL, same landing
+// place.
 function initSettingsTabs() {
-  const tabs = document.querySelectorAll(".tab-btn[data-tab]");
+  const links = document.querySelectorAll(".jump-link[data-tab]");
   const panes = document.querySelectorAll(".tab-pane[data-tab]");
-  if (tabs.length === 0 || panes.length === 0) return;
-  // Mark the page as tabs-enabled BEFORE applying hidden — without
-  // this, the template renders every pane visible (no-JS fallback)
-  // and the CSS rule that visually hides the in-pane <h2> is gated
-  // on this class so headings still appear in the fallback. (Qodo
-  // on PR #129: don't lock operators out of Settings if JS fails
-  // or is skipped by a future refactor.)
-  const page = document.querySelector(".page.settings");
-  if (page) page.classList.add("tabs-enabled");
-  const STORAGE_KEY = "settings.activeTab";
-  const validIds = new Set();
-  tabs.forEach(t => validIds.add(t.dataset.tab));
-  function activate(id) {
-    if (!validIds.has(id)) return;
-    tabs.forEach(t => {
-      const on = t.dataset.tab === id;
-      t.classList.toggle("active", on);
-      t.setAttribute("aria-selected", on ? "true" : "false");
-      // tabindex makes only the active tab keyboard-tabbable; arrow
-      // keys move within the role=tablist group per WAI-ARIA.
-      t.tabIndex = on ? 0 : -1;
+  if (links.length === 0 || panes.length === 0) return;
+
+  const byId = new Map();
+  panes.forEach(p => byId.set(p.dataset.tab, p));
+
+  function markActive(id) {
+    links.forEach(l => {
+      const on = l.dataset.tab === id;
+      l.classList.toggle("active", on);
+      if (on) l.setAttribute("aria-current", "true");
+      else l.removeAttribute("aria-current");
     });
-    panes.forEach(p => {
-      p.hidden = p.dataset.tab !== id;
-    });
-    try { sessionStorage.setItem(STORAGE_KEY, id); } catch { /* private mode */ }
   }
-  tabs.forEach(t => {
-    t.addEventListener("click", () => activate(t.dataset.tab));
-  });
-  // Arrow-key navigation across the tab strip — standard WAI-ARIA
-  // tablist convention. Operators who navigate by keyboard expect
-  // Left/Right (and Home/End) on a focused tab to move within the
-  // group rather than jump out into the form.
-  const tabsArr = Array.from(tabs);
-  tabsArr.forEach((t, i) => {
-    t.addEventListener("keydown", (e) => {
-      let nextIdx = -1;
-      if (e.key === "ArrowRight") nextIdx = (i + 1) % tabsArr.length;
-      else if (e.key === "ArrowLeft") nextIdx = (i - 1 + tabsArr.length) % tabsArr.length;
-      else if (e.key === "Home") nextIdx = 0;
-      else if (e.key === "End") nextIdx = tabsArr.length - 1;
-      if (nextIdx >= 0) {
-        e.preventDefault();
-        const target = tabsArr[nextIdx];
-        activate(target.dataset.tab);
-        target.focus();
-      }
+
+  function goTo(id, { push }) {
+    const pane = byId.get(id);
+    if (!pane) return;
+    pane.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" });
+    markActive(id);
+    if (push) {
+      try { sessionStorage.setItem("settings.activeTab", id); } catch { /* private mode */ }
+    }
+  }
+
+  links.forEach(l => {
+    l.addEventListener("click", (e) => {
+      e.preventDefault();
+      goTo(l.dataset.tab, { push: true });
     });
   });
-  let saved = null;
-  try { saved = sessionStorage.getItem(STORAGE_KEY); } catch { /* private mode */ }
-  // ?tab=<id> deep-link (the Jobs page links straight to a section)
-  // outranks the sessionStorage restore; both validate against the
-  // rendered tab ids so a stale/typo'd value falls back cleanly.
+
+  // Scrollspy: highlight whichever section owns the top of the
+  // viewport. rootMargin pulls the trigger line down from the very top
+  // so a heading that has just scrolled under the sticky header still
+  // reads as current.
+  if ("IntersectionObserver" in window) {
+    const io = new IntersectionObserver((entries) => {
+      const visible = entries.filter(e => e.isIntersecting)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+      if (visible.length) markActive(visible[0].target.dataset.tab);
+    }, { rootMargin: "-80px 0px -70% 0px" });
+    panes.forEach(p => io.observe(p));
+  }
+
   const urlTab = new URLSearchParams(window.location.search).get("tab");
-  if (urlTab && validIds.has(urlTab)) {
-    activate(urlTab);
+  let saved = null;
+  try { saved = sessionStorage.getItem("settings.activeTab"); } catch { /* private mode */ }
+  const initial = (urlTab && byId.has(urlTab)) ? urlTab : (saved && byId.has(saved) ? saved : null);
+  if (initial) {
+    // Jump without smooth scrolling on load — animating to a section
+    // the operator asked for by URL just delays it.
+    byId.get(initial).scrollIntoView({ block: "start" });
+    markActive(initial);
   } else {
-    activate(saved && validIds.has(saved) ? saved : tabsArr[0].dataset.tab);
+    markActive(panes[0].dataset.tab);
   }
+}
+
+// renderSettingsPrereqs answers, next to each toggle, the question the
+// operator actually has: "it says on — is it doing anything?"
+//
+// This exists because of a real state on the author's own bridge.
+// bridge.yaml said analysis.enabled: true and the toggle rendered on;
+// /api/jobs said degradedReason "sox_missing" (the boot-time precheck
+// failed, so the pool was never wired); /api/analysis/stats said
+// enabled:false, soxAvailable:true (sox is findable NOW); /api/doctor
+// said audio-toolchain ok. Four endpoints, four true statements, and
+// audio analysis had done nothing for nine days of uptime.
+//
+// None of those facts was next to the switch. Putting the boot-time
+// VERDICT and the live PREREQUISITE side by side — and saying
+// "restart to apply" when they disagree — is worth more than any
+// default change.
+async function renderSettingsPrereqs() {
+  const slots = {
+    analysis: document.getElementById("prereq-analysis"),
+    upscale: document.getElementById("prereq-upscale"),
+    fingerprint: document.getElementById("prereq-fingerprint"),
+  };
+  if (!slots.analysis && !slots.upscale && !slots.fingerprint) return;
+
+  const [jobs, doctor] = await Promise.all([
+    API.get("/api/jobs").catch(() => null),
+    API.get("/api/doctor").catch(() => null),
+  ]);
+  const checks = new Map();
+  if (doctor && doctor.available && doctor.report && Array.isArray(doctor.report.checks)) {
+    for (const c of doctor.report.checks) checks.set(c.name, c);
+  }
+
+  const paint = (slot, { running, degradedReason, check, offLabel }) => {
+    if (!slot) return;
+    slot.hidden = false;
+    if (running) {
+      slot.dataset.state = "ok";
+      slot.textContent = "active";
+      return;
+    }
+    if (degradedReason) {
+      // The toggle is on and the feature is not running. Say which
+      // way the disagreement points, because the fix differs: a
+      // missing tool needs installing, a tool that is present now
+      // needs a restart to be picked up.
+      const live = check && check.status === "ok";
+      slot.dataset.state = "warn";
+      slot.textContent = live
+        ? "not running — restart to apply"
+        : `not running — ${check ? check.summary : degradedReason}`;
+      return;
+    }
+    slot.dataset.state = "off";
+    slot.textContent = offLabel;
+  };
+
+  const audio = checks.get("audio-toolchain");
+  paint(slots.analysis, {
+    running: !!(jobs && jobs.analysis && jobs.analysis.enabled && !jobs.analysis.degradedReason),
+    degradedReason: jobs && jobs.analysis && jobs.analysis.enabled ? jobs.analysis.degradedReason : "",
+    check: audio,
+    offLabel: audio && audio.status === "ok" ? "off — sox is available" : "off",
+  });
+  paint(slots.upscale, {
+    running: !!(jobs && jobs.upscale && jobs.upscale.enabled),
+    degradedReason: "",
+    check: audio,
+    offLabel: audio && audio.status === "ok" ? "off — sox is available" : "off",
+  });
+  const fp = checks.get("fingerprint-toolchain");
+  paint(slots.fingerprint, {
+    running: !!(jobs && jobs.fingerprint && jobs.fingerprint.enabled),
+    degradedReason: "",
+    check: fp,
+    offLabel: fp && fp.status === "ok" ? "off" : "off — needs fpcalc and an AcoustID key",
+  });
+}
+
+// numOrUndef parses a numeric form field, yielding undefined (which
+// JSON.stringify drops, leaving the server's pointer nil = "unchanged")
+// for a blank or malformed value. Distinct from `|| 0` because 0 is a
+// real value for at least one of these fields.
+function numOrUndef(v) {
+  if (v === null || String(v).trim() === "") return undefined;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? undefined : n;
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 // initEnrichmentSource wires the Enrichment tab's source picker: the Atlas
@@ -2243,6 +2337,7 @@ function mapEnrichSourceToBases(fd) {
 
 function initSettings() {
   initSettingsTabs();
+  void renderSettingsPrereqs();
   initEnrichmentSource();
   // Cert info is a one-shot fetch — the cert doesn't change without
   // a restart, so polling it is wasted work. The endpoints panel is
@@ -2394,6 +2489,18 @@ function initSettings() {
       // fsnotify library watcher opt-in. Restart-required — the
       // watcher goroutine starts at `bridge serve` startup.
       libraryWatchEnabled: fd.get("libraryWatchEnabled") === "on",
+      // Backup cadence + retention. These became editable with the
+      // settings consolidation and MUST be listed here: this payload is
+      // an explicit allowlist, not a FormData dump, so a field that
+      // renders but isn't mapped saves nothing while the page still
+      // reports "Saved." — which is worse than not offering it. Caught
+      // exactly that way in the browser.
+      //
+      // parseInt with a NaN guard rather than `|| 0`: 0 is a MEANINGFUL
+      // value for the interval (it disables the periodic ticker), so
+      // coercing a blank field to 0 would silently turn backups off.
+      backupIntervalHours: numOrUndef(fd.get("backupIntervalHours")),
+      backupKeep: numOrUndef(fd.get("backupKeep")),
       // Enrich upstream base URLs, resolved from the source picker above
       // (blank = public MusicBrainz / Cover Art defaults; atlas = derived
       // <url>/ws/2 + <url>; custom = the raw Advanced fields). Server

@@ -43,8 +43,10 @@ func TestApiJobsNilSafeDefaults(t *testing.T) {
 	if got.Enrichment.HarvestActive {
 		t.Error("harvestActive should be false without the closure")
 	}
-	if got.SmartMixes.Enabled || got.SmartMixes.Run != nil {
-		t.Errorf("smartMixes should be off with no recorder: %+v", got.SmartMixes)
+	// Enabled tracks the config (which now defaults ON); what this test
+	// is about is the RECORDER being absent, so Run must stay nil.
+	if got.SmartMixes.Run != nil {
+		t.Errorf("smartMixes.Run should be nil with no recorder: %+v", got.SmartMixes)
 	}
 	if got.Updates.CheckIntervalHours != 6 {
 		t.Errorf("updates.checkIntervalHours = %d, want resolved default 6", got.Updates.CheckIntervalHours)
@@ -80,7 +82,7 @@ func TestApiJobsWiredSections(t *testing.T) {
 
 	next := config.Clone(srv.deps.CfgHolder.Load())
 	next.Analysis.Enabled = true
-	next.SmartPlaylists.Enabled = true
+	next.SmartPlaylists.Enabled = boolPtrT(true)
 	srv.deps.CfgHolder.Store(next)
 
 	now := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)

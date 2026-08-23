@@ -501,7 +501,7 @@ func (s *Server) pagePlayer(w http.ResponseWriter, r *http.Request) {
 		ID:           id,
 		Query:        r.URL.Query().Get("q"),
 		AtlasEnabled: cfg.Atlas.Enabled,
-		MixesEnabled: cfg.SmartPlaylists.Enabled,
+		MixesEnabled: cfg.SmartPlaylists.EffectiveEnabled(),
 		LibraryName:  cfg.LibraryName,
 	})
 }

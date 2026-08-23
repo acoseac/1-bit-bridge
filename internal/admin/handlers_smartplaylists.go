@@ -53,7 +53,7 @@ func (s *Server) apiSmartPlaylistsList(w http.ResponseWriter, r *http.Request) {
 // Synchronous: a loopback operator action, fast on a typical library.
 func (s *Server) apiSmartPlaylistsRegenerate(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
-	if cfg == nil || !cfg.SmartPlaylists.Enabled {
+	if cfg == nil || !cfg.SmartPlaylists.EffectiveEnabled() {
 		writeError(w, http.StatusNotFound, "smart_playlists_disabled",
 			"smart playlists are not enabled in bridge.yaml")
 		return
@@ -78,7 +78,7 @@ func (s *Server) apiSmartPlaylistsRegenerate(w http.ResponseWriter, r *http.Requ
 // gate as the wholesale handler above.
 func (s *Server) apiSmartPlaylistRegenerateOne(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
-	if cfg == nil || !cfg.SmartPlaylists.Enabled {
+	if cfg == nil || !cfg.SmartPlaylists.EffectiveEnabled() {
 		writeError(w, http.StatusNotFound, "smart_playlists_disabled",
 			"smart playlists are not enabled in bridge.yaml")
 		return
@@ -140,7 +140,7 @@ func newPlaylistUUID() (string, error) {
 // devices see via the normal playlist list/restore flow. A frozen copy by
 // design: the mix keeps regenerating, the saved playlist doesn't follow.
 // Body: optional {"name": "..."} — defaults to "<title> — <date>".
-// Deliberately NOT gated on cfg.SmartPlaylists.Enabled: the snapshot only
+// Deliberately NOT gated on cfg.SmartPlaylists.EffectiveEnabled(): the snapshot only
 // reads the existing cache, and the per-slug cover routes set the precedent.
 func (s *Server) apiSmartPlaylistSaveAsPlaylist(w http.ResponseWriter, r *http.Request) {
 	slug := strings.TrimSpace(r.PathValue("slug"))
@@ -320,7 +320,7 @@ func camelotCode(c smartplaylist.Camelot) string {
 // the JSON admin API, not this page handler.
 func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
-	enabled := cfg != nil && cfg.SmartPlaylists.Enabled
+	enabled := cfg != nil && cfg.SmartPlaylists.EffectiveEnabled()
 
 	// Which families already have an operator-uploaded cover (best-effort).
 	covers, _ := s.deps.Manifest.PlaylistCoversByScope(r.Context(), manifest.CoverScopeSmartMix)
