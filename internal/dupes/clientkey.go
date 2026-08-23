@@ -413,7 +413,40 @@ func nonEmptyTrimmed(s string) string {
 //     Swift filename rule; disc: tag if present, else the disc-folder
 //     rule (which yields 1, never 0, when no disc folder matches);
 //   - year:   ≤ 0 is absent.
-func KeyFor(r Row) Key {
+//
+// Resolved is the value set KeyFor derives BEFORE it keys: the
+// tag → artist → path-default ladder, already applied. It is exported
+// because the album/artist catalog (internal/librarycat) has to label a
+// tile with the SAME strings the key was computed from — re-deriving
+// the ladder in a second package is precisely how a mirror drifts.
+//
+// DiscInferred / TrackInferred record whether the value came from the
+// tag or from the folder/filename rule. That distinction is not
+// decorative here: on a real library `discNumber` is tagged on well
+// under 1% of rows, so the inferred value is what actually orders a
+// multi-disc album.
+type Resolved struct {
+	Title       string
+	Artist      string
+	AlbumArtist string
+	Album       string
+	Year        int
+
+	Disc          int
+	DiscInferred  bool
+	Track         int
+	TrackInferred bool
+}
+
+// Resolve applies the client's field-resolution ladder to one manifest
+// row. It is the whole of KeyFor except the final Key construction, so
+// KeyFor(r) == keyFrom(Resolve(r)) by construction — the extraction is
+// behaviour-preserving and clientkey_test.go's Swift-lifted literals,
+// unmodified, are the proof.
+//
+// See KeyFor's docblock for the per-field rules; they live there
+// because that is the mirror's entry point.
+func Resolve(r Row) Resolved {
 	sharePath := "/" + r.Path
 	// Filename mirrors `(bt.path as NSString).lastPathComponent`, which
 	// splits on "/" ONLY — deliberately NOT LastIndexAny("/\\"): the
@@ -449,18 +482,41 @@ func KeyFor(r Row) Key {
 	if album == "" {
 		album = d.album
 	}
-	track := d.trackNumber
+	track, trackInferred := d.trackNumber, true
 	if r.TrackTagged {
-		track = r.Track
+		track, trackInferred = r.Track, false
 	}
-	disc := d.discNumber
+	disc, discInferred := d.discNumber, true
 	if r.DiscTagged {
-		disc = r.Disc
+		disc, discInferred = r.Disc, false
 	}
+	return Resolved{
+		Title:         title,
+		Artist:        artist,
+		AlbumArtist:   albumArtist,
+		Album:         album,
+		Year:          r.Year,
+		Disc:          disc,
+		DiscInferred:  discInferred,
+		Track:         track,
+		TrackInferred: trackInferred,
+	}
+}
+
+// AlbumIDOf is albumID over an already-Resolved row — the exported
+// entry point for callers that hold a Resolved (the catalog) or that
+// need to map an iOS `(albumArtist, album, year)` favourites triple
+// onto the same identity.
+func AlbumIDOf(res Resolved) string {
+	return albumID(res.AlbumArtist, res.Album, res.Year)
+}
+
+func KeyFor(r Row) Key {
+	res := Resolve(r)
 	return Key{
-		AlbumID:   albumID(albumArtist, album, r.Year),
-		Disc:      disc,
-		Track:     track,
-		NormTitle: normalize(title),
+		AlbumID:   AlbumIDOf(res),
+		Disc:      res.Disc,
+		Track:     res.Track,
+		NormTitle: normalize(res.Title),
 	}
 }
