@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -164,16 +165,24 @@ func TestArtworkDerivationIsCachedNotRepeated(t *testing.T) {
 	thumb := filepath.Join(dir, manifest.ThumbsDirName, metaLocalSha+"-250.jpg")
 
 	fetchArtwork(t, srv, "/api/library/artwork/"+metaLocalSha+"?size=250")
-	first, err := os.Stat(thumb)
-	if err != nil {
+	if _, err := os.Stat(thumb); err != nil {
 		t.Fatalf("thumb not written: %v", err)
 	}
-	fetchArtwork(t, srv, "/api/library/artwork/"+metaLocalSha+"?size=250")
-	second, err := os.Stat(thumb)
-	if err != nil {
+
+	// Detect reuse by CONTENT, not mtime: two writes inside one coarse
+	// clock tick (Windows is ~15.6 ms) leave identical mtimes, so an
+	// mtime comparison would pass even if the thumb had been rebuilt.
+	sentinel := []byte("sentinel-not-a-real-jpeg")
+	if err := os.WriteFile(thumb, sentinel, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !first.ModTime().Equal(second.ModTime()) {
+	future := time.Now().Add(time.Second)
+	if err := os.Chtimes(thumb, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	rw := fetchArtwork(t, srv, "/api/library/artwork/"+metaLocalSha+"?size=250")
+	if !bytes.Equal(rw.Body.Bytes(), sentinel) {
 		t.Error("thumb was re-derived on a second request instead of served from cache")
 	}
 }

@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -93,19 +94,34 @@ func TestEnsureThumbRederivesWhenSourceIsNewer(t *testing.T) {
 	}
 
 	// A cached thumb that is already fresh must not be re-derived.
-	stat0, err := os.Stat(dst)
-	if err != nil {
-		t.Fatalf("stat thumb: %v", err)
+	//
+	// Detected by CONTENT, not by mtime: two writes inside one coarse
+	// clock tick (Windows is ~15.6 ms) leave identical mtimes, so an
+	// mtime comparison would silently pass on exactly the platform most
+	// likely to break. A sentinel cannot be reproduced by a re-derive.
+	sentinel := []byte("sentinel-not-a-real-jpeg")
+	if err := os.WriteFile(dst, sentinel, 0o600); err != nil {
+		t.Fatalf("plant sentinel: %v", err)
+	}
+	// Keep the sentinel newer than the source, which is what "fresh"
+	// means to EnsureThumb.
+	now := time.Now().Add(time.Second)
+	if err := os.Chtimes(dst, now, now); err != nil {
+		t.Fatalf("chtimes sentinel: %v", err)
 	}
 	if err := EnsureThumb(src, dst, 250); err != nil {
 		t.Fatalf("second derive: %v", err)
 	}
-	stat1, err := os.Stat(dst)
+	got, err := os.ReadFile(dst)
 	if err != nil {
-		t.Fatalf("re-stat thumb: %v", err)
+		t.Fatalf("read thumb: %v", err)
 	}
-	if !stat0.ModTime().Equal(stat1.ModTime()) {
-		t.Errorf("fresh thumb was re-derived: mtime moved %v -> %v", stat0.ModTime(), stat1.ModTime())
+	if !bytes.Equal(got, sentinel) {
+		t.Error("a fresh thumb was re-derived instead of reused")
+	}
+	// Restore the real thumb for the staleness half below.
+	if err := os.WriteFile(dst, first, 0o600); err != nil {
+		t.Fatalf("restore thumb: %v", err)
 	}
 
 	// Now replace the portrait the way the enricher does — same path,

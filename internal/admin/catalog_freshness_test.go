@@ -27,6 +27,17 @@ func TestCatalogTTLExpiryServesStaleAndRefreshesBehind(t *testing.T) {
 		t.Fatalf("initial build: %v", err)
 	}
 
+	// Count rebuilds rather than comparing builtAt stamps. Two
+	// time.Now() readings milliseconds apart are NOT reliably ordered:
+	// Windows' timer granularity is ~15.6 ms, so a refresh that ran
+	// correctly can stamp a value EQUAL to the one before it and a
+	// `.After()` assertion fails on CI while passing on every
+	// nanosecond-clock host. Same coarse-clock trap as the indexed_at
+	// bump. The counter answers the question this test actually asks.
+	var builds atomic.Int64
+	catalogBuiltHookForTests = func() { builds.Add(1) }
+	t.Cleanup(func() { catalogBuiltHookForTests = nil })
+
 	// Age the snapshot past the TTL without touching the epoch: nothing
 	// has told us the library changed.
 	cached := srv.catalog.Load()
@@ -51,12 +62,11 @@ func TestCatalogTTLExpiryServesStaleAndRefreshesBehind(t *testing.T) {
 
 	// ...and a refresh must actually happen behind it.
 	srv.WaitForCatalogRefresh()
-	after := srv.catalog.Load()
-	if after == nil {
+	if srv.catalog.Load() == nil {
 		t.Fatal("snapshot vanished after the background refresh")
 	}
-	if !after.builtAt.After(cached.builtAt) {
-		t.Error("no background refresh ran; the snapshot would stay stale until an epoch bump")
+	if got := builds.Load(); got != 1 {
+		t.Errorf("background rebuilds = %d, want exactly 1; a stale snapshot would never refresh", got)
 	}
 }
 

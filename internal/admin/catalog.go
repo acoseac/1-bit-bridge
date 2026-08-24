@@ -105,7 +105,7 @@ func (s *Server) libraryCatalog(ctx context.Context) (*librarycat.Catalog, error
 		}
 		// Stale by the clock only. Hand back what we have and refresh
 		// out of band.
-		s.refreshCatalogAsync()
+		s.refreshCatalogAsync(ctx)
 		return c.cat, nil
 	}
 	return s.rebuildCatalog(ctx)
@@ -212,7 +212,7 @@ func (s *Server) buildLibraryCatalog(ctx context.Context) (*librarycat.Catalog, 
 // It is deliberately NOT a claim that the flag prevents duplicate
 // rebuilds; it does not, and a test asserting so passes with the flag
 // removed.
-func (s *Server) refreshCatalogAsync() {
+func (s *Server) refreshCatalogAsync(ctx context.Context) {
 	if !s.catalogRefreshing.CompareAndSwap(false, true) {
 		return
 	}
@@ -220,13 +220,18 @@ func (s *Server) refreshCatalogAsync() {
 	go func() {
 		defer s.bgRefresh.Done()
 		defer s.catalogRefreshing.Store(false)
-		// Detached ctx: this refresh outlives the request that triggered
-		// it by design — that is the point of answering from the stale
-		// copy — and it is bounded by catalogBuildTimeout inside the
-		// flight. The PR #373 shared-result precedent: a singleflight
-		// result belongs to every joined caller, so it must not be
-		// cancellable by whichever one happened to start it.
-		if _, err := s.rebuildCatalog(context.WithoutCancel(context.Background())); err != nil {
+		// WithoutCancel over the CALLER's ctx, not a fresh Background:
+		// this refresh outlives the request that triggered it by design
+		// — that is the point of answering from the stale copy — but
+		// request-scoped values (request id, the per-request logger)
+		// should still reach it, and Background would drop them. Matches
+		// rebuildCatalog's own buildCtx and every other WithoutCancel in
+		// the codebase. The PR #373 shared-result precedent: a
+		// singleflight result belongs to every joined caller, so it must
+		// not be cancellable by whichever one happened to start it.
+		// Bounded by catalogBuildTimeout inside the flight, and joined
+		// to bgRefresh so shutdown still waits for it.
+		if _, err := s.rebuildCatalog(context.WithoutCancel(ctx)); err != nil {
 			logger.Warn("background catalog refresh", "err", err)
 		}
 	}()
