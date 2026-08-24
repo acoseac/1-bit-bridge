@@ -358,14 +358,25 @@ export async function renderAxisAlbums(view, ctx, kind) {
   const params = new URLSearchParams(ctx.params);
   params.set(kind, id);
 
+  // The label lookup is a second round trip, so the route can change
+  // under it. api.genres/api.composers share the "axis" key and so abort
+  // each OTHER, but navigating to a DIFFERENT section does not — the
+  // fetch completes and setAxisTitle would then stamp a genre name onto
+  // whatever page the reader is now looking at. The generation counter
+  // is what route() bumps on every navigation, so comparing it is the
+  // reliable test rather than relying on which requests happen to share
+  // a key.
+  const myGen = ctx.gen();
   let label = "";
   try {
     const r = await (kind === "genre" ? api.genres({ limit: 200 }) : api.composers({ limit: 200 }));
+    if (ctx.gen() !== myGen) return;
     label = (r.entries || []).find((e) => e.id === id)?.name || "";
   } catch (e) {
+    if (isAborted(e) || ctx.gen() !== myGen) return;
     // A missing label costs a heading, never the albums — the grid below
     // is driven by the id, not the name.
-    if (!isAborted(e)) label = "";
+    label = "";
   }
   if (label) setAxisTitle(label);
   return renderAlbums(view, { ...ctx, params, scopeLabel: label });

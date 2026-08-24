@@ -71,10 +71,10 @@ func TestPlayerRoutesTableCoversEveryPlayerHead(t *testing.T) {
 	// without being reachable heads.
 	var missing []string
 	for h := range heads {
-		if !cases[h] || knownRouteGaps[h] {
-			if knownRouteGaps[h] {
-				continue
-			}
+		if knownRouteGaps[h] {
+			continue
+		}
+		if !cases[h] {
 			missing = append(missing, h)
 		}
 	}
