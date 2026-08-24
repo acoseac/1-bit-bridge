@@ -173,6 +173,41 @@ func TestEnsureThumbDeclinesPassthroughBytes(t *testing.T) {
 	}
 }
 
+// TestEnsureThumbWritesEvenWhenTheScaledFileIsLarger pins that the
+// decline is DIMENSIONAL, not byte-based. A downscale is not guaranteed
+// to shrink a file — a low-detail source re-encoded at q82 can grow —
+// and a byte comparison would discard a perfectly good thumbnail and
+// serve the oversized source, silently not honouring ?size=.
+//
+// The fixture forces the awkward case rather than hoping for it: a
+// nearly-flat source stored at very low quality (few bytes, many
+// pixels), derived at a target whose re-encode is comparable in size.
+func TestEnsureThumbWritesEvenWhenTheScaledFileIsLarger(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "flat.jpg")
+	writeArtFixture(t, src, 400, 400, 5) // tiny bytes, 400 px
+	dst := filepath.Join(dir, ThumbsDirName, "flat-250.jpg")
+
+	if err := EnsureThumb(src, dst, 250); err != nil {
+		t.Fatalf("EnsureThumb: %v", err)
+	}
+	out, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read thumb: %v", err)
+	}
+	w, h, _ := decodeDims(t, out)
+	if w != 250 || h != 250 {
+		t.Errorf("thumb dims = %dx%d, want 250x250", w, h)
+	}
+	// Whether it is larger or smaller than the source is not the point
+	// and not asserted — what matters is that the SIZE WAS HONOURED.
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("source %d bytes @400px -> thumb %d bytes @250px", srcInfo.Size(), len(out))
+}
+
 func TestEnsureThumbMissingSourceIsAnError(t *testing.T) {
 	dir := t.TempDir()
 	err := EnsureThumb(filepath.Join(dir, "nope.jpg"), filepath.Join(dir, "t.jpg"), 250)

@@ -154,26 +154,11 @@ func (s *Server) deriveThumb(key string, size int, src string) (string, bool) {
 // re-validates rather than trusting that, since it is what joins a path.
 func (s *Server) resolveArtworkTier(key string, size int, srcPath func(int) string) (string, bool) {
 	if p := srcPath(size); statOK(p) {
-		// An exact FILENAME match is not an exact SIZE match. Local
-		// covers are all written under a `-500` suffix regardless of
-		// their real dimensions, so trusting the name here is what let
-		// `?size=500` answer with a 1200 px / 255 KB JPEG. Read the
-		// header — a few KB, and these responses are `immutable`, so it
-		// happens about once per browser per cover — and derive when the
-		// file materially overshoots.
-		if px, ok := manifest.ArtworkLongestSide(p); !ok || px < size*artworkOversizeNumerator/artworkOversizeDenominator {
-			return p, true
-		}
-		if derived, ok := s.deriveThumb(key, size, p); ok {
-			return derived, true
-		}
-		return p, true
+		return s.serveOrShrink(key, size, p), true
 	}
-	if s.deps.ArtworkThumbPath != nil && allowedThumbTier(size) {
-		if src, ok := largestSourceAbove(size, srcPath); ok {
-			if derived, ok := s.deriveThumb(key, size, src); ok {
-				return derived, true
-			}
+	if src, ok := s.largestSourceAbove(size, srcPath); ok {
+		if derived, ok := s.deriveThumb(key, size, src); ok {
+			return derived, true
 		}
 	}
 	for _, candidate := range adminArtworkLadderCandidates(size) {
@@ -184,9 +169,38 @@ func (s *Server) resolveArtworkTier(key string, size int, srcPath func(int) stri
 	return "", false
 }
 
+// serveOrShrink decides what to serve for an exact FILENAME match.
+//
+// A name match is not a SIZE match: local covers are all written under a
+// `-500` suffix regardless of their real dimensions, so trusting the
+// name is what let `?size=500` answer with a 1200 px / 255 KB JPEG. Read
+// the header — a few KB, and these responses are `immutable`, so it
+// happens about once per browser per cover — and derive when the file
+// materially overshoots.
+//
+// Always returns a servable path: an unreadable header or a failed
+// derive falls back to the stored file, which is the behaviour that
+// existed before any of this.
+func (s *Server) serveOrShrink(key string, size int, p string) string {
+	px, ok := manifest.ArtworkLongestSide(p)
+	if !ok || px < size*artworkOversizeNumerator/artworkOversizeDenominator {
+		return p
+	}
+	if derived, ok := s.deriveThumb(key, size, p); ok {
+		return derived
+	}
+	return p
+}
+
 // largestSourceAbove finds the smallest stored tier that is still
 // strictly larger than size — the cheapest source to downscale from.
-func largestSourceAbove(size int, srcPath func(int) string) (string, bool) {
+//
+// Returns false when derivation is unwired or the size is not a serve
+// tier, so callers need no separate guard: no source means no derive.
+func (s *Server) largestSourceAbove(size int, srcPath func(int) string) (string, bool) {
+	if s.deps.ArtworkThumbPath == nil || !allowedThumbTier(size) {
+		return "", false
+	}
 	best, bestPx := "", 0
 	for _, candidate := range adminArtworkServeSizes {
 		if candidate <= size {

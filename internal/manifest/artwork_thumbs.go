@@ -38,8 +38,10 @@
 package manifest
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"image"
 	"os"
 	"path/filepath"
 	"time"
@@ -70,6 +72,19 @@ func ArtworkLongestSide(path string) (int, bool) {
 		return dims.X, true
 	}
 	return dims.Y, true
+}
+
+// longestSideOf reads the longest side out of encoded image bytes,
+// header only. Used to confirm a scale actually happened.
+func longestSideOf(data []byte) (int, bool) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0, false
+	}
+	if cfg.Width > cfg.Height {
+		return cfg.Width, true
+	}
+	return cfg.Height, true
 }
 
 // errThumbNotNeeded means the source is already at or below the target
@@ -132,13 +147,21 @@ func EnsureThumb(src, dst string, targetPx int) error {
 	if err != nil {
 		return err
 	}
-	if len(scaled) >= len(data) {
-		// scaleLocalArtworkImpl returns the input VERBATIM on its
-		// passthrough paths (a JPEG whose pixels Go can't decode, or one
-		// over the source-dimension caps). Writing those bytes under a
-		// smaller tier's name would make the filename lie the same way
-		// `-500` already does, so decline instead and let the ladder
-		// serve the real source.
+	// scaleLocalArtworkImpl returns the input VERBATIM on its passthrough
+	// paths (a JPEG whose pixels Go can't decode, or one over the
+	// source-dimension caps). Writing those bytes under a smaller tier's
+	// name would make the filename lie the same way `-500` already does.
+	//
+	// Detect that DIMENSIONALLY, not by comparing byte lengths. A
+	// downscale is NOT guaranteed to shrink the file: the earlier
+	// byte-length form discarded a valid thumbnail whenever the q82
+	// re-encode came out larger than a low-quality source, and then
+	// served the oversized original — silently not honouring ?size= on
+	// exactly the files that most need it. Measured on a q5 400 px
+	// source: 10,897 bytes in, a correct 250 px thumb of 24,648 bytes
+	// out, refused. Pinned by
+	// TestEnsureThumbWritesEvenWhenTheScaledFileIsLarger.
+	if px, ok := longestSideOf(scaled); !ok || px > targetPx {
 		return errThumbNotNeeded
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
