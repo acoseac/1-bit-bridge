@@ -7255,12 +7255,16 @@ func (s *Store) TrackProjectionsForPaths(ctx context.Context, paths []string, va
 const trackProjectionChunk = 400
 
 // trackProjectionsForPathsSQL is spelled as a named const rather than
-// concatenated at the call site. Both operands are constants either
-// way, so Go folds them identically — but SonarCloud's go:S2077 reads a
-// binary expression in the query argument as an assembled query and
-// flags it, and a MEDIUM-severity security finding that is really a
-// formatting preference is worse than the extra name. Same convention
-// as trackFeatureSelect's callers.
+// concatenated at the call site, because a name reads better than a
+// multi-line expression wedged into an argument list.
+//
+// It does NOT silence SonarCloud's go:S2077, and it was written
+// believing it would: that rule fires on any query argument that is not
+// a string LITERAL, so a const identifier is flagged exactly as the
+// concatenation was. Every S2077 in this package is the same false
+// positive — the statement is built entirely from constants and every
+// value is a bound parameter — and the established remedy here is to
+// resolve them as such in SonarCloud, not to reshape the code.
 const trackProjectionsForPathsSQL = trackProjectionSelect + `
 	 WHERE t.path IN (SELECT value FROM json_each(?))
 	 ORDER BY t.path ASC`

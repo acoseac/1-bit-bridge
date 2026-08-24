@@ -140,32 +140,39 @@ func (s *Server) resolveVariantScope(r *http.Request, req scopeRequest) (variant
 
 	cat, err := s.libraryCatalog(r.Context())
 	if err != nil {
-		if errors.Is(err, errCatalogTooLarge) {
-			return variantScope{}, &scopeError{
-				Status:  http.StatusServiceUnavailable,
-				Code:    "catalog_too_large",
-				Message: "this library is too large for the in-memory catalog album and artist scopes use",
-			}
-		}
-		// A browser that navigated away mid-request cancels the
-		// context, which surfaces here as a catalog build failure. That
-		// is not an operator-actionable fault, and logging it at Error
-		// trains people to ignore the level that matters.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			logger.Debug("resolve variant scope: request cancelled", "err", err)
-		} else {
-			logger.Error("resolve variant scope: build catalog", "err", err)
-		}
-		return variantScope{}, &scopeError{
-			Status:  http.StatusInternalServerError,
-			Code:    "internal",
-			Message: "could not build the library catalog",
-		}
+		return variantScope{}, catalogScopeError(err)
 	}
 	if req.AlbumIDs != nil {
 		return albumScope(cat, req.AlbumIDs)
 	}
 	return artistScope(cat, req.ArtistID)
+}
+
+// catalogScopeError classifies a catalog-build failure for the two
+// identity scopes that need one.
+//
+// The cancellation arm is the reason this is worth naming: a browser
+// navigating away mid-request cancels the context, which arrives here
+// as a build failure. Logging that at Error trains people to ignore the
+// level that matters.
+func catalogScopeError(err error) *scopeError {
+	if errors.Is(err, errCatalogTooLarge) {
+		return &scopeError{
+			Status:  http.StatusServiceUnavailable,
+			Code:    "catalog_too_large",
+			Message: "this library is too large for the in-memory catalog album and artist scopes use",
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		logger.Debug("resolve variant scope: request cancelled", "err", err)
+	} else {
+		logger.Error("resolve variant scope: build catalog", "err", err)
+	}
+	return &scopeError{
+		Status:  http.StatusInternalServerError,
+		Code:    "internal",
+		Message: "could not build the library catalog",
+	}
 }
 
 func resolveTrackPathScope(raw []string) (variantScope, *scopeError) {

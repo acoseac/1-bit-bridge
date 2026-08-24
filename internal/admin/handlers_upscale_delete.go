@@ -190,26 +190,27 @@ func parseVariantDeleteRequest(q map[string][]string) (req AdminVariantDeleteReq
 			"deleting all variants requires `?confirm=true` to be set explicitly"
 	}
 
-	if hasPrefix {
+	switch {
+	case hasPrefix:
 		v, ok := validateAdminRelativePath(prefix)
 		if !ok {
-			return req, "bad_request",
-				"`prefix` must be a clean relative path (no leading `/`, no `..`)"
+			return req, "bad_request", pathShapeError("prefix")
 		}
 		req.Prefix = v
-		return req, "", ""
-	}
-	if hasPath {
+	case hasPath:
 		v, ok := validateAdminRelativePath(pathParam)
 		if !ok {
-			return req, "bad_request",
-				"`path` must be a clean relative path (no leading `/`, no `..`)"
+			return req, "bad_request", pathShapeError("path")
 		}
 		req.Path = v
-		return req, "", ""
+	default:
+		req.All = true
 	}
-	req.All = true
 	return req, "", ""
+}
+
+func pathShapeError(param string) string {
+	return "`" + param + "` must be a clean relative path (no leading `/`, no `..`)"
 }
 
 // checkDeleteShapeExclusive rejects every request that names more than
