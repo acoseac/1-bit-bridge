@@ -332,14 +332,19 @@ function variantMarks(t) {
     wrap.appendChild(el("span", {
       class: `track-variant${v.fresh ? "" : " track-variant-stale"}`,
       text: label,
-      attrs: {
-        title: v.fresh
-          ? `${label} ${variantGeometry(v)}${v.sizeBytes ? ` · ${bytes(v.sizeBytes)}` : ""}`
-          : `${label} copy is out of date — the source changed after it was made`,
-      },
+      attrs: { title: variantMarkTitle(v, label) },
     }));
   }
   return wrap;
+}
+
+/** The tooltip on a variant mark: what it is, or why it will not serve. */
+function variantMarkTitle(v, label) {
+  if (!v.fresh) {
+    return `${label} copy is out of date — the source changed after it was made`;
+  }
+  const parts = [label, variantGeometry(v), bytes(v.sizeBytes)].filter(Boolean);
+  return parts.length > 1 ? `${parts[0]} ${parts.slice(1).join(" · ")}` : parts[0];
 }
 
 function variantGeometry(v) {

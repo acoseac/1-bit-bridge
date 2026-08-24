@@ -227,7 +227,7 @@ const VARIANT_REFRESH_MIN_MS = 8000;
 export function wireVariantRefresh() {
   window.addEventListener("bridge:upscale", (ev) => {
     if (!variantRefresh) return;
-    const settled = !!(ev.detail && ev.detail.settled);
+    const settled = !!ev.detail?.settled;
     if (!settled && Date.now() - variantRefreshAt < VARIANT_REFRESH_MIN_MS) return;
     variantRefreshAt = Date.now();
     variantRefresh();

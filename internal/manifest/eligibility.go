@@ -211,6 +211,19 @@ func (s *Store) EligibleRollupByPrefix(ctx context.Context, prefix string, targe
 	return ec, nil
 }
 
+// eligibleCountsForPathsSQL is a named const rather than a call-site
+// concatenation: every operand is already a constant and Go folds them
+// identically, but SonarCloud's go:S2077 reads a binary expression in
+// the query argument as an assembled query.
+const eligibleCountsForPathsSQL = `
+	SELECT
+	  COALESCE(SUM(CASE WHEN ` + upscaleCoveredOrEligibleSQL + `
+	    THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN ` + optimizeCoveredOrEligibleSQL + `
+	    THEN 1 ELSE 0 END), 0)
+	FROM tracks t
+	WHERE t.path IN (SELECT value FROM json_each(?))`
+
 // EligibleCountsForPaths is the identity-scoped twin of
 // EligibleRollupByPrefix: the per-kind coverage denominator over an
 // EXPLICIT set of tracks rather than a subtree.
@@ -250,15 +263,8 @@ func (s *Store) EligibleCountsForPaths(ctx context.Context, paths []string, targ
 			return EligibleCounts{}, err
 		}
 		var chunk EligibleCounts
-		if err := s.db.QueryRowContext(ctx, `
-			SELECT
-			  COALESCE(SUM(CASE WHEN `+upscaleCoveredOrEligibleSQL+`
-			    THEN 1 ELSE 0 END), 0),
-			  COALESCE(SUM(CASE WHEN `+optimizeCoveredOrEligibleSQL+`
-			    THEN 1 ELSE 0 END), 0)
-			FROM tracks t
-			WHERE t.path IN (SELECT value FROM json_each(?))
-		`, targetRate, targetBits, targetRate, targetBits, string(blob)).
+		if err := s.db.QueryRowContext(ctx, eligibleCountsForPathsSQL,
+			targetRate, targetBits, targetRate, targetBits, string(blob)).
 			Scan(&chunk.Upscale, &chunk.Optimize); err != nil {
 			return EligibleCounts{}, fmt.Errorf("eligible counts for paths: %w", err)
 		}

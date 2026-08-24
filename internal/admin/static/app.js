@@ -2876,7 +2876,7 @@ function applyUpscale(r) {
  * throttled away.
  */
 function notifyUpscaleProgress(r) {
-  const pool = r && r.pool;
+  const pool = r?.pool;
   if (!pool) return;
   const completed = (pool.done || 0) + (pool.failed || 0);
   const idle = !(pool.inflight > 0 || pool.queueLen > 0);
