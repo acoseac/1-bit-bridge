@@ -124,6 +124,12 @@ type playerAlbumDTO struct {
 
 	Routed       bool  `json:"routed,omitempty"`
 	RoutedOnline *bool `json:"routedOnline,omitempty"`
+
+	// Variants is the grid's per-album coverage badge, read O(1) from a
+	// precomputed snapshot. Absent when the snapshot could not be built
+	// — the tile then renders without a badge rather than with a wrong
+	// one.
+	Variants *albumCoverage `json:"variants,omitempty"`
 }
 
 type playerAlbumsResponse struct {
@@ -281,7 +287,13 @@ func (s *Server) apiPlayerAlbums(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 
-	idx, err := s.filterAlbums(cat, q)
+	// One whole-library read, shared by the filter and the badges. It is
+	// fetched even when nothing filters on it, because every tile wants
+	// its own numbers — and the snapshot is precomputed precisely so
+	// that costs a map lookup per tile rather than a query.
+	cov := s.albumCoverageFor(r, cat)
+
+	idx, err := s.filterAlbums(cat, cov, q)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -291,7 +303,11 @@ func (s *Server) apiPlayerAlbums(w http.ResponseWriter, r *http.Request) {
 	start, end := pageSlice(len(idx), offset, limit)
 	out := make([]playerAlbumDTO, 0, end-start)
 	for _, i := range idx[start:end] {
-		out = append(out, albumDTO(cat.Albums[i], s.routedOnline))
+		dto := albumDTO(cat.Albums[i], s.routedOnline)
+		if c, ok := cov[cat.Albums[i].ID]; ok {
+			dto.Variants = &c
+		}
+		out = append(out, dto)
 	}
 	meta := playerPageMeta{Total: len(idx), Offset: start, Limit: limit,
 		SnapshotAt: snapshotStamp(cat.BuiltAt)}
@@ -326,32 +342,83 @@ func albumBuckets(cat *librarycat.Catalog, idx []int, mode string) []playerBucke
 // filterAlbums narrows the snapshot to the indices matching the query.
 // Returns a fresh slice every call — the catalog's own ordering must
 // never be mutated, since it is shared by every concurrent reader.
-func (s *Server) filterAlbums(cat *librarycat.Catalog, q map[string][]string) ([]int, error) {
+func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCoverage, q map[string][]string) ([]int, error) {
 	get := func(k string) string {
 		if v, ok := q[k]; ok && len(v) > 0 {
 			return v[0]
 		}
 		return ""
 	}
-	quality := get("quality")
-	artistID := get("artist")
-	genreID := get("genre")
-	composerID := get("composer")
 
+	allow, err := axisAllowSet(cat, get)
+	if err != nil {
+		return nil, err
+	}
+	if allow != nil && len(allow) == 0 {
+		// A filter naming something that isn't there yields an EMPTY
+		// result, not an error: the id may simply have aged out of a
+		// rebuilt snapshot.
+		return []int{}, nil
+	}
+
+	wantQuality, err := parseQualityFilter(get("quality"))
+	if err != nil {
+		return nil, err
+	}
+	wantVariants, err := parseVariantFilter(get("needs"))
+	if err != nil {
+		return nil, err
+	}
+	// The variant filter needs whole-library coverage, and it is the
+	// reason that snapshot exists: filtering a PAGE would draw page 1 of
+	// the filtered list from page 1 of the unfiltered one and report a
+	// total for the wrong set. A nil snapshot (build failed) drops the
+	// filter rather than silently returning everything OR nothing.
+	if cov == nil {
+		wantVariants = nil
+	}
+
+	idx := make([]int, 0, len(cat.Albums))
+	for i, a := range cat.Albums {
+		if allow != nil {
+			if _, in := allow[a.ID]; !in {
+				continue
+			}
+		}
+		if wantQuality != nil && !wantQuality(a) {
+			continue
+		}
+		if wantVariants != nil && !wantVariants(cov[a.ID]) {
+			continue
+		}
+		idx = append(idx, i)
+	}
+	return idx, nil
+}
+
+// axisAllowSet intersects the artist / genre / composer filters into one
+// allowed-album set, or nil when none of them is present.
+//
+// A present filter naming an id the snapshot no longer has yields an
+// EMPTY (non-nil) set rather than an error — the caller reads that as
+// "no results", which is what an aged-out id should mean. nil and empty
+// are therefore different answers here and the caller distinguishes
+// them.
+func axisAllowSet(cat *librarycat.Catalog, get func(string) string) (map[string]struct{}, error) {
 	var allow map[string]struct{}
 	for _, spec := range []struct {
 		id   string
 		load func(string) ([]string, bool)
 	}{
-		{artistID, func(id string) ([]string, bool) {
+		{get("artist"), func(id string) ([]string, bool) {
 			a, ok := cat.ArtistByID(id)
 			return a.AlbumIDs, ok
 		}},
-		{genreID, func(id string) ([]string, bool) {
+		{get("genre"), func(id string) ([]string, bool) {
 			e, ok := cat.GenreByID(id)
 			return e.AlbumIDs, ok
 		}},
-		{composerID, func(id string) ([]string, bool) {
+		{get("composer"), func(id string) ([]string, bool) {
 			e, ok := cat.ComposerByID(id)
 			return e.AlbumIDs, ok
 		}},
@@ -364,10 +431,7 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, q map[string][]string) ([
 		}
 		ids, ok := spec.load(spec.id)
 		if !ok {
-			// A filter naming something that isn't there yields an
-			// EMPTY result, not an error: the id may simply have aged
-			// out of a rebuilt snapshot.
-			return []int{}, nil
+			return map[string]struct{}{}, nil
 		}
 		next := make(map[string]struct{}, len(ids))
 		for _, id := range ids {
@@ -381,25 +445,30 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, q map[string][]string) ([
 		}
 		allow = next
 	}
+	return allow, nil
+}
 
-	wantQuality, err := parseQualityFilter(quality)
-	if err != nil {
-		return nil, err
+// parseVariantFilter maps the `needs` token to a predicate over an
+// album's coverage.
+//
+// "Needs" is deliberately measured against the ELIGIBLE denominator,
+// not the track count: an album of CD-quality tracks does not "need
+// CarPlay copies", it is already at that target, and listing it under a
+// filter called "needs CarPlay" would send an operator to generate
+// nothing. Same reasoning as the coverage bars.
+func parseVariantFilter(v string) (func(albumCoverage) bool, error) {
+	switch v {
+	case "", "all":
+		return nil, nil
+	case "upscale":
+		return func(c albumCoverage) bool { return c.Upscale.Covered < c.Upscale.Eligible }, nil
+	case "optimize":
+		return func(c albumCoverage) bool { return c.Optimize.Covered < c.Optimize.Eligible }, nil
+	case "stale":
+		return func(c albumCoverage) bool { return c.Upscale.Stale > 0 || c.Optimize.Stale > 0 }, nil
+	default:
+		return nil, errors.New("invalid needs filter")
 	}
-
-	idx := make([]int, 0, len(cat.Albums))
-	for i, a := range cat.Albums {
-		if allow != nil {
-			if _, in := allow[a.ID]; !in {
-				continue
-			}
-		}
-		if wantQuality != nil && !wantQuality(a) {
-			continue
-		}
-		idx = append(idx, i)
-	}
-	return idx, nil
 }
 
 // parseQualityFilter maps the query token to a predicate. "" and "all"
@@ -756,12 +825,13 @@ type playerAlbumDetailResponse struct {
 }
 
 type playerArtistDetailResponse struct {
-	Artist       playerArtistDTO  `json:"artist"`
-	Albums       []playerAlbumDTO `json:"albums"`
-	About        *aboutArtistDTO  `json:"about,omitempty"`
-	HasImage     bool             `json:"hasImage"`
-	AtlasEnabled bool             `json:"atlasEnabled"`
-	SnapshotAt   string           `json:"snapshotAt"`
+	Artist       playerArtistDTO          `json:"artist"`
+	Albums       []playerAlbumDTO         `json:"albums"`
+	Variants     *playerVariantSummaryDTO `json:"variants,omitempty"`
+	About        *aboutArtistDTO          `json:"about,omitempty"`
+	HasImage     bool                     `json:"hasImage"`
+	AtlasEnabled bool                     `json:"atlasEnabled"`
+	SnapshotAt   string                   `json:"snapshotAt"`
 }
 
 func (s *Server) apiPlayerAlbumDetail(w http.ResponseWriter, r *http.Request) {
@@ -788,7 +858,7 @@ func (s *Server) apiPlayerAlbumDetail(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	resp := playerAlbumDetailResponse{
 		Album: albumDTO(album, s.routedOnline), Tracks: tracks,
-		Variants:     s.variantSummaryFor(r, album.TrackPaths, tracks),
+		Variants:     s.variantSummaryFor(r, album.TrackPaths, album.SizeBytes),
 		AtlasEnabled: cfg.Atlas.Enabled,
 		SnapshotAt:   snapshotStamp(cat.BuiltAt),
 	}
@@ -829,10 +899,25 @@ func (s *Server) apiPlayerArtistDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	albums := make([]playerAlbumDTO, 0, len(artist.AlbumIDs))
+	// Paths and sizes are unioned from the same albums the page lists,
+	// so the artist's totals are exactly the sum of what is on screen —
+	// no second definition of "this artist's tracks" to drift.
+	var (
+		paths       []string
+		sourceBytes int64
+	)
 	for _, aid := range artist.AlbumIDs {
-		if a, ok := cat.AlbumByID(aid); ok {
-			albums = append(albums, albumDTO(a, s.routedOnline))
+		a, ok := cat.AlbumByID(aid)
+		if !ok {
+			// AlbumIDs and Albums come from the same immutable
+			// snapshot, so a miss is a Build contract violation rather
+			// than a race. Skipping keeps the page well-formed under
+			// any such bug.
+			continue
 		}
+		albums = append(albums, albumDTO(a, s.routedOnline))
+		paths = append(paths, a.TrackPaths...)
+		sourceBytes += a.SizeBytes
 	}
 	cfg := s.deps.CfgHolder.Load()
 	resp := playerArtistDetailResponse{
@@ -840,6 +925,7 @@ func (s *Server) apiPlayerArtistDetail(w http.ResponseWriter, r *http.Request) {
 			TrackCount: artist.TrackCount, AlbumCount: artist.AlbumCount,
 			ArtistMBID: artist.ArtistMBID},
 		Albums:       albums,
+		Variants:     s.variantSummaryFor(r, paths, sourceBytes),
 		AtlasEnabled: cfg.Atlas.Enabled,
 		SnapshotAt:   snapshotStamp(cat.BuiltAt),
 	}

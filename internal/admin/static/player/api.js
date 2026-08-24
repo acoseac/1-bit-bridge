@@ -196,6 +196,16 @@ export async function deleteVariants(scope, kind) {
   const params = new URLSearchParams();
   if (scope.albumIds) scope.albumIds.forEach((id) => params.append("albumId", id));
   if (scope.artistId) params.set("artistId", scope.artistId);
+  if (scope.path !== undefined) {
+    // A folder scope is a prefix. An EMPTY prefix is not "this folder"
+    // — it is every variant in the manifest, which the endpoint only
+    // performs behind an explicit confirm parameter. Refusing here
+    // means a caller cannot reach that by passing a path it forgot to
+    // fill in; clearing the whole cache is a deliberate act with its
+    // own control, on the Roots page.
+    if (!scope.path) throw new Error("Refusing to delete every variant from a folder scope.");
+    params.set("prefix", scope.path);
+  }
   if (kind) params.set("kind", kind);
   const res = await fetch(`/api/upscale/variants?${params.toString()}`, { method: "DELETE" });
   if (!res.ok) {

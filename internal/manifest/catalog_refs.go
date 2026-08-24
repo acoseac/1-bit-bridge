@@ -354,3 +354,135 @@ func (s *Store) variantChunkForPaths(ctx context.Context, blob string, out map[s
 	}
 	return rows.Err()
 }
+
+// VariantPresence is what one track HAS, by kind, as the player's
+// coverage readouts need it.
+//
+// Presence and freshness are separate booleans because they answer
+// different questions. The batch walks skip a track that has a variant
+// of the kind regardless of freshness, so PRESENCE is what "covered"
+// means for a coverage bar; a stale sidecar is nonetheless one the
+// serve path answers 410 for, so it has to be countable on its own.
+//
+// Freshness compares the variant's stamped source facts against the
+// scanner's record of the file, not a live stat: it is the same
+// definition autoOptimizeCandidateSQL uses to decide what needs
+// regenerating, it costs no filesystem access, and it is the only
+// definition available at all for a UPnP-routed row.
+type VariantPresence struct {
+	Upscaled       bool
+	UpscaledFresh  bool
+	Optimized      bool
+	OptimizedFresh bool
+	// Bytes is the total size of this track's sidecars, both kinds.
+	Bytes int64
+}
+
+// variantPresenceSelect aggregates one row per source path. Kept as a
+// shared const so the scoped and whole-library forms cannot drift on
+// what counts as present or fresh — the same reason
+// trackProjectionSelect exists.
+//
+// The kind LIKE patterns are version-agnostic by design (`upscaled-%`
+// matches both v1 and v2 sidecars); see manifest.VariantKindPrefix*.
+const variantPresenceSelect = `
+	SELECT tv.source_path,
+	       MAX(CASE WHEN tv.variant_id LIKE 'upscaled-%'  THEN 1 ELSE 0 END),
+	       MAX(CASE WHEN tv.variant_id LIKE 'upscaled-%'
+	                 AND tv.source_mtime_ns = t.mtime_ns
+	                 AND tv.source_size     = t.size      THEN 1 ELSE 0 END),
+	       MAX(CASE WHEN tv.variant_id LIKE 'optimized-%' THEN 1 ELSE 0 END),
+	       MAX(CASE WHEN tv.variant_id LIKE 'optimized-%'
+	                 AND tv.source_mtime_ns = t.mtime_ns
+	                 AND tv.source_size     = t.size      THEN 1 ELSE 0 END),
+	       COALESCE(SUM(tv.size_bytes), 0)
+	  FROM track_variants tv
+	  JOIN tracks t ON t.path = tv.source_path`
+
+// VariantPresenceForPaths returns coverage for a bounded set of tracks.
+// Absent paths simply have no entry — a track with no sidecars is the
+// zero value, which is what a caller reading the map wants anyway.
+func (s *Store) VariantPresenceForPaths(ctx context.Context, paths []string) (map[string]VariantPresence, error) {
+	if len(paths) == 0 {
+		return map[string]VariantPresence{}, nil
+	}
+	out := make(map[string]VariantPresence, len(paths))
+	for start := 0; start < len(paths); start += variantPresenceChunk {
+		end := start + variantPresenceChunk
+		if end > len(paths) {
+			end = len(paths)
+		}
+		blob, err := json.Marshal(paths[start:end])
+		if err != nil {
+			return nil, err
+		}
+		rows, err := s.db.QueryContext(ctx, variantPresenceForPathsSQL, string(blob))
+		if err != nil {
+			return nil, fmt.Errorf("variant presence for paths: %w", err)
+		}
+		if err := scanVariantPresence(rows, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// AllVariantPresence returns coverage for every track that has at least
+// one sidecar.
+//
+// Whole-library by design: the album grid needs a per-album answer for
+// every tile on the page, and asking per page would mean a query per
+// scroll. One pass over `track_variants` — a table with a row per
+// generated file, not per track — folds into a map the size of the
+// covered set, which on a fully-covered 24k library is tens of
+// thousands of entries and a few MB. The caller caches it; see the
+// admin coverage snapshot.
+func (s *Store) AllVariantPresence(ctx context.Context) (map[string]VariantPresence, error) {
+	rows, err := s.db.QueryContext(ctx, allVariantPresenceSQL)
+	if err != nil {
+		return nil, fmt.Errorf("variant presence: %w", err)
+	}
+	out := make(map[string]VariantPresence)
+	if err := scanVariantPresence(rows, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// The two statements are named consts rather than concatenated at the
+// call site. Both operands are constants either way and Go folds them
+// identically — but SonarCloud's go:S2077 reads a binary expression in
+// the query argument as an assembled query, and a MEDIUM-severity
+// security finding that is really a formatting preference is worse than
+// the extra name.
+const (
+	variantPresenceForPathsSQL = variantPresenceSelect + `
+		 WHERE tv.source_path IN (SELECT value FROM json_each(?))
+		 GROUP BY tv.source_path`
+
+	allVariantPresenceSQL = variantPresenceSelect + `
+		 GROUP BY tv.source_path`
+)
+
+const variantPresenceChunk = 400
+
+func scanVariantPresence(rows *sql.Rows, out map[string]VariantPresence) error {
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			path          string
+			up, upFresh   int
+			opt, optFresh int
+			bytes         int64
+		)
+		if err := rows.Scan(&path, &up, &upFresh, &opt, &optFresh, &bytes); err != nil {
+			return err
+		}
+		out[path] = VariantPresence{
+			Upscaled: up != 0, UpscaledFresh: upFresh != 0,
+			Optimized: opt != 0, OptimizedFresh: optFresh != 0,
+			Bytes: bytes,
+		}
+	}
+	return rows.Err()
+}

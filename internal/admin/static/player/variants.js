@@ -135,7 +135,17 @@ function kindRow(kind, cov, scope, actionable, onChanged) {
   const del = el("button", { class: "btn", text: "Delete" });
   // Delete stays available on a bridge with no sox: reclaiming disk is
   // exactly what an operator without a toolchain still needs to do.
-  del.disabled = c.covered === 0;
+  //
+  // The exception is the WHOLE-LIBRARY folder scope, where "delete"
+  // means every variant the bridge has ever made. That is a different
+  // magnitude of action and it keeps its own typed-confirmation control
+  // on the Roots page; a single browser confirm() beside a coverage bar
+  // is not the guard it deserves.
+  const wholeLibrary = scope.path === "";
+  del.disabled = c.covered === 0 || wholeLibrary;
+  if (wholeLibrary && c.covered > 0) {
+    del.title = "Clearing every variant is done from the Roots page.";
+  }
   del.addEventListener("click", () => {
     if (!confirm(
       `Delete ${c.covered} ${kind.title} variant${c.covered === 1 ? "" : "s"}?\n\n` +

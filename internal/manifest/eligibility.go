@@ -276,3 +276,56 @@ func (s *Store) EligibleCountsForPaths(ctx context.Context, paths []string, targ
 
 // eligibleCountsChunk matches TrackProjectionsForPaths' chunk size.
 const eligibleCountsChunk = 400
+
+// EligibleKinds is one track's per-kind coverage-denominator
+// membership: whether it already has a variant of the kind OR could
+// still get one. Same predicate as the count helpers, per row instead
+// of summed.
+type EligibleKinds struct {
+	Upscale  bool
+	Optimize bool
+}
+
+// allEligibleKindsSQL is a named const for the same reason
+// trackProjectionsForPathsSQL is: every operand is already a constant,
+// but go:S2077 reads a concatenation in the query argument as an
+// assembled query.
+const allEligibleKindsSQL = `
+	SELECT t.path,
+	  CASE WHEN ` + upscaleCoveredOrEligibleSQL + ` THEN 1 ELSE 0 END,
+	  CASE WHEN ` + optimizeCoveredOrEligibleSQL + ` THEN 1 ELSE 0 END
+	FROM tracks t`
+
+// AllEligibleKinds returns the denominator membership for EVERY track.
+//
+// Whole-library because its caller is a FILTER: "albums that still need
+// CarPlay copies" has to be answered across the library before paging,
+// or page 1 of the filtered list is drawn from page 1 of the unfiltered
+// one. A per-page query cannot produce a correct total either.
+//
+// Cheap enough to be a cached snapshot rather than a per-request cost:
+// this is plain-column SQL over the v25 accelerator columns, with no
+// json_extract and no correlated subquery beyond the variant EXISTS the
+// shared predicates already carry.
+//
+// Read-only; no s.mu.
+func (s *Store) AllEligibleKinds(ctx context.Context, targetRate, targetBits int) (map[string]EligibleKinds, error) {
+	rows, err := s.db.QueryContext(ctx, allEligibleKindsSQL,
+		targetRate, targetBits, targetRate, targetBits)
+	if err != nil {
+		return nil, fmt.Errorf("eligible kinds: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]EligibleKinds)
+	for rows.Next() {
+		var (
+			p       string
+			up, opt int
+		)
+		if err := rows.Scan(&p, &up, &opt); err != nil {
+			return nil, err
+		}
+		out[p] = EligibleKinds{Upscale: up != 0, Optimize: opt != 0}
+	}
+	return out, rows.Err()
+}

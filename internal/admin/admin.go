@@ -31,6 +31,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -1185,6 +1186,14 @@ type Server struct {
 	// snapshot in the handler rather than joining the key, so switching
 	// facets in the UI can't re-walk the library once per facet.
 	libMetaMisses libMetaCache[enrichmentMissesResponse]
+
+	// Per-album variant coverage for the album grid — see
+	// album_coverage.go. Its own snapshot rather than a catalog field:
+	// coverage moves on its own (a background sweep writes variants
+	// without bumping the catalog epoch), and its eligibility half
+	// depends on the runtime upscale target.
+	coverage   atomic.Pointer[coverageSnapshot]
+	coverageSF singleflight.Group
 
 	// library-meta retry guard: POST /api/library/enrichment/retry is
 	// per-PATH rate-limited (60s per normalized folder) so an operator
