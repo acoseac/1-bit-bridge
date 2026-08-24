@@ -16,7 +16,8 @@ import { mount as mountBar } from "./nowplaying.js";
 import { el, clear, announce } from "./ui.js";
 import {
   renderAlbums, renderAlbum, renderArtists, renderArtist,
-  renderGenres, renderComposers, renderFavorites, renderPlaylists,
+  renderGenres, renderComposers,
+  renderAxisAlbums, renderFavorites, renderPlaylists,
   renderMixes, renderFolders, renderSearch,
 } from "./views.js";
 
@@ -282,13 +283,19 @@ function route() {
     artists: ["Artists", () => renderArtists(view, ctx)],
     artist: ["Artist", () => renderArtist(view, ctx)],
     genres: ["Genres", () => renderGenres(view, ctx)],
+    genre: ["Genre", () => renderAxisAlbums(view, ctx, "genre")],
     composers: ["Composers", () => renderComposers(view, ctx)],
+    composer: ["Composer", () => renderAxisAlbums(view, ctx, "composer")],
     favorites: ["Favorites", () => renderFavorites(view, ctx)],
     playlists: ["Playlists", () => renderPlaylists(view, ctx)],
     mixes: ["Smart Mixes", () => renderMixes(view, ctx)],
     folders: ["Folders", () => renderFolders(view, ctx)],
     search: ["Search", () => renderSearch(view, ctx)],
   };
+    // routes[section] || routes.albums is a silent fallback: a head that
+  // PLAYER_HEADS claims but this table forgets renders the album grid
+  // under the wrong title instead of failing. TestPlayerRoutesTableCovers
+  // EveryPlayerHead is what keeps the two in step.
   const [title, render] = routes[section] || routes.albums;
 
   titleEl.textContent = title;
