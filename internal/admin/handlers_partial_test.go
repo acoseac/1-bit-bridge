@@ -41,6 +41,7 @@ func TestPartialBoostRendersContentOnly(t *testing.T) {
 		{"/data", "data", "server", `class="subnav"`},
 		{"/diagnostics", "diagnostics", "server", `class="subnav"`},
 		{"/smartmixes", "smartmixes", "server", `class="subnav"`},
+		{"/upnp", "upnp", "server", `class="subnav"`},
 	}
 
 	for _, tc := range cases {
@@ -75,6 +76,11 @@ func TestPartialBoostRendersContentOnly(t *testing.T) {
 			}
 			if !strings.Contains(s, tc.marker) {
 				t.Errorf("partial %s: fragment missing content marker %q", tc.path, tc.marker)
+			}
+			// Vary must ride the PARTIAL response too — a cache storing a
+			// fragment without it is the exact cross-serving this guards.
+			if !strings.Contains(resp.Header.Get("Vary"), "X-Bridge-Partial") {
+				t.Errorf("partial %s: Vary header missing X-Bridge-Partial", tc.path)
 			}
 
 			// --- full (no header) ---

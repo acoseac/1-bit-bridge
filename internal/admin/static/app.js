@@ -8549,7 +8549,12 @@ function runInlineScripts(root) {
     if (type === "application/json" || type === "module") continue;
     const s = document.createElement("script");
     for (const attr of old.attributes) s.setAttribute(attr.name, attr.value);
-    s.textContent = old.textContent;
+    // An inline (no-src) script is wrapped in a block so any top-level
+    // const/let it declares is block-scoped. Re-running the same script on a
+    // later swap would otherwise throw a redeclaration SyntaxError against
+    // the global binding the first run left behind; var / function still
+    // hoist as before. A src script has no inline body to redeclare.
+    s.textContent = old.src ? old.textContent : `{\n${old.textContent}\n}`;
     old.replaceWith(s);
   }
 }
@@ -8582,12 +8587,22 @@ function boostFocusMain(main) {
   }
 }
 
+// boostGen serialises overlapping navigations. Every boostSwap claims the
+// next generation up front; if a newer navigation starts while this one is
+// awaiting the network, its response is discarded rather than swapped in — so
+// two fast clicks (or fast back/forward) can't let a slow-resolving earlier
+// fetch overwrite the page the operator actually landed on. Same idea as the
+// inspector's renderGeneration.
+let boostGen = 0;
+
 // boostSwap fetches the target as a content-only fragment and puts it in
 // <main>, tearing down the outgoing page's scope first and running the
-// incoming page's init after. Returns true on success; false means the caller
-// should hard-navigate. No history is touched until the fetch succeeds, so a
-// failure that falls back to a hard load leaves no phantom entry.
+// incoming page's init after. Returns true on success OR when superseded (the
+// caller must not hard-navigate then); false means the caller should
+// hard-navigate. No history is touched until the fetch succeeds, so a failure
+// that falls back to a hard load leaves no phantom entry.
 async function boostSwap(url, opts = {}) {
+  const gen = ++boostGen;
   let resp;
   try {
     resp = await fetch(url, {
@@ -8597,6 +8612,7 @@ async function boostSwap(url, opts = {}) {
   } catch {
     return false; // network error → hard load
   }
+  if (gen !== boostGen) return true; // superseded by a newer navigation
   // A redirect (public-mode session expiry bouncing to /login) or any
   // non-OK status isn't a boostable page — fall back so the operator lands
   // on the real target.
@@ -8610,6 +8626,7 @@ async function boostSwap(url, opts = {}) {
   } catch {
     return false;
   }
+  if (gen !== boostGen) return true; // superseded while reading the body
 
   const main = document.querySelector("main");
   if (!main) return false;
@@ -8634,11 +8651,17 @@ async function boostSwap(url, opts = {}) {
   if (boostIsPlayerPath(location.pathname) && window.__player) {
     // The injected fragment is the player shell; the module wires its
     // sections + search and renders the current route (and does its own
-    // focus/announce).
+    // focus / announce / scroll restore).
     window.__player.mountShell();
   } else {
     dispatchPageInit(active);
     boostFocusMain(main);
+    // A same-document swap doesn't reset scroll, so without this the
+    // operator lands already scrolled past the top after clicking a nav
+    // entry from partway down a long page. A full load starts at the top;
+    // match it. (Operator scroll isn't tracked, so popstate lands at the
+    // top too — an acceptable default.)
+    window.scrollTo({ top: 0 });
   }
 
   recycleEventStream();
@@ -8663,6 +8686,11 @@ function wireBoostRouter() {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     const a = e.target.closest("#primary-nav a, .subnav a");
     if (!a) return;
+    // Respect a link that explicitly opens elsewhere or downloads — a boost
+    // swap would wrongly load it in place. None ship in the nav today; this
+    // keeps the router correct if one is ever added.
+    if (a.hasAttribute("download")) return;
+    if (a.target && a.target !== "_self") return;
     const url = new URL(a.href, location.origin);
     if (url.origin !== location.origin) return;
     // A hash on the current page (Settings jump list) is not a navigation.
