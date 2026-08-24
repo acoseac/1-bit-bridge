@@ -20,36 +20,35 @@ import (
 // Errors are logged and degrade to a nil summary rather than failing
 // the album: the page's job is to play music, and losing the variant
 // panel is not a reason to lose the track list.
-func (s *Server) variantSummaryFor(r *http.Request, paths []string, tracks []playerTrackDTO) *playerVariantSummaryDTO {
+func (s *Server) variantSummaryFor(r *http.Request, paths []string, sourceBytes int64) *playerVariantSummaryDTO {
 	if s.deps.Manifest == nil {
 		return nil
 	}
 	cfg := s.deps.CfgHolder.Load()
 	out := &playerVariantSummaryDTO{
+		SourceBytes:  sourceBytes,
 		Enabled:      upscaleFeatureEnabled(cfg),
 		SoxAvailable: s.deps.UpscalePrecheck != nil && s.deps.UpscalePrecheck() == nil,
 	}
 
-	// Covered / sizes come from the rows already hydrated — no second
-	// pass over the store for numbers the caller is holding.
-	for _, t := range tracks {
-		out.SourceBytes += t.SizeBytes
-		// Per TRACK, not per variant row: a track with two sidecars of
-		// one kind (an old schema version beside the current one) is
-		// still one covered track, and counting rows would push the
-		// numerator past the denominator.
-		var up, opt variantTally
-		for _, v := range t.Variants {
-			out.VariantBytes += v.SizeBytes
-			switch v.Kind {
-			case variantKindUpscale:
-				up.note(v.Fresh)
-			case variantKindOptimize:
-				opt.note(v.Fresh)
-			}
+	// Coverage comes from SQL rather than from hydrated rows, and that
+	// is what lets an ARTIST have a summary at all: its discography can
+	// run to thousands of tracks, which the page has no other reason to
+	// materialise. Album detail takes the same route so the two views
+	// cannot drift on what "covered" means.
+	cov, err := s.deps.Manifest.VariantPresenceForPaths(r.Context(), paths)
+	if err != nil {
+		logger.Warn("player: variant presence for variant summary", "err", err)
+		return out
+	}
+	for _, p := range paths {
+		c, ok := cov[p]
+		if !ok {
+			continue
 		}
-		up.foldInto(&out.Upscale)
-		opt.foldInto(&out.Optimize)
+		out.VariantBytes += c.Bytes
+		foldPresence(&out.Upscale, c.Upscaled, c.UpscaledFresh)
+		foldPresence(&out.Optimize, c.Optimized, c.OptimizedFresh)
 	}
 
 	rate, bits, err := s.resolveUpscaleTarget(r.Context(), cfg)
@@ -68,9 +67,25 @@ func (s *Server) variantSummaryFor(r *http.Request, paths []string, tracks []pla
 	// (DSD, lossy, unknown geometry, or already at the target). It is a
 	// muted footnote, not missing work — the distinction the
 	// eligible-denominator bars exist to make.
-	out.Upscale.Exempt = exemptCount(len(tracks), counts.Upscale)
-	out.Optimize.Exempt = exemptCount(len(tracks), counts.Optimize)
+	out.Upscale.Exempt = exemptCount(len(paths), counts.Upscale)
+	out.Optimize.Exempt = exemptCount(len(paths), counts.Optimize)
 	return out
+}
+
+// foldPresence records one track against one kind's counters.
+//
+// A track is STALE only when it has no fresh sidecar of the kind: a
+// current copy sitting beside a superseded one is served correctly, and
+// flagging it would send an operator hunting for a problem that is
+// already solved.
+func foldPresence(c *playerVariantCoverageDTO, present, fresh bool) {
+	if !present {
+		return
+	}
+	c.Covered++
+	if !fresh {
+		c.Stale++
+	}
 }
 
 func exemptCount(total, eligible int) int {
@@ -88,32 +103,4 @@ func exemptCount(total, eligible int) int {
 // into "off".
 func upscaleFeatureEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.Upscale.Enabled
-}
-
-// variantTally accumulates one track's sidecars of a single kind.
-//
-// A track counts as STALE only when it has no fresh sidecar of the
-// kind: a current copy sitting beside a superseded one is served
-// correctly, and flagging it would send an operator hunting for a
-// problem that is already solved.
-type variantTally struct {
-	any   bool
-	fresh bool
-}
-
-func (t *variantTally) note(fresh bool) {
-	t.any = true
-	if fresh {
-		t.fresh = true
-	}
-}
-
-func (t variantTally) foldInto(c *playerVariantCoverageDTO) {
-	if !t.any {
-		return
-	}
-	c.Covered++
-	if !t.fresh {
-		c.Stale++
-	}
 }

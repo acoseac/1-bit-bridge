@@ -222,6 +222,11 @@ func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad-target", err.Error())
 		return
 	}
+	// The album grid's coverage snapshot keys on the target, since an
+	// album's eligibility depends on it. Dropping it here means the
+	// operator who just moved the target sees the bars they moved it
+	// for, rather than the previous target's answer for up to a TTL.
+	s.InvalidateAlbumCoverage()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"targetRate": req.TargetRate,
 		"targetBits": req.TargetBits,

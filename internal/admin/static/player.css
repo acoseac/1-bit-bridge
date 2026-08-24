@@ -485,3 +485,41 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 }
 
 .variant-kind-stale { color: var(--accent-warm); margin: 0 0 var(--space-3); }
+
+/* ---- Folder-tree coverage marks ---- */
+
+/* .row is a flex row with space-between, which puts a third child in
+ * the MIDDLE — coverage marks floating in the gap, at a different
+ * horizontal position on every row. Letting the title take the slack
+ * instead packs coverage and meta together on the right, where they
+ * read as one column. Two-child rows (search hits, artists) are
+ * unaffected: the title absorbing the slack puts the meta exactly where
+ * space-between already had it. */
+.row-title { flex: 1 1 auto; min-width: 0; }
+.row-coverage { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
+.row-cov {
+  font-size: 0.68rem; font-weight: 650; letter-spacing: .03em;
+  padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+  background: var(--accent-warm-tint); color: var(--accent-warm);
+  font-variant-numeric: tabular-nums;
+}
+/* Complete coverage reads as settled, not as a warning. */
+.row-cov-done { background: var(--accent-soft); color: var(--accent); }
+
+/* On a phone the three groups do not fit on one line; wrapping puts the
+ * title on its own and the facts under it, rather than crushing the
+ * title to a word. */
+@media (max-width: 640px) {
+  .row { flex-wrap: wrap; row-gap: 2px; }
+  .row-title { flex: 1 0 100%; }
+}
+
+/* Album-tile coverage badge. Sits under the meta line, and only appears
+ * for a state worth noticing — see variantBadge. */
+.tile-variants { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
+.tile-variant {
+  font-size: 0.62rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+  padding: 1px 5px; border-radius: 999px; white-space: nowrap;
+  background: var(--accent-soft); color: var(--accent);
+}
+.tile-variant-stale { background: var(--accent-warm-tint); color: var(--accent-warm); }

@@ -21,6 +21,7 @@ export async function renderAlbums(view, ctx) {
   const { params, setToolbar, scopeLabel } = ctx;
   const sort = params.get("sort") || "recent";
   const quality = params.get("quality") || "all";
+  const needs = params.get("needs") || "all";
   // artist / genre / composer narrow the grid. filterAlbums has always
   // implemented all three (including intersection), but they were never
   // forwarded — so every genre and composer link landed on the FULL
@@ -30,24 +31,26 @@ export async function renderAlbums(view, ctx) {
     const v = params.get(key);
     if (v) scope[key] = v;
   }
-  setToolbar(albumToolbar(sort, quality));
+  setToolbar(albumToolbar(sort, quality, needs));
 
   // One paging engine, not two. The grid used to carry its own copy of
   // the fetch/sentinel/chunk loop, which is why the A–Z rail and the
   // jump-reset appeared on every browse view EXCEPT the biggest one.
   await renderPagedList(view, ctx, {
-    fetchPage: (offset) => api.albums({ sort, quality, ...scope, offset, limit: PAGE }),
+    fetchPage: (offset) => api.albums({ sort, quality, needs, ...scope, offset, limit: PAGE }),
     pick: (r) => r.albums,
     make: albumTile,
     containerClass: "grid",
     countNoun: "album",
     label: scopeLabel,
     emptyTitle: "No albums here",
-    emptyDetail: Object.keys(scope).length
-      ? "Nothing here matches the current filter."
-      : quality === "all"
-        ? "Add a library root and run a scan."
-        : "Nothing in the library matches this quality filter.",
+    emptyDetail: needs !== "all"
+      ? "Every album that can take these already has them."
+      : Object.keys(scope).length
+        ? "Nothing here matches the current filter."
+        : quality === "all"
+          ? "Add a library root and run a scan."
+          : "Nothing in the library matches this quality filter.",
   });
 }
 
@@ -61,10 +64,42 @@ function albumTile(a) {
       el("span", { class: "tile-meta" },
         a.year ? el("span", { text: String(a.year) }) : null,
         q ? chip(q, "chip-quality") : null,
-        a.routed && a.routedOnline === false ? chip("offline", "chip-warn") : null)));
+        a.routed && a.routedOnline === false ? chip("offline", "chip-warn") : null),
+      variantBadge(a.variants)));
 }
 
-function albumToolbar(sort, quality) {
+/**
+ * The tile's coverage badge.
+ *
+ * Only DONE and STALE are shown. An album that is merely missing copies
+ * gets no badge, because most of a library is in that state on any
+ * bridge that has not run a full pass — a badge on nearly every tile is
+ * wallpaper, and the "needs" filter is the way to ask that question
+ * anyway. What earns a mark is a state worth noticing at a glance:
+ * finished, or finished-but-rotten.
+ */
+function variantBadge(cov) {
+  if (!cov) return null;
+  const wrap = el("span", { class: "tile-variants" });
+  for (const [key, label] of [["upscale", "Hi-res"], ["optimize", "CarPlay"]]) {
+    const c = cov[key];
+    if (!c || c.eligible === 0) continue;
+    if (c.stale > 0) {
+      wrap.appendChild(el("span", {
+        class: "tile-variant tile-variant-stale", text: label,
+        attrs: { title: `${label}: ${c.stale} of ${c.covered} out of date` },
+      }));
+    } else if (c.covered >= c.eligible) {
+      wrap.appendChild(el("span", {
+        class: "tile-variant", text: label,
+        attrs: { title: `${label}: all ${c.eligible} covered` },
+      }));
+    }
+  }
+  return wrap.childElementCount ? wrap : null;
+}
+
+function albumToolbar(sort, quality, needs) {
   const bar = el("div", { class: "toolbar" });
   bar.appendChild(select("sort", sort, [
     ["recent", "Recently Added"], ["artist", "Artist"], ["title", "Title"], ["year", "Year"],
@@ -73,6 +108,14 @@ function albumToolbar(sort, quality) {
     ["all", "All Qualities"], ["dsd", "Any DSD"], ["dsd64", "DSD64"], ["dsd128", "DSD128"],
     ["dsd256Plus", "DSD256+"], ["hiresPCM", "Hi-Res PCM"], ["cdQuality", "CD Quality"],
     ["lossy", "Lossy"],
+  ]));
+  // "Needs" is the question the Inspector's folder tree existed to
+  // answer, asked of the library instead of a directory.
+  bar.appendChild(select("needs", needs, [
+    ["all", "Any variant state"],
+    ["optimize", "Needs CarPlay"],
+    ["upscale", "Needs hi-res"],
+    ["stale", "Out-of-date copies"],
   ]));
   return bar;
 }
@@ -168,12 +211,12 @@ export async function renderAlbum(view, { id, setToolbar }) {
   // that takes the whole album page down. `d.variants` is omitempty, so
   // an older bridge or a store the admin server could not reach is
   // enough to hit it.
-  appendIf(view, variantPanel(d.variants, { albumIds: [id] }, rerenderAlbum));
+  appendIf(view, variantPanel(d.variants, { albumIds: [id] }, rerenderView));
   // Generation IS asynchronous, so the numbers just rendered are a
   // snapshot of a moving target. app.js re-broadcasts the pool's
   // progress from the console's existing SSE stream; re-rendering on it
   // is what keeps the bars from sitting stale until a manual reload.
-  onVariantChange(rerenderAlbum);
+  onVariantChange(rerenderView);
 
   view.appendChild(trackList(d.tracks, art));
 }
@@ -184,14 +227,14 @@ function appendIf(parent, node) {
 }
 
 /**
- * Re-run the album view in place.
+ * Re-run the current view in place.
  *
  * Dispatched through the shell's rerender event rather than calling
  * renderAlbum directly: route() owns the generation counter that
  * invalidates an in-flight render, and a direct call would paint over a
  * view the user has already navigated away from.
  */
-function rerenderAlbum() {
+function rerenderView() {
   window.dispatchEvent(new CustomEvent("player:rerender"));
 }
 
@@ -431,6 +474,14 @@ export async function renderArtist(view, { id, gen, setToolbar }) {
         text: `${plural(d.artist.albumCount, "album")} · ${plural(d.artist.trackCount, "track")}` }))));
   const about = aboutBlock(d.about, { title: "About" });
   if (about) view.appendChild(about);
+
+  // Same panel as an album, one level up. An artist is where a bulk
+  // action actually belongs — "give this whole discography CarPlay
+  // copies" is the request, and doing it album by album is the tedium
+  // the Inspector's folder tree used to absorb.
+  appendIf(view, variantPanel(d.variants, { artistId: id }, rerenderView));
+  onVariantChange(rerenderView);
+
   const grid = el("div", { class: "grid" });
   view.appendChild(el("h3", { class: "section-head", text: "Discography" }));
   view.appendChild(grid);
@@ -911,32 +962,131 @@ export async function renderFolders(view, { params, setToolbar, setCrumb }) {
   const path = params.get("path") || "";
   clear(view);
   view.appendChild(spinner());
+  let r;
   try {
-    const r = await api.browse(path);
-    clear(view);
-    if (path) {
-      const up = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-      setCrumb(link(`/folders?path=${encodeURIComponent(up)}`, { class: "crumb-link", text: "← Up" }));
-      view.appendChild(el("p", { class: "muted small", text: path }));
-    }
-    const list = el("div", { class: "rows" });
-    (r.folders || []).forEach((f) => list.appendChild(
-      link(`/folders?path=${encodeURIComponent(f.path)}`, { class: "row" },
-        el("span", { class: "row-title", text: `📁 ${f.name}` }),
-        el("span", { class: "row-meta", text: `${f.trackCount} tracks` }))));
-    (r.tracks || []).forEach((t) => list.appendChild(el("div", { class: "row" },
-      el("span", { class: "row-title", text: t.name }),
-      el("span", { class: "row-meta", text: t.codec || "" }))));
-    if (!list.childElementCount) {
-      view.appendChild(emptyState("Nothing here"));
-      return;
-    }
-    view.appendChild(list);
+    r = await api.browse(path);
   } catch (e) {
     if (isAborted(e)) return;
     clear(view);
     view.appendChild(errorState(e));
+    return;
   }
+  clear(view);
+
+  if (path) {
+    const up = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+    setCrumb(link(`/folders?path=${encodeURIComponent(up)}`, { class: "crumb-link", text: "← Up" }));
+    view.appendChild(el("p", { class: "muted small", text: path }));
+  }
+
+  // The whole node, not this page. The rollup is the only honest source
+  // for a folder's totals — summing the returned page under-counts the
+  // moment a node has more children than one page, which on a
+  // 647-folder root meant showing half the library.
+  view.appendChild(folderSummary(r, path));
+
+  const list = el("div", { class: "rows" });
+  (r.folders || []).forEach((f) => list.appendChild(folderRow(f)));
+  (r.tracks || []).forEach((t) => list.appendChild(browseTrackRow(t)));
+  if (!list.childElementCount) {
+    view.appendChild(emptyState("Nothing here"));
+    return;
+  }
+  view.appendChild(list);
+}
+
+/**
+ * The current folder's variant readout and actions.
+ *
+ * Folders are the one scope that IS a path prefix, so these act through
+ * the folder form — which is also what makes the empty path work as
+ * "the whole library", the bulk control that has no album or artist
+ * equivalent.
+ */
+function folderSummary(r, path) {
+  const total = r.subtreeTracks || 0;
+  if (!total) return el("span");
+
+  // `??`, not `||`. A missing denominator (the store failed) and a
+  // genuine zero (nothing here is eligible) are different answers, and
+  // `||` silently turns the second into the first — which would render
+  // a folder full of finished work as a folder full of missing work.
+  const summary = {
+    upscale: {
+      covered: r.subtreeUpscaled || 0,
+      eligible: r.subtreeUpscaleEligible ?? total,
+      exempt: Math.max(0, total - (r.subtreeUpscaleEligible ?? total)),
+    },
+    optimize: {
+      covered: r.subtreeOptimized || 0,
+      eligible: r.subtreeOptimizeEligible ?? total,
+      exempt: Math.max(0, total - (r.subtreeOptimizeEligible ?? total)),
+    },
+    sourceBytes: r.subtreeSizeBytes || 0,
+    variantBytes: 0,
+    // The browse endpoint carries no feature/toolchain state, and
+    // guessing would either hide working buttons or offer broken ones.
+    // Both true means the panel renders its controls and lets the
+    // endpoint answer — a 503 with a real message beats a disabled
+    // button with an invented one.
+    enabled: true,
+    soxAvailable: true,
+  };
+  const heading = el("p", { class: "muted small", text:
+    `${plural(total, "track")}${r.subtreeSizeBytes ? ` · ${bytes(r.subtreeSizeBytes)}` : ""}` });
+  const wrap = el("div", {}, heading);
+  const panel = variantPanel(summary, { path }, rerenderView);
+  if (panel) wrap.appendChild(panel);
+  onVariantChange(rerenderView);
+  return wrap;
+}
+
+function folderRow(f) {
+  const marks = el("span", { class: "row-coverage" });
+  for (const [key, label, covered, eligible] of [
+    ["upscale", "Hi-res", f.upscaledCount || 0, f.upscaleEligibleCount ?? f.trackCount ?? 0],
+    ["optimize", "CarPlay", f.optimizedCount || 0, f.optimizeEligibleCount ?? f.trackCount ?? 0],
+  ]) {
+    // A folder with nothing eligible for a kind shows no mark for it at
+    // all. "0 / 0" down a long list of folders is noise that reads like
+    // a problem.
+    if (eligible === 0) continue;
+    marks.appendChild(el("span", {
+      class: `row-cov${covered >= eligible ? " row-cov-done" : ""}`,
+      text: `${label} ${covered}/${eligible}`,
+      attrs: { "data-kind": key },
+    }));
+  }
+  return link(`/folders?path=${encodeURIComponent(f.path)}`, { class: "row" },
+    el("span", { class: "row-title", text: `📁 ${f.name}` }),
+    marks,
+    el("span", { class: "row-meta", text:
+      `${plural(f.trackCount || 0, "track")}${f.totalSizeBytes ? ` · ${bytes(f.totalSizeBytes)}` : ""}` }));
+}
+
+/**
+ * A loose track in the folder tree.
+ *
+ * Deliberately NOT the album track row: this one has no play button
+ * (browse rows carry no playability verdict), and it shows the
+ * variant-eligibility skip reason, which is the question a folder view
+ * is being asked.
+ */
+function browseTrackRow(t) {
+  const marks = el("span", { class: "row-coverage" });
+  const skip = variantSkipLabel(t.skipReason);
+  if (skip) {
+    marks.appendChild(el("span", { class: "track-variant-skip", text: "—", attrs: { title: skip } }));
+  } else {
+    for (const [label, has] of [["Hi-res", t.isUpscaled], ["CarPlay", t.isOptimized]]) {
+      if (has) marks.appendChild(el("span", { class: "track-variant", text: label }));
+    }
+  }
+  return el("div", { class: "row" },
+    el("span", { class: "row-title", text: t.name }),
+    marks,
+    el("span", { class: "row-meta", text:
+      [t.codec, bytes(t.sizeBytes)].filter(Boolean).join(" · ") }));
 }
 
 export async function renderSearch(view, { params, setToolbar }) {
