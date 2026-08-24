@@ -143,26 +143,71 @@ export async function renderAlbum(view, { id, setToolbar }) {
     }));
 
   const unplayable = d.tracks.filter((t) => t.play && t.play.kind === "none").length;
-  const meta = [a.albumArtist, a.year ? String(a.year) : "",
-    `${a.trackCount} tracks`, totalDuration(a.duration), qualityLabel(a.quality)]
-    .filter(Boolean).join(" · ");
+
+  // The About card belongs with the release, next to the buttons — not
+  // stranded under the track list where a long album buries it off the
+  // bottom of the page. It is also the one part that is often absent
+  // (Atlas has to have matched the release), so the layout above it must
+  // read complete without it.
+  const about = aboutBlock(d.release, { title: "About this release" });
 
   view.appendChild(el("div", { class: "detail" },
     el("div", { class: "detail-art" }, cover(art, a.title)),
     el("div", { class: "detail-head" },
       el("h2", { class: "detail-title", text: a.title || "Unknown album" }),
       link(`/artist/${a.artistId}`, { class: "detail-artist", text: a.albumArtist || "" }),
-      el("p", { class: "muted small", text: meta }),
+      albumStatLine(a),
       unplayable > 0
         ? el("p", { class: "muted small", text:
             `${unplayable} of ${d.tracks.length} can't play in a browser — download those instead.` })
         : null,
       actions,
-      d.booklet ? bookletLink(d.booklet) : null)));
+      d.booklet ? bookletLink(d.booklet) : null,
+      about)));
 
   view.appendChild(trackList(d.tracks, art));
-  const about = aboutBlock(d.release, { title: "About this release" });
-  if (about) view.appendChild(about);
+}
+
+/**
+ * The stat line under an album title.
+ *
+ * Deliberately does NOT repeat the album artist: it is the link on the
+ * line directly above, and spending the first slot on a duplicate pushed
+ * out the detail nobody else shows. The DTO has carried rateHz, bits and
+ * discCount all along — they were simply never rendered, so the page
+ * said "Hi-Res" where it could say "FLAC 96/24".
+ */
+function albumStatLine(a) {
+  const parts = [];
+  if (a.year) parts.push(String(a.year));
+  if (a.discCount > 1) parts.push(`${a.discCount} discs`);
+  parts.push(`${a.trackCount} ${a.trackCount === 1 ? "track" : "tracks"}`);
+  const dur = totalDuration(a.duration);
+  if (dur) parts.push(dur);
+
+  const line = el("p", { class: "detail-stats muted small", text: parts.join(" · ") });
+  // Format rides as a chip rather than more grey text: it is the one
+  // fact on this line a listener actually scans for.
+  const fmt = albumFormatLabel(a);
+  if (fmt) line.appendChild(chip(fmt, "chip-quality"));
+  return line;
+}
+
+/**
+ * "FLAC 96/24" for an album, falling back to the coarse quality tier.
+ *
+ * formatChip() in format.js answers the same question for a TRACK; an
+ * album has no codec of its own, so this reads the geometry the fold
+ * already voted on and only falls back to the tier ("Hi-Res", "CD") when
+ * the album mixes formats or carries no geometry at all.
+ */
+function albumFormatLabel(a) {
+  const tier = qualityLabel(a.quality);
+  if (Array.isArray(a.qualities) && a.qualities.length > 1) return tier; // mixed — don't imply one
+  if (!a.rateHz) return tier;
+  const khz = (a.rateHz / 1000).toFixed(a.rateHz % 1000 ? 1 : 0);
+  const geometry = a.bits ? `${khz}/${a.bits}` : `${khz} kHz`;
+  return tier ? `${tier} · ${geometry}` : geometry;
 }
 
 function bookletLink(booklet) {

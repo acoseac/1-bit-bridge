@@ -169,9 +169,33 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .track-dl { font-size: 0.78rem; color: var(--fg-muted); text-decoration: none; }
 .track-dl:hover { color: var(--accent); text-decoration: underline; }
 
-.about { margin-top: var(--space-6); max-width: 70ch; }
+/* The About card sits in the detail head, under the action row. It is a
+ * real surface rather than loose text so a long bio reads as a bounded
+ * block instead of running into the track list below it. */
+.about {
+  margin-top: var(--space-5); max-width: 70ch;
+  padding: var(--space-4); border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--bg-elev);
+}
+.about h2 { margin: 0 0 var(--space-2); font-size: 0.95rem; color: var(--accent); }
+/* The attribution link had NO rule, so it fell through to the browser
+ * default (#0000EE) — barely noticeable when this card sat at the foot
+ * of the page, glaring now that it sits under the buttons, and unreadable
+ * against the dark theme. Attribution is mandatory here, so it has to
+ * look deliberate. */
+.about a { color: var(--accent); }
+.about a:hover { text-decoration: underline; }
+.about > p { margin: 0 0 var(--space-2); }
+.about > p:last-child { margin-bottom: 0; }
+/* Deliberately NOT line-clamped. A clamp here would need a disclosure
+ * control to be usable, and the hover-to-expand shortcut is unreachable
+ * on touch — where this page is most likely to be read. The card border
+ * plus the 70ch measure already stop a long bio reading as loose text. */
 .about-text { white-space: pre-wrap; line-height: 1.6; }
 .about-genres { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* The stat line under an album title: text plus a trailing format chip. */
+.detail-stats { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 
 /* ---- Now playing ---- */
 
@@ -208,8 +232,33 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .np-extra { display: flex; align-items: center; gap: var(--space-2); }
 .np-chip { font-size: 0.72rem; color: var(--np-muted); white-space: nowrap; }
 
+/* ---- Components the player markup already asked for ---- */
+
+/* .chip had colour variants but no BASE rule, so every chip rendered as
+ * bare coloured text with no padding, radius or size. */
+.chip {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 600; line-height: 1.5;
+  background: var(--bg-elev); color: var(--fg-muted);
+  white-space: nowrap; vertical-align: middle;
+}
 .chip-quality { background: var(--accent-soft); color: var(--accent); }
 .chip-warn { background: var(--accent-warm-tint); color: var(--accent-warm); }
+
+/* app.css defines `.btn.primary`; the player markup has always asked for
+ * `.btn-primary` and `.btn-quiet`, neither of which existed — so the
+ * album's Play button rendered identically to Shuffle beside it. */
+.btn-primary {
+  background: var(--accent); color: var(--accent-on); border-color: var(--accent);
+  font-weight: 600;
+}
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-primary:active { filter: brightness(0.94); }
+.btn-quiet {
+  background: transparent; border-color: var(--border); color: var(--fg-muted);
+  font-weight: 500;
+}
+.btn-quiet:hover { color: var(--fg); border-color: var(--fg-muted); }
 
 @media (prefers-reduced-motion: reduce) {
   .cover, .tile:hover .cover { transition: none; transform: none; }
