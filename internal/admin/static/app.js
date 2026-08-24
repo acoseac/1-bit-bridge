@@ -2392,7 +2392,11 @@ function initSettings() {
     clearInterval(autocertPollTimer);
     autocertPollTimer = null;
   }
-  autocertPollTimer = setInterval(refreshAutocertTile, 60_000);
+  // pageInterval clears the poll when the Settings page scope is torn
+  // down (a boost navigation away), so it can't keep hitting the network
+  // in the background. The clear-before-set above stays as a defensive
+  // no-op — dispatchPageInit runs each init once per scope.
+  autocertPollTimer = pageInterval(refreshAutocertTile, 60_000);
 
   const form = document.getElementById("settings-form");
   const msg = document.getElementById("settings-msg");
@@ -3389,7 +3393,7 @@ function initLibraryInspector() {
   // top, table header's top) bind to the LIVE heights rather than
   // a hardcoded single-row assumption.
   updateInspectorStickyHeights();
-  window.addEventListener("resize", updateInspectorStickyHeights);
+  window.addEventListener("resize", updateInspectorStickyHeights, { signal: pageSignal() });
   if (typeof ResizeObserver === "function") {
     const search = document.getElementById("inspector-search-slot");
     const toolbar = document.getElementById("inspector-toolbar");
@@ -3420,7 +3424,7 @@ function initLibraryInspector() {
     }
     e.preventDefault();
     searchInput?.focus();
-  });
+  }, { signal: pageSignal() });
   // Click outside the dropdown to dismiss it.
   document.addEventListener("click", (e) => {
     const dropdown = document.getElementById("inspector-search-results");
@@ -3429,7 +3433,7 @@ function initLibraryInspector() {
     if (slot && !slot.contains(e.target)) {
       inspectorSearchHideDropdown();
     }
-  });
+  }, { signal: pageSignal() });
 
   // Browser history integration. popstate restores path + scroll
   // from the entry's stored state without re-pushing history.
@@ -3446,7 +3450,14 @@ function initLibraryInspector() {
       camelot,
       restoreScroll: ev.state ? ev.state.scrollY : 0,
     });
-  });
+  }, { signal: pageSignal() });
+
+  // The action panel's Escape + focus-trap listeners live on <document>
+  // (inspectorA11yListeners) and are otherwise removed only when the panel
+  // is closed. If a panel is open when the operator boosts away, tear them
+  // down with the page scope so a stray Escape on another page can't fire
+  // inspectorClosePanel against the detached panel.
+  pageSignal().addEventListener("abort", () => inspectorA11yListeners("none"), { once: true });
 
   // Variants-storage bar wiring (PR D2). Element-presence-guarded so
   // a bridge build without this template region (older custom
@@ -6553,7 +6564,7 @@ function initJobs() {
   document.addEventListener("visibilitychange", () => {
     batches.resume();
     snapshot.resume();
-  });
+  }, { signal: pageSignal() });
 
   wireJobButton("jobs-scan-now", () => API.post("/api/scan"), "Scan started");
   wireJobButton("jobs-analyze-now", () => API.post("/api/analysis/sweep"), "Sweep queued");
@@ -7473,8 +7484,12 @@ function initDiagnostics() {
     // values frozen from before the tab was backgrounded.
     loadDiagnostics();
     start();
-  });
-  window.addEventListener("pagehide", stop);
+  }, { signal: pageSignal() });
+  window.addEventListener("pagehide", stop, { signal: pageSignal() });
+  // Under partial-boost, leaving Diagnostics is not a page load, so the
+  // 5 s poll would keep firing in the background. Stop it when the page
+  // scope is torn down. (On a full load the interval dies with the page.)
+  pageSignal().addEventListener("abort", stop, { once: true });
 }
 
 // --- boot ---
@@ -8384,12 +8399,66 @@ function initDuplicates() {
   document.getElementById("dupes-load-more")?.addEventListener("click", () => loadDupeGroups(false));
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  initMobileNav();
-  initTheme();
-  initLogout();
-  const active = document.body.dataset.active;
-  switch (active) {
+// ===========================================================================
+// Partial-boost client router (PR 11)
+//
+// Leaving the library player for an operator page (Stats / Settings / Server)
+// used to be a full page load, which destroys the DOM and with it the
+// player's <audio> element — so playback stopped. This router turns those
+// navigations into an in-place swap of <main> only: the persistent chrome
+// (header, top-nav) and the player module's <audio> + now-playing bar, which
+// both live on <body>, are never touched, so audio keeps playing.
+//
+// The server renders the target as a content-only fragment on X-Bridge-Partial
+// (see renderPage). This side fetches it, swaps <main>, re-runs the target's
+// init, and recycles the SSE stream so freshly-injected tiles get a snapshot.
+//
+// Two structural hazards, both handled below:
+//   1. Operator initX register document/window-level listeners and intervals
+//      that nothing removed. On a full load that never mattered; under boost
+//      they would stack a fresh copy per visit. Every such registration is
+//      scoped to an AbortController (pageSignal) that is aborted before the
+//      next swap. Element-level listeners need no scope — they die with the
+//      swapped DOM node.
+//   2. innerHTML does not execute <script> elements. runInlineScripts
+//      re-creates the classic ones so a content template's inline script
+//      still runs; JSON data islands (<script type="application/json">) are
+//      left in place and read as text, exactly as on a full load.
+//
+// Escape hatch: ?boost=0 on the initial URL disables the whole thing and
+// every navigation is an ordinary full load again. And any single boost that
+// can't complete cleanly falls back to location.assign — a hard load of the
+// same target — so this is a pure enhancement with no new failure mode.
+// ===========================================================================
+
+// pageAbort scopes the per-page teardown. pageSignal() hands operator initX a
+// signal to pass as { signal } to document/window addEventListener calls (and
+// to hang interval cleanup off); dispatchPageInit aborts it before running the
+// next page's init.
+let pageAbort = null;
+
+function pageSignal() {
+  if (!pageAbort) pageAbort = new AbortController();
+  return pageAbort.signal;
+}
+
+// pageInterval is setInterval bound to the page scope: the timer is cleared
+// when the scope is torn down, so a poller can't keep firing after the
+// operator has boosted to another page.
+function pageInterval(fn, ms) {
+  const id = setInterval(fn, ms);
+  pageSignal().addEventListener("abort", () => clearInterval(id), { once: true });
+  return id;
+}
+
+// dispatchPageInit is the SINGLE entry point for operator page init, used by
+// both first paint (DOMContentLoaded) and every boost swap, so the two can
+// never drift. It resets the page scope first: the previous page's listeners
+// and intervals are aborted, then a fresh controller backs the new page's.
+function dispatchPageInit(tab) {
+  if (pageAbort) pageAbort.abort();
+  pageAbort = new AbortController();
+  switch (tab) {
     case "dashboard": initDashboard(); break;
     case "library": initLibrary(); break;
     case "library_inspector": initLibraryInspector(); break;
@@ -8401,7 +8470,259 @@ document.addEventListener("DOMContentLoaded", () => {
     case "smartmixes": initSmartMixes(); break;
     case "settings": initSettings(); break;
     case "diagnostics": initDiagnostics(); break;
+    // "stats" and "player" have no per-page initX: Stats is driven entirely
+    // by the SSE stream + server first paint, and the player is boot.js's job.
   }
+}
+
+// recycleEventStream closes and reopens the SSE connection. The server
+// byte-diff-suppresses frames PER CONNECTION, so a just-injected panel would
+// get nothing until a value actually changed (up to 30 s). A fresh connection
+// is sent a full initial snapshot of every tile — the resnapshot the plan
+// calls for, reusing exactly the mechanism handleVisibilityRestore relies on.
+function recycleEventStream() {
+  if (activeEventSource) {
+    try { activeEventSource.close(); } catch { /* ignore */ }
+  }
+  startEventStream();
+}
+
+// BOOST_ENABLED gates the whole router. AbortController + fetch are required
+// for the machinery, so a browser without them stays on full loads.
+//
+// ?boost=0 is the documented escape hatch, and it LATCHES for the tab session
+// via sessionStorage — otherwise it would disable boost for exactly one page
+// load and then re-enable on the very next (full-load) navigation, which is
+// useless when the reason you set it is that boost is misbehaving. Clear the
+// latch by opening a fresh tab; it is deliberately not a persistent, all-tabs
+// kill switch.
+const BOOST_ENABLED = (() => {
+  if (typeof window.AbortController !== "function" || typeof window.fetch !== "function") {
+    return false;
+  }
+  const off = new URLSearchParams(location.search).get("boost") === "0";
+  try {
+    if (off) sessionStorage.setItem("bridge.boostOff", "1");
+    return sessionStorage.getItem("bridge.boostOff") !== "1";
+  } catch {
+    // Private mode / storage disabled: fall back to the per-URL reading.
+    return !off;
+  }
+})();
+
+// isPlayerPath defers to the player module. When the module isn't present
+// (failed to load), everything reads as an operator route, so "/" is fetched
+// as a partial and — unable to mount without the module — falls back to a
+// hard load. Safe either way.
+function boostIsPlayerPath(pathname) {
+  const p = window.__player;
+  return !!(p && typeof p.isPlayerPath === "function" && p.isPlayerPath(pathname));
+}
+
+// lastBoostPath is the pathname of the currently-mounted page. A popstate
+// that kept the pathname is an in-page state change (inspector folders, the
+// player's search query) owned by that page's own handler, not a page swap.
+let lastBoostPath = location.pathname;
+
+// boostLiveRegion is a single polite live region for route-change
+// announcements — SPA navigation is otherwise silent to a screen reader.
+let boostLiveRegion = null;
+function boostAnnounce(text) {
+  if (!boostLiveRegion) {
+    boostLiveRegion = document.createElement("div");
+    boostLiveRegion.className = "sr-only";
+    boostLiveRegion.setAttribute("aria-live", "polite");
+    boostLiveRegion.setAttribute("aria-atomic", "true");
+    document.body.appendChild(boostLiveRegion);
+  }
+  boostLiveRegion.textContent = text;
+}
+
+// runInlineScripts re-creates the classic <script> elements in a
+// freshly-injected fragment so they execute — innerHTML parses them into the
+// DOM but never runs them. JSON data islands and module scripts are left
+// alone: the former are read as text by their consumers, and no content
+// template ships a module script.
+function runInlineScripts(root) {
+  for (const old of root.querySelectorAll("script")) {
+    const type = (old.getAttribute("type") || "").toLowerCase();
+    if (type === "application/json" || type === "module") continue;
+    const s = document.createElement("script");
+    for (const attr of old.attributes) s.setAttribute(attr.name, attr.value);
+    // An inline (no-src) script is wrapped in a block so any top-level
+    // const/let it declares is block-scoped. Re-running the same script on a
+    // later swap would otherwise throw a redeclaration SyntaxError against
+    // the global binding the first run left behind; var / function still
+    // hoist as before. A src script has no inline body to redeclare.
+    s.textContent = old.src ? old.textContent : `{\n${old.textContent}\n}`;
+    old.replaceWith(s);
+  }
+}
+
+// boostUpdateTopNav sets aria-current on the one persistent top-nav entry
+// whose data-tab matches the new section. The in-page sub-nav (Server pages)
+// arrives already-highlighted inside the fetched fragment, so only the four
+// header entries need updating here.
+function boostUpdateTopNav(section) {
+  for (const a of document.querySelectorAll("#primary-nav a")) {
+    if (a.dataset.tab === section) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
+}
+
+// boostFocusMain moves focus to the new view's first heading and announces
+// its title, so a keyboard / screen-reader user gets the same signal a full
+// page load would have given. Without this, client-side navigation is silent.
+function boostFocusMain(main) {
+  const h = main.querySelector("h1");
+  const label = (h && h.textContent.trim()) || "";
+  if (h) {
+    if (!h.hasAttribute("tabindex")) h.setAttribute("tabindex", "-1");
+    try { h.focus({ preventScroll: true }); } catch { /* ignore */ }
+  }
+  if (label) {
+    boostAnnounce(label);
+    const name = document.querySelector("header .name");
+    document.title = name ? `${label} — ${name.textContent}` : label;
+  }
+}
+
+// boostGen serialises overlapping navigations. Every boostSwap claims the
+// next generation up front; if a newer navigation starts while this one is
+// awaiting the network, its response is discarded rather than swapped in — so
+// two fast clicks (or fast back/forward) can't let a slow-resolving earlier
+// fetch overwrite the page the operator actually landed on. Same idea as the
+// inspector's renderGeneration.
+let boostGen = 0;
+
+// boostSwap fetches the target as a content-only fragment and puts it in
+// <main>, tearing down the outgoing page's scope first and running the
+// incoming page's init after. Returns true on success OR when superseded (the
+// caller must not hard-navigate then); false means the caller should
+// hard-navigate. No history is touched until the fetch succeeds, so a failure
+// that falls back to a hard load leaves no phantom entry.
+async function boostSwap(url, opts = {}) {
+  const gen = ++boostGen;
+  let resp;
+  try {
+    resp = await fetch(url, {
+      headers: { "X-Bridge-Partial": "1" },
+      credentials: "same-origin",
+    });
+  } catch {
+    return false; // network error → hard load
+  }
+  if (gen !== boostGen) return true; // superseded by a newer navigation
+  // A redirect (public-mode session expiry bouncing to /login) or any
+  // non-OK status isn't a boostable page — fall back so the operator lands
+  // on the real target.
+  if (!resp.ok || resp.redirected) return false;
+  const active = resp.headers.get("X-Bridge-Active");
+  const section = resp.headers.get("X-Bridge-Section");
+  if (!active || !section) return false; // not a boost-aware response
+  let html;
+  try {
+    html = await resp.text();
+  } catch {
+    return false;
+  }
+  if (gen !== boostGen) return true; // superseded while reading the body
+
+  const main = document.querySelector("main");
+  if (!main) return false;
+
+  // Commit history only now that the fetch has succeeded, and BEFORE the
+  // swap, so location.pathname is correct when the incoming init / player
+  // route reads it. On a popstate the browser already moved history, so
+  // opts.push is null.
+  if (opts.push) history.pushState({ boost: true }, "", opts.push);
+
+  // Tear down the outgoing operator page's scope before its DOM is removed.
+  // The player path (below) is exempt: the module owns its own teardown.
+  if (pageAbort) { pageAbort.abort(); pageAbort = null; }
+
+  main.innerHTML = html;
+  runInlineScripts(main);
+
+  document.body.dataset.active = active;
+  document.body.dataset.section = section;
+  boostUpdateTopNav(section);
+
+  if (boostIsPlayerPath(location.pathname) && window.__player) {
+    // The injected fragment is the player shell; the module wires its
+    // sections + search and renders the current route (and does its own
+    // focus / announce / scroll restore).
+    window.__player.mountShell();
+  } else {
+    dispatchPageInit(active);
+    boostFocusMain(main);
+    // A same-document swap doesn't reset scroll, so without this the
+    // operator lands already scrolled past the top after clicking a nav
+    // entry from partway down a long page. A full load starts at the top;
+    // match it. (Operator scroll isn't tracked, so popstate lands at the
+    // top too — an acceptable default.)
+    window.scrollTo({ top: 0 });
+  }
+
+  recycleEventStream();
+  lastBoostPath = location.pathname;
+  return true;
+}
+
+// boostNavigate is a forward navigation (a click). It fetches first and pushes
+// history only on success, so a failed boost degrades to a clean hard load.
+function boostNavigate(href) {
+  boostSwap(href, { push: href }).then((ok) => {
+    if (!ok) location.assign(href);
+  });
+}
+
+function wireBoostRouter() {
+  if (!BOOST_ENABLED) return;
+
+  // Delegated click on the persistent nav. Player-internal links
+  // (a[data-route]) are boot.js's job and are not matched here.
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const a = e.target.closest("#primary-nav a, .subnav a");
+    if (!a) return;
+    // Respect a link that explicitly opens elsewhere or downloads — a boost
+    // swap would wrongly load it in place. None ship in the nav today; this
+    // keeps the router correct if one is ever added.
+    if (a.hasAttribute("download")) return;
+    if (a.target && a.target !== "_self") return;
+    const url = new URL(a.href, location.origin);
+    if (url.origin !== location.origin) return;
+    // A hash on the current page (Settings jump list) is not a navigation.
+    if (url.pathname === location.pathname && url.hash) return;
+    if (url.href === location.href) { e.preventDefault(); return; }
+    e.preventDefault();
+    boostNavigate(url.href);
+  });
+
+  // Single popstate owner for page changes. In-page state changes (same
+  // pathname) and player-internal back/forward are left to their own
+  // handlers; only a change of mounted page is swapped here.
+  window.addEventListener("popstate", () => {
+    if (location.pathname === lastBoostPath) return;
+    if (boostIsPlayerPath(location.pathname) && boostIsPlayerPath(lastBoostPath)) {
+      lastBoostPath = location.pathname;
+      return; // player ↔ player: boot.js route() handles it
+    }
+    boostSwap(location.href, { push: null }).then((ok) => {
+      if (!ok) location.assign(location.href);
+    });
+  });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  initMobileNav();
+  initTheme();
+  initLogout();
+  wireBoostRouter();
+  // First paint routes through the same dispatcher every boost swap uses, so
+  // the page scope is established identically on load and on navigation.
+  dispatchPageInit(document.body.dataset.active);
   // Start the SSE stream after page-init so the initial snapshot
   // can paint into a fully-bootstrapped DOM. The first snapshot
   // typically lands within a few ms; until it arrives, dashboard

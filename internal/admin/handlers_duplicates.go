@@ -13,8 +13,8 @@ import (
 
 // pageDuplicates renders the Library → Duplicates page shell; all data
 // is client-fetched (the pageJobs shape).
-func (s *Server) pageDuplicates(w http.ResponseWriter, _ *http.Request) {
-	s.renderPage(w, "duplicates", nil)
+func (s *Server) pageDuplicates(w http.ResponseWriter, r *http.Request) {
+	s.renderPage(w, r, "duplicates", nil)
 }
 
 // duplicatesSummaryResponse: GET /api/duplicates/summary. Reads the

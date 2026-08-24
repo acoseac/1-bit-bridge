@@ -252,7 +252,7 @@ func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
 	if s.deps.UpscalePrecheck != nil {
 		soxAvailable = s.deps.UpscalePrecheck() == nil
 	}
-	s.renderPage(w, "library_inspector", map[string]any{
+	s.renderPage(w, r, "library_inspector", map[string]any{
 		"UpscaleStoragePath": cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		"SoxAvailable":       soxAvailable,
 		// Atlas metadata layer gates: AtlasEnabled shows the About
@@ -268,7 +268,7 @@ func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
 
 // pageJobs renders the Jobs page HTML.
 func (s *Server) pageJobs(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, "jobs", nil)
+	s.renderPage(w, r, "jobs", nil)
 }
 
 // variantFailureRetryRequest scopes the retry to a subtree ("" = whole

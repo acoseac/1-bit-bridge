@@ -32,7 +32,7 @@ const (
 // page bootstraps empty and loads everything via the JSON endpoints
 // below, so there's no first-paint data to thread through.
 func (s *Server) pageData(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, "data", map[string]any{})
+	s.renderPage(w, r, "data", map[string]any{})
 }
 
 // resolvePlaylistDeviceToken maps a (display-prefix, playlist-id) pair

@@ -80,7 +80,7 @@ func sectionForTab(tab string) string {
 	}
 }
 
-func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
+func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, active string, data any) {
 	cfg := s.deps.CfgHolder.Load()
 	t, ok := s.pageTmpls[active]
 	if !ok {
@@ -89,6 +89,12 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	// A response's shape depends on X-Bridge-Partial, so any cache between
+	// here and the browser must key on it — otherwise a stored fragment
+	// could answer a full-page request or vice versa. Cache-Control above
+	// is already no-store, but Vary is the correct primitive and costs
+	// nothing.
+	w.Header().Set("Vary", "X-Bridge-Partial")
 	if cfg.IsPublic() {
 		// Clickjacking guard for the internet-facing console:
 		// authenticated pages carry destructive buttons (revoke,
@@ -111,6 +117,31 @@ func (s *Server) renderPage(w http.ResponseWriter, active string, data any) {
 		IsPublic:        cfg.IsPublic(),
 		Data:            data,
 	}
+
+	// Partial-boost (PR 11): when the client router fetches a page to
+	// swap into the live document, it sends X-Bridge-Partial: 1 and we
+	// render just the "content" block — the same inner HTML <main> would
+	// hold — instead of the whole "layout". The persistent chrome (the
+	// <head>, the header/nav, and crucially the player module's <audio>
+	// element and now-playing bar, which live on <body>) is left
+	// untouched, so playback survives the navigation.
+	//
+	// The two X-Bridge-* headers are the authoritative active-tab/section
+	// for the fetched page: the client updates body[data-active] /
+	// [data-section] and the top-nav highlight from them rather than
+	// re-deriving the mapping in JS, so the server stays the single
+	// source of truth for sectionForTab. A full-page fallback
+	// (location.assign) covers any client that can't or won't boost, so
+	// this path is a pure enhancement.
+	if r != nil && r.Header.Get("X-Bridge-Partial") == "1" {
+		w.Header().Set("X-Bridge-Active", active)
+		w.Header().Set("X-Bridge-Section", sectionForTab(active))
+		if err := t.ExecuteTemplate(w, "content", envelope); err != nil {
+			logger.Error("render partial", "page", active, "err", err)
+		}
+		return
+	}
+
 	if err := t.ExecuteTemplate(w, "layout", envelope); err != nil {
 		logger.Error("render", "page", active, "err", err)
 	}
@@ -164,7 +195,7 @@ func (s *Server) pageStats(w http.ResponseWriter, r *http.Request) {
 		// operator to restart manually. (Qodo on PR #124.)
 		"IsSupervised": s.deps.IsSupervised,
 	}
-	s.renderPage(w, "stats", data)
+	s.renderPage(w, r, "stats", data)
 }
 
 // dashboardUpdateStatus returns the UpdateStatus the dashboard tile
@@ -227,7 +258,7 @@ func (s *Server) pageLibrary(w http.ResponseWriter, r *http.Request) {
 		data.UpscaledBytes = up.Bytes
 		data.OptimizedBytes = opt.Bytes
 	}
-	s.renderPage(w, "library", data)
+	s.renderPage(w, r, "library", data)
 }
 
 func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
@@ -255,7 +286,7 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 		"Tokens":     rows,
 		"DefaultURL": defaultBridgeURL(cfg),
 	}
-	s.renderPage(w, "devices", data)
+	s.renderPage(w, r, "devices", data)
 }
 
 // pageUPnP serves the dedicated /upnp page (Configured / Discovered /
@@ -287,7 +318,7 @@ func (s *Server) pageUPnP(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{
 		"FeatureEnabled": cfg != nil && cfg.UPnPUpstream.Enabled,
 	}
-	s.renderPage(w, "upnp", data)
+	s.renderPage(w, r, "upnp", data)
 }
 
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +363,7 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 			data.UpscaleSoxFormatHint = soxFormatHintForCurrentOS()
 		}
 	}
-	s.renderPage(w, "settings", data)
+	s.renderPage(w, r, "settings", data)
 }
 
 // soxInstallHintForCurrentOS returns the package-manager one-
@@ -502,7 +533,7 @@ type playerPageData struct {
 func (s *Server) pagePlayer(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	section, id := playerSectionFor(r)
-	s.renderPage(w, "player", playerPageData{
+	s.renderPage(w, r, "player", playerPageData{
 		Section:      section,
 		ID:           id,
 		Query:        r.URL.Query().Get("q"),
