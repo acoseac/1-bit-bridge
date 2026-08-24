@@ -551,7 +551,10 @@ header.sidebar {
   white-space: nowrap;
   transition: background-color 120ms ease, color 120ms ease;
 }
-#primary-nav a > span { overflow: hidden; text-overflow: ellipsis; }
+/* min-width: 0 is what makes the ellipsis reachable at all: a flex item
+ * defaults to min-width:auto, so it refuses to shrink below its text and the
+ * row overflows the rail instead of truncating. */
+#primary-nav a > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* Icon presentation lives HERE, on the <use> host, not on the sprite's
  * source <g>. A CSS rule matching the original element does not reach the
@@ -640,7 +643,9 @@ header.sidebar {
   letter-spacing: 0.01em;
   color: var(--fg-muted);
   opacity: 0.8;
-  word-break: break-word;
+  /* overflow-wrap, not `word-break: break-word` — that keyword is deprecated
+   * and this is the property actually specified for the behaviour. */
+  overflow-wrap: anywhere;
 }
 
 /* Connection-status badge. Reflects the SSE EventSource readyState so the
@@ -731,6 +736,12 @@ main {
   body {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  /* The rail is a top bar here, so the content well starts at x=0 and the
+   * desktop offset (248 + 36 = 284px) would put the focused skip link off the
+   * right edge of a phone — invisible, which is the one thing a skip link
+   * cannot be. */
+  .skip-link { left: var(--space-4); }
 
   header.sidebar {
     /* Sticky, not static: the drawer is absolutely positioned against this

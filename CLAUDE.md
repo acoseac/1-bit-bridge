@@ -1593,6 +1593,13 @@ job. One flat sidebar absorbs the first two.
   its own hover/focus affordance; the row owns both. The dot is dropped
   visually and the word "pending" is visually-hidden but kept in the accessible
   name, because 248px of rail cannot hold "• 2 pending" beside "Devices".
+  **It must carry NO `aria-label`.** Its name comes from the enclosing link's
+  content, and accname step 2C says a descendant with `aria-label` contributes
+  that string IN PLACE OF its subtree — so the label it shipped with replaced
+  the live count with static prose and the row announced "Devices Pending
+  pairing requests", dropping the one thing the badge exists to say. Verified
+  after the fix: the link reads "Devices 2 pending". `.pairing-badge-label` is
+  clipped rather than `display:none` precisely so it survives into that name.
 - **The now-playing bar starts where the rail ends**, via `--npbar-left` bound
   to `--sidebar-w` — one token, so the two can never disagree about that edge.
 - **A back link is navigation and does not belong in an action row.** The

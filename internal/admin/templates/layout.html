@@ -101,8 +101,19 @@
           where a count belongs, and it survives the sidebar having no
           top-right meta strip to hang from. app.js resolves it by id and
           only toggles [hidden] + the count text, so the move is CSS-only
-          from its side. */ -}}
-      <span id="pairing-badge" class="pairing-badge" hidden aria-label="Pending pairing requests">
+          from its side.
+
+          NO aria-label on this span, deliberately. Its name is computed
+          from the CONTENT of the enclosing <a>, and accname step 2C says a
+          descendant carrying aria-label contributes THAT STRING IN PLACE OF
+          its own subtree — so a label here replaced the live count with
+          static prose and the link announced "Devices Pending pairing
+          requests", dropping the one piece of information the badge exists
+          to convey. Left alone, the subtree supplies it: the dot is
+          display:none, the count is live text, and .pairing-badge-label is
+          clipped rather than hidden (clip-path does not remove a node from
+          the a11y tree), so the link reads "Devices 2 pending". */ -}}
+      <span id="pairing-badge" class="pairing-badge" hidden>
         <span class="pairing-badge-dot" aria-hidden="true"></span>
         <span class="pairing-badge-count" data-count="0"
               role="status" aria-live="polite" aria-atomic="true">0</span>
