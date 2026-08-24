@@ -836,6 +836,16 @@ main {
     font-size: var(--text-md);
   }
 
+  /* 44px touch floor for the two foot-block buttons, at the SHELL breakpoint
+   * rather than the phone one. They used to get this at 640px, which was
+   * correct while the console had a top bar at every width — but the rail now
+   * folds into a top bar at 1023px, so between 641px and 1023px (iPad
+   * portrait, the obvious case) they sat in a touch surface at 27px next to a
+   * correctly-sized 44px hamburger. The bar is 65px tall, so 44px fits with
+   * room to spare. Desktop keeps the compact size: there they are mouse
+   * targets in a sidebar foot, and 44px would bloat it. */
+  .theme-toggle, .logout-btn { min-height: 44px; padding-inline: 14px; }
+
   /* The foot block rides the top bar as a compact status cluster; the build
    * line is the first thing to go — it is reference detail, not something an
    * operator scans, and there is no room for it beside a hamburger. */
@@ -3875,12 +3885,10 @@ section.library-inspector {
    * otherwise force eager mid-character breaks (Gemini on #501). */
   dl dd code { overflow-wrap: anywhere; word-break: normal; }
 
-  /* --- Group D: touch targets to the 44px floor. `.theme-toggle` /
-   *     `.logout-btn` sit in the sidebar's foot block (and, once the rail
-   *     folds to a top bar below 1024px, in that bar); `label.checkbox`
-   *     already flex-centers, so a min-height alone pads the whole tappable
-   *     switch row to 44px. --- */
-  .theme-toggle, .logout-btn { min-height: 44px; padding-inline: 14px; }
+  /* --- Group D: touch target to the 44px floor. `label.checkbox` already
+   *     flex-centers, so a min-height alone pads the whole tappable switch
+   *     row. (`.theme-toggle` / `.logout-btn` used to sit here too; they
+   *     moved to the 1023px block — see the note there.) --- */
   label.checkbox { min-height: 44px; }
 
   /* --- Group F: tighten intro copy so content starts higher on phone.
