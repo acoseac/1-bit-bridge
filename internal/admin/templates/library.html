@@ -67,10 +67,18 @@
     <dl>
       <dt>Stored at</dt>
       <dd><code id="variants-dir">{{.Data.VariantsDir}}</code></dd>
+      {{- /* The BYTES get their own span, and the file count keeps the
+           server-rendered value. The refresh only knows sizes — the
+           variants-dir endpoint reports usedByKind, not a per-kind file
+           count — so writing the whole <dd> replaced "3 files · 1.2 MB"
+           with a bare "1.2 MB" and silently dropped the count on every
+           page load. */ -}}
       <dt>Upscaled</dt>
-      <dd id="variants-upscaled">{{.Data.UpscaledVariants}} file{{if ne .Data.UpscaledVariants 1}}s{{end}} · {{bytesHuman .Data.UpscaledBytes}}</dd>
+      <dd>{{.Data.UpscaledVariants}} file{{if ne .Data.UpscaledVariants 1}}s{{end}} ·
+        <span id="variants-upscaled">{{bytesHuman .Data.UpscaledBytes}}</span></dd>
       <dt>Optimized</dt>
-      <dd id="variants-optimized">{{.Data.OptimizedVariants}} file{{if ne .Data.OptimizedVariants 1}}s{{end}} · {{bytesHuman .Data.OptimizedBytes}}</dd>
+      <dd>{{.Data.OptimizedVariants}} file{{if ne .Data.OptimizedVariants 1}}s{{end}} ·
+        <span id="variants-optimized">{{bytesHuman .Data.OptimizedBytes}}</span></dd>
       <dt>Free on that volume</dt>
       <dd id="variants-free">—</dd>
     </dl>

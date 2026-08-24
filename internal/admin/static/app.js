@@ -8840,6 +8840,9 @@ async function refreshVariantsDir() {
   const s = variantsDirState;
   setText("variants-dir", s.current);
   setText("variants-free", humanBytes(s.freeBytes) + " free");
+  // Sizes only. The file counts beside them are server-rendered and
+  // stay put: this endpoint reports usedByKind, not a per-kind file
+  // count, so writing the whole row would drop the count.
   const byKind = s.usedByKind || {};
   setText("variants-upscaled", humanBytes(byKind.upscale || 0));
   setText("variants-optimized", humanBytes(byKind.optimize || 0));
@@ -8870,6 +8873,11 @@ function wireVariantsDirChange() {
     hideEl("variants-dir-error");
     dialog.showModal();
   });
+  // Enter in the field would otherwise submit the <form method="dialog">
+  // — and Cancel is the submit button, so the dialog closed and threw
+  // the typed path away. Route it to Save, which is what pressing Enter
+  // in a single-field dialog means.
+  submitOnEnter("variants-dir-input", save);
 
   save.addEventListener("click", async () => {
     const input = document.getElementById("variants-dir-input");
@@ -8913,6 +8921,11 @@ function wireVariantsClear() {
   // no trimming, no case folding. A prefix match is what made the old
   // bare [y/N] uninstall prompt a fat-finger hazard.
   phrase.addEventListener("input", () => { go.disabled = phrase.value !== "CLEAR"; });
+  // Same trap as the path dialog, with more at stake: Enter closed the
+  // confirmation without clearing anything, which reads as the button
+  // being broken. It routes to the action — still gated on the exact
+  // phrase, since `go` refuses when the value is anything else.
+  submitOnEnter("variants-clear-phrase", go);
 
   go.addEventListener("click", async () => {
     if (phrase.value !== "CLEAR") return;
@@ -8951,6 +8964,21 @@ function wireVariantsRetry() {
     } finally {
       btn.disabled = false;
     }
+  });
+}
+
+// submitOnEnter makes Enter in a dialog field mean "do the thing"
+// rather than "submit the form". A <form method="dialog"> treats Enter
+// as a submit, which closes the dialog and discards the input — and
+// since these dialogs put Cancel first, that is exactly the wrong
+// button.
+function submitOnEnter(inputID, button) {
+  const input = document.getElementById(inputID);
+  if (!input || !button) return;
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (!button.disabled) button.click();
   });
 }
 
