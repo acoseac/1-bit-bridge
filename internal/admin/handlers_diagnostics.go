@@ -139,6 +139,6 @@ func tailscaleStateLabel(state int) string {
 // filled in by app.js from /api/diagnostics — nothing is server-rendered,
 // because every number here is point-in-time and a template-rendered one
 // would be stale the moment the page painted.
-func (s *Server) pageDiagnostics(w http.ResponseWriter, _ *http.Request) {
-	s.renderPage(w, "diagnostics", map[string]any{})
+func (s *Server) pageDiagnostics(w http.ResponseWriter, r *http.Request) {
+	s.renderPage(w, r, "diagnostics", map[string]any{})
 }

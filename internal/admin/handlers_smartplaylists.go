@@ -368,7 +368,7 @@ func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.renderPage(w, "smartmixes", smartMixPageData{Enabled: enabled, Families: fams, KeyCoverage: keyCoverage})
+	s.renderPage(w, r, "smartmixes", smartMixPageData{Enabled: enabled, Families: fams, KeyCoverage: keyCoverage})
 }
 
 // smartMixTracksForView decodes a cached row into display rows. The

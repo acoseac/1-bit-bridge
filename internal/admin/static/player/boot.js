@@ -40,18 +40,69 @@ boot();
 function boot() {
   audio.init();
   mountBar();
+  wireGlobal();
 
+  // Expose the shell-mount + route entry points so the admin boost router
+  // (app.js) can re-mount the player after it swaps the shell back into
+  // <main> — that is what lets audio survive a round trip out to a Server
+  // page and back to the library. isPlayerPath lets the router recognise
+  // which paths are ours without duplicating the route table.
+  window.__player = { isPlayerPath, mountShell, route };
+
+  if (document.getElementById("player-root")) mountShell();
+}
+
+// wireGlobal registers the listeners that must live for the whole session.
+// They are delegated (or re-query by id at event time), so they keep working
+// across every partial-boost swap WITHOUT being re-registered — re-running
+// this would stack a duplicate of each, so it is called exactly once.
+function wireGlobal() {
+  wireLinks();
+  wireSearchShortcut();
+  window.addEventListener("popstate", () => {
+    // Player-internal back/forward only. The admin boost router owns
+    // cross-page popstate and calls mountShell() when it swaps the shell
+    // in; route() no-ops on operator paths (guard) and before the shell
+    // exists (its own `if (!view) return`).
+    if (isPlayerPath(location.pathname)) route();
+  });
+  window.addEventListener("player:rerender", () => route());
+}
+
+// mountShell wires the freshly-present player shell and renders the current
+// route. Called on first load and again each time the boost router injects
+// the shell into <main>. It deliberately does NOT touch document-level
+// listeners (those live in wireGlobal); only element-level wiring, which is
+// safe to redo because the elements are fresh on each injection.
+export function mountShell() {
   const root = document.getElementById("player-root");
-  if (!root) return; // a server page — audio and the bar are all we owe it
+  if (!root) return;
   seed = readSeed();
   root.removeAttribute("data-booting");
-
   renderSections();
-  wireLinks();
-  wireSearch();
-  window.addEventListener("popstate", () => route());
-  window.addEventListener("player:rerender", () => route());
+  wireSearchInput();
   route();
+}
+
+// PLAYER_HEADS is the set of first path segments the player owns — i.e. the
+// routes the shell mounts and route() dispatches (or falls back to albums
+// for). It MUST match the server's playerRoutes list (handlers_pages.go): the
+// boost router uses isPlayerPath to decide whether a navigation stays in the
+// player or fetches an operator partial, so a head registered server-side but
+// missing here would be fetched as an operator page and never mount the shell.
+// TestPlayerHeadsMatchServerRoutes pins the two together.
+const PLAYER_HEADS = new Set([
+  "albums", "artists", "favorites", "playlists", "mixes",
+  "composers", "genres", "folders", "search",
+  "album", "artist", "genre", "composer", "playlist", "mix",
+]);
+
+// isPlayerPath reports whether a pathname is a player client-side route, so
+// the boost router can tell a library navigation from an operator one. "/"
+// is the album grid.
+function isPlayerPath(pathname) {
+  if (pathname === "/") return true;
+  return PLAYER_HEADS.has(splitPath(pathname).head);
 }
 
 function readSeed() {
@@ -97,19 +148,12 @@ function wireLinks() {
     route();
   });
 
-  // Operator links leave the player, which is a full page load and
-  // therefore stops playback. While something is actually playing,
-  // send them to a new tab instead — the queue survives either way via
-  // sessionStorage, but not interrupting is better than restoring.
-  document.addEventListener("click", (e) => {
-    const a = e.target.closest("#primary-nav a, .subnav a");
-    if (!a || e.defaultPrevented || e.metaKey || e.ctrlKey || e.button !== 0) return;
-    if (!audio.snapshot().playing) return;
-    const url = new URL(a.href, location.origin);
-    if (url.pathname === "/" || url.pathname.startsWith("/album")) return;
-    e.preventDefault();
-    window.open(url.href, "_blank", "noopener");
-  });
+  // Operator links (#primary-nav / .subnav) used to open in a new tab
+  // while something was playing, because leaving the player was a full
+  // page load that stopped playback. The admin boost router now swaps
+  // those pages in place instead, keeping <audio> alive — so that
+  // new-tab workaround is gone. When boost is disabled (?boost=0) they
+  // fall through to an ordinary full load, the same as any other link.
 }
 
 // wireSearch owns the search field: a debounced filter-as-you-type that
@@ -119,7 +163,12 @@ function wireLinks() {
 // first entry into /search — otherwise every keystroke would leave a
 // history entry and Back would walk the user backwards through their
 // own query one character at a time.
-function wireSearch() {
+// wireSearchInput binds the element-level listeners on the search field.
+// It runs once per shell mount because the input/form are fresh elements on
+// each injection — re-binding them is correct and can't stack (the old
+// elements are gone). Split out from the "/" shortcut, which is document-level
+// and must NOT be re-bound.
+function wireSearchInput() {
   const form = document.getElementById("player-search-form");
   const input = document.getElementById("player-search-input");
   if (!form || !input) return;
@@ -158,11 +207,19 @@ function wireSearch() {
     input.blur();
     navigate("/albums");
   });
+}
 
+// wireSearchShortcut binds the document-level "/" focus shortcut. It is
+// registered once (in wireGlobal) and re-queries the input by id at event
+// time, so it keeps focusing the CURRENT field after the shell is re-mounted
+// rather than a stale, detached element from a previous injection.
+function wireSearchShortcut() {
   document.addEventListener("keydown", (e) => {
     if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    const input = document.getElementById("player-search-input");
+    if (!input) return; // not on a player page right now
     e.preventDefault();
     input.focus();
     input.select();
