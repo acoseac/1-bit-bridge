@@ -2,23 +2,31 @@
 {{- /* The player shell.
 
     One server-rendered page for every player route; the sub-views are
-    client-side so the <audio> element survives navigation within the
+    client-side so the audio element survives navigation within the
     library. The seed below lets the first view know what it is without
     a round-trip for the parts that are cheap — the grid still fetches,
     because it pages.
 
     Everything inside #player-root is built by static/player/*.js. The
     markup here is only the mount points, the no-JS fallback, and the
-    seed. */ -}}
+    seed. (Element names in prose, no angle brackets — see the nav comment
+    below for why.) */ -}}
 <script type="application/json" id="player-seed">{{json .Data}}</script>
 
 <div id="player-root" class="player" data-booting="1">
-  {{- /* A plain <div>, not an <aside>. The wrapper is layout only, and
-      <aside> is an implicit complementary LANDMARK — so the old markup
-      published two nested landmarks where only the inner <nav> is one a
-      reader would ever want to jump to, and the <nav> itself had no
-      accessible name (the label sat on the wrapper). Both CSS and JS
-      resolve these by class / id, so the element swap is inert. */ -}}
+  {{- /* A plain div, not an aside. The wrapper is layout only, and aside is
+      an implicit complementary LANDMARK — so the old markup published two
+      nested landmarks where only the inner nav is one a reader would ever
+      want to jump to, and that nav had no accessible name (the label sat on
+      the wrapper). Both CSS and JS resolve these by class / id, so the
+      element swap is inert.
+
+      Element names are written WITHOUT angle brackets here, and that is not
+      a style choice: a static HTML analyser does not treat a Go template
+      comment as a comment, so quoted markup inside one is parsed as real
+      elements. The first draft of this note said so in brackets and turned
+      one Web:S5255 finding into four — three of them prose. The same trap is
+      documented for ids in templates_ids_test.go. */ -}}
   <div class="player-nav">
     <nav id="player-sections" aria-label="Library sections"></nav>
   </div>

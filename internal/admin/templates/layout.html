@@ -29,12 +29,18 @@
     the whole nav on every page. Visually hidden until focused. */ -}}
 <a class="skip-link" href="#main">Skip to content</a>
 
-{{- /* Icon sprite. One <symbol> per nav glyph, referenced by <use> from
+{{- /* Icon sprite. One symbol per nav glyph, referenced by a use element from
     the entries below, so a 12-entry sidebar costs twelve short lines
     instead of twelve inline path blobs. Stroke-only at 1.6 so the set
     reads as one family and inherits the link's currentColor — an icon
     never needs a theme rule of its own. aria-hidden on the sprite host
-    AND on each <use>: the label beside it is the accessible name. */ -}}
+    AND on each use: the label beside it is the accessible name.
+
+    Element names are written WITHOUT angle brackets throughout this file's
+    comments. A static HTML analyser does not treat a Go template comment as
+    a comment, so markup quoted inside one is parsed as REAL elements — that
+    turned one Web:S5255 finding in player.html into four, three of which
+    were prose. templates_ids_test.go documents the same trap for ids. */ -}}
 <svg class="icon-sprite" aria-hidden="true" focusable="false" width="0" height="0">
   <defs>
     <g id="i-browse"><circle cx="12" cy="12" r="8.25"/><circle cx="12" cy="12" r="2.25"/></g>
@@ -52,7 +58,7 @@
   </defs>
 </svg>
 
-{{- /* The app shell is a persistent LEFT SIDEBAR, still the <header>
+{{- /* The app shell is a persistent LEFT SIDEBAR, still the header
     element — initMobileNav() resolves it with querySelector("header")
     and toggles data-nav-open on it, so keeping the tag is what lets the
     phone drawer keep working unchanged.
@@ -104,7 +110,7 @@
           from its side.
 
           NO aria-label on this span, deliberately. Its name is computed
-          from the CONTENT of the enclosing <a>, and accname step 2C says a
+          from the CONTENT of the enclosing link, and accname step 2C says a
           descendant carrying aria-label contributes THAT STRING IN PLACE OF
           its own subtree — so a label here replaced the live count with
           static prose and the link announced "Devices Pending pairing
@@ -164,7 +170,7 @@
     execute in DOCUMENT ORDER, so app.js has already run its page
     dispatch and started the SSE stream by the time this boots — which
     is what lets the player reuse that one stream instead of opening a
-    second. Loaded on every page: it owns the persistent <audio>
+    second. Loaded on every page: it owns the persistent audio
     element, which must outlive a navigation away from the library. */ -}}
 <script type="module" src="/static/player/boot.js?v={{.ServerVersion}}"></script>
 </body>
