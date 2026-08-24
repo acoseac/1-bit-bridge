@@ -1464,6 +1464,73 @@ migration.
   the device rate; there is no exclusive mode and no DoP. iOS remains the
   reference player.
 
+### Player partial-boost — audio survives navigation to operator pages (PR #742, 2026-08-24)
+
+Leaving the player for Stats / Settings / Server was a full page load, which
+destroyed the DOM and the `<audio>` element, so playback stopped. Partial-boost
+swaps `<main>` in place instead. Admin-console only — **no wire change, no
+`ProtocolVersion` bump, no migration, no iOS mirror.**
+
+- **What makes it possible at all: the `<audio>` element AND the now-playing
+  bar are parented to `<body>`, outside `<main>`** (`audio.init()` /
+  `nowplaying.mount()`, both idempotent). A swap that only replaces `<main>`'s
+  content leaves them — and playback — untouched. Do not move either inside
+  `<main>` / `#player-root`.
+- **Server**: `renderPage` gained `r`; on `X-Bridge-Partial: 1` it executes the
+  `"content"` block instead of `"layout"` and returns `X-Bridge-Active` /
+  `X-Bridge-Section` headers (the client updates `body[data-active]` + the
+  top-nav highlight from them, so `sectionForTab` stays the single source of
+  truth). `Vary: X-Bridge-Partial` on both shapes. Pinned by
+  `TestPartialBoostRendersContentOnly` (content-only, headers, both shapes'
+  Vary; a UPnP-specific marker, not the shared `class="subnav"`).
+- **Teardown is the load-bearing hazard.** Operator `initX` register
+  document/window listeners + intervals nothing removed; on a full load that
+  never mattered, but under boost they stack a copy per visit — and the
+  inspector's `popstate` handler actively fights the router. Every such
+  registration is scoped to an `AbortController` (`pageSignal()`) that
+  `dispatchPageInit(tab)` aborts before the next page's init.
+  `dispatchPageInit` is the SINGLE entry for operator init (first paint AND
+  every swap), so the two can't drift. Element-level listeners need no scope —
+  they die with the swapped DOM. The diagnostics poll and the inspector panel's
+  a11y listeners get explicit `pageSignal().addEventListener("abort", …)`
+  teardowns; the timers that self-terminate on DOM absence
+  (`makeVisibilityChain`, `workerElapsedTimer`) are left alone. Verified: the
+  5 s diagnostics poll fires 0 times in 6.5 s after boosting away.
+- **`PLAYER_HEADS` (boot.js) MUST match the server's `playerRoutes`.**
+  `isPlayerPath` decides player-vs-operator; a head the server serves as a
+  player route but that the set omits gets fetched as an operator partial and
+  `dispatchPageInit("player")` (a no-op) runs instead of `mountShell()`,
+  leaving the shell un-booted. This drift was present as written
+  (genre/composer/playlist/mix missing) — now pinned by
+  `TestPlayerHeadsMatchServerRoutes`, negative-controlled both ways.
+- **Concurrent-navigation generation guard.** `boostSwap` claims `++boostGen`
+  up front and discards its response (returns true — no hard fallback) if a
+  newer navigation started while it awaited the network. Without it, two fast
+  clicks let the slower fetch resolve last and land you on the wrong page.
+  Because `pushState` happens INSIDE `boostSwap` after the guard, a superseded
+  nav pushes no phantom history. Verified: three rapid nav clicks land on the
+  last, URL + content paired, history grows by exactly the ones that committed.
+- **Player boot split.** `boot()` runs `wireGlobal()` ONCE (delegated
+  `a[data-route]` click, the `/` shortcut re-querying the input by id, popstate
+  guarded to `isPlayerPath`) and `mountShell()` per shell injection
+  (renderSections + element-level search wiring + route). `window.__player`
+  exposes `isPlayerPath` / `mountShell` / `route` for the boost router to
+  re-mount the shell after swapping it back into `<main>`. Re-running
+  `wireGlobal` would stack the global listeners — don't. The old "open operator
+  links in a new tab while playing" handler is gone (boost replaces it).
+- **SSE recycle IS the resnapshot.** The server byte-diff-suppresses frames per
+  CONNECTION, so a freshly-injected tile gets nothing until a value changes
+  (≤30 s). `recycleEventStream()` (close + reopen) after each swap forces a full
+  initial snapshot — the mechanism `handleVisibilityRestore` already uses.
+  Verified: `tracks-indexed` on the injected Stats page hydrates immediately.
+- **`?boost=0` LATCHES for the tab session via `sessionStorage`** (else it
+  disables boost for exactly one load then re-enables on the next, useless when
+  boost itself is what's broken). Any single boost that can't complete falls
+  back to `location.assign` — a hard load of the same target — so boost is a
+  pure enhancement with no new failure mode. `runInlineScripts` block-wraps
+  inline (no-src) classic scripts so a re-execution can't throw a const/let
+  redeclaration; `application/json` islands + module scripts are left in place.
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future
