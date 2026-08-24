@@ -13,9 +13,15 @@
 <script type="application/json" id="player-seed">{{json .Data}}</script>
 
 <div id="player-root" class="player" data-booting="1">
-  <aside class="player-nav" aria-label="Library sections">
-    <nav id="player-sections"></nav>
-  </aside>
+  {{- /* A plain <div>, not an <aside>. The wrapper is layout only, and
+      <aside> is an implicit complementary LANDMARK — so the old markup
+      published two nested landmarks where only the inner <nav> is one a
+      reader would ever want to jump to, and the <nav> itself had no
+      accessible name (the label sat on the wrapper). Both CSS and JS
+      resolve these by class / id, so the element swap is inert. */ -}}
+  <div class="player-nav">
+    <nav id="player-sections" aria-label="Library sections"></nav>
+  </div>
 
   <div class="player-main">
     <form class="player-search" role="search" id="player-search-form">

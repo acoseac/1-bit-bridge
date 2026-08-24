@@ -238,10 +238,6 @@ body {
   align-items: start;
 }
 
-/* The login screen is a full-bleed page with no shell. Reset the grid so the
- * centring flex layout defined further down still governs. */
-body.login-page { display: flex; grid-template-columns: none; }
-
 /* Keyboard escape hatch past a 12-entry rail. Visually hidden until focused,
  * then it parks over the content well's top-left corner. */
 .skip-link {
@@ -289,7 +285,14 @@ body.login-page { display: flex; grid-template-columns: none; }
    gaps without touching any HTML or JS. */
 
 body.login-page {
+  /* The login screen is full-bleed with no shell, so it overrides the
+   * two-column grid <body> otherwise carries. Both declarations live in THIS
+   * rule rather than a second `body.login-page` block beside the grid — a
+   * duplicate selector is a real maintenance hazard here (the two would be
+   * ~50 lines apart and either could silently win) and SonarCloud's css:S4666
+   * flags it. */
   display: flex;
+  grid-template-columns: none;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
@@ -534,6 +537,8 @@ header.sidebar {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Containing block for the active entry's ::before stub, below. */
+  position: relative;
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   color: var(--fg-muted);
@@ -603,7 +608,6 @@ header.sidebar {
   border-radius: 0 3px 3px 0;
   background: var(--accent);
 }
-#primary-nav a { position: relative; }
 
 #primary-nav a:focus-visible {
   outline: 2px solid var(--accent);
@@ -3861,15 +3865,18 @@ section.library-inspector {
   dl dd code { overflow-wrap: anywhere; word-break: normal; }
 
   /* --- Group D: touch targets to the 44px floor. `.theme-toggle` /
-   *     `.logout-btn` sit in the centered header .meta row; `label.checkbox`
+   *     `.logout-btn` sit in the sidebar's foot block (and, once the rail
+   *     folds to a top bar below 1024px, in that bar); `label.checkbox`
    *     already flex-centers, so a min-height alone pads the whole tappable
    *     switch row to 44px. --- */
   .theme-toggle, .logout-btn { min-height: 44px; padding-inline: 14px; }
   label.checkbox { min-height: 44px; }
 
-  /* --- Group F: tighten intro copy so content starts higher on phone. --- */
-  .lede { font-size: 13px; margin-bottom: 14px; }
-  .page > .muted { font-size: 13px; }
+  /* --- Group F: tighten intro copy so content starts higher on phone.
+   *     Sizes come off the ramp rather than literals, so a change to the
+   *     ramp carries through here too. --- */
+  .lede { font-size: var(--text-sm); margin-bottom: 14px; }
+  .page > .muted { font-size: var(--text-sm); }
 }
 
 /* ---- Data page (playlists + listening history) ---- */
