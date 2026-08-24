@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -7134,7 +7135,35 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, var
 	// search track paths for the variant-prefix string. Locked by
 	// TestListTrackProjectionsUnderPrefix_bindingOrder.
 	variantLike := variantPrefix + `-%`
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.QueryContext(ctx,
+		trackProjectionSelect+`
+		 WHERE t.path LIKE ? ESCAPE '\'
+		 ORDER BY t.path ASC`,
+		variantLike, s.VariantFailureCutoff(), pattern)
+	if err != nil {
+		return nil, fmt.Errorf("list track projections %q: %w", prefix, err)
+	}
+	defer rows.Close()
+	return scanTrackProjections(rows)
+}
+
+// trackProjectionSelect is the SELECT block shared by
+// ListTrackProjectionsUnderPrefix and TrackProjectionsForPaths. Only
+// the WHERE clause differs between them, and the two must agree on
+// every column or the two scopes would disagree about eligibility for
+// the same track — the class of drift childTrackRowSelect and
+// childFolderRollupSelect were extracted to prevent.
+//
+// It is a true `const` (const + const folds at compile time), which is
+// also what keeps SonarCloud go:S2077 quiet: a runtime `+where+`
+// reads as an assembled query even when every fragment is a literal.
+//
+// Result column order matches scanTrackProjections' Scan call. The two
+// leading placeholders are the EXISTS subquery's variant LIKE and the
+// suppression cutoff, in that order — see the binding-order note on
+// ListTrackProjectionsUnderPrefix; any caller appending a WHERE binds
+// its own parameters AFTER those two.
+const trackProjectionSelect = `
 		SELECT t.path, t.size, t.mtime_ns,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS rate,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
@@ -7143,15 +7172,10 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, var
 		       EXISTS(SELECT 1 FROM track_variants tv
 		               WHERE tv.source_path = t.path
 		                 AND tv.variant_id LIKE ?) AS has_variant,
-		       `+variantFailureSuppressedSQL+` AS suppressed
-		  FROM tracks t
-		 WHERE t.path LIKE ? ESCAPE '\'
-		 ORDER BY t.path ASC
-	`, variantLike, s.VariantFailureCutoff(), pattern)
-	if err != nil {
-		return nil, fmt.Errorf("list track projections %q: %w", prefix, err)
-	}
-	defer rows.Close()
+		       ` + variantFailureSuppressedSQL + ` AS suppressed
+		  FROM tracks t`
+
+func scanTrackProjections(rows *sql.Rows) ([]TrackProjection, error) {
 	out := []TrackProjection{}
 	for rows.Next() {
 		var tp TrackProjection
@@ -7165,6 +7189,98 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, var
 		out = append(out, tp)
 	}
 	return out, rows.Err()
+}
+
+// TrackProjectionsForPaths is the explicit-path-set twin of
+// ListTrackProjectionsUnderPrefix, for scopes that are a SET of tracks
+// rather than a subtree.
+//
+// It exists because an album is not a folder. `librarycat.Album`'s
+// FolderPath is the common directory of its tracks, and on the
+// reference library 69 of 880 albums share that directory with another
+// album — one artist folder holds 18 albums flat. Submitting such an
+// album by prefix would enqueue every neighbour, and deleting by prefix
+// would reclaim their sidecars. Only an explicit path set can express
+// "this album and nothing else".
+//
+// It is also the only form that works for a SINGLE track:
+// subtreeLikePattern builds `<base>/%`, which matches strict
+// descendants, so a file path projects zero rows through the prefix
+// query.
+//
+// Cheaper than the prefix form as a bonus — `path IN (json_each(?))`
+// rides the BINARY tracks(path) PRIMARY KEY, where the case-folding
+// LIKE cannot, so this scope also has none of that query's documented
+// case-twin over-count.
+//
+// Paths are chunked so a large artist stays inside SQLite's expression
+// depth and parameter budget; ordering is by path within the whole
+// result, matching the prefix form's ORDER BY.
+func (s *Store) TrackProjectionsForPaths(ctx context.Context, paths []string, variantPrefix string) ([]TrackProjection, error) {
+	if len(paths) == 0 {
+		return []TrackProjection{}, nil
+	}
+	// Sort a COPY, never the caller's slice: the usual caller passes
+	// librarycat.Album.TrackPaths straight out of the immutable catalog
+	// snapshot, which readers holding an older pointer must keep seeing
+	// unchanged. Sorting up front rather than sorting the results means
+	// each chunk's ORDER BY already yields the global order.
+	sorted := append([]string(nil), paths...)
+	sort.Strings(sorted)
+
+	variantLike := variantPrefix + `-%`
+	out := make([]TrackProjection, 0, len(sorted))
+	for start := 0; start < len(sorted); start += trackProjectionChunk {
+		end := start + trackProjectionChunk
+		if end > len(sorted) {
+			end = len(sorted)
+		}
+		blob, err := json.Marshal(sorted[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("track projections for paths: %w", err)
+		}
+		chunk, err := s.trackProjectionChunkForPaths(ctx, variantLike, string(blob))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, chunk...)
+	}
+	return out, nil
+}
+
+// trackProjectionChunk matches VariantsForPaths' chunk size; both bind
+// their path set as one JSON array consumed by json_each, so neither is
+// near SQLite's parameter ceiling — the bound is on the marshalled blob
+// and on keeping a single statement's work predictable.
+const trackProjectionChunk = 400
+
+// trackProjectionsForPathsSQL is spelled as a named const rather than
+// concatenated at the call site, because a name reads better than a
+// multi-line expression wedged into an argument list.
+//
+// It does NOT silence SonarCloud's go:S2077, and it was written
+// believing it would: that rule fires on any query argument that is not
+// a string LITERAL, so a const identifier is flagged exactly as the
+// concatenation was. Every S2077 in this package is the same false
+// positive — the statement is built entirely from constants and every
+// value is a bound parameter — and the established remedy here is to
+// resolve them as such in SonarCloud, not to reshape the code.
+const trackProjectionsForPathsSQL = trackProjectionSelect + `
+	 WHERE t.path IN (SELECT value FROM json_each(?))
+	 ORDER BY t.path ASC`
+
+func (s *Store) trackProjectionChunkForPaths(ctx context.Context, variantLike, blob string) ([]TrackProjection, error) {
+	// Binding order mirrors the prefix form: the SELECT block's two
+	// placeholders (variant LIKE, then the suppression cutoff) come
+	// first because they sit inside the SELECT list, and this query's
+	// own `?` — the JSON path array — is appended after them.
+	rows, err := s.db.QueryContext(ctx, trackProjectionsForPathsSQL,
+		variantLike, s.VariantFailureCutoff(), blob)
+	if err != nil {
+		return nil, fmt.Errorf("track projections for paths: %w", err)
+	}
+	defer rows.Close()
+	return scanTrackProjections(rows)
 }
 
 // VariantRow is the on-disk record for one cached transcoded
