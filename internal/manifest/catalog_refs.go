@@ -45,6 +45,7 @@ type CatalogRef struct {
 	Track       int
 	TrackTagged bool
 	Size        int64
+	MTimeNS     int64
 	Duration    float64
 
 	SampleRate    int
@@ -108,6 +109,7 @@ const catalogRefSelect = `
 	       json_extract(t.tags_json, '$.trackNumber')                     AS tag_track,
 	       COALESCE(json_extract(t.tags_json, '$.duration'),            0) AS tag_duration,
 	       COALESCE(t.size, 0)                                            AS row_size,
+	       COALESCE(t.mtime_ns, 0)                                        AS row_mtime_ns,
 	       CAST(COALESCE(json_extract(t.tags_json, '$.sampleRate'),    0) AS INTEGER) AS tag_rate,
 	       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS tag_bits,
 	       CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'),         0) AS INTEGER) AS tag_is_dsd,
@@ -146,7 +148,7 @@ func (s *Store) StreamCatalogRefs(ctx context.Context, fn func(CatalogRef) error
 		disc, track, isDSD = sql.NullInt64{}, sql.NullInt64{}, 0
 		if err := rows.Scan(&ref.Path, &ref.Title, &ref.Artist, &ref.AlbumArtist,
 			&ref.Album, &ref.Genre, &ref.Composer, &ref.Year, &disc, &track,
-			&ref.Duration, &ref.Size, &ref.SampleRate, &ref.BitsPerSample, &isDSD,
+			&ref.Duration, &ref.Size, &ref.MTimeNS, &ref.SampleRate, &ref.BitsPerSample, &isDSD,
 			&ref.Codec, &ref.ArtworkMBID, &ref.ArtworkVersion, &ref.ReleaseMBID,
 			&ref.ArtistMBID, &ref.IndexedAt, &ref.RoutedUDN); err != nil {
 			return err
@@ -198,6 +200,13 @@ type CatalogTrackRow struct {
 	TrackTagged bool
 	Duration    float64
 	Size        int64
+	// MTimeNS is the scanner's record of the source file's mtime. It
+	// pairs with Size as the freshness key a cached variant stamps at
+	// generation time (`track_variants.source_mtime_ns` /
+	// `source_size`), so a caller can tell a live sidecar from one
+	// whose source has moved on without touching the filesystem —
+	// which routed rows have no way to do anyway.
+	MTimeNS int64
 
 	SampleRate    int
 	BitsPerSample int
@@ -266,7 +275,7 @@ func (s *Store) catalogTrackRowChunk(ctx context.Context, blob string) ([]Catalo
 		)
 		if err := rows.Scan(&ref.Path, &ref.Title, &ref.Artist, &ref.AlbumArtist,
 			&ref.Album, &ref.Genre, &ref.Composer, &ref.Year, &disc, &track,
-			&ref.Duration, &ref.Size, &ref.SampleRate, &ref.BitsPerSample, &isDSD,
+			&ref.Duration, &ref.Size, &ref.MTimeNS, &ref.SampleRate, &ref.BitsPerSample, &isDSD,
 			&ref.Codec, &ref.ArtworkMBID, &ref.ArtworkVersion, &ref.ReleaseMBID,
 			&ref.ArtistMBID, &ref.IndexedAt, &ref.RoutedUDN); err != nil {
 			return nil, err
@@ -278,6 +287,7 @@ func (s *Store) catalogTrackRowChunk(ctx context.Context, blob string) ([]Catalo
 			SampleRate: ref.SampleRate, BitsPerSample: ref.BitsPerSample,
 			IsDSD: isDSD != 0, Codec: ref.Codec,
 			ArtworkMBID: ref.ArtworkMBID, ArtworkVersion: ref.ArtworkVersion,
+			MTimeNS:   ref.MTimeNS,
 			RoutedUDN: ref.RoutedUDN,
 		}
 		if disc.Valid {

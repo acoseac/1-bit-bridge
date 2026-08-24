@@ -247,8 +247,12 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); flex-wrap: wrap; }
 
 .tracks { list-style: none; margin: 0; padding: 0; }
+/* num · title · format · variants · size · duration · download.
+ * Every column past the title is auto-width and right-packed, so a
+ * track with no variants leaves no gap — the marks are absent, not
+ * blank. */
 .track {
-  display: grid; grid-template-columns: 2.2rem 1fr auto auto auto;
+  display: grid; grid-template-columns: 2.2rem 1fr auto auto auto auto auto;
   gap: var(--space-3); align-items: baseline;
   padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 0.9rem;
 }
@@ -265,7 +269,25 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .track-title:hover { color: var(--accent); }
 .track-unplayable .track-title { cursor: default; color: var(--fg-muted); }
 .track-unplayable .track-title:hover { color: var(--fg-muted); }
-.track-meta, .track-dur { color: var(--fg-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.track-meta, .track-dur, .track-size { color: var(--fg-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+
+/* Per-track variant marks. Small enough to scan down a column without
+ * competing with the title, and coloured by MEANING: a live copy takes
+ * the accent, an out-of-date one takes the warm tone every other
+ * "needs attention" surface in this console uses. */
+.track-variants { display: flex; gap: 4px; align-items: center; }
+.track-variant {
+  font-size: 0.66rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+  background: var(--accent-soft); color: var(--accent);
+}
+.track-variant-stale {
+  background: var(--accent-warm-tint); color: var(--accent-warm);
+  /* A stale copy is struck through: it exists on disk and will not be
+   * served, and no colour alone carries that. */
+  text-decoration: line-through;
+}
+.track-variant-skip { color: var(--fg-muted); font-size: 0.8rem; cursor: help; }
 .track-dl { font-size: 0.78rem; color: var(--fg-muted); text-decoration: none; }
 .track-dl:hover { color: var(--accent); text-decoration: underline; }
 
@@ -415,3 +437,51 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 @media (min-width: 1024px) {
   :root { --npbar-left: var(--sidebar-w); }
 }
+
+/* ---- Variant panel (album / artist detail) ---- */
+
+.variants {
+  margin: var(--space-5) 0; padding: var(--space-4);
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel);
+}
+.variants-head { margin: 0 0 var(--space-2); font-size: 0.95rem; }
+.variants-blocked { color: var(--accent-warm); margin: 0 0 var(--space-3); }
+
+.variant-kind { padding: var(--space-3) 0; border-top: 1px solid var(--border); }
+.variant-kind:first-of-type { border-top: 0; }
+.variant-kind-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3);
+}
+.variant-kind-title { font-weight: 650; font-size: 0.88rem; }
+.variant-kind-ratio { color: var(--fg-muted); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+.variant-kind-note { margin: 4px 0 var(--space-3); }
+
+.variant-bar {
+  height: 6px; margin-top: 6px; border-radius: 999px; overflow: hidden;
+  background: var(--bg-elev);
+}
+.variant-bar-fill { height: 100%; background: var(--accent); transition: width .3s ease; }
+
+.variant-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.variant-status { margin: var(--space-2) 0 0; color: var(--fg-muted); min-height: 1.2em; }
+.variant-status-error { color: var(--danger); }
+
+@media (prefers-reduced-motion: reduce) {
+  .variant-bar-fill { transition: none; }
+}
+
+/* Below the phone breakpoint the track row drops to two lines: the
+ * title keeps the width it needs, and everything factual wraps under
+ * it. Seven auto columns at 375px crushed the title to one word. */
+@media (max-width: 640px) {
+  .track {
+    grid-template-columns: 2.2rem 1fr auto;
+    row-gap: 2px;
+  }
+  .track-meta, .track-variants, .track-size {
+    grid-column: 2 / -1;
+  }
+  .track-meta, .track-size { display: inline; }
+}
+
+.variant-kind-stale { color: var(--accent-warm); margin: 0 0 var(--space-3); }

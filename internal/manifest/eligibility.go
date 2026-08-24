@@ -210,3 +210,69 @@ func (s *Store) EligibleRollupByPrefix(ctx context.Context, prefix string, targe
 	}
 	return ec, nil
 }
+
+// eligibleCountsForPathsSQL is a named const rather than a call-site
+// concatenation: every operand is already a constant and Go folds them
+// identically, but SonarCloud's go:S2077 reads a binary expression in
+// the query argument as an assembled query.
+const eligibleCountsForPathsSQL = `
+	SELECT
+	  COALESCE(SUM(CASE WHEN ` + upscaleCoveredOrEligibleSQL + `
+	    THEN 1 ELSE 0 END), 0),
+	  COALESCE(SUM(CASE WHEN ` + optimizeCoveredOrEligibleSQL + `
+	    THEN 1 ELSE 0 END), 0)
+	FROM tracks t
+	WHERE t.path IN (SELECT value FROM json_each(?))`
+
+// EligibleCountsForPaths is the identity-scoped twin of
+// EligibleRollupByPrefix: the per-kind coverage denominator over an
+// EXPLICIT set of tracks rather than a subtree.
+//
+// It exists for the same reason TrackProjectionsForPaths does. An album
+// is a set, not a subtree — its directory is the common ancestor of its
+// tracks and is routinely shared with other albums — so a subtree
+// rollup would count the neighbours' tracks into this album's
+// denominator and the coverage bar would never reach full.
+//
+// Shares upscaleCoveredOrEligibleSQL / optimizeCoveredOrEligibleSQL
+// with both subtree helpers, so all three scopes agree on what
+// "eligible" means by construction rather than by review.
+//
+// BIND ORDER IS LOAD-BEARING, and it is the same contract as the
+// sibling helpers: the upscale predicate's four target binds
+// (targetRate, targetBits, targetRate, targetBits) appear in textual
+// order BEFORE this query's own `?`, the json_each path array. Pinned
+// by TestEligibleCountsForPaths_bindingOrder.
+//
+// Read-only; no s.mu (WAL handles concurrent readers).
+func (s *Store) EligibleCountsForPaths(ctx context.Context, paths []string, targetRate, targetBits int) (EligibleCounts, error) {
+	if len(paths) == 0 {
+		return EligibleCounts{}, nil
+	}
+	var ec EligibleCounts
+	// Chunked for the same reason TrackProjectionsForPaths is: an
+	// artist scope can carry thousands of paths, and the counts sum
+	// cleanly across chunks because every track appears in exactly one.
+	for start := 0; start < len(paths); start += eligibleCountsChunk {
+		end := start + eligibleCountsChunk
+		if end > len(paths) {
+			end = len(paths)
+		}
+		blob, err := json.Marshal(paths[start:end])
+		if err != nil {
+			return EligibleCounts{}, err
+		}
+		var chunk EligibleCounts
+		if err := s.db.QueryRowContext(ctx, eligibleCountsForPathsSQL,
+			targetRate, targetBits, targetRate, targetBits, string(blob)).
+			Scan(&chunk.Upscale, &chunk.Optimize); err != nil {
+			return EligibleCounts{}, fmt.Errorf("eligible counts for paths: %w", err)
+		}
+		ec.Upscale += chunk.Upscale
+		ec.Optimize += chunk.Optimize
+	}
+	return ec, nil
+}
+
+// eligibleCountsChunk matches TrackProjectionsForPaths' chunk size.
+const eligibleCountsChunk = 400

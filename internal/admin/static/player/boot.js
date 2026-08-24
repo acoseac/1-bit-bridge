@@ -14,6 +14,7 @@
 import * as audio from "./audio.js";
 import { mount as mountBar } from "./nowplaying.js";
 import { el, clear, announce } from "./ui.js";
+import { wireVariantRefresh, clearVariantRefresh } from "./variants.js";
 import {
   renderAlbums, renderAlbum, renderArtists, renderArtist,
   renderGenres, renderComposers,
@@ -69,7 +70,9 @@ function wireGlobal() {
     if (isPlayerPath(location.pathname)) route();
   });
   window.addEventListener("player:rerender", () => route());
+  wireVariantRefresh();
 }
+
 
 // mountShell wires the freshly-present player shell and renders the current
 // route. Called on first load and again each time the boost router injects
@@ -288,6 +291,10 @@ function route() {
     if (node) bar.appendChild(node);
   };
   setCrumb(null);
+  // Same reasoning as the crumb: cleared up front, so a view that
+  // installed a variant-refresh hook cannot have it fire after the user
+  // has navigated somewhere else. Only two views ever set one.
+  clearVariantRefresh();
   const ctx = { params, gen, setToolbar, setCrumb, id: rest, mixesEnabled: !!seed.mixesEnabled };
 
   const routes = {

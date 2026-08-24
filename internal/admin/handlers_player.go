@@ -649,6 +649,39 @@ type playerTrackDTO struct {
 	Routed    bool    `json:"routed,omitempty"`
 
 	Play playerPlayabilityDTO `json:"play"`
+
+	// Variants are the cached sidecars this track HAS. Distinct from
+	// Play.VariantID, which names at most one sidecar the browser
+	// should play INSTEAD of the source — these describe what exists,
+	// including for a track whose source plays fine.
+	Variants []playerVariantDTO `json:"variants,omitempty"`
+
+	// VariantSkip explains why this track can never gain a variant:
+	// "dsd_bitstream", "lossy_source", "unknown_format" or "" for no
+	// hard block. Shared with the browse rows via fundamentalSkipReason
+	// so the two surfaces cannot disagree about what is impossible.
+	VariantSkip string `json:"variantSkip,omitempty"`
+}
+
+// playerVariantDTO is one cached sidecar as the UI needs it.
+//
+// Fresh compares the variant's stamped source facts against the
+// SCANNER's record of the file, not against a live stat. That is the
+// same definition ListAutoOptimizeCandidates uses to decide what needs
+// regenerating, it works for routed rows that have no local file to
+// stat, and it keeps this consistent with every other number on the
+// page — size, codec and geometry all come from the library's record
+// too. The playback path deliberately keeps its own live-stat check
+// (variantFresh), because there the file is about to be opened anyway.
+type playerVariantDTO struct {
+	// Kind is "upscale" or "optimize" — the vocabulary the batch and
+	// delete endpoints take, not the `upscaled-`/`optimized-` id prefix.
+	Kind      string `json:"kind"`
+	VariantID string `json:"variantId"`
+	RateHz    int    `json:"rateHz,omitempty"`
+	Bits      int    `json:"bits,omitempty"`
+	SizeBytes int64  `json:"sizeBytes,omitempty"`
+	Fresh     bool   `json:"fresh"`
 }
 
 // playerPlayabilityDTO tells the client what the SERVER knows. The
@@ -675,14 +708,51 @@ type playerPlayabilityDTO struct {
 	Downloadable bool `json:"downloadable"`
 }
 
+// playerVariantCoverageDTO is one kind's coverage over a scope.
+//
+// Eligible is the DENOMINATOR — tracks that already have a variant of
+// this kind PLUS tracks that could still get one — so a bar reads
+// "62 / 62" for an album whose other tracks are natively at the CarPlay
+// floor, rather than "62 / 136" against a target that will never move.
+// Exempt is the remainder, surfaced as a muted note rather than as
+// missing work.
+type playerVariantCoverageDTO struct {
+	Covered  int `json:"covered"`
+	Eligible int `json:"eligible"`
+	Exempt   int `json:"exempt"`
+	// Stale counts covered tracks whose sidecar no longer matches its
+	// source. They are still COVERED — the batch walks skip a track
+	// that has a variant of the kind regardless of freshness, so
+	// reporting them as missing would promise a Generate that enqueues
+	// nothing. Surfaced separately because a copy that exists and will
+	// not be served is a fact an operator cannot infer from a full bar.
+	Stale int `json:"stale,omitempty"`
+}
+
+// playerVariantSummaryDTO is the album/artist-level variant readout.
+//
+// Enabled and SoxAvailable are separate on purpose: the feature can be
+// switched off in config, or switched on with no toolchain to run it.
+// A UI that collapses them tells the operator "unavailable" when the
+// actionable answer is "install sox".
+type playerVariantSummaryDTO struct {
+	Upscale      playerVariantCoverageDTO `json:"upscale"`
+	Optimize     playerVariantCoverageDTO `json:"optimize"`
+	SourceBytes  int64                    `json:"sourceBytes"`
+	VariantBytes int64                    `json:"variantBytes"`
+	Enabled      bool                     `json:"enabled"`
+	SoxAvailable bool                     `json:"soxAvailable"`
+}
+
 type playerAlbumDetailResponse struct {
-	Album        playerAlbumDTO   `json:"album"`
-	Tracks       []playerTrackDTO `json:"tracks"`
-	Release      *aboutReleaseDTO `json:"release,omitempty"`
-	Artist       *aboutArtistDTO  `json:"artist,omitempty"`
-	Booklet      *aboutBookletDTO `json:"booklet,omitempty"`
-	AtlasEnabled bool             `json:"atlasEnabled"`
-	SnapshotAt   string           `json:"snapshotAt"`
+	Album        playerAlbumDTO           `json:"album"`
+	Tracks       []playerTrackDTO         `json:"tracks"`
+	Variants     *playerVariantSummaryDTO `json:"variants,omitempty"`
+	Release      *aboutReleaseDTO         `json:"release,omitempty"`
+	Artist       *aboutArtistDTO          `json:"artist,omitempty"`
+	Booklet      *aboutBookletDTO         `json:"booklet,omitempty"`
+	AtlasEnabled bool                     `json:"atlasEnabled"`
+	SnapshotAt   string                   `json:"snapshotAt"`
 }
 
 type playerArtistDetailResponse struct {
@@ -718,6 +788,7 @@ func (s *Server) apiPlayerAlbumDetail(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	resp := playerAlbumDetailResponse{
 		Album: albumDTO(album, s.routedOnline), Tracks: tracks,
+		Variants:     s.variantSummaryFor(r, album.TrackPaths, tracks),
 		AtlasEnabled: cfg.Atlas.Enabled,
 		SnapshotAt:   snapshotStamp(cat.BuiltAt),
 	}
