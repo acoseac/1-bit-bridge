@@ -242,7 +242,7 @@ func TestBatchSubmitScopeRejections(t *testing.T) {
 			if got, _ := body["error"].(string); got != tc.code {
 				t.Errorf("error code %q, want %q (body %s)", got, tc.code, w.Body.String())
 			}
-			if after := len(stub.submitCalls) + len(stub.submitOptimizeCalls); after != before {
+			if len(stub.submitCalls)+len(stub.submitOptimizeCalls) != before {
 				t.Errorf("a rejected scope still reached the coordinator")
 			}
 		})

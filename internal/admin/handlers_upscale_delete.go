@@ -162,17 +162,8 @@ func parseVariantDeleteRequest(q map[string][]string) (req AdminVariantDeleteReq
 			`unknown kind: ` + kind + ` (expected "upscale" or "optimize")`
 	}
 
-	if hasPrefix && hasPath {
-		return req, "bad_request",
-			"cannot combine `prefix` and `path` query parameters; pick one"
-	}
-	if hasIdentity && (hasPrefix || hasPath) {
-		return req, "bad_request",
-			"cannot combine `albumId` / `artistId` with `prefix` or `path`; pick one"
-	}
-	if has("albumId") && has("artistId") {
-		return req, "bad_request",
-			"cannot combine `albumId` and `artistId`; pick one"
+	if code, msg := checkDeleteShapeExclusive(q, hasPrefix, hasPath, hasIdentity); code != "" {
+		return req, code, msg
 	}
 
 	if hasIdentity {
@@ -219,6 +210,27 @@ func parseVariantDeleteRequest(q map[string][]string) (req AdminVariantDeleteReq
 	}
 	req.All = true
 	return req, "", ""
+}
+
+// checkDeleteShapeExclusive rejects every request that names more than
+// one scope. Split out of the parser because these three checks are one
+// idea — "exactly one shape" — and inlining them pushed
+// parseVariantDeleteRequest past the cognitive-complexity gate for a
+// function whose remaining branches each do something different.
+//
+// Guessing at a mixed request is not an option: one of the shapes it
+// could resolve to deletes every variant in the manifest.
+func checkDeleteShapeExclusive(q map[string][]string, hasPrefix, hasPath, hasIdentity bool) (code, msg string) {
+	has := func(k string) bool { _, ok := q[k]; return ok }
+	switch {
+	case hasPrefix && hasPath:
+		return "bad_request", "cannot combine `prefix` and `path` query parameters; pick one"
+	case hasIdentity && (hasPrefix || hasPath):
+		return "bad_request", "cannot combine `albumId` / `artistId` with `prefix` or `path`; pick one"
+	case has("albumId") && has("artistId"):
+		return "bad_request", "cannot combine `albumId` and `artistId`; pick one"
+	}
+	return "", ""
 }
 
 // validateAdminRelativePath enforces the same "no leading `/`,

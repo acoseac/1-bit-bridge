@@ -179,3 +179,24 @@ func TestRunVariantDelete_PathsWithNoVariantsIsANoOp(t *testing.T) {
 		t.Fatalf("a no-variant scope deleted %v", got)
 	}
 }
+
+// TestRunVariantDelete_PathsDeduplicates: RunVariantDelete is exported,
+// so it can be handed a path set the admin route's own dedup never saw.
+// A duplicate would list the same sidecar twice and the second unlink
+// would report a spurious failure for a file the first one correctly
+// removed.
+func TestRunVariantDelete_PathsDeduplicates(t *testing.T) {
+	srv, deleter, target, _ := newPathsDeleteFixture(t)
+
+	dupes := []string{target[0], target[0], target[1], target[0]}
+	resp, err := srv.RunVariantDelete(context.Background(), VariantDeleteRequest{Paths: dupes})
+	if err != nil {
+		t.Fatalf("RunVariantDelete: %v", err)
+	}
+	if resp.DeletedCount != 2 {
+		t.Errorf("DeletedCount = %d, want 2 — one per distinct path", resp.DeletedCount)
+	}
+	if got := deletedPathsOf(deleter); len(got) != 2 {
+		t.Errorf("deleted %v, want two entries", got)
+	}
+}

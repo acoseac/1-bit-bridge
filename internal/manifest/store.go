@@ -7254,15 +7254,23 @@ func (s *Store) TrackProjectionsForPaths(ctx context.Context, paths []string, va
 // and on keeping a single statement's work predictable.
 const trackProjectionChunk = 400
 
+// trackProjectionsForPathsSQL is spelled as a named const rather than
+// concatenated at the call site. Both operands are constants either
+// way, so Go folds them identically — but SonarCloud's go:S2077 reads a
+// binary expression in the query argument as an assembled query and
+// flags it, and a MEDIUM-severity security finding that is really a
+// formatting preference is worse than the extra name. Same convention
+// as trackFeatureSelect's callers.
+const trackProjectionsForPathsSQL = trackProjectionSelect + `
+	 WHERE t.path IN (SELECT value FROM json_each(?))
+	 ORDER BY t.path ASC`
+
 func (s *Store) trackProjectionChunkForPaths(ctx context.Context, variantLike, blob string) ([]TrackProjection, error) {
 	// Binding order mirrors the prefix form: the SELECT block's two
 	// placeholders (variant LIKE, then the suppression cutoff) come
 	// first because they sit inside the SELECT list, and this query's
 	// own `?` — the JSON path array — is appended after them.
-	rows, err := s.db.QueryContext(ctx,
-		trackProjectionSelect+`
-		 WHERE t.path IN (SELECT value FROM json_each(?))
-		 ORDER BY t.path ASC`,
+	rows, err := s.db.QueryContext(ctx, trackProjectionsForPathsSQL,
 		variantLike, s.VariantFailureCutoff(), blob)
 	if err != nil {
 		return nil, fmt.Errorf("track projections for paths: %w", err)

@@ -358,7 +358,19 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// differs per shape, and everything destructive below —
 		// unlink, DB delete, SSE fan-out — stays the single shared
 		// path an admin delete and an iOS delete both run.
+		//
+		// Paths are de-duplicated here rather than trusted from the
+		// caller. The admin route already dedupes while expanding an
+		// artist (whose albums can overlap), but RunVariantDelete is
+		// exported: a duplicate would list the same sidecar twice, and
+		// the second unlink would then report a spurious failure for a
+		// file the first one correctly removed.
+		seen := make(map[string]struct{}, len(req.Paths))
 		for _, p := range req.Paths {
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			seen[p] = struct{}{}
 			var batch []VariantSummary
 			batch, err = s.variantDeleter.ListVariantsForPath(ctx, p)
 			if err != nil {

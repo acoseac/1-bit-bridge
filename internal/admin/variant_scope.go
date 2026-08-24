@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -146,7 +147,15 @@ func (s *Server) resolveVariantScope(r *http.Request, req scopeRequest) (variant
 				Message: "this library is too large for the in-memory catalog album and artist scopes use",
 			}
 		}
-		logger.Error("resolve variant scope: build catalog", "err", err)
+		// A browser that navigated away mid-request cancels the
+		// context, which surfaces here as a catalog build failure. That
+		// is not an operator-actionable fault, and logging it at Error
+		// trains people to ignore the level that matters.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			logger.Debug("resolve variant scope: request cancelled", "err", err)
+		} else {
+			logger.Error("resolve variant scope: build catalog", "err", err)
+		}
 		return variantScope{}, &scopeError{
 			Status:  http.StatusInternalServerError,
 			Code:    "internal",
