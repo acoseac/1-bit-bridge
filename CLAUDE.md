@@ -1531,6 +1531,98 @@ swaps `<main>` in place instead. Admin-console only — **no wire change, no
   inline (no-src) classic scripts so a re-execution can't throw a const/let
   redeclaration; `application/json` islands + module scripts are left in place.
 
+### Web player: right-sized artwork, catalog freshness, A–Z, collections (PRs #743–#747, 2026-08-24)
+
+Admin-console only — no `/v1` shape change, no `ProtocolVersion` bump, no
+migration, no iOS mirror. Five PRs closing the first round of field reports
+against the player that shipped in #739–#742.
+
+- **`?size=` is now honoured, and the ladder must verify DIMENSIONS, not the
+  filename.** `stampLocalArtwork` writes every local cover under a `-500`
+  suffix whatever its real size is — a misnomer since the scaling module — so
+  a serve path that matched on NAME answered `?size=250` and `?size=500` with
+  the same 600–1200 px file (measured: 191 KB for both; a 12-tile grid pulled
+  ~2.3 MB to fill ~0.5 MP). `resolveArtworkTier` reads the header and derives
+  when the stored tier overshoots by ≥20%. **Derived tiers live in
+  `<artworkDir>/thumbs/`, and that subdirectory is load-bearing three ways:**
+  `/v1/artwork` shares the artwork dir and stats the requested size FIRST (a
+  sibling file would silently change what iOS receives — verified
+  byte-identical before/after with a real bearer token);
+  `enrich.CachedArtistImageMBIDs` enumerates that dir to build the coverage
+  set; and `RunArtworkRescaleOnce` walks it flat. **Don't extend derivation to
+  `/v1` casually** — it reverses the deliberate 2026-08-19 one-tier decision in
+  `artwork_scale.go`'s header and wants its own measurement.
+  **`EnsureThumb`'s mtime freshness check is REQUIRED, not belt-and-braces:**
+  covers are content-keyed (`local-<sha256>`) so a changed cover is a changed
+  filename, but portraits live under a fixed `artist-<mbid>.jpg` the enricher
+  OVERWRITES IN PLACE. **Decline dimensionally, never by byte length** — a
+  downscale is not guaranteed to shrink (measured: a q5 400 px source is 10,897
+  bytes and its correct 250 px thumb is 24,648), and the byte form discarded
+  valid thumbnails and served the oversized original.
+  **Deploy note:** responses carry `immutable` with a one-year max-age, so a
+  browser that cached the pre-fix bytes keeps them under the unchanged URL. One
+  hard reload; not worth a permanent version token.
+- **Catalog staleness has two causes and they get two answers.** An EPOCH
+  change means a scan happened, so it still rebuilds SYNCHRONOUSLY ("I scanned,
+  I refreshed, my album isn't there" is the complaint catalog.go:74-82
+  protects). TTL expiry is only a GUESS that an unnudged writer moved
+  something, so the request is answered from the existing snapshot and the
+  rebuild happens behind it. Plus a one-shot warm at boot (bgWriters-joined) —
+  without it an operator who visits every few hours paid a full fold nearly
+  every visit. **All three paths enter through `rebuildCatalog`'s
+  singleflight**; the refresher must NOT re-enter `libraryCatalog`, which would
+  take its own serve-the-stale shortcut and rebuild nothing (a test caught
+  exactly that). `catalogRefreshing` bounds GOROUTINE SPAWNS, not folds — the
+  singleflight already coalesces the work, and a test asserting otherwise
+  passed with the flag removed.
+- **The A–Z rail files through `librarycat.bucket()`, never a fresh copy.**
+  `sortkey.go`'s header states it mirrors the iOS `AlphabetScrubber` so "the
+  browser's A–Z index and the phone's scrubber" agree — this rail is the client
+  that comment was written for. Diacritics already fold (`Édith` → E) including
+  the deliberate `ø ł đ æ` gap shared with the phone; **don't close that gap
+  here alone.** Buckets ride `playerPageMeta` first-page-only and are OMITTED
+  when the ordering isn't alphabetical, which is how the client knows not to
+  draw a rail. **The letter depends on the SORT**: `Album.Bucket` derives from
+  `SortArtist`, right under an artist sort and wrong under a title sort.
+  Genres are ordered by track count, so `axisIsAlphabetical` CHECKS rather than
+  assumes — a rail over a count-ordered list misdirects while looking
+  authoritative. **A jump is a RESET, not an append** (verified by building the
+  broken version: 17 tiles became 22, spliced).
+- **`route()`'s dispatch table needs a parity guard of its own.**
+  `routes[section] || routes.albums` is a silent fallback, so a head
+  `PLAYER_HEADS` claims and the table forgets renders the ALBUM GRID under the
+  wrong title with no error — that was true for `genre`, `composer`, `playlist`
+  and `mix` from the day the router was written, while
+  `TestPlayerHeadsMatchServerRoutes` pinned only the head SET despite its
+  failure message promising otherwise. `knownRouteGaps` is now EMPTY and the
+  emptiness is the assertion; keep the map so a future gap is a visible line.
+- **A collection is not an album.** `trackList`'s `collection` mode drops disc
+  headings and numbers rows by position: a playlist spanning six albums was
+  otherwise punctuated with "Disc 1" and numbered 3, 1, 8, 2. **Foreign
+  playlist members** (another bridge's `origin_fingerprint`) are COUNTED and
+  REPORTED, never silently dropped — hiding them makes the page disagree with
+  its own tile and the operator's Data page. **Mosaic covers filter on artwork
+  presence BEFORE deduping to four**, or an artworkless album consumes a
+  quadrant and renders as a hole.
+- **`csrfGuard` does NOT 415 a bodyless POST** — it gates the Content-Type
+  check on `ContentLength != 0` and explicitly lets empty bodies through
+  (admin.go). The house convention of always sending the header still applies;
+  it becomes a REQUIREMENT only once a body is sent. Recorded because a plausible
+  misreading sends the next reader chasing a 415 that cannot occur.
+- **Palette: `--accent` is `#856428` (light) / `#d9bc7a` (dark), and the value
+  is contrast-driven.** `--accent` colours normal-size text, so it must clear
+  4.5:1 on all THREE light surfaces: `#9a7b3f` measures 3.98/3.80/3.63 (fails),
+  `#8e6f32` 4.70/4.49/**4.29** (fails on `--bg-elev`), `#856428`
+  5.45/5.21/4.98. New **`--accent-on`** token is the foreground for text on an
+  accent FILL, because the readable choice flips with the theme; the
+  `color: #fff` it replaced was ALREADY failing at 2.98:1 on indigo-400.
+- **Windows CI catches wall-clock test assumptions.** Two `time.Now()` stamps
+  milliseconds apart are not reliably ordered under Windows' ~15.6 ms
+  granularity — the same trap as the `indexed_at` bump. Assert on counted
+  events, and detect "was this file rewritten?" by CONTENT (a planted
+  sentinel), never by comparing mtimes: two writes in one tick leave them
+  equal, so an mtime check silently PASSES on the platform most likely to break.
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future
