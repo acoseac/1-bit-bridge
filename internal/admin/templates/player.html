@@ -24,8 +24,22 @@
              autocomplete="off" spellcheck="false"
              aria-label="Search the library">
     </form>
-    <div class="player-toolbar" id="player-toolbar"></div>
+    {{- /* Title, THEN toolbar. The sort / quality selects filter the list
+        below them, so they belong on that side of the heading — between the
+        search field and the title they read as three unrelated control rows
+        and the section title lost its job of naming the view. Every consumer
+        in player/*.js resolves these by id, so the swap is order-safe. */ -}}
+    {{- /* Breadcrumb slot. Detail views (a playlist, a smart mix, a folder)
+        need a way back to the list they came from, and the only place that
+        reads as a way BACK is above the title. It could not live in the view
+        itself, because #player-title sits outside #player-view — so the shell
+        owns the mount and route() hands each view a setCrumb to fill it.
+
+        Empty for every list view; :empty in player.css collapses the margin
+        so a blank slot costs no vertical space. */ -}}
+    <nav class="player-crumb" id="player-crumb" aria-label="Breadcrumb"></nav>
     <h1 id="player-title" class="player-title" tabindex="-1">Library</h1>
+    <div class="player-toolbar" id="player-toolbar"></div>
     <div id="player-view" class="player-view"></div>
   </div>
 </div>

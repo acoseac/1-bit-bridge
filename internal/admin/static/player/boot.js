@@ -276,7 +276,19 @@ function route() {
     clear(bar);
     if (node) bar.appendChild(node);
   };
-  const ctx = { params, gen, setToolbar, id: rest, mixesEnabled: !!seed.mixesEnabled };
+  // The breadcrumb is cleared HERE, up front, rather than by each view the
+  // way the toolbar is. Only three views ever set one, so leaving it to the
+  // views would mean the other eleven had to remember to clear it — and the
+  // failure mode of forgetting is a stale "← Smart Mixes" sitting above an
+  // unrelated page, pointing somewhere the reader never was.
+  const setCrumb = (node) => {
+    const bar = document.getElementById("player-crumb");
+    if (!bar) return;
+    clear(bar);
+    if (node) bar.appendChild(node);
+  };
+  setCrumb(null);
+  const ctx = { params, gen, setToolbar, setCrumb, id: rest, mixesEnabled: !!seed.mixesEnabled };
 
   const routes = {
     albums: ["Albums", () => renderAlbums(view, ctx)],

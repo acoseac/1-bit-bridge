@@ -92,9 +92,53 @@
   --space-4: 1rem;                   /* 16px */
   --space-5: 1.5rem;                 /* 24px */
   --space-6: 2rem;                   /* 32px */
-  --radius: 10px;
-  --radius-sm: 6px;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --radius-lg: 20px;
   --radius-pill: 999px;
+
+  /* ---- Type ramp -------------------------------------------------------
+   * Named by ROLE, not by size, so a rule reads as an intent. The ramp is
+   * roughly 1.22x and lands on whole/half pixels at the 16px root, which
+   * keeps stems crisp on 1x displays.
+   *
+   * The body size every one of these is judged against is 13.5px, set on
+   * <body> below. A console is a dense surface: the previous flat 14px body
+   * with a 22px h1 gave a title-to-body ratio of 1.57 — too shallow to
+   * establish a page-level anchor, which is why every page read as one
+   * undifferentiated field of text. The ratio is now 2.07. */
+  --text-micro: 10.5px;              /* uppercase group labels, tracked wide */
+  --text-xs: 11.5px;                 /* meta, footnotes, badge text */
+  --text-sm: 12.5px;                 /* dense secondary: table cells, hints */
+  --text-base: 13.5px;               /* body */
+  --text-md: 15px;                   /* panel headings */
+  --text-lg: 17px;                   /* card / section titles */
+  --text-xl: 21px;                   /* sub-page titles */
+  --text-2xl: 28px;                  /* page title */
+  --text-stat: 32px;                 /* the number on a stat tile */
+
+  /* Tracking. Display sizes need negative tracking or their counters open
+   * up; the uppercase micro-label needs strongly POSITIVE tracking or it
+   * reads as a smear at 10.5px. */
+  --track-tight: -0.022em;
+  --track-snug: -0.012em;
+  --track-wide: 0.085em;
+
+  /* ---- Elevation -------------------------------------------------------
+   * Two steps only. Light mode gets very soft, wide shadows tinted with the
+   * slate ink rather than pure black — a neutral-black shadow over a
+   * blue-grey canvas reads as dirt. The dark blocks below map these to
+   * near-nothing and lean on the brighter --border instead, because a drop
+   * shadow on a near-black canvas is invisible and only costs paint. */
+  --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.04), 0 1px 3px rgb(15 23 42 / 0.03);
+  --shadow-md: 0 2px 4px -2px rgb(15 23 42 / 0.05), 0 8px 20px -8px rgb(15 23 42 / 0.10);
+
+  /* ---- Shell -----------------------------------------------------------
+   * One width token, consumed by the sidebar, by <main>'s grid column, and
+   * by the now-playing bar's left inset in player.css — so the three can
+   * never disagree about where the rail ends. */
+  --sidebar-w: 248px;
+  --shell-gutter: 36px;
 
   /* ---- Focus rings (auto-track --accent-soft / --danger, so no dark map) ---- */
   --glow: 0 0 0 3px var(--accent-soft);
@@ -132,6 +176,12 @@
     --ok: var(--_dark-ok);
     --warn: var(--_dark-warn);
     --border: var(--_dark-border);
+    /* Shadows all but vanish on a near-black canvas; the brighter --border
+     * carries the edge instead. Keeping the tokens DEFINED (rather than
+     * letting them inherit the light values) means no downstream rule needs
+     * a dark-mode branch of its own. */
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.30);
+    --shadow-md: 0 8px 24px -10px rgb(0 0 0 / 0.55);
   }
 }
 /* Explicit dark choice — wins over the OS regardless (attribute specificity).
@@ -154,6 +204,12 @@
   --ok: var(--_dark-ok);
   --warn: var(--_dark-warn);
   --border: var(--_dark-border);
+  /* Shadows all but vanish on a near-black canvas; the brighter --border
+   * carries the edge instead. Keeping the tokens DEFINED (rather than
+   * letting them inherit the light values) means no downstream rule needs
+   * a dark-mode branch of its own. */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.30);
+  --shadow-md: 0 8px 24px -10px rgb(0 0 0 / 0.55);
 }
 
 * { box-sizing: border-box; }
@@ -163,11 +219,54 @@ body {
   font-family: var(--sans);
   color: var(--fg);
   background: var(--bg);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--text-base);
+  line-height: 1.55;
   min-height: 100vh;
   position: relative;
+  /* -apple-system at 13.5px is set a shade loose for a dense console; this
+   * pulls it back without reaching for a webfont. */
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.003em;
+
+  /* The app shell. Two columns on desktop: the sidebar rail and the content
+   * well. The rail is a real grid COLUMN rather than a fixed overlay, so
+   * <main> needs no margin compensation and nothing can slide underneath —
+   * and the collapse to a single column below 1024px is then one
+   * grid-template change instead of unwinding a set of offsets. */
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  align-items: start;
 }
+
+/* The login screen is a full-bleed page with no shell. Reset the grid so the
+ * centring flex layout defined further down still governs. */
+body.login-page { display: flex; grid-template-columns: none; }
+
+/* Keyboard escape hatch past a 12-entry rail. Visually hidden until focused,
+ * then it parks over the content well's top-left corner. */
+.skip-link {
+  position: absolute;
+  left: calc(var(--sidebar-w) + var(--shell-gutter));
+  top: 12px;
+  z-index: 200;
+  transform: translateY(-200%);
+  background: var(--bg-panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  padding: 10px 16px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform 140ms ease;
+}
+.skip-link:focus-visible { transform: translateY(0); }
+
+/* The sprite host carries the shared stroke presentation for every glyph, so
+ * each <symbol> stays pure geometry. Sized 0x0 and taken out of flow — it
+ * must not occupy a grid cell. */
+.icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 
 /* Global keyboard-focus ring. Uses outline (not box-shadow) so it survives
  * forced-colors / Windows High Contrast Mode, where box-shadows are stripped
@@ -305,43 +404,74 @@ code {
   word-break: break-all;
 }
 
-header {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 32px;
-  padding: 14px 24px;
+/* ===========================================================
+   App shell — the sidebar rail
+   ===========================================================
+   Still the <header> ELEMENT, deliberately: initMobileNav() resolves it
+   with querySelector("header") and toggles data-nav-open on it, so keeping
+   the tag is what lets the phone drawer keep working with no JS change.
+
+   The rail carries one FLAT nav that replaced two levels — four top tabs
+   plus a nine-entry .subnav that every Server page rendered inside its own
+   content. Two nav bars competing for the same job was the console's real
+   navigation problem; the rail has room for all twelve destinations at
+   once, so nothing is a second click away any more. */
+
+header.sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 20px 14px 16px;
   background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  /* Twelve entries plus the foot block fit a laptop viewport, but a phone
+   * in landscape or a very large text-zoom will not — so the rail scrolls
+   * itself rather than pushing the foot off-screen. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 8px 14px;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
 }
 .brand-mark {
-  width: 40px;
-  height: 40px;
-  /* border-box so the light-mode 4px padding + 1px border (added in
-   * the @media block below) fit INSIDE the 40×40 box instead of growing
-   * the rendered footprint to 50×50. Keeps header height identical
-   * across light/dark schemes. */
+  width: 36px;
+  height: 36px;
+  /* border-box so the light-mode 4px padding + 1px border (added in the
+   * @media block below) fit INSIDE the 36x36 box instead of growing the
+   * rendered footprint. Keeps the rail head the same height in both
+   * schemes. */
   box-sizing: border-box;
-  border-radius: 8px;
-  /* Precomputed alpha hex (--accent-glow-color) instead of color-mix()
-   * so the brand glow renders on older browsers without baseline-2023
-   * support. The image's own dark-teal background blends naturally
-   * with --bg-panel; no transparency removal needed. */
+  border-radius: 10px;
+  /* Precomputed alpha hex (--accent-glow-color) instead of color-mix() so
+   * the brand glow renders on older browsers without baseline-2023
+   * support. The image's own dark-teal background blends naturally with
+   * --bg-panel; no transparency removal needed. */
   box-shadow: 0 0 14px var(--accent-glow-color);
   flex-shrink: 0;
   display: block;
 }
 /* Light-mode brand-mark framing — applies for EFFECTIVE light (system light
- * with no manual override, OR an explicit light choice). On a white panel the
- * artwork's dark-teal background can read as a heavy blob; frame it with a
- * matching panel-bg pad + border so it reads as an icon-in-a-tile. Keep the
- * two blocks in sync. */
+ * with no manual override, OR an explicit light choice). On a white panel
+ * the artwork's dark-teal background can read as a heavy blob; frame it with
+ * a matching panel-bg pad + border so it reads as an icon-in-a-tile. Keep
+ * the two blocks in sync. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) .brand-mark {
     padding: 4px;
@@ -355,171 +485,396 @@ header {
   border: 1px solid var(--border);
 }
 /* Group .login-brand .name so the login page's brand wrapper (which uses
- * .login-brand, not .brand) picks up the same display-font typography.
- * Without this grouped selector the login title falls back to default body text. */
+ * .login-brand, not .brand) picks up the same typography. Without this
+ * grouped selector the login title falls back to default body text.
+ * The rail name truncates rather than wrapping: a long library name must
+ * not push the nav down, and the full string is in <title> anyway. */
 .brand .name, .login-brand .name {
-  font-weight: 600;
-  font-size: 15px;
+  font-weight: 640;
+  font-size: var(--text-md);
   color: var(--fg);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--track-snug);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.login-brand .name { white-space: normal; overflow: visible; }
 
-header nav {
-  display: flex;
-  gap: 4px;
-}
-
-/* Hamburger toggle is phone-only — the @media (max-width: 640px) block
- * below flips it to inline-flex. Hidden everywhere else. */
+/* Hamburger toggle is small-viewport-only — the <1024px block near the end
+ * of this file flips it to inline-flex. Hidden everywhere else. */
 .nav-toggle { display: none; }
-header nav a {
-  color: var(--fg-muted);
-  text-decoration: none;
-  padding: 6px 12px;
-  border-radius: var(--radius);
-  font-weight: 500;
-  font-size: 13px;
-  position: relative;
-  transition: color 0.12s;
-}
-header nav a:hover { color: var(--fg); }
-/* Active-tab indicator is a 2px gradient bar under the link instead
- * of a plain background, so the nav reads as a set of tuning-panel
- * tabs rather than a row of buttons. */
-/* Highlight the active top-level nav entry.
- *
- * Keyed on aria-current, which layout.html emits server-side from
- * ActiveSection — so the same attribute drives the paint AND the screen
- * reader announcement, and they cannot disagree. This replaced a pair
- * of hand-enumerated selector lists (one per nav entry, twice) that
- * grew by two selectors every time a nav entry was added and silently
- * left a new entry unhighlighted until someone remembered. The .subnav
- * in this file already worked this way; now there is one convention
- * rather than two. */
-#primary-nav a[aria-current="page"] {
-  color: var(--accent);
-}
-#primary-nav a[aria-current="page"]::after {
-  content: "";
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 0;
-  height: 2px;
-  background: var(--accent);
-  border-radius: 2px;
-}
 
-/* Secondary tab bar for grouped sections (Library → Browse / Inspector /
- * Jobs; Listening → Playlists & history / Smart mixes). Sits at the top of
- * the page content, under the global header. Real <a> links (separate
- * pages, no JS); visual language mirrors the Settings .tab-nav. */
-.subnav {
+/* ---- Nav ------------------------------------------------------------ */
+
+#primary-nav {
   display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  margin: 0 0 24px;
-  border-bottom: 1px solid var(--border);
-}
-.subnav a {
-  color: var(--fg-muted);
-  text-decoration: none;
-  font-weight: 500;
-  font-size: 14px;
-  padding: 10px 14px;
-  margin-bottom: -1px;
-  border-bottom: 2px solid transparent;
-  border-radius: var(--radius) var(--radius) 0 0;
-  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
-}
-.subnav a:hover { color: var(--fg); background: var(--accent-soft); }
-.subnav a:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.subnav a.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
-.meta {
+/* Group label. The uppercase micro-label is what turns twelve links into
+ * three scannable clusters — the same device the reference designs use for
+ * MENU / STUDIO / ACCOUNT. It is a <p>, not a heading: these are visual
+ * grouping, and promoting them to <h*> would inject three phantom levels
+ * into the document outline of every page. */
+.nav-group {
+  margin: 18px 0 6px;
+  padding: 0 10px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
   color: var(--fg-muted);
-  font-size: 11px;
-  font-family: var(--mono);
-  letter-spacing: 0.02em;
+}
+.nav-group:first-child { margin-top: 2px; }
+
+#primary-nav a {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-/* Connection-status badge in the header. Reflects the SSE
- * EventSource readyState so the operator can tell at a glance
- * whether live updates are flowing.
- *   data-state="connecting" — initial render, before onopen fires
- *   data-state="connected"  — onopen, steady state (subtle, low-noise)
- *   data-state="reconnecting" — onerror with readyState=CONNECTING
- *   data-state="disconnected" — onerror with readyState=CLOSED (terminal)
- * Kept at meta font size so it doesn't dominate the header. */
-.conn-badge {
-  font-size: 11px;
-  padding: 2px 9px;
-  border-radius: var(--radius-pill);
-  border: 1px solid currentcolor;
-  white-space: nowrap;
-  transition: color 120ms ease, opacity 120ms ease;
-}
-.conn-badge[data-state="connected"] {
-  color: color-mix(in srgb, var(--accent) 75%, transparent);
-  opacity: 0.7;
-}
-.conn-badge[data-state="connecting"] {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
   color: var(--fg-muted);
+  text-decoration: none;
+  font-size: var(--text-base);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  /* A long entry ("Playlists & history") stays on one line; the rail width
+   * is the constraint, and a wrapped nav row breaks the vertical rhythm. */
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
 }
-.conn-badge[data-state="reconnecting"] {
-  color: var(--warn);
+#primary-nav a > span { overflow: hidden; text-overflow: ellipsis; }
+
+/* Icon presentation lives HERE, on the <use> host, not on the sprite's
+ * source <g>. A CSS rule matching the original element does not reach the
+ * shadow tree <use> builds from it; what crosses that boundary is ordinary
+ * INHERITANCE from the <use> element itself. fill and stroke are inherited
+ * properties, so setting them here paints every cloned glyph — and it is
+ * also what makes `stroke: currentcolor` track the link's colour through
+ * hover and the active state for free.
+ *
+ * The 24x24 viewBox is an HTML attribute on each <svg> in layout.html, not a
+ * declaration here: `viewbox` is not a CSS property, and without the real
+ * attribute the glyph renders at native scale and overflows its box. */
+.nav-ico {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.72;
+  transition: opacity 120ms ease;
 }
-.conn-badge[data-state="disconnected"] {
-  color: var(--danger);
+#primary-nav a:hover {
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+#primary-nav a:hover .nav-ico { opacity: 1; }
+
+/* Active entry.
+ *
+ * Keyed on aria-current, which layout.html emits server-side per PAGE — so
+ * the same attribute drives the paint AND the screen-reader announcement,
+ * and the two cannot disagree. This is the same convention the old top nav
+ * used; what changed is that it now resolves per page rather than per
+ * section, because the rail has an entry for every page. Hand-enumerating
+ * one selector per entry was tried once before and removed: the list grew
+ * with every new page and silently left new ones unhighlighted. */
+#primary-nav a[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 640;
+}
+#primary-nav a[aria-current="page"] .nav-ico { opacity: 1; }
+/* A 3px stub at the left edge — the rail's answer to the old 2px underline.
+ * Inset rather than a border so the row's box never shifts between states. */
+#primary-nav a[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 3px;
+  height: 18px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+#primary-nav a { position: relative; }
+
+#primary-nav a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
-/* Header light / dark / system theme toggle + public-mode sign-out.
- * The glyph is a text character so it inherits a themed color
- * (invisible-on-dark is avoided). */
+/* ---- Foot block ----------------------------------------------------- */
+
+.sidebar-foot {
+  margin-top: auto;
+  padding: 14px 10px 2px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.meta {
+  color: var(--fg-muted);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* Build identity, in mono because operators quote it verbatim into bug
+ * reports and a proportional font makes a hash hard to transcribe. */
+.build-line {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--text-micro);
+  letter-spacing: 0.01em;
+  color: var(--fg-muted);
+  opacity: 0.8;
+  word-break: break-word;
+}
+
+/* Connection-status badge. Reflects the SSE EventSource readyState so the
+ * operator can tell at a glance whether live updates are flowing.
+ *   data-state="connecting"    initial render, before onopen fires
+ *   data-state="connected"     onopen, steady state (subtle, low-noise)
+ *   data-state="reconnecting"  onerror with readyState=CONNECTING
+ *   data-state="disconnected"  onerror with readyState=CLOSED (terminal)
+ *
+ * In the rail it reads as a status DOT plus a word rather than the old
+ * outlined pill: at the foot of a sidebar an outlined pill competed with the
+ * theme button beside it, and the steady state is the one an operator should
+ * be able to ignore. The dot is drawn with a box-shadow ring so the healthy
+ * state still registers peripherally without shouting. */
+.conn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  font-weight: 550;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  transition: color 120ms ease;
+}
+.conn-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentcolor;
+  /* Halo scales with the state colour because it is drawn from
+   * currentcolor — one rule covers all four states. */
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentcolor 18%, transparent);
+  flex-shrink: 0;
+}
+.conn-badge[data-state="connected"] { color: var(--ok); }
+.conn-badge[data-state="connecting"] { color: var(--fg-muted); }
+.conn-badge[data-state="reconnecting"] { color: var(--warn); }
+.conn-badge[data-state="disconnected"] { color: var(--danger); }
+
+/* Theme toggle + public-mode sign-out. The theme glyph is a text character
+ * so it inherits a themed colour and can never render invisible-on-dark. */
 .theme-toggle, .logout-btn {
   appearance: none;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--text-xs);
+  font-weight: 550;
   color: var(--fg-muted);
   background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  padding: 3px 10px;
+  padding: 4px 11px;
   cursor: pointer;
   white-space: nowrap;
-  transition: color 0.12s, border-color 0.12s;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
 }
 .theme-toggle:hover, .logout-btn:hover {
   color: var(--fg);
+  background: var(--bg-elev);
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 
-main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+/* ---- Content well --------------------------------------------------- */
 
+main {
+  padding: 34px var(--shell-gutter) 96px;
+  max-width: 1240px;
+  width: 100%;
+  min-width: 0;
+}
+
+/* ---- Shell collapse -------------------------------------------------
+   Below 1024px a 248px rail costs a quarter of the viewport, so the shell
+   folds to one column: the rail becomes a top bar (brand + hamburger) and
+   the nav becomes a drawer under it.
+
+   The breakpoint is on the SHELL, not on phone width, because what runs out
+   here is horizontal room for a fixed rail beside a content well — an iPad
+   in portrait hits that at 768px with plenty of room for the drawer.
+
+   initMobileNav() is unchanged: it toggles data-nav-open on <header> and
+   aria-expanded on the button, exactly as it did for the old top-bar nav.
+   All that moved is which rules those attributes drive. */
+@media (max-width: 1023px) {
+  body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  header.sidebar {
+    /* Sticky, not static: the drawer is absolutely positioned against this
+     * element, and a scrolled-away top bar would drop the only way back to
+     * the nav. z-index clears the page's own sticky toolbars (Inspector,
+     * Jobs) but stays under the now-playing bar at 40. */
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow: visible;
+  }
+
+  .sidebar-head {
+    flex: 1 1 auto;
+    padding: 0;
+    min-width: 0;
+  }
+
+  .nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--fg);
+    cursor: pointer;
+    /* 44px is the WCAG / Apple HIG / Material minimum touch target, and the
+     * floor used everywhere else in this file. */
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+  }
+  .nav-toggle:hover {
+    background: var(--bg-panel);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  }
+  /* Three bars drawn from one element: the middle is the box, the outer two
+   * are its ::before / ::after. currentcolor throughout, so it themes for
+   * free — the old text glyph could not be relied on to render at all. */
+  .nav-toggle-bars,
+  .nav-toggle-bars::before,
+  .nav-toggle-bars::after {
+    display: block;
+    width: 17px;
+    height: 1.5px;
+    border-radius: 2px;
+    background: currentcolor;
+  }
+  .nav-toggle-bars {
+    position: relative;
+  }
+  .nav-toggle-bars::before,
+  .nav-toggle-bars::after {
+    content: "";
+    position: absolute;
+    left: 0;
+  }
+  .nav-toggle-bars::before { top: -5.5px; }
+  .nav-toggle-bars::after { top: 5.5px; }
+
+  /* Drawer. Collapsed by default; data-nav-open reveals it. */
+  #primary-nav { display: none; }
+  header[data-nav-open="true"] #primary-nav {
+    display: flex;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 50;
+    max-height: min(70vh, 520px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-md);
+    padding: 8px 12px 14px;
+    gap: 2px;
+  }
+  header[data-nav-open="true"] #primary-nav a {
+    /* Full-width rows at the touch floor. The active stub reads fine here
+     * too, so it is left alone rather than special-cased off. */
+    padding: 11px 12px;
+    min-height: 44px;
+    font-size: var(--text-md);
+  }
+
+  /* The foot block rides the top bar as a compact status cluster; the build
+   * line is the first thing to go — it is reference detail, not something an
+   * operator scans, and there is no room for it beside a hamburger. */
+  .sidebar-foot {
+    margin-top: 0;
+    padding: 0;
+    border-top: none;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .build-line { display: none; }
+  .meta { flex-wrap: nowrap; }
+
+  main { padding: 22px 20px 96px; }
+}
+
+/* Very narrow: the connection word costs more than it earns beside a brand
+ * name and two buttons. The dot survives, and it is the part that carries
+ * the signal — plus the live region still announces state changes. */
+@media (max-width: 520px) {
+  .conn-badge { font-size: 0; gap: 0; }
+  .conn-badge::before { margin: 0; }
+  main { padding: 18px 16px 96px; }
+}
+
+/* The page title. Big enough to anchor the well the way the reference
+ * designs let their section titles anchor a column — at the old 22px it was
+ * only 1.57x the body and read as just another bold line. 640 rather than
+ * 700: the system face's Bold is heavy enough at 28px to look shouty, and
+ * Semibold with tight tracking holds the same authority. */
 h1 {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0 0 4px;
-  letter-spacing: -0.02em;
+  font-size: var(--text-2xl);
+  font-weight: 640;
+  line-height: 1.18;
+  margin: 0 0 6px;
+  letter-spacing: var(--track-tight);
   color: var(--fg);
 }
+h1:focus-visible { outline: 2px solid var(--accent); outline-offset: 6px; }
+
 h2 {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: var(--text-md);
+  font-weight: 640;
   margin: 0 0 12px;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--track-snug);
+  color: var(--fg);
+}
+h3 {
+  font-size: var(--text-base);
+  font-weight: 640;
+  margin: 0 0 8px;
+  letter-spacing: var(--track-snug);
   color: var(--fg);
 }
 /* Subsection heading inside a long form (settings.html groups: General,
@@ -527,13 +882,21 @@ h2 {
  * extra top margin to space the groups visually. The first .section-head
  * in a form gets margin-top: 0 to avoid a leading gap above the first
  * group. */
+/* Subsection heading inside a long form (settings.html groups: General,
+ * Networking, Updates). Now an uppercase micro-label rather than accent-
+ * coloured body text: at 13px in the accent it competed with the panel's own
+ * h2 for the same visual rank, and a form with six of them read as six
+ * peers. Small-caps-by-tracking is unmistakably subordinate, and it reuses
+ * the exact device the sidebar group labels use — one idiom for "this is a
+ * grouping label", wherever it appears. */
 .section-head {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0;
-  color: var(--accent);
-  margin: 28px 0 12px;
-  padding-bottom: 6px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
 }
 .section-head:first-child { margin-top: 0; }
@@ -545,7 +908,16 @@ h2 {
  * below flowed to the 1100px page bound. Visually disjointed and
  * the user-reported "half-width text" issue. Drop the cap so the
  * lede flows to the page max-width like the rest of the content. */
-.lede { color: var(--fg-muted); margin: 0 0 20px; }
+.lede {
+  color: var(--fg-muted);
+  margin: 0 0 26px;
+  font-size: var(--text-base);
+  line-height: 1.6;
+  /* No max-width: every full-width page here (Inspector tables, Settings
+   * forms, Devices) had its lede wrapping at ~50% while the content below
+   * ran to the page bound — visually disjointed, and user-reported as
+   * "half-width text". */
+}
 .hint { color: var(--fg-muted); font-size: 12px; margin-top: 4px; display: block; }
 /* Restore the user-agent `hidden` attribute. The `.hint { display:
  * block }` rule above wins specificity over the UA `[hidden] {
@@ -569,55 +941,77 @@ h2 {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px;
-  margin-bottom: 20px;
-  /* Single soft depth shadow; the hairline border does the edge work. The
-   * prior inset accent ring + double drop-shadow read as a neon "lift". */
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  padding: 22px 24px;
+  margin-bottom: 18px;
+  /* The hairline does the edge work; the shadow only lifts the card off the
+   * canvas by a hair. Both come from tokens so dark mode drops the shadow to
+   * near-nothing without a branch here. */
+  box-shadow: var(--shadow-sm);
 }
 .panel-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
 }
 .panel-head h2 { margin: 0; }
 
+/* Stat tiles. auto-fit + a 190px floor means four across a laptop well and
+ * two on a tablet with no breakpoint of its own. */
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  /* Capped at 320px, not 1fr. auto-fit collapses empty tracks, so with a
+   * 1fr max a two-card page (Stats) stretched each tile to ~590px and the
+   * number floated in the middle of an otherwise empty field. The cap keeps
+   * a tile the same size whether the page has two of them or six, which is
+   * also what makes the number's position predictable down the column. */
+  grid-template-columns: repeat(auto-fit, minmax(190px, 320px));
+  justify-content: start;
   gap: 14px;
-  margin-bottom: 24px;
+  margin-bottom: 26px;
 }
 .card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px 16px;
+  padding: 18px 20px 16px;
   position: relative;
   overflow: hidden;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
 }
 .card:hover {
   border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
 }
+/* Label above number, small and tracked wide — the same micro-label idiom as
+ * the rail's group headings, so the whole console has one way of saying
+ * "this names the thing below". */
 .card-label {
   color: var(--fg-muted);
-  font-size: 11px;
-  margin-bottom: 4px;
+  font-size: var(--text-micro);
+  margin-bottom: 8px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
+  letter-spacing: var(--track-wide);
+  font-weight: 700;
 }
 .card-value {
-  font-size: 26px;
-  font-weight: 600;
+  font-size: var(--text-stat);
+  font-weight: 640;
+  line-height: 1.05;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
+  letter-spacing: var(--track-tight);
   color: var(--fg);
 }
-.card-foot { color: var(--fg-muted); font-size: 11px; margin-top: 4px; }
+.card-foot {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  margin-top: 7px;
+  line-height: 1.4;
+}
 
 dl { display: grid; grid-template-columns: 150px 1fr; gap: 6px 16px; margin: 0; }
 dt { color: var(--fg-muted); }
@@ -628,9 +1022,11 @@ dd code { display: inline-block; margin-right: 6px; margin-bottom: 4px; }
   display: inline-block;
   padding: 2px 9px;
   border-radius: var(--radius-pill);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: var(--text-xs);
+  font-weight: 650;
+  line-height: 1.5;
   border: 1px solid transparent;
+  white-space: nowrap;
 }
 .badge.running {
   background: color-mix(in srgb, var(--ok) 14%, transparent);
@@ -666,15 +1062,22 @@ table.rows {
   border-collapse: collapse;
 }
 table.rows th, table.rows td {
-  padding: 10px 12px;
+  padding: 11px 12px;
   text-align: left;
   border-bottom: 1px solid var(--border);
 }
+/* Header row as a micro-label, matching the card + section-head idiom. The
+ * uppercase tracking is what separates it from the data beneath without
+ * needing a fill or a heavier rule. */
 table.rows th {
   color: var(--fg-muted);
-  font-weight: 600;
-  font-size: 12px;
+  font-weight: 700;
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--track-wide);
+  white-space: nowrap;
 }
+table.rows td { font-size: var(--text-sm); }
 table.rows td.num, table.rows th.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.rows tbody tr:last-child td { border-bottom: none; }
 table.rows tbody tr { transition: background-color 0.1s ease; }
@@ -1040,16 +1443,27 @@ dialog h2 { font-size: 18px; color: var(--fg); }
   box-shadow: 0 0 14px color-mix(in srgb, var(--warn) 20%, transparent);
 }
 
-/* Header pairing badge — visible on every admin page (Dashboard /
- * Library / Devices / Settings). Pulses on count increase. Click
- * routes to /devices, where the per-row card surfaces the
- * verification code + Approve / Decline buttons. */
+/* Pairing badge — a count chip riding the sidebar's Devices entry.
+ *
+ * It used to be a standalone link in the header's meta strip. Moving it onto
+ * its own destination is what a count is FOR, and it is also what let the
+ * rail drop the meta strip entirely. Two consequences the shape has to
+ * absorb: 248px of rail cannot hold "• 2 pending" beside the word "Devices",
+ * so the dot and the word are dropped VISUALLY while staying in the
+ * accessible name; and it is now a <span> inside an <a> rather than an <a>,
+ * so it must not paint its own hover/focus affordance — the row it sits in
+ * owns both. app.js only toggles [hidden] and the count text, so the move
+ * needed no JS change.
+ *
+ * Pulses on count increase. The row routes to /devices, where the per-row
+ * card surfaces the verification code + Approve / Decline buttons. */
 .pairing-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  margin-left: 12px;
-  padding: 4px 10px;
+  /* Pushed hard right, so the count lands on a consistent optical column
+   * down the rail regardless of how long the label beside it is. */
+  margin-left: auto;
+  padding: 1px 7px;
   border-radius: 999px;
   /* Plain-color fallback first; modern browsers progressive-enhance
    * to color-mix on the next line. Without this, browsers without
@@ -1062,27 +1476,26 @@ dialog h2 { font-size: 18px; color: var(--fg); }
   background: var(--accent-warm);
   background: color-mix(in srgb, var(--warn) 90%, white);
   color: #1a1a1a;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--text-xs);
+  font-weight: 700;
   text-decoration: none;
-  letter-spacing: 0.02em;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  letter-spacing: 0.01em;
+  flex-shrink: 0;
 }
-.pairing-badge:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
-}
-.pairing-badge:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.pairing-badge-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #1a1a1a;
+/* Dot and word are decoration + redundancy at rail width. The dot goes
+ * entirely (the chip's amber IS the dot); the word stays in the a11y tree so
+ * the row still announces "Devices, 2 pending" rather than "Devices, 2". */
+.pairing-badge-dot { display: none; }
+.pairing-badge-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 .pairing-badge-count {
   font-variant-numeric: tabular-nums;
@@ -3094,42 +3507,12 @@ section.library-inspector {
  * 600px when both blocks match. */
 
 @media (max-width: 768px) {
-  /* Header collapses from 3-column grid to a single stacked column. */
-  header {
-    grid-template-columns: 1fr;
-    gap: 16px;
-    padding: 16px 20px;
-    align-items: stretch;
-  }
-  header .brand { justify-content: center; }
 
-  /* Nav becomes a horizontally-swipeable scroll-snap belt instead of
-   * wrapping or truncating. Hide the scrollbar in both Firefox + WebKit. */
-  header nav {
-    justify-content: flex-start;
-    overflow-x: auto;
-    white-space: nowrap;
-    padding: 0 20px 8px;
-    margin: 0 -20px;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-  }
-  header nav::-webkit-scrollbar { display: none; }
-  header nav a { padding: 8px 14px; font-size: 13px; flex-shrink: 0; }
-  /* Match the new 14px horizontal padding — keeping the underline aligned
-   * with the text bounds, not the tap-target gutters. */
-  header nav a::after { left: 14px; right: 14px; }
-
-  header .meta {
-    justify-content: center;
-    flex-wrap: wrap;
-    gap: 12px;
-    border-top: 1px solid var(--border);
-    padding-top: 12px;
-  }
-
-  main { padding: 16px; }
-  h1 { font-size: 22px; }
+  /* main's padding is owned by the shell breakpoints (1023px / 520px), which
+   * already account for the rail folding into a top bar — a third value here
+   * only fought them. The heading steps down one rung of the ramp rather than
+   * to a literal, so a change to the ramp carries through. */
+  h1 { font-size: var(--text-xl); }
 
   /* Form action rows stack vertically with full-width tap targets on
    * narrow viewports — preserves the right-aligned flex on desktop. */
@@ -3140,26 +3523,26 @@ section.library-inspector {
     padding: 12px;
   }
 
-  /* --- Secondary nav bars → horizontal scroll-strips (mobile rework).
-   *     Mirrors the header-nav belt above so top-nav / subnav / settings-tabs
-   *     share one idiom; inert until the row actually overflows. The 7-tab
-   *     Settings bar was wrapping to ~3 rows with an orphaned active underline. */
-  .tab-nav, .subnav {
+  /* --- Settings tab bar → horizontal scroll-strip (mobile rework).
+   *     Inert until the row actually overflows. The 7-tab Settings bar was
+   *     wrapping to ~3 rows with an orphaned active underline. (The old
+   *     .subnav shared this rule; it no longer exists — the sidebar absorbed
+   *     it — so only .tab-nav is left.) */
+  .tab-nav {
     flex-wrap: nowrap;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
   }
-  .tab-nav::-webkit-scrollbar,
-  .subnav::-webkit-scrollbar { display: none; }
-  .tab-btn, .subnav a { flex-shrink: 0; }
+  .tab-nav::-webkit-scrollbar { display: none; }
+  .tab-btn { flex-shrink: 0; }
 
   /* Scroll affordance on the Settings tab bar (the belt that reliably
    * overflows): a right-edge fade signals "more tabs", and a trailing flex
    * spacer lets the last tab scroll clear of the fade — padding-right is
-   * unreliably honored in flex overflow-scroll calc. Kept OFF .subnav /
-   * header nav, whose 2–6 short items usually fit; an always-on fade there
-   * would dim a non-scrollable edge. */
+   * unreliably honored in flex overflow-scroll calc. Deliberately NOT
+   * applied to the sidebar's nav, which scrolls vertically and whose fade
+   * would dim a non-scrollable edge most of the time. */
   .tab-nav {
     /* Fade width = the 48px trailing spacer, so the last tab is fully clear of
      * the fade when scrolled to the end. A percentage fade (e.g. 88%) scales
@@ -3316,7 +3699,6 @@ section.library-inspector {
   .tile-menu-btn { min-width: 44px; min-height: 44px; }
 
   /* 4.6 · Remaining sub-44px controls. */
-  .subnav a { padding: 12px 14px; }
   .library-inspector .inspector-storage-btn { min-height: 44px; }
   .inspector-tree .inspector-current-heading-row .folder-action-info { min-height: 44px; }
 }
@@ -3345,80 +3727,6 @@ section.library-inspector {
  * popovers (1–5) but below modals (100) and the floating toast (9999).
  */
 @media (max-width: 640px) {
-  /* --- Hamburger button (hidden on desktop via base .nav-toggle below) --- */
-  .nav-toggle {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    color: var(--fg);
-    font-size: 18px;
-    line-height: 1;
-    padding: 6px 14px;
-    border-radius: var(--radius);
-    cursor: pointer;
-    user-select: none;
-    /* 44px is the WCAG / Apple HIG / Material minimum touch target.
-     * Matches the existing 44px floor used elsewhere in this file. */
-    min-height: 44px;
-  }
-  .nav-toggle:hover {
-    background: var(--bg-panel);
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-  }
-
-  /* --- Header restructure: brand + hamburger on row 1, meta on row 2.
-   *     position: relative anchors the absolute-positioned dropdown. */
-  header {
-    position: relative;
-    grid-template-columns: 1fr auto;
-    align-items: center;
-  }
-  header .brand { justify-content: flex-start; }
-  header .meta {
-    grid-column: 1 / -1;
-    justify-content: center;
-    border-top: 1px solid var(--border);
-    padding-top: 12px;
-    margin-top: 4px;
-  }
-
-  /* --- Nav collapsed by default; the source order + equal/higher
-   *     specificity of these rules wins over the 768px block without
-   *     needing !important. */
-  header nav { display: none; }
-  header[data-nav-open="true"] nav {
-    display: flex;
-    flex-direction: column;
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    z-index: 50;
-    background: var(--bg-panel);
-    border-bottom: 1px solid var(--border);
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.15);
-    padding: 8px 0;
-    margin: 0;
-    overflow: visible;
-    white-space: normal;
-  }
-  header[data-nav-open="true"] nav a {
-    padding: 14px 24px;
-    font-size: 14px;
-    display: block;
-    width: 100%;
-    box-sizing: border-box;
-    border-radius: 0;
-  }
-  header[data-nav-open="true"] nav a:hover {
-    background: var(--bg-elev);
-  }
-  /* Detach the underline indicator — full-width dropdown rows don't
-   * need a tab-bar accent and the absolute-positioned ::after would
-   * draw at the wrong edge anyway. */
-  header[data-nav-open="true"] nav a::after { display: none; }
 
   /* --- Tables → card stack ------------------------------------------------
    * <thead> kept in the DOM for screen readers but visually hidden via

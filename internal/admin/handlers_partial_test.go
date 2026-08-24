@@ -33,14 +33,21 @@ func TestPartialBoostRendersContentOnly(t *testing.T) {
 		{"/", "player", "player", `id="player-root"`},
 		{"/stats", "stats", "stats", `id="tracks-indexed"`},
 		{"/settings", "settings", "settings", `id="settings-form"`},
-		{"/devices", "devices", "server", `class="subnav"`},
-		{"/library", "library", "server", `class="subnav"`},
-		{"/library/inspector", "library_inspector", "server", `class="subnav"`},
-		{"/library/duplicates", "duplicates", "server", `class="subnav"`},
-		{"/jobs", "jobs", "server", `class="subnav"`},
-		{"/data", "data", "server", `class="subnav"`},
-		{"/diagnostics", "diagnostics", "server", `class="subnav"`},
-		{"/smartmixes", "smartmixes", "server", `class="subnav"`},
+		// Each marker is the page's own content root. They used to share
+		// `class="subnav"` — the sub-tab bar every Server page rendered — but
+		// that bar moved into the sidebar when the two nav levels were merged
+		// into one rail, so a shared marker would now be testing the LAYOUT and
+		// would fail for exactly the reason it is meant to catch. A per-page
+		// root is the stronger assertion anyway: it proves the right content
+		// template rendered, not merely that something did.
+		{"/devices", "devices", "server", `class="page devices"`},
+		{"/library", "library", "server", `class="page library"`},
+		{"/library/inspector", "library_inspector", "server", `class="page library-inspector"`},
+		{"/library/duplicates", "duplicates", "server", `class="page duplicates-page"`},
+		{"/jobs", "jobs", "server", `class="page jobs-page"`},
+		{"/data", "data", "server", `class="page data"`},
+		{"/diagnostics", "diagnostics", "server", `class="diagnostics-page"`},
+		{"/smartmixes", "smartmixes", "server", `class="page smartmixes"`},
 		{"/upnp", "upnp", "server", `class="page upnp"`},
 	}
 
