@@ -41,7 +41,7 @@ func TestPartialBoostRendersContentOnly(t *testing.T) {
 		{"/data", "data", "server", `class="subnav"`},
 		{"/diagnostics", "diagnostics", "server", `class="subnav"`},
 		{"/smartmixes", "smartmixes", "server", `class="subnav"`},
-		{"/upnp", "upnp", "server", `class="subnav"`},
+		{"/upnp", "upnp", "server", `class="page upnp"`},
 	}
 
 	for _, tc := range cases {
