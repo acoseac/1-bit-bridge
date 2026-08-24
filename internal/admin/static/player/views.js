@@ -673,6 +673,12 @@ export async function renderMixDetail(view, ctx) {
 
 async function renderCollectionDetail(view, ctx, opts) {
   ctx.setToolbar(null);
+  // Above the title, where a way back belongs. It used to be appended after
+  // the Play / Shuffle / Add-to-queue row, which put a navigation link in the
+  // middle of an action group — and on a smart mix, which has a SECOND action
+  // row below (Regenerate / Save as playlist), it wrapped to a line of its own
+  // and read as a third kind of button sandwiched between the two.
+  ctx.setCrumb(link(opts.backHref, { class: "crumb-link", text: `← ${opts.backLabel}` }));
   clear(view);
   view.appendChild(spinner());
   let d;
@@ -696,8 +702,11 @@ async function renderCollectionDetail(view, ctx, opts) {
   const stats = [plural(c.count ?? tracks.length, "track"), totalDuration(
     tracks.reduce((n, t) => n + (t.duration || 0), 0))].filter(Boolean).join(" · ");
 
+  // No .detail-title here: setAxisTitle above has already put this exact
+  // string in the page's <h1>, and rendering it again beside the art printed
+  // the collection name twice on every playlist and mix page. Albums keep
+  // their .detail-title because their <h1> stays the generic section name.
   const head = el("div", { class: "detail-head" },
-    el("h2", { class: "detail-title", text: c.name || c.id }),
     c.subtitle ? el("p", { class: "detail-artist", text: c.subtitle }) : null,
     el("p", { class: "detail-stats muted small", text: stats }),
     // Members that could not be turned into playable rows: another
@@ -708,8 +717,7 @@ async function renderCollectionDetail(view, ctx, opts) {
       ? el("p", { class: "muted small",
           text: `${plural(d.unresolved, "track")} not in this library — from another bridge, or removed since.` })
       : null,
-    collectionActions(tracks, art),
-    link(opts.backHref, { class: "btn btn-quiet", text: `← ${opts.backLabel}` }));
+    collectionActions(tracks, art));
 
   if (opts.actions) head.appendChild(opts.actions(c, view, ctx));
 
@@ -807,7 +815,7 @@ function mixActions(c, view, ctx) {
   return el("div", {}, box, status);
 }
 
-export async function renderFolders(view, { params, setToolbar }) {
+export async function renderFolders(view, { params, setToolbar, setCrumb }) {
   setToolbar(null);
   const path = params.get("path") || "";
   clear(view);
@@ -817,7 +825,7 @@ export async function renderFolders(view, { params, setToolbar }) {
     clear(view);
     if (path) {
       const up = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-      view.appendChild(link(`/folders?path=${encodeURIComponent(up)}`, { class: "btn btn-quiet", text: "← Up" }));
+      setCrumb(link(`/folders?path=${encodeURIComponent(up)}`, { class: "crumb-link", text: "← Up" }));
       view.appendChild(el("p", { class: "muted small", text: path }));
     }
     const list = el("div", { class: "rows" });

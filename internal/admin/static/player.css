@@ -31,7 +31,10 @@
   --elev-2: 0 4px 14px rgb(0 0 0 / 0.10);
   --elev-3: 0 -2px 20px rgb(0 0 0 / 0.18);
   --grid-min: 168px;
-  --nav-w: 200px;
+  /* The library's section rail. Narrower than it was, because it is no
+   * longer the only rail on screen — the shell sidebar takes 248px before
+   * this one starts, and 200px of second rail left the album grid cramped. */
+  --nav-w: 172px;
   --bar-h: 68px;
   --player-bottom-inset: calc(var(--bar-h) + env(safe-area-inset-bottom, 0px));
 
@@ -75,14 +78,45 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .player > * { min-width: 0; }
 .player[data-booting] { visibility: hidden; }
 .player-nav nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: var(--space-4); }
+/* The library's own section rail is now the SECOND rail on screen, beside
+ * the shell sidebar. It has to read as clearly subordinate or the page looks
+ * like it has two equal navs — so it drops the filled active pill (that
+ * idiom now belongs to the shell rail alone) and marks the active row with
+ * weight and ink instead, which is the quieter of the two available signals. */
 .player-section {
-  padding: 8px 12px; border-radius: var(--radius-sm); color: var(--fg-muted);
-  text-decoration: none; font-size: 0.9rem;
+  padding: 7px 10px; border-radius: var(--radius-sm); color: var(--fg-muted);
+  text-decoration: none; font-size: 0.85rem; font-weight: 500;
+  transition: color 120ms ease, background-color 120ms ease;
 }
 .player-section:hover { background: var(--bg-elev); color: var(--fg); }
-.player-section.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.player-section.active { color: var(--fg); font-weight: 650; }
 .player-main { min-width: 0; }
-.player-title { font-size: 1.6rem; margin: 0 0 var(--space-4); letter-spacing: -0.01em; }
+/* ---- Breadcrumb ----
+   Filled by ctx.setCrumb on the three views that have somewhere to go back
+   to; empty everywhere else. :empty collapses it entirely so a blank slot
+   costs no vertical space above the title — which is what lets the mount
+   live in the shell unconditionally instead of being toggled. */
+.player-crumb { margin: 0 0 var(--space-2); }
+.player-crumb:empty { display: none; }
+.crumb-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--fg-muted); text-decoration: none;
+  font-size: var(--text-sm); font-weight: 550;
+  /* No button chrome. It is navigation, and the whole reason it moved out of
+   * the action row is that a bordered pill among Play / Shuffle read as a
+   * fourth action. Padding still gives it a comfortable target without
+   * drawing a box. */
+  padding: 3px 0;
+}
+.crumb-link:hover { color: var(--fg); text-decoration: underline; }
+.crumb-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+.player-title {
+  font-size: var(--text-2xl); font-weight: 640; line-height: 1.18;
+  /* Top margin separates it from the search field above; the toolbar now
+   * sits below it and brings its own gap. */
+  margin: var(--space-2) 0 var(--space-4); letter-spacing: var(--track-tight);
+}
 .player-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .player-status { padding: var(--space-5) 0; }
 .player-empty { padding: var(--space-6) 0; text-align: center; }
@@ -266,7 +300,11 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 /* ---- Now playing ---- */
 
 .npbar {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  /* Starts where the sidebar rail ends, reading --sidebar-w from app.css so
+   * the two can never disagree about that edge. Below the shell breakpoint
+   * the rail is a top bar and the token is overridden to 0 (see the bottom of
+   * this file), which is why this is a var and not a media-query pair. */
+  position: fixed; left: var(--npbar-left, 0); right: 0; bottom: 0; z-index: 40;
   min-height: var(--bar-h); padding: 10px var(--space-4);
   padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
   display: grid; grid-template-columns: 48px minmax(0, 1fr) auto minmax(180px, 2fr) auto;
@@ -364,3 +402,16 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   background: var(--bg-panel); color: var(--fg); font: inherit; font-size: 0.9rem;
 }
 .player-search input:focus-visible { outline: none; box-shadow: var(--glow); border-color: var(--accent); }
+
+
+/* ---- Shell integration ------------------------------------------------
+   The now-playing bar spans the content well only, so it reads as part of
+   the page rather than a strip laid across the whole window — and the
+   sidebar's own scroll and foot block stay reachable while it is up.
+
+   Defined as a token rather than duplicating the breakpoint's value: the
+   bar's rule above binds to --npbar-left, and the two places that know the
+   rail's width are this file's default and app.css's --sidebar-w. */
+@media (min-width: 1024px) {
+  :root { --npbar-left: var(--sidebar-w); }
+}

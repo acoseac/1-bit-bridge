@@ -8559,13 +8559,39 @@ function runInlineScripts(root) {
   }
 }
 
-// boostUpdateTopNav sets aria-current on the one persistent top-nav entry
-// whose data-tab matches the new section. The in-page sub-nav (Server pages)
-// arrives already-highlighted inside the fetched fragment, so only the four
-// header entries need updating here.
-function boostUpdateTopNav(section) {
-  for (const a of document.querySelectorAll("#primary-nav a")) {
-    if (a.dataset.tab === section) a.setAttribute("aria-current", "page");
+// boostUpdateTopNav sets aria-current on the one sidebar entry that matches
+// the page we just swapped in.
+//
+// It matches the TAB first and only falls back to the section, and that order
+// is the whole contract. Since the sidebar absorbed the old .subnav, every
+// operator page has its own entry keyed on its tab (jobs, duplicates, upnp,
+// …), so a per-section match would light up nothing for nine of them. The
+// section fallback exists for exactly one case: the player's client-side
+// sub-routes (/albums, /artists, /playlists, …) all render the "player" tab,
+// and their entry is keyed on the section so every one of them keeps Browse
+// highlighted.
+//
+// Both values arrive from the server on X-Bridge-Active / X-Bridge-Section, so
+// sectionForTab stays the single source of truth and this never re-derives it.
+//
+// The tab arm is checked against every entry before the section arm is
+// considered at all — a two-pass scan, not one pass with an OR — because "data"
+// and "smartmixes" carry a tab of their own while still belonging to the
+// "server" section, and a single-pass OR would light both their entry and any
+// entry keyed on the section.
+function boostUpdateTopNav(active, section) {
+  const links = document.querySelectorAll("#primary-nav a");
+  let match = null;
+  for (const a of links) {
+    if (a.dataset.tab === active) { match = a; break; }
+  }
+  if (!match) {
+    for (const a of links) {
+      if (a.dataset.tab === section) { match = a; break; }
+    }
+  }
+  for (const a of links) {
+    if (a === match) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
 }
@@ -8646,7 +8672,7 @@ async function boostSwap(url, opts = {}) {
 
   document.body.dataset.active = active;
   document.body.dataset.section = section;
-  boostUpdateTopNav(section);
+  boostUpdateTopNav(active, section);
 
   if (boostIsPlayerPath(location.pathname) && window.__player) {
     // The injected fragment is the player shell; the module wires its

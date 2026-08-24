@@ -1531,6 +1531,109 @@ swaps `<main>` in place instead. Admin-console only — **no wire change, no
   inline (no-src) classic scripts so a re-execution can't throw a const/let
   redeclaration; `application/json` islands + module scripts are left in place.
 
+### Console shell: one sidebar replaces two nav levels (2026-08-24)
+
+Admin-console only — no `/v1` shape change, no `ProtocolVersion` bump, no
+migration, no iOS mirror. A visual redesign, but the load-bearing part is
+structural: the console carried FOUR nav idioms at once (top tabs, a
+nine-entry `.subnav` rendered inside every Server page, the Settings jump
+rail, the player's section rail), and two of them were competing for the same
+job. One flat sidebar absorbs the first two.
+
+- **The rail is still the `<header>` ELEMENT, and that is what made the change
+  cheap.** `initMobileNav()` resolves it with `querySelector("header")` and
+  toggles `data-nav-open` on it; `#nav-toggle`, `#primary-nav`,
+  `#theme-toggle`, `#conn-status`, `#pairing-badge` and `#logout-btn` all kept
+  their ids. So the entire JS side of the shell needed exactly one change (see
+  below) — everything else is CSS and template. **Don't rename the element or
+  those ids** to something more literal; the tag IS the contract.
+- **`boostUpdateTopNav` matches the TAB first and the SECTION only as a
+  fallback, in two passes.** With the sub-nav absorbed, every operator page
+  has its own rail entry keyed on its own tab, so a section-only match (what
+  it did before) would light one entry for nine different pages. The fallback
+  exists for exactly one case: the player's client-side sub-routes (`/albums`,
+  `/artists`, …) all render the `player` tab, and Browse is keyed on the
+  section so every sub-route keeps it lit. **Two passes, not one pass with an
+  OR** — `data` and `smartmixes` carry their own tab while still belonging to
+  the `server` section, so a single-pass OR lights their entry AND any
+  section-keyed one. Both values arrive on `X-Bridge-Active` /
+  `X-Bridge-Section`, so `sectionForTab` stays the single source of truth and
+  the client never re-derives it. Pinned by
+  `TestPrimaryNavHighlightsEveryEntry`, which now asserts exactly one entry is
+  current — the assertion that earns its keep once there are twelve entries
+  and two match keys.
+- **Rail groups are semantic, not a restatement of `sectionForTab`.**
+  Playlists, history and smart mixes sit under LIBRARY even though the server
+  still files them under the Server section for routing. No URL moved, so no
+  bookmark broke — the grouping is presentation.
+- **`body` is a two-column grid and the rail is a real grid COLUMN, not a
+  fixed overlay.** `<main>` needs no margin compensation, nothing can slide
+  under the rail, and the collapse below 1024px is one `grid-template` change
+  instead of unwinding a set of offsets. `body.login-page` resets the grid —
+  that page is full-bleed with no shell.
+- **Icon presentation lives on the `<use>` host (`.nav-ico`), never on the
+  sprite's source `<g>`, and the `viewBox` is an HTML attribute.** A CSS rule
+  matching the original element does NOT reach the shadow tree `<use>` builds
+  from it; what crosses that boundary is ordinary INHERITANCE from the `<use>`
+  element. Both halves were wrong in the first cut and the symptom was the
+  same either way — twelve filled black blobs. `viewbox` is not a CSS
+  property.
+- **The type ramp is named by ROLE and the page title is 2.07x the body.** At
+  the old 22px against a 14px body it was 1.57x, too shallow to anchor a page,
+  which is why every screen read as one undifferentiated field of text. The
+  uppercase micro-label (`--text-micro` + `--track-wide`) is now ONE idiom used
+  by the rail's group headings, the stat-tile labels, table headers and
+  `.section-head` — that last one used to be 13px accent-coloured body text
+  competing with the panel's own `h2` for the same rank.
+- **Stat tiles cap at 320px, not `1fr`.** `auto-fit` collapses empty tracks, so
+  a two-card page stretched each tile to ~590px and left the number floating in
+  an empty field.
+- **The pairing badge moved onto the Devices rail entry** — a count belongs on
+  its destination. It is a `<span>` inside an `<a>` now, so it must not paint
+  its own hover/focus affordance; the row owns both. The dot is dropped
+  visually and the word "pending" is visually-hidden but kept in the accessible
+  name, because 248px of rail cannot hold "• 2 pending" beside "Devices".
+  **It must carry NO `aria-label`.** Its name comes from the enclosing link's
+  content, and accname step 2C says a descendant with `aria-label` contributes
+  that string IN PLACE OF its subtree — so the label it shipped with replaced
+  the live count with static prose and the row announced "Devices Pending
+  pairing requests", dropping the one thing the badge exists to say. Verified
+  after the fix: the link reads "Devices 2 pending". `.pairing-badge-label` is
+  clipped rather than `display:none` precisely so it survives into that name.
+- **The now-playing bar starts where the rail ends**, via `--npbar-left` bound
+  to `--sidebar-w` — one token, so the two can never disagree about that edge.
+- **A back link is navigation and does not belong in an action row.** The
+  collection detail view appended `← Smart Mixes` after Play / Shuffle / Add to
+  queue; on a mix, which has a SECOND action row below (Regenerate / Save as
+  playlist), it wrapped onto its own line and read as a third kind of button
+  sandwiched between the two. It is now a breadcrumb above the title, in a
+  shell-owned `#player-crumb` mount filled through `ctx.setCrumb` — it could
+  not live in the view, because `#player-title` sits outside `#player-view`.
+  **The crumb is cleared in `route()`, up front, not by each view the way the
+  toolbar is**: only three views set one, and the failure mode of forgetting is
+  a stale `← Smart Mixes` above an unrelated page.
+- **`renderCollectionDetail` no longer renders `.detail-title`** —
+  `setAxisTitle` had already put the same string in the page's `<h1>`, so every
+  playlist and mix printed its name twice. Albums keep theirs, because their
+  `<h1>` stays the generic section name.
+- **The player's section rail dropped its filled active pill.** It is the
+  SECOND rail on screen now, and that idiom belongs to the shell rail alone;
+  active is marked with weight and ink instead.
+- **Test markers that were really layout proxies had to move.**
+  `TestPartialBoostRendersContentOnly` asserted every Server page's fragment
+  contained `class="subnav"` — a marker that lived in the LAYOUT, so it failed
+  for exactly the reason it exists to catch. Each page now names its own
+  content root, which is the stronger assertion anyway: it proves the right
+  template rendered, not merely that something did. `primaryNavMarkup` pinned
+  the literal `<nav id="primary-nav">` and broke on an added `aria-label`; it
+  now matches the opening tag without its bracket.
+- **Deliberately NOT changed: the accent palette.** `--accent` (`#856428`) is
+  measured against three light surfaces for 4.5:1 as normal-size TEXT, and the
+  comment above it records the two lighter candidates that fail. A filled
+  button only needs its LABEL to contrast, so a richer fill is available as a
+  separate `--accent-fill` token — but that is a colour-direction decision, not
+  a layout one, and it was left alone.
+
 ### Web player: right-sized artwork, catalog freshness, A–Z, collections (PRs #743–#747, 2026-08-24)
 
 Admin-console only — no `/v1` shape change, no `ProtocolVersion` bump, no
