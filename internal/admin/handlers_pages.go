@@ -513,7 +513,7 @@ func timeAgo(t time.Time) string {
 // nav links.
 var playerRoutes = []string{
 	"/albums", "/artists", "/favorites", "/playlists", "/mixes",
-	"/composers", "/genres", "/folders", "/search",
+	"/composers", "/genres", "/folders", "/search", "/tracks",
 	"/album/{id}", "/artist/{id}", "/genre/{id}", "/composer/{id}",
 	"/playlist/{id}", "/mix/{slug}",
 }

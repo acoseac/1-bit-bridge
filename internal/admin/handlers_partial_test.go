@@ -42,7 +42,6 @@ func TestPartialBoostRendersContentOnly(t *testing.T) {
 		// template rendered, not merely that something did.
 		{"/devices", "devices", "server", `class="page devices"`},
 		{"/library", "library", "server", `class="page library"`},
-		{"/library/inspector", "library_inspector", "server", `class="page library-inspector"`},
 		{"/library/duplicates", "duplicates", "server", `class="page duplicates-page"`},
 		{"/jobs", "jobs", "server", `class="page jobs-page"`},
 		{"/data", "data", "server", `class="page data"`},

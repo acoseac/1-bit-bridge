@@ -106,7 +106,6 @@ func TestPrimaryNavHighlightsEveryEntry(t *testing.T) {
 		// Every operator page now has a rail entry keyed on its own tab.
 		{"/devices", "devices"},
 		{"/library", "library"},
-		{"/library/inspector", "library_inspector"},
 		{"/library/duplicates", "duplicates"},
 		{"/jobs", "jobs"},
 		{"/upnp", "upnp"},

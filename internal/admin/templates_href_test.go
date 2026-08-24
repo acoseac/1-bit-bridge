@@ -50,6 +50,9 @@ const hrefTemplateDummy = "tmpl"
 // was /library/inspector, so the console's own "Start batches from the
 // Library Inspector" link 404'd — invisible because a broken href is not a
 // compile error, not a vet finding, and not covered by any handler test.
+// (Both paths are history now: the Inspector was retired once the player's
+// album, artist and folder views covered it. The failure mode it guards
+// against is not.)
 //
 // The assertion is deliberately "not 404", not "renders": this is about
 // the link resolving to a registered route. A page that 500s because a
@@ -168,7 +171,7 @@ func TestCheckableHrefTarget(t *testing.T) {
 		// that separates "drop anything containing {{" from doing this
 		// properly.
 		{"templated segment survives", "/playlists/{{.ID}}/cover", "/playlists/" + hrefTemplateDummy + "/cover"},
-		{"templated segment plus query", "/library/inspector?path={{.Path}}", "/library/inspector"},
+		{"templated segment plus query", "/library/duplicates?path={{.Path}}", "/library/duplicates"},
 		// A template action may legitimately contain a single `}`. A
 		// `{{[^}]*}}` pattern stops at that brace and leaves `"}}` behind,
 		// producing a target that no route serves — a false broken-link
