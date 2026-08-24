@@ -162,7 +162,13 @@ export async function renderAlbum(view, { id, setToolbar }) {
   // The callback is the DELETE path's refresh: deletion is synchronous,
   // so its numbers are already true when the response lands. Generation
   // deliberately does not use it — see variants.js.
-  view.appendChild(variantPanel(d.variants, { albumIds: [id] }, rerenderAlbum));
+  //
+  // appendIf, not appendChild: variantPanel returns null when the
+  // response carries no summary, and appendChild(null) is a TypeError
+  // that takes the whole album page down. `d.variants` is omitempty, so
+  // an older bridge or a store the admin server could not reach is
+  // enough to hit it.
+  appendIf(view, variantPanel(d.variants, { albumIds: [id] }, rerenderAlbum));
   // Generation IS asynchronous, so the numbers just rendered are a
   // snapshot of a moving target. app.js re-broadcasts the pool's
   // progress from the console's existing SSE stream; re-rendering on it
@@ -170,6 +176,11 @@ export async function renderAlbum(view, { id, setToolbar }) {
   onVariantChange(rerenderAlbum);
 
   view.appendChild(trackList(d.tracks, art));
+}
+
+/** appendChild that tolerates a null child. */
+function appendIf(parent, node) {
+  if (node) parent.appendChild(node);
 }
 
 /**
