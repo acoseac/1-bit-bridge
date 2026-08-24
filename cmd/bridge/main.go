@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1706,6 +1707,16 @@ func writeAutoInitConfig(cfgPath string) error {
 // the flag-driven serveCmd path — same TLS material, same admin
 // listener, same SIGINT graceful-shutdown — just with the inputs
 // pre-parsed. Returns the exit code the CLI would.
+// thumbKeyPattern bounds the cache keys ArtworkThumbPath will build a
+// path from: a release UUID, a local-<sha256> cover sentinel, a 16-hex
+// artworkVersion alias, or an "artist-"-prefixed UUID. It mirrors
+// admin's adminArtworkMBIDPattern plus the artist form the artist-image
+// route adds. Defense in depth — the handlers validate first — but this
+// is the function that touches the filesystem, so it does not trust
+// that.
+var thumbKeyPattern = regexp.MustCompile(
+	`^(artist-)?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|local-[0-9a-f]{64}|[0-9a-f]{16})$`)
+
 func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -3477,6 +3488,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		ArtistImagePath: func(mbid string) string {
 			return enrich.ArtistImagePath(artworkDir, mbid)
 		},
+		// Derived serve tiers for the web player's grids. The key is
+		// already regex-validated by the handler; validate again here,
+		// because this is the function that joins a path. Anything
+		// outside the two shapes the artwork routes admit returns "",
+		// which the caller reads as "no derivation" and answers from the
+		// normal size ladder.
+		ArtworkThumbPath: func(key string, size int) string {
+			if !thumbKeyPattern.MatchString(key) || size <= 0 || size > 4096 {
+				return ""
+			}
+			return filepath.Join(artworkDir, manifest.ThumbsDirName,
+				fmt.Sprintf("%s-%d.jpg", key, size))
+		},
 		BookletPath: func() func(string) string {
 			if harvestClient == nil {
 				return nil
@@ -3656,6 +3680,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// Started here, after adminSrv exists; the nudge channel's buffer
 	// carries anything fired in the gap.
 	startCatalogInvalidator(scanCtx, catalogNudge, adminSrv)
+
+	// Build the player's library snapshot ahead of the first request.
+	// Without this the first person to open the console after a restart
+	// pays the whole fold synchronously — and since the snapshot is
+	// invalidated lazily, an operator who visits occasionally pays it on
+	// essentially every visit. Joined to bgWriters so the fold cannot
+	// still be streaming the store after Store.Close.
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		adminSrv.WarmLibraryCatalog(scanCtx)
+	}()
+
 	adminCtx, adminCancel := context.WithCancel(context.Background())
 	defer adminCancel()
 	adminErr := make(chan error, 1)

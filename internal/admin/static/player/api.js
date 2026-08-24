@@ -113,8 +113,20 @@ export function coverURL(album, size = 500) {
   return `/api/library/artwork/${encodeURIComponent(album.artworkMBID)}?size=${size}${v}`;
 }
 
-export function artistImageURL(mbid) {
-  return mbid ? `/api/library/artist-image/${encodeURIComponent(mbid)}` : null;
+/**
+ * Portrait URL for an artist.
+ *
+ * `size` is optional and only worth passing for small boxes (the round
+ * artist tiles). Omitting it serves the stored file untouched, which is
+ * what the full-size detail hero wants. Unlike a cover there is no
+ * content key to hang a year-long cache on — portraits live under a
+ * fixed `artist-<mbid>` key the enricher overwrites in place — so the
+ * server caps these at a day and revalidates on mtime.
+ */
+export function artistImageURL(mbid, size) {
+  if (!mbid) return null;
+  const base = `/api/library/artist-image/${encodeURIComponent(mbid)}`;
+  return size ? `${base}?size=${size}` : base;
 }
 
 export function bookletURL(mbid) {

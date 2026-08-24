@@ -295,6 +295,23 @@ type Deps struct {
 	ArtistImagePath func(mbid string) string
 	BookletPath     func(mbid string) string
 
+	// ArtworkThumbPath resolves a DERIVED serve tier under
+	// <artworkDir>/thumbs/. Optional: nil disables derivation entirely
+	// and every artwork route falls back to the pre-existing size
+	// ladder, so a caller that does not wire it loses speed, never
+	// correctness.
+	//
+	// Deliberately a separate closure from ArtworkPath rather than a
+	// flag on it: derived tiers live in their own subdirectory, and the
+	// separation is what keeps them out of /v1's ladder and out of
+	// enrich.CachedArtistImageMBIDs' enumeration. See
+	// internal/manifest/artwork_thumbs.go for why that matters.
+	//
+	// `key` is an already-validated cache key (a cover id that passed
+	// adminArtworkMBIDPattern, or "artist-"+a UUID); the implementation
+	// re-validates before joining a path.
+	ArtworkThumbPath func(key string, size int) string
+
 	// BookletNudge prioritizes one release on the harvest booklet
 	// fetch sweep (harvest client NudgeBookletFetch — non-blocking,
 	// 32-buffered, drops are benign: the row still drains via
@@ -1182,6 +1199,12 @@ type Server struct {
 
 	// library catalog snapshot for /api/player/*; see catalog.go
 	catalogState
+
+	// thumbSF single-flights artwork thumbnail derivation, keyed on the
+	// destination path. A grid paint is a dozen DIFFERENT covers so
+	// these rarely coalesce; what it prevents is a reload landing
+	// mid-derive and decoding the same image a second time.
+	thumbSF singleflight.Group
 }
 
 // pages maps the URL-friendly page name to its template filename.
@@ -1544,9 +1567,13 @@ func (s *Server) Serve(ctx context.Context) error {
 		// `s.deps.ScanCtx` is the scanner's cancellation source; the
 		// outer process already cancels it during shutdown, so a
 		// healthy scan honours the cancel and drains promptly.
+		// The background catalog refresher joins this drain: it STREAMS
+		// the store, so letting it outlive Store.Close is the same
+		// reader-after-close class the scan wait exists for.
 		drained := make(chan struct{})
 		go func() {
 			s.bgScans.Wait()
+			s.WaitForCatalogRefresh()
 			close(drained)
 		}()
 		select {
