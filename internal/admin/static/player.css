@@ -126,6 +126,51 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .tile-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .sentinel { height: 1px; }
 
+/* ---- Round artist tiles ---- */
+
+/* Portraits are wider-set than covers: a circle of the same width reads
+ * smaller, and names sit under it rather than beside it. */
+.grid-round { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.tile-round .cover { border-radius: 50%; }
+.tile-round .tile-body { text-align: center; align-items: center; }
+
+/* Monogram fallback for an artist with neither a portrait nor a cover.
+ * Set on .cover by artistTile; the ::after only paints when it is
+ * present, so it never competes with the ♪ glyph. */
+.cover[data-monogram]::after {
+  content: attr(data-monogram);
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: 1.6rem; font-weight: 600; letter-spacing: .02em;
+  color: var(--accent); background: var(--accent-soft); opacity: 1;
+}
+
+/* ---- A–Z jump rail ---- */
+
+.az-rail {
+  position: sticky; top: var(--space-2); float: right; z-index: 5;
+  display: flex; flex-direction: column; align-items: center;
+  gap: 1px; margin-left: var(--space-3); padding: var(--space-2) 2px;
+  border-radius: 999px; background: var(--bg-panel);
+  box-shadow: var(--elev-1); border: 1px solid var(--border);
+}
+.az-letter {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  font-size: 0.68rem; font-weight: 600; line-height: 1;
+  color: var(--accent); padding: 2px 6px; border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.az-letter:hover:not(:disabled) { background: var(--accent-soft); }
+.az-letter:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Empty letters stay in place rather than being dropped: a rail that
+ * changes length as you filter is harder to hit than one that doesn't. */
+.az-letter:disabled { color: var(--fg-muted); opacity: .35; cursor: default; }
+
+/* Touch wants a bigger target than a dense desktop rail. This is also
+ * where the rail earns the most, so it is NOT hidden on small screens. */
+@media (max-width: 640px) {
+  .az-letter { padding: 4px 8px; font-size: 0.72rem; }
+}
+
 /* ---- Rows (artists, genres, composers, folders, search) ---- */
 
 .rows { display: flex; flex-direction: column; content-visibility: auto; }

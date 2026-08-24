@@ -1072,6 +1072,14 @@ type Server struct {
 	soxAvailability   bool
 	soxAvailabilityAt time.Time
 
+	// artistImages caches the "which artists have a cached portrait"
+	// set for the player's artist grid. One ReadDir behind a short TTL;
+	// see cachedArtistImageMBIDs for why it is neither uncached nor
+	// permanent.
+	artistImagesMu sync.Mutex
+	artistImages   map[string]struct{}
+	artistImagesAt time.Time
+
 	// composition cache (dashboard master-quality breakdown).
 	// Manifest.FormatDistribution does a full-table json_extract scan,
 	// far too expensive for the SSE hot path — cache the bucketed

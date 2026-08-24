@@ -40,6 +40,16 @@ func sortKey(s string) string {
 	return b.String()
 }
 
+// BucketOf is the exported form of bucket, for callers that hold a sort
+// key other than the one already stamped on a row.
+//
+// Album.Bucket is derived from SortArtist, so a title-sorted album grid
+// needs bucket(SortTitle) instead — same rule, different key. It routes
+// through the SAME function rather than reimplementing the rule, because
+// the whole point of sortKey/bucket is that this browser's A–Z index and
+// the phone's scrubber file a name identically.
+func BucketOf(sortedKey string) string { return bucket(sortedKey) }
+
 // bucket mirrors AlphabetBucket.letter(for:): the first character of
 // the sort key, A–Z, or "#" for anything else (digits, symbols, CJK,
 // and the empty string).

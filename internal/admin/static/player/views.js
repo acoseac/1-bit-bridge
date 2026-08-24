@@ -4,7 +4,7 @@
 
 import { api, coverURL, artistImageURL, bookletURL, downloadURL, isAborted } from "./api.js";
 import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason } from "./format.js";
-import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, aboutBlock } from "./ui.js";
+import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock } from "./ui.js";
 import * as audio from "./audio.js";
 
 const PAGE = 60;
@@ -15,7 +15,8 @@ const AXIS_FILTERS = ["artist", "genre", "composer"];
 
 // ---- Albums grid ----
 
-export async function renderAlbums(view, { params, gen, setToolbar, scopeLabel }) {
+export async function renderAlbums(view, ctx) {
+  const { params, setToolbar, scopeLabel } = ctx;
   const sort = params.get("sort") || "recent";
   const quality = params.get("quality") || "all";
   // artist / genre / composer narrow the grid. filterAlbums has always
@@ -28,51 +29,24 @@ export async function renderAlbums(view, { params, gen, setToolbar, scopeLabel }
     if (v) scope[key] = v;
   }
   setToolbar(albumToolbar(sort, quality));
-  clear(view);
-  view.appendChild(spinner());
 
-  const grid = el("div", { class: "grid" });
-  let offset = 0;
-  let total = 0;
-  let loading = false;
-  let disposeSentinel = null;
-  const sentinel = el("div", { class: "sentinel" });
-
-  async function page() {
-    if (loading) return;
-    loading = true;
-    try {
-      const r = await api.albums({ sort, quality, ...scope, offset, limit: PAGE });
-      if (offset === 0) {
-        clear(view);
-        total = r.total;
-        if (total === 0) {
-          view.appendChild(emptyState("No albums here",
-            Object.keys(scope).length ? "Nothing here matches the current filter." :
-              quality === "all" ? "Add a library root and run a scan." :
-                "Nothing in the library matches this quality filter."));
-          return;
-        }
-        view.appendChild(el("p", { class: "muted small",
-          text: scopeLabel ? `${plural(total, "album")} in ${scopeLabel}` : plural(total, "album") }));
-        view.appendChild(grid);
-        view.appendChild(sentinel);
-        disposeSentinel = onVisible(sentinel, () => {
-          if (offset < total) void page();
-        });
-      }
-      chunkAppend(grid, r.albums, albumTile, gen);
-      offset += r.albums.length;
-      if (offset >= total && disposeSentinel) { disposeSentinel(); sentinel.remove(); }
-    } catch (e) {
-      if (isAborted(e)) return;
-      clear(view);
-      view.appendChild(errorState(e, () => { offset = 0; void page(); }));
-    } finally {
-      loading = false;
-    }
-  }
-  await page();
+  // One paging engine, not two. The grid used to carry its own copy of
+  // the fetch/sentinel/chunk loop, which is why the A–Z rail and the
+  // jump-reset appeared on every browse view EXCEPT the biggest one.
+  await renderPagedList(view, ctx, {
+    fetchPage: (offset) => api.albums({ sort, quality, ...scope, offset, limit: PAGE }),
+    pick: (r) => r.albums,
+    make: albumTile,
+    containerClass: "grid",
+    countNoun: "album",
+    label: scopeLabel,
+    emptyTitle: "No albums here",
+    emptyDetail: Object.keys(scope).length
+      ? "Nothing here matches the current filter."
+      : quality === "all"
+        ? "Add a library root and run a scan."
+        : "Nothing in the library matches this quality filter.",
+  });
 }
 
 function albumTile(a) {
@@ -277,17 +251,60 @@ function trackRow(t, i, all, albumArt) {
 
 // ---- Artists ----
 
-export async function renderArtists(view, { gen, setToolbar }) {
-  setToolbar(null);
-  await renderSimpleList(view, gen, () => api.artists({ limit: 200 }), (r) => r.artists,
-    (a) => link(`/artist/${a.id}`, { class: "row" },
-      el("span", { class: "row-title", text: a.name }),
-      el("span", { class: "row-meta",
-        text: `${plural(a.albumCount, "album")} · ${plural(a.trackCount, "track")}` })),
-    "No artists yet");
+export async function renderArtists(view, ctx) {
+  ctx.setToolbar(null);
+  await renderPagedList(view, ctx, {
+    fetchPage: (offset) => api.artists({ offset, limit: PAGE }),
+    pick: (r) => r.artists,
+    make: artistTile,
+    containerClass: "grid grid-round",
+    countNoun: "artist",
+    emptyTitle: "No artists yet",
+  });
 }
 
-export async function renderArtist(view, { id, setToolbar }) {
+/**
+ * A round artist tile.
+ *
+ * The image is a three-step cascade, because most libraries have a
+ * portrait for only some artists and a grid of placeholder glyphs looks
+ * broken rather than sparse:
+ *   1. the cached portrait, when `hasImage` says one exists — asked for
+ *      at 250 px, since these are small circles and the stored file is
+ *      a full-size download;
+ *   2. otherwise the artist's top album cover — carried as an artwork
+ *      ref on the artist row, so coverURL() works on it unchanged;
+ *   3. otherwise a monogram, which `cover()` already falls back to when
+ *      the src is null.
+ *
+ * hasImage is what keeps step 1 from firing a request per artist and
+ * eating a 404 for everyone without a portrait.
+ */
+function artistTile(a) {
+  const src = a.hasImage && a.artistMBID
+    ? artistImageURL(a.artistMBID, 250)
+    : coverURL(a, 250);
+  const tile = link(`/artist/${a.id}`, { class: "tile tile-round" },
+    cover(src, a.name),
+    el("div", { class: "tile-body" },
+      el("span", { class: "tile-title", text: a.name }),
+      el("span", { class: "tile-sub", text: plural(a.albumCount, "album") })));
+  if (!src) tile.querySelector(".cover")?.setAttribute("data-monogram", monogram(a.name));
+  return tile;
+}
+
+/**
+ * Initials for the no-artwork fallback. Two letters at most, from the
+ * first two words — enough to tell tiles apart at a glance without
+ * turning the grid into a wall of text.
+ */
+function monogram(name) {
+  return (name || "?").trim().split(/\s+/).slice(0, 2)
+    .map((w) => [...w][0] || "").join("").toUpperCase() || "?";
+}
+
+
+export async function renderArtist(view, { id, gen, setToolbar }) {
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -301,7 +318,7 @@ export async function renderArtist(view, { id, setToolbar }) {
     return;
   }
   clear(view);
-  const portrait = d.hasImage ? artistImageURL(d.artist.artistMBID) : null;
+  const portrait = d.hasImage ? artistImageURL(d.artist.artistMBID, 500) : null;
   view.appendChild(el("div", { class: "detail detail-artist-head" },
     el("div", { class: "detail-art detail-art-round" }, cover(portrait, d.artist.name)),
     el("div", { class: "detail-head" },
@@ -311,9 +328,12 @@ export async function renderArtist(view, { id, setToolbar }) {
   const about = aboutBlock(d.about, { title: "About" });
   if (about) view.appendChild(about);
   const grid = el("div", { class: "grid" });
-  d.albums.forEach((a) => grid.appendChild(albumTile(a)));
   view.appendChild(el("h3", { class: "section-head", text: "Discography" }));
   view.appendChild(grid);
+  // chunkAppend, not a bare forEach: the artist detail returns the whole
+  // discography unpaginated, so a prolific artist built every tile in
+  // one synchronous pass and dropped frames doing it.
+  chunkAppend(grid, d.albums, albumTile, gen);
 }
 
 // ---- Genres / Composers ----
@@ -328,14 +348,18 @@ export function renderComposers(view, ctx) {
     "Composer tags are read from the files; classical releases usually carry them.");
 }
 
-async function renderAxis(view, { gen, setToolbar }, fetcher, kind, emptyTitle, emptyDetail) {
-  setToolbar(null);
-  await renderSimpleList(view, gen, () => fetcher({ limit: 200 }), (r) => r.entries,
-    (e) => link(`/${kind}/${e.id}`, { class: "row" },
+async function renderAxis(view, ctx, fetcher, kind, emptyTitle, emptyDetail) {
+  ctx.setToolbar(null);
+  await renderPagedList(view, ctx, {
+    fetchPage: (offset) => fetcher({ offset, limit: PAGE }),
+    pick: (r) => r.entries,
+    make: (e) => link(`/${kind}/${e.id}`, { class: "row" },
       el("span", { class: "row-title", text: e.name }),
       el("span", { class: "row-meta",
         text: `${plural(e.albumCount, "album")} · ${plural(e.trackCount, "track")}` })),
-    emptyTitle, emptyDetail);
+    countNoun: kind,
+    emptyTitle, emptyDetail,
+  });
 }
 
 /**
@@ -390,25 +414,97 @@ function setAxisTitle(label) {
   document.title = base ? `${label} — ${base}` : label;
 }
 
-async function renderSimpleList(view, gen, fetch, pick, make, emptyTitle, emptyDetail) {
+/**
+ * The paged-list engine behind every browse view.
+ *
+ * Replaces a single `{limit: 200}` fetch that silently truncated at the
+ * server's own cap — a library with more than 200 artists showed the
+ * first 200 with no count line and no hint that the rest existed.
+ *
+ * `fetchPage(offset)` returns the raw response; `pick` extracts the
+ * items; `make` builds one node. `containerClass` chooses rows or a
+ * grid, which is the only difference between the artist tiles and the
+ * genre list.
+ */
+async function renderPagedList(view, ctx, opts) {
+  const { gen } = ctx;
+  const { fetchPage, pick, make, containerClass = "rows",
+    emptyTitle, emptyDetail, countNoun = "", label = "" } = opts;
+
   clear(view);
   view.appendChild(spinner());
-  try {
-    const r = await fetch();
-    const items = pick(r) || [];
-    clear(view);
-    if (items.length === 0) {
-      view.appendChild(emptyState(emptyTitle, emptyDetail));
-      return;
-    }
-    const list = el("div", { class: "rows" });
-    view.appendChild(list);
-    chunkAppend(list, items, make, gen);
-  } catch (e) {
-    if (isAborted(e)) return;
-    clear(view);
-    view.appendChild(errorState(e));
+
+  let offset = 0;
+  let total = 0;
+  let loading = false;
+  let disposeSentinel = null;
+  let container = null;
+  const sentinel = el("div", { class: "sentinel" });
+
+  // A jump is a RESET, not an append. page() appends into the existing
+  // container, so jumping to "S" (offset 240) while the reader has only
+  // scrolled through offset 40 would splice 240 straight after 40 — one
+  // list, two discontiguous alphabets, and a sentinel that then pages on
+  // from the wrong place. So: tear down the observer, drop the nodes,
+  // reset the cursor, and let page() rebuild from the new offset.
+  function resetTo(newOffset) {
+    if (disposeSentinel) { disposeSentinel(); disposeSentinel = null; }
+    sentinel.remove();
+    offset = newOffset;
+    loading = false;
+    if (container) clear(container);
+    void page({ jumped: true });
   }
+
+  async function page({ jumped = false } = {}) {
+    if (loading) return;
+    loading = true;
+    try {
+      const r = await fetchPage(offset);
+      const items = pick(r) || [];
+      const first = !container || jumped;
+      if (first) {
+        total = r.total ?? items.length;
+        if (total === 0) {
+          clear(view);
+          view.appendChild(emptyState(emptyTitle, emptyDetail));
+          return;
+        }
+        if (!container) {
+          clear(view);
+          if (countNoun) {
+            view.appendChild(el("p", { class: "muted small",
+              text: label ? `${plural(total, countNoun)} in ${label}` : plural(total, countNoun) }));
+          }
+          const rail = alphabetRail(r.buckets, (b) => resetTo(b.offset));
+          if (rail) view.appendChild(rail);
+          container = el("div", { class: containerClass });
+          view.appendChild(container);
+        }
+        view.appendChild(sentinel);
+        disposeSentinel = onVisible(sentinel, () => {
+          if (offset < total) void page();
+        });
+        if (jumped) container.scrollIntoView({ block: "start", behavior: "auto" });
+      }
+      chunkAppend(container, items, make, gen);
+      offset += items.length;
+      // A page that returns nothing would otherwise leave the sentinel
+      // armed and spin: stop on a short page as well as a full one.
+      if (items.length === 0 || offset >= total) {
+        if (disposeSentinel) { disposeSentinel(); disposeSentinel = null; }
+        sentinel.remove();
+      }
+    } catch (e) {
+      if (isAborted(e)) return;
+      clear(view);
+      container = null;
+      view.appendChild(errorState(e, () => { offset = 0; void page(); }));
+    } finally {
+      loading = false;
+    }
+  }
+  await page();
 }
 
 // ---- Favorites / Playlists / Mixes / Folders / Search ----
@@ -450,21 +546,31 @@ export async function renderFavorites(view, { setToolbar }) {
   }
 }
 
-export async function renderPlaylists(view, { setToolbar }) {
-  setToolbar(null);
-  await renderSimpleList(view, () => 0, () => api.playlists(), (r) => r.playlists || r || [],
-    (p) => el("div", { class: "row" },
+export async function renderPlaylists(view, ctx) {
+  ctx.setToolbar(null);
+  await renderPagedList(view, ctx, {
+    // Neither of these endpoints paginates, so offset is unused and the
+    // engine stops after one short page. Routed through it anyway for
+    // the generation guard: these two used to pass `() => 0` as gen(),
+    // which makes chunkAppend's stale-render check inert — a fast
+    // navigation away mid-render could interleave rows into the next
+    // view.
+    fetchPage: () => api.playlists(),
+    pick: (r) => r.playlists || r || [],
+    make: (p) => el("div", { class: "row" },
       el("span", { class: "row-title", text: p.name || p.id }),
       // trackCount, NOT itemCount: /api/playlists emits trackCount (a SQL
       // COUNT over playlist_items) and /api/smart-playlists emits
       // itemCount. This row was written against the mixes row below and
       // inherited the wrong key, so every playlist read "0 tracks".
       el("span", { class: "row-meta", text: plural(p.trackCount ?? 0, "track") })),
-    "No playlists backed up",
-    "Playlists appear here when a paired device has playlist backup switched on.");
+    emptyTitle: "No playlists backed up",
+    emptyDetail: "Playlists appear here when a paired device has playlist backup switched on.",
+  });
 }
 
-export async function renderMixes(view, { setToolbar, mixesEnabled }) {
+export async function renderMixes(view, ctx) {
+  const { setToolbar, mixesEnabled } = ctx;
   setToolbar(null);
   if (!mixesEnabled) {
     clear(view);
@@ -472,12 +578,15 @@ export async function renderMixes(view, { setToolbar, mixesEnabled }) {
       "Enable them in Settings → Audio; they are generated from your listening history."));
     return;
   }
-  await renderSimpleList(view, () => 0, () => api.mixes(), (r) => r.playlists || r || [],
-    (m) => el("div", { class: "row" },
+  await renderPagedList(view, ctx, {
+    fetchPage: () => api.mixes(),
+    pick: (r) => r.playlists || r || [],
+    make: (m) => el("div", { class: "row" },
       el("span", { class: "row-title", text: m.title || m.slug }),
       el("span", { class: "row-meta", text: plural(m.itemCount ?? 0, "track") })),
-    "No mixes generated yet",
-    "Mixes are rebuilt periodically once there is listening history to work from.");
+    emptyTitle: "No mixes generated yet",
+    emptyDetail: "Mixes are rebuilt periodically once there is listening history to work from.",
+  });
 }
 
 export async function renderFolders(view, { params, setToolbar }) {

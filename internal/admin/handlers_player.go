@@ -52,6 +52,52 @@ type playerPageMeta struct {
 	Offset     int    `json:"offset"`
 	Limit      int    `json:"limit"`
 	SnapshotAt string `json:"snapshotAt"`
+
+	// Buckets is the A–Z jump index for the CURRENT filter and sort,
+	// emitted on the FIRST page only — the same first-page-only
+	// convention Folders/Total already use, and for the same reason:
+	// it describes the whole result set, so repeating it on every page
+	// is pure wire cost.
+	//
+	// Omitted entirely when the ordering is not alphabetical (an album
+	// grid sorted by year or recency has no meaningful letter index),
+	// which is also how the client knows not to draw a rail.
+	Buckets []playerBucketDTO `json:"buckets,omitempty"`
+}
+
+// playerBucketDTO is one letter of the jump index: where that letter
+// starts in the filtered+sorted list, and how many entries it holds.
+//
+// Offset is an index into that list, so the client jumps by re-fetching
+// at that offset rather than scrolling — which is the only thing that
+// works when the target is past the pages loaded so far.
+type playerBucketDTO struct {
+	Key    string `json:"key"`
+	Offset int    `json:"offset"`
+	Count  int    `json:"count"`
+}
+
+// buildBuckets walks an already-sorted list and records where each
+// letter starts. Runs only for the first page, so it is O(n) once per
+// filter change rather than per page.
+//
+// letterAt returns the bucket for one entry; a caller that sorts by a
+// different key passes a different letterAt, which is why this takes a
+// function instead of reading a Bucket field.
+func buildBuckets(n int, letterAt func(i int) string) []playerBucketDTO {
+	if n == 0 {
+		return nil
+	}
+	out := make([]playerBucketDTO, 0, 27)
+	for i := 0; i < n; i++ {
+		k := letterAt(i)
+		if len(out) > 0 && out[len(out)-1].Key == k {
+			out[len(out)-1].Count++
+			continue
+		}
+		out = append(out, playerBucketDTO{Key: k, Offset: i, Count: 1})
+	}
+	return out
 }
 
 type playerAlbumDTO struct {
@@ -92,6 +138,22 @@ type playerArtistDTO struct {
 	TrackCount int    `json:"trackCount"`
 	AlbumCount int    `json:"albumCount"`
 	ArtistMBID string `json:"artistMBID,omitempty"`
+
+	// HasImage says a cached portrait exists, so the client can ask for
+	// one instead of firing a request per artist and eating a 404 for
+	// everyone without one. Sourced from a single ReadDir, not a stat
+	// per row.
+	HasImage bool `json:"hasImage,omitempty"`
+	// ArtworkMBID/ArtworkVersion are the artist's TOP album's cover —
+	// the fallback tile when there is no portrait, which most artists in
+	// a real library are.
+	//
+	// The cover REF travels rather than the album id so the client can
+	// reuse coverURL() unchanged (same field names as playerAlbumDTO)
+	// and inherit its content-key caching. Sending an id instead would
+	// have needed a new id-addressed cover endpoint for no gain.
+	ArtworkMBID    string `json:"artworkMBID,omitempty"`
+	ArtworkVersion string `json:"artworkVersion,omitempty"`
 }
 
 type playerArtistsResponse struct {
@@ -231,11 +293,34 @@ func (s *Server) apiPlayerAlbums(w http.ResponseWriter, r *http.Request) {
 	for _, i := range idx[start:end] {
 		out = append(out, albumDTO(cat.Albums[i], s.routedOnline))
 	}
-	writeJSON(w, http.StatusOK, playerAlbumsResponse{
-		playerPageMeta: playerPageMeta{Total: len(idx), Offset: start, Limit: limit,
-			SnapshotAt: snapshotStamp(cat.BuiltAt)},
-		Albums: out,
-	})
+	meta := playerPageMeta{Total: len(idx), Offset: start, Limit: limit,
+		SnapshotAt: snapshotStamp(cat.BuiltAt)}
+	if start == 0 {
+		meta.Buckets = albumBuckets(cat, idx, q.Get("sort"))
+	}
+	writeJSON(w, http.StatusOK, playerAlbumsResponse{playerPageMeta: meta, Albums: out})
+}
+
+// albumBuckets builds the A–Z jump index for a sorted album window, or
+// nil when the ordering has no letters to index.
+//
+// The letter depends on the SORT, not on the row: Album.Bucket is
+// derived from SortArtist (librarycat), which is right under an artist
+// sort and wrong under a title sort — "Abbey Road" by The Beatles files
+// under B by artist and A by title. Recency and year orderings get no
+// rail at all, and the omitted field is how the client knows not to draw
+// one.
+func albumBuckets(cat *librarycat.Catalog, idx []int, mode string) []playerBucketDTO {
+	var letterAt func(i int) string
+	switch mode {
+	case "artist":
+		letterAt = func(i int) string { return cat.Albums[idx[i]].Bucket }
+	case "title":
+		letterAt = func(i int) string { return librarycat.BucketOf(cat.Albums[idx[i]].SortTitle) }
+	default:
+		return nil // recent / year — not alphabetical
+	}
+	return buildBuckets(len(idx), letterAt)
 }
 
 // filterAlbums narrows the snapshot to the indices matching the query.
@@ -398,18 +483,32 @@ func (s *Server) apiPlayerArtists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start, end := pageSlice(len(cat.Artists), offset, limit)
+	// One ReadDir for the whole page, not one stat per artist.
+	withImages := s.cachedArtistImageMBIDs()
 	out := make([]playerArtistDTO, 0, end-start)
 	for _, a := range cat.Artists[start:end] {
-		out = append(out, playerArtistDTO{
+		d := playerArtistDTO{
 			ID: a.ID, Name: a.Name, Bucket: a.Bucket,
 			TrackCount: a.TrackCount, AlbumCount: a.AlbumCount, ArtistMBID: a.ArtistMBID,
-		})
+		}
+		if a.ArtistMBID != "" {
+			_, d.HasImage = withImages[strings.ToLower(a.ArtistMBID)]
+		}
+		// AlbumIDs[0] is the artist's top album by in-group track count
+		// (librarycat.rankAlbums), so this is a stable tile.
+		if len(a.AlbumIDs) > 0 {
+			if top, ok := cat.AlbumByID(a.AlbumIDs[0]); ok {
+				d.ArtworkMBID, d.ArtworkVersion = top.ArtworkMBID, top.ArtworkVersion
+			}
+		}
+		out = append(out, d)
 	}
-	writeJSON(w, http.StatusOK, playerArtistsResponse{
-		playerPageMeta: playerPageMeta{Total: len(cat.Artists), Offset: start, Limit: limit,
-			SnapshotAt: snapshotStamp(cat.BuiltAt)},
-		Artists: out,
-	})
+	meta := playerPageMeta{Total: len(cat.Artists), Offset: start, Limit: limit,
+		SnapshotAt: snapshotStamp(cat.BuiltAt)}
+	if start == 0 {
+		meta.Buckets = buildBuckets(len(cat.Artists), func(i int) string { return cat.Artists[i].Bucket })
+	}
+	writeJSON(w, http.StatusOK, playerArtistsResponse{playerPageMeta: meta, Artists: out})
 }
 
 func (s *Server) apiPlayerGenres(w http.ResponseWriter, r *http.Request) {
@@ -444,11 +543,80 @@ func (s *Server) serveAxis(w http.ResponseWriter, r *http.Request,
 		}
 		out = append(out, d)
 	}
-	writeJSON(w, http.StatusOK, playerAxisResponse{
-		playerPageMeta: playerPageMeta{Total: len(entries), Offset: start, Limit: limit,
-			SnapshotAt: snapshotStamp(cat.BuiltAt)},
-		Entries: out,
-	})
+	meta := playerPageMeta{Total: len(entries), Offset: start, Limit: limit,
+		SnapshotAt: snapshotStamp(cat.BuiltAt)}
+	if start == 0 {
+		// Genres are ordered by track count, not alphabetically
+		// (librarycat.finishAxis), so a letter rail would point at
+		// scattered offsets and mislead. Composers ARE alphabetical.
+		if axisIsAlphabetical(entries) {
+			meta.Buckets = buildBuckets(len(entries), func(i int) string { return entries[i].Bucket })
+		}
+	}
+	writeJSON(w, http.StatusOK, playerAxisResponse{playerPageMeta: meta, Entries: out})
+}
+
+// artistImageSetTTL matches the sox-availability cache: short enough
+// that a portrait fetched by the enricher shows up on the next page
+// load, long enough that scrolling a large artist grid does not re-read
+// the artwork directory per page.
+const artistImageSetTTL = 30 * time.Second
+
+// cachedArtistImageMBIDs returns the set of artist MBIDs with a cached
+// portrait, behind a short TTL.
+//
+// The underlying closure is ONE os.ReadDir over the artwork cache — the
+// alternative being one os.Stat per artist, which on a 469-artist
+// library is 469 syscalls per page of an infinite scroll. The TTL is
+// there because portraits appear asynchronously as the enricher runs,
+// so an unbounded cache would leave a freshly-fetched artist looking
+// image-less until a restart, while an uncached one re-reads the
+// directory on every page.
+//
+// A read error degrades to "no portraits", never to an error: the
+// fallback tile is the artist's top album cover, so a failure here costs
+// a nicer image, not a broken grid.
+func (s *Server) cachedArtistImageMBIDs() map[string]struct{} {
+	if s.deps.ArtistImageMBIDs == nil {
+		return nil
+	}
+	now := time.Now()
+	s.artistImagesMu.Lock()
+	if !s.artistImagesAt.IsZero() && now.Sub(s.artistImagesAt) < artistImageSetTTL {
+		v := s.artistImages
+		s.artistImagesMu.Unlock()
+		return v
+	}
+	s.artistImagesMu.Unlock()
+
+	// Read UNLOCKED — a cold directory read must not block concurrent
+	// page requests, the cachedSoxAvailability convention.
+	files, err := s.deps.ArtistImageMBIDs()
+	if err != nil {
+		logger.Warn("artist image set", "err", err)
+		files = nil
+	}
+	s.artistImagesMu.Lock()
+	s.artistImages, s.artistImagesAt = files, now
+	s.artistImagesMu.Unlock()
+	return files
+}
+
+// axisIsAlphabetical reports whether an axis list is actually in
+// letter order, which is what makes a jump rail meaningful.
+//
+// Checked rather than assumed per axis: finishAxis orders GENRES by
+// track count and COMPOSERS by surname, and a rail drawn over a
+// count-ordered list sends the reader to the wrong place while looking
+// authoritative. Cheap — one pass over an already-materialised slice,
+// first page only.
+func axisIsAlphabetical(entries []librarycat.AxisEntry) bool {
+	for i := 1; i < len(entries); i++ {
+		if entries[i-1].Bucket > entries[i].Bucket {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) apiPlayerStats(w http.ResponseWriter, r *http.Request) {
