@@ -20,7 +20,7 @@ import {
   renderGenres, renderComposers,
   renderAxisAlbums, renderFavorites, renderPlaylists, renderPlaylistDetail,
   renderMixDetail,
-  renderMixes, renderFolders, renderSearch,
+  renderMixes, renderFolders, renderSearch, renderTracks,
 } from "./views.js";
 
 const SECTIONS = [
@@ -98,7 +98,7 @@ export function mountShell() {
 // TestPlayerHeadsMatchServerRoutes pins the two together.
 const PLAYER_HEADS = new Set([
   "albums", "artists", "favorites", "playlists", "mixes",
-  "composers", "genres", "folders", "search",
+  "composers", "genres", "folders", "search", "tracks",
   "album", "artist", "genre", "composer", "playlist", "mix",
 ]);
 
@@ -313,6 +313,7 @@ function route() {
     mix: ["Mix", () => renderMixDetail(view, ctx)],
     folders: ["Folders", () => renderFolders(view, ctx)],
     search: ["Search", () => renderSearch(view, ctx)],
+    tracks: ["Tracks", () => renderTracks(view, ctx)],
   };
     // routes[section] || routes.albums is a silent fallback: a head that
   // PLAYER_HEADS claims but this table forgets renders the album grid

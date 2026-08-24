@@ -1102,6 +1102,54 @@ function browseTrackRow(t) {
       [t.codec, bytes(t.sizeBytes)].filter(Boolean).join(" · ") }));
 }
 
+/**
+ * A key-filtered track list.
+ *
+ * This exists because the Smart Mixes harmonic wheel deep-links to a
+ * single Camelot code, and the only view that ever answered that was
+ * the Library Inspector. Folders would be the wrong home for it —
+ * harmonic key has nothing to do with directory structure — so the
+ * question gets a view of its own, backed by the same
+ * `/api/library/browse?camelot=` the Inspector used, which already
+ * returns exactly a filtered track list and no folders.
+ */
+export async function renderTracks(view, { params, setToolbar, setCrumb }) {
+  setToolbar(null);
+  const camelot = (params.get("camelot") || "").toUpperCase();
+  clear(view);
+  if (!/^\d+[AB]$/.test(camelot)) {
+    view.appendChild(emptyState("Tracks by key",
+      "Open a segment of the harmonic wheel on Smart Mixes to list the tracks in that key."));
+    return;
+  }
+  view.appendChild(spinner());
+  let r;
+  try {
+    r = await api.browseByKey(camelot);
+  } catch (e) {
+    if (isAborted(e)) return;
+    clear(view);
+    view.appendChild(errorState(e));
+    return;
+  }
+  clear(view);
+  setCrumb(link("/mixes", { class: "crumb-link", text: "← Smart Mixes" }));
+
+  const tracks = r.tracks || [];
+  // keyName is the human pitch ("A minor"); the code alone is jargon to
+  // anyone who has not memorised the wheel.
+  view.appendChild(el("p", { class: "muted small", text:
+    `${plural(tracks.length, "track")} in ${r.keyName || camelot} (${r.keyFilter || camelot})` }));
+  if (!tracks.length) {
+    view.appendChild(emptyState("Nothing in this key",
+      "No analysed track carries this key. Run an analysis pass if the library is new."));
+    return;
+  }
+  const list = el("div", { class: "rows" });
+  tracks.forEach((t) => list.appendChild(browseTrackRow(t)));
+  view.appendChild(list);
+}
+
 export async function renderSearch(view, { params, setToolbar }) {
   setToolbar(null);
   const q = (params.get("q") || "").trim();

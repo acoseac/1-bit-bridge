@@ -710,7 +710,7 @@ Dedicated Settings → Enrichment tab + extended dashboard coverage + operator r
 
 ### Inspector coverage + Atlas layer batch (PRs #504 / #505 / #506, merged 2026-07-16)
 
-Stacked triple: disk-check volume fix + eligible-denominator coverage (migration **v25**) + the Inspector's Atlas metadata layer. Admin-console-only + one migration — no `/v1` wire change, no `ProtocolVersion` bump, no iOS mirror. The Library section's first tab is now labeled **"Roots"** (was "Browse"; the page manages roots + the transcoded cache — browsing lives in Inspector); the `ActiveTab` key stays `"library"`.
+Stacked triple: disk-check volume fix + eligible-denominator coverage (migration **v25**) + the Inspector's Atlas metadata layer. Admin-console-only + one migration — no `/v1` wire change, no `ProtocolVersion` bump, no iOS mirror. The Library section's first tab is now labeled **"Roots"** (was "Browse"; the page manages roots + the transcoded cache — browsing lived in Inspector, and since 2026-08-24 lives in the player's Browse); the `ActiveTab` key stays `"library"`.
 
 - **Transcode disk pre-flight grades the VARIANTS volume, resolved per-call** (PR #504). The projection endpoint and `Coordinator.Submit`/`SubmitOptimize` statted `cfg.DataDir` while sidecars are written to `cfg.Upscale.EffectiveVariantsDir(...)` — on bridge.ars.md (variants on a ~1 PB B2 mount, dataDir on a 29 GB root disk) every sizable batch was refused with "not enough free space". All check sites now grade the per-call `outputDir` (`c.dataDir` is a documented `""`-fallback only); the three cmd/bridge adapters resolve `outputDir func() string` from the LIVE config holder (nil-guarded) so hot variants-dir changes (POST /api/upscale/variants-dir) apply without restart — **don't snapshot the variants dir at adapter construction again**. `transcode.AvailableDiskSpaceNearest(dir)` walks to the closest EXISTING ancestor before statfs (the variants dir is lazily created; a bare statfs would ENOENT the pre-flight) — the walk advances **only on `os.IsNotExist`**; any other stat failure re-probes the configured dir so the genuine error (EACCES etc.) surfaces instead of silently grading an ancestor volume. `DiskHasHeadroom` routes through it, and Submit/SubmitOptimize surface its typed `*InsufficientDiskSpaceError` DIRECTLY (the "disk probe" wrap covers only genuine probe failures; the old unreachable `!ok` reconstruction is gone). Locked by `TestApiLibraryBrowseProjection_ProbesVariantsDir`, `TestSubmit_RefusesOnInsufficientDiskSpace`, `TestSubmitOptimize_DiskCheckTargetsOutputDir`, `TestSubmit_DiskCheckFallsBackToDataDir`, `TestAvailableDiskSpaceNearest_*` (incl. the POSIX EACCES pin).
 - **Migration v25: format-fact columns are query accelerators ONLY** (PR #505). `tracks` gained `sample_rate` / `bits_per_sample` / `is_dsd` / `codec`, stamped by BOTH upserts (`formatColumnBinds`, nil-safe pointer handling) and backfilled once from `tags_json` (`backfillFormatColumns` — touches ONLY the four columns, **never `enriched_at`/`indexed_at`**; pinned by `TestBackfillFormatColumns`). **tags_json stays the Go readers' truth** — the columns are never spliced onto wire output and MUST NOT gain `json:` tags (same class as the `mtime_ns` gotcha). `MarkEnriched`/`applyReconciledTracks` deliberately do NOT re-stamp (they never change format fields — docblocked). The columns exist so the coverage rollups evaluate eligibility as plain-column SQL — **no `json_extract` on the browse hot path**.
@@ -1725,6 +1725,105 @@ against the player that shipped in #739–#742.
   events, and detect "was this file rewritten?" by CONTENT (a planted
   sentinel), never by comparing mtimes: two writes in one tick leave them
   equal, so an mtime check silently PASSES on the platform most likely to break.
+
+### Variant management moves into Browse; the Inspector is retired (2026-08-24)
+
+Admin-console only — no `/v1` shape change, no `ProtocolVersion` bump, no
+migration, no iOS mirror. Five PRs. The Library Inspector page is gone; its
+URLs 301 to the views that replaced it.
+
+**Reading the older entries above:** several name the Inspector as the consumer
+of a query or an invariant — the `topLevelFSFolderSource` root-browse
+derivation, the byte-range prefix rollups, the eligible-denominator coverage,
+`ListTrackProjectionsUnderPrefix`'s bind order. Every one of those is STILL
+LIVE and unchanged; only the caller moved, to the player's Folders view and the
+album/artist panels. Don't read "the Inspector does X" as dead text.
+
+- **An album is a SET of tracks, never a path prefix — this is the load-bearing
+  fact.** `librarycat.Album.FolderPath` is `commonDir()` of its tracks, and
+  measured on the reference library **69 of 880 albums (7.8%) share that
+  directory with another album**; `2go/Music/Peter Gabriel/Hi-Res Masters/`
+  alone holds **18 albums flat**. So a prefix submit for such an album enqueues
+  every neighbour and a prefix delete reclaims their sidecars. A single track is
+  the mirror image: `subtreeLikePattern` builds `<base>/%`, which matches strict
+  DESCENDANTS, so a file path projects zero rows — which is why the Inspector's
+  per-track "Generate variants" menu item never had anything to enqueue, for its
+  entire life. **Don't re-express an album or artist action as a path prefix.**
+  Pinned end-to-end (store, coordinator, admin, api) by fixtures that stage two
+  albums in one directory and assert the neighbour is untouched.
+- **Identity scopes travel as IDS and are expanded SERVER-SIDE against the
+  catalog.** `POST /api/upscale/batch` takes `albumIds` / `artistId` /
+  `trackPaths`; `DELETE /api/upscale/variants` takes `?albumId=` / `?artistId=`.
+  There is deliberately **no `album_id` column to expand against in SQL** —
+  album identity is `dupes.AlbumIDOf(dupes.Resolve(row))`, folded on read (see
+  `librarycat/doc.go`) — so the expansion goes through `Album.TrackPaths`. That
+  also keeps a 3,000-track artist to one 16-hex id on the wire. The folder form
+  (`path`, `""` = whole library) is untouched and remains the default.
+- **A present-but-EMPTY scope must never read as an ABSENT one.** Absence means
+  the folder form, and an empty folder path means EVERYTHING. `{"albumIds": []}`
+  would have upscaled the whole library; `?artistId=&confirm=true` would have
+  cleared the entire variant cache (`RunVariantDelete`'s own shape guard refused
+  it, so it was a 500 rather than a wipe — but the handler must not build that
+  request). `encoding/json` distinguishes an absent field from `[]`, and the
+  query parser keys off parameter PRESENCE, not value. **The test for this is
+  worthless without `confirm=true` in the table** — without it a blank identity
+  that slipped the presence check still 400s, on the unscoped form's own confirm
+  gate, for an unrelated reason.
+- **Coverage bars read against an ELIGIBLE denominator, and a STALE copy stays
+  in COVERED.** The batch walks skip any track that has a variant of the kind,
+  freshness unread, so reporting a stale sidecar as missing would show an
+  enabled Generate that enqueues nothing. It is counted separately and named
+  with its remedy (delete, then generate). Freshness compares the variant's
+  stamped facts against the SCANNER's record (`tracks.mtime_ns` + `size`), not a
+  live stat — the `autoOptimizeCandidateSQL` definition, which costs no
+  filesystem access and is the only one available for a routed row. The playback
+  path keeps its own live-stat check (`variantFresh`); don't unify them.
+- **The album grid's coverage snapshot is NOT in the catalog, and both halves
+  have their own reason.** ELIGIBILITY could be (it changes only on a rescan)
+  except that it depends on the runtime upscale TARGET, which the catalog knows
+  nothing about — so the snapshot keys on `(epoch, rate, bits)` and the target
+  write drops it. COVERAGE cannot be cached there at all: the auto-optimize
+  sweeper writes variants continuously and does **not** bump the catalog epoch,
+  so a baked mask would tell the operator an album still needs work it finished
+  minutes ago. The `needs` filter is why a whole-library snapshot exists rather
+  than a per-page query — filtering a page draws page 1 of the filtered list
+  from page 1 of the unfiltered one and reports a total for the wrong set.
+- **The live refresh keys on the pool's DONE + FAILED counters, NOT a busy→idle
+  edge.** The edge is the obvious choice and it is wrong: a two-track batch on
+  two workers starts and finishes between two SSE frames, so the client never
+  observes `busy` and the edge never fires (reproduced every time — server 2/2,
+  panel 0/2 until a manual reload). Frames are diff-suppressed, so a completion
+  always produces one. The queue-empty frame bypasses the client's throttle;
+  everything else is throttled, or a projection query lands on a 2 Hz timer.
+  Generate deliberately does NOT refresh on its own response — the work has only
+  been queued, and re-rendering destroys the status line just read.
+- **The whole-library variant clear lives on Roots behind a typed `CLEAR`, and
+  the Browse panels refuse to offer it.** Exact match, not prefix or case-fold —
+  that looseness is what made the old bare `[y/N]` uninstall prompt a fat-finger
+  hazard. The click handler re-checks rather than trusting `disabled`, which a
+  programmatic click walks past. **Don't add a whole-library delete to a
+  coverage-bar panel.**
+- **`/library/inspector` 301s, and `?camelot=` goes to `/tracks`, not
+  `/folders`.** A harmonic key is not a place and a folder tree cannot filter by
+  one; the Smart Mixes wheel deep-links a single Camelot code, so it gets a
+  key-filtered track list backed by the existing `GET /api/library/browse?camelot=`.
+  A new player route must be registered in **all three** of `playerRoutes`,
+  `PLAYER_HEADS` and boot.js's `routes` table — the parity tests pin each pair.
+- **Deleting scattered CSS needs a SELECTOR-SET diff, not a brace scan.** Two
+  near-misses in one pass: a comment containing a literal `{` (`.hint { display:`
+  quoted in prose) made a naive scan swallow the following rule, which was the
+  global `[hidden] { display: none !important }`; and `status-*` / `pairing-*`
+  classes are composed dynamically (`class="status-${r.status}"`), so absence of
+  a string literal does not mean dead. The safe shape is: collect every selector
+  before and after, and refuse to write unless every disappearing selector
+  mentions a proven-dead class and nothing new appeared.
+- **A server-rendered panel driven by runtime ids fails SILENTLY when the two
+  drift** — the JS resolves null, every guard returns early, and the controls do
+  nothing. `roots_variants_panel_test.go` pins both directions and immediately
+  found a span rendered as a count that nothing filled. Its first version matched
+  only `getElementById`, which covered a handful of the ids while appearing to
+  cover all of them, because most wiring goes through the shared `setText`
+  helper — **match any `"prefix-…"` literal, not one call shape.**
 
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 

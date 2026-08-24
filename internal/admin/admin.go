@@ -1242,18 +1242,17 @@ type Server struct {
 
 // pages maps the URL-friendly page name to its template filename.
 var pages = map[string]string{
-	"player":            "player.html",
-	"stats":             "dashboard.html",
-	"library":           "library.html",
-	"library_inspector": "library_inspector.html",
-	"duplicates":        "duplicates.html",
-	"jobs":              "jobs.html",
-	"devices":           "devices.html",
-	"upnp":              "upnp.html",
-	"data":              "data.html",
-	"settings":          "settings.html",
-	"smartmixes":        "smartmixes.html",
-	"diagnostics":       "diagnostics.html",
+	"player":      "player.html",
+	"stats":       "dashboard.html",
+	"library":     "library.html",
+	"duplicates":  "duplicates.html",
+	"jobs":        "jobs.html",
+	"devices":     "devices.html",
+	"upnp":        "upnp.html",
+	"data":        "data.html",
+	"settings":    "settings.html",
+	"smartmixes":  "smartmixes.html",
+	"diagnostics": "diagnostics.html",
 }
 
 // New constructs an admin Server. Call Handler to get the http.Handler for
@@ -1310,7 +1309,7 @@ func (s *Server) Handler() http.Handler {
 	// own now that "/" is the player.
 	mux.HandleFunc("GET /stats", s.pageStats)
 	mux.HandleFunc("GET /library", s.pageLibrary)
-	mux.HandleFunc("GET /library/inspector", s.pageLibraryInspector)
+	mux.HandleFunc("GET /library/inspector", redirectRetiredInspector)
 	mux.HandleFunc("GET /library/duplicates", s.pageDuplicates)
 	mux.HandleFunc("GET /jobs", s.pageJobs)
 	mux.HandleFunc("GET /devices", s.pageDevices)

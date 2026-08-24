@@ -24,14 +24,14 @@
 <link rel="stylesheet" href="/static/player.css?v={{.ServerVersion}}">
 </head>
 <body data-active="{{.ActiveTab}}" data-section="{{.ActiveSection}}">
-{{- /* Skip link: with a 12-entry sidebar standing between the document
+{{- /* Skip link: with an 11-entry sidebar standing between the document
     start and the content, a keyboard user would otherwise tab through
     the whole nav on every page. Visually hidden until focused. */ -}}
 <a class="skip-link" href="#main">Skip to content</a>
 
 {{- /* Icon sprite. One symbol per nav glyph, referenced by a use element from
-    the entries below, so a 12-entry sidebar costs twelve short lines
-    instead of twelve inline path blobs. Stroke-only at 1.6 so the set
+    the entries below, so an 11-entry sidebar costs eleven short lines
+    instead of eleven inline path blobs. Stroke-only at 1.6 so the set
     reads as one family and inherits the link's currentColor — an icon
     never needs a theme rule of its own. aria-hidden on the sprite host
     AND on each use: the label beside it is the accessible name.
@@ -47,7 +47,6 @@
     <g id="i-stats"><path d="M4 20h16M7.5 20v-5.5M12 20V7M16.5 20v-8.5"/></g>
     <g id="i-devices"><rect x="7" y="2.75" width="10" height="18.5" rx="2.5"/><path d="M10.75 18.25h2.5"/></g>
     <g id="i-roots"><path d="M3.25 6.75A1.75 1.75 0 0 1 5 5h3.6a1.75 1.75 0 0 1 1.4.7l.9 1.2H19a1.75 1.75 0 0 1 1.75 1.75v8.6A1.75 1.75 0 0 1 19 19H5a1.75 1.75 0 0 1-1.75-1.75z"/></g>
-    <g id="i-inspector"><circle cx="10.75" cy="10.75" r="6"/><path d="m19.5 19.5-4.5-4.5"/></g>
     <g id="i-duplicates"><rect x="9" y="9" width="11" height="11" rx="2.25"/><path d="M5.5 15A1.5 1.5 0 0 1 4 13.5v-8A1.5 1.5 0 0 1 5.5 4h8A1.5 1.5 0 0 1 15 5.5"/></g>
     <g id="i-jobs"><path d="M3 12.5h3.75L9.5 19l5-14 2.75 7.5H21"/></g>
     <g id="i-upnp"><circle cx="12" cy="12" r="1.9"/><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 15.9a5.5 5.5 0 0 0 0-7.8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 18.7a9.5 9.5 0 0 0 0-13.4"/></g>
@@ -127,8 +126,6 @@
       </span></a>
     <a href="/library" data-tab="library"{{if eq .ActiveTab "library"}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-roots"/></svg><span>Roots</span></a>
-    <a href="/library/inspector" data-tab="library_inspector"{{if eq .ActiveTab "library_inspector"}} aria-current="page"{{end}}>
-      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-inspector"/></svg><span>Inspector</span></a>
     <a href="/library/duplicates" data-tab="duplicates"{{if eq .ActiveTab "duplicates"}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-duplicates"/></svg><span>Duplicates</span></a>
     <a href="/jobs" data-tab="jobs"{{if eq .ActiveTab "jobs"}} aria-current="page"{{end}}>

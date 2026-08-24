@@ -57,6 +57,11 @@ export const api = {
   // cached catalog, tracks from FTS5. Not /api/library/search, which is
   // the Inspector's track+folder view and knows nothing about albums.
   search: (q) => getJSON(`/api/player/search?q=${encodeURIComponent(q)}&limit=12`, { key: "search" }),
+  // The harmonic-key view. Same endpoint as browse, different question:
+  // it answers with a flat track list and no folders, because a key is
+  // not a place.
+  browseByKey: (camelot) =>
+    getJSON(`/api/library/browse?camelot=${encodeURIComponent(camelot)}`, { key: "browse" }),
   browse: (path, cursor) =>
     getJSON(`/api/library/browse?path=${encodeURIComponent(path || "")}` +
       (cursor ? `&afterFolder=${encodeURIComponent(cursor)}` : ""), { key: "browse" }),

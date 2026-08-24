@@ -1,12 +1,16 @@
-// Library Inspector admin endpoints (v1.3 operator-driven upscale).
-// The admin web UI's "Library Inspector" page consumes these:
+// Operator-driven variant batches.
 //
-//   - GET /api/library/browse                (PR 2 — folder tree + rollup)
-//   - GET /api/library/browse-projection     (PR 2 — pre-flight)
-//   - POST /api/upscale/batch                (PR 4 — trigger a batch)
-//   - GET /api/upscale/batches               (PR 4 — Jobs page list)
-//   - DELETE /api/upscale/batches/{id}       (PR 4 — Cancel)
-//   - PATCH /api/upscale/target              (PR 4 — Settings target picker)
+//   - POST /api/upscale/batch                trigger a batch
+//   - GET /api/upscale/batches               Jobs page list
+//   - DELETE /api/upscale/batches/{id}       cancel
+//   - GET|PATCH /api/upscale/target          Settings target picker
+//   - POST /api/upscale/failures/retry       clear the failure debounce
+//
+// These were written for the Library Inspector, which owned the only UI
+// that could reach them. That page is gone; the consumers are now the
+// player's album, artist and folder views, plus the Roots page's
+// transcoded-cache panel. The endpoints themselves did not change —
+// only who calls them, and with which scope (see variantScope).
 //
 // All loopback-only (enforced upstream at the listener layer). The
 // Submit / Cancel / list handlers proxy through to the
@@ -19,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -28,7 +33,7 @@ import (
 
 // Shared upscale-disabled error pair surfaced by every admin handler that
 // gates on `deps.Coordinator.UpscaleEnabled() == false`. Three call sites
-// inside handlers_library_inspector.go + two in handlers_upscale_delete.go;
+// inside handlers_upscale_batch.go + two in handlers_upscale_delete.go;
 // SonarCloud go:S1192 flagged the duplicates.
 const (
 	errCodeUpscaleDisabled    = "upscale-disabled"
@@ -233,45 +238,6 @@ func (s *Server) apiUpscaleTargetPatch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// pageLibraryInspector renders the Library Inspector HTML.
-//
-// `UpscaleStoragePath` is the absolute filesystem directory the
-// long-lived transcode pool writes converted sidecars to —
-// surfaced in the drawer alongside the "Free on data volume"
-// row so the operator can see WHERE the projected variants will
-// land before they hit "Upscale this scope." Always populated
-// regardless of whether the pool itself is running; mirrors
-// `/api/upscale/stats.storagePath`.
-//
-// `SoxAvailable` reflects whether SoX is on PATH (via the wired
-// `UpscalePrecheck` closure). The tile-redesign template uses this
-// to mark per-tile "Generate variants" buttons disabled with an
-// inline "Install SoX" tooltip when false. Delete buttons stay
-// enabled regardless — the operator can reclaim space on a
-// SoX-less box. Nil-safe: when the closure is absent (test
-// harness, upscale feature off at boot), defaults to false so
-// the UI assumes "no variant generation" — strictly safer than
-// assuming yes.
-func (s *Server) pageLibraryInspector(w http.ResponseWriter, r *http.Request) {
-	cfg := s.deps.CfgHolder.Load()
-	soxAvailable := false
-	if s.deps.UpscalePrecheck != nil {
-		soxAvailable = s.deps.UpscalePrecheck() == nil
-	}
-	s.renderPage(w, r, "library_inspector", map[string]any{
-		"UpscaleStoragePath": cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
-		"SoxAvailable":       soxAvailable,
-		// Atlas metadata layer gates: AtlasEnabled shows the About
-		// panel card (bios / descriptions); BookletsEnabled adds the
-		// booklet rows/chips (requires the harvest wiring — mirrors
-		// the /v1/health `booklets` flag condition via Deps.BookletPath).
-		// Tile artwork is data-driven regardless (covers exist via
-		// CAA / local extraction without Atlas).
-		"AtlasEnabled":    cfg.Atlas.Enabled,
-		"BookletsEnabled": s.deps.BookletPath != nil,
-	})
-}
-
 // pageJobs renders the Jobs page HTML.
 func (s *Server) pageJobs(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, r, "jobs", nil)
@@ -336,4 +302,37 @@ func (s *Server) apiVariantFailureRetry(w http.ResponseWriter, r *http.Request) 
 	logging.Component("admin.upscale-failures").Info("transcode-failure suppressions cleared",
 		"path", scrubForLog(normalised), "rows", n)
 	writeJSON(w, http.StatusOK, variantFailureRetryResponse{Cleared: n})
+}
+
+// redirectRetiredInspector keeps the Library Inspector's URLs working.
+//
+// The page is gone — the player's album, artist and folder views cover
+// what it did — but its links were bookmarkable and one of them was a
+// deep link from the Smart Mixes harmonic wheel. A 404 would read as a
+// broken console rather than as a moved feature.
+//
+// Each of its three URL shapes has an exact successor, so the query
+// survives the move:
+//
+//	?camelot=8A  → /tracks   a key is a list of tracks, not a place
+//	?path=Album  → /folders  the same tree, same scoping
+//	(bare)       → /folders
+//
+// 301 rather than 302: this is permanent, and a permanent redirect lets
+// a browser stop asking.
+func redirectRetiredInspector(w http.ResponseWriter, r *http.Request) {
+	q := safeQuery(r)
+	target := "/folders"
+	switch {
+	case q.Get("camelot") != "":
+		target = "/tracks?camelot=" + url.QueryEscape(q.Get("camelot"))
+	case q.Get("path") != "":
+		// normaliseBrowsePath, not the raw value: this builds a URL the
+		// browser will follow, and the folder view resolves it against
+		// the same rules every other path-bearing endpoint uses.
+		if p, ok := normaliseBrowsePath(q.Get("path")); ok && p != "" {
+			target = "/folders?path=" + url.QueryEscape(p)
+		}
+	}
+	http.Redirect(w, r, target, http.StatusMovedPermanently)
 }

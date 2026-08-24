@@ -44,11 +44,14 @@ func seedPrefixFixture(t *testing.T) *Store {
 // upper-bound sentinel, EVERY row falls outside the range. The LIKE form
 // builds 'Album//%' and matches nothing for the same reason.
 //
-// The failure is silent — zero rows, no error — so it surfaces as an
-// Inspector folder reporting "0 eligible" / a batch pre-flight reporting
-// "nothing to do" for a folder full of work. Reachable in production:
-// admin/handlers_library_inspector.go forwards req.Path verbatim,
-// unlike api/upscale_batch.go which runs path.Clean first.
+// The failure is silent — zero rows, no error — so it surfaces as a
+// folder reporting "0 eligible" / a batch pre-flight reporting "nothing
+// to do" for a folder full of work. It was reachable in production
+// because the admin batch-submit handler forwarded req.Path verbatim,
+// unlike api/upscale_batch.go which runs path.Clean first; that handler
+// (now admin/handlers_upscale_batch.go) normalises since PR #536, and
+// this guard is why a future caller reintroducing the raw form is
+// caught here rather than in the field.
 func TestEligibleRollupByPrefixToleratesTrailingSlash(t *testing.T) {
 	s := seedPrefixFixture(t)
 	ctx := context.Background()
