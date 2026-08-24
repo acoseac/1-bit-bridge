@@ -49,7 +49,13 @@
     {{end}}
   </div>
 
-  <div class="panel">
+  {{- /* The transcoded cache. This panel used to be a static readout
+       rendered once at page load; it now also carries the controls the
+       Library Inspector's storage bar owned, because this is the page
+       that is ABOUT where library data lives. The numbers refresh from
+       /api/upscale/variants-dir on load so a generate run started
+       elsewhere is reflected without a reload. */ -}}
+  <div class="panel" id="variants-panel">
     <h2>Transcoded cache</h2>
     <p class="lede">
       Where the bridge stores generated variant sidecars (upscaled + optimized
@@ -60,13 +66,90 @@
          description list. See CLAUDE.md admin mobile conventions. */ -}}
     <dl>
       <dt>Stored at</dt>
-      <dd><code>{{.Data.VariantsDir}}</code></dd>
+      <dd><code id="variants-dir">{{.Data.VariantsDir}}</code></dd>
       <dt>Upscaled</dt>
-      <dd>{{.Data.UpscaledVariants}} file{{if ne .Data.UpscaledVariants 1}}s{{end}} · {{bytesHuman .Data.UpscaledBytes}}</dd>
+      <dd id="variants-upscaled">{{.Data.UpscaledVariants}} file{{if ne .Data.UpscaledVariants 1}}s{{end}} · {{bytesHuman .Data.UpscaledBytes}}</dd>
       <dt>Optimized</dt>
-      <dd>{{.Data.OptimizedVariants}} file{{if ne .Data.OptimizedVariants 1}}s{{end}} · {{bytesHuman .Data.OptimizedBytes}}</dd>
+      <dd id="variants-optimized">{{.Data.OptimizedVariants}} file{{if ne .Data.OptimizedVariants 1}}s{{end}} · {{bytesHuman .Data.OptimizedBytes}}</dd>
+      <dt>Free on that volume</dt>
+      <dd id="variants-free">—</dd>
     </dl>
+
+    {{- /* Legacy variants are sidecars left at a PREVIOUS storage path.
+         They are still served, so this is a migration nudge and not a
+         fault; hidden entirely when there are none. */ -}}
+    <p class="hint" id="variants-legacy" hidden>
+      <strong><span id="variants-legacy-count">0</span> variant<span id="variants-legacy-plural">s</span></strong>
+      (<span id="variants-legacy-bytes">—</span>) are still at a previous storage path.
+      They keep working; run <code>bridge variants move --to &lt;path&gt;</code> to migrate them.
+    </p>
+
+    <div class="row-actions">
+      <button type="button" id="variants-change" class="btn">Change path…</button>
+      <button type="button" id="variants-retry-failures" class="btn">Retry failed transcodes</button>
+      <button type="button" id="variants-clear" class="btn danger">Clear all variants…</button>
+    </div>
+    <p class="hint" id="variants-status" aria-live="polite"></p>
+    <p class="hint">
+      <strong>Retry failed transcodes</strong> clears the debounce on sources that
+      failed conversion repeatedly, so the next run tries them again.
+      <strong>Clear all variants</strong> removes every generated sidecar on this
+      bridge — originals are never touched, and anything cleared can be
+      generated again from Browse.
+    </p>
   </div>
+
+  {{- /* Change-path dialog. A real <dialog>, not a hand-rolled overlay:
+       it gets focus trapping, Escape, and the top layer from the
+       platform. The Inspector's version predated broad <dialog>
+       support and carried all three by hand. */ -}}
+  <dialog id="variants-dir-dialog">
+    <form method="dialog">
+      <h2>Change variants storage path</h2>
+      <p class="hint">
+        An absolute path on a writable volume, and NOT inside any library root.
+        Existing variants are not moved — they keep being served from where they
+        are until you run <code>bridge variants move --to &lt;path&gt;</code>.
+      </p>
+      <label>
+        New path
+        <input type="text" id="variants-dir-input" autocomplete="off" placeholder="/mnt/external/variants">
+      </label>
+      <p class="hint">Leave empty to revert to the default (<code id="variants-dir-default">—</code>).</p>
+      <p class="error" id="variants-dir-error" hidden role="alert"></p>
+      <div class="row-actions">
+        <button type="submit" value="cancel" class="btn">Cancel</button>
+        <button type="button" id="variants-dir-save" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  {{- /* Typed-phrase confirmation for the whole-library clear. This is
+       the control the Browse panels deliberately refuse to offer: a
+       single confirm() beside a coverage bar is not the guard that
+       deleting every generated file deserves. Mirrors the CLI's
+       `bridge artwork --gc --confirm GC-ARTWORK` convention and
+       actUninstall's typed WIPE. */ -}}
+  <dialog id="variants-clear-dialog">
+    <form method="dialog">
+      <h2>Clear every variant?</h2>
+      <p class="hint">
+        This removes <strong>every</strong> generated sidecar
+        from <code id="variants-clear-dir">—</code>, freeing
+        <span id="variants-clear-bytes">—</span>. Your original files are not touched,
+        and paired devices reconcile on their next sync.
+      </p>
+      <label>
+        Type <code>CLEAR</code> to confirm
+        <input type="text" id="variants-clear-phrase" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="error" id="variants-clear-error" hidden role="alert"></p>
+      <div class="row-actions">
+        <button type="submit" value="cancel" class="btn">Cancel</button>
+        <button type="button" id="variants-clear-go" class="btn danger" disabled>Clear all variants</button>
+      </div>
+    </form>
+  </dialog>
 
   <div class="panel">
     <h2>Add a root</h2>

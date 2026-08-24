@@ -1232,6 +1232,7 @@ function setText(id, v) {
 // --- library ---
 
 function initLibrary() {
+  initVariantsPanel();
   const form = document.getElementById("add-root-form");
   if (form) {
     form.addEventListener("submit", async (e) => {
@@ -8805,3 +8806,162 @@ document.addEventListener("DOMContentLoaded", () => {
   // closes + recycles the stream on a real long-idle wake.
   document.addEventListener("visibilitychange", handleVisibilityRestore);
 });
+
+// ---- Roots: the transcoded cache panel ----
+//
+// These controls came from the Library Inspector's storage bar. They
+// belong here because this page is about where library data lives, and
+// because the whole-library clear needs a typed confirmation that has
+// no place beside a per-album coverage bar in Browse.
+
+function initVariantsPanel() {
+  const panel = document.getElementById("variants-panel");
+  if (!panel) return;
+  refreshVariantsDir();
+  wireVariantsDirChange();
+  wireVariantsClear();
+  wireVariantsRetry();
+}
+
+// Last snapshot from /api/upscale/variants-dir. Held so the two dialogs
+// can quote real numbers without a second round-trip on open.
+let variantsDirState = null;
+
+async function refreshVariantsDir() {
+  try {
+    variantsDirState = await API.get("/api/upscale/variants-dir");
+  } catch (err) {
+    // The panel is server-rendered with the counts it had at page load,
+    // so a failed refresh leaves a correct-if-stale readout rather than
+    // a blank one. Say so quietly instead of replacing the numbers.
+    setText("variants-status", "Could not refresh cache figures: " + err.message);
+    return;
+  }
+  const s = variantsDirState;
+  setText("variants-dir", s.current);
+  setText("variants-free", humanBytes(s.freeBytes) + " free");
+  const byKind = s.usedByKind || {};
+  setText("variants-upscaled", humanBytes(byKind.upscale || 0));
+  setText("variants-optimized", humanBytes(byKind.optimize || 0));
+
+  const legacy = document.getElementById("variants-legacy");
+  if (legacy) {
+    legacy.hidden = !s.legacyCount;
+    if (s.legacyCount) {
+      setText("variants-legacy-count", String(s.legacyCount));
+      setText("variants-legacy-plural", s.legacyCount === 1 ? "" : "s");
+      setText("variants-legacy-bytes", humanBytes(s.legacyBytes));
+    }
+  }
+  const clear = document.getElementById("variants-clear");
+  if (clear) clear.disabled = !s.usedBytes;
+}
+
+function wireVariantsDirChange() {
+  const dialog = document.getElementById("variants-dir-dialog");
+  const open = document.getElementById("variants-change");
+  const save = document.getElementById("variants-dir-save");
+  if (!dialog || !open || !save) return;
+
+  open.addEventListener("click", () => {
+    const input = document.getElementById("variants-dir-input");
+    if (input) input.value = variantsDirState?.current || "";
+    setText("variants-dir-default", variantsDirState?.default || "—");
+    hideEl("variants-dir-error");
+    dialog.showModal();
+  });
+
+  save.addEventListener("click", async () => {
+    const input = document.getElementById("variants-dir-input");
+    save.disabled = true;
+    try {
+      // The server validates: absolute, writable, and NOT inside a
+      // library root. Re-checking here would be a second copy of a rule
+      // that has already bitten once by drifting — config.Load rejects
+      // symlinked paths this endpoint used to accept, and the bridge
+      // then refused to start over a value the UI called fine.
+      variantsDirState = await API.post("/api/upscale/variants-dir",
+        { path: (input?.value || "").trim() });
+      dialog.close();
+      await refreshVariantsDir();
+      setText("variants-status", "Storage path updated. Existing variants stay where they are.");
+    } catch (err) {
+      showError("variants-dir-error", err.message);
+    } finally {
+      save.disabled = false;
+    }
+  });
+}
+
+function wireVariantsClear() {
+  const dialog = document.getElementById("variants-clear-dialog");
+  const open = document.getElementById("variants-clear");
+  const go = document.getElementById("variants-clear-go");
+  const phrase = document.getElementById("variants-clear-phrase");
+  if (!dialog || !open || !go || !phrase) return;
+
+  open.addEventListener("click", () => {
+    phrase.value = "";
+    go.disabled = true;
+    hideEl("variants-clear-error");
+    setText("variants-clear-dir", variantsDirState?.current || "the cache");
+    setText("variants-clear-bytes", humanBytes(variantsDirState?.usedBytes || 0));
+    dialog.showModal();
+  });
+
+  // The typed phrase is the guard, so the button follows it exactly —
+  // no trimming, no case folding. A prefix match is what made the old
+  // bare [y/N] uninstall prompt a fat-finger hazard.
+  phrase.addEventListener("input", () => { go.disabled = phrase.value !== "CLEAR"; });
+
+  go.addEventListener("click", async () => {
+    if (phrase.value !== "CLEAR") return;
+    go.disabled = true;
+    try {
+      const res = await API.delete("/api/upscale/variants?confirm=true");
+      dialog.close();
+      await refreshVariantsDir();
+      setText("variants-status",
+        `Cleared ${res.deletedCount} variant${res.deletedCount === 1 ? "" : "s"}, ` +
+        `freed ${humanBytes(res.freedBytes)}.`);
+    } catch (err) {
+      showError("variants-clear-error", err.message);
+      go.disabled = false;
+    }
+  });
+}
+
+function wireVariantsRetry() {
+  const btn = document.getElementById("variants-retry-failures");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    setText("variants-status", "Clearing failure debounces…");
+    try {
+      // No body: the endpoint's unscoped form is the whole library,
+      // which is what a global control should mean. Its `{path}` form
+      // exists for a future folder-scoped version.
+      const res = await API.post("/api/upscale/failures/retry");
+      setText("variants-status", res.cleared > 0
+        ? `Cleared ${res.cleared} failure record${res.cleared === 1 ? "" : "s"}. ` +
+          `Those sources will be retried on the next run.`
+        : "No failing sources were being held back.");
+    } catch (err) {
+      setText("variants-status", "Retry failed: " + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+}
+
+function hideEl(id) {
+  const el = document.getElementById(id);
+  if (el) el.hidden = true;
+}
