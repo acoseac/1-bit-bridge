@@ -286,24 +286,65 @@ func (c *Coordinator) diskPreflight(outputDir string, projected int64, op string
 // variant_id)` so a track that already has a variant at the same
 // target is silently skipped (counted as `AlreadyCovered`).
 func (c *Coordinator) Submit(ctx context.Context, path string, targetRate, targetBits int, outputDir string) (*SubmitResult, error) {
-	if targetRate <= 0 {
-		return nil, fmt.Errorf("submit: target rate %d Hz: must be positive", targetRate)
+	if err := validateUpscaleTarget(targetRate, targetBits); err != nil {
+		return nil, err
 	}
-	switch targetBits {
-	case 16, 24, 32:
-	default:
-		return nil, fmt.Errorf("submit: target bits %d: must be 16/24/32", targetBits)
-	}
-
 	if c.resolver == nil {
 		return nil, fmt.Errorf("submit: no resolver wired — Coordinator can't build JobSpec absolute paths")
 	}
-
 	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path, manifest.VariantKindPrefixUpscaled)
 	if err != nil {
 		return nil, fmt.Errorf("submit: list projections: %w", err)
 	}
+	return c.submitUpscaleProjections(ctx, path, projections, targetRate, targetBits, outputDir)
+}
 
+// SubmitPaths is Submit over an EXPLICIT SET of tracks instead of a
+// subtree. `label` is display only — it lands in `upscale_batches.path`
+// and on the Jobs page row, and nothing derives scope from it.
+//
+// The scope forms are not interchangeable. An album's tracks are a set,
+// not a subtree: `librarycat.Album.FolderPath` is the common directory
+// of its tracks, and on the reference library 69 of 880 albums share
+// that directory with another album (one artist folder holds 18 flat).
+// Submitting such an album by prefix silently enqueues every neighbour.
+// A single track has the mirror-image problem — the prefix query builds
+// `<base>/%`, which matches strict descendants, so a file path projects
+// nothing at all.
+//
+// Everything after projection is the same code Submit runs, so the
+// eligibility gates cannot drift between the two scopes.
+func (c *Coordinator) SubmitPaths(ctx context.Context, label string, paths []string, targetRate, targetBits int, outputDir string) (*SubmitResult, error) {
+	if err := validateUpscaleTarget(targetRate, targetBits); err != nil {
+		return nil, err
+	}
+	if c.resolver == nil {
+		return nil, fmt.Errorf("submit: no resolver wired — Coordinator can't build JobSpec absolute paths")
+	}
+	projections, err := c.store.TrackProjectionsForPaths(ctx, paths, manifest.VariantKindPrefixUpscaled)
+	if err != nil {
+		return nil, fmt.Errorf("submit: track projections: %w", err)
+	}
+	return c.submitUpscaleProjections(ctx, label, projections, targetRate, targetBits, outputDir)
+}
+
+func validateUpscaleTarget(targetRate, targetBits int) error {
+	if targetRate <= 0 {
+		return fmt.Errorf("submit: target rate %d Hz: must be positive", targetRate)
+	}
+	switch targetBits {
+	case 16, 24, 32:
+	default:
+		return fmt.Errorf("submit: target bits %d: must be 16/24/32", targetBits)
+	}
+	return nil
+}
+
+// submitUpscaleProjections is everything Submit and SubmitPaths share:
+// filter, project size, disk pre-flight, batch row, enqueue. `path` is
+// the display label for the batch row, NOT a scope — the scope was
+// already resolved into `projections` by the caller.
+func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string, projections []manifest.TrackProjection, targetRate, targetBits int, outputDir string) (*SubmitResult, error) {
 	// Filter + project. Tracks with `HasVariant` already covered;
 	// tracks with zero source rate / bits are unknown-format and
 	// skipped (the operator pre-flight surfaced them separately).
@@ -812,12 +853,31 @@ func (c *Coordinator) SubmitOptimize(ctx context.Context, path string, outputDir
 	if c.resolver == nil {
 		return nil, fmt.Errorf("submit optimize: no resolver wired — Coordinator can't build JobSpec absolute paths")
 	}
-
 	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path, manifest.VariantKindPrefixOptimized)
 	if err != nil {
 		return nil, fmt.Errorf("submit optimize: list projections: %w", err)
 	}
+	return c.submitOptimizeProjections(ctx, path, projections, outputDir)
+}
 
+// SubmitOptimizePaths is SubmitOptimize over an explicit set of tracks.
+// See SubmitPaths for why the two scope forms are not interchangeable;
+// `label` is display only.
+func (c *Coordinator) SubmitOptimizePaths(ctx context.Context, label string, paths []string, outputDir string) (*SubmitResult, error) {
+	if c.resolver == nil {
+		return nil, fmt.Errorf("submit optimize: no resolver wired — Coordinator can't build JobSpec absolute paths")
+	}
+	projections, err := c.store.TrackProjectionsForPaths(ctx, paths, manifest.VariantKindPrefixOptimized)
+	if err != nil {
+		return nil, fmt.Errorf("submit optimize: track projections: %w", err)
+	}
+	return c.submitOptimizeProjections(ctx, label, projections, outputDir)
+}
+
+// submitOptimizeProjections is everything SubmitOptimize and
+// SubmitOptimizePaths share. `path` is the batch row's display label,
+// not a scope.
+func (c *Coordinator) submitOptimizeProjections(ctx context.Context, path string, projections []manifest.TrackProjection, outputDir string) (*SubmitResult, error) {
 	picked := c.buildOptimizeCandidates(path, projections)
 
 	available, err := c.diskPreflight(outputDir, picked.totalProjected, "submit optimize")

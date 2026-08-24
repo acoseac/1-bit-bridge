@@ -120,6 +120,23 @@ type VariantDeleteRequest struct {
 	// Path non-empty → delete variants for one exact source path.
 	// Must be a cleaned relative path.
 	Path string
+	// Paths non-empty → delete variants for an explicit SET of exact
+	// source paths. Entries must each be a cleaned relative path.
+	//
+	// This is the identity-scoped shape, and it is not
+	// interchangeable with `Prefix`. An album's directory is the
+	// common ancestor of its tracks and is routinely shared with
+	// other albums — on the reference library 69 of 880 albums share
+	// theirs, and one artist folder holds 18 albums flat — so a
+	// prefix delete for such an album reclaims its neighbours'
+	// sidecars too. Only an explicit set can say "this album and
+	// nothing else".
+	//
+	// No `/v1` query parameter produces this shape; it reaches
+	// RunVariantDelete only from the admin route, which expands an
+	// album or artist id against the library catalog. The wire
+	// contract is therefore unchanged.
+	Paths []string
 	// Kind narrows the deletion to one variant kind: "" (default,
 	// back-compat — deletes ALL kinds matching the path scope),
 	// "upscale" (only `upscaled-*` variants), or "optimize" (only
@@ -291,6 +308,11 @@ func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, e
 // caller — iOS reconciles via that single fan-out path no matter
 // whether the user clicked Delete in the iOS app, the admin
 // console, or invoked the HTTP endpoint directly.
+// errShapeRequired is the exactly-one-scope guard's message, shared by
+// the up-front validation and the unreachable default arm so the two
+// can't drift.
+var errShapeRequired = errors.New("variant delete request must set exactly one of All, Prefix, Path, Paths")
+
 func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest) (VariantDeleteResponse, error) {
 	if s.variantDeleter == nil {
 		return VariantDeleteResponse{}, ErrVariantDeleteUnavailable
@@ -309,10 +331,14 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// explicit operator opt-in" property holds at the execution
 	// boundary, not just at the HTTP boundary (CodeRabbit Major on
 	// PR #220).
-	if (req.All && (req.Prefix != "" || req.Path != "")) ||
-		(req.Prefix != "" && req.Path != "") ||
-		(!req.All && req.Prefix == "" && req.Path == "") {
-		return VariantDeleteResponse{}, errors.New("variant delete request must set exactly one of All, Prefix, Path")
+	shapes := 0
+	for _, set := range []bool{req.All, req.Prefix != "", req.Path != "", len(req.Paths) > 0} {
+		if set {
+			shapes++
+		}
+	}
+	if shapes != 1 {
+		return VariantDeleteResponse{}, errShapeRequired
 	}
 
 	// Phase 1: resolve the target row set under the request ctx.
@@ -325,6 +351,21 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	switch {
 	case req.Path != "":
 		rows, err = s.variantDeleter.ListVariantsForPath(ctx, req.Path)
+	case len(req.Paths) > 0:
+		// Union of the per-path listings. Deliberately reuses
+		// ListVariantsForPath rather than adding a set-shaped store
+		// query: phase 1 is the only part of this function that
+		// differs per shape, and everything destructive below —
+		// unlink, DB delete, SSE fan-out — stays the single shared
+		// path an admin delete and an iOS delete both run.
+		for _, p := range req.Paths {
+			var batch []VariantSummary
+			batch, err = s.variantDeleter.ListVariantsForPath(ctx, p)
+			if err != nil {
+				break
+			}
+			rows = append(rows, batch...)
+		}
 	case req.Prefix != "":
 		rows, err = s.variantDeleter.ListVariantsByPathPrefix(ctx, req.Prefix)
 	case req.All:
@@ -337,7 +378,7 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// would land here. Defensive return so a future refactor
 		// that loosens the guard doesn't silently re-open the
 		// zero-value wipe path.
-		return VariantDeleteResponse{}, errors.New("variant delete request must set exactly one of All, Prefix, Path")
+		return VariantDeleteResponse{}, errShapeRequired
 	}
 	if err != nil {
 		return VariantDeleteResponse{}, err

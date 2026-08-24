@@ -44,8 +44,15 @@ const (
 // 16/44.1 or 16/48 FLAC, target params auto-derived per-track). The
 // admin Library Inspector's tile-level multi-select batch UI emits
 // one POST per kind per selected folder.
+//
+// The body names a SCOPE — see variantScope for why the folder form and
+// the identity forms are not interchangeable. `path` (including "" for
+// the whole library) is the folder form and stays the default, so every
+// pre-existing caller is unchanged; `albumIds` / `artistId` /
+// `trackPaths` are the identity forms and are mutually exclusive with it
+// and with each other.
 type adminBatchSubmitRequest struct {
-	Path       string `json:"path"`
+	scopeRequest
 	Kind       string `json:"kind,omitempty"`
 	TargetRate int    `json:"targetRate,omitempty"`
 	TargetBits int    `json:"targetBits,omitempty"`
@@ -69,38 +76,32 @@ func (s *Server) apiUpscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	// in turn cancels its manifest projection walk).
 	// Per Gemini high on PR #202.
 	kind := strings.ToLower(strings.TrimSpace(req.Kind))
-	// Normalise before the coordinator sees it — this handler used to
-	// forward req.Path VERBATIM, unlike every read-side endpoint. The
-	// store's prefix helpers treat a prefix that trims to empty as
-	// whole-library, so `{"path": "//"}` enqueued the ENTIRE library
-	// while the rollup card rendered beside it showed 0.
-	//
-	// normaliseBrowsePath is the same helper the projection endpoint
-	// uses: it strips ALL leading slashes (not just one) and already
-	// maps path.Clean's "." result back to "" — hand-rolling that here
-	// is how the `Clean("") == "."` trap gets reintroduced.
-	normalised, ok := normaliseBrowsePath(req.Path)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "bad-path",
-			"path must be a clean library-relative path (no traversal, no backslashes)")
+	if kind != "" && kind != "upscale" && kind != "optimize" {
+		writeError(w, http.StatusBadRequest, "invalid-kind",
+			`unknown kind: `+req.Kind+` (expected "upscale" or "optimize")`)
+		return
+	}
+	scope, scopeErr := s.resolveVariantScope(r, req.scopeRequest)
+	if scopeErr != nil {
+		writeError(w, scopeErr.Status, scopeErr.Code, scopeErr.Message)
 		return
 	}
 	var (
 		res AdminBatchSubmitResult
 		err error
 	)
-	switch kind {
-	case "", "upscale":
-		res, err = s.deps.BatchCoordinator.Submit(r.Context(), normalised, req.TargetRate, req.TargetBits)
-	case "optimize":
+	switch {
+	case kind == "optimize" && scope.ByIdentity:
+		res, err = s.deps.BatchCoordinator.SubmitOptimizePaths(r.Context(), scope.Label, scope.Paths)
+	case kind == "optimize":
 		// Optimize ignores caller-supplied targetRate/targetBits —
 		// the coordinator auto-derives per-track via
 		// TargetRateForOptimize (family-preserving 16/44.1 or 16/48).
-		res, err = s.deps.BatchCoordinator.SubmitOptimize(r.Context(), normalised)
+		res, err = s.deps.BatchCoordinator.SubmitOptimize(r.Context(), scope.Prefix)
+	case scope.ByIdentity:
+		res, err = s.deps.BatchCoordinator.SubmitPaths(r.Context(), scope.Label, scope.Paths, req.TargetRate, req.TargetBits)
 	default:
-		writeError(w, http.StatusBadRequest, "invalid-kind",
-			`unknown kind: `+req.Kind+` (expected "upscale" or "optimize")`)
-		return
+		res, err = s.deps.BatchCoordinator.Submit(r.Context(), scope.Prefix, req.TargetRate, req.TargetBits)
 	}
 	if err != nil {
 		var dskErr *AdminBatchInsufficientDiskSpace

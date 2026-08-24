@@ -600,9 +600,19 @@ type AutocertStatusSnapshot struct {
 // 0 to signal "varies"). Added in the Library Inspector tile-redesign
 // PR alongside the per-tile "Generate CarPlay-optimized variants"
 // affordance.
+//
+// `SubmitPaths` / `SubmitOptimizePaths` are the IDENTITY-scoped twins:
+// the same work over an explicit set of tracks rather than a subtree,
+// with `label` used only for the batch row's display path. They exist
+// because an album is a set, not a subtree — its directory is the
+// common ancestor of its tracks and is routinely shared with other
+// albums, so a prefix submit would silently enqueue the neighbours.
+// See variantScope.
 type AdminBatchCoordinator interface {
 	Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (AdminBatchSubmitResult, error)
 	SubmitOptimize(ctx context.Context, libraryRelPath string) (AdminBatchSubmitResult, error)
+	SubmitPaths(ctx context.Context, label string, paths []string, targetRate, targetBits int) (AdminBatchSubmitResult, error)
+	SubmitOptimizePaths(ctx context.Context, label string, paths []string) (AdminBatchSubmitResult, error)
 	Cancel(idHex string) error
 	ListBatches(limit int) ([]AdminBatchRow, error)
 	Throughput() AdminBatchThroughput
@@ -694,7 +704,7 @@ type AdminVariantDeleter interface {
 
 // AdminVariantDeleteRequest is the parsed-and-validated input to
 // the admin handler's call into the deleter. Exactly one of `All` /
-// `Prefix` / `Path` is set on any valid request; the handler
+// `Prefix` / `Path` / `Paths` is set on any valid request; the handler
 // short-circuits the unscoped form behind a typed-phrase
 // confirmation in the UI (matches the `bridge artwork --gc`
 // `--confirm` CLI convention) plus the existing `?confirm=true`
@@ -703,6 +713,12 @@ type AdminVariantDeleteRequest struct {
 	All    bool
 	Prefix string
 	Path   string
+	// Paths is the identity-scoped shape: an explicit set of exact
+	// source paths, produced by expanding an `albumId` / `artistId`
+	// query parameter against the library catalog. Not interchangeable
+	// with Prefix — see variantScope for why an album cannot be
+	// addressed as a directory.
+	Paths []string
 	// Kind narrows the deletion to one variant kind ("upscale" /
 	// "optimize"); empty preserves pre-feature behaviour (deletes
 	// BOTH kinds matching the path scope). Wire-shape mirror of

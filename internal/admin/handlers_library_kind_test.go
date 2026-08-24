@@ -20,9 +20,10 @@ type fakeBatchCoordinator struct {
 }
 
 type fakeBatchCall struct {
-	path string
-	rate int
-	bits int
+	path  string
+	paths []string
+	rate  int
+	bits  int
 }
 
 func (f *fakeBatchCoordinator) Submit(_ context.Context, path string, rate, bits int) (AdminBatchSubmitResult, error) {
@@ -33,6 +34,16 @@ func (f *fakeBatchCoordinator) Submit(_ context.Context, path string, rate, bits
 func (f *fakeBatchCoordinator) SubmitOptimize(_ context.Context, path string) (AdminBatchSubmitResult, error) {
 	f.submitOptimizeCalls = append(f.submitOptimizeCalls, fakeBatchCall{path: path})
 	return AdminBatchSubmitResult{Path: path, EnqueuedCount: 1}, nil
+}
+
+func (f *fakeBatchCoordinator) SubmitPaths(_ context.Context, label string, paths []string, rate, bits int) (AdminBatchSubmitResult, error) {
+	f.submitCalls = append(f.submitCalls, fakeBatchCall{path: label, paths: paths, rate: rate, bits: bits})
+	return AdminBatchSubmitResult{Path: label, TargetRate: rate, TargetBits: bits, EnqueuedCount: len(paths)}, nil
+}
+
+func (f *fakeBatchCoordinator) SubmitOptimizePaths(_ context.Context, label string, paths []string) (AdminBatchSubmitResult, error) {
+	f.submitOptimizeCalls = append(f.submitOptimizeCalls, fakeBatchCall{path: label, paths: paths})
+	return AdminBatchSubmitResult{Path: label, EnqueuedCount: len(paths)}, nil
 }
 
 func (f *fakeBatchCoordinator) Cancel(string) error { return nil }

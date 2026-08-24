@@ -906,16 +906,7 @@ func translateAdminSubmitResult(res *transcode.SubmitResult, err error) (admin.A
 }
 
 func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
-	if targetRate == 0 || targetBits == 0 {
-		if rate, bits, err := a.store.GetUpscaleTarget(ctx); err == nil {
-			if targetRate == 0 {
-				targetRate = rate
-			}
-			if targetBits == 0 {
-				targetBits = bits
-			}
-		}
-	}
+	targetRate, targetBits = a.resolveTarget(ctx, targetRate, targetBits)
 	res, err := a.coord.Submit(ctx, libraryRelPath, targetRate, targetBits, a.outputDir())
 	return translateAdminSubmitResult(res, err)
 }
@@ -923,6 +914,37 @@ func (a *adminBatchCoordinatorAdapter) Submit(ctx context.Context, libraryRelPat
 func (a *adminBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libraryRelPath string) (admin.AdminBatchSubmitResult, error) {
 	res, err := a.coord.SubmitOptimize(ctx, libraryRelPath, a.outputDir())
 	return translateAdminSubmitResult(res, err)
+}
+
+func (a *adminBatchCoordinatorAdapter) SubmitPaths(ctx context.Context, label string, paths []string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
+	targetRate, targetBits = a.resolveTarget(ctx, targetRate, targetBits)
+	res, err := a.coord.SubmitPaths(ctx, label, paths, targetRate, targetBits, a.outputDir())
+	return translateAdminSubmitResult(res, err)
+}
+
+func (a *adminBatchCoordinatorAdapter) SubmitOptimizePaths(ctx context.Context, label string, paths []string) (admin.AdminBatchSubmitResult, error) {
+	res, err := a.coord.SubmitOptimizePaths(ctx, label, paths, a.outputDir())
+	return translateAdminSubmitResult(res, err)
+}
+
+// resolveTarget fills an unset rate / bits from the DB-backed admin
+// Settings, leaving a caller-supplied value alone. A lookup failure is
+// deliberately swallowed: the Coordinator validates the target and
+// returns a precise error, which is a better message than one invented
+// here from a scan_state read.
+func (a *adminBatchCoordinatorAdapter) resolveTarget(ctx context.Context, targetRate, targetBits int) (int, int) {
+	if targetRate != 0 && targetBits != 0 {
+		return targetRate, targetBits
+	}
+	if rate, bits, err := a.store.GetUpscaleTarget(ctx); err == nil {
+		if targetRate == 0 {
+			targetRate = rate
+		}
+		if targetBits == 0 {
+			targetBits = bits
+		}
+	}
+	return targetRate, targetBits
 }
 
 func (a *adminBatchCoordinatorAdapter) Cancel(idHex string) error {
@@ -990,6 +1012,7 @@ func (a *adminVariantDeleterAdapter) Delete(ctx context.Context, req admin.Admin
 		All:    req.All,
 		Prefix: req.Prefix,
 		Path:   req.Path,
+		Paths:  req.Paths,
 		Kind:   req.Kind,
 	}
 	resp, err := a.apiSrv.RunVariantDelete(ctx, apiReq)
