@@ -46,6 +46,88 @@ func TestPlayerHeadsMatchServerRoutes(t *testing.T) {
 	}
 }
 
+// TestPlayerRoutesTableCoversEveryPlayerHead pins the OTHER half of the
+// same contract, which the test above never checked despite its failure
+// message promising it ("and, if a route was added, its route() case").
+//
+// route() dispatches through an object literal and falls back with
+// `routes[section] || routes.albums`. That fallback is silent by design
+// — a mistyped path should render something rather than nothing — but it
+// also means a head PLAYER_HEADS claims and the table forgets renders
+// the ALBUM GRID under the wrong title, with no error anywhere. That is
+// not hypothetical: /genre, /composer, /playlist and /mix were all
+// registered, all claimed, and all silently fell through to Albums from
+// the day the router was written until the case that added them.
+func TestPlayerRoutesTableCoversEveryPlayerHead(t *testing.T) {
+	src, err := staticFS.ReadFile("static/player/boot.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	heads := parsePlayerHeads(t, string(src))
+	cases := parseRouteTableKeys(t, string(src))
+
+	// Every head must have its own case. The reverse is allowed: `search`
+	// and the section-only entries can legitimately exist as cases
+	// without being reachable heads.
+	var missing []string
+	for h := range heads {
+		if knownRouteGaps[h] {
+			continue
+		}
+		if !cases[h] {
+			missing = append(missing, h)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("route() has no case for %s.\n"+
+			"  heads:        %s\n"+
+			"  route() cases: %s\n"+
+			"Without a case, `routes[section] || routes.albums` renders the album "+
+			"grid under that section's title instead — silently, with no error.",
+			strings.Join(missing, " "), sortedKeys(heads), sortedKeys(cases))
+	}
+}
+
+// knownRouteGaps are heads deliberately still falling through, so the
+// guard can be ACTIVE for everything else instead of waiting until the
+// last gap closes. Both entries are the playlist/mix views, which land
+// with the change that makes them clickable; that change empties this
+// map. An entry here is a tracked debt — the point of the map is that
+// the gap is visible in code rather than silently absent, which is
+// exactly how these four went unnoticed for the router's whole life.
+//
+// Removing the last entry should leave the map empty, not delete it:
+// the emptiness is the assertion.
+var knownRouteGaps = map[string]bool{
+	"playlist": true,
+	"mix":      true,
+}
+
+// routeTableBlockRe captures the body of route()'s dispatch literal. It
+// is anchored on the `const routes = {` declaration and stops at the
+// lookup that consumes it, so an added case is picked up automatically.
+var routeTableBlockRe = regexp.MustCompile(`(?s)const routes = \{(.*?)
+  \};`)
+var routeKeyRe = regexp.MustCompile(`(?m)^\s{4}([a-z]+):`)
+
+func parseRouteTableKeys(t *testing.T, src string) map[string]bool {
+	t.Helper()
+	m := routeTableBlockRe.FindStringSubmatch(src)
+	if m == nil {
+		t.Fatal("could not find `const routes = {...}` in boot.js — " +
+			"the route-table guard's anchor moved")
+	}
+	out := map[string]bool{}
+	for _, k := range routeKeyRe.FindAllStringSubmatch(m[1], -1) {
+		out[k[1]] = true
+	}
+	if len(out) == 0 {
+		t.Fatal("parsed an empty route table — the anchor matched but the body didn't")
+	}
+	return out
+}
+
 var playerHeadsBlockRe = regexp.MustCompile(`(?s)const PLAYER_HEADS = new Set\(\[(.*?)\]\)`)
 var quotedRe = regexp.MustCompile(`"([a-z]+)"`)
 

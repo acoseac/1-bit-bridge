@@ -3,17 +3,30 @@
 // error states.
 
 import { api, coverURL, artistImageURL, bookletURL, downloadURL, isAborted } from "./api.js";
-import { duration, totalDuration, qualityLabel, formatChip, unplayableReason } from "./format.js";
+import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason } from "./format.js";
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, aboutBlock } from "./ui.js";
 import * as audio from "./audio.js";
 
 const PAGE = 60;
 
+// The album-grid filters filterAlbums accepts. Kept as one list so a new
+// axis is forwarded and preserved by every helper below at once.
+const AXIS_FILTERS = ["artist", "genre", "composer"];
+
 // ---- Albums grid ----
 
-export async function renderAlbums(view, { params, gen, setToolbar }) {
+export async function renderAlbums(view, { params, gen, setToolbar, scopeLabel }) {
   const sort = params.get("sort") || "recent";
   const quality = params.get("quality") || "all";
+  // artist / genre / composer narrow the grid. filterAlbums has always
+  // implemented all three (including intersection), but they were never
+  // forwarded — so every genre and composer link landed on the FULL
+  // library and the filter looked broken from the outside.
+  const scope = {};
+  for (const key of AXIS_FILTERS) {
+    const v = params.get(key);
+    if (v) scope[key] = v;
+  }
   setToolbar(albumToolbar(sort, quality));
   clear(view);
   view.appendChild(spinner());
@@ -29,17 +42,19 @@ export async function renderAlbums(view, { params, gen, setToolbar }) {
     if (loading) return;
     loading = true;
     try {
-      const r = await api.albums({ sort, quality, offset, limit: PAGE });
+      const r = await api.albums({ sort, quality, ...scope, offset, limit: PAGE });
       if (offset === 0) {
         clear(view);
         total = r.total;
         if (total === 0) {
           view.appendChild(emptyState("No albums here",
-            quality === "all" ? "Add a library root and run a scan." :
-              "Nothing in the library matches this quality filter."));
+            Object.keys(scope).length ? "Nothing here matches the current filter." :
+              quality === "all" ? "Add a library root and run a scan." :
+                "Nothing in the library matches this quality filter."));
           return;
         }
-        view.appendChild(el("p", { class: "muted small", text: `${total} albums` }));
+        view.appendChild(el("p", { class: "muted small",
+          text: scopeLabel ? `${plural(total, "album")} in ${scopeLabel}` : plural(total, "album") }));
         view.appendChild(grid);
         view.appendChild(sentinel);
         disposeSentinel = onVisible(sentinel, () => {
@@ -94,6 +109,9 @@ function select(name, value, options) {
     s.appendChild(o);
   }
   s.addEventListener("change", () => {
+    // Mutating the CURRENT url preserves any axis filter already on it,
+    // so changing sort inside a genre does not silently widen the view
+    // back to the whole library.
     const u = new URL(location.href);
     u.searchParams.set(name, s.value);
     // replaceState, not push: four sort attempts should not cost four
@@ -180,8 +198,8 @@ export async function renderAlbum(view, { id, setToolbar }) {
 function albumStatLine(a) {
   const parts = [];
   if (a.year) parts.push(String(a.year));
-  if (a.discCount > 1) parts.push(`${a.discCount} discs`);
-  parts.push(`${a.trackCount} ${a.trackCount === 1 ? "track" : "tracks"}`);
+  if (a.discCount > 1) parts.push(plural(a.discCount, "disc"));
+  parts.push(plural(a.trackCount, "track"));
   const dur = totalDuration(a.duration);
   if (dur) parts.push(dur);
 
@@ -264,7 +282,8 @@ export async function renderArtists(view, { gen, setToolbar }) {
   await renderSimpleList(view, gen, () => api.artists({ limit: 200 }), (r) => r.artists,
     (a) => link(`/artist/${a.id}`, { class: "row" },
       el("span", { class: "row-title", text: a.name }),
-      el("span", { class: "row-meta", text: `${a.albumCount} albums · ${a.trackCount} tracks` })),
+      el("span", { class: "row-meta",
+        text: `${plural(a.albumCount, "album")} · ${plural(a.trackCount, "track")}` })),
     "No artists yet");
 }
 
@@ -288,7 +307,7 @@ export async function renderArtist(view, { id, setToolbar }) {
     el("div", { class: "detail-head" },
       el("h2", { class: "detail-title", text: d.artist.name }),
       el("p", { class: "muted small",
-        text: `${d.artist.albumCount} albums · ${d.artist.trackCount} tracks` }))));
+        text: `${plural(d.artist.albumCount, "album")} · ${plural(d.artist.trackCount, "track")}` }))));
   const about = aboutBlock(d.about, { title: "About" });
   if (about) view.appendChild(about);
   const grid = el("div", { class: "grid" });
@@ -312,10 +331,63 @@ export function renderComposers(view, ctx) {
 async function renderAxis(view, { gen, setToolbar }, fetcher, kind, emptyTitle, emptyDetail) {
   setToolbar(null);
   await renderSimpleList(view, gen, () => fetcher({ limit: 200 }), (r) => r.entries,
-    (e) => link(`/albums?${kind}=${e.id}`, { class: "row" },
+    (e) => link(`/${kind}/${e.id}`, { class: "row" },
       el("span", { class: "row-title", text: e.name }),
-      el("span", { class: "row-meta", text: `${e.albumCount} albums · ${e.trackCount} tracks` })),
+      el("span", { class: "row-meta",
+        text: `${plural(e.albumCount, "album")} · ${plural(e.trackCount, "track")}` })),
     emptyTitle, emptyDetail);
+}
+
+/**
+ * One genre's or one composer's albums.
+ *
+ * `/genre/{id}` and `/composer/{id}` were registered server-side and
+ * claimed by PLAYER_HEADS, but boot.js's route table had no case for
+ * either — so both fell through to the album grid, unfiltered and
+ * titled "Albums", with no sign of which genre had been clicked.
+ *
+ * Implemented as the album grid with the axis pinned rather than as a
+ * separate view: the grid already has the paging, the toolbar and the
+ * tile, and the only thing missing was the filter and a name for it.
+ * The axis id is taken from the PATH, so it survives a sort change and
+ * cannot be dropped by a toolbar rebuild.
+ */
+export async function renderAxisAlbums(view, ctx, kind) {
+  const id = ctx.id;
+  if (!id) return renderAlbums(view, ctx);
+  const params = new URLSearchParams(ctx.params);
+  params.set(kind, id);
+
+  // The label lookup is a second round trip, so the route can change
+  // under it. api.genres/api.composers share the "axis" key and so abort
+  // each OTHER, but navigating to a DIFFERENT section does not — the
+  // fetch completes and setAxisTitle would then stamp a genre name onto
+  // whatever page the reader is now looking at. The generation counter
+  // is what route() bumps on every navigation, so comparing it is the
+  // reliable test rather than relying on which requests happen to share
+  // a key.
+  const myGen = ctx.gen();
+  let label = "";
+  try {
+    const r = await (kind === "genre" ? api.genres({ limit: 200 }) : api.composers({ limit: 200 }));
+    if (ctx.gen() !== myGen) return;
+    label = (r.entries || []).find((e) => e.id === id)?.name || "";
+  } catch (e) {
+    if (isAborted(e) || ctx.gen() !== myGen) return;
+    // A missing label costs a heading, never the albums — the grid below
+    // is driven by the id, not the name.
+    label = "";
+  }
+  if (label) setAxisTitle(label);
+  return renderAlbums(view, { ...ctx, params, scopeLabel: label });
+}
+
+/** Retitle the page once the axis name is known. */
+function setAxisTitle(label) {
+  const h = document.getElementById("player-title");
+  if (h) h.textContent = label;
+  const base = document.title.split(" — ").slice(1).join(" — ");
+  document.title = base ? `${label} — ${base}` : label;
 }
 
 async function renderSimpleList(view, gen, fetch, pick, make, emptyTitle, emptyDetail) {
@@ -383,7 +455,11 @@ export async function renderPlaylists(view, { setToolbar }) {
   await renderSimpleList(view, () => 0, () => api.playlists(), (r) => r.playlists || r || [],
     (p) => el("div", { class: "row" },
       el("span", { class: "row-title", text: p.name || p.id }),
-      el("span", { class: "row-meta", text: `${p.itemCount ?? 0} tracks` })),
+      // trackCount, NOT itemCount: /api/playlists emits trackCount (a SQL
+      // COUNT over playlist_items) and /api/smart-playlists emits
+      // itemCount. This row was written against the mixes row below and
+      // inherited the wrong key, so every playlist read "0 tracks".
+      el("span", { class: "row-meta", text: plural(p.trackCount ?? 0, "track") })),
     "No playlists backed up",
     "Playlists appear here when a paired device has playlist backup switched on.");
 }
@@ -399,7 +475,7 @@ export async function renderMixes(view, { setToolbar, mixesEnabled }) {
   await renderSimpleList(view, () => 0, () => api.mixes(), (r) => r.playlists || r || [],
     (m) => el("div", { class: "row" },
       el("span", { class: "row-title", text: m.title || m.slug }),
-      el("span", { class: "row-meta", text: `${m.itemCount ?? 0} tracks` })),
+      el("span", { class: "row-meta", text: plural(m.itemCount ?? 0, "track") })),
     "No mixes generated yet",
     "Mixes are rebuilt periodically once there is listening history to work from.");
 }

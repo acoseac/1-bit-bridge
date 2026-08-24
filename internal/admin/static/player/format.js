@@ -30,6 +30,12 @@ const QUALITY_LABELS = {
   unknown: "",
 };
 
+/** "1 album" / "2 albums" — English -s pluralisation, which covers
+ * every noun the player counts (album, track, disc, mix). */
+export function plural(n, word) {
+  return `${n} ${n === 1 ? word : word + "s"}`;
+}
+
 export function qualityLabel(q) {
   return QUALITY_LABELS[q] ?? "";
 }
