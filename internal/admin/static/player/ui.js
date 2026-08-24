@@ -114,6 +114,41 @@ export function onVisible(sentinel, onHit) {
   return () => io.disconnect();
 }
 
+/**
+ * The A–Z jump rail.
+ *
+ * The server sends `buckets` on the FIRST page only, computed after the
+ * filter and sort, so a letter's `offset` is an index into the CURRENT
+ * result set. Jumping therefore means re-fetching at that offset, not
+ * scrolling: the target is usually far past the pages loaded so far.
+ *
+ * Letters with nothing behind them render as disabled buttons rather
+ * than being omitted — a rail that changes length as you filter is
+ * harder to hit than one that stays put.
+ *
+ * Real <button>s, so keyboard and screen-reader support come free. The
+ * same reasoning that put a real <input type="range"> in the scrubber.
+ */
+const RAIL_LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+
+export function alphabetRail(buckets, onJump) {
+  if (!Array.isArray(buckets) || buckets.length === 0) return null;
+  const byKey = new Map(buckets.map((b) => [b.key, b]));
+  const rail = el("nav", { class: "az-rail", attrs: { "aria-label": "Jump to letter" } });
+  for (const letter of RAIL_LETTERS) {
+    const b = byKey.get(letter);
+    const btn = el("button", {
+      class: "az-letter", text: letter,
+      attrs: b
+        ? { type: "button", title: `${b.count} under ${letter}` }
+        : { type: "button", disabled: "", "aria-disabled": "true" },
+    });
+    if (b) btn.addEventListener("click", () => onJump(b));
+    rail.appendChild(btn);
+  }
+  return rail;
+}
+
 /** Announce a route change to assistive tech. */
 export function announce(text) {
   const live = document.getElementById("player-live");
