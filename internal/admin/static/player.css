@@ -235,7 +235,14 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   text-decoration: none; color: inherit;
 }
 .row:hover { background: var(--bg-elev); }
-.row-title { font-size: 0.92rem; }
+/* flex 1 1 auto so the title absorbs the row's slack. .row is a flex
+ * row with space-between, which puts a THIRD child in the middle —
+ * coverage marks floating in the gap at a different horizontal position
+ * on every row. Letting the title take the slack packs coverage and
+ * meta together on the right, where they read as one column. Two-child
+ * rows (search hits, artists) are unaffected: the title absorbing the
+ * slack puts the meta exactly where space-between already had it. */
+.row-title { font-size: 0.92rem; flex: 1 1 auto; min-width: 0; }
 .row-meta { font-size: 0.8rem; color: var(--fg-muted); white-space: nowrap; }
 
 /* ---- Detail ---- */
@@ -488,14 +495,6 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 
 /* ---- Folder-tree coverage marks ---- */
 
-/* .row is a flex row with space-between, which puts a third child in
- * the MIDDLE — coverage marks floating in the gap, at a different
- * horizontal position on every row. Letting the title take the slack
- * instead packs coverage and meta together on the right, where they
- * read as one column. Two-child rows (search hits, artists) are
- * unaffected: the title absorbing the slack puts the meta exactly where
- * space-between already had it. */
-.row-title { flex: 1 1 auto; min-width: 0; }
 .row-coverage { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
 .row-cov {
   font-size: 0.68rem; font-weight: 650; letter-spacing: .03em;

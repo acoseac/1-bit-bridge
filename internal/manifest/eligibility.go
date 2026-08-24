@@ -286,6 +286,16 @@ type EligibleKinds struct {
 	Optimize bool
 }
 
+// allEligibleKindsSQL is a named const for the same reason
+// trackProjectionsForPathsSQL is: every operand is already a constant,
+// but go:S2077 reads a concatenation in the query argument as an
+// assembled query.
+const allEligibleKindsSQL = `
+	SELECT t.path,
+	  CASE WHEN ` + upscaleCoveredOrEligibleSQL + ` THEN 1 ELSE 0 END,
+	  CASE WHEN ` + optimizeCoveredOrEligibleSQL + ` THEN 1 ELSE 0 END
+	FROM tracks t`
+
 // AllEligibleKinds returns the denominator membership for EVERY track.
 //
 // Whole-library because its caller is a FILTER: "albums that still need
@@ -300,12 +310,8 @@ type EligibleKinds struct {
 //
 // Read-only; no s.mu.
 func (s *Store) AllEligibleKinds(ctx context.Context, targetRate, targetBits int) (map[string]EligibleKinds, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.path,
-		  CASE WHEN `+upscaleCoveredOrEligibleSQL+` THEN 1 ELSE 0 END,
-		  CASE WHEN `+optimizeCoveredOrEligibleSQL+` THEN 1 ELSE 0 END
-		FROM tracks t
-	`, targetRate, targetBits, targetRate, targetBits)
+	rows, err := s.db.QueryContext(ctx, allEligibleKindsSQL,
+		targetRate, targetBits, targetRate, targetBits)
 	if err != nil {
 		return nil, fmt.Errorf("eligible kinds: %w", err)
 	}

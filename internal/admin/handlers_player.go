@@ -349,56 +349,19 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCover
 		}
 		return ""
 	}
-	quality := get("quality")
-	artistID := get("artist")
-	genreID := get("genre")
-	composerID := get("composer")
 
-	var allow map[string]struct{}
-	for _, spec := range []struct {
-		id   string
-		load func(string) ([]string, bool)
-	}{
-		{artistID, func(id string) ([]string, bool) {
-			a, ok := cat.ArtistByID(id)
-			return a.AlbumIDs, ok
-		}},
-		{genreID, func(id string) ([]string, bool) {
-			e, ok := cat.GenreByID(id)
-			return e.AlbumIDs, ok
-		}},
-		{composerID, func(id string) ([]string, bool) {
-			e, ok := cat.ComposerByID(id)
-			return e.AlbumIDs, ok
-		}},
-	} {
-		if spec.id == "" {
-			continue
-		}
-		if !playerIDPattern.MatchString(spec.id) {
-			return nil, errors.New("invalid id")
-		}
-		ids, ok := spec.load(spec.id)
-		if !ok {
-			// A filter naming something that isn't there yields an
-			// EMPTY result, not an error: the id may simply have aged
-			// out of a rebuilt snapshot.
-			return []int{}, nil
-		}
-		next := make(map[string]struct{}, len(ids))
-		for _, id := range ids {
-			if allow == nil {
-				next[id] = struct{}{}
-				continue
-			}
-			if _, in := allow[id]; in {
-				next[id] = struct{}{}
-			}
-		}
-		allow = next
+	allow, err := axisAllowSet(cat, get)
+	if err != nil {
+		return nil, err
+	}
+	if allow != nil && len(allow) == 0 {
+		// A filter naming something that isn't there yields an EMPTY
+		// result, not an error: the id may simply have aged out of a
+		// rebuilt snapshot.
+		return []int{}, nil
 	}
 
-	wantQuality, err := parseQualityFilter(quality)
+	wantQuality, err := parseQualityFilter(get("quality"))
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +374,7 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCover
 	// the filtered list from page 1 of the unfiltered one and report a
 	// total for the wrong set. A nil snapshot (build failed) drops the
 	// filter rather than silently returning everything OR nothing.
-	if wantVariants != nil && cov == nil {
+	if cov == nil {
 		wantVariants = nil
 	}
 
@@ -431,6 +394,58 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCover
 		idx = append(idx, i)
 	}
 	return idx, nil
+}
+
+// axisAllowSet intersects the artist / genre / composer filters into one
+// allowed-album set, or nil when none of them is present.
+//
+// A present filter naming an id the snapshot no longer has yields an
+// EMPTY (non-nil) set rather than an error — the caller reads that as
+// "no results", which is what an aged-out id should mean. nil and empty
+// are therefore different answers here and the caller distinguishes
+// them.
+func axisAllowSet(cat *librarycat.Catalog, get func(string) string) (map[string]struct{}, error) {
+	var allow map[string]struct{}
+	for _, spec := range []struct {
+		id   string
+		load func(string) ([]string, bool)
+	}{
+		{get("artist"), func(id string) ([]string, bool) {
+			a, ok := cat.ArtistByID(id)
+			return a.AlbumIDs, ok
+		}},
+		{get("genre"), func(id string) ([]string, bool) {
+			e, ok := cat.GenreByID(id)
+			return e.AlbumIDs, ok
+		}},
+		{get("composer"), func(id string) ([]string, bool) {
+			e, ok := cat.ComposerByID(id)
+			return e.AlbumIDs, ok
+		}},
+	} {
+		if spec.id == "" {
+			continue
+		}
+		if !playerIDPattern.MatchString(spec.id) {
+			return nil, errors.New("invalid id")
+		}
+		ids, ok := spec.load(spec.id)
+		if !ok {
+			return map[string]struct{}{}, nil
+		}
+		next := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			if allow == nil {
+				next[id] = struct{}{}
+				continue
+			}
+			if _, in := allow[id]; in {
+				next[id] = struct{}{}
+			}
+		}
+		allow = next
+	}
+	return allow, nil
 }
 
 // parseVariantFilter maps the `needs` token to a predicate over an

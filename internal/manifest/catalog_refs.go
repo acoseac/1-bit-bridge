@@ -416,9 +416,7 @@ func (s *Store) VariantPresenceForPaths(ctx context.Context, paths []string) (ma
 		if err != nil {
 			return nil, err
 		}
-		rows, err := s.db.QueryContext(ctx, variantPresenceSelect+`
-			 WHERE tv.source_path IN (SELECT value FROM json_each(?))
-			 GROUP BY tv.source_path`, string(blob))
+		rows, err := s.db.QueryContext(ctx, variantPresenceForPathsSQL, string(blob))
 		if err != nil {
 			return nil, fmt.Errorf("variant presence for paths: %w", err)
 		}
@@ -440,8 +438,7 @@ func (s *Store) VariantPresenceForPaths(ctx context.Context, paths []string) (ma
 // thousands of entries and a few MB. The caller caches it; see the
 // admin coverage snapshot.
 func (s *Store) AllVariantPresence(ctx context.Context) (map[string]VariantPresence, error) {
-	rows, err := s.db.QueryContext(ctx, variantPresenceSelect+`
-		 GROUP BY tv.source_path`)
+	rows, err := s.db.QueryContext(ctx, allVariantPresenceSQL)
 	if err != nil {
 		return nil, fmt.Errorf("variant presence: %w", err)
 	}
@@ -451,6 +448,21 @@ func (s *Store) AllVariantPresence(ctx context.Context) (map[string]VariantPrese
 	}
 	return out, nil
 }
+
+// The two statements are named consts rather than concatenated at the
+// call site. Both operands are constants either way and Go folds them
+// identically — but SonarCloud's go:S2077 reads a binary expression in
+// the query argument as an assembled query, and a MEDIUM-severity
+// security finding that is really a formatting preference is worse than
+// the extra name.
+const (
+	variantPresenceForPathsSQL = variantPresenceSelect + `
+		 WHERE tv.source_path IN (SELECT value FROM json_each(?))
+		 GROUP BY tv.source_path`
+
+	allVariantPresenceSQL = variantPresenceSelect + `
+		 GROUP BY tv.source_path`
+)
 
 const variantPresenceChunk = 400
 

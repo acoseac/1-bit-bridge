@@ -44,14 +44,24 @@ export async function renderAlbums(view, ctx) {
     countNoun: "album",
     label: scopeLabel,
     emptyTitle: "No albums here",
-    emptyDetail: needs !== "all"
-      ? "Every album that can take these already has them."
-      : Object.keys(scope).length
-        ? "Nothing here matches the current filter."
-        : quality === "all"
-          ? "Add a library root and run a scan."
-          : "Nothing in the library matches this quality filter.",
+    emptyDetail: emptyGridDetail({ needs, quality, scoped: Object.keys(scope).length > 0 }),
   });
+}
+
+/**
+ * Why the album grid is empty, in the terms of whatever narrowed it.
+ *
+ * The order is most-specific-first: a variant filter explains itself
+ * before an axis filter does, and an axis filter before a quality one,
+ * because that is the order the reader most recently touched them.
+ * "Add a library root" is the only answer that means the LIBRARY is
+ * empty rather than the view.
+ */
+function emptyGridDetail({ needs, quality, scoped }) {
+  if (needs !== "all") return "Every album that can take these already has them.";
+  if (scoped) return "Nothing here matches the current filter.";
+  if (quality !== "all") return "Nothing in the library matches this quality filter.";
+  return "Add a library root and run a scan.";
 }
 
 function albumTile(a) {
@@ -1032,13 +1042,17 @@ function folderSummary(r, path) {
     enabled: true,
     soxAvailable: true,
   };
-  const heading = el("p", { class: "muted small", text:
-    `${plural(total, "track")}${r.subtreeSizeBytes ? ` · ${bytes(r.subtreeSizeBytes)}` : ""}` });
+  const heading = el("p", { class: "muted small", text: tracksAndSize(total, r.subtreeSizeBytes) });
   const wrap = el("div", {}, heading);
   const panel = variantPanel(summary, { path }, rerenderView);
   if (panel) wrap.appendChild(panel);
   onVariantChange(rerenderView);
   return wrap;
+}
+
+/** "12 tracks · 1.2 GB", dropping the size when there isn't one. */
+function tracksAndSize(count, sizeBytes) {
+  return [plural(count, "track"), bytes(sizeBytes)].filter(Boolean).join(" · ");
 }
 
 function folderRow(f) {
@@ -1060,8 +1074,7 @@ function folderRow(f) {
   return link(`/folders?path=${encodeURIComponent(f.path)}`, { class: "row" },
     el("span", { class: "row-title", text: `📁 ${f.name}` }),
     marks,
-    el("span", { class: "row-meta", text:
-      `${plural(f.trackCount || 0, "track")}${f.totalSizeBytes ? ` · ${bytes(f.totalSizeBytes)}` : ""}` }));
+    el("span", { class: "row-meta", text: tracksAndSize(f.trackCount || 0, f.totalSizeBytes) }));
 }
 
 /**
