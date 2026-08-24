@@ -1363,6 +1363,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/player/genres", s.apiPlayerGenres)
 	mux.HandleFunc("GET /api/player/composers", s.apiPlayerComposers)
 	mux.HandleFunc("GET /api/player/stats", s.apiPlayerStats)
+	// Playlists and smart mixes for the player. Separate from the
+	// operator-facing /api/playlists and /api/smart-playlists, which are
+	// summaries-only by design: these carry cover refs and hydrate their
+	// tracks through the album path so they are actually playable.
+	mux.HandleFunc("GET /api/player/playlists", s.apiPlayerPlaylists)
+	mux.HandleFunc("GET /api/player/playlists/{id}", s.apiPlayerPlaylistDetail)
+	mux.HandleFunc("GET /api/player/mixes", s.apiPlayerMixes)
+	mux.HandleFunc("GET /api/player/mixes/{slug}", s.apiPlayerMixDetail)
+	mux.HandleFunc("GET /api/library/collection-cover/{scope}/{key}", s.apiPlayerCollectionCover)
 	mux.HandleFunc("GET /api/player/search", s.apiPlayerSearch)
 	// Byte routes. No separate HEAD registration is needed — Go's
 	// ServeMux matches a HEAD request against a GET pattern, verified

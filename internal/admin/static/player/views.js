@@ -2,7 +2,7 @@
 // container it is handed; each is responsible for its own loading and
 // error states.
 
-import { api, coverURL, artistImageURL, bookletURL, downloadURL, isAborted } from "./api.js";
+import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL, isAborted } from "./api.js";
 import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason } from "./format.js";
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock } from "./ui.js";
 import * as audio from "./audio.js";
@@ -212,23 +212,36 @@ function bookletLink(booklet) {
       : null);
 }
 
-function trackList(tracks, albumArt) {
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.collection] - render as an ordered COLLECTION
+ *   rather than an album: no disc headings, and rows numbered by their
+ *   position in the list.
+ *
+ *   A playlist spanning six albums is not an album. Disc headings would
+ *   punctuate it with "Disc 1" wherever a member happened to come from a
+ *   multi-disc release, and album track numbers would run 3, 1, 8, 2 —
+ *   both true of the underlying files and both meaningless here, where
+ *   the ORDER is the thing the user chose.
+ */
+function trackList(tracks, albumArt, opts = {}) {
   const list = el("ol", { class: "tracks" });
   let disc = null;
   tracks.forEach((t, i) => {
-    if (t.disc && t.disc !== disc) {
+    if (!opts.collection && t.disc && t.disc !== disc) {
       disc = t.disc;
       list.appendChild(el("li", { class: "track-disc", text: `Disc ${disc}` }));
     }
-    list.appendChild(trackRow(t, i, tracks, albumArt));
+    list.appendChild(trackRow(t, i, tracks, albumArt, opts));
   });
   return list;
 }
 
-function trackRow(t, i, all, albumArt) {
+function trackRow(t, i, all, albumArt, opts = {}) {
   const playable = !t.play || t.play.kind !== "none";
   const row = el("li", { class: `track${playable ? "" : " track-unplayable"}` });
-  row.appendChild(el("span", { class: "track-num", text: t.track ? String(t.track) : String(i + 1) }));
+  const num = opts.collection ? i + 1 : (t.track || i + 1);
+  row.appendChild(el("span", { class: "track-num", text: String(num) }));
   const title = el("button", {
     class: "track-title", text: t.title || t.path,
     attrs: playable ? {} : { "aria-disabled": "true", "aria-describedby": "why-" + i },
@@ -574,21 +587,11 @@ export async function renderFavorites(view, { setToolbar }) {
 export async function renderPlaylists(view, ctx) {
   ctx.setToolbar(null);
   await renderPagedList(view, ctx, {
-    // Neither of these endpoints paginates, so offset is unused and the
-    // engine stops after one short page. Routed through it anyway for
-    // the generation guard: these two used to pass `() => 0` as gen(),
-    // which makes chunkAppend's stale-render check inert — a fast
-    // navigation away mid-render could interleave rows into the next
-    // view.
     fetchPage: () => api.playlists(),
-    pick: (r) => r.playlists || r || [],
-    make: (p) => el("div", { class: "row" },
-      el("span", { class: "row-title", text: p.name || p.id }),
-      // trackCount, NOT itemCount: /api/playlists emits trackCount (a SQL
-      // COUNT over playlist_items) and /api/smart-playlists emits
-      // itemCount. This row was written against the mixes row below and
-      // inherited the wrong key, so every playlist read "0 tracks".
-      el("span", { class: "row-meta", text: plural(p.trackCount ?? 0, "track") })),
+    pick: (r) => r.collections || [],
+    make: (c) => collectionTile(c, `/playlist/${c.id}`, "playlist"),
+    containerClass: "grid",
+    countNoun: "playlist",
     emptyTitle: "No playlists backed up",
     emptyDetail: "Playlists appear here when a paired device has playlist backup switched on.",
   });
@@ -605,13 +608,203 @@ export async function renderMixes(view, ctx) {
   }
   await renderPagedList(view, ctx, {
     fetchPage: () => api.mixes(),
-    pick: (r) => r.playlists || r || [],
-    make: (m) => el("div", { class: "row" },
-      el("span", { class: "row-title", text: m.title || m.slug }),
-      el("span", { class: "row-meta", text: plural(m.itemCount ?? 0, "track") })),
+    pick: (r) => r.collections || [],
+    make: (c) => collectionTile(c, `/mix/${c.id}`, "smartmix"),
+    containerClass: "grid",
+    countNoun: "mix",
     emptyTitle: "No mixes generated yet",
     emptyDetail: "Mixes are rebuilt periodically once there is listening history to work from.",
   });
+}
+
+/**
+ * A playlist or smart-mix tile.
+ *
+ * Artwork is a ladder, not a single source: an operator-uploaded cover
+ * wins outright; otherwise a 2x2 mosaic of the collection's leading
+ * DISTINCT album covers; otherwise a single cover when the collection
+ * spans fewer than four albums; otherwise the empty-cover glyph. The
+ * server has already dropped members with no artwork, so a quadrant is
+ * never a hole.
+ */
+function collectionTile(c, href, scope) {
+  return link(href, { class: "tile" },
+    collectionArt(c, scope),
+    el("div", { class: "tile-body" },
+      el("span", { class: "tile-title", text: c.name || c.id }),
+      el("span", { class: "tile-sub", text: c.subtitle || plural(c.count ?? 0, "track") })));
+}
+
+function collectionArt(c, scope) {
+  if (c.hasCover) return cover(collectionCoverURL(scope, c.id), c.name || "");
+  const refs = Array.isArray(c.covers) ? c.covers : [];
+  if (refs.length >= 4) {
+    const box = el("div", { class: "cover cover-mosaic" });
+    for (const ref of refs.slice(0, 4)) {
+      box.appendChild(el("img", {
+        attrs: { src: coverURL(ref, 250), alt: "", loading: "lazy", decoding: "async" },
+      }));
+    }
+    return box;
+  }
+  return cover(refs.length ? coverURL(refs[0], 500) : null, c.name || "");
+}
+
+// ---- Playlist / mix detail ----
+
+export async function renderPlaylistDetail(view, ctx) {
+  await renderCollectionDetail(view, ctx, {
+    fetch: () => api.playlist(ctx.id),
+    scope: "playlist",
+    backHref: "/playlists",
+    backLabel: "Playlists",
+  });
+}
+
+export async function renderMixDetail(view, ctx) {
+  await renderCollectionDetail(view, ctx, {
+    fetch: () => api.mix(ctx.id),
+    scope: "smartmix",
+    backHref: "/mixes",
+    backLabel: "Smart Mixes",
+    actions: mixActions,
+  });
+}
+
+async function renderCollectionDetail(view, ctx, opts) {
+  ctx.setToolbar(null);
+  clear(view);
+  view.appendChild(spinner());
+  let d;
+  try {
+    d = await opts.fetch();
+  } catch (e) {
+    if (isAborted(e)) return;
+    clear(view);
+    view.appendChild(errorState(e));
+    return;
+  }
+  clear(view);
+  const c = d.collection;
+  const tracks = d.tracks || [];
+  setAxisTitle(c.name || c.id);
+
+  const art = c.hasCover
+    ? collectionCoverURL(opts.scope, c.id)
+    : (c.covers?.length ? coverURL(c.covers[0], 500) : null);
+
+  const stats = [plural(c.count ?? tracks.length, "track"), totalDuration(
+    tracks.reduce((n, t) => n + (t.duration || 0), 0))].filter(Boolean).join(" · ");
+
+  const head = el("div", { class: "detail-head" },
+    el("h2", { class: "detail-title", text: c.name || c.id }),
+    c.subtitle ? el("p", { class: "detail-artist", text: c.subtitle }) : null,
+    el("p", { class: "detail-stats muted small", text: stats }),
+    // Members that could not be turned into playable rows: another
+    // bridge's tracks, or tracks removed since the backup. Said out
+    // loud, because the count above includes them and a silent
+    // discrepancy reads as a bug.
+    d.unresolved > 0
+      ? el("p", { class: "muted small",
+          text: `${plural(d.unresolved, "track")} not in this library — from another bridge, or removed since.` })
+      : null,
+    collectionActions(tracks, art),
+    link(opts.backHref, { class: "btn btn-quiet", text: `← ${opts.backLabel}` }));
+
+  if (opts.actions) head.appendChild(opts.actions(c, view, ctx));
+
+  view.appendChild(el("div", { class: "detail" },
+    el("div", { class: "detail-art" }, cover(art, c.name || "")), head));
+
+  if (tracks.length) {
+    view.appendChild(trackList(tracks, art, { collection: true }));
+  } else {
+    view.appendChild(emptyState("Nothing playable here",
+      "None of this collection's tracks resolve to a file in this library."));
+  }
+}
+
+function collectionActions(tracks, art) {
+  const playable = tracks.filter((t) => !t.play || t.play.kind !== "none");
+  const row = el("div", { class: "detail-actions" });
+  if (!playable.length) return row;
+  row.appendChild(el("button", {
+    class: "btn btn-primary", text: "Play",
+    on: { click: () => audio.playQueue(tracks, 0, { albumArt: art }) },
+  }));
+  row.appendChild(el("button", {
+    class: "btn", text: "Shuffle",
+    on: { click: () => { audio.setShuffle(true); audio.playQueue(tracks, 0, { albumArt: art }); } },
+  }));
+  row.appendChild(el("button", {
+    class: "btn", text: "Add to queue",
+    on: { click: () => audio.enqueue(tracks) },
+  }));
+  return row;
+}
+
+/**
+ * Regenerate / Save as playlist for a smart mix.
+ *
+ * Both call the EXISTING operator endpoints — no new backend. Feedback
+ * is inline and the buttons disable while in flight, because regenerate
+ * runs the whole engine and a second click would queue a second run.
+ */
+function mixActions(c, view, ctx) {
+  const status = el("p", { class: "muted small", attrs: { role: "status" } });
+  const box = el("div", { class: "detail-actions detail-actions-secondary" });
+
+  const regen = el("button", { class: "btn btn-quiet", text: "Regenerate" });
+  regen.addEventListener("click", async () => {
+    regen.disabled = true;
+    const was = regen.textContent;
+    regen.textContent = "Regenerating…";
+    status.textContent = "";
+    try {
+      const r = await api.regenerateMix(c.id);
+      if (r && r.removed) {
+        status.textContent = "This mix no longer has enough to draw from and was removed.";
+        return;
+      }
+      status.textContent = "Rebuilt.";
+      await window.__player?.route?.();
+    } catch (e) {
+      status.textContent = e.message || "Could not regenerate.";
+    } finally {
+      regen.disabled = false;
+      regen.textContent = was;
+    }
+  });
+  box.appendChild(regen);
+
+  const save = el("button", { class: "btn btn-quiet", text: "Save as playlist" });
+  save.addEventListener("click", () => {
+    if (box.querySelector(".save-form")) return;
+    const input = el("input", {
+      class: "toolbar-select save-name",
+      attrs: { type: "text", value: c.name || c.id, "aria-label": "Playlist name" },
+    });
+    const confirm = el("button", { class: "btn btn-primary", text: "Save" });
+    const form = el("form", { class: "save-form" }, input, confirm);
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      confirm.disabled = true;
+      try {
+        const r = await api.saveMixAsPlaylist(c.id, input.value.trim() || c.name);
+        status.textContent = `Saved "${r?.name || input.value}" as a playlist.`;
+        form.remove();
+      } catch (e) {
+        status.textContent = e.message || "Could not save.";
+        confirm.disabled = false;
+      }
+    });
+    box.appendChild(form);
+    input.focus();
+    input.select();
+  });
+  box.appendChild(save);
+
+  return el("div", {}, box, status);
 }
 
 export async function renderFolders(view, { params, setToolbar }) {

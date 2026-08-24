@@ -17,7 +17,8 @@ import { el, clear, announce } from "./ui.js";
 import {
   renderAlbums, renderAlbum, renderArtists, renderArtist,
   renderGenres, renderComposers,
-  renderAxisAlbums, renderFavorites, renderPlaylists,
+  renderAxisAlbums, renderFavorites, renderPlaylists, renderPlaylistDetail,
+  renderMixDetail,
   renderMixes, renderFolders, renderSearch,
 } from "./views.js";
 
@@ -288,7 +289,9 @@ function route() {
     composer: ["Composer", () => renderAxisAlbums(view, ctx, "composer")],
     favorites: ["Favorites", () => renderFavorites(view, ctx)],
     playlists: ["Playlists", () => renderPlaylists(view, ctx)],
+    playlist: ["Playlist", () => renderPlaylistDetail(view, ctx)],
     mixes: ["Smart Mixes", () => renderMixes(view, ctx)],
+    mix: ["Mix", () => renderMixDetail(view, ctx)],
     folders: ["Folders", () => renderFolders(view, ctx)],
     search: ["Search", () => renderSearch(view, ctx)],
   };

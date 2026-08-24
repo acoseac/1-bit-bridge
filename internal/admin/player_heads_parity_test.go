@@ -89,20 +89,16 @@ func TestPlayerRoutesTableCoversEveryPlayerHead(t *testing.T) {
 	}
 }
 
-// knownRouteGaps are heads deliberately still falling through, so the
-// guard can be ACTIVE for everything else instead of waiting until the
-// last gap closes. Both entries are the playlist/mix views, which land
-// with the change that makes them clickable; that change empties this
-// map. An entry here is a tracked debt — the point of the map is that
-// the gap is visible in code rather than silently absent, which is
-// exactly how these four went unnoticed for the router's whole life.
+// knownRouteGaps are heads deliberately still falling through. It is
+// EMPTY, and the emptiness is the assertion: every registered player
+// route now has a route() case, so nothing silently renders the album
+// grid under someone else's title.
 //
-// Removing the last entry should leave the map empty, not delete it:
-// the emptiness is the assertion.
-var knownRouteGaps = map[string]bool{
-	"playlist": true,
-	"mix":      true,
-}
+// Kept rather than deleted so a future gap has to be added here
+// explicitly — a visible, reviewable line — instead of being introduced
+// by simply forgetting a case, which is how genre, composer, playlist
+// and mix all went unnoticed for the router's whole life.
+var knownRouteGaps = map[string]bool{}
 
 // routeTableBlockRe captures the body of route()'s dispatch literal. It
 // is anchored on the `const routes = {` declaration and stops at the
