@@ -40,6 +40,58 @@ export function qualityLabel(q) {
   return QUALITY_LABELS[q] ?? "";
 }
 
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"];
+
+/**
+ * "1.2 GB" — decimal units, matching the operator pages.
+ *
+ * Decimal rather than binary on purpose: these numbers sit beside disk
+ * free space, and every OS an operator reads that from reports decimal
+ * GB. A file the Finder calls 1.2 GB must not read as 1.1 GB here.
+ */
+export function bytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  let v = n;
+  let u = 0;
+  while (v >= 1000 && u < BYTE_UNITS.length - 1) {
+    v /= 1000;
+    u++;
+  }
+  // Sub-MB values are whole units; above that one decimal is the most
+  // precision worth showing beside a track title.
+  const digits = u < 2 ? 0 : 1;
+  return `${v.toFixed(digits)} ${BYTE_UNITS[u]}`;
+}
+
+const VARIANT_KIND_LABELS = {
+  upscale: "Hi-res",
+  optimize: "CarPlay",
+};
+
+/** The short label on a variant chip. */
+export function variantKindLabel(kind) {
+  return VARIANT_KIND_LABELS[kind] ?? kind;
+}
+
+const SKIP_LABELS = {
+  dsd_bitstream: "DSD — variants not possible",
+  lossy_source: "Lossy source — variants not possible",
+  unknown_format: "Format unreadable — variants not possible",
+  no_decoder: "This host's sox cannot decode it",
+};
+
+/**
+ * Why a track can never gain a variant, or "" when nothing blocks it.
+ *
+ * Deliberately distinct from unplayableReason: that one is about THIS
+ * BROWSER, which says nothing about whether the bridge can transcode
+ * the file. A DSD track is both, an ALAC track is only the first, and a
+ * lossy track is only the second.
+ */
+export function variantSkipLabel(code) {
+  return SKIP_LABELS[code] ?? "";
+}
+
 /** "FLAC 96/24" — the chip under a now-playing title. */
 export function formatChip(track) {
   if (!track) return "";

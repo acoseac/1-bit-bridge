@@ -2841,9 +2841,51 @@ async function refreshUpscaleStats() {
 // Settings "Audio quality" tile and the Jobs page "Workers" grid. Each
 // renderer is a no-op on the page that lacks its container, so one event
 // feeds whichever surface is open.
+// The pool's lifetime completion count as of the last frame, so the
+// player can tell when generated variants have actually landed.
+// `null` until the first frame: the initial snapshot on a bridge that
+// has done work since boot must not read as a batch finishing now.
+let lastUpscaleCompleted = null;
+
 function applyUpscale(r) {
   applyUpscaleStats(r); // Settings tile
   renderWorkerGrid(r); // Jobs page live pipeline
+  notifyUpscaleProgress(r); // Player variant panels
+}
+
+/**
+ * Tell the player when generated variants have actually landed.
+ *
+ * The player rides this stream rather than opening its own — boot.js is
+ * loaded after app.js precisely so it can reuse this one EventSource.
+ *
+ * The signal is the pool's lifetime DONE + FAILED count advancing, not
+ * a busy→idle edge. The edge looked like the natural choice and is
+ * wrong: a small batch can start and finish between two frames, so the
+ * client never observes `busy` at all and the edge never fires. Two
+ * tracks on two workers reproduced it every time — the server had the
+ * variants, the panel sat at 0 / 2 until a manual reload.
+ *
+ * The counters do not have that hole, because SSE frames are
+ * diff-suppressed: a completion CHANGES the payload, so a completion
+ * always produces a frame, however brief the work was.
+ *
+ * `settled` additionally reports that the queue is now empty, which the
+ * player uses to bypass its own throttle — a long batch creeps under
+ * the throttle, and its final result must never be the update that gets
+ * throttled away.
+ */
+function notifyUpscaleProgress(r) {
+  const pool = r && r.pool;
+  if (!pool) return;
+  const completed = (pool.done || 0) + (pool.failed || 0);
+  const idle = !(pool.inflight > 0 || pool.queueLen > 0);
+  const advanced = lastUpscaleCompleted !== null && completed > lastUpscaleCompleted;
+  lastUpscaleCompleted = completed;
+  if (!advanced) return;
+  window.dispatchEvent(new CustomEvent("bridge:upscale", {
+    detail: { settled: idle },
+  }));
 }
 
 // workerElapsedTimer ticks the per-worker elapsed labels locally (1 s) so

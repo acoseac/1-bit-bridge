@@ -3,9 +3,11 @@
 // error states.
 
 import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL, isAborted } from "./api.js";
-import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason } from "./format.js";
+import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason,
+         bytes, variantKindLabel, variantSkipLabel } from "./format.js";
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock } from "./ui.js";
 import * as audio from "./audio.js";
+import { variantPanel, onVariantChange } from "./variants.js";
 
 const PAGE = 60;
 
@@ -157,7 +159,29 @@ export async function renderAlbum(view, { id, setToolbar }) {
       d.booklet ? bookletLink(d.booklet) : null,
       about)));
 
+  // The callback is the DELETE path's refresh: deletion is synchronous,
+  // so its numbers are already true when the response lands. Generation
+  // deliberately does not use it — see variants.js.
+  view.appendChild(variantPanel(d.variants, { albumIds: [id] }, rerenderAlbum));
+  // Generation IS asynchronous, so the numbers just rendered are a
+  // snapshot of a moving target. app.js re-broadcasts the pool's
+  // progress from the console's existing SSE stream; re-rendering on it
+  // is what keeps the bars from sitting stale until a manual reload.
+  onVariantChange(rerenderAlbum);
+
   view.appendChild(trackList(d.tracks, art));
+}
+
+/**
+ * Re-run the album view in place.
+ *
+ * Dispatched through the shell's rerender event rather than calling
+ * renderAlbum directly: route() owns the generation counter that
+ * invalidates an in-flight render, and a direct call would paint over a
+ * view the user has already navigated away from.
+ */
+function rerenderAlbum() {
+  window.dispatchEvent(new CustomEvent("player:rerender"));
 }
 
 /**
@@ -176,6 +200,11 @@ function albumStatLine(a) {
   parts.push(plural(a.trackCount, "track"));
   const dur = totalDuration(a.duration);
   if (dur) parts.push(dur);
+
+  // Size joins the line rather than the chip: it is a fact about the
+  // files, like the track count, not a claim about their quality.
+  const size = bytes(a.sizeBytes);
+  if (size) parts.push(size);
 
   const line = el("p", { class: "detail-stats muted small", text: parts.join(" · ") });
   // Format rides as a chip rather than more grey text: it is the one
@@ -254,12 +283,58 @@ function trackRow(t, i, all, albumArt, opts = {}) {
     row.appendChild(el("span", { class: "chip chip-warn", text: unplayableReason(t), attrs: { id: "why-" + i } }));
   }
   row.appendChild(el("span", { class: "track-meta", text: formatChip(t) }));
+  row.appendChild(variantMarks(t));
+  row.appendChild(el("span", { class: "track-size", text: bytes(t.sizeBytes) }));
   row.appendChild(el("span", { class: "track-dur", text: duration(t.duration) }));
   row.appendChild(el("a", {
     class: "track-dl", text: "Download",
     attrs: { href: downloadURL(t.path), download: "" },
   }));
   return row;
+}
+
+/**
+ * The per-track variant marks.
+ *
+ * Two states are worth distinguishing and a third is not. A FRESH
+ * variant is a copy that will actually be served; a STALE one is a copy
+ * the serve path answers 410 for, so showing it as plain presence would
+ * promise something that does not exist. "Absent" gets no mark at all —
+ * a column of empty placeholders down a track list is noise, and the
+ * album-level bar above already says how many are missing.
+ *
+ * A track that can never take a variant says so once, in place of the
+ * marks, because a permanent impossibility is a different fact from a
+ * gap someone could close.
+ */
+function variantMarks(t) {
+  const wrap = el("span", { class: "track-variants" });
+  const skip = variantSkipLabel(t.variantSkip);
+  if (skip) {
+    wrap.appendChild(el("span", {
+      class: "track-variant-skip", text: "—", attrs: { title: skip },
+    }));
+    return wrap;
+  }
+  for (const v of t.variants || []) {
+    const label = variantKindLabel(v.kind);
+    wrap.appendChild(el("span", {
+      class: `track-variant${v.fresh ? "" : " track-variant-stale"}`,
+      text: label,
+      attrs: {
+        title: v.fresh
+          ? `${label} ${variantGeometry(v)}${v.sizeBytes ? ` · ${bytes(v.sizeBytes)}` : ""}`
+          : `${label} copy is out of date — the source changed after it was made`,
+      },
+    }));
+  }
+  return wrap;
+}
+
+function variantGeometry(v) {
+  if (!v.rateHz) return "";
+  const khz = (v.rateHz / 1000).toFixed(v.rateHz % 1000 ? 1 : 0);
+  return v.bits ? `${khz}/${v.bits}` : `${khz} kHz`;
 }
 
 // ---- Artists ----

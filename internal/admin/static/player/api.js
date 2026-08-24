@@ -171,3 +171,39 @@ export function artistImageURL(mbid, size) {
 export function bookletURL(mbid) {
   return mbid ? `/api/library/booklet/${encodeURIComponent(mbid)}` : null;
 }
+
+/**
+ * Variant generation and deletion, scoped by IDENTITY.
+ *
+ * The id forms exist because an album is not a folder: its directory is
+ * the common ancestor of its tracks and is routinely shared with other
+ * albums, so a path-scoped submit would enqueue the neighbours and a
+ * path-scoped delete would reclaim their sidecars. Sending the catalog
+ * id lets the server expand it against the same snapshot this page was
+ * rendered from — and keeps an artist with thousands of tracks to one
+ * short id on the wire.
+ */
+export function generateVariants(scope, kind) {
+  return postJSON("/api/upscale/batch", { ...scope, kind });
+}
+
+/**
+ * Delete is a DELETE with query parameters and no body — the shape the
+ * endpoint has always had, and the reason the scope travels as an id
+ * rather than a path list here too.
+ */
+export async function deleteVariants(scope, kind) {
+  const params = new URLSearchParams();
+  if (scope.albumIds) scope.albumIds.forEach((id) => params.append("albumId", id));
+  if (scope.artistId) params.set("artistId", scope.artistId);
+  if (kind) params.set("kind", kind);
+  const res = await fetch(`/api/upscale/variants?${params.toString()}`, { method: "DELETE" });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.json())?.message || "";
+    } catch { /* a non-JSON error body is not worth a second failure */ }
+    throw new Error(detail || `Request failed (${res.status})`);
+  }
+  return res.json();
+}

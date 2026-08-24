@@ -202,6 +202,13 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 		if dto.Play.Kind != playUniversal {
 			s.attachVariant(&dto.Play, p, variants[p])
 		}
+		// Independent of playback: what this track HAS, and whether it
+		// could ever have more. A universally-playable FLAC needs no
+		// substitute sidecar but may well own two.
+		dto.Variants = describeVariants(variants[p], row)
+		dto.VariantSkip = fundamentalSkipReason(
+			row.IsDSD, row.Codec, floatOrNil(row.SampleRate), intOrNil(row.BitsPerSample),
+			p, s.soxCanDecode())
 		out = append(out, dto)
 	}
 	return out, nil
@@ -488,4 +495,68 @@ func (s *Server) attachVariant(play *playerPlayabilityDTO, relPath string, rows 
 	play.VariantContentType = playerContentType(".flac")
 	play.VariantRateHz = v.SampleRate
 	play.VariantBits = v.BitsPerSample
+}
+
+// describeVariants turns the stored sidecar rows for one track into the
+// wire shape, newest-relevant kind first.
+//
+// Ordering is by KIND, not by whatever the store returned: the two
+// chips always appear in the same places, so a reader scanning a track
+// list is comparing like with like down the column.
+func describeVariants(rows []manifest.VariantRow, row manifest.CatalogTrackRow) []playerVariantDTO {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]playerVariantDTO, 0, len(rows))
+	for _, kind := range []struct{ prefix, name string }{
+		{manifest.VariantKindPrefixUpscaled + "-", variantKindUpscale},
+		{manifest.VariantKindPrefixOptimized + "-", variantKindOptimize},
+	} {
+		for _, v := range rows {
+			if !strings.HasPrefix(v.VariantID, kind.prefix) {
+				continue
+			}
+			out = append(out, playerVariantDTO{
+				Kind:      kind.name,
+				VariantID: v.VariantID,
+				RateHz:    v.SampleRate,
+				Bits:      v.BitsPerSample,
+				SizeBytes: v.SizeBytes,
+				// The scanner's record, not a live stat — see
+				// playerVariantDTO.
+				Fresh: v.SourceMTimeNS == row.MTimeNS && v.SourceSize == row.Size,
+			})
+		}
+	}
+	return out
+}
+
+// The kind vocabulary the batch / delete endpoints take. The store
+// spells the same distinction as an id PREFIX (`upscaled-` /
+// `optimized-`); keeping the two spellings apart in one place is what
+// stops a UI sending "upscaled" to an endpoint that wants "upscale".
+const (
+	variantKindUpscale  = "upscale"
+	variantKindOptimize = "optimize"
+)
+
+// floatOrNil / intOrNil adapt the catalog row's plain zero-means-absent
+// integers to fundamentalSkipReason's pointer parameters, which come
+// from the browse rows where the distinction between "no tag" and "zero"
+// survives. Zero reaches the skip classifier as absent either way, which
+// is the answer it wants: a track with no readable geometry is
+// "unknown_format".
+func floatOrNil(v int) *float64 {
+	if v <= 0 {
+		return nil
+	}
+	f := float64(v)
+	return &f
+}
+
+func intOrNil(v int) *int {
+	if v <= 0 {
+		return nil
+	}
+	return &v
 }
