@@ -344,22 +344,41 @@ func validateUpscaleTarget(targetRate, targetBits int) error {
 // filter, project size, disk pre-flight, batch row, enqueue. `path` is
 // the display label for the batch row, NOT a scope — the scope was
 // already resolved into `projections` by the caller.
-func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string, projections []manifest.TrackProjection, targetRate, targetBits int, outputDir string) (*SubmitResult, error) {
-	// Filter + project. Tracks with `HasVariant` already covered;
-	// tracks with zero source rate / bits are unknown-format and
-	// skipped (the operator pre-flight surfaced them separately).
-	type candidate struct {
-		path       string
-		absPath    string
-		size       int64
-		mtimeNS    int64
-		sampleRate int
-		bits       int
-	}
+// upscaleCandidates is what the eligibility walk produces: the tracks
+// to enqueue, the projected total, and how many were already covered.
+//
+// Mirrors optimizeCandidates on the CarPlay side. The upscale walk was
+// the only one still inline in its submit function, which is what made
+// that function the largest thing in this package.
+type upscaleCandidate struct {
+	path       string
+	absPath    string
+	size       int64
+	mtimeNS    int64
+	sampleRate int
+	bits       int
+}
+
+type upscaleCandidates struct {
+	cands          []upscaleCandidate
+	alreadyCovered int
+	totalProjected int64
+}
+
+// buildUpscaleCandidates filters projections through the upscale
+// eligibility gate, resolves absolute paths, and accumulates the
+// projected-size total.
+//
+// The gate order is load-bearing and is a lockstep mirror of
+// upscaleEligibleSQL — change one and change the other, or the
+// coverage bars stop agreeing with what a submit actually enqueues.
+// Pure helper: no side effects beyond logging.
+func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []manifest.TrackProjection, targetRate, targetBits int) upscaleCandidates {
+	// Tracks with `HasVariant` are already covered; tracks with zero
+	// source rate / bits are unknown-format and skipped (the operator
+	// pre-flight surfaces them separately).
 	var (
-		cands          []candidate
-		alreadyCovered int
-		totalProjected int64
+		out            upscaleCandidates
 		compressionFct = DefaultCompressionFactor(targetBits)
 		resolveErrors  int
 	)
@@ -369,7 +388,7 @@ func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string,
 	soxInfo := c.soxSnapshot()
 	for _, t := range projections {
 		if t.HasVariant {
-			alreadyCovered++
+			out.alreadyCovered++
 			continue
 		}
 		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
@@ -452,7 +471,7 @@ func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string,
 				"path", t.Path, "err", err)
 			continue
 		}
-		cands = append(cands, candidate{
+		out.cands = append(out.cands, upscaleCandidate{
 			path:       t.Path,
 			absPath:    absPath,
 			size:       t.Size,
@@ -460,13 +479,19 @@ func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string,
 			sampleRate: t.SampleRate,
 			bits:       t.BitsPerSample,
 		})
-		totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
+		out.totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
 			targetRate, targetBits, compressionFct)
 	}
 	if resolveErrors > 0 {
 		c.logger.Info("submit: filtered tracks with resolver failures",
-			"batchPath", path, "count", resolveErrors)
+			"batchPath", batchPath, "count", resolveErrors)
 	}
+	return out
+}
+
+func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string, projections []manifest.TrackProjection, targetRate, targetBits int, outputDir string) (*SubmitResult, error) {
+	picked := c.buildUpscaleCandidates(path, projections, targetRate, targetBits)
+	cands, alreadyCovered, totalProjected := picked.cands, picked.alreadyCovered, picked.totalProjected
 
 	available, err := c.diskPreflight(outputDir, totalProjected, "submit")
 	if err != nil {
