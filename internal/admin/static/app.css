@@ -1,9 +1,9 @@
 /* 1-bit bridge admin console — modern premium theme.
  *
- * Refined slate-base canvas with an elegant indigo accent. Replaces the flat
+ * Refined slate-base canvas with a muted old-gold accent. Replaces the flat
  * citrus look with an enterprise-grade UI design. Dark mode shifts the same
- * accent set against a near-black slate indigo void to preserve optimal
- * operator contrast.
+ * accent set against a near-black slate void to preserve optimal operator
+ * contrast.
  *
  * All token NAMES are preserved (--bg, --accent, --accent-hot, --accent-warm,
  * --danger, --warn, etc.) so every downstream rule reads through unchanged,
@@ -26,14 +26,32 @@
   --bg-elev: #f1f5f9;                /* slate-100 fields & elevated tokens */
   --fg: #0f172a;                     /* deep slate body text */
   --fg-muted: #64748b;               /* muted slate for descriptions */
-  --accent: #4f46e5;                 /* indigo — the single quiet accent */
+  /* Old gold, NOT a lighter one. --accent colours normal-size text
+   * (.detail-artist, .track-title:hover, .section-head), so it must clear
+   * 4.5:1 on all THREE light surfaces, not just white. Measured:
+   *   #9a7b3f -> 3.98 / 3.80 / 3.63  (fails everywhere)
+   *   #8e6f32 -> 4.70 / 4.49 / 4.29  (fails on --bg-elev)
+   *   #856428 -> 5.45 / 5.21 / 4.98  (clears all three)
+   * against --bg-panel / --bg / --bg-elev. It also lands nearest the
+   * indigo it replaced (6.29 / 6.01 / 5.74), so nothing downstream needed
+   * re-tuning, and it sits far enough from --accent-warm in LIGHTNESS
+   * that the accent and the warning never read as the same signal —
+   * which is the whole reason for a warm accent to be this dark. */
+  --accent: #856428;                 /* old gold — the single quiet accent */
   --accent-hot: #e11d48;             /* rose — retained for --danger derivation */
   --accent-warm: #d97706;            /* amber — warning / restart indicators */
   /* Pre-computed amber tint for legacy webviews that don't honor color-mix();
    * modern browsers progressively enhance. */
   --accent-warm-tint: #fef3c7;
-  --accent-soft: rgba(79, 70, 229, 0.08);
-  --accent-glow-color: #4f46e540;    /* ≈25% alpha — used by .brand-mark */
+  --accent-soft: rgba(133, 100, 40, 0.10);
+  /* Foreground for text sitting ON an accent FILL. It has to be a token
+   * because the readable choice flips with the theme: light mode fills
+   * with a dark gold and wants white, dark mode fills with a light sand
+   * and wants ink. The hardcoded `color: #fff` this replaces was already
+   * failing before the palette moved — white on indigo-400 measured
+   * 2.98:1 — and a light-accent palette takes that to 1.84:1. */
+  --accent-on: #ffffff;              /* 5.45:1 on --accent */
+  --accent-glow-color: #85642840;    /* ≈25% alpha — used by .brand-mark */
   --danger: #e11d48;
   --ok: #10b981;                     /* emerald — online / success */
   --warn: #d97706;                   /* amber — matched to --accent-warm */
@@ -46,12 +64,13 @@
   --_dark-bg-elev: #1e293b;
   --_dark-fg: #f8fafc;
   --_dark-fg-muted: #94a3b8;
-  --_dark-accent: #818cf8;           /* indigo-400 — readable on slate */
+  --_dark-accent: #d9bc7a;           /* warm sand — readable on slate */
   --_dark-accent-hot: #fb7185;
   --_dark-accent-warm: #fbbf24;
   --_dark-accent-warm-tint: #2e2204;
-  --_dark-accent-soft: rgba(129, 140, 248, 0.15);
-  --_dark-accent-glow-color: rgba(129, 140, 248, 0.3);
+  --_dark-accent-soft: rgba(217, 188, 122, 0.15);
+  --_dark-accent-on: #1a1205;        /* 10.09:1 on --_dark-accent */
+  --_dark-accent-glow-color: rgba(217, 188, 122, 0.3);
   --_dark-danger: #fb7185;
   --_dark-ok: #34d399;
   --_dark-warn: #fbbf24;
@@ -107,6 +126,7 @@
     --accent-warm: var(--_dark-accent-warm);
     --accent-warm-tint: var(--_dark-accent-warm-tint);
     --accent-soft: var(--_dark-accent-soft);
+    --accent-on: var(--_dark-accent-on);
     --accent-glow-color: var(--_dark-accent-glow-color);
     --danger: var(--_dark-danger);
     --ok: var(--_dark-ok);
@@ -128,6 +148,7 @@
   --accent-warm: var(--_dark-accent-warm);
   --accent-warm-tint: var(--_dark-accent-warm-tint);
   --accent-soft: var(--_dark-accent-soft);
+  --accent-on: var(--_dark-accent-on);
   --accent-glow-color: var(--_dark-accent-glow-color);
   --danger: var(--_dark-danger);
   --ok: var(--_dark-ok);
@@ -215,7 +236,7 @@ body.login-page {
   margin-top: 24px;
   padding: 12px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-on);
   border: none;
   border-radius: var(--radius);
   font-weight: 600;
@@ -688,7 +709,7 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
  * old control-panel idiom). */
 .btn.primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-on);
   border-color: var(--accent);
 }
 .btn.primary:hover {
@@ -705,7 +726,7 @@ table.rows tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, 
 .btn.primary:disabled:hover {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-on);
   box-shadow: none;
 }
 /* .destructive is an alias used in settings.html for the same visual intent
