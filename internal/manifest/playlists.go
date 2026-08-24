@@ -297,3 +297,46 @@ type AdminPlaylistSummary struct {
 	UpdatedAt      int64
 	TrackCount     int
 }
+
+// PlaylistHeadPaths returns the first `perPlaylist` LOCAL item paths of
+// every live playlist, keyed by playlist id.
+//
+// One query for the whole set, not one per playlist: the player's
+// playlist grid builds a mosaic from each playlist's leading covers, and
+// a GetPlaylist per tile would be N round trips to answer a question
+// about the first handful of rows.
+//
+// FOREIGN items (another bridge's tracks, carried as
+// origin_fingerprint + origin_path) are excluded: nothing here can
+// resolve them to a local album, so they cannot contribute artwork. They
+// still COUNT — track_count comes from ListAllPlaylistsForAdmin and
+// includes them — so a playlist of entirely foreign refs shows its real
+// size with no mosaic, which is the honest rendering.
+func (s *Store) PlaylistHeadPaths(ctx context.Context, perPlaylist int) (map[string][]string, error) {
+	if perPlaylist <= 0 {
+		return map[string][]string{}, nil
+	}
+	const q = `SELECT i.playlist_id, i.path
+	             FROM playlist_items i
+	             JOIN playlists p ON p.id = i.playlist_id
+	            WHERE p.deleted = 0 AND i.path IS NOT NULL AND i.path != ''
+	              AND i.position < ?
+	         ORDER BY i.playlist_id, i.position`
+	rows, err := s.db.QueryContext(ctx, q, perPlaylist)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string][]string{}
+	for rows.Next() {
+		var id, p string
+		if err := rows.Scan(&id, &p); err != nil {
+			return nil, err
+		}
+		out[id] = append(out[id], p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

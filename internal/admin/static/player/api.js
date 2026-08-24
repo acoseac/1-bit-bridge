@@ -60,13 +60,52 @@ export const api = {
   browse: (path, cursor) =>
     getJSON(`/api/library/browse?path=${encodeURIComponent(path || "")}` +
       (cursor ? `&afterFolder=${encodeURIComponent(cursor)}` : ""), { key: "browse" }),
-  playlists: () => getJSON("/api/playlists", { key: "playlists" }),
-  playlistDetail: (device, id) =>
-    getJSON(`/api/playlists/detail?device=${encodeURIComponent(device)}&id=${encodeURIComponent(id)}`,
-      { key: "detail" }),
+  // The player's own collection endpoints, not the operator ones:
+  // /api/playlists and /api/smart-playlists are summaries-only by
+  // design, so they carry no cover refs and nothing playable.
+  playlists: () => getJSON("/api/player/playlists", { key: "playlists" }),
+  playlist: (id) => getJSON(`/api/player/playlists/${encodeURIComponent(id)}`, { key: "detail" }),
+  mixes: () => getJSON("/api/player/mixes", { key: "mixes" }),
+  mix: (slug) => getJSON(`/api/player/mixes/${encodeURIComponent(slug)}`, { key: "detail" }),
   favorites: () => getJSON("/api/favorites", { key: "favorites" }),
-  mixes: () => getJSON("/api/smart-playlists", { key: "mixes" }),
+
+  // Mix actions reuse the operator endpoints unchanged — no new backend.
+  regenerateMix: (slug) =>
+    postJSON(`/api/smart-playlists/${encodeURIComponent(slug)}/regenerate`),
+  saveMixAsPlaylist: (slug, name) =>
+    postJSON(`/api/smart-playlists/${encodeURIComponent(slug)}/save-as-playlist`, { name }),
 };
+
+/**
+ * POST with a JSON body.
+ *
+ * Always sends Content-Type: application/json, per the house convention
+ * — note csrfGuard does NOT 415 a bodyless POST (it gates the
+ * Content-Type check on ContentLength != 0 and lets empty bodies
+ * through), so the header is convention here rather than a requirement.
+ * It becomes a requirement the moment a body IS sent, which
+ * save-as-playlist does.
+ */
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.json())?.message || "";
+    } catch { /* a non-JSON error body is not worth a second failure */ }
+    throw new Error(detail || `Request failed (${res.status})`);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+/** Cover URL for a playlist or smart-mix operator upload. */
+export function collectionCoverURL(scope, key) {
+  return `/api/library/collection-cover/${encodeURIComponent(scope)}/${encodeURIComponent(key)}`;
+}
 
 function qs(params = {}) {
   const u = new URLSearchParams();

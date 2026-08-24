@@ -144,6 +144,27 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   color: var(--accent); background: var(--accent-soft); opacity: 1;
 }
 
+/* ---- Collection tiles (playlists, smart mixes) ---- */
+
+/* A 2x2 of the collection's leading DISTINCT album covers. The server
+ * drops members with no artwork before it picks four, so a quadrant is
+ * never a hole; fewer than four falls back to a single cover in JS
+ * rather than drawing a partial grid. */
+.cover-mosaic {
+  display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+  gap: 1px;
+}
+.cover-mosaic img {
+  width: 100%; height: 100%; object-fit: cover;
+  opacity: 1; /* no per-image fade: four staggered fades read as a glitch */
+}
+
+/* The secondary action row (regenerate / save) sits under the primary
+ * transport, quieter and wrapping on narrow screens. */
+.detail-actions-secondary { margin-top: var(--space-2); flex-wrap: wrap; }
+.save-form { display: flex; gap: var(--space-2); align-items: center; }
+.save-name { min-width: 12rem; }
+
 /* ---- A–Z jump rail ---- */
 
 .az-rail {
