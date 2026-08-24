@@ -94,6 +94,134 @@ func adminArtworkLadderCandidates(size int) []int {
 	return candidates
 }
 
+// artworkOversize{Numerator,Denominator} express the ratio at which a
+// stored tier is "materially bigger than asked for" and worth a one-off
+// re-encode: 6/5, i.e. 20%. Below it a decode would trade real CPU for a
+// few percent of bytes; at 1200-for-500 (2.4x) or 600-for-250 (2.4x) it
+// pays for itself many times over.
+const (
+	artworkOversizeNumerator   = 6
+	artworkOversizeDenominator = 5
+)
+
+// deriveThumb derives `size` from `src` and returns the path to serve.
+//
+// A failure here must NEVER turn a cached cover into a 404 — the caller
+// falls back to serving the source, which is exactly the pre-existing
+// behaviour. That is why the only outcomes are (path, true) and
+// (_, false), with the reason logged rather than propagated.
+func (s *Server) deriveThumb(key string, size int, src string) (string, bool) {
+	if s.deps.ArtworkThumbPath == nil || !allowedThumbTier(size) {
+		return "", false
+	}
+	dst := s.deps.ArtworkThumbPath(key, size)
+	if dst == "" {
+		return "", false
+	}
+	_, err, _ := s.thumbSF.Do(dst, func() (any, error) {
+		return nil, manifest.EnsureThumb(src, dst, size)
+	})
+	switch {
+	case err == nil:
+		return dst, true
+	case manifest.ErrThumbNotNeeded(err):
+		// Nothing smaller to give.
+	default:
+		logger.Warn("derive artwork thumb", "key", key, "size", size, "err", err)
+	}
+	return "", false
+}
+
+// resolveArtworkTier returns a path to serve for `key` at `size`, and
+// whether one was found.
+//
+// The cover cache stores ONE tier per image, so before this the ladder
+// simply fell back: `?size=250` matched nothing and served the 1200 px
+// source, and a browser album grid pulled ~190 KB per ~190 px tile. Here
+// an exact hit still wins outright; otherwise a LARGER tier is derived
+// down once into `<artworkDir>/thumbs/` and served from then on. Only
+// when nothing larger exists does it fall back down the ladder, which is
+// the pre-existing behaviour and the reason a size-specific miss never
+// reports a release as coverless.
+//
+// Derivation is single-flighted on (key, size): a grid paint is a dozen
+// DIFFERENT covers so the flights rarely coalesce, but a reload landing
+// mid-derive must attach rather than decode the same image twice.
+//
+// Derive targets are restricted to `adminArtworkServeSizes` by the
+// caller, so `?size=1..4096` cannot spray 4096 files onto disk. `key`
+// has already passed the route's bounded-alphabet pattern; thumbPath
+// re-validates rather than trusting that, since it is what joins a path.
+func (s *Server) resolveArtworkTier(key string, size int, srcPath func(int) string) (string, bool) {
+	if p := srcPath(size); statOK(p) {
+		// An exact FILENAME match is not an exact SIZE match. Local
+		// covers are all written under a `-500` suffix regardless of
+		// their real dimensions, so trusting the name here is what let
+		// `?size=500` answer with a 1200 px / 255 KB JPEG. Read the
+		// header — a few KB, and these responses are `immutable`, so it
+		// happens about once per browser per cover — and derive when the
+		// file materially overshoots.
+		if px, ok := manifest.ArtworkLongestSide(p); !ok || px < size*artworkOversizeNumerator/artworkOversizeDenominator {
+			return p, true
+		}
+		if derived, ok := s.deriveThumb(key, size, p); ok {
+			return derived, true
+		}
+		return p, true
+	}
+	if s.deps.ArtworkThumbPath != nil && allowedThumbTier(size) {
+		if src, ok := largestSourceAbove(size, srcPath); ok {
+			if derived, ok := s.deriveThumb(key, size, src); ok {
+				return derived, true
+			}
+		}
+	}
+	for _, candidate := range adminArtworkLadderCandidates(size) {
+		if p := srcPath(candidate); statOK(p) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// largestSourceAbove finds the smallest stored tier that is still
+// strictly larger than size — the cheapest source to downscale from.
+func largestSourceAbove(size int, srcPath func(int) string) (string, bool) {
+	best, bestPx := "", 0
+	for _, candidate := range adminArtworkServeSizes {
+		if candidate <= size {
+			continue
+		}
+		p := srcPath(candidate)
+		if !statOK(p) {
+			continue
+		}
+		if best == "" || candidate < bestPx {
+			best, bestPx = p, candidate
+		}
+	}
+	return best, best != ""
+}
+
+// allowedThumbTier reports whether size is one of the serve tiers, which
+// is what bounds how many derived files can ever exist per image.
+func allowedThumbTier(size int) bool {
+	for _, s := range adminArtworkServeSizes {
+		if s == size {
+			return true
+		}
+	}
+	return false
+}
+
+func statOK(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // libMetaCacheTTL matches the composition/enrichment-meta snapshot
 // TTLs — the refs walk is the same json_extract cost class.
 const libMetaCacheTTL = 60 * time.Second
@@ -925,15 +1053,14 @@ func (s *Server) apiLibraryArtwork(w http.ResponseWriter, r *http.Request) {
 		size = n
 	}
 	cc := artworkCacheControl(mbid, hasVersionParam)
-	for _, candidate := range adminArtworkLadderCandidates(size) {
-		path := s.deps.ArtworkPath(mbid, candidate)
-		if _, err := os.Stat(path); err != nil {
-			continue
-		}
-		serveCacheFile(w, r, path, "image/jpeg", cc)
+	path, ok := s.resolveArtworkTier(mbid, size, func(px int) string {
+		return s.deps.ArtworkPath(mbid, px)
+	})
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "not cached")
 		return
 	}
-	writeError(w, http.StatusNotFound, "not_found", "not cached")
+	serveCacheFile(w, r, path, "image/jpeg", cc)
 }
 
 // apiLibraryArtistImage handles GET /api/library/artist-image/{mbid}.
@@ -941,6 +1068,14 @@ func (s *Server) apiLibraryArtwork(w http.ResponseWriter, r *http.Request) {
 // portraits are enricher-fetched (Deezer), have no version column,
 // and change only via the operator's own retry; ServeContent's mtime
 // revalidation covers replacement after expiry.
+//
+// `?size=` is optional and derives a smaller tier when asked (the round
+// artist tiles want ~250 px, not a full portrait). OMITTING it serves
+// the stored file byte-for-byte, exactly as before — so nothing that
+// does not opt in changes. The absence of a version scheme is also why
+// EnsureThumb's mtime freshness check is REQUIRED rather than
+// belt-and-braces here: the key is a fixed `artist-<mbid>.jpg` the
+// enricher overwrites in place.
 func (s *Server) apiLibraryArtistImage(w http.ResponseWriter, r *http.Request) {
 	if s.deps.ArtistImagePath == nil {
 		writeError(w, http.StatusNotFound, "not_found", "artwork cache not wired")
@@ -951,7 +1086,21 @@ func (s *Server) apiLibraryArtistImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "mbid must be a MusicBrainz UUID")
 		return
 	}
-	serveCacheFile(w, r, s.deps.ArtistImagePath(mbid), "image/jpeg", "private, max-age=86400")
+	src := s.deps.ArtistImagePath(mbid)
+	path := src
+	if v := r.URL.Query().Get("size"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 || n > 4096 {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid size")
+			return
+		}
+		if statOK(src) {
+			if derived, ok := s.deriveThumb("artist-"+mbid, n, src); ok {
+				path = derived
+			}
+		}
+	}
+	serveCacheFile(w, r, path, "image/jpeg", "private, max-age=86400")
 }
 
 // apiLibraryBooklet handles GET /api/library/booklet/{mbid} — the

@@ -184,7 +184,7 @@ func rescaleOneArtworkFile(path string, log interface {
 	// heavy" — scaleLocalArtwork's verbatim fast path would return the
 	// input unchanged, so the rescale pass asks for an unconditional
 	// decode + q82 re-encode (still capped + passthrough-guarded).
-	scaled, err := scaleLocalArtworkImpl(data, true)
+	scaled, err := scaleLocalArtworkImpl(data, true, localArtMaxDimensionPx)
 	if err != nil {
 		log.Warn("rescale decode; skipping file", "path", path, "err", err)
 		return rescaleFailed, 0

@@ -121,7 +121,7 @@ var errArtworkNotDecodable = errors.New("artwork bytes not a decodable JPEG/PNG"
 // vs the pre-scaling behaviour). The returned slice aliases `data` on
 // the verbatim paths; callers must not mutate it.
 func scaleLocalArtwork(data []byte) ([]byte, error) {
-	return scaleLocalArtworkImpl(data, false)
+	return scaleLocalArtworkImpl(data, false, localArtMaxDimensionPx)
 }
 
 // scaleLocalArtworkImpl is the shared body. forceReencode skips the
@@ -130,7 +130,14 @@ func scaleLocalArtwork(data []byte) ([]byte, error) {
 // fine but the encode is archival-heavy and the point IS the q82
 // re-encode. Every safety path (decode caps, unparseable-JPEG
 // passthrough) is identical in both modes.
-func scaleLocalArtworkImpl(data []byte, forceReencode bool) ([]byte, error) {
+//
+// maxDim is the longest-side ceiling. Both scan-time callers pass
+// localArtMaxDimensionPx, so their behaviour is unchanged; EnsureThumb
+// passes a smaller serve tier. It is a parameter rather than a constant
+// read ONLY so the thumbnail deriver can reuse every safety path here
+// (source-dimension caps, the JPEG-passthrough fallbacks, the decode
+// semaphore) instead of growing a second copy of them.
+func scaleLocalArtworkImpl(data []byte, forceReencode bool, maxDim int) ([]byte, error) {
 	isJPEG := looksLikeJPEG(data)
 	if !isJPEG && !looksLikePNG(data) {
 		return nil, errArtworkNotDecodable
@@ -160,7 +167,7 @@ func scaleLocalArtworkImpl(data []byte, forceReencode bool) ([]byte, error) {
 		return nil, fmt.Errorf("png artwork dimensions out of range (%dx%d)", cfg.Width, cfg.Height)
 	}
 	if !forceReencode && format == "jpeg" &&
-		cfg.Width <= localArtMaxDimensionPx && cfg.Height <= localArtMaxDimensionPx {
+		cfg.Width <= maxDim && cfg.Height <= maxDim {
 		// Already right-sized JPEG — the common case; zero decode cost.
 		return data, nil
 	}
@@ -183,13 +190,13 @@ func scaleLocalArtworkImpl(data []byte, forceReencode bool) ([]byte, error) {
 		return nil, errArtworkNotDecodable
 	}
 	nw, nh := w, h
-	if w > localArtMaxDimensionPx || h > localArtMaxDimensionPx {
+	if w > maxDim || h > maxDim {
 		if w >= h {
-			nw = localArtMaxDimensionPx
-			nh = int(float64(h) * float64(localArtMaxDimensionPx) / float64(w))
+			nw = maxDim
+			nh = int(float64(h) * float64(maxDim) / float64(w))
 		} else {
-			nw = int(float64(w) * float64(localArtMaxDimensionPx) / float64(h))
-			nh = localArtMaxDimensionPx
+			nw = int(float64(w) * float64(maxDim) / float64(h))
+			nh = maxDim
 		}
 		if nw < 1 {
 			nw = 1

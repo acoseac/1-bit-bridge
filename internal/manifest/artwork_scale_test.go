@@ -213,7 +213,7 @@ func TestScaleLocalArtworkImpl_ForceReencodesWithinBoundsJPEG(t *testing.T) {
 	if !bytes.Equal(verbatim, src) {
 		t.Fatalf("precondition: normal path must return within-bounds JPEG verbatim")
 	}
-	forced, err := scaleLocalArtworkImpl(src, true)
+	forced, err := scaleLocalArtworkImpl(src, true, localArtMaxDimensionPx)
 	if err != nil {
 		t.Fatalf("forced scale: %v", err)
 	}

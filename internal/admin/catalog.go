@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -73,19 +74,52 @@ func (s *Server) InvalidateLibraryCatalog() {
 // libraryCatalog returns the current snapshot, rebuilding if it is cold
 // or stale.
 //
-// The rebuild is SYNCHRONOUS and single-flighted. An async
-// swap-when-ready would avoid the one caller's wait, but it also means
-// "I scanned, I refreshed, my new album isn't there" — and at a
-// fraction of a second on a loopback console that trade is not worth
-// the reasoning cost. Revisit if a library ever pushes the build past
-// a second or two; the singleflight already bounds the damage to one
-// waiter rather than N.
+// Staleness has TWO causes and they are not the same question, so they
+// no longer get the same answer:
+//
+//   - EPOCH CHANGED — a scan actually happened, and the snapshot is
+//     known-wrong. Rebuild SYNCHRONOUSLY. This is the case the original
+//     design protects: "I scanned, I refreshed, my new album isn't
+//     there" is a real complaint, and making the one unlucky caller wait
+//     a fraction of a second is the right trade.
+//   - TTL EXPIRED, epoch unchanged — nothing told us anything moved;
+//     the TTL is a GUESS that an unnudged writer (enrichment, a dupe
+//     restamp) might have. Serve the snapshot we have and refresh
+//     behind the request. Blocking a page load on a guess is what made
+//     an occasional visitor pay a full fold on essentially every visit.
+//
+// Cold (no snapshot at all) stays synchronous — there is nothing to
+// serve. `WarmLibraryCatalog` exists so that case is normally paid at
+// boot rather than by a person waiting on a page.
+//
+// EVERY path into a build goes through `catalogSF.Do("catalog", …)` —
+// boot warm, cold request, and background refresh alike. That is what
+// makes a request arriving mid-warm ATTACH to the running flight
+// instead of starting a second fold of the same library, and it is the
+// entire reason the singleflight is keyed on a constant.
 func (s *Server) libraryCatalog(ctx context.Context) (*librarycat.Catalog, error) {
 	epoch := s.catalogEpoch.Load()
-	if c := s.catalog.Load(); c != nil && c.epoch == epoch &&
-		time.Since(c.builtAt) < catalogCacheTTL {
+	if c := s.catalog.Load(); c != nil && c.epoch == epoch {
+		if time.Since(c.builtAt) < catalogCacheTTL {
+			return c.cat, nil
+		}
+		// Stale by the clock only. Hand back what we have and refresh
+		// out of band.
+		s.refreshCatalogAsync()
 		return c.cat, nil
 	}
+	return s.rebuildCatalog(ctx)
+}
+
+// rebuildCatalog is the single owner of the catalog singleflight. Both
+// the cold-request path and the background refresher enter HERE rather
+// than through libraryCatalog, and that is load-bearing in each
+// direction: routing through the flight is what makes a request landing
+// mid-warm attach to the running build instead of starting a second fold
+// of the same library, and NOT routing back through libraryCatalog is
+// what stops the background refresher taking libraryCatalog's own
+// serve-the-stale-copy shortcut and rebuilding nothing at all.
+func (s *Server) rebuildCatalog(ctx context.Context) (*librarycat.Catalog, error) {
 	v, err, _ := s.catalogSF.Do("catalog", func() (any, error) {
 		// Re-check inside the flight: a queued caller must not rebuild
 		// what the leader just built.
@@ -99,6 +133,14 @@ func (s *Server) libraryCatalog(ctx context.Context) (*librarycat.Catalog, error
 		cat, err := s.buildLibraryCatalog(buildCtx)
 		if err != nil {
 			return nil, err // errors are never cached
+		}
+		// Test seam (nil in production — one nil-check on a path that
+		// just folded the whole library, so the cost is genuinely
+		// nothing). It exists because "how many rebuilds happened" is
+		// otherwise unobservable from outside, and a test that cannot
+		// count them cannot tell real coalescing from luck.
+		if h := catalogBuiltHookForTests; h != nil {
+			h()
 		}
 		// Fence on the epoch captured BEFORE the build. libMetaCache
 		// documents why IT doesn't fence — its retry writes nothing the
@@ -156,11 +198,86 @@ func (s *Server) buildLibraryCatalog(ctx context.Context) (*librarycat.Catalog, 
 	return b.Build(time.Now()), nil
 }
 
+// refreshCatalogAsync rebuilds the snapshot behind a request that was
+// already answered from a clock-stale copy.
+//
+// What bounds the actual WORK is the singleflight inside rebuildCatalog:
+// a burst of stale reads coalesces into one fold no matter how many
+// callers arrive. The `refreshing` flag bounds something narrower and
+// worth being precise about — GOROUTINE SPAWNS. Without it, every stale
+// read spawns a goroutine that then merely joins the running flight, and
+// each of those is a bgRefresh.Add that shutdown has to wait out. With
+// it, a burst spawns one.
+//
+// It is deliberately NOT a claim that the flag prevents duplicate
+// rebuilds; it does not, and a test asserting so passes with the flag
+// removed.
+func (s *Server) refreshCatalogAsync() {
+	if !s.catalogRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	s.bgRefresh.Add(1)
+	go func() {
+		defer s.bgRefresh.Done()
+		defer s.catalogRefreshing.Store(false)
+		// Detached ctx: this refresh outlives the request that triggered
+		// it by design — that is the point of answering from the stale
+		// copy — and it is bounded by catalogBuildTimeout inside the
+		// flight. The PR #373 shared-result precedent: a singleflight
+		// result belongs to every joined caller, so it must not be
+		// cancellable by whichever one happened to start it.
+		if _, err := s.rebuildCatalog(context.WithoutCancel(context.Background())); err != nil {
+			logger.Warn("background catalog refresh", "err", err)
+		}
+	}()
+}
+
+// WarmLibraryCatalog builds the snapshot ahead of the first request.
+//
+// Without it the first person to open the player after a restart pays
+// the whole fold synchronously. It routes through libraryCatalog, so a
+// request that lands mid-warm joins this flight rather than starting a
+// second one.
+//
+// Deliberately NOT re-run on the post-scan nudge: catalog.go's
+// invalidation docblock is right that laziness is the debounce, and a
+// bulk import or a noisy inotify burst must not re-fold the library
+// once per event. This is a one-shot at boot.
+func (s *Server) WarmLibraryCatalog(ctx context.Context) {
+	start := time.Now()
+	cat, err := s.libraryCatalog(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			logger.Warn("warm library catalog", "err", err)
+		}
+		return
+	}
+	logger.Info("library catalog warm",
+		"albums", len(cat.Albums), "artists", len(cat.Artists),
+		"took", time.Since(start).Round(time.Millisecond))
+}
+
+// WaitForCatalogRefresh drains any in-flight background refresh. Called
+// on shutdown so a rebuild cannot still be reading the store after
+// Store.Close — the same discipline the bgWriters WaitGroup applies to
+// every other background reader.
+func (s *Server) WaitForCatalogRefresh() { s.bgRefresh.Wait() }
+
 // catalogState is the Server-side cache state, embedded by value.
 type catalogState struct {
 	catalog      atomic.Pointer[cachedCatalog]
 	catalogEpoch atomic.Uint64
 	catalogSF    singleflight.Group
+
+	// catalogRefreshing admits one background refresher at a time; see
+	// refreshCatalogAsync for why the singleflight alone is not enough.
+	catalogRefreshing atomic.Bool
+	// bgRefresh lets shutdown wait for that refresher.
+	bgRefresh sync.WaitGroup
 }
+
+// catalogBuiltHookForTests fires after each successful fold. Production
+// code MUST NOT set it; only tests, restoring via t.Cleanup.
+var catalogBuiltHookForTests func()
 
 var errCatalogTooLarge = errors.New("library too large for the in-memory catalog")
