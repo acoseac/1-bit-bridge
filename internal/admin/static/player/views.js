@@ -441,6 +441,25 @@ async function renderPagedList(view, ctx, opts) {
   let container = null;
   const sentinel = el("div", { class: "sentinel" });
 
+  // renderGen invalidates a fetch that was in flight when a jump reset
+  // the list.
+  //
+  // Be precise about what this does and does not fix. The obvious
+  // hazard — a stale page appending into the freshly cleared container —
+  // is ALREADY prevented, because getJSON aborts the previous request
+  // under the same key and every fetchPage here happens to use one. It
+  // is not reproducible: four rapid jumps against a build with this
+  // guard removed still rendered exactly the last bucket.
+  //
+  // What the counter buys is that the protection stops being
+  // INCIDENTAL. renderPagedList accepts an arbitrary fetchPage and does
+  // not require a keyed request, so the day one is added without a key
+  // the abort quietly stops covering it. And the abort never covered
+  // `loading` at all: the superseded call's `finally` clears it while
+  // the jump's own fetch is still running, which lets the sentinel start
+  // a third page. That part is a real ordering defect today.
+  let renderGen = 0;
+
   // A jump is a RESET, not an append. page() appends into the existing
   // container, so jumping to "S" (offset 240) while the reader has only
   // scrolled through offset 40 would splice 240 straight after 40 — one
@@ -448,6 +467,7 @@ async function renderPagedList(view, ctx, opts) {
   // from the wrong place. So: tear down the observer, drop the nodes,
   // reset the cursor, and let page() rebuild from the new offset.
   function resetTo(newOffset) {
+    renderGen++;
     if (disposeSentinel) { disposeSentinel(); disposeSentinel = null; }
     sentinel.remove();
     offset = newOffset;
@@ -459,8 +479,10 @@ async function renderPagedList(view, ctx, opts) {
   async function page({ jumped = false } = {}) {
     if (loading) return;
     loading = true;
+    const myGen = renderGen;
     try {
       const r = await fetchPage(offset);
+      if (myGen !== renderGen) return; // a jump superseded this page
       const items = pick(r) || [];
       const first = !container || jumped;
       if (first) {
@@ -496,12 +518,15 @@ async function renderPagedList(view, ctx, opts) {
         sentinel.remove();
       }
     } catch (e) {
-      if (isAborted(e)) return;
+      if (isAborted(e) || myGen !== renderGen) return;
       clear(view);
       container = null;
       view.appendChild(errorState(e, () => { offset = 0; void page(); }));
     } finally {
-      loading = false;
+      // Only the CURRENT generation may release the flag: a superseded
+      // page clearing it would let the sentinel fire while the jump's
+      // own fetch is still in flight.
+      if (myGen === renderGen) loading = false;
     }
   }
   await page();
