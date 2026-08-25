@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,22 +91,117 @@ func TestWatcherDebounce(t *testing.T) {
 // store close); the fix makes Run block on the in-flight scan — this test
 // pins that the block terminates (no deadlock) and the scan's write landed.
 func TestWatcherShutdownDrainsInflightScan(t *testing.T) {
+	// Held open at the dispatch's tail so the cancel below provably lands
+	// while a scan is still counted in flight. The previous shape slept
+	// 100ms for the watches to register and 60ms for a 20ms debounce to
+	// fire — which was wrong in both directions. Too short (routinely, on
+	// Windows: slower fsnotify registration and ~15.6ms clock granularity)
+	// and nothing had been dispatched, so the run failed with "expected
+	// the in-flight scan's track to have landed". Too long — the ordinary
+	// case — and the one-file scan had already FINISHED, scanWG was back
+	// to zero, and the assertion passed without the drain doing anything
+	// at all. So it was flaky and weak at once; this version is neither.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
 	libDir, store, w := newWatcherFixture(t, "Music", 20*time.Millisecond)
+	// Set BEFORE Run's goroutine starts: goroutine creation is the
+	// happens-before edge that makes this write visible to the dispatch
+	// goroutines without a race. (A package-level var could not offer
+	// that — see the field's docblock.)
+	w.afterDispatchHookForTests = func() {
+		once.Do(func() { close(entered) })
+		<-release
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
 	go func() { _ = w.Run(ctx); close(runDone) }()
 
-	time.Sleep(100 * time.Millisecond) // let the per-dir watches register
-	if err := os.WriteFile(filepath.Join(libDir, "x.flac"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	// Write until a dispatch actually happens, rather than sleeping a
+	// guess at how long watch registration takes. Re-writing the same
+	// path is harmless and re-arms the debounce, so a write that lands
+	// before the watch exists simply costs one more iteration.
+	//
+	// stopWriter is what makes the failure path survivable, and that is not
+	// a nicety: the timeout below fires exactly when no dispatch ever
+	// happened — the Windows case this test exists to report — and without
+	// a second exit condition the writer would spin on `entered`, which is
+	// never closed there, and the deferred `<-writerDone` would hang the
+	// test binary instead of printing the failure. Closed unconditionally
+	// in cleanup, so both paths drain it.
+	writerDone := make(chan struct{})
+	stopWriter := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-entered:
+				return
+			case <-stopWriter:
+				return
+			default:
+			}
+			_ = os.WriteFile(filepath.Join(libDir, "x.flac"), []byte("x"), 0o644)
+			select {
+			case <-entered:
+				return
+			case <-stopWriter:
+				return
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		// cancel here too, not just in the body: the timeout path below
+		// Fatals WITHOUT having cancelled, and cleanups run LIFO, so this
+		// one fires before the fixture's store.Close(). Without it Run
+		// would still be watching when the store closes underneath it —
+		// the very B8 shape this test is about.
+		cancel()
+		close(stopWriter)
+		<-writerDone
+		// Bounded, deliberately. If Run itself has deadlocked — the exact
+		// defect these assertions detect — an unbounded wait here would
+		// hang the test binary and bury the failure that was just
+		// reported. Leaking a goroutine into an already-finishing process
+		// is the cheaper of the two.
+		select {
+		case <-runDone:
+		case <-time.After(3 * time.Second):
+		}
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("no subtree scan was ever dispatched — the watch never registered")
 	}
-	time.Sleep(60 * time.Millisecond) // let the 20ms debounce fire the scan
+
+	// A dispatch is now parked at its tail with scanWG at 1, and the scan
+	// it just ran has already written. Cancel here is what the drain has
+	// to survive.
 	cancel()
 
+	// The assertion the whole test exists for: Run MUST NOT return while
+	// that dispatch is outstanding. The window is a heuristic but it fails
+	// SAFE — a broken drain returns in microseconds, and a slow machine
+	// only makes "has not returned yet" more true, never less.
+	select {
+	case <-runDone:
+		close(release)
+		t.Fatal("Run returned while a dispatch was still in flight — " +
+			"waitForInflightScans did not wait")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(release)
 	select {
 	case <-runDone: // Run's defer (cancelAllPending + waitForInflightScans) completed
 	case <-time.After(3 * time.Second):
-		t.Fatal("Run did not return after cancel — waitForInflightScans deadlocked")
+		t.Fatal("Run did not return once the in-flight scan finished — " +
+			"waitForInflightScans deadlocked")
 	}
 	// The dispatched scan completed before Run returned (Run waited for it),
 	// so its UpsertTrackBatch landed against the still-open store.

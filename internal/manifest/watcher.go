@@ -59,6 +59,24 @@ type Watcher struct {
 	// deferred Store.Close() executes (B8, the SQLite-corruption class).
 	closing bool
 	scanWG  sync.WaitGroup
+
+	// afterDispatchHookForTests fires at the tail of a debounced dispatch
+	// — after ScanSubtree has returned (so its writes have landed) but
+	// BEFORE the deferred scanWG.Done(), which is the only window in which
+	// a dispatch is provably still counted as in-flight. That window is
+	// what makes the shutdown drain testable at all: without it a test can
+	// only sleep and hope, and a sleep that is slightly too LONG lets the
+	// scan finish, drops scanWG to zero, and passes without exercising the
+	// wait at all.
+	//
+	// Per-INSTANCE, not a package-level var — the same call the transcode
+	// Pool's jobTimeout seam makes, and for the same reason, learned here
+	// the hard way: as a package var this raced under -race, because a
+	// dispatch goroutine left over from an EARLIER watcher test reads it
+	// with no happens-before edge to the next test's assignment. Set before
+	// Run starts (goroutine creation orders the write); nil in production,
+	// one nil check per debounced directory change.
+	afterDispatchHookForTests func()
 }
 
 // NewWatcher constructs a Watcher against the scanner's currently
@@ -316,6 +334,11 @@ func (wt *Watcher) scheduleScan(ctx context.Context, dir string) {
 		watcherLogger.Info("subtree scan", "dir", dir)
 		if _, err := wt.scanner.ScanSubtree(ctx, dir); err != nil && ctx.Err() == nil {
 			watcherLogger.Error("subtree scan", "dir", dir, "err", err)
+		}
+		// Deliberately here rather than in a defer: this must run BEFORE
+		// the deferred scanWG.Done() above, and defers unwind LIFO.
+		if hook := wt.afterDispatchHookForTests; hook != nil {
+			hook()
 		}
 	})
 	wt.pending[dir] = ps
