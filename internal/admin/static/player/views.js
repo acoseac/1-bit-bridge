@@ -727,41 +727,116 @@ async function renderPagedList(view, ctx, opts) {
 
 // ---- Favorites / Playlists / Mixes / Folders / Search ----
 
-export async function renderFavorites(view, { setToolbar }) {
+/**
+ * Hearted albums and hearted tracks, as two tabs.
+ *
+ * This used to be two stacked lists of unclickable grey text — the
+ * stored backup document printed verbatim, which is the operator's
+ * question, not a listener's. Now the albums ARE albums (the same tile
+ * as the grid, opening the same page) and the tracks are a playable
+ * queue, because both resolve server-side through the same catalog the
+ * rest of the player reads.
+ *
+ * Tabs rather than a stack for the reason the album page has them: a
+ * long album grid pushed every hearted track off the bottom of the
+ * screen, and the two are answers to different questions asked one at a
+ * time.
+ */
+export async function renderFavorites(view, { gen, setToolbar }) {
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
+  let r;
   try {
-    const r = await api.favorites();
-    clear(view);
-    const tracks = r.tracks || [];
-    const albums = r.albums || [];
-    if (!tracks.length && !albums.length) {
-      view.appendChild(emptyState("No favorites yet",
-        "Hearts sync from the 1-bit app when a device backs them up to this bridge."));
-      return;
-    }
-    if (albums.length) {
-      view.appendChild(el("h3", { class: "section-head", text: `Albums (${albums.length})` }));
-      const list = el("div", { class: "rows" });
-      albums.forEach((a) => list.appendChild(el("div", { class: "row" },
-        el("span", { class: "row-title", text: a.album || "Unknown album" }),
-        el("span", { class: "row-meta", text: a.albumArtist || "" }))));
-      view.appendChild(list);
-    }
-    if (tracks.length) {
-      view.appendChild(el("h3", { class: "section-head", text: `Tracks (${tracks.length})` }));
-      const list = el("div", { class: "rows" });
-      tracks.forEach((t) => list.appendChild(el("div", { class: "row" },
-        el("span", { class: "row-title", text: t.title || t.path || "" }),
-        el("span", { class: "row-meta", text: t.artist || "" }))));
-      view.appendChild(list);
-    }
+    r = await api.favorites();
   } catch (e) {
     if (isAborted(e)) return;
     clear(view);
     view.appendChild(errorState(e));
+    return;
   }
+  clear(view);
+  const albums = r.albums || [];
+  const tracks = r.tracks || [];
+  const lostAlbums = r.unresolvedAlbums || 0;
+  const lostTracks = r.unresolvedTracks || 0;
+
+  // Nothing hearted at all is a different state from nothing that
+  // RESOLVES here: the first is a setup hint, the second means the
+  // hearts belong to another source and no amount of setup on this
+  // bridge will show them.
+  if (!albums.length && !tracks.length) {
+    view.appendChild(r.stored && (lostAlbums || lostTracks)
+      ? emptyState("Nothing hearted from this library",
+          `${plural(lostAlbums + lostTracks, "favorite")} came from another bridge, ` +
+          "a device's own files, or something removed since — none of them live here.")
+      : emptyState("No favorites yet",
+          "Hearts sync from the 1-bit app when a device backs them up to this bridge."));
+    return;
+  }
+
+  const grid = el("div", { class: "grid" });
+  appendIf(view, detailTabs("favorites", [
+    {
+      id: "albums", label: `Albums (${albums.length})`,
+      panel: albums.length
+        ? withUnresolved(grid, lostAlbums, "album")
+        : (lostAlbums ? unresolvedOnly(lostAlbums, "album") : null),
+    },
+    {
+      id: "tracks", label: `Tracks (${tracks.length})`,
+      panel: tracks.length
+        ? favoriteTracksPanel(tracks, lostTracks)
+        : (lostTracks ? unresolvedOnly(lostTracks, "track") : null),
+    },
+  ]));
+
+  // After the grid is in the document, so the reader watches it fill —
+  // and only when it actually got there, since a tab whose panel was
+  // replaced by the unresolved notice never holds it.
+  if (albums.length) chunkAppend(grid, albums, albumTile, gen);
+}
+
+/**
+ * A tab's content plus the count of hearts this bridge could not place.
+ *
+ * Said out loud rather than dropped, for the same reason the collection
+ * detail says it: the operator's own Favorites panel counts every
+ * entry, so a page that quietly shows fewer disagrees with it in a way
+ * that reads as a bug.
+ */
+function withUnresolved(node, lost, noun) {
+  if (!lost) return node;
+  return el("div", {}, unresolvedNote(lost, noun), node);
+}
+
+function unresolvedOnly(lost, noun) {
+  return emptyState(`No hearted ${noun}s from this library`,
+    `${plural(lost, noun)} came from another bridge, a device's own files, ` +
+    "or something removed since.");
+}
+
+function unresolvedNote(lost, noun) {
+  return el("p", { class: "muted small", text:
+    `${plural(lost, noun)} not shown — from another bridge, or removed since.` });
+}
+
+/**
+ * The tracks tab: transport, then the list.
+ *
+ * albumArt is deliberately null. The queue carries ONE cover and
+ * favorites span the library, so any choice would be the wrong cover
+ * for all but one track — the now-playing bar shows none rather than a
+ * confident lie, exactly as it does for a playlist with no cover.
+ */
+function favoriteTracksPanel(tracks, lost) {
+  const box = el("div", {}, collectionActions(tracks, null));
+  if (lost) box.appendChild(unresolvedNote(lost, "track"));
+  // Numbered by position with no disc headings: favorites are an
+  // ordered set drawn from many albums, which is exactly what
+  // `collection` means here.
+  box.appendChild(trackList(tracks, null, { collection: true }));
+  return box;
 }
 
 export async function renderPlaylists(view, ctx) {

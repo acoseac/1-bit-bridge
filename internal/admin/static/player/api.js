@@ -72,7 +72,12 @@ export const api = {
   playlist: (id) => getJSON(`/api/player/playlists/${encodeURIComponent(id)}`, { key: "detail" }),
   mixes: () => getJSON("/api/player/mixes", { key: "mixes" }),
   mix: (slug) => getJSON(`/api/player/mixes/${encodeURIComponent(slug)}`, { key: "detail" }),
-  favorites: () => getJSON("/api/favorites", { key: "favorites" }),
+  // The PLAYER's favorites, not /api/favorites: that one is the stored
+  // backup document verbatim (the operator's Data page reads it), which
+  // carries no artwork, no album ids and no playability. This one is
+  // joined against the catalog so the tabs can show albums as albums
+  // and tracks as a queue.
+  favorites: () => getJSON("/api/player/favorites", { key: "favorites" }),
 
   // Mix actions reuse the operator endpoints unchanged — no new backend.
   // They came with the retired /smartmixes page; the player is now the
