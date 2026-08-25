@@ -2025,6 +2025,27 @@ run on one platform.
   Windows signal is readable until it is fixed. Simulating it locally is
   cheap and conclusive — convert the static files to CRLF, run the package,
   convert back.
+- **`TestWatcherShutdownDrainsInflightScan` (`internal/manifest`) is a KNOWN
+  Windows timing flake — re-run before investigating.** It is built on sleeps
+  (100 ms for the per-dir watches to register, 60 ms for a 20 ms debounce to
+  fire, then cancel), and on Windows fsnotify registration is slower and the
+  clock granularity is ~15.6 ms, so the debounce can miss its window and no
+  scan is in flight to drain. Observed 2026-08-25 on a PR touching ONLY
+  `internal/admin` (job 97791984802); a re-run of the identical commit passed,
+  and the same manifest code passed on two other PRs the same day.
+  **This compounds with the non-blocking leg above**: a leg that is both
+  non-blocking AND intermittently red is one a reader learns to skip, which is
+  precisely how a genuine Windows regression would land unnoticed. Worth
+  rewriting against a synchronisation point rather than sleeps; not yet done.
+- **A `.track`-style CSS grid must not hardcode a column count when its
+  children are conditional.** `trackRow` appends an extra unplayable-reason
+  chip only for a track the browser cannot decode, so the row has 7 or 8
+  children; a seven-column template put the eighth on a second row and doubled
+  every DSD row's height (shipped, field-reported). The fix is
+  `grid-auto-flow: column` — implicit trailing columns, so the count cannot
+  disagree — NOT widening the template, which works until the next conditional
+  child. `TestTrackRowGridHoldsEveryConditionalChild` pins it and accepts
+  either shape.
 
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
