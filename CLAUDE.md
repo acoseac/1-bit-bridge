@@ -1825,6 +1825,117 @@ album/artist panels. Don't read "the Inspector does X" as dead text.
   cover all of them, because most wiring goes through the shared `setText`
   helper — **match any `"prefix-…"` literal, not one call shape.**
 
+### Detail tabs, smart mixes on the player, and three parity tests (PRs #754 / #755 / #756, 2026-08-25)
+
+Admin-console only — no `/v1` change, no `ProtocolVersion` bump, no migration,
+no iOS mirror. The user-visible half is small; the durable half is that **three
+separate classes of silent breakage were live at once**, and each now has a test.
+
+- **Album and artist detail are TABS** (Tracks / About / Variants; Albums /
+  About / Variants), default to the track list or discography. Stacked, the
+  Atlas About card and the variant panel pushed the first track most of a
+  screen down — on a one-track album with nothing to generate, entirely below
+  the fold. **Nothing is lost by hiding the coverage**: the album tile carries
+  its variant badge and every track row carries its own marks, so "does this
+  have CarPlay copies" is still answerable from the default tab. A tab whose
+  panel would be empty is DROPPED (no Atlas entry → no About tab), and an empty
+  track list or discography renders an **empty state rather than a blank
+  panel** — omitting the primary tab would leave the page's content absent with
+  no explanation.
+  **The tab choice survives a re-render and is keyed on the SUBJECT.** The
+  album page re-renders itself whenever a variant job lands or a delete
+  completes — which is exactly when the reader is on the Variants tab — so
+  without the memory every one of those bounced them back to Tracks
+  mid-operation. One slot, not a Map: only the current view can be re-rendered.
+  The tab buttons reuse app.css's `.tab-btn` (the Settings idiom) rather than
+  restyling; the variant panel is compacted independently (title · ratio ·
+  both buttons on one line above the bar, and no permanently-blank status row).
+
+- **`.small` had a rule in NEITHER stylesheet, and had ridden ~25 nodes since
+  the player was written** — every stat line, every variant note, the About
+  label and attribution. Everything asking to recede rendered at the body's
+  13.5px, which is a real part of why those panels felt heavy. Now bound to
+  `--text-sm`. `TestPlayerEmittedClassesAreStyled` found it and now guards it:
+  the player builds every node in JS, so nothing connects an emitted class to a
+  rule. It also **records which classes are BORROWED from app.css** (`btn`,
+  `muted`, `section-head`, `tab-btn`) — those make an app.css-only rule
+  load-bearing for a file that never mentions it. **Strip CSS comments before
+  scanning**: this repo's commentary names the classes it discusses, and a
+  comment mentioning `.tab-btn` read as a definition — a false pass in the one
+  direction that matters.
+
+- **`dispatchPageInit` dispatched on a tab name no page rendered, and five
+  controls were dead for two days.** PR #739 renamed the operator dashboard's
+  page key `"dashboard"` → `"stats"` and left `case "dashboard": initDashboard()`
+  behind. Every lookup inside is nil-guarded, so nothing threw — the function
+  simply never ran. Dead on Stats: **Scan now**, **Which tracks?**, **Retry
+  missing**; dead on Settings: **Check now**, **Roll back** (the same function
+  wired them, from when the two pages were one). Confirmed in a browser before
+  fixing: clicking *Scan now* fired no request and did not even disable the
+  button. The update-panel wiring moved to `initSettings`, where the panel has
+  lived since #129. `TestEveryPageTabHasAnInitCase` pins BOTH directions — a
+  page with no case, and a case naming a page that no longer exists — reading
+  the tab list off `Server.pageTmpls` rather than a second hand-written copy.
+  **When you rename a page key, grep the dispatch switch.**
+
+- **`humanBytes` was deleted out from under nine callers.** #753 retired the
+  Library Inspector, deleted 3,362 lines of app.js including
+  `function humanBytes(n)`, and left every caller. `applyStats` threw on EVERY
+  SSE stats frame on every page; the Roots page's `variants-free` sat on its
+  em-dash placeholder; and because the throw happens eight statements earlier,
+  `clear.disabled = !s.usedBytes` never ran — leaving "Clear all variants…"
+  live on an empty cache, on the one button in that panel guarded by a typed
+  phrase. All nine now call `formatBytes`.
+  `TestAppJSHasNoCallsToDeletedHelpers` is the guard. **It is a heuristic, not
+  a parser, deliberately**: Go cannot parse JavaScript and this project will
+  not grow a Node build step for one file. It strips comments and string
+  literals, collects bare `name(` calls, and collects declarations across the
+  forms this codebase uses (function, const/let/var, object property, method
+  shorthand, arrow params, array AND object destructuring, ES imports), with
+  two small documented allowlists — browser globals, and locals the scan cannot
+  see. **A name in neither IS the bug**, and the failure message says so.
+
+- **The sidebar's Smart mixes entry points INTO the player, which needs a
+  discriminator in THREE places.** `/smartmixes` is retired (301 → `/mixes`,
+  matching the Inspector); the harmonic-coverage wheel moved to Stats (a fact
+  about the library, not a control; hidden when nothing is analyzed). Because
+  every player route renders the `player` tab AND the `player` section,
+  tab-or-section matching cannot tell `/albums` from `/mixes` — both entries
+  would light, and `TestPrimaryNavHighlightsEveryEntry` requires exactly one.
+  `pageData.PlayerNav` (from `playerNavEntry`) is the answer, applied at first
+  paint in layout.html, on a boosted swap via the **`X-Bridge-Player-Nav`**
+  header, and in boot.js's `updateSidebarNav` for the navigations that never
+  reach the server. `boostUpdateTopNav` skips `data-player-section` entries in
+  its tab pass, so it depends on neither markup order nor `route()` running
+  afterwards — verified by stubbing `window.__player` and boosting into
+  `/mixes`. `TestPlayerNavEntriesMatchTheLayout` pins the Go ↔ template ↔
+  boot.js triple. **`updateSidebarNav` compares `dataset.playerSection` as a
+  VALUE**: `section` is a path segment off `location.pathname`, and
+  interpolating it into a selector lets a URL with a quote throw a
+  DOMException that takes `route()` — and the whole render — down with it.
+
+- **Operator affordances ride the mix, not a separate page**: the grid gains
+  "Regenerate all", mix detail gains Set / Replace / Remove cover, and
+  **playlist detail gains the same control** — `POST /api/playlists/{id}/cover`
+  had existed since the covers work landed with NO caller, because the only UI
+  ever built was the smart-mix half on the page that is now gone. The file
+  input is `sr-only`, never `[hidden]`: `[hidden]` is `display:none !important`
+  (app.css:955), which drops it from the tab order, and a `<label>` is not
+  natively focusable — the label paints the ring via `:focus-within`.
+
+- **PROCESS — stacked PRs get NO CI in this repo.** `gate.yml` and `gofmt.yml`
+  (and codeql) are `pull_request: branches: [main]`, so a PR targeting a
+  feature branch runs **only SonarCloud**. The documented stack-and-batch
+  workflow therefore ships its children un-gated until they are retargeted to
+  `main`. Retargeting alone does not fire the workflows either — the base
+  change is not a `synchronize` event — so **amend for a fresh SHA and
+  force-push after retargeting**, then wait for gate/gofmt/codeql before
+  merging. Two other traps hit in the same session: capture each child's fork
+  point BEFORE amending its parent (an amend changes the SHA `--onto` needs),
+  and `[hidden] { display: none !important }` already exists at app.css:955 —
+  a review finding claiming otherwise is a false positive, verifiable in
+  seconds by reading a computed style.
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future
