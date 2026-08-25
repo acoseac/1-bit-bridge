@@ -29,6 +29,12 @@ import (
 // trackAppendRe counts the appends in trackRow's body. Both the
 // unconditional calls and the one inside `if (!playable)` match, which is
 // what makes the count a MAXIMUM rather than a typical case.
+//
+// No comment-stripping on this side, unlike the CSS: the `^\s*` anchor
+// already skips `// row.appendChild(…)` and ` * row.appendChild(…)`,
+// and the one shape that WOULD slip through — a bare indented
+// appendChild line inside a /* */ block — inflates the count and makes
+// the test stricter. That is a false alarm, not a false pass.
 var trackAppendRe = regexp.MustCompile(`(?m)^\s*row\.appendChild\(`)
 
 // baseTrackRuleRe finds the `.track { … }` rule at column 0 — the base
@@ -42,7 +48,17 @@ func TestTrackRowGridHoldsEveryConditionalChild(t *testing.T) {
 	// page-init parity test failed on windows-latest for exactly that
 	// reason from the day it was added.
 	views := readNormalized(t, "static/player/views.js")
-	css := readNormalized(t, "static/player.css")
+	// Comments stripped from the WHOLE file before anything is matched,
+	// reusing the sibling class-parity test's cssCommentRe rather than
+	// declaring a second copy. Two things it buys here: a commented-out
+	// `grid-auto-flow: column` — or one merely NAMED in the prose above
+	// the rule, which player.css now does — can no longer satisfy the
+	// check, and a `}` inside a comment can no longer truncate
+	// baseTrackRuleRe's `[^}]*` early and hand back half a rule. The
+	// sibling test learned the first half the hard way: this repo
+	// comments densely and names the identifiers it discusses, so a scan
+	// that trusts prose gets a false PASS, the one direction that matters.
+	css := cssCommentRe.ReplaceAllString(readNormalized(t, "static/player.css"), "")
 
 	start := strings.Index(views, "function trackRow(")
 	if start < 0 {
