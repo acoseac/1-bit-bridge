@@ -1069,7 +1069,7 @@ function coverControl(scope, c, status) {
   const label = el("label", { class: "btn btn-quiet" },
     input, c.hasCover ? "Replace cover…" : "Set cover…");
   input.addEventListener("change", async () => {
-    const file = input.files && input.files[0];
+    const file = input.files?.[0];
     if (!file) return;
     status.textContent = "Uploading…";
     try {

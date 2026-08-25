@@ -4544,7 +4544,7 @@ function initCamelotWheel() {
   // itself is, and it is the element assistive tech should stop on.
   // Read off the host so the template still owns the wording.
   svg.setAttribute("role", "img");
-  const wheelLabel = host.getAttribute("data-label");
+  const wheelLabel = host.dataset.label;
   if (wheelLabel) svg.setAttribute("aria-label", wheelLabel);
 
   const segByCode = new Map();
