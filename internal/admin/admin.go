@@ -1394,6 +1394,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/player/playlists/{id}", s.apiPlayerPlaylistDetail)
 	mux.HandleFunc("GET /api/player/mixes", s.apiPlayerMixes)
 	mux.HandleFunc("GET /api/player/mixes/{slug}", s.apiPlayerMixDetail)
+	// Favorites for the player. Separate from the operator-facing
+	// /api/favorites, which serves the stored backup document verbatim:
+	// this one joins it against the catalog so hearted albums are
+	// albums and hearted tracks are playable.
+	mux.HandleFunc("GET /api/player/favorites", s.apiPlayerFavorites)
 	mux.HandleFunc("GET /api/library/collection-cover/{scope}/{key}", s.apiPlayerCollectionCover)
 	mux.HandleFunc("GET /api/player/search", s.apiPlayerSearch)
 	// Byte routes. No separate HEAD registration is needed — Go's
