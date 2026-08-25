@@ -355,9 +355,17 @@ function updateSidebarNav(section) {
   const nav = document.getElementById("primary-nav");
   if (!nav) return;
   const owner = section === "mix" ? "mixes" : section;
-  const match = nav.querySelector(`a[data-player-section="${owner}"]`) ||
-    nav.querySelector('a[data-tab="player"]:not([data-player-section])');
-  for (const a of nav.querySelectorAll("a")) {
+  // Compared as a value, not interpolated into a selector. `section` is a
+  // path segment straight off location.pathname, so a URL carrying a quote
+  // or a bracket would build a malformed selector and querySelector throws
+  // a DOMException — taking route() down with it and leaving the page
+  // unrendered. CSS.escape would also fix that; not building the selector
+  // at all is one fewer thing to remember.
+  const links = [...nav.querySelectorAll("a")];
+  const match = links.find((a) => a.dataset.playerSection === owner) ||
+    links.find((a) => a.dataset.tab === "player" && !a.dataset.playerSection) ||
+    null;
+  for (const a of links) {
     if (a === match) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }

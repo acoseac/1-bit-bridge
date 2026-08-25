@@ -818,7 +818,7 @@ function regenerateAllButton() {
     status.textContent = "";
     try {
       const r = await api.regenerateMixes();
-      status.textContent = r && r.families != null
+      status.textContent = r?.families != null
         ? `Rebuilt ${plural(r.families, "mix", "mixes")}.`
         : "Rebuilt.";
       await window.__player?.route?.();
@@ -990,7 +990,7 @@ function mixActions(c, view, ctx) {
     status.textContent = "";
     try {
       const r = await api.regenerateMix(c.id);
-      if (r && r.removed) {
+      if (r?.removed) {
         status.textContent = "This mix no longer has enough to draw from and was removed.";
         return;
       }
@@ -1110,7 +1110,18 @@ function coverControl(scope, c, status) {
 function readAsDataURL(file) {
   return new Promise((resolve, reject) => {
     const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result || ""));
+    fr.onload = () => {
+      // readAsDataURL always yields a string, but FileReader.result is
+      // typed string | ArrayBuffer | null — and String(anArrayBuffer) is
+      // "[object ArrayBuffer]", which would be POSTed as an image and
+      // rejected by the server with a confusing message. Fail here, where
+      // the cause is nameable.
+      if (typeof fr.result !== "string") {
+        reject(new Error("Could not read that file."));
+        return;
+      }
+      resolve(fr.result);
+    };
     fr.onerror = () => reject(new Error("Could not read that file."));
     fr.readAsDataURL(file);
   });

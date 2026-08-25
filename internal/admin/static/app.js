@@ -4539,6 +4539,13 @@ function initCamelotWheel() {
   const svg = document.createElementNS(CAMELOT_NS, "svg");
   svg.setAttribute("viewBox", "0 0 400 400"); // responsive — no fixed px
   svg.setAttribute("class", "camelot-svg");
+  // role + name live on the real <svg>, not on the host div. A div with
+  // role="img" is a claim about an element that is not one; the graphic
+  // itself is, and it is the element assistive tech should stop on.
+  // Read off the host so the template still owns the wording.
+  svg.setAttribute("role", "img");
+  const wheelLabel = host.getAttribute("data-label");
+  if (wheelLabel) svg.setAttribute("aria-label", wheelLabel);
 
   const segByCode = new Map();
   for (let num = 1; num <= 12; num++) {
@@ -5170,24 +5177,23 @@ function runInlineScripts(root) {
 // them. boot.js applies the same rule again for player navigations that
 // never reach the server at all.
 function boostUpdateTopNav(active, section, playerNav) {
-  const links = document.querySelectorAll("#primary-nav a");
-  let match = null;
-  if (playerNav) {
-    for (const a of links) {
-      if (a.dataset.playerSection === playerNav) { match = a; break; }
-    }
-  }
-  if (!match) {
-    for (const a of links) {
-      if (a.dataset.playerSection) continue;
-      if (a.dataset.tab === active) { match = a; break; }
-    }
-  }
-  if (!match) {
-    for (const a of links) {
-      if (a.dataset.tab === section) { match = a; break; }
-    }
-  }
+  const links = [...document.querySelectorAll("#primary-nav a")];
+  const match =
+    (playerNav && links.find((a) => a.dataset.playerSection === playerNav)) ||
+    links.find((a) => !a.dataset.playerSection && a.dataset.tab === active) ||
+    links.find((a) => a.dataset.tab === section) ||
+    null;
+  markNavCurrent(links, match);
+}
+
+// markNavCurrent paints exactly one entry, and clears the rest.
+//
+// Shared with the player's own router (via updateSidebarNav in boot.js,
+// which resolves its match a different way): both must leave exactly one
+// aria-current, because that attribute is what the CSS paints from AND
+// what a screen reader announces, so two of them is a visual bug and an
+// a11y bug at once.
+function markNavCurrent(links, match) {
   for (const a of links) {
     if (a === match) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
