@@ -5,7 +5,7 @@
 import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL, isAborted } from "./api.js";
 import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason,
          bytes, variantKindLabel, variantSkipLabel } from "./format.js";
-import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock } from "./ui.js";
+import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs } from "./ui.js";
 import * as audio from "./audio.js";
 import { variantPanel, onVariantChange } from "./variants.js";
 
@@ -191,13 +191,6 @@ export async function renderAlbum(view, { id, setToolbar }) {
 
   const unplayable = d.tracks.filter((t) => t.play && t.play.kind === "none").length;
 
-  // The About card belongs with the release, next to the buttons — not
-  // stranded under the track list where a long album buries it off the
-  // bottom of the page. It is also the one part that is often absent
-  // (Atlas has to have matched the release), so the layout above it must
-  // read complete without it.
-  const about = aboutBlock(d.release, { title: "About this release" });
-
   view.appendChild(el("div", { class: "detail" },
     el("div", { class: "detail-art" }, cover(art, a.title)),
     el("div", { class: "detail-head" },
@@ -209,26 +202,38 @@ export async function renderAlbum(view, { id, setToolbar }) {
             `${unplayable} of ${d.tracks.length} can't play in a browser — download those instead.` })
         : null,
       actions,
-      d.booklet ? bookletLink(d.booklet) : null,
-      about)));
+      d.booklet ? bookletLink(d.booklet) : null)));
 
-  // The callback is the DELETE path's refresh: deletion is synchronous,
-  // so its numbers are already true when the response lands. Generation
-  // deliberately does not use it — see variants.js.
+  // Tracks, About and Variants are TABS rather than a stack. Stacked,
+  // the About card and the variant panel together pushed the first
+  // track most of a screen down — on a one-track album with nothing to
+  // generate, entirely below the fold. Both are things the reader asks
+  // for deliberately; the track list is what they came for.
   //
-  // appendIf, not appendChild: variantPanel returns null when the
-  // response carries no summary, and appendChild(null) is a TypeError
-  // that takes the whole album page down. `d.variants` is omitempty, so
-  // an older bridge or a store the admin server could not reach is
-  // enough to hit it.
-  appendIf(view, variantPanel(d.variants, { albumIds: [id] }, rerenderView));
+  // Nothing is lost by hiding the coverage: the album tile in the grid
+  // carries its variant badge, and each track row carries its own
+  // marks, so "does this have CarPlay copies" is still answerable from
+  // the default tab.
+  //
+  // The variant panel's onChanged callback is the DELETE path's
+  // refresh: deletion is synchronous, so its numbers are already true
+  // when the response lands. Generation deliberately does not use it —
+  // see variants.js.
+  const variants = variantPanel(d.variants, { albumIds: [id] }, rerenderView, { plain: true });
+  appendIf(view, detailTabs(`album:${id}`, [
+    { id: "tracks", label: "Tracks", panel: trackList(d.tracks, art) },
+    { id: "about", label: "About", panel: aboutBlock(d.release, { plain: true }) },
+    { id: "variants", label: "Variants", panel: variants },
+  ]));
+
   // Generation IS asynchronous, so the numbers just rendered are a
   // snapshot of a moving target. app.js re-broadcasts the pool's
   // progress from the console's existing SSE stream; re-rendering on it
   // is what keeps the bars from sitting stale until a manual reload.
-  onVariantChange(rerenderView);
-
-  view.appendChild(trackList(d.tracks, art));
+  // Only worth hooking when there is a panel to refresh — a bridge that
+  // sent no summary would otherwise re-render the whole page for
+  // numbers it never showed.
+  if (variants) onVariantChange(rerenderView);
 }
 
 /** appendChild that tolerates a null child. */
@@ -482,22 +487,30 @@ export async function renderArtist(view, { id, gen, setToolbar }) {
       el("h2", { class: "detail-title", text: d.artist.name }),
       el("p", { class: "muted small",
         text: `${plural(d.artist.albumCount, "album")} · ${plural(d.artist.trackCount, "track")}` }))));
-  const about = aboutBlock(d.about, { title: "About" });
-  if (about) view.appendChild(about);
-
-  // Same panel as an album, one level up. An artist is where a bulk
-  // action actually belongs — "give this whole discography CarPlay
-  // copies" is the request, and doing it album by album is the tedium
-  // the Inspector's folder tree used to absorb.
-  appendIf(view, variantPanel(d.variants, { artistId: id }, rerenderView));
-  onVariantChange(rerenderView);
-
+  // Same tab set as an album, one level up: the discography is what the
+  // page is for, and a long bio plus a variant panel between the header
+  // and the first cover is exactly the burial this replaced.
+  //
+  // No "Discography" heading inside the panel — the tab says Albums,
+  // and a heading under it would be the same word twice.
   const grid = el("div", { class: "grid" });
-  view.appendChild(el("h3", { class: "section-head", text: "Discography" }));
-  view.appendChild(grid);
+  // An artist is where a bulk variant action actually belongs — "give
+  // this whole discography CarPlay copies" is the request, and doing it
+  // album by album is the tedium the Inspector's folder tree absorbed.
+  const variants = variantPanel(d.variants, { artistId: id }, rerenderView, { plain: true });
+  appendIf(view, detailTabs(`artist:${id}`, [
+    { id: "albums", label: "Albums", panel: grid },
+    { id: "about", label: "About", panel: aboutBlock(d.about, { plain: true }) },
+    { id: "variants", label: "Variants", panel: variants },
+  ]));
+  if (variants) onVariantChange(rerenderView);
+
   // chunkAppend, not a bare forEach: the artist detail returns the whole
   // discography unpaginated, so a prolific artist built every tile in
   // one synchronous pass and dropped frames doing it.
+  //
+  // After the grid is in the document, so the chunks land in a node the
+  // reader can actually see fill.
   chunkAppend(grid, d.albums, albumTile, gen);
 }
 

@@ -445,6 +445,39 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   :root { --npbar-left: var(--sidebar-w); }
 }
 
+/* .small has been on ~25 nodes across the player — every stat line,
+   every variant note, the About label and attribution, the blocked
+   warning — since the module was written, and has never had a rule in
+   either stylesheet. Everything asking to be secondary was rendering at
+   the body's 13.5px, which is a real part of why these panels felt
+   heavy: nothing receded.
+
+   Bound to --text-sm rather than a local number so it sits on app.css's
+   type ramp with the console's other dense-secondary text. Not scoped
+   under .player-main: boot.js loads on every page and nothing else in
+   the console uses a bare .small, so a global definition can only fix
+   the class, never surprise an operator page. */
+.small { font-size: var(--text-sm); }
+
+/* ---- Detail tabs (album / artist) ----
+
+   Tracks / About / Variants, with the track list — the thing the reader
+   came for — open by default. Stacked, About and the variant panel
+   together pushed the first track most of a screen down.
+
+   The buttons reuse app.css's .tab-btn rather than restyling: the
+   Settings page's tabs are the console's established idiom, and one
+   definition means a future restyle carries here for free. Only the
+   strip's layout is local, because .tab-nav's negative margins assume
+   it sits inside a .panel's 20px padding and these sit in <main>. */
+
+.detail-tabs { min-width: 0; }
+.detail-tabstrip {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  margin: 0 0 var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
 /* ---- Variant panel (album / artist detail) ---- */
 
 .variants {
@@ -454,23 +487,42 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .variants-head { margin: 0 0 var(--space-2); font-size: 0.95rem; }
 .variants-blocked { color: var(--accent-warm); margin: 0 0 var(--space-3); }
 
+/* A panel is already a bounded, labelled surface, so the card chrome on
+   the About and Variants blocks would frame one paragraph twice. The
+   builders pass `plain` for this; a `.tabpanels > *` selector would do
+   the same job until someone wrapped a panel in a div and it silently
+   stopped. */
+.about-plain, .variants-plain {
+  margin: 0; padding: 0; border: 0; background: none; border-radius: 0;
+}
+
 .variant-kind { padding: var(--space-3) 0; border-top: 1px solid var(--border); }
 .variant-kind:first-of-type { border-top: 0; }
+/* Title, ratio and the button pair on one line. The title takes the
+ * slack so the ratio and buttons pack against the right edge and line
+ * up between the two kinds — with space-between they drifted, because
+ * "Hi-res upscale" and "CarPlay-optimized" are different widths. */
 .variant-kind-head {
-  display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3);
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
 }
-.variant-kind-title { font-weight: 650; font-size: 0.88rem; }
+.variant-kind-title { font-weight: 650; font-size: 0.88rem; flex: 1 1 auto; min-width: 0; }
 .variant-kind-ratio { color: var(--fg-muted); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
-.variant-kind-note { margin: 4px 0 var(--space-3); }
+.variant-kind-note { margin: 4px 0 0; }
 
 .variant-bar {
-  height: 6px; margin-top: 6px; border-radius: 999px; overflow: hidden;
+  height: 6px; margin-top: 8px; border-radius: 999px; overflow: hidden;
   background: var(--bg-elev);
 }
 .variant-bar-fill { height: 100%; background: var(--accent); transition: width .3s ease; }
 
 .variant-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
-.variant-status { margin: var(--space-2) 0 0; color: var(--fg-muted); min-height: 1.2em; }
+/* No reserved min-height. Two permanently blank lines — one per kind —
+ * were a third of the panel's height for a message that only appears
+ * after a click. The shift when one lands is a response to a deliberate
+ * action, which is when a layout change reads as feedback rather than
+ * as jitter. */
+.variant-status { margin: var(--space-2) 0 0; color: var(--fg-muted); }
+.variant-status:empty { display: none; }
 .variant-status-error { color: var(--danger); }
 
 @media (prefers-reduced-motion: reduce) {
@@ -491,7 +543,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   .track-meta, .track-size { display: inline; }
 }
 
-.variant-kind-stale { color: var(--accent-warm); margin: 0 0 var(--space-3); }
+.variant-kind-stale { color: var(--accent-warm); margin: 4px 0 0; }
 
 /* ---- Folder-tree coverage marks ---- */
 
