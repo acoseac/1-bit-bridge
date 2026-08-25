@@ -42,7 +42,14 @@ func TestEveryPageTabHasAnInitCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read app.js: %v", err)
 	}
-	body := string(app)
+	// Normalized to LF before any offset arithmetic. A Windows checkout
+	// carries CRLF (there is no .gitattributes pinning eol), so the
+	// "\n}\n" terminator below simply is not present in the bytes and
+	// this test failed with "could not find the end of dispatchPageInit"
+	// on windows-latest from the day it was added — a parity guard that
+	// is permanently red on one platform checks nothing on that platform
+	// while looking like it does.
+	body := strings.ReplaceAll(string(app), "\r\n", "\n")
 	start := strings.Index(body, "function dispatchPageInit(")
 	if start < 0 {
 		t.Fatal("dispatchPageInit not found in app.js — this test has stopped checking anything")
