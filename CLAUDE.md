@@ -1936,6 +1936,96 @@ separate classes of silent breakage were live at once**, and each now has a test
   a review finding claiming otherwise is a false positive, verifiable in
   seconds by reading a computed style.
 
+### Favorites on the player, and the router races review found (PRs #757 / #758 / #759, 2026-08-25)
+
+Admin-console only — no `/v1` change, no `ProtocolVersion` bump, no
+`PROTOCOL.md` change, no iOS mirror, no migration. The user-visible half is
+small; the durable half is two router invariants and a test that had never
+run on one platform.
+
+- **`/api/favorites` and `/api/player/favorites` are deliberately two
+  endpoints.** The first serves the stored backup document verbatim — raw
+  display strings, no album ids, no artwork, no playability — which is the
+  right answer to the operator's question and is what the Data page reads.
+  The player's joins it against the catalog. **Don't widen the operator one
+  into something that serves both**; they answer different questions and the
+  operator's is a faithful dump by design.
+- **A hearted album resolves by the catalog's OWN identity, and there is no
+  looser fallback — on purpose.** The wire stores album favorites as the
+  display triple `(albumArtist, album, year)`, which is exactly the input to
+  the client's album identity, and `internal/dupes` mirrors that identity
+  verbatim; so `favoriteAlbumID` is `librarycat.HashID(dupes.AlbumIDOf(...))`
+  — the same key the builder stamped onto `Album.ID`, not a resemblance test.
+  A miss means the album is genuinely not in this library and is reported as
+  unresolved. **A second, fuzzier match would attribute a heart to the wrong
+  record while looking like it worked**, and the whole point of the mirror is
+  that album identity has ONE definition on both sides.
+  `TestFavoriteAlbumIDMatchesTheCatalogsOwnIdentity` compares against the
+  catalog's own ids rather than a hard-coded digest, so the two derivations
+  cannot drift unnoticed.
+  **Test-fixture lesson worth generalising:** the no-fallback test initially
+  PASSED against a build with the fallback added, because its fixture (a heart
+  with a year, against a library album with a DIFFERENT year) misses under the
+  fallback too. Only the other direction catches it — a heart carrying a year
+  the library lacks, where retry-without-the-year FINDS the album. When
+  pinning the ABSENCE of a rule, build the fixture the rule would actually
+  fire on, and negative-control it.
+- **`route()` MUST call `abortReads()`; `getJSON`'s per-key abort is not a
+  substitute.** The per-key abort cancels a second request under the SAME key
+  — paging inside a view, a search keystroke — and does nothing across views.
+  Every render awaits its fetch and then `clear(view)`s, so a slow read from
+  the view the reader LEFT paints over the page that replaced it. Measured,
+  not theorised: delay `/api/player/favorites` by 3s, open `/favorites`, go to
+  `/albums` 150 ms later — URL and `<h1>` said Albums while the body was the
+  Favorites tab strip with six favorite tiles. Fixed once at the router rather
+  than eleven times in the views (every render already returns on
+  `isAborted`). **Scoped to READS deliberately** — `postJSON`/`deleteJSON`
+  carry no signal and never enter that map, so a generate or a delete survives
+  a navigation, which is what an operator who pressed the button and walked
+  away expects. **Don't move the call into the views, and don't extend it to
+  the mutations.**
+- **The post-render scroll restore is generation-guarded, and the guard became
+  REQUIRED the moment `abortReads` landed.** An abandoned render now reliably
+  reaches route()'s `.then` (its fetch rejects, the view returns on
+  `isAborted`, the promise resolves), so it would apply ITS route's scroll
+  offset to the page that replaced it. The comfortable assumption — "the stale
+  scroll lands first, so it is a flicker" — is WRONG: instrumenting
+  `window.scrollTo` through the same repro gave `[{top: 0}, {top: 640}]`, the
+  stale offset LAST, leaving the reader 640px down a page they had just
+  opened. One comparison against the generation counter, the `chunkAppend`
+  idiom. Verified in both directions, including that an un-superseded route
+  still restores.
+- **The folder variant panel's open state is in memory, and must NOT become
+  `sessionStorage`** (suggested on review, declined). The player's own
+  analogue — `detailTabs`' `tabMemory` — is in memory for the same reason: a
+  fresh load opens on the default, and here the default (collapsed) IS the
+  change. `app.js` persisting the SETTINGS tab is not a precedent; that is a
+  navigation position, so losing it lands you somewhere you were not, whereas
+  losing this only re-collapses a tool one click away. Remembering it at all
+  is load-bearing: the panel re-renders when generated variants land, so
+  without it Generate would collapse the panel reporting its own result.
+- **A `\n`-literal scan of a static file in a test MUST normalize CRLF
+  first.** `TestEveryPageTabHasAnInitCase` located the end of
+  `dispatchPageInit` with `strings.Index(body, "\n}\n")`; there is no
+  `.gitattributes` pinning `eol`, so a Windows checkout carries CRLF and that
+  terminator is not in the bytes at all (LF: offset 782; CRLF: -1). It failed
+  on `windows-latest` **from the day it was added**. Fixed at the read
+  (`strings.ReplaceAll(..., "\r\n", "\n")`) rather than by adding
+  `.gitattributes` — pinning `eol` repo-wide rewrites every contributor's
+  working tree and is a separate, deliberate policy call. Regex-based scans
+  were already fine (`\s` matches `\r`); this was the only such site, proven
+  by converting all 22 `static/`+`templates/` files to CRLF and running the
+  package.
+- **PROCESS — `test (windows-latest)` is NON-BLOCKING in `gate.yml`, so a red
+  Windows leg hides behind a green `gate`.** That is how the above went
+  unnoticed for a day on `main`. **When a Windows-only failure is suspected,
+  read the per-JOB conclusions** (`gh api .../runs/<id>/jobs`), not the run's
+  conclusion — and treat a permanently-red leg as urgent for a second reason:
+  it masks any genuine Windows regression that lands behind it, so no PR's
+  Windows signal is readable until it is fixed. Simulating it locally is
+  cheap and conclusive — convert the static files to CRLF, run the package,
+  convert back.
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future
