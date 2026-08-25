@@ -15,6 +15,12 @@ const PAGE = 60;
 // axis is forwarded and preserved by every helper below at once.
 const AXIS_FILTERS = ["artist", "genre", "composer"];
 
+// The variant kinds a coverage readout reports, in the order they are
+// shown. One list, and the labels come from variantKindLabel — so the
+// folder rows and the folder's own summary line cannot name or order
+// them differently, and a third kind reaches both at once.
+const COVERAGE_KINDS = ["upscale", "optimize"];
+
 // ---- Albums grid ----
 
 export async function renderAlbums(view, ctx) {
@@ -995,6 +1001,8 @@ async function renderCollectionDetail(view, ctx, opts) {
   const tracks = d.tracks || [];
   setAxisTitle(c.name || c.id);
 
+  // The single URL, for the things that can only carry one: the
+  // now-playing bar's queue art and the track rows' fallback.
   const art = c.hasCover
     ? collectionCoverURL(opts.scope, c.id)
     : (c.covers?.length ? coverURL(c.covers[0], 500) : null);
@@ -1021,8 +1029,12 @@ async function renderCollectionDetail(view, ctx, opts) {
 
   if (opts.actions) head.appendChild(opts.actions(c, view, ctx));
 
+  // The BOX gets collectionArt, not `art` — the same ladder the tile in
+  // the grid uses, mosaic and all. Rendering only covers[0] here meant a
+  // playlist showed four covers on the way in and one on arrival, which
+  // reads as the wrong page having loaded.
   view.appendChild(el("div", { class: "detail" },
-    el("div", { class: "detail-art" }, cover(art, c.name || "")), head));
+    el("div", { class: "detail-art" }, collectionArt(c, opts.scope)), head));
 
   if (tracks.length) {
     view.appendChild(trackList(tracks, art, { collection: true }));
@@ -1284,10 +1296,82 @@ function folderSummary(r, path) {
   };
   const heading = el("p", { class: "muted small", text: tracksAndSize(total, r.subtreeSizeBytes) });
   const wrap = el("div", {}, heading);
-  const panel = variantPanel(summary, { path }, rerenderView);
-  if (panel) wrap.appendChild(panel);
+  // Plain, because the disclosure below supplies the frame and the
+  // label — the card chrome inside it would draw a box in a box under a
+  // heading that already says "Variants".
+  const panel = variantPanel(summary, { path }, rerenderView, { plain: true });
+  if (panel) wrap.appendChild(variantDisclosure(summary, panel));
   onVariantChange(rerenderView);
   return wrap;
+}
+
+/**
+ * Whether the folder view's variant panel is expanded.
+ *
+ * Remembering it at all is what makes the disclosure usable: the panel
+ * re-renders whenever generated variants land (onVariantChange above),
+ * so without this, pressing Generate would collapse the panel that
+ * reported the result.
+ *
+ * NOT keyed on the folder path, so walking into a subfolder keeps it
+ * open rather than making the reader re-open it at every level of the
+ * tree — which is how it is used, one directory at a time.
+ *
+ * In memory, and deliberately NOT sessionStorage (suggested on review).
+ * The player's own analogue, detailTabs' tabMemory, is in memory for the
+ * same reason: a fresh load should open on the default, and here the
+ * default — collapsed — is the whole point of the change. Persisting it
+ * would mean an operator who once expanded the panel gets a screenful
+ * of it back on every load thereafter, which is the state this replaced.
+ * app.js persists the SETTINGS tab across reloads, but that is a
+ * navigation position: losing it lands you somewhere you were not,
+ * whereas losing this only re-collapses a tool that is one click away.
+ */
+let folderVariantsOpen = false;
+
+/**
+ * The folder view's variant panel, collapsed behind a summary line.
+ *
+ * Two coverage bars, four buttons, two notes and a totals line is most
+ * of a screen, and on the Folders page it sat above the listing — so
+ * browsing a tree meant scrolling past the same panel at every level to
+ * reach the folders, which is what the page is for.
+ *
+ * Nothing is lost while it is closed: the summary carries both ratios,
+ * and every folder row already shows its own coverage marks. Kinds with
+ * nothing eligible are left out of the summary for the same reason
+ * folderRow leaves them out of a row — "0 / 0" is noise that reads like
+ * a problem.
+ */
+function variantDisclosure(summary, panel) {
+  const line = el("span", { class: "variants-summary" });
+  for (const key of COVERAGE_KINDS) {
+    const c = summary[key];
+    if (!c || !c.eligible) continue;
+    line.appendChild(coverageMark(key, c.covered, c.eligible));
+  }
+  const box = el("details", { class: "variants variants-disclosure" });
+  box.open = folderVariantsOpen;
+  box.appendChild(el("summary", { class: "variants-summary-row" },
+    el("span", { class: "variants-head", text: "Variants" }), line));
+  box.appendChild(panel);
+  box.addEventListener("toggle", () => { folderVariantsOpen = box.open; });
+  return box;
+}
+
+/**
+ * One "Hi-res 3/12" coverage mark.
+ *
+ * Shared by the folder rows and the folder's own summary line so the two
+ * can't drift in label, order or the done state — the summary is a
+ * roll-up of exactly what the rows below it say.
+ */
+function coverageMark(kind, covered, eligible) {
+  return el("span", {
+    class: `row-cov${covered >= eligible ? " row-cov-done" : ""}`,
+    text: `${variantKindLabel(kind)} ${covered}/${eligible}`,
+    attrs: { "data-kind": kind },
+  });
 }
 
 /** "12 tracks · 1.2 GB", dropping the size when there isn't one. */
@@ -1297,19 +1381,17 @@ function tracksAndSize(count, sizeBytes) {
 
 function folderRow(f) {
   const marks = el("span", { class: "row-coverage" });
-  for (const [key, label, covered, eligible] of [
-    ["upscale", "Hi-res", f.upscaledCount || 0, f.upscaleEligibleCount ?? f.trackCount ?? 0],
-    ["optimize", "CarPlay", f.optimizedCount || 0, f.optimizeEligibleCount ?? f.trackCount ?? 0],
-  ]) {
+  const counts = {
+    upscale: [f.upscaledCount || 0, f.upscaleEligibleCount ?? f.trackCount ?? 0],
+    optimize: [f.optimizedCount || 0, f.optimizeEligibleCount ?? f.trackCount ?? 0],
+  };
+  for (const key of COVERAGE_KINDS) {
+    const [covered, eligible] = counts[key];
     // A folder with nothing eligible for a kind shows no mark for it at
     // all. "0 / 0" down a long list of folders is noise that reads like
     // a problem.
     if (eligible === 0) continue;
-    marks.appendChild(el("span", {
-      class: `row-cov${covered >= eligible ? " row-cov-done" : ""}`,
-      text: `${label} ${covered}/${eligible}`,
-      attrs: { "data-kind": key },
-    }));
+    marks.appendChild(coverageMark(key, covered, eligible));
   }
   return link(`/folders?path=${encodeURIComponent(f.path)}`, { class: "row" },
     el("span", { class: "row-title", text: `📁 ${f.name}` }),

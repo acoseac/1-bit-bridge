@@ -509,6 +509,38 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   margin: 0; padding: 0; border: 0; background: none; border-radius: 0;
 }
 
+/* The folder view's panel is collapsed behind its own summary. It keeps
+   the .variants card chrome — the <details> IS the card here — and the
+   panel inside is built `plain` so nothing is framed twice. */
+.variants-disclosure > summary { list-style: none; cursor: pointer; }
+.variants-disclosure > summary::-webkit-details-marker { display: none; }
+/* The native marker is dropped and redrawn as a chevron because a
+   `display: flex` summary loses ::marker in Chromium anyway — verified
+   in the browser, not assumed. Drawing it explicitly is what keeps the
+   affordance identical in every engine. */
+.variants-summary-row { display: flex; align-items: center; gap: var(--space-3); }
+.variants-summary-row::before {
+  content: ""; flex: none; width: 0.42rem; height: 0.42rem; margin-right: 2px;
+  border-right: 2px solid var(--fg-muted); border-bottom: 2px solid var(--fg-muted);
+  transform: rotate(-45deg); transition: transform 0.15s ease;
+}
+.variants-disclosure[open] > .variants-summary-row::before { transform: rotate(45deg); }
+/* .variants-head is the album panel's <h2>; here it labels a flex row,
+   so it wants no trailing margin. Sharing the class rather than cloning
+   its type keeps one definition of how a panel titles itself. */
+.variants-summary-row .variants-head { margin: 0; }
+.variants-summary { display: flex; align-items: center; gap: var(--space-2);
+  margin-left: auto; flex-wrap: wrap; }
+.variants-disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px;
+}
+/* Separates the summary from the panel only when it is open — closed,
+   the padding would be dead space under a single line. */
+.variants-disclosure[open] > .variants-plain {
+  margin-top: var(--space-3); padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
 .variant-kind { padding: var(--space-3) 0; border-top: 1px solid var(--border); }
 .variant-kind:first-of-type { border-top: 0; }
 /* Title, ratio and the button pair on one line. The title takes the
@@ -540,6 +572,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 
 @media (prefers-reduced-motion: reduce) {
   .variant-bar-fill { transition: none; }
+  .variants-summary-row::before { transition: none; }
 }
 
 /* Below the phone breakpoint the track row drops to two lines: the
