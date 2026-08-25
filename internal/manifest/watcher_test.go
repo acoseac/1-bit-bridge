@@ -122,12 +122,23 @@ func TestWatcherShutdownDrainsInflightScan(t *testing.T) {
 	// guess at how long watch registration takes. Re-writing the same
 	// path is harmless and re-arms the debounce, so a write that lands
 	// before the watch exists simply costs one more iteration.
+	//
+	// stopWriter is what makes the failure path survivable, and that is not
+	// a nicety: the timeout below fires exactly when no dispatch ever
+	// happened — the Windows case this test exists to report — and without
+	// a second exit condition the writer would spin on `entered`, which is
+	// never closed there, and the deferred `<-writerDone` would hang the
+	// test binary instead of printing the failure. Closed unconditionally
+	// in cleanup, so both paths drain it.
 	writerDone := make(chan struct{})
+	stopWriter := make(chan struct{})
 	go func() {
 		defer close(writerDone)
 		for {
 			select {
 			case <-entered:
+				return
+			case <-stopWriter:
 				return
 			default:
 			}
@@ -135,11 +146,16 @@ func TestWatcherShutdownDrainsInflightScan(t *testing.T) {
 			select {
 			case <-entered:
 				return
+			case <-stopWriter:
+				return
 			case <-time.After(150 * time.Millisecond):
 			}
 		}
 	}()
-	t.Cleanup(func() { <-writerDone })
+	t.Cleanup(func() {
+		close(stopWriter)
+		<-writerDone
+	})
 
 	select {
 	case <-entered:
