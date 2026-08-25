@@ -221,7 +221,17 @@ export async function renderAlbum(view, { id, setToolbar }) {
   // see variants.js.
   const variants = variantPanel(d.variants, { albumIds: [id] }, rerenderView, { plain: true });
   appendIf(view, detailTabs(`album:${id}`, [
-    { id: "tracks", label: "Tracks", panel: trackList(d.tracks, art) },
+    // An empty track list is a truthy <ol>, so detailTabs would keep the
+    // tab and open on a blank panel. Say what happened instead: a row
+    // deleted between the catalog build and this fetch is the realistic
+    // way to get here, and "no tracks" is the useful thing to know.
+    {
+      id: "tracks", label: "Tracks",
+      panel: d.tracks.length
+        ? trackList(d.tracks, art)
+        : emptyState("No tracks here",
+            "This album's files are gone from the library — a rescan will remove it."),
+    },
     { id: "about", label: "About", panel: aboutBlock(d.release, { plain: true }) },
     { id: "variants", label: "Variants", panel: variants },
   ]));
@@ -498,8 +508,12 @@ export async function renderArtist(view, { id, gen, setToolbar }) {
   // this whole discography CarPlay copies" is the request, and doing it
   // album by album is the tedium the Inspector's folder tree absorbed.
   const variants = variantPanel(d.variants, { artistId: id }, rerenderView, { plain: true });
+  const albums = d.albums.length
+    ? grid
+    : emptyState("No albums here",
+        "This artist's files are gone from the library — a rescan will remove them.");
   appendIf(view, detailTabs(`artist:${id}`, [
-    { id: "albums", label: "Albums", panel: grid },
+    { id: "albums", label: "Albums", panel: albums },
     { id: "about", label: "About", panel: aboutBlock(d.about, { plain: true }) },
     { id: "variants", label: "Variants", panel: variants },
   ]));
@@ -510,8 +524,9 @@ export async function renderArtist(view, { id, gen, setToolbar }) {
   // one synchronous pass and dropped frames doing it.
   //
   // After the grid is in the document, so the chunks land in a node the
-  // reader can actually see fill.
-  chunkAppend(grid, d.albums, albumTile, gen);
+  // reader can actually see fill. Skipped when the grid was replaced by
+  // an empty state and is not in the document at all.
+  if (albums === grid) chunkAppend(grid, d.albums, albumTile, gen);
 }
 
 // ---- Genres / Composers ----

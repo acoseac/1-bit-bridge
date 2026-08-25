@@ -29,9 +29,16 @@ var (
 	// class: "a b c" literals. Template literals are skipped on purpose:
 	// their interpolated half can't be resolved statically, and the
 	// static half is always a class this catches at another call site.
-	classLiteralRe = regexp.MustCompile(`class:\s*"([^"$` + "`" + `]+)"`)
+	//
+	// Both quote styles, though the codebase uses double throughout: a
+	// single-quoted literal this failed to see would be a class the test
+	// silently stopped checking, which is the direction that matters. The
+	// open and close quotes are not tied together — RE2 has no
+	// backreferences — so a mismatched pair would match; harmless here,
+	// since it is not valid JavaScript in the first place.
+	classLiteralRe = regexp.MustCompile(`class:\s*["']([^"'$` + "`" + `]+)["']`)
 	// classList.add / toggle / remove("x")
-	classListRe = regexp.MustCompile(`classList\.(?:add|toggle|remove)\("([^"$` + "`" + `]+)"`)
+	classListRe = regexp.MustCompile(`classList\.(?:add|toggle|remove)\(["']([^"'$` + "`" + `]+)["']`)
 	// Any .name appearing in a stylesheet — selectors, not properties.
 	cssClassRe = regexp.MustCompile(`\.([A-Za-z][\w-]*)`)
 	// Comments are stripped BEFORE the scan. This file's own commentary

@@ -243,7 +243,7 @@ const tabMemory = { key: null, id: null };
  *   only one survives, or null when none do.
  */
 export function detailTabs(key, specs) {
-  const live = (specs || []).filter((s) => s && s.panel);
+  const live = (specs || []).filter((s) => s?.panel);
   if (!live.length) return null;
   // A single tab is chrome that says nothing: a lone "Tracks" button
   // above a track list is a control with no alternative to offer.
@@ -284,7 +284,9 @@ export function detailTabs(key, specs) {
     });
     btn.addEventListener("click", () => show(i));
     btn.addEventListener("keydown", (e) => {
-      const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      let step = 0;
+      if (e.key === "ArrowRight") step = 1;
+      else if (e.key === "ArrowLeft") step = -1;
       let next = -1;
       if (step) next = (i + step + live.length) % live.length;
       else if (e.key === "Home") next = 0;
