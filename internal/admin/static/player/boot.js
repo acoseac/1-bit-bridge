@@ -336,8 +336,19 @@ function route() {
   titleEl.focus({ preventScroll: true });
   announce(title);
 
+  // Generation-guarded, like chunkAppend: a render that has been
+  // superseded must not apply ITS route's scroll offset to the page
+  // that replaced it. abortReads() makes an abandoned render resolve
+  // (its fetch rejects, the view returns on isAborted), so this `.then`
+  // now runs reliably for routes the reader has left — and the abort
+  // can land AFTER the new route has already scrolled, which makes the
+  // stale offset the LAST writer rather than a flicker. Measured:
+  // scrollTo saw [{top: 0}, {top: 640}] and the reader ended up 640px
+  // down a page they had just opened.
+  const myGen = gen();
   const state = history.state || {};
   void Promise.resolve(render()).then(() => {
+    if (myGen !== gen()) return;
     window.scrollTo({ top: state.scrollY || 0 });
   });
 }
