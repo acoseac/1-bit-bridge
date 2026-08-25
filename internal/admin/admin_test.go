@@ -1618,57 +1618,26 @@ func TestSettingsPatchSmartPlaylistsEnabled(t *testing.T) {
 	}
 }
 
-// TestPageSmartMixes covers the /smartmixes render: a "Feature disabled"
-// state when off, and the seeded families + their member tracks when on.
-func TestPageSmartMixes(t *testing.T) {
-	srv, cfg, _ := newTestServer(t)
-
-	// Feature off (default) → disabled panel, no family content.
+// TestRetiredSmartMixesPageRedirects: /smartmixes was an operator page
+// with its own card list, and it is gone — smart mixes are tiles you
+// play, so they live in the player, where the affordances the page owned
+// (regenerate, save as playlist, set a cover) now ride the mix itself.
+//
+// Its URL was bookmarkable and the sidebar pointed at it for months, so
+// a 404 would read as a broken console rather than as a moved feature.
+func TestRetiredSmartMixesPageRedirects(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/smartmixes", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
 	rw := httptest.NewRecorder()
-	// smartPlaylists defaults ON now, so reaching the disabled panel
-	// takes an explicit opt-out.
-	off := cfg
-	off.SmartPlaylists.Enabled = boolPtrT(false)
-	srv.deps.CfgHolder.Store(off)
-	srv.pageSmartMixes(rw, httptest.NewRequest("GET", "/smartmixes", nil))
-	if rw.Code != 200 {
-		t.Fatalf("/smartmixes status = %d; want 200", rw.Code)
-	}
-	if !strings.Contains(rw.Body.String(), "smartmix-disabled-panel") {
-		t.Error("feature-off /smartmixes MUST surface the disabled panel")
-	}
+	srv.Handler().ServeHTTP(rw, req)
 
-	// Enable + seed families (flat, time-of-day, and a never-refreshed one).
-	cfg.SmartPlaylists.Enabled = boolPtrT(true)
-	srv.deps.CfgHolder.Store(cfg)
-	flat := []byte(`[{"position":0,"path":"/Abdullah/Water/01.flac","title":"Song For Sathima","artist":"Abdullah Ibrahim"}]`)
-	hourly := []byte(`{"hourly":{"8":[{"position":0,"path":"/x/commute.flac","title":"Morning Drive","artist":"AM"}]}}`)
-	if err := srv.deps.Manifest.ReplaceSmartPlaylists(context.Background(), []manifest.StoredSmartPlaylist{
-		{Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation", Subtitle: "most played this fortnight", Position: 0, RefreshedAt: time.Now().UnixNano(), ItemsJSON: flat},
-		{Slug: "time-of-day", Kind: "timeOfDay", Title: "Morning Commute", Position: 1, RefreshedAt: time.Now().UnixNano(), ItemsJSON: hourly},
-		// RefreshedAt == 0 must render "not yet refreshed", NOT a 1970-epoch
-		// relative time (Gemini MEDIUM on PR #401).
-		{Slug: "never-run", Kind: "recentlyPlayed", Title: "Never Run", Position: 2, RefreshedAt: 0, ItemsJSON: []byte(`[{"position":0,"path":"/y/z.flac","title":"Z"}]`)},
-	}); err != nil {
-		t.Fatalf("seed smart playlists: %v", err)
+	if rw.Code != http.StatusMovedPermanently {
+		t.Fatalf("GET /smartmixes = %d; want %d (permanent — a browser should stop asking)",
+			rw.Code, http.StatusMovedPermanently)
 	}
-
-	rw = httptest.NewRecorder()
-	srv.pageSmartMixes(rw, httptest.NewRequest("GET", "/smartmixes", nil))
-	if rw.Code != 200 {
-		t.Fatalf("/smartmixes (enabled) status = %d; want 200", rw.Code)
-	}
-	body := rw.Body.String()
-	if strings.Contains(body, "smartmix-disabled-panel") {
-		t.Error("enabled /smartmixes MUST NOT show the disabled panel")
-	}
-	for _, want := range []string{"Heavy Rotation", "Song For Sathima", "smartmix-regen", "Morning Commute", "Morning Drive", "Never Run", "not yet refreshed",
-		// Card-grid rework: per-family regenerate + save-as-playlist actions
-		// and the collapsed track-list disclosure.
-		"smartmix-grid", "smartmix-regen-one", "smartmix-save", "smartmix-tracklist", "Show tracks"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("/smartmixes body missing %q", want)
-		}
+	if got := rw.Header().Get("Location"); got != "/mixes" {
+		t.Errorf("GET /smartmixes → %q; want \"/mixes\" (the player's mix grid)", got)
 	}
 }
 

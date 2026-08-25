@@ -32,8 +32,15 @@ const QUALITY_LABELS = {
 
 /** "1 album" / "2 albums" — English -s pluralisation, which covers
  * every noun the player counts (album, track, disc, mix). */
-export function plural(n, word) {
-  return `${n} ${n === 1 ? word : word + "s"}`;
+/**
+ * "1 track" / "12 tracks".
+ *
+ * @param {string} [many] - the plural form, when appending "s" is wrong.
+ *   "mix" is the case that forced it: a sibilant takes "-es", and
+ *   "3 mixs" is the kind of thing a reader notices and nothing else does.
+ */
+export function plural(n, word, many) {
+  return `${n} ${n === 1 ? word : (many || word + "s")}`;
 }
 
 export function qualityLabel(q) {

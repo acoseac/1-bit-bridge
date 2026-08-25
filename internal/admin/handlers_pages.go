@@ -50,14 +50,41 @@ var tmplFuncs = template.FuncMap{
 // "never leaves the loopback admin console" copy on it. renderPage
 // itself reads it for the frame-ancestors clickjacking headers.
 type pageData struct {
-	ActiveTab       string
-	ActiveSection   string
+	ActiveTab     string
+	ActiveSection string
+	// PlayerNav is the player sub-section that has a sidebar entry of
+	// its OWN, or "" when the current player route is covered by Browse.
+	// Empty on every operator page.
+	//
+	// It exists because every player route renders the "player" tab and
+	// the "player" section, so tab-or-section matching cannot tell
+	// /albums from /mixes — and with Smart mixes now pointing into the
+	// player, two rail entries would light at once. layout.html branches
+	// on this; boot.js applies the same rule client-side for navigations
+	// that never reach the server.
+	PlayerNav       string
 	LibraryName     string
 	Fingerprint     string
 	ServerVersion   string
 	ProtocolVersion int
 	IsPublic        bool
 	Data            any
+}
+
+// playerNavEntry maps a player sub-section to the sidebar entry that
+// owns it. Only sections with their own rail entry appear here;
+// everything else belongs to Browse and returns "".
+//
+// The mix DETAIL route folds onto the same entry as the grid, so
+// drilling into a mix keeps Smart mixes lit rather than jumping the
+// highlight back to Browse.
+func playerNavEntry(section string) string {
+	switch section {
+	case "mixes", "mix":
+		return "mixes"
+	default:
+		return ""
+	}
 }
 
 // sectionForTab maps a page's ActiveTab to its top-level nav SECTION so
@@ -78,6 +105,17 @@ func sectionForTab(tab string) string {
 		// failing anywhere.
 		return "server"
 	}
+}
+
+// activePlayerNav resolves the sidebar entry for a player page, reusing
+// playerSectionFor so the section is derived exactly once — the same
+// value pagePlayer seeds the shell with.
+func activePlayerNav(active string, r *http.Request) string {
+	if active != "player" || r == nil {
+		return ""
+	}
+	section, _ := playerSectionFor(r)
+	return playerNavEntry(section)
 }
 
 func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, active string, data any) {
@@ -110,6 +148,7 @@ func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, active strin
 	envelope := pageData{
 		ActiveTab:       active,
 		ActiveSection:   sectionForTab(active),
+		PlayerNav:       activePlayerNav(active, r),
 		LibraryName:     cfg.LibraryName,
 		Fingerprint:     s.deps.Fingerprint,
 		ServerVersion:   version.ServerVersion,
@@ -136,6 +175,12 @@ func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, active strin
 	if r != nil && r.Header.Get("X-Bridge-Partial") == "1" {
 		w.Header().Set("X-Bridge-Active", active)
 		w.Header().Set("X-Bridge-Section", sectionForTab(active))
+		// Third value, for the same reason as the other two: the client
+		// must not re-derive which sidebar entry owns a player route.
+		// Sent only when there IS one — an absent header means Browse.
+		if nav := envelope.PlayerNav; nav != "" {
+			w.Header().Set("X-Bridge-Player-Nav", nav)
+		}
 		if err := t.ExecuteTemplate(w, "content", envelope); err != nil {
 			logger.Error("render partial", "page", active, "err", err)
 		}
@@ -194,6 +239,12 @@ func (s *Server) pageStats(w http.ResponseWriter, r *http.Request) {
 		// through so the JS can drop the auto-reload + tell the
 		// operator to restart manually. (Qodo on PR #124.)
 		"IsSupervised": s.deps.IsSupervised,
+		// Harmonic coverage, inherited from the retired /smartmixes
+		// page. A key distribution is a fact about the library, like
+		// the composition bars above it — not a control — so this is
+		// where it belongs. Cheap: a GROUP BY on real
+		// track_analysis columns, no json_extract.
+		"KeyCoverage": s.keyCoverage(r.Context()),
 	}
 	s.renderPage(w, r, "stats", data)
 }

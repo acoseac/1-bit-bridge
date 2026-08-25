@@ -272,6 +272,7 @@ function route() {
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
+  updateSidebarNav(section);
 
   const setToolbar = (node) => {
     const bar = document.getElementById("player-toolbar");
@@ -333,6 +334,41 @@ function route() {
   void Promise.resolve(render()).then(() => {
     window.scrollTo({ top: state.scrollY || 0 });
   });
+}
+
+// updateSidebarNav highlights the sidebar entry that owns this player
+// route.
+//
+// The server does the same thing on a cold load (pageData.PlayerNav →
+// layout.html), but most navigation here never reaches the server: the
+// router swaps views in place, so nothing else would move the highlight
+// off Smart mixes when the reader clicks through to an album.
+//
+// Every player route carries data-tab="player", so the entry keyed on a
+// SECTION has to win — otherwise Browse would match everything and
+// Smart mixes would never light. Sections with no entry of their own
+// fall back to Browse, which is the entry without a data-player-section.
+//
+// Kept in step with playerNavEntry (handlers_pages.go) by
+// TestSidebarPlayerNavAgreesWithBoot.
+function updateSidebarNav(section) {
+  const nav = document.getElementById("primary-nav");
+  if (!nav) return;
+  const owner = section === "mix" ? "mixes" : section;
+  // Compared as a value, not interpolated into a selector. `section` is a
+  // path segment straight off location.pathname, so a URL carrying a quote
+  // or a bracket would build a malformed selector and querySelector throws
+  // a DOMException — taking route() down with it and leaving the page
+  // unrendered. CSS.escape would also fix that; not building the selector
+  // at all is one fewer thing to remember.
+  const links = [...nav.querySelectorAll("a")];
+  const match = links.find((a) => a.dataset.playerSection === owner) ||
+    links.find((a) => a.dataset.tab === "player" && !a.dataset.playerSection) ||
+    null;
+  for (const a of links) {
+    if (a === match) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
 }
 
 window.addEventListener("scroll", () => {
