@@ -39,6 +39,9 @@ func seedFavoritesLibrary(t *testing.T, st *manifest.Store) {
 	}
 }
 
+// seedFavorites writes the singleton favorites document through the same
+// store call the wire handler uses, so the fixtures exercise the real
+// local-XOR-foreign row shapes rather than a hand-built table.
 func seedFavorites(t *testing.T, st *manifest.Store,
 	tracks []manifest.FavoriteTrackRow, albums []manifest.FavoriteAlbumRow) {
 	t.Helper()

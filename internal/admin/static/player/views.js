@@ -798,12 +798,17 @@ export async function renderFavorites(view, { gen, setToolbar }) {
 }
 
 /**
- * A tab's content plus the count of hearts this bridge could not place.
+ * The three shapes a tab takes when some hearts belong somewhere else.
  *
- * Said out loud rather than dropped, for the same reason the collection
- * detail says it: the operator's own Favorites panel counts every
- * entry, so a page that quietly shows fewer disagrees with it in a way
- * that reads as a bug.
+ * They are said out loud rather than dropped, for the same reason the
+ * collection detail reports its own unresolved members: the operator's
+ * Favorites panel counts every entry, so a page that quietly shows
+ * fewer disagrees with it in a way that reads as a bug.
+ *
+ * withUnresolved is the tab that HAS content — a note above it.
+ * unresolvedOnly is the tab that has none, where the count is the whole
+ * answer and needs to explain itself rather than read as "empty".
+ * unresolvedNote is the line they share.
  */
 function withUnresolved(node, lost, noun) {
   if (!lost) return node;

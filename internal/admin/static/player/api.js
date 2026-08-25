@@ -40,6 +40,33 @@ async function errorFrom(r) {
   return e;
 }
 
+/**
+ * Cancel every in-flight read.
+ *
+ * getJSON's per-key abort only covers a SECOND request under the SAME
+ * key. That is enough for paging inside one view and no help at all
+ * across views: leaving /favorites for /albums leaves the favorites
+ * fetch running under its own key, and when it lands the view clears
+ * itself and paints favorites over the album grid — the URL and the
+ * heading say Albums while the body says something else. Reproduced in
+ * a browser by delaying one read past a navigation, not theorised.
+ *
+ * route() calls this up front, beside the crumb and variant-refresh
+ * teardown that are there for the same reason: a view the reader has
+ * left must not be able to act. Every render already returns on
+ * isAborted, so no individual view needs a guard of its own — which is
+ * the point, since eleven of them would have had to remember.
+ *
+ * Deliberately scoped to READS. postJSON / deleteJSON carry no signal
+ * and never enter this map, so a generate or a delete stays alive
+ * across a navigation — which is what an operator who pressed the
+ * button and walked away expects.
+ */
+export function abortReads() {
+  for (const ctrl of inflight.values()) ctrl.abort();
+  inflight.clear();
+}
+
 /** True for an AbortError, which is a cancellation, not a failure. */
 export function isAborted(err) {
   return err && (err.name === "AbortError" || err.code === 20);

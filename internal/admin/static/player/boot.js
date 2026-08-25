@@ -15,6 +15,7 @@ import * as audio from "./audio.js";
 import { mount as mountBar } from "./nowplaying.js";
 import { el, clear, announce } from "./ui.js";
 import { wireVariantRefresh, clearVariantRefresh } from "./variants.js";
+import { abortReads } from "./api.js";
 import {
   renderAlbums, renderAlbum, renderArtists, renderArtist,
   renderGenres, renderComposers,
@@ -296,6 +297,11 @@ function route() {
   // installed a variant-refresh hook cannot have it fire after the user
   // has navigated somewhere else. Only two views ever set one.
   clearVariantRefresh();
+  // And the same reasoning once more, for the reads themselves: a fetch
+  // the previous view started must not be able to paint. getJSON's
+  // per-key abort cannot do this — two views with different keys race,
+  // and the loser wins. See abortReads in api.js.
+  abortReads();
   const ctx = { params, gen, setToolbar, setCrumb, id: rest, mixesEnabled: !!seed.mixesEnabled };
 
   const routes = {
