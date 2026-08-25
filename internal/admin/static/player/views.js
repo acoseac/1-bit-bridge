@@ -364,9 +364,18 @@ function trackRow(t, i, all, albumArt, opts = {}) {
     title.addEventListener("click", () => audio.playQueue(all, i, { albumArt }));
   }
   row.appendChild(title);
-  if (!playable) {
-    row.appendChild(el("span", { class: "chip chip-warn", text: unplayableReason(t), attrs: { id: "why-" + i } }));
-  }
+  // The reason cell is ALWAYS appended, empty for a playable track, so
+  // every row has the same number of cells. That is what lets the list
+  // share one grid (see .track's subgrid rule) — with a conditional cell
+  // the 7-child rows would auto-place their metadata into the 8-child
+  // rows' columns and nothing would line up. The wrapper carries no chip
+  // styling of its own; the chip goes inside it only when there is one,
+  // so an empty cell collapses to zero width and the `1fr` title column
+  // absorbs the gap.
+  row.appendChild(el("span", { class: "track-why" },
+    playable ? null : el("span", {
+      class: "chip chip-warn", text: unplayableReason(t), attrs: { id: "why-" + i },
+    })));
   row.appendChild(el("span", { class: "track-meta", text: formatChip(t) }));
   row.appendChild(variantMarks(t));
   row.appendChild(el("span", { class: "track-size", text: bytes(t.sizeBytes) }));

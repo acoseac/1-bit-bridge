@@ -57,6 +57,9 @@ var layoutOnlyClasses = map[string]string{
 	"detail-head":        "grid child of .detail — positioned by the parent's template",
 	"detail-artist-head": "modifier on .detail for the round-portrait variant",
 	"tabpanels":          "plain block wrapper; the panels inside carry the styling",
+	"track-why": "grid cell for the unplayable reason — always emitted so every " +
+		"row has the same cell count and the list can share one grid; the chip " +
+		"inside carries the styling, and an empty one must collapse to nothing",
 }
 
 func TestPlayerEmittedClassesAreStyled(t *testing.T) {
