@@ -275,8 +275,11 @@ func smartPlaylistItemCount(row manifest.StoredSmartPlaylist) int {
 	return len(items)
 }
 
-// --- /smartmixes admin page (read-only render of the cached families) ---
-
+// smartMixTrackView is one decoded member of a cached family.
+//
+// It outlived the /smartmixes page that rendered it: the save-as-playlist
+// handler decodes a family through the same helper, and the player's own
+// mix views read /api/player/mixes/{slug} instead.
 type smartMixTrackView struct {
 	Position int
 	Title    string
@@ -284,25 +287,7 @@ type smartMixTrackView struct {
 	Path     string
 }
 
-type smartMixFamilyView struct {
-	Slug        string
-	Kind        string
-	Title       string
-	Subtitle    string
-	RefreshedAt time.Time
-	ItemCount   int
-	HasCover    bool
-	Tracks      []smartMixTrackView
-}
-
-type smartMixPageData struct {
-	Enabled  bool
-	Families []smartMixFamilyView
-	// KeyCoverage maps each Camelot wheel code ("8A" / "11B") to the
-	// number of analyzed tracks in that key — the harmonic-coverage wheel.
-	// Empty when analysis hasn't run or the query failed.
-	KeyCoverage map[string]int
-}
+// --- Harmonic coverage (the Camelot wheel, rendered on /stats) ---
 
 // camelotCode renders a Camelot wheel position as its canonical code,
 // e.g. {Num:8, Minor:true} → "8A", {Num:11, Minor:false} → "11B".
@@ -314,61 +299,27 @@ func camelotCode(c smartplaylist.Camelot) string {
 	return strconv.Itoa(c.Num) + letter
 }
 
-// pageSmartMixes renders the cached smart-playlist families (slug / kind /
-// title / refreshed-at / member tracks) with a "Regenerate now" affordance.
-// Read-only: the regenerate POST + the (PR-pending) cover upload run through
-// the JSON admin API, not this page handler.
-func (s *Server) pageSmartMixes(w http.ResponseWriter, r *http.Request) {
-	cfg := s.deps.CfgHolder.Load()
-	enabled := cfg != nil && cfg.SmartPlaylists.EffectiveEnabled()
-
-	// Which families already have an operator-uploaded cover (best-effort).
-	covers, _ := s.deps.Manifest.PlaylistCoversByScope(r.Context(), manifest.CoverScopeSmartMix)
-
-	var fams []smartMixFamilyView
-	rows, err := s.deps.Manifest.LoadSmartPlaylists(r.Context())
+// keyCoverage counts analyzed tracks per Camelot wheel code.
+//
+// Reuses smartplaylist.ToCamelot — the sequencer's own mapping, and the
+// single source of truth for these codes, so the wheel and Auto Mix can
+// never disagree about what "8A" means.
+//
+// Best-effort: a query error yields an empty map so the panel renders
+// as "nothing analyzed yet" rather than failing the page around it.
+func (s *Server) keyCoverage(ctx context.Context) map[string]int {
+	out := map[string]int{}
+	kd, err := s.deps.Manifest.KeyDistribution(ctx)
 	if err != nil {
-		logger.Error("pageSmartMixes: load", "err", err)
-	} else {
-		fams = make([]smartMixFamilyView, 0, len(rows))
-		for _, row := range rows {
-			_, hasCover := covers[row.Slug]
-			// Leave RefreshedAt as the zero Time when never refreshed
-			// (RefreshedAt == 0) so the template renders "not yet refreshed"
-			// rather than "55 years ago" — time.Unix(0, 0) is the 1970 epoch
-			// (Gemini MEDIUM on PR #401).
-			var refreshed time.Time
-			if row.RefreshedAt > 0 {
-				refreshed = time.Unix(0, row.RefreshedAt)
-			}
-			fams = append(fams, smartMixFamilyView{
-				Slug:        row.Slug,
-				Kind:        row.Kind,
-				Title:       row.Title,
-				Subtitle:    row.Subtitle,
-				RefreshedAt: refreshed,
-				ItemCount:   smartPlaylistItemCount(row),
-				HasCover:    hasCover,
-				Tracks:      smartMixTracksForView(row),
-			})
+		logger.Warn("key distribution", "err", err)
+		return out
+	}
+	for _, kc := range kd {
+		if c, ok := smartplaylist.ToCamelot(kc.KeyRoot, kc.KeyMode); ok {
+			out[camelotCode(c)] += kc.Count
 		}
 	}
-	// Harmonic coverage for the Camelot wheel — count analyzed tracks per
-	// wheel code, reusing smartplaylist.ToCamelot (the sequencer's own
-	// mapping, single source of truth). Best-effort: a query error leaves
-	// the wheel empty rather than failing the page.
-	keyCoverage := map[string]int{}
-	if kd, kdErr := s.deps.Manifest.KeyDistribution(r.Context()); kdErr != nil {
-		logger.Warn("pageSmartMixes: key distribution", "err", kdErr)
-	} else {
-		for _, kc := range kd {
-			if c, ok := smartplaylist.ToCamelot(kc.KeyRoot, kc.KeyMode); ok {
-				keyCoverage[camelotCode(c)] += kc.Count
-			}
-		}
-	}
-
-	s.renderPage(w, r, "smartmixes", smartMixPageData{Enabled: enabled, Families: fams, KeyCoverage: keyCoverage})
+	return out
 }
 
 // smartMixTracksForView decodes a cached row into display rows. The

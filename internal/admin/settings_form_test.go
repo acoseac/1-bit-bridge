@@ -111,7 +111,6 @@ func TestPrimaryNavHighlightsEveryEntry(t *testing.T) {
 		{"/upnp", "upnp"},
 		{"/diagnostics", "diagnostics"},
 		{"/data", "data"},
-		{"/smartmixes", "smartmixes"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"

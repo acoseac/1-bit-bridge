@@ -118,7 +118,7 @@ func TestRenderedPagesHaveNoDuplicateIDs(t *testing.T) {
 	// sub-routes that render the same shell through a different path.
 	pages := append([]string{
 		"/", "/stats", "/library", "/library/duplicates",
-		"/jobs", "/devices", "/upnp", "/data", "/smartmixes", "/settings",
+		"/jobs", "/devices", "/upnp", "/data", "/settings",
 		"/diagnostics", "/login",
 	}, playerRoutes...)
 

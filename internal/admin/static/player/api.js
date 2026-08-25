@@ -75,11 +75,37 @@ export const api = {
   favorites: () => getJSON("/api/favorites", { key: "favorites" }),
 
   // Mix actions reuse the operator endpoints unchanged — no new backend.
+  // They came with the retired /smartmixes page; the player is now the
+  // only surface that offers them.
+  regenerateMixes: () => postJSON("/api/smart-playlists/regenerate"),
   regenerateMix: (slug) =>
     postJSON(`/api/smart-playlists/${encodeURIComponent(slug)}/regenerate`),
   saveMixAsPlaylist: (slug, name) =>
     postJSON(`/api/smart-playlists/${encodeURIComponent(slug)}/save-as-playlist`, { name }),
+
+  // Operator-uploaded collection covers. The two scopes are different
+  // endpoints rather than one parameterised route, so the mapping lives
+  // here in one place instead of at every call site.
+  //
+  // POST /api/playlists/{id}/cover has existed since the covers work
+  // landed and had NO caller: the only UI ever built was the smart-mix
+  // half, on the page that is now gone. A playlist could not be given a
+  // cover from anywhere in the console.
+  uploadCover: (scope, key, dataURL) =>
+    postJSON(coverAdminURL(scope, key), { image: dataURL }),
+  deleteCover: (scope, key) => deleteJSON(coverAdminURL(scope, key)),
 };
+
+/**
+ * The admin cover endpoint for a scope, which is NOT the read URL —
+ * collectionCoverURL below serves the bytes, this mutates them.
+ */
+function coverAdminURL(scope, key) {
+  const id = encodeURIComponent(key);
+  return scope === "smartmix"
+    ? `/api/smart-playlists/${id}/cover`
+    : `/api/playlists/${id}/cover`;
+}
 
 /**
  * POST with a JSON body.
@@ -97,6 +123,19 @@ async function postJSON(url, body) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.json())?.message || "";
+    } catch { /* a non-JSON error body is not worth a second failure */ }
+    throw new Error(detail || `Request failed (${res.status})`);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+/** DELETE with no body, same error shape as postJSON. */
+async function deleteJSON(url) {
+  const res = await fetch(url, { method: "DELETE" });
   if (!res.ok) {
     let detail = "";
     try {

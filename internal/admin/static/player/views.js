@@ -786,6 +786,10 @@ export async function renderMixes(view, ctx) {
       "Enable them in Settings → Audio; they are generated from your listening history."));
     return;
   }
+  // "Regenerate all" came from the retired /smartmixes page. It belongs
+  // on the grid rather than on a mix: it runs the whole engine, and
+  // every family's contents change at once.
+  setToolbar(regenerateAllButton());
   await renderPagedList(view, ctx, {
     fetchPage: () => api.mixes(),
     pick: (r) => r.collections || [],
@@ -795,6 +799,37 @@ export async function renderMixes(view, ctx) {
     emptyTitle: "No mixes generated yet",
     emptyDetail: "Mixes are rebuilt periodically once there is listening history to work from.",
   });
+}
+
+/**
+ * The mixes grid's one operator control.
+ *
+ * A rebuild takes a while and changes every family, so the button
+ * reports and then re-routes rather than mutating tiles in place —
+ * there is no partial state worth painting.
+ */
+function regenerateAllButton() {
+  const status = el("span", { class: "muted small", attrs: { role: "status" } });
+  const btn = el("button", { class: "btn", text: "Regenerate all" });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = "Regenerating…";
+    status.textContent = "";
+    try {
+      const r = await api.regenerateMixes();
+      status.textContent = r && r.families != null
+        ? `Rebuilt ${plural(r.families, "mix", "mixes")}.`
+        : "Rebuilt.";
+      await window.__player?.route?.();
+    } catch (e) {
+      status.textContent = e.message || "Could not regenerate.";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = was;
+    }
+  });
+  return el("div", { class: "toolbar" }, btn, status);
 }
 
 /**
@@ -838,6 +873,11 @@ export async function renderPlaylistDetail(view, ctx) {
     scope: "playlist",
     backHref: "/playlists",
     backLabel: "Playlists",
+    // Cover only — a backed-up playlist has no server-side regenerate
+    // or snapshot to offer. POST /api/playlists/{id}/cover has existed
+    // since the covers work landed with no caller at all: the only UI
+    // ever built was the smart-mix half, on a page that is now gone.
+    actions: (c) => playlistActions(c),
   });
 }
 
@@ -991,8 +1031,89 @@ function mixActions(c, view, ctx) {
     input.select();
   });
   box.appendChild(save);
+  box.appendChild(coverControl("smartmix", c, status));
 
   return el("div", {}, box, status);
+}
+
+/** The playlist detail's secondary row: a cover control and nothing else. */
+function playlistActions(c) {
+  const status = el("p", { class: "muted small", attrs: { role: "status" } });
+  const box = el("div", { class: "detail-actions detail-actions-secondary" },
+    coverControl("playlist", c, status));
+  return el("div", {}, box, status);
+}
+
+/**
+ * Set / replace / remove an operator-uploaded cover.
+ *
+ * The file input is inside its <label>, visually hidden but NOT
+ * `hidden`: [hidden] is display:none !important, which drops the input
+ * from the tab order, and a <label> is not natively focusable — so the
+ * upload would be unreachable by keyboard. The label paints the focus
+ * ring via :focus-within. (Same reasoning as the retired page's control,
+ * which learned it from a review.)
+ *
+ * Re-routes on success rather than swapping the <img> src: the cover
+ * appears on the tile and in the now-playing bar too, and the read URL
+ * is unversioned, so a re-fetch is the only thing that makes every copy
+ * of it agree.
+ */
+function coverControl(scope, c, status) {
+  const box = el("span", { class: "cover-control" });
+
+  const input = el("input", {
+    class: "sr-only",
+    attrs: { type: "file", accept: "image/jpeg,image/png" },
+  });
+  const label = el("label", { class: "btn btn-quiet" },
+    input, c.hasCover ? "Replace cover…" : "Set cover…");
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    status.textContent = "Uploading…";
+    try {
+      await api.uploadCover(scope, c.id, await readAsDataURL(file));
+      status.textContent = "Cover saved.";
+      await window.__player?.route?.();
+    } catch (e) {
+      status.textContent = e.message || "Upload failed.";
+    } finally {
+      // Cleared unconditionally, so re-picking the SAME file fires
+      // `change` again — without this a failed upload could not be
+      // retried with the same image.
+      input.value = "";
+    }
+  });
+  box.appendChild(label);
+
+  if (c.hasCover) {
+    const remove = el("button", { class: "btn btn-quiet", text: "Remove cover" });
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      status.textContent = "Removing…";
+      try {
+        await api.deleteCover(scope, c.id);
+        status.textContent = "Cover removed.";
+        await window.__player?.route?.();
+      } catch (e) {
+        remove.disabled = false;
+        status.textContent = e.message || "Remove failed.";
+      }
+    });
+    box.appendChild(remove);
+  }
+  return box;
+}
+
+/** Read a picked image as a data: URL, which is what the endpoint takes. */
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ""));
+    fr.onerror = () => reject(new Error("Could not read that file."));
+    fr.readAsDataURL(file);
+  });
 }
 
 export async function renderFolders(view, { params, setToolbar, setCrumb }) {

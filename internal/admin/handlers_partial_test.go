@@ -46,7 +46,6 @@ func TestPartialBoostRendersContentOnly(t *testing.T) {
 		{"/jobs", "jobs", "server", `class="page jobs-page"`},
 		{"/data", "data", "server", `class="page data"`},
 		{"/diagnostics", "diagnostics", "server", `class="diagnostics-page"`},
-		{"/smartmixes", "smartmixes", "server", `class="page smartmixes"`},
 		{"/upnp", "upnp", "server", `class="page upnp"`},
 	}
 

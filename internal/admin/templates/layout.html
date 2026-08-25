@@ -89,13 +89,22 @@
 
   <nav id="primary-nav" aria-label="Primary">
     <p class="nav-group">Library</p>
-    <a href="/" data-tab="player"{{if eq .ActiveSection "player"}} aria-current="page"{{end}}>
+    {{- /* Browse owns every player route EXCEPT the ones with a rail entry
+        of their own — .PlayerNav names those. Without the second clause,
+        Browse and Smart mixes would both light on /mixes, because every
+        player route renders the same tab AND the same section. */ -}}
+    <a href="/" data-tab="player"{{if and (eq .ActiveSection "player") (eq .PlayerNav "")}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-browse"/></svg><span>Browse</span></a>
     <a href="/stats" data-tab="stats"{{if eq .ActiveTab "stats"}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-stats"/></svg><span>Stats</span></a>
     <a href="/data" data-tab="data"{{if eq .ActiveTab "data"}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-data"/></svg><span>Playlists &amp; history</span></a>
-    <a href="/smartmixes" data-tab="smartmixes"{{if eq .ActiveTab "smartmixes"}} aria-current="page"{{end}}>
+    {{- /* Into the PLAYER, not an operator page: mixes are tiles you play,
+        and the operator affordances (regenerate, save as playlist, set a
+        cover) moved onto the mix itself. data-player-section is what
+        boot.js matches on when the router navigates client-side and the
+        server never sees the request. */ -}}
+    <a href="/mixes" data-tab="player" data-player-section="mixes"{{if eq .PlayerNav "mixes"}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-smartmixes"/></svg><span>Smart mixes</span></a>
 
     <p class="nav-group">Server</p>

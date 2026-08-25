@@ -1251,7 +1251,6 @@ var pages = map[string]string{
 	"upnp":        "upnp.html",
 	"data":        "data.html",
 	"settings":    "settings.html",
-	"smartmixes":  "smartmixes.html",
 	"diagnostics": "diagnostics.html",
 }
 
@@ -1315,7 +1314,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /devices", s.pageDevices)
 	mux.HandleFunc("GET /upnp", s.pageUPnP)
 	mux.HandleFunc("GET /data", s.pageData)
-	mux.HandleFunc("GET /smartmixes", s.pageSmartMixes)
+	mux.HandleFunc("GET /smartmixes", redirectRetiredSmartMixes)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 	mux.HandleFunc("GET /diagnostics", s.pageDiagnostics)
 

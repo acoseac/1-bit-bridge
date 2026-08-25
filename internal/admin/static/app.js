@@ -92,21 +92,21 @@ function isExpectedRestartDisconnect(err) {
 
 // --- dashboard ---
 
-function initDashboard() {
-  const scanBtn = document.getElementById("scan-now");
-  if (scanBtn) {
-    scanBtn.addEventListener("click", async () => {
-      scanBtn.disabled = true;
-      try {
-        await API.post("/api/scan");
-      } finally {
-        setTimeout(() => (scanBtn.disabled = false), 500);
-      }
-    });
-  }
-
-  // Updates: "Roll back" swaps the previous binary back in. Guarded by
-  // a typed-intent confirm rather than a bare one — this replaces the
+// wireUpdatePanel binds the Updates panel's three controls.
+//
+// Called from initSettings, because that is where the panel lives —
+// dashboard.html carries no update-* id at all. It used to sit inside
+// the dashboard init, from the era when Stats and Settings were one
+// page, which is why "Check now" and "Roll back" were dead even after
+// the dispatch bug below was accounted for.
+//
+// bindInstallButton is NOT idempotent, and renderUpdateTile also calls
+// it — but only in the branch where it CREATES the button, so the
+// server-rendered one is bound here and the JS-created one at birth.
+// Exactly one listener either way; keep that split if either side moves.
+function wireUpdatePanel() {
+  // "Roll back" swaps the previous binary back in. Guarded by a
+  // typed-intent confirm rather than a bare one — this replaces the
   // running binary, and the operator should not be able to do it by
   // reflex from a dialog they were already dismissing.
   const rollbackBtn = document.getElementById("update-rollback");
@@ -126,6 +126,64 @@ function initDashboard() {
         rollbackBtn.textContent = "Roll back";
         rollbackBtn.disabled = false;
         alert("Rollback failed: " + err.message);
+      }
+    });
+  }
+
+  // "Check now" forces a fresh GitHub poll. The handler returns the
+  // post-check status so the tile refreshes in one trip.
+  const updateCheckBtn = document.getElementById("update-check");
+  if (updateCheckBtn) {
+    updateCheckBtn.addEventListener("click", async () => {
+      const oldText = updateCheckBtn.textContent;
+      updateCheckBtn.disabled = true;
+      updateCheckBtn.textContent = "Checking…";
+      try {
+        const u = await API.post("/api/updates/check");
+        renderUpdateTile(u);
+      } catch (err) {
+        renderUpdateTile({ lastError: err.message });
+      } finally {
+        updateCheckBtn.textContent = oldText;
+        updateCheckBtn.disabled = false;
+      }
+    });
+  }
+
+  // "Install & restart" downloads, verifies, swaps the binary, then
+  // hits the existing /api/restart endpoint. The two are kept
+  // sequential rather than fused into one server-side handler so the
+  // user sees distinct success / failure surfaces for each step.
+  // The 409 active-sessions branch surfaces an "Install anyway" prompt
+  // backed by ?force=1.
+  bindInstallButton(document.getElementById("update-install"));
+}
+
+// initStats wires the Stats page's controls and paints its harmonic
+// wheel.
+//
+// It was `initDashboard`, dispatched on a tab named "dashboard" — a name
+// no page has rendered since the player took over "/" and the operator
+// dashboard moved to /stats (#739). Every lookup inside is nil-guarded,
+// so nothing failed: the function simply never ran, and "Scan now",
+// "Which tracks?" and "Retry missing" have had no click handler at all.
+// The update-panel wiring that used to live here moved to initSettings
+// along with the panel itself.
+function initStats() {
+  // The Camelot wheel, inherited from the retired /smartmixes page. Its
+  // container is absent unless something has been analyzed, and the
+  // helper no-ops on that — so this is safe on a library with no
+  // analysis, and on every other page.
+  initCamelotWheel();
+
+  const scanBtn = document.getElementById("scan-now");
+  if (scanBtn) {
+    scanBtn.addEventListener("click", async () => {
+      scanBtn.disabled = true;
+      try {
+        await API.post("/api/scan");
+      } finally {
+        setTimeout(() => (scanBtn.disabled = false), 500);
       }
     });
   }
@@ -190,38 +248,6 @@ function initDashboard() {
       }
     });
   }
-
-  // Updates panel: "Check now" forces a fresh GitHub poll. The handler
-  // returns the post-check status so the tile refreshes in one trip.
-  const updateCheckBtn = document.getElementById("update-check");
-  if (updateCheckBtn) {
-    updateCheckBtn.addEventListener("click", async () => {
-      const oldText = updateCheckBtn.textContent;
-      updateCheckBtn.disabled = true;
-      updateCheckBtn.textContent = "Checking…";
-      try {
-        const u = await API.post("/api/updates/check");
-        renderUpdateTile(u);
-      } catch (err) {
-        renderUpdateTile({ lastError: err.message });
-      } finally {
-        updateCheckBtn.textContent = oldText;
-        updateCheckBtn.disabled = false;
-      }
-    });
-  }
-
-  // "Install & restart" downloads, verifies, swaps the binary, then
-  // hits the existing /api/restart endpoint. The two are kept
-  // sequential rather than fused into one server-side handler so the
-  // user sees distinct success / failure surfaces for each step.
-  // The 409 active-sessions branch surfaces an "Install anyway" prompt
-  // backed by ?force=1.
-  //
-  // Also wired in renderUpdateTile when the button is added mid-tick
-  // (e.g. server-rendered first paint had no update available). The
-  // helper is shared so both entry paths run the same flow.
-  bindInstallButton(document.getElementById("update-install"));
 
   // Backups + Tailscale wiring moved to initSettings (PR #129)
   // — the panels themselves moved from this dashboard page to the
@@ -2338,6 +2364,9 @@ function mapEnrichSourceToBases(fd) {
 
 function initSettings() {
   initSettingsTabs();
+  // The Updates panel lives on this page; its wiring used to sit in the
+  // dashboard init, from when Stats and Settings were one page.
+  wireUpdatePanel();
   void renderSettingsPrereqs();
   initEnrichmentSource();
   // Cert info is a one-shot fetch — the cert doesn't change without
@@ -4651,166 +4680,6 @@ function camelotWedge(cx, cy, rInner, rOuter, a0, a1) {
   ].join(" ");
 }
 
-function initSmartMixes() {
-  initCamelotWheel(); // harmonic-coverage wheel (no-op when feature off)
-  const btn = document.getElementById("smartmix-regen");
-  if (btn) {
-    const status = document.getElementById("smartmix-regen-status");
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      const old = btn.textContent;
-      btn.textContent = "Regenerating…";
-      if (status) status.textContent = "";
-      try {
-        const r = await API.post("/api/smart-playlists/regenerate");
-        const n = r && r.families != null ? r.families : "?";
-        btn.textContent = `Generated ${n} — reloading…`;
-        setTimeout(() => location.reload(), 700);
-      } catch (e) {
-        btn.disabled = false;
-        btn.textContent = old;
-        if (status) status.textContent = e && e.message ? e.message : "Regeneration failed.";
-      }
-    });
-  }
-
-  // Per-card actions: regenerate ONE family in place / snapshot it as a
-  // regular playlist. Regenerate reloads on success (same pattern as the
-  // wholesale button + the cover flows); save stays on the page and links
-  // to the Data page where the snapshot landed.
-  document.querySelectorAll(".smartmix-card").forEach((card) => {
-    const slug = card.dataset.slug;
-    if (!slug) return;
-    const status = card.querySelector(".smartmix-card-status");
-    const setStatus = (t) => { if (status) status.textContent = t; };
-
-    const regen = card.querySelector(".smartmix-regen-one");
-    if (regen) {
-      regen.addEventListener("click", async () => {
-        regen.disabled = true;
-        const old = regen.textContent;
-        regen.textContent = "Regenerating…";
-        setStatus("");
-        try {
-          const r = await API.post(`/api/smart-playlists/${encodeURIComponent(slug)}/regenerate`);
-          if (r && r.removed) {
-            setStatus("Mix came back empty and was removed — reloading…");
-          } else {
-            const n = r && r.itemCount != null ? r.itemCount : "?";
-            setStatus(`Regenerated (${n} tracks) — reloading…`);
-          }
-          setTimeout(() => location.reload(), 700);
-        } catch (e) {
-          regen.disabled = false;
-          regen.textContent = old;
-          setStatus(e && e.message ? e.message : "Regeneration failed.");
-        }
-      });
-    }
-
-    // "Save as playlist…" opens an inline name form (no native prompt —
-    // consistent with the rest of the console and keyboard-friendly).
-    // Everything is built with createElement/textContent; r.name echoes
-    // operator input and must never reach innerHTML.
-    const save = card.querySelector(".smartmix-save");
-    if (save) {
-      save.addEventListener("click", () => {
-        if (card.querySelector(".smartmix-save-form")) return; // already open
-        const form = document.createElement("form");
-        form.className = "smartmix-save-form";
-        const input = document.createElement("input");
-        input.type = "text";
-        input.className = "smartmix-save-name";
-        input.setAttribute("aria-label", "Playlist name");
-        // en-US pinned so the prefill matches the server-side default name
-        // format ("Jan 2, 2006") when the operator clears the field — the
-        // admin console is English-only throughout (Gemini on PR #657).
-        const today = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-        input.value = `${card.dataset.title || slug} — ${today}`;
-        const ok = document.createElement("button");
-        ok.type = "submit";
-        ok.className = "btn primary";
-        ok.textContent = "Save";
-        const cancel = document.createElement("button");
-        cancel.type = "button";
-        cancel.className = "btn";
-        cancel.textContent = "Cancel";
-        form.append(input, ok, cancel);
-        const actions = card.querySelector(".smartmix-actions");
-        (actions || save).after(form);
-        save.disabled = true;
-        input.focus();
-        input.select();
-        const close = () => { form.remove(); save.disabled = false; };
-        cancel.addEventListener("click", close);
-        form.addEventListener("submit", async (ev) => {
-          ev.preventDefault();
-          ok.disabled = true;
-          cancel.disabled = true;
-          setStatus("Saving…");
-          try {
-            const nm = input.value.trim();
-            const r = await API.post(`/api/smart-playlists/${encodeURIComponent(slug)}/save-as-playlist`,
-              nm ? { name: nm } : {});
-            close();
-            if (status) {
-              status.textContent = `Saved “${r.name}” (${r.trackCount} tracks) — view it under `;
-              const link = document.createElement("a");
-              link.href = "/data";
-              link.textContent = "Playlists & history";
-              status.append(link, ".");
-            }
-          } catch (e) {
-            ok.disabled = false;
-            cancel.disabled = false;
-            setStatus(e && e.message ? e.message : "Save failed.");
-          }
-        });
-      });
-    }
-  });
-
-  document.querySelectorAll(".smartmix-cover-control").forEach((ctrl) => {
-    const slug = ctrl.dataset.slug;
-    const status = ctrl.querySelector(".smartmix-cover-status");
-    const setStatus = (t) => { if (status) status.textContent = t; };
-    const base = `/api/smart-playlists/${encodeURIComponent(slug)}/cover`;
-
-    const input = ctrl.querySelector(".smartmix-cover-input");
-    if (input) {
-      input.addEventListener("change", async () => {
-        const file = input.files && input.files[0];
-        if (!file) return;
-        setStatus("Uploading…");
-        try {
-          const dataURL = await readFileAsDataURL(file);
-          await API.post(base, { image: dataURL });
-          setStatus("Saved — reloading…");
-          setTimeout(() => location.reload(), 600);
-        } catch (e) {
-          setStatus(e && e.message ? e.message : "Upload failed.");
-        } finally {
-          input.value = "";
-        }
-      });
-    }
-
-    const remove = ctrl.querySelector(".smartmix-cover-remove");
-    if (remove) {
-      remove.addEventListener("click", async () => {
-        setStatus("Removing…");
-        try {
-          await API.delete(base);
-          setStatus("Removed — reloading…");
-          setTimeout(() => location.reload(), 600);
-        } catch (e) {
-          setStatus(e && e.message ? e.message : "Remove failed.");
-        }
-      });
-    }
-  });
-}
-
 // Light / dark / system theme toggle. Cycles system → light → dark and
 // persists to localStorage["bridge-theme"]. applyTheme mirrors the pre-paint
 // IIFE in layout.html <head> (which prevents the flash-of-wrong-theme on load).
@@ -5175,18 +5044,19 @@ function dispatchPageInit(tab) {
   if (pageAbort) pageAbort.abort();
   pageAbort = new AbortController();
   switch (tab) {
-    case "dashboard": initDashboard(); break;
+    case "stats": initStats(); break;
     case "library": initLibrary(); break;
     case "duplicates": initDuplicates(); break;
     case "jobs": initJobs(); break;
     case "devices": initDevices(); break;
     case "upnp": initUPnP(); break;
     case "data": initData(); break;
-    case "smartmixes": initSmartMixes(); break;
     case "settings": initSettings(); break;
     case "diagnostics": initDiagnostics(); break;
-    // "stats" and "player" have no per-page initX: Stats is driven entirely
-    // by the SSE stream + server first paint, and the player is boot.js's job.
+    // "player" has no per-page initX — that is boot.js's job. Every other
+    // tab MUST appear above: a case labelled with a tab no page renders
+    // is silent, and leaves its controls dead with correct-looking
+    // markup. TestEveryPageTabHasAnInitCase pins the two together.
   }
 }
 
@@ -5277,28 +5147,41 @@ function runInlineScripts(root) {
 // boostUpdateTopNav sets aria-current on the one sidebar entry that matches
 // the page we just swapped in.
 //
-// It matches the TAB first and only falls back to the section, and that order
-// is the whole contract. Since the sidebar absorbed the old .subnav, every
-// operator page has its own entry keyed on its tab (jobs, duplicates, upnp,
-// …), so a per-section match would light up nothing for nine of them. The
-// section fallback exists for exactly one case: the player's client-side
-// sub-routes (/albums, /artists, /playlists, …) all render the "player" tab,
-// and their entry is keyed on the section so every one of them keeps Browse
-// highlighted.
+// Three arms, checked in order, each against EVERY entry before the next is
+// considered — a three-pass scan, not one pass with an OR:
 //
-// Both values arrive from the server on X-Bridge-Active / X-Bridge-Section, so
-// sectionForTab stays the single source of truth and this never re-derives it.
+//   1. playerNav, when the page is a player route with a sidebar entry of
+//      its own (Smart mixes). Every player route renders the same tab and
+//      the same section, so nothing else can tell /mixes from /albums.
+//   2. the tab, which is how every operator page is keyed (jobs, devices,
+//      upnp, …) now that the sidebar has absorbed the old .subnav. Entries
+//      carrying a data-player-section are SKIPPED here: they belong to arm
+//      1 alone, and they share data-tab="player" with Browse, so matching
+//      them by tab would depend on their order in the markup.
+//   3. the section, the fallback that keeps Browse lit for the player's
+//      other sub-routes (/albums, /artists, /playlists, …).
 //
-// The tab arm is checked against every entry before the section arm is
-// considered at all — a two-pass scan, not one pass with an OR — because "data"
-// and "smartmixes" carry a tab of their own while still belonging to the
-// "server" section, and a single-pass OR would light both their entry and any
-// entry keyed on the section.
-function boostUpdateTopNav(active, section) {
+// A single-pass OR would light two entries at once: "data" carries a tab of
+// its own while still belonging to the "server" section.
+//
+// All three values arrive from the server on X-Bridge-Active /
+// X-Bridge-Section / X-Bridge-Player-Nav, so sectionForTab and
+// playerNavEntry stay the single source of truth and this never re-derives
+// them. boot.js applies the same rule again for player navigations that
+// never reach the server at all.
+function boostUpdateTopNav(active, section, playerNav) {
   const links = document.querySelectorAll("#primary-nav a");
   let match = null;
-  for (const a of links) {
-    if (a.dataset.tab === active) { match = a; break; }
+  if (playerNav) {
+    for (const a of links) {
+      if (a.dataset.playerSection === playerNav) { match = a; break; }
+    }
+  }
+  if (!match) {
+    for (const a of links) {
+      if (a.dataset.playerSection) continue;
+      if (a.dataset.tab === active) { match = a; break; }
+    }
   }
   if (!match) {
     for (const a of links) {
@@ -5387,7 +5270,7 @@ async function boostSwap(url, opts = {}) {
 
   document.body.dataset.active = active;
   document.body.dataset.section = section;
-  boostUpdateTopNav(active, section);
+  boostUpdateTopNav(active, section, resp.headers.get("X-Bridge-Player-Nav") || "");
 
   if (boostIsPlayerPath(location.pathname) && window.__player) {
     // The injected fragment is the player shell; the module wires its

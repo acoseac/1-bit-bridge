@@ -304,6 +304,25 @@ func (s *Server) apiVariantFailureRetry(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, variantFailureRetryResponse{Cleared: n})
 }
 
+// redirectRetiredSmartMixes keeps /smartmixes working.
+//
+// The operator page is gone. Smart mixes are a library surface, not a
+// server one — tiles you play — so they live in the player, where the
+// grid already had artwork and playback and the affordances the operator
+// page owned (regenerate, save as playlist, set a cover) now ride the
+// mix itself. The console had TWO Smart Mixes destinations; this is the
+// one that goes.
+//
+// The page's other half, the harmonic-coverage wheel, is a fact about
+// the library rather than a control, and moved to /stats alongside the
+// composition bars.
+//
+// 301, matching the Inspector's retirement: permanent, and a permanent
+// redirect lets a browser stop asking.
+func redirectRetiredSmartMixes(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/mixes", http.StatusMovedPermanently)
+}
+
 // redirectRetiredInspector keeps the Library Inspector's URLs working.
 //
 // The page is gone — the player's album, artist and folder views cover

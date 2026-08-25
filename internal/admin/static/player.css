@@ -199,6 +199,19 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .save-form { display: flex; gap: var(--space-2); align-items: center; }
 .save-name { min-width: 12rem; }
 
+/* The cover control is a <label> wrapping a visually-hidden file input
+ * plus an optional Remove button, so it has to look like the buttons it
+ * sits among. display:contents lets both children join the parent's flex
+ * row directly rather than forming a nested box with its own spacing. */
+.cover-control { display: contents; }
+/* The input is sr-only, so the label paints the keyboard focus ring —
+ * without this the upload is reachable by Tab and invisible while it is.
+ * Matches .btn:focus-visible in app.css. */
+.cover-control label:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ---- A–Z jump rail ---- */
 
 .az-rail {
