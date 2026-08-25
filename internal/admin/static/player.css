@@ -291,6 +291,58 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 0.9rem;
 }
 .track:hover { background: var(--bg-elev); }
+
+/* An empty reason cell must not occupy a column where the columns are NOT
+ * shared. In the base per-row layout it is a zero-width track with a gap
+ * on each side, which measures as 12px of extra space between the title
+ * and the format chip and takes the same 12px off the title. It earns its
+ * cell back inside the @supports block below, where a constant cell count
+ * is precisely what lets the rows align — and the mobile block at the end
+ * of this file hides it again, for the same reason as here. */
+.track-why:empty { display: none; }
+
+/* Columns that line up DOWN the page, not just across one row.
+ *
+ * Each row being its own grid is why the format, size and duration
+ * columns sat at a different x on every line — a grid sizes its tracks
+ * from its own content and knows nothing about its siblings. The list
+ * becomes one grid and each row a SUBGRID spanning it, so every row
+ * resolves against the same tracks.
+ *
+ * Subgrid rather than `display: contents` on the row, which is the other
+ * way to share a parent grid and costs too much: a contents-display <li>
+ * has no box, so the row loses its hover background, its bottom border
+ * and its padding, and it has a history of dropping list semantics for
+ * assistive tech. The <li> keeps its box here.
+ *
+ * Wrapped in @supports because the failure mode is bad: an unsupported
+ * `subgrid` makes the declaration invalid, which would leave .track with
+ * no template at all and stack every cell vertically. Without the guard
+ * that is what an older engine renders. With it, the base rule above
+ * stands and the only thing lost is the alignment. */
+@supports (grid-template-columns: subgrid) {
+  .tracks {
+    display: grid;
+    /* num · title · reason · format · variants · size · duration · download */
+    grid-template-columns: 2.2rem 1fr repeat(6, auto);
+  }
+  .track {
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    /* The base rule flows into implicit COLUMNS because it has no count
+     * to work from; here the eight tracks are declared, so ordinary row
+     * flow fills them left to right. */
+    grid-auto-flow: row;
+  }
+  /* A disc heading is a sibling <li> in the same grid and has nothing to
+   * do with the columns — it spans them. */
+  .track-disc { grid-column: 1 / -1; }
+  /* Reinstated: here the cell count has to be constant across rows, which
+   * is the whole mechanism. The column is `auto`, so on an album where
+   * nothing carries a chip it costs nothing, and where something does,
+   * every row reserves that width — which IS the alignment. */
+  .track-why:empty { display: block; }
+}
 .track-disc {
   list-style: none; padding: var(--space-4) 10px 4px; font-size: 0.78rem;
   text-transform: uppercase; letter-spacing: .06em; color: var(--fg-muted);
@@ -593,7 +645,15 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
  * title keeps the width it needs, and everything factual wraps under
  * it. Seven auto columns at 375px crushed the title to one word. */
 @media (max-width: 640px) {
+  /* Back to a row-per-grid below the phone breakpoint: this layout stacks
+   * the factual cells under the title, so there are no columns left to
+   * align and the shared grid would only fight the spans below. Later in
+   * source order than the @supports block above, which is what lets it
+   * win without a specificity trick. */
+  .tracks { display: block; }
+  .track-why:empty { display: none; }
   .track {
+    grid-column: auto;
     grid-template-columns: 2.2rem 1fr auto;
     /* Back to row flow: this layout WANTS the wrap, and drives it with
      * the `grid-column: 2 / -1` spans below. Leaving the desktop rule's
