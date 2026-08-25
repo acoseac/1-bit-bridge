@@ -2035,8 +2035,20 @@ run on one platform.
   and the same manifest code passed on two other PRs the same day.
   **This compounds with the non-blocking leg above**: a leg that is both
   non-blocking AND intermittently red is one a reader learns to skip, which is
-  precisely how a genuine Windows regression would land unnoticed. Worth
-  rewriting against a synchronisation point rather than sleeps; not yet done.
+  precisely how a genuine Windows regression would land unnoticed. **Rewritten
+  2026-08-25 (PR #761) — it was also VACUOUS**: with `wt.scanWG.Wait()`
+  removed, the very regression it names, the sleep-based shape passed 10 runs
+  out of 10, because a sleep long enough to be reliable also let the one-file
+  scan FINISH before the cancel. It now parks a dispatch at its tail via
+  `Watcher.afterDispatchHookForTests` — after `ScanSubtree` returns but before
+  the deferred `scanWG.Done()`, the only window in which a dispatch is provably
+  in flight — cancels, and asserts `Run` has not returned. The seam is a FIELD
+  and not a package var for the reason `Pool.jobTimeout` is: as a package var
+  it raced under `-race`, a dispatch goroutine from an EARLIER watcher test
+  reading it against the next test's write. **And in a test whose subject is a
+  shutdown deadlock, every channel receive in the FAILURE and CLEANUP paths
+  needs a bound** — two review rounds each caught one unbounded wait that would
+  hang the binary instead of reporting the failure it had just detected.
 - **A `.track`-style CSS grid must not hardcode a column count when its
   children are conditional.** `trackRow` appends an extra unplayable-reason
   chip only for a track the browser cannot decode, so the row has 7 or 8
@@ -2046,6 +2058,23 @@ run on one platform.
   disagree — NOT widening the template, which works until the next conditional
   child. `TestTrackRowGridHoldsEveryConditionalChild` pins it and accepts
   either shape.
+- **A track-list row is a SUBGRID of the list, and the reason cell is always
+  emitted** (PR #762). Per-row grids cannot align: a grid sizes its tracks from
+  its own content and knows nothing about its siblings, so format/size/duration
+  sat at a different x on every line (measured spread up to 202px). `.tracks` is
+  the grid; each `.track` spans it with `grid-template-columns: subgrid`.
+  **NOT `display: contents` on the row** — that shares the parent grid too, but
+  a contents-display `<li>` has no box, so the row loses its hover background,
+  its bottom border and its padding, and it has a history of dropping list
+  semantics for assistive tech. **Keep the `@supports` guard**: an engine
+  without `subgrid` treats the declaration as invalid, which would leave
+  `.track` with no template at all and stack every cell vertically — guarded, it
+  simply keeps the per-row base rule. The always-emitted `.track-why` is what
+  makes the cell count constant (a shared grid cannot align a 7-cell row with an
+  8-cell row); it is `display: none` when `:empty` at the top level and on
+  mobile, where the columns are NOT shared and it would only add a gap, and
+  reinstated inside the `@supports` block where the constant count is the whole
+  mechanism.
 
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
