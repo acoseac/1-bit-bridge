@@ -282,7 +282,7 @@ function applyStats(s) {
   setText("comp-upscaled", s.tracksWithUpscaled ?? 0);
   setText("comp-optimized", s.tracksWithOptimized ?? 0);
   setText("comp-variant-files", s.variantFiles ?? 0);
-  setText("comp-variant-bytes", humanBytes(s.variantBytes ?? 0));
+  setText("comp-variant-bytes", formatBytes(s.variantBytes ?? 0));
   const scanStatus = document.getElementById("scan-status");
   if (scanStatus) {
     scanStatus.innerHTML = s.isScanning
@@ -4857,7 +4857,7 @@ async function refreshDupesSummary() {
         t.tier,
         String(t.groups),
         String(t.redundantFiles),
-        humanBytes(t.bytesInNonLargestCopies || 0),
+        formatBytes(t.bytesInNonLargestCopies || 0),
         String(t.suppressed),
       ];
       for (const c of cells) {
@@ -4882,7 +4882,7 @@ function dupeMemberGeometry(m) {
     const secs = String(Math.floor(m.durationSec % 60)).padStart(2, "0");
     parts.push(`${mins}:${secs}`);
   }
-  parts.push(humanBytes(m.sizeBytes || 0));
+  parts.push(formatBytes(m.sizeBytes || 0));
   return parts.join(" · ");
 }
 
@@ -5400,13 +5400,13 @@ async function refreshVariantsDir() {
   }
   const s = variantsDirState;
   setText("variants-dir", s.current);
-  setText("variants-free", humanBytes(s.freeBytes) + " free");
+  setText("variants-free", formatBytes(s.freeBytes) + " free");
   // Sizes only. The file counts beside them are server-rendered and
   // stay put: this endpoint reports usedByKind, not a per-kind file
   // count, so writing the whole row would drop the count.
   const byKind = s.usedByKind || {};
-  setText("variants-upscaled", humanBytes(byKind.upscale || 0));
-  setText("variants-optimized", humanBytes(byKind.optimize || 0));
+  setText("variants-upscaled", formatBytes(byKind.upscale || 0));
+  setText("variants-optimized", formatBytes(byKind.optimize || 0));
 
   const legacy = document.getElementById("variants-legacy");
   if (legacy) {
@@ -5414,7 +5414,7 @@ async function refreshVariantsDir() {
     if (s.legacyCount) {
       setText("variants-legacy-count", String(s.legacyCount));
       setText("variants-legacy-plural", s.legacyCount === 1 ? "" : "s");
-      setText("variants-legacy-bytes", humanBytes(s.legacyBytes));
+      setText("variants-legacy-bytes", formatBytes(s.legacyBytes));
     }
   }
   const clear = document.getElementById("variants-clear");
@@ -5474,7 +5474,7 @@ function wireVariantsClear() {
     go.disabled = true;
     hideEl("variants-clear-error");
     setText("variants-clear-dir", variantsDirState?.current || "the cache");
-    setText("variants-clear-bytes", humanBytes(variantsDirState?.usedBytes || 0));
+    setText("variants-clear-bytes", formatBytes(variantsDirState?.usedBytes || 0));
     dialog.showModal();
   });
 
@@ -5497,7 +5497,7 @@ function wireVariantsClear() {
       await refreshVariantsDir();
       setText("variants-status",
         `Cleared ${res.deletedCount} variant${res.deletedCount === 1 ? "" : "s"}, ` +
-        `freed ${humanBytes(res.freedBytes)}.`);
+        `freed ${formatBytes(res.freedBytes)}.`);
     } catch (err) {
       showError("variants-clear-error", err.message);
       go.disabled = false;
