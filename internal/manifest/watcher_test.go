@@ -153,8 +153,23 @@ func TestWatcherShutdownDrainsInflightScan(t *testing.T) {
 		}
 	}()
 	t.Cleanup(func() {
+		// cancel here too, not just in the body: the timeout path below
+		// Fatals WITHOUT having cancelled, and cleanups run LIFO, so this
+		// one fires before the fixture's store.Close(). Without it Run
+		// would still be watching when the store closes underneath it —
+		// the very B8 shape this test is about.
+		cancel()
 		close(stopWriter)
 		<-writerDone
+		// Bounded, deliberately. If Run itself has deadlocked — the exact
+		// defect these assertions detect — an unbounded wait here would
+		// hang the test binary and bury the failure that was just
+		// reported. Leaking a goroutine into an already-finishing process
+		// is the cheaper of the two.
+		select {
+		case <-runDone:
+		case <-time.After(3 * time.Second):
+		}
 	})
 
 	select {
