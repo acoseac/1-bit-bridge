@@ -267,12 +267,26 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); flex-wrap: wrap; }
 
 .tracks { list-style: none; margin: 0; padding: 0; }
-/* num · title · format · variants · size · duration · download.
- * Every column past the title is auto-width and right-packed, so a
- * track with no variants leaves no gap — the marks are absent, not
- * blank. */
+/* num · title · [unplayable reason] · format · variants · size · duration
+ * · download. Every column past the title is auto-width and right-packed,
+ * so a track with no variants leaves no gap — the marks are absent, not
+ * blank.
+ *
+ * The trailing columns are IMPLICIT (grid-auto-flow: column), not a fixed
+ * count, because the child count is conditional: trackRow appends an
+ * unplayable-reason chip only when the track cannot play in a browser.
+ * With a hardcoded seven-column template that eighth child overflowed
+ * into an implicit second ROW at column 1 — every DSD track rendered its
+ * Download link on a line of its own, doubling the row to 72px and
+ * left-aligning it under the track number. A whole DSD album was twice
+ * the height it should be (field-reported on bridge.ars.md, "Bitches
+ * Brew", 6/6 rows). Letting the columns be implicit means the row stops
+ * caring how many trailing items there are, which is the actual
+ * invariant — the next conditional element would have re-broken a
+ * widened-to-eight template the same way. */
 .track {
-  display: grid; grid-template-columns: 2.2rem 1fr auto auto auto auto auto;
+  display: grid; grid-template-columns: 2.2rem 1fr;
+  grid-auto-flow: column; grid-auto-columns: auto;
   gap: var(--space-3); align-items: baseline;
   padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 0.9rem;
 }
@@ -581,6 +595,11 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 @media (max-width: 640px) {
   .track {
     grid-template-columns: 2.2rem 1fr auto;
+    /* Back to row flow: this layout WANTS the wrap, and drives it with
+     * the `grid-column: 2 / -1` spans below. Leaving the desktop rule's
+     * column flow in place would place those items along a single row
+     * instead. */
+    grid-auto-flow: row;
     row-gap: 2px;
   }
   .track-meta, .track-variants, .track-size {
