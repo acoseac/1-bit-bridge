@@ -369,9 +369,15 @@ function trackRow(t, i, all, albumArt, opts = {}) {
   // share one grid (see .track's subgrid rule) — with a conditional cell
   // the 7-child rows would auto-place their metadata into the 8-child
   // rows' columns and nothing would line up. The wrapper carries no chip
-  // styling of its own; the chip goes inside it only when there is one,
-  // so an empty cell collapses to zero width and the `1fr` title column
-  // absorbs the gap.
+  // styling of its own; the chip goes inside it only when there is one.
+  //
+  // An empty one does NOT simply vanish under the shared grid: the reason
+  // column is `auto`, so once any row carries a chip every row reserves
+  // that width — which is exactly what puts the following columns on a
+  // common x. It costs nothing on an album where nothing is unplayable.
+  // Where the columns are not shared (the no-subgrid fallback, and
+  // mobile) the stylesheet hides it, because there it would only add a
+  // gap.
   row.appendChild(el("span", { class: "track-why" },
     playable ? null : el("span", {
       class: "chip chip-warn", text: unplayableReason(t), attrs: { id: "why-" + i },

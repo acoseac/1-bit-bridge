@@ -292,6 +292,15 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 }
 .track:hover { background: var(--bg-elev); }
 
+/* An empty reason cell must not occupy a column where the columns are NOT
+ * shared. In the base per-row layout it is a zero-width track with a gap
+ * on each side, which measures as 12px of extra space between the title
+ * and the format chip and takes the same 12px off the title. It earns its
+ * cell back inside the @supports block below, where a constant cell count
+ * is precisely what lets the rows align — and the mobile block at the end
+ * of this file hides it again, for the same reason as here. */
+.track-why:empty { display: none; }
+
 /* Columns that line up DOWN the page, not just across one row.
  *
  * Each row being its own grid is why the format, size and duration
@@ -328,6 +337,11 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   /* A disc heading is a sibling <li> in the same grid and has nothing to
    * do with the columns — it spans them. */
   .track-disc { grid-column: 1 / -1; }
+  /* Reinstated: here the cell count has to be constant across rows, which
+   * is the whole mechanism. The column is `auto`, so on an album where
+   * nothing carries a chip it costs nothing, and where something does,
+   * every row reserves that width — which IS the alignment. */
+  .track-why:empty { display: block; }
 }
 .track-disc {
   list-style: none; padding: var(--space-4) 10px 4px; font-size: 0.78rem;
@@ -637,6 +651,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    * source order than the @supports block above, which is what lets it
    * win without a specificity trick. */
   .tracks { display: block; }
+  .track-why:empty { display: none; }
   .track {
     grid-column: auto;
     grid-template-columns: 2.2rem 1fr auto;
