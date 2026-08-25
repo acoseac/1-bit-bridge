@@ -164,11 +164,16 @@ export function announce(text) {
  * URL comes from a remote service and a javascript: scheme reaching an
  * anchor would be an XSS.
  */
-export function aboutBlock(about, { title }) {
+export function aboutBlock(about, { title, plain } = {}) {
   if (!about || about.state !== "found") return null;
   const text = about.bio || about.bioSummary || about.description || "";
   if (!text.trim()) return null;
-  const box = el("section", { class: "about" }, el("h2", { text: title }));
+  // `plain` drops the heading and the card chrome, for the case where a
+  // tab panel is already the boundary. A bordered card nested directly
+  // inside a tabpanel reads as two frames around one paragraph, and the
+  // tab is a better label than a heading repeating it.
+  const box = el("section", { class: plain ? "about about-plain" : "about" },
+    plain || !title ? null : el("h2", { text: title }));
   const body = el("p", { class: "about-text", text });
   box.appendChild(body);
   if (about.recordLabel) {
@@ -202,4 +207,107 @@ export function safeHref(raw) {
   } catch {
     return null;
   }
+}
+
+// ---- Detail tabs ----
+
+// Panel ids have to be unique across the document for aria-controls to
+// resolve, and a detail view can be re-rendered many times in a session.
+let tabSeq = 0;
+
+// The tab the reader last chose, and the subject it belonged to.
+//
+// This is what makes the Variants tab usable at all. The album and
+// artist views re-render themselves whenever a variant job lands or a
+// delete completes — which is precisely when the reader is looking at
+// the Variants tab — and without a memory every one of those bounced
+// them back to Tracks mid-operation.
+//
+// Keyed on the SUBJECT, not just the tab id: navigating to a different
+// album opens on its default, because a remembered "variants" from the
+// previous album says nothing about what the reader wants from this
+// one. One slot rather than a Map: only the current view can be
+// re-rendered, so a second entry could never be read.
+const tabMemory = { key: null, id: null };
+
+/**
+ * A tab strip over a set of panels.
+ *
+ * @param {string} key - identifies the subject ("album:<id>"). The
+ *   remembered tab is restored only for a matching key.
+ * @param {Array<{id: string, label: string, panel: Node|null}>} specs -
+ *   in display order. A spec with a null panel is DROPPED, which is how
+ *   "no Atlas entry for this release" and "this bridge sent no variant
+ *   summary" turn into an absent tab rather than an empty one.
+ * @returns {Node|null} the strip plus its panels, the lone panel when
+ *   only one survives, or null when none do.
+ */
+export function detailTabs(key, specs) {
+  const live = (specs || []).filter((s) => s?.panel);
+  if (!live.length) return null;
+  // A single tab is chrome that says nothing: a lone "Tracks" button
+  // above a track list is a control with no alternative to offer.
+  if (live.length === 1) return live[0].panel;
+
+  const seq = ++tabSeq;
+  const wanted = tabMemory.key === key ? tabMemory.id : null;
+  let active = live.findIndex((s) => s.id === wanted);
+  if (active < 0) active = 0;
+
+  const strip = el("div", { class: "detail-tabstrip", attrs: { role: "tablist" } });
+  const panels = el("div", { class: "tabpanels" });
+  const buttons = [];
+
+  const show = (i) => {
+    tabMemory.key = key;
+    tabMemory.id = live[i].id;
+    live.forEach((s, n) => {
+      const on = n === i;
+      buttons[n].classList.toggle("active", on);
+      buttons[n].setAttribute("aria-selected", on ? "true" : "false");
+      // Roving tabindex: the strip is ONE tab stop and the arrow keys
+      // move within it, which is what the tablist pattern asks for and
+      // what stops a three-tab strip costing three tabs to walk past.
+      buttons[n].tabIndex = on ? 0 : -1;
+      s.panel.hidden = !on;
+    });
+  };
+
+  live.forEach((s, i) => {
+    const panelID = `tabpanel-${seq}-${s.id}`;
+    const tabID = `tab-${seq}-${s.id}`;
+    const btn = el("button", {
+      // .tab-btn is app.css's — the Settings page's tab idiom, reused
+      // so the console has one look for one control.
+      class: "tab-btn", text: s.label,
+      attrs: { type: "button", role: "tab", id: tabID, "aria-controls": panelID },
+    });
+    btn.addEventListener("click", () => show(i));
+    btn.addEventListener("keydown", (e) => {
+      let step = 0;
+      if (e.key === "ArrowRight") step = 1;
+      else if (e.key === "ArrowLeft") step = -1;
+      let next = -1;
+      if (step) next = (i + step + live.length) % live.length;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = live.length - 1;
+      if (next < 0) return;
+      e.preventDefault();
+      show(next);
+      buttons[next].focus();
+    });
+    buttons.push(btn);
+    strip.appendChild(btn);
+
+    s.panel.id = panelID;
+    s.panel.setAttribute("role", "tabpanel");
+    s.panel.setAttribute("aria-labelledby", tabID);
+    // Not tabbable itself: every panel here holds its own focusable
+    // content (track buttons, links, the variant controls), so a
+    // tabindex on the container would add a stop that lands nowhere.
+    panels.appendChild(s.panel);
+  });
+
+  show(active);
+  return el("div", { class: "detail-tabs" }, strip, panels);
 }

@@ -36,12 +36,17 @@ const KINDS = [
  *   caller can re-fetch. The panel deliberately does NOT re-fetch itself:
  *   generation is asynchronous, so the numbers that matter arrive later,
  *   from the live refresh rather than from the response to the click.
+ * @param {object} [opts]
+ * @param {boolean} [opts.plain=false] - drop the heading and the card
+ *   chrome, for a container that already frames and labels the panel —
+ *   i.e. a tab. The folder view, where this is one section among
+ *   several on an unframed page, keeps both.
  */
-export function variantPanel(summary, scope, onChanged) {
+export function variantPanel(summary, scope, onChanged, { plain = false } = {}) {
   if (!summary) return null;
 
-  const root = el("section", { class: "variants" });
-  root.appendChild(el("h2", { class: "variants-head", text: "Variants" }));
+  const root = el("section", { class: plain ? "variants variants-plain" : "variants" });
+  if (!plain) root.appendChild(el("h2", { class: "variants-head", text: "Variants" }));
 
   const totals = [];
   if (summary.sourceBytes) totals.push(`${bytes(summary.sourceBytes)} of originals`);
@@ -81,9 +86,16 @@ function kindRow(kind, cov, scope, actionable, onChanged) {
   const c = cov || { covered: 0, eligible: 0, exempt: 0, stale: 0 };
   const row = el("div", { class: "variant-kind" });
 
+  // Title, ratio and both buttons share ONE line, with the bar under
+  // it. Stacked — title / bar / note / buttons / status — each kind was
+  // five rows tall and the pair filled a screen for two numbers and two
+  // controls. Nothing was dropped; it is the same content on half the
+  // lines.
+  const status = el("p", { class: "small variant-status", attrs: { "aria-live": "polite" } });
   const head = el("div", { class: "variant-kind-head" },
     el("span", { class: "variant-kind-title", text: kind.title }),
-    el("span", { class: "variant-kind-ratio", text: `${c.covered} / ${c.eligible}` }));
+    el("span", { class: "variant-kind-ratio", text: `${c.covered} / ${c.eligible}` }),
+    kindActions(kind, c, scope, actionable, onChanged, status));
   row.appendChild(head);
   row.appendChild(bar(c, kind.title));
 
@@ -114,7 +126,12 @@ function kindRow(kind, cov, scope, actionable, onChanged) {
     }));
   }
 
-  const status = el("p", { class: "small variant-status", attrs: { "aria-live": "polite" } });
+  row.appendChild(status);
+  return row;
+}
+
+/** The Generate / Delete pair, which now rides the kind's title line. */
+function kindActions(kind, c, scope, actionable, onChanged, status) {
   const missing = Math.max(0, c.eligible - c.covered);
 
   const gen = el("button", { class: "btn btn-primary", text: kind.action });
@@ -155,9 +172,7 @@ function kindRow(kind, cov, scope, actionable, onChanged) {
       onChanged);
   });
 
-  row.appendChild(el("div", { class: "variant-actions" }, gen, del));
-  row.appendChild(status);
-  return row;
+  return el("div", { class: "variant-actions" }, gen, del);
 }
 
 function bar(c, label) {
