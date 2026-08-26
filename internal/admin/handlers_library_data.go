@@ -512,12 +512,22 @@ func csvSafe(s string) string {
 // per event). Caller has already set the download headers.
 func writeHistoryCSV(w http.ResponseWriter, events []manifest.HistoryEventOut) {
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"started_at", "path", "codec", "iface_type", "output_rate", "duration_used", "is_dop", "variant_id", "device_name"})
+	// source_device is APPENDED, never inserted: a CSV column order is a
+	// contract with whatever spreadsheet or script already reads these
+	// exports, and adding a column at the end leaves every existing one
+	// where it was.
+	//
+	// device_name stays what it has always been — the OUTPUT hardware.
+	// The two are one word apart and mean different things (see
+	// historyEventDTO), so both are named rather than one being
+	// "corrected" into the other.
+	_ = cw.Write([]string{"started_at", "path", "codec", "iface_type", "output_rate", "duration_used", "is_dop", "variant_id", "device_name", "source_device"})
 	for _, e := range events {
 		_ = cw.Write([]string{
 			nsToRFC3339(e.StartedAt), csvSafe(e.Path), csvSafe(e.Codec), csvSafe(e.IfaceType),
 			strconv.Itoa(e.OutputRate), strconv.FormatFloat(e.DurationUsed, 'f', -1, 64),
 			strconv.FormatBool(e.IsDoP), csvSafe(e.VariantID), csvSafe(e.DeviceName),
+			csvSafe(e.SourceDeviceName),
 		})
 	}
 	cw.Flush()

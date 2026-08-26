@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -294,6 +295,57 @@ func TestHistoryEventsAndExport(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "started_at,path,codec") {
 		t.Errorf("history csv missing header")
+	}
+}
+
+// TestHistoryExportsNameBothDevices pins that the two export buttons
+// sitting next to each other produce the same columns.
+//
+// The console gained a "Device" column showing the SOURCE device, so
+// `sourceDevice` joined the JSON DTO — and CSV, which writes its own
+// row, kept only `device_name`, the OUTPUT DAC. Two exports of the same
+// table disagreeing about which devices it names is the shape of bug
+// that only shows up in a spreadsheet a week later.
+//
+// device_name stays where it was: a CSV column ORDER is a contract with
+// whatever already reads these files, so the new column is appended.
+func TestHistoryExportsNameBothDevices(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedDataFixture(t, srv)
+	h := srv.Handler()
+
+	rec := doExport(t, h, "/api/history/export?format=csv")
+	if rec.Code != 200 {
+		t.Fatalf("csv export: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	header, _, _ := strings.Cut(body, "\n")
+	cols := strings.Split(strings.TrimRight(header, "\r"), ",")
+	if len(cols) == 0 || cols[len(cols)-1] != "source_device" {
+		t.Errorf("csv header = %q; want source_device APPENDED as the last column", header)
+	}
+	if !strings.Contains(header, "device_name") {
+		t.Errorf("csv header lost device_name (the output DAC): %q", header)
+	}
+	if !strings.Contains(body, "Test iPhone") {
+		t.Errorf("csv names no source device, but the fixture registered one:\n%s", body)
+	}
+
+	// And the JSON export, from the same button row, carries it too.
+	rec = doExport(t, h, "/api/history/export?format=json")
+	if rec.Code != 200 {
+		t.Fatalf("json export: %d", rec.Code)
+	}
+	var out struct {
+		Events []struct {
+			SourceDevice string `json:"sourceDevice"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode json export: %v", err)
+	}
+	if len(out.Events) == 0 || out.Events[0].SourceDevice != "Test iPhone" {
+		t.Errorf("json export sourceDevice = %+v, want the registered device name", out.Events)
 	}
 }
 

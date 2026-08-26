@@ -494,14 +494,24 @@ func unresolvedPlaylistItems(items []manifest.PlaylistItemRow, tracks []playerTr
 	if len(items) == len(tracks) {
 		return nil
 	}
-	kept := make(map[string]struct{}, len(tracks))
+	// COUNTS, not a set. A playlist may hold the same path at two
+	// positions (`playlist_items` is keyed on position, not path), and a
+	// set would let one hydrated row account for both — the count above
+	// would then report an unresolved member this list never names.
+	//
+	// Not reachable today: hydrateTracks iterates its INPUT paths, so a
+	// doubled path yields two rows and the two agree. The counts make the
+	// function correct without depending on that, which is the same
+	// reason it subtracts rather than re-deriving the drop rule.
+	kept := make(map[string]int, len(tracks))
 	for _, t := range tracks {
-		kept[t.Path] = struct{}{}
+		kept[t.Path]++
 	}
 	out := make([]playerUnresolvedItemDTO, 0, min(len(items)-len(tracks), maxUnresolvedListed))
 	for _, it := range items {
 		if it.Path != "" {
-			if _, ok := kept[it.Path]; ok {
+			if kept[it.Path] > 0 {
+				kept[it.Path]--
 				continue
 			}
 		}

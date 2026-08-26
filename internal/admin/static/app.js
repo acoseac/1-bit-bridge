@@ -2109,6 +2109,14 @@ let traySettingsPromise = null;
 // same field is worse than either being stale.
 const mountedTrays = new Set();
 
+// Deleting from a Set during its own forEach is well-defined — a removed
+// entry simply is not visited — so this needs no copy.
+function pruneDetachedTrays() {
+  mountedTrays.forEach((entry) => {
+    if (!entry.tray.isConnected) mountedTrays.delete(entry);
+  });
+}
+
 function invalidateTraySettings() {
   traySettings = null;
   traySettingsPromise = null;
@@ -2139,7 +2147,8 @@ function traySettingsSnapshot() {
  * Row =
  *   { field, type: "switch", label, hint?, restart? }
  * | { field, type: "select", label, hint?, restart?, options: [[value, label], …] }
- * | { field, type: "number", label, hint?, restart?, min?, max?, unit?, placeholder? }
+ * | { field, type: "number", label, hint?, restart?, min?, max?, unit?,
+ *     placeholder?, emptyValue? }   // emptyValue: what a CLEARED box sends
  * | { type: "note", text }   // no field: an explanation, not a control
  */
 function buildFeatureTray(spec) {
@@ -2202,6 +2211,16 @@ function buildFeatureTray(spec) {
     tray.appendChild(foot);
   }
 
+  // Prune BEFORE adding, not only when a save happens to re-sync.
+  //
+  // pageSignal aborts on dispatchPageInit, which the player never calls:
+  // navigating /mixes → /albums → /mixes inside the player rebuilds the
+  // toolbar without any teardown, so each visit would leave its tray —
+  // and the detached DOM it holds — in the set forever. syncTray drops a
+  // disconnected entry when it runs, but it only runs on open and after
+  // a save, so a reader who never opens one accumulates them silently.
+  // (Gemini on PR #763.)
+  pruneDetachedTrays();
   const entry = { tray, controls };
   mountedTrays.add(entry);
   pageSignal().addEventListener("abort", () => mountedTrays.delete(entry), { once: true });
@@ -2259,6 +2278,11 @@ function buildFeatureTray(spec) {
 // push server values into it. A "note" row has no control and is just
 // prose — used where a page has something to explain but nothing to
 // switch (History, whose recording gate is per-device on iOS by design).
+//
+// Split into trayControlFor / trayLabelFor rather than one branchy
+// function: the two type switches are independent decisions (what
+// element the value lives in, and where the badge sits relative to it)
+// and reading them apart is what makes the badge rule legible.
 function buildTrayRow(row, status, controls) {
   if (row.type === "note") {
     const p = document.createElement("p");
@@ -2268,34 +2292,7 @@ function buildTrayRow(row, status, controls) {
   }
   if (!row.field) return null;
 
-  const wrap = document.createElement("div");
-  wrap.className = "tray-row";
-
-  let input;
-  if (row.type === "select") {
-    input = document.createElement("select");
-    for (const [value, label] of row.options || []) {
-      const opt = document.createElement("option");
-      opt.value = value;
-      opt.textContent = label;
-      input.appendChild(opt);
-    }
-  } else if (row.type === "number") {
-    input = document.createElement("input");
-    input.type = "number";
-    if (row.min != null) input.min = String(row.min);
-    if (row.max != null) input.max = String(row.max);
-    // A field whose settings response carries `omitempty` and whose
-    // stored value is 0 arrives ABSENT, and an empty box beside a card
-    // reading "every 6 h" looks like a disagreement rather than "unset,
-    // so the default applies". updateCheckIntervalHours is the one field
-    // in that shape — backups report their effective values.
-    if (row.placeholder) input.placeholder = row.placeholder;
-  } else {
-    input = document.createElement("input");
-    input.type = "checkbox";
-    input.setAttribute("role", "switch");
-  }
+  const input = trayControlFor(row);
   // Disabled until the snapshot lands: an unpopulated switch shows
   // "off", and a reader who flips it is turning ON something that may
   // already be on — or, worse, watching a PATCH send the value the
@@ -2303,46 +2300,9 @@ function buildTrayRow(row, status, controls) {
   input.disabled = true;
   input.dataset.field = row.field;
 
-  const label = document.createElement("label");
-  // A switch borrows app.css's `label.checkbox` outright rather than
-  // restyling one: the console has one toggle, and a tray that grew its
-  // own would be a second thing to keep in step with it. `.tray-switch`
-  // carries only the compact metrics (a tray is denser than a settings
-  // pane), which is why the borrowed class comes first.
-  label.className = row.type === "select" || row.type === "number"
-    ? "tray-field"
-    : "checkbox tray-switch";
-  const text = document.createElement("span");
-  text.className = "tray-label";
-  text.textContent = row.label;
-  const badge = row.restart ? document.createElement("span") : null;
-  if (badge) {
-    badge.className = "badge warn";
-    badge.textContent = "restart";
-  }
-  if (row.type === "select" || row.type === "number") {
-    // Badge with the LABEL, not after the control. In a narrow tray the
-    // label takes its own line and the control keeps its unit beside it,
-    // so a trailing badge landed alone on a third line and read as a
-    // stray chip belonging to nothing.
-    const headGroup = document.createElement("span");
-    headGroup.className = "tray-field-head";
-    headGroup.appendChild(text);
-    if (badge) headGroup.appendChild(badge);
-    label.append(headGroup, input);
-    if (row.unit) {
-      const u = document.createElement("span");
-      u.className = "tray-unit";
-      u.textContent = row.unit;
-      label.appendChild(u);
-    }
-  } else {
-    // A switch reads left to right — toggle, what it does, then the
-    // caveat — which is also the order the Settings page uses.
-    label.append(input, text);
-    if (badge) label.appendChild(badge);
-  }
-  wrap.appendChild(label);
+  const wrap = document.createElement("div");
+  wrap.className = "tray-row";
+  wrap.appendChild(trayLabelFor(row, input));
   if (row.hint) {
     const hint = document.createElement("small");
     hint.className = "tray-hint";
@@ -2358,6 +2318,84 @@ function buildTrayRow(row, status, controls) {
   return wrap;
 }
 
+// trayControlFor builds the element the value lives in.
+function trayControlFor(row) {
+  if (row.type === "select") {
+    const sel = document.createElement("select");
+    for (const [value, label] of row.options || []) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      sel.appendChild(opt);
+    }
+    return sel;
+  }
+  if (row.type === "number") {
+    const num = document.createElement("input");
+    num.type = "number";
+    if (row.min != null) num.min = String(row.min);
+    if (row.max != null) num.max = String(row.max);
+    // A field whose settings response carries `omitempty` and whose
+    // stored value is 0 arrives ABSENT, and an empty box beside a card
+    // reading "every 6 h" looks like a disagreement rather than "unset,
+    // so the default applies". updateCheckIntervalHours is the one field
+    // in that shape — backups report their effective values.
+    if (row.placeholder) num.placeholder = row.placeholder;
+    return num;
+  }
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.setAttribute("role", "switch");
+  return box;
+}
+
+// trayLabelFor wraps the control in its label, with the restart badge on
+// the side the layout needs it.
+function trayLabelFor(row, input) {
+  const label = document.createElement("label");
+  // A switch borrows app.css's `label.checkbox` outright rather than
+  // restyling one: the console has one toggle, and a tray that grew its
+  // own would be a second thing to keep in step with it. `.tray-switch`
+  // carries only the compact metrics (a tray is denser than a settings
+  // pane), which is why the borrowed class comes first.
+  const isField = row.type === "select" || row.type === "number";
+  label.className = isField ? "tray-field" : "checkbox tray-switch";
+
+  const text = document.createElement("span");
+  text.className = "tray-label";
+  text.textContent = row.label;
+  const badge = row.restart ? document.createElement("span") : null;
+  if (badge) {
+    badge.className = "badge warn";
+    badge.textContent = "restart";
+  }
+
+  if (!isField) {
+    // A switch reads left to right — toggle, what it does, then the
+    // caveat — which is also the order the Settings page uses.
+    label.append(input, text);
+    if (badge) label.appendChild(badge);
+    return label;
+  }
+
+  // Badge with the LABEL, not after the control. In a narrow tray the
+  // label takes its own line and the control keeps its unit beside it,
+  // so a trailing badge landed alone on a third line and read as a
+  // stray chip belonging to nothing.
+  const headGroup = document.createElement("span");
+  headGroup.className = "tray-field-head";
+  headGroup.appendChild(text);
+  if (badge) headGroup.appendChild(badge);
+  label.append(headGroup, input);
+  if (row.unit) {
+    const u = document.createElement("span");
+    u.className = "tray-unit";
+    u.textContent = row.unit;
+    label.appendChild(u);
+  }
+  return label;
+}
+
 // trayValueOf reads a control's current value in the shape the PATCH
 // field expects — bool for a switch, string for a select, number for a
 // number field.
@@ -2365,7 +2403,13 @@ function trayValueOf(ctl) {
   if (ctl.row.type === "select") return ctl.input.value;
   if (ctl.row.type === "number") {
     const n = parseInt(ctl.input.value, 10);
-    return Number.isNaN(n) ? null : n;
+    if (!Number.isNaN(n)) return n;
+    // A field whose stored 0 means "use the built-in default" can be
+    // cleared back to it, the way the Settings form's own `|| "0"` does.
+    // Only where the row says so: for a field with no such sentinel a
+    // blank box is a mistake, and silently sending 0 would turn a
+    // fat-finger into a saved value.
+    return ctl.row.emptyValue ?? null;
   }
   return ctl.input.checked;
 }
@@ -3936,7 +3980,13 @@ function mountJobTrays() {
       {
         field: "updateCheckIntervalHours", type: "number", restart: true, min: 1,
         label: "Check every", unit: "hours", placeholder: "6 (default)",
-        hint: "Left blank the bridge uses its default of 6 hours.",
+        // 0 IS the unset sentinel for this field (cmd/bridge only
+        // overrides the updater's own 6 h when the config value is > 0),
+        // so clearing the box has to mean the default rather than "Enter
+        // a number." — which is what the hint promised and the generic
+        // NaN guard refused. (CodeRabbit on PR #763.)
+        emptyValue: 0,
+        hint: "Clear it to go back to the bridge's default of 6 hours.",
       },
       {
         field: "updateAutoInstall", type: "switch", restart: true,

@@ -184,6 +184,38 @@ func TestUnresolvedPlaylistItemsCapsTheListNotTheCount(t *testing.T) {
 	}
 }
 
+// The same path at two positions is legal — playlist_items is keyed on
+// position — and the count and the list have to agree about it.
+//
+// The first arm is today's behaviour: hydrateTracks iterates its INPUT
+// paths, so a doubled path yields two rows and nothing is unresolved.
+// The second is the arm that made this worth changing — a hydrate that
+// returned ONE row would leave the subtract-based count claiming an
+// unresolved member that a set-based list could never name. The counts
+// make the two agree without depending on which of those is true.
+func TestUnresolvedPlaylistItemsCountsRepeatedPaths(t *testing.T) {
+	items := []manifest.PlaylistItemRow{
+		{Position: 0, Path: "A/Alpha/01.flac", Title: "First"},
+		{Position: 1, Path: "A/Alpha/01.flac", Title: "Again"},
+	}
+	both := []playerTrackDTO{{Path: "A/Alpha/01.flac"}, {Path: "A/Alpha/01.flac"}}
+	if got := unresolvedPlaylistItems(items, both); got != nil {
+		t.Errorf("both copies hydrated: got %+v, want nil", got)
+	}
+
+	one := []playerTrackDTO{{Path: "A/Alpha/01.flac"}}
+	got := unresolvedPlaylistItems(items, one)
+	if len(got) != len(items)-len(one) {
+		t.Fatalf("one copy hydrated: listed %d, but the response's own count "+
+			"(len(items)-len(tracks)) says %d — the two disagree, and the reader "+
+			"is told about a member nothing names: %+v", len(got), len(items)-len(one), got)
+	}
+	if got[0].Position != 1 {
+		t.Errorf("listed position %d, want the SECOND copy (1) — the first is the "+
+			"one that hydrated", got[0].Position)
+	}
+}
+
 // A playlist whose members all resolve reports nothing, so the client
 // renders no note at all rather than an empty disclosure.
 func TestUnresolvedPlaylistItemsSilentWhenEverythingResolves(t *testing.T) {

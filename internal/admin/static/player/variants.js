@@ -85,6 +85,16 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
       root.appendChild(tray.tray);
     } else {
       root.appendChild(note);
+      // No gear means no route to the switch, and the note stopped
+      // naming Settings when the gear started answering for it — so a
+      // bridge where app.js failed to publish the tray would state the
+      // problem and offer nothing. The link is the fallback ONLY: beside
+      // a gear it would duplicate the tray's own footer.
+      // (CodeRabbit on PR #763.)
+      if (!summary.enabled) {
+        root.appendChild(el("p", { class: "small" },
+          el("a", { attrs: { href: "/settings?tab=audio" }, text: "Audio settings →" })));
+      }
     }
   }
 

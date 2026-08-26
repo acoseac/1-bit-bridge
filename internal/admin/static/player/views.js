@@ -782,6 +782,12 @@ export async function renderFavorites(view, { gen, setToolbar }) {
   const tracks = r.tracks || [];
   const lostAlbums = r.unresolvedAlbums || 0;
   const lostTracks = r.unresolvedTracks || 0;
+  // BEFORE the empty-state branch below, not after the tabs. A stored
+  // document whose every entry is foreign or deleted returns early, and
+  // that is exactly the state where "backed up by X, 3 months ago" does
+  // the most work — it is what tells the reader the hearts are real and
+  // simply belong somewhere else. (CodeRabbit on PR #763.)
+  appendIf(view, collectionProvenance(r));
 
   // Nothing hearted at all is a different state from nothing that
   // RESOLVES here: the first is a setup hint, the second means the
@@ -798,10 +804,10 @@ export async function renderFavorites(view, { gen, setToolbar }) {
   }
 
   const grid = el("div", { class: "grid" });
-  // Provenance above the tabs, not inside one: it describes the whole
-  // stored document, and repeating it on both tabs would say the same
-  // thing twice while implying the two halves were pushed separately.
-  appendIf(view, collectionProvenance(r));
+  // The provenance line is already in place above (and above the tabs,
+  // not inside one: it describes the whole stored document, and
+  // repeating it on both tabs would say the same thing twice while
+  // implying the two halves were pushed separately).
   appendIf(view, detailTabs("favorites", [
     {
       id: "albums", label: `Albums (${albums.length})`,
