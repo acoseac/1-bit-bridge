@@ -369,10 +369,27 @@ Use the published artifact — it is what `latestServerVersion` names, it carrie
 goreleaser's clean `{{.Version}}` stamp (`0.1.9`, no `v`), and it is the binary users get:
 
 ```sh
+# 1. Fetch + verify against the release's OWN manifest, then extract.
 gh release download v0.1.9 -R acoseac/1-bit-bridge \
   -p '1-bit-bridge_0.1.9_linux_amd64.tar.gz' -p 'checksums.txt' -D /tmp/rel
 (cd /tmp/rel && shasum -a 256 -c checksums.txt --ignore-missing && tar xzf *_linux_amd64.tar.gz)
-# then the runbook's own upload → SHA-gate → DETACHED swap → setcap → restart flow
+
+# 2. Upload THAT binary -- /tmp/rel/bridge, NOT dist/bridge-linux-amd64. The
+#    bridge.ars.md upload step above hardcodes the locally-built path, so
+#    "then follow the flow above" would ship a main build and reintroduce the
+#    exact version string this whole note exists to avoid.
+scp -i <DEMO-SSH-KEY> /tmp/rel/bridge <DEMO-SSH>:/tmp/bridge.new
+shasum -a 256 /tmp/rel/bridge                                          # local
+ssh -i <DEMO-SSH-KEY> <DEMO-SSH> 'chmod +x /tmp/bridge.new
+                                  sha256sum /tmp/bridge.new
+                                  /tmp/bridge.new version'             # remote
+
+# Gate on BOTH: the digests match, AND `version` prints a bare `0.1.9` with no
+# -N-g<sha> suffix. The second is the one that catches having uploaded the
+# wrong file, which a digest comparison against that same wrong file cannot.
+
+# 3. Then the DETACHED swap -> setcap -> restart from the bridge.ars.md section,
+#    unchanged -- it operates on /tmp/bridge.new and never names the local path.
 ```
 
 Keep the detached dispatch: the window between the two `mv`s is the one state with no
