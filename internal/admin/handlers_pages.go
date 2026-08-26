@@ -75,18 +75,26 @@ type pageData struct {
 // owns it. Only sections with their own rail entry appear here;
 // everything else belongs to Browse and returns "".
 //
-// A DETAIL route folds onto the same entry as its grid, so drilling into
-// a mix or a playlist keeps that entry lit rather than jumping the
-// highlight back to Browse.
+// NO SECTION CURRENTLY HAS ONE. Playlists and Smart mixes did until the
+// sidebar's Library group was found to be offering a second route to two
+// views that Browse's own section rail already lists; both entries were
+// removed and every player route now lights Browse.
+//
+// The seam is kept rather than deleted because it is a three-way contract
+// — this function, the data-player-section attribute in layout.html, and
+// updateSidebarNav in boot.js — and boot.js's two-pass highlight exists
+// specifically so a section-keyed entry does not light alongside a
+// tab-keyed one. That subtlety is what a future re-add would get wrong if
+// it had to be rebuilt from nothing. The parity tests in
+// page_init_parity_test.go assert the empty case explicitly, so adding a
+// case here without the other two sides fails immediately.
+//
+// A DETAIL route must fold onto the same entry as its grid (return the
+// same string for "mix" as for "mixes"), so drilling in keeps that entry
+// lit rather than jumping the highlight back to Browse.
 func playerNavEntry(section string) string {
-	switch section {
-	case "mixes", "mix":
-		return "mixes"
-	case "playlists", "playlist":
-		return "playlists"
-	default:
-		return ""
-	}
+	_ = section
+	return ""
 }
 
 // sectionForTab maps a page's ActiveTab to its top-level nav SECTION so
