@@ -104,17 +104,45 @@ func TestAPIFavorites(t *testing.T) {
 	}
 }
 
-func TestDataPageRenders(t *testing.T) {
+func TestHistoryPageRenders(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/history", nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	rw := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("GET /history: %d", rw.Code)
+	}
+	body := rw.Body.String()
+	if !strings.Contains(body, "Listening history") {
+		t.Errorf("history page missing expected content")
+	}
+	// The page carried playlists and favorites until they consolidated
+	// into the player's own views. Pin the ABSENCE too: a duplicate
+	// surface that quietly comes back is exactly what this move fixed,
+	// and it would come back as markup, not as a failing assertion
+	// anywhere else.
+	for _, gone := range []string{"playlists-body", "favorites-tracks-body", "playlist-detail-panel"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("history page still renders %q — playlists and favorites live in the player now", gone)
+		}
+	}
+}
+
+// TestRetiredDataPageRedirects pins the old URL. It was linked from the
+// sidebar for the console's whole life and is certainly bookmarked; a
+// 404 would read as a broken console rather than as a moved page.
+func TestRetiredDataPageRedirects(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/data", nil)
 	req.RemoteAddr = "127.0.0.1:5000"
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
-	if rw.Code != 200 {
-		t.Fatalf("GET /data: %d", rw.Code)
+	if rw.Code != http.StatusMovedPermanently {
+		t.Fatalf("GET /data: status %d; want 301", rw.Code)
 	}
-	if !strings.Contains(rw.Body.String(), "Playlists") {
-		t.Errorf("data page missing expected content")
+	if got := rw.Header().Get("Location"); got != "/history" {
+		t.Errorf("GET /data: Location = %q; want /history", got)
 	}
 }
 

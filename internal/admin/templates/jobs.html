@@ -4,8 +4,8 @@
   <p class="lede">
     Everything the bridge does on its own — scans, enrichment, audio
     analysis, maintenance — with cadences, last runs, and manual
-    triggers. Feature toggles live in <a href="/settings">Settings</a>
-    (most apply on restart); this page shows what's actually running.
+    triggers. Each card's gear opens that job's own switches;
+    <a href="/settings">Settings</a> remains the full list.
   </p>
 
   {{/* Slow-moving per-job state (gates, cadences, last/next runs,
@@ -17,7 +17,7 @@
        applyAnalysisStats carries the analysis pool + sweep state. */}}
   <div class="jobs-cards">
 
-    <div class="panel job-card">
+    <div class="panel job-card" id="job-scan-card">
       <div class="panel-head">
         <h2>Library scanner</h2>
         <button type="button" id="jobs-scan-now" class="btn">Scan now</button>

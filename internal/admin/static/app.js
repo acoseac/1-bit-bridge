@@ -2060,6 +2060,408 @@ function restartPending() {
   } catch { return false; }
 }
 
+
+// ===========================================================
+// Per-page feature trays
+// ===========================================================
+//
+// A small gear beside a heading that opens the switches for THAT
+// feature, in place. Settings stays the one exhaustive surface; these
+// are the two or three fields the operator is looking at the page for,
+// where they are already looking.
+//
+// The precedent is the Duplicates page, which has carried its serving
+// policy inline since it shipped. Every other togglable feature had its
+// status on one page (Jobs, Smart mixes, History) and its switch on
+// another, so the loop "is this on? → Settings → find the tab → toggle
+// → navigate back" ran for a single checkbox.
+//
+// No new endpoint: PATCH /api/settings is already a partial update with
+// pointer-typed fields, so a tray sends only the field it owns and the
+// server's own hot-apply / restart-required rules answer for it. That
+// is deliberate — a tray must never be able to mean something different
+// from the same control on the Settings page.
+//
+// Trays are INLINE, not floating popovers. An anchored popover needs
+// viewport clamping, a z-index in the ledger, outside-click dismissal
+// and its own phone layout; a disclosure that expands under its heading
+// needs none of those and cannot be clipped by the card it lives in.
+
+let traySeq = 0;
+
+// The shared /api/settings snapshot. One fetch backs every tray on a
+// page — the Jobs page mounts nine — and a successful save updates it in
+// place so a tray opened afterwards shows the new value rather than the
+// one from page load.
+//
+// Dropped on every page init (see dispatchPageInit), NOT held for the
+// session: config changes from places this module never sees — the
+// Settings form, the CLI, another tab, a second browser — and a tray
+// showing a value from three navigations ago is the same
+// two-surfaces-disagree failure the cross-tray re-sync below exists to
+// prevent. One request per visit to a page that has trays.
+let traySettings = null;
+let traySettingsPromise = null;
+
+// Every tray mounted on the CURRENT page, so a save in one can re-sync
+// the others: analysisEnabled appears on both the Audio analysis card
+// and the Smart mixes card, and two open trays disagreeing about the
+// same field is worse than either being stale.
+const mountedTrays = new Set();
+
+function invalidateTraySettings() {
+  traySettings = null;
+  traySettingsPromise = null;
+}
+
+function traySettingsSnapshot() {
+  if (traySettings) return Promise.resolve(traySettings);
+  if (!traySettingsPromise) {
+    traySettingsPromise = API.get("/api/settings")
+      .then((s) => { traySettings = s || {}; return traySettings; })
+      .catch((err) => { traySettingsPromise = null; throw err; });
+  }
+  return traySettingsPromise;
+}
+
+/**
+ * Build a feature tray. Returns { button, tray } for the caller to
+ * place — attachFeatureTray below is the placement every operator page
+ * wants, and the player supplies its own because its toolbar is rebuilt
+ * on every route.
+ *
+ * spec = {
+ *   title: string,          // names the feature, not the page
+ *   blurb?: string,         // one line: what turning this on does
+ *   rows: Row[],
+ *   link?: { href, text },  // deep link to the full settings section
+ * }
+ * Row =
+ *   { field, type: "switch", label, hint?, restart? }
+ * | { field, type: "select", label, hint?, restart?, options: [[value, label], …] }
+ * | { field, type: "number", label, hint?, restart?, min?, max?, unit?, placeholder? }
+ * | { type: "note", text }   // no field: an explanation, not a control
+ */
+function buildFeatureTray(spec) {
+  const id = `feature-tray-${++traySeq}`;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tray-toggle";
+  button.setAttribute("aria-expanded", "false");
+  button.setAttribute("aria-controls", id);
+  // The gear is decorative; the accessible name comes from the text
+  // beside it, which is clipped rather than removed so the control still
+  // announces WHICH feature it configures. Two gears on one page with
+  // the name "Settings" would be indistinguishable by voice.
+  button.innerHTML =
+    `<svg class="tray-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">` +
+    `<use href="#i-settings"/></svg>` +
+    `<span class="tray-toggle-label">${escapeHTML(spec.title)} settings</span>`;
+
+  const tray = document.createElement("div");
+  tray.className = "feature-tray";
+  tray.id = id;
+  tray.hidden = true;
+
+  const head = document.createElement("div");
+  head.className = "tray-head";
+  const h = document.createElement("p");
+  h.className = "tray-title";
+  h.textContent = spec.title;
+  head.appendChild(h);
+  if (spec.blurb) {
+    const b = document.createElement("p");
+    b.className = "tray-blurb";
+    b.textContent = spec.blurb;
+    head.appendChild(b);
+  }
+  tray.appendChild(head);
+
+  const status = document.createElement("p");
+  status.className = "tray-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+
+  const controls = [];
+  const body = document.createElement("div");
+  body.className = "tray-rows";
+  for (const row of spec.rows || []) {
+    const built = buildTrayRow(row, status, controls);
+    if (built) body.appendChild(built);
+  }
+  tray.appendChild(body);
+  tray.appendChild(status);
+
+  if (spec.link) {
+    const foot = document.createElement("p");
+    foot.className = "tray-foot";
+    const a = document.createElement("a");
+    a.href = spec.link.href;
+    a.textContent = spec.link.text;
+    foot.appendChild(a);
+    tray.appendChild(foot);
+  }
+
+  const entry = { tray, controls };
+  mountedTrays.add(entry);
+  pageSignal().addEventListener("abort", () => mountedTrays.delete(entry), { once: true });
+
+  // Warm the shared snapshot at MOUNT, not at first open.
+  //
+  // The controls start disabled and unchecked, so an open that has to
+  // wait for the fetch shows every switch briefly in the OFF position
+  // before flipping — a reader watching that has just been told the
+  // wrong thing about their own configuration, however briefly. One
+  // request per page (all trays share the promise, and the Jobs page
+  // mounts nine of them), issued while the reader is still reading the
+  // page.
+  void traySettingsSnapshot().then(() => syncTray(entry)).catch(() => {
+    // Silent: nothing is open yet, so there is nowhere to report it. The
+    // open path below retries and shows the error there.
+  });
+
+  const close = () => {
+    tray.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+  };
+  button.addEventListener("click", () => {
+    if (!tray.hidden) { close(); return; }
+    tray.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    // Normally a no-op: the mount-time warm above has already landed and
+    // syncTray has run. This is the retry path for a snapshot that failed
+    // or is still in flight, and the only place the failure can be
+    // reported, because it is the only place the reader is looking.
+    if (!traySettings) {
+      status.textContent = "Loading…";
+      status.dataset.tone = "";
+      traySettingsSnapshot()
+        .then(() => { status.textContent = ""; syncTray(entry); })
+        .catch((err) => {
+          status.dataset.tone = "err";
+          status.textContent = `Could not read settings: ${err.message || err}`;
+        });
+    }
+    const first = tray.querySelector("input, select, button, a");
+    if (first) first.focus();
+  });
+  tray.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    close();
+    button.focus();
+  });
+
+  return { button, tray };
+}
+
+// buildTrayRow renders one row and registers its control so syncTray can
+// push server values into it. A "note" row has no control and is just
+// prose — used where a page has something to explain but nothing to
+// switch (History, whose recording gate is per-device on iOS by design).
+function buildTrayRow(row, status, controls) {
+  if (row.type === "note") {
+    const p = document.createElement("p");
+    p.className = "tray-note";
+    p.textContent = row.text || "";
+    return p;
+  }
+  if (!row.field) return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "tray-row";
+
+  let input;
+  if (row.type === "select") {
+    input = document.createElement("select");
+    for (const [value, label] of row.options || []) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      input.appendChild(opt);
+    }
+  } else if (row.type === "number") {
+    input = document.createElement("input");
+    input.type = "number";
+    if (row.min != null) input.min = String(row.min);
+    if (row.max != null) input.max = String(row.max);
+    // A field whose settings response carries `omitempty` and whose
+    // stored value is 0 arrives ABSENT, and an empty box beside a card
+    // reading "every 6 h" looks like a disagreement rather than "unset,
+    // so the default applies". updateCheckIntervalHours is the one field
+    // in that shape — backups report their effective values.
+    if (row.placeholder) input.placeholder = row.placeholder;
+  } else {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.setAttribute("role", "switch");
+  }
+  // Disabled until the snapshot lands: an unpopulated switch shows
+  // "off", and a reader who flips it is turning ON something that may
+  // already be on — or, worse, watching a PATCH send the value the
+  // control happened to default to.
+  input.disabled = true;
+  input.dataset.field = row.field;
+
+  const label = document.createElement("label");
+  // A switch borrows app.css's `label.checkbox` outright rather than
+  // restyling one: the console has one toggle, and a tray that grew its
+  // own would be a second thing to keep in step with it. `.tray-switch`
+  // carries only the compact metrics (a tray is denser than a settings
+  // pane), which is why the borrowed class comes first.
+  label.className = row.type === "select" || row.type === "number"
+    ? "tray-field"
+    : "checkbox tray-switch";
+  const text = document.createElement("span");
+  text.className = "tray-label";
+  text.textContent = row.label;
+  const badge = row.restart ? document.createElement("span") : null;
+  if (badge) {
+    badge.className = "badge warn";
+    badge.textContent = "restart";
+  }
+  if (row.type === "select" || row.type === "number") {
+    // Badge with the LABEL, not after the control. In a narrow tray the
+    // label takes its own line and the control keeps its unit beside it,
+    // so a trailing badge landed alone on a third line and read as a
+    // stray chip belonging to nothing.
+    const headGroup = document.createElement("span");
+    headGroup.className = "tray-field-head";
+    headGroup.appendChild(text);
+    if (badge) headGroup.appendChild(badge);
+    label.append(headGroup, input);
+    if (row.unit) {
+      const u = document.createElement("span");
+      u.className = "tray-unit";
+      u.textContent = row.unit;
+      label.appendChild(u);
+    }
+  } else {
+    // A switch reads left to right — toggle, what it does, then the
+    // caveat — which is also the order the Settings page uses.
+    label.append(input, text);
+    if (badge) label.appendChild(badge);
+  }
+  wrap.appendChild(label);
+  if (row.hint) {
+    const hint = document.createElement("small");
+    hint.className = "tray-hint";
+    hint.textContent = row.hint;
+    wrap.appendChild(hint);
+  }
+
+  const ctl = { row, input };
+  controls.push(ctl);
+  // change, not input: a number field would otherwise PATCH on every
+  // keystroke, and "6" on the way to "60" is a real, saved value.
+  input.addEventListener("change", () => saveTrayField(ctl, status));
+  return wrap;
+}
+
+// trayValueOf reads a control's current value in the shape the PATCH
+// field expects — bool for a switch, string for a select, number for a
+// number field.
+function trayValueOf(ctl) {
+  if (ctl.row.type === "select") return ctl.input.value;
+  if (ctl.row.type === "number") {
+    const n = parseInt(ctl.input.value, 10);
+    return Number.isNaN(n) ? null : n;
+  }
+  return ctl.input.checked;
+}
+
+function trayApplyValue(ctl, value) {
+  if (ctl.row.type === "select") ctl.input.value = value == null ? "" : String(value);
+  else if (ctl.row.type === "number") ctl.input.value = value == null ? "" : String(value);
+  else ctl.input.checked = !!value;
+}
+
+// syncTray pushes the shared snapshot into a tray's controls and enables
+// them. Called on first open and after any tray's successful save.
+function syncTray(entry) {
+  if (!traySettings) return;
+  // Self-pruning. Operator pages tear their trays down through
+  // pageSignal, but the player rebuilds its toolbar on every internal
+  // route WITHOUT re-running dispatchPageInit — so a tray left behind by
+  // a navigation from /mixes to /albums would stay in the set with a
+  // detached node. Cheap, and it means the player needs no hook of its own.
+  if (!entry.tray.isConnected) {
+    mountedTrays.delete(entry);
+    return;
+  }
+  for (const ctl of entry.controls) {
+    trayApplyValue(ctl, traySettings[ctl.row.field]);
+    ctl.input.disabled = false;
+  }
+}
+
+async function saveTrayField(ctl, status) {
+  const value = trayValueOf(ctl);
+  if (value == null) {
+    status.dataset.tone = "err";
+    status.textContent = "Enter a number.";
+    return;
+  }
+  status.dataset.tone = "";
+  status.textContent = "Saving…";
+  ctl.input.disabled = true;
+  try {
+    const r = await API.patch("/api/settings", { [ctl.row.field]: value });
+    if (traySettings) traySettings[ctl.row.field] = value;
+    if (r && r.restartRequired) {
+      markRestartPending(true);
+      status.dataset.tone = "warn";
+      status.textContent = "Saved — restart the bridge to apply.";
+    } else {
+      status.dataset.tone = "ok";
+      status.textContent = "Saved.";
+    }
+    // Every OTHER tray on the page, so a shared field can't show two
+    // different answers at once.
+    for (const other of mountedTrays) syncTray(other);
+  } catch (err) {
+    // Snap the control back to what the server still holds: leaving it
+    // showing the rejected value is the one outcome that lies.
+    if (traySettings) trayApplyValue(ctl, traySettings[ctl.row.field]);
+    status.dataset.tone = "err";
+    status.textContent = `Save failed: ${err.message || err}`;
+  } finally {
+    ctl.input.disabled = false;
+  }
+}
+
+/**
+ * Mount a tray onto a heading row: the gear goes INSIDE `head`, the tray
+ * immediately after it. That lands the panel under the heading and above
+ * the card's body on the Jobs page, and under the page title on a page
+ * head — the same relationship in both, with no per-caller placement.
+ *
+ * A missing head is a no-op, not a throw: every operator initX is
+ * nil-guarded so a page that renders without a given card stays silent.
+ */
+function attachFeatureTray(head, spec) {
+  if (!head || !head.parentNode) return null;
+  const { button, tray } = buildFeatureTray(spec);
+  // Into the head's action GROUP when it has one, not the head itself.
+  //
+  // .panel-head wraps, and a job card in the two-up grid is ~320px wide:
+  // heading + badge + trigger button + gear overflows it, so a gear added
+  // as a third child of the head dropped onto a line of its own at the
+  // LEFT edge — below the heading, nowhere near the controls it belongs
+  // with. Inside .panel-actions the whole group wraps together and stays
+  // one block.
+  (head.querySelector(":scope > .panel-actions") || head).appendChild(button);
+  head.parentNode.insertBefore(tray, head.nextSibling);
+  return { button, tray };
+}
+
+// The player module is an ES module and app.js is a deferred classic
+// script, so there is no import between them — the same one-way window
+// handshake boot.js already uses for window.__player, in the other
+// direction. Exposed as a function rather than the internals so the
+// player cannot reach the snapshot cache.
+window.BridgeFeatureTray = { build: buildFeatureTray };
+
 // showUpnpRestartBanner injects (or refreshes) a one-time "Restart
 // required" banner above the configured panel so the operator knows
 // their CRUD action won't take effect until the next bridge restart.
@@ -3294,6 +3696,7 @@ function makeVisibilityChain(fn, ms) {
 
 function initJobs() {
   if (!document.getElementById("jobs-page-root")) return;
+  mountJobTrays();
 
   // Two chains: the 5 s upscale-batch table (fast — live counters
   // during a batch) and the 10 s /api/jobs snapshot (slow-moving
@@ -3370,6 +3773,180 @@ function initJobs() {
       setTimeout(() => { retry.textContent = "Retry missing"; retry.disabled = false; }, 4000);
     });
   }
+}
+
+
+// mountJobTrays hangs a feature tray off every job card that HAS a
+// switch. The Jobs page shows what each job is doing; before this, the
+// switch that governs it lived one page away, so "is analysis on?" was
+// answered here and "turn it on" was answered in Settings.
+//
+// The restart badges mirror the Settings page field-for-field on
+// purpose. They are a PREDICTION — the authoritative answer is the
+// restartRequired flag on the PATCH response, which the tray reports
+// after the save either way — so a badge that disagreed with Settings
+// would be two different predictions for one field. autoOptimizeEnabled
+// carries none, exactly as it carries none there: it hot-applies
+// whenever a sweeper is wired.
+function mountJobTrays() {
+  const head = (id) => document.querySelector(`#${id} .panel-head`);
+
+  attachFeatureTray(head("job-scan-card"), {
+    title: "Library scanner",
+    blurb: "The periodic full walk is always on. These change how often it " +
+      "runs and whether newly-dropped files are picked up before the next one.",
+    rows: [
+      {
+        field: "scanIntervalSec", type: "number", restart: true, min: 60,
+        label: "Full scan every", unit: "seconds",
+        hint: "Defaults to 21600 (6 h). Raise it for a mechanical NAS you want " +
+          "to let spin down; the on-demand trigger above still works either way.",
+      },
+      {
+        field: "libraryWatchEnabled", type: "switch", restart: true,
+        label: "Watch folders for changes",
+        hint: "Files appear within seconds instead of at the next scan. Best on " +
+          "local disks — a NAS on a flaky network can thrash incremental scans.",
+      },
+    ],
+    link: { href: "/settings?tab=general", text: "Library settings →" },
+  });
+
+  attachFeatureTray(head("enrichment-panel"), {
+    title: "Enrichment",
+    blurb: "Covers, artist and release IDs are always fetched. This adds the " +
+      "rich tier — biographies and release descriptions — from your own Atlas.",
+    rows: [
+      {
+        field: "atlasEnabled", type: "switch", restart: true,
+        label: "Atlas biographies and descriptions",
+        hint: "Needs a reachable Atlas mirror; set its URL under enrichment settings.",
+      },
+    ],
+    link: { href: "/settings?tab=enrichment", text: "Enrichment settings →" },
+  });
+
+  attachFeatureTray(head("job-analysis-card"), {
+    title: "Audio analysis",
+    blurb: "Decodes each track once through sox to pre-compute a waveform, " +
+      "loudness, key and tempo.",
+    rows: [
+      {
+        field: "analysisEnabled", type: "switch", restart: true,
+        label: "Analyse the library",
+        hint: "Sidecars survive a toggle, so turning this off and on again " +
+          "costs nothing already computed.",
+      },
+    ],
+    link: { href: "/settings?tab=audio", text: "Audio settings →" },
+  });
+
+  attachFeatureTray(head("job-fp-card"), {
+    title: "Acoustic fingerprinting",
+    blurb: "Identifies tracks whose tags no text match can fix, by fingerprinting " +
+      "the audio itself and asking AcoustID.",
+    rows: [
+      {
+        field: "fingerprintEnabled", type: "switch", restart: true,
+        label: "Fingerprint unmatched tracks",
+        hint: "Needs fpcalc on the bridge host and a free AcoustID application " +
+          "key — without either it degrades to off at startup.",
+      },
+    ],
+    link: { href: "/settings?tab=enrichment", text: "Fingerprint settings →" },
+  });
+
+  attachFeatureTray(head("job-ao-card"), {
+    title: "CarPlay pre-generation",
+    blurb: "Builds the optimized copies ahead of time instead of waiting for a " +
+      "device to ask for one. All three switches have to be on for anything to run.",
+    rows: [
+      { field: "upscaleEnabled", type: "switch", restart: true, label: "PCM upscaling" },
+      { field: "optimizeEnabled", type: "switch", restart: true, label: "CarPlay-optimized variants" },
+      {
+        field: "autoOptimizeEnabled", type: "switch",
+        label: "Pre-generate them",
+        hint: "Applies immediately. Spends disk and CPU on tracks nobody has " +
+          "asked for yet, newest first, and stops before the variants volume fills.",
+      },
+    ],
+    link: { href: "/settings?tab=audio", text: "Audio settings →" },
+  });
+
+  attachFeatureTray(head("job-dupes-card"), {
+    title: "Duplicate serving",
+    blurb: "Which copy of a duplicated recording the bridge serves. Nothing is " +
+      "ever deleted or moved — this changes what is offered, not what is stored.",
+    rows: [
+      {
+        field: "duplicatesFilter", type: "select",
+        label: "Policy",
+        options: [
+          ["highest-quality", "Highest quality"],
+          ["same-format", "Same format only"],
+          ["off", "Off — serve everything"],
+        ],
+        hint: "Applies immediately: saving re-runs the stamping pass. " +
+          "The full explanation of each policy is on the Duplicates page.",
+      },
+    ],
+    link: { href: "/library/duplicates", text: "Duplicates →" },
+  });
+
+  attachFeatureTray(head("job-mix-card"), {
+    title: "Smart mixes",
+    blurb: "Auto-generated playlists built from listening history, rebuilt daily.",
+    rows: [
+      {
+        field: "smartPlaylistsEnabled", type: "switch", restart: true,
+        label: "Generate smart mixes",
+      },
+      {
+        field: "analysisEnabled", type: "switch", restart: true,
+        label: "Audio analysis",
+        hint: "Only the harmonic Auto Mix needs it; the history-based families " +
+          "generate without it.",
+      },
+    ],
+    link: { href: "/mixes", text: "Smart mixes →" },
+  });
+
+  attachFeatureTray(head("job-backup-card"), {
+    title: "Backups",
+    blurb: "Periodic snapshots of the manifest database, token store and certificates.",
+    rows: [
+      {
+        field: "backupIntervalHours", type: "number", restart: true, min: 0,
+        label: "Snapshot every", unit: "hours",
+        hint: "0 turns the periodic snapshot off; the button above still writes one.",
+      },
+      {
+        field: "backupKeep", type: "number", restart: true, min: 1,
+        label: "Keep", unit: "snapshots",
+      },
+    ],
+    link: { href: "/settings?tab=backups", text: "Backup settings →" },
+  });
+
+  attachFeatureTray(head("job-upd-card"), {
+    title: "Update checks",
+    blurb: "How often the bridge asks GitHub for a newer release, and whether it " +
+      "installs one on its own.",
+    rows: [
+      {
+        field: "updateCheckIntervalHours", type: "number", restart: true, min: 1,
+        label: "Check every", unit: "hours", placeholder: "6 (default)",
+        hint: "Left blank the bridge uses its default of 6 hours.",
+      },
+      {
+        field: "updateAutoInstall", type: "switch", restart: true,
+        label: "Install updates automatically",
+        hint: "Verifies the signature, swaps the binary and restarts. Quiet hours " +
+          "are set under update settings.",
+      },
+    ],
+    link: { href: "/settings?tab=updates", text: "Update settings →" },
+  });
 }
 
 // wireJobButton — shared trigger-button UX: disable while in flight,
@@ -4235,45 +4812,73 @@ function initDiagnostics() {
 
 // --- boot ---
 
-// ---- Data page (playlists + listening history) ----
+// ---- Listening history page ----
+//
+// Telemetry only. Playlists and favorites used to share this page with
+// it, duplicating the player's own Playlists and Favorites views; they
+// consolidated into Browse, taking their provenance and unresolved-member
+// detail with them (see handlers_player_collections.go). What stayed is
+// the one thing that was never anywhere else.
 
 // History paging cursor state (module-scoped for the "Load more" button).
 let historyCursor = 0;
 let historyLoading = false;
+// The device prefix the table is filtered to, "" for every device. Also
+// module-scoped: "Load more" has to keep paging the SAME filter, and
+// re-reading the select at click time would page a filter the operator
+// changed mid-scroll.
+let historyDevice = "";
 
-function initData() {
-  loadPlaylists();
-  loadFavorites();
+function initHistory() {
+  const root = document.getElementById("history-events-body");
+  if (!root) return;
+
+  attachFeatureTray(document.querySelector(".page.history .page-head"), {
+    title: "Listening history",
+    blurb: "Recording is a per-device switch in the 1-bit app, not a bridge " +
+      "setting — each paired device decides whether to send its plays here.",
+    rows: [
+      {
+        type: "note",
+        text: "There is deliberately no server-side kill switch: every paired " +
+          "device is yours, each already chooses for itself under Edit Bridge → " +
+          "Sync & History, and a gate here would only shadow that choice. To " +
+          "stop a device reporting, turn it off on the device — or unpair it.",
+      },
+      {
+        field: "smartPlaylistsEnabled", type: "switch", restart: true,
+        label: "Build smart mixes from this history",
+        hint: "Heavy Rotation, Forgotten Favorites and the rest are generated " +
+          "from these plays. Off means the history is still recorded, just not used.",
+      },
+    ],
+    link: { href: "/devices", text: "Paired devices →" },
+  });
+
   loadHistorySummary();
+  loadHistoryDeviceFilter();
   historyCursor = 0;
+  historyDevice = "";
   loadHistoryEvents(true);
 
-  const closeBtn = document.getElementById("playlist-detail-close");
-  if (closeBtn) {
-    closeBtn.addEventListener("click", () => {
-      const panel = document.getElementById("playlist-detail-panel");
-      if (panel) panel.hidden = true;
-    });
-  }
-  // Playlist export buttons read the currently-open playlist from the
-  // detail panel's dataset (set when a row is opened).
-  document.querySelectorAll(".export-playlist").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const panel = document.getElementById("playlist-detail-panel");
-      if (!panel?.dataset.device || !panel?.dataset.id) return;
-      const q = new URLSearchParams({
-        device: panel.dataset.device,
-        id: panel.dataset.id,
-        format: btn.dataset.format,
-      });
-      globalThis.location = `/api/playlists/export?${q.toString()}`;
-    });
-  });
   document.querySelectorAll(".export-history").forEach((btn) => {
     btn.addEventListener("click", () => {
-      globalThis.location = `/api/history/export?format=${encodeURIComponent(btn.dataset.format)}`;
+      const q = new URLSearchParams({ format: btn.dataset.format });
+      // The export follows the table's filter. An "Export" beside a
+      // table showing one device that silently wrote every device's
+      // plays would be the wrong file with the right name.
+      if (historyDevice) q.set("device", historyDevice);
+      globalThis.location = `/api/history/export?${q.toString()}`;
     });
   });
+  const sel = document.getElementById("history-device");
+  if (sel) {
+    sel.addEventListener("change", () => {
+      historyDevice = sel.value || "";
+      historyCursor = 0;
+      loadHistoryEvents(true);
+    });
+  }
   const moreBtn = document.getElementById("history-load-more");
   if (moreBtn) moreBtn.addEventListener("click", () => loadHistoryEvents(false));
 }
@@ -4283,7 +4888,7 @@ function initData() {
 //
 // Failure is non-fatal and returns an empty map: the caller falls back to
 // the prefix, which is exactly the pre-existing display. A device list
-// that fails to load must not take the playlists table down with it.
+// that fails to load must not take the history table down with it.
 async function loadDeviceNames() {
   try {
     const d = await API.get("/api/devices");
@@ -4297,137 +4902,73 @@ async function loadDeviceNames() {
   }
 }
 
-// renderDeviceCell shows the device NAME when known, keeping the prefix
-// as a title so the identifier is still recoverable — two devices can
-// share a name ("iPhone"), and the prefix is what every other surface
-// and the CLI key on.
-function renderDeviceCell(prefix, names) {
-  const name = names.get(prefix);
-  if (!name) return `<code>${escapeHTML(prefix || "")}</code>`;
-  return `<span title="${escapeHTML(prefix || "")}">${escapeHTML(name)}</span>`;
-}
-
-async function loadPlaylists() {
-  const body = document.getElementById("playlists-body");
-  if (!body) return;
-  try {
-    const data = await API.get("/api/playlists");
-    const rows = data.playlists || [];
-    if (rows.length === 0) {
-      body.innerHTML = `<tr><td colspan="5"><em>No playlist backups yet.</em></td></tr>`;
-      return;
-    }
-    // Resolve device names once per render. /api/devices has always
-    // carried deviceName; this table rendered the token prefix
-    // (a3f91c2e…) beside it, so the console showed an opaque hex string
-    // for a device whose name the bridge already knew. PROTOCOL.md:664
-    // promises the named surface.
-    const deviceNames = await loadDeviceNames();
-    body.innerHTML = rows.map((p) => `
-      <tr class="playlist-row" data-device="${escapeHTML(p.deviceTokenPrefix)}" data-id="${escapeHTML(p.id)}">
-        <td data-label="Name">${escapeHTML(p.name)}</td>
-        <td data-label="Device">${renderDeviceCell(p.deviceTokenPrefix, deviceNames)}</td>
-        <td class="num" data-label="Tracks">${p.trackCount}</td>
-        <td data-label="Updated">${p.updatedAt ? formatTimeAgo(new Date(p.updatedAt)) : "—"}</td>
-        <td class="row-actions" data-label="Actions"><button type="button" class="btn open-playlist">View</button></td>
-      </tr>`).join("");
-    body.querySelectorAll(".playlist-row").forEach((tr) => {
-      tr.querySelector(".open-playlist").addEventListener("click", () =>
-        openPlaylistDetail(tr.dataset.device, tr.dataset.id));
-    });
-  } catch (err) {
-    body.innerHTML = `<tr><td colspan="5" class="error">Failed to load playlists: ${escapeHTML(String(err.message || err))}</td></tr>`;
+// loadHistoryDeviceFilter fills the per-device dropdown.
+//
+// GET /api/history/events has accepted a `device` prefix since it
+// shipped and the console never offered one, so "what has the study
+// speaker been playing?" was answerable by the API and not by the page.
+//
+// A roster that fails to load leaves the select with its "All devices"
+// option, which is the unfiltered view the page opens on anyway.
+async function loadHistoryDeviceFilter() {
+  const sel = document.getElementById("history-device");
+  if (!sel) return;
+  const names = await loadDeviceNames();
+  for (const [prefix, name] of names) {
+    const opt = document.createElement("option");
+    opt.value = prefix;
+    opt.textContent = name;
+    opt.title = prefix;
+    sel.appendChild(opt);
   }
-}
-
-// loadFavorites renders the backed-up favorites document (hearted tracks +
-// albums) on the data page. Never-stored → friendly empty states; a fetch
-// failure takes only this panel down (the playlists/history loaders are
-// independent by the same rule).
-async function loadFavorites() {
-  const tracksBody = document.getElementById("favorites-tracks-body");
-  const albumsBody = document.getElementById("favorites-albums-body");
-  if (!tracksBody || !albumsBody) return;
-  try {
-    const data = await API.get("/api/favorites");
-    const metaEl = document.getElementById("favorites-meta");
-    if (metaEl && data.stored) {
-      const names = await loadDeviceNames();
-      const dev = names.get(data.deviceTokenPrefix) || data.deviceTokenPrefix || "";
-      const when = data.lastModifiedAt ? formatTimeAgo(new Date(data.lastModifiedAt)) : "";
-      metaEl.textContent = `Last updated ${when}${dev ? ` by ${dev}` : ""}.`;
-    }
-    const tracks = data.tracks || [];
-    tracksBody.innerHTML = tracks.length === 0
-      ? `<tr><td colspan="5"><em>No favorite tracks backed up yet.</em></td></tr>`
-      : tracks.map((t) => `
-        <tr>
-          <td data-label="Title">${escapeHTML(t.title || "—")}</td>
-          <td data-label="Artist">${escapeHTML(t.artist || "—")}</td>
-          <td data-label="Album">${escapeHTML(t.album || "—")}</td>
-          <td data-label="Source">${t.foreign
-            ? `<span class="badge idle" title="${escapeHTML(t.originPath || "")}">foreign</span>`
-            : `<code>${escapeHTML(t.path || "")}</code>`}</td>
-          <td data-label="Favorited">${t.favoritedAt ? formatTimeAgo(new Date(t.favoritedAt)) : "—"}</td>
-        </tr>`).join("");
-    const albums = data.albums || [];
-    albumsBody.innerHTML = albums.length === 0
-      ? `<tr><td colspan="4"><em>No favorite albums backed up yet.</em></td></tr>`
-      : albums.map((a) => `
-        <tr>
-          <td data-label="Album">${escapeHTML(a.album || "—")}</td>
-          <td data-label="Album artist">${escapeHTML(a.albumArtist || "—")}</td>
-          <td class="num" data-label="Year">${a.year ? a.year : "—"}</td>
-          <td data-label="Favorited">${a.favoritedAt ? formatTimeAgo(new Date(a.favoritedAt)) : "—"}</td>
-        </tr>`).join("");
-  } catch (err) {
-    const msg = `<em>Failed to load favorites: ${escapeHTML(String(err.message || err))}</em>`;
-    tracksBody.innerHTML = `<tr><td colspan="5" class="error">${msg}</td></tr>`;
-    albumsBody.innerHTML = `<tr><td colspan="4" class="error">${msg}</td></tr>`;
-  }
-}
-
-async function openPlaylistDetail(device, id) {
-  const panel = document.getElementById("playlist-detail-panel");
-  const tbody = document.getElementById("playlist-detail-body");
-  if (!panel || !tbody) return;
-  try {
-    const q = new URLSearchParams({ device, id });
-    const pl = await API.get(`/api/playlists/detail?${q.toString()}`);
-    panel.dataset.device = device;
-    panel.dataset.id = id;
-    setText("playlist-detail-title", pl.name || "Playlist");
-    const items = pl.items || [];
-    tbody.innerHTML = items.length === 0
-      ? `<tr><td colspan="4"><em>Empty playlist.</em></td></tr>`
-      : items.map((it) => `
-        <tr>
-          <td class="num" data-label="#">${it.position + 1}</td>
-          <td data-label="Title">${escapeHTML(it.title || "—")}</td>
-          <td data-label="Artist">${escapeHTML(it.artist || "—")}</td>
-          <td data-label="Source">${it.foreign
-            ? `<span class="badge idle" title="${escapeHTML(it.originPath || "")}">foreign</span>`
-            : `<code>${escapeHTML(it.path || "")}</code>`}</td>
-        </tr>`).join("");
-    panel.hidden = false;
-    panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="4" class="error">Failed to load: ${escapeHTML(String(err.message || err))}</td></tr>`;
-    panel.hidden = false;
-  }
+  // Nothing to choose between: one device (or none) makes the control a
+  // decoration that implies a comparison the data can't offer.
+  sel.parentElement.hidden = names.size < 2;
 }
 
 async function loadHistorySummary() {
   try {
     const data = await API.get("/api/history");
-    setText("history-summary", `${data.totalEvents} play${data.totalEvents === 1 ? "" : "s"} recorded across all devices.`);
+    setText("history-total", (data.totalEvents || 0).toLocaleString());
     renderHistogram("history-codecs", data.codecs);
     renderHistogram("history-routes", data.routes);
     renderHistogram("history-top", data.topTracks, true);
+    // The tiles are the same three histograms' leading buckets, read as
+    // sentences. No extra query: every number here is already in the
+    // response the histograms below are drawn from, so the summary
+    // cannot disagree with the detail under it.
+    fillHistoryLeader("history-top-track", data.topTracks, data.totalEvents, true);
+    fillHistoryLeader("history-top-route", data.routes, data.totalEvents, false);
+    fillHistoryLeader("history-top-codec", data.codecs, data.totalEvents, false);
   } catch (err) {
-    setText("history-summary", "Failed to load history summary.");
+    setText("history-total", "—");
     console.warn("history summary:", err);
   }
+}
+
+// fillHistoryLeader writes one tile: the biggest bucket's label, with its
+// share of all plays underneath.
+//
+// Share is of TOTAL events, not of the histogram's own sum: the codec and
+// route histograms only cover events that reported one, so a percentage
+// of their own total would read as "78% of plays" while meaning "78% of
+// the plays that said".
+function fillHistoryLeader(id, buckets, total, basename) {
+  const el = document.getElementById(id);
+  const foot = document.getElementById(`${id}-foot`);
+  const top = (buckets || [])[0];
+  if (!el) return;
+  if (!top) {
+    el.textContent = "—";
+    if (foot) foot.textContent = "no plays recorded yet";
+    return;
+  }
+  const label = basename ? (top.label || "").split("/").pop() : top.label;
+  el.textContent = label || "(unknown)";
+  el.title = top.label || "";
+  if (!foot) return;
+  const share = total > 0 ? Math.round((top.count / total) * 100) : 0;
+  foot.textContent = `${top.count.toLocaleString()} plays · ${share}% of all`;
 }
 
 function renderHistogram(id, buckets, basename) {
@@ -4458,6 +4999,7 @@ async function loadHistoryEvents(reset) {
   historyLoading = true;
   try {
     const q = new URLSearchParams({ limit: "50" });
+    if (historyDevice) q.set("device", historyDevice);
     if (!reset && historyCursor > 0) q.set("after", String(historyCursor));
     const data = await API.get(`/api/history/events?${q.toString()}`);
     const events = data.events || [];
@@ -4465,14 +5007,17 @@ async function loadHistoryEvents(reset) {
       <tr>
         <td data-label="When">${e.startedAt ? formatTimeAgo(new Date(e.startedAt)) : "—"}</td>
         <td data-label="Track"><code>${escapeHTML((e.path || "").split("/").pop())}</code></td>
+        <td data-label="Device">${escapeHTML(e.sourceDevice || "—")}</td>
         <td data-label="Codec">${escapeHTML(e.codec || "—")}</td>
-        <td data-label="Route">${escapeHTML(e.route || "—")}</td>
+        <td data-label="Route" title="${escapeHTML(e.deviceName || "")}">${escapeHTML(e.route || "—")}</td>
         <td class="num" data-label="Rate">${e.outputRate ? (e.outputRate / 1000).toFixed(1) + "k" : "—"}</td>
         <td class="num" data-label="Played">${Math.round(e.durationUsed || 0)}s</td>
       </tr>`).join("");
     if (reset) {
       body.innerHTML = events.length === 0
-        ? `<tr><td colspan="6"><em>No plays recorded yet.</em></td></tr>`
+        ? `<tr><td colspan="7"><em>${historyDevice
+            ? "No plays recorded for that device yet."
+            : "No plays recorded yet."}</em></td></tr>`
         : rowsHTML;
     } else if (events.length > 0) {
       body.insertAdjacentHTML("beforeend", rowsHTML);
@@ -4486,7 +5031,7 @@ async function loadHistoryEvents(reset) {
     // same cursor). CodeRabbit on PR #341.
     if (moreBtn) moreBtn.hidden = !(data.nextCursor && events.length >= 50);
   } catch (err) {
-    if (reset) body.innerHTML = `<tr><td colspan="6" class="error">Failed to load history.</td></tr>`;
+    if (reset) body.innerHTML = `<tr><td colspan="7" class="error">Failed to load history.</td></tr>`;
     console.warn("history events:", err);
   } finally {
     historyLoading = false;
@@ -5050,6 +5595,7 @@ function pageInterval(fn, ms) {
 function dispatchPageInit(tab) {
   if (pageAbort) pageAbort.abort();
   pageAbort = new AbortController();
+  invalidateTraySettings();
   switch (tab) {
     case "stats": initStats(); break;
     case "library": initLibrary(); break;
@@ -5057,7 +5603,7 @@ function dispatchPageInit(tab) {
     case "jobs": initJobs(); break;
     case "devices": initDevices(); break;
     case "upnp": initUPnP(); break;
-    case "data": initData(); break;
+    case "history": initHistory(); break;
     case "settings": initSettings(); break;
     case "diagnostics": initDiagnostics(); break;
     // "player" has no per-page initX — that is boot.js's job. Every other

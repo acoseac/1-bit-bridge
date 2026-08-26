@@ -210,6 +210,24 @@ export function audioURL(path, variantID) {
   return `/api/player/audio?path=${encodeURIComponent(path)}${v}`;
 }
 
+/**
+ * A one-playlist export download, in json / csv / m3u8.
+ *
+ * The OPERATOR endpoint, unchanged: /api/playlists/export already wrote
+ * all three formats (including the M3U8 whose every interpolated field
+ * is newline-flattened against playlist-line injection), and a second
+ * writer under /api/player would be a second place for that to be got
+ * wrong. Its `device` parameter is optional now — the read is id-scoped
+ * — so nothing but the id is needed here.
+ *
+ * A URL rather than a fetch: the response is a file download with
+ * Content-Disposition, so it has to reach the browser's own download
+ * path. The caller assigns location.
+ */
+export function playlistExportURL(id, format) {
+  return `/api/playlists/export?id=${encodeURIComponent(id)}&format=${encodeURIComponent(format)}`;
+}
+
 export function downloadURL(path) {
   return `/api/player/download?path=${encodeURIComponent(path)}`;
 }

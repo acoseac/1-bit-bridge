@@ -176,3 +176,27 @@ export function unplayableReason(track) {
   }
   return "May not play in this browser";
 }
+
+/**
+ * "3d ago" for an RFC3339 stamp, or "" for a missing / unparseable one.
+ *
+ * Deliberately the same four-step ladder as app.js's formatTimeAgo
+ * rather than a shared helper: the two files load as different module
+ * kinds (a deferred classic script and an ES module), so sharing would
+ * mean hanging a function off window for six lines of arithmetic. What
+ * matters is that the WORDING agrees, and this comment is the pin.
+ *
+ * Returns "" rather than a placeholder because every caller composes it
+ * into a longer line with a separator; a caller that wants an em-dash
+ * can supply one, and one that gets "" simply drops the clause.
+ */
+export function timeAgo(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}

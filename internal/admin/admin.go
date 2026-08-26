@@ -1249,7 +1249,7 @@ var pages = map[string]string{
 	"jobs":        "jobs.html",
 	"devices":     "devices.html",
 	"upnp":        "upnp.html",
-	"data":        "data.html",
+	"history":     "history.html",
 	"settings":    "settings.html",
 	"diagnostics": "diagnostics.html",
 }
@@ -1313,7 +1313,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /jobs", s.pageJobs)
 	mux.HandleFunc("GET /devices", s.pageDevices)
 	mux.HandleFunc("GET /upnp", s.pageUPnP)
-	mux.HandleFunc("GET /data", s.pageData)
+	mux.HandleFunc("GET /history", s.pageHistory)
+	// The page was "/data" while it carried playlists, favorites AND
+	// telemetry. It carries only telemetry now, so the URL says so — and
+	// the old one keeps working, the way every other retired console URL
+	// here does.
+	mux.HandleFunc("GET /data", redirectRetiredDataPage)
 	mux.HandleFunc("GET /smartmixes", redirectRetiredSmartMixes)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 	mux.HandleFunc("GET /diagnostics", s.pageDiagnostics)

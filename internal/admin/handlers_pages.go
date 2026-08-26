@@ -75,13 +75,15 @@ type pageData struct {
 // owns it. Only sections with their own rail entry appear here;
 // everything else belongs to Browse and returns "".
 //
-// The mix DETAIL route folds onto the same entry as the grid, so
-// drilling into a mix keeps Smart mixes lit rather than jumping the
+// A DETAIL route folds onto the same entry as its grid, so drilling into
+// a mix or a playlist keeps that entry lit rather than jumping the
 // highlight back to Browse.
 func playerNavEntry(section string) string {
 	switch section {
 	case "mixes", "mix":
 		return "mixes"
+	case "playlists", "playlist":
+		return "playlists"
 	default:
 		return ""
 	}

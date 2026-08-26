@@ -41,6 +41,17 @@ type playerCollectionDTO struct {
 	Kind     string `json:"kind,omitempty"`
 	Subtitle string `json:"subtitle,omitempty"`
 	HasCover bool   `json:"hasCover,omitempty"`
+	// Provenance, playlists only: which device last wrote this backup
+	// and when the bridge received it. A smart mix has neither — it is
+	// generated here — so both stay empty and omitempty drops them.
+	//
+	// These came off the operator page when playlists consolidated into
+	// the player. They are the two facts a backup listing has that a
+	// library listing does not, and dropping them would have made the
+	// move a net loss of information rather than a consolidation.
+	DeviceName        string `json:"deviceName,omitempty"`
+	DeviceTokenPrefix string `json:"deviceTokenPrefix,omitempty"`
+	UpdatedAt         string `json:"updatedAt,omitempty"`
 	// Covers are up to mosaicCovers artwork refs, most-representative
 	// first, for the tile mosaic. Empty when nothing in the collection
 	// resolves to a local album with artwork.
@@ -67,9 +78,40 @@ type playerCollectionDetailResponse struct {
 	// the backup. Reported rather than hidden: silently dropping them
 	// makes the detail page disagree with the count on the tile, and the
 	// operator's own Data page.
-	Unresolved int    `json:"unresolved,omitempty"`
-	SnapshotAt string `json:"snapshotAt"`
+	Unresolved int `json:"unresolved,omitempty"`
+	// UnresolvedItems names them, up to maxUnresolvedListed.
+	//
+	// The count alone was all the player ever had, and it is the one
+	// thing the retired operator table could say that this could not:
+	// WHICH members are missing, and whether each is another bridge's
+	// or simply gone. That is what an operator repairing a backup
+	// needs, so the list travels with the count rather than staying
+	// behind on a page that no longer exists.
+	UnresolvedItems []playerUnresolvedItemDTO `json:"unresolvedItems,omitempty"`
+	SnapshotAt      string                    `json:"snapshotAt"`
 }
+
+// playerUnresolvedItemDTO is one collection member that could not be
+// turned into a playable row: a foreign reference this bridge never
+// resolves, or a local path whose file has gone since the backup.
+//
+// Origin is a DISPLAY string, not the raw pair — the fingerprint of
+// another bridge is an identifier the reader can do nothing with, and
+// the path is the part that identifies the track.
+type playerUnresolvedItemDTO struct {
+	Position int    `json:"position"`
+	Title    string `json:"title,omitempty"`
+	Artist   string `json:"artist,omitempty"`
+	Origin   string `json:"origin,omitempty"`
+	Foreign  bool   `json:"foreign,omitempty"`
+}
+
+// maxUnresolvedListed bounds the named half of the unresolved report.
+// The COUNT is always exact; only the list is capped, because a
+// playlist backed up from a device whose library this bridge does not
+// hold could otherwise name every one of its 5,000 members in a
+// response nobody reads past the first screen of.
+const maxUnresolvedListed = 200
 
 // apiPlayerPlaylists handles GET /api/player/playlists.
 func (s *Server) apiPlayerPlaylists(w http.ResponseWriter, r *http.Request) {
@@ -92,14 +134,18 @@ func (s *Server) apiPlayerPlaylists(w http.ResponseWriter, r *http.Request) {
 		heads = nil
 	}
 	covers := s.coverSet(r, manifest.CoverScopePlaylist)
+	devices := s.deviceNamesByToken(r)
 
 	out := make([]playerCollectionDTO, 0, len(rows))
 	for _, p := range rows {
 		_, hasCover := covers[strings.ToLower(p.ID)]
 		out = append(out, playerCollectionDTO{
 			ID: p.ID, Name: p.Name, Count: p.TrackCount,
-			HasCover: hasCover,
-			Covers:   mosaicFor(cat, heads[p.ID]),
+			HasCover:          hasCover,
+			Covers:            mosaicFor(cat, heads[p.ID]),
+			DeviceName:        devices[p.DeviceToken],
+			DeviceTokenPrefix: redactDeviceToken(p.DeviceToken),
+			UpdatedAt:         nsToRFC3339(p.UpdatedAt),
 		})
 	}
 	writeJSON(w, http.StatusOK, playerCollectionsResponse{
@@ -145,14 +191,19 @@ func (s *Server) apiPlayerPlaylistDetail(w http.ResponseWriter, r *http.Request)
 	}
 	covers := s.coverSet(r, manifest.CoverScopePlaylist)
 	_, hasCover := covers[strings.ToLower(row.ID)]
+	devices := s.deviceNamesByToken(r)
 	writeJSON(w, http.StatusOK, playerCollectionDetailResponse{
 		Collection: playerCollectionDTO{
 			ID: row.ID, Name: row.Name, Count: len(items), HasCover: hasCover,
-			Covers: mosaicFor(cat, paths),
+			Covers:            mosaicFor(cat, paths),
+			DeviceName:        devices[row.DeviceToken],
+			DeviceTokenPrefix: redactDeviceToken(row.DeviceToken),
+			UpdatedAt:         nsToRFC3339(row.UpdatedAt),
 		},
-		Tracks:     tracks,
-		Unresolved: len(items) - len(tracks),
-		SnapshotAt: snapshotStamp(cat.BuiltAt),
+		Tracks:          tracks,
+		Unresolved:      len(items) - len(tracks),
+		UnresolvedItems: unresolvedPlaylistItems(items, tracks),
+		SnapshotAt:      snapshotStamp(cat.BuiltAt),
 	})
 }
 
@@ -399,4 +450,76 @@ func coverContentType(ext string) string {
 	default:
 		return "image/jpeg"
 	}
+}
+
+// deviceNamesByToken maps a device's FULL recovery token to its display
+// name, from the registration roster.
+//
+// Keyed on the full token rather than the redacted prefix because both
+// sides of the lookup are server-side here — the retired operator table
+// had to match on the prefix only because its rows had already been
+// redacted for the wire.
+//
+// A roster read failure degrades to an empty map, never an error: a
+// missing name costs the reader a "backed up by" line, and taking the
+// playlist grid down over it would be the worse trade. (The same rule
+// the retired loadDeviceNames followed on the client.)
+func (s *Server) deviceNamesByToken(r *http.Request) map[string]string {
+	if s.deps.Manifest == nil {
+		return nil
+	}
+	regs, err := s.deps.Manifest.ListDeviceRegistrations(r.Context())
+	if err != nil {
+		logger.Warn("player collections: device roster", "err", err)
+		return nil
+	}
+	out := make(map[string]string, len(regs))
+	for _, d := range regs {
+		if d.DeviceToken != "" && d.DeviceName != "" {
+			out[d.DeviceToken] = d.DeviceName
+		}
+	}
+	return out
+}
+
+// unresolvedPlaylistItems names the members hydrateTracks dropped.
+//
+// Derived by SUBTRACTING the hydrated paths from the stored items
+// rather than by re-deriving the drop rule: hydrateTracks skips a path
+// for reasons this function has no business knowing (deleted since the
+// snapshot, newly duplicate-suppressed), and a second copy of that
+// judgement would disagree with the count sitting next to it the first
+// time either side changed.
+func unresolvedPlaylistItems(items []manifest.PlaylistItemRow, tracks []playerTrackDTO) []playerUnresolvedItemDTO {
+	if len(items) == len(tracks) {
+		return nil
+	}
+	kept := make(map[string]struct{}, len(tracks))
+	for _, t := range tracks {
+		kept[t.Path] = struct{}{}
+	}
+	out := make([]playerUnresolvedItemDTO, 0, min(len(items)-len(tracks), maxUnresolvedListed))
+	for _, it := range items {
+		if it.Path != "" {
+			if _, ok := kept[it.Path]; ok {
+				continue
+			}
+		}
+		if len(out) == maxUnresolvedListed {
+			break
+		}
+		foreign := it.OriginFingerprint != "" || it.OriginPath != ""
+		origin := it.Path
+		if foreign {
+			origin = it.OriginPath
+		}
+		out = append(out, playerUnresolvedItemDTO{
+			Position: it.Position, Title: it.Title, Artist: it.Artist,
+			Origin: origin, Foreign: foreign,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

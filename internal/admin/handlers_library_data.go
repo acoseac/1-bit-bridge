@@ -31,8 +31,19 @@ const (
 // pageData renders the "Data" page (playlists + listening history). The
 // page bootstraps empty and loads everything via the JSON endpoints
 // below, so there's no first-paint data to thread through.
-func (s *Server) pageData(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "data", map[string]any{})
+func (s *Server) pageHistory(w http.ResponseWriter, r *http.Request) {
+	s.renderPage(w, r, "history", map[string]any{})
+}
+
+// redirectRetiredDataPage keeps /data working.
+//
+// 301, matching the Inspector's and the Smart Mixes page's retirement:
+// permanent, and a permanent redirect lets a browser stop asking. The
+// page did not go away — playlists and favorites moved into the player
+// and what is left is listening history, which is what /history now
+// serves.
+func redirectRetiredDataPage(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/history", http.StatusMovedPermanently)
 }
 
 // resolvePlaylistDeviceToken maps a (display-prefix, playlist-id) pair
@@ -60,6 +71,21 @@ func (s *Server) resolvePlaylistDeviceToken(r *http.Request, prefix, id string) 
 		}
 	}
 	return match, match != ""
+}
+
+// playlistDeviceMatches is the OPTIONAL form of the check above: no
+// prefix supplied means nothing to verify, so nothing to fail.
+//
+// Written as its own named predicate rather than inlined at the two call
+// sites so "blank means skip" is stated once. Both callers still need a
+// non-empty id — GetPlaylist answers nil for a blank one, which is the
+// 404 they already handle.
+func playlistDeviceMatches(s *Server, r *http.Request, prefix, id string) bool {
+	if strings.TrimSuffix(prefix, "…") == "" {
+		return true
+	}
+	_, ok := s.resolvePlaylistDeviceToken(r, prefix, id)
+	return ok
 }
 
 // resolveDeviceTokenByPrefix maps a device display-prefix to the full
@@ -120,7 +146,17 @@ func (s *Server) apiPlaylistDetail(w http.ResponseWriter, r *http.Request) {
 	// the UI clicked must still exist under that last-writer prefix);
 	// the store read itself is id-scoped now that playlists are
 	// user-wide rather than device-scoped.
-	if _, ok := s.resolvePlaylistDeviceToken(r, prefix, id); !ok {
+	//
+	// OPTIONAL, not required: `device` is a check on a fact the caller
+	// already had, never an authorisation term — the read is id-scoped
+	// and the console is the loopback operator surface either way. The
+	// player's playlist page carries no device prefix (it reads
+	// /api/player/playlists/{id}, which stopped needing one in v1.7), so
+	// demanding it here would have meant either threading a redundant
+	// parameter through the player or duplicating the export writers.
+	// An empty prefix skips the check; a NON-empty one that fails it is
+	// still a 404, so no caller that passes it loses the guard.
+	if !playlistDeviceMatches(s, r, prefix, id) {
 		writeError(w, http.StatusNotFound, errCodeNotFound, "no matching playlist for that device")
 		return
 	}
@@ -174,7 +210,10 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv, m3u8")
 		return
 	}
-	if _, ok := s.resolvePlaylistDeviceToken(r, prefix, id); !ok {
+	// Optional — see apiPlaylistDetail for why. `id` alone identifies a
+	// playlist; a blank `device` skips the consistency check, a wrong
+	// one still 404s.
+	if !playlistDeviceMatches(s, r, prefix, id) {
 		writeError(w, http.StatusNotFound, errCodeNotFound, "no matching playlist for that device")
 		return
 	}
@@ -293,10 +332,22 @@ type historyEventDTO struct {
 	DurationUsed float64 `json:"durationUsed"`
 	Codec        string  `json:"codec,omitempty"`
 	Route        string  `json:"route,omitempty"`
-	DeviceName   string  `json:"deviceName,omitempty"`
-	VariantID    string  `json:"variantId,omitempty"`
-	OutputRate   int     `json:"outputRate,omitempty"`
-	IsDoP        bool    `json:"isDop"`
+	// DeviceName is the OUTPUT hardware the track played through — the
+	// DAC or speaker iOS reported, e.g. "Chord Mojo 2". NOT the phone.
+	DeviceName string `json:"deviceName,omitempty"`
+	// SourceDevice is the paired device that played it, resolved from the
+	// registration roster.
+	//
+	// The two are a well-worn trap: they differ by one word and mean
+	// completely different things, and the console's "Device" column was
+	// wired to DeviceName on the reasonable-looking assumption that it
+	// named the phone — so every row read "—" until a real DAC name
+	// appeared, at which point it would have named the wrong thing
+	// confidently. Both are on the wire so a reader can have either.
+	SourceDevice string `json:"sourceDevice,omitempty"`
+	VariantID    string `json:"variantId,omitempty"`
+	OutputRate   int    `json:"outputRate,omitempty"`
+	IsDoP        bool   `json:"isDop"`
 }
 
 // apiHistoryEvents handles GET /api/history/events?device=<prefix>&limit=&after=
@@ -486,6 +537,7 @@ func historyToDTO(e manifest.HistoryEventOut) historyEventDTO {
 		Codec:        e.Codec,
 		Route:        e.IfaceType,
 		DeviceName:   e.DeviceName,
+		SourceDevice: e.SourceDeviceName,
 		VariantID:    e.VariantID,
 		OutputRate:   e.OutputRate,
 		IsDoP:        e.IsDoP,

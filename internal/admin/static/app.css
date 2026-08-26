@@ -2352,12 +2352,47 @@ code.storage-path {
   .page > .muted { font-size: var(--text-sm); }
 }
 
-/* ---- Data page (playlists + listening history) ---- */
-.page.data .export-actions {
+/* ---- Listening history page ---- */
+.page.history .export-actions {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   flex-wrap: wrap;
+}
+/* The per-device filter. A label wrapping its select rather than a bare
+ * control: the word "Device" is the only thing that says what the list
+ * narrows, and it is hidden wholesale (by initHistory) when there are
+ * fewer than two devices to choose between. */
+.inline-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.inline-select select {
+  padding: 5px 9px;
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-width: 14rem;
+}
+.inline-select select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* "6d ago" is two words the table was happy to break across two lines,
+ * which made every row in a 50-row log a different height. */
+.page.history table.rows td[data-label="When"] { white-space: nowrap; }
+/* A stat tile whose value is a NAME, not a number. --text-stat is sized
+ * for four digits; a codec or a track title at 32px wraps to three lines
+ * and blows the tile's height out. */
+.card-value-text {
+  font-size: var(--text-lg);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .histogram-grid {
   display: grid;
@@ -2629,4 +2664,231 @@ ul.histogram li {
 @media (max-width: 560px) {
   .logs-controls { flex-direction: column; align-items: stretch; }
   .logs-control select { width: 100%; }
+}
+
+/* ===========================================================
+   Per-page feature trays
+   ===========================================================
+   A gear beside a heading that opens that feature's switches in place.
+   See the "Per-page feature trays" block in app.js for why these are
+   inline disclosures rather than anchored popovers.
+
+   Placement rule: the gear is appended INSIDE the heading row and the
+   tray inserted immediately after it, so one CSS block covers both a
+   .panel-head inside a card and a .page-head at the top of a page. */
+
+.tray-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 32px, not the 44px touch floor: this sits in a heading row beside
+   * other 30-32px buttons, and a taller control would set the row's
+   * height. The phone block below takes it to 44. */
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.tray-toggle:hover { background: var(--bg-elev); color: var(--fg); border-color: var(--border); }
+.tray-toggle[aria-expanded="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+/* The gear turns when its tray is open — the one motion in the whole
+ * component, and it is the affordance that says the button is a state
+ * rather than an action. */
+.tray-ico {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.18s ease;
+}
+.tray-toggle[aria-expanded="true"] .tray-ico { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .tray-ico { transition: none; }
+  .tray-toggle[aria-expanded="true"] .tray-ico { transform: none; }
+}
+/* Clipped, not display:none — the button's accessible name comes from
+ * this text, and two gears on one page both announcing "Settings" would
+ * be indistinguishable by voice. */
+.tray-toggle-label {
+  position: absolute;
+  clip-path: inset(50%);
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+/* .panel-head is justify-content:space-between, which with three children
+ * (heading, existing action, gear) strands the action in the middle of
+ * the row. The heading takes the slack instead, so the controls stay
+ * together on the trailing edge whether there are one or two of them.
+ *
+ * Solved with an auto margin rather than by flipping justify-content,
+ * because the flip has to out-specify `.jobs-page .job-card .panel-head`
+ * (0,3,0) — a two-class `:has()` selector loses to it, silently, and the
+ * gear goes on wrapping. An auto margin competes only with
+ * `.panel-head h2` (0,1,1), which nothing needs to beat.
+ *
+ * Descendant :has(), not child: the gear is appended INTO .panel-actions
+ * when the head has one (see attachFeatureTray), so it is not always a
+ * direct child. */
+.panel-head:has(.tray-toggle) > :first-child { margin-right: auto; }
+
+/* The page-level heading row: title (with its lede below) on the left,
+ * the gear on the right. A wrapper rather than a rule on h1 because the
+ * lede is a sibling that must stay under the title, not beside the gear. */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.page-head > .tray-toggle { margin-top: 4px; }
+
+.feature-tray {
+  /* A containment context so the rows can respond to the TRAY's width,
+   * not the viewport's. A job card in the two-up grid is ~320px wide on a
+   * 1400px screen, so a viewport media query would never fire for the one
+   * case that needs it. */
+  container-type: inline-size;
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  /* The accent edge is what separates configuration from content at a
+   * glance — without it the tray reads as another panel of readings. */
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.page-head + .feature-tray { margin-top: var(--space-3); }
+
+.tray-head { margin-bottom: var(--space-3); }
+.tray-title {
+  margin: 0;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.tray-blurb {
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--fg-muted);
+  max-width: 62ch;
+}
+
+.tray-rows { display: grid; gap: var(--space-3); }
+.tray-row { display: grid; gap: 2px; }
+
+/* Compact metrics over the borrowed label.checkbox: a tray is denser
+ * than a settings pane, and the inherited 16px bottom margin would
+ * double every gap in the grid above. */
+label.checkbox.tray-switch {
+  margin-bottom: 0;
+  font-size: var(--text-base);
+  gap: var(--space-2);
+}
+.tray-switch .tray-label { flex: 1 1 auto; }
+
+.tray-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-base);
+  color: var(--fg);
+}
+.tray-field .tray-field-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.tray-field .tray-label { flex: 0 1 auto; }
+.tray-field input[type=number] {
+  /* Overrides the global width:100% on number inputs, which would push
+   * the label onto its own line for a field holding four digits. */
+  width: 7.5rem;
+  margin-top: 0;
+  padding: 6px 10px;
+  flex: 0 0 auto;
+}
+.tray-field select {
+  padding: 6px 10px;
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-width: 60%;
+}
+.tray-field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tray-unit { color: var(--fg-muted); font-size: var(--text-sm); }
+
+.tray-hint,
+.tray-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--fg-muted);
+  max-width: 62ch;
+}
+/* A hint belongs to the control above it, so it indents past the switch
+ * track to sit under the label rather than under the toggle. */
+.tray-switch + .tray-hint { padding-left: calc(38px + var(--space-2)); }
+
+/* Narrow tray (a job card in the two-up grid): the label and its control
+ * stack instead of sharing a line, which at ~320px squeezed "Full scan
+ * every" into three wrapped lines beside a 7.5rem number field. */
+@container (max-width: 360px) {
+  .tray-field { flex-wrap: wrap; }
+  /* Only the LABEL takes a full line. The control keeps its unit and its
+   * restart badge on the same row — pushing it to 100% width dropped
+   * "seconds" and the badge onto a third line, which read as three
+   * unrelated fragments rather than one field. */
+  /* The label and its restart badge take the first line as one unit; the
+   * control and its unit take the second. Grouped in the markup rather
+   * than reordered with `order`, which reorders the paint but not the
+   * tab or reading order — a control that reads in a different sequence
+   * to the one it paints in is worse than a wrapped line. */
+  .tray-field .tray-field-head { flex: 1 0 100%; }
+  .tray-field input[type=number] { width: auto; flex: 1 1 6rem; }
+  .tray-field select { flex: 1 1 8rem; max-width: none; }
+}
+
+.tray-status {
+  margin: var(--space-3) 0 0;
+  min-height: 1.2em;
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.tray-status[data-tone="ok"] { color: var(--ok); }
+.tray-status[data-tone="warn"] { color: var(--warn); }
+.tray-status[data-tone="err"] { color: var(--danger); }
+
+.tray-foot { margin: var(--space-2) 0 0; font-size: var(--text-sm); }
+
+@media (max-width: 640px) {
+  /* Touch floor, matching the rest of the phone block. */
+  .tray-toggle { width: 44px; height: 44px; flex-basis: 44px; }
+  .tray-field { flex-wrap: wrap; }
+  .tray-field select, .tray-field input[type=number] { max-width: none; width: 100%; }
+  /* The indent only makes sense while the label sits beside the switch;
+   * at this width the hint is better off flush with everything else. */
+  .tray-switch + .tray-hint { padding-left: 0; }
 }
