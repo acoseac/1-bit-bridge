@@ -152,3 +152,55 @@ func cssClasses(t *testing.T, path string) map[string]bool {
 	}
 	return set
 }
+
+// TestPlayerCSSDoesNotHijackOperatorTableClasses pins the OTHER direction
+// of the two-stylesheet arrangement.
+//
+// player.css loads after app.css, so a bare `.x` rule there outranks
+// app.css's `table.x` — and app.css deliberately leaves `display` off its
+// tables at desktop width, relying on the browser default. `.rows` was
+// exactly this: the player's list container and the operator console's
+// table share the name, so every table in the console was laid out as a
+// flex column, and `content-visibility: auto` (fine on a div, ruinous on
+// a table with no contain-intrinsic-size) collapsed it to blank space.
+// Fifty rows of listening history rendered as nothing at all.
+//
+// It survived review because both files read correctly on their own; it
+// took loading the page to see. This is the assertion that would have
+// caught it without that.
+func TestPlayerCSSDoesNotHijackOperatorTableClasses(t *testing.T) {
+	app, err := os.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	player, err := os.ReadFile("static/player.css")
+	if err != nil {
+		t.Fatalf("read player.css: %v", err)
+	}
+	appBody := cssCommentRe.ReplaceAllString(string(app), " ")
+	playerBody := cssCommentRe.ReplaceAllString(string(player), " ")
+
+	// Classes app.css styles specifically as an ELEMENT.class — those are
+	// the ones a bare class rule in the later file can silently take over.
+	qualified := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\b([a-z]+)\.([A-Za-z][\w-]*)`).
+		FindAllStringSubmatch(appBody, -1) {
+		qualified[m[2]] = true
+	}
+	if len(qualified) < 3 {
+		t.Fatalf("only %d element-qualified classes scraped from app.css — "+
+			"the regex has stopped matching", len(qualified))
+	}
+
+	// A bare `.x` at the start of a selector in player.css: no element,
+	// no ancestor, nothing to stop it matching an operator table.
+	bare := regexp.MustCompile(`(?m)^\s*\.([A-Za-z][\w-]*)\s*(?:,|\{)`)
+	for _, m := range bare.FindAllStringSubmatch(playerBody, -1) {
+		if qualified[m[1]] {
+			t.Errorf("player.css has a bare `.%s` rule while app.css styles "+
+				"`<element>.%s` — player.css loads second, so it wins on the "+
+				"operator console's element and silently restyles it. Qualify "+
+				"it (`.%s:not(table)`) or rename.", m[1], m[1], m[1])
+		}
+	}
+}

@@ -46,6 +46,15 @@ type playerFavoritesResponse struct {
 	UnresolvedAlbums int    `json:"unresolvedAlbums,omitempty"`
 	UnresolvedTracks int    `json:"unresolvedTracks,omitempty"`
 	SnapshotAt       string `json:"snapshotAt"`
+
+	// Provenance: which device last pushed the document and when the
+	// bridge received it. Came off the operator page when favorites
+	// consolidated here — it is the one thing that view said which this
+	// one could not, and "hearts from a device that stopped syncing
+	// three months ago" is only visible if the date is.
+	DeviceName        string `json:"deviceName,omitempty"`
+	DeviceTokenPrefix string `json:"deviceTokenPrefix,omitempty"`
+	UpdatedAt         string `json:"updatedAt,omitempty"`
 }
 
 // apiPlayerFavorites handles GET /api/player/favorites.
@@ -74,6 +83,9 @@ func (s *Server) apiPlayerFavorites(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
+	resp.DeviceTokenPrefix = redactDeviceToken(meta.DeviceToken)
+	resp.DeviceName = s.deviceNamesByToken(r)[meta.DeviceToken]
+	resp.UpdatedAt = nsToRFC3339(meta.UpdatedAt)
 
 	for _, fa := range favAlbums {
 		album, found := cat.AlbumByID(favoriteAlbumID(fa.AlbumArtist, fa.Album, fa.Year))

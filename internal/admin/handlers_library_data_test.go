@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,17 +105,45 @@ func TestAPIFavorites(t *testing.T) {
 	}
 }
 
-func TestDataPageRenders(t *testing.T) {
+func TestHistoryPageRenders(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/history", nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	rw := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rw, req)
+	if rw.Code != 200 {
+		t.Fatalf("GET /history: %d", rw.Code)
+	}
+	body := rw.Body.String()
+	if !strings.Contains(body, "Listening history") {
+		t.Errorf("history page missing expected content")
+	}
+	// The page carried playlists and favorites until they consolidated
+	// into the player's own views. Pin the ABSENCE too: a duplicate
+	// surface that quietly comes back is exactly what this move fixed,
+	// and it would come back as markup, not as a failing assertion
+	// anywhere else.
+	for _, gone := range []string{"playlists-body", "favorites-tracks-body", "playlist-detail-panel"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("history page still renders %q — playlists and favorites live in the player now", gone)
+		}
+	}
+}
+
+// TestRetiredDataPageRedirects pins the old URL. It was linked from the
+// sidebar for the console's whole life and is certainly bookmarked; a
+// 404 would read as a broken console rather than as a moved page.
+func TestRetiredDataPageRedirects(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/data", nil)
 	req.RemoteAddr = "127.0.0.1:5000"
 	rw := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rw, req)
-	if rw.Code != 200 {
-		t.Fatalf("GET /data: %d", rw.Code)
+	if rw.Code != http.StatusMovedPermanently {
+		t.Fatalf("GET /data: status %d; want 301", rw.Code)
 	}
-	if !strings.Contains(rw.Body.String(), "Playlists") {
-		t.Errorf("data page missing expected content")
+	if got := rw.Header().Get("Location"); got != "/history" {
+		t.Errorf("GET /data: Location = %q; want /history", got)
 	}
 }
 
@@ -266,6 +295,57 @@ func TestHistoryEventsAndExport(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "started_at,path,codec") {
 		t.Errorf("history csv missing header")
+	}
+}
+
+// TestHistoryExportsNameBothDevices pins that the two export buttons
+// sitting next to each other produce the same columns.
+//
+// The console gained a "Device" column showing the SOURCE device, so
+// `sourceDevice` joined the JSON DTO — and CSV, which writes its own
+// row, kept only `device_name`, the OUTPUT DAC. Two exports of the same
+// table disagreeing about which devices it names is the shape of bug
+// that only shows up in a spreadsheet a week later.
+//
+// device_name stays where it was: a CSV column ORDER is a contract with
+// whatever already reads these files, so the new column is appended.
+func TestHistoryExportsNameBothDevices(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedDataFixture(t, srv)
+	h := srv.Handler()
+
+	rec := doExport(t, h, "/api/history/export?format=csv")
+	if rec.Code != 200 {
+		t.Fatalf("csv export: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	header, _, _ := strings.Cut(body, "\n")
+	cols := strings.Split(strings.TrimRight(header, "\r"), ",")
+	if len(cols) == 0 || cols[len(cols)-1] != "source_device" {
+		t.Errorf("csv header = %q; want source_device APPENDED as the last column", header)
+	}
+	if !strings.Contains(header, "device_name") {
+		t.Errorf("csv header lost device_name (the output DAC): %q", header)
+	}
+	if !strings.Contains(body, "Test iPhone") {
+		t.Errorf("csv names no source device, but the fixture registered one:\n%s", body)
+	}
+
+	// And the JSON export, from the same button row, carries it too.
+	rec = doExport(t, h, "/api/history/export?format=json")
+	if rec.Code != 200 {
+		t.Fatalf("json export: %d", rec.Code)
+	}
+	var out struct {
+		Events []struct {
+			SourceDevice string `json:"sourceDevice"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode json export: %v", err)
+	}
+	if len(out.Events) == 0 || out.Events[0].SourceDevice != "Test iPhone" {
+		t.Errorf("json export sourceDevice = %+v, want the registered device name", out.Events)
 	}
 }
 

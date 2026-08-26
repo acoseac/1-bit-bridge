@@ -5,22 +5,28 @@ import (
 	"testing"
 )
 
-// TestPlaylistTableUsesDeviceNames pins that the Listening table renders
-// the device NAME rather than the redacted token prefix.
+// TestConsoleSurfacesDeviceNames pins that the console names devices
+// rather than showing a redacted token prefix.
 //
-// /api/devices has always carried deviceName; the table rendered
-// deviceTokenPrefix beside it, so the console showed an opaque hex string
-// (a3f91c2e…) for a device whose name the bridge already knew, and
-// PROTOCOL.md:664 promises the named surface.
-func TestPlaylistTableUsesDeviceNames(t *testing.T) {
+// /api/devices has always carried deviceName; the retired playlists table
+// rendered deviceTokenPrefix beside it, so the console showed an opaque
+// hex string (a3f91c2e…) for a device whose name the bridge already knew,
+// and PROTOCOL.md:664 promises the named surface.
+//
+// That table is gone — playlists live in the player now, and their
+// "backed up by" line is resolved SERVER-side (deviceNamesByToken in
+// handlers_player_collections.go, pinned by its own test). What still
+// resolves names in app.js is the history page's per-device filter, so
+// that is what this now guards.
+func TestConsoleSurfacesDeviceNames(t *testing.T) {
 	b, err := staticFS.ReadFile("static/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	js := string(b)
-	for _, want := range []string{"loadDeviceNames", "renderDeviceCell"} {
+	for _, want := range []string{"loadDeviceNames", "loadHistoryDeviceFilter"} {
 		if !strings.Contains(js, want) {
-			t.Errorf("app.js no longer defines %s; the playlists table would fall back to the raw prefix", want)
+			t.Errorf("app.js no longer defines %s; the history device filter would list raw prefixes (or nothing)", want)
 		}
 	}
 	// The lookup must be fed from /api/devices, not invented locally.

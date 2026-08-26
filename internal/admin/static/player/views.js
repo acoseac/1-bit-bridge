@@ -2,9 +2,10 @@
 // container it is handed; each is responsible for its own loading and
 // error states.
 
-import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL, isAborted } from "./api.js";
+import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL,
+         playlistExportURL, isAborted } from "./api.js";
 import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason,
-         bytes, variantKindLabel, variantSkipLabel } from "./format.js";
+         bytes, variantKindLabel, variantSkipLabel, timeAgo } from "./format.js";
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs } from "./ui.js";
 import * as audio from "./audio.js";
 import { variantPanel, onVariantChange } from "./variants.js";
@@ -781,6 +782,12 @@ export async function renderFavorites(view, { gen, setToolbar }) {
   const tracks = r.tracks || [];
   const lostAlbums = r.unresolvedAlbums || 0;
   const lostTracks = r.unresolvedTracks || 0;
+  // BEFORE the empty-state branch below, not after the tabs. A stored
+  // document whose every entry is foreign or deleted returns early, and
+  // that is exactly the state where "backed up by X, 3 months ago" does
+  // the most work — it is what tells the reader the hearts are real and
+  // simply belong somewhere else. (CodeRabbit on PR #763.)
+  appendIf(view, collectionProvenance(r));
 
   // Nothing hearted at all is a different state from nothing that
   // RESOLVES here: the first is a setup hint, the second means the
@@ -797,6 +804,10 @@ export async function renderFavorites(view, { gen, setToolbar }) {
   }
 
   const grid = el("div", { class: "grid" });
+  // The provenance line is already in place above (and above the tabs,
+  // not inside one: it describes the whole stored document, and
+  // repeating it on both tabs would say the same thing twice while
+  // implying the two halves were pushed separately).
   appendIf(view, detailTabs("favorites", [
     {
       id: "albums", label: `Albums (${albums.length})`,
@@ -870,7 +881,12 @@ export async function renderPlaylists(view, ctx) {
   await renderPagedList(view, ctx, {
     fetchPage: () => api.playlists(),
     pick: (r) => r.collections || [],
-    make: (c) => collectionTile(c, `/playlist/${c.id}`, "playlist"),
+    // Subtitle computed here rather than server-side: it is one line of
+    // presentation over two fields the response already carries, and
+    // baking it into the DTO would make the same string the mix grid's
+    // real subtitle (a family's description) shares a field with.
+    make: (c) => collectionTile({ ...c, subtitle: playlistSubtitle(c) },
+      `/playlist/${c.id}`, "playlist"),
     containerClass: "grid",
     countNoun: "playlist",
     emptyTitle: "No playlists backed up",
@@ -880,17 +896,22 @@ export async function renderPlaylists(view, ctx) {
 
 export async function renderMixes(view, ctx) {
   const { setToolbar, mixesEnabled } = ctx;
-  setToolbar(null);
   if (!mixesEnabled) {
+    // The gear is the POINT of this state: the empty state used to name
+    // a page in Settings and leave the reader to walk there, which is
+    // the trip this whole tray exists to remove. The switch is restart-
+    // required, so it says so after the save rather than pretending the
+    // grid will fill in.
+    setToolbar(mixesToolbar(null));
     clear(view);
     view.appendChild(emptyState("Smart mixes are off",
-      "Enable them in Settings → Audio; they are generated from your listening history."));
+      "Turn them on with the gear above — they are generated from your listening history."));
     return;
   }
   // "Regenerate all" came from the retired /smartmixes page. It belongs
   // on the grid rather than on a mix: it runs the whole engine, and
   // every family's contents change at once.
-  setToolbar(regenerateAllButton());
+  setToolbar(mixesToolbar(regenerateAllButton()));
   await renderPagedList(view, ctx, {
     fetchPage: () => api.mixes(),
     pick: (r) => r.collections || [],
@@ -900,6 +921,44 @@ export async function renderMixes(view, ctx) {
     emptyTitle: "No mixes generated yet",
     emptyDetail: "Mixes are rebuilt periodically once there is listening history to work from.",
   });
+}
+
+/**
+ * The mixes grid's toolbar: whatever controls the state has, plus the
+ * feature gear.
+ *
+ * window.BridgeFeatureTray, not an import: the tray lives in app.js,
+ * which is a deferred classic script — the same one-way window handshake
+ * boot.js uses in the other direction for window.__player. Guarded,
+ * because a missing app.js must cost the gear and not the grid.
+ *
+ * The tray is returned INSIDE the toolbar node rather than placed as a
+ * sibling, because setToolbar clears only #player-toolbar: a sibling
+ * would survive every route change and stack a copy per visit.
+ */
+function mixesToolbar(controls) {
+  const bar = controls || el("div", { class: "toolbar" });
+  const built = window.BridgeFeatureTray?.build({
+    title: "Smart mixes",
+    blurb: "Auto-generated playlists — Heavy Rotation, Forgotten Favorites, " +
+      "Auto Mix — rebuilt daily from what your devices have played.",
+    rows: [
+      {
+        field: "smartPlaylistsEnabled", type: "switch", restart: true,
+        label: "Generate smart mixes",
+      },
+      {
+        field: "analysisEnabled", type: "switch", restart: true,
+        label: "Audio analysis",
+        hint: "Only the harmonic Auto Mix needs it. The history-based families " +
+          "generate without it.",
+      },
+    ],
+    link: { href: "/settings?tab=audio", text: "All audio settings →" },
+  });
+  if (!built) return bar;
+  bar.appendChild(built.button);
+  return el("div", { class: "toolbar-stack" }, bar, built.tray);
 }
 
 /**
@@ -931,6 +990,75 @@ function regenerateAllButton() {
     }
   });
   return el("div", { class: "toolbar" }, btn, status);
+}
+
+/**
+ * "12 tracks · 3d ago" for a playlist tile.
+ *
+ * The date is the bridge's RECEIPT time, not the client's own
+ * last-modified stamp: the question a backup listing answers is "is
+ * this device still syncing", and the answer has to be in the
+ * bridge's own clock to be trustworthy.
+ */
+function playlistSubtitle(c) {
+  return [plural(c.count ?? 0, "track"), timeAgo(c.updatedAt)].filter(Boolean).join(" · ");
+}
+
+/**
+ * "Backed up by Arsenie's iPhone · 3d ago", or null.
+ *
+ * Null for a smart mix, which has no provenance to report — it is
+ * generated here — so the shared detail renderer needs no flag: the
+ * fields are simply absent and omitempty never put them on the wire.
+ *
+ * The token prefix rides the title attribute rather than the text. Two
+ * devices can share a name ("iPhone") and the prefix is what the CLI
+ * and every other console surface key on, so it has to stay
+ * recoverable — but it is a hex string, and putting it in the line
+ * would make the line about the identifier instead of the device.
+ */
+function collectionProvenance(c) {
+  const when = timeAgo(c.updatedAt);
+  if (!c.deviceName && !c.deviceTokenPrefix && !when) return null;
+  const who = c.deviceName || c.deviceTokenPrefix;
+  const text = who
+    ? `Backed up by ${who}${when ? ` · ${when}` : ""}`
+    : `Backed up ${when}`;
+  const node = el("p", { class: "detail-provenance muted small", text });
+  if (c.deviceTokenPrefix) node.title = c.deviceTokenPrefix;
+  return node;
+}
+
+/**
+ * The members that could not be turned into playable rows: a count, and
+ * — when the server named them — the list behind a disclosure.
+ *
+ * Said out loud rather than hidden, because the count above includes
+ * them and a silent discrepancy reads as a bug. Collapsed by default
+ * because on a healthy playlist there is nothing here, and on an
+ * unhealthy one the reader wants the number first and the names second.
+ */
+function unresolvedBlock(d) {
+  const n = d.unresolved || 0;
+  if (n <= 0) return null;
+  const note = el("summary", { class: "muted small",
+    text: `${plural(n, "track")} not in this library — from another bridge, or removed since.` });
+  const items = d.unresolvedItems || [];
+  if (!items.length) return el("p", { class: "muted small", text: note.textContent });
+
+  const list = el("ol", { class: "unresolved-list" });
+  for (const it of items) {
+    list.appendChild(el("li", {},
+      el("span", { class: "unresolved-pos", text: String((it.position ?? 0) + 1) }),
+      el("span", { class: "unresolved-title", text: it.title || it.origin || "Unknown track" }),
+      it.artist ? el("span", { class: "unresolved-artist", text: it.artist }) : null,
+      chip(it.foreign ? "another source" : "missing", "chip-quiet")));
+  }
+  if (items.length < n) {
+    list.appendChild(el("li", { class: "muted small",
+      text: `…and ${n - items.length} more.` }));
+  }
+  return el("details", { class: "unresolved" }, note, list);
 }
 
 /**
@@ -1032,14 +1160,8 @@ async function renderCollectionDetail(view, ctx, opts) {
   const head = el("div", { class: "detail-head" },
     c.subtitle ? el("p", { class: "detail-artist", text: c.subtitle }) : null,
     el("p", { class: "detail-stats muted small", text: stats }),
-    // Members that could not be turned into playable rows: another
-    // bridge's tracks, or tracks removed since the backup. Said out
-    // loud, because the count above includes them and a silent
-    // discrepancy reads as a bug.
-    d.unresolved > 0
-      ? el("p", { class: "muted small",
-          text: `${plural(d.unresolved, "track")} not in this library — from another bridge, or removed since.` })
-      : null,
+    collectionProvenance(c),
+    unresolvedBlock(d),
     collectionActions(tracks, art));
 
   if (opts.actions) head.appendChild(opts.actions(c, view, ctx));
@@ -1143,11 +1265,31 @@ function mixActions(c, view, ctx) {
   return el("div", {}, box, status);
 }
 
-/** The playlist detail's secondary row: a cover control and nothing else. */
+/**
+ * The playlist detail's secondary row: export, then a cover control.
+ *
+ * Export is the one thing the retired operator table did that had no
+ * equivalent here, and it is the reason a backup listing exists at all
+ * — a playlist you cannot get out of the bridge is not backed up in any
+ * useful sense. Three formats, unchanged from that page: JSON (the
+ * document verbatim), CSV (a spreadsheet), M3U8 (openable by a player
+ * on the bridge host).
+ *
+ * location assignment, not fetch: the response carries
+ * Content-Disposition, so it has to reach the browser's own download
+ * path rather than a JS reader.
+ */
 function playlistActions(c) {
   const status = el("p", { class: "muted small", attrs: { role: "status" } });
-  const box = el("div", { class: "detail-actions detail-actions-secondary" },
-    coverControl("playlist", c, status));
+  const box = el("div", { class: "detail-actions detail-actions-secondary" });
+  box.appendChild(el("span", { class: "export-label muted small", text: "Export" }));
+  for (const fmt of ["json", "csv", "m3u8"]) {
+    box.appendChild(el("button", {
+      class: "btn btn-quiet", text: fmt.toUpperCase(),
+      on: { click: () => { location.href = playlistExportURL(c.id, fmt); } },
+    }));
+  }
+  box.appendChild(coverControl("playlist", c, status));
   return el("div", {}, box, status);
 }
 

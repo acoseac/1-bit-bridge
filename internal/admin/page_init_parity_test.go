@@ -120,7 +120,8 @@ func TestSidebarPlayerNavHighlight(t *testing.T) {
 		{"/", "Browse"},
 		{"/albums", "Browse"},
 		{"/artists", "Browse"},
-		{"/playlists", "Browse"},
+		{"/playlists", "Playlists"},
+		{"/playlist/abc", "Playlists"},
 		{"/mixes", "Smart mixes"},
 		{"/mix/heavy-rotation", "Smart mixes"},
 	} {
@@ -209,6 +210,8 @@ func TestPartialResponseCarriesPlayerNav(t *testing.T) {
 	for _, tc := range []struct{ path, want string }{
 		{"/mixes", "mixes"},
 		{"/mix/heavy-rotation", "mixes"},
+		{"/playlists", "playlists"},
+		{"/playlist/abc", "playlists"},
 		{"/albums", ""},
 		{"/", ""},
 		{"/jobs", ""},

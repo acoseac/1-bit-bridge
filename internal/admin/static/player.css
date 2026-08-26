@@ -123,6 +123,14 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .player-empty h2 { margin: 0 0 var(--space-2); font-size: 1.1rem; }
 
 .toolbar { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-4); }
+/* A toolbar with a feature tray under it. The tray has to live INSIDE
+ * the node setToolbar is handed — that node is what gets cleared on the
+ * next route — so the two stack in a wrapper rather than as siblings.
+ * The toolbar keeps its own bottom margin; the wrapper adds none. */
+.toolbar-stack { display: block; }
+.toolbar-stack > .toolbar { margin-bottom: var(--space-2); }
+/* The gear sits at the trailing edge of the row, away from the actions. */
+.toolbar-stack > .toolbar > .tray-toggle { margin-left: auto; }
 .toolbar-select {
   padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--bg-panel); color: var(--fg); font: inherit; font-size: 0.85rem;
@@ -241,7 +249,23 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 
 /* ---- Rows (artists, genres, composers, folders, search) ---- */
 
-.rows { display: flex; flex-direction: column; content-visibility: auto; }
+/* :not(table) is load-bearing, not tidiness. app.css styles the operator
+ * console's tables as `table.rows` and sets no `display` on them at
+ * desktop width, relying on the browser default — and this stylesheet
+ * loads AFTER it, so a BARE `.rows` here won.
+ *
+ * Every operator table in the console was therefore laid out as a flex
+ * column, and `content-visibility: auto` on a table with no
+ * contain-intrinsic-size collapsed it: 50 rows of listening history
+ * rendered as blank space under the heading. Present since the player
+ * shipped, and invisible in review because both stylesheets read
+ * correctly on their own.
+ *
+ * Excluded by ELEMENT rather than renamed to `div.rows` so a future
+ * player list built as a ul or an ol still gets the rule.
+ * TestPlayerCSSDoesNotHijackOperatorTableClasses is what notices the
+ * next collision of this shape. */
+.rows:not(table) { display: flex; flex-direction: column; content-visibility: auto; }
 .row {
   display: flex; justify-content: space-between; gap: var(--space-4); align-items: baseline;
   padding: 10px 12px; border-bottom: 1px solid var(--border);
@@ -456,6 +480,72 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 }
 .chip-quality { background: var(--accent-soft); color: var(--accent); }
 .chip-warn { background: var(--accent-warm-tint); color: var(--accent-warm); }
+/* The quietest chip: a label that classifies without claiming attention.
+ * Used on the unresolved list, where every row already IS the exception
+ * and a coloured badge per line would make the block shout. */
+.chip-quiet { background: transparent; border: 1px solid var(--border); color: var(--fg-muted); }
+
+/* ---- Collection provenance + unresolved members ------------------------
+ *
+ * Both moved here when playlists and favorites consolidated out of the
+ * operator page. Deliberately quiet: they are facts ABOUT the list, and
+ * the list is what the reader came for.
+ */
+.detail-provenance { margin-top: var(--space-1); }
+
+.unresolved { margin-top: var(--space-2); }
+.unresolved > summary {
+  cursor: pointer;
+  /* The marker is the only affordance saying this expands, so it stays —
+   * list-style:none here would leave a paragraph that silently opens. */
+  padding: 2px 0;
+}
+.unresolved > summary::marker { color: var(--fg-muted); }
+.unresolved-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  /* Bounded: a backup whose whole library lives on another bridge names
+   * up to 200 members, and an unbounded block would bury the actions
+   * below it under a page of grey rows. */
+  max-height: 260px;
+  overflow-y: auto;
+}
+.unresolved-list li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  padding: 3px 0;
+}
+.unresolved-pos { min-width: 2.2em; text-align: right; opacity: 0.7; font-variant-numeric: tabular-nums; }
+.unresolved-title { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.unresolved-artist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Pushes the chip to the trailing edge without a second grid column,
+ * which would have to agree with a row that has no artist. */
+.unresolved-list li > .chip { margin-left: auto; }
+
+/* The "Export" word ahead of the three format buttons. An inline label,
+ * not a legend: the row is a flex line of buttons, and a fieldset here
+ * would add a border and a box the rest of the actions do not have. */
+/* The blocked-variants note and its gear on one line, the note taking
+ * the slack so the gear sits at the trailing edge. */
+.variants-blocked-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.variants-blocked-row > .variants-blocked { flex: 1 1 auto; margin: 0; }
+
+.export-label {
+  align-self: center;
+  text-transform: uppercase;
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
+}
 
 /* app.css defines `.btn.primary`; the player markup has always asked for
  * `.btn-primary` and `.btn-quiet`, neither of which existed — so the

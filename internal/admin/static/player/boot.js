@@ -126,7 +126,12 @@ function renderSections() {
   if (!nav) return;
   clear(nav);
   for (const [key, label, href] of SECTIONS) {
-    if (key === "mixes" && !seed.mixesEnabled) continue;
+    // Smart Mixes stays listed even when the feature is off. It used to
+    // be skipped, which was coherent while the off-state said "enable
+    // this in Settings" — there was nothing to go there for. The page is
+    // now where the switch IS, so hiding it left a reader with no way to
+    // discover the feature from inside the player at all, while the
+    // shell sidebar went on listing it two inches away.
     nav.appendChild(el("a", {
       class: "player-section", text: label,
       attrs: { href, "data-route": "", "data-section": key },
@@ -371,7 +376,11 @@ function route() {
 function updateSidebarNav(section) {
   const nav = document.getElementById("primary-nav");
   if (!nav) return;
-  const owner = section === "mix" ? "mixes" : section;
+  // A detail route belongs to its grid's entry: /mix/x is Smart mixes and
+  // /playlist/x is Playlists, not Browse. Kept in step with the server's
+  // playerNavEntry by TestPlayerNavEntriesMatchTheLayout.
+  const detailOwner = { mix: "mixes", playlist: "playlists" };
+  const owner = detailOwner[section] || section;
   // Compared as a value, not interpolated into a selector. `section` is a
   // path segment straight off location.pathname, so a URL carrying a quote
   // or a bracket would build a malformed selector and querySelector throws

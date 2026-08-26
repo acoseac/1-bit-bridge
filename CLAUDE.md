@@ -2076,6 +2076,136 @@ run on one platform.
   reinstated inside the `@supports` block where the constant count is the whole
   mechanism.
 
+### Playlists consolidate into Browse; per-page feature trays (2026-08-26)
+
+Admin-console only — no `/v1` shape change, no `ProtocolVersion` bump, no
+`PROTOCOL.md` change, no iOS mirror, no migration. Two halves: the console
+stopped showing playlists (and favorites) in two places, and every togglable
+feature grew a switch on the page that reports on it.
+
+- **`/data` is retired; `/history` is the page, and it carries telemetry
+  ONLY.** Playlists and favorites duplicated the player's own views, so they
+  moved to Browse and the page kept its name honest. 301 from `/data`
+  (bookmarked for the console's whole life; the Inspector / Smart Mixes
+  precedent). The tab key, the template and the `.page` class all moved to
+  `history` together — `handlers_partial_test.go`'s per-page content marker
+  and `TestEveryPageTabHasAnInitCase` both key on that name, so a half-rename
+  fails loudly.
+- **A consolidation must carry the facts the retired surface had, or it is a
+  loss dressed as a tidy-up.** Three things moved with the playlists rather
+  than being dropped: **provenance** (`deviceName` / `deviceTokenPrefix` /
+  `updatedAt` on `playerCollectionDTO`, resolved server-side by
+  `deviceNamesByToken` — a backup listing whose whole point is "is this device
+  still syncing" needs the date); **`unresolvedItems`**, which NAMES the
+  members that could not be hydrated and says which are another bridge's and
+  which are simply gone (the count alone was all the player had); and
+  **export** (JSON / CSV / M3U8), which reuses `/api/playlists/export`
+  unchanged rather than growing a second set of writers — the M3U8 one
+  newline-flattens every device-supplied field against playlist-line
+  injection, and a twin would be a second place to get that wrong. Favorites
+  got the provenance line; its unresolved entries stay a count, deliberately
+  (a heart that lives on another bridge is not a document you repair).
+  A smart mix carries none of it — it is generated here, so the fields are
+  absent and `omitempty` drops them; pinned by
+  `TestPlayerMixesCarryNoProvenance`.
+- **`device` on `/api/playlists/{detail,export}` is OPTIONAL, not unchecked.**
+  It was only ever a consistency check on a fact the caller already had — the
+  read has been id-scoped since playlists stopped being device-scoped in v1.7
+  — and the player's playlist page has no prefix to send. Blank skips the
+  check; a supplied-but-wrong prefix still 404s, which is what keeps the guard
+  meaningful for the callers that do pass it.
+- **`unresolvedPlaylistItems` SUBTRACTS the hydrated paths rather than
+  re-deriving the drop rule.** `hydrateTracks` skips a path for reasons this
+  function has no business knowing (deleted since the snapshot, newly
+  duplicate-suppressed), and a second copy of that judgement would disagree
+  with the count beside it the first time either changed. The COUNT is exact;
+  only the list is capped (`maxUnresolvedListed`).
+
+**Per-page feature trays** — a gear beside a heading that opens that feature's
+switches in place. The Duplicates page has had its serving policy inline since
+it shipped; everything else had its status on one page (Jobs, Smart mixes,
+History, an album's Variants tab) and its switch on another.
+
+- **No new endpoint, deliberately.** `PATCH /api/settings` is already a partial
+  update with pointer fields, so a tray sends only the field it owns and the
+  server's own hot-apply / restart rules answer for it. A tray must never be
+  able to mean something different from the same control on the Settings page.
+- **`TestEveryFeatureTrayFieldExistsOnBothSettingsStructs` is the load-bearing
+  test.** A row names its settings field as a STRING, and `encoding/json`
+  DROPS an unknown field — so a typo saves nothing, the handler answers 200,
+  and the tray reports "Saved." while the operator watches a switch move. It
+  walks every `.js` under `static/` rather than a hand-listed set, because a
+  tray added to a fourth file would otherwise be silently unchecked — the same
+  forgot-the-list failure the test is about.
+  `TestFeatureTrayRestartBadgesAgreeWithSettings` pins the badges against the
+  Settings page field-by-field (the badge is a PREDICTION; the authoritative
+  answer is `restartRequired` on the response, which the tray reports either
+  way — so two surfaces predicting differently is the failure worth catching).
+  `autoOptimizeEnabled` is the field it catches: it hot-applies and carries no
+  badge on either surface.
+- **Trays are INLINE disclosures, not anchored popovers.** A popover needs
+  viewport clamping, a z-index in the ledger, outside-click dismissal and its
+  own phone layout; a panel that expands under its heading needs none of those
+  and cannot be clipped by the card it lives in.
+- **The gear goes into the head's `.panel-actions` when there is one.**
+  `.panel-head` wraps and a job card in the two-up grid is ~320px: a gear
+  added as a third child of the head dropped to a line of its own at the LEFT
+  edge, below the heading and nowhere near the controls it belongs with.
+- **The heading takes the slack with an auto margin, NOT a `justify-content`
+  flip.** `.jobs-page .job-card .panel-head` is (0,3,0) and beats a two-class
+  `:has()` selector silently. An auto margin competes only with
+  `.panel-head h2` (0,1,1).
+- **`@container`, not `@media`.** A job card is ~320px wide on a 1400px
+  screen, so a viewport query never fires for the one case that needs it.
+- **The snapshot is warmed at MOUNT, not at first open.** Controls start
+  disabled and unchecked, so an open that waits on the fetch shows every
+  switch briefly OFF — telling the reader the wrong thing about their own
+  configuration. One request per page; all trays share the promise (the Jobs
+  page mounts nine).
+- **`window.BridgeFeatureTray`** is how the player module reaches it: app.js is
+  a deferred classic script and the player is an ES module, the same one-way
+  window handshake `window.__player` uses in the other direction. Guarded at
+  every call site — a missing app.js must cost the gear, not the view.
+- **History gets a tray with NO server-side switch, and that is the honest
+  answer.** Playlists / favorites / history are deliberately ungated
+  bridge-side (2026-08-14 feature review, P2-38); the tray says so and points
+  at the per-device toggle in the app, rather than inventing a gate that would
+  shadow the iOS one. The Duplicates page keeps its inline fieldset — a gear
+  there would be two controls for one field on one page.
+- **Smart Mixes now stays in the player's section rail when the feature is
+  off.** Skipping it was coherent while the off-state said "enable this in
+  Settings"; the page is where the switch IS now, so hiding it left no way to
+  discover the feature from inside the player while the shell sidebar listed
+  it two inches away.
+
+**Two pre-existing bugs surfaced by loading the page, not by review:**
+
+- **`player.css`'s bare `.rows { display: flex; content-visibility: auto }`
+  had been hijacking every operator TABLE since the player shipped.** app.css
+  styles them as `table.rows` and sets no `display` at desktop width, relying
+  on the browser default; player.css loads second and won. `content-visibility`
+  on a table with no `contain-intrinsic-size` then collapsed it — 50 rows of
+  listening history rendered as blank space under the heading. Now
+  `.rows:not(table)` (excluded by ELEMENT, so a future player list built as a
+  `ul` still gets the rule), pinned by
+  `TestPlayerCSSDoesNotHijackOperatorTableClasses`, which flags any bare class
+  rule in player.css that app.css qualifies with an element.
+- **`historyEventDTO.DeviceName` is the OUTPUT hardware (the DAC), not the
+  phone.** The two differ by one word and mean completely different things,
+  and the new "Device" column was wired to it on the reasonable-looking
+  assumption that it named the source device — every row read "—" until a real
+  DAC name appeared, at which point it would have named the wrong thing
+  confidently. `SourceDevice` (from the roster LEFT JOIN that has always been
+  there) is the phone; both are on the wire now, and the output hardware rides
+  the Route cell's title.
+
+**Verification note.** Both of the above, and four layout defects, were found
+by seeding a throwaway copy of a real bridge DB with playlists / favorites /
+history and driving the console in a browser. `go test` was green through all
+of them. For anything with no data on a dev box, a `_`-prefixed seeder
+(invisible to `./...`) writing through `internal/manifest` is the cheapest way
+to get a page that renders something.
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future

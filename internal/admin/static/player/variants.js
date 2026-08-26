@@ -56,7 +56,47 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
   }
 
   const blocked = blockedReason(summary);
-  if (blocked) root.appendChild(el("p", { class: "variants-blocked small", text: blocked }));
+  if (blocked) {
+    const note = el("p", { class: "variants-blocked small", text: blocked });
+    // A gear beside the note when the block is a SETTING. The other
+    // reason — sox missing — is a package to install on the host, and a
+    // switch that cannot fix it would be the wrong offer.
+    //
+    // This note is the exact "go to Settings → Audio" round trip the
+    // trays exist to remove, on a panel showing coverage bars the reader
+    // cannot act on. window.BridgeFeatureTray, guarded: see mixesToolbar.
+    const tray = !summary.enabled && window.BridgeFeatureTray?.build({
+      title: "Variant generation",
+      blurb: "Cached hi-res and CarPlay-optimized copies, generated offline by " +
+        "sox. Nothing is transcoded on the fly and the originals are untouched.",
+      rows: [
+        { field: "upscaleEnabled", type: "switch", restart: true, label: "PCM upscaling" },
+        {
+          field: "optimizeEnabled", type: "switch", restart: true,
+          label: "CarPlay-optimized variants",
+          hint: "16-bit downsamples for head units and cellular streaming. " +
+            "Only active while PCM upscaling is on — they share a worker pool.",
+        },
+      ],
+      link: { href: "/settings?tab=audio", text: "All audio settings →" },
+    });
+    if (tray) {
+      root.appendChild(el("div", { class: "variants-blocked-row" }, note, tray.button));
+      root.appendChild(tray.tray);
+    } else {
+      root.appendChild(note);
+      // No gear means no route to the switch, and the note stopped
+      // naming Settings when the gear started answering for it — so a
+      // bridge where app.js failed to publish the tray would state the
+      // problem and offer nothing. The link is the fallback ONLY: beside
+      // a gear it would duplicate the tray's own footer.
+      // (CodeRabbit on PR #763.)
+      if (!summary.enabled) {
+        root.appendChild(el("p", { class: "small" },
+          el("a", { attrs: { href: "/settings?tab=audio" }, text: "Audio settings →" })));
+      }
+    }
+  }
 
   for (const kind of KINDS) {
     root.appendChild(kindRow(kind, summary[kind.key], scope, !blocked, onChanged));
@@ -74,7 +114,10 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
  */
 function blockedReason(summary) {
   if (!summary.enabled) {
-    return "Variant generation is switched off for this bridge — enable it in Settings → Audio.";
+    // No "→ Settings" in the copy: the gear beside this line IS the fix
+    // now, and a sentence sending the reader elsewhere would compete
+    // with the control next to it.
+    return "Variant generation is switched off for this bridge.";
   }
   if (!summary.soxAvailable) {
     return "sox is not installed on the bridge host, so no variants can be generated.";
