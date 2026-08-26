@@ -244,6 +244,33 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .leCertNotAfter'
 
 **Why this matters: the backups compete with the rclone VFS cache for the root disk.** They accumulate at ~44 MB per deploy and were never pruned before 2026-08-17, when 100 of them held **4.1 GB of the 29 GB root — 85% full, 4.3 GB free**. The mount runs `--vfs-cache-max-size 5G`, so the cache could not have reached its configured size, and the SQLite DB plus `data/backups/` share that same disk. Pruning to two took it to 71% / 8.2 GB free. If free space is under ~6 GB here, check for accumulated `bridge.old-*` before suspecting the library mount.
 
+**`journalctl -p warning` FINDS NOTHING for either bridge — grep the text instead.** The
+bridge writes every slog level to stderr, and systemd stamps a journal priority from the
+*stream*, not from the `level=` field inside the line. So `-p warning` filters on a
+priority the bridge never sets, and returns zero however bad things are. Measured on
+bridge.1-bit.app, same 24 h window:
+
+| Query | Hits |
+|---|---|
+| `journalctl -u 1-bit-bridge -p warning` | **0** |
+| `journalctl -u 1-bit-bridge \| grep -c 'level=WARN'` | **1325** |
+| `journalctl -u 1-bit-bridge \| grep -c 'level=ERROR'` | 0 |
+
+This is a health check that looks like it passed. Use:
+
+```sh
+journalctl -u 1-bit-bridge --since '-24h' --no-pager | grep -c 'level=ERROR'
+journalctl -u 1-bit-bridge --since '-24h' --no-pager | grep 'level=WARN' | grep -v 'component=http'
+```
+
+The `component=http` exclusion matters on a public host: those 1325 WARNs are all 404s
+from internet scanners probing `:443` (`GET /`, `/favicon.ico`, `/api/v2/static/not.found`)
+— expected noise, and they drown any real warning in an unfiltered grep. A bridge behind
+a LAN or a whitelist sees none of it, so don't port the exclusion there by reflex.
+(Found 2026-08-26 while health-checking the demo bridge, after using `-p warning` on
+bridge.ars.md and reporting a clean result the query could not have established. That
+one happened to be clean; the check hadn't shown it.)
+
 **Don't `journalctl --vacuum-time` aggressively** during a debug loop — bridge logs are the only forensic surface (no separate log file path). 7-day default retention is fine; cut tighter only when disk pressure is real.
 
 **The swap is dispatched DETACHED (`setsid nohup`), and the verification polls `:443` rather than SSH.** Run inline over the SSH channel, the swap dies wherever the connection dies — and the window between the two `mv`s is the one state with **no binary at `/usr/local/bin/bridge`**. The running process survives on its held inode, so nothing looks wrong until the next restart, which then fails under `Restart=always` and takes the bridge down. On 2026-08-17 a deploy dropped exactly inside step 4; it happened to die *before* the first `mv`, which was luck. Diagnose an interrupted swap by comparing `/usr/local/bin/bridge version` against `/tmp/bridge.new version` and checking whether a `bridge.old-<today's ts>` exists — if the newest backup predates the attempt, the first `mv` never ran and nothing is broken. Progress lands in `/tmp/bridge-swap.log` on the host.
@@ -321,11 +348,47 @@ WantedBy=multi-user.target
 ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh
 ```
 
-`.env.demo` (untracked, covered by `.gitignore`'s `.env.*`) carries `HOST` / `SSH_KEY` / `HEALTH_URL=https://bridge.1-bit.app/v1/health`. The script's SHA-gate + two-step swap + setcap + restart + health-verify all apply unchanged. Verify afterwards:
+**Deploy this host from the RELEASE ARTIFACT, not from `main`** — it is the only
+bridge where the version *string* is user-visible, and the deploy script cannot produce
+the right one. The script builds whatever `git describe --tags` yields on `main`; one
+commit past a tag that is `v0.1.9-1-g8f3a873`, which is valid semver where `-1-g8f3a873`
+is a **prerelease** — and semver ranks a prerelease BELOW the plain release:
+
+```
+semverGreater("0.1.9", "0.1.9-1-g8f3a873") == true      # reports an update forever
+semverGreater("0.1.9", "0.1.9")            == false
+```
+
+So the bridge sets `updateAvailable: true` permanently, and iOS is not passive about it:
+`BridgeEditorView.probeResultSection` renders `bridgeUpdateAdvisoryRow` with **no demo
+gate**, so a user opening the demo bridge in Settings is told *"Bridge update available ·
+0.1.9"* about a server they do not own. (Observed 2026-08-26; the host had been shipping
+that since 08-20, on a build whose only delta from the tag was a docs commit.)
+
+Use the published artifact — it is what `latestServerVersion` names, it carries
+goreleaser's clean `{{.Version}}` stamp (`0.1.9`, no `v`), and it is the binary users get:
 
 ```sh
-curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .leCertNotAfter, (.features | index("demoMode") != null)'
-# Expect: the new version, an LE expiry ~90d out, and `true` (demoMode advertised).
+gh release download v0.1.9 -R acoseac/1-bit-bridge \
+  -p '1-bit-bridge_0.1.9_linux_amd64.tar.gz' -p 'checksums.txt' -D /tmp/rel
+(cd /tmp/rel && shasum -a 256 -c checksums.txt --ignore-missing && tar xzf *_linux_amd64.tar.gz)
+# then the runbook's own upload → SHA-gate → DETACHED swap → setcap → restart flow
+```
+
+Keep the detached dispatch: the window between the two `mv`s is the one state with no
+binary at `/usr/local/bin/bridge`. Confirm with `updateAvailable` reading **false**
+afterwards — that is the signal the version string is clean, and no other check shows it.
+
+The other two bridges track `main` deliberately and will keep reporting
+`updateAvailable: true` between releases. That is correct there ("you are ahead of the
+last tag") and needs no fix.
+
+`.env.demo` (untracked, covered by `.gitignore`'s `.env.*`) carries `HOST` / `SSH_KEY` / `HEALTH_URL=https://bridge.1-bit.app/v1/health`. The script's SHA-gate + two-step swap + setcap + restart + health-verify all apply unchanged, and remain the right path for a hotfix that has no release tag. Verify afterwards:
+
+```sh
+curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, .leCertNotAfter, (.features | index("demoMode") != null)'
+# Expect: the new version, `false` (see the release-artifact note above), an LE expiry
+# ~90d out, and `true` (demoMode advertised).
 ```
 
 **Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then `rsync -av --delete <out>/library/ <DEMO-SSH>:/srv/onebit-demo/library/` and trigger a **Full rescan** (admin console via tunnel, or `systemctl restart 1-bit-bridge` — startup scans). Remember the standing doctrine: delta scans never delete, so removals need the full rescan.
@@ -384,7 +447,7 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 
 Public read-only demo bridge (the iOS "Add demo bridge" target). Full coordinates + rationale live in the `Demo bridge` subsection under "Production deployments" above.
 
-**One-line summary**: `ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh`, then `curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, (.features | index("demoMode") != null)'` — expect the new version and `true`. If `demoMode` ever reads `false` on this host, STOP and fix the config before anything else: the read-only posture is what the iOS app's "collects nothing" demo claim rests on.
+**One-line summary**: deploy the RELEASE ARTIFACT rather than a `main` build (see the `Demo bridge` subsection for why — a `git describe` version string makes this host advertise `updateAvailable: true` forever, which iOS shows to demo users), then `curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, (.features | index("demoMode") != null)'` — expect the new version, `false`, and `true`. If `demoMode` ever reads `false` on this host, STOP and fix the config before anything else: the read-only posture is what the iOS app's "collects nothing" demo claim rests on.
 
 **SSH-flap note (2026-08-17): it is not the key, and it is not necessarily all-or-nothing.**
 
