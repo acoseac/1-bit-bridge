@@ -26,7 +26,6 @@
    * in the --_dark-* vars; only the token MAPPING repeats across the two dark
    * selector contexts, so the palettes can't drift. All public token NAMES are
    * preserved so every downstream rule + app.js (data-* state) reads unchanged. */
-  color-scheme: light;
 
   /* ---- Light theme (base) ----------------------------------------------
    *
@@ -247,7 +246,6 @@
     --danger: var(--_dark-danger);
     --ok: var(--_dark-ok);
     --warn: var(--_dark-warn);
-  --warn-on: var(--_dark-warn-on);
     --warn-on: var(--_dark-warn-on);
     --border: var(--_dark-border);
     /* Shadows all but vanish on a near-black canvas; the brighter --border
@@ -282,6 +280,7 @@
   --danger: var(--_dark-danger);
   --ok: var(--_dark-ok);
   --warn: var(--_dark-warn);
+  --warn-on: var(--_dark-warn-on);
   --border: var(--_dark-border);
   /* Shadows all but vanish on a near-black canvas; the brighter --border
    * carries the edge instead. Keeping the tokens DEFINED (rather than

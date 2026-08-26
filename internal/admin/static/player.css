@@ -677,7 +677,8 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 }
 .np-seek::-webkit-slider-thumb, .np-vol::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
-  width: 11px; height: 11px; margin-top: -3.5px; border-radius: 50%;
+  /* (track 4px − thumb box 15px: 11px + 2px border each side) / 2 */
+  width: 11px; height: 11px; margin-top: -5.5px; border-radius: 50%;
   background: var(--accent); border: 2px solid var(--np-bg);
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.30);
 }
@@ -823,8 +824,8 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   /* The controls stay; the numeric scrubber and the extras go. Position
    * feedback survives as .np-rail on the bar's top edge — the previous
    * rule hid .np-scrub with nothing in its place, so a phone got none. */
-  .npbar { grid-template-columns: minmax(0, 1fr) auto; }
-  .np-scrub, .np-extra { display: none; }
+  .npbar { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .np-scrub, .np-chip, .np-vol { display: none; }
 }
 
 @media (min-width: 769px) { .np-rail { display: none; } }

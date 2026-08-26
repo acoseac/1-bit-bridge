@@ -77,6 +77,10 @@ export function mount() {
   });
   refs.volume.addEventListener("input", () => {
     const v = refs.volume.value / 100;
+    // The slider is the other way the level changes, so it feeds the
+    // unmute restore point too — without this, dragging to 40%, then to
+    // zero, then tapping unmute snapped back to full volume.
+    if (v > 0) refs.lastVolume = v;
     audio.setVolume(v);
     setVolumeFill(v);
     swapIcon(refs.mute, v === 0 ? "vol-mute" : "vol");
