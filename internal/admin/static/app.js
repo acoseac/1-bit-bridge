@@ -323,7 +323,11 @@ function applyComposition(c) {
 // renderDistBar paints one proportional stacked bar + legend from a set
 // of {label,count} segments. Built via createElement/textContent (never
 // innerHTML) so codec/tier labels can't inject markup. Segment colour is
-// derived in CSS from data-kind + the --i index (stable palette).
+// a chart token from app.css set inline as var(--chart-...): the ordered
+// bars (pcm, dsd — tier index IS the rate order) walk the sequential
+// yellow ramp so lightness encodes the tier; the codec bar walks the
+// fixed categorical order. Tokens, not literals, so both themes resolve
+// from the same place the rest of the palette lives.
 function renderDistBar(barId, legendId, segs, total, kind) {
   const bar = document.getElementById(barId);
   const legend = document.getElementById(legendId);
@@ -338,10 +342,18 @@ function renderDistBar(barId, legendId, segs, total, kind) {
     // path for MP3/M4A/WAV/AIFF doesn't expose them). Render it neutral
     // grey so it reads as "unanalysed", not a quality tier.
     const unknown = seg.label === "Unknown";
+    // Sequential ramp for the ordered kinds, fixed categorical order for
+    // codec; the ramp clamps at its darkest step rather than wrapping
+    // (a wrapped sequential would un-order the encoding). The Unknown
+    // bucket keeps its neutral class — its CSS wins via !important, and
+    // skipping the inline set keeps the cascade honest.
+    const tok = kind === "codec"
+      ? `--chart-cat-${(i % 8) + 1}`
+      : `--chart-seq-${Math.min(i, 4) + 1}`;
     const span = document.createElement("span");
     span.className = unknown ? "dist-seg is-unknown" : "dist-seg";
     span.style.width = pct.toFixed(2) + "%";
-    span.style.setProperty("--i", String(i));
+    if (!unknown) span.style.background = `var(${tok})`;
     span.dataset.kind = kind;
     span.title = `${seg.label}: ${seg.count} (${pct.toFixed(1)}%)`;
     bar.appendChild(span);
@@ -349,9 +361,9 @@ function renderDistBar(barId, legendId, segs, total, kind) {
     const item = document.createElement("span");
     item.className = unknown ? "dist-legend-item is-unknown" : "dist-legend-item";
     item.dataset.kind = kind;
-    item.style.setProperty("--i", String(i));
     const swatch = document.createElement("i");
     swatch.className = "dist-swatch";
+    if (!unknown) swatch.style.background = `var(${tok})`;
     item.appendChild(swatch);
     item.appendChild(document.createTextNode(`${seg.label} `));
     const b = document.createElement("b");
@@ -5124,9 +5136,13 @@ function initCamelotWheel() {
   }
 
   const cx = 200, cy = 200;
+  // Ring GEOMETRY is the major/minor encoding; colour is redundant with
+  // it, so the fills come from the theme's wheel tokens (major = brand
+  // yellow, minor = warm grey) and fill-opacity keeps carrying the
+  // per-key intensity.
   const rings = {
-    A: { rInner: 62, rOuter: 116, hue: 174 }, // minor (inner) — teal
-    B: { rInner: 120, rOuter: 182, hue: 255 }, // major (outer) — indigo
+    A: { rInner: 62, rOuter: 116, fill: "var(--chart-wheel-minor)" }, // minor (inner)
+    B: { rInner: 120, rOuter: 182, fill: "var(--chart-wheel-major)" }, // major (outer)
   };
   let maxCount = 0;
   for (const n of Object.values(coverage)) if (n > maxCount) maxCount = n;
@@ -5155,7 +5171,7 @@ function initCamelotWheel() {
       const seg = document.createElementNS(CAMELOT_NS, "path");
       seg.setAttribute("d", camelotWedge(cx, cy, ring.rInner, ring.rOuter, a0, a1));
       seg.setAttribute("class", count > 0 ? "camelot-seg" : "camelot-seg empty");
-      seg.style.fill = `hsl(${ring.hue} 60% 55%)`;
+      seg.style.fill = ring.fill;
       seg.style.fillOpacity = count > 0 ? (0.18 + 0.82 * intensity).toFixed(3) : "0.06";
       seg.dataset.code = code;
       const title = document.createElementNS(CAMELOT_NS, "title");
