@@ -29,8 +29,8 @@
     the whole nav on every page. Visually hidden until focused. */ -}}
 <a class="skip-link" href="#main">Skip to content</a>
 
-{{- /* Icon sprite. One symbol per nav glyph, referenced by a use element from
-    the entries below, so an 11-entry sidebar costs eleven short lines
+{{- /* Icon sprite. One symbol per nav glyph plus the now-playing transport
+    set, referenced by a use element from the entries below, so an 11-entry sidebar costs eleven short lines
     instead of eleven inline path blobs. Stroke-only at 1.6 so the set
     reads as one family and inherits the link's currentColor — an icon
     never needs a theme rule of its own. aria-hidden on the sprite host
@@ -51,10 +51,30 @@
     <g id="i-jobs"><path d="M3 12.5h3.75L9.5 19l5-14 2.75 7.5H21"/></g>
     <g id="i-upnp"><circle cx="12" cy="12" r="1.9"/><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 15.9a5.5 5.5 0 0 0 0-7.8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 18.7a9.5 9.5 0 0 0 0-13.4"/></g>
     <g id="i-data"><path d="M4 6.5h16M4 12h16M4 17.5h9.5"/></g>
-    <g id="i-playlists"><path d="M4 6.5h10M4 11h10M4 15.5h6"/><path d="M13.5 18.5V9.25l6-1.5v8.75"/><circle cx="11.75" cy="18.5" r="1.75"/><circle cx="17.75" cy="16.5" r="1.75"/></g>
-    <g id="i-smartmixes"><path d="m12 3.5 1.75 5.6 5.6 1.75-5.6 1.75L12 18.25l-1.75-5.65L4.65 10.85l5.6-1.75z"/><path d="M18.75 3v3M20.25 4.5h-3"/></g>
     <g id="i-diagnostics"><path d="M12 3.25 19.5 6.5v5.1c0 4.35-3 7.85-7.5 9.15-4.5-1.3-7.5-4.8-7.5-9.15V6.5z"/><path d="m9.25 12 2 2 3.5-3.75"/></g>
     <g id="i-settings"><path d="M4 7.5h8.5M17 7.5h3M4 16.5h3M11.5 16.5h8.5"/><circle cx="14.75" cy="7.5" r="2.25"/><circle cx="9.25" cy="16.5" r="2.25"/></g>
+
+    {{- /* Transport glyphs for the now-playing bar. The bar is parented to
+        body on EVERY page, operator pages included, so its icons belong in
+        this one sprite rather than a second one built in JS.
+
+        These are FILLED shapes where the nav set is stroked, which is the
+        media-transport convention and the reason the bar hosts them through
+        a class of its own (np-ico) instead of nav-ico: presentation lives on
+        the use HOST, never on the source g, because a rule matching the
+        original element does not cross into the shadow tree that use builds.
+        np-ico paints fill, np-ico-line paints stroke. */ -}}
+    <g id="i-np-play"><path d="M8 5.2v13.6L19 12z"/></g>
+    <g id="i-np-pause"><path d="M8 5.5h3.1v13H8zM12.9 5.5H16v13h-3.1z"/></g>
+    <g id="i-np-prev"><path d="M7 5.5h2.4v13H7zM20 5.5v13L10.4 12z"/></g>
+    <g id="i-np-next"><path d="M14.6 5.5H17v13h-2.4zM4 5.5v13L13.6 12z"/></g>
+    <g id="i-np-shuffle"><path d="M3.5 6.5h3.2c1.3 0 2.5.65 3.2 1.75l4.2 6.5A3.8 3.8 0 0 0 17.3 16.5h3.2M3.5 17.5h3.2c1.3 0 2.5-.65 3.2-1.75l.9-1.4M13.2 9.65l.9-1.4A3.8 3.8 0 0 1 17.3 6.5h3.2"/><path d="m18.3 4 2.4 2.5-2.4 2.5M18.3 14l2.4 2.5-2.4 2.5"/></g>
+    <g id="i-np-repeat"><path d="M6.75 8.25h10.5a2.5 2.5 0 0 1 2.5 2.5v1.5M17.25 15.75H6.75a2.5 2.5 0 0 1-2.5-2.5v-1.5"/><path d="m8.75 5.75-2.5 2.5 2.5 2.5M15.25 13.25l2.5 2.5-2.5 2.5"/></g>
+    {{- /* Repeat-one is a DIFFERENT glyph, not the same one recoloured: the
+        three modes have to be told apart without relying on colour. */ -}}
+    <g id="i-np-repeat-one"><path d="M6.75 8.25h10.5a2.5 2.5 0 0 1 2.5 2.5v1.5M17.25 15.75H6.75a2.5 2.5 0 0 1-2.5-2.5v-1.5"/><path d="m8.75 5.75-2.5 2.5 2.5 2.5M15.25 13.25l2.5 2.5-2.5 2.5"/><path d="M11.35 10.6 12.5 9.9v4.2"/></g>
+    <g id="i-np-vol"><path d="M4.5 9.5h3L11 6.25v11.5L7.5 14.5h-3z"/><path d="M14.3 9.6a3.4 3.4 0 0 1 0 4.8M16.9 7.3a6.8 6.8 0 0 1 0 9.4" fill="none" stroke="currentcolor" stroke-width="1.6" stroke-linecap="round"/></g>
+    <g id="i-np-vol-mute"><path d="M4.5 9.5h3L11 6.25v11.5L7.5 14.5h-3z"/><path d="m14.5 9.75 4.5 4.5M19 9.75l-4.5 4.5" fill="none" stroke="currentcolor" stroke-width="1.6" stroke-linecap="round"/></g>
   </defs>
 </svg>
 
@@ -98,17 +118,26 @@
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-browse"/></svg><span>Browse</span></a>
     <a href="/stats" data-tab="stats"{{if eq .ActiveTab "stats"}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-stats"/></svg><span>Stats</span></a>
-    <a href="/playlists" data-tab="player" data-player-section="playlists"{{if eq .PlayerNav "playlists"}} aria-current="page"{{end}}>
-      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-playlists"/></svg><span>Playlists</span></a>
     <a href="/history" data-tab="history"{{if eq .ActiveTab "history"}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-data"/></svg><span>Listening history</span></a>
-    {{- /* Into the PLAYER, not an operator page: mixes are tiles you play,
-        and the operator affordances (regenerate, save as playlist, set a
-        cover) moved onto the mix itself. data-player-section is what
-        boot.js matches on when the router navigates client-side and the
-        server never sees the request. */ -}}
-    <a href="/mixes" data-tab="player" data-player-section="mixes"{{if eq .PlayerNav "mixes"}} aria-current="page"{{end}}>
-      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-smartmixes"/></svg><span>Smart mixes</span></a>
+    {{- /* Playlists and Smart mixes USED to have rail entries of their own.
+        They were removed because Browse's own section rail already lists
+        both, so the sidebar was offering a second route to the same two
+        views — and the duplicate had the further cost of needing the
+        data-player-section discriminator below to keep Browse from lighting
+        alongside them.
+
+        The discriminator is kept, empty, rather than deleted: it is a
+        three-way contract (playerNavEntry in handlers_pages.go, the
+        data-player-section attribute here, and updateSidebarNav in boot.js
+        for navigations the server never sees), and boot.js's two-pass
+        highlight in particular exists so that an entry keyed on a player
+        SECTION does not double-light with one keyed on the tab. Rebuilding
+        that from scratch is where the bug would be. To add an entry back:
+        return its section from playerNavEntry, declare
+        data-player-section="<section>" on the anchor with
+        {{`{{if eq .PlayerNav "<section>"}}`}}, and the parity tests in
+        page_init_parity_test.go will hold the three sides together. */ -}}
 
     <p class="nav-group">Server</p>
     <a href="/devices" data-tab="devices"{{if eq .ActiveTab "devices"}} aria-current="page"{{end}}>

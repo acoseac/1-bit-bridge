@@ -106,12 +106,20 @@ func TestEveryPageTabHasAnInitCase(t *testing.T) {
 	}
 }
 
-// The sidebar's Smart mixes entry points INTO the player, so it cannot be
-// keyed on a tab of its own — every player route renders the "player" tab
-// and the "player" section. playerNavEntry is the discriminator, and it
-// has to agree with three other places: the layout's data-player-section
-// attributes, the entries' highlight conditions, and boot.js, which
-// re-applies the same rule for navigations that never reach the server.
+// Every player route renders the "player" tab AND the "player" section, so
+// nothing in the sidebar can be keyed on either alone without lighting on
+// all of them. playerNavEntry is the discriminator that lets one player
+// sub-section own its own rail entry, and it has to agree with three other
+// places: the layout's data-player-section attributes, the entries'
+// highlight conditions, and boot.js, which re-applies the same rule for
+// navigations that never reach the server.
+//
+// Since Playlists and Smart mixes were removed from the sidebar (Browse's
+// own section rail already lists both), NO section owns an entry — so the
+// interesting assertion is that /playlists and /mixes light Browse, and
+// that exactly one entry is current on each. Those two rows are the ones
+// that would catch a half-finished re-add: an entry declared in the layout
+// but not returned here lights nothing, and the reverse double-lights.
 func TestSidebarPlayerNavHighlight(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	for _, tc := range []struct {
@@ -120,10 +128,10 @@ func TestSidebarPlayerNavHighlight(t *testing.T) {
 		{"/", "Browse"},
 		{"/albums", "Browse"},
 		{"/artists", "Browse"},
-		{"/playlists", "Playlists"},
-		{"/playlist/abc", "Playlists"},
-		{"/mixes", "Smart mixes"},
-		{"/mix/heavy-rotation", "Smart mixes"},
+		{"/playlists", "Browse"},
+		{"/playlist/abc", "Browse"},
+		{"/mixes", "Browse"},
+		{"/mix/heavy-rotation", "Browse"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		req.RemoteAddr = "127.0.0.1:54321"
@@ -172,6 +180,20 @@ func TestPlayerNavEntriesMatchTheLayout(t *testing.T) {
 		}
 	}
 
+	// Assert the CURRENT truth rather than letting both loops pass over
+	// empty maps: with no entries on either side this test would otherwise
+	// verify nothing at all, which is how a seam rots into paper.
+	if len(declared) != len(produced) {
+		t.Errorf("sidebar declares %d data-player-section entries but playerNavEntry "+
+			"produces %d — the two sides of the contract have diverged",
+			len(declared), len(produced))
+	}
+	if len(declared) == 0 {
+		t.Log("no player section owns a sidebar entry (Playlists and Smart mixes " +
+			"were removed as duplicates of Browse's section rail); the seam is " +
+			"kept empty on purpose — see playerNavEntry")
+	}
+
 	for e := range produced {
 		if !declared[e] {
 			t.Errorf("playerNavEntry returns %q but no sidebar entry declares "+
@@ -207,11 +229,17 @@ func TestPlayerNavEntriesMatchTheLayout(t *testing.T) {
 // Sent only when there is an entry to name: an absent header means Browse.
 func TestPartialResponseCarriesPlayerNav(t *testing.T) {
 	srv, _, _ := newTestServer(t)
+	//
+	// With no player section owning a rail entry, the header is currently
+	// never sent — every row wants "". The rows are kept so that a re-add
+	// which forgets the header (leaving a boosted navigation unable to move
+	// the highlight, since a boost swaps main and leaves the sidebar alone)
+	// is caught by an existing test rather than needing a new one.
 	for _, tc := range []struct{ path, want string }{
-		{"/mixes", "mixes"},
-		{"/mix/heavy-rotation", "mixes"},
-		{"/playlists", "playlists"},
-		{"/playlist/abc", "playlists"},
+		{"/mixes", ""},
+		{"/mix/heavy-rotation", ""},
+		{"/playlists", ""},
+		{"/playlist/abc", ""},
 		{"/albums", ""},
 		{"/", ""},
 		{"/jobs", ""},

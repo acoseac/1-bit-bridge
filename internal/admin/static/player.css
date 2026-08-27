@@ -15,34 +15,51 @@
  * The player does NOT force dark. Flipping the default would silently
  * override an OS preference and regress the operator pages, which live
  * in the same document. The Qobuz/Apple Music feel comes from
- * cover-forward layout and a distinct now-playing material, not from
- * dark chrome — so the bar gets a fixed dark ink in BOTH themes, the
- * way a mini-player does, and the grid keeps respecting the theme.
+ * cover-forward layout, not from dark chrome.
+ *
+ * The now-playing bar used to be the one exception — a fixed dark ink in
+ * both themes. It no longer is: see the --np-* tokens below for why that
+ * exception was the source of a real bug rather than a style choice.
  *
  * z-index ledger, restated once so it stays one list:
  *   popovers 1–5 · now-playing bar 40 · sheets 60 · modals 100 · toast 9999
  */
 
 :root {
-  --cover-radius: 8px;
+  --cover-radius: 14px;   /* the reference's soft card corners */
   --cover-ring: inset 0 0 0 1px rgb(0 0 0 / 0.10);
   --cover-placeholder: linear-gradient(135deg, var(--bg-elev), var(--bg-panel));
   --elev-1: 0 1px 2px rgb(0 0 0 / 0.06);
   --elev-2: 0 4px 14px rgb(0 0 0 / 0.10);
   --elev-3: 0 -2px 20px rgb(0 0 0 / 0.18);
-  --grid-min: 168px;
+  --grid-min: 176px;
   /* The library's section rail. Narrower than it was, because it is no
    * longer the only rail on screen — the shell sidebar takes 248px before
    * this one starts, and 200px of second rail left the album grid cramped. */
   --nav-w: 172px;
   --bar-h: 68px;
-  --player-bottom-inset: calc(var(--bar-h) + env(safe-area-inset-bottom, 0px));
+  /* bar height + the dock's 14px bottom float + breathing room above it */
+  --player-bottom-inset: calc(var(--bar-h) + 40px + env(safe-area-inset-bottom, 0px));
 
-  /* Fixed dark ink for the now-playing material, in both themes. */
-  --np-bg: #10141c;
-  --np-fg: #f1f5f9;
-  --np-muted: #94a3b8;
-  --np-border: #1f2937;
+  /* The now-playing material FOLLOWS THE THEME.
+   *
+   * It used to be a fixed near-black in both themes, and that was the root
+   * of the reported "repeat looks the same on and off": one --accent had to
+   * be legible on a white page AND on a near-black bar, and no single value
+   * can be. The old gold measured 3.38:1 there, which is under even the 3:1
+   * a UI component needs — and since the toggles were colour EMOJI, `color`
+   * never reached them anyway.
+   *
+   * Aliased rather than deleted so every .np-* rule below reads unchanged,
+   * and so the bar can never drift from the palette again: it is now the
+   * same surface as any other panel. */
+  --np-bg: var(--bg-panel);
+  --np-fg: var(--fg);
+  --np-muted: var(--fg-muted);
+  --np-border: var(--border);
+  /* The unplayed part of a scrubber. Derived from --fg so it tracks both
+   * themes without a second mapping. */
+  --np-track: color-mix(in srgb, var(--fg) 16%, transparent);
 
   --_dark-cover-ring: inset 0 0 0 1px rgb(255 255 255 / 0.10);
   --_dark-cover-placeholder: linear-gradient(135deg, #1b2436, #141b28);
@@ -77,19 +94,72 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
  * lets the strip's own overflow-x:auto engage. */
 .player > * { min-width: 0; }
 .player[data-booting] { visibility: hidden; }
-.player-nav nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: var(--space-4); }
+/* Level-2 menu grey. On a phone the wrapper is a rounded strip (the base
+ * rule); from tablet up the band is painted by a FIXED pseudo-element
+ * running the full viewport height, flush against the sidebar with no
+ * padding or radius — exactly the way the level-1 rail owns its column.
+ * A fixed band is the only shape that survives every page length: an
+ * in-flow column ends where short content ends, and negative-margin
+ * tricks have to chase main's padding, which changes when the
+ * now-playing dock is up. pointer-events:none keeps it purely paint. */
+.player-nav {
+  background: var(--subrail-bg); border-radius: var(--radius-lg);
+  padding: 12px 10px;
+}
+.player-nav nav {
+  display: flex; flex-direction: column; gap: 2px;
+  position: sticky; top: var(--space-4);
+}
+@media (min-width: 769px) {
+  .player-nav { background: none; border-radius: 0; padding: 0; }
+  .player-nav::before {
+    content: ""; position: fixed; top: 0; bottom: 0; left: 0;
+    width: calc(var(--shell-gutter) + var(--nav-w) + 12px);
+    background: var(--subrail-bg);
+    pointer-events: none;
+  }
+  /* The links must paint above the band; a fixed sibling pseudo with
+   * z-index:auto would otherwise cover them in paint order. */
+  .player-nav nav { position: sticky; top: var(--space-4); z-index: 1; }
+  /* The dock floats in the CONTENT column on player pages — over a
+   * full-height band its old sidebar-anchored offset left it straddling
+   * the grey/white seam. Same token the bar already reads. */
+  body:has(.player-nav) { --npbar-left: calc(var(--shell-gutter) + var(--nav-w) + 12px); }
+}
+@media (min-width: 1024px) {
+  .player-nav::before { left: var(--sidebar-w); }
+  body:has(.player-nav) {
+    --npbar-left: calc(var(--sidebar-w) + var(--shell-gutter) + var(--nav-w) + 12px);
+  }
+}
 /* The library's own section rail is now the SECOND rail on screen, beside
  * the shell sidebar. It has to read as clearly subordinate or the page looks
  * like it has two equal navs — so it drops the filled active pill (that
  * idiom now belongs to the shell rail alone) and marks the active row with
  * weight and ink instead, which is the quieter of the two available signals. */
+/* The same micro-label idiom as the sidebar's LIBRARY / SERVER / SYSTEM
+ * headings, so the two menu levels visibly share one vocabulary. CSS
+ * content is fine here: the console is single-language and the word
+ * truthfully names what the list is — the sections of Browse. */
+.player-nav nav::before {
+  content: "Browse";
+  margin: 6px 0 6px;
+  padding: 0 10px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
 .player-section {
   padding: 7px 10px; border-radius: var(--radius-sm); color: var(--fg-muted);
-  text-decoration: none; font-size: 0.85rem; font-weight: 500;
+  text-decoration: none; font-size: var(--text-base); font-weight: 500;
   transition: color 120ms ease, background-color 120ms ease;
 }
-.player-section:hover { background: var(--bg-elev); color: var(--fg); }
-.player-section.active { color: var(--fg); font-weight: 650; }
+.player-section:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); color: var(--fg); }
+/* Same yellow-wash pill as the sidebar's active entry — the two menu
+ * levels mark "you are here" in one voice. */
+.player-section.active { color: var(--fg); font-weight: 650; background: var(--accent-soft); }
 .player-main { min-width: 0; }
 /* ---- Breadcrumb ----
    Filled by ctx.setCrumb on the three views that have somewhere to go back
@@ -117,7 +187,12 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    * sits below it and brings its own gap. */
   margin: var(--space-2) 0 var(--space-4); letter-spacing: var(--track-tight);
 }
-.player-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+/* No focus ring: .player-title is the tabindex="-1" heading route() focuses
+ * to announce a navigation, so a ring here is never a keyboard affordance.
+ * See the h1:focus-visible rule in app.css for the full reasoning — this
+ * rule has to state it too, because (0,2,0) beats that (0,1,1) selector
+ * and its :not() would otherwise be overridden right back. */
+.player-title:focus-visible { outline: none; }
 .player-status { padding: var(--space-5) 0; }
 .player-empty { padding: var(--space-6) 0; text-align: center; }
 .player-empty h2 { margin: 0 0 var(--space-2); font-size: 1.1rem; }
@@ -139,9 +214,14 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 /* ---- Grid ---- */
 
 .grid {
-  display: grid; gap: var(--space-4);
+  display: grid; gap: var(--space-5);   /* airy — the grid is where 'spacious' is judged */
   grid-template-columns: repeat(auto-fill, minmax(var(--grid-min), 1fr));
 }
+/* No card chrome at all: the tile is its COVER plus two lines of text on
+ * the page ground, the way every cover-forward player grid works — the
+ * artwork carries the surface, and the yellow lives on the chips and
+ * controls instead of behind them. The hover lift belongs to the cover
+ * for the same reason: a shadow under a transparent box draws a ghost. */
 .tile { text-decoration: none; color: inherit; display: block; }
 .tile:hover .cover { transform: translateY(-2px); box-shadow: var(--elev-2), var(--cover-ring); }
 .cover {
@@ -266,6 +346,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
  * TestPlayerCSSDoesNotHijackOperatorTableClasses is what notices the
  * next collision of this shape. */
 .rows:not(table) { display: flex; flex-direction: column; content-visibility: auto; }
+.rows:not(table) > .row:last-child { border-bottom: 0; }
 .row {
   display: flex; justify-content: space-between; gap: var(--space-4); align-items: baseline;
   padding: 10px 12px; border-bottom: 1px solid var(--border);
@@ -284,13 +365,24 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 
 /* ---- Detail ---- */
 
-.detail { display: grid; grid-template-columns: 260px 1fr; gap: var(--space-5); margin-bottom: var(--space-5); }
+/* No frame: the header is the cover and the facts, sitting directly on
+ * the page the way the grid tiles now do. The single hairline under the
+ * tab strip below is all the structure the detail page draws. */
+.detail {
+  display: grid; grid-template-columns: 260px 1fr; gap: var(--space-5);
+  margin-bottom: var(--space-5);
+}
 .detail-art-round .cover { border-radius: 50%; }
 .detail-title { font-size: 1.4rem; margin: 0 0 4px; }
 .detail-artist { color: var(--accent); text-decoration: none; font-size: 0.95rem; }
 .detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); flex-wrap: wrap; }
 
 .tracks { list-style: none; margin: 0; padding: 0; }
+/* Inside .detail-tabs the CARD is the wrapper; the panels block and the
+ * list inside go back to plain so nothing is framed twice — the same
+ * reasoning the plain About/Variants builders document below. */
+.tabpanels { padding-top: var(--space-2); }
+.tracks > .track:last-child { border-bottom: 0; }
 /* num · title · [unplayable reason] · format · variants · size · duration
  * · download. Every column past the title is auto-width and right-packed,
  * so a track with no variants leaves no gap — the marks are absent, not
@@ -429,44 +521,190 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 /* The stat line under an album title: text plus a trailing format chip. */
 .detail-stats { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 
-/* ---- Now playing ---- */
+/* ---- Now playing -------------------------------------------------------
+ *
+ * Three zones — what is playing / the controls / the extras — which is
+ * where every media player lands, and which the previous five-column
+ * single-row grid was not. Two things that grid got wrong: the scrubber
+ * competed with the metadata for width, and shuffle/repeat sat in a
+ * far-right cluster with nothing relating them to the transport they
+ * modify. The centre column is a fixed max-width so the transport stays
+ * optically centred whatever the title length.
+ * ---------------------------------------------------------------------- */
 
 .npbar {
   /* Starts where the sidebar rail ends, reading --sidebar-w from app.css so
    * the two can never disagree about that edge. Below the shell breakpoint
    * the rail is a top bar and the token is overridden to 0 (see the bottom of
    * this file), which is why this is a var and not a media-query pair. */
-  position: fixed; left: var(--npbar-left, 0); right: 0; bottom: 0; z-index: 40;
-  min-height: var(--bar-h); padding: 10px var(--space-4);
-  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-  display: grid; grid-template-columns: 48px minmax(0, 1fr) auto minmax(180px, 2fr) auto;
+  /* A floating dock, not a full-bleed strip: inset from every edge and
+   * fully rounded, the way the reference's mini-player floats over the
+   * page. overflow:hidden lets .np-rail hug the rounded top edge; the
+   * children sit ≥8px inside, so their 2px focus outlines never reach
+   * the clip. */
+  position: fixed; left: calc(var(--npbar-left, 0px) + 18px); right: 18px;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px)); z-index: 40;
+  border-radius: 24px; overflow: hidden;
+  min-height: var(--bar-h); padding: 8px var(--space-4);
+  /* Equal side columns keep the transport optically centred whatever the
+   * title length; the centre is proportional rather than a fixed 560px,
+   * which at 800-1000px wide starved the metadata down to two ellipses. */
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
   gap: var(--space-4); align-items: center;
   background: var(--np-bg); color: var(--np-fg);
-  border-top: 1px solid var(--np-border); box-shadow: var(--elev-3);
+  border: 1px solid var(--np-border); box-shadow: var(--elev-2), var(--elev-3);
+}
+/* Translucent only where it can actually blur. Declared in @supports so a
+ * browser without backdrop-filter keeps the opaque background above rather
+ * than showing the page scrolling through a 78%-alpha panel. */
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  .npbar {
+    background: color-mix(in srgb, var(--np-bg) 82%, transparent);
+    -webkit-backdrop-filter: saturate(160%) blur(16px);
+    backdrop-filter: saturate(160%) blur(16px);
+  }
 }
 .npbar[hidden] { display: none; }
-.np-art { width: 48px; height: 48px; border-radius: 6px; overflow: hidden; background: #1b2436; }
-.np-art img { width: 100%; height: 100%; object-fit: cover; }
+
+/* Position line on the bar's top edge. Below the phone breakpoint the
+ * numeric scrubber row is hidden, and before this there was then NO
+ * position feedback at all on a phone. Two hard stops rather than a
+ * gradient ramp: this is a measurement, not a fade. */
+.np-rail {
+  position: absolute; inset: 0 0 auto; height: 2px;
+  background: linear-gradient(to right,
+    var(--accent) var(--np-progress, 0%), transparent var(--np-progress, 0%));
+  pointer-events: none;
+}
+
+.np-now { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.np-art {
+  width: 48px; height: 48px; flex: 0 0 48px; border-radius: var(--cover-radius);
+  overflow: hidden; background: var(--bg-elev); box-shadow: var(--cover-ring);
+}
+.np-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.np-art-link { display: block; width: 100%; height: 100%; }
+.np-art-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .np-meta { display: flex; flex-direction: column; min-width: 0; }
 .np-title { font-size: 0.9rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .np-title a { color: inherit; text-decoration: none; }
 .np-title a:hover { text-decoration: underline; }
-.np-sub, .np-notice { font-size: 0.78rem; color: var(--np-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.np-notice-error { color: #fca5a5; }
-.np-transport { display: flex; gap: 4px; }
+.np-sub, .np-notice { font-size: var(--text-xs); color: var(--np-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-notice:empty { display: none; }
+.np-notice-error { color: var(--danger); }
+
+.np-center { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; width: 100%; max-width: 560px; margin: 0 auto; }
+.np-transport { display: flex; align-items: center; gap: 2px; }
+
+/* ---- Transport buttons -------------------------------------------------
+ * Presentation lives on the use HOST (.np-ico), never on the sprite's
+ * source g: a rule matching the original element does not cross into the
+ * shadow tree that use builds from it. The nav set is stroked; these are
+ * filled, which is the media-transport convention. */
+.np-ico { width: 18px; height: 18px; display: block; fill: currentcolor; stroke: none; }
 .np-btn {
-  background: none; border: 0; color: var(--np-fg); font-size: 1.1rem; cursor: pointer;
-  min-width: 44px; min-height: 44px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: none; border: 0; color: var(--np-fg); cursor: pointer;
+  min-width: 40px; min-height: 40px; border-radius: 50%; padding: 0;
+  transition: background 120ms ease, color 120ms ease;
 }
-.np-btn:hover { background: rgb(255 255 255 / 0.08); }
-.np-btn[aria-pressed="true"] { color: var(--accent); }
-.np-scrub { display: flex; align-items: center; gap: var(--space-2); }
-.np-time { font-size: 0.75rem; color: var(--np-muted); font-variant-numeric: tabular-nums; min-width: 3.2em; }
-.np-seek, .np-vol { accent-color: var(--accent); width: 100%; }
-.np-seek:disabled { opacity: .35; }
-.np-vol { max-width: 90px; }
-.np-extra { display: flex; align-items: center; gap: var(--space-2); }
-.np-chip { font-size: 0.72rem; color: var(--np-muted); white-space: nowrap; }
+.np-btn:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.np-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.np-btn-sm { min-width: 32px; min-height: 32px; }
+.np-btn-sm .np-ico { width: 16px; height: 16px; }
+
+/* The reference's transport: a solid BLACK circle with a white glyph.
+ * --accent is the ink, so this is background:var(--accent) — which also
+ * hands dark mode the reference's inverted reading-panel move for free
+ * (white circle, ink glyph). Yellow is reserved for the album page's
+ * primary pill and for ENGAGED toggles; two identical yellow circles a
+ * ruler apart would make play and shuffle-on read as the same control. */
+.np-btn-play {
+  background: var(--accent); color: var(--accent-on);
+  border: 0;
+  min-width: 44px; min-height: 44px; margin: 0 6px;
+}
+.np-btn-play:hover { background: color-mix(in srgb, var(--accent) 82%, var(--np-bg)); }
+.np-btn-play .np-ico { width: 18px; height: 18px; }
+
+/* ---- Shuffle / repeat --------------------------------------------------
+ * The reported bug: these were indistinguishable on and off. Three causes,
+ * all fixed here and in nowplaying.js — they were colour EMOJI, so `color`
+ * never applied; the colour they were given was 3.38:1 on the old fixed
+ * dark bar; and repeat has THREE modes that one aria-pressed boolean and
+ * one glyph could not express.
+ *
+ * The active cue is a filled pill, not just a hue, so it survives a
+ * colour-vision difference and a greyscale print — and repeat-one swaps to
+ * a genuinely different glyph rather than recolouring the same one. */
+.np-btn-toggle { color: var(--np-muted); }
+.np-btn-toggle .np-ico { fill: none; stroke: currentcolor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+/* Engaged = a SOLID yellow circle with an ink glyph — the reference's
+ * badge idiom, and unmistakable in greyscale too: the state cue is the
+ * filled shape itself (a mid-grey disc appears), not a hue shift, so no
+ * extra dot is needed. Off stays a bare muted glyph. repeat-one swaps to
+ * a different sprite symbol on top of this, so the three repeat modes
+ * are never distinguished by colour alone. */
+.np-btn-toggle[aria-pressed="true"],
+.np-btn-toggle[data-repeat="all"],
+.np-btn-toggle[data-repeat="one"] {
+  color: var(--accent-fill-on); background: var(--accent-fill);
+}
+.np-btn-toggle[aria-pressed="true"]:hover,
+.np-btn-toggle[data-repeat="all"]:hover,
+.np-btn-toggle[data-repeat="one"]:hover {
+  background: color-mix(in srgb, var(--accent-fill) 82%, var(--accent-fill-edge));
+}
+
+/* ---- Scrubber ----------------------------------------------------------
+ * A real input[type=range]: keyboard seeking, value announcement and
+ * Windows High Contrast all come free. Both vendor track/thumb pairs are
+ * written out because appearance:none opts out of the native rendering
+ * entirely — omitting the -moz- half leaves Firefox with an invisible
+ * control, not a default one. */
+.np-scrub { display: flex; align-items: center; gap: var(--space-2); width: 100%; }
+.np-time { font-size: var(--text-xs); color: var(--np-muted); font-variant-numeric: tabular-nums; min-width: 3.2em; }
+.np-time-total { text-align: right; }
+
+.np-seek, .np-vol {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 16px; background: transparent; cursor: pointer; margin: 0;
+}
+.np-seek::-webkit-slider-runnable-track, .np-vol::-webkit-slider-runnable-track {
+  height: 4px; border-radius: var(--radius-pill);
+  background: linear-gradient(to right,
+    var(--accent) var(--np-progress, 0%), var(--np-track) var(--np-progress, 0%));
+}
+.np-seek::-webkit-slider-thumb, .np-vol::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  /* (track 4px − thumb box 15px: 11px + 2px border each side) / 2 */
+  width: 11px; height: 11px; margin-top: -5.5px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--np-bg);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.30);
+}
+.np-seek::-moz-range-track, .np-vol::-moz-range-track {
+  height: 4px; border-radius: var(--radius-pill); background: var(--np-track);
+}
+.np-seek::-moz-range-progress, .np-vol::-moz-range-progress {
+  height: 4px; border-radius: var(--radius-pill); background: var(--accent);
+}
+.np-seek::-moz-range-thumb, .np-vol::-moz-range-thumb {
+  width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--np-bg);
+  background: var(--accent); box-shadow: 0 1px 3px rgb(0 0 0 / 0.30);
+}
+.np-seek:focus-visible, .np-vol:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--radius-pill);
+}
+.np-seek:disabled { opacity: .35; cursor: default; }
+.np-vol { max-width: 84px; }
+/* iOS Safari ignores audio.volume outright, so a slider there is a control
+ * that does nothing. The mute button beside it still works, which is why
+ * this hides the slider rather than the whole group — before the mute
+ * button existed, a phone had no way to silence the bar at all. */
+@media (hover: none) { .np-vol { display: none; } }
+
+.np-extra { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
+.np-chip { font-size: var(--text-xs); color: var(--np-muted); white-space: nowrap; }
 
 /* ---- Components the player markup already asked for ---- */
 
@@ -478,7 +716,9 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   background: var(--bg-elev); color: var(--fg-muted);
   white-space: nowrap; vertical-align: middle;
 }
-.chip-quality { background: var(--accent-soft); color: var(--accent); }
+/* The reference's yellow price pill: solid fill, ink label (11.94:1).
+ * On a yellow TILE this inverts to the black pill — see the tile scope. */
+.chip-quality { background: var(--accent-fill); color: var(--accent-fill-on); }
 .chip-warn { background: var(--accent-warm-tint); color: var(--accent-warm); }
 /* The quietest chip: a label that classifies without claiming attention.
  * Used on the unresolved list, where every row already IS the exception
@@ -551,7 +791,8 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
  * `.btn-primary` and `.btn-quiet`, neither of which existed — so the
  * album's Play button rendered identically to Shuffle beside it. */
 .btn-primary {
-  background: var(--accent); color: var(--accent-on); border-color: var(--accent);
+  background: var(--accent-fill); color: var(--accent-fill-on);
+  border-color: var(--accent-fill);
   font-weight: 600;
 }
 .btn-primary:hover { filter: brightness(1.08); }
@@ -580,12 +821,20 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   }
   .player-nav nav::-webkit-scrollbar { display: none; }
   .player-section { white-space: nowrap; }
-  .npbar { grid-template-columns: 44px minmax(0, 1fr) auto; }
-  .np-scrub, .np-extra { display: none; }
+  /* The controls stay; the numeric scrubber and the extras go. Position
+   * feedback survives as .np-rail on the bar's top edge — the previous
+   * rule hid .np-scrub with nothing in its place, so a phone got none. */
+  .npbar { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .np-scrub, .np-chip, .np-vol { display: none; }
 }
+
+@media (min-width: 769px) { .np-rail { display: none; } }
 
 @media (max-width: 640px) {
   :root { --grid-min: 140px; --bar-h: 60px; }
+  /* Shuffle and repeat are the first to go when width runs out: they are
+   * modes you set once, not controls you reach for mid-track. */
+  .np-btn-toggle { display: none; }
   .track { grid-template-columns: 2rem 1fr auto; }
   .track-meta, .track-dl { display: none; }
 }
@@ -595,7 +844,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
  * search is that you reach for it from wherever you are. */
 .player-search { margin-bottom: var(--space-4); }
 .player-search input {
-  width: 100%; max-width: 460px; padding: 8px 12px;
+  width: 100%; max-width: 460px; padding: 10px 16px;
   border: 1px solid var(--border); border-radius: var(--radius-pill);
   background: var(--bg-panel); color: var(--fg); font: inherit; font-size: 0.9rem;
 }
@@ -651,7 +900,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 
 .variants {
   margin: var(--space-5) 0; padding: var(--space-4);
-  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel);
+  border: 0; border-radius: var(--radius-lg); background: var(--bg-elev);
 }
 .variants-head { margin: 0 0 var(--space-2); font-size: 0.95rem; }
 .variants-blocked { color: var(--accent-warm); margin: 0 0 var(--space-3); }
@@ -769,8 +1018,9 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   background: var(--accent-warm-tint); color: var(--accent-warm);
   font-variant-numeric: tabular-nums;
 }
-/* Complete coverage reads as settled, not as a warning. */
-.row-cov-done { background: var(--accent-soft); color: var(--accent); }
+/* Complete coverage reads as settled, not as a warning — the solid
+ * yellow pill, same voice as .chip-quality. */
+.row-cov-done { background: var(--accent-fill); color: var(--accent-fill-on); }
 
 /* On a phone the three groups do not fit on one line; wrapping puts the
  * title on its own and the facts under it, rather than crushing the
