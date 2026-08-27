@@ -347,7 +347,10 @@ chunk's `FRTE` header (`numFrames / frameRateHz` — the DSDIFF 1.5 spec
 fixes DST at 75 frames/s; the extractor honours the stored value)
 without decoding anything; uncompressed DFF likewise gains `duration`
 (net-new in v1.10) from the declared `DSD ` payload size + `CHNL` +
-`FS`.
+`FS`. The uncompressed duration is omitted when the declared payload
+does not fit inside the physical file (`payload offset + declared
+size > on-disk bytes` — a truncated file must not report a duration
+for audio it doesn't hold); typing itself still lands.
 
 Serving is unchanged and bit-exact: `/v1/download` + the DLNA
 `/dlna/file/...` handler ship DST `.dff` bytes verbatim (a DST-capable

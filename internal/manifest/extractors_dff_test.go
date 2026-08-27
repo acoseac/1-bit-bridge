@@ -377,6 +377,36 @@ func TestExtractDFF_TruncatedFile_NoDurationForMissingAudio(t *testing.T) {
 	}
 }
 
+func TestExtractDFF_BoundAfterPayloadStartButBeforeEnd_NoDuration(t *testing.T) {
+	// CodeRabbit round 2: the fit check must be `payload offset +
+	// declared size <= physical size`, not size alone — a file
+	// truncated AFTER the payload start but BEFORE its declared end
+	// passes the size-only compare (declared 42_336_000 <= physical
+	// 42_336_010) while the payload's END exceeds the file by roughly
+	// the header length. The iOS DFFHeadScan applies the identical
+	// offset-aware rule (Mirror parity). Typing still lands.
+	fixture := buildDFFWithOpts(t, dffFixtureOpts{
+		sampleRate:      2_822_400,
+		compression:     "DSD ",
+		channels:        2,
+		declaredDSDSize: 42_336_000,
+	})
+	path := writeTempDFF(t, fixture)
+	if err := os.Truncate(path, 42_336_010); err != nil {
+		t.Fatalf("sparse-extend fixture: %v", err)
+	}
+	track := &Track{}
+	if err := extractDFFWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractDFFWithContext: %v", err)
+	}
+	if track.Duration != nil {
+		t.Errorf("Duration = %v, want nil (payload END exceeds the file)", *track.Duration)
+	}
+	if track.IsDSD == nil || !*track.IsDSD {
+		t.Errorf("IsDSD = %v, want non-nil true (typing must survive the failed fit)", track.IsDSD)
+	}
+}
+
 func TestExtractDFF_UncompressedWithoutCHNL_NoDuration(t *testing.T) {
 	// Duration needs the channel count; typing doesn't. A legacy
 	// CHNL-less fixture keeps the format stamps and omits Duration —
