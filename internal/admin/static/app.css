@@ -99,6 +99,47 @@
   --accent-fill-on: #141414;         /* 11.94:1 on --accent-fill */
   --accent-fill-soft: #faeec9;       /* flat pale-yellow for large tints */
 
+  /* ---- Chart palettes (the Stats / Jobs graphs) -----------------------
+   * Two jobs, per the data-viz method:
+   *
+   * --chart-seq-*: SEQUENTIAL — one hue, light -> dark, for the ORDERED
+   * bars (PCM sampling density, DSD streams: the tier index IS the rate
+   * order, so lightness encodes it). Monotonic in lightness by
+   * construction.
+   *
+   * --chart-cat-*: CATEGORICAL — a FIXED eight-step order for the codec
+   * bar, assigned by segment position (the bar is sorted count-desc at
+   * render, there are no filters to repaint survivors, and the swatch
+   * legend carries identity). The order is designed for ADJACENT
+   * separation and machine-validated in both themes: colour-vision
+   * ΔE >= 15.5 light / 16.9 dark on the worst adjacent pair, normal
+   * vision >= 16.0 / 17.6 (OKLab x100). The brand is monochrome+yellow,
+   * so the reference validator's lightness-band and chroma-floor checks
+   * fail BY DESIGN (near-black and warm neutrals ARE the palette) — the
+   * relief the low-contrast warning demands is real: every bar carries a
+   * swatch legend with counts, per-segment tooltips, and 2px surface
+   * gaps between fills.
+   *
+   * --chart-wheel-*: the Camelot wheel's two rings. Ring GEOMETRY
+   * (inner/outer) is the major/minor encoding; colour is redundant with
+   * it, so major wears the brand yellow and minor a warm grey, and
+   * fill-opacity keeps encoding per-key intensity. */
+  --chart-seq-1: #f7e7b4;
+  --chart-seq-2: #f4cc54;
+  --chart-seq-3: #d29a26;
+  --chart-seq-4: #9a5200;
+  --chart-seq-5: #5e3a08;
+  --chart-cat-1: #141414;
+  --chart-cat-2: #f4cc54;
+  --chart-cat-3: #6e6753;
+  --chart-cat-4: #f0e0ab;
+  --chart-cat-5: #9a5200;
+  --chart-cat-6: #cfcfc4;
+  --chart-cat-7: #d9a72e;
+  --chart-cat-8: #4b4433;
+  --chart-wheel-major: #f4cc54;
+  --chart-wheel-minor: #6e6753;
+
   /* ---- Signals (the only non-neutral, non-yellow hues; they must stay
    *      mutually distinguishable, so they do not join the monochrome) ---- */
   --accent-hot: #be123c;             /* retained for --danger derivation */
@@ -124,6 +165,25 @@
   --_dark-bg-elev: #242422;
   --_dark-rail-bg: #222220;
   --_dark-subrail-bg: #181816;
+  /* Dark chart steps are SELECTED, not flipped: the sequential ramp keeps
+   * its light->dark order but lifts the dark end off the near-black
+   * surface; the categorical order re-validates against #1a1a19 (see the
+   * light block's numbers). The two invariant yellows stay put. */
+  --_dark-chart-seq-1: #f7e7b4;
+  --_dark-chart-seq-2: #f4cc54;
+  --_dark-chart-seq-3: #dcae2e;
+  --_dark-chart-seq-4: #c98a28;
+  --_dark-chart-seq-5: #a9741a;
+  --_dark-chart-cat-1: #f4f4f1;
+  --_dark-chart-cat-2: #f4cc54;
+  --_dark-chart-cat-3: #a8a190;
+  --_dark-chart-cat-4: #efdfae;
+  --_dark-chart-cat-5: #c98a28;
+  --_dark-chart-cat-6: #4f4f48;
+  --_dark-chart-cat-7: #d9a72e;
+  --_dark-chart-cat-8: #8a8578;
+  --_dark-chart-wheel-major: #f4cc54;
+  --_dark-chart-wheel-minor: #a8a190;
   --_dark-fg: #f4f4f1;
   --_dark-fg-muted: #a2a29b;
   --_dark-border: #2e2e2b;
@@ -231,6 +291,21 @@
     --bg-elev: var(--_dark-bg-elev);
     --rail-bg: var(--_dark-rail-bg);
     --subrail-bg: var(--_dark-subrail-bg);
+    --chart-seq-1: var(--_dark-chart-seq-1);
+    --chart-seq-2: var(--_dark-chart-seq-2);
+    --chart-seq-3: var(--_dark-chart-seq-3);
+    --chart-seq-4: var(--_dark-chart-seq-4);
+    --chart-seq-5: var(--_dark-chart-seq-5);
+    --chart-cat-1: var(--_dark-chart-cat-1);
+    --chart-cat-2: var(--_dark-chart-cat-2);
+    --chart-cat-3: var(--_dark-chart-cat-3);
+    --chart-cat-4: var(--_dark-chart-cat-4);
+    --chart-cat-5: var(--_dark-chart-cat-5);
+    --chart-cat-6: var(--_dark-chart-cat-6);
+    --chart-cat-7: var(--_dark-chart-cat-7);
+    --chart-cat-8: var(--_dark-chart-cat-8);
+    --chart-wheel-major: var(--_dark-chart-wheel-major);
+    --chart-wheel-minor: var(--_dark-chart-wheel-minor);
     --fg: var(--_dark-fg);
     --fg-muted: var(--_dark-fg-muted);
     --accent: var(--_dark-accent);
@@ -265,6 +340,21 @@
   --bg-elev: var(--_dark-bg-elev);
   --rail-bg: var(--_dark-rail-bg);
   --subrail-bg: var(--_dark-subrail-bg);
+  --chart-seq-1: var(--_dark-chart-seq-1);
+  --chart-seq-2: var(--_dark-chart-seq-2);
+  --chart-seq-3: var(--_dark-chart-seq-3);
+  --chart-seq-4: var(--_dark-chart-seq-4);
+  --chart-seq-5: var(--_dark-chart-seq-5);
+  --chart-cat-1: var(--_dark-chart-cat-1);
+  --chart-cat-2: var(--_dark-chart-cat-2);
+  --chart-cat-3: var(--_dark-chart-cat-3);
+  --chart-cat-4: var(--_dark-chart-cat-4);
+  --chart-cat-5: var(--_dark-chart-cat-5);
+  --chart-cat-6: var(--_dark-chart-cat-6);
+  --chart-cat-7: var(--_dark-chart-cat-7);
+  --chart-cat-8: var(--_dark-chart-cat-8);
+  --chart-wheel-major: var(--_dark-chart-wheel-major);
+  --chart-wheel-minor: var(--_dark-chart-wheel-minor);
   --fg: var(--_dark-fg);
   --fg-muted: var(--_dark-fg-muted);
   --accent: var(--_dark-accent);
@@ -2052,6 +2142,11 @@ code.storage-path {
 }
 .dist-bar {
   display: flex;
+  /* The 2px surface gap between fills is load-bearing for a one-family
+   * palette: adjacent same-hue segments separate by the seam even where
+   * their lightness difference is smallest. The bar's own background
+   * shows through as the seam (and as the empty remainder). */
+  gap: 2px;
   width: 100%;
   height: 16px;
   border-radius: 6px;
@@ -2090,23 +2185,13 @@ code.storage-path {
   display: inline-block;
   flex: none;
 }
-/* Per-kind palettes — hue ramps over the --i segment index. PCM shifts
-   blue→teal with rising sampling density; DSD is a violet family; codecs
-   spread across a warm-to-green wheel. */
-.dist-seg[data-kind="pcm"],
-.dist-legend-item[data-kind="pcm"] .dist-swatch {
-  background: hsl(calc((210 - var(--i) * 26) * 1deg) 62% 52%);
-}
-.dist-seg[data-kind="dsd"],
-.dist-legend-item[data-kind="dsd"] .dist-swatch {
-  background: hsl(calc((280 + var(--i) * 12) * 1deg) 55% 58%);
-}
-.dist-seg[data-kind="codec"],
-.dist-legend-item[data-kind="codec"] .dist-swatch {
-  background: hsl(calc((150 + var(--i) * 43) * 1deg) 50% 50%);
-}
-/* "Unknown" (codec known, PCM geometry not extracted) reads neutral —
-   wins over the per-kind hue regardless of source order. */
+/* Segment colour comes from the chart tokens in :root, set inline by
+ * renderDistBar as var(--chart-...) — the ordered bars (pcm, dsd) walk
+ * the sequential yellow ramp so lightness encodes the rate tier, and
+ * the codec bar walks the fixed categorical order. The computed-hue
+ * hsl(calc(...)) rules this replaces cycled a generated hue per index,
+ * which is the classic categorical anti-pattern (and clashed with the
+ * grey/yellow/black/white theme besides). */
 .dist-seg.is-unknown,
 .dist-legend-item.is-unknown .dist-swatch {
   background: var(--fg-muted) !important;
