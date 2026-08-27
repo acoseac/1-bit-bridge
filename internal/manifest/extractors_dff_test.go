@@ -324,14 +324,20 @@ func TestExtractDFF_Uncompressed_StampsDurationFromDSDSize(t *testing.T) {
 	// Net-new for ALL DFF (the extractor never computed duration
 	// before): DSD64 stereo with a declared 42_336_000-byte payload =
 	// 2_822_400/8 bytes-per-channel-per-second × 2 ch × 60 s → 60 s.
-	// The walker seeks past the declared size (landing at EOF — the
-	// clean terminator), so the fixture doesn't write the payload.
-	path := writeTempDFF(t, buildDFFWithOpts(t, dffFixtureOpts{
+	// The fixture is SPARSE-extended to cover the declared payload
+	// (os.Truncate — APFS holes cost nothing) so the physical-size
+	// truncation bound admits the duration; the walker seeks through
+	// the hole and terminates at the real EOF.
+	fixture := buildDFFWithOpts(t, dffFixtureOpts{
 		sampleRate:      2_822_400,
 		compression:     "DSD ",
 		channels:        2,
 		declaredDSDSize: 42_336_000,
-	}))
+	})
+	path := writeTempDFF(t, fixture)
+	if err := os.Truncate(path, int64(len(fixture))+42_336_000); err != nil {
+		t.Fatalf("sparse-extend fixture: %v", err)
+	}
 	track := &Track{}
 	if err := extractDFFWithContext(path, track, nil); err != nil {
 		t.Fatalf("extractDFFWithContext: %v", err)
@@ -344,6 +350,30 @@ func TestExtractDFF_Uncompressed_StampsDurationFromDSDSize(t *testing.T) {
 	}
 	if track.Compression != "" {
 		t.Errorf("Compression = %q, want empty for uncompressed", track.Compression)
+	}
+}
+
+func TestExtractDFF_TruncatedFile_NoDurationForMissingAudio(t *testing.T) {
+	// A truncated file whose DSD chunk declares more payload than the
+	// file physically holds must not stamp a duration for audio that
+	// doesn't exist — `Seek` lands past EOF without error, so the
+	// declared size alone can't be trusted (CodeRabbit on this PR;
+	// the iOS DFFHeadScan applies the same bound). Typing still lands.
+	path := writeTempDFF(t, buildDFFWithOpts(t, dffFixtureOpts{
+		sampleRate:      2_822_400,
+		compression:     "DSD ",
+		channels:        2,
+		declaredDSDSize: 42_336_000, // file is only a few hundred bytes
+	}))
+	track := &Track{}
+	if err := extractDFFWithContext(path, track, nil); err != nil {
+		t.Fatalf("extractDFFWithContext: %v", err)
+	}
+	if track.Duration != nil {
+		t.Errorf("Duration = %v, want nil (declared payload exceeds the file)", *track.Duration)
+	}
+	if track.IsDSD == nil || !*track.IsDSD {
+		t.Errorf("IsDSD = %v, want non-nil true (typing must survive truncation)", track.IsDSD)
 	}
 }
 

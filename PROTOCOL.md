@@ -343,7 +343,8 @@ DST rows are TYPED like any other DSD row: `isDSD: true`,
 with `compression` in one extractor commit (a half-stamped row would
 re-open the DIDL `<res bitsPerSample>` renderer silent-decline class the
 `!IsDSD` co-gate exists for). `duration` is exact, derived from the DST
-chunk's `FRTE` header (`numFrames / frameRateHz`, always 75 frames/s)
+chunk's `FRTE` header (`numFrames / frameRateHz` — the DSDIFF 1.5 spec
+fixes DST at 75 frames/s; the extractor honours the stored value)
 without decoding anything; uncompressed DFF likewise gains `duration`
 (net-new in v1.10) from the declared `DSD ` payload size + `CHNL` +
 `FS`.

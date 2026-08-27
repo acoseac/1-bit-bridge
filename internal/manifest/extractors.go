@@ -1876,6 +1876,16 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// malformed file that errors mid-walk therefore stamps nothing
 	// beyond Codec — strictly more honest than the old inline commit
 	// (don't stamp a file we errored on).
+	// Physical file size — the truncation bound for the uncompressed
+	// duration: `Seek` happily lands past EOF, so a truncated file
+	// declaring a large `DSD ` payload would otherwise get a duration
+	// for audio bytes that don't exist (CodeRabbit on the DST PR). A
+	// Stat failure leaves the bound at 0 = unknown; typing still lands,
+	// duration is skipped.
+	var physicalSize uint64
+	if fi, statErr := f.Stat(); statErr == nil && fi.Size() > 0 {
+		physicalSize = uint64(fi.Size())
+	}
 	var (
 		prop         dffPropInfo
 		dsdChunkSize uint64
@@ -1892,7 +1902,7 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			// commit here from everything the walk gathered.
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				applyDFFStamps(t, absPath, prop,
-					dsdChunkSize, haveDSDChunk,
+					dsdChunkSize, haveDSDChunk, physicalSize,
 					dstFrames, dstFrameRate, haveFRTE)
 				if ec != nil && ec.ArtworkCacheDir != "" {
 					extractLocalArtwork(absPath, t, nil, ec)
@@ -2312,8 +2322,12 @@ const dffMaxPlausibleDurationSeconds = 604_800.0
 // space could overflow uint64 on a forged header; float math cannot
 // trap, and implausible results (non-finite, ≤ 0, ≥ a week) stamp
 // nothing.
+// physicalSize is the on-disk byte count (0 = unknown): a declared
+// `DSD ` payload the file can't physically hold stamps NO duration
+// (typing still lands) — the same truncation bound the iOS
+// `DFFHeadScan.typeStamp(from:fileSizeBound:)` applies (Mirror parity).
 func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
-	dsdSize uint64, haveDSD bool,
+	dsdSize uint64, haveDSD bool, physicalSize uint64,
 	dstFrames uint32, dstFrameRate uint16, haveFRTE bool) {
 	if !prop.haveFS || prop.fsRate == 0 {
 		return
@@ -2343,7 +2357,9 @@ func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
 	switch prop.compression {
 	case dffCompressionAbsent, dffCompressionUncompressed:
 		stampFormat()
-		if haveDSD && dsdSize > 0 && prop.haveCHNL && prop.channels > 0 {
+		if haveDSD && dsdSize > 0 &&
+			(physicalSize == 0 || dsdSize <= physicalSize) &&
+			prop.haveCHNL && prop.channels > 0 {
 			setDuration(float64(dsdSize) * 8.0 /
 				(float64(prop.channels) * float64(prop.fsRate)))
 		}
