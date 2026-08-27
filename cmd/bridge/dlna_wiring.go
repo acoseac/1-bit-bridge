@@ -714,8 +714,12 @@ func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string)
 	if t.TrackNumber != nil {
 		ti.TrackNumber = *t.TrackNumber
 	}
-	// Channels not surfaced by manifest.Track today — left as 0;
-	// DIDLForTrack treats 0 as "unknown" and omits the attribute.
+	// Channels: surfaced by the DFF extractor (DSDIFF CHNL) since the
+	// DST-typing pass; other formats leave it nil and DIDLForTrack's
+	// default-to-2 behaviour is unchanged.
+	if t.Channels != nil {
+		ti.Channels = *t.Channels
+	}
 	return ti
 }
 

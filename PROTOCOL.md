@@ -319,6 +319,41 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 - `isDSD: true` tracks MUST set `sampleRate` to the DSD rate in Hz (e.g. `2822400` for DSD64, `5644800` for DSD128) and `bitsPerSample: 1`.
 - `duration` is in seconds, regardless of format.
 
+#### DST-compressed DSDIFF (additive, since v1.10)
+
+DST (Direct Stream Transfer, ISO/IEC 14496-3 Subpart 10) is the lossless
+DSD compressor used by SACD rips inside `.dff` containers. Two additive
+manifest fields carry it (`ProtocolVersion` stays 1; pre-v1.10 bridges
+omit both and clients treat absence as before):
+
+- `compression` (string, `omitempty`) — the DSDIFF `CMPR` compression
+  name. Exactly `"DST"` for DST-compressed `.dff`; omitted for
+  everything else. `codec` stays `"DFF"` for compressed and uncompressed
+  DSDIFF alike (clients match `codec` by equality elsewhere), so this
+  field is the ONLY wire discriminator. iOS maps `compression == "DST"`
+  onto its canonical DST codec marker at its upsert chokepoint and
+  refuses playback with an honest pre-flight error until its DST decoder
+  ships (docs/DSTFeasibility.md).
+- `channels` (`*int`, `omitempty`) — the audio channel count (DSDIFF
+  `CHNL` numChannels; 2 = stereo, 5/6 = multichannel SACD layouts).
+  Today only the DFF extractor populates it; other formats omit it.
+
+DST rows are TYPED like any other DSD row: `isDSD: true`,
+`sampleRate` = the DSD rate, `bitsPerSample: 1` — all stamped together
+with `compression` in one extractor commit (a half-stamped row would
+re-open the DIDL `<res bitsPerSample>` renderer silent-decline class the
+`!IsDSD` co-gate exists for). `duration` is exact, derived from the DST
+chunk's `FRTE` header (`numFrames / frameRateHz`, always 75 frames/s)
+without decoding anything; uncompressed DFF likewise gains `duration`
+(net-new in v1.10) from the declared `DSD ` payload size + `CHNL` +
+`FS`.
+
+Serving is unchanged and bit-exact: `/v1/download` + the DLNA
+`/dlna/file/...` handler ship DST `.dff` bytes verbatim (a DST-capable
+renderer decodes for itself). The bridge's analysis pipeline keeps its
+DSD exclusion — DST is skipped by the same `.dff` extension gate as
+uncompressed DSDIFF.
+
 ### `POST /v1/upscale` (additive, since v1.2)
 
 Hands a track or folder to the long-lived transcode worker pool inside `bridge serve` for offline PCM upscaling. Companion to the CLI `bridge upscale` command — same engine, different lifetime.
