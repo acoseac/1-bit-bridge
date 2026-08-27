@@ -204,7 +204,17 @@ var Ext = map[string]bool{
 // version-stale diff-guard, and already-cached oversized JPEG covers
 // are handled by RunArtworkRescaleOnce, not this re-extract (the
 // stampLocalArtwork Stat hit skips them here).
-const ExtractorVersion = 4
+//
+// v5 (DST typing + all-DFF duration, docs/DSTFeasibility.md §5/§6):
+// DST-compressed DSDIFF rows now stamp SampleRate/IsDSD/BitsPerSample
+// + the additive `Compression = "DST"` wire discriminator + Duration
+// from FRTE, and EVERY DFF (compressed or not) gains Channels (CHNL)
+// + Duration (net-new — the extractor never computed DFF duration
+// before). The bump re-extracts existing DFF rows once so
+// already-scanned SACD rips re-serve typed; iOS's delta sync then
+// updates its rows through the same upsert chokepoint that maps
+// `compression == "DST"` onto its canonical DST codec marker.
+const ExtractorVersion = 5
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -1802,13 +1812,25 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 // doesn't recognize the container at all. Path-derived defaults +
 // future enrichment fill in the rest.
 //
-// Compression handling: only `DSD ` (uncompressed) is supported by the
-// iOS player. `DST ` (Direct Stream Transfer) is the lossless DSD
-// compressor used in some SACD rips; iOS would refuse to play it. We
-// log + return without populating IsDSD/SampleRate so iOS-side surface
-// classifies the row as "an unknown audio file" rather than "a DSD
-// track that fails to load". Codec stays "DFF" so `TrackQualityChip`
-// still renders something sensible.
+// Compression handling (docs/DSTFeasibility.md §5/§6 — the Mirror-PR
+// reversal of the PR #186 default-deny, both sides in one release so a
+// file types identically regardless of source): `DSD ` (uncompressed)
+// stamps as before, and `DST ` (Direct Stream Transfer, the lossless
+// SACD compressor) is now TYPED too — SampleRate + IsDSD +
+// BitsPerSample stamped TOGETHER (the DIDL `<res>` `!IsDSD` co-gate
+// must never observe a half-stamped row — the PR #563 renderer
+// silent-decline class), plus the additive `Compression = "DST"` wire
+// discriminator (Codec stays "DFF" for both) and an exact Duration
+// from the DST chunk's FRTE header. iOS maps `compression == "DST"`
+// onto its canonical DST codec marker and refuses playback with an
+// honest pre-flight error until its decoder ships. UNKNOWN CMPR
+// FOURCCs keep the default-deny (row classifies as unknown audio).
+//
+// Duration is stamped for BOTH DFF shapes (net-new for all DFF — the
+// extractor never computed it before): DST from `FRTE`
+// (numFrames / frameRate), uncompressed from the declared `DSD ` chunk
+// size (`bytes × 8 / (channels × rate)`, needing the newly-parsed
+// `CHNL` count). Channels stamp whenever CHNL is present.
 func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	t.Codec = "DFF"
 
@@ -1833,24 +1855,53 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		return fmt.Errorf("dff: not a DSDIFF DSD form (got %q)", frm8[12:16])
 	}
 
-	// Walk top-level chunks looking for PROP and DIIN. Each chunk: 4
-	// bytes FOURCC, 8 bytes BE size, payload, then a single pad byte
-	// if size is odd (DSDIFF / IFF chunk-pad rule). The DSD audio
-	// chunk holds the actual samples — for high-resolution DSD256+
-	// stereo this routinely exceeds 1 GiB. We don't allocate for it
-	// (we just Seek past), so no sanity limit is needed at the outer
-	// walk; only the PROP / DIIN body allocations have size caps.
+	// Walk top-level chunks looking for PROP, the sound chunk and DIIN.
+	// Each chunk: 4 bytes FOURCC, 8 bytes BE size, payload, then a
+	// single pad byte if size is odd (DSDIFF / IFF chunk-pad rule). The
+	// DSD audio chunk holds the actual samples — for high-resolution
+	// DSD256+ stereo this routinely exceeds 1 GiB. We don't allocate
+	// for it (we just Seek past), so no sanity limit is needed at the
+	// outer walk; only the PROP / DIIN body allocations have size caps.
 	//
 	// Chunk ORDER in DSDIFF is FRM8 → FVER → PROP → DSD → DIIN (DIIN
 	// typically follows the audio payload per the spec). The walker
 	// continues past every recognised chunk until EOF so DIIN is
 	// reached regardless of where it lands.
+	//
+	// Format stamps COMMIT AT THE EOF TERMINATOR, not inside the PROP
+	// case — the duration inputs (the `DSD ` chunk's declared size, the
+	// `DST ` chunk's FRTE header) arrive AFTER PROP in the walk, and
+	// committing everything in one place is what keeps the
+	// SampleRate/IsDSD/BitsPerSample trio atomic per the docblock. A
+	// malformed file that errors mid-walk therefore stamps nothing
+	// beyond Codec — strictly more honest than the old inline commit
+	// (don't stamp a file we errored on).
+	// Physical file size — the truncation bound for the uncompressed
+	// duration: `Seek` happily lands past EOF, so a truncated file
+	// declaring a large `DSD ` payload would otherwise get a duration
+	// for audio bytes that don't exist (CodeRabbit on the DST PR). A
+	// Stat failure leaves the bound at 0 = unknown, and an UNKNOWN bound
+	// fails OPEN (the fit check is skipped; typing and duration both
+	// land) — parity with the iOS `DFFHeadScan.typeStamp(fileSizeBound:
+	// nil)` semantics. In practice Stat on an open handle doesn't fail,
+	// and a genuinely empty file EOFs the walk before any DSD chunk.
+	var physicalSize uint64
+	if fi, statErr := f.Stat(); statErr == nil && fi.Size() > 0 {
+		physicalSize = uint64(fi.Size())
+	}
+	var (
+		prop  dffPropInfo
+		sound dffSoundInfo
+	)
+	sound.physicalSize = physicalSize
 	for {
 		var chunkHeader [12]byte
 		if _, err := io.ReadFull(f, chunkHeader[:]); err != nil {
 			// EOF — normal terminator regardless of whether we found
-			// PROP / DIIN. Codec already stamped.
+			// PROP / DIIN. Codec already stamped; the format stamps
+			// commit here from everything the walk gathered.
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				applyDFFStamps(t, absPath, prop, sound)
 				if ec != nil && ec.ArtworkCacheDir != "" {
 					extractLocalArtwork(absPath, t, nil, ec)
 				}
@@ -1910,10 +1961,7 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 				continue
 			}
-			if dstCompressed := parsePropChunks(body[4:], t); dstCompressed {
-				scanLogger.Warn("dff: DST-compressed DSDIFF not supported; skipping format stamp",
-					"path", absPath)
-			}
+			prop = parsePropChunks(body[4:])
 			// Pad byte after odd-size payload — the body slice already
 			// consumed `size` bytes, but the file cursor needs a pad
 			// advance to stay aligned for the next chunk.
@@ -1960,6 +2008,57 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				if _, err := f.Seek(1, io.SeekCurrent); err != nil {
 					return fmt.Errorf("dff: DIIN pad seek: %w", err)
 				}
+			}
+		case "DSD ":
+			// Uncompressed audio chunk — capture the declared payload
+			// size (the duration input: interleaved byte count) AND
+			// the payload's file offset (the fit check needs
+			// `offset + size <= physicalSize`, not size alone — a file
+			// truncated after the payload START but before its
+			// declared END would otherwise stamp a duration for audio
+			// that isn't there; CodeRabbit round 2, mirrored on the
+			// iOS `DFFHeadScan`). Then seek past exactly like the
+			// default arm. The payload is never read.
+			sound.dsdSize = size
+			sound.haveDSD = true
+			if pos, posErr := f.Seek(0, io.SeekCurrent); posErr == nil && pos > 0 {
+				sound.dsdPayloadOffset = uint64(pos)
+			}
+			skip, err := safeSeekSkip(size)
+			if err != nil {
+				return fmt.Errorf("dff: DSD chunk unsafe to skip: %w", err)
+			}
+			if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+				return fmt.Errorf("dff: seek past DSD chunk: %w", err)
+			}
+		case "DST ":
+			// DST Sound Data chunk — its FIRST nested chunk is FRTE
+			// (DST Frame Information: u32 numFrames + u16 frameRate,
+			// 6 bytes) per DSDIFF 1.5, which gives the EXACT duration
+			// without decoding anything. Read the 18 bytes (12-byte
+			// nested header + 6 payload) only when the declared chunk
+			// size can hold them, then seek past the remainder (the
+			// compressed audio frames) — the same skip math as the
+			// default arm, minus what was consumed.
+			skip, err := safeSeekSkip(size)
+			if err != nil {
+				return fmt.Errorf("dff: DST chunk unsafe to skip: %w", err)
+			}
+			var consumed int64
+			if size >= 18 {
+				var frte [18]byte
+				if _, err := io.ReadFull(f, frte[:]); err != nil {
+					return fmt.Errorf("dff: DST FRTE read: %w", err)
+				}
+				consumed = 18
+				if string(frte[0:4]) == "FRTE" && be64(frte[4:12]) >= 6 {
+					sound.dstFrames = be32(frte[12:16])
+					sound.dstFrameRate = be16(frte[16:18])
+					sound.haveFRTE = true
+				}
+			}
+			if _, err := f.Seek(skip-consumed, io.SeekCurrent); err != nil {
+				return fmt.Errorf("dff: seek past DST chunk: %w", err)
 			}
 		default:
 			// Skip the chunk payload + odd-byte pad. Real DSD audio
@@ -2125,13 +2224,34 @@ func readDIINPString(payload []byte, fourcc, absPath string) (string, bool) {
 // compression was confirmed as "DSD ". Chunk-walking errors aren't
 // surfaced because PROP is well-bounded by its parent and partial
 // reads stay inside the buffer.
-func parsePropChunks(body []byte, t *Track) (dstCompressed bool) {
-	var (
-		haveFS         bool
-		fsRate         uint32
-		haveCMPR       bool
-		isUncompressed bool
-	)
+// dffCompression classifies the PROP `CMPR` chunk. `Absent` is
+// spec-legal (DSDIFF 1.5 allows omission — treat as uncompressed);
+// `Unknown` is any FOURCC that is neither "DSD " nor "DST " and keeps
+// the default-deny (future/unknown variants stay untyped).
+type dffCompression int
+
+const (
+	dffCompressionAbsent dffCompression = iota
+	dffCompressionUncompressed
+	dffCompressionDST
+	dffCompressionUnknown
+)
+
+// dffPropInfo carries what the PROP walk gathered; the commit policy
+// over it (plus the sound-chunk facts) lives in applyDFFStamps —
+// gathered here, committed at the walk's EOF terminator, mirroring the
+// iOS `DFFHeadScan.Result` / `typeStamp` split so the two sides can't
+// drift on the commit rules.
+type dffPropInfo struct {
+	fsRate      uint32
+	haveFS      bool
+	channels    int
+	haveCHNL    bool
+	compression dffCompression
+}
+
+func parsePropChunks(body []byte) dffPropInfo {
+	info := dffPropInfo{compression: dffCompressionAbsent}
 	for len(body) >= 12 {
 		fourcc := string(body[0:4])
 		size := be64(body[4:12])
@@ -2144,21 +2264,29 @@ func parsePropChunks(body []byte, t *Track) (dstCompressed bool) {
 		switch fourcc {
 		case "FS  ":
 			if len(payload) >= 4 {
-				fsRate = be32(payload[0:4])
-				haveFS = true
+				info.fsRate = be32(payload[0:4])
+				info.haveFS = true
+			}
+		case "CHNL":
+			// CHNL payload: u16 BE channel count + one 4-byte channel
+			// ID per channel. Only the count is needed (the duration
+			// math + the DLNA `nrAudioChannels` attribute).
+			if len(payload) >= 2 {
+				info.channels = int(be16(payload[0:2]))
+				info.haveCHNL = true
 			}
 		case "CMPR":
 			// CMPR payload: 4 bytes compression FOURCC + variable-
 			// length compression name. "DSD " = uncompressed,
 			// "DST " = DST compressed, anything else = unknown.
 			if len(payload) >= 4 {
-				haveCMPR = true
-				compression := string(payload[0:4])
-				switch compression {
+				switch string(payload[0:4]) {
 				case "DSD ":
-					isUncompressed = true
+					info.compression = dffCompressionUncompressed
 				case "DST ":
-					dstCompressed = true
+					info.compression = dffCompressionDST
+				default:
+					info.compression = dffCompressionUnknown
 				}
 			}
 		}
@@ -2174,26 +2302,130 @@ func parsePropChunks(body []byte, t *Track) (dstCompressed bool) {
 		}
 		body = body[advance:]
 	}
-	// Commit DSD stamps only when (a) FS was present, AND (b) CMPR
-	// was either absent (DSDIFF spec allows omission, treat as
-	// uncompressed) OR explicitly "DSD ". This keeps unknown CMPR
-	// FOURCCs (DST and any future variant) out of the playable-DSD
-	// classification path.
-	if haveFS && fsRate > 0 && (!haveCMPR || isUncompressed) {
-		rate := float64(fsRate)
+	return info
+}
+
+// dffSoundInfo bundles what the DFF walk gathered from the sound
+// chunks plus the physical-size bound — the trailing-scalar parameters
+// applyDFFStamps used to take positionally (CodeRabbit on the DST PR:
+// six same-typed trailing scalars are a call-site transposition
+// hazard; the struct names each fact once).
+type dffSoundInfo struct {
+	// Uncompressed `DSD ` chunk: declared interleaved payload byte
+	// count + the payload's file offset (0 = unknown; a real payload
+	// never starts at 0 — the FRM8 header precedes it).
+	dsdSize          uint64
+	dsdPayloadOffset uint64
+	haveDSD          bool
+	// DST `FRTE` header: frame count + frames/s.
+	dstFrames    uint32
+	dstFrameRate uint16
+	haveFRTE     bool
+	// On-disk byte count (0 = unknown → the fit check fails OPEN,
+	// parity with iOS `fileSizeBound: nil`).
+	physicalSize uint64
+}
+
+// payloadFits reports whether the declared `DSD ` payload physically
+// fits inside the file: offset + size <= physicalSize, overflow-safe.
+// Unknown bound (0) fails OPEN; unknown offset (0) fails CLOSED — an
+// unverifiable fit must not stamp a duration (iOS `DFFHeadScan`
+// applies the identical rule).
+func (s dffSoundInfo) payloadFits() bool {
+	if s.physicalSize == 0 {
+		return true
+	}
+	if s.dsdPayloadOffset == 0 {
+		return false
+	}
+	if s.dsdPayloadOffset > s.physicalSize {
+		return false
+	}
+	return s.dsdSize <= s.physicalSize-s.dsdPayloadOffset
+}
+
+// dffMaxPlausibleDurationSeconds caps a derived duration — a forged
+// `DSD ` chunk size or FRTE frame count must not stamp an absurd value.
+// A week (no real DSD track approaches it); at or past the ceiling the
+// Duration stays nil (honest absence beats garbage). Mirrors the iOS
+// `DFFHeadScan.maxPlausibleDurationSeconds` constant.
+const dffMaxPlausibleDurationSeconds = 604_800.0
+
+// applyDFFStamps is the single commit policy over everything the DFF
+// walk gathered — called once, at the EOF terminator. Truth table
+// (mirrors iOS `DFFHeadScan.typeStamp`, the Mirror-PR lockstep):
+//
+//   - no usable FS            → nothing (matches the old gate)
+//   - CMPR unknown variant    → nothing (default-deny PRESERVED)
+//   - CMPR absent / "DSD "    → SampleRate + IsDSD + bits + Channels +
+//     Duration from the declared DSD payload (bytes × 8 / (ch × rate))
+//   - CMPR "DST "             → the same trio stamped TOGETHER (the
+//     DIDL !IsDSD co-gate must never see a half-stamped row) +
+//     Compression = "DST" + Channels + Duration from FRTE
+//
+// Duration math runs in float64 throughout — `dsdSize × 8` in integer
+// space could overflow uint64 on a forged header; float math cannot
+// trap, and implausible results (non-finite, ≤ 0, ≥ a week) stamp
+// nothing.
+// sound.physicalSize is the on-disk byte count (0 = unknown): a
+// declared `DSD ` payload that does not FIT inside the file
+// (payload offset + declared size > on-disk bytes, overflow-safe —
+// size alone would pass a file truncated after the payload start)
+// stamps NO duration; typing still lands. The same bound the iOS
+// `DFFHeadScan.typeStamp(from:fileSizeBound:)` applies (Mirror
+// parity).
+func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
+	sound dffSoundInfo) {
+	if !prop.haveFS || prop.fsRate == 0 {
+		return
+	}
+	stampFormat := func() {
+		rate := float64(prop.fsRate)
 		t.SampleRate = &rate
 		isDSD := true
 		t.IsDSD = &isDSD
 		// `t.Codec` is stamped as "DFF" at the top of
-		// extractDFFWithContext, before this function is called —
-		// the lossy-codec gate sees the authoritative value (DFF is
-		// lossless → gate allows the bits write).
+		// extractDFFWithContext — the lossy-codec gate sees the
+		// authoritative value (DFF is lossless → bits write allowed).
 		if canSetBitsPerSample(t.Codec) {
 			bits := 1
 			t.BitsPerSample = &bits
 		}
+		if prop.haveCHNL && prop.channels > 0 {
+			ch := prop.channels
+			t.Channels = &ch
+		}
 	}
-	return dstCompressed
+	setDuration := func(d float64) {
+		if d > 0 && d < dffMaxPlausibleDurationSeconds && !math.IsInf(d, 0) && !math.IsNaN(d) {
+			t.Duration = &d
+		}
+	}
+	switch prop.compression {
+	case dffCompressionAbsent, dffCompressionUncompressed:
+		stampFormat()
+		if sound.haveDSD && sound.dsdSize > 0 &&
+			sound.payloadFits() &&
+			prop.haveCHNL && prop.channels > 0 {
+			setDuration(float64(sound.dsdSize) * 8.0 /
+				(float64(prop.channels) * float64(prop.fsRate)))
+		}
+	case dffCompressionDST:
+		stampFormat()
+		t.Compression = "DST"
+		if sound.haveFRTE && sound.dstFrames > 0 && sound.dstFrameRate > 0 {
+			setDuration(float64(sound.dstFrames) / float64(sound.dstFrameRate))
+		}
+		scanLogger.Info("dff: DST-compressed DSDIFF — typed as DST (playback needs the DST decoder)",
+			"path", absPath)
+	case dffCompressionUnknown:
+		// Default-deny: unknown compression variants stay untyped so
+		// clients classify the row as unknown audio rather than DSD
+		// that fails to load (the PR #186 contract, now scoped to
+		// genuinely-unknown FOURCCs only).
+		scanLogger.Warn("dff: unknown CMPR compression; skipping format stamp",
+			"path", absPath)
+	}
 }
 
 // extractLocalArtwork stamps t.ArtworkMBID with `local-<sha256>` when
@@ -2504,6 +2736,8 @@ func le64(b []byte) uint64 { return binary.LittleEndian.Uint64(b) }
 
 // DSDIFF (DFF) chunks use big-endian sizes (IFF/AIFF dialect), unlike
 // DSF's little-endian header. Kept narrowly scoped to extractor needs.
+func be16(b []byte) uint16 { return binary.BigEndian.Uint16(b) }
+
 func be32(b []byte) uint32 { return binary.BigEndian.Uint32(b) }
 
 func be64(b []byte) uint64 { return binary.BigEndian.Uint64(b) }

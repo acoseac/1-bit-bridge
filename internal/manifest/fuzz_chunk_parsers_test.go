@@ -66,8 +66,11 @@ func FuzzParseDIINChunks(f *testing.F) {
 
 func FuzzParsePropChunks(f *testing.F) {
 	f.Add([]byte("FS  \x00\x00\x00\x00\x00\x00\x00\x04\x00\x2B\x11\x00"))
+	// CHNL + CMPR("DST ") seeds so the gather-only rewrite's new arms
+	// stay in the fuzz corpus.
+	f.Add([]byte("CHNL\x00\x00\x00\x00\x00\x00\x00\x02\x00\x02"))
+	f.Add([]byte("CMPR\x00\x00\x00\x00\x00\x00\x00\x05DST \x00\x00"))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		var tr Track
-		_ = parsePropChunks(b, &tr)
+		_ = parsePropChunks(b)
 	})
 }
