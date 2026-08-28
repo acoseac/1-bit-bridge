@@ -2206,6 +2206,88 @@ of them. For anything with no data on a dev box, a `_`-prefixed seeder
 (invisible to `./...`) writing through `internal/manifest` is the cheapest way
 to get a page that renders something.
 
+### Settings apply live where it is structurally sane; the rest is reported PER FIELD (2026-08-28)
+
+`PATCH /api/settings` used to answer with one blanket `restartRequired` boolean.
+Sixteen of twenty-six fields now apply live, and every supplied field reports its
+own outcome. **The field → apply-semantics matrix lives in
+`ops/settings-apply-semantics.md`** and is the contract the planned cloud control
+plane reads; `TestMatrixDocMatchesWhatTheHandlerReports` drives the real handler
+for every row in it, so the doc cannot silently drift from the code the way the
+WAV/AIFF extractor claim above did.
+
+Admin-only throughout: no `/v1` wire-shape change, `ProtocolVersion` untouched.
+The `/v1/health.features` CONTENT does change mid-process now (that is the point
+of a live feature gate), which is allowed and observable to iOS — it is not a
+shape change and needs no mirror.
+
+**Four rules a future change must not undo:**
+
+1. **Never split a field's halves.** Either EVERY consumer of a config field
+   reads it live, or every consumer takes it at boot. Hot-applying a cheap struct
+   field while reporting `restart` makes `/v1/health` advertise a capability in
+   the same breath the settings response calls the change pending. This is why
+   there is no `partial` status — the rule removes the case instead of naming it,
+   and it is why `atlasEnabled` stays wholly boot-bound (an API field it could
+   convert in a line, plus a file-backed harvest state store it cannot).
+   `TestSmartPlaylistsHealthFlagAndEndpointMoveTogether` is the pin.
+2. **When a change cannot take effect, say so.** The rule `autoOptimizeEnabled`
+   established, generalised: `reason` is populated exactly when the OUTCOME
+   depended on THIS bridge's runtime state — no sweeper wired (`restart` +
+   reason), or applied-but-inert like `fingerprintEnabled` on a host without
+   fpcalc (`live` + reason, because a restart would change nothing). NOT for
+   "listeners bind once", which is true everywhere; twenty near-identical strings
+   is how the two that carry information get skipped. The verdict is computed
+   INSIDE the `CfgHolder.Update` closure and never derived afterwards from a
+   static table — a table cannot see this bridge's wiring.
+3. **A cadence provider needs a rearm, or `live` is a lie.** Every loop reads a
+   `func() time.Duration` before each wait (a timer per iteration, not a ticker —
+   a ticker cannot change period), and `Deps.TriggerCadenceRearm` wakes them on
+   change. Without it, a shortened 6 h interval is not read until the old one
+   elapses, which is indistinguishable from being ignored. **The rearm is NOT a
+   work-nudge** — it re-reads the schedule and never runs the work — and it fires
+   only on an actual change, because it restarts the wait. `interval() <= 0`
+   PARKS a loop rather than ending it, and the backup ticker is started
+   unconditionally; the old early-return made "disabled" terminal for the process
+   so `0 → N` had no loop alive to notice.
+4. **The enrich pacing travels with the base URL.** `MinInterval()` re-derives
+   from the same live value. A live base with a frozen interval is the one
+   mistake here that reaches a third party: clearing the mirror URL starts
+   calling public MusicBrainz at the self-hosted 150 ms, ~6.7 rps against a
+   service that asks anonymous clients for one. The base/interval straddle is
+   safe by construction — the gap is measured since the last request to the OLD
+   host, so the new one sees its first request with no prior traffic.
+
+**The split that made the feature gates convertible:** WIRED (a boot fact — the
+pool exists, the toolchain is present) vs ACTIVE (the operator's toggle). Wire
+the subsystem unconditionally, gate it on ONE shared live predicate read by every
+consumer. Three copies of the same gates is how a card claims "active" while
+every sweep short-circuits. A disabled pass records NO status — a "last run"
+timestamp for work that never happened is worse than a stale card.
+
+**Deliberately left restart-bound, don't "finish the job":** the transcode and
+analyze pools (enqueue-under-lock / Stop ordering / publisher drain — the
+invariants that produced live panics), the fsnotify watcher (its `scanWG` /
+`closing` drain guards a SQLite-corruption vector, and that drain's test was once
+VACUOUS), DLNA (a cloud tenant has no LAN), and the two listener binds. Reopen
+the watcher only if tenants mount storage after boot.
+
+**`updateAutoInstall` is symmetric on purpose.** An asymmetry hot-applying only
+the OFF direction was considered and rejected as a hidden state machine. The ON
+direction cannot surprise anyone: `maybeAutoInstall` runs ONLY from the poll loop
+(never the admin "Check now" path), the cadence floor is 1 h with a 6 h default,
+and the install still clears quiet-hours and the in-flight sessions gate —
+re-checked AFTER the download. The install opts + restart callback are now wired
+unconditionally; they are inert unless the gate is on, and boot-gating them was
+what would have made the toggle a lie.
+
+**Process note worth keeping:** the badge-parity test added in the first PR
+(`TestTrayBadgesAgreeWithWhatTheServerReports` — UI badge vs what the SERVER
+reports, not the older two-predictions-agree test) caught all eight stale
+`restart` badges as the fields converted, across three PRs, with no manual sweep.
+When converting a field, expect it to fail and drop the badge; that is the
+mechanism working.
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future
