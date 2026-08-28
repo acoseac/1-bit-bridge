@@ -2082,7 +2082,12 @@ function fieldsNeedingRestart(resp) {
   // Sorted so the same set of edits always reads the same way; an
   // object's key order is insertion-dependent and would otherwise shuffle
   // between saves for no reason the operator can see.
-  out.sort();
+  //
+  // With an explicit comparator, not the default: a bare sort() coerces to
+  // string and orders by UTF-16 code unit, which is a trap the moment the
+  // array holds anything but ASCII. These are field names today, so the
+  // two agree — the comparator is what keeps that from being load-bearing.
+  out.sort((a, b) => a.localeCompare(b));
   // A bridge too old to send `fields` still sets the boolean.
   if (!out.length && resp && resp.restartRequired) return ["some settings"];
   return out;
