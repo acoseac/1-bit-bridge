@@ -2286,8 +2286,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// Upstream metadata/cover-art roots are configurable (default public
 	// MusicBrainz / Cover Art Archive). Point cfg.Enrich.* at a self-hosted
 	// 1-bit-atlas mirror to keep enrichment on your own network.
-	mbClient := enrich.NewMusicBrainzClient(cfg.Enrich.MusicBrainzBaseURL, userAgent, nil)
-	caaClient := enrich.NewCoverArtClient(cfg.Enrich.CoverArtBaseURL, userAgent, nil)
+	// Live base URLs: the operator can repoint enrichment at (or away
+	// from) a self-hosted Atlas mirror without a restart. The politeness
+	// pacing re-derives from the same live value inside the clients —
+	// see WithLiveBase, and note that a frozen interval pointed at a
+	// changed host is the one mistake here that reaches a third party.
+	mbClient := enrich.NewMusicBrainzClient(cfg.Enrich.MusicBrainzBaseURL, userAgent, nil).
+		WithLiveBase(func() string { return liveCfg().Enrich.MusicBrainzBaseURL })
+	caaClient := enrich.NewCoverArtClient(cfg.Enrich.CoverArtBaseURL, userAgent, nil).
+		WithLiveBase(func() string { return liveCfg().Enrich.CoverArtBaseURL })
 	deezerClient := enrich.NewDeezerClient("", userAgent, nil)
 	// Phase-H harvest credential store, opened early so the enricher can wire
 	// the Phase-B authenticated premium-cover fetcher BEFORE its worker

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,9 @@ type CoverArtClient struct {
 	// minInterval is the politeness pacing the ENRICHER must apply before
 	// each call, derived from base at construction — see pacing.go.
 	minInterval time.Duration
+	// liveBase, when non-nil, supersedes base and is read per use — see
+	// WithLiveBase. The pacing re-derives from it too.
+	liveBase func() string
 }
 
 // NewCoverArtClient constructs a client.
@@ -58,7 +62,12 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 // MinInterval is the pacing the caller should sleep between requests:
 // PublicCAAMinInterval against coverartarchive.org, SelfHostedMinInterval
 // against an operator's own mirror. See pacing.go.
-func (c *CoverArtClient) MinInterval() time.Duration { return c.minInterval }
+func (c *CoverArtClient) MinInterval() time.Duration {
+	if c.liveBase != nil {
+		return minIntervalForBase(c.resolveBase(), PublicCAAMinInterval, publicCAAHosts)
+	}
+	return c.minInterval
+}
 
 // MaxCoverArtBytes caps individual cover-art body reads. 20 MB is
 // generous — the largest 1200×1200 JPEG observed in the wild is
@@ -82,7 +91,7 @@ func (c *CoverArtClient) FetchReleaseFront(ctx context.Context, mbid string, siz
 	if !validSize(size) {
 		return nil, fmt.Errorf("coverart: unsupported size %d, want one of %v", size, SupportedCoverSizes)
 	}
-	u := fmt.Sprintf("%s/release/%s/front-%d", c.base, mbid, size)
+	u := fmt.Sprintf("%s/release/%s/front-%d", c.resolveBase(), mbid, size)
 	return c.fetch(ctx, u)
 }
 
@@ -96,7 +105,7 @@ func (c *CoverArtClient) FetchReleaseGroupFront(ctx context.Context, rgMBID stri
 	if !validSize(size) {
 		return nil, fmt.Errorf("coverart: unsupported size %d", size)
 	}
-	u := fmt.Sprintf("%s/release-group/%s/front-%d", c.base, rgMBID, size)
+	u := fmt.Sprintf("%s/release-group/%s/front-%d", c.resolveBase(), rgMBID, size)
 	return c.fetch(ctx, u)
 }
 
@@ -113,7 +122,7 @@ func (c *CoverArtClient) FetchReleaseFrontStream(ctx context.Context, mbid strin
 	if !validSize(size) {
 		return nil, fmt.Errorf("coverart: unsupported size %d, want one of %v", size, SupportedCoverSizes)
 	}
-	u := fmt.Sprintf("%s/release/%s/front-%d", c.base, mbid, size)
+	u := fmt.Sprintf("%s/release/%s/front-%d", c.resolveBase(), mbid, size)
 	return c.fetchStream(ctx, u)
 }
 
@@ -126,7 +135,7 @@ func (c *CoverArtClient) FetchReleaseGroupFrontStream(ctx context.Context, rgMBI
 	if !validSize(size) {
 		return nil, fmt.Errorf("coverart: unsupported size %d", size)
 	}
-	u := fmt.Sprintf("%s/release-group/%s/front-%d", c.base, rgMBID, size)
+	u := fmt.Sprintf("%s/release-group/%s/front-%d", c.resolveBase(), rgMBID, size)
 	return c.fetchStream(ctx, u)
 }
 
@@ -190,4 +199,42 @@ func ParseSize(s string) (int, error) {
 		return 0, fmt.Errorf("size %d unsupported (allowed: %v)", n, SupportedCoverSizes)
 	}
 	return n, nil
+}
+
+// WithLiveBase attaches a provider consulted per use instead of the base
+// URL captured at construction, so `enrich.coverArtBaseURL` applies
+// without a restart.
+//
+// **The pacing travels with it.** MinInterval re-derives from the same
+// live value, because the politeness contract is with a HOST, not with a
+// client instance: a live base whose interval stayed frozen at the
+// self-hosted 150ms would start hammering public Cover Art Archive at ~6.7 rps
+// the moment an operator cleared the mirror URL. That is the one mistake
+// in this file that reaches a third party.
+//
+// Base and interval are read separately, and a change can land between
+// the two. That is safe by construction rather than by luck: the pacing
+// gap is measured since the last request to the OLD host, so the first
+// request to the NEW one arrives with no prior traffic to it at all, and
+// every request after it is paced by the new host's own interval. The
+// worst case is a single request that waited longer or shorter than the
+// new host requires while that host has seen nothing.
+//
+// An empty or whitespace-only live value falls back to the constructed
+// base, so a cleared config resolves to the public default rather than to
+// a broken empty-prefix URL. Nil keeps the captured base entirely, which
+// is what every caller other than the serve path wants.
+func (c *CoverArtClient) WithLiveBase(f func() string) *CoverArtClient {
+	c.liveBase = f
+	return c
+}
+
+// resolveBase returns the base URL to use right now.
+func (c *CoverArtClient) resolveBase() string {
+	if c.liveBase != nil {
+		if v := strings.TrimRight(strings.TrimSpace(c.liveBase()), "/"); v != "" {
+			return v
+		}
+	}
+	return c.base
 }

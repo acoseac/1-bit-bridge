@@ -52,6 +52,9 @@ type MusicBrainzClient struct {
 	// than on the Enricher so it can never drift out of sync with the host
 	// it protects — see pacing.go.
 	minInterval time.Duration
+	// liveBase, when non-nil, supersedes base and is read per use — see
+	// WithLiveBase. The pacing re-derives from it too.
+	liveBase func() string
 }
 
 // NewMusicBrainzClient constructs a client. userAgent MUST be set to
@@ -76,7 +79,12 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 // MinInterval is the pacing the caller should sleep between requests:
 // PublicMBMinInterval against musicbrainz.org, SelfHostedMinInterval against an
 // operator's own mirror. See pacing.go.
-func (c *MusicBrainzClient) MinInterval() time.Duration { return c.minInterval }
+func (c *MusicBrainzClient) MinInterval() time.Duration {
+	if c.liveBase != nil {
+		return minIntervalForBase(c.resolveBase(), PublicMBMinInterval, publicMBHosts)
+	}
+	return c.minInterval
+}
 
 // Candidate-window sizes. Named so the docstrings can't go stale against
 // them the way "MB returns up to 25 candidates" did while the code asked
@@ -120,7 +128,7 @@ func (c *MusicBrainzClient) SearchRelease(ctx context.Context, artist, album str
 	}
 
 	q := fmt.Sprintf(`release:"%s" AND artist:"%s"`, escapeLucene(album), escapeLucene(artist))
-	u := fmt.Sprintf("%s/release/?query=%s&fmt=json&limit=%d", c.base, url.QueryEscape(q), releaseSearchLimit)
+	u := fmt.Sprintf("%s/release/?query=%s&fmt=json&limit=%d", c.resolveBase(), url.QueryEscape(q), releaseSearchLimit)
 
 	var body releaseSearchResponse
 	if err := c.get(ctx, u, &body); err != nil {
@@ -150,7 +158,7 @@ func (c *MusicBrainzClient) ReleaseGroupMBID(ctx context.Context, releaseMBID st
 	if releaseMBID == "" {
 		return "", fmt.Errorf("musicbrainz: empty release mbid")
 	}
-	u := fmt.Sprintf("%s/release/%s?fmt=json&inc=release-groups", c.base, url.PathEscape(releaseMBID))
+	u := fmt.Sprintf("%s/release/%s?fmt=json&inc=release-groups", c.resolveBase(), url.PathEscape(releaseMBID))
 	var body releaseLookupResponse
 	if err := c.get(ctx, u, &body); err != nil {
 		return "", err
@@ -173,7 +181,7 @@ func (c *MusicBrainzClient) SearchArtist(ctx context.Context, artist string) (*S
 	// equality passes, the candidate WINDOW became the binding constraint: a
 	// correct low-scoring match (Zdob și Zdub at 57) can sit below several
 	// higher-scoring wrong ones and fall outside a 5-row window entirely.
-	u := fmt.Sprintf("%s/artist/?query=%s&fmt=json&limit=%d", c.base, url.QueryEscape(q), artistSearchLimit)
+	u := fmt.Sprintf("%s/artist/?query=%s&fmt=json&limit=%d", c.resolveBase(), url.QueryEscape(q), artistSearchLimit)
 
 	var body artistSearchResponse
 	if err := c.get(ctx, u, &body); err != nil {
@@ -772,4 +780,42 @@ func escapeLucene(s string) string {
 		b.WriteByte(c)
 	}
 	return b.String()
+}
+
+// WithLiveBase attaches a provider consulted per use instead of the base
+// URL captured at construction, so `enrich.musicbrainzBaseURL` applies
+// without a restart.
+//
+// **The pacing travels with it.** MinInterval re-derives from the same
+// live value, because the politeness contract is with a HOST, not with a
+// client instance: a live base whose interval stayed frozen at the
+// self-hosted 150ms would start hammering public MusicBrainz at ~6.7 rps
+// the moment an operator cleared the mirror URL. That is the one mistake
+// in this file that reaches a third party.
+//
+// Base and interval are read separately, and a change can land between
+// the two. That is safe by construction rather than by luck: the pacing
+// gap is measured since the last request to the OLD host, so the first
+// request to the NEW one arrives with no prior traffic to it at all, and
+// every request after it is paced by the new host's own interval. The
+// worst case is a single request that waited longer or shorter than the
+// new host requires while that host has seen nothing.
+//
+// An empty or whitespace-only live value falls back to the constructed
+// base, so a cleared config resolves to the public default rather than to
+// a broken empty-prefix URL. Nil keeps the captured base entirely, which
+// is what every caller other than the serve path wants.
+func (c *MusicBrainzClient) WithLiveBase(f func() string) *MusicBrainzClient {
+	c.liveBase = f
+	return c
+}
+
+// resolveBase returns the base URL to use right now.
+func (c *MusicBrainzClient) resolveBase() string {
+	if c.liveBase != nil {
+		if v := strings.TrimRight(strings.TrimSpace(c.liveBase()), "/"); v != "" {
+			return v
+		}
+	}
+	return c.base
 }

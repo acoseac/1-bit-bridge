@@ -522,7 +522,7 @@ func (e *Enricher) resolveAlbumFromAcoustic(ctx context.Context, t *manifest.Tra
 	// from MusicBrainz via AcoustID, and the album is either the operator's own
 	// title or a MusicBrainz release-group title. Retrying variations of an
 	// already-canonical query would only widen the candidate space.
-	if !sleepCtx(ctx, e.MBMinInterval) {
+	if !sleepCtx(ctx, e.mbMinInterval()) {
 		return "", "", ctx.Err()
 	}
 	res, err := e.mb.SearchRelease(ctx, m.ArtistName, album)
