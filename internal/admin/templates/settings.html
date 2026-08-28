@@ -107,7 +107,7 @@
       </p>
 
       <div class="field">
-        <label>Enrichment source <span class="badge warn">restart</span>
+        <label>Enrichment source
           <select name="enrichSource">
             <option value="musicbrainz" {{if eq .Data.EnrichSource "musicbrainz"}}selected{{end}}>MusicBrainz (public)</option>
             <option value="atlas" {{if eq .Data.EnrichSource "atlas"}}selected{{end}}>Atlas (self-hosted)</option>
@@ -171,7 +171,7 @@
         </label>
       </div>
       <div class="field">
-        <label>AcoustID application key <span class="badge warn">restart</span>
+        <label>AcoustID application key
           <input name="fingerprintApiKey" type="password" autocomplete="off"
                  placeholder="{{if .Data.FingerprintKeySet}}key on file — leave blank to keep it{{else}}paste a key from acoustid.org/new-application{{end}}">
         </label>
@@ -598,7 +598,7 @@
       </div>
 
       <div class="field">
-        <label>Quiet hours <span class="badge warn">restart</span>
+        <label>Quiet hours
           <input name="updateQuietHours" type="text" placeholder="HH:MM-HH:MM (optional)"
                  value="{{.Data.UpdateQuietHours}}" pattern="^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$">
         </label>

@@ -532,6 +532,20 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 		return 9, true
 	case "updateCheckIntervalHours":
 		return 3, true
+	// Strings. These three are Settings-page-only — no tray carries them —
+	// which is exactly why they went unchecked while their badges went
+	// stale. Omitting them here would leave the new page-scraping test
+	// skipping the fields it was written for.
+	case "updateQuietHours":
+		return "02:00-04:00", true
+	case "fingerprintApiKey":
+		// Non-blank: a blank submit is the documented no-op and reports
+		// `unchanged`, which the caller treats as "proves nothing".
+		return "probe-key-123", true
+	case "enrichMusicBrainzBaseURL":
+		return "https://mirror.example.test/ws/2", true
+	case "enrichCoverArtBaseURL":
+		return "https://mirror.example.test", true
 	}
 	return nil, false
 }
@@ -738,4 +752,124 @@ func TestFingerprintDegradedMessagesAreBounded(t *testing.T) {
 	if fingerprintDegradedMessage("fpcalc_missing") == fingerprintDegradedMessage("no_api_key") {
 		t.Error("the two known reasons must read differently — they need different fixes")
 	}
+}
+
+// uiOnlyControls maps a Settings-page control that is NOT a settingsPatch
+// field onto the field(s) it actually drives. Its badge has to agree with
+// theirs, since that is what the operator's click will change.
+var uiOnlyControls = map[string][]string{
+	// The enrichment-source picker is derived, not stored — it writes the
+	// two base URLs (see mapEnrichSourceToBases in app.js). There is
+	// deliberately no `enrich.source` config field, so nothing else
+	// connects this control to an apply semantic.
+	"enrichSource": {"enrichMusicBrainzBaseURL", "enrichCoverArtBaseURL"},
+}
+
+// TestSettingsPageBadgesAgreeWithWhatTheServerReports walks the SETTINGS
+// PAGE's own badges and checks each against what the handler reports.
+//
+// This is the direction the other two badge tests do not cover, and the
+// gap was real: both of them iterate TRAY rows and consult the Settings
+// page only for fields a tray happens to contain. A field that lives on
+// the Settings page alone — updateQuietHours, fingerprintApiKey, the
+// enrichment-source picker — was never visited by either, so all three
+// kept a stale `restart` badge through the conversion PRs and shipped to
+// production saying a change needed a bounce that it did not.
+//
+// Scraping the page rather than a hand-listed set is the point: a badge
+// added to a new field is checked automatically, which a list would not
+// be.
+func TestSettingsPageBadgesAgreeWithWhatTheServerReports(t *testing.T) {
+	html, err := os.ReadFile("templates/settings.html")
+	if err != nil {
+		t.Fatalf("read settings.html: %v", err)
+	}
+	page := string(html)
+
+	checked := 0
+	for _, field := range settingsPageFields(t, page) {
+		// A UI-only control inherits the semantics of what it writes.
+		probes, ok := uiOnlyControls[field]
+		if !ok {
+			probes = []string{field}
+		}
+		badge, rendered := settingsBadgeFor(page, field)
+		if !rendered {
+			continue
+		}
+
+		var values []any
+		for _, p := range probes {
+			v, ok := differentValueFor(t, p)
+			if !ok {
+				values = nil
+				break
+			}
+			values = append(values, v)
+		}
+		if values == nil {
+			continue // no mechanical "other value" for this one
+		}
+
+		t.Run(field, func(t *testing.T) {
+			srv, _, _ := newTestServer(t)
+			// The badge predicts the TYPICAL bridge, i.e. one where the
+			// feature's wiring is present.
+			srv.deps.TriggerAutoOptimizeSweep = func() bool { return true }
+			srv.deps.TriggerCadenceRearm = func() {}
+
+			body := map[string]any{}
+			for i, p := range probes {
+				body[p] = values[i]
+			}
+			var resp settingsPatchResponse
+			if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings", body, &resp); code != 200 {
+				t.Fatalf("patch %v: %d", body, code)
+			}
+			// A control that drives several fields needs a restart iff ANY
+			// of them does.
+			wantBadge := false
+			for _, p := range probes {
+				got, ok := resp.Fields[p]
+				if !ok {
+					t.Fatalf("%s absent from report", p)
+				}
+				if got.Status == applyUnchanged {
+					t.Fatalf("%s: differentValueFor produced the stored value, so this "+
+						"row proves nothing", p)
+				}
+				if got.Status == applyRestart {
+					wantBadge = true
+				}
+			}
+			if badge != wantBadge {
+				t.Errorf("Settings page badge for %q says restart=%v, server reports %v — "+
+					"the operator is being told the wrong thing about whether their change "+
+					"took effect", field, badge, wantBadge)
+			}
+		})
+		checked++
+	}
+	if checked < 8 {
+		t.Fatalf("only %d Settings-page fields exercised — the scrape has stopped working, "+
+			"so this test is checking almost nothing", checked)
+	}
+}
+
+// settingsPageFields returns every named form control on the Settings
+// page, in document order.
+func settingsPageFields(t *testing.T, page string) []string {
+	t.Helper()
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range regexp.MustCompile(`name="([A-Za-z][A-Za-z0-9]*)"`).FindAllStringSubmatch(page, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	if len(out) < 15 {
+		t.Fatalf("only %d named controls scraped — the regex has stopped matching", len(out))
+	}
+	return out
 }
