@@ -2298,9 +2298,22 @@ not by any test. `TestSettingsPageBadgesAgreeWithWhatTheServerReports` walks the
 PAGE's own controls and closes it. **A UI-only control inherits the semantics of
 what it writes** (`uiOnlyControls` maps `enrichSource` to the two enrich base
 URLs); there is deliberately no `enrich.source` config field, so nothing else
-connects that control to an apply semantic. Generalisable lesson: when two
-surfaces render the same setting, a test that walks ONE of them proves nothing
-about the other — walk each surface from its own side.
+connects that control to an apply semantic.
+
+**Then a THIRD surface: the description prose.** Apply semantics are stated in
+the badge, the hint text, AND the server's report. `optimizeEnabled` lost its
+badge when the field went live but kept a sentence reading "wired at startup, so
+a change takes effect after a restart" — the same wrong answer, moved somewhere
+nobody was checking, and a reader who trusts prose over a chip gets it.
+`TestSettingsProseDoesNotContradictTheBadge` flags any field whose hint claims a
+restart while its badge says otherwise. **Collapse whitespace before matching
+prose in this template** — hints wrap across lines, and the first version of that
+test passed against the very sentence it was written to catch because the phrase
+straddled a newline.
+
+Generalisable lesson: when several surfaces state the same fact, a test that
+walks ONE of them proves nothing about the others — walk each from its own side,
+and count the surfaces before assuming there are two.
 
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 

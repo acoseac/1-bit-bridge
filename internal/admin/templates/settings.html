@@ -234,8 +234,8 @@
           hi-res PCM so CarPlay / cellular streams start fast. On by default;
           only active while PCM upscaling (above) is enabled — the optimize
           pipeline shares its sox worker pool. Advertised to iOS on
-          <code>/v1/health</code>; wired at startup, so a change takes effect
-          after a restart.
+          <code>/v1/health</code>; applies immediately — the health flag, the
+          projection gate and the pre-generation sweeper all read it live.
         </small>
       </div>
 

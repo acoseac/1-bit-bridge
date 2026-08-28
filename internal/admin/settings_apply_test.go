@@ -873,3 +873,84 @@ func settingsPageFields(t *testing.T, page string) []string {
 	}
 	return out
 }
+
+// restartProseRe finds a description sentence claiming a change needs a
+// restart. Deliberately narrow — it matches the one phrasing the page
+// uses for that claim, not every sentence containing the word (the
+// updater's "atomic swap → restart" describes what the FEATURE does, and
+// the mDNS hint says the opposite).
+var restartProseRe = regexp.MustCompile(`takes effect after a restart|requires? a restart before`)
+
+// TestSettingsProseDoesNotContradictTheBadge closes the third surface.
+//
+// A setting's apply semantics are stated in THREE places on this page: the
+// badge, the description prose, and (indirectly) the server's own report.
+// The badge tests cover the first against the third. The prose was
+// unchecked — and it drifted: `optimizeEnabled` lost its badge when the
+// field went live but kept a sentence saying "wired at startup, so a
+// change takes effect after a restart", which is the same wrong answer the
+// badge had been giving, in a place nobody was looking.
+//
+// A reader who trusts prose over a chip gets the stale answer either way,
+// so the two have to agree.
+func TestSettingsProseDoesNotContradictTheBadge(t *testing.T) {
+	html, err := os.ReadFile("templates/settings.html")
+	if err != nil {
+		t.Fatalf("read settings.html: %v", err)
+	}
+	page := string(html)
+
+	checked := 0
+	for _, field := range settingsPageFields(t, page) {
+		badge, rendered := settingsBadgeFor(page, field)
+		if !rendered {
+			continue
+		}
+		hint := hintTextFor(page, field)
+		if hint == "" {
+			continue
+		}
+		// Collapse whitespace FIRST: the template wraps its hints across
+		// lines, so a claim can straddle a newline and slip past a naive
+		// match — which is exactly how the first version of this test
+		// passed against the stale prose it was written to catch.
+		claimsRestart := restartProseRe.MatchString(collapseWS(hint))
+		if claimsRestart && !badge {
+			t.Errorf("field %q: the description says a change takes effect after a restart, "+
+				"but it carries no restart badge — one of the two is stale, and a reader who "+
+				"trusts the prose gets the wrong answer", field)
+		}
+		checked++
+	}
+	if checked < 8 {
+		t.Fatalf("only %d fields with hints scraped — the scrape has stopped working", checked)
+	}
+}
+
+// hintTextFor returns the `<small class="hint">` that follows a field's
+// input, which is where the page puts its per-setting explanation.
+func hintTextFor(page, field string) string {
+	i := strings.Index(page, `name="`+field+`"`)
+	if i < 0 {
+		return ""
+	}
+	start := strings.Index(page[i:], `<small class="hint"`)
+	if start < 0 {
+		return ""
+	}
+	start += i
+	end := strings.Index(page[start:], "</small>")
+	if end < 0 {
+		return ""
+	}
+	// Stop at the NEXT field's input, so a field with no hint of its own
+	// cannot borrow its neighbour's.
+	if next := strings.Index(page[i+1:], `name="`); next >= 0 && i+1+next < start {
+		return ""
+	}
+	return page[start : start+end]
+}
+
+// collapseWS flattens runs of whitespace (including newlines) to single
+// spaces, so a phrase wrapped across template lines still matches.
+func collapseWS(s string) string { return strings.Join(strings.Fields(s), " ") }
