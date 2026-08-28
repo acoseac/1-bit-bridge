@@ -628,7 +628,7 @@ func buildArtistLadder(artist, albumArtist string) []string {
 func (e *Enricher) searchArtistWithFallbacks(ctx context.Context, attempts []string, t *manifest.Track) (*SearchResult, string, error) {
 	for i, name := range attempts {
 		// Pace EVERY rung — the politeness contract is per-request.
-		if !sleepCtx(ctx, e.MBMinInterval) {
+		if !sleepCtx(ctx, e.mbMinInterval()) {
 			return nil, "", ctx.Err()
 		}
 		res, err := e.mb.SearchArtist(ctx, name)

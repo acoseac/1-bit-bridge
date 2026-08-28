@@ -39,8 +39,15 @@ func TestSettingsPatchEnrichBaseURLs(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&patchResp); err != nil {
 		t.Fatal(err)
 	}
-	if !patchResp.RestartRequired {
-		t.Error("changing enrich base URLs must mark RestartRequired (clients wired at startup)")
+	// HOT since the enrich-base conversion: both clients read the base per
+	// use and re-derive their politeness pacing from the same live value.
+	if patchResp.RestartRequired {
+		t.Error("changing enrich base URLs must NOT mark RestartRequired — both clients read them live")
+	}
+	for _, f := range []string{"enrichMusicBrainzBaseURL", "enrichCoverArtBaseURL"} {
+		if got := patchResp.Fields[f].Status; got != applyLive {
+			t.Errorf("%s status = %q, want %q", f, got, applyLive)
+		}
 	}
 
 	gresp, err := http.Get(ts.URL + "/api/settings")

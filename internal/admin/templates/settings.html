@@ -128,13 +128,13 @@
       <details id="enrich-advanced" {{if eq .Data.EnrichSource "custom"}}open{{end}}>
         <summary>Advanced: raw mirror URLs</summary>
         <div class="field">
-          <label>MusicBrainz base URL <span class="badge warn">restart</span>
+          <label>MusicBrainz base URL
             <input name="enrichMusicBrainzBaseURL" type="url" value="{{.Data.EnrichMusicBrainzBaseURL}}"
                    placeholder="https://musicbrainz.org/ws/2">
           </label>
         </div>
         <div class="field">
-          <label>Cover Art base URL <span class="badge warn">restart</span>
+          <label>Cover Art base URL
             <input name="enrichCoverArtBaseURL" type="url" value="{{.Data.EnrichCoverArtBaseURL}}"
                    placeholder="https://coverartarchive.org">
           </label>

@@ -146,8 +146,8 @@ Classes describe *how the value is consumed*, not how important it is.
 | `smartPlaylistsEnabled` | **A** | `live` | Store wired unconditionally; the health flag and the endpoint both key off one `smartPlaylistsActive()`. The regenerator is started unconditionally and gated per run. |
 | `optimizeEnabled` | **A** | `live` | Health advertisement, admin projection gate and pre-generation sweeper all read it live. The sweeper is wired unconditionally within an active upscale pool. |
 | `libraryWatchEnabled` | C | `restart` | fsnotify watcher with a `scanWG` / `closing` drain contract guarding a SQLite-corruption vector. |
-| `enrichMusicBrainzBaseURL` | B | `restart` | Client built at boot. **The base URL also derives the pacing** — see the invariant in `CLAUDE.md`. |
-| `enrichCoverArtBaseURL` | B | `restart` | As above. |
+| `enrichMusicBrainzBaseURL` | **A** | `live` | Read per use, and the politeness pacing **re-derives from the same live value** — see below. |
+| `enrichCoverArtBaseURL` | **A** | `live` | As above. |
 | `atlasEnabled` | B / C | `restart` | Deliberately whole: an API field *and* a file-backed harvest state store. **Stays boot-bound under rule 1** — converting only the cheap half is the split this rule forbids. |
 | `fingerprintEnabled` | **A** | `live` (+reason when degraded) | Sweeper started unconditionally behind one shared live predicate; the fpcalc probe is lazy + TTL-cached rather than a boot snapshot. |
 | `fingerprintApiKey` | **A** | `live` | The AcoustID client reads the key per request. A blank submit is a documented no-op and reports `unchanged`.<br>`ACOUSTID_API_KEY` still wins when set. |
@@ -253,6 +253,41 @@ would convert in a line, but its other half opens a file-backed harvest state
 store at boot. Converting one and not the other is exactly the split rule 1
 forbids, and the whole-field conversion is a lifecycle change this stack does not
 take on.
+
+---
+
+## The enrich base URLs: pacing travels with the host
+
+`pacing.go` makes the politeness interval a function of the base URL rather than
+a separate knob, deliberately: it is a contract with two specific HOSTS
+(musicbrainz.org at 1.1 s, coverartarchive.org at 500 ms), and a self-hosted
+mirror is neither. That is why the pacing is derived rather than configured.
+
+Making the base live therefore has to make the interval live **with it**.
+`MinInterval()` re-derives from the same live value; a live base with a frozen
+interval is the one mistake in this area that reaches a third party — an operator
+clears the mirror URL, the client starts calling public MusicBrainz, and it does
+so at the self-hosted 150 ms, roughly 6.7 rps against a service that asks
+anonymous clients for one.
+
+**The straddle is safe by construction, not by luck.** Base and interval are read
+separately, so a change can land between them. The pacing gap is measured since
+the last request to the OLD host, so the first request to the NEW one arrives
+with no prior traffic to it at all, and every request after it is paced by the
+new host's own interval. The worst case is a single request that waited longer or
+shorter than the new host requires while that host has seen nothing from us.
+
+Two smaller rules the tests pin: an empty or whitespace-only live value falls back
+to the constructed base (a cleared config field must resolve to the public default,
+not to a host-less URL), and a nil provider keeps the captured base and its
+captured pacing entirely, which is what every caller other than the serve path
+wants.
+
+The enricher needed converting too. It captured the interval into an exported
+field at construction, so a live client alone would not have been enough — the
+sleeps read the enricher's copy. `mbMinInterval()` / `caaMinInterval()` ask the
+client when it has a live base and fall back to the field otherwise, so tests and
+the CLI that set those fields directly are unaffected.
 
 ---
 

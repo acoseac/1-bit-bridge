@@ -2341,7 +2341,12 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			}
 			if v := strings.TrimRight(strings.TrimSpace(*in), "/"); v != *dst {
 				*dst = v
-				report.restart(field)
+				// HOT: both clients read the base per use, and re-derive
+				// their politeness pacing from the same live value — a
+				// live base with a frozen interval would hammer public
+				// MusicBrainz at the self-hosted rate the moment an
+				// operator cleared the mirror URL.
+				report.live(field)
 			} else {
 				report.unchanged(field)
 			}

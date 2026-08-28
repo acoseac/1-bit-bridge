@@ -982,6 +982,28 @@ const (
 // acousticSkipReason maps a declined fallback onto its bounded skip reason.
 // fallback is used when the feature is off entirely, so a bridge without
 // fingerprinting reports exactly what it always did.
+// mbMinInterval / caaMinInterval resolve the pacing for the NEXT request.
+//
+// They ask the client when it has a LIVE base, because the interval is a
+// property of the host being called and the host can now change under a
+// running enricher: a captured value would keep the self-hosted 150ms
+// pointed at public MusicBrainz the moment an operator cleared the mirror
+// URL. Without a live base the captured field wins, which is what every
+// caller that sets these directly (tests, the CLI) expects.
+func (e *Enricher) mbMinInterval() time.Duration {
+	if e.mb != nil && e.mb.liveBase != nil {
+		return e.mb.MinInterval()
+	}
+	return e.MBMinInterval
+}
+
+func (e *Enricher) caaMinInterval() time.Duration {
+	if e.caa != nil && e.caa.liveBase != nil {
+		return e.caa.MinInterval()
+	}
+	return e.CAAMinInterval
+}
+
 func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) string {
 	if !e.acousticActive() {
 		return fallback
@@ -1100,7 +1122,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 	if e.premiumCovers != nil && e.premiumCovers.TryCache(ctx, path, mbid, size) {
 		return true, nil
 	}
-	if !sleepCtx(ctx, e.CAAMinInterval) { // pace
+	if !sleepCtx(ctx, e.caaMinInterval()) { // pace
 		return false, ctx.Err()
 	}
 	body, err := e.caa.FetchReleaseFrontStream(ctx, mbid, size)
@@ -1140,7 +1162,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		// and a transient MB lookup error shouldn't block the iTunes
 		// fallback below.
 	} else if rgMBID != "" {
-		if !sleepCtx(ctx, e.CAAMinInterval) { // pace the second CAA call
+		if !sleepCtx(ctx, e.caaMinInterval()) { // pace the second CAA call
 			return false, ctx.Err()
 		}
 		rgBody, rgFetchErr := e.caa.FetchReleaseGroupFrontStream(ctx, rgMBID, size)
@@ -1246,7 +1268,7 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 		return cached, nil
 	}
 	metrics.RecordMBCache("release_group", false)
-	if !sleepCtx(ctx, e.MBMinInterval) { // pace
+	if !sleepCtx(ctx, e.mbMinInterval()) { // pace
 		return "", ctx.Err()
 	}
 	rg, err := e.mb.ReleaseGroupMBID(ctx, releaseMBID)
@@ -1504,7 +1526,7 @@ func (e *Enricher) searchReleaseWithFallbacks(ctx context.Context, t *manifest.T
 	for i, a := range attempts {
 		// Pace every attempt, not just the first — these are real upstream
 		// calls and the politeness contract is per-request.
-		if !sleepCtx(ctx, e.MBMinInterval) {
+		if !sleepCtx(ctx, e.mbMinInterval()) {
 			return nil, ctx.Err()
 		}
 		res, err := e.mb.SearchRelease(ctx, a.artist, a.album)
