@@ -2288,6 +2288,20 @@ reports, not the older two-predictions-agree test) caught all eight stale
 When converting a field, expect it to fail and drop the badge; that is the
 mechanism working.
 
+**…and the hole it left, which shipped.** Both tray badge tests iterate TRAY
+rows and consult the Settings page only for fields a tray happens to contain, so
+a Settings-page-ONLY field is invisible to both. `updateQuietHours`,
+`fingerprintApiKey` and the derived `enrichSource` picker kept stale `restart`
+badges through all four conversion PRs and reached production telling the
+operator a bounce was needed that was not — found by looking at the live console,
+not by any test. `TestSettingsPageBadgesAgreeWithWhatTheServerReports` walks the
+PAGE's own controls and closes it. **A UI-only control inherits the semantics of
+what it writes** (`uiOnlyControls` maps `enrichSource` to the two enrich base
+URLs); there is deliberately no `enrich.source` config field, so nothing else
+connects that control to an apply semantic. Generalisable lesson: when two
+surfaces render the same setting, a test that walks ONE of them proves nothing
+about the other — walk each surface from its own side.
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future
