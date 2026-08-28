@@ -3619,6 +3619,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		StartedAt:            time.Now().UTC(),
 		ScanCtx:              scanCtx,
 		Restart:              cancel,
+		// Same tracker the auto-installer gates on before swapping a
+		// binary — the admin restart path simply never consulted it.
+		InflightSessions: sessions.Inflight,
 		// UPnP upstream admin surface (Bridge PR E). Nil when the
 		// feature is disabled — admin handlers return a clean 404 +
 		// the Devices page hides the card. ctx is passed so async

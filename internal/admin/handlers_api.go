@@ -3069,14 +3069,7 @@ func classifyUpdateError(err error) (status int, short string) {
 
 // --- POST /api/restart ---
 
-func (s *Server) apiRestart(w http.ResponseWriter, r *http.Request) {
-	// Respond first, exit after a brief delay so the browser sees the 202.
-	w.WriteHeader(http.StatusAccepted)
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		s.restart()
-	}()
-}
+// apiRestart moved to handlers_restart.go when it gained the drain.
 
 // --- GET /api/pair-qr?data=<url> ---
 //
