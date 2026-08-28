@@ -3905,7 +3905,7 @@ function mountJobTrays() {
       "runs and whether newly-dropped files are picked up before the next one.",
     rows: [
       {
-        field: "scanIntervalSec", type: "number", restart: true, min: 60,
+        field: "scanIntervalSec", type: "number", min: 60,
         label: "Full scan every", unit: "seconds",
         hint: "Defaults to 21600 (6 h). Raise it for a mechanical NAS you want " +
           "to let spin down; the on-demand trigger above still works either way.",
@@ -4024,12 +4024,12 @@ function mountJobTrays() {
     blurb: "Periodic snapshots of the manifest database, token store and certificates.",
     rows: [
       {
-        field: "backupIntervalHours", type: "number", restart: true, min: 0,
+        field: "backupIntervalHours", type: "number", min: 0,
         label: "Snapshot every", unit: "hours",
         hint: "0 turns the periodic snapshot off; the button above still writes one.",
       },
       {
-        field: "backupKeep", type: "number", restart: true, min: 1,
+        field: "backupKeep", type: "number", min: 1,
         label: "Keep", unit: "snapshots",
       },
     ],
@@ -4042,7 +4042,7 @@ function mountJobTrays() {
       "installs one on its own.",
     rows: [
       {
-        field: "updateCheckIntervalHours", type: "number", restart: true, min: 1,
+        field: "updateCheckIntervalHours", type: "number", min: 1,
         label: "Check every", unit: "hours", placeholder: "6 (default)",
         // 0 IS the unset sentinel for this field (cmd/bridge only
         // overrides the updater's own 6 h when the config value is > 0),
@@ -4053,8 +4053,7 @@ function mountJobTrays() {
         hint: "Clear it to go back to the bridge's default of 6 hours.",
       },
       {
-        field: "updateAutoInstall", type: "switch", restart: true,
-        label: "Install updates automatically",
+        field: "updateAutoInstall", type: "switch", label: "Install updates automatically",
         hint: "Verifies the signature, swaps the binary and restarts. Quiet hours " +
           "are set under update settings.",
       },

@@ -2269,12 +2269,31 @@ func enqueueableAudioFile(abs, name string) bool {
 }
 
 // RunPeriodic runs an initial scan, then rescans every interval until ctx
-// is done. Logs errors but never exits early on a scan failure. Waits for
-// the initial scan goroutine before returning, so callers can safely Close
-// the Store after ctx cancellation without racing in-flight SQL.
-func (s *Scanner) RunPeriodic(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = time.Hour
+// is done.
+//
+// `interval` is a PROVIDER, re-read before each wait rather than captured
+// once. It used to be a time.Duration feeding one time.NewTicker built
+// before the loop, which is precisely why changing scanIntervalSec needed
+// a restart: the ticker never re-evaluated it. A nil provider, or one
+// returning <= 0, falls back to one hour — the historical behaviour for a
+// non-positive interval.
+//
+// `rearm`, when non-nil, wakes the wait so the provider is re-read
+// immediately. Without it a cadence change would not be observed until
+// the OLD interval elapsed, which on the 6 h default means an operator
+// who shortens the cadence waits out the long one first — technically
+// "applied", indistinguishable from ignored. The channel carries no data;
+// receiving on it re-arms and never scans, because a settings save is not
+// a request to scan.
+func (s *Scanner) RunPeriodic(ctx context.Context, interval func() time.Duration, rearm <-chan struct{}) {
+	resolve := func() time.Duration {
+		if interval == nil {
+			return time.Hour
+		}
+		if d := interval(); d > 0 {
+			return d
+		}
+		return time.Hour
 	}
 	var initial sync.WaitGroup
 	initial.Add(1)
@@ -2285,17 +2304,21 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval time.Duration) {
 		}
 	}()
 	defer initial.Wait()
-	// Periodic rescans.
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	// Periodic rescans. A fresh timer per iteration rather than one
+	// ticker: a ticker cannot change period, and that is the whole point.
 	for {
+		t := time.NewTimer(resolve())
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
-		case <-ticker.C:
+		case <-t.C:
 			if _, err := s.Scan(ctx); err != nil && ctx.Err() == nil {
 				scanLogger.Error("periodic scan", "err", err)
 			}
+		case <-rearm:
+			// Cadence changed; re-read it on the next iteration.
+			t.Stop()
 		}
 	}
 }

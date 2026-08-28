@@ -344,7 +344,7 @@ var autoOptimizeSettleDelay = 3 * time.Minute
 //
 // nudge is buffered-1; senders use a non-blocking send so a pending
 // nudge coalesces with the sweep about to run. status is nil-safe.
-func runAutoOptimizeSweeper(ctx context.Context, sw *autoOptimizeSweeper, interval time.Duration, nudge <-chan struct{}, status *sweepStatus[admin.AutoOptimizeSweepCounts]) {
+func runAutoOptimizeSweeper(ctx context.Context, sw *autoOptimizeSweeper, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AutoOptimizeSweepCounts]) {
 	sweep := func() {
 		status.sweepStarted()
 		var counts *admin.AutoOptimizeSweepCounts
@@ -355,5 +355,5 @@ func runAutoOptimizeSweeper(ctx context.Context, sw *autoOptimizeSweeper, interv
 	// Cadence (settle delay, one-drain semantics, tick-or-nudge) lives in
 	// the shared runSweepLoop — see its docstring for why the nudge is
 	// drained exactly once.
-	runSweepLoop(ctx, status, autoOptimizeSettleDelay, interval, nudge, sweep)
+	runSweepLoop(ctx, status, autoOptimizeSettleDelay, interval, nudge, rearm, sweep)
 }

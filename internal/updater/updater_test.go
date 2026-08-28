@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -340,4 +341,171 @@ func TestStatusInitiallyHasCurrentVersion(t *testing.T) {
 	if got.UpdateAvailable {
 		t.Error("UpdateAvailable = true before any poll has happened")
 	}
+}
+
+// TestLiveProvidersOverrideStaticOptions pins the three update settings
+// being read at DECISION time rather than captured in New().
+//
+// The distinction matters most for autoInstall: it gates a background
+// binary swap and a supervised restart, so an operator switching it off
+// must have that bind before the next poll, not after a restart they were
+// never told to perform.
+func TestLiveProvidersOverrideStaticOptions(t *testing.T) {
+	var live atomic.Bool
+	var hours atomic.Int64
+	hours.Store(int64(3 * time.Hour))
+	var qStart, qEnd atomic.Int64
+
+	u := New(Options{
+		// Static values deliberately the OPPOSITE of the live ones, so a
+		// pass can only come from the provider being consulted.
+		AutoInstall:       false,
+		CheckInterval:     9 * time.Hour,
+		QuietHoursStart:   111,
+		QuietHoursEnd:     222,
+		LiveAutoInstall:   live.Load,
+		LiveCheckInterval: func() time.Duration { return time.Duration(hours.Load()) },
+		LiveQuietHours:    func() (int, int) { return int(qStart.Load()), int(qEnd.Load()) },
+	})
+
+	if u.autoInstallEnabled() {
+		t.Error("live provider says false; the static true must not win")
+	}
+	live.Store(true)
+	if !u.autoInstallEnabled() {
+		t.Error("flipping the live provider must bind without reconstructing the Updater")
+	}
+
+	if got := u.checkInterval(); got != 3*time.Hour {
+		t.Errorf("checkInterval = %v, want the live 3h (not the static 9h)", got)
+	}
+	s, e := u.quietHours()
+	if s != 0 || e != 0 {
+		t.Errorf("quietHours = (%d,%d), want the live (0,0)", s, e)
+	}
+	qStart.Store(60)
+	qEnd.Store(120)
+	if s, e := u.quietHours(); s != 60 || e != 120 {
+		t.Errorf("quietHours = (%d,%d) after a live change, want (60,120)", s, e)
+	}
+}
+
+// TestLiveCheckIntervalIsClamped — the floor and default that New()
+// applies to the static value are the CONTRACT, not an artifact of
+// construction. A live provider that skipped them could poll GitHub every
+// second, which is exactly the abuse minCheckInterval exists to prevent.
+func TestLiveCheckIntervalIsClamped(t *testing.T) {
+	var d atomic.Int64
+	u := New(Options{LiveCheckInterval: func() time.Duration { return time.Duration(d.Load()) }})
+
+	d.Store(0) // "unset" resolves to the default, as at construction
+	if got := u.checkInterval(); got != DefaultCheckInterval {
+		t.Errorf("zero interval = %v, want DefaultCheckInterval %v", got, DefaultCheckInterval)
+	}
+	d.Store(int64(time.Second)) // below the floor
+	if got := u.checkInterval(); got != minCheckInterval {
+		t.Errorf("1s interval = %v, want the floor %v", got, minCheckInterval)
+	}
+	d.Store(int64(-5 * time.Hour)) // negative
+	if got := u.checkInterval(); got != DefaultCheckInterval {
+		t.Errorf("negative interval = %v, want DefaultCheckInterval %v", got, DefaultCheckInterval)
+	}
+	d.Store(int64(4 * time.Hour)) // clear of both clamps
+	if got := u.checkInterval(); got != 4*time.Hour {
+		t.Errorf("4h interval = %v, want it passed through", got)
+	}
+}
+
+// TestNilLiveProvidersKeepStaticBehaviour — every caller that is not
+// cmd/bridge (tests, the CLI) leaves these nil and must be unaffected.
+func TestNilLiveProvidersKeepStaticBehaviour(t *testing.T) {
+	u := New(Options{AutoInstall: true, CheckInterval: 2 * time.Hour,
+		QuietHoursStart: 60, QuietHoursEnd: 120})
+	if !u.autoInstallEnabled() {
+		t.Error("nil provider must fall back to the static AutoInstall")
+	}
+	if got := u.checkInterval(); got != 2*time.Hour {
+		t.Errorf("checkInterval = %v, want the static 2h", got)
+	}
+	if s, e := u.quietHours(); s != 60 || e != 120 {
+		t.Errorf("quietHours = (%d,%d), want the static (60,120)", s, e)
+	}
+}
+
+// TestRunRearmRereadsTheIntervalWithoutPolling pins the fix for the gap
+// Gemini caught on the cadence PR: LiveCheckInterval alone made the new
+// value readable but not READ, because the loop was parked on a timer
+// built from the old one — up to 6 h on the default, which is
+// indistinguishable from the change being ignored.
+//
+// Also pins that a rearm does NOT poll. A settings save is not a request
+// to check GitHub for updates, and turning one into the other would put
+// an outbound request behind every unrelated Save.
+//
+// Both signals are channels fed from the real code paths — the httptest
+// handler for polls, the interval provider for reads — so the assertions
+// are about what the loop actually did. An earlier draft counted polls
+// with a variable nothing incremented, which made the no-poll half
+// vacuous.
+func TestRunRearmRereadsTheIntervalWithoutPolling(t *testing.T) {
+	polls := make(chan struct{}, 16)
+	reads := make(chan struct{}, 16)
+	// Non-blocking so the loop is never gated on the test draining.
+	signal := func(ch chan struct{}) {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	await := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		signal(polls)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"tag_name":"v0.0.1","assets":[]}`)
+	}))
+	defer srv.Close()
+
+	rearm := make(chan struct{}, 1)
+	client := NewClient("acoseac/1-bit-bridge", 2*time.Second)
+	client.baseURL = srv.URL
+	u := New(Options{
+		// An hour: long enough that the timer cannot fire, so a second
+		// interval read can only come from the rearm.
+		LiveCheckInterval: func() time.Duration { signal(reads); return time.Hour },
+		Rearm:             rearm,
+		Client:            client,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); u.Run(ctx) }()
+
+	// Run polls once on entry, then reads the interval for its first wait.
+	await(polls, "the entry poll")
+	await(reads, "the first interval read")
+
+	// Rearm: the loop must consult the provider again...
+	rearm <- struct{}{}
+	await(reads, "an interval read after the rearm")
+
+	// ...and must not have polled for it. Give a wrong implementation
+	// room to make the request before concluding it did not.
+	time.Sleep(150 * time.Millisecond)
+	select {
+	case <-polls:
+		t.Error("rearm triggered a poll — a settings save is not a request to check " +
+			"for updates")
+	default:
+	}
+	cancel()
+	<-done
 }

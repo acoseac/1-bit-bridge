@@ -179,7 +179,7 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 		// 1h interval: the ticker can't fire inside this test — any sweep
 		// after the initial one can only come from a nudge.
 		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, time.Hour, nudge, status)
+			pool, staticInterval(time.Hour), nudge, nil, status)
 	}()
 
 	firstEnd := waitForSweep(t, status, time.Time{}, 5*time.Second)
@@ -235,7 +235,7 @@ func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
 	go func() {
 		defer close(done)
 		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, time.Hour, make(chan struct{}, 1), status)
+			pool, staticInterval(time.Hour), make(chan struct{}, 1), nil, status)
 	}()
 	waitForSweep(t, status, time.Time{}, 5*time.Second)
 	_, _, _, nextDue, _ := status.snapshot()

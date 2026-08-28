@@ -171,7 +171,22 @@ const startupBackupSkipThreshold = 24 * time.Hour
 // cost one snapshot per boot), and then on the configured interval.
 // All errors are logged to stderr — never fatal, since a failed
 // backup must never take down the running bridge.
-func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval time.Duration, stdout, stderr io.Writer, status *sweepStatus[struct{}]) {
+// runBackupTicker takes its cadence AND its retention as providers,
+// re-read per use rather than captured once.
+//
+// `keep` is read at PRUNE time, which is the only moment it means
+// anything: retention is not a lifecycle, it is an argument to a function
+// that runs on a schedule, and capturing it was never buying anything.
+//
+// `interval` is read before each wait. A provider returning <= 0 parks
+// the loop instead of ending it — the operator disabled the cadence, and
+// re-enabling it must not require a restart. That is why the goroutine is
+// now started UNCONDITIONALLY by the caller: the old shape only spawned
+// it when hours > 0, so 0 → N had no loop alive to notice the change.
+//
+// `rearm` wakes the wait so a changed cadence is re-read immediately
+// rather than after the old interval — up to a day, on the 24 h default.
+func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, interval func() time.Duration, rearm <-chan struct{}, stdout, stderr io.Writer, status *sweepStatus[struct{}]) {
 	backupsRoot := filepath.Join(src.DataDir, backup.BackupsDirName)
 	doSnapshot := func(triggered string) {
 		status.sweepStarted()
@@ -186,7 +201,7 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		// PruneContext, and unconditionally — see backupCmd for both
 		// rationales. The ticker's ctx is the one shutdown cancels, so a
 		// prune stuck listing a wedged mount can't burn the whole grace.
-		res, err := backup.PruneContext(ctx, backupsRoot, keep)
+		res, err := backup.PruneContext(ctx, backupsRoot, keep())
 		// Warning, not a failure — see the same handling in
 		// backupCmd. Pre-split this early-returned and suppressed
 		// the "pruned N" line on every tick, forever.
@@ -202,34 +217,45 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		}
 	}
 
-	// Throttle: if a snapshot exists within the skip threshold, the
-	// startup snapshot is redundant — skip it. List errors are
-	// non-fatal (rare; surfaces a misconfig or disk problem the user
-	// should see) and fall through to writing the snapshot anyway.
-	skip, latest, err := startupSnapshotShouldSkip(backupsRoot, time.Now().UTC(), startupBackupSkipThreshold)
-	switch {
-	case err != nil:
-		fmt.Fprintf(stderr, "backup (startup): list existing snapshots: %v (writing anyway)\n", err)
-		doSnapshot("startup")
-	case skip:
-		fmt.Fprintf(stdout, "backup (startup): recent snapshot at %s — skipping (threshold %s)\n",
-			latest.Format(time.RFC3339), startupBackupSkipThreshold)
-	default:
-		doSnapshot("startup")
-	}
-
-	status.scheduleNext(time.Now().Add(interval))
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			status.scheduleNext(time.Now().Add(interval))
+	// The startup snapshot and the scheduled ones differ, so the loop's
+	// single `sweep` closure distinguishes the first call from the rest.
+	//
+	// Throttle on the first: if a snapshot exists within the skip
+	// threshold, the startup one is redundant. List errors are non-fatal
+	// (rare; surfaces a misconfig or disk problem the user should see)
+	// and fall through to writing the snapshot anyway.
+	first := true
+	sweep := func() {
+		if !first {
 			doSnapshot("scheduled")
+			return
+		}
+		first = false
+		skip, latest, err := startupSnapshotShouldSkip(backupsRoot, time.Now().UTC(), startupBackupSkipThreshold)
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "backup (startup): list existing snapshots: %v (writing anyway)\n", err)
+			doSnapshot("startup")
+		case skip:
+			fmt.Fprintf(stdout, "backup (startup): recent snapshot at %s — skipping (threshold %s)\n",
+				latest.Format(time.RFC3339), startupBackupSkipThreshold)
+		default:
+			doSnapshot("startup")
 		}
 	}
+
+	// The SHARED loop, not a second hand-rolled ticker.
+	//
+	// It already carries every property this needs — re-read the interval
+	// before each wait, park (never exit) when it is non-positive, clear
+	// the scheduled-next while dormant, and re-arm without doing the work
+	// — and a private copy here would be a second place to get the
+	// 0 -> N transition wrong. Settle delay 0: the startup snapshot is
+	// the point of running at boot, and deferring it would change what an
+	// operator gets from a short-lived process. No nudge: there is no
+	// "back up now" button on this path (the CLI's `bridge backup` runs
+	// its own snapshot).
+	runSweepLoop(ctx, status, 0, interval, nil, rearm, sweep)
 }
 
 // startupSnapshotShouldSkip reports whether the most-recent existing

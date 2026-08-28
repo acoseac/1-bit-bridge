@@ -409,6 +409,23 @@ type Deps struct {
 	// — the PATCH then still persists and takes effect on restart.
 	TriggerAutoOptimizeSweep func() bool
 
+	// TriggerCadenceRearm pokes every background loop whose schedule is
+	// read from the live config, so a changed cadence is picked up now
+	// rather than after the OLD interval elapses. On the 6 h scan default
+	// that difference is what separates "applied" from indistinguishable
+	// from ignored.
+	//
+	// Deliberately NOT the work-nudge channels: a rearm asks a loop to
+	// re-read its schedule, never to run. Turning a settings save into a
+	// backup run is not what the operator asked for.
+	//
+	// Nil when nothing is wired (tests, the CLI). The settings handler
+	// still reports the cadence fields `live` in that case — the VALUE is
+	// live regardless, since every loop re-reads its provider on the next
+	// pass; the rearm only decides whether that pass is now or after the
+	// current wait.
+	TriggerCadenceRearm func()
+
 	// TriggerDuplicatesPass nudges the duplicates stamping sweeper
 	// (cmd/bridge runDuplicatesSweeper) to re-evaluate suppression under
 	// the CURRENT duplicates.filter policy — the hot-apply half of the
