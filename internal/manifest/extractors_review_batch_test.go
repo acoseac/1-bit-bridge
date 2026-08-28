@@ -69,6 +69,7 @@ func TestSkipID3v2(t *testing.T) {
 // in sync (both carry a lockstep comment saying so).
 func TestExtCoversDispatcher(t *testing.T) {
 	dispatched := []string{
+		".iso",
 		".dsf", ".dff",
 		".aif", ".aiff", ".aifc",
 		".wav",

@@ -358,6 +358,53 @@ renderer decodes for itself). The bridge's analysis pipeline keeps its
 DSD exclusion — DST is skipped by the same `.dff` extension gate as
 uncompressed DSDIFF.
 
+### SACD ISO expansion (additive, since v1.11)
+
+A scanned `.iso` SACD disc image expands into one VIRTUAL track row per
+stereo track; the container itself gets no row and no new wire field
+exists (`ProtocolVersion` stays 1 — virtual rows are ordinary manifest
+rows whose `path` carries the pinned grammar below).
+
+**The virtual-path grammar is a PINNED cross-repo contract** (the iOS
+mirror is `SACDVirtualPath.swift`; the bridge implementation is
+`internal/manifest/sacd.go` — both sides must parse the SAME shapes;
+otherwise deletion membership and client classification drift):
+
+```
+<container path ending .iso>/st/<NN>.dff
+```
+
+- `st/` is the stereo area — the only area minted in v1. `mc/`
+  (multichannel) is RESERVED: both sides recognize the shape, neither
+  mints it.
+- `<NN>` is the 1-based track index: zero-padded two digits for 1–99
+  (`01`…`99`), unpadded for 100–255 (`100`…`255`). Nothing else parses
+  (`1`, `00`, `001`, `256` are not virtual indexes).
+- The `.iso` suffix matches case-insensitively; path ordering is never
+  a sort key.
+
+Virtual rows are fully TYPED SACD DSD: `codec: "DFF"`,
+`compression: "DST"`, `isDSD: true`, `sampleRate: 2822400`,
+`bitsPerSample: 1`, `channels: 2`, plus TOC-derived tags (track/album
+titles + performer from the disc's own text banks, `duration` from the
+TRL2 timecode spans — normative, gaps excluded), `trackNumber` (the
+area's continuous display number), `discNumber` (the album-set
+sequence), and the container's `size`/`mtime` as the row's identity
+stat. Non-SACD `.iso` files, plain-DSD (non-DST) areas, and
+multichannel-only discs contribute NO rows.
+
+**The bridge never demuxes server-side.** Clients that play a virtual
+track fetch the CONTAINER's bytes over the ordinary ranged
+`/v1/read` and demux the track's sector window themselves (the iOS
+materializer). `/v1/read`, `/v1/download`, `/v1/stat` etc. on a
+VIRTUAL path answer the standard `404 not_found` — the path resolves
+but no file exists there — and the DLNA `/dlna/file/...` handler 404s
+the same way, which is the intended baseline (a renderer cannot fetch
+a virtual track). Lifecycle follows the container: removal reaps the
+virtual rows through the ordinary missing-count threshold (journaled —
+delta clients see tombstones), and a re-authored image re-expands with
+superseded rows retired immediately.
+
 ### `POST /v1/upscale` (additive, since v1.2)
 
 Hands a track or folder to the long-lived transcode worker pool inside `bridge serve` for offline PCM upscaling. Companion to the CLI `bridge upscale` command — same engine, different lifetime.
