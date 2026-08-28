@@ -217,48 +217,45 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		}
 	}
 
-	// Throttle: if a snapshot exists within the skip threshold, the
-	// startup snapshot is redundant — skip it. List errors are
-	// non-fatal (rare; surfaces a misconfig or disk problem the user
-	// should see) and fall through to writing the snapshot anyway.
-	skip, latest, err := startupSnapshotShouldSkip(backupsRoot, time.Now().UTC(), startupBackupSkipThreshold)
-	switch {
-	case err != nil:
-		fmt.Fprintf(stderr, "backup (startup): list existing snapshots: %v (writing anyway)\n", err)
-		doSnapshot("startup")
-	case skip:
-		fmt.Fprintf(stdout, "backup (startup): recent snapshot at %s — skipping (threshold %s)\n",
-			latest.Format(time.RFC3339), startupBackupSkipThreshold)
-	default:
-		doSnapshot("startup")
+	// The startup snapshot and the scheduled ones differ, so the loop's
+	// single `sweep` closure distinguishes the first call from the rest.
+	//
+	// Throttle on the first: if a snapshot exists within the skip
+	// threshold, the startup one is redundant. List errors are non-fatal
+	// (rare; surfaces a misconfig or disk problem the user should see)
+	// and fall through to writing the snapshot anyway.
+	first := true
+	sweep := func() {
+		if !first {
+			doSnapshot("scheduled")
+			return
+		}
+		first = false
+		skip, latest, err := startupSnapshotShouldSkip(backupsRoot, time.Now().UTC(), startupBackupSkipThreshold)
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "backup (startup): list existing snapshots: %v (writing anyway)\n", err)
+			doSnapshot("startup")
+		case skip:
+			fmt.Fprintf(stdout, "backup (startup): recent snapshot at %s — skipping (threshold %s)\n",
+				latest.Format(time.RFC3339), startupBackupSkipThreshold)
+		default:
+			doSnapshot("startup")
+		}
 	}
 
-	for {
-		d := interval()
-		var tickC <-chan time.Time
-		var t *time.Timer
-		if d > 0 {
-			t = time.NewTimer(d)
-			tickC = t.C
-			status.scheduleNext(time.Now().Add(d))
-		} else {
-			// Dormant. Clearing the schedule matters: a stale "next
-			// backup at 03:00" on the Jobs card after the operator set
-			// intervalHours to 0 is a promise the loop will not keep.
-			status.scheduleNext(time.Time{})
-		}
-		select {
-		case <-ctx.Done():
-			stopTimer(t)
-			return
-		case <-tickC:
-			doSnapshot("scheduled")
-		case <-rearm:
-			// Cadence changed; re-read it. Deliberately no snapshot — a
-			// settings save is not a request to back up.
-			stopTimer(t)
-		}
-	}
+	// The SHARED loop, not a second hand-rolled ticker.
+	//
+	// It already carries every property this needs — re-read the interval
+	// before each wait, park (never exit) when it is non-positive, clear
+	// the scheduled-next while dormant, and re-arm without doing the work
+	// — and a private copy here would be a second place to get the
+	// 0 -> N transition wrong. Settle delay 0: the startup snapshot is
+	// the point of running at boot, and deferring it would change what an
+	// operator gets from a short-lived process. No nudge: there is no
+	// "back up now" button on this path (the CLI's `bridge backup` runs
+	// its own snapshot).
+	runSweepLoop(ctx, status, 0, interval, nil, rearm, sweep)
 }
 
 // startupSnapshotShouldSkip reports whether the most-recent existing
