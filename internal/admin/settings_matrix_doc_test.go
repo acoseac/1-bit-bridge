@@ -33,10 +33,19 @@ var matrixRowRe = regexp.MustCompile("(?m)^\\|\\s*`([a-zA-Z][a-zA-Z0-9]*)`\\s*\\
 var statusCodeRe = regexp.MustCompile("`(live|restart|unchanged)`")
 
 func TestMatrixDocMatchesWhatTheHandlerReports(t *testing.T) {
-	doc, err := os.ReadFile("../../ops/settings-apply-semantics.md")
+	raw, err := os.ReadFile("../../ops/settings-apply-semantics.md")
 	if err != nil {
 		t.Fatalf("read the matrix doc: %v", err)
 	}
+	// Normalize line endings AT THE READ. Nothing pins `eol` in a
+	// .gitattributes, so a Windows checkout carries CRLF and a `\n`
+	// literal below finds nothing — which is how this test failed on the
+	// windows-latest leg while passing everywhere else. The repo has been
+	// bitten by this exact shape before (TestEveryPageTabHasAnInitCase).
+	// Fixed here rather than by adding .gitattributes: pinning eol
+	// repo-wide rewrites every contributor's working tree and is a
+	// separate, deliberate policy call.
+	doc := strings.ReplaceAll(string(raw), "\r\n", "\n")
 
 	// Scope the scan to the matrix section. The file carries a SECOND
 	// three-column table (the control-plane restart list) whose rows have
@@ -46,7 +55,7 @@ func TestMatrixDocMatchesWhatTheHandlerReports(t *testing.T) {
 	// provision time" to a recommendation would silently override the
 	// real matrix row, and the vacuous-pass guard below would not notice
 	// because the count stays the same.
-	section := matrixSection(t, string(doc))
+	section := matrixSection(t, doc)
 
 	rows := map[string][]string{} // field -> allowed statuses
 	for _, m := range matrixRowRe.FindAllStringSubmatch(section, -1) {
