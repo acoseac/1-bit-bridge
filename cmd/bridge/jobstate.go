@@ -180,13 +180,13 @@ func jobRunClosure[T any](status *sweepStatus[T]) func() *admin.JobRunState {
 // Wired for EVERY serve — a feature-off bridge still gets a card
 // explaining why (enabled flag + degradedReason); status is nil in
 // that case and the lifecycle fields stay zero.
-func fingerprintStateClosure(enabled, active bool, degradedReason string, status *sweepStatus[admin.FingerprintSweepCounts]) func() *admin.FingerprintJobState {
+func fingerprintStateClosure(enabled, active func() bool, degradedReason func() string, status *sweepStatus[admin.FingerprintSweepCounts]) func() *admin.FingerprintJobState {
 	return func() *admin.FingerprintJobState {
 		running, lastStart, lastEnd, nextDue, last := status.snapshot()
 		return &admin.FingerprintJobState{
-			Enabled:        enabled,
-			Active:         active,
-			DegradedReason: degradedReason,
+			Enabled:        enabled != nil && enabled(),
+			Active:         active != nil && active(),
+			DegradedReason: valueOr(degradedReason, ""),
 			Running:        running,
 			LastStartedAt:  timePtrIfSet(lastStart),
 			LastFinishedAt: timePtrIfSet(lastEnd),
@@ -194,6 +194,16 @@ func fingerprintStateClosure(enabled, active bool, degradedReason string, status
 			Last:           last,
 		}
 	}
+}
+
+// valueOr resolves an optional provider to its value, or a fallback when
+// nil. The card reads three live gates and a nil-check per gate reads
+// worse than one helper.
+func valueOr[T any](f func() T, fallback T) T {
+	if f == nil {
+		return fallback
+	}
+	return f()
 }
 
 // autoOptimizeStateClosure adapts the auto-optimize sweeper's recorder

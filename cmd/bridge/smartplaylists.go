@@ -17,8 +17,18 @@ import (
 // status (nil-safe) records last/next-run timestamps for the admin
 // Jobs card — the on-demand POST /api/smart-playlists/regenerate stays
 // the synchronous trigger and is not routed through this loop.
-func runSmartPlaylistRegenerator(ctx context.Context, store *manifest.Store, analysisEnabled bool, interval time.Duration, status *sweepStatus[struct{}]) {
+func runSmartPlaylistRegenerator(ctx context.Context, store *manifest.Store, analysisEnabled bool, enabled func() bool, interval func() time.Duration, rearm <-chan struct{}, status *sweepStatus[struct{}]) {
+	on := func() bool { return enabled == nil || enabled() }
 	regen := func() {
+		// Checked per run, not once at startup: the toggle hot-applies,
+		// and a regenerator that captured the boot value would keep
+		// writing families to a store the API has stopped serving.
+		if !on() {
+			// Deliberately no status bookkeeping — a disabled run is not
+			// a run, and recording one would put a "last regenerated"
+			// timestamp on the Jobs card for work that never happened.
+			return
+		}
 		status.sweepStarted()
 		opts := smartplaylistgen.DefaultOptions(time.Now().UnixNano(), analysisEnabled)
 		n, err := smartplaylistgen.Regenerate(ctx, store, opts)
@@ -35,27 +45,11 @@ func runSmartPlaylistRegenerator(ctx context.Context, store *manifest.Store, ana
 	// (slightly longer than the analysis sweeper's, since this reads the
 	// analysis it produces).
 	const settleDelay = 120 * time.Second
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(settleDelay):
-	}
-	if interval > 0 {
-		status.scheduleNext(time.Now().Add(interval))
-	}
-	regen()
-	if interval <= 0 {
-		return
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			status.scheduleNext(time.Now().Add(interval))
-			regen()
-		}
-	}
+	// The shared loop, rather than the hand-rolled ticker this used: it
+	// already has the interval-provider + rearm + dormant-parks semantics
+	// this needs, and a second copy would be a second place to get the
+	// 0 → N transition wrong. No work-nudge — there is no "regenerate now"
+	// button; the admin's per-family regenerate goes straight to the
+	// engine.
+	runSweepLoop(ctx, status, settleDelay, interval, nil, rearm, regen)
 }

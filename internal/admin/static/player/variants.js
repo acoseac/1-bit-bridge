@@ -72,8 +72,7 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
       rows: [
         { field: "upscaleEnabled", type: "switch", restart: true, label: "PCM upscaling" },
         {
-          field: "optimizeEnabled", type: "switch", restart: true,
-          label: "CarPlay-optimized variants",
+          field: "optimizeEnabled", type: "switch", label: "CarPlay-optimized variants",
           hint: "16-bit downsamples for head units and cellular streaming. " +
             "Only active while PCM upscaling is on — they share a worker pool.",
         },

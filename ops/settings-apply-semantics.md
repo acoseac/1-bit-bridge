@@ -47,17 +47,27 @@ reading that key is unknowable. Deriving it is what stops the two drifting;
 
 ### `reason`
 
-Populated **exactly when the status could have come out differently on another
-bridge** — i.e. when it depended on runtime wiring rather than on a static
-property of the field.
+Populated **exactly when the outcome depended on this bridge's runtime state**
+rather than on a static property of the field. Two shapes qualify:
 
-- `autoOptimizeEnabled` → `restart` because no sweeper is wired here: a reason.
-- `mdnsEnabled` → `restart` because no mDNS lifecycle is wired: a reason.
-- `tailscaleMode` → `restart`, naming which transition it was: a reason.
-- `listenAddress` → `restart` because listeners bind once: **not** a reason. It
-  is true on every bridge, and spelling it out for all the restart-bound fields
-  would be twenty near-identical strings the reader learns to skip — at which
-  point the ones that carry information get skipped along with them.
+**The status could have been different elsewhere.**
+
+- `autoOptimizeEnabled` → `restart` because no sweeper is wired here.
+- `mdnsEnabled` → `restart` because no mDNS lifecycle is wired.
+- `tailscaleMode` → `restart`, naming which transition it was.
+
+**The status is `live` and the change applied, but the feature is inert for a
+reason the operator can act on.**
+
+- `fingerprintEnabled` → `live`, "saved, but fpcalc is not installed on this
+  bridge, so no fingerprinting will run". A restart would change nothing, so
+  `restart` would be a lie — and silence would have the operator move the switch,
+  read "Saved.", and never learn that nothing will happen.
+
+**What does not qualify:** `listenAddress` → `restart` because listeners bind
+once. True on every bridge, and spelling it out for all the restart-bound fields
+would be twenty near-identical strings the reader learns to skip — at which point
+the ones that carry information get skipped along with them.
 
 ### Why the value is an object
 
@@ -133,14 +143,14 @@ Classes describe *how the value is consumed*, not how important it is.
 | `updateCheckIntervalHours` | **A** | `live` | The poll loop re-reads the cadence before each wait (rearm-woken), clamped by the same floor/default `New()` applies. |
 | `upscaleEnabled` | C | `restart` | `transcode.Pool` + coordinator + five API adapters + the sox precheck. |
 | `analysisEnabled` | C | `restart` | `analyze.Pool` + sweeper + the API store adapter. |
-| `smartPlaylistsEnabled` | B | `restart` | Regenerator goroutine + an API store field. Pure SQL over the existing manifest — no toolchain, no pool. |
-| `optimizeEnabled` | B | `restart` | An API field plus whether the auto-optimize sweeper is wired at all. |
+| `smartPlaylistsEnabled` | **A** | `live` | Store wired unconditionally; the health flag and the endpoint both key off one `smartPlaylistsActive()`. The regenerator is started unconditionally and gated per run. |
+| `optimizeEnabled` | **A** | `live` | Health advertisement, admin projection gate and pre-generation sweeper all read it live. The sweeper is wired unconditionally within an active upscale pool. |
 | `libraryWatchEnabled` | C | `restart` | fsnotify watcher with a `scanWG` / `closing` drain contract guarding a SQLite-corruption vector. |
 | `enrichMusicBrainzBaseURL` | B | `restart` | Client built at boot. **The base URL also derives the pacing** — see the invariant in `CLAUDE.md`. |
 | `enrichCoverArtBaseURL` | B | `restart` | As above. |
-| `atlasEnabled` | B / C | `restart` | Deliberately whole: an API field *and* a file-backed harvest state store. Stays boot-bound under rule 1. |
-| `fingerprintEnabled` | B | `restart` | Sweeper wired only when the boot precheck (fpcalc + AcoustID key) passed. |
-| `fingerprintApiKey` | B | `restart` | Read once by the boot precheck. A blank submit is a documented no-op and reports `unchanged`. |
+| `atlasEnabled` | B / C | `restart` | Deliberately whole: an API field *and* a file-backed harvest state store. **Stays boot-bound under rule 1** — converting only the cheap half is the split this rule forbids. |
+| `fingerprintEnabled` | **A** | `live` (+reason when degraded) | Sweeper started unconditionally behind one shared live predicate; the fpcalc probe is lazy + TTL-cached rather than a boot snapshot. |
+| `fingerprintApiKey` | **A** | `live` | The AcoustID client reads the key per request. A blank submit is a documented no-op and reports `unchanged`.<br>`ACOUSTID_API_KEY` still wins when set. |
 | `dlnaEnabled` | C | `restart` | HTTP listener + per-interface SSDP advertisers. |
 
 ### Endpoints outside the settings PATCH
@@ -204,6 +214,45 @@ rather than only when auto-install was on at boot. They are inert on their own �
 them boot-gated is what would have made the toggle a lie: a bridge that started
 with auto-install off would flip the switch, hit the "install opts missing"
 defensive branch, and never install anything.
+
+---
+
+## Feature gates: wired vs. active
+
+The conversion that made `smartPlaylistsEnabled`, `optimizeEnabled` and
+`fingerprintEnabled` hot is one move repeated three times: **split "is this
+feature wired on this bridge" from "is it switched on right now."**
+
+Wired is a boot fact — the pool exists, the toolchain is present, the store is
+attached — and it genuinely cannot change mid-process. Active is the operator's
+toggle, and it can. Folding both into one boot-time nil check is what made these
+restart-bound; separating them is what makes the toggle live without touching any
+lifecycle.
+
+Concretely:
+
+- The subsystem is wired **unconditionally** (a store attached, a sweeper
+  goroutine started), because a component that only exists when the flag was on
+  at boot makes the flag restart-bound however live the rest of the path is.
+- Every consumer reads **one shared predicate**. Three copies of the same gates
+  is how a card comes to claim "active" while every sweep short-circuits — the
+  divergence `/v1/upscale/stats` already exists to prevent.
+- A disabled pass records **no status**. Reporting one puts a "last run"
+  timestamp on the Jobs card for work that never happened, which is worse than
+  looking stale: it says the feature is doing something.
+
+`fingerprint`'s prerequisite probe is **lazy and TTL-cached**, not a boot
+snapshot. `fpcalc -version` is a fork-exec, and charging every bridge for it to
+support a feature that is off by default is the wrong trade; the cached probe
+runs the first time anything asks. Its failure is logged **once per process** —
+it is consulted on every sweep and every card render, so an unconditional line
+would be the per-minute spam the SSDP send-suppression exists to prevent.
+
+`atlasEnabled` was deliberately **not** converted. Its cheap half (an API field)
+would convert in a line, but its other half opens a file-backed harvest state
+store at boot. Converting one and not the other is exactly the split rule 1
+forbids, and the whole-field conversion is a lifecycle change this stack does not
+take on.
 
 ---
 

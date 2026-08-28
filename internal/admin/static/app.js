@@ -3955,8 +3955,7 @@ function mountJobTrays() {
       "the audio itself and asking AcoustID.",
     rows: [
       {
-        field: "fingerprintEnabled", type: "switch", restart: true,
-        label: "Fingerprint unmatched tracks",
+        field: "fingerprintEnabled", type: "switch", label: "Fingerprint unmatched tracks",
         hint: "Needs fpcalc on the bridge host and a free AcoustID application " +
           "key — without either it degrades to off at startup.",
       },
@@ -3970,7 +3969,7 @@ function mountJobTrays() {
       "device to ask for one. All three switches have to be on for anything to run.",
     rows: [
       { field: "upscaleEnabled", type: "switch", restart: true, label: "PCM upscaling" },
-      { field: "optimizeEnabled", type: "switch", restart: true, label: "CarPlay-optimized variants" },
+      { field: "optimizeEnabled", type: "switch", label: "CarPlay-optimized variants" },
       {
         field: "autoOptimizeEnabled", type: "switch",
         label: "Pre-generate them",
@@ -4006,8 +4005,7 @@ function mountJobTrays() {
     blurb: "Auto-generated playlists built from listening history, rebuilt daily.",
     rows: [
       {
-        field: "smartPlaylistsEnabled", type: "switch", restart: true,
-        label: "Generate smart mixes",
+        field: "smartPlaylistsEnabled", type: "switch", label: "Generate smart mixes",
       },
       {
         field: "analysisEnabled", type: "switch", restart: true,
@@ -4959,8 +4957,7 @@ function initHistory() {
           "stop a device reporting, turn it off on the device — or unpair it.",
       },
       {
-        field: "smartPlaylistsEnabled", type: "switch", restart: true,
-        label: "Build smart mixes from this history",
+        field: "smartPlaylistsEnabled", type: "switch", label: "Build smart mixes from this history",
         hint: "Heavy Rotation, Forgotten Favorites and the rest are generated " +
           "from these plays. Off means the history is still recorded, just not used.",
       },

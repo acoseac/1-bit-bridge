@@ -59,6 +59,37 @@ func (e *Enricher) WithAcousticFallback(l AcousticLookup) *Enricher {
 	return e
 }
 
+// WithAcousticEnabled attaches a LIVE on/off predicate for the acoustic
+// fallback, so `fingerprint.enabled` applies without a restart.
+//
+// Separate from WithAcousticFallback because the two answer different
+// questions: the lookup is WIRED when this bridge has the toolchain, and
+// ACTIVE when the operator has the feature switched on. cmd/bridge wires
+// the lookup unconditionally and gates it here — a lookup wired only when
+// the flag was on at boot makes the flag restart-bound however live
+// everything downstream is.
+//
+// Nil means "wired == enabled", which is what every other caller wants.
+func (e *Enricher) WithAcousticEnabled(f func() bool) *Enricher {
+	e.acousticEnabled = f
+	return e
+}
+
+// acousticActive reports whether the fallback should be consulted.
+//
+// Used at BOTH gate sites, and that matters: acousticSkipReason keys the
+// bounded skip reason off it, so a bridge with the feature off must read
+// as no-lookup-at-all there. Gating only the lookup would leave every
+// unmatched track on a fingerprint-disabled bridge reporting
+// "no fingerprint match" in the admin's enrichment breakdown — a reason
+// for work that never ran.
+func (e *Enricher) acousticActive() bool {
+	if e.acoustic == nil {
+		return false
+	}
+	return e.acousticEnabled == nil || e.acousticEnabled()
+}
+
 // junkArtistTags are the tag values that carry no artist information, so a
 // track bearing one has no witness with which to contradict a fingerprint.
 //
@@ -277,7 +308,7 @@ const (
 // map read (see AcousticLookup), and keeping it that way is what lets the
 // fallback sit on the enricher's single goroutine.
 func (e *Enricher) applyAcousticFallback(ctx context.Context, t *manifest.Track) (AcousticMatch, acousticOutcome) {
-	if e.acoustic == nil {
+	if !e.acousticActive() {
 		return AcousticMatch{}, acousticNoVerdict
 	}
 	m, ok := e.acoustic.LookupPath(t.Path)

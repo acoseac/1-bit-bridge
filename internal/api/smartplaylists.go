@@ -26,6 +26,32 @@ func (s *Server) WithSmartPlaylistStore(st SmartPlaylistStore) *Server {
 	return s
 }
 
+// WithSmartPlaylistEnabled attaches a LIVE on/off predicate, so the
+// feature toggle applies without a restart.
+//
+// The store stays the "is this wired at all" signal; this is the
+// "is it on right now" one, and both have to agree before the endpoint
+// answers or the health flag is advertised. Splitting them is what lets
+// cmd/bridge wire the store unconditionally — which it must, because a
+// store wired only when the flag was on at boot makes the flag
+// restart-bound no matter how live the rest of the path is.
+//
+// Nil keeps the pre-existing behaviour (wired == enabled), which is what
+// every caller other than cmd/bridge wants.
+func (s *Server) WithSmartPlaylistEnabled(f func() bool) *Server {
+	s.smartPlaylistsEnabled = f
+	return s
+}
+
+// smartPlaylistsActive reports whether the feed should answer: wired AND
+// currently enabled.
+func (s *Server) smartPlaylistsActive() bool {
+	if s.smartPlaylistStore == nil {
+		return false
+	}
+	return s.smartPlaylistsEnabled == nil || s.smartPlaylistsEnabled()
+}
+
 // smartPlaylistResponseMaxItems caps each family on the wire. Generation
 // already caps at the engine MaxItems; this also bounds the time-of-day
 // window union (which merges several hour pools).
@@ -79,7 +105,7 @@ type smartPlaylistsResponse struct {
 // the device's current local hour, used ONLY to title the time-of-day family;
 // the bucket itself is the server's current UTC hour (the same instant).
 func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
-	if s.smartPlaylistStore == nil {
+	if !s.smartPlaylistsActive() {
 		writeError(w, http.StatusNotFound, "smart_playlists_not_supported",
 			"this bridge does not generate smart playlists")
 		return

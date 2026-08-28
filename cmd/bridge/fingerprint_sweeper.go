@@ -134,8 +134,20 @@ const fingerprintTagVetoTTL = 30 * 24 * time.Hour
 // sweep; a nudge arriving mid-sweep stays buffered so the select fires
 // an immediate follow-up. status (nil-safe) records the lifecycle for
 // the admin Jobs surface.
-func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
+// runFingerprintSweeper drives the sweep loop. `enabled` is a LIVE gate
+// checked per pass, so `fingerprint.enabled` applies without a restart —
+// the sweeper is started unconditionally and simply does nothing while the
+// feature is off.
+//
+// A disabled pass records NO status. Reporting one would put a "last
+// fingerprint sweep" timestamp on the Jobs card for work that never ran,
+// which is worse than the card looking stale: it says the feature is
+// doing something.
+func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, enabled func() bool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
 	runSweepLoop(ctx, status, fingerprintSweeperSettleDelay, interval, nudge, rearm, func() {
+		if enabled != nil && !enabled() {
+			return
+		}
 		status.sweepStarted()
 		status.sweepFinished(s.sweep(ctx))
 	})

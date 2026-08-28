@@ -131,7 +131,7 @@ type Server struct {
 	variantDeleter         VariantDeleter               // nil unless WithVariantDeleter wired (variant-lifecycle delete)
 	inflightDropper        InflightDropper              // nil unless WithInflightDropper wired (transcode pool dedup)
 	upscaleEnabled         bool                         // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
-	carPlayOptimizeEnabled bool                         // gated AND-wise on upscaleEnabled by the wiring layer
+	carPlayOptimizeEnabled func() bool                  // LIVE predicate; gated AND-wise on upscaleEnabled by the wiring layer
 	dlnaEnabled            bool                         // mirrors cfg.DLNA.Enabled AND shouldEnableDLNA(...) — opt-in LAN-only DLNA MediaServer
 	rendererDiscovery      RendererDiscoverySnapshotter // nil unless WithRendererDiscovery wired — opt-in SSDP MediaRenderer cache for /v1/renderers
 	upscaleEnqueuer        UpscaleEnqueuer              // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
@@ -202,6 +202,9 @@ type Server struct {
 	// on cfg.SmartPlaylists.EffectiveEnabled()). Same feature-off shape as the others;
 	// read-only on the request path. *manifest.Store satisfies it.
 	smartPlaylistStore SmartPlaylistStore
+	// smartPlaylistsEnabled is the optional LIVE on/off predicate; nil
+	// means "wired == enabled" (see WithSmartPlaylistEnabled).
+	smartPlaylistsEnabled func() bool
 
 	// coverStore resolves operator-uploaded custom cover hashes for the
 	// smart-mix + playlist wire DTOs (the imageHash advertisement). Nil →
@@ -687,7 +690,14 @@ func (s *Server) WithAnalysisStats(p AnalysisStatsProvider) *Server {
 // the wire-emit branch in /v1/health additionally requires
 // `s.upscaleEnabled` (optimize shares the SoX pool with upscale and
 // has no meaning without it).
-func (s *Server) WithCarPlayOptimize(enabled bool) *Server {
+//
+// Takes a PREDICATE rather than a bool so the toggle hot-applies: the
+// health handler calls it per request. A captured bool would keep
+// advertising a capability the operator has switched off — and would
+// keep NOT advertising one they switched on — until a restart, while the
+// pre-generation sweeper reading the same setting live had already
+// changed behaviour. Nil reads as off.
+func (s *Server) WithCarPlayOptimize(enabled func() bool) *Server {
 	s.carPlayOptimizeEnabled = enabled
 	return s
 }
@@ -1522,7 +1532,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		feats = append(feats, "booklets")
 	}
 	if s.upscaleEnabled {
-		if s.carPlayOptimizeEnabled {
+		if s.carPlayOptimizeEnabled != nil && s.carPlayOptimizeEnabled() {
 			feats = append(feats, "carPlayOptimize")
 		}
 		if s.variantDeleter != nil {
@@ -1620,10 +1630,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		feats = append(feats, "rendererDiscovery")
 	}
 	// `smartPlaylists` advertises GET /v1/smart-playlists (server-generated
-	// dynamic feeds). Gated on the store being wired (cfg.SmartPlaylists
-	// .Enabled). Alpha-sorted between rendererDiscovery and
-	// upscaleCompleteEvents (r < s < u).
-	if s.smartPlaylistStore != nil {
+	// dynamic feeds). Gated on the store being wired AND the live toggle,
+	// so a hot-applied cfg.SmartPlaylists.Enabled=false stops advertising
+	// a capability the endpoint now 404s — the two must not disagree.
+	// Alpha-sorted between rendererDiscovery and upscaleCompleteEvents
+	// (r < s < u).
+	if s.smartPlaylistsActive() {
 		feats = append(feats, "smartPlaylists")
 	}
 	// `spectrum` advertises GET /v1/spectrum?path=… plus the additive
