@@ -2098,6 +2098,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		mdnsWasEnabled       bool
 		mdnsNowEnabled       bool
 		duplicatesChanged    bool
+		// cadenceChanged: a background loop's schedule changed, so the
+		// rearm fan-out should wake them to re-read it.
+		cadenceChanged bool
 		// autoOptimizeFlipped: the pre-generation gate changed value.
 		// Hot-applies via a sweeper nudge instead of restartRequired.
 		autoOptimizeFlipped bool
@@ -2136,10 +2139,12 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.ScanIntervalSec != nil {
 			if *p.ScanIntervalSec != next.ScanIntervalSec {
 				next.ScanIntervalSec = *p.ScanIntervalSec
-				// scanner.RunPeriodic creates a static time.NewTicker at
-				// startup and never re-evaluates the interval; the new value
-				// only takes effect after a restart.
-				report.restart("scanIntervalSec")
+				// HOT: Scanner.RunPeriodic and the analysis sweeper both
+				// read the interval from a provider before each wait, and
+				// the cadence rearm below wakes them so the new value
+				// binds now rather than after the old interval.
+				cadenceChanged = true
+				report.live("scanIntervalSec")
 			} else {
 				report.unchanged("scanIntervalSec")
 			}
@@ -2153,8 +2158,11 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			if *p.BackupIntervalHours != next.Backup.EffectiveIntervalHours() {
 				v := *p.BackupIntervalHours
 				next.Backup.IntervalHours = &v
-				// runBackupTicker builds its time.Ticker once at startup.
-				report.restart("backupIntervalHours")
+				// HOT: runBackupTicker re-reads the interval before each
+				// wait, and is started unconditionally so 0 → N has a loop
+				// alive to notice.
+				cadenceChanged = true
+				report.live("backupIntervalHours")
 			} else {
 				report.unchanged("backupIntervalHours")
 			}
@@ -2162,7 +2170,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.BackupKeep != nil {
 			if *p.BackupKeep != next.Backup.EffectiveKeep() {
 				next.Backup.Keep = *p.BackupKeep
-				report.restart("backupKeep")
+				// HOT: read at prune time, which is the only moment
+				// retention means anything.
+				report.live("backupKeep")
 			} else {
 				report.unchanged("backupKeep")
 			}
@@ -2170,11 +2180,15 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.UpdateAutoInstall != nil {
 			if *p.UpdateAutoInstall != next.Update.AutoInstall {
 				next.Update.AutoInstall = *p.UpdateAutoInstall
-				// AutoInstall is wired into the updater at constructor
-				// time (cmd/bridge/main.go reads cfg.Update.AutoInstall
-				// once when building updater.Options). Toggling it at
-				// runtime requires a restart for the change to bind.
-				report.restart("updateAutoInstall")
+				// HOT: the updater reads this at the top of every poll
+				// cycle. Symmetric in both directions — an asymmetry that
+				// hot-applied only the OFF direction would be a hidden
+				// state machine, and the ON direction cannot surprise
+				// anyone: maybeAutoInstall runs only from the poll loop
+				// (never from the admin "Check now" path), the cadence
+				// floor is 1 h, and the install still has to clear
+				// quiet-hours and the in-flight sessions gate.
+				report.live("updateAutoInstall")
 			} else {
 				report.unchanged("updateAutoInstall")
 			}
@@ -2182,7 +2196,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.UpdateQuietHours != nil {
 			if *p.UpdateQuietHours != next.Update.QuietHours {
 				next.Update.QuietHours = *p.UpdateQuietHours
-				report.restart("updateQuietHours")
+				// HOT: resolved at the auto-install gate, not at
+				// construction.
+				report.live("updateQuietHours")
 			} else {
 				report.unchanged("updateQuietHours")
 			}
@@ -2190,7 +2206,10 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.UpdateCheckIntervalHours != nil {
 			if *p.UpdateCheckIntervalHours != next.Update.CheckIntervalHours {
 				next.Update.CheckIntervalHours = *p.UpdateCheckIntervalHours
-				report.restart("updateCheckIntervalHours")
+				// HOT: the poll loop re-reads the cadence before each
+				// wait (clamped by the same floor/default New() applies).
+				cadenceChanged = true
+				report.live("updateCheckIntervalHours")
 			} else {
 				report.unchanged("updateCheckIntervalHours")
 			}
@@ -2549,6 +2568,11 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if duplicatesChanged && s.deps.TriggerDuplicatesPass != nil {
 		s.deps.TriggerDuplicatesPass()
+	}
+	// Rearm AFTER the new config is persisted and published, so a loop
+	// woken by this reads the new value rather than racing the Store.
+	if cadenceChanged && s.deps.TriggerCadenceRearm != nil {
+		s.deps.TriggerCadenceRearm()
 	}
 	// Nudge on BOTH directions of the auto-optimize flip. On→off matters
 	// as much as off→on: the sweeper re-reads the flag and records a

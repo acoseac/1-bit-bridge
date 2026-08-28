@@ -240,14 +240,43 @@ func autoOptimizeStateClosure(enabled func() bool, degradedReason string, status
 // sweep was too early to see. Dropping it would lose exactly the
 // freshly-scanned files the nudge exists to catch.
 //
-// `interval <= 0 && nudge == nil` returns after the first sweep — the
-// single-shot call shape tests use. With a nudge wired the loop stays
-// parked for on-demand sweeps even without a periodic cadence.
+// # interval is a provider, and the loop re-reads it every iteration
+//
+// It used to be a captured time.Duration feeding one time.NewTicker built
+// before the loop, which is why a scan-interval change needed a restart:
+// the ticker never re-evaluated it. Reading a closure per iteration is
+// what makes the cadence fields hot.
+//
+// Two consequences worth stating, because both look like bugs otherwise:
+//
+//   - A timer per iteration, not one ticker. A ticker cannot change
+//     period, and Reset on a live ticker has enough footguns around
+//     already-queued sends that a fresh timer per pass is the cheaper
+//     thing to reason about. Cost is one allocation per sweep.
+//   - `interval() <= 0` parks the loop instead of ending it. Dormant is
+//     now a RESUMABLE state — an operator can set backup.intervalHours to
+//     0 and back — so the old `interval <= 0 && nudge == nil` early return
+//     had to go. A parked loop with no nudge and no rearm blocks on
+//     ctx.Done alone, which costs one goroutine and is what lets the
+//     0 → N transition ever be observed.
+//
+// # rearm
+//
+// Re-reads the interval and re-arms the timer WITHOUT sweeping. The
+// settings PATCH fires it when a cadence field changes, so "live" means
+// live rather than "from the next tick of the old cadence" — which on a
+// 6 h interval would have been a lie with a straight face.
+//
+// It deliberately restarts the wait rather than preserving elapsed time:
+// the PATCH only fires it when the value actually changed, and an
+// operator who just changed a cadence is asking for a new schedule. The
+// pathological case (nudging at hour 5 of a 6 h wait, pushing the next
+// sweep to hour 11) needs a same-value-different-config edit to reach.
 //
 // `sweep` owns its own status bookkeeping (sweepStarted / sweepFinished);
 // the loop only arms `scheduleNext`, so a caller keeps whatever
 // counts-on-failure semantics it needs.
-func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDelay, interval time.Duration, nudge <-chan struct{}, sweep func()) {
+func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDelay time.Duration, interval func() time.Duration, nudge, rearm <-chan struct{}, sweep func()) {
 	// time.NewTimer + defer Stop, NOT time.After: `time.After` keeps its
 	// timer alive until it fires even when ctx.Done() wins the select, and
 	// runServe is re-entered every time the launcher menu restarts the
@@ -264,28 +293,59 @@ func runSweepLoop[T any](ctx context.Context, status *sweepStatus[T], settleDela
 	case <-nudge:
 	default:
 	}
-	if interval > 0 {
-		status.scheduleNext(time.Now().Add(interval))
+	if d := intervalOf(interval); d > 0 {
+		status.scheduleNext(time.Now().Add(d))
 	}
 	sweep()
-	if interval <= 0 && nudge == nil {
-		return
-	}
-	var tickC <-chan time.Time
-	if interval > 0 {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		tickC = t.C
-	}
 	for {
+		d := intervalOf(interval)
+		var tickC <-chan time.Time
+		var t *time.Timer
+		if d > 0 {
+			t = time.NewTimer(d)
+			tickC = t.C
+			status.scheduleNext(time.Now().Add(d))
+		} else {
+			// Dormant: no scheduled next. Clearing it matters — a stale
+			// "next run at 14:00" on the Jobs card after the operator
+			// disabled the cadence is a promise the loop will not keep.
+			status.scheduleNext(time.Time{})
+		}
 		select {
 		case <-ctx.Done():
+			stopTimer(t)
 			return
 		case <-tickC:
-			status.scheduleNext(time.Now().Add(interval))
 			sweep()
 		case <-nudge:
+			stopTimer(t)
 			sweep()
+		case <-rearm:
+			// Cadence changed. Re-read it on the next iteration; do NOT
+			// sweep — a settings save is not a request to do the work.
+			stopTimer(t)
 		}
 	}
+}
+
+// intervalOf resolves a nil provider to 0 (dormant), so a caller with no
+// periodic cadence can pass nil rather than a closure returning zero.
+func intervalOf(f func() time.Duration) time.Duration {
+	if f == nil {
+		return 0
+	}
+	return f()
+}
+
+// stopTimer is nil-safe: the dormant branch above leaves t nil.
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
+	}
+}
+
+// staticInterval adapts a fixed duration to the provider shape, for tests
+// and for callers whose cadence genuinely cannot change.
+func staticInterval(d time.Duration) func() time.Duration {
+	return func() time.Duration { return d }
 }

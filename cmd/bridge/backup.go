@@ -171,7 +171,22 @@ const startupBackupSkipThreshold = 24 * time.Hour
 // cost one snapshot per boot), and then on the configured interval.
 // All errors are logged to stderr — never fatal, since a failed
 // backup must never take down the running bridge.
-func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval time.Duration, stdout, stderr io.Writer, status *sweepStatus[struct{}]) {
+// runBackupTicker takes its cadence AND its retention as providers,
+// re-read per use rather than captured once.
+//
+// `keep` is read at PRUNE time, which is the only moment it means
+// anything: retention is not a lifecycle, it is an argument to a function
+// that runs on a schedule, and capturing it was never buying anything.
+//
+// `interval` is read before each wait. A provider returning <= 0 parks
+// the loop instead of ending it — the operator disabled the cadence, and
+// re-enabling it must not require a restart. That is why the goroutine is
+// now started UNCONDITIONALLY by the caller: the old shape only spawned
+// it when hours > 0, so 0 → N had no loop alive to notice the change.
+//
+// `rearm` wakes the wait so a changed cadence is re-read immediately
+// rather than after the old interval — up to a day, on the 24 h default.
+func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, interval func() time.Duration, rearm <-chan struct{}, stdout, stderr io.Writer, status *sweepStatus[struct{}]) {
 	backupsRoot := filepath.Join(src.DataDir, backup.BackupsDirName)
 	doSnapshot := func(triggered string) {
 		status.sweepStarted()
@@ -186,7 +201,7 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		// PruneContext, and unconditionally — see backupCmd for both
 		// rationales. The ticker's ctx is the one shutdown cancels, so a
 		// prune stuck listing a wedged mount can't burn the whole grace.
-		res, err := backup.PruneContext(ctx, backupsRoot, keep)
+		res, err := backup.PruneContext(ctx, backupsRoot, keep())
 		// Warning, not a failure — see the same handling in
 		// backupCmd. Pre-split this early-returned and suppressed
 		// the "pruned N" line on every tick, forever.
@@ -218,16 +233,30 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep int, interval
 		doSnapshot("startup")
 	}
 
-	status.scheduleNext(time.Now().Add(interval))
-	t := time.NewTicker(interval)
-	defer t.Stop()
 	for {
+		d := interval()
+		var tickC <-chan time.Time
+		var t *time.Timer
+		if d > 0 {
+			t = time.NewTimer(d)
+			tickC = t.C
+			status.scheduleNext(time.Now().Add(d))
+		} else {
+			// Dormant. Clearing the schedule matters: a stale "next
+			// backup at 03:00" on the Jobs card after the operator set
+			// intervalHours to 0 is a promise the loop will not keep.
+			status.scheduleNext(time.Time{})
+		}
 		select {
 		case <-ctx.Done():
+			stopTimer(t)
 			return
-		case <-t.C:
-			status.scheduleNext(time.Now().Add(interval))
+		case <-tickC:
 			doSnapshot("scheduled")
+		case <-rearm:
+			// Cadence changed; re-read it. Deliberately no snapshot — a
+			// settings save is not a request to back up.
+			stopTimer(t)
 		}
 	}
 }

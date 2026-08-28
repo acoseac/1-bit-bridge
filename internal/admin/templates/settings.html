@@ -67,7 +67,7 @@
       </div>
 
       <div class="field">
-        <label>Scan interval (seconds) <span class="badge warn">restart</span>
+        <label>Scan interval (seconds)
           <input name="scanIntervalSec" type="number" min="1" value="{{.Data.ScanIntervalSec}}">
         </label>
         <small class="hint">How often the full walk runs. Defaults to 21600 (6 h).</small>
@@ -587,7 +587,7 @@
       <div class="field">
         <label class="checkbox">
           <input name="updateAutoInstall" type="checkbox" role="switch" {{if .Data.UpdateAutoInstall}}checked{{end}}>
-          Auto-install new releases <span class="badge warn">restart</span>
+          Auto-install new releases
         </label>
         <small class="hint">
           When enabled, every successful poll that surfaces an update triggers
@@ -610,7 +610,7 @@
       </div>
 
       <div class="field">
-        <label>Check interval (hours) <span class="badge warn">restart</span>
+        <label>Check interval (hours)
           <input name="updateCheckIntervalHours" type="number" min="0" placeholder="6"
                  value="{{if gt .Data.UpdateCheckIntervalHours 0}}{{.Data.UpdateCheckIntervalHours}}{{end}}">
         </label>
@@ -738,13 +738,13 @@
         now.
       */}}
       <div class="field">
-        <label for="backupIntervalHours">Snapshot every (hours) <span class="badge restart">restart</span></label>
+        <label for="backupIntervalHours">Snapshot every (hours)</label>
         <input type="number" id="backupIntervalHours" name="backupIntervalHours" min="0" max="8760"
                value="{{.Data.BackupIntervalHours}}">
         <p class="hint">0 disables the periodic snapshot; manual "Snapshot now" still works.</p>
       </div>
       <div class="field">
-        <label for="backupKeep">Snapshots to keep <span class="badge restart">restart</span></label>
+        <label for="backupKeep">Snapshots to keep</label>
         <input type="number" id="backupKeep" name="backupKeep" min="1" max="365"
                value="{{.Data.BackupKeep}}">
         <p class="hint">Older snapshots are pruned after each successful run.</p>

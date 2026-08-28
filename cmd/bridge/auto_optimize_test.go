@@ -412,7 +412,7 @@ func TestRunAutoOptimizeSweeperSweepsOnNudge(t *testing.T) {
 		defer close(done)
 		// interval 0 → nudge-only, so the loop parks on the nudge instead
 		// of racing a ticker.
-		runAutoOptimizeSweeper(ctx, f.sweeper, 0, nudge, nil)
+		runAutoOptimizeSweeper(ctx, f.sweeper, staticInterval(0), nudge, nil, nil)
 	}()
 
 	// The post-settle sweep already covers the seeded track; wait for it,

@@ -349,7 +349,7 @@ var analysisSweeperSettleDelay = 90 * time.Second
 // nudge is a buffered-1 channel; senders use a non-blocking send so a
 // pending nudge coalesces with the next sweep. status (nil-safe)
 // records the sweep lifecycle for the admin Jobs surface.
-func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir string, pool *analyze.Pool, interval time.Duration, nudge <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
+func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir string, pool *analyze.Pool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
 	sweep := func() {
 		status.sweepStarted()
 		// counts stays nil on failure/cancel so sweepFinished keeps the
@@ -405,5 +405,5 @@ func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *br
 	// Cadence (settle delay, one-drain semantics, tick-or-nudge) lives in
 	// the shared runSweepLoop — see its docstring for why the nudge is
 	// drained exactly once.
-	runSweepLoop(ctx, status, analysisSweeperSettleDelay, interval, nudge, sweep)
+	runSweepLoop(ctx, status, analysisSweeperSettleDelay, interval, nudge, rearm, sweep)
 }

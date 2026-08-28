@@ -2056,13 +2056,44 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// boot snapshot until the holder lands, live holder afterwards — the
 	// two can't differ in between, because config mutations only arrive
 	// via the admin server, which starts later.
-	var dupeCfgLive atomic.Pointer[config.RuntimeConfig]
-	scanner.SetDupePolicy(func() dupes.Policy {
-		live := cfg
-		if h := dupeCfgLive.Load(); h != nil {
-			live = h.Load()
+	// lateCfgHolder is the live config holder, late-bound because it
+	// belongs to apiSrv and apiSrv is built ~500 lines below — while the
+	// scanner, its duplicates policy and its scan cadence all have to be
+	// wired here, BEFORE RunPeriodic starts. Boot snapshot until the
+	// holder lands, live holder afterwards; the two cannot differ in
+	// between, because config mutations only arrive via the admin server,
+	// which starts later still.
+	var lateCfgHolder atomic.Pointer[config.RuntimeConfig]
+	liveCfg := func() *config.Config {
+		if h := lateCfgHolder.Load(); h != nil {
+			if live := h.Load(); live != nil {
+				return live
+			}
 		}
-		return dupePolicyFromConfig(live)
+		return cfg
+	}
+	// liveInterval builds a cadence provider that re-reads the live
+	// snapshot on every call, which is what makes the interval settings
+	// hot. Never returns zero from a nil snapshot — zero means DORMANT,
+	// and silently parking a sweeper is the worse failure.
+	liveInterval := func(pick func(*config.Config) time.Duration) func() time.Duration {
+		return func() time.Duration { return pick(liveCfg()) }
+	}
+	// cadenceRearms collects every buffered-1 channel that wants a poke
+	// when a CADENCE setting changes, so the loop re-reads its interval
+	// and re-arms instead of waiting out the old one. Fanned out by
+	// Deps.TriggerCadenceRearm below.
+	//
+	// Separate from postScanNudges because the two mean opposite things:
+	// a post-scan nudge asks a sweeper to DO THE WORK NOW, a rearm asks it
+	// only to re-read its schedule. Sending a work-nudge on a settings
+	// save would turn "I changed the backup cadence" into "run a backup",
+	// which is not what the operator asked for and, on a large library,
+	// not what they would want.
+	var cadenceRearms []chan struct{}
+
+	scanner.SetDupePolicy(func() dupes.Policy {
+		return dupePolicyFromConfig(liveCfg())
 	})
 	provider := manifest.NewProvider(manifestStore, scanner)
 
@@ -2079,10 +2110,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// shutdown path runs.
 	scanCtx, scanCancel := context.WithCancel(ctx)
 	defer scanCancel()
+	scanRearm := make(chan struct{}, 1)
+	cadenceRearms = append(cadenceRearms, scanRearm)
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
-		scanner.RunPeriodic(scanCtx, cfg.ScanInterval())
+		scanner.RunPeriodic(scanCtx, liveInterval((*config.Config).ScanInterval), scanRearm)
 	}()
 
 	// One-shot in-place rescale of the pre-right-sizing local-artwork
@@ -2269,24 +2302,33 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// disabled the ticker (`intervalHours: 0`); we skip the goroutine in
 	// that case. The on-demand CLI path stays available regardless.
 	backupSources := buildBackupSources(cfg, *configPath)
-	var backupRunState *sweepStatus[struct{}]
-	if hrs := cfg.Backup.EffectiveIntervalHours(); hrs > 0 {
-		backupRunState = &sweepStatus[struct{}]{}
-		backupInterval := time.Duration(hrs) * time.Hour
-		// Joined on bgWriters like every other background worker. It is not
-		// a manifest-store writer — `vacuumInto` opens its own mode=ro
-		// connection, so it never races Store.Close() — but leaving it
-		// fire-and-forget still let Snapshot/Prune/ReapOrphans run past
-		// runServe's return, which is what the documented shutdown contract
-		// forbids and what produced an intermittent
-		// `TempDir RemoveAll: directory not empty` under data/backups/ in
-		// TestServeStartsAndServesHealth.
-		bgWriters.Add(1)
-		go func() {
-			defer bgWriters.Done()
-			runBackupTicker(scanCtx, backupSources, cfg.Backup.EffectiveKeep(), backupInterval, stdout, stderr, backupRunState)
-		}()
-	}
+	// Started UNCONDITIONALLY, unlike the pre-hot-cadence shape which
+	// only spawned it when the interval was > 0. A dormant loop is what
+	// makes `backupIntervalHours: 0 → 24` observable without a restart:
+	// with no loop alive there is nothing to notice the change. It costs
+	// one parked goroutine on a bridge that has backups disabled.
+	//
+	// Joined on bgWriters like every other background worker. It is not a
+	// manifest-store writer — `vacuumInto` opens its own mode=ro
+	// connection, so it never races Store.Close() — but leaving it
+	// fire-and-forget still let Snapshot/Prune/ReapOrphans run past
+	// runServe's return, which is what the documented shutdown contract
+	// forbids and what produced an intermittent
+	// `TempDir RemoveAll: directory not empty` under data/backups/ in
+	// TestServeStartsAndServesHealth.
+	backupRunState := &sweepStatus[struct{}]{}
+	backupRearm := make(chan struct{}, 1)
+	cadenceRearms = append(cadenceRearms, backupRearm)
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		runBackupTicker(scanCtx, backupSources,
+			func() int { return liveCfg().Backup.EffectiveKeep() },
+			liveInterval(func(c *config.Config) time.Duration {
+				return time.Duration(c.Backup.EffectiveIntervalHours()) * time.Hour
+			}),
+			backupRearm, stdout, stderr, backupRunState)
+	}()
 
 	// Sessions tracker counts inflight /v1/read + /v1/download
 	// requests. The Install path consults Inflight() before
@@ -2349,6 +2391,28 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// session tracker, quiet-hours, and the Phase C compat
 		// gate identically across platforms.
 		AutoInstall: cfg.Update.AutoInstall,
+		// Live overrides: the three update settings hot-apply, re-read
+		// at decision time off the live holder rather than captured here.
+		LiveAutoInstall: func() bool { return liveCfg().Update.AutoInstall },
+		LiveQuietHours: func() (int, int) {
+			// Validate() already rejected an unparseable window at load
+			// AND at every settings PATCH, so a parse failure here means
+			// the stored value is one neither path could produce. Fall
+			// back to "any time" — the documented meaning of an unset
+			// window, and the same answer the boot path gives.
+			raw := liveCfg().Update.QuietHours
+			if raw == "" {
+				return 0, 0
+			}
+			start, end, err := config.ParseQuietHours(raw)
+			if err != nil {
+				return 0, 0
+			}
+			return start, end
+		},
+		LiveCheckInterval: func() time.Duration {
+			return time.Duration(liveCfg().Update.CheckIntervalHours) * time.Hour
+		},
 		// Compat-gate token snapshot. The updater calls this on each
 		// install attempt to decide whether the candidate's
 		// MinClientVersion would orphan a still-paired older client.
@@ -2363,12 +2427,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		updOpts.QuietHoursStart = start
 		updOpts.QuietHoursEnd = end
 	}
-	if cfg.Update.AutoInstall {
-		// Auto-install wires the install opts when the operator
-		// opted in via config. Phase B-Windows (PR #48) added the
-		// SCM-coordinated rename-trick swap, so Windows is now a
-		// supported auto-install platform — same gate sequence as
-		// darwin/linux.
+	// Wired UNCONDITIONALLY, unlike the pre-hot-cadence shape which only
+	// built these when auto-install was on at boot.
+	//
+	// They are inert on their own: maybeAutoInstall returns at its first
+	// line unless autoInstallEnabled() is true, so an installed-but-unused
+	// InstallOptions does nothing. Leaving them boot-gated is what would
+	// make the toggle a lie — a bridge that started with auto-install off
+	// would flip the switch, hit the "install opts missing" defensive
+	// branch, log a warning nobody reads, and never install anything.
+	//
+	// Same move as making the auto-optimize sweeper unconditional: the
+	// gate belongs in ONE place, read live, not duplicated as a wiring
+	// decision taken once at boot.
+	{
+		// Phase B-Windows (PR #48) added the SCM-coordinated rename-trick
+		// swap, so Windows is a supported auto-install platform — same
+		// gate sequence as darwin/linux.
 		updOpts.AutoInstallOpts = &updater.InstallOptions{
 			DataDir:    cfg.DataDir,
 			BinaryPath: binaryPath,
@@ -2572,7 +2647,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// Flip the duplicates-policy closure from the boot snapshot to the
 	// live holder (see SetDupePolicy above) so settings PATCHes reach
 	// the next stamping pass.
-	dupeCfgLive.Store(cfgHolder)
+	lateCfgHolder.Store(cfgHolder)
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
 	// http.Server on its own port + an SSDP advertiser so any DLNA
@@ -2744,6 +2819,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// sweep tick. Registered via postScanNudges rather than its own
 		// SetPostScanHook call — see that slice's docstring.
 		postScanNudges = append(postScanNudges, analysisNudge)
+		analysisRearm := make(chan struct{}, 1)
+		cadenceRearms = append(cadenceRearms, analysisRearm)
 		// Joined via bgWriters: the sweeper queries the store and enqueues
 		// analysis jobs whose completions write it back, so it must drain
 		// before Store.Close() like the other manifest writers.
@@ -2751,8 +2828,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		go func() {
 			defer bgWriters.Done()
 			runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
-				analyze.WaveformDirFor(cfg.DataDir), analysisPool, cfg.ScanInterval(),
-				analysisNudge, analysisSweepState)
+				analyze.WaveformDirFor(cfg.DataDir), analysisPool,
+				liveInterval((*config.Config).ScanInterval),
+				analysisNudge, analysisRearm, analysisSweepState)
 		}()
 	}
 
@@ -2777,11 +2855,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// coalescing contract as the analysis sweeper's.
 		fingerprintNudge = make(chan struct{}, 1)
 		fingerprintSweepState = &sweepStatus[admin.FingerprintSweepCounts]{}
+		fingerprintRearm := make(chan struct{}, 1)
+		cadenceRearms = append(cadenceRearms, fingerprintRearm)
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			runFingerprintSweeper(scanCtx, sweeper, cfg.Fingerprint.EffectiveSweepInterval(),
-				fingerprintNudge, fingerprintSweepState)
+			runFingerprintSweeper(scanCtx, sweeper,
+				liveInterval(func(c *config.Config) time.Duration {
+					return c.Fingerprint.EffectiveSweepInterval()
+				}),
+				fingerprintNudge, fingerprintRearm, fingerprintSweepState)
 		}()
 	}
 
@@ -2970,11 +3053,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				},
 				diskFree: transcode.AvailableDiskSpaceNearest,
 			}
+			autoOptimizeRearm := make(chan struct{}, 1)
+			cadenceRearms = append(cadenceRearms, autoOptimizeRearm)
 			bgWriters.Add(1)
 			go func() {
 				defer bgWriters.Done()
-				runAutoOptimizeSweeper(scanCtx, sweeper, cfg.AutoOptimizeInterval(),
-					autoOptimizeNudge, autoOptimizeSweepState)
+				runAutoOptimizeSweeper(scanCtx, sweeper,
+					liveInterval((*config.Config).AutoOptimizeInterval),
+					autoOptimizeNudge, autoOptimizeRearm, autoOptimizeSweepState)
 			}()
 		}
 
@@ -3458,7 +3544,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		AutoOptimizeState:        autoOptimizeStateClosure(autoOptimizeEnabledFn, "", autoOptimizeSweepState),
 		TriggerAutoOptimizeSweep: nudgeTriggerClosure(autoOptimizeNudge),
 		TriggerDuplicatesPass:    nudgeTriggerClosure(duplicatesNudge),
-		DuplicatesSweepRun:       jobRunClosure(duplicatesSweepState),
+		// Fan-out over every cadence loop. Captured by value: the slice
+		// is fully appended by this point (every sweeper is wired above),
+		// so the closure sees the complete set.
+		TriggerCadenceRearm: func(chans []chan struct{}) func() {
+			if len(chans) == 0 {
+				return nil
+			}
+			return func() {
+				for _, c := range chans {
+					select {
+					case c <- struct{}{}:
+					default: // buffered-1; a pending rearm already covers this
+					}
+				}
+			}
+		}(cadenceRearms),
+		DuplicatesSweepRun: jobRunClosure(duplicatesSweepState),
 		// Last/next-run recorders for the smart-mix + backup cards (nil
 		// when the respective loop isn't running).
 		SmartMixRun: jobRunClosure(smartMixRunState),

@@ -20,9 +20,9 @@ convention rather than necessity.
 {
   "restartRequired": true,
   "fields": {
-    "libraryName":        { "status": "live" },
-    "scanIntervalSec":    { "status": "restart" },
-    "backupKeep":         { "status": "unchanged" },
+    "libraryName":         { "status": "live" },
+    "libraryWatchEnabled": { "status": "restart" },
+    "backupKeep":          { "status": "unchanged" },
     "autoOptimizeEnabled": { "status": "restart",
                              "reason": "no auto-optimize sweeper is wired on this bridge …" }
   }
@@ -125,12 +125,12 @@ Classes describe *how the value is consumed*, not how important it is.
 | `tailscaleMode` | A / C | `live` (cli→disabled) / `restart`+reason | Only `cli → disabled` hot-applies, via `TailscaleDisable`. Every other transition rewires the auto-pilot and the listener composition; the reason names which transition it was. |
 | `listenAddress` | D | `restart` | The `/v1` listener bind. |
 | `adminAddress` | D | `restart` | The admin listener bind, and the loopback-only enforcement point. |
-| `scanIntervalSec` | B | `restart` | Boot snapshot into a static ticker; two consumers (`RunPeriodic`, the analysis sweeper). |
-| `backupIntervalHours` | B | `restart` | Static ticker, and the goroutine is only *spawned* when hours > 0 — so `0 → N` needs the loop to exist first. |
-| `backupKeep` | B | `restart` | A scalar captured into a long-lived goroutine. Retention is not a lifecycle at all. |
-| `updateAutoInstall` | B | `restart` | Captured into `updater.Options`. |
-| `updateQuietHours` | B | `restart` | Captured into `updater.Options`. |
-| `updateCheckIntervalHours` | B | `restart` | Captured into `updater.Options`. |
+| `scanIntervalSec` | **A** | `live` | `RunPeriodic` and the analysis sweeper both re-read a provider before each wait; the cadence rearm wakes them so the new value binds now. |
+| `backupIntervalHours` | **A** | `live` | Provider re-read before each wait. The ticker goroutine is now started **unconditionally** and parks when the interval is 0, which is what makes `0 → N` observable. |
+| `backupKeep` | **A** | `live` | Read at prune time, which is the only moment retention means anything. No rearm — there is no parked wait to disturb. |
+| `updateAutoInstall` | **A** | `live` | Read at the top of every poll cycle. Symmetric in both directions — see the note below. |
+| `updateQuietHours` | **A** | `live` | Resolved at the auto-install gate, not at construction. |
+| `updateCheckIntervalHours` | **A** | `live` | The poll loop re-reads the cadence before each wait, clamped by the same floor/default `New()` applies. |
 | `upscaleEnabled` | C | `restart` | `transcode.Pool` + coordinator + five API adapters + the sox precheck. |
 | `analysisEnabled` | C | `restart` | `analyze.Pool` + sweeper + the API store adapter. |
 | `smartPlaylistsEnabled` | B | `restart` | Regenerator goroutine + an API store field. Pure SQL over the existing manifest — no toolchain, no pool. |
@@ -155,6 +155,55 @@ Classes describe *how the value is consumed*, not how important it is.
 `deployment.mode`, `dataDir`, `tlsCertPath` / `tlsKeyPath`, and the tsnet state
 directory are config-file edits only. Autocert has its own handler and is out of
 scope here.
+
+---
+
+## Cadence fields: what "live" means, precisely
+
+A schedule that is re-read *eventually* is not the same as one that is re-read
+*now*. Reporting `live` for a 6 h scan interval whose loop will not consult the
+new value until the old one elapses is technically true and practically
+indistinguishable from being ignored.
+
+So the cadence conversion has two halves, and they ship together:
+
+1. **The provider.** Every loop reads a `func() time.Duration` before each wait
+   instead of building one `time.NewTicker` up front. A timer per iteration
+   rather than a ticker, because a ticker cannot change period.
+2. **The rearm.** `Deps.TriggerCadenceRearm` pokes every such loop when a cadence
+   field changes, so it re-reads immediately.
+
+The rearm is **not** a work-nudge. A nudge asks a sweeper to do the work now; a
+rearm asks it only to re-read its schedule. Collapsing them would turn "I changed
+the backup cadence" into "run a backup", which on a large library is a materially
+different thing to have asked for. Separate channels, separate fan-out.
+
+It fires **only on an actual change**, because it restarts the wait: firing it on
+a same-value save would push the next scheduled run out by a full interval every
+time the operator pressed Save on an unrelated field.
+
+**Dormant is a resumable state.** `interval() <= 0` parks a loop instead of
+ending it, and the backup ticker is started unconditionally. The old shape
+returned outright — so "disabled" was terminal for the process, and setting
+`backupIntervalHours` back to 24 had no loop alive to notice. Costs one parked
+goroutine on a bridge with backups off.
+
+### `updateAutoInstall` is symmetric, deliberately
+
+An asymmetry that hot-applied only the OFF direction was considered and rejected:
+it is a hidden state machine, and the ON direction cannot surprise anyone.
+`maybeAutoInstall` runs **only** from the poll loop — the admin "Check now" path
+deliberately does not call it — the cadence floor is 1 h with a 6 h default, and
+the install still has to clear the quiet-hours window and the in-flight sessions
+gate (re-checked *after* the download, since a stream may have started during
+it). There is no path from "operator ticked the box" to "restart within seconds".
+
+The install options and the restart callback are now wired **unconditionally**
+rather than only when auto-install was on at boot. They are inert on their own —
+`maybeAutoInstall` returns at its first line unless the gate is on — and leaving
+them boot-gated is what would have made the toggle a lie: a bridge that started
+with auto-install off would flip the switch, hit the "install opts missing"
+defensive branch, and never install anything.
 
 ---
 
@@ -195,6 +244,13 @@ its latency is the tenant's first impression.
 | `TestFieldApplyWireShape` | Object values, `reason` omitted when empty (key-absence via a decoded map, never a substring probe). |
 | `TestTrayBadgesAgreeWithWhatTheServerReports` | The UI badge agrees with what the server actually reports for that field — the check that makes a stale badge fail loudly when a field is converted. |
 | `TestFeatureTrayRestartBadgesAgreeWithSettings` | The two UI predictions agree with each other. |
+| `TestSweepLoopRereadsIntervalEveryIteration` | The provider is consulted per iteration, not cached — a provider read once is exactly as restart-bound as the duration it replaced. |
+| `TestSweepLoopRearmDoesNotSweep` | A rearm re-reads the schedule and never runs the work. |
+| `TestSweepLoopDormantIntervalIsResumable` | `0 → N` is observable, i.e. the loop parks rather than exits. |
+| `TestSweepLoopDormantClearsScheduledNext` | No stale "next run at …" after the cadence is disabled. |
+| `TestCadenceChangeFiresTheRearm` | Which fields fire the rearm, and which correctly do not. |
+| `TestUnchangedCadenceDoesNotFireTheRearm` | A same-value save cannot push the next run out by a full interval. |
+| `TestLiveProvidersOverrideStaticOptions` / `TestLiveCheckIntervalIsClamped` / `TestNilLiveProvidersKeepStaticBehaviour` | The updater reads its three settings at decision time, clamped, without regressing callers that pass none. |
 
 All of the above are negative-control-verified: each was run against a mutated
 build and confirmed to fail. A mutation that removes the only use of a symbol is

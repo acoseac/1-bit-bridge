@@ -147,18 +147,22 @@ func TestMixedPatchReportsPerFieldNotPerRequest(t *testing.T) {
 
 	var resp settingsPatchResponse
 	code := doJSON(t, srv.Handler(), "PATCH", "/api/settings", map[string]any{
-		"libraryName":     "Renamed Live",   // read per request off the holder
-		"scanIntervalSec": 7200,             // captured by a boot-time ticker
-		"adminAddress":    "127.0.0.1:7789", // already the stored value
+		"libraryName": "Renamed Live", // read per request off the holder
+		// libraryWatchEnabled rather than a cadence field: the cadence
+		// ones became hot, and this one is class C — the fsnotify watcher
+		// is spawned once at boot behind a drain contract, so it is
+		// expected to stay restart-bound for the life of this stack.
+		"libraryWatchEnabled": true,
+		"adminAddress":        "127.0.0.1:7789", // already the stored value
 	}, &resp)
 	if code != 200 {
 		t.Fatalf("patch: %d", code)
 	}
 
 	want := map[string]applyStatus{
-		"libraryName":     applyLive,
-		"scanIntervalSec": applyRestart,
-		"adminAddress":    applyUnchanged,
+		"libraryName":         applyLive,
+		"libraryWatchEnabled": applyRestart,
+		"adminAddress":        applyUnchanged,
 	}
 	for field, wantStatus := range want {
 		got, ok := resp.Fields[field]
@@ -176,7 +180,7 @@ func TestMixedPatchReportsPerFieldNotPerRequest(t *testing.T) {
 			len(resp.Fields), resp.Fields.fields(), len(want))
 	}
 	if !resp.RestartRequired {
-		t.Error("scanIntervalSec changed, so the legacy rollup must still be true")
+		t.Error("libraryWatchEnabled changed, so the legacy rollup must still be true")
 	}
 }
 
@@ -569,4 +573,82 @@ func TestCustomEndpointsReportedAfterPruning(t *testing.T) {
 			t.Errorf("status = %q, want %q", got, applyLive)
 		}
 	})
+}
+
+// TestCadenceChangeFiresTheRearm pins the second half of "live" for the
+// cadence fields.
+//
+// Reporting `live` for a schedule that will not be re-read until the OLD
+// interval elapses is technically true and practically a lie: on the 6 h
+// scan default the operator who shortens the cadence waits out the long
+// one first, which is indistinguishable from being ignored. The rearm is
+// what closes that gap, so the report and the rearm have to move
+// together.
+func TestCadenceChangeFiresTheRearm(t *testing.T) {
+	cases := []struct {
+		field string
+		value any
+		rearm bool
+	}{
+		// Schedules: a loop is parked on the old interval and has to be
+		// woken to re-read it.
+		{"scanIntervalSec", 7200, true},
+		{"backupIntervalHours", 12, true},
+		{"updateCheckIntervalHours", 3, true},
+		// Read at decision time, so there is no parked wait to disturb.
+		// Firing the rearm for these would be harmless but dishonest
+		// about what changed.
+		{"backupKeep", 9, false},
+		{"updateAutoInstall", true, false},
+		{"updateQuietHours", "02:00-04:00", false},
+		// Not a cadence at all.
+		{"libraryName", "Rearm Probe", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			srv, _, _ := newTestServer(t)
+			var fired int
+			srv.deps.TriggerCadenceRearm = func() { fired++ }
+
+			var resp settingsPatchResponse
+			if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+				map[string]any{tc.field: tc.value}, &resp); code != 200 {
+				t.Fatalf("patch: %d", code)
+			}
+			if got := resp.Fields[tc.field].Status; got != applyLive {
+				t.Fatalf("%s: status = %q, want %q — this case assumes the field is hot",
+					tc.field, got, applyLive)
+			}
+			if want := 0; !tc.rearm && fired != want {
+				t.Errorf("%s: rearm fired %d times, want %d", tc.field, fired, want)
+			}
+			if tc.rearm && fired != 1 {
+				t.Errorf("%s: rearm fired %d times, want 1 — without it the new schedule "+
+					"is not read until the old interval elapses", tc.field, fired)
+			}
+		})
+	}
+}
+
+// TestUnchangedCadenceDoesNotFireTheRearm — the rearm RESTARTS a wait, so
+// firing it on a same-value save would push the next run out by a full
+// interval every time the operator pressed Save on an unrelated field.
+func TestUnchangedCadenceDoesNotFireTheRearm(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	cfg := srv.deps.CfgHolder.Load()
+	var fired int
+	srv.deps.TriggerCadenceRearm = func() { fired++ }
+
+	var resp settingsPatchResponse
+	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+		map[string]any{"scanIntervalSec": cfg.ScanIntervalSec}, &resp); code != 200 {
+		t.Fatalf("patch: %d", code)
+	}
+	if got := resp.Fields["scanIntervalSec"].Status; got != applyUnchanged {
+		t.Fatalf("status = %q, want %q", got, applyUnchanged)
+	}
+	if fired != 0 {
+		t.Errorf("rearm fired %d times on an unchanged value — every save would push the "+
+			"next scheduled run out by a full interval", fired)
+	}
 }

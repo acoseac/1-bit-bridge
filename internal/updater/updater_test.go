@@ -341,3 +341,92 @@ func TestStatusInitiallyHasCurrentVersion(t *testing.T) {
 		t.Error("UpdateAvailable = true before any poll has happened")
 	}
 }
+
+// TestLiveProvidersOverrideStaticOptions pins the three update settings
+// being read at DECISION time rather than captured in New().
+//
+// The distinction matters most for autoInstall: it gates a background
+// binary swap and a supervised restart, so an operator switching it off
+// must have that bind before the next poll, not after a restart they were
+// never told to perform.
+func TestLiveProvidersOverrideStaticOptions(t *testing.T) {
+	var live atomic.Bool
+	var hours atomic.Int64
+	hours.Store(int64(3 * time.Hour))
+	var qStart, qEnd atomic.Int64
+
+	u := New(Options{
+		// Static values deliberately the OPPOSITE of the live ones, so a
+		// pass can only come from the provider being consulted.
+		AutoInstall:       false,
+		CheckInterval:     9 * time.Hour,
+		QuietHoursStart:   111,
+		QuietHoursEnd:     222,
+		LiveAutoInstall:   live.Load,
+		LiveCheckInterval: func() time.Duration { return time.Duration(hours.Load()) },
+		LiveQuietHours:    func() (int, int) { return int(qStart.Load()), int(qEnd.Load()) },
+	})
+
+	if u.autoInstallEnabled() {
+		t.Error("live provider says false; the static true must not win")
+	}
+	live.Store(true)
+	if !u.autoInstallEnabled() {
+		t.Error("flipping the live provider must bind without reconstructing the Updater")
+	}
+
+	if got := u.checkInterval(); got != 3*time.Hour {
+		t.Errorf("checkInterval = %v, want the live 3h (not the static 9h)", got)
+	}
+	s, e := u.quietHours()
+	if s != 0 || e != 0 {
+		t.Errorf("quietHours = (%d,%d), want the live (0,0)", s, e)
+	}
+	qStart.Store(60)
+	qEnd.Store(120)
+	if s, e := u.quietHours(); s != 60 || e != 120 {
+		t.Errorf("quietHours = (%d,%d) after a live change, want (60,120)", s, e)
+	}
+}
+
+// TestLiveCheckIntervalIsClamped — the floor and default that New()
+// applies to the static value are the CONTRACT, not an artifact of
+// construction. A live provider that skipped them could poll GitHub every
+// second, which is exactly the abuse minCheckInterval exists to prevent.
+func TestLiveCheckIntervalIsClamped(t *testing.T) {
+	var d atomic.Int64
+	u := New(Options{LiveCheckInterval: func() time.Duration { return time.Duration(d.Load()) }})
+
+	d.Store(0) // "unset" resolves to the default, as at construction
+	if got := u.checkInterval(); got != DefaultCheckInterval {
+		t.Errorf("zero interval = %v, want DefaultCheckInterval %v", got, DefaultCheckInterval)
+	}
+	d.Store(int64(time.Second)) // below the floor
+	if got := u.checkInterval(); got != minCheckInterval {
+		t.Errorf("1s interval = %v, want the floor %v", got, minCheckInterval)
+	}
+	d.Store(int64(-5 * time.Hour)) // negative
+	if got := u.checkInterval(); got != DefaultCheckInterval {
+		t.Errorf("negative interval = %v, want DefaultCheckInterval %v", got, DefaultCheckInterval)
+	}
+	d.Store(int64(4 * time.Hour)) // clear of both clamps
+	if got := u.checkInterval(); got != 4*time.Hour {
+		t.Errorf("4h interval = %v, want it passed through", got)
+	}
+}
+
+// TestNilLiveProvidersKeepStaticBehaviour — every caller that is not
+// cmd/bridge (tests, the CLI) leaves these nil and must be unaffected.
+func TestNilLiveProvidersKeepStaticBehaviour(t *testing.T) {
+	u := New(Options{AutoInstall: true, CheckInterval: 2 * time.Hour,
+		QuietHoursStart: 60, QuietHoursEnd: 120})
+	if !u.autoInstallEnabled() {
+		t.Error("nil provider must fall back to the static AutoInstall")
+	}
+	if got := u.checkInterval(); got != 2*time.Hour {
+		t.Errorf("checkInterval = %v, want the static 2h", got)
+	}
+	if s, e := u.quietHours(); s != 60 || e != 120 {
+		t.Errorf("quietHours = (%d,%d), want the static (60,120)", s, e)
+	}
+}

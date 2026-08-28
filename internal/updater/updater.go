@@ -167,6 +167,27 @@ type Options struct {
 	// where its own binary is).
 	AutoInstallOpts *InstallOptions
 
+	// LiveAutoInstall, LiveQuietHours and LiveCheckInterval override
+	// their static twins above when non-nil, re-read at DECISION time
+	// rather than captured here. They exist so the three update settings
+	// hot-apply: cmd/bridge wires them to closures over the live config
+	// holder, and every other caller (tests, the CLI) leaves them nil and
+	// keeps the static fields.
+	//
+	// The distinction that matters for AutoInstall: it gates a background
+	// binary swap and a supervised restart, so "applies live" has to be
+	// read precisely. maybeAutoInstall runs ONLY from Run's poll loop —
+	// the admin "Check now" path deliberately does not call it — and
+	// DefaultCheckInterval is 6 h with a 1 h floor. So flipping this on
+	// cannot begin anything sooner than the next scheduled poll, and that
+	// poll still has to clear the quiet-hours window and the in-flight
+	// sessions gate (which is re-checked AFTER the download, since a
+	// stream may have started during it). There is no path from "operator
+	// ticked the box" to "restart within seconds".
+	LiveAutoInstall   func() bool
+	LiveQuietHours    func() (start, end int)
+	LiveCheckInterval func() time.Duration
+
 	// AutoInstallRestart is invoked after a successful auto-install
 	// to trigger the process restart that loads the new binary.
 	// Nil disables the auto-install path. cmd/bridge/main.go wires
@@ -197,6 +218,9 @@ type Updater struct {
 	autoInstall        bool
 	quietHoursStart    int
 	quietHoursEnd      int
+	liveAutoInstall    func() bool
+	liveQuietHours     func() (int, int)
+	liveCheckInterval  func() time.Duration
 	autoInstallOpts    *InstallOptions
 	autoInstallRestart func()
 	tokenSnapshot      func() []auth.Token
@@ -264,6 +288,9 @@ func New(opts Options) *Updater {
 		autoInstall:        opts.AutoInstall,
 		quietHoursStart:    opts.QuietHoursStart,
 		quietHoursEnd:      opts.QuietHoursEnd,
+		liveAutoInstall:    opts.LiveAutoInstall,
+		liveQuietHours:     opts.LiveQuietHours,
+		liveCheckInterval:  opts.LiveCheckInterval,
 		autoInstallOpts:    opts.AutoInstallOpts,
 		autoInstallRestart: opts.AutoInstallRestart,
 		tokenSnapshot:      opts.TokenSnapshot,
@@ -306,11 +333,14 @@ func (u *Updater) Run(ctx context.Context) {
 		u.maybeAutoInstall(ctx)
 	}
 
-	t := time.NewTicker(u.interval)
-	defer t.Stop()
+	// A fresh timer per iteration rather than one ticker: a ticker cannot
+	// change period, and re-reading the cadence is what makes
+	// update.checkIntervalHours hot.
 	for {
+		t := time.NewTimer(u.checkInterval())
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
 			if u.checkOnce(ctx) {
@@ -318,6 +348,43 @@ func (u *Updater) Run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// autoInstallEnabled resolves the auto-install gate, preferring the live
+// provider. Read at the top of every poll cycle, so an operator's flip
+// binds on the next one without a restart.
+func (u *Updater) autoInstallEnabled() bool {
+	if u.liveAutoInstall != nil {
+		return u.liveAutoInstall()
+	}
+	return u.autoInstall
+}
+
+// quietHours resolves the auto-install window, preferring the live
+// provider. Read at the gate rather than at construction.
+func (u *Updater) quietHours() (int, int) {
+	if u.liveQuietHours != nil {
+		return u.liveQuietHours()
+	}
+	return u.quietHoursStart, u.quietHoursEnd
+}
+
+// checkInterval resolves the poll cadence, preferring the live provider
+// and applying the same floor/default clamps New() applies to the static
+// value — the clamps are the contract, not an artifact of construction,
+// so a live value that skipped them could poll GitHub every second.
+func (u *Updater) checkInterval() time.Duration {
+	d := u.interval
+	if u.liveCheckInterval != nil {
+		d = u.liveCheckInterval()
+	}
+	if d <= 0 {
+		d = DefaultCheckInterval
+	}
+	if d < minCheckInterval {
+		d = minCheckInterval
+	}
+	return d
 }
 
 // maybeAutoInstall is the auto-install entry point. Returns
@@ -333,7 +400,7 @@ func (u *Updater) Run(ctx context.Context) {
 // audit "why didn't auto-install fire") but never escalate to
 // stderr; a deferred install is a normal state.
 func (u *Updater) maybeAutoInstall(ctx context.Context) {
-	if !u.autoInstall {
+	if !u.autoInstallEnabled() {
 		return
 	}
 	// Reset DeferredReason at the start of each cycle so a stale
@@ -610,11 +677,12 @@ func (u *Updater) inAllowedWindow(t time.Time) bool {
 	// ("any time"), so the two diverge only at this layer; pre-fix the
 	// short-circuit fired only for (0,0), so a non-zero equal window fell
 	// through to inWindow(120,120,…) → false and auto-install fired NEVER.
-	if u.quietHoursStart == u.quietHoursEnd {
+	start, end := u.quietHours()
+	if start == end {
 		return true
 	}
 	mod := t.Hour()*60 + t.Minute()
-	return inWindow(u.quietHoursStart, u.quietHoursEnd, mod)
+	return inWindow(start, end, mod)
 }
 
 // inWindow mirrors config.IsInQuietHours but lives here so the
