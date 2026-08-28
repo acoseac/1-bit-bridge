@@ -2039,7 +2039,17 @@ type settingsPatch struct {
 }
 
 type settingsPatchResponse struct {
+	// RestartRequired is the legacy blanket answer, kept indefinitely
+	// and DERIVED from Fields (applyReport.needsRestart) rather than
+	// tracked beside it. The bridge is open-source and self-hosted, so
+	// the set of scripts reading this key is unknowable; carrying it
+	// costs one line and deprecating it buys nothing.
 	RestartRequired bool `json:"restartRequired"`
+	// Fields is the per-field outcome, keyed by the field's JSON tag on
+	// settingsPatch. Present for every field the patch SUPPLIED,
+	// including ones that turned out to be unchanged. See
+	// settings_apply.go for the three statuses and when Reason is set.
+	Fields applyReport `json:"fields"`
 }
 
 // resolvedDuplicatesFilter renders the effective duplicates.filter for
@@ -2075,8 +2085,14 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	// two concurrent PATCHes fire their hot-reload callbacks in commit
 	// order. fn rejections ride back as *cfgAbort; updateErr is either
 	// one of those or the Save failure.
+	// report is populated INSIDE the Update closure, at the same sites
+	// that used to set `restart = true`. Deliberately not derived
+	// afterwards from a static field→semantics table: several answers
+	// are conditional on this bridge's wiring (no auto-optimize sweeper
+	// → the flip cannot hot-apply; which tailscale transition this is),
+	// and a table computed outside the closure cannot see any of that.
+	report := applyReport{}
 	var (
-		restart              bool
 		tailscaleWasDisabled bool
 		tailscaleHotReload   bool
 		mdnsWasEnabled       bool
@@ -2088,20 +2104,33 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	)
 	updateErr := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
 		if p.LibraryName != nil {
-			next.LibraryName = strings.TrimSpace(*p.LibraryName)
-			// Library name reaches iOS via /v1/health, which reads the live
-			// cfg each request — no restart needed.
+			// Compare before assigning: the write is idempotent either
+			// way (TrimSpace of the stored value is the stored value),
+			// but without the compare a same-value submit could not be
+			// reported as `unchanged`.
+			if v := strings.TrimSpace(*p.LibraryName); v != next.LibraryName {
+				next.LibraryName = v
+				// Library name reaches iOS via /v1/health, which reads the live
+				// cfg each request — no restart needed.
+				report.live("libraryName")
+			} else {
+				report.unchanged("libraryName")
+			}
 		}
 		if p.ListenAddress != nil {
 			if *p.ListenAddress != next.ListenAddress {
 				next.ListenAddress = *p.ListenAddress
-				restart = true
+				report.restart("listenAddress")
+			} else {
+				report.unchanged("listenAddress")
 			}
 		}
 		if p.AdminAddress != nil {
 			if *p.AdminAddress != next.AdminAddress {
 				next.AdminAddress = *p.AdminAddress
-				restart = true
+				report.restart("adminAddress")
+			} else {
+				report.unchanged("adminAddress")
 			}
 		}
 		if p.ScanIntervalSec != nil {
@@ -2110,7 +2139,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// scanner.RunPeriodic creates a static time.NewTicker at
 				// startup and never re-evaluates the interval; the new value
 				// only takes effect after a restart.
-				restart = true
+				report.restart("scanIntervalSec")
+			} else {
+				report.unchanged("scanIntervalSec")
 			}
 		}
 		if p.BackupIntervalHours != nil {
@@ -2123,13 +2154,17 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				v := *p.BackupIntervalHours
 				next.Backup.IntervalHours = &v
 				// runBackupTicker builds its time.Ticker once at startup.
-				restart = true
+				report.restart("backupIntervalHours")
+			} else {
+				report.unchanged("backupIntervalHours")
 			}
 		}
 		if p.BackupKeep != nil {
 			if *p.BackupKeep != next.Backup.EffectiveKeep() {
 				next.Backup.Keep = *p.BackupKeep
-				restart = true
+				report.restart("backupKeep")
+			} else {
+				report.unchanged("backupKeep")
 			}
 		}
 		if p.UpdateAutoInstall != nil {
@@ -2139,19 +2174,25 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// time (cmd/bridge/main.go reads cfg.Update.AutoInstall
 				// once when building updater.Options). Toggling it at
 				// runtime requires a restart for the change to bind.
-				restart = true
+				report.restart("updateAutoInstall")
+			} else {
+				report.unchanged("updateAutoInstall")
 			}
 		}
 		if p.UpdateQuietHours != nil {
 			if *p.UpdateQuietHours != next.Update.QuietHours {
 				next.Update.QuietHours = *p.UpdateQuietHours
-				restart = true
+				report.restart("updateQuietHours")
+			} else {
+				report.unchanged("updateQuietHours")
 			}
 		}
 		if p.UpdateCheckIntervalHours != nil {
 			if *p.UpdateCheckIntervalHours != next.Update.CheckIntervalHours {
 				next.Update.CheckIntervalHours = *p.UpdateCheckIntervalHours
-				restart = true
+				report.restart("updateCheckIntervalHours")
+			} else {
+				report.unchanged("updateCheckIntervalHours")
 			}
 		}
 		// Custom endpoints: array form takes precedence; textarea form is
@@ -2176,7 +2217,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// runtime hook, but the operator-friction gain
 				// isn't worth the rewiring complexity until a
 				// user requests it.
-				restart = true
+				report.restart("upscaleEnabled")
+			} else {
+				report.unchanged("upscaleEnabled")
 			}
 		}
 		if p.AnalysisEnabled != nil {
@@ -2186,7 +2229,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// health flag + /v1/waveform wiring are decided once at
 				// startup, so a runtime flip needs a restart to take
 				// effect. Idempotent same-value submissions skip the banner.
-				restart = true
+				report.restart("analysisEnabled")
+			} else {
+				report.unchanged("analysisEnabled")
 			}
 		}
 		if p.SmartPlaylistsEnabled != nil {
@@ -2201,7 +2246,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// once at startup (cmd/bridge/main.go), so a runtime flip
 				// needs a restart. Idempotent same-value submissions skip the
 				// banner.
-				restart = true
+				report.restart("smartPlaylistsEnabled")
+			} else {
+				report.unchanged("smartPlaylistsEnabled")
 			}
 		}
 		if p.OptimizeEnabled != nil {
@@ -2217,7 +2264,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// carPlayOptimize advertisement are resolved once at
 				// `bridge serve` startup, so a runtime flip needs a
 				// restart (same shape as UpscaleEnabled).
-				restart = true
+				report.restart("optimizeEnabled")
+			} else {
+				report.unchanged("optimizeEnabled")
 			}
 		}
 		if p.AutoOptimizeEnabled != nil {
@@ -2236,8 +2285,15 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// the switch, see nothing happen, and have nothing to act on.
 				autoOptimizeFlipped = true
 				if s.deps.TriggerAutoOptimizeSweep == nil {
-					restart = true
+					report.restartBecause("autoOptimizeEnabled",
+						"no auto-optimize sweeper is wired on this bridge "+
+							"(the upscale pool is absent, or the optimize kind is off), "+
+							"so the persisted value cannot take effect until a restart")
+				} else {
+					report.live("autoOptimizeEnabled")
 				}
+			} else {
+				report.unchanged("autoOptimizeEnabled")
 			}
 		}
 		if p.LibraryWatchEnabled != nil {
@@ -2248,31 +2304,37 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// start/stop hook, so a flip needs a restart in both
 				// directions. Idempotent same-value submissions skip
 				// the banner.
-				restart = true
+				report.restart("libraryWatchEnabled")
+			} else {
+				report.unchanged("libraryWatchEnabled")
 			}
 		}
 		// Enrich upstream base URLs (#406's config). Trim to match
 		// normalizeBaseURL so a re-submit of the stored value doesn't spuriously
 		// flag a restart; Config.Validate() below does the authoritative
 		// normalize + http(s) validation. Restart-required (clients wired once).
-		applyEnrichBase := func(in *string, dst *string) {
+		applyEnrichBase := func(field string, in *string, dst *string) {
 			if in == nil {
 				return
 			}
 			if v := strings.TrimRight(strings.TrimSpace(*in), "/"); v != *dst {
 				*dst = v
-				restart = true
+				report.restart(field)
+			} else {
+				report.unchanged(field)
 			}
 		}
-		applyEnrichBase(p.EnrichMusicBrainzBaseURL, &next.Enrich.MusicBrainzBaseURL)
-		applyEnrichBase(p.EnrichCoverArtBaseURL, &next.Enrich.CoverArtBaseURL)
+		applyEnrichBase("enrichMusicBrainzBaseURL", p.EnrichMusicBrainzBaseURL, &next.Enrich.MusicBrainzBaseURL)
+		applyEnrichBase("enrichCoverArtBaseURL", p.EnrichCoverArtBaseURL, &next.Enrich.CoverArtBaseURL)
 		if p.AtlasEnabled != nil {
 			if *p.AtlasEnabled != next.Atlas.Enabled {
 				next.Atlas.Enabled = *p.AtlasEnabled
 				// Restart-required: the /v1/atlas-ingest + /v1/atlas-meta routes
 				// and the atlasEnrichment health flag are wired once at startup.
 				// Idempotent same-value submits skip the banner.
-				restart = true
+				report.restart("atlasEnabled")
+			} else {
+				report.unchanged("atlasEnabled")
 			}
 		}
 		if p.FingerprintEnabled != nil {
@@ -2282,7 +2344,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// run once at `bridge serve` startup (same startup-wired
 				// shape as upscale/analysis), so a runtime flip needs a
 				// restart. Idempotent same-value submits skip the banner.
-				restart = true
+				report.restart("fingerprintEnabled")
+			} else {
+				report.unchanged("fingerprintEnabled")
 			}
 		}
 		if p.DuplicatesFilter != nil {
@@ -2300,11 +2364,20 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// its policy per run.
 				next.Duplicates.Filter = resolved
 				duplicatesChanged = true
+				report.live("duplicatesFilter")
+			} else {
+				report.unchanged("duplicatesFilter")
 			}
 		}
 		if p.FingerprintAPIKey != nil {
 			// Blank = keep current (the form always submits the field);
-			// clearing a stored key is deliberately a YAML edit.
+			// clearing a stored key is deliberately a YAML edit. Both the
+			// blank case and a re-submit of the stored key report
+			// `unchanged` — nothing was written either way, and the
+			// alternative (omitting the field) would leave a caller unable
+			// to distinguish "you sent it and it was a no-op" from "you
+			// forgot to send it".
+			report.unchanged("fingerprintApiKey")
 			if v := strings.TrimSpace(*p.FingerprintAPIKey); v != "" && v != next.Fingerprint.APIKey {
 				if len(v) > maxFingerprintKeyLen {
 					return &cfgAbort{status: http.StatusBadRequest, code: "validate",
@@ -2315,13 +2388,31 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// restart to activate (or to un-degrade an enabled-but-
 				// keyless bridge). Note ACOUSTID_API_KEY env, when set,
 				// still wins over this stored value (ResolvedAPIKey).
-				restart = true
+				report.restart("fingerprintApiKey")
 			}
 		}
-		if p.CustomEndpoints != nil {
-			next.CustomEndpoints = *p.CustomEndpoints
-		} else if p.CustomEndpointsText != nil {
-			next.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
+		// Both forms report under `customEndpoints`: the array form wins
+		// when both are sent, so reporting the textarea form under its own
+		// key would name a field that did not decide the outcome.
+		// Validate() below may still prune invalid entries, which is why
+		// the compare is against the pre-normalisation list — it answers
+		// "did this request ask for a different list", not "is the stored
+		// list byte-identical to what you sent".
+		if p.CustomEndpoints != nil || p.CustomEndpointsText != nil {
+			want := next.CustomEndpoints
+			if p.CustomEndpoints != nil {
+				want = *p.CustomEndpoints
+			} else {
+				want = splitCustomEndpointsText(*p.CustomEndpointsText)
+			}
+			if slices.Equal(want, next.CustomEndpoints) {
+				report.unchanged("customEndpoints")
+			} else {
+				next.CustomEndpoints = want
+				// Read per request by advertise.Endpoints() and the
+				// /v1/health handler, both off the live snapshot.
+				report.live("customEndpoints")
+			}
 		}
 
 		// PR 4 — Tailscale mode dropdown. Hot-reload matrix:
@@ -2369,8 +2460,20 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			tailscaleHotReload = newMode != prevMode &&
 				tailscaleNowDisabled &&
 				prevMode == config.TailscaleModeCLI
-			if newMode != prevMode && !tailscaleHotReload {
-				restart = true
+			switch {
+			case newMode == prevMode:
+				report.unchanged("tailscaleMode")
+			case tailscaleHotReload:
+				report.live("tailscaleMode")
+			default:
+				// Name the transition: WHICH one it is decides the
+				// answer, so a bare "restart" would drop the only fact
+				// a reader needs to understand why cli → disabled got a
+				// different answer than this did.
+				report.restartBecause("tailscaleMode", fmt.Sprintf(
+					"the %s → %s transition rewires the Tailscale auto-pilot and the "+
+						"listener composition, both of which are built at startup",
+					prevMode, newMode))
 			}
 		}
 		if p.DLNAEnabled != nil {
@@ -2382,7 +2485,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// listener and the per-interface SSDP advertisers — same
 				// startup-wired shape as upscaleEnabled, so restart-required
 				// is the honest answer rather than a partial hot-apply.
-				restart = true
+				report.restart("dlnaEnabled")
+			} else {
+				report.unchanged("dlnaEnabled")
 			}
 		}
 		// PR 4 — mDNS toggle. Hot-reloadable in BOTH directions.
@@ -2392,6 +2497,20 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			v := *p.MDNSEnabled
 			next.MDNS.Enabled = &v
 			mdnsNowEnabled = v
+			switch {
+			case mdnsNowEnabled == mdnsWasEnabled:
+				report.unchanged("mdnsEnabled")
+			case s.deps.MDNSToggle == nil:
+				// Same honesty rule as the auto-optimize sweeper: with no
+				// lifecycle wired the persisted value cannot take effect
+				// in this process, so say so rather than report a success
+				// the operator would watch fail to happen.
+				report.restartBecause("mdnsEnabled",
+					"no mDNS lifecycle is wired on this bridge, so the persisted "+
+						"value cannot take effect until a restart")
+			default:
+				report.live("mdnsEnabled")
+			}
 		}
 
 		// NormalizeAndValidate, not bare Validate: this path PERSISTS `next`,
@@ -2431,7 +2550,10 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		s.deps.TriggerAutoOptimizeSweep()
 	}
 
-	writeJSON(w, http.StatusOK, settingsPatchResponse{RestartRequired: restart})
+	writeJSON(w, http.StatusOK, settingsPatchResponse{
+		RestartRequired: report.needsRestart(),
+		Fields:          report,
+	})
 }
 
 // upscaleStatsResponse is the JSON shape /api/upscale/stats
