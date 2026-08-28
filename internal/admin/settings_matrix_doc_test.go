@@ -3,6 +3,7 @@ package admin
 import (
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -37,8 +38,18 @@ func TestMatrixDocMatchesWhatTheHandlerReports(t *testing.T) {
 		t.Fatalf("read the matrix doc: %v", err)
 	}
 
+	// Scope the scan to the matrix section. The file carries a SECOND
+	// three-column table (the control-plane restart list) whose rows have
+	// the same shape, and whose third column is prose. Today none of that
+	// prose contains a backticked status code, so those rows are skipped
+	// — but "today" is the whole problem: one edit adding "`restart` at
+	// provision time" to a recommendation would silently override the
+	// real matrix row, and the vacuous-pass guard below would not notice
+	// because the count stays the same.
+	section := matrixSection(t, string(doc))
+
 	rows := map[string][]string{} // field -> allowed statuses
-	for _, m := range matrixRowRe.FindAllStringSubmatch(string(doc), -1) {
+	for _, m := range matrixRowRe.FindAllStringSubmatch(section, -1) {
 		field, statusCell := m[1], m[3]
 		var codes []string
 		for _, c := range statusCodeRe.FindAllStringSubmatch(statusCell, -1) {
@@ -110,4 +121,24 @@ func keysOfStrings(m map[string][]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// matrixSection returns the body of the "## The matrix" heading, up to the
+// next second-level heading.
+//
+// Anchored on the heading rather than on the table's own delimiters
+// because a table is easy to move and a heading is not: if the section is
+// renamed the test fails loudly here instead of silently scanning nothing.
+func matrixSection(t *testing.T, doc string) string {
+	const heading = "\n## The matrix\n"
+	i := strings.Index(doc, heading)
+	if i < 0 {
+		t.Fatalf("no %q heading in the matrix doc — the section was renamed and this test "+
+			"would otherwise scan the wrong table", strings.TrimSpace(heading))
+	}
+	rest := doc[i+len(heading):]
+	if j := strings.Index(rest, "\n## "); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest
 }
