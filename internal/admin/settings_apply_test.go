@@ -530,3 +530,43 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 	}
 	return nil, false
 }
+
+// TestCustomEndpointsReportedAfterPruning — the verdict is decided after
+// NormalizeAndValidate, which drops entries that are not absolute https
+// URLs.
+//
+// Deciding before it would report `live` for a request whose entries
+// validation then pruned: the saved list unchanged, the response claiming
+// otherwise. That is the one answer worse than no answer for a control
+// plane reconciling desired state — it records a convergence that did not
+// happen and stops trying.
+func TestCustomEndpointsReportedAfterPruning(t *testing.T) {
+	t.Run("only-invalid entries report unchanged", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		var resp settingsPatchResponse
+		// http, not https — ValidateCustomEndpoints prunes it.
+		if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+			map[string]any{"customEndpoints": []string{"http://not-https.example"}}, &resp); code != 200 {
+			t.Fatalf("patch: %d", code)
+		}
+		if got := resp.Fields["customEndpoints"].Status; got != applyUnchanged {
+			t.Errorf("status = %q, want %q — every entry was pruned, so the saved list "+
+				"is exactly what it was", got, applyUnchanged)
+		}
+		if got := srv.deps.CfgHolder.Load().CustomEndpoints; len(got) != 0 {
+			t.Errorf("stored list = %v, want empty (the entry was invalid)", got)
+		}
+	})
+
+	t.Run("a surviving entry reports live", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		var resp settingsPatchResponse
+		if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+			map[string]any{"customEndpoints": []string{"https://bridge.example:7788"}}, &resp); code != 200 {
+			t.Fatalf("patch: %d", code)
+		}
+		if got := resp.Fields["customEndpoints"].Status; got != applyLive {
+			t.Errorf("status = %q, want %q", got, applyLive)
+		}
+	})
+}

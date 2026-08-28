@@ -2394,24 +2394,22 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// Both forms report under `customEndpoints`: the array form wins
 		// when both are sent, so reporting the textarea form under its own
 		// key would name a field that did not decide the outcome.
-		// Validate() below may still prune invalid entries, which is why
-		// the compare is against the pre-normalisation list — it answers
-		// "did this request ask for a different list", not "is the stored
-		// list byte-identical to what you sent".
+		//
+		// The VERDICT is deferred until after NormalizeAndValidate below,
+		// which prunes invalid entries. Deciding here would report `live`
+		// for a request whose entries validation then dropped — the saved
+		// list unchanged, the response claiming otherwise, which is the one
+		// answer worse than no answer for a control plane reconciling
+		// desired state.
+		var customEndpointsBefore []string
+		customEndpointsTouched := false
 		if p.CustomEndpoints != nil || p.CustomEndpointsText != nil {
-			want := next.CustomEndpoints
+			customEndpointsBefore = slices.Clone(next.CustomEndpoints)
+			customEndpointsTouched = true
 			if p.CustomEndpoints != nil {
-				want = *p.CustomEndpoints
+				next.CustomEndpoints = *p.CustomEndpoints
 			} else {
-				want = splitCustomEndpointsText(*p.CustomEndpointsText)
-			}
-			if slices.Equal(want, next.CustomEndpoints) {
-				report.unchanged("customEndpoints")
-			} else {
-				next.CustomEndpoints = want
-				// Read per request by advertise.Endpoints() and the
-				// /v1/health handler, both off the live snapshot.
-				report.live("customEndpoints")
+				next.CustomEndpoints = splitCustomEndpointsText(*p.CustomEndpointsText)
 			}
 		}
 
@@ -2519,6 +2517,17 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// `next` is the fresh clone of the live snapshot Update hands this fn.
 		if err := next.NormalizeAndValidate(); err != nil {
 			return &cfgAbort{status: http.StatusBadRequest, code: "validate", msg: err.Error()}
+		}
+		// Now that pruning has run, compare what was actually SAVED against
+		// what was there before. Read per request by advertise.Endpoints()
+		// and the /v1/health handler, both off the live snapshot, so a real
+		// change is live.
+		if customEndpointsTouched {
+			if slices.Equal(next.CustomEndpoints, customEndpointsBefore) {
+				report.unchanged("customEndpoints")
+			} else {
+				report.live("customEndpoints")
+			}
 		}
 		return nil
 	})
