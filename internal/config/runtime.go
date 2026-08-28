@@ -99,6 +99,9 @@ func Clone(cfg *Config) *Config {
 	if cfg.CustomEndpoints != nil {
 		out.CustomEndpoints = append([]string(nil), cfg.CustomEndpoints...)
 	}
+	if cfg.Deployment.ManagedSettings != nil {
+		out.Deployment.ManagedSettings = append([]string(nil), cfg.Deployment.ManagedSettings...)
+	}
 	if cfg.Backup.IntervalHours != nil {
 		v := *cfg.Backup.IntervalHours
 		out.Backup.IntervalHours = &v

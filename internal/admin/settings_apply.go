@@ -72,7 +72,13 @@
 // whose script consumers are unknowable.
 package admin
 
-import "sort"
+import (
+	"reflect"
+	"sort"
+	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
+)
 
 // applyStatus is what happened to one field named in a settings PATCH.
 type applyStatus string
@@ -207,4 +213,37 @@ func soxDegradedMessage(probeErr error, hasFLAC, formatsKnown bool) string {
 		return "saved, but this sox build has no FLAC support, so nothing will be generated"
 	}
 	return ""
+}
+
+// managedFieldsIn returns the SUPPLIED fields that this bridge's control
+// plane owns, sorted.
+//
+// Reflection over the patch struct rather than a hand-listed set: a field
+// added to settingsPatch without a line here would be silently
+// changeable on a managed bridge, and nothing else would notice.
+// TestEveryPatchFieldCanBeManaged pins that every field is reachable.
+func managedFieldsIn(cfg *config.Config, p settingsPatch) []string {
+	if cfg == nil || len(cfg.Deployment.ManagedSettings) == 0 {
+		return nil
+	}
+	var out []string
+	v := reflect.ValueOf(p)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		// Pointer fields distinguish "not supplied" from "supplied as
+		// zero", which is exactly the distinction that matters: a caller
+		// that did not mention a managed field is not trying to set it.
+		if v.Field(i).Kind() == reflect.Ptr && v.Field(i).IsNil() {
+			continue
+		}
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		if cfg.Deployment.IsManagedSetting(name) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
