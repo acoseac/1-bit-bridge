@@ -337,6 +337,7 @@ rewritten around a hook that parks a dispatch at exactly the right instant.
 | `TestFieldApplyWireShape` | Object values, `reason` omitted when empty (key-absence via a decoded map, never a substring probe). |
 | `TestTrayBadgesAgreeWithWhatTheServerReports` | The UI badge agrees with what the server actually reports for that field — the check that makes a stale badge fail loudly when a field is converted. |
 | `TestFeatureTrayRestartBadgesAgreeWithSettings` | The two UI predictions agree with each other. |
+| `TestSettingsPageBadgesAgreeWithWhatTheServerReports` | The **Settings page's own** badges against what the handler reports. The two tray tests iterate TRAY rows and consult the page only for fields a tray contains, so a Settings-page-only field (`updateQuietHours`, `fingerprintApiKey`, the `enrichSource` picker) was invisible to both — all three kept a stale badge through the conversion PRs and shipped. Scrapes the page rather than a hand-listed set, so a badge on a new field is checked automatically. |
 | `TestMatrixDocMatchesWhatTheHandlerReports` | **This file's matrix against the real handler**, row by row, plus every PATCH field having a row at all. A doc that has drifted is worse than no doc: it sends an operator to bounce a bridge that already applied the change, or tells a control plane a field is live when it is still waiting. |
 | `TestSmartPlaylistsHealthFlagAndEndpointMoveTogether` | Rule 1 where it would actually break: `/v1/health` and the endpoint agree across all four combinations of wired × enabled. |
 | `TestAcousticActiveGatesBothSites` | The fingerprint gate is checked at the skip-reason site too, so a disabled bridge does not report "no fingerprint match" for work that never ran. |
@@ -350,6 +351,21 @@ rewritten around a hook that parks a dispatch at exactly the right instant.
 | `TestLiveProvidersOverrideStaticOptions` / `TestLiveCheckIntervalIsClamped` / `TestNilLiveProvidersKeepStaticBehaviour` | The updater reads its three settings at decision time, clamped, without regressing callers that pass none. |
 
 All of the above are negative-control-verified: each was run against a mutated
-build and confirmed to fail. A mutation that removes the only use of a symbol is
-a **build break, not a control** — treat that as "control invalid" and mutate
-differently.
+build and confirmed to fail. Two failure modes to watch for, both hit while
+writing these:
+
+- **A mutation that removes the only use of a symbol is a build break, not a
+  control.** Treat that as "control invalid" and mutate differently — e.g.
+  `(flag || true)` rather than deleting the flag's only reference.
+- **A control that edits the wrong text is also invalid, and it looks like a
+  pass.** Re-adding a badge with a first-match string replace hit the prose
+  *"a free AcoustID application key"* instead of the label; the test correctly
+  ignored it and reported green. Anchor the mutation on the thing the test
+  actually reads.
+
+And a third, about the tests rather than the controls: **a scraping test that
+skips a field passes while checking nothing.** The page-badge test above
+initially skipped all three defects it was written for, because its
+value-generator had no case for string fields. Every scraper here carries a
+minimum-count guard for that reason; when adding one, make it fail loudly on an
+empty scrape rather than trusting the loop body.
