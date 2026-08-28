@@ -370,6 +370,11 @@ type settingsResponse struct {
 	// not a metric, and because its IsSupervised caveat only makes
 	// sense next to the auto-install toggle it qualifies.
 	//
+	// ManagedSettings names the fields a control plane owns on this
+	// bridge. The console hides them and the PATCH refuses them; a
+	// self-hosted install has none and the field is omitted.
+	ManagedSettings []string `json:"managedSettings,omitempty"`
+
 	// Populated by the page handler, not settingsResponseFromConfig:
 	// it is runtime state from the updater, not config.
 	Update *UpdateStatus `json:"update,omitempty"`
@@ -1830,6 +1835,7 @@ func (s *Server) apiTokensRevoke(w http.ResponseWriter, r *http.Request) {
 func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsResponse {
 	resp := settingsResponse{
 		LibraryName:              cfg.LibraryName,
+		ManagedSettings:          cfg.Deployment.ManagedSettings,
 		ListenAddress:            cfg.ListenAddress,
 		AdminAddress:             cfg.AdminAddress,
 		DataDir:                  cfg.DataDir,
@@ -2069,6 +2075,17 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	var p settingsPatch
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&p); err != nil {
 		writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
+		return
+	}
+
+	// Refuse managed fields BEFORE taking the lock or touching the config.
+	// Refused, never silently dropped: a control plane that owns a field
+	// and a caller that quietly fails to set it is the "reports success
+	// and changes nothing" failure the per-field report exists to remove.
+	if bad := managedFieldsIn(s.deps.CfgHolder.Load(), p); len(bad) > 0 {
+		writeError(w, http.StatusForbidden, "managed-setting",
+			"these settings are managed by the control plane on this bridge and cannot be "+
+				"changed here: "+strings.Join(bad, ", "))
 		return
 	}
 

@@ -2095,6 +2095,32 @@ function fieldsNeedingRestart(resp) {
   return out;
 }
 
+/**
+ * Hide settings a control plane owns on this bridge.
+ *
+ * A control the operator cannot act on is worse than no control: it will
+ * eventually be flipped, do nothing, and be reported as a bug. The server
+ * refuses these in PATCH too — this only stops them being offered.
+ *
+ * Hides the whole enclosing `.field` (label, input and hint together), so
+ * a hidden setting leaves no orphaned caption behind. A managed field the
+ * page does not render is a no-op, which is what makes the list safe to
+ * carry names this build has never heard of.
+ */
+function hideManagedSettings(managed) {
+  if (!Array.isArray(managed) || !managed.length) return;
+  for (const name of managed) {
+    // Attribute-value lookup, not an interpolated selector: the list
+    // comes from bridge.yaml, and a name containing a quote would throw a
+    // DOMException that takes the rest of the page's init down with it.
+    for (const el of document.querySelectorAll("[name]")) {
+      if (el.getAttribute("name") !== name) continue;
+      const field = el.closest(".field") || el.closest("label") || el;
+      field.hidden = true;
+    }
+  }
+}
+
 function markRestartPending(pending) {
   try {
     if (pending) sessionStorage.setItem(RESTART_PENDING_KEY, "1");
@@ -2872,6 +2898,13 @@ function mapEnrichSourceToBases(fd) {
 
 function initSettings() {
   initSettingsTabs();
+  // Hide control-plane-owned settings before anything else wires them:
+  // the operator should never see a switch this bridge will refuse.
+  // Fire-and-forget — a failed read leaves every field visible, which is
+  // the pre-existing behaviour and strictly better than a blank page.
+  API.get("/api/settings")
+    .then(d => hideManagedSettings(d && d.managedSettings))
+    .catch(() => {});
   // The Updates panel lives on this page; its wiring used to sit in the
   // dashboard init, from when Stats and Settings were one page.
   wireUpdatePanel();

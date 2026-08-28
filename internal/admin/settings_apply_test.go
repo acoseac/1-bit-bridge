@@ -1011,3 +1011,101 @@ func TestUpscaleDegradedReason(t *testing.T) {
 		})
 	}
 }
+
+// TestManagedSettingsAreRefused — a control plane that owns a field and a
+// caller that quietly fails to set it is the "reports success and changes
+// nothing" failure the per-field report exists to remove. So a managed
+// field is REFUSED, not silently dropped.
+func TestManagedSettingsAreRefused(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	if err := srv.deps.CfgHolder.Update(srv.deps.CfgPath, func(c *config.Config) error {
+		c.Deployment.ManagedSettings = []string{"listenAddress", "dlnaEnabled"}
+		return nil
+	}); err != nil {
+		t.Fatalf("arrange: %v", err)
+	}
+
+	// A managed field alone.
+	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+		map[string]any{"listenAddress": "127.0.0.1:9999"}, nil); code != 403 {
+		t.Errorf("managed field: status = %d, want 403", code)
+	}
+	// Still the stored value.
+	if got := srv.deps.CfgHolder.Load().ListenAddress; got != "127.0.0.1:7788" {
+		t.Errorf("listenAddress changed to %q despite the refusal", got)
+	}
+
+	// A managed field mixed with a free one: the WHOLE patch is refused,
+	// so a caller cannot half-apply and be told it worked.
+	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+		map[string]any{"libraryName": "Renamed", "dlnaEnabled": true}, nil); code != 403 {
+		t.Errorf("mixed patch: status = %d, want 403", code)
+	}
+	if got := srv.deps.CfgHolder.Load().LibraryName; got == "Renamed" {
+		t.Error("the free field in a refused patch was applied — a refusal must be atomic")
+	}
+
+	// An unmanaged field still works.
+	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+		map[string]any{"libraryName": "Fine"}, nil); code != 200 {
+		t.Errorf("unmanaged field: status = %d, want 200", code)
+	}
+}
+
+// TestUnmanagedBridgeIsUnaffected — every self-hosted install has an
+// empty list, and must behave exactly as before.
+func TestUnmanagedBridgeIsUnaffected(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+		map[string]any{"listenAddress": "127.0.0.1:9999"}, nil); code != 200 {
+		t.Errorf("status = %d, want 200 — nothing is managed on a default bridge", code)
+	}
+}
+
+// TestManagedCheckIgnoresFieldsTheRequestDidNotSupply — pointer fields
+// distinguish "not supplied" from "supplied as zero", and that is exactly
+// the distinction that matters here: a caller who never mentioned a
+// managed field is not trying to set it, and refusing them would make a
+// managed bridge reject every unrelated save.
+func TestManagedCheckIgnoresFieldsTheRequestDidNotSupply(t *testing.T) {
+	cfg := &config.Config{Deployment: config.DeploymentConfig{
+		ManagedSettings: []string{"listenAddress", "dlnaEnabled"},
+	}}
+	if got := managedFieldsIn(cfg, settingsPatch{}); len(got) != 0 {
+		t.Errorf("empty patch flagged %v", got)
+	}
+	name := "x"
+	if got := managedFieldsIn(cfg, settingsPatch{LibraryName: &name}); len(got) != 0 {
+		t.Errorf("unmanaged field flagged %v", got)
+	}
+	addr := "127.0.0.1:1"
+	on := true
+	got := managedFieldsIn(cfg, settingsPatch{ListenAddress: &addr, DLNAEnabled: &on})
+	if len(got) != 2 || got[0] != "dlnaEnabled" || got[1] != "listenAddress" {
+		t.Errorf("got %v, want both managed fields, sorted", got)
+	}
+}
+
+// TestEveryPatchFieldCanBeManaged — managedFieldsIn reflects over the
+// struct rather than consulting a hand-listed set, so a field added to
+// settingsPatch is covered automatically. This pins that: a hand-listed
+// version would leave the newest field silently changeable on a managed
+// bridge, and nothing else would notice.
+func TestEveryPatchFieldCanBeManaged(t *testing.T) {
+	tags := patchJSONTags(t)
+	cfg := &config.Config{Deployment: config.DeploymentConfig{ManagedSettings: tags}}
+	p := settingsPatch{}
+	// Populate every pointer field so all of them count as "supplied".
+	v := reflect.ValueOf(&p).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		if f.Kind() == reflect.Ptr && f.CanSet() {
+			f.Set(reflect.New(f.Type().Elem()))
+		}
+	}
+	got := managedFieldsIn(cfg, p)
+	if len(got) != len(tags) {
+		t.Errorf("managedFieldsIn saw %d of %d patch fields (%v) — a field it cannot see "+
+			"is one a managed bridge would silently let through", len(got), len(tags), got)
+	}
+}

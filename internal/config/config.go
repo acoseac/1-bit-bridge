@@ -744,6 +744,40 @@ type DeploymentConfig struct {
 	// cert for the operator's domain SNI and a self-signed cert
 	// for direct-IP / unknown SNI.
 	AdminTLSTerminatedByProxy bool `yaml:"adminTLSTerminatedByProxy,omitempty"`
+
+	// ManagedSettings names settings whose value is owned by an external
+	// control plane rather than by whoever is looking at this bridge.
+	//
+	// It exists for the hosted product. There, several settings are not a
+	// choice the tenant gets to make — the listener binds are the control
+	// plane's, and DLNA and the filesystem watcher are meaningless on a
+	// cloud host with no LAN and object storage underneath. Rendering
+	// those as switches is worse than hiding them: a control the operator
+	// cannot act on is a control that will eventually be flipped, do
+	// nothing, and be reported as a bug.
+	//
+	// Entries are the settings' JSON field names as the admin API uses
+	// them (`listenAddress`, `dlnaEnabled`, …). A managed field is hidden
+	// by the console and REFUSED by the settings PATCH — refused, never
+	// silently ignored, because "reports success and changes nothing" is
+	// the one failure mode worse than an error.
+	//
+	// Empty (the default, and every self-hosted install) manages nothing
+	// and changes no behaviour.
+	ManagedSettings []string `yaml:"managedSettings,omitempty"`
+}
+
+// IsManagedSetting reports whether a settings field is control-plane
+// owned on this bridge. Comparison is exact: these are wire field names,
+// not operator prose, and a fold-insensitive match would let a typo in
+// bridge.yaml silently manage a field nobody meant to lock.
+func (d DeploymentConfig) IsManagedSetting(field string) bool {
+	for _, m := range d.ManagedSettings {
+		if m == field {
+			return true
+		}
+	}
+	return false
 }
 
 // DeploymentMode is the typed representation of DeploymentConfig.Mode.

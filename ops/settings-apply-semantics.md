@@ -363,6 +363,47 @@ PR #42. It simply was never wired into the admin restart path.
 
 ---
 
+## Managed settings: hiding what the tenant does not own
+
+`deployment.managedSettings` names settings whose value belongs to an external
+control plane. A managed field is **hidden by the console and refused by the
+PATCH** (403 `managed-setting`).
+
+It exists because four of the restart-bound fields are not a choice a hosted
+tenant gets to make at all:
+
+| Field | Why it is not the tenant's |
+|---|---|
+| `listenAddress`, `adminAddress` | The control plane's binds. |
+| `dlnaEnabled` | A cloud host has no LAN. DLNA is meaningless there. |
+| `libraryWatchEnabled` | Object storage has no inotify. A provisioning decision. |
+
+Rendering those as switches is worse than hiding them: **a control the operator
+cannot act on is a control that will eventually be flipped, do nothing, and be
+reported as a bug.**
+
+Three rules:
+
+- **Refused, never silently dropped.** "Reports success and changes nothing" is
+  the exact failure the per-field report exists to remove; reintroducing it for
+  managed fields would be a regression wearing a feature's clothes.
+- **The refusal is atomic.** A patch mixing a managed field with a free one is
+  refused whole, so a caller cannot half-apply and be told it worked.
+- **Membership is by reflection over `settingsPatch`, not a hand-listed set.** A
+  field added later is covered automatically; a list would leave the newest field
+  silently changeable on a managed bridge with nothing to notice.
+  `TestEveryPatchFieldCanBeManaged` pins it.
+
+Empty (the default, and every self-hosted install) manages nothing and changes no
+behaviour.
+
+**There is no iOS half to this.** These are admin-surface settings; the iOS app's
+per-bridge toggles are playlist backup, favorites and playback history, none of
+which are in this set. A cloud tenant with `dlnaEnabled` forced off simply never
+sees the `dlnaServer` health flag, which is already the right behaviour.
+
+---
+
 ## What a control plane must restart for
 
 **Six fields. Everything else applies live.**
