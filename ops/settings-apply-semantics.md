@@ -293,28 +293,37 @@ the CLI that set those fields directly are unaffected.
 
 ## What a control plane must restart for
 
-Everything whose status comes back `restart`. As of the current tree that is the
-class C and class D rows above, plus any class B field not yet converted, plus
-the conditional cases when the subsystem is not wired on that tenant.
+**Six fields. Everything else applies live.**
 
-Two of them will never convert, and a control plane should treat them as
-provisioning-time settings rather than runtime ones:
+| Field | Why it stays restart-bound | Recommendation |
+|---|---|---|
+| `listenAddress` | The `/v1` listener bind | Provisioning-time setting |
+| `adminAddress` | The admin listener bind | Provisioning-time setting |
+| `upscaleEnabled` | `transcode.Pool` — enqueue / stop / publisher-drain ordering has a history of production panics | Provisioning-time setting |
+| `analysisEnabled` | `analyze.Pool` — same invariants | Provisioning-time setting |
+| `dlnaEnabled` | HTTP listener + per-interface SSDP advertisers | Irrelevant to a cloud tenant: no LAN to advertise on |
+| `libraryWatchEnabled` | fsnotify watcher behind a `scanWG` / `closing` drain guarding a SQLite-corruption vector | The one deliberate maybe — see below |
+| `atlasEnabled` | An API field *and* a file-backed harvest state store; converting one half is what rule 1 forbids | Convertible, but as a whole-field lifecycle change |
+| `tailscaleMode` | Every transition except `cli → disabled` rewires the auto-pilot and the listener composition | Provisioning-time setting |
 
-- `listenAddress`, `adminAddress` — listener binds.
+Two of them (`listenAddress`, `adminAddress`) will never convert. The rest are
+**provisioning decisions per tenant rather than user-facing toggles**, so a
+supervised restart at provision time costs nothing — which is why the stack
+stopped here rather than taking on runtime pool teardown.
 
-Three more are recommended to stay restart-bound. They are provisioning
-decisions per tenant, not user-facing toggles, so a supervised restart at
-provision time costs nothing:
+Do not read this table as the source of truth on its own:
+`TestMatrixDocMatchesWhatTheHandlerReports` drives the real handler for every row
+above, so the answer the bridge gives is the answer the control plane should
+trust, and this file is checked against it rather than the other way round.
 
-- `upscaleEnabled`, `analysisEnabled` — worker pools whose enqueue / stop /
-  publisher-drain ordering has a history of production panics.
-- `dlnaEnabled` — a cloud tenant has no LAN to advertise on.
+### When to reopen `libraryWatchEnabled`
 
-`libraryWatchEnabled` is the one deliberate maybe. Re-open it if tenants mount
-storage *after* boot, where the periodic scan becomes the only discovery path and
-its latency is the tenant's first impression.
-
----
+If tenants mount storage **after** boot. There the periodic full scan becomes the
+only discovery path and its latency is the tenant's first impression of the
+product. `mdnsLifecycle` proves the shape works; what makes it a maybe rather
+than a yes is that the drain contract guards a corruption vector, and a test for
+that drain was once vacuous — it passed with the drain removed — until it was
+rewritten around a hook that parks a dispatch at exactly the right instant.
 
 ## Tests that hold this together
 
@@ -328,6 +337,10 @@ its latency is the tenant's first impression.
 | `TestFieldApplyWireShape` | Object values, `reason` omitted when empty (key-absence via a decoded map, never a substring probe). |
 | `TestTrayBadgesAgreeWithWhatTheServerReports` | The UI badge agrees with what the server actually reports for that field — the check that makes a stale badge fail loudly when a field is converted. |
 | `TestFeatureTrayRestartBadgesAgreeWithSettings` | The two UI predictions agree with each other. |
+| `TestMatrixDocMatchesWhatTheHandlerReports` | **This file's matrix against the real handler**, row by row, plus every PATCH field having a row at all. A doc that has drifted is worse than no doc: it sends an operator to bounce a bridge that already applied the change, or tells a control plane a field is live when it is still waiting. |
+| `TestSmartPlaylistsHealthFlagAndEndpointMoveTogether` | Rule 1 where it would actually break: `/v1/health` and the endpoint agree across all four combinations of wired × enabled. |
+| `TestAcousticActiveGatesBothSites` | The fingerprint gate is checked at the skip-reason site too, so a disabled bridge does not report "no fingerprint match" for work that never ran. |
+| `TestPacingFollowsTheLiveBase` | The politeness interval re-derives with the base — the one mistake in this area that reaches a third party. |
 | `TestSweepLoopRereadsIntervalEveryIteration` | The provider is consulted per iteration, not cached — a provider read once is exactly as restart-bound as the duration it replaced. |
 | `TestSweepLoopRearmDoesNotSweep` | A rearm re-reads the schedule and never runs the work. |
 | `TestSweepLoopDormantIntervalIsResumable` | `0 → N` is observable, i.e. the loop parks rather than exits. |
