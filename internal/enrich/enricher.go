@@ -83,6 +83,9 @@ type Enricher struct {
 	// acoustic is the fingerprint verdict source. Nil (the default) means
 	// acoustic fingerprinting is off, exactly like a nil premiumCovers.
 	acoustic AcousticLookup
+	// acousticEnabled is the optional LIVE on/off predicate; nil means
+	// "wired == enabled" (see WithAcousticEnabled).
+	acousticEnabled func() bool
 
 	// CacheDir is the root where the cached JPEGs live. Album covers go
 	// in <CacheDir>/<mbid>-<size>.jpg (see ArtworkCachePath); artist
@@ -980,7 +983,7 @@ const (
 // fallback is used when the feature is off entirely, so a bridge without
 // fingerprinting reports exactly what it always did.
 func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) string {
-	if e.acoustic == nil {
+	if !e.acousticActive() {
 		return fallback
 	}
 	if outcome == acousticRefused {

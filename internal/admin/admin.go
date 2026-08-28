@@ -409,6 +409,15 @@ type Deps struct {
 	// — the PATCH then still persists and takes effect on restart.
 	TriggerAutoOptimizeSweep func() bool
 
+	// FingerprintDegraded reports the bounded reason acoustic
+	// fingerprinting cannot run on this bridge right now ("" = it can).
+	// Consulted by the settings PATCH so switching the feature ON can say
+	// immediately that nothing will happen, rather than leaving the
+	// operator to work it out from the Jobs card.
+	//
+	// Nil (tests, the CLI) simply omits that explanation.
+	FingerprintDegraded func() string
+
 	// TriggerCadenceRearm pokes every background loop whose schedule is
 	// read from the live config, so a changed cadence is picked up now
 	// rather than after the OLD interval elapses. On the 6 h scan default
@@ -487,6 +496,17 @@ type Deps struct {
 	// produce honest per-track size estimates.
 	// Nil-safe alongside OptimizeEligible.
 	TargetRateForOptimize func(sourceRate int) int
+
+	// OptimizeActive is the LIVE on/off gate for kind="optimize".
+	//
+	// Distinct from the two closures above, which say whether the feature
+	// is WIRED at all (the upscale pool exists on this bridge). This says
+	// whether it is switched ON right now, and it is separate precisely so
+	// cmd/bridge can wire the closures once at boot — the pool's own
+	// lifetime — while the operator's toggle stays hot.
+	//
+	// Nil keeps the pre-existing behaviour (wired == active).
+	OptimizeActive func() bool
 
 	// BatchCoordinator is the v1.3 admin Library Inspector's gateway
 	// to the transcode.Coordinator. Wired to a closure-based adapter

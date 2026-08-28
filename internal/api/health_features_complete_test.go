@@ -81,7 +81,7 @@ func newAllFeaturesServer(t *testing.T) *Server {
 		WithAtlasMeta(true, time.Hour, mstore).
 		WithBooklets(mstore, t.TempDir(), func(string) {}).
 		WithUpscale(true, newStubVariantStore()).
-		WithCarPlayOptimize(true).
+		WithCarPlayOptimize(func() bool { return true }).
 		WithVariantDeleter(&stubVariantDeleter{}).
 		WithBatchCoordinator(&stubBatchCoordinator{}).
 		WithDLNA(true).

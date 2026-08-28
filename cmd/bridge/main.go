@@ -1238,6 +1238,72 @@ func (c *soxToolchainCache) flac() (hasFLAC, known bool) {
 	return info.HasFLAC, info.FormatsKnown
 }
 
+// fingerprintToolchainCache is the lazily-probed, TTL-cached fpcalc
+// availability check, mirroring soxToolchainCache.
+//
+// LAZY because the probe is a fork-exec and the feature is off by
+// default: running it at boot would charge every bridge for a capability
+// almost none of them use. CACHED because the sweeper, the enricher's
+// acoustic gate and the admin Jobs card all consult it, and an uncached
+// probe would fork once per consult.
+//
+// hasKey is a parameter rather than a captured value because the API key
+// is itself a hot setting — an operator can paste one in and the answer
+// has to change without a restart. It is not part of the cache key: the
+// fpcalc probe does not depend on it, so the cached probe is reused and
+// only the key half is re-evaluated.
+type fingerprintToolchainCache struct {
+	mu  sync.Mutex
+	at  time.Time
+	err error
+	// Two flags, not one. The feature is hot now, so an operator can fix
+	// one prerequisite and immediately hit the other — register a key,
+	// then discover fpcalc is missing, or install fpcalc and discover
+	// there is no key. A single flag would permanently suppress whichever
+	// warning came second, for the lifetime of the process, at exactly
+	// the moment it became the useful one.
+	loggedProbeErr bool
+	loggedNoKey    bool
+	stderr         io.Writer
+}
+
+const fingerprintToolchainTTL = 30 * time.Second
+
+// ready reports whether acoustic fingerprinting can actually run, and the
+// bounded degraded-reason key when it cannot.
+//
+// Reasons are the same bounded set fingerprintFeatureReady used, so the
+// admin card's rendering is unchanged.
+func (c *fingerprintToolchainCache) ready(hasKey bool) (bool, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.at.IsZero() || time.Since(c.at) >= fingerprintToolchainTTL {
+		_, c.err = acoustid.Probe(context.Background())
+		c.at = time.Now()
+	}
+	if c.err != nil {
+		// Logged ONCE per process, not per probe: this is consulted on
+		// every sweep and every Jobs-card render, so an unconditional
+		// line would be the 12-per-minute spam the M-SEARCH suppression
+		// exists to prevent.
+		if !c.loggedProbeErr && c.stderr != nil {
+			c.loggedProbeErr = true
+			fmt.Fprintf(c.stderr, "fingerprint: enabled but fpcalc is not available — feature inactive: %v\n", c.err)
+		}
+		return false, "fpcalc_missing"
+	}
+	if !hasKey {
+		if !c.loggedNoKey && c.stderr != nil {
+			c.loggedNoKey = true
+			fmt.Fprint(c.stderr, "fingerprint: enabled but no AcoustID API key is configured — feature inactive.\n"+
+				"  Register a free application key at https://acoustid.org/new-application,\n"+
+				"  then set ACOUSTID_API_KEY (preferred) or fingerprint.apiKey in bridge.yaml.\n")
+		}
+		return false, "no_api_key"
+	}
+	return true, ""
+}
+
 // updateInfoAdapter bridges *updater.Updater to api.UpdaterStatus +
 // admin's read-side without coupling those packages to the updater
 // type. Trivial; lives here at the wiring point so the api / admin
@@ -2261,21 +2327,44 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// populated later by the sweeper, which needs apiSrv's hot-reloading
 	// resolver and therefore cannot be built until further down.
 	//
-	// Gated on the config flag AND both prerequisites: a `true` config with
-	// fpcalc or the API key missing degrades to feature-off here, so the
-	// bridge still boots. fingerprintCache stays nil in that case, and a nil
-	// AcousticLookup means the fallback is simply never consulted.
-	var fingerprintCache *acoustid.Cache
-	var fingerprintDegraded string // bounded key for the admin Jobs card ("" = not demoted)
-	acoustIDKey := cfg.Fingerprint.ResolvedAPIKey()
-	if cfg.Fingerprint.Enabled {
-		if ok, reason := fingerprintFeatureReady(ctx, acoustIDKey != "", stderr); ok {
-			fingerprintCache = acoustid.NewCache(fingerprintCacheCap)
-			enricher.WithAcousticFallback(acousticLookupAdapter{cache: fingerprintCache})
-		} else {
-			fingerprintDegraded = reason
+	// Wired UNCONDITIONALLY, with both the on/off flag and the toolchain
+	// prerequisites resolved LIVE — the flag hot-applies, so a cache and a
+	// lookup built only when it was on at boot would make it restart-bound
+	// no matter how live the rest of the path is. NewCache allocates two
+	// empty maps, so an unused one costs nothing.
+	//
+	// The prerequisite probe is LAZY, not run at boot: `fpcalc -version`
+	// is a fork-exec, and paying it on every boot of every bridge to
+	// support a feature that is off by default is the wrong trade. The
+	// cached probe below runs the first time anything actually asks.
+	fingerprintCache := acoustid.NewCache(fingerprintCacheCap)
+	fingerprintToolchain := &fingerprintToolchainCache{stderr: stderr}
+	// fingerprintReady is the SHARED live predicate: the sweeper asks it
+	// whether to work, the enricher asks it whether to consult a verdict,
+	// and the admin card asks it what to report. One closure, deliberately
+	// — three copies of the same three gates is how a card comes to claim
+	// "active" while every sweep short-circuits.
+	fingerprintReady := func() bool {
+		live := liveCfg()
+		if !live.Fingerprint.Enabled {
+			return false
 		}
+		ok, _ := fingerprintToolchain.ready(live.Fingerprint.ResolvedAPIKey() != "")
+		return ok
 	}
+	// fingerprintDegradedReason is "" when the feature is off (not
+	// degraded, just off) or ready; otherwise the bounded key the Jobs
+	// card renders.
+	fingerprintDegradedReason := func() string {
+		live := liveCfg()
+		if !live.Fingerprint.Enabled {
+			return ""
+		}
+		_, reason := fingerprintToolchain.ready(live.Fingerprint.ResolvedAPIKey() != "")
+		return reason
+	}
+	enricher.WithAcousticFallback(acousticLookupAdapter{cache: fingerprintCache}).
+		WithAcousticEnabled(fingerprintReady)
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
@@ -2524,10 +2613,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	}
 
 	// Smart playlists read precomputed analysis + history (no decode), so
-	// there's no sox precheck. The harmonic Auto Mix + Daily Mix discovery
-	// self-omit when analysis isn't active; the listening families work from
-	// history alone.
-	smartPlaylistsActive := cfg.SmartPlaylists.EffectiveEnabled()
+	// there's no sox precheck — and no boot snapshot of the flag either:
+	// both the API gate and the regenerator read it live (see their wiring
+	// below), which is what makes the toggle hot. The harmonic Auto Mix +
+	// Daily Mix discovery self-omit when analysis isn't active; the
+	// listening families work from history alone.
 
 	// LE-cert expiry provider for /v1/health (public mode). Live
 	// closure so background autocert renewals surface on the next
@@ -2551,7 +2641,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithCertExpiry(certNotAfter).
 		WithLECertExpiry(leCertExpiry).
 		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider}).
-		WithCarPlayOptimize(upscaleActive && cfg.Upscale.EffectiveOptimizeEnabled()).
+		WithCarPlayOptimize(func() bool {
+			// upscaleActive is the boot fact (pool wired + sox probe
+			// passed) AND-ed with the LIVE optimize toggle — the same
+			// pairing autoOptimizeEnabledFn uses, so the health flag and
+			// the sweeper cannot disagree about whether the feature is on.
+			return upscaleActive && liveCfg().Upscale.EffectiveOptimizeEnabled()
+		}).
 		WithAnalysis(analysisActive, &analysisStoreAdapter{provider: provider}).
 		WithAnalysisStats(&analysisStatsAdapter{
 			enabled: func() bool { return analysisActive },
@@ -2575,11 +2671,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			WithFavoritesStore(manifestStore).
 			WithHistoryStore(manifestStore)
 	}
-	// Conditionally wire the smart-playlist feed so the health flag + the
-	// 404-when-off shape stay honest when cfg.SmartPlaylists.EffectiveEnabled() is false.
-	if smartPlaylistsActive {
-		apiSrv.WithSmartPlaylistStore(manifestStore)
-	}
+	// Wired UNCONDITIONALLY, with the on/off decision handed to a LIVE
+	// predicate. A store wired only when the flag was on at boot makes the
+	// flag restart-bound however live the rest of the path is, and the
+	// health flag + the 404-when-off shape both key off the same
+	// smartPlaylistsActive() so they cannot disagree with each other.
+	apiSrv.WithSmartPlaylistStore(manifestStore).
+		WithSmartPlaylistEnabled(func() bool {
+			return liveCfg().SmartPlaylists.EffectiveEnabled()
+		})
 
 	// Phase-H bulk harvest (opt-in via cfg.Atlas.HarvestEnabled). The iOS app
 	// provisions a bulk_harvest credential to POST /v1/atlas-harvest/credential;
@@ -2845,34 +2945,34 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// construction would keep routing against the old roots after an admin
 	// add/remove. Joined to bgWriters so a live fpcalc child cannot outlive
 	// runServe.
-	var fingerprintNudge chan struct{}
-	var fingerprintSweepState *sweepStatus[admin.FingerprintSweepCounts]
-	if fingerprintCache != nil {
-		sweeper := &fingerprintSweeper{
-			store:     manifestStore,
-			resolver:  apiSrv.Resolver(),
-			client:    acoustid.NewClient("", acoustIDKey, userAgent, nil),
-			cache:     fingerprintCache,
-			workers:   cfg.Fingerprint.EffectiveWorkers(),
-			maxPerRun: cfg.Fingerprint.EffectiveMaxPerRun(),
-			length:    cfg.Fingerprint.EffectiveLength(),
-		}
-		// Buffered-1 nudge for the admin "Sweep now" button — same
-		// coalescing contract as the analysis sweeper's.
-		fingerprintNudge = make(chan struct{}, 1)
-		fingerprintSweepState = &sweepStatus[admin.FingerprintSweepCounts]{}
-		fingerprintRearm := make(chan struct{}, 1)
-		cadenceRearms = append(cadenceRearms, fingerprintRearm)
-		bgWriters.Add(1)
-		go func() {
-			defer bgWriters.Done()
-			runFingerprintSweeper(scanCtx, sweeper,
-				liveInterval(func(c *config.Config) time.Duration {
-					return c.Fingerprint.EffectiveSweepInterval()
-				}),
-				fingerprintNudge, fingerprintRearm, fingerprintSweepState)
-		}()
+	sweeper := &fingerprintSweeper{
+		store:    manifestStore,
+		resolver: apiSrv.Resolver(),
+		// Live API key: it is otherwise read once here, so an operator
+		// pasting a freshly registered AcoustID key would keep getting
+		// "no API key configured" until they bounced the bridge.
+		client: acoustid.NewClient("", "", userAgent, nil).
+			WithLiveAPIKey(func() string { return liveCfg().Fingerprint.ResolvedAPIKey() }),
+		cache:     fingerprintCache,
+		workers:   cfg.Fingerprint.EffectiveWorkers(),
+		maxPerRun: cfg.Fingerprint.EffectiveMaxPerRun(),
+		length:    cfg.Fingerprint.EffectiveLength(),
 	}
+	// Buffered-1 nudge for the admin "Sweep now" button — same
+	// coalescing contract as the analysis sweeper's.
+	fingerprintNudge := make(chan struct{}, 1)
+	fingerprintSweepState := &sweepStatus[admin.FingerprintSweepCounts]{}
+	fingerprintRearm := make(chan struct{}, 1)
+	cadenceRearms = append(cadenceRearms, fingerprintRearm)
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		runFingerprintSweeper(scanCtx, sweeper, fingerprintReady,
+			liveInterval(func(c *config.Config) time.Duration {
+				return c.Fingerprint.EffectiveSweepInterval()
+			}),
+			fingerprintNudge, fingerprintRearm, fingerprintSweepState)
+	}()
 
 	// Duplicates stamping sweeper — ALWAYS wired (not feature-gated):
 	// stamping runs regardless of policy (stats work with the filter
@@ -2890,18 +2990,24 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 
 	// Smart-playlist regenerator (shares scanCtx). analysisActive (the
 	// sox-resolved flag) gates the harmonic/discovery families.
-	var smartMixRunState *sweepStatus[struct{}]
-	if smartPlaylistsActive {
-		smartMixRunState = &sweepStatus[struct{}]{}
-		// Joined via bgWriters — the regenerator persists generated playlists
-		// to the store, so it must drain before Store.Close().
-		bgWriters.Add(1)
-		go func() {
-			defer bgWriters.Done()
-			runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive,
-				cfg.SmartPlaylists.EffectiveRegenerateInterval(), smartMixRunState)
-		}()
-	}
+	// Started unconditionally, gated live — same shape as the api wiring
+	// above, and for the same reason: a goroutine that only exists when
+	// the flag was on at boot is what makes the flag restart-bound.
+	// Joined via bgWriters — the regenerator persists generated playlists
+	// to the store, so it must drain before Store.Close().
+	smartMixRunState := &sweepStatus[struct{}]{}
+	smartMixRearm := make(chan struct{}, 1)
+	cadenceRearms = append(cadenceRearms, smartMixRearm)
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive,
+			func() bool { return liveCfg().SmartPlaylists.EffectiveEnabled() },
+			liveInterval(func(c *config.Config) time.Duration {
+				return c.SmartPlaylists.EffectiveRegenerateInterval()
+			}),
+			smartMixRearm, smartMixRunState)
+	}()
 
 	// One TTL-cached sox probe shared by every consumer: the admin's
 	// availability + FLAC closures (so the Settings page does at most one
@@ -3015,7 +3121,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// bgWriters-joined: completions call UpsertVariant, so the
 		// sweeper's work must drain before Store.Close() like every other
 		// manifest writer.
-		if cfg.Upscale.EffectiveOptimizeEnabled() {
+		// Wired UNCONDITIONALLY (within upscaleActive), not behind a boot
+		// read of EffectiveOptimizeEnabled. autoOptimizeEnabledFn below
+		// already checks all three gates live, so the boot `if` bought
+		// nothing except making optimizeEnabled restart-bound: off→on
+		// could not start a sweeper that was never created.
+		{
 			autoOptimizeNudge = make(chan struct{}, 1)
 			autoOptimizeSweepState = &sweepStatus[admin.AutoOptimizeSweepCounts]{}
 			postScanNudges = append(postScanNudges, autoOptimizeNudge)
@@ -3539,8 +3650,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Fingerprint job card: always wired so a feature-off bridge still
 		// explains WHY (config flag + degraded reason); the trigger stays
 		// nil unless the sweeper is actually running.
-		FingerprintState: fingerprintStateClosure(cfg.Fingerprint.Enabled,
-			fingerprintCache != nil, fingerprintDegraded, fingerprintSweepState),
+		FingerprintState: fingerprintStateClosure(
+			func() bool { return liveCfg().Fingerprint.Enabled },
+			fingerprintReady, fingerprintDegradedReason, fingerprintSweepState),
 		TriggerFingerprintSweep: nudgeTriggerClosure(fingerprintNudge),
 		// Auto-optimize card + trigger. Both nil unless the sweeper is
 		// wired (upscale pool present AND the optimize kind enabled), so a
@@ -3550,6 +3662,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		AutoOptimizeState:        autoOptimizeStateClosure(autoOptimizeEnabledFn, "", autoOptimizeSweepState),
 		TriggerAutoOptimizeSweep: nudgeTriggerClosure(autoOptimizeNudge),
 		TriggerDuplicatesPass:    nudgeTriggerClosure(duplicatesNudge),
+		FingerprintDegraded:      fingerprintDegradedReason,
 		// Fan-out over every cadence loop. Captured by value: the slice
 		// is fully appended by this point (every sweeper is wired above),
 		// so the closure sees the complete set.
@@ -3748,20 +3861,34 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// data — divergent from what /v1/health advertises and
 		// from what POST /v1/upscale (kind=optimize) accepts. Per
 		// CodeRabbit major on PR #276.
+		// WIRED vs ACTIVE, split. These two closures now answer only "is
+		// the feature wired on this bridge" — the pool exists, which is a
+		// boot fact and cannot change — while OptimizeActive below carries
+		// the operator's toggle and is read live.
+		//
+		// Before the split both questions were folded into whether these
+		// were nil, evaluated ONCE at Deps construction. That is what made
+		// optimizeEnabled restart-bound on the admin projection endpoint
+		// even after the sweeper and the health flag went live: the
+		// endpoint kept its boot answer while the rest of the feature had
+		// moved on, which is exactly the split-halves failure the
+		// per-field report exists to make impossible.
 		OptimizeEligible: func() func(string, string, int, int) bool {
-			live := cfgHolder.Load()
-			if live == nil || !live.Upscale.Enabled || !live.Upscale.EffectiveOptimizeEnabled() {
+			if upscalePool == nil {
 				return nil
 			}
 			return transcode.OptimizeEligible
 		}(),
 		TargetRateForOptimize: func() func(int) int {
-			live := cfgHolder.Load()
-			if live == nil || !live.Upscale.Enabled || !live.Upscale.EffectiveOptimizeEnabled() {
+			if upscalePool == nil {
 				return nil
 			}
 			return transcode.TargetRateForOptimize
 		}(),
+		OptimizeActive: func() bool {
+			live := liveCfg()
+			return live.Upscale.Enabled && live.Upscale.EffectiveOptimizeEnabled()
+		},
 		BatchCoordinator: func() admin.AdminBatchCoordinator {
 			// Closure-resolved so admin doesn't see a typed-nil
 			// pointer when upscale is disabled at boot — returning

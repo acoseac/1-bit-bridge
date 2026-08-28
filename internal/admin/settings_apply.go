@@ -42,13 +42,24 @@
 //
 // # When `reason` is populated
 //
-// Exactly when the status could have come out DIFFERENTLY on another
-// bridge — i.e. when it depends on runtime state rather than on a static
-// property of the field. `autoOptimizeEnabled` answering `restart`
-// because no sweeper is wired is a reason; `listenAddress` answering
-// `restart` because listeners bind once is not, and spelling it out for
-// all twenty restart-bound fields would be twenty near-identical strings
-// the reader learns to skip.
+// Exactly when the OUTCOME depended on this bridge's runtime state rather
+// than on a static property of the field. Two shapes qualify:
+//
+//   - The status itself could have been different elsewhere.
+//     `autoOptimizeEnabled` answering `restart` because no sweeper is
+//     wired here; `tailscaleMode` naming which transition this was.
+//   - The status is `live` and the change genuinely applied, but the
+//     feature is inert for a reason the operator can act on.
+//     `fingerprintEnabled` on a host without fpcalc: a restart would
+//     change nothing, so `restart` would be a lie — and silence would
+//     have the operator move the switch, read "Saved.", and never learn
+//     that nothing will run.
+//
+// What does NOT qualify: `listenAddress` answering `restart` because
+// listeners bind once. True on every bridge, and spelling it out for all
+// twenty restart-bound fields would be twenty near-identical strings the
+// reader learns to skip — at which point the ones that carry information
+// are skipped along with them.
 //
 // # Why the value is an object rather than a bare string
 //
@@ -163,4 +174,21 @@ func (a applyReport) fields() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// fingerprintDegradedMessage renders a bounded degraded-reason key as an
+// operator-facing sentence for the settings response.
+//
+// Bounded on purpose — the keys come from the toolchain probe, never from
+// an error string, so this switch cannot grow an unbounded set of
+// messages (the same rule markSkipped's reason keys follow).
+func fingerprintDegradedMessage(reason string) string {
+	switch reason {
+	case "fpcalc_missing":
+		return "saved, but fpcalc is not installed on this bridge, so no fingerprinting will run"
+	case "no_api_key":
+		return "saved, but no AcoustID API key is configured, so no fingerprinting will run"
+	default:
+		return "saved, but the fingerprint toolchain is unavailable, so no fingerprinting will run"
+	}
 }

@@ -53,8 +53,15 @@ func TestSettingsPatchOptimizeEnabledComparesResolvedDefault(t *testing.T) {
 	}
 
 	resp, _ = patchSettingsExpect(t, ts, `{"optimizeEnabled":false}`, http.StatusOK)
-	if !resp.RestartRequired {
-		t.Error("on→off must mark RestartRequired — the optimize closures are resolved at startup")
+	// HOT since the feature-gate conversion: the health advertisement,
+	// the admin projection gate and the pre-generation sweeper all read
+	// the flag live, and the sweeper is wired unconditionally so off→on
+	// has something to start.
+	if resp.RestartRequired {
+		t.Error("on→off must NOT mark RestartRequired — every optimize consumer reads the flag live")
+	}
+	if got := resp.Fields["optimizeEnabled"].Status; got != applyLive {
+		t.Errorf("optimizeEnabled status = %q, want %q", got, applyLive)
 	}
 	live := srv.deps.CfgHolder.Load()
 	if live.Upscale.EffectiveOptimizeEnabled() {

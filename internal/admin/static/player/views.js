@@ -944,8 +944,7 @@ function mixesToolbar(controls) {
       "Auto Mix — rebuilt daily from what your devices have played.",
     rows: [
       {
-        field: "smartPlaylistsEnabled", type: "switch", restart: true,
-        label: "Generate smart mixes",
+        field: "smartPlaylistsEnabled", type: "switch", label: "Generate smart mixes",
       },
       {
         field: "analysisEnabled", type: "switch", restart: true,

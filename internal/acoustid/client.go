@@ -199,10 +199,13 @@ var ErrNoMatch = errors.New("acoustid: no match")
 
 // Client talks to the AcoustID web service.
 type Client struct {
-	base      string
-	apiKey    string
-	userAgent string
-	http      *http.Client
+	base   string
+	apiKey string
+	// liveAPIKey, when non-nil, supersedes apiKey and is read per
+	// request — see WithLiveAPIKey.
+	liveAPIKey func() string
+	userAgent  string
+	http       *http.Client
 
 	// minInterval is the politeness pacing the CALLER must apply before each
 	// request. It lives here, derived from base at construction, so it can
@@ -355,12 +358,17 @@ func (c *Client) Lookup(ctx context.Context, fp Fingerprint) ([]Result, error) {
 	if fp.Value == "" {
 		return nil, fmt.Errorf("acoustid: empty fingerprint")
 	}
-	if c.apiKey == "" {
+	// ONE read per lookup, not two. The provider is live now, so a
+	// second call can land after a key change and disagree with the
+	// first — the emptiness guard passing on a key that is no longer the
+	// one sent, or the reverse.
+	key := c.key()
+	if key == "" {
 		return nil, fmt.Errorf("acoustid: no API key configured")
 	}
 
 	q := url.Values{}
-	q.Set("client", c.apiKey)
+	q.Set("client", key)
 	q.Set("duration", strconv.Itoa(fp.DurationSeconds()))
 	q.Set("fingerprint", fp.Value)
 	q.Set("format", "json")
@@ -639,4 +647,33 @@ func parseRetryAfter(header string, now time.Time) time.Duration {
 		return d
 	}
 	return 0
+}
+
+// WithLiveAPIKey attaches a provider consulted per request instead of the
+// key captured at construction.
+//
+// It exists so `fingerprint.apiKey` applies without a restart: the key is
+// otherwise read once when the client is built, so an operator pasting a
+// freshly registered AcoustID key would keep getting "no API key
+// configured" until they bounced the bridge — with nothing on screen
+// connecting the two.
+//
+// Trimmed on read for the same reason the constructor trims: a trailing
+// space survives most .env editors and Windows `set VAR=value &&`, and
+// AcoustID answers a padded key with a bare "invalid API key", which
+// sends you looking at the key rather than at the whitespace around it.
+//
+// Nil (the default) keeps the captured value, which is what every caller
+// other than the serve path wants.
+func (c *Client) WithLiveAPIKey(f func() string) *Client {
+	c.liveAPIKey = f
+	return c
+}
+
+// key resolves the API key, preferring the live provider.
+func (c *Client) key() string {
+	if c.liveAPIKey != nil {
+		return strings.TrimSpace(c.liveAPIKey())
+	}
+	return c.apiKey
 }

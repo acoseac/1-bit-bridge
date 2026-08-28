@@ -27,7 +27,7 @@ func fetchHealthFeatures(t *testing.T, upscaleWired, carPlayOptimizeOn bool) []s
 	if upscaleWired {
 		srv = srv.WithUpscale(true, newStubVariantStore())
 	}
-	srv = srv.WithCarPlayOptimize(carPlayOptimizeOn)
+	srv = srv.WithCarPlayOptimize(func() bool { return carPlayOptimizeOn })
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 

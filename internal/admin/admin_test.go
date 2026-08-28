@@ -767,8 +767,18 @@ func TestSettingsPatchFingerprint(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("patch fingerprint on: %d", code)
 	}
-	if !resp.RestartRequired {
-		t.Error("fingerprint enable+key must mark restart required (sweeper wired at startup)")
+	// HOT since the feature-gate conversion: the sweeper is started
+	// unconditionally behind one live predicate, and the AcoustID client
+	// reads the key per request.
+	if resp.RestartRequired {
+		t.Error("fingerprint enable+key must NOT mark restart required — the sweeper, " +
+			"the enricher gate and the client all read these live")
+	}
+	if got := resp.Fields["fingerprintEnabled"].Status; got != applyLive {
+		t.Errorf("fingerprintEnabled status = %q, want %q", got, applyLive)
+	}
+	if got := resp.Fields["fingerprintApiKey"].Status; got != applyLive {
+		t.Errorf("fingerprintApiKey status = %q, want %q", got, applyLive)
 	}
 	live := srv.deps.CfgHolder.Load()
 	if !live.Fingerprint.Enabled {
@@ -1576,8 +1586,14 @@ func TestSettingsPatchSmartPlaylistsEnabled(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("patch smartPlaylists off: %d", code)
 	}
-	if !resp.RestartRequired {
-		t.Error("smartPlaylistsEnabled change must mark restart required")
+	// HOT since the feature-gate conversion: the API feed gate and the
+	// regenerator both read the flag live, and both are wired
+	// unconditionally so there is always something there to read it.
+	if resp.RestartRequired {
+		t.Error("smartPlaylistsEnabled must NOT mark restart required — both consumers read it live")
+	}
+	if got := resp.Fields["smartPlaylistsEnabled"].Status; got != applyLive {
+		t.Errorf("smartPlaylistsEnabled status = %q, want %q", got, applyLive)
 	}
 	if srv.deps.CfgHolder.Load().SmartPlaylists.EffectiveEnabled() {
 		t.Error("in-memory cfg did not reflect smartPlaylists.enabled=false")
@@ -1604,15 +1620,15 @@ func TestSettingsPatchSmartPlaylistsEnabled(t *testing.T) {
 			"nil-means-on would then silently re-enable it on the next load")
 	}
 
-	// Back on: also a change, also restart-required.
+	// Back on: also a change, also hot.
 	resp = settingsPatchResponse{}
 	code = doJSON(t, h, "PATCH", "/api/settings",
 		map[string]any{"smartPlaylistsEnabled": true}, &resp)
 	if code != 200 {
 		t.Fatalf("patch back on: %d", code)
 	}
-	if !resp.RestartRequired {
-		t.Error("flipping smartPlaylistsEnabled back on must mark restart required")
+	if resp.RestartRequired {
+		t.Error("flipping smartPlaylistsEnabled back on must NOT mark restart required")
 	}
 	if !srv.deps.CfgHolder.Load().SmartPlaylists.EffectiveEnabled() {
 		t.Error("in-memory cfg did not reflect smartPlaylists.enabled=true")

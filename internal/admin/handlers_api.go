@@ -2101,6 +2101,10 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// cadenceChanged: a background loop's schedule changed, so the
 		// rearm fan-out should wake them to re-read it.
 		cadenceChanged bool
+		// fingerprintOn: the fingerprint toggle was switched ON, so the
+		// post-commit block below can check whether the toolchain will
+		// actually let it run and say so.
+		fingerprintOn bool
 		// autoOptimizeFlipped: the pre-generation gate changed value.
 		// Hot-applies via a sweeper nudge instead of restartRequired.
 		autoOptimizeFlipped bool
@@ -2261,11 +2265,10 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// Persist explicitly — either value is now a choice.
 				v := *p.SmartPlaylistsEnabled
 				next.SmartPlaylists.Enabled = &v
-				// The daily smart-playlist regenerator goroutine is launched
-				// once at startup (cmd/bridge/main.go), so a runtime flip
-				// needs a restart. Idempotent same-value submissions skip the
-				// banner.
-				report.restart("smartPlaylistsEnabled")
+				// HOT: the API feed gate and the regenerator both read
+				// the flag live, and both are wired unconditionally so
+				// there is always something there to read it.
+				report.live("smartPlaylistsEnabled")
 			} else {
 				report.unchanged("smartPlaylistsEnabled")
 			}
@@ -2279,11 +2282,11 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			if *p.OptimizeEnabled != next.Upscale.EffectiveOptimizeEnabled() {
 				v := *p.OptimizeEnabled
 				next.Upscale.OptimizeEnabled = &v
-				// The optimize eligibility closures + the /v1/health
-				// carPlayOptimize advertisement are resolved once at
-				// `bridge serve` startup, so a runtime flip needs a
-				// restart (same shape as UpscaleEnabled).
-				report.restart("optimizeEnabled")
+				// HOT: the health advertisement, the admin projection
+				// gate and the pre-generation sweeper all read the flag
+				// live. The sweeper is wired unconditionally (within an
+				// active upscale pool) so off→on has something to start.
+				report.live("optimizeEnabled")
 			} else {
 				report.unchanged("optimizeEnabled")
 			}
@@ -2359,11 +2362,19 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.FingerprintEnabled != nil {
 			if *p.FingerprintEnabled != next.Fingerprint.Enabled {
 				next.Fingerprint.Enabled = *p.FingerprintEnabled
-				// The fingerprint sweeper + its fpcalc/AcoustID-key precheck
-				// run once at `bridge serve` startup (same startup-wired
-				// shape as upscale/analysis), so a runtime flip needs a
-				// restart. Idempotent same-value submits skip the banner.
-				report.restart("fingerprintEnabled")
+				// HOT: the sweeper, the enricher's acoustic gate and the
+				// Jobs card share one live predicate, and the fpcalc
+				// probe behind it is lazy + cached rather than a boot
+				// snapshot.
+				//
+				// `live` even when fpcalc is missing, with a reason: the
+				// SETTING did apply, a restart would not help, and the
+				// degraded state is what a bridge booting with the
+				// feature on and no fpcalc already reports. Answering
+				// `restart` there would send the operator to bounce a
+				// bridge that would come back identically inert.
+				fingerprintOn = *p.FingerprintEnabled
+				report.live("fingerprintEnabled")
 			} else {
 				report.unchanged("fingerprintEnabled")
 			}
@@ -2403,11 +2414,13 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 						msg: fmt.Sprintf("fingerprintApiKey: implausibly long (%d bytes; AcoustID application keys are short tokens)", len(v))}
 				}
 				next.Fingerprint.APIKey = v
-				// The key is read once by the sweeper precheck at startup;
-				// restart to activate (or to un-degrade an enabled-but-
-				// keyless bridge). Note ACOUSTID_API_KEY env, when set,
-				// still wins over this stored value (ResolvedAPIKey).
-				report.restart("fingerprintApiKey")
+				// HOT: the AcoustID client reads the key per request, so
+				// a freshly registered key binds on the next lookup —
+				// including on a bridge that booted with no key at all,
+				// where the sweeper simply reported itself degraded.
+				// ACOUSTID_API_KEY env, when set, still wins over this
+				// stored value (ResolvedAPIKey).
+				report.live("fingerprintApiKey")
 			}
 		}
 		// Both forms report under `customEndpoints`: the array form wins
@@ -2573,6 +2586,19 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	// woken by this reads the new value rather than racing the Store.
 	if cadenceChanged && s.deps.TriggerCadenceRearm != nil {
 		s.deps.TriggerCadenceRearm()
+	}
+	// Fingerprint turned ON: the setting applied, but whether anything
+	// will RUN depends on a toolchain this bridge may not have. Say so
+	// here rather than leaving the operator to notice on the Jobs card
+	// that the switch they just moved did nothing.
+	//
+	// Attached to a `live` status, not a `restart` one: the value did
+	// take effect and a bounce would change nothing. This is the honesty
+	// rule applied to the case where the obstacle is not the wiring.
+	if fingerprintOn && s.deps.FingerprintDegraded != nil {
+		if why := s.deps.FingerprintDegraded(); why != "" {
+			report.set("fingerprintEnabled", applyLive, fingerprintDegradedMessage(why))
+		}
 	}
 	// Nudge on BOTH directions of the auto-optimize flip. On→off matters
 	// as much as off→on: the sweeper re-reads the flag and records a

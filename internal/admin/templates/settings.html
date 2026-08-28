@@ -166,7 +166,7 @@
       <div class="field">
         <label class="checkbox">
           <input name="fingerprintEnabled" type="checkbox" role="switch" {{if .Data.FingerprintEnabled}}checked{{end}}>
-          Identify untagged tracks by audio <span class="badge warn">restart</span>
+          Identify untagged tracks by audio
           <span class="prereq" id="prereq-fingerprint" data-state="off" hidden></span>
         </label>
       </div>
@@ -227,7 +227,7 @@
       <div class="field">
         <label class="checkbox">
           <input name="optimizeEnabled" type="checkbox" role="switch" {{if .Data.OptimizeEnabled}}checked{{end}}>
-          CarPlay-optimized variants <span class="badge warn">restart</span>
+          CarPlay-optimized variants
         </label>
         <small class="hint">
           Generates 16-bit family-preserving downsamples (44.1 / 48 kHz) from
@@ -404,7 +404,7 @@
       <div class="field">
         <label class="checkbox">
           <input name="smartPlaylistsEnabled" type="checkbox" role="switch" {{if .Data.SmartPlaylistsEnabled}}checked{{end}}>
-          Enable smart mixes <span class="badge warn">restart</span>
+          Enable smart mixes
         </label>
         <small class="hint">
           When enabled, the bridge advertises <code>smartPlaylists</code> on

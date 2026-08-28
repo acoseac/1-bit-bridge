@@ -185,9 +185,10 @@ func TestMixedPatchReportsPerFieldNotPerRequest(t *testing.T) {
 }
 
 // TestReasonIsPresentOnlyWhenTheAnswerWasConditional pins the rule that
-// keeps `reason` meaningful: it is populated exactly when the status
-// depended on THIS bridge's runtime wiring, not on a static property of
-// the field.
+// keeps `reason` meaningful: it is populated exactly when the OUTCOME
+// depended on THIS bridge's runtime state, not on a static property of
+// the field. (See TestFingerprintEnabledLiveWithDegradedReason for the
+// other qualifying shape — a `live` that applied but is inert.)
 //
 // Without the rule the honest thing to do looks like explaining every
 // restart, which produces twenty near-identical strings a reader learns
@@ -650,5 +651,91 @@ func TestUnchangedCadenceDoesNotFireTheRearm(t *testing.T) {
 	if fired != 0 {
 		t.Errorf("rearm fired %d times on an unchanged value — every save would push the "+
 			"next scheduled run out by a full interval", fired)
+	}
+}
+
+// TestFingerprintEnabledLiveWithDegradedReason pins the shape of an
+// honest `live` that still needs to warn.
+//
+// Switching fingerprinting on APPLIES — the sweeper, the enricher gate
+// and the AcoustID client all read it live — but whether anything RUNS
+// depends on fpcalc being installed. A restart would not change that, so
+// `restart` would be a lie; silence would have the operator move the
+// switch, see "Saved.", and never learn that nothing will happen.
+//
+// This is the honesty rule applied where the obstacle is the toolchain
+// rather than the wiring: same obligation, different status.
+func TestFingerprintEnabledLiveWithDegradedReason(t *testing.T) {
+	t.Run("toolchain missing", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.deps.FingerprintDegraded = func() string { return "fpcalc_missing" }
+
+		var resp settingsPatchResponse
+		if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+			map[string]any{"fingerprintEnabled": true}, &resp); code != 200 {
+			t.Fatalf("patch: %d", code)
+		}
+		got := resp.Fields["fingerprintEnabled"]
+		if got.Status != applyLive {
+			t.Errorf("status = %q, want %q — a restart cannot install fpcalc", got.Status, applyLive)
+		}
+		if got.Reason == "" {
+			t.Fatal("no reason: the operator gets 'Saved.' for a switch that will do nothing")
+		}
+		if !strings.Contains(got.Reason, "fpcalc") {
+			t.Errorf("reason %q does not name what is missing", got.Reason)
+		}
+		if resp.RestartRequired {
+			t.Error("a live-with-a-warning field must not raise the restart rollup")
+		}
+	})
+
+	t.Run("toolchain present", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.deps.FingerprintDegraded = func() string { return "" }
+
+		var resp settingsPatchResponse
+		if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+			map[string]any{"fingerprintEnabled": true}, &resp); code != 200 {
+			t.Fatalf("patch: %d", code)
+		}
+		got := resp.Fields["fingerprintEnabled"]
+		if got.Status != applyLive || got.Reason != "" {
+			t.Errorf("got %+v, want a bare live — nothing to warn about", got)
+		}
+	})
+
+	t.Run("switching OFF never warns", func(t *testing.T) {
+		// The toolchain is irrelevant to turning the feature off, and a
+		// warning there would be noise attached to a change that fully
+		// took effect.
+		srv, _, _ := newTestServer(t)
+		srv.deps.FingerprintDegraded = func() string { return "fpcalc_missing" }
+		if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+			map[string]any{"fingerprintEnabled": true}, nil); code != 200 {
+			t.Fatalf("arrange: %d", code)
+		}
+		var resp settingsPatchResponse
+		if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+			map[string]any{"fingerprintEnabled": false}, &resp); code != 200 {
+			t.Fatalf("patch off: %d", code)
+		}
+		if r := resp.Fields["fingerprintEnabled"].Reason; r != "" {
+			t.Errorf("switching off carried reason %q", r)
+		}
+	})
+}
+
+// TestFingerprintDegradedMessagesAreBounded — the keys come from the
+// toolchain probe, never from an error string, so the message set cannot
+// grow unbounded (the rule markSkipped's reason keys follow).
+func TestFingerprintDegradedMessagesAreBounded(t *testing.T) {
+	for _, key := range []string{"fpcalc_missing", "no_api_key", "something_new"} {
+		if msg := fingerprintDegradedMessage(key); msg == "" {
+			t.Errorf("%s: empty message", key)
+		}
+	}
+	if fingerprintDegradedMessage("fpcalc_missing") == fingerprintDegradedMessage("no_api_key") {
+		t.Error("the two known reasons must read differently — they need different fixes")
 	}
 }
