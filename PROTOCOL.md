@@ -367,8 +367,8 @@ rows whose `path` carries the pinned grammar below).
 
 **The virtual-path grammar is a PINNED cross-repo contract** (the iOS
 mirror is `SACDVirtualPath.swift`; the bridge implementation is
-`internal/manifest/sacd.go` — both parse the SAME shapes or deletion
-membership and client classification drift):
+`internal/manifest/sacd.go` — both sides must parse the SAME shapes;
+otherwise deletion membership and client classification drift):
 
 ```
 <container path ending .iso>/st/<NN>.dff
