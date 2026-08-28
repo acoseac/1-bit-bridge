@@ -78,9 +78,10 @@ async function errorFromResponse(r) {
 //
 //   * `TypeError` — fetch's connection-drop signal when the server
 //     tears the listener down mid-read.
-//   * `SyntaxError` — `r.json()` failing on an empty body when the
-//     202 reaches the browser before the exit. The handler does
-//     not write a JSON body for the 202.
+//   * `SyntaxError` — `r.json()` failing on a TRUNCATED body. The
+//     handler does write a JSON body with the 202 now (the drain
+//     result), but the process exits 100 ms later, so a slow read can
+//     still catch the connection going away mid-parse.
 //
 // Anything else (notably a plain `Error` from `errorFromResponse`,
 // which wraps real 4xx/5xx) is a genuine failure and the caller
@@ -1075,15 +1076,16 @@ async function runInstall(btn, force) {
     const path = force ? "/api/updates/install?force=1" : "/api/updates/install";
     await API.post(path);
     btn.textContent = supervised ? "Restarting…" : "Stopping…";
-    // Fire restart and don't await — the server tears the listener
-    // down before we can read the response body anyway. The 2.5 s
-    // auto-reload below is the empirical sweet-spot for launchd /
-    // systemd / SCM respawn; under those it lands the operator
-    // back on a working admin page. (Qodo on PR #124.) For
-    // unsupervised processes there's no respawn, so the reload
-    // would race a listener that's never coming back — replace
-    // it with an in-place message instructing manual restart.
-    fetch("/api/restart", {
+    // AWAIT the restart now, where the old code deliberately did not.
+    // The handler drains in-flight streams first, so the response marks
+    // the moment the exit is actually imminent — starting the 2.5 s
+    // reload timer before that would land the operator on a page served
+    // by the OLD process, which then restarts under them.
+    //
+    // Failures are swallowed on purpose: the connection dropping mid-read
+    // is the expected shape of a server on its way out, and the reload
+    // below recovers either way.
+    await fetch("/api/restart", {
       method: "POST",
       headers: { "content-type": "application/json" },
     }).catch(() => {});
@@ -3129,13 +3131,24 @@ function initSettings() {
       ? "Restart the bridge now? The page will become unreachable until the service manager relaunches it (~1–2 s)."
       : "Stop the bridge now? This bridge isn't running under a service manager, so the page will go down and you'll need to start it again manually.";
     if (!confirm(prompt)) return;
+    showMsg(msg, "warn", "Waiting for in-flight streams to finish…");
     try {
-      await API.post("/api/restart");
+      // The handler now waits for /v1/read + /v1/download to drain before
+      // exiting, and only answers once it has. Awaiting it is therefore
+      // the moment the restart is genuinely about to happen — and the
+      // body says whether anyone got cut off.
+      const r = await API.post("/api/restart");
       // Honoured — the pending-restart debt is settled.
       markRestartPending(false);
-      const post = supervised
+      let post = supervised
         ? "Restart signalled. Reload the page in a few seconds."
         : "Stop signalled. Start the bridge again manually, then reload.";
+      if (r && r.drained === false && r.inflight > 0) {
+        // Say it plainly rather than reporting a clean restart: someone
+        // was listening and we went ahead anyway.
+        post = `${post} (${r.inflight} stream${r.inflight === 1 ? "" : "s"} still ` +
+          `in flight after ${Math.round((r.waitedMs || 0) / 1000)}s — interrupted.)`;
+      }
       showMsg(msg, "warn", post);
     } catch (err) {
       if (isExpectedRestartDisconnect(err)) {

@@ -291,6 +291,42 @@ the CLI that set those fields directly are unaffected.
 
 ---
 
+## Restarting without anyone noticing
+
+A supervised restart is ~2 seconds and the control plane owns the process, so
+for a restart-bound field the fix is for the control plane to bounce on the
+operator's behalf. The blocker was never the restart — it was that the person
+whose stream got cut never asked for anything.
+
+`POST /api/restart` therefore waits for in-flight `/v1/read` + `/v1/download` to
+finish first, and **reports whether it managed it**:
+
+```json
+{ "restarting": true, "drained": true, "inflight": 0, "waitedMs": 412 }
+```
+
+- **Draining is the default**, including for a bodyless POST — a caller that did
+  not think about it gets the safer behaviour. `{"drain": false}` opts out.
+- **Idle costs nothing.** Zero in-flight returns immediately; only a real stream
+  makes anyone wait.
+- **Bounded, and honest at the bound.** A stream can outlive any deadline, so the
+  wait is capped (30 s default, 5 min ceiling — the admin server sets no
+  `WriteTimeout`, so nothing else would stop a caller holding the request open).
+  On timeout it restarts anyway and says `drained: false` with the count and a
+  reason. Reporting a clean drain it could not verify would have a control plane
+  record a graceful restart and never learn it interrupted someone.
+- **`inflight: -1` means unknown**, not zero — a bridge with no session tracker
+  wired cannot know what it is interrupting, and says so.
+
+The wait is deliberately **not** tied to the request context: the restart was
+already requested, and a control plane whose HTTP client gives up mid-drain still
+wants the bounce.
+
+The machinery is `updater.Tracker`, which the auto-installer has gated on since
+PR #42. It simply was never wired into the admin restart path.
+
+---
+
 ## What a control plane must restart for
 
 **Six fields. Everything else applies live.**

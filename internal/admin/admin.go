@@ -418,6 +418,21 @@ type Deps struct {
 	// Nil (tests, the CLI) simply omits that explanation.
 	FingerprintDegraded func() string
 
+	// InflightSessions reports how many file-serving requests
+	// (/v1/read + /v1/download) are in flight right now.
+	//
+	// Wired to the same updater.Tracker the auto-installer consults before
+	// swapping a binary. The admin restart path did NOT consult it, which
+	// was survivable while a restart was an operator standing at the
+	// console deciding to bounce their own bridge — and stops being
+	// survivable the moment a control plane restarts on the operator's
+	// behalf to apply a setting, because then the person whose stream is
+	// cut never asked for anything.
+	//
+	// Nil means the count is unknown; the restart handler then says so
+	// rather than claiming a clean drain it cannot verify.
+	InflightSessions func() int64
+
 	// TriggerCadenceRearm pokes every background loop whose schedule is
 	// read from the live config, so a changed cadence is picked up now
 	// rather than after the OLD interval elapses. On the 6 h scan default
