@@ -143,6 +143,7 @@ var Ext = map[string]bool{
 	".flac": true,
 	".dsf":  true,
 	".dff":  true, // DSDIFF — rarer but found in audiophile libraries
+	".iso":  true, // SACD disc image — expands to virtual DST tracks (sacd.go)
 	".mp3":  true,
 	".m4a":  true, // AAC / ALAC
 	".m4b":  true, // MPEG-4 audiobook — same MP4 container/atoms as .m4a
@@ -214,7 +215,17 @@ var Ext = map[string]bool{
 // already-scanned SACD rips re-serve typed; iOS's delta sync then
 // updates its rows through the same upsert chokepoint that maps
 // `compression == "DST"` onto its canonical DST codec marker.
-const ExtractorVersion = 5
+//
+// v6 (SACD ISO expansion, sacd.go): `.iso` joins the discovery gate and
+// an SACD image expands into virtual DST track rows at
+// "<iso>/st/NN.dff" (TOC-derived tags; no container row; the pinned
+// cross-repo path grammar in PROTOCOL.md). ISO pickup itself comes
+// from the DISCOVERY gate (never-walked files have no rows to be
+// stale), so this bump is the standing every-extraction-change rule —
+// it makes any FUTURE sacd.go fix re-expand existing virtual rows.
+// Unchanged non-ISO rows ride reExtractUnchanged's diff-guard onto the
+// light version stamp, so no library-wide re-enrich wave fires.
+const ExtractorVersion = 6
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -382,6 +393,13 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 	// scanner's discovery gate skips those files before they ever
 	// reach this dispatcher. TestExtCoversDispatcher pins it.
 	switch ext {
+	case ".iso":
+		// SACD ISO expansion happens in the scanner worker via
+		// ExpandSACDISO (one container → N virtual rows — this 1:1
+		// dispatcher cannot express it). The case exists to satisfy
+		// the Ext↔dispatcher lockstep above; reaching it means a
+		// non-scanner caller fed an ISO — extract nothing, no error.
+		return nil
 	case ".dsf":
 		return extractDSFWithContext(absPath, t, ec)
 	case ".dff":

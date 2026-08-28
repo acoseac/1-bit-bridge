@@ -593,6 +593,18 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		if _, ok := seen[p]; ok {
 			continue
 		}
+		if c, ok := SACDVirtualContainer(p); ok {
+			if _, containerSeen := seen[c]; containerSeen {
+				// SACD virtual rows never appear in a disk walk — the
+				// row is SEEN whenever its CONTAINER is (the routed-row
+				// hazard, one row-species over; the iOS scanner's
+				// reapRowIsSeen mirror). A container genuinely gone
+				// falls through and its rows reap at the threshold;
+				// rows a re-expansion superseded are retired
+				// immediately by processSACDISO, never here.
+				continue
+			}
+		}
 		if _, routed := routedSet[p]; routed {
 			continue
 		}
@@ -1027,7 +1039,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 		// the worker proceeds to the next path on the channel.
 		// Mirrors the same pattern processJob uses in
 		// internal/transcode/pool.go.
-		var trackToWrite *Track
+		var tracksToWrite []*Track
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -1036,9 +1048,19 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 						"path", pi.abs,
 						"panic", r,
 						"stack", string(debug.Stack()))
-					trackToWrite = nil
+					tracksToWrite = nil
 				}
 			}()
+			// SACD ISO container: one input file → N virtual track
+			// rows (sacd.go — the 1:1 dispatcher below cannot express
+			// it). The branch owns its OWN skip-gate keyed on the
+			// representative first virtual row carrying the
+			// container's size+mtime, so an unchanged image costs one
+			// stat like any other file.
+			if strings.EqualFold(filepath.Ext(pi.rel), ".iso") {
+				tracksToWrite = s.processSACDISO(ctx, pi)
+				return
+			}
 			// Early-skip on unchanged-since-last-scan: matches the legacy
 			// walker. Concurrent reads from N workers against the same
 			// SQLite handle are fine (modernc.org/sqlite WAL mode allows
@@ -1121,7 +1143,9 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 				// lands on the stamp leg naturally: the fresh extract's
 				// stampLocalArtwork already re-wrote the missing cache
 				// file, and the row itself is unchanged.
-				trackToWrite = s.reExtractUnchanged(ctx, pi, multiRoot, ec)
+				if t := s.reExtractUnchanged(ctx, pi, multiRoot, ec); t != nil {
+					tracksToWrite = []*Track{t}
+				}
 				if hook := afterExtractHookForTests; hook != nil {
 					hook(pi.abs)
 				}
@@ -1145,17 +1169,19 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			if hook := afterExtractHookForTests; hook != nil {
 				hook(pi.abs)
 			}
-			trackToWrite = t
+			tracksToWrite = []*Track{t}
 		}()
-		if trackToWrite == nil {
-			// Either an early-skip-unchanged hit, or a panic during
-			// extraction. Both paths skip the writer hand-off.
+		if len(tracksToWrite) == 0 {
+			// An early-skip-unchanged hit, a panic during extraction,
+			// or a non-expandable ISO. All paths skip the hand-off.
 			continue
 		}
-		select {
-		case writes <- trackToWrite:
-		case <-ctx.Done():
-			return
+		for _, tw := range tracksToWrite {
+			select {
+			case writes <- tw:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -1328,6 +1354,78 @@ func mergePostScanFields(fresh, old *Track) {
 // but the scan continues. The legacy walker had the same behaviour
 // (bare `log.Printf` on UpsertTrack failure); per-batch failure is
 // rarer because a single transaction wraps many rows.
+// processSACDISO is the worker leg for an `.iso` container: its own
+// skip-gate (the generic gate keys `GetTrackStat` on `pi.rel`, and a
+// container has NO row — the representative FIRST virtual row carries
+// the container's size+mtime instead), then TOC parse + expansion via
+// ExpandSACDISO, then a journaled retire of any STALE virtual rows the
+// fresh expansion no longer covers — a re-rip that SHRINKS (or an image
+// that stopped being SACD) must not leave trailing rows alive forever
+// behind the deletion pass's container-seen sparing.
+//
+// Runs inside the worker's panic-recovery closure; returns nil for an
+// unchanged image, a non-SACD/plain-DSD/multichannel-only image, or a
+// parse failure (logged — the image simply contributes no rows).
+func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
+	rep := SACDVirtualTrackPath(pi.rel, 1)
+	existing, statErr := s.store.GetTrackStat(ctx, rep)
+	if statErr != nil && ctx.Err() == nil {
+		scanLogger.Warn("sacd skip-gate lookup", "path", pi.rel, "err", statErr)
+	}
+	if existing != nil && existing.Size == pi.info.Size() &&
+		existing.MTimeNS == pi.info.ModTime().UnixNano() &&
+		existing.ExtractorVersion >= ExtractorVersion {
+		// Unchanged + current: the deletion pass's container-seen
+		// membership keeps every virtual row alive without touching
+		// missing_count, so there is nothing to write.
+		return nil
+	}
+
+	tracks, err := ExpandSACDISO(pi.abs, pi.rel, pi.info.Size(), pi.info.ModTime().UTC())
+	if err != nil {
+		scanLogger.Error("sacd expand", "path", pi.abs, "err", err)
+		return nil
+	}
+
+	// Retire virtual rows the fresh expansion no longer mints. The
+	// container-seen sparing in the deletion pass deliberately keeps
+	// EVERY virtual row of a present container, so supersession must
+	// happen here, where the current track set is known. Routed through
+	// the SAME journaled threshold writer the deletion pass uses
+	// (threshold 1 = immediate, scoped delete) so client delta syncs
+	// see the removals as tombstones.
+	fresh := make(map[string]struct{}, len(tracks))
+	for _, t := range tracks {
+		fresh[t.Path] = struct{}{}
+	}
+	if under, err := s.store.TrackPathsUnder(ctx, pi.rel); err == nil {
+		var stale []string
+		for _, p := range under {
+			if _, ok := fresh[p]; ok {
+				continue
+			}
+			if IsSACDVirtualPath(p) {
+				stale = append(stale, p)
+			}
+		}
+		if len(stale) > 0 {
+			if n, derr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, stale, 1); derr != nil {
+				scanLogger.Warn("sacd stale-row retire", "path", pi.rel, "err", derr)
+			} else if n > 0 {
+				scanLogger.Info("sacd retired stale virtual rows", "path", pi.rel, "count", n)
+			}
+		}
+	} else if ctx.Err() == nil {
+		scanLogger.Warn("sacd stale-row listing", "path", pi.rel, "err", err)
+	}
+
+	if len(tracks) == 0 {
+		scanLogger.Debug("iso is not an expandable SACD image", "path", pi.rel)
+		return nil
+	}
+	return tracks
+}
+
 func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, committed *atomic.Int64, wg *sync.WaitGroup) {
 	defer wg.Done()
 	batch := make([]*Track, 0, scanBatchSize)
@@ -1698,6 +1796,18 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	for p := range beforeTrackSet {
 		if _, ok := seen[p]; ok {
 			continue
+		}
+		if c, ok := SACDVirtualContainer(p); ok {
+			if _, containerSeen := seen[c]; containerSeen {
+				// SACD virtual rows never appear in a disk walk — the
+				// row is SEEN whenever its CONTAINER is (the routed-row
+				// hazard, one row-species over; the iOS scanner's
+				// reapRowIsSeen mirror). A container genuinely gone
+				// falls through and its rows reap at the threshold;
+				// rows a re-expansion superseded are retired
+				// immediately by processSACDISO, never here.
+				continue
+			}
 		}
 		if _, routed := routedSet[p]; routed {
 			continue
