@@ -2101,10 +2101,12 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// cadenceChanged: a background loop's schedule changed, so the
 		// rearm fan-out should wake them to re-read it.
 		cadenceChanged bool
-		// fingerprintOn: the fingerprint toggle was switched ON, so the
-		// post-commit block below can check whether the toolchain will
-		// actually let it run and say so.
+		// fingerprintOn / upscaleOn / analysisOn: the toggle was switched
+		// ON, so the post-commit block below can check whether the
+		// toolchain will actually let it run and say so.
 		fingerprintOn bool
+		upscaleOn     bool
+		analysisOn    bool
 		// autoOptimizeFlipped: the pre-generation gate changed value.
 		// Hot-applies via a sweeper nudge instead of restartRequired.
 		autoOptimizeFlipped bool
@@ -2230,17 +2232,13 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.UpscaleEnabled != nil {
 			if *p.UpscaleEnabled != next.Upscale.Enabled {
 				next.Upscale.Enabled = *p.UpscaleEnabled
-				// Pool / sox-precheck / api wiring happens once at
-				// `bridge serve` startup. A live flip would have to
-				// instantiate (or shut down) the Pool, change the
-				// /v1/health response, AND reconfigure the variant-
-				// store hook — invasive enough that surfacing
-				// "restart required" is the right call for v1.2.
-				// A future iteration could hot-apply via a
-				// runtime hook, but the operator-friction gain
-				// isn't worth the rewiring complexity until a
-				// user requests it.
-				report.restart("upscaleEnabled")
+				// HOT: the pool is constructed unconditionally and
+				// never stopped before shutdown, so the flag decides
+				// only whether the feature DOES anything. The health
+				// flag, the manifest variant gate and every enqueue
+				// path read one shared live predicate.
+				upscaleOn = *p.UpscaleEnabled
+				report.live("upscaleEnabled")
 			} else {
 				report.unchanged("upscaleEnabled")
 			}
@@ -2248,11 +2246,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if p.AnalysisEnabled != nil {
 			if *p.AnalysisEnabled != next.Analysis.Enabled {
 				next.Analysis.Enabled = *p.AnalysisEnabled
-				// Same rationale as upscale: the serve-side `waveform`
-				// health flag + /v1/waveform wiring are decided once at
-				// startup, so a runtime flip needs a restart to take
-				// effect. Idempotent same-value submissions skip the banner.
-				report.restart("analysisEnabled")
+				// HOT, same shape as upscale.
+				analysisOn = *p.AnalysisEnabled
+				report.live("analysisEnabled")
 			} else {
 				report.unchanged("analysisEnabled")
 			}
@@ -2603,6 +2599,22 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	if fingerprintOn && s.deps.FingerprintDegraded != nil {
 		if why := s.deps.FingerprintDegraded(); why != "" {
 			report.set("fingerprintEnabled", applyLive, fingerprintDegradedMessage(why))
+		}
+	}
+	// Same shape for the two sox-backed features: the setting applied, but
+	// whether anything RUNS depends on a toolchain this bridge may not
+	// have. A restart would not install sox, so `live` is the honest
+	// status — with a reason, so the operator is not left watching a
+	// switch they just moved do nothing.
+	if hasFLAC, known := s.soxFLACStatus(); s.deps.UpscalePrecheck != nil {
+		soxErr := s.deps.UpscalePrecheck()
+		if why := soxDegradedMessage(soxErr, hasFLAC, known); why != "" {
+			if upscaleOn {
+				report.set("upscaleEnabled", applyLive, why)
+			}
+			if analysisOn {
+				report.set("analysisEnabled", applyLive, why)
+			}
 		}
 	}
 	// Nudge on BOTH directions of the auto-optimize flip. On→off matters

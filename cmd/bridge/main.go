@@ -2603,21 +2603,51 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// in-memory — the rest of the server keeps running unaffected.
 	// iOS sees `upscaleEnabled: false` on /v1/health in either
 	// disabled case.
-	upscaleActive := cfg.Upscale.Enabled
-	if upscaleActive && !soxFeatureReady(ctx, "upscale", stderr) {
-		upscaleActive = false
+	// ONE TTL-cached sox probe shared by every consumer: the live feature
+	// gates below, the upscale enqueuer's per-source decodability check,
+	// and the admin tiles (so the Settings page does at most one
+	// fork-exec per 30 s window regardless of tile count). Declared here
+	// rather than beside the admin wiring because the gates need it first.
+	soxCache := &soxToolchainCache{}
+	// soxOK is the LIVE toolchain verdict. Lazy + cached rather than a
+	// boot snapshot: the probe is a fork-exec, and an operator who
+	// installs sox and then enables the feature should not have to bounce
+	// the bridge to be believed.
+	soxOK := func(feature string) bool {
+		info, err := soxCache.snapshot()
+		// nil stderr: this is consulted per request, so a line per
+		// consult would be the per-minute spam the SSDP send-suppression
+		// exists to prevent. The boot check below logs once.
+		return soxUsable(info, err, feature, nil)
 	}
-	provider.SetUpscaleEnabled(upscaleActive)
+	// upscaleActiveFn / analysisActiveFn are the LIVE gates. Both pools
+	// are constructed UNCONDITIONALLY below, so these decide whether the
+	// feature does anything — not whether it exists. That split is what
+	// makes the toggles hot without any runtime teardown: the dangerous
+	// half of a pool lifecycle is stopping one, and nothing stops these
+	// until shutdown.
+	upscaleActiveFn := func() bool { return liveCfg().Upscale.Enabled && soxOK("upscale") }
+	analysisActiveFn := func() bool { return liveCfg().Analysis.Enabled && soxOK("analysis") }
+	// Boot-time courtesy log, once: an operator who enabled either
+	// feature without a usable sox gets told at startup rather than
+	// discovering it from a silent no-op.
+	if cfg.Upscale.Enabled {
+		_ = soxFeatureReady(ctx, "upscale", stderr)
+	}
+	if cfg.Analysis.Enabled {
+		_ = soxFeatureReady(ctx, "analysis", stderr)
+	}
+	// Live source, not a boot snapshot: the atomic is written once, so
+	// after a settings PATCH the manifest would keep stripping (or keep
+	// emitting) variants against a value /v1/health had already moved
+	// past.
+	provider.SetUpscaleEnabledSource(upscaleActiveFn)
 
 	// Analysis feature gate: same shape as upscale — config flag AND a
 	// working sox in PATH (analysis decodes through sox). A missing sox
 	// with the flag on degrades to "feature off" in-memory. Serve-side
 	// generation is CLI-driven (`bridge analyze`); serve only advertises
 	// the `waveform` flag + serves /v1/waveform from cached sidecars.
-	analysisActive := cfg.Analysis.Enabled
-	if analysisActive && !soxFeatureReady(ctx, "analysis", stderr) {
-		analysisActive = false
-	}
 
 	// Smart playlists read precomputed analysis + history (no decode), so
 	// there's no sox precheck — and no boot snapshot of the flag either:
@@ -2647,17 +2677,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithPairing(pairingStore).
 		WithCertExpiry(certNotAfter).
 		WithLECertExpiry(leCertExpiry).
-		WithUpscale(upscaleActive, &variantStoreAdapter{provider: provider}).
+		WithUpscale(upscaleActiveFn, &variantStoreAdapter{provider: provider}).
 		WithCarPlayOptimize(func() bool {
-			// upscaleActive is the boot fact (pool wired + sox probe
-			// passed) AND-ed with the LIVE optimize toggle — the same
-			// pairing autoOptimizeEnabledFn uses, so the health flag and
-			// the sweeper cannot disagree about whether the feature is on.
-			return upscaleActive && liveCfg().Upscale.EffectiveOptimizeEnabled()
+			// The live upscale gate AND-ed with the live optimize toggle
+			// — the same pairing autoOptimizeEnabledFn uses, so the
+			// health flag and the sweeper cannot disagree about whether
+			// the feature is on.
+			return upscaleActiveFn() && liveCfg().Upscale.EffectiveOptimizeEnabled()
 		}).
-		WithAnalysis(analysisActive, &analysisStoreAdapter{provider: provider}).
+		WithAnalysis(analysisActiveFn, &analysisStoreAdapter{provider: provider}).
 		WithAnalysisStats(&analysisStatsAdapter{
-			enabled: func() bool { return analysisActive },
+			enabled: analysisActiveFn,
 			store:   manifestStore,
 		}).
 		WithAtlasMeta(cfg.Atlas.Enabled, cfg.Atlas.EffectiveMetaTTL(), manifestStore).
@@ -2918,7 +2948,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	var analysisPool *analyze.Pool
 	var analysisNudge chan struct{}
 	var analysisSweepState *sweepStatus[admin.AnalysisSweepCounts]
-	if analysisActive {
+	// Constructed UNCONDITIONALLY. The pool is a few goroutines parked on
+	// a channel when nothing is enqueued, and building it always is what
+	// makes analysis.enabled hot: a pool that exists only when the flag
+	// was on at boot makes the flag restart-bound however live the rest
+	// of the path is.
+	//
+	// Note this is always-construct-NEVER-STOP, not runtime start/stop.
+	// The dangerous half of a pool lifecycle is Stop — its ordering
+	// against Enqueue and the publisher drain has produced live panics —
+	// and nothing here stops the pool before shutdown.
+	{
 		analysisPool = analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap())
 		defer analysisPool.Stop()
 		// Buffered-1 nudge: the scanner's post-scan hook and the admin
@@ -3008,21 +3048,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
-		runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActive,
+		runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActiveFn(),
 			func() bool { return liveCfg().SmartPlaylists.EffectiveEnabled() },
 			liveInterval(func(c *config.Config) time.Duration {
 				return c.SmartPlaylists.EffectiveRegenerateInterval()
 			}),
 			smartMixRearm, smartMixRunState)
 	}()
-
-	// One TTL-cached sox probe shared by every consumer: the admin's
-	// availability + FLAC closures (so the Settings page does at most one
-	// fork-exec per 30 s window regardless of tile count) AND the upscale
-	// enqueuer's per-source decodability check. Declared here rather than
-	// beside the admin wiring below because the enqueuer is constructed
-	// first; one instance keeps all three reading the same snapshot.
-	soxCache := &soxToolchainCache{}
 
 	var upscalePool *transcode.Pool
 	var upscaleCoordinator *transcode.Coordinator
@@ -3038,7 +3070,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// same live-runtime-vs-persisted-config divergence /v1/upscale/stats
 	// exists to avoid.
 	var autoOptimizeEnabledFn func() bool
-	if upscaleActive {
+	// Constructed UNCONDITIONALLY — see the analysis pool above for why,
+	// and for why always-construct-never-stop avoids the Stop-ordering
+	// invariants that make a real pool lifecycle dangerous.
+	{
 		upscalePool = transcode.NewPool(manifestStore, cfg.Upscale.EffectiveWorkers(), cfg.Upscale.EffectiveQueueCap())
 		defer upscalePool.Stop()
 		// v1.3 Coordinator wraps the Pool with per-batch tracking.
@@ -3646,7 +3681,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Live runtime state of audio analysis (startup-computed gate),
 		// so the admin tile's `enabled` matches /v1/health's `waveform`
 		// flag rather than the persisted config flag.
-		AnalysisActive: func() bool { return analysisActive },
+		AnalysisActive: analysisActiveFn,
 		// Analysis pool + sweeper surfaces (nil when the feature is off —
 		// the admin then omits the fields, mirroring the upscale tile).
 		AnalysisPoolStats: analysisPoolStatsClosure(analysisPool),

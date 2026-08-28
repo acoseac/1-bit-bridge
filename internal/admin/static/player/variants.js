@@ -70,7 +70,7 @@ export function variantPanel(summary, scope, onChanged, { plain = false } = {}) 
       blurb: "Cached hi-res and CarPlay-optimized copies, generated offline by " +
         "sox. Nothing is transcoded on the fly and the originals are untouched.",
       rows: [
-        { field: "upscaleEnabled", type: "switch", restart: true, label: "PCM upscaling" },
+        { field: "upscaleEnabled", type: "switch", label: "PCM upscaling" },
         {
           field: "optimizeEnabled", type: "switch", label: "CarPlay-optimized variants",
           hint: "16-bit downsamples for head units and cellular streaming. " +

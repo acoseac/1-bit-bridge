@@ -192,3 +192,19 @@ func fingerprintDegradedMessage(reason string) string {
 		return "saved, but the fingerprint toolchain is unavailable, so no fingerprinting will run"
 	}
 }
+
+// soxDegradedMessage renders why a sox-backed feature will not run, or ""
+// when it will.
+//
+// Mirrors the conservative FormatsKnown gate the serve-side probe uses:
+// an unparseable `sox --help` is treated as FLAC-present, so a help-output
+// reword can never make a working install look broken.
+func soxDegradedMessage(probeErr error, hasFLAC, formatsKnown bool) string {
+	if probeErr != nil {
+		return "saved, but sox is not installed on this bridge, so nothing will be generated"
+	}
+	if formatsKnown && !hasFLAC {
+		return "saved, but this sox build has no FLAC support, so nothing will be generated"
+	}
+	return ""
+}

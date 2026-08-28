@@ -669,8 +669,9 @@ func TestSettingsPatchUpscaleEnabled(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("patch upscale on: %d", code)
 	}
-	if !resp.RestartRequired {
-		t.Error("upscaleEnabled change must mark restart required (Pool wired at constructor time)")
+	if resp.RestartRequired {
+		t.Error("upscaleEnabled must NOT mark restart required — the pool is constructed " +
+			"unconditionally and every consumer reads one live predicate")
 	}
 	if !srv.deps.CfgHolder.Load().Upscale.Enabled {
 		t.Error("in-memory cfg did not reflect upscale.enabled=true")
@@ -691,8 +692,8 @@ func TestSettingsPatchUpscaleEnabled(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("patch upscale off: %d", code)
 	}
-	if !resp.RestartRequired {
-		t.Error("upscaleEnabled flip-off must also require restart")
+	if resp.RestartRequired {
+		t.Error("upscaleEnabled flip-off must NOT require a restart either")
 	}
 
 	// Same value re-submission MUST NOT mark restart required —
@@ -723,8 +724,8 @@ func TestSettingsPatchAnalysisEnabled(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("patch analysis on: %d", code)
 	}
-	if !resp.RestartRequired {
-		t.Error("analysisEnabled change must mark restart required")
+	if resp.RestartRequired {
+		t.Error("analysisEnabled must NOT mark restart required — same shape as upscale")
 	}
 	if !srv.deps.CfgHolder.Load().Analysis.Enabled {
 		t.Error("in-memory cfg did not reflect analysis.enabled=true")

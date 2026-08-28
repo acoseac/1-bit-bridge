@@ -728,7 +728,7 @@ func fileFixtureWithVariant(t *testing.T, sourceRel, variantID string, mtimeDrif
 	raw, _, _ := store.Mint("test")
 
 	srv := New(cfg, store, nil, "fp")
-	srv.WithUpscale(true, &fakeVariantStore{
+	srv.WithUpscale(func() bool { return true }, &fakeVariantStore{
 		wantSourcePath: sourceRel,
 		wantVariantID:  variantID,
 		rec: &VariantRecord{

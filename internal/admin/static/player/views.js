@@ -947,8 +947,7 @@ function mixesToolbar(controls) {
         field: "smartPlaylistsEnabled", type: "switch", label: "Generate smart mixes",
       },
       {
-        field: "analysisEnabled", type: "switch", restart: true,
-        label: "Audio analysis",
+        field: "analysisEnabled", type: "switch", label: "Audio analysis",
         hint: "Only the harmonic Auto Mix needs it. The history-based families " +
           "generate without it.",
       },

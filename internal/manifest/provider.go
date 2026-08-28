@@ -65,6 +65,16 @@ type Provider struct {
 	// setter. Provider is always used by pointer (see NewProvider), so the
 	// non-copyable atomic is never copied (go vet copylocks stays clean).
 	upscaleEnabled atomic.Bool
+	// upscaleEnabledFn, when set, SUPERSEDES the atomic and is consulted
+	// per manifest fetch. It exists because the flag became hot: the
+	// atomic is written once at startup, so after a settings PATCH it
+	// would keep stripping (or keep emitting) variants against a value
+	// the rest of the bridge had already moved past — a client's manifest
+	// disagreeing with /v1/health about whether the feature is on.
+	//
+	// atomic.Pointer rather than a bare field: manifest fetches run on
+	// HTTP-handler goroutines, so an unsynchronised write would race them.
+	upscaleEnabledFn atomic.Pointer[func() bool]
 
 	// last{Count,Pending}ErrLogNS carry the unix-nano timestamp of the most
 	// recent health-probe DB-error log for TracksIndexed / PendingDeletions.
@@ -108,6 +118,26 @@ func NewProvider(store *Store, scanner *Scanner) *Provider {
 // the next /v1/manifest fetch.
 func (p *Provider) SetUpscaleEnabled(v bool) { p.upscaleEnabled.Store(v) }
 
+// SetUpscaleEnabledSource attaches a LIVE gate, consulted per manifest
+// fetch instead of the stored boolean. Nil clears it, restoring the
+// stored value — which is what every caller that only ever calls
+// SetUpscaleEnabled (tests, the CLI) keeps getting.
+func (p *Provider) SetUpscaleEnabledSource(f func() bool) {
+	if f == nil {
+		p.upscaleEnabledFn.Store(nil)
+		return
+	}
+	p.upscaleEnabledFn.Store(&f)
+}
+
+// upscaleGate resolves the effective gate, preferring the live source.
+func (p *Provider) upscaleGate() bool {
+	if fn := p.upscaleEnabledFn.Load(); fn != nil {
+		return (*fn)()
+	}
+	return p.upscaleEnabled.Load()
+}
+
 // WriteManifest satisfies api.ManifestProvider for the legacy
 // non-paginated /v1/manifest endpoint. Streams JSON straight to w
 // instead of materialising a full []Track in memory — the previous
@@ -119,14 +149,14 @@ func (p *Provider) SetUpscaleEnabled(v bool) { p.upscaleEnabled.Store(v) }
 // disconnect mid-response (slow network, iOS app backgrounded mid-sync,
 // slow-read DOS) terminates the SQLite scan instead of running to EOF.
 func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
-	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, p.upscaleEnabled.Load())
+	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, p.upscaleGate())
 }
 
 // BuildManifestPage satisfies api.ManifestProvider for the paginated
 // full-manifest path introduced in v1.1. See `BuildManifestPage` in
 // scanner.go for the cursor semantics.
 func (p *Provider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*Manifest, error) {
-	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, p.upscaleEnabled.Load())
+	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, p.upscaleGate())
 }
 
 // IsScanning satisfies api.ManifestProvider.

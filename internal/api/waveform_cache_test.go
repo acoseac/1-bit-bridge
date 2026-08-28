@@ -52,7 +52,7 @@ func waveformFixture(t *testing.T) (*httptest.Server, string, string) {
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	raw, _, _ := store.Mint("wf")
 
-	srv := New(cfg, store, nil, "fp").WithAnalysis(true, stubAnalysisStore{rec: &AnalysisRecord{
+	srv := New(cfg, store, nil, "fp").WithAnalysis(func() bool { return true }, stubAnalysisStore{rec: &AnalysisRecord{
 		SourcePath:    srcRel,
 		WaveformPath:  sidecar,
 		WaveformTag:   hex.EncodeToString(sum[:])[:8],

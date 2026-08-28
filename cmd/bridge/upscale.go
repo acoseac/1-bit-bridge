@@ -927,12 +927,32 @@ func printSoxFormatHint(w io.Writer) {
 // the probe; the 2 s cap lives inside ProbeSox regardless.
 func soxFeatureReady(ctx context.Context, feature string, stderr io.Writer) bool {
 	info, err := transcode.ProbeSox(ctx)
+	return soxUsable(info, err, feature, stderr)
+}
+
+// soxUsable is the verdict, split out from the probe so a CACHED probe
+// result can reach the same judgement without re-forking.
+//
+// The conservative FormatsKnown gate is the contract: an unparseable
+// `sox --help` is treated as FLAC-present, so a help-output reword can
+// never disable a working install.
+//
+// `stderr` may be nil, for callers that only want the verdict — the live
+// gates consult this on every request, and a line per consult would be
+// the per-minute spam the SSDP send-suppression exists to prevent. The
+// ONE boot-time caller passes a writer so an operator who enabled the
+// feature without sox still gets told once.
+func soxUsable(info transcode.SoxInfo, err error, feature string, stderr io.Writer) bool {
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but sox is not available — disabling: %v\n", feature, err)
+		if stderr != nil {
+			fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but sox is not available — disabling: %v\n", feature, err)
+		}
 		return false
 	}
 	if info.FormatsKnown && !info.HasFLAC {
-		fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but the installed sox build lacks FLAC support (needed for the internal pipeline) — disabling\n", feature)
+		if stderr != nil {
+			fmt.Fprintf(stderr, "%s: feature is enabled in bridge.yaml but the installed sox build lacks FLAC support (needed for the internal pipeline) — disabling\n", feature)
+		}
 		return false
 	}
 	return true

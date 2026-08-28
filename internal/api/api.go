@@ -130,14 +130,14 @@ type Server struct {
 	upnpPublicProvider     UPnPUpstreamPublicProvider   // nil unless WithUPnPUpstreamPublicProvider wired (UPnP upstream advertisement on /v1/health)
 	variantDeleter         VariantDeleter               // nil unless WithVariantDeleter wired (variant-lifecycle delete)
 	inflightDropper        InflightDropper              // nil unless WithInflightDropper wired (transcode pool dedup)
-	upscaleEnabled         bool                         // mirrors cfg.Upscale.Enabled (and sox-probe outcome)
+	upscaleEnabled         func() bool                  // LIVE; mirrors cfg.Upscale.Enabled AND the sox probe
 	carPlayOptimizeEnabled func() bool                  // LIVE predicate; gated AND-wise on upscaleEnabled by the wiring layer
 	dlnaEnabled            bool                         // mirrors cfg.DLNA.Enabled AND shouldEnableDLNA(...) — opt-in LAN-only DLNA MediaServer
 	rendererDiscovery      RendererDiscoverySnapshotter // nil unless WithRendererDiscovery wired — opt-in SSDP MediaRenderer cache for /v1/renderers
 	upscaleEnqueuer        UpscaleEnqueuer              // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider   UpscaleStatsProvider         // nil unless WithUpscaleStats wired (v1.2 management UI)
 	analysisStore          AnalysisStore                // nil unless WithAnalysis(true, as) called — /v1/waveform lookup
-	analysisEnabled        bool                         // mirrors cfg.Analysis.Enabled (and sox-probe outcome) — gates the "waveform" health feature flag
+	analysisEnabled        func() bool                  // LIVE; mirrors cfg.Analysis.Enabled AND the sox probe — gates the "waveform" health feature flag
 	analysisStatsProvider  AnalysisStatsProvider        // nil unless WithAnalysisStats wired — /v1/analysis/stats
 	batchCoordinator       BatchCoordinator             // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
 	eventBroker            *eventBroker                 // nil disables /v1/events (back-compat for test harnesses); wired once at startup, see StartEventBroker
@@ -651,12 +651,21 @@ func (s *Server) touchDevice(ctx context.Context, deviceToken, tokenID string) {
 //     `enabled` (cleared in the manifest provider otherwise).
 //   - /v1/download honors `?variant=<id>` iff `enabled` AND
 //     `vs != nil`; 404 `variant_not_found` otherwise.
-func (s *Server) WithUpscale(enabled bool, vs VariantStore) *Server {
+//
+// Takes a PREDICATE, read per request, so the toggle hot-applies. The
+// STORE is wired unconditionally: gating it on the boot value is what
+// made the flag restart-bound, since a nil store cannot be filled in
+// later. `enabled` decides whether the feature answers; the store decides
+// whether it CAN. Nil predicate reads as off.
+func (s *Server) WithUpscale(enabled func() bool, vs VariantStore) *Server {
 	s.upscaleEnabled = enabled
-	if enabled {
-		s.variantStore = vs
-	}
+	s.variantStore = vs
 	return s
+}
+
+// upscaleActive reports whether the upscale surface should answer.
+func (s *Server) upscaleActive() bool {
+	return s.upscaleEnabled != nil && s.upscaleEnabled()
 }
 
 // WithAnalysis wires the offline audio-analysis feature. `enabled`
@@ -668,12 +677,17 @@ func (s *Server) WithUpscale(enabled bool, vs VariantStore) *Server {
 // Effect on the wire:
 //   - /v1/health advertises the `waveform` feature flag iff `enabled`.
 //   - /v1/waveform serves sidecars iff `as != nil`; 404 otherwise.
-func (s *Server) WithAnalysis(enabled bool, as AnalysisStore) *Server {
+//
+// Predicate + unconditional store, for the same reason as WithUpscale.
+func (s *Server) WithAnalysis(enabled func() bool, as AnalysisStore) *Server {
 	s.analysisEnabled = enabled
-	if enabled {
-		s.analysisStore = as
-	}
+	s.analysisStore = as
 	return s
+}
+
+// analysisActive reports whether the analysis surface should answer.
+func (s *Server) analysisActive() bool {
+	return s.analysisEnabled != nil && s.analysisEnabled()
 }
 
 // WithAnalysisStats attaches the GET /v1/analysis/stats provider.
@@ -1458,7 +1472,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// `false` explicitly (not omitted) when the server supports
 	// the feature but has it turned off. Older servers without
 	// the field surface as nil on iOS, which iOS treats as false.
-	upscaleEnabled := s.upscaleEnabled
+	upscaleEnabled := s.upscaleActive()
 	resp.UpscaleEnabled = &upscaleEnabled
 	if !s.certNotAfter.IsZero() {
 		notAfter := s.certNotAfter
@@ -1531,7 +1545,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.bookletStore != nil && s.bookletDir != "" {
 		feats = append(feats, "booklets")
 	}
-	if s.upscaleEnabled {
+	if s.upscaleActive() {
 		if s.carPlayOptimizeEnabled != nil && s.carPlayOptimizeEnabled() {
 			feats = append(feats, "carPlayOptimize")
 		}
@@ -1571,7 +1585,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.favoritesStore != nil {
 		feats = append(feats, "favorites")
 	}
-	if s.analysisEnabled {
+	if s.analysisActive() {
 		// `keyTempo` advertises that this bridge fills Track.keyRoot /
 		// keyMode (estimated musical key) and Track.bpm (when the source
 		// has no BPM tag) from offline analysis. Same analysis-active gate
@@ -1586,7 +1600,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// `keyTempo` and `operatorDrivenUpscale` (k < l < o).
 		feats = append(feats, "loudness")
 	}
-	if s.upscaleEnabled {
+	if s.upscaleActive() {
 		if s.batchCoordinator != nil {
 			feats = append(feats, "operatorDrivenUpscale")
 		}
@@ -1645,7 +1659,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// has the machinery for the other, though an individual track may carry
 	// a waveform and no spectrum (analysis predating wf6). Alpha-sorted
 	// between smartPlaylists and trackQuality (sm < sp < t).
-	if s.analysisEnabled {
+	if s.analysisActive() {
 		feats = append(feats, "spectrum")
 	}
 	// `trackQuality` advertises the wf4 quality scalars —
@@ -1655,14 +1669,14 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// field absence as absence either way (additive), the flag exists
 	// for discoverability. Alpha-sorted between `smartPlaylists` and
 	// `upscaleCompleteEvents` (s < t < u).
-	if s.analysisEnabled {
+	if s.analysisActive() {
 		feats = append(feats, "trackQuality")
 	}
-	if s.upscaleEnabled {
+	if s.upscaleActive() {
 		feats = append(feats, "upscaleCompleteEvents")
 	}
 	feats = append(feats, "variantBumpsIndex")
-	if s.analysisEnabled {
+	if s.analysisActive() {
 		// Offline audio analysis is active — iOS may fetch
 		// `GET /v1/waveform?path=…` for any track whose manifest row
 		// carries a `waveformTag`. Alpha-sorted last (`w` > `v`).
