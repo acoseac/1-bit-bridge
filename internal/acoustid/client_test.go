@@ -542,3 +542,40 @@ func TestRateLimitErrorIsNilSafe(t *testing.T) {
 		t.Error("a rate limit must classify transient even without a cause")
 	}
 }
+
+// TestLookupReadsTheLiveKeyOnce pins that one lookup consults the key
+// provider exactly once.
+//
+// The provider is live, so two reads can straddle a change: the
+// emptiness guard would pass on a key that is no longer the one sent, or
+// refuse on one that has just arrived. Counting the reads is the only way
+// to see that from outside — the request that goes out looks the same
+// either way until the moment the two disagree.
+func TestLookupReadsTheLiveKeyOnce(t *testing.T) {
+	var reads int
+	c := NewClient("", "", "ua", nil).WithLiveAPIKey(func() string {
+		reads++
+		return "k"
+	})
+	// A dead base URL: the request fails, but only AFTER the key has been
+	// read and the query built, which is the part under test.
+	c.base = "http://127.0.0.1:1"
+	_, _ = c.Lookup(t.Context(), Fingerprint{Value: "AQAA", Duration: 30})
+	if reads != 1 {
+		t.Errorf("key provider read %d times per lookup, want 1 — two reads can straddle "+
+			"a live key change and disagree with each other", reads)
+	}
+}
+
+// TestLookupRefusesAnEmptyLiveKey — the guard has to see the live value,
+// not the (empty) constructed one, in both directions.
+func TestLookupRefusesAnEmptyLiveKey(t *testing.T) {
+	key := ""
+	c := NewClient("", "constructed-key", "ua", nil).
+		WithLiveAPIKey(func() string { return key })
+	_, err := c.Lookup(t.Context(), Fingerprint{Value: "AQAA", Duration: 30})
+	if err == nil || !strings.Contains(err.Error(), "no API key") {
+		t.Errorf("err = %v, want the no-API-key refusal — the live empty value must beat "+
+			"the constructed one", err)
+	}
+}

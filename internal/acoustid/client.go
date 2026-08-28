@@ -358,12 +358,17 @@ func (c *Client) Lookup(ctx context.Context, fp Fingerprint) ([]Result, error) {
 	if fp.Value == "" {
 		return nil, fmt.Errorf("acoustid: empty fingerprint")
 	}
-	if c.key() == "" {
+	// ONE read per lookup, not two. The provider is live now, so a
+	// second call can land after a key change and disagree with the
+	// first — the emptiness guard passing on a key that is no longer the
+	// one sent, or the reverse.
+	key := c.key()
+	if key == "" {
 		return nil, fmt.Errorf("acoustid: no API key configured")
 	}
 
 	q := url.Values{}
-	q.Set("client", c.key())
+	q.Set("client", key)
 	q.Set("duration", strconv.Itoa(fp.DurationSeconds()))
 	q.Set("fingerprint", fp.Value)
 	q.Set("format", "json")

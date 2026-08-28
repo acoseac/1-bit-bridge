@@ -2414,10 +2414,10 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 						msg: fmt.Sprintf("fingerprintApiKey: implausibly long (%d bytes; AcoustID application keys are short tokens)", len(v))}
 				}
 				next.Fingerprint.APIKey = v
-				// The key is read once by the sweeper precheck at startup;
-				// restart to activate (or to un-degrade an enabled-but-
 				// HOT: the AcoustID client reads the key per request, so
-				// a freshly registered key binds on the next lookup.
+				// a freshly registered key binds on the next lookup —
+				// including on a bridge that booted with no key at all,
+				// where the sweeper simply reported itself degraded.
 				// ACOUSTID_API_KEY env, when set, still wins over this
 				// stored value (ResolvedAPIKey).
 				report.live("fingerprintApiKey")
