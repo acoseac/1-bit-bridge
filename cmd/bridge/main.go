@@ -2384,6 +2384,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// the scanner. Poll failures are non-fatal — the bridge serves
 	// fine without update awareness; the admin UI shows "couldn't
 	// reach GitHub" in the LastError field.
+	// Rearm for the update poll cadence — without it the loop re-reads the
+	// interval only after the CURRENT wait expires, up to 6 h away, which
+	// is indistinguishable from the change being ignored.
+	updateRearm := make(chan struct{}, 1)
+	cadenceRearms = append(cadenceRearms, updateRearm)
 	updOpts := updater.Options{
 		// AutoInstall is on every platform now that Phase B-Windows
 		// (PR #48) wired the rename-trick swap with SCM-stop
@@ -2413,6 +2418,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		LiveCheckInterval: func() time.Duration {
 			return time.Duration(liveCfg().Update.CheckIntervalHours) * time.Hour
 		},
+		Rearm: updateRearm,
 		// Compat-gate token snapshot. The updater calls this on each
 		// install attempt to decide whether the candidate's
 		// MinClientVersion would orphan a still-paired older client.

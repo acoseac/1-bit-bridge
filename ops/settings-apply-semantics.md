@@ -130,7 +130,7 @@ Classes describe *how the value is consumed*, not how important it is.
 | `backupKeep` | **A** | `live` | Read at prune time, which is the only moment retention means anything. No rearm — there is no parked wait to disturb. |
 | `updateAutoInstall` | **A** | `live` | Read at the top of every poll cycle. Symmetric in both directions — see the note below. |
 | `updateQuietHours` | **A** | `live` | Resolved at the auto-install gate, not at construction. |
-| `updateCheckIntervalHours` | **A** | `live` | The poll loop re-reads the cadence before each wait, clamped by the same floor/default `New()` applies. |
+| `updateCheckIntervalHours` | **A** | `live` | The poll loop re-reads the cadence before each wait (rearm-woken), clamped by the same floor/default `New()` applies. |
 | `upscaleEnabled` | C | `restart` | `transcode.Pool` + coordinator + five API adapters + the sox precheck. |
 | `analysisEnabled` | C | `restart` | `analyze.Pool` + sweeper + the API store adapter. |
 | `smartPlaylistsEnabled` | B | `restart` | Regenerator goroutine + an API store field. Pure SQL over the existing manifest — no toolchain, no pool. |

@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -429,4 +430,92 @@ func TestNilLiveProvidersKeepStaticBehaviour(t *testing.T) {
 	if s, e := u.quietHours(); s != 60 || e != 120 {
 		t.Errorf("quietHours = (%d,%d), want the static (60,120)", s, e)
 	}
+}
+
+// TestRunRearmRereadsTheIntervalWithoutPolling pins the fix for the gap
+// Gemini caught on the cadence PR: LiveCheckInterval alone made the new
+// value readable but not READ, because the loop was parked on a timer
+// built from the old one — up to 6 h on the default, which is
+// indistinguishable from the change being ignored.
+//
+// Also pins that a rearm does NOT poll. A settings save is not a request
+// to check GitHub for updates, and turning one into the other would put
+// an outbound request behind every unrelated Save.
+//
+// The poll count comes from a real httptest server the client is pointed
+// at, not from a counter beside the assertion: an incidental counter that
+// nothing increments makes the second half of this test vacuous, which is
+// exactly how it was written the first time.
+func TestRunRearmRereadsTheIntervalWithoutPolling(t *testing.T) {
+	var polls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"tag_name":"v0.0.1","assets":[]}`)
+	}))
+	defer srv.Close()
+
+	var d atomic.Int64
+	d.Store(int64(time.Hour)) // long enough that the timer cannot fire
+
+	rearm := make(chan struct{}, 1)
+	reads := make(chan struct{}, 16)
+	client := NewClient("acoseac/1-bit-bridge", 2*time.Second)
+	client.baseURL = srv.URL
+	u := New(Options{
+		LiveCheckInterval: func() time.Duration {
+			select {
+			case reads <- struct{}{}:
+			default:
+			}
+			return time.Duration(d.Load())
+		},
+		Rearm:  rearm,
+		Client: client,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); u.Run(ctx) }()
+
+	// Run polls once on entry, then reads the interval for its first wait.
+	waitRead(t, reads, "the first interval read")
+	waitFor(t, func() bool { return polls.Load() >= 1 }, "the entry poll")
+	before := polls.Load()
+
+	// Rearm: the loop must consult the provider again...
+	rearm <- struct{}{}
+	waitRead(t, reads, "an interval read after the rearm")
+
+	// ...and must not have polled for it. Give a wrong implementation
+	// room to make the request before concluding it did not.
+	time.Sleep(150 * time.Millisecond)
+	if got := polls.Load(); got != before {
+		t.Errorf("rearm triggered %d extra poll(s) — a settings save is not a request "+
+			"to check for updates", got-before)
+	}
+	cancel()
+	<-done
+}
+
+func waitRead(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }

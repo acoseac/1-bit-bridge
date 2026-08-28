@@ -188,6 +188,16 @@ type Options struct {
 	LiveQuietHours    func() (start, end int)
 	LiveCheckInterval func() time.Duration
 
+	// Rearm wakes Run's wait so LiveCheckInterval is re-read immediately.
+	//
+	// Without it the new cadence is not consulted until the CURRENT wait
+	// expires — up to 6 h on the default — which is indistinguishable
+	// from the change being ignored, and would make the settings
+	// response's `live` a lie in the one way that matters. Receiving on
+	// it never polls: a settings save is not a request to check for
+	// updates.
+	Rearm <-chan struct{}
+
 	// AutoInstallRestart is invoked after a successful auto-install
 	// to trigger the process restart that loads the new binary.
 	// Nil disables the auto-install path. cmd/bridge/main.go wires
@@ -221,6 +231,7 @@ type Updater struct {
 	liveAutoInstall    func() bool
 	liveQuietHours     func() (int, int)
 	liveCheckInterval  func() time.Duration
+	rearm              <-chan struct{}
 	autoInstallOpts    *InstallOptions
 	autoInstallRestart func()
 	tokenSnapshot      func() []auth.Token
@@ -291,6 +302,7 @@ func New(opts Options) *Updater {
 		liveAutoInstall:    opts.LiveAutoInstall,
 		liveQuietHours:     opts.LiveQuietHours,
 		liveCheckInterval:  opts.LiveCheckInterval,
+		rearm:              opts.Rearm,
 		autoInstallOpts:    opts.AutoInstallOpts,
 		autoInstallRestart: opts.AutoInstallRestart,
 		tokenSnapshot:      opts.TokenSnapshot,
@@ -346,6 +358,10 @@ func (u *Updater) Run(ctx context.Context) {
 			if u.checkOnce(ctx) {
 				u.maybeAutoInstall(ctx)
 			}
+		case <-u.rearm:
+			// Cadence changed; re-read it on the next iteration.
+			// Deliberately no poll — see Options.Rearm.
+			t.Stop()
 		}
 	}
 }
