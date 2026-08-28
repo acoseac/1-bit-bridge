@@ -2059,6 +2059,40 @@ async function onUpnpRemoveClick(btn) {
 // a restart the operator never performed shouldn't haunt them next week.
 const RESTART_PENDING_KEY = "bridge.restartPending";
 
+/**
+ * One field's outcome from a PATCH /api/settings response.
+ *
+ * The server reports `fields: {name: {status, reason?}}` alongside the
+ * legacy `restartRequired` boolean. Falls back to the boolean when the
+ * key is absent, which covers exactly one case worth covering: a console
+ * served by a bridge older than the per-field report. Same-origin, so the
+ * two can only disagree across a mid-upgrade page load — cheap insurance
+ * against a stale tab reporting nothing at all.
+ */
+function applyStatusFor(resp, field) {
+  const entry = resp && resp.fields && resp.fields[field];
+  if (entry && entry.status) return entry;
+  return { status: resp && resp.restartRequired ? "restart" : "live" };
+}
+
+/** Field names from a PATCH response whose status is `restart`. */
+function fieldsNeedingRestart(resp) {
+  const fields = (resp && resp.fields) || {};
+  const out = Object.keys(fields).filter((k) => fields[k].status === "restart");
+  // Sorted so the same set of edits always reads the same way; an
+  // object's key order is insertion-dependent and would otherwise shuffle
+  // between saves for no reason the operator can see.
+  //
+  // With an explicit comparator, not the default: a bare sort() coerces to
+  // string and orders by UTF-16 code unit, which is a trap the moment the
+  // array holds anything but ASCII. These are field names today, so the
+  // two agree — the comparator is what keeps that from being load-bearing.
+  out.sort((a, b) => a.localeCompare(b));
+  // A bridge too old to send `fields` still sets the boolean.
+  if (!out.length && resp && resp.restartRequired) return ["some settings"];
+  return out;
+}
+
 function markRestartPending(pending) {
   try {
     if (pending) sessionStorage.setItem(RESTART_PENDING_KEY, "1");
@@ -2464,10 +2498,24 @@ async function saveTrayField(ctl, status) {
   try {
     const r = await API.patch("/api/settings", { [ctl.row.field]: value });
     if (traySettings) traySettings[ctl.row.field] = value;
-    if (r && r.restartRequired) {
+    // A tray saves exactly ONE field, so read that field's own answer
+    // rather than the request-wide rollup. They agree here today, but
+    // the rollup is an OR: the moment a tray ever sends a second field
+    // it would start reporting a neighbour's restart as this switch's.
+    const applied = applyStatusFor(r, ctl.row.field);
+    if (applied.status === "restart") {
       markRestartPending(true);
       status.dataset.tone = "warn";
-      status.textContent = "Saved — restart the bridge to apply.";
+      // The server's reason, when it has one, beats our generic line:
+      // it is the difference between "restart to apply" and "there is no
+      // sweeper on this bridge, so it will never apply until you do".
+      status.textContent = applied.reason
+        ? `Saved — ${applied.reason}`
+        : "Saved — restart the bridge to apply.";
+      if (applied.reason) status.title = applied.reason;
+    } else if (applied.status === "unchanged") {
+      status.dataset.tone = "ok";
+      status.textContent = "Already set.";
     } else {
       status.dataset.tone = "ok";
       status.textContent = "Saved.";
@@ -3044,9 +3092,13 @@ function initSettings() {
         fpKey.value = "";
         fpKey.placeholder = "key on file — leave blank to keep it";
       }
+      // Name the pending fields instead of "some fields": this form
+      // submits ~20 at once, and "some" leaves the operator to guess
+      // which of their edits is the one still waiting.
+      const pending = fieldsNeedingRestart(r);
       showMsg(msg, r.restartRequired ? "warn" : "ok",
         r.restartRequired
-          ? "Saved. Some fields need a restart to take effect."
+          ? `Saved. Needs a restart to apply: ${pending.join(", ")}.`
           : "Saved.");
       // Sticky across navigation: a save that needs a restart must still
       // be pending when the operator comes back to this page. Never
