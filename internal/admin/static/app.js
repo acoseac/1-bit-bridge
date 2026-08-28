@@ -3953,8 +3953,7 @@ function mountJobTrays() {
       "loudness, key and tempo.",
     rows: [
       {
-        field: "analysisEnabled", type: "switch", restart: true,
-        label: "Analyse the library",
+        field: "analysisEnabled", type: "switch", label: "Analyse the library",
         hint: "Sidecars survive a toggle, so turning this off and on again " +
           "costs nothing already computed.",
       },
@@ -3981,7 +3980,7 @@ function mountJobTrays() {
     blurb: "Builds the optimized copies ahead of time instead of waiting for a " +
       "device to ask for one. All three switches have to be on for anything to run.",
     rows: [
-      { field: "upscaleEnabled", type: "switch", restart: true, label: "PCM upscaling" },
+      { field: "upscaleEnabled", type: "switch", label: "PCM upscaling" },
       { field: "optimizeEnabled", type: "switch", label: "CarPlay-optimized variants" },
       {
         field: "autoOptimizeEnabled", type: "switch",
@@ -4021,8 +4020,7 @@ function mountJobTrays() {
         field: "smartPlaylistsEnabled", type: "switch", label: "Generate smart mixes",
       },
       {
-        field: "analysisEnabled", type: "switch", restart: true,
-        label: "Audio analysis",
+        field: "analysisEnabled", type: "switch", label: "Audio analysis",
         hint: "Only the harmonic Auto Mix needs it; the history-based families " +
           "generate without it.",
       },

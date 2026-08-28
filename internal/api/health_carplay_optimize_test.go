@@ -25,7 +25,7 @@ func fetchHealthFeatures(t *testing.T, upscaleWired, carPlayOptimizeOn bool) []s
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	srv := New(cfg, store, nil, "fp")
 	if upscaleWired {
-		srv = srv.WithUpscale(true, newStubVariantStore())
+		srv = srv.WithUpscale(func() bool { return true }, newStubVariantStore())
 	}
 	srv = srv.WithCarPlayOptimize(func() bool { return carPlayOptimizeOn })
 	hs := httptest.NewServer(srv.Handler())

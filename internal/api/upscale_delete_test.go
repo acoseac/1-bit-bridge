@@ -167,7 +167,7 @@ func deleteFixture(t *testing.T, wireDeleter bool) (*httptest.Server, string, *s
 	raw, _, _ := store.Mint("test")
 
 	srv := New(cfg, store, nil, "fp")
-	srv.upscaleEnabled = true // so the /v1/health features path advertises (not used in this file)
+	srv.upscaleEnabled = func() bool { return true } // so the /v1/health features path advertises (not used in this file)
 
 	deleter := &stubVariantDeleter{
 		all:    []VariantSummary{},

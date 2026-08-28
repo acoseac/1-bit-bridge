@@ -123,6 +123,7 @@ Classes describe *how the value is consumed*, not how important it is.
 - **B — convertible.** A captured scalar or a static ticker where a closure over
   the holder would do.
 - **C — lifecycle.** Needs runtime start/stop of a boot-wired subsystem.
+  Emptied by the always-construct-never-stop move — see below.
 - **D — permanent.** Restart-bound for a reason that will not change.
 
 | Field | Class | Status today | Notes |
@@ -141,8 +142,8 @@ Classes describe *how the value is consumed*, not how important it is.
 | `updateAutoInstall` | **A** | `live` | Read at the top of every poll cycle. Symmetric in both directions — see the note below. |
 | `updateQuietHours` | **A** | `live` | Resolved at the auto-install gate, not at construction. |
 | `updateCheckIntervalHours` | **A** | `live` | The poll loop re-reads the cadence before each wait (rearm-woken), clamped by the same floor/default `New()` applies. |
-| `upscaleEnabled` | C | `restart` | `transcode.Pool` + coordinator + five API adapters + the sox precheck. |
-| `analysisEnabled` | C | `restart` | `analyze.Pool` + sweeper + the API store adapter. |
+| `upscaleEnabled` | **A** | `live` (+reason when sox is unusable) | Pool constructed unconditionally and never stopped before shutdown; one shared live predicate gates the health flag, the manifest variant gate and every enqueue path. The sox probe is lazy + TTL-cached. |
+| `analysisEnabled` | **A** | `live` (+reason when sox is unusable) | Same shape as upscale. |
 | `smartPlaylistsEnabled` | **A** | `live` | Store wired unconditionally; the health flag and the endpoint both key off one `smartPlaylistsActive()`. The regenerator is started unconditionally and gated per run. |
 | `optimizeEnabled` | **A** | `live` | Health advertisement, admin projection gate and pre-generation sweeper all read it live. The sweeper is wired unconditionally within an active upscale pool. |
 | `libraryWatchEnabled` | C | `restart` | fsnotify watcher with a `scanWG` / `closing` drain contract guarding a SQLite-corruption vector. |
@@ -214,6 +215,41 @@ rather than only when auto-install was on at boot. They are inert on their own �
 them boot-gated is what would have made the toggle a lie: a bridge that started
 with auto-install off would flip the switch, hit the "install opts missing"
 defensive branch, and never install anything.
+
+---
+
+## Always construct, never stop
+
+The pools looked like class C — "needs runtime start/stop" — and that framing
+was wrong in a way that cost two fields their hot-apply for a while.
+
+**The dangerous half of a pool lifecycle is stopping one.** `Stop`'s ordering
+against `Enqueue`, the publisher drain, the fire-state-change-under-lock rule:
+those are the invariants with a history of live panics. **Constructing** a pool
+is cheap and safe, and an idle pool is a handful of goroutines parked on a
+channel.
+
+So both pools are now built unconditionally at boot and never stopped before
+shutdown. The flag decides whether the feature **does** anything, not whether it
+**exists** — the same wired-vs-active split as the feature gates below, applied
+to something that merely looked heavier.
+
+Two things fall out:
+
+- **The sox probe had to become lazy + TTL-cached**, because a boot probe is
+  itself a boot snapshot: an operator who installs sox and then enables the
+  feature should not have to bounce the bridge to be believed. Same shape as the
+  fingerprint toolchain probe.
+- **The manifest provider needed a live gate too.** Its `upscaleEnabled` atomic
+  is written once at startup, so after a PATCH it would keep stripping (or keep
+  emitting) variants against a value `/v1/health` had already moved past —
+  a client's manifest disagreeing with health about whether the feature is on.
+  `SetUpscaleEnabledSource` supersedes the stored boolean; nil restores it, which
+  is what every caller that only calls `SetUpscaleEnabled` keeps getting.
+
+When sox is missing or FLAC-less the toggle still reports `live` **with a
+reason**: the setting did apply, a restart would not install sox, and the
+alternative is an operator watching a switch they just moved do nothing.
 
 ---
 

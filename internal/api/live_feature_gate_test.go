@@ -101,7 +101,7 @@ func TestSmartPlaylistsGateIsReadLive(t *testing.T) {
 func TestCarPlayOptimizeGateIsReadLive(t *testing.T) {
 	on := false
 	srv := newTestServerForFeatureGate(t)
-	srv.WithUpscale(true, nil).WithCarPlayOptimize(func() bool { return on })
+	srv.WithUpscale(func() bool { return true }, nil).WithCarPlayOptimize(func() bool { return on })
 
 	if healthAdvertises(t, srv, "carPlayOptimize") {
 		t.Fatal("advertised while off")
@@ -116,7 +116,7 @@ func TestCarPlayOptimizeGateIsReadLive(t *testing.T) {
 // func must not panic the health handler.
 func TestNilCarPlayOptimizeReadsAsOff(t *testing.T) {
 	srv := newTestServerForFeatureGate(t)
-	srv.WithUpscale(true, nil)
+	srv.WithUpscale(func() bool { return true }, nil)
 	if healthAdvertises(t, srv, "carPlayOptimize") {
 		t.Error("a nil predicate must read as off")
 	}
@@ -163,4 +163,72 @@ func healthAdvertises(t *testing.T, srv *Server, feature string) bool {
 		}
 	}
 	return false
+}
+
+// TestUpscaleAndAnalysisGatesAreReadLive — the pools are constructed
+// unconditionally now, so "wired" no longer stands in for "on". A gate
+// read once would be exactly as restart-bound as the boot boolean it
+// replaced, and the type signature would not say so.
+func TestUpscaleAndAnalysisGatesAreReadLive(t *testing.T) {
+	up, an := false, false
+	srv := newTestServerForFeatureGate(t)
+	srv.WithUpscale(func() bool { return up }, nil).
+		WithAnalysis(func() bool { return an }, nil)
+
+	if healthAdvertises(t, srv, "waveform") {
+		t.Fatal("waveform advertised while analysis is off")
+	}
+	an = true
+	if !healthAdvertises(t, srv, "waveform") {
+		t.Error("flipping analysis on did not reach /v1/health")
+	}
+	an = false
+	if healthAdvertises(t, srv, "waveform") {
+		t.Error("flipping analysis back off did not reach /v1/health — the gate has to " +
+			"work in both directions")
+	}
+
+	// Probe the top-level `upscaleEnabled` field rather than a feature
+	// flag: every upscale FLAG additionally requires an adapter this bare
+	// server has none of (operatorDrivenUpscale needs a batch coordinator,
+	// deleteVariants a variant deleter), so a flag would stay absent for a
+	// reason unrelated to the gate under test.
+	up = true
+	if !healthUpscaleEnabled(t, srv) {
+		t.Error("flipping upscale on did not reach /v1/health")
+	}
+	up = false
+	if healthUpscaleEnabled(t, srv) {
+		t.Error("flipping upscale back off did not reach /v1/health")
+	}
+}
+
+// TestNilFeatureGatesReadAsOff — the fields are funcs now, and a nil one
+// must not panic the health handler.
+func TestNilFeatureGatesReadAsOff(t *testing.T) {
+	srv := newTestServerForFeatureGate(t)
+	if srv.upscaleActive() || srv.analysisActive() {
+		t.Error("nil predicates must read as off")
+	}
+	// And the handler must survive them.
+	if healthAdvertises(t, srv, "waveform") {
+		t.Error("waveform advertised with a nil analysis gate")
+	}
+}
+
+// healthUpscaleEnabled reads the top-level `upscaleEnabled` boolean.
+func healthUpscaleEnabled(t *testing.T, srv *Server) bool {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.health(rec, httptest.NewRequest("GET", "/v1/health", nil))
+	if rec.Code != 200 {
+		t.Fatalf("health: %d", rec.Code)
+	}
+	var resp struct {
+		UpscaleEnabled *bool `json:"upscaleEnabled"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	return resp.UpscaleEnabled != nil && *resp.UpscaleEnabled
 }

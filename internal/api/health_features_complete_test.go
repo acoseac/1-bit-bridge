@@ -80,14 +80,14 @@ func newAllFeaturesServer(t *testing.T) *Server {
 	srv := New(cfg, authStore, nil, "fp").
 		WithAtlasMeta(true, time.Hour, mstore).
 		WithBooklets(mstore, t.TempDir(), func(string) {}).
-		WithUpscale(true, newStubVariantStore()).
+		WithUpscale(func() bool { return true }, newStubVariantStore()).
 		WithCarPlayOptimize(func() bool { return true }).
 		WithVariantDeleter(&stubVariantDeleter{}).
 		WithBatchCoordinator(&stubBatchCoordinator{}).
 		WithDLNA(true).
 		WithRendererDiscovery(&stubRendererDiscovery{}).
 		WithFavoritesStore(mstore).
-		WithAnalysis(true, stubAnalysisStore{}).
+		WithAnalysis(func() bool { return true }, stubAnalysisStore{}).
 		WithHistoryStore(mstore).
 		WithPlaylistStore(mstore).
 		WithSmartPlaylistStore(mstore).

@@ -67,7 +67,7 @@ func spectrumFixture(t *testing.T, mutate func(*AnalysisRecord)) (*httptest.Serv
 	cfg := &config.Config{LibraryRoots: []string{root}, ListenAddress: ":7788", LibraryName: "T"}
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	raw, _, _ := store.Mint("sp")
-	srv := New(cfg, store, nil, "fp").WithAnalysis(true, stubAnalysisStore{rec: rec})
+	srv := New(cfg, store, nil, "fp").WithAnalysis(func() bool { return true }, stubAnalysisStore{rec: rec})
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw, srcRel, curve

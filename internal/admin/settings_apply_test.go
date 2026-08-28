@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"regexp"
@@ -954,3 +955,59 @@ func hintTextFor(page, field string) string {
 // collapseWS flattens runs of whitespace (including newlines) to single
 // spaces, so a phrase wrapped across template lines still matches.
 func collapseWS(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// TestUpscaleDegradedReason — the sox-backed twin of the fingerprint
+// case: the toggle APPLIES (the pool is always there, the gate is live),
+// but whether anything runs depends on a toolchain this bridge may not
+// have. A restart would not install sox, so `live` is the honest status —
+// with a reason, or the operator watches a switch they just moved do
+// nothing.
+func TestUpscaleDegradedReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		probeErr   error
+		hasFLAC    bool
+		known      bool
+		wantReason string // substring; "" means no reason
+	}{
+		{"sox missing", errors.New("exec: sox not found"), false, false, "sox is not installed"},
+		{"sox without FLAC", nil, false, true, "no FLAC support"},
+		{"sox fine", nil, true, true, ""},
+		// Conservative gate: an unparseable `sox --help` is treated as
+		// FLAC-present, so a help-output reword can never make a working
+		// install look broken.
+		{"formats unknown", nil, false, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _ := newTestServer(t)
+			srv.deps.UpscalePrecheck = func() error { return tc.probeErr }
+			srv.deps.UpscaleSoxFLAC = func() (bool, bool) { return tc.hasFLAC, tc.known }
+
+			var resp settingsPatchResponse
+			if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+				map[string]any{"upscaleEnabled": true, "analysisEnabled": true}, &resp); code != 200 {
+				t.Fatalf("patch: %d", code)
+			}
+			for _, f := range []string{"upscaleEnabled", "analysisEnabled"} {
+				got := resp.Fields[f]
+				if got.Status != applyLive {
+					t.Errorf("%s: status = %q, want %q — a restart cannot install sox",
+						f, got.Status, applyLive)
+				}
+				if tc.wantReason == "" {
+					if got.Reason != "" {
+						t.Errorf("%s: unexpected reason %q", f, got.Reason)
+					}
+					continue
+				}
+				if !strings.Contains(got.Reason, tc.wantReason) {
+					t.Errorf("%s: reason = %q, want it to mention %q", f, got.Reason, tc.wantReason)
+				}
+			}
+			if resp.RestartRequired {
+				t.Error("a live-with-a-warning field must not raise the restart rollup")
+			}
+		})
+	}
+}

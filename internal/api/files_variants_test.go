@@ -92,7 +92,7 @@ func fileVariantFixture(t *testing.T) (*httptest.Server, string, string, *stubVa
 	raw, _, _ := store.Mint("test")
 
 	vs := newStubVariantStore()
-	srv := New(cfg, store, nil, "fp").WithUpscale(true, vs)
+	srv := New(cfg, store, nil, "fp").WithUpscale(func() bool { return true }, vs)
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw, root, vs, sidecarPath
@@ -237,7 +237,7 @@ func TestDownloadVariantMissingOnDiskReturns410(t *testing.T) {
 	assertWireErrorCode(t, resp, "variant_missing_on_disk")
 }
 
-// TestDownloadVariantWhenFeatureDisabledReturns404 — `WithUpscale(false, nil)`
+// TestDownloadVariantWhenFeatureDisabledReturns404 — `WithUpscale(func() bool { return false }, nil)`
 // must keep `?variant=` in 404-land. iOS sees an unfamiliar bridge as
 // "no variants supported" without surprises.
 func TestDownloadVariantWhenFeatureDisabledReturns404(t *testing.T) {
@@ -342,7 +342,7 @@ func TestHealthAdvertisesUpscaleEnabled(t *testing.T) {
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 
 	for _, enabled := range []bool{true, false} {
-		srv := New(cfg, store, nil, "fp").WithUpscale(enabled, nil)
+		srv := New(cfg, store, nil, "fp").WithUpscale(func() bool { return enabled }, nil)
 		hs := httptest.NewServer(srv.Handler())
 
 		resp := authGet(t, hs, "/v1/health", "")
@@ -421,7 +421,7 @@ func TestHealthAdvertisesUpscaleCompleteEventsFeature(t *testing.T) {
 	// Upscale must be enabled for the flag to advertise — that gate
 	// is the round-2 fix companion to this test (see
 	// `TestHealthOmitsUpscaleCompleteEventsWhenUpscaleDisabled` below).
-	srv := New(cfg, store, nil, "fp").WithUpscale(true, newStubVariantStore())
+	srv := New(cfg, store, nil, "fp").WithUpscale(func() bool { return true }, newStubVariantStore())
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 
@@ -668,7 +668,7 @@ func TestHealthFeaturesAlphaSortedAcrossAllConditionals(t *testing.T) {
 
 	srv := New(cfg, authStore, nil, "fp").
 		WithPairing(pairingStore).
-		WithUpscale(true, newStubVariantStore())
+		WithUpscale(func() bool { return true }, newStubVariantStore())
 	stop := srv.StartEventBroker()
 	t.Cleanup(stop)
 
