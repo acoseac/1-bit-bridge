@@ -1253,11 +1253,18 @@ func (c *soxToolchainCache) flac() (hasFLAC, known bool) {
 // fpcalc probe does not depend on it, so the cached probe is reused and
 // only the key half is re-evaluated.
 type fingerprintToolchainCache struct {
-	mu     sync.Mutex
-	at     time.Time
-	err    error
-	logged bool
-	stderr io.Writer
+	mu  sync.Mutex
+	at  time.Time
+	err error
+	// Two flags, not one. The feature is hot now, so an operator can fix
+	// one prerequisite and immediately hit the other — register a key,
+	// then discover fpcalc is missing, or install fpcalc and discover
+	// there is no key. A single flag would permanently suppress whichever
+	// warning came second, for the lifetime of the process, at exactly
+	// the moment it became the useful one.
+	loggedProbeErr bool
+	loggedNoKey    bool
+	stderr         io.Writer
 }
 
 const fingerprintToolchainTTL = 30 * time.Second
@@ -1279,15 +1286,15 @@ func (c *fingerprintToolchainCache) ready(hasKey bool) (bool, string) {
 		// every sweep and every Jobs-card render, so an unconditional
 		// line would be the 12-per-minute spam the M-SEARCH suppression
 		// exists to prevent.
-		if !c.logged && c.stderr != nil {
-			c.logged = true
+		if !c.loggedProbeErr && c.stderr != nil {
+			c.loggedProbeErr = true
 			fmt.Fprintf(c.stderr, "fingerprint: enabled but fpcalc is not available — feature inactive: %v\n", c.err)
 		}
 		return false, "fpcalc_missing"
 	}
 	if !hasKey {
-		if !c.logged && c.stderr != nil {
-			c.logged = true
+		if !c.loggedNoKey && c.stderr != nil {
+			c.loggedNoKey = true
 			fmt.Fprint(c.stderr, "fingerprint: enabled but no AcoustID API key is configured — feature inactive.\n"+
 				"  Register a free application key at https://acoustid.org/new-application,\n"+
 				"  then set ACOUSTID_API_KEY (preferred) or fingerprint.apiKey in bridge.yaml.\n")
