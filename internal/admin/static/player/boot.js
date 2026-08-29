@@ -151,11 +151,21 @@ function wireLinks() {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     const a = e.target.closest("a[data-route]");
     if (!a) return;
+    // A download or an explicit target is not a navigation, so it is not
+    // ours to intercept — the same reasoning as the modifier keys above,
+    // expressed by the markup instead of by the reader's hand. Inert as
+    // written: every such anchor the player builds (the booklet's
+    // target=_blank, a track's download, the Atlas attribution) is a plain
+    // el("a") with no data-route, so this handler never sees one. It is
+    // here because link() is the ergonomic helper for building an anchor,
+    // and a download button reaching for it would otherwise be swallowed
+    // by the router with nothing failing.
+    if (a.hasAttribute("download") || (a.target && a.target !== "_self")) return;
     const url = new URL(a.href, location.origin);
     if (url.origin !== location.origin) return;
     e.preventDefault();
     if (url.href === location.href) return;
-    history.pushState({ scrollY: 0 }, "", url);
+    pushRoute(url.pathname + url.search);
     route();
   });
 
@@ -218,7 +228,7 @@ function wireSearchInput() {
     // the results describing the same thing.
     if (typed && entering && q.length < 2) return;
     const url = q ? `/search?q=${encodeURIComponent(q)}` : "/search";
-    if (entering) history.pushState({ scrollY: 0 }, "", url);
+    if (entering) pushRoute(url);
     else history.replaceState(history.state || {}, "", url);
     route();
   };
@@ -269,8 +279,102 @@ function wireSearchShortcut() {
   });
 }
 
+/**
+ * The route the reader actually took to reach a page, kept per history
+ * entry so the breadcrumb can say where they came FROM rather than only
+ * where a page structurally hangs.
+ *
+ * The structural answer is right for a folder and wrong for an album:
+ * an album reached from a composer hangs off its artist, so a purely
+ * structural trail told a reader who had just clicked through
+ * "Composers › Lewis Allen" that they were somewhere else entirely. It
+ * was reported twice.
+ *
+ * Kept in history.state rather than in the URL deliberately. An album
+ * URL stays canonical — it is the album, for everyone — while the state
+ * rides the entry through reload, Back and Forward. A pasted link or a
+ * new tab has no state, which is exactly when the structural fallback is
+ * the honest answer.
+ *
+ * Recording it in the ROUTER means every entry point is covered at once,
+ * including ones added later: nothing at a link site has to opt in.
+ */
+const maxTrail = 4;
+
+/**
+ * The page being left, as a crumb entry.
+ *
+ * The label is read from the heading at navigation time, which is what
+ * the reader just saw — including a title a view set asynchronously. A
+ * click landing before that resolves gets the section name, which is
+ * imprecise but never wrong.
+ */
+function currentCrumbEntry() {
+  const h = document.getElementById("player-title");
+  const label = (h?.textContent || "").trim();
+  return label ? { label, href: location.pathname + location.search } : null;
+}
+
+/**
+ * Read the trail off the current history entry.
+ *
+ * Validated on the way in, not merely type-checked: history.state
+ * survives reloads and outlives the code that wrote it, so a stale entry
+ * from an older (or newer) version of this file can arrive in any shape.
+ * The href test rejects "//evil.com" as well as absolute URLs — a
+ * protocol-relative href passes a naive startsWith("/") and would put an
+ * off-origin link in the breadcrumb.
+ */
+function readTrail() {
+  const raw = history.state?.trail;
+  if (!Array.isArray(raw)) return null;
+  const out = raw.filter((e) =>
+    e && typeof e.label === "string" && e.label !== "" &&
+    typeof e.href === "string" && e.href.startsWith("/") && !e.href.startsWith("//"));
+  return out.length ? out : null;
+}
+
+/**
+ * The top-level lists, which START a trail rather than extending one.
+ *
+ * Without this a breadcrumb becomes a browsing log: leaving an artist for
+ * the Albums section produced "Artists › Abdullah Ibrahim › Albums › …",
+ * which is a true history and a useless trail. Arriving at a top-level
+ * list is a fresh start, so it resets — and the cycle check below cannot
+ * cover this, because jumping to a SIBLING section is not a loop.
+ *
+ * "/" is the album grid, and /search is a top-level destination too even
+ * though it has no section link of its own. Compared on the path, so a
+ * query (/search?q=…, /folders?path=…) still matches.
+ */
+const trailRoots = new Set(["/", "/search", ...SECTIONS.map(([, , href]) => href)]);
+
+/**
+ * The trail to store on the entry we are about to push.
+ *
+ * Ancestors of the current page, plus the current page itself. A target
+ * already in the trail truncates it back to before that point, so
+ * stepping back up a chain (album → its artist byline → that album
+ * again) cannot grow one link per lap. maxTrail is a backstop only —
+ * with the root reset above, real trails are two or three deep.
+ */
+function trailFor(targetHref) {
+  if (trailRoots.has(targetHref.split("?")[0])) return [];
+  const here = currentCrumbEntry();
+  let next = readTrail() || [];
+  if (here) next = [...next, here];
+  const loop = next.findIndex((e) => e.href === targetHref);
+  if (loop >= 0) next = next.slice(0, loop);
+  return next.slice(-maxTrail);
+}
+
+/** pushState with the route trail attached. Every push goes through here. */
+function pushRoute(href) {
+  history.pushState({ scrollY: 0, trail: trailFor(href) }, "", href);
+}
+
 export function navigate(href) {
-  history.pushState({ scrollY: 0 }, "", href);
+  pushRoute(href);
   route();
 }
 
@@ -339,7 +443,8 @@ function route() {
   // per-key abort cannot do this — two views with different keys race,
   // and the loser wins. See abortReads in api.js.
   abortReads();
-  const ctx = { params, gen, setToolbar, setCrumb, id: rest, mixesEnabled: !!seed.mixesEnabled };
+  const ctx = { params, gen, setToolbar, setCrumb, id: rest,
+    mixesEnabled: !!seed.mixesEnabled, trail: readTrail() };
 
   const routes = {
     albums: ["Albums", () => renderAlbums(view, ctx)],
