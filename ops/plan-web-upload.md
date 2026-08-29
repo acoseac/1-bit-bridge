@@ -62,9 +62,12 @@ a B2 FUSE mount, so every commit would be a cross-device `EXDEV` copy, writing
 every byte twice. `updater.copyAndRename` exists for exactly that case and is the
 wrong tool here.
 
-Config escape hatch: `upload.stagingDir` for operators who object to a hidden
-directory inside their music folder, with a documented cross-device copy
-fallback. Default is inside the root.
+**There is deliberately no `upload.stagingDir` escape hatch.** It was planned,
+and then removed before it shipped: pointing staging at another volume makes
+every commit a cross-device copy, and `atomicwrite.RenameWithRetry` retries
+`os.Rename` — it does not handle `EXDEV`. An inert knob an operator can set and
+that silently does nothing is worse than none. If the hatch is ever wanted it
+needs the destination-side temp + copy + fsync + finalize path built with it.
 
 **Partial files never carry an audio extension.** `.part` is not in
 `manifest.Ext`, so even if a staging path were somehow walked,
@@ -116,7 +119,10 @@ which is the right reason to have it.
 ### D4 — Opaque ids in URLs; user paths only in the session manifest
 
 The client declares its file list up front and gets back an opaque `fileID` per
-file. Nothing user-supplied ever appears in a URL path or query.
+file. No user-supplied PATH ever appears in a URL. (The chunk route does carry a
+client-supplied `offset=N` query — a bounded integer, parsed with
+`strconv.ParseInt` and refused when negative, so it cannot carry the decoding
+hazard a path would.)
 
 This sidesteps the `+`-decoding class outright (`url.Values` decodes `+` as a
 space — the documented `/v1` variant-delete trap, and the reason `safeQuery`
@@ -457,6 +463,8 @@ with a reason is more honest than that.
 | `library.trashTTL` | 7d | Purge window; the same sweeper handles it |
 | `upload.chunkBytes` | 4 MiB | Hint only — the server accepts any size |
 
+There is no `stagingDir` knob; see D1.
+
 Disk is pre-flighted at session create against the declared total via
 `transcode.AvailableDiskSpaceNearest` (walks to the nearest existing ancestor —
 the staging dir is created lazily) and re-checked periodically during upload with
@@ -723,8 +731,9 @@ leverage for the cloud product. Worth its own plan.
 
 ## Resolved (first two review passes, 2026-08-29)
 
-1. **Staging inside the root** — settled, both passes agreed. `upload.stagingDir`
-   survives as an operator override only.
+1. **Staging inside the root** — settled, all three passes agreed. The planned
+   `upload.stagingDir` override was REMOVED rather than shipped inert: it would
+   make commit a cross-device copy that `RenameWithRetry` does not implement.
 2. **Chunk size** — **4 MiB**, and the point is mostly moot because the server is
    chunk-agnostic (see **Wire shape**). The two passes split 8 vs 4; 4 wins on the
    arithmetic. On a relay at ~200 ms RTT, one round trip per chunk is negligible

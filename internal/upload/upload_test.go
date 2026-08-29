@@ -43,7 +43,7 @@ func writeAll(t *testing.T, m *Manager, sid, fid string, data []byte, chunk int)
 		if end > len(data) {
 			end = len(data)
 		}
-		if _, err := m.WriteChunk(sid, fid, int64(off), bytes.NewReader(data[off:end]), nil); err != nil {
+		if _, err := m.WriteChunk(sid, fid, int64(off), bytes.NewReader(data[off:end]), nil, 0); err != nil {
 			t.Fatalf("WriteChunk at %d: %v", off, err)
 		}
 	}
@@ -122,7 +122,7 @@ func TestTornChunkTruncatesToManifestOffset(t *testing.T) {
 	s := mustCreate(t, m, []FileDecl{{Path: "A/B/x.flac", Size: int64(len(body))}}, CreateOptions{})
 	fid := s.Files[0].ID
 
-	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:10]), nil); err != nil {
+	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:10]), nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -150,7 +150,7 @@ func TestTornChunkTruncatesToManifestOffset(t *testing.T) {
 		t.Fatalf("resume offset = %d, want 10 — the offset came from the file size, not the manifest", got.Files[0].Offset)
 	}
 
-	if _, err := m.WriteChunk(s.ID, fid, 10, bytes.NewReader(body[10:]), nil); err != nil {
+	if _, err := m.WriteChunk(s.ID, fid, 10, bytes.NewReader(body[10:]), nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	staged, err := os.ReadFile(part)
@@ -195,10 +195,10 @@ func TestOffsetMismatchReportsTheActualOffset(t *testing.T) {
 	m, _ := newTestManager(t)
 	s := mustCreate(t, m, []FileDecl{{Path: "x.flac", Size: 100}}, CreateOptions{})
 	fid := s.Files[0].ID
-	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(make([]byte, 40)), nil); err != nil {
+	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(make([]byte, 40)), nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	_, err := m.WriteChunk(s.ID, fid, 99, bytes.NewReader([]byte("x")), nil)
+	_, err := m.WriteChunk(s.ID, fid, 99, bytes.NewReader([]byte("x")), nil, 0)
 	var mm *OffsetMismatch
 	if !errors.As(err, &mm) {
 		t.Fatalf("err = %v, want an *OffsetMismatch", err)
@@ -224,7 +224,7 @@ func TestSessionResumesAcrossRestart(t *testing.T) {
 	body := bytes.Repeat([]byte("abcdefgh"), 512) // 4096 bytes
 	s := mustCreate(t, m1, []FileDecl{{Path: "A/x.flac", Size: int64(len(body))}}, CreateOptions{})
 	fid := s.Files[0].ID
-	if _, err := m1.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:1000]), nil); err != nil {
+	if _, err := m1.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:1000]), nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -236,7 +236,7 @@ func TestSessionResumesAcrossRestart(t *testing.T) {
 	if got.Files[0].Offset != 1000 {
 		t.Fatalf("resumed offset = %d, want 1000", got.Files[0].Offset)
 	}
-	if _, err := m2.WriteChunk(s.ID, fid, 1000, bytes.NewReader(body[1000:]), nil); err != nil {
+	if _, err := m2.WriteChunk(s.ID, fid, 1000, bytes.NewReader(body[1000:]), nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	got, err = m2.Get(s.ID)
@@ -257,7 +257,7 @@ func TestDeclaredDigestMismatchRefusesCompletion(t *testing.T) {
 	s := mustCreate(t, m, []FileDecl{{
 		Path: "x.flac", Size: int64(len(body)), Digest: hex.EncodeToString(wrong[:]),
 	}}, CreateOptions{})
-	_, err := m.WriteChunk(s.ID, s.Files[0].ID, 0, bytes.NewReader(body), nil)
+	_, err := m.WriteChunk(s.ID, s.Files[0].ID, 0, bytes.NewReader(body), nil, 0)
 	if !errors.Is(err, ErrDigestMismatch) {
 		t.Fatalf("err = %v, want ErrDigestMismatch", err)
 	}
@@ -272,7 +272,7 @@ func TestChunkDigestMismatchDoesNotAdvanceOffset(t *testing.T) {
 	fid := s.Files[0].ID
 
 	bad := sha256.Sum256([]byte("not what we sent"))
-	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:5]), bad[:]); !errors.Is(err, ErrDigestMismatch) {
+	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:5]), bad[:], 0); !errors.Is(err, ErrDigestMismatch) {
 		t.Fatalf("err = %v, want ErrDigestMismatch", err)
 	}
 	got, err := m.Get(s.ID)
@@ -283,7 +283,7 @@ func TestChunkDigestMismatchDoesNotAdvanceOffset(t *testing.T) {
 		t.Fatalf("offset advanced to %d after a digest mismatch; the client cannot recover by re-sending", got.Files[0].Offset)
 	}
 	good := sha256.Sum256(body[:5])
-	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:5]), good[:]); err != nil {
+	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:5]), good[:], 0); err != nil {
 		t.Fatalf("re-send after a rejected chunk failed: %v", err)
 	}
 }
@@ -307,7 +307,7 @@ func TestConcurrentChunksToOneFileSerialise(t *testing.T) {
 		wg.Add(1)
 		go func(i int, p []byte) {
 			defer wg.Done()
-			_, errs[i] = m.WriteChunk(s.ID, fid, 0, bytes.NewReader(p), nil)
+			_, errs[i] = m.WriteChunk(s.ID, fid, 0, bytes.NewReader(p), nil, 0)
 		}(i, payload)
 	}
 	wg.Wait()
@@ -361,7 +361,7 @@ func TestConcurrentChunksToDifferentFilesDoNotSerialise(t *testing.T) {
 	go func() {
 		defer close(blockedDone)
 		close(started)
-		_, _ = m.WriteChunk(s.ID, s.Files[0].ID, 0, blocking, nil)
+		_, _ = m.WriteChunk(s.ID, s.Files[0].ID, 0, blocking, nil, 0)
 	}()
 	<-started
 	// The blocked writer must be JOINED before the test returns, or it keeps
@@ -379,7 +379,7 @@ func TestConcurrentChunksToDifferentFilesDoNotSerialise(t *testing.T) {
 	// B must complete while A is still blocked.
 	done := make(chan error, 1)
 	go func() {
-		_, err := m.WriteChunk(s.ID, s.Files[1].ID, 0, bytes.NewReader([]byte("abcdefgh")), nil)
+		_, err := m.WriteChunk(s.ID, s.Files[1].ID, 0, bytes.NewReader([]byte("abcdefgh")), nil, 0)
 		done <- err
 	}()
 
@@ -416,7 +416,7 @@ func TestFileLockMapIsReapedOnCompletionAndTeardown(t *testing.T) {
 	}
 
 	s2 := mustCreate(t, m, decls, CreateOptions{})
-	if _, err := m.WriteChunk(s2.ID, s2.Files[0].ID, 0, bytes.NewReader([]byte("da")), nil); err != nil {
+	if _, err := m.WriteChunk(s2.ID, s2.Files[0].ID, 0, bytes.NewReader([]byte("da")), nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Abandon(s2.ID); err != nil {
@@ -562,7 +562,7 @@ func TestCommitRevalidatesPathsFromDisk(t *testing.T) {
 func TestCommitRefusesIncompleteFiles(t *testing.T) {
 	m, _ := newTestManager(t)
 	s := mustCreate(t, m, []FileDecl{{Path: "x.flac", Size: 100}}, CreateOptions{})
-	if _, err := m.WriteChunk(s.ID, s.Files[0].ID, 0, bytes.NewReader(make([]byte, 40)), nil); err != nil {
+	if _, err := m.WriteChunk(s.ID, s.Files[0].ID, 0, bytes.NewReader(make([]byte, 40)), nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	res, err := m.Commit(s.ID)
@@ -699,6 +699,17 @@ func TestSweeperRunsOnceAtStartup(t *testing.T) {
 	// A ticker period far longer than the test: only the STARTUP pass can
 	// remove anything here.
 	go func() { defer close(done); m.RunSweeper(ctx, time.Hour) }()
+	// Cleanup rather than a bare `defer cancel()`: cancelling without JOINING
+	// leaves the sweeper running against a temp dir t.TempDir is removing, and
+	// t.Cleanup covers the t.Fatal paths a defer at the bottom would not.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("the sweeper did not stop on context cancellation")
+		}
+	})
 
 	deadline := time.After(5 * time.Second)
 	for {
@@ -707,14 +718,10 @@ func TestSweeperRunsOnceAtStartup(t *testing.T) {
 		}
 		select {
 		case <-deadline:
-			cancel()
-			<-done
 			t.Fatal("the stale session survived; the sweeper only runs on its ticker, so a crash leaves orphans for a full period")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	cancel()
-	<-done
 }
 
 func TestCreateRejectsUnknownRoot(t *testing.T) {
@@ -755,5 +762,87 @@ func TestCommittedFileIsReadableLikeNormalLibraryContent(t *testing.T) {
 	// is not owner-only.
 	if info.Mode().Perm()&0o044 == 0 {
 		t.Errorf("committed file mode is %v — readable only by the bridge's own user", info.Mode().Perm())
+	}
+}
+
+// TestConcurrentCommitsToOneDestinationDoNotClobber — the per-file lock is
+// keyed on (session, file), so two SESSIONS targeting the same destination
+// would both stat it, both find nothing, and both rename. os.Rename REPLACES,
+// so the second silently destroys the first — exactly what skip-by-default
+// exists to prevent.
+func TestConcurrentCommitsToOneDestinationDoNotClobber(t *testing.T) {
+	m, root := newTestManager(t)
+	const dest = "Artist/Album/01.flac"
+
+	mk := func(body []byte) string {
+		s := mustCreate(t, m, []FileDecl{{Path: dest, Size: int64(len(body))}}, CreateOptions{})
+		writeAll(t, m, s.ID, s.Files[0].ID, body, 1024)
+		return s.ID
+	}
+	a := mk(bytes.Repeat([]byte("A"), 64))
+	b := mk(bytes.Repeat([]byte("B"), 64))
+
+	var wg sync.WaitGroup
+	results := make([]*CommitResult, 2)
+	for i, sid := range []string{a, b} {
+		wg.Add(1)
+		go func(i int, sid string) {
+			defer wg.Done()
+			res, err := m.Commit(sid)
+			if err != nil {
+				t.Errorf("commit: %v", err)
+				return
+			}
+			results[i] = res
+		}(i, sid)
+	}
+	wg.Wait()
+
+	committed, skipped := 0, 0
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		committed += r.Committed
+		skipped += r.Skipped
+	}
+	if committed != 1 || skipped != 1 {
+		t.Fatalf("committed=%d skipped=%d, want exactly one of each — a concurrent commit clobbered the other",
+			committed, skipped)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "Artist", "Album", "01.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 64 || (got[0] != 'A' && got[0] != 'B') {
+		t.Fatalf("destination holds %d bytes starting %q — the two commits interleaved", len(got), got[:1])
+	}
+}
+
+// TestOversizeChunkIsRefusedRatherThanTruncated — io.LimitReader already bounds
+// what is WRITTEN, so this is not an overflow. It is about not hiding a client
+// bug behind a 200.
+func TestOversizeChunkIsRefusedRatherThanTruncated(t *testing.T) {
+	m, _ := newTestManager(t)
+	s := mustCreate(t, m, []FileDecl{{Path: "x.flac", Size: 10}}, CreateOptions{})
+	body := bytes.Repeat([]byte("x"), 500)
+	_, err := m.WriteChunk(s.ID, s.Files[0].ID, 0, bytes.NewReader(body), nil, int64(len(body)))
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	got, err := m.Get(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Files[0].Offset != 0 {
+		t.Errorf("offset advanced to %d on a refused chunk", got.Files[0].Offset)
+	}
+	// An undeclared length still gets the bounded-truncation behaviour.
+	if _, err := m.WriteChunk(s.ID, s.Files[0].ID, 0, bytes.NewReader(body), nil, -1); err != nil {
+		t.Fatalf("chunked (undeclared length) upload failed: %v", err)
+	}
+	got, _ = m.Get(s.ID)
+	if got.Files[0].Offset != 10 {
+		t.Errorf("offset = %d, want 10 — LimitReader should bound an undeclared oversize", got.Files[0].Offset)
 	}
 }

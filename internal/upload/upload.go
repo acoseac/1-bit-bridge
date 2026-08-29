@@ -97,6 +97,8 @@ func (c Config) resolved() Config {
 type Manager struct {
 	cfg   Config
 	locks *keyedLocks
+	// destLocks serialises commits by DESTINATION path, across sessions.
+	destLocks *keyedLocks
 
 	// roots returns the LIVE library roots. A snapshot would keep routing
 	// against a set the admin has since changed (the same reason the api
@@ -135,6 +137,7 @@ func NewManager(cfg Config, roots func() []string, opts ...Option) *Manager {
 	m := &Manager{
 		cfg:       cfg.resolved(),
 		locks:     newKeyedLocks(),
+		destLocks: newKeyedLocks(),
 		roots:     roots,
 		freeBytes: defaultFreeBytes,
 		now:       time.Now,
@@ -391,7 +394,7 @@ func (m *Manager) List() ([]*Session, error) {
 // chunkDigest, when non-nil, is the expected raw SHA-256 of THIS chunk's bytes
 // (RFC 9530 Content-Digest). A mismatch leaves the offset untouched so the
 // client simply re-sends.
-func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDigest []byte) (int64, error) {
+func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDigest []byte, contentLength int64) (int64, error) {
 	doc, err := m.findSession(sid)
 	if err != nil {
 		return 0, err
@@ -419,6 +422,16 @@ func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDi
 	}
 	if st.Offset >= fd.Size {
 		return st.Offset, nil // already complete; idempotent re-send
+	}
+
+	// io.LimitReader below already bounds what is WRITTEN to the declared
+	// size, so an oversize payload cannot overflow the file or the disk
+	// budget. But silently truncating a client that announced more than the
+	// file can hold hides its bug behind a 200; when the length is declared,
+	// say so instead.
+	if remaining := fd.Size - st.Offset; contentLength > 0 && contentLength > remaining {
+		return st.Offset, fmt.Errorf("%w: chunk declares %d bytes, only %d remain for this file",
+			ErrTooLarge, contentLength, remaining)
 	}
 
 	part := m.partPath(doc.Root, sid, fid)
@@ -599,6 +612,20 @@ func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutco
 			out.Status, out.Reason = "failed", err.Error()
 			return out, ""
 		}
+		// The collision check and the rename must be atomic AGAINST OTHER
+		// SESSIONS, not just against this file's own chunks. Two sessions
+		// targeting the same destination would otherwise both stat it, both
+		// find nothing, and both rename — and os.Rename REPLACES, so the
+		// second silently destroys the first, which is exactly what
+		// skip-by-default exists to prevent.
+		//
+		// A destination-keyed lock rather than an exclusive-create rename:
+		// RENAME_NOREPLACE is Linux-only, and the os.Link trick needs
+		// hardlinks, which the reference deployment's rclone/B2 mount does not
+		// provide. One bridge is one process, which is the scope that matters.
+		unlockDest := m.destLocks.lock(dest)
+		defer unlockDest()
+
 		if !doc.Overwrite {
 			if _, err := os.Stat(dest); err == nil {
 				out.Status, out.Reason = "skipped", "a file already exists at this path"

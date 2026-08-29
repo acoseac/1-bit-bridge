@@ -296,7 +296,7 @@ func (s *Server) apiUploadChunk(w http.ResponseWriter, r *http.Request) {
 	// server's 30s ReadTimeout while a genuinely stalled client still dies.
 	body := newUploadBodyReader(w, r.Body)
 
-	next, err := m.WriteChunk(r.PathValue("sid"), r.PathValue("fid"), offset, body, digest)
+	next, err := m.WriteChunk(r.PathValue("sid"), r.PathValue("fid"), offset, body, digest, r.ContentLength)
 	if err != nil {
 		writeUploadError(w, err)
 		return

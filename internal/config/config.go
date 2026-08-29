@@ -404,13 +404,21 @@ type UploadConfig struct {
 	// ChunkBytes all resolve to internal/upload's defaults at zero AND at a
 	// negative value — a -1 typed hoping to disable a cap must not yield an
 	// unbounded one.
-	MaxFileBytes      int64  `yaml:"maxFileBytes,omitempty"`
-	MaxSessionFiles   int    `yaml:"maxSessionFiles,omitempty"`
-	MinFreeBytes      int64  `yaml:"minFreeBytes,omitempty"`
-	SessionTTLSeconds int    `yaml:"sessionTtlSeconds,omitempty"`
-	ChunkBytes        int64  `yaml:"chunkBytes,omitempty"`
-	StagingDir        string `yaml:"stagingDir,omitempty"`
+	MaxFileBytes      int64 `yaml:"maxFileBytes,omitempty"`
+	MaxSessionFiles   int   `yaml:"maxSessionFiles,omitempty"`
+	MinFreeBytes      int64 `yaml:"minFreeBytes,omitempty"`
+	SessionTTLSeconds int   `yaml:"sessionTtlSeconds,omitempty"`
+	ChunkBytes        int64 `yaml:"chunkBytes,omitempty"`
 }
+
+// NOTE: there is deliberately no stagingDir knob. Staging lives inside the
+// target root so that commit is a same-filesystem rename; pointing it at
+// another volume would make every commit a cross-device copy that
+// atomicwrite.RenameWithRetry does not implement (it retries os.Rename and
+// does not handle EXDEV). An inert field that an operator can set and that
+// silently does nothing is worse than no field at all — if the escape hatch is
+// ever wanted, it needs the destination-side temp + copy + fsync + finalize
+// path built with it.
 
 // AtlasConfig governs the optional rich-tier Atlas metadata integration
 // (Phase 2). When Enabled, the bridge accepts metadata pushed by the
