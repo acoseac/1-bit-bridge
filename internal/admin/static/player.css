@@ -162,12 +162,27 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .player-section.active { color: var(--fg); font-weight: 650; background: var(--accent-soft); }
 .player-main { min-width: 0; }
 /* ---- Breadcrumb ----
-   Filled by ctx.setCrumb on the three views that have somewhere to go back
-   to; empty everywhere else. :empty collapses it entirely so a blank slot
-   costs no vertical space above the title — which is what lets the mount
-   live in the shell unconditionally instead of being toggled. */
+   Filled by ctx.setCrumb on every view that hangs off another one; empty on
+   the top-level lists. :empty collapses it entirely so a blank slot costs no
+   vertical space above the title — which is what lets the mount live in the
+   shell unconditionally instead of being toggled. */
 .player-crumb { margin: 0 0 var(--space-2); }
 .player-crumb:empty { display: none; }
+/* Wraps rather than scrolling or truncating the trail. A deep folder path is
+ * the case that overflows, and a second line of crumbs is legible where a
+ * clipped one is not — the segments that fall off the end of a scroller are
+ * the ones nearest the current folder, i.e. the likeliest destinations. */
+.crumb-list {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 0 6px; margin: 0; padding: 0; list-style: none;
+}
+.crumb-item { display: inline-flex; align-items: center; min-width: 0; }
+/* Separator as generated content: decorative, so it stays out of the
+ * accessible name of either neighbouring link. */
+.crumb-item + .crumb-item::before {
+  content: "\203A"; margin-right: 6px;
+  color: var(--fg-muted); opacity: 0.6; font-size: var(--text-sm);
+}
 .crumb-link {
   display: inline-flex; align-items: center; gap: 4px;
   color: var(--fg-muted); text-decoration: none;
@@ -177,9 +192,21 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    * fourth action. Padding still gives it a comfortable target without
    * drawing a box. */
   padding: 3px 0;
+  /* Album folders carry catalogue numbers and edition suffixes, so one
+   * segment can be longer than the whole rest of the trail. Ellipsised, with
+   * crumbs() supplying a title attribute past the same threshold so the full
+   * name stays reachable. */
+  max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .crumb-link:hover { color: var(--fg); text-decoration: underline; }
 .crumb-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+/* ---- Search results ----
+   The wrapper exists so a refinement can dim the results it is replacing
+   instead of blanking the page to a spinner between keystrokes. Opacity only
+   — moving or resizing anything would undo the point, which is that the list
+   under the reader's eye stays where it is. */
+.search-results[aria-busy="true"] { opacity: 0.5; transition: opacity 120ms ease; }
 
 .player-title {
   font-size: var(--text-2xl); font-weight: 640; line-height: 1.18;

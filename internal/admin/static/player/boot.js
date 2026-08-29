@@ -189,9 +189,19 @@ function wireSearchInput() {
   }
 
   let timer = null;
-  const commit = () => {
+  // typed distinguishes the debounce firing from an explicit Enter or
+  // Escape. Only the first is suppressed below: an explicit action gets
+  // an explicit answer, even when the answer is "type another letter".
+  const commit = ({ typed = false } = {}) => {
     const q = input.value.trim();
     const entering = location.pathname !== "/search";
+    // One letter is not a search — renderSearch requires two — so
+    // committing it swapped whatever the reader was looking at for a
+    // "type at least two characters" panel, on the way to a query they
+    // were still in the middle of. Once ON /search it does commit, so
+    // deleting back down to one letter still keeps the box, the URL and
+    // the results describing the same thing.
+    if (typed && entering && q.length < 2) return;
     const url = q ? `/search?q=${encodeURIComponent(q)}` : "/search";
     if (entering) history.pushState({ scrollY: 0 }, "", url);
     else history.replaceState(history.state || {}, "", url);
@@ -200,11 +210,17 @@ function wireSearchInput() {
 
   input.addEventListener("input", () => {
     clearTimeout(timer);
-    // 250 ms: long enough that a fast typist issues one request per
-    // pause, short enough to feel live. api.js aborts the in-flight
-    // request per keystroke, so a slow response can't overwrite a
-    // newer one.
-    timer = setTimeout(commit, 250);
+    // 400 ms, up from 250. The debounce restarts on every keystroke, so
+    // what it really measures is how long a PAUSE has to be before the
+    // reader is treated as finished — and 250 ms is inside the ordinary
+    // rhythm of typing a word, which is why searching felt like it fired
+    // per letter. 400 ms sits past the gaps within a word and still
+    // under the beat between words. Enter commits immediately for anyone
+    // who does not want to wait at all.
+    //
+    // api.js aborts the in-flight request per keystroke, so a slow
+    // response can't overwrite a newer one.
+    timer = setTimeout(() => commit({ typed: true }), 400);
   });
   form.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -338,7 +354,19 @@ function route() {
   // Client-side navigation is silent for assistive tech: without moving
   // focus and announcing, a keyboard user pressing Back gets no signal
   // that anything changed.
-  titleEl.focus({ preventScroll: true });
+  //
+  // Except when the reader is TYPING, which is a navigation they did not
+  // ask for: filter-as-you-type routes to /search on every pause, so the
+  // unconditional focus() yanked the caret out of the field mid-word and
+  // every keystroke after it went nowhere. Reproduced at a 320 ms
+  // cadence — a perfectly ordinary typing speed against the debounce —
+  // where "abdullah" reached the box as "a".
+  //
+  // The live region still fires: announcing costs nothing and moving
+  // focus is the only part that was wrong.
+  if (document.activeElement !== document.getElementById("player-search-input")) {
+    titleEl.focus({ preventScroll: true });
+  }
   announce(title);
 
   // Generation-guarded, like chunkAppend: a render that has been
