@@ -105,6 +105,19 @@ type Scanner struct {
 	lastFull atomic.Int64 // UnixNano of last successful full scan
 	progress atomic.Int64 // tracks indexed so far during the current scan
 
+	// lastProgressAt is the UnixNano of the last time the running scan
+	// COMMITTED rows (seeded at scan start so the walk's lead-in counts
+	// as progress). Zero when no scan is running. Read by
+	// ScanStalledFor to answer "is this scan actually getting anywhere",
+	// which is what /v1/health advertises to clients — see
+	// scanStallThreshold.
+	lastProgressAt atomic.Int64
+
+	// stallLogged latches the one loud log per stall episode, so a
+	// wedged scan says so once rather than on every health poll. Reset
+	// at scan start and whenever progress resumes.
+	stallLogged atomic.Bool
+
 	// activeScans counts the Scan / ScanSubtree invocations currently
 	// executing. Both hold s.mu for their whole body so the value is 0
 	// or 1 in practice, but a counter (rather than a bool) keeps the
@@ -270,7 +283,82 @@ func (s *Scanner) Roots() []string {
 }
 
 // IsScanning reports whether a scan is currently running.
+//
+// This is "the Scan goroutine has not returned", NOT "the scan is
+// getting anywhere" — a scan wedged in an uninterruptible read keeps
+// this true forever. Consumers that gate CLIENT behaviour want
+// ScanStalledFor as well; /v1/health composes the two (see
+// scanStallThreshold).
 func (s *Scanner) IsScanning() bool { return s.scanning.Load() }
+
+// scanStallThreshold is how long a running scan may go without
+// committing a single row before the bridge stops advertising it to
+// clients as an active scan.
+//
+// **Why this exists.** iOS defers every incremental sync while the
+// bridge reports a scan in flight. That is a good optimisation and a
+// terrible failure mode: on 2026-08-29 two scanner threads on the
+// production bridge wedged in `fuse_open` on a network mount —
+// uninterruptible in the kernel, so unkillable and never returning —
+// and the flag stayed true across the process's whole lifetime. Every
+// phone silently stopped syncing, showing "Bridge is indexing — sync
+// will resume" indefinitely, with nothing in the logs to say why. The
+// scan cannot be rescued from userspace; what CAN be contained is the
+// blast radius reaching the clients.
+//
+// **Why so generous.** A healthy scan can legitimately go minutes
+// without committing: walking a large tree before the first batch
+// fills, or the post-walk phases. The asymmetry favours a long
+// threshold — tripping early merely lets a client sync against a
+// mid-scan manifest, which is safe (rows are served from SQLite, and
+// the client's delta cursor re-fetches anything committed later), while
+// never tripping leaves every client stranded.
+const scanStallThreshold = 15 * time.Minute
+
+// ScanStalledFor reports how long the running scan has gone without
+// committing rows. Zero when no scan is running, or when the scan has
+// not yet been seeded (both mean "nothing to report").
+func (s *Scanner) ScanStalledFor(now time.Time) time.Duration {
+	if !s.scanning.Load() {
+		return 0
+	}
+	last := s.lastProgressAt.Load()
+	if last == 0 {
+		return 0
+	}
+	d := now.Sub(time.Unix(0, last))
+	if d < 0 {
+		// A backward clock step must not manufacture a stall.
+		return 0
+	}
+	return d
+}
+
+// IsScanStalled reports whether a scan is running but has committed
+// nothing for longer than scanStallThreshold. Logs once per stall
+// episode so a wedged scan is visible in the journal rather than only
+// as an absence of activity.
+func (s *Scanner) IsScanStalled(now time.Time) bool {
+	stalled := s.ScanStalledFor(now)
+	if stalled < scanStallThreshold {
+		return false
+	}
+	if s.stallLogged.CompareAndSwap(false, true) {
+		scanLogger.Warn("scan appears stalled — no rows committed; "+
+			"clients will be told no scan is running so their syncs resume",
+			"stalledFor", stalled.Round(time.Second).String(),
+			"progress", s.progress.Load())
+	}
+	return true
+}
+
+// noteScanProgress records that the scan just got somewhere, clearing
+// any stall latch so a scan that recovers logs again if it stalls
+// twice.
+func (s *Scanner) noteScanProgress(now time.Time) {
+	s.lastProgressAt.Store(now.UnixNano())
+	s.stallLogged.Store(false)
+}
 
 // LastFullScan returns the timestamp of the most recent successful scan,
 // or the zero time if none has completed yet.
@@ -317,12 +405,20 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	defer s.mu.Unlock()
 	s.scanning.Store(true)
 	s.progress.Store(0)
+	// Seed the stall clock at the start so the walk's lead-in (which
+	// commits nothing until the first batch fills) counts as progress
+	// rather than as a stall in flight.
+	s.noteScanProgress(time.Now())
 	// Per-Scan reset of the folder-art single-flight cache. Cross-scan
 	// persistence would create stale "no folder.jpg" hits when a user
 	// adds cover.jpg between scans (the scanner re-extracts the track
 	// but the cache still says "absent").
 	s.folderArt = sync.Map{}
 	defer s.scanning.Store(false)
+	// Zeroing the clock alongside the flag keeps ScanStalledFor's "no
+	// scan running" answer honest without depending on read ordering
+	// between the two.
+	defer s.lastProgressAt.Store(0)
 
 	// Post-scan hook: fired via defer so every successful return site is
 	// covered, gated on scanOK so an error return or a panic mid-scan
@@ -1471,6 +1567,10 @@ func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, commi
 		if committedRows > 0 {
 			n := committed.Add(int64(committedRows))
 			s.progress.Store(n)
+			// The stall clock advances on COMMITTED rows only — the same
+			// signal `progress` reports. A scan that is reading but never
+			// committing is exactly the case worth surfacing.
+			s.noteScanProgress(time.Now())
 		}
 		batch = batch[:0]
 	}

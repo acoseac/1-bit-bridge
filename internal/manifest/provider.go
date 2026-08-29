@@ -162,6 +162,12 @@ func (p *Provider) BuildManifestPage(ctx context.Context, cursor string, limit i
 // IsScanning satisfies api.ManifestProvider.
 func (p *Provider) IsScanning() bool { return p.scanner.IsScanning() }
 
+// IsScanStalled satisfies api.ManifestProvider — a scan is running but
+// has committed nothing for longer than the scanner's stall threshold.
+// /v1/health uses it to stop advertising a wedged scan to clients (see
+// the scanStallThreshold docblock for the incident this exists for).
+func (p *Provider) IsScanStalled() bool { return p.scanner.IsScanStalled(time.Now()) }
+
 // LastFullScan satisfies api.ManifestProvider.
 func (p *Provider) LastFullScan() time.Time { return p.scanner.LastFullScan() }
 
