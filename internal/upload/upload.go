@@ -593,63 +593,61 @@ func (m *Manager) Commit(sid string) (*CommitResult, error) {
 // commitOne renames ONE staged file into the library. The caller holds this
 // file's lock.
 func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutcome, string) {
-	{
-		out := CommitOutcome{Path: fd.RelPath, Bytes: fd.Size}
-		st, err := m.readState(doc.Root, sid, fd.ID)
-		if err != nil || st.Offset != fd.Size {
-			out.Status, out.Reason = "failed", "incomplete"
-			return out, ""
-		}
-		// Re-validate. The manifest has been on disk since Create and is not
-		// trusted to still say what it said.
-		clean, err := ValidateRelPath(fd.RelPath)
-		if err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			return out, ""
-		}
-		dest := filepath.Join(doc.Root, filepath.FromSlash(clean))
-		if err := AssertRootContains(doc.Root, dest); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			return out, ""
-		}
-		// The collision check and the rename must be atomic AGAINST OTHER
-		// SESSIONS, not just against this file's own chunks. Two sessions
-		// targeting the same destination would otherwise both stat it, both
-		// find nothing, and both rename — and os.Rename REPLACES, so the
-		// second silently destroys the first, which is exactly what
-		// skip-by-default exists to prevent.
-		//
-		// A destination-keyed lock rather than an exclusive-create rename:
-		// RENAME_NOREPLACE is Linux-only, and the os.Link trick needs
-		// hardlinks, which the reference deployment's rclone/B2 mount does not
-		// provide. One bridge is one process, which is the scope that matters.
-		unlockDest := m.destLocks.lock(dest)
-		defer unlockDest()
-
-		if !doc.Overwrite {
-			if _, err := os.Stat(dest); err == nil {
-				out.Status, out.Reason = "skipped", "a file already exists at this path"
-				return out, ""
-			}
-		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			return out, ""
-		}
-		// RenameWithRetry absorbs the Windows scan-on-close window.
-		if err := atomicwrite.RenameWithRetry(m.partPath(doc.Root, sid, fd.ID), dest); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			return out, ""
-		}
-		if err := fsutil.SyncParentDir(dest); err != nil {
-			logger.Warn("sync parent dir after commit", "path", dest, "err", err)
-		}
-		out.Status = "committed"
-		if d := path.Dir(clean); d != "." {
-			return out, d
-		}
-		return out, "."
+	out := CommitOutcome{Path: fd.RelPath, Bytes: fd.Size}
+	st, err := m.readState(doc.Root, sid, fd.ID)
+	if err != nil || st.Offset != fd.Size {
+		out.Status, out.Reason = "failed", "incomplete"
+		return out, ""
 	}
+	// Re-validate. The manifest has been on disk since Create and is not
+	// trusted to still say what it said.
+	clean, err := ValidateRelPath(fd.RelPath)
+	if err != nil {
+		out.Status, out.Reason = "failed", err.Error()
+		return out, ""
+	}
+	dest := filepath.Join(doc.Root, filepath.FromSlash(clean))
+	if err := AssertRootContains(doc.Root, dest); err != nil {
+		out.Status, out.Reason = "failed", err.Error()
+		return out, ""
+	}
+	// The collision check and the rename must be atomic AGAINST OTHER
+	// SESSIONS, not just against this file's own chunks. Two sessions
+	// targeting the same destination would otherwise both stat it, both
+	// find nothing, and both rename — and os.Rename REPLACES, so the
+	// second silently destroys the first, which is exactly what
+	// skip-by-default exists to prevent.
+	//
+	// A destination-keyed lock rather than an exclusive-create rename:
+	// RENAME_NOREPLACE is Linux-only, and the os.Link trick needs
+	// hardlinks, which the reference deployment's rclone/B2 mount does not
+	// provide. One bridge is one process, which is the scope that matters.
+	unlockDest := m.destLocks.lock(dest)
+	defer unlockDest()
+
+	if !doc.Overwrite {
+		if _, err := os.Stat(dest); err == nil {
+			out.Status, out.Reason = "skipped", "a file already exists at this path"
+			return out, ""
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		out.Status, out.Reason = "failed", err.Error()
+		return out, ""
+	}
+	// RenameWithRetry absorbs the Windows scan-on-close window.
+	if err := atomicwrite.RenameWithRetry(m.partPath(doc.Root, sid, fd.ID), dest); err != nil {
+		out.Status, out.Reason = "failed", err.Error()
+		return out, ""
+	}
+	if err := fsutil.SyncParentDir(dest); err != nil {
+		logger.Warn("sync parent dir after commit", "path", dest, "err", err)
+	}
+	out.Status = "committed"
+	if d := path.Dir(clean); d != "." {
+		return out, d
+	}
+	return out, "."
 }
 
 // openStagedFile opens a .part for positioned writing.
