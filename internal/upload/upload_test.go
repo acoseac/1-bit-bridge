@@ -445,6 +445,16 @@ func TestCommitIsSameFilesystemRename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Prime the file identity WHILE THE PATH STILL EXISTS.
+	//
+	// On Unix the inode is already in the FileInfo, but on Windows
+	// os.SameFile loads the volume + file index lazily, by re-opening
+	// fileStat.path — and after the commit that path has been renamed away, so
+	// the load fails and SameFile returns false no matter what happened.
+	// Comparing the value with itself forces that load now and caches it
+	// (os.sameFile calls loadFileId on both arguments, which is idempotent),
+	// so the comparison below measures the rename rather than the lookup.
+	_ = os.SameFile(partInfo, partInfo)
 
 	res, err := m.Commit(s.ID)
 	if err != nil {
