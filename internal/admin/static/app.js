@@ -1318,7 +1318,8 @@ async function refreshSpaceMeter() {
 
 // --- Upload -----------------------------------------------------------------
 //
-// The console's file/folder upload. Chunked PUTs against /api/upload/*, which
+// The console's file/folder upload. Chunked PUTs against the /api/upload
+// routes, which
 // is why it can resume and why a 200 MB file is not at the mercy of the admin
 // server's ReadTimeout.
 //

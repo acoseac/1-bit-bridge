@@ -79,7 +79,11 @@ var ariaRefRe = regexp.MustCompile(`(aria-describedby|aria-labelledby|aria-contr
 // hex so it cannot bite today, but the habit is what stops it biting when
 // something user-derived enters a URL later.
 func TestUploadClientEncodesPathSegmentsNotFormEncoded(t *testing.T) {
-	js := readFile(t, "static/app.js")
+	// CRLF: there is no .gitattributes pinning eol, so a Windows checkout
+	// carries "\r\n" and a "\n}\n" literal is not in the bytes at all. The
+	// same test shape failed on windows-latest from the day it was added the
+	// last time (see CLAUDE.md); normalizing at the read is the fix.
+	js := strings.ReplaceAll(readFile(t, "static/app.js"), "\r\n", "\n")
 	start := strings.Index(js, "async function putUploadChunk")
 	if start < 0 {
 		t.Fatal("putUploadChunk not found — this test no longer covers the chunk URL")
