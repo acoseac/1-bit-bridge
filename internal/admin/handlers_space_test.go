@@ -62,3 +62,21 @@ func TestLibrarySpaceReportsLibraryBytes(t *testing.T) {
 		t.Errorf("libraryBytes = %v, want 3500", sp["libraryBytes"])
 	}
 }
+
+// TestLibrarySpaceReportsCapacity — totalBytes is the denominator the sidebar
+// bar fills against. Declared-but-never-populated it silently pins the bar at
+// 0%, because the only other denominator available is indexed library bytes,
+// which on a shared disk reads "almost empty" while the volume is nearly full.
+func TestLibrarySpaceReportsCapacity(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	var sp map[string]any
+	doJSON(t, srv.Handler(), "GET", "/api/library/space", nil, &sp)
+	total, _ := sp["totalBytes"].(float64)
+	free, _ := sp["freeBytes"].(float64)
+	if total <= 0 {
+		t.Fatal("totalBytes is absent or zero — the sidebar bar has no denominator and sits at 0% forever")
+	}
+	if total < free {
+		t.Errorf("totalBytes (%v) < freeBytes (%v) — the two probes disagree about which volume they measured", total, free)
+	}
+}

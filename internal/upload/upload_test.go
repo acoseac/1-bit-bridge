@@ -732,3 +732,28 @@ func TestFindSessionRejectsTraversalIDs(t *testing.T) {
 		}
 	}
 }
+
+// TestCommittedFileIsReadableLikeNormalLibraryContent — the staged file's mode
+// survives the rename, so it IS the committed file's mode. At 0o600 an uploaded
+// track is readable only by the bridge's own user, unlike every other file in
+// the library, and a Samba share or a backup job running as someone else
+// silently cannot read it.
+func TestCommittedFileIsReadableLikeNormalLibraryContent(t *testing.T) {
+	m, root := newTestManager(t)
+	body := []byte("audio")
+	s := mustCreate(t, m, []FileDecl{{Path: "A/x.flac", Size: int64(len(body))}}, CreateOptions{})
+	writeAll(t, m, s.ID, s.Files[0].ID, body, 16)
+	if _, err := m.Commit(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(root, "A", "x.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Group/other read bits, modulo whatever the process umask trims. A
+	// typical umask of 022 leaves 0644; the assertion is only that the file
+	// is not owner-only.
+	if info.Mode().Perm()&0o044 == 0 {
+		t.Errorf("committed file mode is %v — readable only by the bridge's own user", info.Mode().Perm())
+	}
+}

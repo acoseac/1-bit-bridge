@@ -1271,7 +1271,387 @@ function setText(id, v) {
 
 // --- library ---
 
+// --- Sidebar space meter ----------------------------------------------------
+//
+// Three numbers, because "free" alone cannot answer the question a quota user
+// has. Trash does not free space until it is purged, so the reclaimable figure
+// sits next to the free one — otherwise an operator at the ceiling is told they
+// are stuck when they are one click from not being.
+//
+// Progressive: the widget stays hidden unless a floor or quota is configured,
+// or free space is already inside twice the floor.
+async function refreshSpaceMeter() {
+  const el = document.getElementById("space-meter");
+  if (!el) return;
+  let sp;
+  try {
+    sp = await API.get("/api/library/space");
+  } catch {
+    return; // a missing number degrades the widget, it does not break the page
+  }
+  if (!sp || !sp.probed) return;
+  const near = sp.minFreeBytes > 0 && sp.freeBytes < sp.minFreeBytes * 2;
+  if (!sp.configured && !near) return;
+
+  el.hidden = false;
+  el.classList.toggle("low", sp.minFreeBytes > 0 && sp.freeBytes <= sp.minFreeBytes);
+
+  const used = sp.totalBytes > 0 ? sp.totalBytes - sp.freeBytes : sp.libraryBytes;
+  const denom = sp.totalBytes > 0 ? sp.totalBytes : used + sp.freeBytes;
+  const fill = document.getElementById("space-meter-fill");
+  if (fill && denom > 0) fill.style.width = `${Math.min(100, Math.round((used / denom) * 100))}%`;
+
+  const text = document.getElementById("space-meter-text");
+  if (!text) return;
+  text.replaceChildren();
+  text.appendChild(document.createTextNode(`${formatBytes(sp.freeBytes)} free`));
+  if (sp.reclaimableBytes > 0) {
+    text.appendChild(document.createTextNode(" · "));
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "space-meter-reclaim";
+    btn.textContent = `${formatBytes(sp.reclaimableBytes)} in trash`;
+    btn.addEventListener("click", () => { location.href = "/library"; });
+    text.appendChild(btn);
+  }
+}
+
+// --- Upload -----------------------------------------------------------------
+//
+// The console's file/folder upload. Chunked PUTs against /api/upload/*, which
+// is why it can resume and why a 200 MB file is not at the mercy of the admin
+// server's ReadTimeout.
+//
+// Two behaviours here are deliberate rather than incidental:
+//
+//   * The destination PREVIEW is shown before anything transfers.
+//     webkitRelativePath includes the folder you picked, so selecting an artist
+//     folder nests one level deeper than selecting one of its albums — and
+//     because those land at DIFFERENT paths, nothing collides and you end up
+//     with two copies of the same album on disk. Showing the resolved path is
+//     the only place that is preventable.
+//
+//   * Files the server flags as already present are DESELECTED, not removed.
+//     The pre-flight warns; it does not decide. A track legitimately on both an
+//     album and a compilation is a real library.
+
+const UPLOAD_PARALLEL_FILES = 3;
+
+let uploadState = null;
+
+function initUpload() {
+  const panel = document.getElementById("upload-panel");
+  if (!panel) return;
+  const signal = pageSignal();
+
+  // The panel is hidden until the operator has opted in. An operator who has
+  // not enabled uploads should see no upload chrome at all.
+  API.get("/api/settings")
+    .then((cfg) => {
+      if (!cfg || !cfg.uploadEnabled) return;
+      panel.hidden = false;
+      wireUpload(signal);
+    })
+    .catch(() => {});
+}
+
+function wireUpload(signal) {
+  const drop = document.getElementById("upload-drop");
+  const filesInput = document.getElementById("upload-files");
+  const folderInput = document.getElementById("upload-folder");
+
+  API.get("/api/library/space")
+    .then((sp) => setText("upload-root", sp && sp.root ? sp.root : "your library"))
+    .catch(() => {});
+
+  filesInput?.addEventListener("change", () => stageFiles(collectFromInput(filesInput)));
+  folderInput?.addEventListener("change", () => stageFiles(collectFromInput(folderInput)));
+
+  for (const evt of ["dragenter", "dragover"]) {
+    drop?.addEventListener(evt, (e) => {
+      e.preventDefault();
+      drop.classList.add("dragging");
+    });
+  }
+  for (const evt of ["dragleave", "drop"]) {
+    drop?.addEventListener(evt, () => drop.classList.remove("dragging"));
+  }
+  drop?.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    const picked = await collectFromDataTransfer(e.dataTransfer);
+    stageFiles(picked);
+  });
+  drop?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      filesInput?.click();
+    }
+  });
+
+  document.getElementById("upload-cancel")?.addEventListener("click", resetUpload);
+  document.getElementById("upload-start")?.addEventListener("click", startUpload);
+  document.getElementById("upload-abort")?.addEventListener("click", () => {
+    if (uploadState) uploadState.aborted = true;
+  });
+
+  // An in-flight upload must not survive a boosted navigation away.
+  signal?.addEventListener("abort", () => {
+    if (uploadState) uploadState.aborted = true;
+  });
+}
+
+function collectFromInput(input) {
+  return Array.from(input.files || []).map((f) => ({
+    file: f,
+    path: f.webkitRelativePath || f.name,
+  }));
+}
+
+// collectFromDataTransfer walks a dropped folder via webkitGetAsEntry, which is
+// the only cross-browser way to get a directory out of a drop (the File System
+// Access API's showDirectoryPicker is Chromium-only).
+async function collectFromDataTransfer(dt) {
+  const out = [];
+  const roots = [];
+  for (const item of Array.from(dt?.items || [])) {
+    const entry = item.webkitGetAsEntry?.();
+    if (entry) roots.push(entry);
+  }
+  if (roots.length === 0) {
+    return Array.from(dt?.files || []).map((f) => ({ file: f, path: f.name }));
+  }
+  const walk = (entry, prefix) =>
+    new Promise((resolve) => {
+      if (entry.isFile) {
+        entry.file(
+          (f) => {
+            out.push({ file: f, path: prefix + entry.name });
+            resolve();
+          },
+          () => resolve(),
+        );
+        return;
+      }
+      const reader = entry.createReader();
+      const batch = () =>
+        reader.readEntries(async (entries) => {
+          if (!entries.length) return resolve();
+          await Promise.all(entries.map((e) => walk(e, prefix + entry.name + "/")));
+          batch(); // readEntries returns at most 100 per call
+        }, () => resolve());
+      batch();
+    });
+  await Promise.all(roots.map((r) => walk(r, "")));
+  return out;
+}
+
+function stageFiles(picked) {
+  const usable = picked.filter((p) => p.file && p.file.size >= 0);
+  if (!usable.length) return;
+  uploadState = { picked: usable, session: null, aborted: false, preflightSkipped: 0 };
+  const note = document.getElementById("upload-dupe-note");
+  if (note) note.hidden = true;
+  renderUploadReview();
+}
+
+function renderUploadReview() {
+  const review = document.getElementById("upload-review");
+  const list = document.getElementById("upload-preview");
+  if (!review || !list || !uploadState) return;
+
+  document.getElementById("upload-progress").hidden = true;
+  document.getElementById("upload-result").hidden = true;
+  document.getElementById("upload-error").hidden = true;
+  review.hidden = false;
+  list.replaceChildren();
+
+  const picked = uploadState.picked;
+  const total = picked.reduce((n, p) => n + p.file.size, 0);
+  setText("upload-count", String(picked.length));
+  setText("upload-count-plural", picked.length === 1 ? "" : "s");
+  setText("upload-total", formatBytes(total));
+
+  // Preview the RESOLVED destination for a bounded sample — the full list can
+  // be thousands of rows and the point is the shape, not the enumeration.
+  const shown = picked.slice(0, 8);
+  for (const p of shown) {
+    const li = document.createElement("li");
+    li.textContent = p.path;
+    list.appendChild(li);
+  }
+  if (picked.length > shown.length) {
+    const li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = `…and ${picked.length - shown.length} more`;
+    list.appendChild(li);
+  }
+}
+
+async function startUpload() {
+  if (!uploadState) return;
+  const err = document.getElementById("upload-error");
+  const start = document.getElementById("upload-start");
+  err.hidden = true;
+  start.disabled = true;
+  try {
+    const overwrite = document.getElementById("upload-overwrite")?.checked === true;
+    let session = await createUploadSession(uploadState.picked, overwrite);
+
+    // The pre-flight WARNS. Anything the server recognises is dropped from the
+    // set by default, and the operator is told what happened and can re-run
+    // with overwrite if that is what they meant.
+    const dupes = session.files.filter((f) => f.duplicateOf);
+    if (dupes.length && !overwrite) {
+      const keep = uploadState.picked.filter((p) => {
+        const f = session.files.find((x) => x.path === p.path);
+        return !(f && f.duplicateOf);
+      });
+      const note = document.getElementById("upload-dupe-note");
+      note.hidden = false;
+      const one = dupes.length === 1;
+      note.textContent =
+        `${dupes.length} file${one ? "" : "s"} already ${one ? "exists" : "exist"} in your ` +
+        `library (for example ${dupes[0].duplicateOf}) and will be skipped. ` +
+        `Tick "Replace files that already exist" if you meant to overwrite them.`;
+      await API.delete(`/api/upload/sessions/${encodeURIComponent(session.id)}`);
+      if (!keep.length) {
+        document.getElementById("upload-review").hidden = true;
+        showUploadResult("Nothing to upload — every file is already in the library.");
+        return;
+      }
+      uploadState.preflightSkipped = dupes.length;
+      uploadState.picked = keep;
+      session = await createUploadSession(keep, overwrite);
+    }
+
+    uploadState.session = session;
+    document.getElementById("upload-review").hidden = true;
+    document.getElementById("upload-progress").hidden = false;
+    await transferAll(session);
+    if (uploadState.aborted) {
+      showUploadResult("Upload stopped. Staged progress is kept — start again to resume.");
+      return;
+    }
+    const res = await API.post(`/api/upload/sessions/${encodeURIComponent(session.id)}/commit`);
+    reportCommit(res);
+  } catch (e) {
+    err.hidden = false;
+    err.textContent = e && e.message ? e.message : String(e);
+  } finally {
+    start.disabled = false;
+    document.getElementById("upload-progress").hidden = true;
+  }
+}
+
+async function createUploadSession(picked, overwrite) {
+  return API.post("/api/upload/sessions", {
+    overwrite,
+    files: picked.map((p) => ({ path: p.path, size: p.file.size })),
+  });
+}
+
+async function transferAll(session) {
+  const byPath = new Map(uploadState.picked.map((p) => [p.path, p.file]));
+  const queue = session.files.filter((f) => !f.complete);
+  const totalBytes = session.files.reduce((n, f) => n + f.size, 0) || 1;
+  let doneBytes = session.files.reduce((n, f) => n + f.offset, 0);
+
+  const bar = document.getElementById("upload-bar");
+  const paint = () => {
+    bar.value = Math.min(100, Math.round((doneBytes / totalBytes) * 100));
+    setText("upload-status", `${formatBytes(doneBytes)} of ${formatBytes(totalBytes)}`);
+  };
+  paint();
+
+  let next = 0;
+  const worker = async () => {
+    while (!uploadState.aborted) {
+      const i = next++;
+      if (i >= queue.length) return;
+      const meta = queue[i];
+      const file = byPath.get(meta.path);
+      if (!file) continue;
+      let offset = meta.offset;
+      while (offset < meta.size && !uploadState.aborted) {
+        const end = Math.min(offset + session.chunkBytes, meta.size);
+        const res = await putUploadChunk(session.id, meta.id, offset, file.slice(offset, end));
+        doneBytes += res.offset - offset;
+        offset = res.offset;
+        paint();
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(UPLOAD_PARALLEL_FILES, queue.length) }, worker),
+  );
+}
+
+async function putUploadChunk(sid, fid, offset, blob) {
+  const url =
+    `/api/upload/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(fid)}` +
+    `?offset=${offset}`;
+  const r = await fetch(url, {
+    method: "PUT",
+    // octet-stream is what csrfGuard's narrow allowlist admits, and it is
+    // preflight-forced, unlike a multipart form.
+    headers: { "content-type": "application/octet-stream" },
+    body: blob,
+  });
+  if (r.status === 409) {
+    // The server holds a different offset. It tells us which, so resume
+    // rather than guessing.
+    const body = await r.json().catch(() => ({}));
+    if (typeof body.offset === "number") return { offset: body.offset };
+  }
+  if (!r.ok) throw await errorFromResponse(r);
+  return r.json();
+}
+
+function reportCommit(res) {
+  const parts = [];
+  if (res.committed) parts.push(`${res.committed} added`);
+  // Files the PRE-FLIGHT dropped never reached the session, so the server
+  // cannot count them. Reporting only the server's number would leave the
+  // operator staring at "1 added" after picking three files.
+  const preflight = uploadState?.preflightSkipped || 0;
+  if (preflight) parts.push(`${preflight} already in your library`);
+  if (res.skipped) parts.push(`${res.skipped} skipped (already present)`);
+  if (res.failed) parts.push(`${res.failed} failed`);
+  let msg = parts.length ? parts.join(" · ") : "Nothing to do.";
+  if (res.committed) {
+    msg += res.fullScan
+      ? " — rescanning the library."
+      : ` — rescanning ${res.scanDirs.length} folder${res.scanDirs.length === 1 ? "" : "s"}.`;
+  }
+  const failed = (res.outcomes || []).filter((o) => o.status === "failed");
+  if (failed.length) msg += ` First failure: ${failed[0].path} (${failed[0].reason}).`;
+  showUploadResult(msg);
+  resetUpload();
+}
+
+function showUploadResult(msg) {
+  const el = document.getElementById("upload-result");
+  el.hidden = false;
+  el.textContent = msg;
+}
+
+function resetUpload() {
+  uploadState = null;
+  document.getElementById("upload-review").hidden = true;
+  document.getElementById("upload-progress").hidden = true;
+  // The duplicate note is deliberately NOT cleared here. resetUpload runs
+  // immediately after a commit, and the note is the explanation for the
+  // number the operator is about to read — hiding it leaves "1 added" with
+  // no account of where the other two went. It is cleared when a NEW
+  // selection is staged, which is the moment it goes stale.
+  const f = document.getElementById("upload-files");
+  const d = document.getElementById("upload-folder");
+  if (f) f.value = "";
+  if (d) d.value = "";
+}
+
 function initLibrary() {
+  initUpload();
   initVariantsPanel();
   const form = document.getElementById("add-root-form");
   if (form) {
@@ -3064,6 +3444,7 @@ function initSettings() {
       // fsnotify library watcher opt-in. Restart-required — the
       // watcher goroutine starts at `bridge serve` startup.
       libraryWatchEnabled: fd.get("libraryWatchEnabled") === "on",
+      uploadEnabled: fd.get("uploadEnabled") === "on",
       // Backup cadence + retention. These became editable with the
       // settings consolidation and MUST be listed here: this payload is
       // an explicit allowlist, not a FormData dump, so a field that
@@ -6052,6 +6433,9 @@ function wireBoostRouter() {
 document.addEventListener("DOMContentLoaded", () => {
   initMobileNav();
   initTheme();
+  // Sidebar widget: every page, once. Cheap (one query + one statfs) and
+  // self-hiding when neither a floor nor a quota is configured.
+  refreshSpaceMeter();
   initLogout();
   wireBoostRouter();
   // First paint routes through the same dispatcher every boost swap uses, so

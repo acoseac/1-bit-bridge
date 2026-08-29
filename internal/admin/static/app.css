@@ -3085,3 +3085,93 @@ label.checkbox.tray-switch {
    * at this width the hint is better off flush with everything else. */
   .tray-switch + .tray-hint { padding-left: 0; }
 }
+
+/* --- Upload ---------------------------------------------------------------
+   The drop target on the Library page. Keyboard-reachable (tabindex + Enter
+   forwards to the file input) because a drop zone that is mouse-only is not a
+   control, and the two "Choose…" labels wrap sr-only inputs rather than hiding
+   them with [hidden] — display:none drops a control out of the tab order, and
+   a <label> is not natively focusable, so the ring is painted via
+   :focus-within. */
+.upload-drop {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius, 8px);
+  background: var(--bg-elev);
+  padding: 1.5rem 1rem;
+  text-align: center;
+}
+.upload-drop.dragging {
+  border-color: var(--accent-fill-edge);
+  background: var(--accent-fill-soft);
+}
+.upload-drop:focus-visible,
+.upload-drop:focus-within {
+  outline: 2px solid var(--accent-fill-edge);
+  outline-offset: 2px;
+}
+.upload-drop-title {
+  font-weight: 600;
+  margin: 0 0 0.25rem;
+}
+.upload-pick {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+.upload-preview {
+  list-style: none;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+  background: var(--bg-elev);
+  border-radius: var(--radius, 8px);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--text-sm, 0.85rem);
+  max-height: 12rem;
+  overflow-y: auto;
+}
+.upload-preview li { padding: 0.1rem 0; overflow-wrap: anywhere; }
+#upload-bar { width: 100%; }
+
+/* --- Sidebar space meter --------------------------------------------------
+   Rendered only when a floor or quota is configured, or free space is already
+   near the floor: a self-hoster with a 40 TB NAS should never see a meter for
+   a number that will never bind. */
+.space-meter {
+  padding: 0.5rem 0.75rem 0;
+  font-size: var(--text-micro, 0.7rem);
+}
+.space-meter-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+  margin-bottom: 0.25rem;
+}
+.space-meter-fill {
+  height: 100%;
+  background: var(--accent-fill);
+  transition: width 0.3s ease;
+}
+.space-meter.low .space-meter-fill { background: var(--warn, #d29a26); }
+.space-meter-text { color: var(--fg-muted); }
+.space-meter-reclaim {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--fg-muted);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* The upload duplicate note. `.hint.warn` had no rule, so the note read as
+   ordinary hint text — indistinguishable from the two hints directly above it,
+   which is the one thing it must not be: it explains a count the operator is
+   about to misread. */
+.hint.warn {
+  color: var(--warn);
+  border-left: 3px solid var(--warn);
+  padding-left: 0.6rem;
+}
