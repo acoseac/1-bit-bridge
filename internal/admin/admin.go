@@ -1756,7 +1756,17 @@ func (s *Server) csrfGuard(next http.Handler) http.Handler {
 				ct = ct[:i]
 			}
 			ct = strings.TrimSpace(strings.ToLower(ct))
-			if ct != "application/json" {
+			// application/octet-stream is permitted on the upload
+			// chunk routes only. That relaxation keeps the property
+			// this check exists for: octet-stream is not a CORS
+			// simple content type and PUT is not a simple method, so
+			// such a request is preflight-forced and the bridge
+			// answers no preflight. multipart/form-data IS simple and
+			// therefore stays refused everywhere, upload routes
+			// included — see uploadOctetStreamRoutes.
+			okCT := ct == "application/json" ||
+				(ct == "application/octet-stream" && allowsOctetStreamBody(r.Method, r.URL.Path))
+			if !okCT {
 				http.Error(w, "admin refused: Content-Type must be application/json", http.StatusUnsupportedMediaType)
 				return
 			}
