@@ -119,6 +119,27 @@
     <p class="hint" id="upload-result" aria-live="polite" hidden></p>
   </div>
 
+  {{- /* Trash. Hidden unless deleting is enabled in Settings. This panel is
+      where the space actually comes back: moving a file to the trash frees
+      nothing, so an operator who deleted to make room and stopped here would
+      still be full. */ -}}
+  <div class="panel" id="trash-panel" hidden>
+    <div class="panel-head">
+      <h2>Trash</h2>
+      <div class="panel-actions">
+        <button type="button" id="trash-empty" class="btn danger">Empty trash</button>
+      </div>
+    </div>
+    <p class="hint" id="trash-summary">—</p>
+    <table class="rows" id="trash-table" hidden>
+      <thead>
+        <tr><th>File</th><th>Size</th><th>Deleted</th><th>Expires</th><th></th></tr>
+      </thead>
+      <tbody id="trash-body"></tbody>
+    </table>
+    <p class="hint" id="trash-status" aria-live="polite"></p>
+  </div>
+
   <div class="panel" id="variants-panel">
     <h2>Transcoded cache</h2>
     <p class="lede">

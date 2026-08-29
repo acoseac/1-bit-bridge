@@ -539,62 +539,31 @@ func (m *Manager) Commit(sid string) (*CommitResult, error) {
 	dirs := make(map[string]struct{})
 
 	for _, fd := range doc.Files {
-		out := CommitOutcome{Path: fd.RelPath, Bytes: fd.Size}
-		st, err := m.readState(doc.Root, sid, fd.ID)
-		if err != nil || st.Offset != fd.Size {
-			out.Status, out.Reason = "failed", "incomplete"
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		// Re-validate. The manifest has been on disk since Create and is not
-		// trusted to still say what it said.
-		clean, err := ValidateRelPath(fd.RelPath)
-		if err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		dest := filepath.Join(doc.Root, filepath.FromSlash(clean))
-		if err := AssertRootContains(doc.Root, dest); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		if !doc.Overwrite {
-			if _, err := os.Stat(dest); err == nil {
-				out.Status, out.Reason = "skipped", "a file already exists at this path"
-				res.Skipped++
-				res.Outcomes = append(res.Outcomes, out)
-				continue
+		// Hold the same per-file lock WriteChunk takes.
+		//
+		// The completeness check below plus the fsync-before-offset ordering
+		// already prevent a partial file reaching the library, so this is not
+		// closing a demonstrated corruption. What it does close is Windows,
+		// where renaming a file with an open handle fails with a sharing
+		// violation and RenameWithRetry burns its whole budget before
+		// reporting failure — and the class of reasoning that has to be
+		// redone from scratch every time either side is edited.
+		unlock := m.locks.lock(sid + "/" + fd.ID)
+		out, dir := m.commitOne(doc, sid, fd)
+		unlock()
+
+		switch out.Status {
+		case "committed":
+			res.Committed++
+			if dir != "" {
+				dirs[dir] = struct{}{}
 			}
-		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
+		case "skipped":
+			res.Skipped++
+		default:
 			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
 		}
-		// RenameWithRetry absorbs the Windows scan-on-close window.
-		if err := atomicwrite.RenameWithRetry(m.partPath(doc.Root, sid, fd.ID), dest); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		if err := fsutil.SyncParentDir(dest); err != nil {
-			logger.Warn("sync parent dir after commit", "path", dest, "err", err)
-		}
-		out.Status = "committed"
-		res.Committed++
 		res.Outcomes = append(res.Outcomes, out)
-		if d := path.Dir(clean); d != "." {
-			dirs[d] = struct{}{}
-		} else {
-			dirs["."] = struct{}{}
-		}
 	}
 
 	for d := range dirs {
@@ -606,6 +575,54 @@ func (m *Manager) Commit(sid string) (*CommitResult, error) {
 		logger.Warn("remove staging dir after commit", "session", sid, "err", err)
 	}
 	return res, nil
+}
+
+// commitOne renames ONE staged file into the library. The caller holds this
+// file's lock.
+func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutcome, string) {
+	{
+		out := CommitOutcome{Path: fd.RelPath, Bytes: fd.Size}
+		st, err := m.readState(doc.Root, sid, fd.ID)
+		if err != nil || st.Offset != fd.Size {
+			out.Status, out.Reason = "failed", "incomplete"
+			return out, ""
+		}
+		// Re-validate. The manifest has been on disk since Create and is not
+		// trusted to still say what it said.
+		clean, err := ValidateRelPath(fd.RelPath)
+		if err != nil {
+			out.Status, out.Reason = "failed", err.Error()
+			return out, ""
+		}
+		dest := filepath.Join(doc.Root, filepath.FromSlash(clean))
+		if err := AssertRootContains(doc.Root, dest); err != nil {
+			out.Status, out.Reason = "failed", err.Error()
+			return out, ""
+		}
+		if !doc.Overwrite {
+			if _, err := os.Stat(dest); err == nil {
+				out.Status, out.Reason = "skipped", "a file already exists at this path"
+				return out, ""
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			out.Status, out.Reason = "failed", err.Error()
+			return out, ""
+		}
+		// RenameWithRetry absorbs the Windows scan-on-close window.
+		if err := atomicwrite.RenameWithRetry(m.partPath(doc.Root, sid, fd.ID), dest); err != nil {
+			out.Status, out.Reason = "failed", err.Error()
+			return out, ""
+		}
+		if err := fsutil.SyncParentDir(dest); err != nil {
+			logger.Warn("sync parent dir after commit", "path", dest, "err", err)
+		}
+		out.Status = "committed"
+		if d := path.Dir(clean); d != "." {
+			return out, d
+		}
+		return out, "."
+	}
 }
 
 // openStagedFile opens a .part for positioned writing.

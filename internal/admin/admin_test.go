@@ -93,6 +93,13 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Join admin-spawned background scans. IsScanning is deliberately
+	// full-Scan-only, so it does NOT cover ScanSubtree — which is what an
+	// upload commit or a delete triggers. Registered AFTER the store's own
+	// cleanup so it runs BEFORE it (LIFO): otherwise those goroutines outlive
+	// the test and log "database is closed" against a store already shut,
+	// which is noise today and a flake the moment one of them asserts.
+	t.Cleanup(func() { srvBgScansWait(srv) })
 	return srv, cfg, cfgPath
 }
 
@@ -1769,5 +1776,16 @@ func TestSettingsPatchAutoOptimizeUnwiredRequiresRestart(t *testing.T) {
 	}
 	if !srv.deps.CfgHolder.Load().Upscale.AutoOptimize.Enabled {
 		t.Error("the flag must still persist even when it needs a restart to take effect")
+	}
+}
+
+// srvBgScansWait joins the admin server's background-scan WaitGroup with a
+// bound, so a wedged scan reports rather than hanging the test binary.
+func srvBgScansWait(s *Server) {
+	done := make(chan struct{})
+	go func() { defer close(done); s.bgScans.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
 	}
 }

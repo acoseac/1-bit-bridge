@@ -14,6 +14,8 @@ import (
 // question is even live rather than leaving the client to guess.
 func TestLibrarySpaceConfiguredOnlyWithAFloorOrUploads(t *testing.T) {
 	srv, _, _ := newTestServer(t)
+	resetSpaceCacheForTest()
+	t.Cleanup(resetSpaceCacheForTest)
 
 	var sp map[string]any
 	if code := doJSON(t, srv.Handler(), "GET", "/api/library/space", nil, &sp); code != http.StatusOK {
@@ -49,6 +51,8 @@ func TestLibrarySpaceConfiguredOnlyWithAFloorOrUploads(t *testing.T) {
 // exactly the number an operator deciding what to delete needs.
 func TestLibrarySpaceReportsLibraryBytes(t *testing.T) {
 	srv, _, _ := newTestServer(t)
+	resetSpaceCacheForTest()
+	t.Cleanup(resetSpaceCacheForTest)
 	for i, sz := range []int64{1000, 2500} {
 		if err := srv.deps.Manifest.UpsertTrack(t.Context(), &manifest.Track{
 			Path: string(rune('a'+i)) + ".flac", Size: sz,
@@ -69,6 +73,8 @@ func TestLibrarySpaceReportsLibraryBytes(t *testing.T) {
 // which on a shared disk reads "almost empty" while the volume is nearly full.
 func TestLibrarySpaceReportsCapacity(t *testing.T) {
 	srv, _, _ := newTestServer(t)
+	resetSpaceCacheForTest()
+	t.Cleanup(resetSpaceCacheForTest)
 	var sp map[string]any
 	doJSON(t, srv.Handler(), "GET", "/api/library/space", nil, &sp)
 	total, _ := sp["totalBytes"].(float64)

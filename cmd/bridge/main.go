@@ -64,6 +64,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
+	"github.com/acoseac/1-bit-bridge/internal/trash"
 	"github.com/acoseac/1-bit-bridge/internal/tsnet"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/upload"
@@ -3649,15 +3650,37 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		uploadMgr.RunSweeper(scanCtx, uploadSweepInterval)
 	}()
 
+	// Trash. The gate is read LIVE on every mutating call, so
+	// library.allowDelete hot-applies; a nil gate would fail closed, which is
+	// the right direction for the only thing in the bridge that removes
+	// library content.
+	trashMgr := trash.New(
+		scanner.Roots,
+		func() bool {
+			live := cfgHolder.Load()
+			return live != nil && live.Library.AllowDelete
+		},
+		time.Duration(cfg.Library.TrashTtlSeconds)*time.Second,
+	)
+	// bgWriters-joined for the same reason the upload sweeper is: it unlinks
+	// files inside a library root.
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		trashMgr.RunSweeper(scanCtx, trashSweepInterval)
+	}()
+
 	adminSrv, err := admin.New(admin.Deps{
-		CfgHolder:   cfgHolder,
-		CfgPath:     absCfgPath,
-		Auth:        store,
-		Manifest:    manifestStore,
-		Scanner:     scanner,
-		Upload:      uploadMgr,
-		Resolver:    apiSrv.Resolver(),
-		Fingerprint: fingerprint,
+		CfgHolder:    cfgHolder,
+		CfgPath:      absCfgPath,
+		Auth:         store,
+		Manifest:     manifestStore,
+		Scanner:      scanner,
+		Upload:       uploadMgr,
+		TrashManager: trashMgr,
+		Trash:        trashMgr.Reclaimable,
+		Resolver:     apiSrv.Resolver(),
+		Fingerprint:  fingerprint,
 		// Pairing-QR baker asks the SNI cert switcher what fingerprint a
 		// device will capture when it dials a given host, so a public-mode
 		// QR advertises the autocert LE fingerprint (what the device sees)

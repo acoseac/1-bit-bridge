@@ -323,6 +323,11 @@ func TestParseContentDigestSHA256(t *testing.T) {
 	if err != nil || !bytes.Equal(got, sum[:]) {
 		t.Errorf("well-formed digest: got %x err %v", got, err)
 	}
+	// Parameters on the member are ignored, per RFC 8941 §3.1.2.
+	got, err = parseContentDigestSHA256("sha-256=:" + b64 + ":;q=1")
+	if err != nil || !bytes.Equal(got, sum[:]) {
+		t.Errorf("digest with a parameter: got %x err %v", got, err)
+	}
 	// Other algorithms are ignored rather than refused, per RFC 9530.
 	got, err = parseContentDigestSHA256("sha-512=:" + b64 + ":")
 	if err != nil || got != nil {

@@ -196,6 +196,49 @@ function select(name, value, options) {
 
 // ---- Album detail ----
 
+// appendDeleteAction adds a Delete button to a detail toolbar when the console
+// allows deleting. It is fire-and-forget: a failure to learn the setting leaves
+// the toolbar as it was, which is the safe direction for a destructive control.
+async function appendDeleteAction(actions, tracks, label) {
+  const paths = (tracks || []).map((t) => t.path).filter(Boolean);
+  if (!paths.length) return;
+  let cfg;
+  try {
+    cfg = await api.settings();
+  } catch {
+    return;
+  }
+  if (!cfg || !cfg.allowDelete) return;
+
+  const btn = el("button", {
+    class: "btn danger", text: "Delete…",
+    on: {
+      click: async () => {
+        const n = paths.length;
+        if (!confirm(
+          `Move ${n} file${n === 1 ? "" : "s"} from "${label}" to the trash?\n\n` +
+          `They stay recoverable from the Library page until the trash is emptied.`)) {
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "Deleting…";
+        try {
+          const res = await api.trash(paths);
+          const failed = (res.outcomes || []).filter((o) => o.status === "failed");
+          btn.textContent = failed.length
+            ? `${res.ok} deleted, ${failed.length} failed`
+            : `${res.ok} moved to trash`;
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = "Delete…";
+          alert(e && e.message ? e.message : String(e));
+        }
+      },
+    },
+  });
+  actions.appendChild(btn);
+}
+
 export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
   setToolbar(null);
   clear(view);
@@ -259,6 +302,13 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
       class: "btn", text: "Add to queue",
       on: { click: () => audio.enqueue(d.tracks) },
     }));
+
+  // Delete is appended ASYNCHRONOUSLY and only when the operator has turned
+  // it on, so a bridge without it renders exactly the toolbar it did before.
+  // Deleting moves the files to the library's trash rather than unlinking
+  // them, which is why the confirm can be a plain one: it is recoverable, and
+  // the Library page is where the space is actually reclaimed.
+  appendDeleteAction(actions, d.tracks, a.title);
 
   const unplayable = d.tracks.filter((t) => t.play && t.play.kind === "none").length;
 

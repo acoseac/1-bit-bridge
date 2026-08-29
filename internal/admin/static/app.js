@@ -1264,6 +1264,22 @@ function formatTimeAgo(d) {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
+// formatTimeUntil is the FUTURE counterpart. formatTimeAgo clamps at zero, so
+// feeding it a future timestamp renders "0s ago" — which for a trash expiry
+// says the entry is going away right now when it has a week left. A wrong
+// answer that looks like a real one, so the two are kept separate.
+function formatTimeUntil(d) {
+  const sec = Math.floor((d.getTime() - Date.now()) / 1000);
+  if (sec <= 0) return "any moment";
+  if (sec < 3600) return `in ${Math.max(1, Math.floor(sec / 60))}m`;
+  // ROUND, not floor, on the coarse buckets. A 7-day window read back
+  // milliseconds after the delete is 6.9999 days, and flooring it renders
+  // "in 6d" — which reads as a bug immediately after an action that
+  // promised a week. The most this over-states is half a bucket.
+  if (sec < 86400) return `in ${Math.round(sec / 3600)}h`;
+  return `in ${Math.round(sec / 86400)}d`;
+}
+
 function setText(id, v) {
   const el = document.getElementById(id);
   if (el) el.textContent = String(v);
@@ -1311,9 +1327,105 @@ async function refreshSpaceMeter() {
     btn.type = "button";
     btn.className = "space-meter-reclaim";
     btn.textContent = `${formatBytes(sp.reclaimableBytes)} in trash`;
-    btn.addEventListener("click", () => { location.href = "/library"; });
+    // boostNavigate, NOT location.href: a full page load destroys the DOM and
+    // with it the <audio> element, stopping playback. Surviving navigation to
+    // an operator page is the whole point of the partial-boost router.
+    btn.addEventListener("click", () => { boostNavigate("/library"); });
     text.appendChild(btn);
   }
+}
+
+// --- Trash ------------------------------------------------------------------
+//
+// Deleting moves files into a hidden folder inside the library rather than
+// unlinking them, so this panel is where the space actually comes back: an
+// operator who deleted to make room and never emptied the trash is still full.
+// That is why the summary leads with what emptying would reclaim.
+
+function initTrash() {
+  const panel = document.getElementById("trash-panel");
+  if (!panel) return;
+  API.get("/api/settings")
+    .then((cfg) => {
+      if (!cfg || !cfg.allowDelete) return;
+      panel.hidden = false;
+      document.getElementById("trash-empty")?.addEventListener("click", emptyTrash);
+      refreshTrash();
+    })
+    .catch(() => {});
+}
+
+async function refreshTrash() {
+  const body = document.getElementById("trash-body");
+  const table = document.getElementById("trash-table");
+  if (!body) return;
+  let entries;
+  try {
+    entries = await API.get("/api/library/trash");
+  } catch {
+    return;
+  }
+  body.replaceChildren();
+  const total = (entries || []).reduce((n, e) => n + e.size, 0);
+  const empty = !entries || entries.length === 0;
+  table.hidden = empty;
+  document.getElementById("trash-empty").disabled = empty;
+  setText(
+    "trash-summary",
+    empty
+      ? "Nothing in the trash."
+      : `${entries.length} file${entries.length === 1 ? "" : "s"} · ${formatBytes(total)} — ` +
+        `emptying the trash is what returns this space.`,
+  );
+  for (const e of entries || []) {
+    const tr = document.createElement("tr");
+    const path = document.createElement("td");
+    path.textContent = e.originalPath;
+    const size = document.createElement("td");
+    size.textContent = formatBytes(e.size);
+    const when = document.createElement("td");
+    when.textContent = formatTimeAgo(new Date(e.trashedAt));
+    const exp = document.createElement("td");
+    exp.textContent = formatTimeUntil(new Date(e.expiresAt));
+    const act = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn";
+    btn.textContent = "Restore";
+    btn.addEventListener("click", () => restoreTrash(e.id));
+    act.appendChild(btn);
+    tr.append(path, size, when, exp, act);
+    body.appendChild(tr);
+  }
+}
+
+async function restoreTrash(id) {
+  try {
+    const res = await API.post("/api/library/trash/restore", { ids: [id] });
+    const failed = (res.outcomes || []).find((o) => o.status === "failed");
+    setText("trash-status", failed ? `Could not restore: ${failed.reason}` : "Restored.");
+  } catch (e) {
+    setText("trash-status", e && e.message ? e.message : String(e));
+  }
+  refreshTrash();
+  refreshSpaceMeter();
+}
+
+async function emptyTrash() {
+  // Deliberately a plain confirm rather than the typed-phrase gate the
+  // whole-library variant clear uses: this destroys only what the operator
+  // already chose to delete, and it is the documented way to reclaim space,
+  // so a high-friction ceremony here would train them to avoid the one
+  // action that fixes being full.
+  if (!confirm("Permanently delete everything in the trash? This cannot be undone.")) return;
+  try {
+    const res = await API.delete("/api/library/trash");
+    setText("trash-status", `Reclaimed ${formatBytes(res.bytes || 0)}.`);
+  } catch (e) {
+    setText("trash-status", e && e.message ? e.message : String(e));
+  }
+  refreshTrash();
+  refreshSpaceMeter();
 }
 
 // --- Upload -----------------------------------------------------------------
@@ -1566,6 +1678,18 @@ async function transferAll(session) {
 
   let next = 0;
   const worker = async () => {
+    try {
+      await workerLoop();
+    } catch (err) {
+      // Promise.all rejects on the first failure and startUpload tears the
+      // progress UI down — but the sibling workers only watch `aborted`, so
+      // without this they keep PUTting chunks after the operator has been
+      // told the upload failed.
+      uploadState.aborted = true;
+      throw err;
+    }
+  };
+  const workerLoop = async () => {
     while (!uploadState.aborted) {
       const i = next++;
       if (i >= queue.length) return;
@@ -1653,6 +1777,7 @@ function resetUpload() {
 
 function initLibrary() {
   initUpload();
+  initTrash();
   initVariantsPanel();
   const form = document.getElementById("add-root-form");
   if (form) {
@@ -3446,6 +3571,7 @@ function initSettings() {
       // watcher goroutine starts at `bridge serve` startup.
       libraryWatchEnabled: fd.get("libraryWatchEnabled") === "on",
       uploadEnabled: fd.get("uploadEnabled") === "on",
+      allowDelete: fd.get("allowDelete") === "on",
       // Backup cadence + retention. These became editable with the
       // settings consolidation and MUST be listed here: this payload is
       // an explicit allowlist, not a FormData dump, so a field that

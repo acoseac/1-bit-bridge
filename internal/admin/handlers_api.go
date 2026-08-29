@@ -231,6 +231,12 @@ type settingsResponse struct {
 	// SEPARATE gate (library.allowDelete): enabling an additive feature must
 	// never silently enable a destructive one.
 	UploadEnabled bool `json:"uploadEnabled"`
+
+	// AllowDelete gates removing library content from the console. Its OWN
+	// gate, never folded into uploadEnabled. Deleting moves files into
+	// <root>/.bridge-trash rather than unlinking, so it is recoverable for
+	// library.trashTtlSeconds — but it does NOT free space until purged.
+	AllowDelete bool `json:"allowDelete"`
 	// AutoOptimizeMaxPerSweep / AutoOptimizeMinFreeBytes are the RESOLVED
 	// effective values (zero YAML → the package defaults), so the UI
 	// shows what the sweeper will actually do rather than a blank.
@@ -1861,6 +1867,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		OptimizeEnabled:          cfg.Upscale.EffectiveOptimizeEnabled(),
 		AutoOptimizeEnabled:      cfg.Upscale.AutoOptimize.Enabled,
 		UploadEnabled:            cfg.Upload.Enabled,
+		AllowDelete:              cfg.Library.AllowDelete,
 		AutoOptimizeMaxPerSweep:  cfg.Upscale.AutoOptimize.EffectiveMaxPerSweep(),
 		AutoOptimizeMinFreeBytes: cfg.Upscale.AutoOptimize.EffectiveMinFreeBytes(),
 		LibraryWatchEnabled:      cfg.LibraryWatch.Enabled,
@@ -2003,6 +2010,10 @@ type settingsPatch struct {
 	// UploadEnabled hot-applies: the routes are wired unconditionally and
 	// the handlers read the flag per request (WIRED vs ACTIVE).
 	UploadEnabled *bool `json:"uploadEnabled,omitempty"`
+
+	// AllowDelete hot-applies: the trash manager reads the gate live on
+	// every mutating call.
+	AllowDelete *bool `json:"allowDelete,omitempty"`
 	// LibraryWatchEnabled toggles the fsnotify instant-update watcher.
 	// Restart-required: the watcher goroutine is spawned once at
 	// `bridge serve` startup (same startup-wired shape as UpscaleEnabled).
@@ -2314,6 +2325,20 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				report.live("optimizeEnabled")
 			} else {
 				report.unchanged("optimizeEnabled")
+			}
+		}
+		if p.AllowDelete != nil {
+			if *p.AllowDelete != next.Library.AllowDelete {
+				next.Library.AllowDelete = *p.AllowDelete
+				if s.deps.TrashManager == nil {
+					report.restartBecause("allowDelete",
+						"the trash subsystem is not wired on this bridge, "+
+							"so the persisted value cannot take effect until a restart")
+				} else {
+					report.live("allowDelete")
+				}
+			} else {
+				report.unchanged("allowDelete")
 			}
 		}
 		if p.UploadEnabled != nil {

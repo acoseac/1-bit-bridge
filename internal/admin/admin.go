@@ -45,6 +45,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
+	"github.com/acoseac/1-bit-bridge/internal/trash"
 	"github.com/acoseac/1-bit-bridge/internal/upload"
 )
 
@@ -87,6 +88,11 @@ type Deps struct {
 	// until the trash exists; the space widget then shows zero reclaimable,
 	// which is the truth on a bridge without one.
 	Trash func(root string) int64
+
+	// TrashManager backs the console's delete surface. Gated separately from
+	// uploads by library.allowDelete — enabling an additive feature must
+	// never silently enable a destructive one.
+	TrashManager *trash.Manager
 
 	// Fingerprint is the self-signed TLS cert SHA-256 in colon-hex form.
 	// Shown in the dashboard cert tile (the LAN pin operators verify) and
@@ -1406,6 +1412,10 @@ func (s *Server) Handler() http.Handler {
 	// allowlist covers — see uploadOctetStreamRoutes, which is pinned to
 	// exactly this prefix.
 	mux.HandleFunc("GET /api/library/space", s.apiLibrarySpace)
+	mux.HandleFunc("POST /api/library/trash", s.apiTrashAdd)
+	mux.HandleFunc("GET /api/library/trash", s.apiTrashList)
+	mux.HandleFunc("POST /api/library/trash/restore", s.apiTrashRestore)
+	mux.HandleFunc("DELETE /api/library/trash", s.apiTrashPurge)
 	mux.HandleFunc("POST /api/upload/sessions", s.apiUploadCreate)
 	mux.HandleFunc("GET /api/upload/sessions", s.apiUploadList)
 	mux.HandleFunc("GET /api/upload/sessions/{sid}", s.apiUploadStatus)

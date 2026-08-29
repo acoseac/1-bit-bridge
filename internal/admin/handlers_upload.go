@@ -337,6 +337,12 @@ func parseContentDigestSHA256(h string) ([]byte, error) {
 			continue
 		}
 		v = strings.TrimSpace(v)
+		// A structured-field member may carry parameters (RFC 8941 §3.1.2):
+		// `sha-256=:base64:;q=1`. Without stripping them the byte-sequence
+		// check below sees a trailing `1` and rejects a well-formed header.
+		if before, _, found := strings.Cut(v, ";"); found {
+			v = strings.TrimSpace(before)
+		}
 		if len(v) < 2 || v[0] != ':' || v[len(v)-1] != ':' {
 			return nil, errors.New("Content-Digest sha-256 value must be a byte sequence (:base64:)")
 		}

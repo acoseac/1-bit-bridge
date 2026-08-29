@@ -12,8 +12,10 @@ and therefore gets its own gate). **Move** is a follow-on — see the bottom.
 depend on it. **Scope:** the admin surface only. Nothing here touches `/v1`;
 `ProtocolVersion` is untouched, and there is no iOS mirror and no Mirror-PR pair.
 
-Kept in `ops/` per the repo rule — it names no hosts, no keys and no unfixed
-weaknesses, so the placement is convention rather than necessity.
+Kept in `ops/` per the repo rule. It names the reference deployment by the
+public hostname the tracked runbook already carries, and no SSH coordinates, key
+paths or unfixed weaknesses — so the placement is convention rather than
+necessity.
 
 ---
 

@@ -177,3 +177,81 @@ var (
 	uploadCSSCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
 	hintWarnRuleRe     = regexp.MustCompile(`\.hint\.warn\s*[,{]`)
 )
+
+// The trash panel has the same silent-drift exposure as the upload one: ids
+// resolved at runtime, nothing in Go linking the two halves.
+var trashIDRe = regexp.MustCompile(`"(trash-[a-z0-9-]+)"`)
+var trashTmplIDRe = regexp.MustCompile(`id="(trash-[a-z0-9-]+)"`)
+
+func TestTrashPanelIDsMatchBothWays(t *testing.T) {
+	js := readFile(t, "static/app.js")
+	tmpl := readFile(t, "templates/library.html")
+
+	inTmpl := map[string]bool{}
+	for _, m := range trashTmplIDRe.FindAllStringSubmatch(tmpl, -1) {
+		inTmpl[m[1]] = true
+	}
+	if len(inTmpl) == 0 {
+		t.Fatal("no trash-* ids in library.html — the panel is gone or was renamed wholesale")
+	}
+	inJS := map[string]bool{}
+	for _, m := range trashIDRe.FindAllStringSubmatch(js, -1) {
+		inJS[m[1]] = true
+	}
+	ariaWired := map[string]bool{}
+	for _, m := range ariaRefRe.FindAllStringSubmatch(tmpl, -1) {
+		for _, id := range strings.Fields(m[2]) {
+			ariaWired[id] = true
+		}
+	}
+	for id := range inJS {
+		if !inTmpl[id] {
+			t.Errorf("app.js reaches for %q but library.html renders no such id", id)
+		}
+	}
+	for id := range inTmpl {
+		if !inJS[id] && !ariaWired[id] {
+			t.Errorf("library.html renders id=%q but nothing references it", id)
+		}
+	}
+}
+
+// TestTrashPanelIsHiddenUntilDeleteIsAllowed — an operator who has not turned
+// deleting on should see no delete chrome, the same rule the upload panel and
+// the upscale stats card follow.
+func TestTrashPanelIsHiddenUntilDeleteIsAllowed(t *testing.T) {
+	tmpl := readFile(t, "templates/library.html")
+	i := strings.Index(tmpl, `id="trash-panel"`)
+	if i < 0 {
+		t.Fatal("trash panel not found")
+	}
+	open := tmpl[strings.LastIndex(tmpl[:i], "<"):]
+	open = open[:strings.Index(open, ">")]
+	if !strings.Contains(open, "hidden") {
+		t.Errorf("the trash panel renders visible by default: %q", open)
+	}
+	js := readFile(t, "static/app.js")
+	if !strings.Contains(js, "cfg.allowDelete") {
+		t.Error("app.js never consults allowDelete, so the panel would either always or never show")
+	}
+}
+
+// TestExpiryUsesAFutureFormatter — formatTimeAgo clamps at zero, so a trash
+// expiry rendered through it reads "0s ago" when it has a week left: a wrong
+// answer that looks like a real one. This shipped once.
+func TestExpiryUsesAFutureFormatter(t *testing.T) {
+	js := readFile(t, "static/app.js")
+	i := strings.Index(js, "async function refreshTrash")
+	if i < 0 {
+		t.Fatal("refreshTrash not found — this test no longer covers the expiry cell")
+	}
+	end := strings.Index(js[i:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not delimit refreshTrash")
+	}
+	body := js[i : i+end]
+	if !strings.Contains(body, "formatTimeUntil(new Date(e.expiresAt))") {
+		t.Error("the trash expiry is not rendered with formatTimeUntil; formatTimeAgo " +
+			"clamps at zero and shows a future timestamp as \"0s ago\"")
+	}
+}

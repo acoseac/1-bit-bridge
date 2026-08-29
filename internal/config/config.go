@@ -74,6 +74,7 @@ type Config struct {
 	Duplicates      DuplicatesConfig     `yaml:"duplicates,omitempty"`
 	SmartPlaylists  SmartPlaylistsConfig `yaml:"smartPlaylists,omitempty"`
 	Upload          UploadConfig         `yaml:"upload,omitempty"`
+	Library         LibraryConfig        `yaml:"library,omitempty"`
 	Tailscale       TailscaleConfig      `yaml:"tailscale,omitempty"`
 	Scanner         ScannerConfig        `yaml:"scanner,omitempty"`
 	Limits          LimitsConfig         `yaml:"limits,omitempty"`
@@ -364,6 +365,24 @@ func (e EnrichConfig) EffectiveCoverSize() int {
 		return 1200
 	}
 	return e.CoverSize
+}
+
+// LibraryConfig governs operations that MUTATE library content.
+//
+// AllowDelete is its own gate, deliberately NOT folded into upload.enabled:
+// enabling an additive feature must never silently enable a destructive one.
+// It defaults OFF, and the zero value is that default.
+//
+// Deleting moves a file into <root>/.bridge-trash/<stamp>/ rather than
+// unlinking it — recoverable for TrashTtlSeconds, and NOT reclaimed until the
+// operator purges. That is the honest tension: trash does not free space, which
+// is why the console reports reclaimable bytes beside free ones.
+type LibraryConfig struct {
+	AllowDelete bool `yaml:"allowDelete,omitempty"`
+
+	// TrashTtlSeconds resolves to internal/trash's default at zero AND at a
+	// negative value.
+	TrashTtlSeconds int `yaml:"trashTtlSeconds,omitempty"`
 }
 
 // UploadConfig governs the admin console's file-upload surface.
@@ -2355,6 +2374,10 @@ func (c *Config) Validate() error {
 	if c.Upload.SessionTTLSeconds < 0 || c.Upload.SessionTTLSeconds > maxIntervalSeconds {
 		return fmt.Errorf("upload.sessionTtlSeconds: must be between 0 and %d (0 uses the default), got %d",
 			maxIntervalSeconds, c.Upload.SessionTTLSeconds)
+	}
+	if c.Library.TrashTtlSeconds < 0 || c.Library.TrashTtlSeconds > maxIntervalSeconds {
+		return fmt.Errorf("library.trashTtlSeconds: must be between 0 and %d (0 uses the default), got %d",
+			maxIntervalSeconds, c.Library.TrashTtlSeconds)
 	}
 	// Enrich upstream base URLs: require an absolute http(s) URL —
 	// surfaces typos at load time instead of as silent runtime enrichment

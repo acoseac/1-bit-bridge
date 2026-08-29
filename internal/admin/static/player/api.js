@@ -106,6 +106,11 @@ export const api = {
   // and tracks as a queue.
   favorites: () => getJSON("/api/player/favorites", { key: "favorites" }),
 
+  // Delete reuses the operator trash endpoints unchanged. The settings read
+  // is what tells the toolbar whether to offer the control at all.
+  settings: () => getJSON("/api/settings", { key: "settings" }),
+  trash: (paths) => postJSON("/api/library/trash", { paths }),
+
   // Mix actions reuse the operator endpoints unchanged — no new backend.
   // They came with the retired /smartmixes page; the player is now the
   // only surface that offers them.
