@@ -6,7 +6,7 @@ import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, download
          playlistExportURL, isAborted } from "./api.js";
 import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason,
          bytes, variantKindLabel, variantSkipLabel, timeAgo } from "./format.js";
-import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs } from "./ui.js";
+import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce } from "./ui.js";
 import * as audio from "./audio.js";
 import { variantPanel, onVariantChange } from "./variants.js";
 
@@ -21,6 +21,25 @@ const AXIS_FILTERS = ["artist", "genre", "composer"];
 // folder rows and the folder's own summary line cannot name or order
 // them differently, and a third kind reaches both at once.
 const COVERAGE_KINDS = ["upscale", "optimize"];
+
+// The top-level section each detail view hangs off, as ONE table.
+//
+// A crumb pointing at a path the shell does not own would fall out of
+// the player and take a full page load with it — which stops playback,
+// the one thing the client-side router exists to prevent. Keeping the
+// hrefs here rather than inline at seven call sites means a renamed
+// section is one edit, and TestCrumbRootsAreRealSections pins these
+// against boot.js's own SECTIONS list so a rename that misses this
+// table fails loudly instead of shipping seven dead links.
+const CRUMB_ROOTS = {
+  albums: { label: "Albums", href: "/albums" },
+  artists: { label: "Artists", href: "/artists" },
+  genres: { label: "Genres", href: "/genres" },
+  composers: { label: "Composers", href: "/composers" },
+  playlists: { label: "Playlists", href: "/playlists" },
+  mixes: { label: "Smart Mixes", href: "/mixes" },
+  folders: { label: "Folders", href: "/folders" },
+};
 
 // ---- Albums grid ----
 
@@ -160,7 +179,7 @@ function select(name, value, options) {
 
 // ---- Album detail ----
 
-export async function renderAlbum(view, { id, setToolbar }) {
+export async function renderAlbum(view, { id, setToolbar, setCrumb }) {
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -176,6 +195,23 @@ export async function renderAlbum(view, { id, setToolbar }) {
   clear(view);
   const a = d.album;
   const art = coverURL(a, 500);
+
+  // Structural, not a record of how the reader got here: an album is
+  // reachable from the grid, an artist, a genre, a playlist and search,
+  // so "where you came from" is a different answer every time and is
+  // not in the URL. The artist chain is true from every one of those
+  // routes and is the only up-link the page has — the .detail-artist
+  // line below is the same destination, but it reads as a byline, not
+  // as a way out.
+  //
+  // A provenance trail (?from=..., or a stack in history.state) was
+  // considered and left out: it makes the URL unshareable and the same
+  // page render differently for two readers, and Back already answers
+  // the literal question.
+  setCrumb(a.artistId
+    ? crumbs([CRUMB_ROOTS.artists,
+              { label: a.albumArtist || "Unknown artist", href: `/artist/${a.artistId}` }])
+    : crumbs([CRUMB_ROOTS.albums]));
 
   const actions = el("div", { class: "detail-actions" },
     el("button", {
@@ -498,8 +534,9 @@ function monogram(name) {
 }
 
 
-export async function renderArtist(view, { id, gen, setToolbar }) {
+export async function renderArtist(view, { id, gen, setToolbar, setCrumb }) {
   setToolbar(null);
+  setCrumb(crumbs([CRUMB_ROOTS.artists]));
   clear(view);
   view.appendChild(spinner());
   let d;
@@ -597,6 +634,12 @@ export async function renderAxisAlbums(view, ctx, kind) {
   const params = new URLSearchParams(ctx.params);
   params.set(kind, id);
 
+  // Set before the label lookup, not after: the crumb is derivable from
+  // the ROUTE alone, so it can be on screen while the name is still in
+  // flight — and it survives the lookup failing, which is the case
+  // where a way back matters most.
+  ctx.setCrumb(crumbs([kind === "genre" ? CRUMB_ROOTS.genres : CRUMB_ROOTS.composers]));
+
   // The label lookup is a second round trip, so the route can change
   // under it. api.genres/api.composers share the "axis" key and so abort
   // each OTHER, but navigating to a DIFFERENT section does not — the
@@ -621,12 +664,21 @@ export async function renderAxisAlbums(view, ctx, kind) {
   return renderAlbums(view, { ...ctx, params, scopeLabel: label });
 }
 
-/** Retitle the page once the axis name is known. */
+/**
+ * Retitle the page once the real name is known.
+ *
+ * Re-announces as well as retitling. route() announces the SECTION name
+ * ("Folders", "Genre") because that is all it knows at dispatch time, so
+ * without this a screen reader hears the same word on every folder in a
+ * tree while the heading says something different each time — the one
+ * reader who cannot see the crumb gets the least orientation.
+ */
 function setAxisTitle(label) {
   const h = document.getElementById("player-title");
   if (h) h.textContent = label;
   const base = document.title.split(" — ").slice(1).join(" — ");
   document.title = base ? `${label} — ${base}` : label;
+  announce(label);
 }
 
 /**
@@ -1098,8 +1150,7 @@ export async function renderPlaylistDetail(view, ctx) {
   await renderCollectionDetail(view, ctx, {
     fetch: () => api.playlist(ctx.id),
     scope: "playlist",
-    backHref: "/playlists",
-    backLabel: "Playlists",
+    root: CRUMB_ROOTS.playlists,
     // Cover only — a backed-up playlist has no server-side regenerate
     // or snapshot to offer. POST /api/playlists/{id}/cover has existed
     // since the covers work landed with no caller at all: the only UI
@@ -1112,8 +1163,7 @@ export async function renderMixDetail(view, ctx) {
   await renderCollectionDetail(view, ctx, {
     fetch: () => api.mix(ctx.id),
     scope: "smartmix",
-    backHref: "/mixes",
-    backLabel: "Smart Mixes",
+    root: CRUMB_ROOTS.mixes,
     actions: mixActions,
   });
 }
@@ -1125,7 +1175,7 @@ async function renderCollectionDetail(view, ctx, opts) {
   // middle of an action group — and on a smart mix, which has a SECOND action
   // row below (Regenerate / Save as playlist), it wrapped to a line of its own
   // and read as a third kind of button sandwiched between the two.
-  ctx.setCrumb(link(opts.backHref, { class: "crumb-link", text: `← ${opts.backLabel}` }));
+  ctx.setCrumb(crumbs([opts.root]));
   clear(view);
   view.appendChild(spinner());
   let d;
@@ -1377,6 +1427,21 @@ function readAsDataURL(file) {
 export async function renderFolders(view, { params, setToolbar, setCrumb }) {
   setToolbar(null);
   const path = params.get("path") || "";
+  // Both derived from the path, so both are painted BEFORE the fetch:
+  // they are the answer to "where am I", which is exactly the question a
+  // reader has while the folder is still loading, and they stay correct
+  // if it fails to load at all.
+  //
+  // The heading takes the leaf and the crumb takes its ancestors, so the
+  // page names itself the way /genre/{id} and a playlist do rather than
+  // sitting under a permanent "Folders". The full path used to be a grey
+  // line under a lone "← Up" link, which said where you were but gave no
+  // way to any level except one step up — on Artist/Album/Disc 03 that
+  // meant clicking up twice to reach the artist.
+  setCrumb(crumbs(folderAncestors(path)));
+  const segments = pathSegments(path);
+  if (segments.length) setAxisTitle(segments[segments.length - 1]);
+
   clear(view);
   view.appendChild(spinner());
   let r;
@@ -1389,12 +1454,6 @@ export async function renderFolders(view, { params, setToolbar, setCrumb }) {
     return;
   }
   clear(view);
-
-  if (path) {
-    const up = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    setCrumb(link(`/folders?path=${encodeURIComponent(up)}`, { class: "crumb-link", text: "← Up" }));
-    view.appendChild(el("p", { class: "muted small", text: path }));
-  }
 
   // The whole node, not this page. The rollup is the only honest source
   // for a folder's totals — summing the returned page under-counts the
@@ -1410,6 +1469,38 @@ export async function renderFolders(view, { params, setToolbar, setCrumb }) {
     return;
   }
   view.appendChild(list);
+}
+
+/**
+ * A browse path split into its segments.
+ *
+ * Empty segments are dropped so a stray or doubled separator — which a
+ * hand-edited URL can carry — cannot produce a blank crumb linking to a
+ * path that differs from the one it was derived from.
+ */
+function pathSegments(path) {
+  return (path || "").split("/").filter(Boolean);
+}
+
+/**
+ * The ancestors of a browse path: the root, then every segment ABOVE
+ * the current one, each linking to its own level.
+ *
+ * The leaf is excluded because it is the heading (see renderFolders).
+ * At the root the whole trail is empty, so crumbs() returns null and the
+ * slot collapses — "Folders › " above a heading that already says
+ * Folders would be one word twice and a link to the page you are on.
+ */
+function folderAncestors(path) {
+  const segments = pathSegments(path);
+  if (!segments.length) return [];
+  const trail = [CRUMB_ROOTS.folders];
+  let prefix = "";
+  for (const segment of segments.slice(0, -1)) {
+    prefix = prefix ? `${prefix}/${segment}` : segment;
+    trail.push({ label: segment, href: `/folders?path=${encodeURIComponent(prefix)}` });
+  }
+  return trail;
 }
 
 /**
@@ -1610,7 +1701,7 @@ export async function renderTracks(view, { params, setToolbar, setCrumb }) {
     return;
   }
   clear(view);
-  setCrumb(link("/mixes", { class: "crumb-link", text: "← Smart Mixes" }));
+  setCrumb(crumbs([CRUMB_ROOTS.mixes]));
 
   const tracks = r.tracks || [];
   // keyName is the human pitch ("A minor"); the code alone is jargon to
@@ -1630,14 +1721,27 @@ export async function renderTracks(view, { params, setToolbar, setCrumb }) {
 export async function renderSearch(view, { params, setToolbar }) {
   setToolbar(null);
   const q = (params.get("q") || "").trim();
-  clear(view);
   if (q.length < 2) {
+    clear(view);
     view.appendChild(emptyState("Search the library",
       "Type at least two characters. Albums and artists match on a folded key, so " +
       "\u201cbeatles\u201d finds \u201cThe Beatles\u201d."));
     return;
   }
-  view.appendChild(spinner());
+
+  // Refining a query keeps the previous results on screen, dimmed, while
+  // the next one is in flight. Clearing to a spinner on every commit is
+  // what made typing feel like a series of separate searches: the page
+  // blanked, redrew, and blanked again a word later, so nothing was ever
+  // stable long enough to read. A spinner is right for the FIRST search,
+  // where there is nothing to keep.
+  const previous = view.querySelector(".search-results");
+  if (previous) previous.setAttribute("aria-busy", "true");
+  else {
+    clear(view);
+    view.appendChild(spinner());
+  }
+
   let r;
   try {
     r = await api.search(q);
@@ -1648,12 +1752,16 @@ export async function renderSearch(view, { params, setToolbar }) {
     return;
   }
   clear(view);
+  // Everything below goes into one container, which is also the marker
+  // the refinement path above looks for. It has to be a real element
+  // rather than a fragment for that reason.
+  const results = view.appendChild(el("div", { class: "search-results" }));
 
   const albums = r.albums || [];
   const artists = r.artists || [];
   const tracks = r.tracks || [];
   if (!albums.length && !artists.length && !tracks.length) {
-    view.appendChild(emptyState(`Nothing matches \u201c${q}\u201d`,
+    results.appendChild(emptyState(`Nothing matches \u201c${q}\u201d`,
       r.tracksAvailable === false
         ? "Track search is unavailable on this bridge (SQLite built without FTS5), so only " +
           "albums and artists were searched."
@@ -1662,7 +1770,7 @@ export async function renderSearch(view, { params, setToolbar }) {
   }
 
   if (albums.length) {
-    view.appendChild(el("h3", { class: "section-head", text: "Albums" }));
+    results.appendChild(el("h3", { class: "section-head", text: "Albums" }));
     const grid = el("div", { class: "grid" });
     albums.forEach((a) => grid.appendChild(
       link(`/album/${a.id}`, { class: "tile" },
@@ -1670,21 +1778,21 @@ export async function renderSearch(view, { params, setToolbar }) {
         el("div", { class: "tile-body" },
           el("span", { class: "tile-title", text: a.name }),
           el("span", { class: "tile-sub", text: a.detail || "" })))));
-    view.appendChild(grid);
+    results.appendChild(grid);
   }
 
   if (artists.length) {
-    view.appendChild(el("h3", { class: "section-head", text: "Artists" }));
+    results.appendChild(el("h3", { class: "section-head", text: "Artists" }));
     const list = el("div", { class: "rows" });
     artists.forEach((a) => list.appendChild(
       link(`/artist/${a.id}`, { class: "row" },
         el("span", { class: "row-title", text: a.name }),
         el("span", { class: "row-meta", text: a.detail || "" }))));
-    view.appendChild(list);
+    results.appendChild(list);
   }
 
   if (tracks.length) {
-    view.appendChild(el("h3", { class: "section-head", text: "Tracks" }));
+    results.appendChild(el("h3", { class: "section-head", text: "Tracks" }));
     const list = el("div", { class: "rows" });
     tracks.forEach((t) => {
       const label = el("span", { class: "row-title", text: t.title || t.path });
@@ -1696,9 +1804,9 @@ export async function renderSearch(view, { params, setToolbar }) {
         ? link(`/album/${t.albumId}`, { class: "row" }, label, meta)
         : el("div", { class: "row" }, label, meta));
     });
-    view.appendChild(list);
+    results.appendChild(list);
   } else if (r.tracksAvailable === false) {
-    view.appendChild(el("p", { class: "muted small",
+    results.appendChild(el("p", { class: "muted small",
       text: "Track search is unavailable on this bridge (SQLite built without FTS5)." }));
   }
 }

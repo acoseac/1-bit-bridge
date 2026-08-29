@@ -55,6 +55,44 @@ export function cover(src, alt) {
   return box;
 }
 
+/**
+ * A breadcrumb trail of ANCESTORS, outermost first.
+ *
+ * The current page is deliberately NOT listed. It is named by the
+ * heading directly below — route() sets a section title and the detail
+ * views retitle it through setAxisTitle — so listing it here would
+ * print the same string twice, which is exactly what
+ * renderCollectionDetail dropped its own .detail-title to stop doing.
+ * That gives one rule with no exceptions: the crumb says where this
+ * page hangs, the heading says what it is.
+ *
+ * Items with no href are dropped rather than rendered as inert text: a
+ * crumb whose only job is to be clickable is worse than absent when it
+ * is not, and the caller that could not resolve an ancestor (an album
+ * with no artist row) has a shorter, still-true trail to fall back on.
+ *
+ * The title attribute is set only past truncateAt, because .crumb-link
+ * ellipsises long labels and a tooltip is then the only way back to the
+ * full name. Setting it unconditionally would put a tooltip identical
+ * to the visible text on every crumb, which some screen readers
+ * announce twice.
+ */
+const crumbTruncateAt = 24;
+
+export function crumbs(items) {
+  const list = (items || []).filter((i) => i?.label && i?.href);
+  if (!list.length) return null;
+  const ol = el("ol", { class: "crumb-list" });
+  for (const { label, href } of list) {
+    ol.appendChild(el("li", { class: "crumb-item" },
+      link(href, {
+        class: "crumb-link", text: label,
+        attrs: label.length > crumbTruncateAt ? { title: label } : {},
+      })));
+  }
+  return ol;
+}
+
 export function chip(text, cls = "") {
   return text ? el("span", { class: `chip ${cls}`.trim(), text }) : null;
 }
