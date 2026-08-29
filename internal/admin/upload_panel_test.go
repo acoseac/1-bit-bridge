@@ -240,7 +240,10 @@ func TestTrashPanelIsHiddenUntilDeleteIsAllowed(t *testing.T) {
 // expiry rendered through it reads "0s ago" when it has a week left: a wrong
 // answer that looks like a real one. This shipped once.
 func TestExpiryUsesAFutureFormatter(t *testing.T) {
-	js := readFile(t, "static/app.js")
+	// Normalized for the same reason putUploadChunk's scan is: a Windows
+	// checkout carries CRLF and the "\n}\n" delimiter below is not in the
+	// bytes at all.
+	js := strings.ReplaceAll(readFile(t, "static/app.js"), "\r\n", "\n")
 	i := strings.Index(js, "async function refreshTrash")
 	if i < 0 {
 		t.Fatal("refreshTrash not found — this test no longer covers the expiry cell")
