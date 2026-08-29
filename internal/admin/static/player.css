@@ -204,6 +204,14 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    * name stays reachable. */
   max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* The page you are on: same metrics as a link so the trail stays on one
+ * baseline, but no colour shift, no underline and no pointer — it must not
+ * look clickable, because that ambiguity is the whole reason it exists. */
+.crumb-current {
+  display: inline-block; color: var(--fg); font-size: var(--text-sm);
+  font-weight: 600; padding: 3px 0;
+  max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .crumb-link:hover { color: var(--fg); text-decoration: underline; }
 .crumb-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
 
@@ -406,7 +414,12 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   margin-bottom: var(--space-5);
 }
 .detail-art-round .cover { border-radius: 50%; }
-.detail-title { font-size: 1.4rem; margin: 0 0 4px; }
+/* The artist header carries no actions, and since the name moved into the page
+ * heading it carries only a stats line — so the album layout's 260px portrait
+ * left most of the right column empty. A smaller portrait and a centred row
+ * keep the block proportionate without a second layout. The mobile rule below
+ * still collapses it to one column: same specificity, later in the file. */
+.detail-artist-head { grid-template-columns: 168px 1fr; align-items: center; }
 .detail-artist { color: var(--accent); text-decoration: none; font-size: 0.95rem; }
 .detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); flex-wrap: wrap; }
 

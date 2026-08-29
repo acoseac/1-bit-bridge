@@ -56,38 +56,53 @@ export function cover(src, alt) {
 }
 
 /**
- * A breadcrumb trail of ANCESTORS, outermost first.
+ * A breadcrumb trail, outermost first, ending at the page you are on.
  *
- * The current page is deliberately NOT listed. It is named by the
- * heading directly below — route() sets a section title and the detail
- * views retitle it through setAxisTitle — so listing it here would
- * print the same string twice, which is exactly what
- * renderCollectionDetail dropped its own .detail-title to stop doing.
- * That gives one rule with no exceptions: the crumb says where this
- * page hangs, the heading says what it is.
+ * `items` are the ancestors, each a link; `current` is the page itself,
+ * rendered as plain non-link text carrying aria-current="page".
  *
- * Items with no href are dropped rather than rendered as inert text: a
- * crumb whose only job is to be clickable is worse than absent when it
- * is not, and the caller that could not resolve an ancestor (an album
- * with no artist row) has a shorter, still-true trail to fall back on.
+ * The current page used to be left out, on the reasoning that the
+ * heading below already named it. That was wrong in practice and was
+ * reported as such: a trail reading "Artists › Buika" above an album
+ * gives the reader no way to tell whether Buika is where they ARE or
+ * where they came FROM, and on the two pages whose heading was a generic
+ * category ("Album", "Artist") there was nothing naming the current page
+ * at all. Ending the trail on a visibly non-link item removes the
+ * question rather than asking the reader to infer the answer, and it is
+ * what every file manager and repository browser does.
+ *
+ * Ancestors without an href are dropped: a crumb whose only job is to be
+ * clickable is worse than absent when it is not, and a caller that could
+ * not resolve one (an album with no artist row) has a shorter, still-true
+ * trail to fall back on. `current` needs no href by construction.
+ *
+ * A trail with no ancestors is not a trail — it would be one non-link
+ * word above a heading that already says it — so it returns null even
+ * when `current` is given. That lets a top-level list pass its own label
+ * unconditionally without special-casing.
  *
  * The title attribute is set only past truncateAt, because .crumb-link
- * ellipsises long labels and a tooltip is then the only way back to the
- * full name. Setting it unconditionally would put a tooltip identical
- * to the visible text on every crumb, which some screen readers
- * announce twice.
+ * and .crumb-current ellipsise long labels and a tooltip is then the only
+ * way back to the full name. Setting it unconditionally would put a
+ * tooltip identical to the visible text on every crumb, which some screen
+ * readers announce twice.
  */
 const crumbTruncateAt = 24;
 
-export function crumbs(items) {
+export function crumbs(items, current) {
   const list = (items || []).filter((i) => i?.label && i?.href);
   if (!list.length) return null;
   const ol = el("ol", { class: "crumb-list" });
+  const titleOf = (label) => (label.length > crumbTruncateAt ? { title: label } : {});
   for (const { label, href } of list) {
     ol.appendChild(el("li", { class: "crumb-item" },
-      link(href, {
-        class: "crumb-link", text: label,
-        attrs: label.length > crumbTruncateAt ? { title: label } : {},
+      link(href, { class: "crumb-link", text: label, attrs: titleOf(label) })));
+  }
+  if (current) {
+    ol.appendChild(el("li", { class: "crumb-item" },
+      el("span", {
+        class: "crumb-current", text: current,
+        attrs: { "aria-current": "page", ...titleOf(current) },
       })));
   }
   return ol;

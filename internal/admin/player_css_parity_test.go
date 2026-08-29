@@ -54,8 +54,7 @@ var (
 // whose own rule positions it (a grid or flex item), so a rule here would
 // be an empty block. Add to this list only with a reason.
 var layoutOnlyClasses = map[string]string{
-	"detail-head":        "grid child of .detail — positioned by the parent's template",
-	"detail-artist-head": "modifier on .detail for the round-portrait variant",
+	"detail-head": "grid child of .detail — positioned by the parent's template",
 	"track-why": "grid cell for the unplayable reason — always emitted so every " +
 		"row has the same cell count and the list can share one grid; the chip " +
 		"inside carries the styling, and an empty one must collapse to nothing",
