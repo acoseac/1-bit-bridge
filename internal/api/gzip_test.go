@@ -124,6 +124,7 @@ func (f *fakeStreamingProvider) BuildManifestPage(ctx context.Context, cursor st
 	return nil, nil
 }
 func (f *fakeStreamingProvider) IsScanning() bool                           { return false }
+func (f *fakeStreamingProvider) IsScanStalled() bool                        { return false }
 func (f *fakeStreamingProvider) LastFullScan() time.Time                    { return time.Time{} }
 func (f *fakeStreamingProvider) TracksIndexed(ctx context.Context) int      { return 0 }
 func (f *fakeStreamingProvider) PendingDeletions(ctx context.Context) int64 { return 0 }

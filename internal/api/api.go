@@ -332,6 +332,11 @@ type ManifestProvider interface {
 	// JSON writer can buffer the whole page without OOM risk.
 	BuildManifestPage(ctx context.Context, cursor string, limit int) (*ManifestPage, error)
 	IsScanning() bool
+	// IsScanStalled reports a scan that is running but has committed
+	// nothing for longer than the scanner's stall threshold — a wedged
+	// scan, which must not be advertised to clients as active (see
+	// `health`).
+	IsScanStalled() bool
 	LastFullScan() time.Time
 	TracksIndexed(ctx context.Context) int
 	// PendingDeletions returns the total count of rows across tracks
@@ -1408,7 +1413,18 @@ type RootStatus struct {
 // the manifest package lands; the shape is stubbed in for iOS decoder
 // stability.
 type ScanState struct {
-	IsScanning    bool      `json:"isScanning"`
+	// IsScanning means "a scan is running AND getting somewhere". A scan
+	// wedged with no committed rows past the scanner's stall threshold
+	// reports false here and sets ScanStalled instead — clients gate
+	// their incremental syncs on this field, and a wedged scan must not
+	// stall them indefinitely (see `health`).
+	IsScanning bool `json:"isScanning"`
+
+	// ScanStalled is the diagnostic half of the pair: a scan IS running,
+	// it just isn't progressing. Additive and omitempty, so older clients
+	// (which only read isScanning) are unaffected — ProtocolVersion
+	// stays 1.
+	ScanStalled   bool      `json:"scanStalled,omitempty"`
 	LastFullScan  time.Time `json:"lastFullScan,omitempty"`
 	TracksIndexed int       `json:"tracksIndexed"`
 
@@ -1437,7 +1453,19 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgHolder.Load()
 	scanState := ScanState{}
 	if s.manifest != nil {
-		scanState.IsScanning = s.manifest.IsScanning()
+		// A wedged scan is reported as NOT scanning, with the stall
+		// surfaced separately. Clients defer their incremental syncs
+		// while a scan is in flight — a good optimisation that becomes a
+		// silent outage when the scan can never finish (2026-08-29:
+		// scanner threads stuck uninterruptibly in `fuse_open` on a
+		// network mount, so every phone stopped syncing indefinitely).
+		// Serving a client mid-scan is safe — rows come from SQLite and
+		// the client's delta cursor re-fetches anything committed later
+		// — so the honest answer to "should you wait for me?" is no.
+		scanning := s.manifest.IsScanning()
+		stalled := scanning && s.manifest.IsScanStalled()
+		scanState.IsScanning = scanning && !stalled
+		scanState.ScanStalled = stalled
 		scanState.LastFullScan = s.manifest.LastFullScan()
 		// TTL-cached: /v1/health is unauthenticated and can be flooded, so the
 		// two COUNT(*) scans run at most ~once per healthCountsTTL rather than

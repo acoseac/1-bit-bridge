@@ -34,6 +34,7 @@ type fakeManifestProvider struct {
 	body             any
 	err              error
 	isScanning       bool
+	isScanStalled    bool
 	lastFullScan     time.Time
 	tracksIndexed    int
 	pendingDeletions int64
@@ -76,6 +77,7 @@ func (f *fakeManifestProvider) BuildManifestPage(ctx context.Context, cursor str
 	return &manifest.Manifest{}, nil
 }
 func (f *fakeManifestProvider) IsScanning() bool                           { return f.isScanning }
+func (f *fakeManifestProvider) IsScanStalled() bool                        { return f.isScanStalled }
 func (f *fakeManifestProvider) LastFullScan() time.Time                    { return f.lastFullScan }
 func (f *fakeManifestProvider) TracksIndexed(ctx context.Context) int      { return f.tracksIndexed }
 func (f *fakeManifestProvider) PendingDeletions(ctx context.Context) int64 { return f.pendingDeletions }
