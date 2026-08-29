@@ -55,7 +55,7 @@ const CRUMB_ROOTS = {
  * trail anyway.
  */
 function crumbAncestors(trail, structural) {
-  return trail && trail.length ? trail : structural;
+  return trail?.length ? trail : structural;
 }
 
 // ---- Albums grid ----
