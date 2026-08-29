@@ -208,10 +208,17 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb }) {
   // considered and left out: it makes the URL unshareable and the same
   // page render differently for two readers, and Back already answers
   // the literal question.
+  const albumName = a.title || "Unknown album";
   setCrumb(a.artistId
     ? crumbs([CRUMB_ROOTS.artists,
-              { label: a.albumArtist || "Unknown artist", href: `/artist/${a.artistId}` }])
-    : crumbs([CRUMB_ROOTS.albums]));
+              { label: a.albumArtist || "Unknown artist", href: `/artist/${a.artistId}` }],
+             albumName)
+    : crumbs([CRUMB_ROOTS.albums], albumName));
+  // The heading names the album, the way every other detail page names
+  // its subject. It used to stay the generic word "Album", which left the
+  // page with no heading of its own and put a category label between the
+  // trail and the title beside the cover.
+  setAxisTitle(albumName);
 
   const actions = el("div", { class: "detail-actions" },
     el("button", {
@@ -237,7 +244,9 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb }) {
   view.appendChild(el("div", { class: "detail" },
     el("div", { class: "detail-art" }, cover(art, a.title)),
     el("div", { class: "detail-head" },
-      el("h2", { class: "detail-title", text: a.title || "Unknown album" }),
+      // No title here: setAxisTitle above has put it in the page heading,
+      // and rendering it again beside the cover printed the album name
+      // twice — the same reason renderCollectionDetail dropped its own.
       link(`/artist/${a.artistId}`, { class: "detail-artist", text: a.albumArtist || "" }),
       albumStatLine(a),
       unplayable > 0
@@ -536,7 +545,6 @@ function monogram(name) {
 
 export async function renderArtist(view, { id, gen, setToolbar, setCrumb }) {
   setToolbar(null);
-  setCrumb(crumbs([CRUMB_ROOTS.artists]));
   clear(view);
   view.appendChild(spinner());
   let d;
@@ -549,11 +557,13 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb }) {
     return;
   }
   clear(view);
+  setCrumb(crumbs([CRUMB_ROOTS.artists], d.artist.name));
+  setAxisTitle(d.artist.name);
   const portrait = d.hasImage ? artistImageURL(d.artist.artistMBID, 500) : null;
   view.appendChild(el("div", { class: "detail detail-artist-head" },
     el("div", { class: "detail-art detail-art-round" }, cover(portrait, d.artist.name)),
     el("div", { class: "detail-head" },
-      el("h2", { class: "detail-title", text: d.artist.name }),
+      // Named by the heading, like every other detail page.
       el("p", { class: "muted small",
         text: `${plural(d.artist.albumCount, "album")} · ${plural(d.artist.trackCount, "track")}` }))));
   // Same tab set as an album, one level up: the discography is what the
@@ -638,7 +648,8 @@ export async function renderAxisAlbums(view, ctx, kind) {
   // the ROUTE alone, so it can be on screen while the name is still in
   // flight — and it survives the lookup failing, which is the case
   // where a way back matters most.
-  ctx.setCrumb(crumbs([kind === "genre" ? CRUMB_ROOTS.genres : CRUMB_ROOTS.composers]));
+  const root = kind === "genre" ? CRUMB_ROOTS.genres : CRUMB_ROOTS.composers;
+  ctx.setCrumb(crumbs([root]));
 
   // The label lookup is a second round trip, so the route can change
   // under it. api.genres/api.composers share the "axis" key and so abort
@@ -660,7 +671,13 @@ export async function renderAxisAlbums(view, ctx, kind) {
     // is driven by the id, not the name.
     label = "";
   }
-  if (label) setAxisTitle(label);
+  if (label) {
+    setAxisTitle(label);
+    // Re-set now that the name is known, so the trail ends on the page the
+    // reader is on. The ancestors-only form above stays as the immediate
+    // paint and as the fallback when the lookup fails.
+    ctx.setCrumb(crumbs([root], label));
+  }
   return renderAlbums(view, { ...ctx, params, scopeLabel: label });
 }
 
@@ -1190,7 +1207,11 @@ async function renderCollectionDetail(view, ctx, opts) {
   clear(view);
   const c = d.collection;
   const tracks = d.tracks || [];
-  setAxisTitle(c.name || c.id);
+  const name = c.name || c.id;
+  setAxisTitle(name);
+  // Re-set with the name now that it is known; the ancestors-only form
+  // above was the immediate paint while the fetch was in flight.
+  ctx.setCrumb(crumbs([opts.root], name));
 
   // The single URL, for the things that can only carry one: the
   // now-playing bar's queue art and the track rows' fallback.
@@ -1201,10 +1222,11 @@ async function renderCollectionDetail(view, ctx, opts) {
   const stats = [plural(c.count ?? tracks.length, "track"), totalDuration(
     tracks.reduce((n, t) => n + (t.duration || 0), 0))].filter(Boolean).join(" · ");
 
-  // No .detail-title here: setAxisTitle above has already put this exact
-  // string in the page's <h1>, and rendering it again beside the art printed
-  // the collection name twice on every playlist and mix page. Albums keep
-  // their .detail-title because their <h1> stays the generic section name.
+  // No title here: setAxisTitle above has already put this exact string in
+  // the page's <h1>, and rendering it again beside the art printed the
+  // collection name twice. Albums and artists now do the same — the
+  // .detail-title class this note used to carve them out for is gone, and
+  // every detail page names its subject in the heading.
   const head = el("div", { class: "detail-head" },
     c.subtitle ? el("p", { class: "detail-artist", text: c.subtitle }) : null,
     el("p", { class: "detail-stats muted small", text: stats }),
@@ -1438,9 +1460,10 @@ export async function renderFolders(view, { params, setToolbar, setCrumb }) {
   // line under a lone "← Up" link, which said where you were but gave no
   // way to any level except one step up — on Artist/Album/Disc 03 that
   // meant clicking up twice to reach the artist.
-  setCrumb(crumbs(folderAncestors(path)));
   const segments = pathSegments(path);
-  if (segments.length) setAxisTitle(segments[segments.length - 1]);
+  const leaf = segments.length ? segments[segments.length - 1] : "";
+  setCrumb(crumbs(folderAncestors(path), leaf));
+  if (leaf) setAxisTitle(leaf);
 
   clear(view);
   view.appendChild(spinner());
@@ -1701,7 +1724,11 @@ export async function renderTracks(view, { params, setToolbar, setCrumb }) {
     return;
   }
   clear(view);
-  setCrumb(crumbs([CRUMB_ROOTS.mixes]));
+  // The human pitch, not the wheel code: "A minor" names the page in the
+  // same vocabulary the line below it uses.
+  const keyName = r.keyName || camelot;
+  setCrumb(crumbs([CRUMB_ROOTS.mixes], keyName));
+  setAxisTitle(keyName);
 
   const tracks = r.tracks || [];
   // keyName is the human pitch ("A minor"); the code alone is jargon to
