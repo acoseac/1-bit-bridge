@@ -357,11 +357,24 @@ func TestConcurrentChunksToDifferentFilesDoNotSerialise(t *testing.T) {
 	}))
 
 	started := make(chan struct{})
+	blockedDone := make(chan struct{})
 	go func() {
+		defer close(blockedDone)
 		close(started)
 		_, _ = m.WriteChunk(s.ID, s.Files[0].ID, 0, blocking, nil)
 	}()
 	<-started
+	// The blocked writer must be JOINED before the test returns, or it keeps
+	// writing into the staging directory while t.TempDir's cleanup removes it
+	// — a flake that surfaces as "directory not empty", nowhere near the
+	// assertion. Registered before the release below so it runs after it.
+	t.Cleanup(func() {
+		select {
+		case <-blockedDone:
+		case <-time.After(5 * time.Second):
+			t.Error("the blocked writer never finished")
+		}
+	})
 
 	// B must complete while A is still blocked.
 	done := make(chan error, 1)
