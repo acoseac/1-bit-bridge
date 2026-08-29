@@ -45,6 +45,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
+	"github.com/acoseac/1-bit-bridge/internal/upload"
 )
 
 var logger = logging.Component("admin")
@@ -74,6 +75,18 @@ type Deps struct {
 	Manifest  *manifest.Store
 	Scanner   *manifest.Scanner
 	Resolver  *bridgefs.Resolver
+
+	// Upload stages files uploaded through the console and commits them
+	// into a library root. Nil means the subsystem is not wired, which the
+	// handlers report as 503 — distinct from the operator having the
+	// feature turned off (403), so a misconfiguration does not read as a
+	// setting.
+	Upload *upload.Manager
+
+	// Trash reports what emptying the trash for a root would reclaim. Nil
+	// until the trash exists; the space widget then shows zero reclaimable,
+	// which is the truth on a bridge without one.
+	Trash func(root string) int64
 
 	// Fingerprint is the self-signed TLS cert SHA-256 in colon-hex form.
 	// Shown in the dashboard cert tile (the LAN pin operators verify) and
@@ -1388,6 +1401,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/updates/install", s.apiUpdatesInstall)
 	mux.HandleFunc("POST /api/updates/rollback", s.apiUpdatesRollback)
 	mux.HandleFunc("POST /api/scan", s.apiScan)
+
+	// Upload. The PUT chunk route is the one csrfGuard's octet-stream
+	// allowlist covers — see uploadOctetStreamRoutes, which is pinned to
+	// exactly this prefix.
+	mux.HandleFunc("GET /api/library/space", s.apiLibrarySpace)
+	mux.HandleFunc("POST /api/upload/sessions", s.apiUploadCreate)
+	mux.HandleFunc("GET /api/upload/sessions", s.apiUploadList)
+	mux.HandleFunc("GET /api/upload/sessions/{sid}", s.apiUploadStatus)
+	mux.HandleFunc("PUT /api/upload/sessions/{sid}/files/{fid}", s.apiUploadChunk)
+	mux.HandleFunc("POST /api/upload/sessions/{sid}/commit", s.apiUploadCommit)
+	mux.HandleFunc("DELETE /api/upload/sessions/{sid}", s.apiUploadAbandon)
 	mux.HandleFunc("GET /api/roots", s.apiRootsList)
 	mux.HandleFunc("POST /api/roots", s.apiRootsAdd)
 	mux.HandleFunc("DELETE /api/roots", s.apiRootsRemove)

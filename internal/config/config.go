@@ -73,6 +73,7 @@ type Config struct {
 	Fingerprint     FingerprintConfig    `yaml:"fingerprint,omitempty"`
 	Duplicates      DuplicatesConfig     `yaml:"duplicates,omitempty"`
 	SmartPlaylists  SmartPlaylistsConfig `yaml:"smartPlaylists,omitempty"`
+	Upload          UploadConfig         `yaml:"upload,omitempty"`
 	Tailscale       TailscaleConfig      `yaml:"tailscale,omitempty"`
 	Scanner         ScannerConfig        `yaml:"scanner,omitempty"`
 	Limits          LimitsConfig         `yaml:"limits,omitempty"`
@@ -363,6 +364,33 @@ func (e EnrichConfig) EffectiveCoverSize() int {
 		return 1200
 	}
 	return e.CoverSize
+}
+
+// UploadConfig governs the admin console's file-upload surface.
+//
+// Enabled defaults to OFF, and the zero value IS that default. Every other
+// feature that commits an operator to gigabytes, CPU, a third-party key or an
+// open endpoint ships off (upscale, autoOptimize, analysis, fingerprint, atlas,
+// libraryWatch); upload is an open WRITE endpoint, so it holds the same line.
+// A cloud control plane turns it on per tenant.
+//
+// The flag is read LIVE by the handlers rather than captured at boot: the
+// routes are wired unconditionally and the gate is one predicate, so the
+// setting hot-applies. Deleting content is a SEPARATE gate — enabling an
+// additive feature must never silently enable a destructive one.
+type UploadConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// MaxFileBytes, MaxSessionFiles, MinFreeBytes, SessionTTLSeconds and
+	// ChunkBytes all resolve to internal/upload's defaults at zero AND at a
+	// negative value — a -1 typed hoping to disable a cap must not yield an
+	// unbounded one.
+	MaxFileBytes      int64  `yaml:"maxFileBytes,omitempty"`
+	MaxSessionFiles   int    `yaml:"maxSessionFiles,omitempty"`
+	MinFreeBytes      int64  `yaml:"minFreeBytes,omitempty"`
+	SessionTTLSeconds int    `yaml:"sessionTtlSeconds,omitempty"`
+	ChunkBytes        int64  `yaml:"chunkBytes,omitempty"`
+	StagingDir        string `yaml:"stagingDir,omitempty"`
 }
 
 // AtlasConfig governs the optional rich-tier Atlas metadata integration
@@ -2319,6 +2347,14 @@ func (c *Config) Validate() error {
 	// add`, admin's apiRootsAdd) already stat independently.
 	if c.ScanIntervalSec < 1 || c.ScanIntervalSec > maxIntervalSeconds {
 		return fmt.Errorf("scanIntervalSec: must be between 1 and %d, got %d", maxIntervalSeconds, c.ScanIntervalSec)
+	}
+	// upload.sessionTtlSeconds feeds a time.Duration(n) * time.Second
+	// conversion that overflows to a NEGATIVE duration past ~9.2e9, and
+	// time.NewTicker panics on a non-positive interval — so an unchecked
+	// value here is a startup crash, not a slow sweeper.
+	if c.Upload.SessionTTLSeconds < 0 || c.Upload.SessionTTLSeconds > maxIntervalSeconds {
+		return fmt.Errorf("upload.sessionTtlSeconds: must be between 0 and %d (0 uses the default), got %d",
+			maxIntervalSeconds, c.Upload.SessionTTLSeconds)
 	}
 	// Enrich upstream base URLs: require an absolute http(s) URL —
 	// surfaces typos at load time instead of as silent runtime enrichment
