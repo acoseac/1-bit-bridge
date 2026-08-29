@@ -496,7 +496,15 @@
         </small>
       </div>
 
-      <div class="field">
+      {{/*
+        Hidden in public mode, like the mDNS toggle above and for the same
+        reason: startDLNAIfEnabled refuses outright when IsPublic, so the
+        control does nothing there whatever it is set to. It used to render
+        `disabled` with a note explaining that it is ignored — which is a
+        control admitting it is decorative, and the operator still has to
+        read the note to find out. Hiding it is the honest version.
+      */}}
+      <div class="field" {{if .Data.DLNABlockedByPublic}}hidden{{end}}>
         <label class="checkbox">
           <input type="checkbox" role="switch" name="dlnaEnabled" {{if .Data.DLNAEnabled}}checked{{end}} {{if .Data.DLNABlockedByPublic}}disabled{{end}}>
           Enable UPnP/DLNA server <span class="badge warn">restart</span>

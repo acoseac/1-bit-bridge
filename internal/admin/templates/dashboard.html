@@ -15,6 +15,30 @@
   </div>
 
   <div class="panel">
+    <div class="panel-head">
+      <h2>Scanner</h2>
+      <button type="button" id="scan-now" class="btn">Scan now</button>
+    </div>
+    <dl>
+      <dt>Status</dt>
+      <dd id="scan-status">
+        {{if .Data.IsScanning}}
+          <span class="badge running">scanning</span>
+          <span>· {{.Data.ScanProgress}} tracks so far</span>
+        {{else}}
+          <span class="badge idle">idle</span>
+        {{end}}
+      </dd>
+      <dt>Last full scan</dt>
+      <dd id="last-full-scan">{{timeAgo .Data.LastFullScan}}</dd>
+      <dt>Roots</dt>
+      <dd>
+        {{range .Data.Roots}}<code>{{.}}</code>{{else}}<em>none configured</em>{{end}}
+      </dd>
+    </dl>
+  </div>
+
+  <div class="panel">
     <h2>Library composition</h2>
     <p class="hint">An honest breakdown of what the bridge holds. Variants are generated copies stored in the transcoded cache — they're never counted as original tracks.</p>
     <dl class="composition">
@@ -166,31 +190,6 @@
     <script type="application/json" id="key-coverage-data">{{json .Data.KeyCoverage}}</script>
   </div>
   {{end}}
-
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Scanner</h2>
-      <button type="button" id="scan-now" class="btn">Scan now</button>
-    </div>
-    <dl>
-      <dt>Status</dt>
-      <dd id="scan-status">
-        {{if .Data.IsScanning}}
-          <span class="badge running">scanning</span>
-          <span>· {{.Data.ScanProgress}} tracks so far</span>
-        {{else}}
-          <span class="badge idle">idle</span>
-        {{end}}
-      </dd>
-      <dt>Last full scan</dt>
-      <dd id="last-full-scan">{{timeAgo .Data.LastFullScan}}</dd>
-      <dt>Roots</dt>
-      <dd>
-        {{range .Data.Roots}}<code>{{.}}</code>{{else}}<em>none configured</em>{{end}}
-      </dd>
-    </dl>
-  </div>
-
 
   {{/*
     Backups + Tailscale HTTPS panels live in Settings now (Backups

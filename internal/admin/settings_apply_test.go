@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -1108,4 +1109,66 @@ func TestEveryPatchFieldCanBeManaged(t *testing.T) {
 		t.Errorf("managedFieldsIn saw %d of %d patch fields (%v) — a field it cannot see "+
 			"is one a managed bridge would silently let through", len(got), len(tags), got)
 	}
+}
+
+// TestPublicModeHidesLANOnlySettings — a control the bridge itself
+// refuses is worse than no control: the operator flips it, nothing
+// happens, and the only explanation is a note they have to read.
+//
+// Both of these are LAN-only by construction. `startDLNAIfEnabled`
+// refuses outright when IsPublic (SSDP multicast has no meaning on a
+// public VPS), and mDNS advertises to a LAN that a public bridge does not
+// have. Neither is a choice the operator gets to make there.
+func TestPublicModeHidesLANOnlySettings(t *testing.T) {
+	for _, field := range []string{"dlnaEnabled", "mdnsEnabled"} {
+		t.Run(field, func(t *testing.T) {
+			loopback := renderSettingsField(t, false, field)
+			if strings.Contains(loopback, "hidden") {
+				t.Errorf("loopback mode hides %s — it is a real control there", field)
+			}
+			public := renderSettingsField(t, true, field)
+			if !strings.Contains(public, "hidden") {
+				t.Errorf("public mode still renders %s as a live control, but the bridge "+
+					"refuses it there regardless of the value", field)
+			}
+		})
+	}
+}
+
+// renderSettingsField executes the settings TEMPLATE directly and returns
+// the `.field` wrapper enclosing the named control.
+//
+// The template rather than the HTTP route, because a public-mode bridge
+// requires configured admin auth and answers 503 without it — standing
+// that up would be a lot of fixture for a question about one conditional.
+// This drives the same template the page handler does, with the same
+// data shape, so the thing under test is unchanged.
+func renderSettingsField(t *testing.T, public bool, field string) string {
+	t.Helper()
+	srv, _, _ := newTestServer(t)
+	tmpl, ok := srv.pageTmpls["settings"]
+	if !ok {
+		t.Fatal("no settings template registered")
+	}
+	data := settingsResponse{
+		IsPublic:            public,
+		DLNABlockedByPublic: public,
+		// The updates panel dereferences this; a nil would fail the
+		// render for a reason unrelated to what is under test.
+		Update: &UpdateStatus{},
+	}
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "layout", pageData{Data: data}); err != nil {
+		t.Fatalf("render settings (public=%v): %v", public, err)
+	}
+	html := buf.String()
+	i := strings.Index(html, `name="`+field+`"`)
+	if i < 0 {
+		t.Fatalf("%s not rendered at all (public=%v)", field, public)
+	}
+	start := strings.LastIndex(html[:i], `<div class="field`)
+	if start < 0 {
+		t.Fatalf("no enclosing .field for %s", field)
+	}
+	return html[start:i]
 }
