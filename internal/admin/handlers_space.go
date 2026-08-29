@@ -53,6 +53,16 @@ func (s *Server) apiLibrarySpace(w http.ResponseWriter, r *http.Request) {
 
 	if free, err := transcode.AvailableDiskSpaceNearest(root); err == nil {
 		out.FreeBytes, out.Probed = free, true
+		// Capacity is what makes a fill bar mean something. Without it the
+		// only available denominator is indexed library bytes, which on a
+		// shared disk reads "almost empty" while the volume is nearly full.
+		// A failure here is not fatal: the widget drops the bar and keeps
+		// the free-space figure, which is the number that actually matters.
+		if total, terr := transcode.TotalDiskSpace(root); terr == nil {
+			out.TotalBytes = total
+		} else {
+			logger.Warn("library capacity probe", "root", root, "err", terr)
+		}
 	} else {
 		// Deliberately not an error response: a missing number degrades the
 		// widget, it does not break the page.

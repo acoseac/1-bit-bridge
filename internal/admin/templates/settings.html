@@ -88,6 +88,24 @@
         </small>
       </div>
 
+      <div class="field">
+        <label class="checkbox">
+          <input name="uploadEnabled" type="checkbox" role="switch" {{if .Data.UploadEnabled}}checked{{end}}>
+          Allow uploads from this console
+        </label>
+        <small class="hint">
+          Adds a drop target on the Library page so files and folders can be
+          added over the network — the only way to fill a library on a host you
+          have no shell access to. Off by default: it is a write endpoint, so it
+          holds the same line as every other feature that commits you to
+          something. Applies immediately. On a loopback console this adds
+          nothing an operator could not already do with a file manager; on a
+          public bridge it sits behind the admin sign-in like every other page.
+          Uploading cannot delete or replace anything — a file whose path
+          already exists is skipped unless you explicitly ask to overwrite.
+        </small>
+      </div>
+
       <div class="field read-only">
         <label>Data directory
           <input type="text" value="{{.Data.DataDir}}" disabled>

@@ -185,6 +185,17 @@
       report, the live-stream indicator, and the two controls that were
       in the old header's meta strip. Pinned to the bottom of the rail
       the way the reference designs pin their account chip. */ -}}
+  {{- /* Space meter. Hidden by default and revealed by app.js only when a
+      floor or quota is configured, or free space is already near the floor —
+      an operator with a 40 TB NAS should never see a meter for a number that
+      will never bind. It sits in the rail because a quota user needs it in
+      peripheral vision, not one navigation away. */ -}}
+  <div class="space-meter" id="space-meter" hidden>
+    <div class="space-meter-bar" role="img" aria-labelledby="space-meter-text">
+      <div class="space-meter-fill" id="space-meter-fill" style="width:0%"></div>
+    </div>
+    <p class="space-meter-text" id="space-meter-text">—</p>
+  </div>
   <div class="sidebar-foot">
     <div class="meta">
       <span id="conn-status" class="conn-badge" data-state="connecting" aria-live="polite">Connecting…</span>

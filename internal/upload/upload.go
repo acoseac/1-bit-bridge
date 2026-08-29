@@ -618,5 +618,14 @@ func (m *Manager) Commit(sid string) (*CommitResult, error) {
 // explicit positioning the offset is an assertion: a future change that drops
 // the truncate fails loudly instead of appending to garbage.
 func openStagedFile(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+	// 0o644, not 0o600: this mode SURVIVES the commit rename, so it is the
+	// mode the file has once it is part of the library. 0o600 leaves an
+	// uploaded track readable only by the bridge's own user — unlike every
+	// other file in the library — so a Samba share, a backup tool, or any
+	// other service running as a different user silently cannot read it.
+	// The process umask still applies, so a hardened host gets its own
+	// stricter answer rather than this one.
+	//
+	// Staging is not exposed in the meantime: its directory is 0o700.
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
 }

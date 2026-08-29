@@ -350,6 +350,7 @@ func currentValuesForEveryPatchField(t *testing.T, cfg *config.Config) map[strin
 		"customEndpoints":          cfg.CustomEndpoints,
 		// Present so the exemption is exercised rather than assumed.
 		"customEndpointsText":      strings.Join(cfg.CustomEndpoints, "\n"),
+		"uploadEnabled":            cfg.Upload.Enabled,
 		"upscaleEnabled":           cfg.Upscale.Enabled,
 		"analysisEnabled":          cfg.Analysis.Enabled,
 		"smartPlaylistsEnabled":    cfg.SmartPlaylists.EffectiveEnabled(),

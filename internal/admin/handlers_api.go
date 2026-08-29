@@ -224,6 +224,13 @@ type settingsResponse struct {
 	// Hot-applying — the sweeper reads the flag live — so a flip does
 	// NOT set restartRequired.
 	AutoOptimizeEnabled bool `json:"autoOptimizeEnabled"`
+
+	// UploadEnabled gates the console's file-upload surface. Default OFF —
+	// it is an open WRITE endpoint, so it holds the same line as every other
+	// feature that commits an operator to something. Deleting content is a
+	// SEPARATE gate (library.allowDelete): enabling an additive feature must
+	// never silently enable a destructive one.
+	UploadEnabled bool `json:"uploadEnabled"`
 	// AutoOptimizeMaxPerSweep / AutoOptimizeMinFreeBytes are the RESOLVED
 	// effective values (zero YAML → the package defaults), so the UI
 	// shows what the sweeper will actually do rather than a blank.
@@ -1853,6 +1860,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		SmartPlaylistsEnabled:    cfg.SmartPlaylists.EffectiveEnabled(),
 		OptimizeEnabled:          cfg.Upscale.EffectiveOptimizeEnabled(),
 		AutoOptimizeEnabled:      cfg.Upscale.AutoOptimize.Enabled,
+		UploadEnabled:            cfg.Upload.Enabled,
 		AutoOptimizeMaxPerSweep:  cfg.Upscale.AutoOptimize.EffectiveMaxPerSweep(),
 		AutoOptimizeMinFreeBytes: cfg.Upscale.AutoOptimize.EffectiveMinFreeBytes(),
 		LibraryWatchEnabled:      cfg.LibraryWatch.Enabled,
@@ -1991,6 +1999,10 @@ type settingsPatch struct {
 	// flag on every sweep, and the PATCH nudges it so an off→on flip
 	// starts work immediately — the TriggerDuplicatesPass precedent.
 	AutoOptimizeEnabled *bool `json:"autoOptimizeEnabled,omitempty"`
+
+	// UploadEnabled hot-applies: the routes are wired unconditionally and
+	// the handlers read the flag per request (WIRED vs ACTIVE).
+	UploadEnabled *bool `json:"uploadEnabled,omitempty"`
 	// LibraryWatchEnabled toggles the fsnotify instant-update watcher.
 	// Restart-required: the watcher goroutine is spawned once at
 	// `bridge serve` startup (same startup-wired shape as UpscaleEnabled).
@@ -2302,6 +2314,24 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				report.live("optimizeEnabled")
 			} else {
 				report.unchanged("optimizeEnabled")
+			}
+		}
+		if p.UploadEnabled != nil {
+			if *p.UploadEnabled != next.Upload.Enabled {
+				next.Upload.Enabled = *p.UploadEnabled
+				// Live in the strict sense: the handlers read
+				// cfg.Upload.Enabled from the runtime holder on every
+				// request, and the upload manager is wired at boot
+				// regardless. Nothing to nudge and nothing to restart.
+				if s.deps.Upload == nil {
+					report.restartBecause("uploadEnabled",
+						"the upload subsystem is not wired on this bridge, "+
+							"so the persisted value cannot take effect until a restart")
+				} else {
+					report.live("uploadEnabled")
+				}
+			} else {
+				report.unchanged("uploadEnabled")
 			}
 		}
 		if p.AutoOptimizeEnabled != nil {
