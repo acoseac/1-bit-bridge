@@ -557,8 +557,14 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb }) {
     return;
   }
   clear(view);
-  setCrumb(crumbs([CRUMB_ROOTS.artists], d.artist.name));
-  setAxisTitle(d.artist.name);
+  // Falls back for an EMPTY name, not an absent d.artist: the lines below
+  // dereference it unconditionally, so optional chaining here would title
+  // the page "Unknown artist" and then throw three lines later — hiding
+  // the failure without preventing it. An empty name is the reachable
+  // case, and it would leave the page with no heading at all.
+  const artistName = d.artist.name || "Unknown artist";
+  setCrumb(crumbs([CRUMB_ROOTS.artists], artistName));
+  setAxisTitle(artistName);
   const portrait = d.hasImage ? artistImageURL(d.artist.artistMBID, 500) : null;
   view.appendChild(el("div", { class: "detail detail-artist-head" },
     el("div", { class: "detail-art detail-art-round" }, cover(portrait, d.artist.name)),
