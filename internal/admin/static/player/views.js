@@ -41,6 +41,23 @@ const CRUMB_ROOTS = {
   folders: { label: "Folders", href: "/folders" },
 };
 
+/**
+ * The crumb ancestors for a detail page: the route the reader actually
+ * took, when the router recorded one, and the page's own structural
+ * chain when it did not.
+ *
+ * The fallback is not a degraded mode — it is the right answer for a
+ * pasted link, a new tab or a reload into a fresh entry, where there is
+ * no route to report and the structural chain is the only true one.
+ *
+ * Folders deliberately do NOT use this: a folder path IS a hierarchy, it
+ * is derivable without any history, and drilling down produces the same
+ * trail anyway.
+ */
+function crumbAncestors(trail, structural) {
+  return trail && trail.length ? trail : structural;
+}
+
 // ---- Albums grid ----
 
 export async function renderAlbums(view, ctx) {
@@ -179,7 +196,7 @@ function select(name, value, options) {
 
 // ---- Album detail ----
 
-export async function renderAlbum(view, { id, setToolbar, setCrumb }) {
+export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -209,11 +226,15 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb }) {
   // page render differently for two readers, and Back already answers
   // the literal question.
   const albumName = a.title || "Unknown album";
-  setCrumb(a.artistId
-    ? crumbs([CRUMB_ROOTS.artists,
-              { label: a.albumArtist || "Unknown artist", href: `/artist/${a.artistId}` }],
-             albumName)
-    : crumbs([CRUMB_ROOTS.albums], albumName));
+  // The artist chain is the structural fallback, not the first choice:
+  // an album opened from a composer or a genre belongs, for the reader,
+  // to the list they were just in. The artist stays one click away as the
+  // byline beside the cover either way.
+  const structural = a.artistId
+    ? [CRUMB_ROOTS.artists,
+       { label: a.albumArtist || "Unknown artist", href: `/artist/${a.artistId}` }]
+    : [CRUMB_ROOTS.albums];
+  setCrumb(crumbs(crumbAncestors(trail, structural), albumName));
   // The heading names the album, the way every other detail page names
   // its subject. It used to stay the generic word "Album", which left the
   // page with no heading of its own and put a category label between the
@@ -543,7 +564,7 @@ function monogram(name) {
 }
 
 
-export async function renderArtist(view, { id, gen, setToolbar, setCrumb }) {
+export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail }) {
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -563,7 +584,7 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb }) {
   // the failure without preventing it. An empty name is the reachable
   // case, and it would leave the page with no heading at all.
   const artistName = d.artist.name || "Unknown artist";
-  setCrumb(crumbs([CRUMB_ROOTS.artists], artistName));
+  setCrumb(crumbs(crumbAncestors(trail, [CRUMB_ROOTS.artists]), artistName));
   setAxisTitle(artistName);
   const portrait = d.hasImage ? artistImageURL(d.artist.artistMBID, 500) : null;
   view.appendChild(el("div", { class: "detail detail-artist-head" },
@@ -655,7 +676,8 @@ export async function renderAxisAlbums(view, ctx, kind) {
   // flight — and it survives the lookup failing, which is the case
   // where a way back matters most.
   const root = kind === "genre" ? CRUMB_ROOTS.genres : CRUMB_ROOTS.composers;
-  ctx.setCrumb(crumbs([root]));
+  const chain = crumbAncestors(ctx.trail, [root]);
+  ctx.setCrumb(crumbs(chain));
 
   // The label lookup is a second round trip, so the route can change
   // under it. api.genres/api.composers share the "axis" key and so abort
@@ -682,7 +704,7 @@ export async function renderAxisAlbums(view, ctx, kind) {
     // Re-set now that the name is known, so the trail ends on the page the
     // reader is on. The ancestors-only form above stays as the immediate
     // paint and as the fallback when the lookup fails.
-    ctx.setCrumb(crumbs([root], label));
+    ctx.setCrumb(crumbs(chain, label));
   }
   return renderAlbums(view, { ...ctx, params, scopeLabel: label });
 }
@@ -1198,7 +1220,8 @@ async function renderCollectionDetail(view, ctx, opts) {
   // middle of an action group — and on a smart mix, which has a SECOND action
   // row below (Regenerate / Save as playlist), it wrapped to a line of its own
   // and read as a third kind of button sandwiched between the two.
-  ctx.setCrumb(crumbs([opts.root]));
+  const chain = crumbAncestors(ctx.trail, [opts.root]);
+  ctx.setCrumb(crumbs(chain));
   clear(view);
   view.appendChild(spinner());
   let d;
@@ -1217,7 +1240,7 @@ async function renderCollectionDetail(view, ctx, opts) {
   setAxisTitle(name);
   // Re-set with the name now that it is known; the ancestors-only form
   // above was the immediate paint while the fetch was in flight.
-  ctx.setCrumb(crumbs([opts.root], name));
+  ctx.setCrumb(crumbs(chain, name));
 
   // The single URL, for the things that can only carry one: the
   // now-playing bar's queue art and the track rows' fallback.
@@ -1710,7 +1733,7 @@ function browseTrackRow(t) {
  * `/api/library/browse?camelot=` the Inspector used, which already
  * returns exactly a filtered track list and no folders.
  */
-export async function renderTracks(view, { params, setToolbar, setCrumb }) {
+export async function renderTracks(view, { params, setToolbar, setCrumb, trail }) {
   setToolbar(null);
   const camelot = (params.get("camelot") || "").toUpperCase();
   clear(view);
@@ -1733,7 +1756,7 @@ export async function renderTracks(view, { params, setToolbar, setCrumb }) {
   // The human pitch, not the wheel code: "A minor" names the page in the
   // same vocabulary the line below it uses.
   const keyName = r.keyName || camelot;
-  setCrumb(crumbs([CRUMB_ROOTS.mixes], keyName));
+  setCrumb(crumbs(crumbAncestors(trail, [CRUMB_ROOTS.mixes]), keyName));
   setAxisTitle(keyName);
 
   const tracks = r.tracks || [];
