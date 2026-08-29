@@ -2441,3 +2441,150 @@ The bridge half of the SACD ISO batch (iOS acoseac/1-bit#1451/#1454/#1455). A sc
 - **Nothing else changed, verified not assumed**: `/v1/read`/`/v1/download`/`/v1/stat` 404 virtual paths cleanly through `ResolveChecked`; the DLNA file handler 404s the same way (the intended baseline — clients play by fetching the CONTAINER bytes and demuxing the window client-side); analysis keeps its `.dff` DSD exclusion; fingerprint + upscale eligibility already gate DSD out. **Don't add a bridge-side demux** — serving stays bit-exact verbatim by mission.
 
 Locked by `sacd_test.go` (grammar truth table + plain/raw geometry identity + damaged-first-copy fallback + nothing-from-non-SACD + stem fallback; the Go fixture builder writes raw bytes INDEPENDENTLY of the parser so a shared misunderstanding cannot self-validate) + `scanner_sacd_test.go` (expansion E2E, THE survival control, container-removal reap, shrink immediate-retire, sibling-audio isolation, the unchanged-rescan skip-gate pinned via a `MarkEnriched` title surviving).
+
+### Web upload + delete-as-trash (PRs #788–#792, 2026-08-30)
+
+The console can put files INTO a library and take them out again. Five stacked
+PRs; admin-surface only — **no `/v1` change, no `ProtocolVersion` bump, no
+`PROTOCOL.md` change, no iOS mirror, no migration.** Design record:
+`ops/plan-web-upload.md`. Two independent gates, both default OFF:
+`upload.enabled` and `library.allowDelete`.
+
+- **Staging and trash live INSIDE the target root, as dot-directories**
+  (`.bridge-upload/`, `.bridge-trash/<unixNano>/`). `shouldSkipDir` returns
+  `SkipDir` for any `.`-prefixed name BEFORE the walker upserts a folder row, so
+  neither tree is ever walked — no folder rows, no track rows, no interaction
+  with the deletion pass. That is what makes commit and delete **same-filesystem
+  renames**. The tidier-looking alternative — staging under `<dataDir>` — is a
+  cross-device `EXDEV` copy wherever the library is a separate mount, which is
+  the normal case (bridge.ars.md has its data dir on the 29 GB root disk and its
+  library on a B2 FUSE mount): every byte written twice. **Don't move staging or
+  trash out of the root, and don't drop the leading dot.**
+- **`csrfGuard`'s relaxation is `application/octet-stream` on PUT only, and
+  `multipart/form-data` stays refused EVERYWHERE.** The Content-Type check is a
+  CORS simple-request defense: the simple types are exactly
+  `x-www-form-urlencoded`, `multipart/form-data` and `text/plain`, so multipart
+  is forgeable cross-origin while octet-stream (and a PUT method) forces a
+  preflight the bridge never answers. Building the upload as a multipart form
+  would hand back precisely the property the guard provides. The allowlist
+  refuses any path that changes under `path.Clean`, mirroring
+  `sessionMiddleware`'s bypass rule.
+- **The admin server's `ReadTimeout: 30s` caps reading the ENTIRE body**, so a
+  200 MB file dies at 30 s under ~55 Mbps. Fixed by rolling the deadline forward
+  as bytes arrive (`uploadBodyReader`, `http.ResponseController`) rather than
+  raising it globally and losing the Slowloris protection PR #75 added. The
+  window is a per-instance field, not a package var (`Pool.jobTimeout`
+  precedent).
+- **The durable offset is the per-file meta record, NEVER the staged file's
+  size.** A dropped PUT leaves bytes past the last acknowledged offset, so every
+  open truncates back to the recorded one. Ordering is bytes → fsync → offset →
+  fsync: the reverse lets a crash advertise an offset the file cannot honour,
+  and then truncate-on-open discards REAL data. Staged files are opened WITHOUT
+  `O_APPEND` — POSIX would ignore the seek, which the truncate makes harmless
+  *by accident*, and an accident that happens to be correct is one edit from not
+  being. The running SHA-256 is marshalled into the meta record (108 bytes,
+  verified), so a resume finishes with the right whole-file hash without
+  re-reading what it staged.
+- **Locks are refcounted and per `(session, file)`, never per session.** The
+  naive map leaks an entry per file; the naive FIX is worse, since deleting a
+  key while another goroutine is between lookup and lock hands them different
+  mutexes for the same file. A session-wide lock passes every other locking test
+  while quietly serialising a folder upload, which is where browser throughput
+  comes from — there is a control test that goes red if it is widened.
+- **`planScanDirs` does not scan the common ancestor, and the depth-1 floor and
+  the in-loop re-prune are BOTH load-bearing.** `A/Album` and `Z/Album` have the
+  root as their LCA, so an ancestor trigger degrades to a full scan on exactly
+  the sessions where a targeted one matters. But one-scan-per-directory has a
+  worse cliff: **`ScanSubtree`'s tail runs `restampDuplicates`, and that pass is
+  WHOLE-LIBRARY**, so N subtree scans cost N whole-library restamps. Without the
+  floor, nine top-level artist folders collapse to the root in one iteration and
+  escalate — after destroying the information needed to do the nine targeted
+  scans. Without the re-prune the result keeps redundant pairs and over-collapses
+  to whole top-level folders: **brute-forced over 400,000 random inputs, 12,718
+  differ.** My first test for the re-prune did NOT distinguish it and I nearly
+  wrote the reviewer's finding off on hand-reasoning — the brute force settled
+  it. `maxSubtreeScans = 8` is still a guess; the restamp duration is now logged
+  on every subtree scan so it can be tuned from data.
+- **The duplicate pre-flight WARNS, it never decides.** `(basename, size)`
+  against `tracks`, once per session. It answers the overlapping-upload case:
+  uploading an album folder and then the artist folder containing it lands two
+  copies at DIFFERENT paths, so nothing collides, both survive on disk, and the
+  duplicate election tie-breaks on the SHALLOWER path — the flat copy wins and
+  the properly-nested one is suppressed. A control test pins that a flagged file
+  still uploads: a track legitimately on both an album and a compilation is a
+  real library, and that is serve-time suppression's job.
+- **Committed files are 0644, not 0600.** The staged file's mode SURVIVES the
+  rename, so it is the library file's mode. At 0600 an uploaded track is
+  readable only by the bridge's own user, unlike everything else in the library
+  — a Samba share or a backup job running as someone else silently cannot read
+  it. Umask still applies.
+- **Trash age comes from the `<stamp>` DIRECTORY NAME, never a file's `stat`.**
+  `os.Rename` preserves mtime — measured, not assumed: a file stamped 2019 and
+  trashed now reads as **2797 days old the instant it lands**, so an mtime-driven
+  sweeper purges it on the very next tick, oldest-content-first, destroying the
+  recovery window for precisely the material most likely to be irreplaceable.
+  Restore `MkdirAll`s the destination parent FIRST — the directory may have been
+  removed after the last track in it was trashed, which is exactly the case
+  restore exists for. A directory whose name is not a stamp is LEFT ALONE: its
+  age is unknowable and guessing deletes user content.
+- **Trashing does not free space; purging does.** That tension is why
+  `/api/library/space` reports reclaimable bytes beside free ones, why the `507`
+  body carries `reclaimableBytes` (so a full disk becomes "empty trash and
+  resume" rather than a dead end), and why the trash panel leads with what
+  emptying would return. Rows retire IMMEDIATELY via
+  `IncrementMissingTracksAndDeleteAtThreshold(paths, 1)` — the existing path that
+  already unlinks sidecars and writes tombstones — not the three-scan
+  missing-count debounce, because an explicit operator delete should not linger.
+- **Deleting takes an EXPLICIT PATH LIST, never a prefix.** That sidesteps the
+  `LIKE`-vs-byte-range case-fold class entirely rather than getting it right:
+  there is no prefix to scope. The plan called for a byte-ranged pin; the
+  implementation made it unnecessary, which is strictly better.
+- **`upload.enabled` and `library.allowDelete` are two gates and must stay two.**
+  Enabling an additive feature must never silently enable a destructive one; a
+  control test asserts that turning uploads on leaves deleting refused. A nil
+  delete gate fails CLOSED.
+
+**Process lesson worth more than any single fix: `go test` was green through
+FIVE defects that a live browser found** — committed files at 0600; `totalBytes`
+declared and never populated (the sidebar bar pinned at 0% forever); the
+duplicate note hidden by the post-commit reset; the note nested inside the block
+that collapses when the upload starts (**a JS assertion read `hidden === false`
+and LIED — that says nothing about an ancestor**, only a screenshot caught it);
+and `.hint.warn` being an inert class combination whose first guard could not
+fail, because `.hint.warn` is a substring of `.hint.warn-DISABLED`. Seed a
+throwaway bridge and drive the console before believing a green suite about UI.
+
+**Round-two review findings worth keeping** (the stack drew 14; 12 taken, 1
+corrected, 1 declined): the read deadline must advance on ELAPSED TIME, not
+bytes — a 256 KiB threshold starves the slow client it exists to protect (4
+KiB/s delivers 240 KiB in a 60s window and is torn down mid-transfer);
+collision handling must be atomic ACROSS SESSIONS, since the per-file lock is
+keyed on `(session, file)` and `os.Rename` REPLACES, so two sessions targeting
+one destination let the second silently destroy the first (a destination-keyed
+lock, because `RENAME_NOREPLACE` is Linux-only and `os.Link` needs hardlinks
+the rclone/B2 mount lacks); and `SetReadDeadline` must only log the
+wrapped-ResponseWriter diagnosis for `ErrNotSupported`, because everything else
+is a client hanging up and `warnOnce` meant one spurious disconnect SUPPRESSED
+the real diagnosis forever. **`upload.stagingDir` was removed rather than
+shipped**: it was declared in config and never read, and an inert knob an
+operator can set to no effect is worse than none.
+
+**Two guards in this repo caught things nothing else would have**, and both
+deserve their keep: `TestEverySettingsFieldIsMappedIntoThePatchPayload` flagged
+a settings control that would have rendered, accepted an edit, reported
+"Saved." and changed nothing; and `TestAppJSHasNoCallsToDeletedHelpers` flagged
+four functions that plainly exist — the cause was a comment of mine containing
+`/api/upload/` followed by `*`, whose `/*` opens a fake block comment and
+swallowed **46 KB** of app.js from the scanner. **Don't write `/*` inside a
+`//` comment in this codebase's JS.**
+
+**Process notes from the batch.** Stacked PRs in this repo get **no CI at all**
+until they target `main` (`gate.yml` / `gofmt.yml` / `codeql` are
+`pull_request: branches: [main]`, and `gh pr checks` reports "no checks
+reported" on a feature-branch base) — so the retarget-then-amend dance is not
+optional if you want the Windows leg to have run before you merge. And when
+waiting on a local `make check`, do NOT poll with `pgrep -f "go test -p"`:
+that pattern matches the waiting shell's OWN command line, so the loop waits on
+itself forever and reports the gate as busy long after it finished. Use the
+harness's background-task completion notification, or a self-match-proof
+pattern like `[/]go-build.*[.]test`.
