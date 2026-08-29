@@ -31,7 +31,14 @@ func TestEveryPushStateCarriesTheRouteTrail(t *testing.T) {
 	}
 	body := stripJSComments(string(src))
 
-	pushes := regexp.MustCompile(`history\.pushState\(([^;]*?)\)`).FindAllStringSubmatch(body, -1)
+	// Captures to the end of the LINE rather than to the first ")". The
+	// arguments contain a nested call — pushState({… trail: trailFor(href) }…)
+	// — so a paren-terminated match stops inside it, and an earlier
+	// semicolon-excluding form could be truncated by an inline comment that
+	// happened to contain one, failing a correct call. A multi-line
+	// pushState captures nothing and fails loudly, which is the right
+	// answer anyway: use pushRoute.
+	pushes := regexp.MustCompile(`history\.pushState\(([^\n]*)`).FindAllStringSubmatch(body, -1)
 	if len(pushes) == 0 {
 		t.Fatal("no history.pushState call found in boot.js — the player navigates " +
 			"somehow, so this test has stopped finding what it checks")
@@ -56,11 +63,50 @@ func TestEveryPushStateCarriesTheRouteTrail(t *testing.T) {
 	}
 }
 
-// stripJSComments removes // and /* */ comments so prose that mentions a
-// symbol cannot be read as code. This file's own commentary names pushState
-// and trail repeatedly; without the strip, a comment would satisfy the check
-// it exists to make.
+// stripJSComments removes block comments and // comments, so prose that
+// mentions a symbol cannot be read as code. boot.js's commentary names
+// pushState and trail repeatedly; without the strip, a comment would satisfy
+// the check it exists to make — and that is not hypothetical. A negative
+// control that removed the trail and wrote "// keep the trail? no" beside it
+// PASSED against a line-comment-only stripper, because the scan reads to the
+// end of the line and the comment supplied the word.
+//
+// The // strip is quote-aware rather than a plain cut at the first slashes:
+// boot.js contains both e.href.startsWith("//") and a quoted "//evil.com", and
+// a naive rule would cut a line of real code in half. Regex literals would
+// need the same care; boot.js has none (splitPath is deliberately string ops),
+// and one appearing later would at worst truncate a line this test does not
+// read.
 func stripJSComments(src string) string {
 	src = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(src, "")
-	return regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(src, "")
+	lines := strings.Split(src, "\n")
+	for i, line := range lines {
+		lines[i] = stripLineComment(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// stripLineComment cuts a line at the first // that is outside a string
+// literal, tracking single, double and template quotes and backslash escapes.
+func stripLineComment(line string) string {
+	var quote byte
+	escaped := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case escaped:
+			escaped = false
+		case quote != 0 && c == '\\':
+			escaped = true
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'' || c == '`':
+			quote = c
+		case c == '/' && i+1 < len(line) && line[i+1] == '/':
+			return line[:i]
+		}
+	}
+	return line
 }

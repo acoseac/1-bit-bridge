@@ -151,6 +151,16 @@ function wireLinks() {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     const a = e.target.closest("a[data-route]");
     if (!a) return;
+    // A download or an explicit target is not a navigation, so it is not
+    // ours to intercept — the same reasoning as the modifier keys above,
+    // expressed by the markup instead of by the reader's hand. Inert as
+    // written: every such anchor the player builds (the booklet's
+    // target=_blank, a track's download, the Atlas attribution) is a plain
+    // el("a") with no data-route, so this handler never sees one. It is
+    // here because link() is the ergonomic helper for building an anchor,
+    // and a download button reaching for it would otherwise be swallowed
+    // by the router with nothing failing.
+    if (a.hasAttribute("download") || (a.target && a.target !== "_self")) return;
     const url = new URL(a.href, location.origin);
     if (url.origin !== location.origin) return;
     e.preventDefault();
