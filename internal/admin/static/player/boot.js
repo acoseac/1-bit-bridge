@@ -189,10 +189,25 @@ function wireSearchInput() {
   }
 
   let timer = null;
+  // Where the reader was when the pending keystroke was typed. A debounce
+  // outlives a navigation: type two letters, click an album inside the
+  // window, and the timer still fires — commit then sees the album route
+  // as `entering` and pushes the reader straight back out to /search,
+  // roughly 300 ms after they arrived somewhere they chose deliberately.
+  // Reproduced in a browser; it predates the 250 ms → 400 ms change,
+  // which only widened the window.
+  //
+  // Comparing the full href rather than clearing the timer from route()
+  // covers every way the location can change — a link click, popstate,
+  // navigate(), a boost swap out of the player — without enumerating
+  // them, and it leaves a `player:rerender` (a variant job landing) alone,
+  // which route() would otherwise cancel out from under someone mid-word.
+  let armedAt = "";
   // typed distinguishes the debounce firing from an explicit Enter or
   // Escape. Only the first is suppressed below: an explicit action gets
   // an explicit answer, even when the answer is "type another letter".
   const commit = ({ typed = false } = {}) => {
+    if (typed && location.href !== armedAt) return; // the reader moved on
     const q = input.value.trim();
     const entering = location.pathname !== "/search";
     // One letter is not a search — renderSearch requires two — so
@@ -220,6 +235,7 @@ function wireSearchInput() {
     //
     // api.js aborts the in-flight request per keystroke, so a slow
     // response can't overwrite a newer one.
+    armedAt = location.href;
     timer = setTimeout(() => commit({ typed: true }), 400);
   });
   form.addEventListener("submit", (e) => {

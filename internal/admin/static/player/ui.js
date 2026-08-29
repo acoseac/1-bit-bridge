@@ -80,7 +80,7 @@ export function cover(src, alt) {
 const crumbTruncateAt = 24;
 
 export function crumbs(items) {
-  const list = (items || []).filter((i) => i && i.label && i.href);
+  const list = (items || []).filter((i) => i?.label && i?.href);
   if (!list.length) return null;
   const ol = el("ol", { class: "crumb-list" });
   for (const { label, href } of list) {

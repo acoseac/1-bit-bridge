@@ -184,7 +184,13 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   color: var(--fg-muted); opacity: 0.6; font-size: var(--text-sm);
 }
 .crumb-link {
-  display: inline-flex; align-items: center; gap: 4px;
+  /* inline-block, not inline-flex: text-overflow applies to block containers
+   * only, so the ellipsis below is non-conformant on a flex container —
+   * Chromium renders it anyway, Firefox does not. There is nothing left to
+   * lay out here in any case (the arrow this rule was written for is gone;
+   * a crumb is plain text now), and .crumb-item is the flex parent that
+   * centres it. */
+  display: inline-block;
   color: var(--fg-muted); text-decoration: none;
   font-size: var(--text-sm); font-weight: 550;
   /* No button chrome. It is navigation, and the whole reason it moved out of
