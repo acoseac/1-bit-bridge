@@ -67,11 +67,18 @@ var beforeApplyDupeStampsHookForTests func()
 // insideScan=true: the caller holds s.mu and is itself what makes
 // activeScans non-zero, so it must never hit the abandon guard.
 func (s *Scanner) restampDuplicatesNonFatal(ctx context.Context) {
-	if n, err := s.restampDuplicates(ctx, true); err != nil {
-		scanLogger.Error("duplicate stamping", "err", err)
-	} else if n > 0 {
-		scanLogger.Info("duplicate stamping updated serving stamps", "tracks", n)
+	// The duration is logged unconditionally because this pass is
+	// WHOLE-LIBRARY even when it runs in a subtree scan's tail. That is what
+	// bounds how many discrete subtree scans stay cheaper than one full scan
+	// (admin.maxSubtreeScans), and that cap is currently a guess — one number
+	// per scan is what turns it into a measured one.
+	start := time.Now()
+	n, err := s.restampDuplicates(ctx, true)
+	if err != nil {
+		scanLogger.Error("duplicate stamping", "err", err, "took", time.Since(start))
+		return
 	}
+	scanLogger.Info("duplicate stamping", "tracks", n, "took", time.Since(start))
 }
 
 // RestampDuplicates runs one full stamping pass and returns the number
