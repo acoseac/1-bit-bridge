@@ -296,7 +296,7 @@ func (s *Server) apiUploadChunk(w http.ResponseWriter, r *http.Request) {
 	// server's 30s ReadTimeout while a genuinely stalled client still dies.
 	body := newUploadBodyReader(w, r.Body)
 
-	next, err := m.WriteChunk(r.PathValue("sid"), r.PathValue("fid"), offset, body, digest)
+	next, err := m.WriteChunk(r.PathValue("sid"), r.PathValue("fid"), offset, body, digest, r.ContentLength)
 	if err != nil {
 		writeUploadError(w, err)
 		return
@@ -337,6 +337,12 @@ func parseContentDigestSHA256(h string) ([]byte, error) {
 			continue
 		}
 		v = strings.TrimSpace(v)
+		// A structured-field member may carry parameters (RFC 8941 §3.1.2):
+		// `sha-256=:base64:;q=1`. Without stripping them the byte-sequence
+		// check below sees a trailing `1` and rejects a well-formed header.
+		if before, _, found := strings.Cut(v, ";"); found {
+			v = strings.TrimSpace(before)
+		}
 		if len(v) < 2 || v[0] != ':' || v[len(v)-1] != ':' {
 			return nil, errors.New("Content-Digest sha-256 value must be a byte sequence (:base64:)")
 		}

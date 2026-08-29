@@ -74,6 +74,7 @@ type Config struct {
 	Duplicates      DuplicatesConfig     `yaml:"duplicates,omitempty"`
 	SmartPlaylists  SmartPlaylistsConfig `yaml:"smartPlaylists,omitempty"`
 	Upload          UploadConfig         `yaml:"upload,omitempty"`
+	Library         LibraryConfig        `yaml:"library,omitempty"`
 	Tailscale       TailscaleConfig      `yaml:"tailscale,omitempty"`
 	Scanner         ScannerConfig        `yaml:"scanner,omitempty"`
 	Limits          LimitsConfig         `yaml:"limits,omitempty"`
@@ -366,6 +367,24 @@ func (e EnrichConfig) EffectiveCoverSize() int {
 	return e.CoverSize
 }
 
+// LibraryConfig governs operations that MUTATE library content.
+//
+// AllowDelete is its own gate, deliberately NOT folded into upload.enabled:
+// enabling an additive feature must never silently enable a destructive one.
+// It defaults OFF, and the zero value is that default.
+//
+// Deleting moves a file into <root>/.bridge-trash/<stamp>/ rather than
+// unlinking it — recoverable for TrashTtlSeconds, and NOT reclaimed until the
+// operator purges. That is the honest tension: trash does not free space, which
+// is why the console reports reclaimable bytes beside free ones.
+type LibraryConfig struct {
+	AllowDelete bool `yaml:"allowDelete,omitempty"`
+
+	// TrashTtlSeconds resolves to internal/trash's default at zero AND at a
+	// negative value.
+	TrashTtlSeconds int `yaml:"trashTtlSeconds,omitempty"`
+}
+
 // UploadConfig governs the admin console's file-upload surface.
 //
 // Enabled defaults to OFF, and the zero value IS that default. Every other
@@ -385,13 +404,21 @@ type UploadConfig struct {
 	// ChunkBytes all resolve to internal/upload's defaults at zero AND at a
 	// negative value — a -1 typed hoping to disable a cap must not yield an
 	// unbounded one.
-	MaxFileBytes      int64  `yaml:"maxFileBytes,omitempty"`
-	MaxSessionFiles   int    `yaml:"maxSessionFiles,omitempty"`
-	MinFreeBytes      int64  `yaml:"minFreeBytes,omitempty"`
-	SessionTTLSeconds int    `yaml:"sessionTtlSeconds,omitempty"`
-	ChunkBytes        int64  `yaml:"chunkBytes,omitempty"`
-	StagingDir        string `yaml:"stagingDir,omitempty"`
+	MaxFileBytes      int64 `yaml:"maxFileBytes,omitempty"`
+	MaxSessionFiles   int   `yaml:"maxSessionFiles,omitempty"`
+	MinFreeBytes      int64 `yaml:"minFreeBytes,omitempty"`
+	SessionTTLSeconds int   `yaml:"sessionTtlSeconds,omitempty"`
+	ChunkBytes        int64 `yaml:"chunkBytes,omitempty"`
 }
+
+// NOTE: there is deliberately no stagingDir knob. Staging lives inside the
+// target root so that commit is a same-filesystem rename; pointing it at
+// another volume would make every commit a cross-device copy that
+// atomicwrite.RenameWithRetry does not implement (it retries os.Rename and
+// does not handle EXDEV). An inert field that an operator can set and that
+// silently does nothing is worse than no field at all — if the escape hatch is
+// ever wanted, it needs the destination-side temp + copy + fsync + finalize
+// path built with it.
 
 // AtlasConfig governs the optional rich-tier Atlas metadata integration
 // (Phase 2). When Enabled, the bridge accepts metadata pushed by the
@@ -2355,6 +2382,10 @@ func (c *Config) Validate() error {
 	if c.Upload.SessionTTLSeconds < 0 || c.Upload.SessionTTLSeconds > maxIntervalSeconds {
 		return fmt.Errorf("upload.sessionTtlSeconds: must be between 0 and %d (0 uses the default), got %d",
 			maxIntervalSeconds, c.Upload.SessionTTLSeconds)
+	}
+	if c.Library.TrashTtlSeconds < 0 || c.Library.TrashTtlSeconds > maxIntervalSeconds {
+		return fmt.Errorf("library.trashTtlSeconds: must be between 0 and %d (0 uses the default), got %d",
+			maxIntervalSeconds, c.Library.TrashTtlSeconds)
 	}
 	// Enrich upstream base URLs: require an absolute http(s) URL —
 	// surfaces typos at load time instead of as silent runtime enrichment

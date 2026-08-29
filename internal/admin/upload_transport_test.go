@@ -166,7 +166,7 @@ func TestUploadBodyReaderSurvivesPastReadTimeout(t *testing.T) {
 		// A window comfortably longer than the inter-chunk pause but far
 		// shorter than the whole transfer, so only the rolling extension
 		// can carry it to completion.
-		body := newUploadBodyReaderTuned(w, r.Body, 250*time.Millisecond, 256)
+		body := newUploadBodyReaderTuned(w, r.Body, 250*time.Millisecond, 80*time.Millisecond)
 		n, err := io.Copy(io.Discard, body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusRequestTimeout)
@@ -222,7 +222,7 @@ func TestUploadBodyReaderStillKillsAStalledClient(t *testing.T) {
 
 	done := make(chan error, 1)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := newUploadBodyReaderTuned(w, r.Body, window, 256)
+		body := newUploadBodyReaderTuned(w, r.Body, window, window/2)
 		_, err := io.Copy(io.Discard, body)
 		done <- err
 		if err != nil {
@@ -268,5 +268,51 @@ func TestUploadBodyReaderStillKillsAStalledClient(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("handler never returned; the stall deadline did not fire")
+	}
+}
+
+// TestUploadBodyReaderSurvivesATrickleUnderAnyByteThreshold is the case a
+// byte-based extension starves.
+//
+// The first shape of this extended after 256 KiB. A client sending 4 KiB/s
+// delivers 240 KiB in a 60s window — never reaching the threshold — so an
+// ACTIVELY transferring upload was torn down as though it had stalled. Time-
+// based extension means any progress at all keeps it alive, which is the
+// property the whole helper exists for.
+func TestUploadBodyReaderSurvivesATrickleUnderAnyByteThreshold(t *testing.T) {
+	const (
+		window      = 200 * time.Millisecond
+		total       = 600 // bytes — far below any byte threshold worth having
+		chunk       = 20
+		pause       = 25 * time.Millisecond // 30 chunks ≈ 750ms >> window
+		readTimeout = 150 * time.Millisecond
+	)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := newUploadBodyReaderTuned(w, r.Body, window, window/2)
+		n, err := io.Copy(io.Discard, body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusRequestTimeout)
+			return
+		}
+		fmt.Fprintf(w, "%d", n)
+	})
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.ReadTimeout = readTimeout
+	srv.Start()
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPut, srv.URL, trickleBody(total, chunk, pause))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("a steadily-trickling upload was torn down: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(b) != fmt.Sprint(total) {
+		t.Fatalf("status %d body %q, want 200 and %d bytes", resp.StatusCode, b, total)
 	}
 }

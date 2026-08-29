@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"path"
@@ -72,10 +73,16 @@ const (
 	// which is the Slowloris protection ReadTimeout was added for (PR #75).
 	uploadStallWindow = 60 * time.Second
 
-	// uploadDeadlineExtendEvery bounds the syscall rate. At 256 KiB a 4 MiB
-	// chunk costs 16 extensions, which is noise against the write path, and
-	// staying alive needs only ~34 kbps sustained.
-	uploadDeadlineExtendEvery = 256 << 10
+	// uploadExtendAfter is how much of the window may elapse before the next
+	// successful read pushes the deadline forward.
+	//
+	// This is deliberately TIME-based rather than byte-based. A byte threshold
+	// (the first shape here was 256 KiB) starves exactly the client it is
+	// meant to protect: at 4 KiB/s a client sends 240 KiB in a 60s window,
+	// never reaches the threshold, and is torn down while actively
+	// transferring. Extending on elapsed time instead means ANY progress keeps
+	// the connection alive, at a bounded ~2 syscalls per window.
+	uploadExtendAfter = uploadStallWindow / 2
 )
 
 // uploadBodyReader wraps an upload request body and pushes the connection's
@@ -89,12 +96,12 @@ const (
 // read proceeds: a degraded upload beats a refused one, and the log line is
 // what leads a maintainer to the wrapper they added.
 type uploadBodyReader struct {
-	src         io.Reader
-	rc          *http.ResponseController
-	window      time.Duration
-	extendEvery int64
-	sinceExtend int64
-	warnOnce    sync.Once
+	src        io.Reader
+	rc         *http.ResponseController
+	window     time.Duration
+	extendGap  time.Duration
+	lastExtend time.Time
+	warnOnce   sync.Once
 }
 
 // newUploadBodyReader arms the deadline immediately. The server's ReadTimeout
@@ -102,40 +109,51 @@ type uploadBodyReader struct {
 // deferring the first extension until after the first Read would leave a slow
 // first chunk racing a clock that is already running.
 func newUploadBodyReader(w http.ResponseWriter, body io.Reader) *uploadBodyReader {
-	return newUploadBodyReaderTuned(w, body, uploadStallWindow, uploadDeadlineExtendEvery)
+	return newUploadBodyReaderTuned(w, body, uploadStallWindow, uploadExtendAfter)
 }
 
 // newUploadBodyReaderTuned is the constructor tests drive so a stall can be
 // observed in milliseconds instead of a minute. The tuning lives on the
 // INSTANCE rather than in package-level vars, matching transcode.Pool.jobTimeout
 // — a package var would race across parallel tests.
-func newUploadBodyReaderTuned(w http.ResponseWriter, body io.Reader, window time.Duration, extendEvery int64) *uploadBodyReader {
+func newUploadBodyReaderTuned(w http.ResponseWriter, body io.Reader, window, extendGap time.Duration) *uploadBodyReader {
+	if extendGap <= 0 || extendGap > window {
+		extendGap = window / 2
+	}
 	u := &uploadBodyReader{
-		src:         body,
-		rc:          http.NewResponseController(w),
-		window:      window,
-		extendEvery: extendEvery,
+		src:       body,
+		rc:        http.NewResponseController(w),
+		window:    window,
+		extendGap: extendGap,
 	}
 	u.extend()
 	return u
 }
 
 func (u *uploadBodyReader) extend() {
-	if err := u.rc.SetReadDeadline(time.Now().Add(u.window)); err != nil {
-		u.warnOnce.Do(func() {
-			logger.Error("upload read deadline not settable — uploads are capped by the server ReadTimeout; a ResponseWriter is being wrapped without Unwrap", "err", err)
-		})
+	u.lastExtend = time.Now()
+	err := u.rc.SetReadDeadline(u.lastExtend.Add(u.window))
+	if err == nil {
+		return
 	}
+	// ONLY ErrNotSupported means the ResponseWriter was wrapped without an
+	// Unwrap method. Every other error here is ordinary connection lifecycle —
+	// a client that hung up mid-upload returns "use of closed network
+	// connection" — and logging the wrapper diagnosis for those is both
+	// misleading and self-defeating: warnOnce means the first spurious one
+	// SUPPRESSES the real diagnosis for the life of the process.
+	if !errors.Is(err, http.ErrNotSupported) {
+		return
+	}
+	u.warnOnce.Do(func() {
+		logger.Error("upload read deadline not settable — uploads are capped by the server ReadTimeout; a ResponseWriter is being wrapped without Unwrap", "err", err)
+	})
 }
 
 func (u *uploadBodyReader) Read(p []byte) (int, error) {
 	n, err := u.src.Read(p)
-	if n > 0 {
-		u.sinceExtend += int64(n)
-		if u.sinceExtend >= u.extendEvery {
-			u.sinceExtend = 0
-			u.extend()
-		}
+	if n > 0 && time.Since(u.lastExtend) >= u.extendGap {
+		u.extend()
 	}
 	return n, err
 }

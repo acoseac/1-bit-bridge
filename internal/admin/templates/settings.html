@@ -106,6 +106,22 @@
         </small>
       </div>
 
+      <div class="field">
+        <label class="checkbox">
+          <input name="allowDelete" type="checkbox" role="switch" {{if .Data.AllowDelete}}checked{{end}}>
+          Allow deleting from this console
+        </label>
+        <small class="hint">
+          Off by default, and separate from uploads on purpose — turning on the
+          drop target must not also hand out a delete button. Deleting moves
+          files to a hidden trash folder inside the library rather than
+          removing them, so a mistake is recoverable for a week. The catch
+          worth knowing: <strong>trash does not free space</strong> until you
+          empty it, which is why the Library page shows what emptying it would
+          reclaim. Applies immediately.
+        </small>
+      </div>
+
       <div class="field read-only">
         <label>Data directory
           <input type="text" value="{{.Data.DataDir}}" disabled>

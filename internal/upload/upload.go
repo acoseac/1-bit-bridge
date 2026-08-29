@@ -97,6 +97,8 @@ func (c Config) resolved() Config {
 type Manager struct {
 	cfg   Config
 	locks *keyedLocks
+	// destLocks serialises commits by DESTINATION path, across sessions.
+	destLocks *keyedLocks
 
 	// roots returns the LIVE library roots. A snapshot would keep routing
 	// against a set the admin has since changed (the same reason the api
@@ -135,6 +137,7 @@ func NewManager(cfg Config, roots func() []string, opts ...Option) *Manager {
 	m := &Manager{
 		cfg:       cfg.resolved(),
 		locks:     newKeyedLocks(),
+		destLocks: newKeyedLocks(),
 		roots:     roots,
 		freeBytes: defaultFreeBytes,
 		now:       time.Now,
@@ -391,7 +394,7 @@ func (m *Manager) List() ([]*Session, error) {
 // chunkDigest, when non-nil, is the expected raw SHA-256 of THIS chunk's bytes
 // (RFC 9530 Content-Digest). A mismatch leaves the offset untouched so the
 // client simply re-sends.
-func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDigest []byte) (int64, error) {
+func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDigest []byte, contentLength int64) (int64, error) {
 	doc, err := m.findSession(sid)
 	if err != nil {
 		return 0, err
@@ -419,6 +422,16 @@ func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDi
 	}
 	if st.Offset >= fd.Size {
 		return st.Offset, nil // already complete; idempotent re-send
+	}
+
+	// io.LimitReader below already bounds what is WRITTEN to the declared
+	// size, so an oversize payload cannot overflow the file or the disk
+	// budget. But silently truncating a client that announced more than the
+	// file can hold hides its bug behind a 200; when the length is declared,
+	// say so instead.
+	if remaining := fd.Size - st.Offset; contentLength > 0 && contentLength > remaining {
+		return st.Offset, fmt.Errorf("%w: chunk declares %d bytes, only %d remain for this file",
+			ErrTooLarge, contentLength, remaining)
 	}
 
 	part := m.partPath(doc.Root, sid, fid)
@@ -539,62 +552,31 @@ func (m *Manager) Commit(sid string) (*CommitResult, error) {
 	dirs := make(map[string]struct{})
 
 	for _, fd := range doc.Files {
-		out := CommitOutcome{Path: fd.RelPath, Bytes: fd.Size}
-		st, err := m.readState(doc.Root, sid, fd.ID)
-		if err != nil || st.Offset != fd.Size {
-			out.Status, out.Reason = "failed", "incomplete"
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		// Re-validate. The manifest has been on disk since Create and is not
-		// trusted to still say what it said.
-		clean, err := ValidateRelPath(fd.RelPath)
-		if err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		dest := filepath.Join(doc.Root, filepath.FromSlash(clean))
-		if err := AssertRootContains(doc.Root, dest); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		if !doc.Overwrite {
-			if _, err := os.Stat(dest); err == nil {
-				out.Status, out.Reason = "skipped", "a file already exists at this path"
-				res.Skipped++
-				res.Outcomes = append(res.Outcomes, out)
-				continue
+		// Hold the same per-file lock WriteChunk takes.
+		//
+		// The completeness check below plus the fsync-before-offset ordering
+		// already prevent a partial file reaching the library, so this is not
+		// closing a demonstrated corruption. What it does close is Windows,
+		// where renaming a file with an open handle fails with a sharing
+		// violation and RenameWithRetry burns its whole budget before
+		// reporting failure — and the class of reasoning that has to be
+		// redone from scratch every time either side is edited.
+		unlock := m.locks.lock(sid + "/" + fd.ID)
+		out, dir := m.commitOne(doc, sid, fd)
+		unlock()
+
+		switch out.Status {
+		case "committed":
+			res.Committed++
+			if dir != "" {
+				dirs[dir] = struct{}{}
 			}
-		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
+		case "skipped":
+			res.Skipped++
+		default:
 			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
 		}
-		// RenameWithRetry absorbs the Windows scan-on-close window.
-		if err := atomicwrite.RenameWithRetry(m.partPath(doc.Root, sid, fd.ID), dest); err != nil {
-			out.Status, out.Reason = "failed", err.Error()
-			res.Failed++
-			res.Outcomes = append(res.Outcomes, out)
-			continue
-		}
-		if err := fsutil.SyncParentDir(dest); err != nil {
-			logger.Warn("sync parent dir after commit", "path", dest, "err", err)
-		}
-		out.Status = "committed"
-		res.Committed++
 		res.Outcomes = append(res.Outcomes, out)
-		if d := path.Dir(clean); d != "." {
-			dirs[d] = struct{}{}
-		} else {
-			dirs["."] = struct{}{}
-		}
 	}
 
 	for d := range dirs {
@@ -606,6 +588,66 @@ func (m *Manager) Commit(sid string) (*CommitResult, error) {
 		logger.Warn("remove staging dir after commit", "session", sid, "err", err)
 	}
 	return res, nil
+}
+
+// commitOne renames ONE staged file into the library. The caller holds this
+// file's lock.
+func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutcome, string) {
+	out := CommitOutcome{Path: fd.RelPath, Bytes: fd.Size}
+	st, err := m.readState(doc.Root, sid, fd.ID)
+	if err != nil || st.Offset != fd.Size {
+		out.Status, out.Reason = "failed", "incomplete"
+		return out, ""
+	}
+	// Re-validate. The manifest has been on disk since Create and is not
+	// trusted to still say what it said.
+	clean, err := ValidateRelPath(fd.RelPath)
+	if err != nil {
+		out.Status, out.Reason = "failed", err.Error()
+		return out, ""
+	}
+	dest := filepath.Join(doc.Root, filepath.FromSlash(clean))
+	if err := AssertRootContains(doc.Root, dest); err != nil {
+		out.Status, out.Reason = "failed", err.Error()
+		return out, ""
+	}
+	// The collision check and the rename must be atomic AGAINST OTHER
+	// SESSIONS, not just against this file's own chunks. Two sessions
+	// targeting the same destination would otherwise both stat it, both
+	// find nothing, and both rename — and os.Rename REPLACES, so the
+	// second silently destroys the first, which is exactly what
+	// skip-by-default exists to prevent.
+	//
+	// A destination-keyed lock rather than an exclusive-create rename:
+	// RENAME_NOREPLACE is Linux-only, and the os.Link trick needs
+	// hardlinks, which the reference deployment's rclone/B2 mount does not
+	// provide. One bridge is one process, which is the scope that matters.
+	unlockDest := m.destLocks.lock(dest)
+	defer unlockDest()
+
+	if !doc.Overwrite {
+		if _, err := os.Stat(dest); err == nil {
+			out.Status, out.Reason = "skipped", "a file already exists at this path"
+			return out, ""
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		out.Status, out.Reason = "failed", err.Error()
+		return out, ""
+	}
+	// RenameWithRetry absorbs the Windows scan-on-close window.
+	if err := atomicwrite.RenameWithRetry(m.partPath(doc.Root, sid, fd.ID), dest); err != nil {
+		out.Status, out.Reason = "failed", err.Error()
+		return out, ""
+	}
+	if err := fsutil.SyncParentDir(dest); err != nil {
+		logger.Warn("sync parent dir after commit", "path", dest, "err", err)
+	}
+	out.Status = "committed"
+	if d := path.Dir(clean); d != "." {
+		return out, d
+	}
+	return out, "."
 }
 
 // openStagedFile opens a .part for positioned writing.

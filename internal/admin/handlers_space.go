@@ -3,8 +3,34 @@ package admin
 import (
 	"net/http"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
+)
+
+// spaceTTL bounds how often the space snapshot is recomputed.
+//
+// The sidebar widget asks for this on EVERY admin page load, and the snapshot
+// costs two statfs calls plus a SUM(size) over `tracks` — which has no index on
+// size, so it is a full scan. On a 19k-track library behind a FUSE mount that
+// is not free, and none of the three numbers moves fast enough to notice a few
+// seconds of staleness. Deletes and purges invalidate the reclaimable half
+// through the trash manager's own cache, which this reads live.
+const spaceTTL = 15 * time.Second
+
+// diskFacts are the expensive, slow-moving half of the snapshot.
+type diskFacts struct {
+	root    string
+	free    int64
+	total   int64
+	library int64
+}
+
+var (
+	spaceMu   sync.Mutex
+	spaceSnap diskFacts
+	spaceAt   time.Time
 )
 
 // librarySpaceDTO backs the sidebar's space widget.
@@ -51,6 +77,19 @@ func (s *Server) apiLibrarySpace(w http.ResponseWriter, r *http.Request) {
 	out.MinFreeBytes = cfg.Upload.MinFreeBytes
 	out.Configured = cfg.Upload.Enabled || cfg.Upload.MinFreeBytes > 0
 
+	// Only the DISK facts are cached. Everything config-derived
+	// (Configured, MinFreeBytes, Root) is recomputed every call: an operator
+	// who enables uploads and reloads must not find the widget still hidden
+	// because a snapshot from ten seconds ago said the question was not live.
+	if f, ok := cachedDiskFacts(root); ok {
+		out.FreeBytes, out.TotalBytes, out.LibraryBytes, out.Probed = f.free, f.total, f.library, true
+		if s.deps.Trash != nil {
+			out.ReclaimableBytes = s.deps.Trash(root)
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
 	if free, err := transcode.AvailableDiskSpaceNearest(root); err == nil {
 		out.FreeBytes, out.Probed = free, true
 		// Capacity is what makes a fill bar mean something. Without it the
@@ -78,5 +117,30 @@ func (s *Server) apiLibrarySpace(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Trash != nil {
 		out.ReclaimableBytes = s.deps.Trash(root)
 	}
+	// Only a PROBED snapshot is cached. Caching a failed probe would pin
+	// "unknown" — which the widget renders as absent — for the whole TTL.
+	if out.Probed {
+		spaceMu.Lock()
+		spaceSnap = diskFacts{root: root, free: out.FreeBytes, total: out.TotalBytes, library: out.LibraryBytes}
+		spaceAt = time.Now()
+		spaceMu.Unlock()
+	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func cachedDiskFacts(root string) (diskFacts, bool) {
+	spaceMu.Lock()
+	defer spaceMu.Unlock()
+	if spaceAt.IsZero() || spaceSnap.root != root || time.Since(spaceAt) >= spaceTTL {
+		return diskFacts{}, false
+	}
+	return spaceSnap, true
+}
+
+// resetSpaceCacheForTest clears the snapshot between tests, which would
+// otherwise leak across them through the package-level cache.
+func resetSpaceCacheForTest() {
+	spaceMu.Lock()
+	spaceSnap, spaceAt = diskFacts{}, time.Time{}
+	spaceMu.Unlock()
 }
