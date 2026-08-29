@@ -397,6 +397,20 @@ Three rules:
 Empty (the default, and every self-hosted install) manages nothing and changes no
 behaviour.
 
+**Two controls hide themselves without needing the list**, because public mode
+already refuses them outright: `dlnaEnabled` (`startDLNAIfEnabled` returns early
+when `IsPublic` — SSDP multicast has no meaning on a public VPS) and
+`mdnsEnabled` (no LAN to advertise on). Both are hidden by `IsPublic`, derived,
+no config. A control the bridge itself ignores is worse than no control: the
+operator flips it, nothing happens, and the only explanation is a note they have
+to read.
+
+**`tailscaleMode` is deliberately NOT in that group.** It reads like a LAN
+concern but is not refused in public mode — it is merely *defaulted* to
+`disabled` when unset, and switching it to `cli`/`tsnet` genuinely works there.
+Hiding it automatically would remove a working control. A hosted deployment that
+does not want it should name it in `managedSettings`.
+
 **There is no iOS half to this.** These are admin-surface settings; the iOS app's
 per-bridge toggles are playlist backup, favorites and playback history, none of
 which are in this set. A cloud tenant with `dlnaEnabled` forced off simply never
