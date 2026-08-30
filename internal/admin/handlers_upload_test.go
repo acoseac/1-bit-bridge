@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -352,6 +353,15 @@ func TestParseContentDigestSHA256(t *testing.T) {
 // uploads as configured is not a server fault, and the operator needs the
 // cause in the response rather than in a log they have no reason to open.
 func TestReadOnlyLibraryReturns503NotA500(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Chmod on Windows sets only the read-only ATTRIBUTE, and that does
+		// not stop files being created inside a directory — so a 0o500 fixture
+		// is simply writable there and MkdirAll succeeds. Reproducing this
+		// would need an ACL edit via icacls, which this repo deliberately
+		// avoids shelling out to. The CLASSIFICATION itself is covered on every
+		// platform by TestClassifyStagingError*.
+		t.Skip("Chmod cannot make a directory unwritable on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the mode bits this fixture relies on")
 	}

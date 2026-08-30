@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -857,6 +859,15 @@ func TestOversizeChunkIsRefusedRatherThanTruncated(t *testing.T) {
 // This is not hypothetical: bridge.ars.md mounted its B2-backed library with
 // rclone's --read-only until this feature needed writes.
 func TestReadOnlyLibraryIsNamedRatherThanA500(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Chmod on Windows sets only the read-only ATTRIBUTE, and that does
+		// not stop files being created inside a directory — so a 0o500 fixture
+		// is simply writable there and MkdirAll succeeds. Reproducing this
+		// would need an ACL edit via icacls, which this repo deliberately
+		// avoids shelling out to. The CLASSIFICATION itself is covered on every
+		// platform by TestClassifyStagingError*.
+		t.Skip("Chmod cannot make a directory unwritable on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the mode bits this fixture relies on")
 	}
@@ -888,7 +899,19 @@ func TestClassifyStagingErrorPassesUnrelatedFailuresThrough(t *testing.T) {
 	if !strings.Contains(got.Error(), "disk on fire") {
 		t.Errorf("the original cause was dropped: %v", got)
 	}
-	if !errors.Is(classifyStagingError("/lib", syscall.EROFS), ErrLibraryNotWritable) {
-		t.Error("EROFS was not classified")
+	// Both mappings, on every platform: these need no filesystem, so they are
+	// the coverage that survives where the end-to-end fixture cannot run.
+	for name, in := range map[string]error{
+		"EROFS":      syscall.EROFS,
+		"permission": fs.ErrPermission,
+		"EACCES":     syscall.EACCES,
+	} {
+		got := classifyStagingError("/lib", in)
+		if !errors.Is(got, ErrLibraryNotWritable) {
+			t.Errorf("%s was not classified as an unwritable library: %v", name, got)
+		}
+		if !strings.Contains(got.Error(), "/lib") {
+			t.Errorf("%s message does not name the root: %v", name, got)
+		}
 	}
 }
