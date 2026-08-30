@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -154,3 +155,68 @@ func TestHealthWithABadTokenIsUnauthenticatedNot401(t *testing.T) {
 		t.Error("a bogus token cost the caller the handshake fields")
 	}
 }
+
+// TestUnauthenticatedHealthDoesNotQueryTheManifest.
+//
+// /v1/health is the one endpoint reachable without a credential, so it
+// is the one that can be flooded. Computing scanState for a caller who
+// will never see it is work done on the cheapest-to-abuse path — and
+// the counts, TTL-cached or not, mean touching the store.
+//
+// Counting provider calls rather than timing anything: a timing
+// assertion here would be a flake generator, and the question is
+// whether the code path runs at all.
+func TestUnauthenticatedHealthDoesNotQueryTheManifest(t *testing.T) {
+	mp := &countingManifestProvider{}
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LibraryRoots: []string{lib}, ListenAddress: ":7788", LibraryName: "T"}
+	store, err := auth.OpenStore(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(New(cfg, store, mp, "fp").Handler())
+	t.Cleanup(hs.Close)
+
+	res, err := http.Get(hs.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if n := mp.scanCalls(); n != 0 {
+		t.Errorf("an unauthenticated /v1/health made %d manifest call(s) for a field "+
+			"it then drops", n)
+	}
+
+	raw, _, err := store.Mint("probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/health", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	res2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2.Body.Close()
+	if n := mp.scanCalls(); n == 0 {
+		t.Error("an AUTHENTICATED /v1/health made no manifest call — the field is " +
+			"supposed to move behind the token, not disappear")
+	}
+}
+
+// countingManifestProvider records whether the scan-state path ran.
+type countingManifestProvider struct {
+	fakeManifestProvider
+	calls atomic.Int64
+}
+
+func (c *countingManifestProvider) IsScanning() bool {
+	c.calls.Add(1)
+	return c.fakeManifestProvider.IsScanning()
+}
+
+func (c *countingManifestProvider) scanCalls() int64 { return c.calls.Load() }

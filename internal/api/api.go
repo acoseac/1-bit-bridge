@@ -1501,7 +1501,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// PROTOCOL.md "Health disclosure".
 	authed := s.healthCallerIsAuthenticated(r)
 	scanState := ScanState{}
-	if s.manifest != nil {
+	// Gated on `authed` as well as on the manifest: an unauthenticated
+	// caller never sees scanState, so computing it is work for a field
+	// that is dropped. The counts are TTL-cached, but /v1/health is the
+	// one endpoint that can be flooded without a credential, and the
+	// cheapest request is the one that does nothing. (Gemini on #801.)
+	if authed && s.manifest != nil {
 		// A wedged scan is reported as NOT scanning, with the stall
 		// surfaced separately. Clients defer their incremental syncs
 		// while a scan is in flight — a good optimisation that becomes a
