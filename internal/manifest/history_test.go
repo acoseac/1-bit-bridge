@@ -113,7 +113,7 @@ func TestHistoryHistogramsAndTopTracks(t *testing.T) {
 		t.Errorf("route histogram wrong: %+v", routes)
 	}
 	top, _ := s.TopTracks(ctx, 10)
-	if len(top) != 2 || top[0].Label != "hit.flac" || top[0].Count != 2 {
+	if len(top) != 2 || top[0].Path != "hit.flac" || top[0].Count != 2 {
 		t.Errorf("top tracks wrong: %+v", top)
 	}
 	total, _ := s.HistoryEventCount(ctx)
@@ -176,5 +176,64 @@ func TestListHistoryDeviceAttribution(t *testing.T) {
 	}
 	if list[1].SourceDeviceToken != "devA" || list[1].SourceDeviceName != "iPhone 17" {
 		t.Errorf("registered device attribution wrong: %+v", list[1])
+	}
+}
+
+// TestTopTracksResolvesTitleAndArtist pins the join that makes the
+// Listening-history panel readable.
+//
+// playback_history stores the path, so until this landed the console's
+// most human view listed "09. Bye Baby Blue.flac" and
+// "03 - Adele - Don't You Remember.flac" — the least readable panel in
+// the product, describing the most human data in it.
+//
+// The unresolved row is the other half and matters as much: a play of a
+// file since deleted or renamed is still a real play. It must survive
+// with empty metadata so the caller can fall back to the basename,
+// rather than vanishing from the counts.
+func TestTopTracksResolvesTitleAndArtist(t *testing.T) {
+	s := newDeviceTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertTrack(ctx, &Track{
+		Path:   "Adele/25/03 - Adele - Don't You Remember.flac",
+		Title:  "Don't You Remember",
+		Artist: "Adele",
+		Album:  "25",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	_ = s.InsertHistoryBatch(ctx, []PlaybackHistoryRow{
+		histEvent("devA", "Adele/25/03 - Adele - Don't You Remember.flac", 1, 1, "FLAC", "CarPlay"),
+		histEvent("devA", "Adele/25/03 - Adele - Don't You Remember.flac", 2, 1, "FLAC", "CarPlay"),
+		histEvent("devA", "Gone/Deleted/09. Bye Baby Blue.flac", 3, 1, "FLAC", "CarPlay"),
+	})
+
+	top, err := s.TopTracks(ctx, 10)
+	if err != nil {
+		t.Fatalf("TopTracks: %v", err)
+	}
+	if len(top) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(top), top)
+	}
+
+	if top[0].Title != "Don't You Remember" || top[0].Artist != "Adele" {
+		t.Errorf("resolved row = %+v, want title/artist spliced from the catalog", top[0])
+	}
+	if top[0].Count != 2 {
+		t.Errorf("count = %d, want 2", top[0].Count)
+	}
+	if top[0].Path == "" {
+		t.Error("path dropped — the tooltip and the fallback both need it")
+	}
+
+	// The deleted track: present, counted, unnamed.
+	if top[1].Title != "" || top[1].Artist != "" {
+		t.Errorf("unresolved row = %+v, want empty metadata", top[1])
+	}
+	if top[1].Path != "Gone/Deleted/09. Bye Baby Blue.flac" {
+		t.Errorf("unresolved path = %q — a play of a since-deleted file is still a play "+
+			"and must not vanish from the counts", top[1].Path)
 	}
 }

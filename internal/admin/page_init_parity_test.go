@@ -31,6 +31,10 @@ import (
 // dispatch switch. Add to this list only with a reason.
 var tabsWithoutInit = map[string]string{
 	"player": "the player module (boot.js) owns its own mount and routing",
+	// The 404 page is prose and five links. It has no control to wire,
+	// and giving it an empty init case just to satisfy this guard would
+	// make the guard weaker for every page that does need one.
+	"notfound": "static page — prose and anchors, no interactive controls",
 }
 
 var dispatchCaseRe = regexp.MustCompile(`case "([a-z]+)":\s*init`)

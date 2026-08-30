@@ -1324,6 +1324,11 @@ var pages = map[string]string{
 	"history":     "history.html",
 	"settings":    "settings.html",
 	"diagnostics": "diagnostics.html",
+	// Rendered by the catch-all below. It is a real page with the real
+	// shell on purpose: the bare `404 page not found` Go writes by
+	// default has no nav, so a mistyped or stale link left the operator
+	// with the browser Back button as the only way out.
+	"notfound": "notfound.html",
 }
 
 // New constructs an admin Server. Call Handler to get the http.Handler for
@@ -1395,6 +1400,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /smartmixes", redirectRetiredSmartMixes)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 	mux.HandleFunc("GET /diagnostics", s.pageDiagnostics)
+
+	// Catch-all 404. Go's ServeMux prefers the most specific pattern, so
+	// this fires only when nothing above matched. Registered here rather
+	// than at the bottom of the function so it reads next to the other
+	// page routes; ordering is irrelevant to matching.
+	//
+	// One deliberate consequence, verified rather than assumed: a "/"
+	// pattern also absorbs the method-mismatch case, so `POST /stats`
+	// now renders 404 instead of Go's 405. Nothing in the product issues
+	// one — the browser only GETs pages — and the alternative is
+	// enumerating every registered pattern here just to tell the two
+	// apart. API paths still answer JSON (see notFound), so a client
+	// never gets an HTML body it can't parse.
+	mux.HandleFunc("/", s.notFound)
 
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
