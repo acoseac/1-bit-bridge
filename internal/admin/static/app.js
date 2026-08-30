@@ -1609,7 +1609,28 @@ function sessionKey(entries) {
     .join("\u0001");
 }
 
-function findResumable(picked) {
+// findResumable returns a staged session that matches BOTH the picked files and
+// the current overwrite choice.
+//
+// overwrite is fixed when the session is created and is what commit consults,
+// so adopting a session created with overwrite:true while the operator has
+// since unticked "Replace files that already exist" would overwrite their
+// library against their stated wish — the one direction of this mismatch that
+// destroys data. Treating it as part of the identity refuses both directions
+// rather than reasoning about which is safe.
+function findResumable(picked, overwrite) {
+  const want = sessionKey(picked.map((p) => ({ path: p.path, size: p.file.size })));
+  return resumableSessions.find(
+    (s) =>
+      !!s.overwrite === !!overwrite &&
+      sessionKey(s.files.map((f) => ({ path: f.path, size: f.size }))) === want,
+  );
+}
+
+// findFilesOnlyMatch is the diagnostic half: same files, different overwrite.
+// Without it the operator ticks a box, watches a full re-upload start, and has
+// no idea why the resume they were offered did not happen.
+function findFilesOnlyMatch(picked) {
   const want = sessionKey(picked.map((p) => ({ path: p.path, size: p.file.size })));
   return resumableSessions.find(
     (s) => sessionKey(s.files.map((f) => ({ path: f.path, size: f.size }))) === want,
@@ -1617,15 +1638,18 @@ function findResumable(picked) {
 }
 
 async function discardResumable() {
-  for (const s of resumableSessions) {
-    try {
-      await API.delete(`/api/upload/sessions/${encodeURIComponent(s.id)}`);
-    } catch (e) {
-      showUploadError(e && e.message ? e.message : String(e));
-      return;
-    }
+  // ONLY the session the banner is describing. The banner shows
+  // resumableSessions[0]; discarding the whole list would throw away staged
+  // progress for uploads the operator never saw, let alone chose to abandon.
+  // Re-reading afterwards lets the next one surface.
+  const s = resumableSessions[0];
+  if (!s) return;
+  try {
+    await API.delete(`/api/upload/sessions/${encodeURIComponent(s.id)}`);
+  } catch (e) {
+    showUploadError(e && e.message ? e.message : String(e));
+    return;
   }
-  resumableSessions = [];
   await refreshResumable();
   showUploadResult("Discarded the interrupted upload.");
 }
@@ -1739,11 +1763,19 @@ async function startUpload() {
     // Same files, same sizes as something already staged? Continue it rather
     // than starting over. transferAll already skips complete files and resumes
     // partial ones from their recorded offset, so nothing else changes.
-    const existing = findResumable(uploadState.picked);
-    let session = existing
+    const existing = findResumable(uploadState.picked, overwrite);
+    const isResumed = !!existing;
+    if (!isResumed && findFilesOnlyMatch(uploadState.picked)) {
+      showUploadError(
+        `Starting over rather than resuming: the interrupted upload was created with ` +
+          `"Replace files that already exist" ${overwrite ? "off" : "on"}, and it is now ` +
+          `${overwrite ? "on" : "off"}. That setting is fixed when an upload starts.`,
+      );
+    }
+    let session = isResumed
       ? await API.get(`/api/upload/sessions/${encodeURIComponent(existing.id)}`)
       : await createUploadSession(uploadState.picked, overwrite);
-    if (existing) {
+    if (isResumed) {
       const done = session.files.reduce((n, f) => n + f.offset, 0);
       showUploadResult(`Continuing the interrupted upload from ${formatBytes(done)}.`);
     }
@@ -1760,7 +1792,7 @@ async function startUpload() {
     // The pre-flight WARNS. Anything the server recognises is dropped from the
     // set by default, and the operator is told what happened and can re-run
     // with overwrite if that is what they meant.
-    const dupes = existing ? [] : session.files.filter((f) => f.duplicateOf);
+    const dupes = isResumed ? [] : session.files.filter((f) => f.duplicateOf);
     if (dupes.length && !overwrite) {
       const keep = uploadState.picked.filter((p) => {
         const f = session.files.find((x) => x.path === p.path);

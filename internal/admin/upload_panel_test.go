@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -83,7 +85,7 @@ func TestUploadClientEncodesPathSegmentsNotFormEncoded(t *testing.T) {
 	// carries "\r\n" and a "\n}\n" literal is not in the bytes at all. The
 	// same test shape failed on windows-latest from the day it was added the
 	// last time (see CLAUDE.md); normalizing at the read is the fix.
-	js := strings.ReplaceAll(readFile(t, "static/app.js"), "\r\n", "\n")
+	js := readFile(t, "static/app.js")
 	start := strings.Index(js, "async function putUploadChunk")
 	if start < 0 {
 		t.Fatal("putUploadChunk not found — this test no longer covers the chunk URL")
@@ -243,7 +245,7 @@ func TestExpiryUsesAFutureFormatter(t *testing.T) {
 	// Normalized for the same reason putUploadChunk's scan is: a Windows
 	// checkout carries CRLF and the "\n}\n" delimiter below is not in the
 	// bytes at all.
-	js := strings.ReplaceAll(readFile(t, "static/app.js"), "\r\n", "\n")
+	js := readFile(t, "static/app.js")
 	i := strings.Index(js, "async function refreshTrash")
 	if i < 0 {
 		t.Fatal("refreshTrash not found — this test no longer covers the expiry cell")
@@ -408,7 +410,7 @@ func TestResumeMatchesOnPathAndSizeNotPathAlone(t *testing.T) {
 // the deselect-by-default rule would drop exactly the work being resumed.
 func TestResumeSkipsTheDuplicatePreflight(t *testing.T) {
 	js := readFile(t, "static/app.js")
-	if !strings.Contains(js, "const dupes = existing ? [] : session.files.filter") {
+	if !strings.Contains(js, "const dupes = isResumed ? [] : session.files.filter") {
 		t.Error("the duplicate pre-flight still runs on a resumed session")
 	}
 }
@@ -426,5 +428,71 @@ func TestResumeBannerIsWiredBothWays(t *testing.T) {
 	}
 	if !strings.Contains(js, "refreshResumable()") {
 		t.Error("the banner is never populated")
+	}
+}
+
+// TestResumeRefusesAnOverwriteMismatch — `overwrite` is fixed when a session is
+// created and is what commit consults. Adopting a session created with
+// overwrite:true while the operator has since unticked "Replace files that
+// already exist" would overwrite their library against their stated wish. That
+// is the one direction of this mismatch that destroys data, so the identity
+// check refuses both rather than reasoning about which is safe.
+func TestResumeRefusesAnOverwriteMismatch(t *testing.T) {
+	js := readFile(t, "static/app.js")
+	i := strings.Index(js, "function findResumable")
+	if i < 0 {
+		t.Fatal("findResumable is gone")
+	}
+	end := strings.Index(js[i:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not delimit findResumable")
+	}
+	if !strings.Contains(js[i:i+end], "s.overwrite") {
+		t.Error("findResumable ignores overwrite, so a resume can silently override the operator's current choice")
+	}
+	// And the mismatch must be EXPLAINED, or a full re-upload starts for no
+	// visible reason.
+	if !strings.Contains(js, "findFilesOnlyMatch") {
+		t.Error("an overwrite mismatch starts over with no explanation")
+	}
+}
+
+// TestDiscardRemovesOnlyTheDisplayedSession — the banner describes
+// resumableSessions[0]; discarding the whole list would throw away staged
+// progress for uploads the operator never saw.
+func TestDiscardRemovesOnlyTheDisplayedSession(t *testing.T) {
+	js := readFile(t, "static/app.js")
+	i := strings.Index(js, "async function discardResumable")
+	if i < 0 {
+		t.Fatal("discardResumable is gone")
+	}
+	end := strings.Index(js[i:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not delimit discardResumable")
+	}
+	body := js[i : i+end]
+	if strings.Contains(body, "for (const s of resumableSessions)") {
+		t.Error("discardResumable deletes every staged session, not the one shown")
+	}
+	if !strings.Contains(body, "resumableSessions[0]") {
+		t.Error("discardResumable does not target the displayed session")
+	}
+}
+
+// TestReadFileNormalizesCRLF is the structural fix for a bug written three
+// times: a "\n}\n" delimiter is simply not in the bytes of a Windows checkout,
+// so the scan finds nothing and only the windows-latest leg fails.
+func TestReadFileNormalizesCRLF(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "crlf.txt")
+	if err := os.WriteFile(p, []byte("func x() {\r\n\treturn\r\n}\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, p)
+	if strings.Contains(got, "\r") {
+		t.Fatal("readFile returned CRLF; every \"\\n}\\n\" scan in this package breaks on a Windows checkout")
+	}
+	if !strings.Contains(got, "\n}\n") {
+		t.Error("the normalized text still does not contain the delimiter these scans rely on")
 	}
 }
