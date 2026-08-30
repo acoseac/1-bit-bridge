@@ -15,10 +15,16 @@ import (
 // silent, indefinite sync outage. `/v1/health` must therefore answer
 // "should you wait for me?" — not "is a goroutine alive?".
 
+// healthScanState reads scanState from an AUTHENTICATED /v1/health.
+// The block is authed-only since the health split — an unauthenticated
+// caller gets no scanState at all, which is what
+// TestHealthUnauthenticatedOmitsInventoryFields pins.
 func healthScanState(t *testing.T, mp ManifestProvider) ScanState {
 	t.Helper()
-	hs, _ := withManifest(t, mp)
-	resp, err := http.Get(hs.URL + "/v1/health")
+	hs, tok := withManifest(t, mp)
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/health", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +33,10 @@ func healthScanState(t *testing.T, mp ManifestProvider) ScanState {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	return got.ScanState
+	if got.ScanState == nil {
+		t.Fatal("authenticated /v1/health returned no scanState")
+	}
+	return *got.ScanState
 }
 
 func TestHealth_ActiveScanIsAdvertisedAsScanning(t *testing.T) {

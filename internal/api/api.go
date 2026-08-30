@@ -1164,15 +1164,21 @@ func (s *Server) Handler() http.Handler {
 // all four as optional and falls back to "no update info" rather
 // than a hard error if any are missing.
 type HealthResponse struct {
-	ProtocolVersion     int       `json:"protocolVersion"`
-	ServerVersion       string    `json:"serverVersion"`
-	LibraryName         string    `json:"libraryName"`
-	LibraryRoots        []string  `json:"libraryRoots"`
-	CertFingerprint     string    `json:"certFingerprint"`
-	StartedAt           time.Time `json:"startedAt"`
-	ScanState           ScanState `json:"scanState"`
-	Endpoints           []string  `json:"endpoints,omitempty"`
-	LatestServerVersion string    `json:"latestServerVersion,omitempty"`
+	ProtocolVersion int       `json:"protocolVersion"`
+	ServerVersion   string    `json:"serverVersion"`
+	LibraryName     string    `json:"libraryName"`
+	LibraryRoots    []string  `json:"libraryRoots"`
+	CertFingerprint string    `json:"certFingerprint"`
+	StartedAt       time.Time `json:"startedAt"`
+	// ScanState is a pointer + omitempty so the UNAUTHENTICATED response
+	// can drop it. It carries tracksIndexed, which is a library-size
+	// inventory number a pre-pairing caller has no need for. iOS
+	// declares it `ScanState?`, so its absence is decode-safe on every
+	// shipped client — which is exactly why this one could move and
+	// libraryName could not.
+	ScanState           *ScanState `json:"scanState,omitempty"`
+	Endpoints           []string   `json:"endpoints,omitempty"`
+	LatestServerVersion string     `json:"latestServerVersion,omitempty"`
 	// UpdateAvailable is a pointer so a genuine `false` (updater
 	// wired, poll ran, no newer release) serializes explicitly rather
 	// than being dropped by `omitempty` — otherwise a successful poll
@@ -1449,10 +1455,58 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
+// healthCallerIsAuthenticated reports whether this /v1/health request
+// carries a valid bearer token.
+//
+// /v1/health is and must remain reachable without one: iOS fetches it
+// before pairing exists, to read protocolVersion, certFingerprint and
+// the endpoint list. So this is not a gate — it selects which of two
+// payloads to send.
+//
+// Deliberately silent about failure. An invalid or absent token is not
+// an error here, it just means "unauthenticated caller", and answering
+// 401 would break every pre-pairing probe. Nothing is recorded either:
+// the authed() middleware's client-version tracking and device binding
+// are for real API traffic, and a health poll is not that.
+func (s *Server) healthCallerIsAuthenticated(r *http.Request) bool {
+	raw := extractBearer(r)
+	if raw == "" || s.store == nil {
+		return false
+	}
+	_, ok := s.store.Validate(raw)
+	return ok
+}
+
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgHolder.Load()
+	// The split. What an unauthenticated caller does NOT get:
+	//
+	//   - scanState (tracksIndexed) — the library's size
+	//   - latestServerVersion / updateAvailable / updateReleaseNotesURL
+	//
+	// The update triple is the sharpest of the two. An unauthenticated
+	// internet-wide scan of these endpoints could enumerate every bridge
+	// and sort them by how far behind they are on patches — a targeting
+	// index, handed out for free, and the field that makes it possible
+	// is of no use whatsoever to a client deciding whether to pair.
+	//
+	// What an unauthenticated caller still gets, and why: protocolVersion,
+	// certFingerprint, endpoints and minClientVersion ARE the pre-pairing
+	// handshake. libraryName, libraryRoots, serverVersion and startedAt
+	// are disclosure too — but iOS declares them non-optional, so removing
+	// them fails Codable decoding outright on every shipped app rather
+	// than degrading. Trimming those needs an iOS release that makes them
+	// optional first; until then the honest move is to take the two that
+	// are safe and say plainly that the rest is pending. See
+	// PROTOCOL.md "Health disclosure".
+	authed := s.healthCallerIsAuthenticated(r)
 	scanState := ScanState{}
-	if s.manifest != nil {
+	// Gated on `authed` as well as on the manifest: an unauthenticated
+	// caller never sees scanState, so computing it is work for a field
+	// that is dropped. The counts are TTL-cached, but /v1/health is the
+	// one endpoint that can be flooded without a credential, and the
+	// cheapest request is the one that does nothing. (Gemini on #801.)
+	if authed && s.manifest != nil {
 		// A wedged scan is reported as NOT scanning, with the stall
 		// surfaced separately. Clients defer their incremental syncs
 		// while a scan is in flight — a good optimisation that becomes a
@@ -1479,22 +1533,33 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		LibraryRoots:    libraryRootBasenames(cfg.LibraryRoots),
 		CertFingerprint: s.fingerprint,
 		StartedAt:       s.startedAt,
-		ScanState:       scanState,
 		// TTL-cached for the same reason as the COUNT(*) scans above:
 		// /v1/health is unauthenticated and unlimited, and the uncached
 		// form ran a full interface enumeration (1 + N kernel dumps) per
 		// request. See endpointsCache.
 		Endpoints: s.endpointsCache.endpoints(s.reachableEndpoints),
 	}
+	if authed {
+		resp.ScanState = &scanState
+	}
 	if s.updater != nil {
 		info := s.updater.UpdateInfo()
-		resp.LatestServerVersion = info.LatestVersion
-		// Local copy's address, not &info.UpdateAvailable directly —
-		// robust if UpdateInfo ever returns a reused/looped struct.
-		updateAvail := info.UpdateAvailable
-		resp.UpdateAvailable = &updateAvail
-		resp.UpdateReleaseNotesURL = info.ReleaseNotesURL
+		// MinClientVersion stays UNAUTHENTICATED. It is the client-compat
+		// floor, not server disclosure: iOS reads it before pairing to
+		// decide whether to nudge the user toward an App Store update,
+		// and it says nothing about this host's patch level. Dropping it
+		// with the rest of this block would have broken that nudge — the
+		// only reason it is called out is that it shares a source struct
+		// with the three fields that do get withheld.
 		resp.MinClientVersion = info.MinClientVersion
+		if authed {
+			resp.LatestServerVersion = info.LatestVersion
+			// Local copy's address, not &info.UpdateAvailable directly —
+			// robust if UpdateInfo ever returns a reused/looped struct.
+			updateAvail := info.UpdateAvailable
+			resp.UpdateAvailable = &updateAvail
+			resp.UpdateReleaseNotesURL = info.ReleaseNotesURL
+		}
 	}
 	// Capability flag — non-nil pointer so the wire shape says
 	// `false` explicitly (not omitted) when the server supports

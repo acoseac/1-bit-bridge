@@ -71,7 +71,30 @@ Anchoring the hash to the encoded form (not the raw bytes) means client and serv
 
 Pairing probe and liveness check. No auth token required for this endpoint (so the iOS "Add Bridge" sheet can show a meaningful error before the user has pasted their token).
 
-**Response** (`200 OK`, JSON):
+#### Health disclosure
+
+The response has **two shapes**, selected by whether the request carries a valid bearer token. This is not a gate — an unauthenticated caller still gets `200` and the full pre-pairing handshake — it selects how much the bridge says about itself to a stranger.
+
+Withheld from an **unauthenticated** caller:
+
+| field | why |
+|---|---|
+| `scanState` | carries `tracksIndexed`, the library's size — an inventory number no pre-pairing client needs |
+| `latestServerVersion` | |
+| `updateAvailable` | together these say whether this host is **behind on patches**. Unauthenticated, across the internet, that enumerates every reachable bridge and sorts them by how far behind they are |
+| `updateReleaseNotesURL` | |
+
+Always present, authenticated or not:
+
+`protocolVersion`, `certFingerprint`, `endpoints` and `minClientVersion` **are** the handshake — a client cannot decide whether or how to pair without them. `minClientVersion` in particular is a client-compat floor, not server disclosure: it says which app version this bridge needs, and nothing about its own patch level.
+
+`libraryName`, `libraryRoots`, `serverVersion` and `startedAt` are disclosure too, and are **deliberately still sent**. iOS declares all four non-optional in its `HealthResponse`, so withholding them fails `Codable` decoding outright on every shipped app rather than degrading. Narrowing them further requires an iOS release that makes them optional first; the two field groups above were moved precisely because iOS already declares them optional (`ScanState?`, `String?`, `Bool?`), so their absence is decode-safe today.
+
+An **invalid or expired** token is treated as unauthenticated, never as an error. Answering `401` here would break every pre-pairing probe, and a client holding a revoked token would lose the endpoint list it needs to reach the bridge at all.
+
+`ProtocolVersion` is unchanged: every affected field was already optional on the wire.
+
+**Response** (`200 OK`, JSON — the authenticated shape; an unauthenticated caller sees the same document without the four fields above):
 ```json
 {
   "protocolVersion": 1,

@@ -136,14 +136,20 @@ func TestHealthReflectsScanState(t *testing.T) {
 		lastFullScan:  last,
 		tracksIndexed: 1234,
 	}
-	hs, _ := withManifest(t, mp)
-	resp, err := http.Get(hs.URL + "/v1/health")
+	hs, tok := withManifest(t, mp)
+	// Authenticated: scanState is authed-only since the health split.
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/health", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	var got HealthResponse
 	json.NewDecoder(resp.Body).Decode(&got)
+	if got.ScanState == nil {
+		t.Fatal("authenticated /v1/health returned no scanState")
+	}
 	if !got.ScanState.IsScanning {
 		t.Error("isScanning not reflected")
 	}
