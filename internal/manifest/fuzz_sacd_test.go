@@ -112,18 +112,92 @@ func sacdSeedImage(tail []byte) []byte {
 	return append(out, tail...)
 }
 
+// sacdSeedMasterUnit builds a master TOC unit that actually SURVIVES
+// parseSACDTOC's validation, rather than one that merely starts with the
+// right eight bytes.
+//
+// The distinction matters, and the first version of this file got it
+// wrong: the area pointers live at offsets 64/68 and 72/76 of the master
+// sector, and a candidate is adopted only when `start > 0 && end > start`.
+// A seed whose pointer bytes sit anywhere else is rejected at
+// `len(cand) == 0` and reaches exactly as far as an all-zero buffer — so
+// it looked like a deeper seed and contributed nothing.
+func sacdSeedMasterUnit() []byte {
+	unit := make([]byte, 2*sacdSectorPayload)
+	copy(unit, sacdMasterSignature)
+	putU16 := func(off int, v uint16) { unit[off], unit[off+1] = byte(v>>8), byte(v) }
+	putU32 := func(off int, v uint32) {
+		unit[off], unit[off+1] = byte(v>>24), byte(v>>16)
+		unit[off+2], unit[off+3] = byte(v>>8), byte(v)
+	}
+	putU16(18, 1)     // album sequence
+	putU32(64, 0x10)  // area 1 start
+	putU32(68, 0x200) // area 1 end — start > 0 && end > start, so adopted
+	putU16(120, 2001) // year
+	// Second sector: the first locale text bank, so the album-title and
+	// artist pointer slots get walked too.
+	bank := unit[sacdSectorPayload:]
+	copy(bank, []byte("SACDText"))
+	bank[16], bank[17] = 0, 64 // album-title slot -> offset 64
+	copy(bank[64:], []byte("Seed Album\x00"))
+	return unit
+}
+
+// sacdSeedArea builds a stereo area TOC that reaches the track table and
+// the TTxt bank walk — the deepest arithmetic in the file.
+//
+// Every gate on the way there has to be satisfied, and the first version
+// of this seed cleared none past the third: channels == 2, then
+// 1 <= trackCount <= 255, then `trackAreaEnd > trackAreaStart` — both were
+// left zero, so 0 <= 0 returned early and the track table was never
+// reached at all. Past that: the TRL1/TRL2 sector signatures, each track's
+// start LSN falling inside [trackAreaStart, trackAreaEnd), and start and
+// duration timecodes whose seconds < 60 and frames < 75 with a non-zero
+// duration.
+func sacdSeedArea() []byte {
+	const tocSectors = 4 // the 3-sector minimum + one TTxt sector to walk
+	d := make([]byte, tocSectors*sacdSectorPayload)
+	putU16 := func(off int, v uint16) { d[off], d[off+1] = byte(v>>8), byte(v) }
+	putU32 := func(off int, v uint32) {
+		d[off], d[off+1] = byte(v>>24), byte(v>>16)
+		d[off+2], d[off+3] = byte(v>>8), byte(v)
+	}
+	copy(d, sacdStereoSignature)
+	putU16(10, tocSectors) // tocSize
+	d[32] = 2              // channels — stereo, or parseSACDArea refuses
+	d[68] = 0              // trackOffset
+	d[69] = 1              // trackCount
+	putU32(72, 0x10)       // trackAreaStart
+	putU32(76, 0x200)      // trackAreaEnd — must exceed start
+
+	trl1 := sacdSectorPayload
+	trl2 := 2 * sacdSectorPayload
+	copy(d[trl1:], sacdTRL1Signature)
+	copy(d[trl2:], sacdTRL2Signature)
+	putU32(trl1+8, 0x20) // track 1 start LSN, inside [start, end)
+	// Start 00:00:00 and a three-minute duration, both read as
+	// (minutes, seconds, frames) and validated at 75 fps.
+	d[trl2+8], d[trl2+9], d[trl2+10] = 0, 0, 0
+	d[trl2+8+1020], d[trl2+8+1021], d[trl2+8+1022] = 3, 0, 0
+
+	// Fourth sector: a TTxt bank with one item, so the pointer-following
+	// text walk runs instead of being skipped for want of a sector.
+	base := 3 * sacdSectorPayload
+	copy(d[base:], sacdTTxtSignature)
+	putU16(base+8, 32) // track 1's item pointer -> offset 32 within the bank
+	d[base+32] = 1     // one item
+	d[base+36] = 0x01  // type 0x01 = title
+	copy(d[base+37:], []byte("Seed Title\x00"))
+	return d
+}
+
 // FuzzParseSACDTOC drives the whole TOC read — geometry probe, master-copy
 // fallback across sectors 510/520/530, the eight locale text banks, and the
 // area pointers — with the image's own bytes under the fuzzer's control.
 func FuzzParseSACDTOC(f *testing.F) {
+	f.Add(sacdSeedMasterUnit()) // survives validation — see the builder
 	f.Add(sacdSeedImage(nil))
 	f.Add(sacdSeedImage(bytes.Repeat([]byte{0xFF}, 4096)))
-	// A signature followed by a plausible area-pointer region: the copy
-	// fallback only adopts a copy that carries at least one pointer, so a
-	// seed with non-zero pointers reaches further than an all-zero one.
-	f.Add(sacdSeedImage(append(
-		bytes.Repeat([]byte{0}, 8),
-		[]byte{0, 0, 0x02, 0x10, 0, 0, 0x20, 0x00}...)))
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, b []byte) {
@@ -151,16 +225,7 @@ func FuzzParseSACDTOC(f *testing.F) {
 // trackCount indexes the start/duration tables, and the TTxt bank walk
 // follows file-controlled pointers to NUL-terminated text.
 func FuzzParseSACDArea(f *testing.F) {
-	// A minimally plausible area: signature, tocSize=3, then the TRL1/TRL2
-	// sector signatures at their fixed offsets.
-	area := make([]byte, 3*sacdSectorPayload)
-	copy(area, sacdStereoSignature)
-	area[10], area[11] = 0, 3 // tocSize (big-endian u16)
-	area[32] = 2              // channels
-	area[69] = 1              // trackCount
-	copy(area[sacdSectorPayload:], sacdTRL1Signature)
-	copy(area[2*sacdSectorPayload:], sacdTRL2Signature)
-	f.Add(area)
+	f.Add(sacdSeedArea()) // reaches the track table and TTxt walk
 	f.Add([]byte{})
 	f.Add(bytes.Repeat([]byte{0xFF}, sacdSectorPayload))
 
@@ -170,6 +235,48 @@ func FuzzParseSACDArea(f *testing.F) {
 		}
 		for _, g := range []sacdGeometry{sacdPlain2048, sacdRaw2064} {
 			_, _ = parseSACDArea(sacdFuzzImage{base: g.payloadOffset, data: b}, g, 0)
+		}
+	})
+}
+
+// TestSACDFuzzSeedsReachTheParser keeps the two structural seeds honest.
+//
+// A seed is only worth its bytes if it gets PAST the validation gates; one
+// that is rejected early is indistinguishable from the empty seed and
+// quietly narrows the corpus the fuzzer starts from. Both seeds in this
+// file were exactly that when first written — the master unit put its area
+// pointers at the wrong offset, and the area seed left trackAreaStart /
+// trackAreaEnd zero, so `trackAreaEnd <= trackAreaStart` returned before
+// the track table. Nothing failed; the targets simply explored less.
+//
+// Asserting the parse SUCCEEDS is what makes that visible, and it is why
+// this is a test rather than a comment.
+func TestSACDFuzzSeedsReachTheParser(t *testing.T) {
+	t.Run("master unit parses to a TOC", func(t *testing.T) {
+		img := sacdFuzzImage{base: sacdMasterTOCSectors[0] * sacdPlain2048.stride, data: sacdSeedMasterUnit()}
+		toc, err := parseSACDTOC(img)
+		if err != nil {
+			t.Fatalf("seed master unit failed to parse: %v", err)
+		}
+		if toc == nil {
+			t.Fatal("seed master unit produced no TOC — it is rejected at the " +
+				"area-pointer gate and explores no more than the empty seed")
+		}
+	})
+
+	t.Run("area seed parses to a stereo area with a track", func(t *testing.T) {
+		area, ok := parseSACDArea(sacdFuzzImage{data: sacdSeedArea()}, sacdPlain2048, 0)
+		if !ok {
+			t.Fatal("seed area TOC was refused — it never reaches the track " +
+				"table or the TTxt bank walk, which is the arithmetic this " +
+				"target exists to exercise")
+		}
+		if len(area.tracks) != 1 {
+			t.Fatalf("seed area produced %d tracks, want 1", len(area.tracks))
+		}
+		if got := area.tracks[0].title; got != "Seed Title" {
+			t.Errorf("seed area track title = %q, want %q — the TTxt bank walk "+
+				"did not run", got, "Seed Title")
 		}
 	})
 }
