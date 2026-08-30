@@ -85,16 +85,11 @@ func TestUploadClientEncodesPathSegmentsNotFormEncoded(t *testing.T) {
 	// carries "\r\n" and a "\n}\n" literal is not in the bytes at all. The
 	// same test shape failed on windows-latest from the day it was added the
 	// last time (see CLAUDE.md); normalizing at the read is the fix.
-	js := readFile(t, "static/app.js")
-	start := strings.Index(js, "async function putUploadChunk")
-	if start < 0 {
-		t.Fatal("putUploadChunk not found — this test no longer covers the chunk URL")
-	}
-	end := strings.Index(js[start:], "\n}\n")
-	if end < 0 {
-		t.Fatal("could not delimit putUploadChunk")
-	}
-	body := js[start : start+end]
+	// extractJSFunction anchors on the opening paren. A bare
+	// "async function putUploadChunk" prefix-matches putUploadChunkVerified,
+	// which wraps it — this test extracted the WRONG function and failed the
+	// moment that wrapper was added.
+	body := extractJSFunction(t, readFile(t, "static/app.js"), "putUploadChunk")
 	if strings.Contains(body, "URLSearchParams") {
 		t.Error("putUploadChunk builds its URL with URLSearchParams, which form-encodes a space as '+'")
 	}
