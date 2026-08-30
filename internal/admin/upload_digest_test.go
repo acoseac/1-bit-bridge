@@ -25,6 +25,13 @@ import (
 // wrong function. That is not hypothetical — putUploadChunkVerified wraps
 // putUploadChunk, and a bare-prefix scan for the latter found the former.
 //
+// The terminator is a brace at COLUMN 0. app.js is prettier-formatted, so
+// every nested closing brace is indented and only a top-level one can match —
+// which is why this captures a whole function rather than stopping at the
+// first inner block. A review bot read it as stopping at the `if (!subtle)`
+// brace; empirically it does not, and node parses the result, so a truncated
+// extraction would surface as a SyntaxError rather than a silent wrong pass.
+//
 // readFile normalizes CRLF, so the "\n}\n" terminator is present on every
 // platform (see its docblock — this has bitten three times).
 func extractJSFunction(t *testing.T, src, name string) string {
@@ -66,7 +73,15 @@ func TestClientChunkDigestIsAcceptedByTheServerParser(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		payload = append(payload, byte(i*7%256))
 	}
-	driver := "let uploadState = null;\n" + fn + `
+	// globalThis.crypto only became a global in Node 19. On an older runtime
+	// the function under test would find no SubtleCrypto, take its degradation
+	// path, and return no header — so the test would FAIL rather than skip,
+	// blaming the client for the runtime. node:crypto has exposed webcrypto
+	// since Node 15, which covers everything realistic.
+	driver := `import { webcrypto } from "node:crypto";
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
+let uploadState = null;
+` + fn + `
 (async () => {
   const bytes = new Uint8Array(` + jsBytes(payload) + `);
   const h = await chunkDigestHeaders(bytes);
