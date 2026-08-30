@@ -1579,7 +1579,7 @@ func (s *Server) Handler() http.Handler {
 	// the loopback gate is the sole trust boundary and matches the
 	// "scrapers run on the same host" intent. The CSRF guard is a
 	// no-op for GET so the bare promhttp handler passes through safely.
-	mux.Handle("GET /metrics", loopbackOnly(promhttp.Handler()))
+	mux.Handle("GET /metrics", s.metricsGate(promhttp.Handler()))
 
 	// Static. The embed keeps files at "static/app.css", not "app.css",
 	// so we serve the fs directly — the request path already matches.
@@ -2020,6 +2020,60 @@ func loopbackOnly(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// metricsGate is loopbackOnly widened by config.Metrics.AllowCIDRs.
+//
+// Loopback is always permitted, so the default posture is byte-for-byte
+// what it was. The CIDR list exists because the loopback default is
+// UNREACHABLE in a container: a Prometheus outside the network
+// namespace gets a 403, and the only workaround was a sidecar whose
+// entire job is to be on the correct side of that check.
+//
+// The list is read live from the config holder, so widening it is a
+// settings change rather than a restart. Parsing per request is
+// affordable — a scrape is once every 15 seconds at most, and caching a
+// parsed list would need invalidation for no measurable gain.
+//
+// An unparseable entry is skipped, not fatal: it can only ever make the
+// gate NARROWER, so the failure mode is a scraper that is refused and
+// an operator who notices, rather than a bridge that will not boot.
+func (s *Server) metricsGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			http.Error(w, "admin refused: bad remote addr", http.StatusForbidden)
+			return
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			http.Error(w, "admin refused: bad remote addr", http.StatusForbidden)
+			return
+		}
+		if ip.IsLoopback() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if cfg := s.deps.CfgHolder.Load(); cfg != nil && ipInAnyCIDR(ip, cfg.Metrics.AllowCIDRs) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "admin refused: non-loopback remote", http.StatusForbidden)
+	})
+}
+
+// ipInAnyCIDR reports whether ip falls inside any of the given CIDRs.
+func ipInAnyCIDR(ip net.IP, cidrs []string) bool {
+	for _, c := range cidrs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(c))
+		if err != nil || network == nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // restart fires the configured restart callback (or os.Exit(0) by default).

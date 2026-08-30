@@ -43,6 +43,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -69,12 +70,76 @@ func Init(w io.Writer) *slog.Logger {
 		if w == nil {
 			w = os.Stderr
 		}
-		handler := slog.NewTextHandler(w, &slog.HandlerOptions{
-			Level: slog.LevelInfo,
-		})
+		opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+		var handler slog.Handler
+		if jsonRequested(w) {
+			handler = slog.NewJSONHandler(w, opts)
+		} else {
+			handler = slog.NewTextHandler(w, opts)
+		}
 		slog.SetDefault(slog.New(handler))
 	})
 	return slog.Default()
+}
+
+// FormatEnvVar selects the log format.
+//
+//	BRIDGE_LOG_FORMAT=json  — structured, one object per line
+//	BRIDGE_LOG_FORMAT=text  — the key=value form
+//	unset                   — json when stderr is NOT a terminal, else text
+const FormatEnvVar = "BRIDGE_LOG_FORMAT"
+
+// jsonRequested decides the format.
+//
+// The default is conditional rather than fixed because the two
+// deployments want opposite things and neither should have to say so.
+// An operator running `bridge serve` in a terminal is READING these
+// lines, and text is what a person reads. A container ships stdout to a
+// collector that parses them, and text is what forces that collector to
+// guess — this repo's own log-export code has to reconstruct structure
+// out of the text format with a strict `time=` + `level=` prefix scan,
+// which is a fair sign it should have been structured on the way out.
+//
+// A TTY is the honest discriminator for "a human is looking at this".
+// The explicit variable exists for the cases it gets wrong: a
+// terminal-attached process whose output is being captured, or a
+// service manager that hands the process a pty.
+//
+// Only os.Stderr and os.Stdout are probed. Any other writer — a test
+// buffer, a file — is not a terminal by construction, and calling
+// Stat on it to find out would be pointless work with a nil-pointer
+// hazard for a wrapped writer.
+func jsonRequested(w io.Writer) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(FormatEnvVar))) {
+	case "json":
+		return true
+	case "text":
+		return false
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		// Not a real file (a test buffer, a pipe wrapper). Text keeps
+		// existing test expectations and reads fine either way.
+		return false
+	}
+	return !isTerminal(f)
+}
+
+// isTerminal reports whether f is a character device.
+//
+// Deliberately a Stat mode check rather than an ioctl: the bridge's
+// only other TTY test (the launcher menu) uses a dependency for this,
+// and mode&ModeCharDevice is enough to tell a terminal from a pipe or a
+// file, which is the whole question here. A Stat error is treated as
+// not-a-terminal, so an unstattable stderr gets the machine-readable
+// format — the safer direction, since the case that produces one is a
+// redirect.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // Component returns a logger that tags every record with

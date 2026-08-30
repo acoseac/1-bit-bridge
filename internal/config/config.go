@@ -87,11 +87,37 @@ type Config struct {
 	Enrich          EnrichConfig         `yaml:"enrich,omitempty"`
 	Atlas           AtlasConfig          `yaml:"atlas,omitempty"`
 	Artwork         ArtworkConfig        `yaml:"artwork,omitempty"`
+	Metrics         MetricsConfig        `yaml:"metrics,omitempty"`
 	Demo            DemoConfig           `yaml:"demo,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
 	DisableHTTP3 bool `yaml:"disableHttp3,omitempty"`
+}
+
+// MetricsConfig controls who may scrape /metrics.
+//
+// The endpoint is loopback-only by default and stays that way: on a
+// single box the operator IS the loopback, and anything that can reach
+// 127.0.0.1 already owns the token store and the SQLite file.
+//
+// That default is unreachable in a container. A Prometheus running
+// anywhere but inside the same network namespace gets a 403, so the
+// only way to scrape a containerised bridge was a sidecar whose whole
+// job is to be on the right side of the loopback check. AllowCIDRs
+// widens the gate to named networks — a cluster's monitoring subnet —
+// without opening it to the internet.
+//
+// Deliberately CIDRs and not "any authenticated caller": /metrics has
+// no session, and giving it one would mean a scraper holding an admin
+// credential. A network range is the smaller grant.
+type MetricsConfig struct {
+	// AllowCIDRs are additional networks permitted to scrape /metrics,
+	// in CIDR form ("10.0.0.0/8", "fd00::/8"). Loopback is always
+	// allowed and needs no entry. An unparseable entry is dropped at
+	// load with a warning rather than failing the boot — a typo in a
+	// monitoring range must not take the bridge down.
+	AllowCIDRs []string `yaml:"allowCidrs,omitempty"`
 }
 
 // DemoConfig configures the read-only public demo posture (the
