@@ -7,19 +7,27 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 - `make build` — builds `./bin/bridge` for the host OS.
 - `make build-all` — cross-compiles to `dist/bridge-<os>-<arch>{.exe}`.
 - `make test` — pure-Go race-enabled suite; ~150 tests across 10 packages.
-- **Fuzz targets exist and are NOT run by `make test`** (PR #704, 2026-08-16). 29 targets in
+- **Fuzz targets exist and are NOT run by `make test`** (PR #704, 2026-08-16). 32 targets in
   `fuzz_*_test.go` across `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes}`,
   covering the three untrusted-input surfaces: the audio extractors (whole-file + the pure
-  chunk-body parsers), the LAN-facing UNAUTHENTICATED parsers (SSDP / SOAP / DIDL / device
-  description), and `fs.Resolver`. Without `-fuzz` they run their seed corpora as ordinary
-  tests, so the normal suite absorbs them for free. To actually fuzz:
-  `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s` (one target at
-  a time — Go permits only one `-fuzz` per invocation). Three carry PROPERTY assertions worth
-  keeping green rather than merely not-crashing: `FuzzResolveContainment` (a successful
-  `Resolve` must land inside a root — asymmetric, so only a real escape fails it),
-  `FuzzFoldForMatch` (the documented
+  chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
+  SOAP / DIDL / device description), and `fs.Resolver`. Without `-fuzz` they run their seed
+  corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
+  `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
+  (one target at a time — Go permits only one `-fuzz` per invocation).
+  **`-fuzzminimizetime` is not optional on a target that keeps finding new coverage.** It
+  defaults to 60s, minimization burns CPU *without incrementing the reported `execs`*, and the
+  run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
+  Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
+  sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
+  the wall clock. Four carry PROPERTY assertions worth keeping green rather than merely
+  not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
+  asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
-  and `FuzzParseRetryAfter` (the `maxRetryAfter` cap). **A crash found by the extractor
+  `FuzzParseRetryAfter` (the `maxRetryAfter` cap), and `FuzzSACDVirtualPathRoundTrip` (a
+  rendered virtual path must parse back to the same index and container — the renderer and the
+  parser disagreeing is a row-reaping bug, since the deletion pass keys on
+  `IsSACDVirtualPath`). **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest. Baseline at
   introduction: ~41M executions total, zero panics, zero escapes.

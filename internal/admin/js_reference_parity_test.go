@@ -2,8 +2,11 @@ package admin
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -51,8 +54,24 @@ var (
 	jsDeclPropRe   = regexp.MustCompile(`\b([A-Za-z0-9_$]+)\s*[:=]\s*(?:async\s*)?(?:function\b|\()`)
 	jsDeclMethodRe = regexp.MustCompile(`(^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^()]{0,300}\)\s*\{`)
 	jsArrowArgsRe  = regexp.MustCompile(`\(([^()]{0,300})\)\s*=>`)
-	jsArrowOneRe   = regexp.MustCompile(`(^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$]*)\s*=>`)
-	jsIdentRe      = regexp.MustCompile(`[A-Za-z_$][A-Za-z0-9_$]*`)
+	// Parameters of a `function` declaration. The arrow form above was
+	// already collected; this is the same class for the keyword form, and
+	// without it every callback parameter of a plain function reads as an
+	// undeclared call — `chunkAppend(container, items, make, gen)` in
+	// ui.js, `run(button, status, call, describe, onChanged)` in
+	// variants.js, the destructured `{ setCrumb }` of renderAlbum in
+	// views.js. Listing those names as blind spots would fix nine
+	// instances and leave the class; this removes the class.
+	// `\bfunction\b` — the trailing boundary is load-bearing. With
+	// `function\s*` the pattern also matches the CALL `functionCall(arg)`,
+	// reading "Call" as the name and adding `arg` to the declared set, so a
+	// deleted `arg()` helper would pass the guard. The boundary rejects it
+	// (`n` and `C` are both word characters) while still admitting the
+	// anonymous `function(a)` form, where the boundary sits between `n` and
+	// `(`. `\*?` keeps generator declarations.
+	jsFuncArgsRe = regexp.MustCompile(`\bfunction\b\s*\*?\s*[A-Za-z0-9_$]*\s*\(([^()]{0,300})\)`)
+	jsArrowOneRe = regexp.MustCompile(`(^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$]*)\s*=>`)
+	jsIdentRe    = regexp.MustCompile(`[A-Za-z_$][A-Za-z0-9_$]*`)
 )
 
 // jsCallKeywords read as `name(` but are language constructs.
@@ -83,8 +102,108 @@ var jsScannerBlindSpots = map[string]string{
 	"action": "callback parameter of wireJobButton",
 }
 
+// jsSourceFiles returns every shipped .js file under static/, so a module
+// added later is covered on arrival.
+//
+// This walks rather than listing names because the list WAS a hardcoded
+// pair ("static/app.js", "static/player/boot.js") and the seven other
+// player modules — 3,920 lines, `views.js` alone 1,920 — were unscanned.
+// The defect this guards is not hypothetical there: `humanBytes` was
+// deleted out from under nine callers (2026-08-25) and threw on every SSE
+// stats frame. The sibling CSS guard (player_css_parity_test.go) already
+// walks the directory, so the asymmetry was accidental.
+func jsSourceFiles(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	if err := filepath.WalkDir("static", func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".js") {
+			out = append(out, filepath.ToSlash(p))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk static: %v", err)
+	}
+	// Nine modules ship today, and the floor is the count rather than a
+	// loose lower bound: at 5 the guard still passed after four modules
+	// disappeared. Deleting one should be a deliberate act that edits this
+	// number — the same reasoning as the declared-hook list in the sibling
+	// template-class guard. Adding modules is free.
+	//
+	// This is a different job from the aggregate call floor below: this one
+	// answers "are all the modules still here", that one answers "is the
+	// regex still matching". The aggregate cannot do this job — losing
+	// views.js drops the total from 551 to 438, still above any threshold
+	// loose enough not to trip on an ordinary refactor.
+	const jsModulesShippingToday = 9
+	if len(out) < jsModulesShippingToday {
+		t.Fatalf("found %d .js files under static/, expected at least %d — either "+
+			"the walk has stopped matching, or a module was deleted and this "+
+			"count was not updated with it", len(out), jsModulesShippingToday)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestJSDeclarationsDoesNotTreatAFunctionCallAsADeclaration is the
+// near-miss regression for jsFuncArgsRe's word boundary.
+//
+// `functionCall(arg)` is a CALL. Without the boundary the parameter
+// collector read it as a declaration named "Call" taking a parameter
+// "arg", which would silently add `arg` to the declared set and let a
+// deleted `arg()` helper through the guard this file exists to be.
+func TestJSDeclarationsDoesNotTreatAFunctionCallAsADeclaration(t *testing.T) {
+	decls := jsDeclarations(stripJSNoise(`
+		functionCall(deletedHelper);
+		myfunction(alsoNotDeclared);
+	`))
+	for _, name := range []string{"deletedHelper", "alsoNotDeclared"} {
+		if decls[name] {
+			t.Errorf("%q was collected as a declaration, but it is an argument to a "+
+				"CALL whose name merely ends in/starts with \"function\" — a helper "+
+				"deleted out from under it would now pass the guard", name)
+		}
+	}
+
+	// The forms that must still be collected, or the fix trades one hole
+	// for another.
+	for _, src := range []string{
+		"function named(a) {}",
+		"function (b) {}",
+		"async function* gen(c) {}",
+	} {
+		got := jsDeclarations(stripJSNoise(src))
+		var want string
+		switch {
+		case strings.Contains(src, "named"):
+			want = "a"
+		case strings.Contains(src, "gen"):
+			want = "c"
+		default:
+			want = "b"
+		}
+		if !got[want] {
+			t.Errorf("parameter %q of %q was not collected — the boundary fix "+
+				"broke a real declaration form", want, src)
+		}
+	}
+}
+
 func TestAppJSHasNoCallsToDeletedHelpers(t *testing.T) {
-	for _, name := range []string{"static/app.js", "static/player/boot.js"} {
+	var totalCalls atomic.Int64
+	t.Cleanup(func() {
+		// The real "did the scan break" assertion. Per-file floors have to
+		// tolerate the smallest module; this does not, and a regex that
+		// stopped matching collapses it to near zero.
+		if n := totalCalls.Load(); n < 400 {
+			t.Errorf("only %d calls scraped across every static/**/*.js file — "+
+				"the scan has stopped matching, which would make this whole "+
+				"guard pass while checking nothing", n)
+		}
+	})
+	for _, name := range jsSourceFiles(t) {
 		t.Run(name, func(t *testing.T) {
 			b, err := os.ReadFile(name)
 			if err != nil {
@@ -96,11 +215,19 @@ func TestAppJSHasNoCallsToDeletedHelpers(t *testing.T) {
 			for _, m := range jsCallRe.FindAllStringSubmatch(body, -1) {
 				called[m[2]] = true
 			}
-			if len(called) < 20 {
+			// Floor of 8, not the 20 this carried while it scanned only
+			// app.js: the smallest real module (nowplaying.js) has 14
+			// distinct calls, and a per-file number tuned to the largest
+			// file makes adding a small module fail for no reason. What
+			// the guard is actually for — "the scan silently stopped
+			// matching" — yields ~0 for every file, so 8 catches it, and
+			// the aggregate assertion below catches it far more strongly.
+			if len(called) < 8 {
 				t.Fatalf("only %d calls scraped from %s — the scan has stopped "+
 					"matching, which would make this pass while checking nothing",
 					len(called), name)
 			}
+			totalCalls.Add(int64(len(called)))
 
 			declared := jsDeclarations(body)
 
@@ -156,6 +283,11 @@ func jsDeclarations(body string) map[string]bool {
 	add(jsDeclMethodRe.FindAllStringSubmatch(body, -1), 2)
 	add(jsArrowOneRe.FindAllStringSubmatch(body, -1), 2)
 	for _, m := range jsArrowArgsRe.FindAllStringSubmatch(body, -1) {
+		for _, id := range jsIdentRe.FindAllString(m[1], -1) {
+			out[id] = true
+		}
+	}
+	for _, m := range jsFuncArgsRe.FindAllStringSubmatch(body, -1) {
 		for _, id := range jsIdentRe.FindAllString(m[1], -1) {
 			out[id] = true
 		}

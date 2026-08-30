@@ -99,7 +99,30 @@ func SACDVirtualTrackPath(containerRel string, index int) string {
 	if c == "" {
 		return ""
 	}
-	return containerRel + "/st/" + c + ".dff"
+	p := containerRel + "/st/" + c + ".dff"
+	// A minted path MUST round-trip through the recognizer.
+	//
+	// This guarded only the index until 2026-08-31, so a container that
+	// the recognizer rejects still produced a path — SACDVirtualTrackPath("", 94)
+	// returned "/st/94.dff", which IsSACDVirtualPath then says is not a
+	// virtual path at all. The Swift mirror has always had the guard, and
+	// its comment states the reason in as many words: "Mirror the parse's
+	// container rule exactly so minted paths always round-trip."
+	//
+	// No production caller reaches it — processSACDISO only ever passes a
+	// real `.iso` — so this closes a latent divergence in a pinned
+	// cross-repo grammar rather than fixing a live defect. It matters
+	// because the deletion pass keys on IsSACDVirtualPath to decide whether
+	// a row counts as seen: a path the minter produces and the recognizer
+	// disowns is a row nothing can spare.
+	//
+	// Checking against the recognizer rather than restating its rule is
+	// deliberate — a second copy of "must end .iso, non-empty" is a second
+	// thing that can drift, and this is the file where drift is the bug.
+	if got, ok := SACDVirtualContainer(p); !ok || got != containerRel {
+		return ""
+	}
+	return p
 }
 
 // parseSACDVirtualIndex accepts exactly the minted widths: two-digit
