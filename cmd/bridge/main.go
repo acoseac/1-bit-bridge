@@ -3575,6 +3575,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		}
 		loginLimiter = adminauth.NewRateLimiter()
 		defer loginLimiter.Stop()
+		// Land debounced session activity, the auth.Store.FlushLastUsed
+		// convention. Without it a session touched seconds before exit
+		// reloads with a stale LastUsedAt and expires that much earlier.
+		defer func() {
+			if err := adminAuthStore.FlushSessions(); err != nil {
+				fmt.Fprintf(stderr, "adminauth: flush sessions on shutdown: %v\n", err)
+			}
+		}()
 	}
 
 	// Admin TLS wiring (public mode + direct-TLS path only). When

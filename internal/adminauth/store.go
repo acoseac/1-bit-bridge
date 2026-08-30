@@ -4,17 +4,36 @@
 // limiter. Gated on `deployment.mode == public` — loopback installs
 // remain unauthenticated as their historical contract requires.
 //
-// Sessions are in-memory only; restart logs everyone out. This is
-// deliberate — the pairing store has the same "in-memory state is
-// fine, paired clients re-establish" property, and persisting
-// sessions across restart is extra disk surface for marginal UX
-// gain. The credentials file is the only on-disk state.
+// Sessions persist alongside the credentials, so a restart no longer
+// signs every operator out.
+//
+// That reverses the original decision recorded here, and the reason is
+// deployment shape rather than taste. On a single box a restart is a
+// deliberate act by the person who is about to log back in, so
+// in-memory was the right trade. On a hosted bridge the process
+// restarts for reasons the operator did not ask for and may not see —
+// an auto-install, a settings change that needs a bounce, a container
+// reschedule — and "you are signed out again" stops reading as a
+// consequence of anything. It also blocks running two replicas behind
+// a load balancer, since neither can see the other's sessions.
+//
+// Two shapes were considered and rejected. SQLite (the tenant DB)
+// would put session writes behind the same global writer mutex the
+// scanner and enricher contend for, to store data that has nothing to
+// do with the library. Stateless signed cookies avoid disk entirely
+// but buy a key: where it lives, how it rotates, and what happens to
+// every live session when it does — and a key stored in this same
+// directory gains nothing over storing the sessions themselves.
+// Writing them into the file that already holds the credential needs
+// no new primitive, no new failure mode, and keeps instant revocation
+// (deleting a row is the whole mechanism).
 package adminauth
 
 import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +45,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -34,6 +54,8 @@ import (
 // arm64). Lower would weaken brute-force resistance; higher would
 // make the login path feel sluggish on weak hardware. Bump only via
 // a deliberate PR with target-host benchmarks.
+var logger = logging.Component("adminauth")
+
 const adminBcryptCost = 12
 
 // minPasswordLen is the floor for an ENVIRONMENT-SEEDED credential.
@@ -108,6 +130,28 @@ type Session struct {
 	LastUsedAt time.Time
 }
 
+// storeFile is the on-disk envelope: the credential plus the live
+// sessions. Sessions are keyed by the HEX of the token digest — the
+// same value the in-memory map keys on, rendered as a string because
+// JSON object keys must be strings. The raw token is never written;
+// only its SHA-256, exactly as in memory.
+type storeFile struct {
+	User     *userRecord         `json:"user"`
+	Sessions map[string]*Session `json:"sessions,omitempty"`
+}
+
+// sessionFlushInterval debounces LastUsedAt writes. Every
+// authenticated request bumps the timestamp, and persisting each one
+// would put an fsync on the hot path of the whole console. Bounded to
+// one write per interval, with FlushSessions landing the remainder at
+// shutdown — the auth.Store lastUsedFlush idiom, same reasoning and
+// the same 30 s window.
+//
+// What a crash inside the window costs: up to 30 s of idle-timeout
+// credit, so a session could expire marginally earlier than it should.
+// Nothing is lost that a re-login does not restore.
+const sessionFlushInterval = 30 * time.Second
+
 // Store is the concurrent-safe credentials + session manager.
 // One mutex guards both — the contention is low (admin login flow
 // only) and a single lock keeps the invariants obvious.
@@ -118,6 +162,12 @@ type Store struct {
 	user     *userRecord
 	sessions map[[sha256.Size]byte]*Session
 	now      func() time.Time // injectable clock for tests
+
+	// sessionsDirty marks LastUsedAt bumps not yet on disk;
+	// lastSessionFlush is when the last write landed. Both guarded by
+	// mu.
+	sessionsDirty    bool
+	lastSessionFlush time.Time
 }
 
 // OpenStore loads (or initialises as empty) the store at path. A
@@ -325,6 +375,19 @@ func (s *Store) CreateSession(username string) (string, error) {
 		IssuedAt:   now,
 		LastUsedAt: now,
 	}
+	// A login is rare, so this one writes synchronously rather than
+	// riding the debounce: the whole point is that the session survives
+	// a restart, and a login that is not durable until the next
+	// validate has a window where it is not.
+	//
+	// A write failure does NOT fail the login. The session is live in
+	// this process and works; it simply will not survive a restart,
+	// which is the behaviour every session had before persistence
+	// existed. Refusing a valid login because the disk hiccuped would
+	// be the worse trade.
+	if err := s.persistSessionsLocked(now); err != nil {
+		logger.Error("persist session on login", "err", err)
+	}
 	s.mu.Unlock()
 	return raw, nil
 }
@@ -464,6 +527,23 @@ func (s *Store) SetInitialPassword(username, password string) error {
 	return nil
 }
 
+// persistSessionsLocked writes the store and clears the dirty flag.
+// Caller MUST hold s.mu. No-op when there is no credential to write
+// alongside — loopback installs never mint sessions, and persist()
+// refuses a nil user.
+func (s *Store) persistSessionsLocked(now time.Time) error {
+	if s.user == nil {
+		s.sessionsDirty = false
+		return nil
+	}
+	if err := s.persist(); err != nil {
+		return err
+	}
+	s.sessionsDirty = false
+	s.lastSessionFlush = now
+	return nil
+}
+
 // sessionExpired reports whether a session has crossed its idle
 // timeout or hard cap as of now. Single predicate so CreateSession's
 // sweep and ValidateSession's per-lookup check can't drift.
@@ -515,19 +595,50 @@ func (s *Store) ValidateSession(raw string) (*Session, error) {
 	}
 	digest := sha256.Sum256([]byte(raw))
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess, ok := s.sessions[digest]
 	if !ok {
+		s.mu.Unlock()
 		return nil, ErrSessionNotFound
 	}
 	now := s.now()
 	if sessionExpired(sess, now) {
 		delete(s.sessions, digest)
+		// An expiry is a real state change and worth landing, but it is
+		// also self-correcting — load() drops expired sessions anyway —
+		// so it rides the debounce rather than forcing a write.
+		s.sessionsDirty = true
+		s.mu.Unlock()
 		return nil, ErrSessionExpired
 	}
 	sess.LastUsedAt = now
 	out := *sess
+	// LastUsedAt moves on EVERY authenticated request. Writing each one
+	// would put an fsync on the hot path of the entire console, so the
+	// bump is debounced; FlushSessions lands the remainder at shutdown.
+	s.sessionsDirty = true
+	due := now.Sub(s.lastSessionFlush) >= sessionFlushInterval
+	if due {
+		if err := s.persistSessionsLocked(now); err != nil {
+			logger.Error("persist session activity", "err", err)
+		}
+	}
+	s.mu.Unlock()
 	return &out, nil
+}
+
+// FlushSessions writes any debounced LastUsedAt bumps. Call on clean
+// shutdown so the last few minutes of activity are not lost — without
+// it a session touched seconds before exit reloads with a stale
+// timestamp and expires that much earlier than it should.
+//
+// Mirrors auth.Store.FlushLastUsed, and is wired from the same place.
+func (s *Store) FlushSessions() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.sessionsDirty {
+		return nil
+	}
+	return s.persistSessionsLocked(s.now())
 }
 
 // DeleteSession invalidates a session by raw token. Idempotent —
@@ -539,7 +650,20 @@ func (s *Store) DeleteSession(raw string) {
 	}
 	digest := sha256.Sum256([]byte(raw))
 	s.mu.Lock()
+	if _, ok := s.sessions[digest]; !ok {
+		// Unknown token: nothing to revoke, and nothing to write. Logout
+		// against an already-expired session must not rewrite the file.
+		s.mu.Unlock()
+		return
+	}
 	delete(s.sessions, digest)
+	// Synchronous, and this is the one that matters most: a revocation
+	// left in the debounce window would be UNDONE by a restart, so a
+	// logout would silently not be a logout. Logged at Error for the
+	// same reason.
+	if err := s.persistSessionsLocked(s.now()); err != nil {
+		logger.Error("persist session revocation", "err", err)
+	}
 	s.mu.Unlock()
 }
 
@@ -569,11 +693,60 @@ func (s *Store) load() error {
 		s.user = nil
 		return nil
 	}
-	var rec userRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
+	// Two shapes. The envelope is current; a bare userRecord is what
+	// every install before sessions were persisted has on disk. The
+	// discriminator is a top-level "passwordHash", which only the
+	// legacy shape has — checked rather than guessed from a failed
+	// unmarshal, because encoding/json ignores unknown fields and would
+	// happily decode the legacy file into an all-nil envelope.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
 		return fmt.Errorf("parse adminauth store: %w", err)
 	}
-	s.user = &rec
+	if _, legacy := probe["passwordHash"]; legacy {
+		var rec userRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			return fmt.Errorf("parse adminauth store: %w", err)
+		}
+		s.user = &rec
+		// No sessions to restore, and the next write upgrades the file
+		// in place. Nothing to migrate explicitly.
+		return nil
+	}
+	var f storeFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return fmt.Errorf("parse adminauth store: %w", err)
+	}
+	s.user = f.User
+	s.sessions = make(map[[sha256.Size]byte]*Session, len(f.Sessions))
+	now := s.now()
+	for hexKey, sess := range f.Sessions {
+		if sess == nil {
+			continue
+		}
+		// A session already past its deadline is dropped at load rather
+		// than resurrected for one request: restoring an expired session
+		// would let a restart EXTEND a login, which is the opposite of
+		// what the hard cap is for.
+		if sessionExpired(sess, now) {
+			continue
+		}
+		digest, err := hex.DecodeString(hexKey)
+		if err != nil || len(digest) != sha256.Size {
+			// A hand-edited or truncated key cannot address anything;
+			// skipping it costs one login.
+			continue
+		}
+		var k [sha256.Size]byte
+		copy(k[:], digest)
+		s.sessions[k] = sess
+	}
+	// Start the debounce window now. Without this lastSessionFlush is
+	// the zero time, so the very FIRST authenticated request after
+	// startup is always "due" and writes synchronously — a guaranteed
+	// fsync on the first page load of every boot, to persist timestamps
+	// that were just read off disk unchanged. (Gemini on PR #800.)
+	s.lastSessionFlush = now
 	return nil
 }
 
@@ -587,7 +760,11 @@ func (s *Store) persist() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("mkdir adminauth store: %w", err)
 	}
-	data, err := json.MarshalIndent(s.user, "", "  ")
+	f := storeFile{User: s.user, Sessions: make(map[string]*Session, len(s.sessions))}
+	for digest, sess := range s.sessions {
+		f.Sessions[hex.EncodeToString(digest[:])] = sess
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
