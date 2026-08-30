@@ -21,7 +21,7 @@ var uploadTmplIDRe = regexp.MustCompile(`id="(upload-[a-z0-9-]+)"`)
 
 func TestUploadPanelIDsExistInTheTemplate(t *testing.T) {
 	js := readFile(t, "static/app.js")
-	tmpl := readFile(t, "templates/library.html")
+	tmpl := readFile(t, "templates/upload.html")
 
 	present := map[string]bool{}
 	for _, m := range uploadTmplIDRe.FindAllStringSubmatch(tmpl, -1) {
@@ -46,7 +46,7 @@ func TestUploadPanelIDsExistInTheTemplate(t *testing.T) {
 
 func TestUploadPanelIDsAreWiredInAppJS(t *testing.T) {
 	js := readFile(t, "static/app.js")
-	tmpl := readFile(t, "templates/library.html")
+	tmpl := readFile(t, "templates/upload.html")
 
 	used := map[string]bool{}
 	for _, m := range uploadIDRe.FindAllStringSubmatch(js, -1) {
@@ -104,7 +104,7 @@ func TestUploadClientEncodesPathSegmentsNotFormEncoded(t *testing.T) {
 // TestUploadPanelIsHiddenUntilEnabled — an operator who has not opted in should
 // see no upload chrome at all, the same rule the upscale stats card follows.
 func TestUploadPanelIsHiddenUntilEnabled(t *testing.T) {
-	tmpl := readFile(t, "templates/library.html")
+	tmpl := readFile(t, "templates/upload.html")
 	i := strings.Index(tmpl, `id="upload-panel"`)
 	if i < 0 {
 		t.Fatal("upload panel not found in library.html")
@@ -130,7 +130,7 @@ func TestUploadPanelIsHiddenUntilEnabled(t *testing.T) {
 // note itself says nothing about an ancestor being hidden. Only a screenshot
 // caught it, so the pin has to be structural.
 func TestUploadDupeNoteOutlivesTheReviewBlock(t *testing.T) {
-	tmpl := readFile(t, "templates/library.html")
+	tmpl := readFile(t, "templates/upload.html")
 	review := strings.Index(tmpl, `id="upload-review"`)
 	note := strings.Index(tmpl, `id="upload-dupe-note"`)
 	result := strings.Index(tmpl, `id="upload-result"`)
@@ -156,7 +156,7 @@ func TestUploadDupeNoteOutlivesTheReviewBlock(t *testing.T) {
 // its first outing, so the note rendered as ordinary hint text, visually
 // indistinguishable from the two plain hints directly above it.
 func TestTemplateWarnHintIsStyled(t *testing.T) {
-	tmpl := readFile(t, "templates/library.html")
+	tmpl := readFile(t, "templates/upload.html")
 	if !strings.Contains(tmpl, `class="hint warn"`) {
 		t.Skip("no warn hint in this template any more")
 	}
@@ -256,5 +256,124 @@ func TestExpiryUsesAFutureFormatter(t *testing.T) {
 	if !strings.Contains(body, "formatTimeUntil(new Date(e.expiresAt))") {
 		t.Error("the trash expiry is not rendered with formatTimeUntil; formatTimeAgo " +
 			"clamps at zero and shows a future timestamp as \"0s ago\"")
+	}
+}
+
+// TestErrorClassIsStyled — `.error` is used by four elements across the
+// templates and had NO rule in either stylesheet, so every one of them rendered
+// as ordinary body text. An upload rejection appeared as an unremarkable line
+// under a long file list and was missed in the field.
+//
+// Same shape as the warn-hint guard: comments stripped, selector anchored to a
+// boundary, because a plain substring passes against `.error-details` and
+// against the class merely being named in a comment.
+func TestErrorClassIsStyled(t *testing.T) {
+	tmpl := ""
+	for _, f := range []string{"templates/library.html", "templates/settings.html", "templates/devices.html"} {
+		tmpl += readFile(t, f)
+	}
+	if !strings.Contains(tmpl, `class="error"`) {
+		t.Skip("no bare .error elements any more")
+	}
+	css := uploadCSSCommentRe.ReplaceAllString(readFile(t, "static/app.css"), "")
+	if !errorRuleRe.MatchString(css) {
+		t.Error(`templates render class="error" but app.css has no .error rule — ` +
+			"every error message renders as ordinary body text")
+	}
+}
+
+var errorRuleRe = regexp.MustCompile(`\.error\s*[,{]`)
+
+// TestUploadFiltersOSJunkBeforeDeclaring — a folder picked on a Mac contains a
+// .DS_Store nobody put there. Declaring it means the operator is told about a
+// rejection for a file they did not choose and cannot avoid.
+func TestUploadFiltersOSJunkBeforeDeclaring(t *testing.T) {
+	js := readFile(t, "static/app.js")
+	if !strings.Contains(js, "function isOSJunkPath") {
+		t.Fatal("no OS-junk filter in the upload client")
+	}
+	for _, name := range []string{".ds_store", "thumbs.db", "desktop.ini", "@eadir"} {
+		if !strings.Contains(js, name) {
+			t.Errorf("the junk list does not cover %q", name)
+		}
+	}
+	// The AppleDouble sidecar rule is a prefix test, not a name.
+	if !strings.Contains(js, `startsWith("._")`) {
+		t.Error("AppleDouble sidecars (._name) are not filtered")
+	}
+	if !strings.Contains(js, "isOSJunkPath(p.path)") {
+		t.Error("the filter is defined but never applied to the picked files")
+	}
+}
+
+// TestAddMusicHasItsOwnPageAndRailEntry — uploading used to be a panel on the
+// Roots page, below the roots table and the transcoded-cache card. On a host
+// with no shell it is the ONLY way to get audio in, so it is a destination
+// rather than something you scroll past.
+func TestAddMusicHasItsOwnPageAndRailEntry(t *testing.T) {
+	if pages["upload"] != "upload.html" {
+		t.Fatalf(`pages["upload"] = %q, want upload.html`, pages["upload"])
+	}
+	layout := readFile(t, "templates/layout.html")
+	if !strings.Contains(layout, `href="/upload" data-tab="upload"`) {
+		t.Error("no Add music entry in the sidebar")
+	}
+	// The icon must exist in the sprite, or the entry renders a blank box.
+	if !strings.Contains(layout, `<g id="i-add">`) {
+		t.Error(`the rail entry references #i-add but the sprite has no such symbol`)
+	}
+	// The panel moved: it must NOT still be on the Roots page as well.
+	if strings.Contains(readFile(t, "templates/library.html"), `id="upload-panel"`) {
+		t.Error("the upload panel is on BOTH the Roots page and its own page")
+	}
+	if !strings.Contains(readFile(t, "templates/upload.html"), `id="upload-panel"`) {
+		t.Error("upload.html does not contain the upload panel")
+	}
+}
+
+// TestAddMusicPageExplainsItselfWhenDisabled — the entry is unconditional, so a
+// visitor with uploads off must land on something better than an empty page.
+func TestAddMusicPageExplainsItselfWhenDisabled(t *testing.T) {
+	tmpl := readFile(t, "templates/upload.html")
+	if !strings.Contains(tmpl, `id="upload-disabled-panel"`) {
+		t.Fatal("no off-state panel on the Add music page")
+	}
+	js := readFile(t, "static/app.js")
+	if !strings.Contains(js, `getElementById("upload-disabled-panel")`) {
+		t.Error("the off-state panel is never revealed")
+	}
+	if !strings.Contains(js, "attachFeatureTray(off.querySelector") {
+		t.Error("the off-state offers no way to turn uploads on from this page")
+	}
+	if !strings.Contains(readFile(t, "templates/upload.html"), `class="panel-actions"`) {
+		t.Error("the off-state panel has no action group for the tray gear to land in")
+	}
+}
+
+// TestDropZoneIsNotAFakeButton — the drop zone contains two label-wrapped file
+// inputs. A button must not have interactive descendants, so role="button"
+// there made the whole card announce as one button while holding two real
+// controls, and a screen reader may flatten or hide them.
+//
+// Dragging is inherently pointer-only; the keyboard path is those inputs.
+// SonarHTML flagged the missing keyboard handler, which was the right flag for
+// the wrong reason — the fix is dropping the role, not adding an onkeydown.
+func TestDropZoneIsNotAFakeButton(t *testing.T) {
+	tmpl := readFile(t, "templates/upload.html")
+	i := strings.Index(tmpl, `id="upload-drop"`)
+	if i < 0 {
+		t.Fatal("drop zone not found")
+	}
+	tag := tmpl[strings.LastIndex(tmpl[:i], "<"):]
+	tag = tag[:strings.Index(tag, ">")]
+	if strings.Contains(tag, `role="button"`) {
+		t.Errorf("the drop zone claims role=button while containing interactive children: %q", tag)
+	}
+	if strings.Contains(tag, "tabindex") {
+		t.Errorf("the drop zone is focusable but has nothing keyboard-activatable of its own: %q", tag)
+	}
+	// The real keyboard path must still be there.
+	if strings.Count(tmpl, `type="file"`) < 2 {
+		t.Error("the two file inputs are the keyboard path and one is missing")
 	}
 }

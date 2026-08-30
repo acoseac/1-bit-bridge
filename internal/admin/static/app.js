@@ -1449,6 +1449,31 @@ async function emptyTrash() {
 //     album and a compilation is a real library.
 
 const UPLOAD_PARALLEL_FILES = 3;
+// OS junk that appears in folders WITHOUT ANYONE PUTTING IT THERE. Filtered on
+// the client so it never reaches the preview or the rejection report: an
+// operator who drags an album should not be told about a .DS_Store they did
+// not create and cannot avoid. The server refuses these too (dot-prefixed
+// segments, unaccepted extensions) — this is about not making it their problem.
+//
+// Mirrors the spirit of manifest.shouldSkipDir, which the scanner applies to
+// the same names on the read side.
+const UPLOAD_JUNK_NAMES = new Set([
+  ".ds_store", ".localized", ".spotlight-v100", ".trashes", ".fseventsd",
+  ".temporaryitems", ".appledouble", ".appledesktop", ".documentrevisions-v100",
+  "thumbs.db", "desktop.ini", "$recycle.bin", "system volume information",
+  "@eadir", ".sync", ".dropbox", ".dropbox.attr",
+]);
+
+function isOSJunkPath(path) {
+  for (const seg of String(path).split("/")) {
+    const low = seg.toLowerCase();
+    if (UPLOAD_JUNK_NAMES.has(low)) return true;
+    // AppleDouble resource forks: "._01 Track.dsf" beside the real file.
+    if (low.startsWith("._")) return true;
+  }
+  return false;
+}
+
 
 let uploadState = null;
 
@@ -1457,15 +1482,36 @@ function initUpload() {
   if (!panel) return;
   const signal = pageSignal();
 
-  // The panel is hidden until the operator has opted in. An operator who has
-  // not enabled uploads should see no upload chrome at all.
   API.get("/api/settings")
     .then((cfg) => {
-      if (!cfg || !cfg.uploadEnabled) return;
-      panel.hidden = false;
-      wireUpload(signal);
+      if (cfg && cfg.uploadEnabled) {
+        panel.hidden = false;
+        wireUpload(signal);
+        return;
+      }
+      // Off: explain it HERE and offer the switch here too. On the Roots page
+      // this branch simply rendered nothing, which was right when uploading
+      // was one panel among several; on a page called "Add music" an empty
+      // page is a dead end.
+      const off = document.getElementById("upload-disabled-panel");
+      if (!off) return;
+      off.hidden = false;
+      // attachFeatureTray, not a hand-rolled append: buildFeatureTray returns
+      // { button, tray } — two elements with a placement relationship — and
+      // the helper already encodes where each goes, including the
+      // .panel-actions wrapping that a bare append to .panel-head gets wrong.
+      attachFeatureTray(off.querySelector(".panel-head"), {
+        title: "Uploads",
+        blurb: "Adds a drop target on this page. Applies immediately.",
+        rows: [{ field: "uploadEnabled", type: "switch", label: "Allow uploads from this console" }],
+        link: { href: "/settings", text: "All settings" },
+      });
     })
-    .catch(() => {});
+    .catch((e) => {
+      // NOT swallowed. A blanket catch here hid a TypeError from appending the
+      // wrong thing, so the gear silently never appeared and nothing said why.
+      console.error("upload page init", e);
+    });
 }
 
 function wireUpload(signal) {
@@ -1493,12 +1539,6 @@ function wireUpload(signal) {
     e.preventDefault();
     const picked = await collectFromDataTransfer(e.dataTransfer);
     stageFiles(picked);
-  });
-  drop?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      filesInput?.click();
-    }
   });
 
   document.getElementById("upload-cancel")?.addEventListener("click", resetUpload);
@@ -1559,9 +1599,18 @@ async function collectFromDataTransfer(dt) {
 }
 
 function stageFiles(picked) {
-  const usable = picked.filter((p) => p.file && p.file.size >= 0);
-  if (!usable.length) return;
-  uploadState = { picked: usable, session: null, aborted: false, preflightSkipped: 0 };
+  const present = picked.filter((p) => p.file && p.file.size >= 0);
+  const usable = present.filter((p) => !isOSJunkPath(p.path));
+  const junk = present.length - usable.length;
+  if (!usable.length) {
+    showUploadError(
+      junk > 0
+        ? `Nothing to upload — all ${junk} item${junk === 1 ? "" : "s"} were system files.`
+        : "Nothing to upload.",
+    );
+    return;
+  }
+  uploadState = { picked: usable, session: null, aborted: false, preflightSkipped: 0, junkSkipped: junk };
   const note = document.getElementById("upload-dupe-note");
   if (note) note.hidden = true;
   renderUploadReview();
@@ -1582,7 +1631,8 @@ function renderUploadReview() {
   const total = picked.reduce((n, p) => n + p.file.size, 0);
   setText("upload-count", String(picked.length));
   setText("upload-count-plural", picked.length === 1 ? "" : "s");
-  setText("upload-total", formatBytes(total));
+  const junk = uploadState.junkSkipped || 0;
+  setText("upload-total", formatBytes(total) + (junk ? ` (${junk} system file${junk === 1 ? "" : "s"} skipped)` : ""));
 
   // Preview the RESOLVED destination for a bounded sample — the full list can
   // be thousands of rows and the point is the shape, not the enumeration.
@@ -1609,6 +1659,15 @@ async function startUpload() {
   try {
     const overwrite = document.getElementById("upload-overwrite")?.checked === true;
     let session = await createUploadSession(uploadState.picked, overwrite);
+
+    // Files the SERVER would not take. Reported, not fatal — the acceptable
+    // ones still upload.
+    if (session.rejected && session.rejected.length) {
+      showUploadError(
+        `${session.rejected.length} file${session.rejected.length === 1 ? " was" : "s were"} skipped:`,
+        session.rejected.map((r) => `${r.path} — ${r.reason}`),
+      );
+    }
 
     // The pre-flight WARNS. Anything the server recognises is dropped from the
     // set by default, and the operator is told what happened and can re-run
@@ -1648,8 +1707,7 @@ async function startUpload() {
     const res = await API.post(`/api/upload/sessions/${encodeURIComponent(session.id)}/commit`);
     reportCommit(res);
   } catch (e) {
-    err.hidden = false;
-    err.textContent = e && e.message ? e.message : String(e);
+    showUploadError(e && e.message ? e.message : String(e));
   } finally {
     start.disabled = false;
     document.getElementById("upload-progress").hidden = true;
@@ -1754,6 +1812,35 @@ function reportCommit(res) {
   resetUpload();
 }
 
+// showUploadError puts the message somewhere it will actually be read. The
+// first version wrote to a <p class="error"> that had NO CSS RULE anywhere, so
+// a rejection rendered as ordinary body text under a long file list and was
+// missed — which is exactly how this function came to exist.
+function showUploadError(msg, details) {
+  const el = document.getElementById("upload-error");
+  if (!el) return;
+  el.replaceChildren();
+  el.appendChild(document.createTextNode(msg));
+  if (details && details.length) {
+    const ul = document.createElement("ul");
+    ul.className = "error-details";
+    for (const d of details.slice(0, 6)) {
+      const li = document.createElement("li");
+      li.textContent = d;
+      ul.appendChild(li);
+    }
+    if (details.length > 6) {
+      const li = document.createElement("li");
+      li.className = "muted";
+      li.textContent = `…and ${details.length - 6} more`;
+      ul.appendChild(li);
+    }
+    el.appendChild(ul);
+  }
+  el.hidden = false;
+  el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
 function showUploadResult(msg) {
   const el = document.getElementById("upload-result");
   el.hidden = false;
@@ -1776,7 +1863,6 @@ function resetUpload() {
 }
 
 function initLibrary() {
-  initUpload();
   initTrash();
   initVariantsPanel();
   const form = document.getElementById("add-root-form");
@@ -6265,6 +6351,7 @@ function dispatchPageInit(tab) {
   switch (tab) {
     case "stats": initStats(); break;
     case "library": initLibrary(); break;
+    case "upload": initUpload(); break;
     case "duplicates": initDuplicates(); break;
     case "jobs": initJobs(); break;
     case "devices": initDevices(); break;

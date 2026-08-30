@@ -57,6 +57,11 @@ type uploadFileDTO struct {
 	DuplicateOf string `json:"duplicateOf,omitempty"`
 }
 
+type uploadRejectedDTO struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
 type uploadSessionDTO struct {
 	ID         string          `json:"id"`
 	Root       string          `json:"root"`
@@ -64,6 +69,9 @@ type uploadSessionDTO struct {
 	Overwrite  bool            `json:"overwrite"`
 	ChunkBytes int64           `json:"chunkBytes"`
 	Files      []uploadFileDTO `json:"files"`
+	// Rejected lists declared files the session would not accept. Reported,
+	// not fatal — see upload.RejectedFile.
+	Rejected []uploadRejectedDTO `json:"rejected,omitempty"`
 }
 
 type uploadChunkDTO struct {
@@ -163,6 +171,9 @@ func uploadSessionDTOOf(s *upload.Session, dupes map[string]string) uploadSessio
 		Overwrite:  s.Overwrite,
 		ChunkBytes: s.ChunkBytes,
 		Files:      make([]uploadFileDTO, 0, len(s.Files)),
+	}
+	for _, r := range s.Rejected {
+		out.Rejected = append(out.Rejected, uploadRejectedDTO{Path: r.Path, Reason: r.Reason})
 	}
 	for _, f := range s.Files {
 		out.Files = append(out.Files, uploadFileDTO{

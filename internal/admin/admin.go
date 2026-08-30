@@ -1316,6 +1316,7 @@ var pages = map[string]string{
 	"player":      "player.html",
 	"stats":       "dashboard.html",
 	"library":     "library.html",
+	"upload":      "upload.html",
 	"duplicates":  "duplicates.html",
 	"jobs":        "jobs.html",
 	"devices":     "devices.html",
@@ -1379,6 +1380,7 @@ func (s *Server) Handler() http.Handler {
 	// own now that "/" is the player.
 	mux.HandleFunc("GET /stats", s.pageStats)
 	mux.HandleFunc("GET /library", s.pageLibrary)
+	mux.HandleFunc("GET /upload", s.pageUpload)
 	mux.HandleFunc("GET /library/inspector", redirectRetiredInspector)
 	mux.HandleFunc("GET /library/duplicates", s.pageDuplicates)
 	mux.HandleFunc("GET /jobs", s.pageJobs)
