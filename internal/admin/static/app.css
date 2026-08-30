@@ -2605,6 +2605,12 @@ code.storage-path {
 }
 .histogram-grid h3 { margin: 0 0 0.5rem; font-size: 0.85rem; color: var(--fg-muted); }
 ul.histogram { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+
+/* The 404 page's "where to go instead" list. Without a rule it kept the
+ * user-agent discs and ~40px indent inside a panel, which is the one
+ * place in the console a bare <ul> appears — every other list resets. */
+ul.notfound-links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+ul.notfound-links a { font-weight: 600; }
 ul.histogram li {
   position: relative;
   display: grid;

@@ -1138,7 +1138,6 @@ function renderUpdateTile(u) {
   const status = document.getElementById("update-status");
   const lastCheck = document.getElementById("update-last-check");
   const lastError = document.getElementById("update-last-error");
-  const latest = document.getElementById("update-latest");
   if (!status) return;
 
   // Add or remove the "Install & restart" button to match the
@@ -1232,11 +1231,6 @@ function renderUpdateTile(u) {
       if (dt) dt.hidden = true;
     }
   }
-  if (latest && u?.latestVersion) {
-    latest.textContent = u.latestVersion;
-    latest.hidden = false;
-  }
-
   // DeferredReason: the auto-installer's gate refused this cycle
   // (currently MinClientVersion compat). Surface as a yellow
   // "deferred" badge so the operator can see why an available
