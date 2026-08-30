@@ -150,8 +150,8 @@ func TestEnrichmentSnapshotExtendedFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Artist-image closure: only artMBID has a cached image.
-	srv.deps.ArtistImageMBIDs = func() (map[string]struct{}, error) {
-		return map[string]struct{}{artMBID: {}}, nil
+	srv.deps.ArtistImages = func() (map[string]string, error) {
+		return map[string]string{artMBID: "v1"}, nil
 	}
 
 	snap := srv.getEnrichmentSnapshot()

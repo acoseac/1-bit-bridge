@@ -234,15 +234,15 @@ type Deps struct {
 	// Nil-safe: absent → never fast-tick the upscale frame.
 	UpscaleBusy func() bool
 
-	// ArtistImageMBIDs enumerates the artist MBIDs with a cached image
+	// ArtistImages enumerates the artist MBIDs with a cached image
 	// file on disk (lowercase-keyed set). Wired to a closure over
-	// `enrich.CachedArtistImageMBIDs(artworkDir)` in cmd/bridge/main.go
+	// `enrich.CachedArtistImages(artworkDir)` in cmd/bridge/main.go
 	// (UpscalePrecheck decoupling pattern — admin never imports
 	// internal/enrich). Feeds the dashboard's artist-image have/missing
 	// coverage stats; called only inside the 60s-TTL enrichment-meta
 	// snapshot, so the directory read stays off any hot path. Nil-safe:
 	// absent → the artistImages coverage field is omitted.
-	ArtistImageMBIDs func() (map[string]struct{}, error)
+	ArtistImages func() (map[string]string, error)
 
 	// HarvestForceSubmit zeroes the Atlas bulk-harvest client's
 	// last-submit stamp so its next tick (≤ PollInterval) re-submits the
@@ -271,7 +271,7 @@ type Deps struct {
 	// EnrichSkipReasons returns the enricher's process-lifetime tally of
 	// why it stopped short, keyed by bounded reason (no_search_terms /
 	// no_mb_match / mb_error). Wired to enrich.Enricher.SkipReasons in
-	// cmd/bridge/main.go — same decoupling as ArtistImageMBIDs, so admin
+	// cmd/bridge/main.go — same decoupling as ArtistImages, so admin
 	// still never imports internal/enrich. Nil-safe: absent → the
 	// skipReasons field is omitted from the misses response.
 	EnrichSkipReasons func() map[string]int64
@@ -281,7 +281,7 @@ type Deps struct {
 	// (/api/library/artwork|artist-image|booklet). Closures over
 	// enrich.ArtworkCachePath / enrich.ArtistImagePath /
 	// api.BookletPath in cmd/bridge/main.go — admin imports neither
-	// package (ArtistImageMBIDs decoupling precedent). The handlers
+	// package (ArtistImages decoupling precedent). The handlers
 	// validate ids against the same bounded-alphabet regexes as the
 	// /v1 twins BEFORE any path join, so the closures only ever see
 	// traversal-free values. Nil-safe: absent → the routes 404 and
@@ -324,7 +324,7 @@ type Deps struct {
 	// Deliberately a separate closure from ArtworkPath rather than a
 	// flag on it: derived tiers live in their own subdirectory, and the
 	// separation is what keeps them out of /v1's ladder and out of
-	// enrich.CachedArtistImageMBIDs' enumeration. See
+	// enrich.CachedArtistImages' enumeration. See
 	// internal/manifest/artwork_thumbs.go for why that matters.
 	//
 	// `key` is an already-validated cache key (a cover id that passed
@@ -1162,10 +1162,10 @@ type Server struct {
 
 	// artistImages caches the "which artists have a cached portrait"
 	// set for the player's artist grid. One ReadDir behind a short TTL;
-	// see cachedArtistImageMBIDs for why it is neither uncached nor
+	// see cachedArtistImages for why it is neither uncached nor
 	// permanent.
 	artistImagesMu sync.Mutex
-	artistImages   map[string]struct{}
+	artistImages   map[string]string
 	artistImagesAt time.Time
 
 	// composition cache (dashboard master-quality breakdown).

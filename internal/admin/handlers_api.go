@@ -892,7 +892,7 @@ type enrichmentResponse struct {
 	Source string `json:"source,omitempty"`
 	// Coverage stats for the rich-tier facets, each nil (omitted) when the
 	// backing data source isn't wired: artist images need the
-	// Deps.ArtistImageMBIDs closure; bios/descriptions come from the
+	// Deps.ArtistImages closure; bios/descriptions come from the
 	// artist_atlas / release_atlas tables. All three ride the 60s
 	// enrichment-meta cache (getEnrichmentMetaSnapshot).
 	ArtistImages      *coverageCounts `json:"artistImages,omitempty"`
@@ -1151,15 +1151,15 @@ func (s *Server) computeEnrichmentMeta(ctx context.Context) (enrichmentMetaPart,
 }
 
 // artistImageCoverage intersects the library's distinct artist MBIDs with the
-// on-disk artist-image cache (via the nil-safe Deps.ArtistImageMBIDs closure).
+// on-disk artist-image cache (via the nil-safe Deps.ArtistImages closure).
 // Returns nil (facet omitted) when the closure isn't wired or either read
 // fails — never a zero-lying pair. Only called inside the enrichment-meta
 // flight, so both reads ride the 60s TTL.
 func (s *Server) artistImageCoverage(ctx context.Context) *coverageCounts {
-	if s.deps.ArtistImageMBIDs == nil {
+	if s.deps.ArtistImages == nil {
 		return nil
 	}
-	files, err := s.deps.ArtistImageMBIDs()
+	files, err := s.deps.ArtistImages()
 	if err != nil {
 		logger.Warn("enrichment: artist image dir", "err", err)
 		return nil
@@ -1338,10 +1338,10 @@ func (s *Server) clearFingerprintSuppression(ctx context.Context, scope, prefix 
 }
 
 func (s *Server) resetArtistImageGaps(ctx context.Context) int64 {
-	if s.deps.ArtistImageMBIDs == nil {
+	if s.deps.ArtistImages == nil {
 		return 0
 	}
-	files, err := s.deps.ArtistImageMBIDs()
+	files, err := s.deps.ArtistImages()
 	if err != nil {
 		return 0
 	}

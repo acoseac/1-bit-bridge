@@ -28,7 +28,7 @@ func TestCachedArtistImageMBIDs(t *testing.T) {
 		t.Fatal(err) // a directory with a matching name must be skipped
 	}
 
-	got, err := CachedArtistImageMBIDs(dir)
+	got, err := CachedArtistImages(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestCachedArtistImageMBIDs(t *testing.T) {
 // TestCachedArtistImageMBIDsMissingDir pins the fresh-install shape: a
 // nonexistent cache dir is "no images", not an error.
 func TestCachedArtistImageMBIDsMissingDir(t *testing.T) {
-	got, err := CachedArtistImageMBIDs(filepath.Join(t.TempDir(), "nope"))
+	got, err := CachedArtistImages(filepath.Join(t.TempDir(), "nope"))
 	if err != nil {
 		t.Fatalf("missing dir: err = %v, want nil", err)
 	}

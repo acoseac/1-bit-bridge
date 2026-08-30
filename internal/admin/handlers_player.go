@@ -150,6 +150,12 @@ type playerArtistDTO struct {
 	// everyone without one. Sourced from a single ReadDir, not a stat
 	// per row.
 	HasImage bool `json:"hasImage,omitempty"`
+	// ImageVersion is the portrait's content token. Present only when
+	// HasImage; the client appends it as `v=` so the response can be
+	// served immutable instead of revalidating on every visit. Absent
+	// (a portrait whose Info() could not be read) falls back to the
+	// short max-age, which is the pre-2026-08-30 behaviour.
+	ImageVersion string `json:"imageVersion,omitempty"`
 	// ArtworkMBID/ArtworkVersion are the artist's TOP album's cover —
 	// the fallback tile when there is no portrait, which most artists in
 	// a real library are.
@@ -553,7 +559,7 @@ func (s *Server) apiPlayerArtists(w http.ResponseWriter, r *http.Request) {
 	}
 	start, end := pageSlice(len(cat.Artists), offset, limit)
 	// One ReadDir for the whole page, not one stat per artist.
-	withImages := s.cachedArtistImageMBIDs()
+	withImages := s.cachedArtistImages()
 	out := make([]playerArtistDTO, 0, end-start)
 	for _, a := range cat.Artists[start:end] {
 		d := playerArtistDTO{
@@ -561,7 +567,7 @@ func (s *Server) apiPlayerArtists(w http.ResponseWriter, r *http.Request) {
 			TrackCount: a.TrackCount, AlbumCount: a.AlbumCount, ArtistMBID: a.ArtistMBID,
 		}
 		if a.ArtistMBID != "" {
-			_, d.HasImage = withImages[strings.ToLower(a.ArtistMBID)]
+			d.ImageVersion, d.HasImage = withImages[strings.ToLower(a.ArtistMBID)]
 		}
 		// AlbumIDs[0] is the artist's top album by in-group track count
 		// (librarycat.rankAlbums), so this is a stable tile.
@@ -631,7 +637,7 @@ func (s *Server) serveAxis(w http.ResponseWriter, r *http.Request,
 // the artwork directory per page.
 const artistImageSetTTL = 30 * time.Second
 
-// cachedArtistImageMBIDs returns the set of artist MBIDs with a cached
+// cachedArtistImages returns the set of artist MBIDs with a cached
 // portrait, behind a short TTL.
 //
 // The underlying closure is ONE os.ReadDir over the artwork cache — the
@@ -645,8 +651,8 @@ const artistImageSetTTL = 30 * time.Second
 // A read error degrades to "no portraits", never to an error: the
 // fallback tile is the artist's top album cover, so a failure here costs
 // a nicer image, not a broken grid.
-func (s *Server) cachedArtistImageMBIDs() map[string]struct{} {
-	if s.deps.ArtistImageMBIDs == nil {
+func (s *Server) cachedArtistImages() map[string]string {
+	if s.deps.ArtistImages == nil {
 		return nil
 	}
 	now := time.Now()
@@ -660,7 +666,7 @@ func (s *Server) cachedArtistImageMBIDs() map[string]struct{} {
 
 	// Read UNLOCKED — a cold directory read must not block concurrent
 	// page requests, the cachedSoxAvailability convention.
-	files, err := s.deps.ArtistImageMBIDs()
+	files, err := s.deps.ArtistImages()
 	if err != nil {
 		logger.Warn("artist image set", "err", err)
 		files = nil
@@ -932,9 +938,14 @@ func (s *Server) apiPlayerArtistDetail(w http.ResponseWriter, r *http.Request) {
 	if cfg.Atlas.Enabled {
 		resp.About = s.artistAbout(r.Context(), artist.ArtistMBID)
 	}
+	// The detail view stats the one file directly rather than going
+	// through the TTL-cached directory listing: it is a single artist,
+	// and a portrait fetched seconds ago should show up here without
+	// waiting out the list cache.
 	if artist.ArtistMBID != "" && s.deps.ArtistImagePath != nil {
-		if _, err := os.Stat(s.deps.ArtistImagePath(artist.ArtistMBID)); err == nil {
+		if fi, err := os.Stat(s.deps.ArtistImagePath(artist.ArtistMBID)); err == nil {
 			resp.HasImage = true
+			resp.Artist.ImageVersion = manifest.ArtworkFileVersion(fi.ModTime(), fi.Size())
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
