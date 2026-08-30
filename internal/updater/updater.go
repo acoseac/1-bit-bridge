@@ -32,6 +32,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -792,10 +793,85 @@ func normalizeTag(s string) string {
 	return strings.TrimPrefix(strings.TrimSpace(s), "v")
 }
 
+// describeSuffixRE matches the tail `git describe --tags --always --dirty`
+// appends to the nearest tag: `-<commits ahead>-g<abbrev sha>`, optionally
+// followed by `-dirty`. Anchored at the end and specific about its shape so
+// a genuine pre-release (`0.2.0-rc.1`, `0.2.0-beta1`) is left alone — those
+// MUST keep pre-release ordering, where they sort BELOW their release.
+var describeSuffixRE = regexp.MustCompile(`-(\d+)-g([0-9a-fA-F]+)(-dirty)?$`)
+
+// dirtySuffix is the other shape describe emits: an exact tag on a dirty
+// tree, `v0.1.9-dirty`, with no commit count.
+const dirtySuffix = "-dirty"
+
+// normalizeDescribe rewrites a `git describe` version string so it compares
+// as a DESCENDANT of its tag rather than a pre-release of it.
+//
+// This is the whole fix for the downgrade bug. `make build` stamps
+// ServerVersion from `git describe --tags --always --dirty`, so a build 65
+// commits past v0.1.9 reports `0.1.9-65-g8b092ad`. Semver reads a hyphenated
+// suffix as a PRE-RELEASE, and a pre-release sorts BELOW its release — so
+// `0.1.9 > 0.1.9-65-g8b092ad` is true under the spec, and the updater
+// correctly-but-uselessly concluded that the tag was an upgrade. It armed
+// Install, and with auto-install on it would have reverted every edge build
+// to the last tag on the next poll.
+//
+// The commits-ahead and sha are BUILD METADATA, not a pre-release: they
+// identify which build of 0.1.9-and-then-some this is, and semver ignores
+// build metadata when ordering. So `0.1.9+65.g8b092ad` compares EQUAL to
+// `0.1.9` — no update offered, which is right — while `0.1.10` still
+// compares greater, so a genuine release still lands. Both halves matter;
+// a fix that only suppressed the downgrade would also suppress real updates.
+//
+// Returns the input unchanged when it carries no describe suffix, so this is
+// a no-op on every release tag and every hand-written pre-release.
+func normalizeDescribe(v string) string {
+	if m := describeSuffixRE.FindStringSubmatch(v); m != nil {
+		base := v[:len(v)-len(m[0])]
+		meta := m[1] + ".g" + m[2]
+		if m[3] != "" {
+			meta += ".dirty"
+		}
+		return appendBuildMeta(base, meta)
+	}
+	if base, ok := strings.CutSuffix(v, dirtySuffix); ok {
+		return appendBuildMeta(base, "dirty")
+	}
+	return v
+}
+
+// appendBuildMeta attaches build metadata to a version that may already
+// carry some.
+//
+// Semver permits exactly ONE "+", so a tag that itself carries build
+// metadata — `v0.1.9+ci.1`, which `git describe` extends to
+// `v0.1.9+ci.1-65-g8b092ad` — must have the commits-ahead appended with a
+// "." to the existing metadata rather than a second "+".
+//
+// Getting this wrong is not cosmetic: `v0.1.9+ci.1+65.g8b092ad` fails
+// semver.IsValid, `current` falls back to the v0.0.0 floor, and the tag is
+// reported as an upgrade — reinstating the exact downgrade this whole
+// function exists to prevent, for that one input shape. Verified against
+// golang.org/x/mod: the double-plus form is rejected, the dotted form is
+// accepted. (CodeRabbit on PR #797.)
+func appendBuildMeta(base, meta string) string {
+	if strings.Contains(base, "+") {
+		return base + "." + meta
+	}
+	return base + "+" + meta
+}
+
 // semverGreater returns true if latest > current under semver ordering.
 // Both inputs are bare (no "v" prefix); we re-add the "v" because
 // golang.org/x/mod/semver insists on it. Invalid `latest` returns false
 // — a malformed remote tag isn't comparable.
+//
+// Both sides pass through normalizeDescribe first so a build that is a
+// descendant of a tag is never treated as older than it; see that
+// function for why that is the load-bearing part. The transform is a
+// no-op on anything that isn't a `git describe` string, so applying it
+// symmetrically costs nothing and avoids an asymmetry a future caller
+// would have to remember.
 //
 // **Invalid `current` is treated as the floor (`v0.0.0`)** so that
 // non-semver dev/CI builds — `make build` artefacts stamped with a
@@ -804,11 +880,11 @@ func normalizeTag(s string) string {
 // previous "any invalid → false" rule meant operators running such a
 // build couldn't see updates at all (Qodo bot review on PR #89).
 func semverGreater(latest, current string) bool {
-	lv := "v" + latest
+	lv := "v" + normalizeDescribe(latest)
 	if !semver.IsValid(lv) {
 		return false
 	}
-	cv := "v" + current
+	cv := "v" + normalizeDescribe(current)
 	if !semver.IsValid(cv) {
 		// Treat a non-semver current as the lowest possible version so
 		// any valid release is reported as an upgrade candidate. The
