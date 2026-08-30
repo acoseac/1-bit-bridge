@@ -47,27 +47,31 @@ export function qualityLabel(q) {
   return QUALITY_LABELS[q] ?? "";
 }
 
-const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"];
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
 
 /**
- * "1.2 GB" — decimal units, matching the operator pages.
+ * "1.2 GB" — binary units, matching the operator pages.
  *
- * Decimal rather than binary on purpose: these numbers sit beside disk
- * free space, and every OS an operator reads that from reports decimal
- * GB. A file the Finder calls 1.2 GB must not read as 1.1 GB here.
+ * This claimed to be decimal "matching the operator pages" until
+ * 2026-08-30, and it was neither: app.js has always been binary, so the
+ * same console rendered a track at 43.8 MB and its volume at 209 GB
+ * under two different definitions of the unit. Binary is the survivor
+ * because the numbers that matter — free space, cache size, library size
+ * — are compared against `df -h` on a Linux host, which is binary.
+ *
+ * LOCKSTEP MIRROR of formatBytes() in static/app.js; the two files
+ * cannot share code (classic script vs ES module) so TestByteFormattersAgree
+ * compares them. Change one, change the other. The only intended
+ * difference is the empty-input return: this one yields "" so a missing
+ * size renders as nothing beside a track title, where formatBytes yields
+ * "0 B" for a stat tile that must show a number.
  */
 export function bytes(n) {
   if (!Number.isFinite(n) || n <= 0) return "";
-  let v = n;
-  let u = 0;
-  while (v >= 1000 && u < BYTE_UNITS.length - 1) {
-    v /= 1000;
-    u++;
-  }
-  // Sub-MB values are whole units; above that one decimal is the most
-  // precision worth showing beside a track title.
-  const digits = u < 2 ? 0 : 1;
-  return `${v.toFixed(digits)} ${BYTE_UNITS[u]}`;
+  let v = n, u = 0;
+  while (v >= 1024 && u < BYTE_UNITS.length - 1) { v /= 1024; u++; }
+  if (u === 0) return v + " B";
+  return v.toFixed(v >= 10 ? 0 : 1) + " " + BYTE_UNITS[u];
 }
 
 const VARIANT_KIND_LABELS = {

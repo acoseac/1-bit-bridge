@@ -1,0 +1,18 @@
+{{define "content"}}
+<h1>Page not found</h1>
+<p class="hint">
+  There is nothing at <code>{{.Data.Path}}</code>. It may have been a typo, or a
+  link to a page this bridge has since retired.
+</p>
+
+<div class="panel">
+  <div class="panel-head"><h2>Where to go instead</h2></div>
+  <ul class="notfound-links">
+    <li><a href="/">Browse</a> — the library player</li>
+    <li><a href="/stats">Stats</a> — library composition, enrichment, scanner</li>
+    <li><a href="/jobs">Background activity</a> — every job the bridge runs on its own</li>
+    <li><a href="/library">Library roots</a> — roots, trash and the transcoded cache</li>
+    <li><a href="/settings">Settings</a> — the full list of switches</li>
+  </ul>
+</div>
+{{end}}

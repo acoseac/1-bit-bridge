@@ -196,25 +196,54 @@ func (s *Store) RouteHistogram(ctx context.Context, deviceToken string) ([]Histo
 	return s.histogram(ctx, "iface_type", deviceToken)
 }
 
-// TopTracks returns the most-played paths (by event count) across all
-// devices, capped at limit. Read path — no s.mu.
-func (s *Store) TopTracks(ctx context.Context, limit int) ([]HistoryBucket, error) {
+// HistoryTopTrack is a most-played row with the catalog metadata spliced
+// on. Title/Artist are empty when the path no longer resolves — a play of
+// a file since deleted or renamed is still a real play, so the row
+// survives and the caller falls back to the basename.
+type HistoryTopTrack struct {
+	Path   string
+	Title  string
+	Artist string
+	Count  int64
+}
+
+// TopTracks returns the most-played tracks (by event count) across all
+// devices, resolved to title + artist. Read path — no s.mu.
+//
+// The join is what makes the panel readable: playback_history stores the
+// path, so before this the console's most human view listed
+// "09. Bye Baby Blue.flac" and "03 - Adele - Don't You Remember.flac".
+// Title and artist live in tags_json rather than a column, so this is a
+// json_extract — bounded by the LIMIT, over an aggregate of at most a
+// few thousand rows, and only on an operator page.
+//
+// Selecting t.tags_json alongside GROUP BY h.path is safe here, not the
+// usual bare-column hazard: the join key IS the group key, so every row
+// in a group carries the same tracks row and there is nothing arbitrary
+// to pick between.
+func (s *Store) TopTracks(ctx context.Context, limit int) ([]HistoryTopTrack, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT path AS label, COUNT(*) AS n
-		  FROM playback_history
-		 GROUP BY path ORDER BY n DESC LIMIT ?
+		SELECT h.path,
+		       COALESCE(json_extract(t.tags_json, '$.title'),  '') AS title,
+		       COALESCE(json_extract(t.tags_json, '$.artist'), '') AS artist,
+		       COUNT(*) AS n
+		  FROM playback_history h
+		  LEFT JOIN tracks t ON t.path = h.path
+		 GROUP BY h.path
+		 ORDER BY n DESC
+		 LIMIT ?
 	`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []HistoryBucket
+	var out []HistoryTopTrack
 	for rows.Next() {
-		var b HistoryBucket
-		if err := rows.Scan(&b.Label, &b.Count); err != nil {
+		var b HistoryTopTrack
+		if err := rows.Scan(&b.Path, &b.Title, &b.Artist, &b.Count); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

@@ -3572,9 +3572,16 @@ async function renderSettingsPrereqs() {
   };
   if (!slots.analysis && !slots.upscale && !slots.fingerprint) return;
 
-  const [jobs, doctor] = await Promise.all([
+  // Upscale is NOT a node on /api/jobs — it has no sweeper, so it never
+  // grew a card there. Reading `jobs.upscale` (which this function did
+  // until 2026-08-30) yields undefined on every bridge, so the chip
+  // could never paint "active" for anyone. It is the same endpoint the
+  // stats block on this page already polls, so taking the verdict from
+  // there means the chip and the numbers beneath it cannot disagree.
+  const [jobs, doctor, upscale] = await Promise.all([
     API.get("/api/jobs").catch(() => null),
     API.get("/api/doctor").catch(() => null),
+    API.get("/api/upscale/stats").catch(() => null),
   ]);
   const checks = new Map();
   if (doctor && doctor.available && doctor.report && Array.isArray(doctor.report.checks)) {
@@ -3612,8 +3619,12 @@ async function renderSettingsPrereqs() {
     check: audio,
     offLabel: audio && audio.status === "ok" ? "off — sox is available" : "off",
   });
+  // `enabled` here is the RUNTIME verdict, not the persisted config flag:
+  // the handler reports it as "the pool exists", so a config that says on
+  // with a boot-time precheck that failed reads as off — which is the
+  // disagreement this chip exists to surface.
   paint(slots.upscale, {
-    running: !!(jobs && jobs.upscale && jobs.upscale.enabled),
+    running: !!(upscale && upscale.enabled),
     degradedReason: "",
     check: audio,
     offLabel: audio && audio.status === "ok" ? "off — sox is available" : "off",
@@ -4430,13 +4441,30 @@ function applyAnalysisStats(r) {
   setText("analysis-storage-path", r.storagePath ?? "—");
 }
 
+// BYTE_UNITS / formatBytes: binary units, and the ladder MUST reach PB.
+//
+// It stopped at GB until 2026-08-30, so a petabyte-class object-storage
+// mount rendered as "1048576 GB free" in the sidebar of every page and
+// twice more on Roots. The number was right; only the unit ran out.
+//
+// Binary (1024) rather than decimal is the deliberate half: these numbers
+// sit beside disk free space, the bridge host is Linux, and `df -h` — the
+// thing an operator compares against — is binary. It is also what every
+// operator page has shown for its whole life, so the "209 GB on disk" in
+// anyone's head keeps meaning what it meant.
+//
+// LOCKSTEP MIRROR of `bytes()` in static/player/format.js. The two files
+// cannot share code — app.js is a deferred classic script and the player
+// is ES modules — so TestByteFormattersAgree compares them. Change one,
+// change the other.
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
+
 function formatBytes(n) {
-  if (!n) return "0 B";
-  const kb = 1024, mb = kb * 1024, gb = mb * 1024;
-  if (n >= gb) return (n / gb).toFixed(n >= 10 * gb ? 0 : 1) + " GB";
-  if (n >= mb) return (n / mb).toFixed(n >= 10 * mb ? 0 : 1) + " MB";
-  if (n >= kb) return (n / kb).toFixed(n >= 10 * kb ? 0 : 1) + " KB";
-  return n + " B";
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  let v = n, u = 0;
+  while (v >= 1024 && u < BYTE_UNITS.length - 1) { v /= 1024; u++; }
+  if (u === 0) return v + " B";
+  return v.toFixed(v >= 10 ? 0 : 1) + " " + BYTE_UNITS[u];
 }
 
 function showMsg(el, kind, text) {
@@ -5901,6 +5929,23 @@ async function loadHistorySummary() {
 // route histograms only cover events that reported one, so a percentage
 // of their own total would read as "78% of plays" while meaning "78% of
 // the plays that said".
+// historyTrackLabel renders a top-tracks row the way a person would name
+// it: "Title · Artist". The path is what the table stores, so before the
+// /api/history join landed this panel listed bare filenames — the most
+// human view in the console was the least readable one.
+//
+// Falls back to the basename when the row carries no title, which is the
+// honest answer for a play of a file that has since been deleted or
+// renamed: the play happened, the catalog can no longer name it.
+function historyTrackLabel(b) {
+  if (!b) return "(unknown)";
+  const title = (b.title || "").trim();
+  const artist = (b.artist || "").trim();
+  if (title && artist) return `${title} · ${artist}`;
+  if (title) return title;
+  return (b.label || "").split("/").pop() || "(unknown)";
+}
+
 function fillHistoryLeader(id, buckets, total, basename) {
   const el = document.getElementById(id);
   const foot = document.getElementById(`${id}-foot`);
@@ -5911,7 +5956,7 @@ function fillHistoryLeader(id, buckets, total, basename) {
     if (foot) foot.textContent = "no plays recorded yet";
     return;
   }
-  const label = basename ? (top.label || "").split("/").pop() : top.label;
+  const label = basename ? historyTrackLabel(top) : top.label;
   el.textContent = label || "(unknown)";
   el.title = top.label || "";
   if (!foot) return;
@@ -5930,7 +5975,7 @@ function renderHistogram(id, buckets, basename) {
   const max = Math.max(...rows.map((b) => b.count), 1);
   el.innerHTML = rows.slice(0, 12).map((b) => {
     let label = b.label || "(unknown)";
-    if (basename) label = label.split("/").pop();
+    if (basename) label = historyTrackLabel(b);
     const pct = Math.round((b.count / max) * 100);
     return `<li title="${escapeHTML(b.label || "")}">
       <span class="histogram-bar" style="width:${pct}%"></span>

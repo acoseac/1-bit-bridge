@@ -129,6 +129,16 @@ func activePlayerNav(active string, r *http.Request) string {
 }
 
 func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, active string, data any) {
+	s.renderPageStatus(w, r, active, http.StatusOK, data)
+}
+
+// renderPageStatus is renderPage with an explicit status code, for the
+// one page that is not a 200. Each branch writes the status immediately
+// before executing its template and never earlier — WriteHeader freezes
+// the header map, so an early call would silently drop Content-Type,
+// Cache-Control, Vary, the public-mode framing guards, and the three
+// X-Bridge-* headers the partial-boost router reads.
+func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, active string, status int, data any) {
 	cfg := s.deps.CfgHolder.Load()
 	t, ok := s.pageTmpls[active]
 	if !ok {
@@ -191,12 +201,18 @@ func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, active strin
 		if nav := envelope.PlayerNav; nav != "" {
 			w.Header().Set("X-Bridge-Player-Nav", nav)
 		}
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+		}
 		if err := t.ExecuteTemplate(w, "content", envelope); err != nil {
 			logger.Error("render partial", "page", active, "err", err)
 		}
 		return
 	}
 
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
 	if err := t.ExecuteTemplate(w, "layout", envelope); err != nil {
 		logger.Error("render", "page", active, "err", err)
 	}
@@ -621,4 +637,24 @@ func playerSectionFor(r *http.Request) (section, id string) {
 	default:
 		return head, ""
 	}
+}
+
+// notFound is the catch-all registered on "/". Two shapes, because two
+// kinds of caller land here: an API client gets the same JSON error
+// envelope every other admin endpoint returns, and a browser gets a real
+// page with the nav intact.
+//
+// Written because guessing "/roots" and "/duplicates" from the sidebar
+// labels — the real paths are /library and /library/duplicates — landed
+// on unstyled black-on-white "404 page not found" with no way back. On a
+// hosted bridge that page is what a stale bookmark or a mistyped URL
+// reaches, so it is worth the twenty lines.
+func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		writeError(w, http.StatusNotFound, "not_found", "no such endpoint")
+		return
+	}
+	// ActiveTab "notfound" matches no nav entry, so nothing is
+	// highlighted — which is correct: the reader is nowhere.
+	s.renderPageStatus(w, r, "notfound", http.StatusNotFound, map[string]any{"Path": r.URL.Path})
 }

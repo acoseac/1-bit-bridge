@@ -173,6 +173,18 @@ type historyBucketRow struct {
 	Count int64  `json:"count"`
 }
 
+// historyTopTrackRow is the top-tracks DTO. It keeps `label` (the path)
+// so the existing renderer and its title= tooltip carry on working, and
+// adds the resolved metadata beside it. Title/Artist are omitempty: the
+// client treats absence as "this path no longer resolves" and falls back
+// to the basename, which is exactly what it showed before.
+type historyTopTrackRow struct {
+	Label  string `json:"label"`
+	Title  string `json:"title,omitempty"`
+	Artist string `json:"artist,omitempty"`
+	Count  int64  `json:"count"`
+}
+
 // apiHistorySummary handles GET /api/history — owner-visible playback
 // telemetry overview: total event count + codec / route histograms + top
 // tracks (all aggregated across devices). Loopback-only, read-only.
@@ -182,7 +194,7 @@ func (s *Server) apiHistorySummary(w http.ResponseWriter, r *http.Request) {
 			"totalEvents": 0,
 			"codecs":      []historyBucketRow{},
 			"routes":      []historyBucketRow{},
-			"topTracks":   []historyBucketRow{},
+			"topTracks":   []historyTopTrackRow{},
 		})
 		return
 	}
@@ -208,8 +220,18 @@ func (s *Server) apiHistorySummary(w http.ResponseWriter, r *http.Request) {
 		"totalEvents": total,
 		"codecs":      toBucketRows(codecs),
 		"routes":      toBucketRows(routes),
-		"topTracks":   toBucketRows(top),
+		"topTracks":   toTopTrackRows(top),
 	})
+}
+
+func toTopTrackRows(in []manifest.HistoryTopTrack) []historyTopTrackRow {
+	out := make([]historyTopTrackRow, 0, len(in))
+	for _, b := range in {
+		out = append(out, historyTopTrackRow{
+			Label: b.Path, Title: b.Title, Artist: b.Artist, Count: b.Count,
+		})
+	}
+	return out
 }
 
 func toBucketRows(in []manifest.HistoryBucket) []historyBucketRow {
