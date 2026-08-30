@@ -684,8 +684,18 @@ header.sidebar {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  flex: 1 1 auto;
-  min-height: 0;
+  /* NOT flex: 1 1 auto + min-height: 0.
+     That pair let the rail shrink the nav below its own content, and with no
+     scroll on it the last links rendered UNDERNEATH whatever followed —
+     latent until the space meter added a third flex child and Settings
+     overlapped the meter by 35px. Giving the nav its own scroll fixed the
+     overlap and replaced it with a worse bug: Settings simply vanished below
+     an invisible internal scroll.
+     The nav takes its natural height and never shrinks; .sidebar-foot's
+     `margin-top: auto` still pins the footer to the bottom when there is
+     spare room, and when there is not, header.sidebar's own `overflow: auto`
+     scrolls the WHOLE rail — so nothing is ever hidden. */
+  flex: 0 0 auto;
 }
 
 /* Group label. The uppercase micro-label is what turns twelve links into
@@ -3139,6 +3149,7 @@ label.checkbox.tray-switch {
    near the floor: a self-hoster with a 40 TB NAS should never see a meter for
    a number that will never bind. */
 .space-meter {
+  flex: 0 0 auto;
   padding: 0.5rem 0.75rem 0;
   font-size: var(--text-micro, 0.7rem);
 }
@@ -3175,3 +3186,27 @@ label.checkbox.tray-switch {
   border-left: 3px solid var(--warn);
   padding-left: 0.6rem;
 }
+
+/* --- Error text -----------------------------------------------------------
+   `.error` was used by four elements across the templates and had NO RULE
+   ANYWHERE, so every one of them rendered as ordinary body text. An upload
+   rejection appeared as an unremarkable line under a long file list and was
+   missed in the field — which is the whole reason this rule exists. Same class
+   of defect as `.hint.warn` being inert. */
+.error {
+  color: var(--danger, #b3261e);
+  border-left: 3px solid var(--danger, #b3261e);
+  background: var(--bg-elev);
+  border-radius: var(--radius-sm, 10px);
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+  font-size: var(--text-sm);
+}
+.error-details {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  font-family: var(--mono, ui-monospace, monospace);
+  overflow-wrap: anywhere;
+}
+.error-details li { padding: 0.1rem 0; }

@@ -1,0 +1,99 @@
+{{define "content"}}
+<section class="page page-upload">
+  <h1>Add music</h1>
+  <p class="page-lead">
+    Copy files or whole folders into the library over the network — the only
+    way to fill a library on a host you have no shell access to.
+  </p>
+
+  {{- /* Shown when uploads are off. The switch lives here as well as in
+      Settings: an operator who navigated to "Add music" and found it disabled
+      should not have to go looking for the reason. */ -}}
+  <div class="panel" id="upload-disabled-panel" hidden>
+    <div class="panel-head">
+      <h2>Uploads are turned off</h2>
+      <div class="panel-actions"></div>
+    </div>
+    <p class="hint">
+      Off by default because it is a write endpoint. Turning it on lets anyone
+      who can reach this console add files to the library; it never lets them
+      replace or delete anything — a file whose path already exists is skipped
+      unless you explicitly ask to overwrite. Deleting is a separate switch.
+    </p>
+  </div>
+
+  {{- /* Upload. Hidden unless uploads are enabled in Settings — an operator
+      who has not opted in should see no upload chrome at all, the same rule
+      the upscale stats card follows. */ -}}
+  {{- /* No <h2> here: the page <h1> directly above already says "Add music",
+      and repeating it printed the same words twice — the duplicate-title
+      mistake the collection detail view already made once. */ -}}
+  <div class="panel" id="upload-panel" hidden>
+    <p class="hint">
+      Files land in <code id="upload-root">—</code>. Folders keep their
+      structure, including the folder you pick.
+    </p>
+
+    <div id="upload-drop" class="upload-drop" tabindex="0" role="button"
+         aria-describedby="upload-drop-help">
+      <p class="upload-drop-title">Drop files or a folder here</p>
+      <p class="hint" id="upload-drop-help">
+        FLAC, DSF, DFF, ALAC, MP3, WAV, AIFF and SACD ISOs, plus cover art
+        (.jpg), booklets (.pdf), lyrics (.lrc) and cue sheets.
+      </p>
+      <div class="upload-pick">
+        <label class="btn">
+          Choose files
+          <input type="file" id="upload-files" multiple class="sr-only">
+        </label>
+        <label class="btn">
+          Choose a folder
+          <input type="file" id="upload-folder" webkitdirectory multiple class="sr-only">
+        </label>
+      </div>
+    </div>
+
+    <div id="upload-review" hidden>
+      <p class="hint">
+        <strong><span id="upload-count">0</span></strong> file<span id="upload-count-plural">s</span>,
+        <span id="upload-total">—</span>. These will be written to:
+      </p>
+      {{- /* The destination PREVIEW is the fix for the surprise in
+          webkitRelativePath: it includes the folder you selected, so picking
+          an artist folder nests differently from picking one album. Showing
+          the resolved path before anything transfers is what stops a
+          duplicate library arriving at a second path. */ -}}
+      <ul class="upload-preview" id="upload-preview"></ul>
+      <div class="row-actions">
+        <button type="button" id="upload-start" class="btn primary">Upload</button>
+        <button type="button" id="upload-cancel" class="btn">Cancel</button>
+        <label class="checkbox">
+          <input type="checkbox" id="upload-overwrite">
+          Replace files that already exist
+        </label>
+      </div>
+    </div>
+
+    <div id="upload-progress" hidden>
+      <progress id="upload-bar" max="100" value="0"></progress>
+      <p class="hint" id="upload-status" aria-live="polite"></p>
+      <button type="button" id="upload-abort" class="btn">Stop</button>
+    </div>
+
+    {{- /* Outside #upload-review deliberately: the review collapses when the
+        upload starts, and this note has to outlive it — it is the explanation
+        for the count in #upload-result directly below. */ -}}
+    {{- /* Outside #upload-review for the same reason the duplicate note is:
+        the review collapses when the upload starts, and an error raised during
+        it must survive that. role=alert so it is announced, not just shown. */ -}}
+    <p class="error" id="upload-error" hidden role="alert"></p>
+    <p class="hint warn" id="upload-dupe-note" hidden></p>
+    <p class="hint" id="upload-result" aria-live="polite" hidden></p>
+  </div>
+
+  {{- /* Trash. Hidden unless deleting is enabled in Settings. This panel is
+      where the space actually comes back: moving a file to the trash frees
+      nothing, so an operator who deleted to make room and stopped here would
+      still be full. */ -}}
+</section>
+{{end}}

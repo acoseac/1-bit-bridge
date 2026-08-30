@@ -212,6 +212,20 @@ type FileStatus struct {
 	DuplicateOf string // an existing library path this looks like
 }
 
+// RejectedFile is a declared file the session would not accept.
+//
+// These are REPORTED rather than fatal. A folder picked on a Mac contains a
+// .DS_Store, one picked on Windows a Thumbs.db, and a curated album may carry a
+// stray .txt — refusing the whole session for any of them would mean an
+// operator cannot upload an album because of a file the operating system put
+// there without asking. Every one of these is a file that CANNOT be uploaded,
+// so skipping is the only possible outcome; the only question is whether the
+// operator is told, and they are.
+type RejectedFile struct {
+	Path   string
+	Reason string
+}
+
 // Session is the client-facing session view.
 type Session struct {
 	ID         string
@@ -221,6 +235,7 @@ type Session struct {
 	Overwrite  bool
 	ChunkBytes int64
 	Files      []FileStatus
+	Rejected   []RejectedFile
 }
 
 // Create validates the declaration, reserves staging, and writes the manifest.
@@ -248,31 +263,49 @@ func (m *Manager) Create(decls []FileDecl, opts CreateOptions) (*Session, error)
 	}
 
 	var total int64
+	var rejected []RejectedFile
+	reject := func(path, reason string) { rejected = append(rejected, RejectedFile{Path: path, Reason: reason}) }
+
 	seen := make(map[string]bool, len(decls))
 	for _, d := range decls {
 		clean, err := ValidateRelPath(d.Path)
 		if err != nil {
-			return nil, fmt.Errorf("%q: %w", d.Path, err)
+			reject(d.Path, strings.TrimPrefix(err.Error(), ErrInvalidPath.Error()+": "))
+			continue
 		}
 		if seen[clean] {
-			return nil, fmt.Errorf("%w: %q declared twice", ErrInvalidPath, clean)
+			reject(d.Path, "declared twice")
+			continue
 		}
 		seen[clean] = true
 		if d.Size < 0 {
-			return nil, fmt.Errorf("%w: %q has a negative size", ErrInvalidPath, clean)
+			reject(clean, "negative size")
+			continue
 		}
 		if d.Size > m.cfg.MaxFileBytes {
-			return nil, fmt.Errorf("%w: %q is %d bytes, limit is %d", ErrTooLarge, clean, d.Size, m.cfg.MaxFileBytes)
+			reject(clean, fmt.Sprintf("%d bytes, over the %d-byte per-file limit", d.Size, m.cfg.MaxFileBytes))
+			continue
 		}
 		if d.Digest != "" {
 			if _, err := hex.DecodeString(d.Digest); err != nil || len(d.Digest) != 64 {
-				return nil, fmt.Errorf("%w: %q has a malformed digest", ErrInvalidPath, clean)
+				reject(clean, "malformed digest")
+				continue
 			}
 		}
 		total += d.Size
 		doc.Files = append(doc.Files, fileDoc{
 			ID: newID(), RelPath: clean, Size: d.Size, Digest: strings.ToLower(d.Digest),
 		})
+	}
+
+	// Nothing acceptable IS an error — there is no session to create — and the
+	// first reason is the useful half of the message.
+	if len(doc.Files) == 0 {
+		reason := "no acceptable files"
+		if len(rejected) > 0 {
+			reason = fmt.Sprintf("%q: %s", rejected[0].Path, rejected[0].Reason)
+		}
+		return nil, fmt.Errorf("%w: nothing to upload (%s)", ErrInvalidPath, reason)
 	}
 
 	// Request-scoped ceiling, supplied by the caller.
@@ -295,7 +328,9 @@ func (m *Manager) Create(decls []FileDecl, opts CreateOptions) (*Session, error)
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("write session manifest: %w", err)
 	}
-	return m.view(doc), nil
+	out := m.view(doc)
+	out.Rejected = rejected
+	return out, nil
 }
 
 // checkSpace fails CLOSED. A probe error means no way to honour the floor, and

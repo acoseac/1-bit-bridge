@@ -915,3 +915,69 @@ func TestClassifyStagingErrorPassesUnrelatedFailuresThrough(t *testing.T) {
 		}
 	}
 }
+
+// TestJunkFilesDoNotBlockTheWholeSession is the case a real folder upload hits
+// on the first try: a Mac folder contains .DS_Store, and refusing the session
+// for it means the operator cannot upload an album because of a file the
+// operating system put there without asking.
+func TestJunkFilesDoNotBlockTheWholeSession(t *testing.T) {
+	m, _ := newTestManager(t)
+	s, err := m.Create([]FileDecl{
+		{Path: "Album/.DS_Store", Size: 6148},
+		{Path: "Album/01 Track.dsf", Size: 1000},
+		{Path: "Album/cover.jpg", Size: 500},
+		{Path: "Album/notes.txt", Size: 10},
+		{Path: "Album/._01 Track.dsf", Size: 4096},
+	}, CreateOptions{})
+	if err != nil {
+		t.Fatalf("a session with junk in it was refused outright: %v", err)
+	}
+	if len(s.Files) != 2 {
+		t.Fatalf("accepted %d files, want 2 (the .dsf and the .jpg): %+v", len(s.Files), s.Files)
+	}
+	if len(s.Rejected) != 3 {
+		t.Fatalf("reported %d rejections, want 3: %+v", len(s.Rejected), s.Rejected)
+	}
+	// The report has to name the file AND say why, or it is not actionable.
+	for _, r := range s.Rejected {
+		if r.Path == "" || r.Reason == "" {
+			t.Errorf("rejection is not actionable: %+v", r)
+		}
+	}
+}
+
+// TestSessionWithNothingAcceptableIsAnError — skip-and-report must not become
+// "silently create an empty session the operator watches do nothing".
+func TestSessionWithNothingAcceptableIsAnError(t *testing.T) {
+	m, _ := newTestManager(t)
+	_, err := m.Create([]FileDecl{
+		{Path: "Album/.DS_Store", Size: 6148},
+		{Path: "Album/Thumbs.db", Size: 100},
+	}, CreateOptions{})
+	if !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("err = %v, want ErrInvalidPath", err)
+	}
+	if !strings.Contains(err.Error(), "nothing to upload") {
+		t.Errorf("the message does not say what happened: %v", err)
+	}
+}
+
+// TestHostilePathsAreRejectedNotAccepted — skip-and-report must not turn into
+// accepting a traversal alongside the good files.
+func TestHostilePathsAreRejectedNotAccepted(t *testing.T) {
+	m, _ := newTestManager(t)
+	s, err := m.Create([]FileDecl{
+		{Path: "../escape.flac", Size: 1},
+		{Path: "/etc/passwd.flac", Size: 1},
+		{Path: "Album/ok.flac", Size: 1},
+	}, CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Files) != 1 || s.Files[0].Path != "Album/ok.flac" {
+		t.Fatalf("accepted files = %+v, want only Album/ok.flac", s.Files)
+	}
+	if len(s.Rejected) != 2 {
+		t.Errorf("hostile paths were not reported: %+v", s.Rejected)
+	}
+}
