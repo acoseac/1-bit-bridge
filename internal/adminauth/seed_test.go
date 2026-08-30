@@ -181,3 +181,17 @@ func TestSeedHonoursUsernameOverride(t *testing.T) {
 		t.Errorf("SeedSource() = %q", SeedSource())
 	}
 }
+
+// TestSeedLengthIsCountedInRunes: the error message says "characters",
+// and a four-emoji password is 16 bytes but 4 characters. Counting
+// bytes would accept it while claiming a 12-character floor.
+func TestSeedLengthIsCountedInRunes(t *testing.T) {
+	// 8 runes, 24 bytes — comfortably over the byte floor, under the
+	// character floor.
+	t.Setenv("BRIDGE_ADMIN_PASSWORD", "🔑🔒🗝️🛡️🔐🔓🗄️🧱")
+	s, _ := emptyStore(t)
+	if _, err := s.SeedFromEnv(); err == nil {
+		t.Fatal("an 8-character password was accepted because it happened to be " +
+			"24 bytes — the check must count what the message promises")
+	}
+}

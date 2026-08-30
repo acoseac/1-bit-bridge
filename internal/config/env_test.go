@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -99,12 +100,23 @@ func TestEveryConfigLeafIsEnvSettable(t *testing.T) {
 				walk(ft, path)
 				continue
 			}
-			// Only kinds a variable can express. A map or a slice of
-			// structs is not something an env var should be carrying.
+			// Kinds a single environment variable can express.
+			//
+			// Written from what an env var CAN carry, not from what
+			// envBindings currently handles. The distinction is the
+			// whole point and I got it wrong first time: the original
+			// predicate accepted only *bool among pointers, which is
+			// exactly the set the implementation supported — so it could
+			// never flag a kind that had been forgotten, and it did not
+			// notice that every *int field (Backup.IntervalHours, both
+			// manifest rate limits, two integrity sweep intervals) had
+			// no override at all. A completeness test that mirrors the
+			// implementation is not a completeness test. (Gemini on
+			// PR #802.)
 			settable := ft.Kind() == reflect.String || ft.Kind() == reflect.Bool ||
 				ft.Kind() == reflect.Int || ft.Kind() == reflect.Int64 ||
 				(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.String) ||
-				(ft.Kind() == reflect.Pointer && ft.Elem().Kind() == reflect.Bool)
+				(ft.Kind() == reflect.Pointer && isScalarKind(ft.Elem().Kind()))
 			if !settable {
 				continue
 			}
@@ -227,4 +239,65 @@ func TestEnvOverrideDocsCoversEverything(t *testing.T) {
 		}
 	}
 	_ = fmt.Sprint(docs)
+}
+
+func isScalarKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.String, reflect.Bool, reflect.Int, reflect.Int64:
+		return true
+	}
+	return false
+}
+
+// TestListSeparatorIsNotColonForURLsOrCIDRs is the Gemini HIGH on
+// PR #802, and it was my bug: the hand-written form applied the OS PATH
+// separator to libraryRoots only, which is right, and generalising it
+// to every string slice broke everything else.
+//
+// A colon separator is CATASTROPHIC for the other slice fields in this
+// config. customEndpoints holds URLs, which carry a colon before the
+// port; metrics.allowCidrs holds CIDRs, which carry several in any IPv6
+// range. Splitting "https://bridge.example:7788" on ":" yields three
+// fragments, each of which then fails validation and is silently
+// dropped — so the operator's endpoint list would simply vanish with a
+// warning about three malformed URLs they never wrote.
+func TestListSeparatorIsNotColonForURLsOrCIDRs(t *testing.T) {
+	t.Setenv("BRIDGE_CUSTOM_ENDPOINTS", "https://a.example:7788,https://b.example:8443")
+	t.Setenv("BRIDGE_LIBRARY_ROOTS", "/srv/music"+string(os.PathListSeparator)+"/srv/more")
+
+	cfg := &Config{}
+	cfg.applyEnvOverrides()
+
+	wantEndpoints := []string{"https://a.example:7788", "https://b.example:8443"}
+	if !reflect.DeepEqual(cfg.CustomEndpoints, wantEndpoints) {
+		t.Errorf("customEndpoints = %q, want %q — a colon separator shreds every URL",
+			cfg.CustomEndpoints, wantEndpoints)
+	}
+	// And libraryRoots keeps the PATH separator, which is what makes a
+	// Windows drive-letter path survive.
+	wantRoots := []string{"/srv/music", "/srv/more"}
+	if !reflect.DeepEqual(cfg.LibraryRoots, wantRoots) {
+		t.Errorf("libraryRoots = %q, want %q", cfg.LibraryRoots, wantRoots)
+	}
+}
+
+// TestEnvSetsPointerIntFields covers the kinds the first cut silently
+// skipped. Backup.IntervalHours is the one that matters most for a
+// hosted bridge: 0 disables the periodic snapshot, and a tenant that
+// cannot be given a backup schedule from the environment has to be
+// given one by hand.
+func TestEnvSetsPointerIntFields(t *testing.T) {
+	t.Setenv("BRIDGE_BACKUP_INTERVAL_HOURS", "12")
+	t.Setenv("BRIDGE_LIMITS_MANIFEST_REQUESTS_PER_MINUTE", "30")
+
+	cfg := &Config{}
+	cfg.applyEnvOverrides()
+
+	if cfg.Backup.IntervalHours == nil || *cfg.Backup.IntervalHours != 12 {
+		t.Errorf("backup.intervalHours = %v, want 12", cfg.Backup.IntervalHours)
+	}
+	if cfg.Limits.Manifest.RequestsPerMinute == nil || *cfg.Limits.Manifest.RequestsPerMinute != 30 {
+		t.Errorf("limits.manifest.requestsPerMinute = %v, want 30",
+			cfg.Limits.Manifest.RequestsPerMinute)
+	}
 }

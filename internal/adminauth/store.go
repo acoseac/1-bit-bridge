@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"golang.org/x/crypto/bcrypt"
@@ -430,7 +431,11 @@ func SeedSource() string {
 // ValidateSession, so hashing under it would stall all admin auth for
 // that window.
 func (s *Store) SetInitialPassword(username, password string) error {
-	if len(password) < minPasswordLen {
+	// Runes, not bytes: the message says "characters", and a
+	// four-emoji password is 16 bytes and 4 characters. Counting bytes
+	// would accept it while the message claims a 12-character floor.
+	// (Gemini on PR #802.)
+	if utf8.RuneCountInString(password) < minPasswordLen {
 		return fmt.Errorf("adminauth: password must be at least %d characters", minPasswordLen)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), adminBcryptCost)

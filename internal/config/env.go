@@ -115,6 +115,32 @@ func toUpperRune(r rune) rune {
 	return r
 }
 
+// pathListFields are the slice fields whose entries are FILESYSTEM
+// PATHS, and so use the OS-native PATH separator.
+//
+// Everything else uses a comma, and the distinction is not cosmetic. A
+// colon separator is correct for paths (and `;` on Windows, so a
+// drive-letter path like C:\Music is not split in half) and CATASTROPHIC
+// for anything else in this config: `customEndpoints` holds URLs, which
+// contain a colon before the port, and `metrics.allowCidrs` holds CIDRs,
+// which contain several in any IPv6 range. Splitting
+// "https://bridge.example:7788" on ":" yields three fragments, every one
+// of which then fails URL validation and is silently dropped.
+//
+// The hand-written form this replaced applied the PATH separator to
+// libraryRoots ONLY, which was right; generalising it to every string
+// slice is what introduced the bug. (Gemini HIGH on PR #802.)
+var pathListFields = map[string]bool{
+	"libraryRoots": true,
+}
+
+func listSeparator(yamlPath string) string {
+	if pathListFields[yamlPath] {
+		return string(os.PathListSeparator)
+	}
+	return ","
+}
+
 // envBinding is one settable leaf: where it lives and what it is called.
 type envBinding struct {
 	YAMLPath string
@@ -124,6 +150,8 @@ type envBinding struct {
 	// than only the one it was discovered on.
 	index []int
 	kind  reflect.Kind
+	// elemKind is the pointed-to kind for a pointer leaf.
+	elemKind reflect.Kind
 	// elemIsString marks a []string leaf.
 	elemIsString bool
 }
@@ -172,13 +200,16 @@ func envBindings() []envBinding {
 					})
 				}
 			case reflect.Pointer:
-				// Pointer-to-bool is the codebase's "unset means default
-				// on" idiom (SmartPlaylists.Enabled). An env override
-				// allocates, which is exactly the explicit choice the
-				// pointer exists to represent.
-				if ft.Elem().Kind() == reflect.Bool {
+				// Pointer scalars are the codebase's "unset means the
+				// default" idiom — *bool for SmartPlaylists.Enabled,
+				// *int for Backup.IntervalHours and the manifest rate
+				// limits. An env override allocates, which is exactly
+				// the explicit choice the pointer exists to represent.
+				switch ft.Elem().Kind() {
+				case reflect.Bool, reflect.Int, reflect.Int64:
 					out = append(out, envBinding{
-						YAMLPath: path, EnvVar: envName(path), index: here, kind: ft.Kind(),
+						YAMLPath: path, EnvVar: envName(path), index: here,
+						kind: ft.Kind(), elemKind: ft.Elem().Kind(),
 					})
 				}
 			}
@@ -241,12 +272,26 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 		}
 		fv.SetBool(v)
 	case reflect.Pointer:
-		v, err := strconv.ParseBool(raw)
-		if err != nil {
-			validateLogger.Warn("ignoring unparseable boolean env var", "var", name, "value", raw, "err", err)
-			return
+		switch b.elemKind {
+		case reflect.Bool:
+			v, err := strconv.ParseBool(raw)
+			if err != nil {
+				validateLogger.Warn("ignoring unparseable boolean env var", "var", name, "value", raw, "err", err)
+				return
+			}
+			fv.Set(reflect.ValueOf(&v))
+		case reflect.Int, reflect.Int64:
+			n, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				validateLogger.Warn("ignoring unparseable integer env var", "var", name, "value", raw, "err", err)
+				return
+			}
+			// Allocate through the field's own element type so an
+			// *int and an *int64 field each get the right pointee.
+			ptr := reflect.New(fv.Type().Elem())
+			ptr.Elem().SetInt(n)
+			fv.Set(ptr)
 		}
-		fv.Set(reflect.ValueOf(&v))
 	case reflect.Int, reflect.Int64:
 		v, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
@@ -255,11 +300,7 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 		}
 		fv.SetInt(v)
 	case reflect.Slice:
-		// OS-native PATH separator: `:` on POSIX, `;` on Windows, so a
-		// drive-letter path (C:\Music) is not split in half. Container
-		// deployments are linux, where this is `:`, so existing
-		// docker-compose and k8s manifests keep working unchanged.
-		parts := strings.Split(raw, string(os.PathListSeparator))
+		parts := strings.Split(raw, listSeparator(b.YAMLPath))
 		out := make([]string, 0, len(parts))
 		for _, p := range parts {
 			if p = strings.TrimSpace(p); p != "" {
