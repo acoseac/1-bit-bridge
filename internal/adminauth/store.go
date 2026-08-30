@@ -741,6 +741,12 @@ func (s *Store) load() error {
 		copy(k[:], digest)
 		s.sessions[k] = sess
 	}
+	// Start the debounce window now. Without this lastSessionFlush is
+	// the zero time, so the very FIRST authenticated request after
+	// startup is always "due" and writes synchronously — a guaranteed
+	// fsync on the first page load of every boot, to persist timestamps
+	// that were just read off disk unchanged. (Gemini on PR #800.)
+	s.lastSessionFlush = now
 	return nil
 }
 

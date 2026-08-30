@@ -59,9 +59,14 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 // ready is the readiness predicate, split out so it can be tested
 // without an HTTP round trip.
 //
-// A missing dependency is NOT-ready rather than a panic or a 200: an
-// admin server constructed without a manifest cannot serve a library,
-// which is exactly what this endpoint reports.
+// The nil checks are unreachable on the constructed path — New refuses
+// a Deps without a Manifest and Scanner — and are kept anyway. This is
+// the function an orchestrator polls, and an orchestrator's response to
+// a failing liveness check is to RESTART the process: a nil dereference
+// here turns the cheapest possible bug into a restart loop rather than
+// a stack trace someone reads. Two lines of defence are worth more than
+// the tidiness in the one function whose whole job is to answer
+// honestly when something is wrong.
 //
 // The scan check is "has one ever finished", not "is one running now".
 // A periodic rescan on a live bridge must not drop it out of rotation

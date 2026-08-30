@@ -204,3 +204,37 @@ func TestLastUsedIsDebouncedNotWrittenPerRequest(t *testing.T) {
 		t.Error("FlushSessions wrote nothing — debounced activity would be lost at exit")
 	}
 }
+
+// TestFirstValidateAfterStartupDoesNotWrite: without seeding the
+// debounce window at load, lastSessionFlush is the zero time, so the
+// first authenticated request of every boot is "due" and fsyncs the
+// credentials file — to persist timestamps that were just read off disk
+// unchanged.
+func TestFirstValidateAfterStartupDoesNotWrite(t *testing.T) {
+	s, path := newPersistStore(t)
+	raw, _ := s.CreateSession("admin")
+
+	s2, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.ValidateSession(raw); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Error("the first validate after startup rewrote the store — the debounce " +
+			"window must start at load, not at the zero time")
+	}
+}
+
+// No test here for "an empty sessions map is omitted": encoding/json's
+// omitempty already drops a non-nil empty map, so both spellings emit
+// the same bytes and any such test would be vacuous. Verified with a
+// 10-line program rather than from memory — the docs define empty as
+// "any array, slice, map, or string of length zero", which includes a
+// non-nil one. (Declined finding, Gemini on PR #800.)
