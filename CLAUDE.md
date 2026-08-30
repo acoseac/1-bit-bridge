@@ -2588,3 +2588,45 @@ that pattern matches the waiting shell's OWN command line, so the loop waits on
 itself forever and reports the gate as busy long after it finished. Use the
 harness's background-task completion notification, or a self-match-proof
 pattern like `[/]go-build.*[.]test`.
+
+**Follow-ups from the first real folder upload (#793, #794).** Enabling uploads
+on the VPS turned up four things a green suite did not:
+
+- **A read-only library root fails every session at the first `mkdir`**, and
+  the generic wrap reached the operator as a 500 whose cause was only in the
+  log. `classifyStagingError` now names `EROFS` and permission failures
+  separately as `ErrLibraryNotWritable` → **503 `library_read_only`** with the
+  remedy in the message. The reference deployment mounted its B2 library
+  `--read-only` until this feature needed writes.
+- **`--vfs-cache-mode minimal` cannot serve this upload path.** rclone's docs:
+  under `minimal`, *"files opened for write only can't be seeked"* and
+  *"existing files opened for write must have O_TRUNC set"* — the chunked path
+  does both. Dropping `--read-only` alone leaves uploads broken confusingly;
+  the mount needs `writes` (NOT `full`, which caches every read and thrashes
+  the cache on a streaming library). **Measured and not a problem:** staging
+  inside a B2-backed root does not amplify uploads — rclone coalesces repeated
+  close-triggered write-backs into ONE upload — though that depends on
+  `--vfs-write-back` (5s), so chunks arriving slower than that would each
+  upload the file-so-far.
+- **One `.DS_Store` blocked a fourteen-file album.** `Create` refused the whole
+  session on the first invalid path. It now skips-and-reports; nothing
+  acceptable is still an error. The client also filters OS junk
+  (`.DS_Store`, `Thumbs.db`, `desktop.ini`, `@eaDir`, AppleDouble `._*`)
+  BEFORE declaring, so the operator is never told about a rejection for a file
+  the OS created without asking.
+- **`.error` had no CSS rule anywhere** — four elements across the templates
+  used it and all rendered as ordinary body text, which is why the rejection
+  was missed in the field. Same inert-class family as `.hint.warn`.
+
+**Two latent layout bugs the new page exposed.** `#primary-nav` carried
+`min-height: 0` with no scroll: that only PERMITS shrinking below content, and
+the shrunk box then spills so the last links render UNDERNEATH what follows —
+Settings overlapped the space meter by 35px once the rail gained a third flex
+child. Giving the nav its own scroll fixed the overlap and replaced it with a
+worse bug (Settings hidden behind an invisible internal scroll); the answer is
+a natural-height nav so `header.sidebar`'s own overflow scrolls the WHOLE rail.
+And the drop zone was `role="button"` around two label-wrapped file inputs — a
+button must not contain interactive descendants, so the card announced as one
+button while holding two controls. SonarCloud flagged the missing keyboard
+handler, which was the right flag for the wrong reason: the fix is dropping the
+role, not adding an `onkeydown` to satisfy the checker.
