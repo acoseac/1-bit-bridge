@@ -80,13 +80,13 @@ Withheld from an **unauthenticated** caller:
 | field | why |
 |---|---|
 | `scanState` | carries `tracksIndexed`, the library's size — an inventory number no pre-pairing client needs |
-| `latestServerVersion` | |
-| `updateAvailable` | together these say whether this host is **behind on patches**. Unauthenticated, across the internet, that enumerates every reachable bridge and sorts them by how far behind they are |
-| `updateReleaseNotesURL` | |
+| `latestServerVersion`, `updateAvailable`, `updateReleaseNotesURL` | together these say whether this host is **behind on patches**. Unauthenticated, across the internet, that enumerates every reachable bridge and sorts them by how far behind they are |
 
-Always present, authenticated or not:
+Never withheld on the basis of authentication:
 
 `protocolVersion`, `certFingerprint`, `endpoints` and `minClientVersion` **are** the handshake — a client cannot decide whether or how to pair without them. `minClientVersion` in particular is a client-compat floor, not server disclosure: it says which app version this bridge needs, and nothing about its own patch level.
+
+"Never withheld" is not the same as "always present", and the difference is load-bearing for a client. `endpoints` and `minClientVersion` are both `omitempty`: a bridge that can enumerate no reachable URL sends no `endpoints`, and one with no updater wired sends no `minClientVersion`. Their absence means the bridge had nothing to say — it never means the caller was not trusted with it.
 
 `libraryName`, `libraryRoots`, `serverVersion` and `startedAt` are disclosure too, and are **deliberately still sent**. iOS declares all four non-optional in its `HealthResponse`, so withholding them fails `Codable` decoding outright on every shipped app rather than degrading. Narrowing them further requires an iOS release that makes them optional first; the two field groups above were moved precisely because iOS already declares them optional (`ScanState?`, `String?`, `Bool?`), so their absence is decode-safe today.
 
