@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
@@ -24,11 +25,44 @@ func (s *Server) boundaryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.deps.CfgHolder.Load()
 		if cfg != nil && cfg.IsPublic() {
+			setHSTS(w, r)
 			next.ServeHTTP(w, r)
 			return
 		}
 		guarded.ServeHTTP(w, r)
 	})
+}
+
+// hstsMaxAge is one year in seconds, the value the header is only
+// meaningful at: a short max-age leaves a window on every device that
+// has not visited recently, which is the window an attacker on the path
+// wants.
+const hstsMaxAge = 31536000
+
+// setHSTS declares that this origin is HTTPS-only.
+//
+// Public mode ONLY, and never in loopback: the loopback console is
+// plain http://127.0.0.1:7789, and pinning HSTS for `localhost` would
+// poison that host name in the operator's browser for every other local
+// service they run — an unrelated dev server on 127.0.0.1 would start
+// failing, and the fix is buried in chrome://net-internals.
+//
+// Skipped on a plain-HTTP request even in public mode. A bridge behind
+// a TLS-terminating proxy serves the admin console over http on a
+// private interface, and a browser ignores HSTS over http anyway — but
+// asserting it there would be a claim the bridge cannot back.
+//
+// No `includeSubDomains` and no `preload`. Both are decisions about a
+// whole DNS name that the bridge does not own: it is one service on a
+// domain that may host others, and preload is effectively irreversible.
+// An operator who wants either should send it from their proxy, where
+// the scope is theirs to decide.
+func setHSTS(w http.ResponseWriter, r *http.Request) {
+	if r.TLS == nil {
+		return
+	}
+	w.Header().Set("Strict-Transport-Security",
+		"max-age="+strconv.Itoa(hstsMaxAge))
 }
 
 // sessionMiddleware enforces a valid admin session for every

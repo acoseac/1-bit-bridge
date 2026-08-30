@@ -102,6 +102,9 @@ func Clone(cfg *Config) *Config {
 	if cfg.Deployment.ManagedSettings != nil {
 		out.Deployment.ManagedSettings = append([]string(nil), cfg.Deployment.ManagedSettings...)
 	}
+	if cfg.Metrics.AllowCIDRs != nil {
+		out.Metrics.AllowCIDRs = append([]string(nil), cfg.Metrics.AllowCIDRs...)
+	}
 	if cfg.Backup.IntervalHours != nil {
 		v := *cfg.Backup.IntervalHours
 		out.Backup.IntervalHours = &v
