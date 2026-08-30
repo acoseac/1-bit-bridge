@@ -140,6 +140,13 @@ func writeUploadError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusRequestEntityTooLarge, "too_large", err.Error())
 	case errors.Is(err, upload.ErrDigestMismatch):
 		writeError(w, http.StatusBadRequest, "digest_mismatch", err.Error())
+	case errors.Is(err, upload.ErrLibraryNotWritable):
+		// 503, not 500: the bridge is fine, the deployment cannot accept
+		// uploads as configured — the same shape as an unwired subsystem. The
+		// message carries the cause and the remedy, because the alternative is
+		// an operator reading "upload failed" while the real reason sits in a
+		// log they have no reason to open.
+		writeError(w, http.StatusServiceUnavailable, "library_read_only", err.Error())
 	case errors.Is(err, upload.ErrInvalidPath), errors.Is(err, upload.ErrUnknownRoot):
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 	default:

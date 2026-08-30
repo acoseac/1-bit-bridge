@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -31,6 +33,15 @@ var (
 	ErrNoSpace        = errors.New("upload: insufficient free space")
 	ErrIncomplete     = errors.New("upload: file incomplete")
 	ErrUnknownRoot    = errors.New("upload: not a configured library root")
+
+	// ErrLibraryNotWritable is a CONFIGURATION fault, not a server fault, and
+	// it is worth its own sentinel because the generic answer is actively
+	// unhelpful: staging lives inside the library root, so a read-only mount
+	// fails every session at the first mkdir, and the operator sees "upload
+	// failed" with the real cause — "read-only file system" — only in the
+	// server log. A read-only library is a perfectly reasonable setup to have
+	// and an easy one to forget you chose.
+	ErrLibraryNotWritable = errors.New("upload: the library root is not writable")
 )
 
 // OffsetMismatch carries the offset the server actually holds, so a client
@@ -274,7 +285,7 @@ func (m *Manager) Create(decls []FileDecl, opts CreateOptions) (*Session, error)
 
 	dir := m.sessionDir(root, doc.ID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create staging dir: %w", err)
+		return nil, classifyStagingError(root, err)
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {
@@ -670,4 +681,24 @@ func openStagedFile(path string) (*os.File, error) {
 	//
 	// Staging is not exposed in the meantime: its directory is 0o700.
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
+}
+
+// classifyStagingError turns a failure to create the staging directory into
+// something the operator can act on.
+//
+// This is the first thing every session does, so it is where a read-only or
+// unwritable library surfaces — before a single byte has been uploaded. Both
+// cases are configuration, not a bridge fault, so they get their own sentinel
+// rather than falling through to a 500 whose message names nothing.
+func classifyStagingError(root string, err error) error {
+	switch {
+	case errors.Is(err, syscall.EROFS):
+		return fmt.Errorf("%w: %q is mounted read-only, and uploads stage inside the "+
+			"library root so that committing a file is an instant rename rather than a "+
+			"copy. Remount it read-write to accept uploads", ErrLibraryNotWritable, root)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("%w: the bridge cannot write to %q. Check the ownership and "+
+			"mode of the library root", ErrLibraryNotWritable, root)
+	}
+	return fmt.Errorf("create staging dir: %w", err)
 }

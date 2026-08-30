@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -844,5 +847,71 @@ func TestOversizeChunkIsRefusedRatherThanTruncated(t *testing.T) {
 	got, _ = m.Get(s.ID)
 	if got.Files[0].Offset != 10 {
 		t.Errorf("offset = %d, want 10 — LimitReader should bound an undeclared oversize", got.Files[0].Offset)
+	}
+}
+
+// TestReadOnlyLibraryIsNamedRatherThanA500 — staging lives inside the library
+// root, so a read-only mount fails every session at the first mkdir. The
+// generic answer ("create staging dir: ...") reaches the client as a 500
+// "upload failed" with the real cause visible only in the server log, which is
+// the least useful place for it.
+//
+// This is not hypothetical: bridge.ars.md mounted its B2-backed library with
+// rclone's --read-only until this feature needed writes.
+func TestReadOnlyLibraryIsNamedRatherThanA500(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Chmod on Windows sets only the read-only ATTRIBUTE, and that does
+		// not stop files being created inside a directory — so a 0o500 fixture
+		// is simply writable there and MkdirAll succeeds. Reproducing this
+		// would need an ACL edit via icacls, which this repo deliberately
+		// avoids shelling out to. The CLASSIFICATION itself is covered on every
+		// platform by TestClassifyStagingError*.
+		t.Skip("Chmod cannot make a directory unwritable on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the mode bits this fixture relies on")
+	}
+	root := t.TempDir()
+	// A directory the bridge cannot create anything inside stands in for a
+	// read-only mount: both surface as a permission-class failure at the same
+	// call, and EROFS cannot be staged without an actual mount.
+	if err := os.Chmod(root, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+
+	m := NewManager(Config{}, func() []string { return []string{root} },
+		WithFreeBytes(func(string) (int64, error) { return roomyDisk, nil }))
+	_, err := m.Create([]FileDecl{{Path: "A/x.flac", Size: 1}}, CreateOptions{})
+	if !errors.Is(err, ErrLibraryNotWritable) {
+		t.Fatalf("err = %v, want ErrLibraryNotWritable", err)
+	}
+	if !strings.Contains(err.Error(), root) {
+		t.Errorf("the message does not name the root: %v", err)
+	}
+}
+
+func TestClassifyStagingErrorPassesUnrelatedFailuresThrough(t *testing.T) {
+	got := classifyStagingError("/lib", errors.New("disk on fire"))
+	if errors.Is(got, ErrLibraryNotWritable) {
+		t.Error("an unrelated failure was misreported as an unwritable library")
+	}
+	if !strings.Contains(got.Error(), "disk on fire") {
+		t.Errorf("the original cause was dropped: %v", got)
+	}
+	// Both mappings, on every platform: these need no filesystem, so they are
+	// the coverage that survives where the end-to-end fixture cannot run.
+	for name, in := range map[string]error{
+		"EROFS":      syscall.EROFS,
+		"permission": fs.ErrPermission,
+		"EACCES":     syscall.EACCES,
+	} {
+		got := classifyStagingError("/lib", in)
+		if !errors.Is(got, ErrLibraryNotWritable) {
+			t.Errorf("%s was not classified as an unwritable library: %v", name, got)
+		}
+		if !strings.Contains(got.Error(), "/lib") {
+			t.Errorf("%s message does not name the root: %v", name, got)
+		}
 	}
 }

@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -344,5 +346,44 @@ func TestParseContentDigestSHA256(t *testing.T) {
 		if _, err := parseContentDigestSHA256(bad); err == nil {
 			t.Errorf("malformed digest %q was accepted", bad)
 		}
+	}
+}
+
+// TestReadOnlyLibraryReturns503NotA500 — a deployment that cannot accept
+// uploads as configured is not a server fault, and the operator needs the
+// cause in the response rather than in a log they have no reason to open.
+func TestReadOnlyLibraryReturns503NotA500(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Chmod on Windows sets only the read-only ATTRIBUTE, and that does
+		// not stop files being created inside a directory — so a 0o500 fixture
+		// is simply writable there and MkdirAll succeeds. Reproducing this
+		// would need an ACL edit via icacls, which this repo deliberately
+		// avoids shelling out to. The CLASSIFICATION itself is covered on every
+		// platform by TestClassifyStagingError*.
+		t.Skip("Chmod cannot make a directory unwritable on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the mode bits this fixture relies on")
+	}
+	srv, cfg, _ := newTestServer(t)
+	enableUploads(t, srv)
+	root := cfg.LibraryRoots[0]
+	if err := os.Chmod(root, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	var out map[string]any
+	code := doJSON(t, srv.Handler(), "POST", "/api/upload/sessions", map[string]any{
+		"files": []any{map[string]any{"path": "A/x.flac", "size": 1}},
+	}, &out)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (%v)", code, out)
+	}
+	if got, _ := out["error"].(string); got != "library_read_only" {
+		t.Errorf("error code = %q, want library_read_only", got)
+	}
+	if msg, _ := out["message"].(string); !strings.Contains(msg, "read-write") && !strings.Contains(msg, "cannot write") {
+		t.Errorf("the message does not say what to do: %q", msg)
 	}
 }
