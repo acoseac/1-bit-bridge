@@ -845,30 +845,48 @@ func ArtistImagePath(cacheDir, mbid string) string {
 	return filepath.Join(cacheDir, fmt.Sprintf("artist-%s.jpg", mbid))
 }
 
-// CachedArtistImageMBIDs enumerates the artist MBIDs that have a cached
-// image on disk — the `artist-<mbid>.jpg` files ArtistImagePath writes —
-// as a lowercase-keyed set. One os.ReadDir over the cache dir; the strict
-// UUID check on the middle segment naturally excludes the name-hashed
-// canonical files (`artist-name-<sha256>.jpg`, see ArtistImagePathByName)
-// and the `<mbid>-<size>.jpg` album covers sharing the directory. A
-// missing cache dir is "no images yet", not an error (fresh install).
-// Used by the admin dashboard's artist-image coverage stats via the
-// Deps.ArtistImageMBIDs closure — called behind a 60s TTL cache there,
-// so the directory read is off any hot path.
-func CachedArtistImageMBIDs(cacheDir string) (map[string]struct{}, error) {
+// CachedArtistImages enumerates the artist MBIDs that have a cached
+// portrait, mapping each to a short CONTENT VERSION token.
+//
+// The version is what lets the console serve portraits `immutable`.
+// Album covers already could: their id is either content-keyed
+// (`local-<sha256>`) or carries an `artwork_version` cache-buster, so
+// the URL changes when the bytes do. Portraits had neither — the
+// enricher overwrites `artist-<mbid>.jpg` IN PLACE, so the URL is
+// stable across a content change and the only safe answer was a short
+// max-age plus mtime revalidation. The measured cost of that on
+// bridge.ars.md: 49 conditional requests on one load of /artists,
+// p50 177 ms, 14 KB transferred because every one was a 304.
+//
+// mtime+size is a sound key here precisely BECAUSE the writer
+// overwrites in place: a replacement always moves at least the mtime,
+// and the enricher's writer is an atomic rename, so a partially-written
+// file is never observable. It is not a hash of the bytes and does not
+// claim to be — two writes inside one filesystem timestamp tick with an
+// identical length would collide, which for a portrait fetched from an
+// upstream at most once per enrichment pass is not a case that arises.
+//
+// One os.ReadDir plus one Info() per entry. Info() lstats on Unix, so
+// this is O(artists) syscalls — which is why the admin side calls it
+// behind a TTL cache and never per-artist.
+//
+// A malformed or unreadable entry is skipped rather than failing the
+// sweep: a portrait that cannot be versioned should fall back to
+// revalidation, not take the whole grid down.
+func CachedArtistImages(cacheDir string) (map[string]string, error) {
 	if cacheDir == "" {
 		// An unconfigured dir must not fall through to os.ReadDir(""), which
 		// would enumerate the process's working directory (Gemini on PR #495).
-		return map[string]struct{}{}, nil
+		return map[string]string{}, nil
 	}
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]struct{}{}, nil
+			return map[string]string{}, nil
 		}
 		return nil, err
 	}
-	out := make(map[string]struct{}, len(entries))
+	out := make(map[string]string, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -881,7 +899,15 @@ func CachedArtistImageMBIDs(cacheDir string) (map[string]struct{}, error) {
 		if !isValidMBID(mbid) {
 			continue
 		}
-		out[strings.ToLower(mbid)] = struct{}{}
+		info, err := e.Info()
+		if err != nil {
+			// Raced with a delete, or unreadable. Record presence with an
+			// empty version so the tile still renders; the handler then
+			// falls back to revalidation for this one artist.
+			out[strings.ToLower(mbid)] = ""
+			continue
+		}
+		out[strings.ToLower(mbid)] = manifest.ArtworkFileVersion(info.ModTime(), info.Size())
 	}
 	return out, nil
 }

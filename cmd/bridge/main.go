@@ -3780,8 +3780,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// Artist-image coverage source for the dashboard enrichment card —
 		// one ReadDir over the shared artwork cache dir, called behind the
 		// admin's 60s enrichment-meta TTL (never per-tick).
-		ArtistImageMBIDs: func() (map[string]struct{}, error) {
-			return enrich.CachedArtistImageMBIDs(artworkDir)
+		ArtistImages: func() (map[string]string, error) {
+			return enrich.CachedArtistImages(artworkDir)
 		},
 		// Why the enricher stopped short, by bounded reason. In-memory and
 		// process-lifetime — it answers "is this library unmatchable, or is

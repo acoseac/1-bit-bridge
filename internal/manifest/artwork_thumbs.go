@@ -25,7 +25,7 @@
 //     silently change the bytes iOS receives. artwork_scale.go's header
 //     records a deliberate 2026-08-19 decision that clients get one
 //     1200 px tier; this module must not reverse it as a side effect.
-//   - `enrich.CachedArtistImageMBIDs` enumerates that directory to build
+//   - `enrich.CachedArtistImages` enumerates that directory to build
 //     the artist-image coverage set, keying on the `artist-<uuid>.jpg`
 //     shape. Size-suffixed portraits alongside it would need that parser
 //     taught about them.
@@ -39,6 +39,8 @@ package manifest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -179,4 +181,27 @@ func EnsureThumb(src, dst string, targetPx int) error {
 		_ = os.Chtimes(dst, srcInfo.ModTime(), srcInfo.ModTime().Add(time.Second))
 	}
 	return nil
+}
+
+// ArtworkFileVersion derives a short content token for an image the
+// cache overwrites IN PLACE, so its URL can carry a cache-buster and be
+// served immutable.
+//
+// It lives here because both producers need it and they cannot see each
+// other: internal/enrich builds the token when it enumerates the
+// portrait cache, internal/admin recomputes it from the file it is
+// about to serve, and admin deliberately does not import enrich (the
+// Deps-closure decoupling). internal/manifest is the package both
+// already depend on.
+//
+// mtime+size, not a hash of the bytes, and it does not claim to be one.
+// It is sound for this use precisely because the writers overwrite in
+// place via atomic rename: a replacement always moves at least the
+// mtime, and a half-written file is never observable. Two writes inside
+// one filesystem timestamp tick with an identical length would collide;
+// for an image refetched from an upstream at most once per enrichment
+// pass, that is not a case that arises.
+func ArtworkFileVersion(mod time.Time, size int64) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d-%d", mod.UnixNano(), size)))
+	return hex.EncodeToString(sum[:8])
 }

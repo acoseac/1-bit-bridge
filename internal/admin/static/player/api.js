@@ -256,15 +256,26 @@ export function coverURL(album, size = 500) {
  *
  * `size` is optional and only worth passing for small boxes (the round
  * artist tiles). Omitting it serves the stored file untouched, which is
- * what the full-size detail hero wants. Unlike a cover there is no
- * content key to hang a year-long cache on — portraits live under a
- * fixed `artist-<mbid>` key the enricher overwrites in place — so the
- * server caps these at a day and revalidates on mtime.
+ * what the full-size detail hero wants.
+ *
+ * `version` is the portrait's content token (`imageVersion` on the DTO).
+ * Portraits live under a fixed `artist-<mbid>` key the enricher
+ * overwrites in place, so there is no content key IN the id the way
+ * `local-<sha256>` covers have one — the token supplies it, and the
+ * server verifies it against the file before answering immutable.
+ * Without it the response caps at a day and revalidates on mtime, which
+ * measured as 49 conditional requests on one load of /artists.
+ *
+ * Pass it wherever you have it. Omitting it is correct-but-slow, never
+ * wrong.
  */
-export function artistImageURL(mbid, size) {
+export function artistImageURL(mbid, size, version) {
   if (!mbid) return null;
+  const q = [];
+  if (size) q.push(`size=${size}`);
+  if (version) q.push(`v=${encodeURIComponent(version)}`);
   const base = `/api/library/artist-image/${encodeURIComponent(mbid)}`;
-  return size ? `${base}?size=${size}` : base;
+  return q.length ? `${base}?${q.join("&")}` : base;
 }
 
 export function bookletURL(mbid) {

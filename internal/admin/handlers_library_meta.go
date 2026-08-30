@@ -767,8 +767,8 @@ func (s *Server) computeLibraryMetaDetail(ctx context.Context, normalised string
 		resp.Release = s.releaseAbout(ctx, dominantRelease)
 	}
 
-	if dominantArtist != "" && s.deps.ArtistImageMBIDs != nil {
-		if files, err := s.deps.ArtistImageMBIDs(); err == nil {
+	if dominantArtist != "" && s.deps.ArtistImages != nil {
+		if files, err := s.deps.ArtistImages(); err == nil {
 			_, resp.HasArtistImage = files[strings.ToLower(dominantArtist)]
 		}
 	}
@@ -909,8 +909,8 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 
 	// Facet 2: artist images — MBIDs under the folder minus the
 	// on-disk image set (resetArtistImageGaps shape, scoped).
-	if s.deps.ArtistImageMBIDs != nil {
-		if files, err := s.deps.ArtistImageMBIDs(); err == nil {
+	if s.deps.ArtistImages != nil {
+		if files, err := s.deps.ArtistImages(); err == nil {
 			if mbids, err := s.deps.Manifest.DistinctArtistMBIDsUnderPrefix(ctx, normalised); err == nil {
 				var missing []string
 				for _, m := range mbids {
@@ -1114,7 +1114,38 @@ func (s *Server) apiLibraryArtistImage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	serveCacheFile(w, r, path, "image/jpeg", "private, max-age=86400")
+	serveCacheFile(w, r, path, "image/jpeg", artistImageCacheControl(src, r.URL.Query().Get("v")))
+}
+
+// artistImageCacheControl decides how long a portrait may be cached.
+//
+// The token is VERIFIED against the source file rather than trusted.
+// A caller that supplies any `v=` at all could otherwise pin a stale
+// portrait for a year: the client's token comes from a TTL-cached
+// directory listing, so a portrait replaced inside that window is
+// served under the OLD token, and answering that immutable would freeze
+// the previous image in the viewer's cache until they clear it. On a
+// mismatch the response degrades to the short max-age, which is exactly
+// the behaviour every portrait had before versioning existed — the
+// client's next catalog read carries the new token and the fresh URL
+// then earns the long cache.
+//
+// The stat is on the SOURCE, not the derived thumbnail: the thumbnail
+// is a pure function of the source, and deriveThumb already rebuilds it
+// when the source moves.
+func artistImageCacheControl(src, token string) string {
+	const short = "private, max-age=86400"
+	if token == "" {
+		return short
+	}
+	fi, err := os.Stat(src)
+	if err != nil {
+		return short
+	}
+	if manifest.ArtworkFileVersion(fi.ModTime(), fi.Size()) != token {
+		return short
+	}
+	return "private, max-age=31536000, immutable"
 }
 
 // apiLibraryBooklet handles GET /api/library/booklet/{mbid} — the

@@ -592,7 +592,7 @@ export async function renderArtists(view, ctx) {
  */
 function artistTile(a) {
   const src = a.hasImage && a.artistMBID
-    ? artistImageURL(a.artistMBID, 250)
+    ? artistImageURL(a.artistMBID, 250, a.imageVersion)
     : coverURL(a, 250);
   const tile = link(`/artist/${a.id}`, { class: "tile tile-round" },
     cover(src, a.name),
@@ -636,7 +636,9 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail 
   const artistName = d.artist.name || "Unknown artist";
   setCrumb(crumbs(crumbAncestors(trail, [CRUMB_ROOTS.artists]), artistName));
   setAxisTitle(artistName);
-  const portrait = d.hasImage ? artistImageURL(d.artist.artistMBID, 500) : null;
+  const portrait = d.hasImage
+    ? artistImageURL(d.artist.artistMBID, 500, d.artist.imageVersion)
+    : null;
   view.appendChild(el("div", { class: "detail detail-artist-head" },
     el("div", { class: "detail-art detail-art-round" }, cover(portrait, d.artist.name)),
     el("div", { class: "detail-head" },
