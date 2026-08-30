@@ -2544,6 +2544,36 @@ PRs; admin-surface only — **no `/v1` change, no `ProtocolVersion` bump, no
   control test asserts that turning uploads on leaves deleting refused. A nil
   delete gate fails CLOSED.
 
+- **Chunks are verified by CONTENT, not just length** (2026-08-30). The server has
+  parsed and verified an RFC 9530 `Content-Digest` since the path shipped and skips
+  the check when absent; nothing sent it, so uploads were size-verified only. The
+  client now hashes each chunk with `crypto.subtle`. **Per chunk is the right
+  granularity, not a compromise** — SubtleCrypto has no incremental digest API, so a
+  whole-file hash would mean holding a 900 MB DSF in memory, and every byte travels
+  inside some chunk. **The retry is scoped to `digest_mismatch` and MUST stay
+  scoped**: it is safe only because the server refuses the bytes without advancing
+  its offset and `openStagedFile` truncates back to it, so the re-send writes the
+  same range over nothing — widen it to all failures and you are blindly retrying
+  errors that are not idempotent. Without a retry, adding verification could only
+  ever have converted silent corruption into a dead multi-gigabyte upload.
+  `crypto.subtle` needs a secure context; **both supported deployments are one**
+  (loopback is potentially-trustworthy, and public mode's `:7789` serves a real LE
+  cert — it is an HTTPS listener, which Chrome's omnibox hides), so an absent
+  SubtleCrypto degrades to no header AND says so in the result line rather than
+  dropping the guarantee silently. `errorFromResponse` carries `code`/`status` so
+  none of this depends on matching prose.
+  **The test runs the SHIPPED client function under node against the real Go
+  parser** — a hand-written Go replica asserts its author's beliefs, and a source
+  scan cannot catch a format disagreement that would 400 every chunk. Two fixture
+  traps worth not repeating: the payload must travel as explicit BYTES (a string
+  round-trip put U+FFFD in place of an invalid UTF-8 byte, so the two sides hashed
+  different inputs), and a corruption test must send DIFFERENT bytes than the retry
+  (sending the same bytes twice cannot distinguish a working truncate from a broken
+  one). **`extractJSFunction` anchors on the opening paren** because
+  `putUploadChunkVerified` prefix-matches `putUploadChunk` — a bare-name scan
+  silently examines the wrong function, which is exactly how this change broke an
+  existing test.
+
 **Process lesson worth more than any single fix: `go test` was green through
 FIVE defects that a live browser found** — committed files at 0600; `totalBytes`
 declared and never populated (the sidebar bar pinned at 0% forever); the
