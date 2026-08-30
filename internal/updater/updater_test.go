@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/version"
+	"golang.org/x/mod/semver"
 )
 
 func TestSemverGreater(t *testing.T) {
@@ -597,5 +598,43 @@ func TestNormalizeDescribe(t *testing.T) {
 		if got := normalizeDescribe(c.in); got != c.want {
 			t.Errorf("normalizeDescribe(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestNormalizeDescribeWithBuildMetadataInTheTag is the CodeRabbit
+// finding on PR #797, and it matters more than it looks.
+//
+// Semver permits exactly one "+". A tag that already carries build
+// metadata — `v0.1.9+ci.1`, which describe extends to
+// `v0.1.9+ci.1-65-g8b092ad` — would otherwise be rewritten with a
+// SECOND one. That string fails semver.IsValid, `current` falls to the
+// v0.0.0 floor, and the release is reported as an upgrade: the downgrade
+// this function exists to prevent, back again for that input shape.
+//
+// Verified against golang.org/x/mod before fixing: `v0.1.9+ci.1+65.g...`
+// is rejected, `v0.1.9+ci.1.65.g...` is accepted.
+func TestNormalizeDescribeWithBuildMetadataInTheTag(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"0.1.9+ci.1-65-g8b092ad", "0.1.9+ci.1.65.g8b092ad"},
+		{"0.1.9+ci.1-65-g8b092ad-dirty", "0.1.9+ci.1.65.g8b092ad.dirty"},
+		{"0.1.9+ci.1-dirty", "0.1.9+ci.1.dirty"},
+		// Unchanged: no metadata in the tag, single "+" as before.
+		{"0.1.9-65-g8b092ad", "0.1.9+65.g8b092ad"},
+	}
+	for _, c := range cases {
+		got := normalizeDescribe(c.in)
+		if got != c.want {
+			t.Errorf("normalizeDescribe(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if !semver.IsValid("v" + got) {
+			t.Errorf("normalizeDescribe(%q) = %q, which semver rejects — `current` "+
+				"would fall to the v0.0.0 floor and the tag would be offered as an "+
+				"upgrade, which is the downgrade bug all over again", c.in, got)
+		}
+	}
+	// End to end: the descendant of a metadata-carrying tag must not be
+	// offered its own tag as an update.
+	if semverGreater("0.1.9", "0.1.9+ci.1-65-g8b092ad") {
+		t.Error("a descendant of v0.1.9+ci.1 was offered v0.1.9 as an upgrade")
 	}
 }

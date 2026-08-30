@@ -800,9 +800,9 @@ func normalizeTag(s string) string {
 // MUST keep pre-release ordering, where they sort BELOW their release.
 var describeSuffixRE = regexp.MustCompile(`-(\d+)-g([0-9a-fA-F]+)(-dirty)?$`)
 
-// dirtyOnlySuffixRE matches the other shape describe emits: an exact tag on
-// a dirty tree, `v0.1.9-dirty`, with no commit count.
-var dirtyOnlySuffixRE = regexp.MustCompile(`-dirty$`)
+// dirtySuffix is the other shape describe emits: an exact tag on a dirty
+// tree, `v0.1.9-dirty`, with no commit count.
+const dirtySuffix = "-dirty"
 
 // normalizeDescribe rewrites a `git describe` version string so it compares
 // as a DESCENDANT of its tag rather than a pre-release of it.
@@ -832,12 +832,33 @@ func normalizeDescribe(v string) string {
 		if m[3] != "" {
 			meta += ".dirty"
 		}
-		return base + "+" + meta
+		return appendBuildMeta(base, meta)
 	}
-	if loc := dirtyOnlySuffixRE.FindStringIndex(v); loc != nil {
-		return v[:loc[0]] + "+dirty"
+	if base, ok := strings.CutSuffix(v, dirtySuffix); ok {
+		return appendBuildMeta(base, "dirty")
 	}
 	return v
+}
+
+// appendBuildMeta attaches build metadata to a version that may already
+// carry some.
+//
+// Semver permits exactly ONE "+", so a tag that itself carries build
+// metadata — `v0.1.9+ci.1`, which `git describe` extends to
+// `v0.1.9+ci.1-65-g8b092ad` — must have the commits-ahead appended with a
+// "." to the existing metadata rather than a second "+".
+//
+// Getting this wrong is not cosmetic: `v0.1.9+ci.1+65.g8b092ad` fails
+// semver.IsValid, `current` falls back to the v0.0.0 floor, and the tag is
+// reported as an upgrade — reinstating the exact downgrade this whole
+// function exists to prevent, for that one input shape. Verified against
+// golang.org/x/mod: the double-plus form is rejected, the dotted form is
+// accepted. (CodeRabbit on PR #797.)
+func appendBuildMeta(base, meta string) string {
+	if strings.Contains(base, "+") {
+		return base + "." + meta
+	}
+	return base + "+" + meta
 }
 
 // semverGreater returns true if latest > current under semver ordering.
