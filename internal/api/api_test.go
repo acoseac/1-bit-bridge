@@ -146,8 +146,11 @@ func TestHealthReturns200WithExpectedShape(t *testing.T) {
 	if got.StartedAt.IsZero() {
 		t.Error("startedAt missing")
 	}
-	if got.ScanState.IsScanning {
-		t.Error("scanState.isScanning should be false on fresh server")
+	// Unauthenticated: scanState is omitted entirely since the health
+	// split. Its absence IS the assertion here.
+	if got.ScanState != nil {
+		t.Error("unauthenticated /v1/health must not carry scanState — it is a " +
+			"library-size inventory number a pre-pairing caller has no use for")
 	}
 }
 
@@ -434,7 +437,13 @@ func TestHealthIncludesUpdateFieldsWhenUpdaterAttached(t *testing.T) {
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 
-	resp, err := http.Get(hs.URL + "/v1/health")
+	// Authenticated: the update triple is authed-only since the health
+	// split, because an unauthenticated scan of it sorts bridges by how
+	// far behind they are.
+	raw, _, _ := store.Mint("probe")
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/health", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +488,11 @@ func TestHealthUpdateAvailableFalseIsPresentWhenNoUpdate(t *testing.T) {
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 
-	resp, err := http.Get(hs.URL + "/v1/health")
+	// Authenticated: the update triple is authed-only since the health split.
+	raw, _, _ := store.Mint("probe")
+	req, _ := http.NewRequest("GET", hs.URL+"/v1/health", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
