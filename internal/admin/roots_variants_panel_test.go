@@ -27,13 +27,21 @@ import (
 // reports on a fraction of its subject is worse than no guard.
 var variantsPanelIDRe = regexp.MustCompile(`"(variants-[a-z0-9-]+)"`)
 
+// readFile reads a source file for scanning, with line endings NORMALIZED.
+//
+// There is no .gitattributes pinning eol, so a Windows checkout carries CRLF —
+// and every test here that delimits a region with a "\n}\n" literal then finds
+// nothing, failing only on the windows-latest leg. That has now been written
+// three separate times (TestEveryPageTabHasAnInitCase, then two upload-panel
+// scans), so normalizing per call site demonstrably does not stick. A test that
+// genuinely needs the raw bytes should call os.ReadFile itself and say why.
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	return string(b)
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
 }
 
 // TestVariantsPanelIDsExistInTheTemplate pins the JS → template

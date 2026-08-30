@@ -1523,6 +1523,12 @@ function wireUpload(signal) {
     .then((sp) => setText("upload-root", sp && sp.root ? sp.root : "your library"))
     .catch(() => {});
 
+  // Surface an interrupted session BEFORE the operator re-picks. A browser
+  // cannot reopen files from a previous page load, so resume still needs them
+  // to choose the same folder — but knowing the bytes are still there is what
+  // makes them choose it rather than give up.
+  refreshResumable();
+
   filesInput?.addEventListener("change", () => stageFiles(collectFromInput(filesInput)));
   folderInput?.addEventListener("change", () => stageFiles(collectFromInput(folderInput)));
 
@@ -1541,6 +1547,7 @@ function wireUpload(signal) {
     stageFiles(picked);
   });
 
+  document.getElementById("upload-resume-discard")?.addEventListener("click", discardResumable);
   document.getElementById("upload-cancel")?.addEventListener("click", resetUpload);
   document.getElementById("upload-start")?.addEventListener("click", startUpload);
   document.getElementById("upload-abort")?.addEventListener("click", () => {
@@ -1551,6 +1558,100 @@ function wireUpload(signal) {
   signal?.addEventListener("abort", () => {
     if (uploadState) uploadState.aborted = true;
   });
+}
+
+// --- Resume -----------------------------------------------------------------
+//
+// Staged bytes and their durable offsets survive a restart — that is what the
+// session manifest is for — but the client used to create a NEW session on
+// every pick, so an interruption meant re-uploading everything while the old
+// session sat untouched until the sweeper reaped it. The server has always
+// listed live sessions with per-file offsets for exactly this.
+//
+// The constraint that shapes the UX: a browser cannot reopen files from a
+// previous page load. Resume therefore cannot be a single button — the
+// operator has to re-pick the same folder, and we match what they picked
+// against what is already staged.
+
+let resumableSessions = [];
+
+async function refreshResumable() {
+  const banner = document.getElementById("upload-resume");
+  if (!banner) return;
+  try {
+    resumableSessions = (await API.get("/api/upload/sessions")) || [];
+  } catch {
+    resumableSessions = [];
+  }
+  if (!resumableSessions.length) {
+    banner.hidden = true;
+    return;
+  }
+  const s = resumableSessions[0];
+  const total = s.files.reduce((n, f) => n + f.size, 0);
+  const done = s.files.reduce((n, f) => n + f.offset, 0);
+  setText(
+    "upload-resume-text",
+    `An upload was interrupted: ${s.files.length} file${s.files.length === 1 ? "" : "s"}, ` +
+      `${formatBytes(done)} of ${formatBytes(total)} already transferred. ` +
+      `Choose the same folder again to carry on from where it stopped.`,
+  );
+  banner.hidden = false;
+}
+
+// sessionKey is the identity two picks must share to be the same upload: every
+// path AND its size. Path alone would adopt a session whose files have since
+// changed on disk, splicing staged bytes onto content they do not belong to.
+function sessionKey(entries) {
+  return entries
+    .map((e) => `${e.path}\u0000${e.size}`)
+    .sort()
+    .join("\u0001");
+}
+
+// findResumable returns a staged session that matches BOTH the picked files and
+// the current overwrite choice.
+//
+// overwrite is fixed when the session is created and is what commit consults,
+// so adopting a session created with overwrite:true while the operator has
+// since unticked "Replace files that already exist" would overwrite their
+// library against their stated wish — the one direction of this mismatch that
+// destroys data. Treating it as part of the identity refuses both directions
+// rather than reasoning about which is safe.
+function findResumable(picked, overwrite) {
+  const want = sessionKey(picked.map((p) => ({ path: p.path, size: p.file.size })));
+  return resumableSessions.find(
+    (s) =>
+      !!s.overwrite === !!overwrite &&
+      sessionKey(s.files.map((f) => ({ path: f.path, size: f.size }))) === want,
+  );
+}
+
+// findFilesOnlyMatch is the diagnostic half: same files, different overwrite.
+// Without it the operator ticks a box, watches a full re-upload start, and has
+// no idea why the resume they were offered did not happen.
+function findFilesOnlyMatch(picked) {
+  const want = sessionKey(picked.map((p) => ({ path: p.path, size: p.file.size })));
+  return resumableSessions.find(
+    (s) => sessionKey(s.files.map((f) => ({ path: f.path, size: f.size }))) === want,
+  );
+}
+
+async function discardResumable() {
+  // ONLY the session the banner is describing. The banner shows
+  // resumableSessions[0]; discarding the whole list would throw away staged
+  // progress for uploads the operator never saw, let alone chose to abandon.
+  // Re-reading afterwards lets the next one surface.
+  const s = resumableSessions[0];
+  if (!s) return;
+  try {
+    await API.delete(`/api/upload/sessions/${encodeURIComponent(s.id)}`);
+  } catch (e) {
+    showUploadError(e && e.message ? e.message : String(e));
+    return;
+  }
+  await refreshResumable();
+  showUploadResult("Discarded the interrupted upload.");
 }
 
 function collectFromInput(input) {
@@ -1658,7 +1759,26 @@ async function startUpload() {
   start.disabled = true;
   try {
     const overwrite = document.getElementById("upload-overwrite")?.checked === true;
-    let session = await createUploadSession(uploadState.picked, overwrite);
+
+    // Same files, same sizes as something already staged? Continue it rather
+    // than starting over. transferAll already skips complete files and resumes
+    // partial ones from their recorded offset, so nothing else changes.
+    const existing = findResumable(uploadState.picked, overwrite);
+    const isResumed = !!existing;
+    if (!isResumed && findFilesOnlyMatch(uploadState.picked)) {
+      showUploadError(
+        `Starting over rather than resuming: the interrupted upload was created with ` +
+          `"Replace files that already exist" ${overwrite ? "off" : "on"}, and it is now ` +
+          `${overwrite ? "on" : "off"}. That setting is fixed when an upload starts.`,
+      );
+    }
+    let session = isResumed
+      ? await API.get(`/api/upload/sessions/${encodeURIComponent(existing.id)}`)
+      : await createUploadSession(uploadState.picked, overwrite);
+    if (isResumed) {
+      const done = session.files.reduce((n, f) => n + f.offset, 0);
+      showUploadResult(`Continuing the interrupted upload from ${formatBytes(done)}.`);
+    }
 
     // Files the SERVER would not take. Reported, not fatal — the acceptable
     // ones still upload.
@@ -1672,7 +1792,7 @@ async function startUpload() {
     // The pre-flight WARNS. Anything the server recognises is dropped from the
     // set by default, and the operator is told what happened and can re-run
     // with overwrite if that is what they meant.
-    const dupes = session.files.filter((f) => f.duplicateOf);
+    const dupes = isResumed ? [] : session.files.filter((f) => f.duplicateOf);
     if (dupes.length && !overwrite) {
       const keep = uploadState.picked.filter((p) => {
         const f = session.files.find((x) => x.path === p.path);
@@ -1810,6 +1930,7 @@ function reportCommit(res) {
   if (failed.length) msg += ` First failure: ${failed[0].path} (${failed[0].reason}).`;
   showUploadResult(msg);
   resetUpload();
+  refreshResumable();
 }
 
 // showUploadError puts the message somewhere it will actually be read. The
