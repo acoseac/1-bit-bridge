@@ -65,9 +65,16 @@ function isUpdateLastCheckZero(u) {
 async function errorFromResponse(r) {
   try {
     const j = await r.json();
-    return new Error(j.message || j.error || `${r.status} ${r.statusText}`);
+    const e = new Error(j.message || j.error || `${r.status} ${r.statusText}`);
+    // The stable machine-readable half. Callers that need to tell one failure
+    // from another must never have to match on prose.
+    e.code = j.error;
+    e.status = r.status;
+    return e;
   } catch {
-    return new Error(`${r.status} ${r.statusText}`);
+    const e = new Error(`${r.status} ${r.statusText}`);
+    e.status = r.status;
+    return e;
   }
 }
 
@@ -1449,6 +1456,8 @@ async function emptyTrash() {
 //     album and a compilation is a real library.
 
 const UPLOAD_PARALLEL_FILES = 3;
+// A chunk the server rejects as corrupt is re-sent this many extra times.
+const UPLOAD_DIGEST_RETRIES = 2;
 // OS junk that appears in folders WITHOUT ANYONE PUTTING IT THERE. Filtered on
 // the client so it never reaches the preview or the rejection report: an
 // operator who drags an album should not be told about a .DS_Store they did
@@ -1711,7 +1720,7 @@ function stageFiles(picked) {
     );
     return;
   }
-  uploadState = { picked: usable, session: null, aborted: false, preflightSkipped: 0, junkSkipped: junk };
+  uploadState = { picked: usable, session: null, aborted: false, preflightSkipped: 0, junkSkipped: junk, digestUnavailable: false };
   const note = document.getElementById("upload-dupe-note");
   if (note) note.hidden = true;
   renderUploadReview();
@@ -1877,7 +1886,11 @@ async function transferAll(session) {
       let offset = meta.offset;
       while (offset < meta.size && !uploadState.aborted) {
         const end = Math.min(offset + session.chunkBytes, meta.size);
-        const res = await putUploadChunk(session.id, meta.id, offset, file.slice(offset, end));
+        // Read the chunk once, into memory: the digest needs the bytes, and
+        // handing the same buffer to fetch avoids reading the slice twice.
+        // Peak cost is UPLOAD_PARALLEL_FILES x chunkBytes (3 x 4 MiB).
+        const bytes = await file.slice(offset, end).arrayBuffer();
+        const res = await putUploadChunkVerified(session.id, meta.id, offset, bytes);
         doneBytes += res.offset - offset;
         offset = res.offset;
         paint();
@@ -1889,16 +1902,77 @@ async function transferAll(session) {
   );
 }
 
-async function putUploadChunk(sid, fid, offset, blob) {
+// chunkDigestHeaders builds the RFC 9530 Content-Digest for one chunk.
+//
+// The server has always verified this header and skipped the check when it is
+// absent; nothing ever sent it, so uploads were size-verified but not
+// content-verified. Per chunk is the right granularity: SHA-256 has no
+// composable incremental API in the browser, so hashing a whole 900 MB file
+// client-side is not available — but every byte travels inside some chunk, so
+// verifying each one covers the file.
+//
+// crypto.subtle exists only in a secure context. Both supported admin
+// deployments are one (loopback is potentially-trustworthy; public mode serves
+// the console over TLS), so this is populated in practice. An unusual
+// deployment must lose verification rather than the ability to upload, so a
+// missing or failing SubtleCrypto degrades to no header — and says so at the
+// end, because silently dropping an integrity guarantee is worse than not
+// having offered one.
+async function chunkDigestHeaders(bytes) {
+  const subtle = globalThis.crypto && globalThis.crypto.subtle;
+  if (!subtle) {
+    if (uploadState) uploadState.digestUnavailable = true;
+    return null;
+  }
+  try {
+    const hash = new Uint8Array(await subtle.digest("SHA-256", bytes));
+    let raw = "";
+    for (const b of hash) raw += String.fromCharCode(b);
+    return { "content-digest": `sha-256=:${btoa(raw)}:` };
+  } catch {
+    if (uploadState) uploadState.digestUnavailable = true;
+    return null;
+  }
+}
+
+// putUploadChunkVerified re-sends a chunk the server rejected as corrupt.
+//
+// A digest mismatch is the one failure where retrying is unambiguously safe:
+// the server refused the bytes and did NOT advance its offset, and reopening
+// the staged file truncates back to that offset — so the retry writes the same
+// range over nothing. Without it, adding verification could only ever convert
+// silent corruption into a dead multi-gigabyte upload. Every other failure
+// keeps its existing behaviour and propagates on the first occurrence.
+async function putUploadChunkVerified(sid, fid, offset, bytes) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await putUploadChunk(sid, fid, offset, bytes);
+    } catch (e) {
+      if (
+        attempt >= UPLOAD_DIGEST_RETRIES ||
+        uploadState?.aborted ||
+        !e ||
+        e.code !== "digest_mismatch"
+      ) {
+        throw e;
+      }
+    }
+  }
+}
+
+async function putUploadChunk(sid, fid, offset, bytes) {
   const url =
     `/api/upload/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(fid)}` +
     `?offset=${offset}`;
   const r = await fetch(url, {
     method: "PUT",
-    // octet-stream is what csrfGuard's narrow allowlist admits, and it is
-    // preflight-forced, unlike a multipart form.
-    headers: { "content-type": "application/octet-stream" },
-    body: blob,
+    headers: {
+      // octet-stream is what csrfGuard's narrow allowlist admits, and it is
+      // preflight-forced, unlike a multipart form.
+      "content-type": "application/octet-stream",
+      ...((await chunkDigestHeaders(bytes)) || {}),
+    },
+    body: bytes,
   });
   if (r.status === 409) {
     // The server holds a different offset. It tells us which, so resume
@@ -1928,6 +2002,11 @@ function reportCommit(res) {
   }
   const failed = (res.outcomes || []).filter((o) => o.status === "failed");
   if (failed.length) msg += ` First failure: ${failed[0].path} (${failed[0].reason}).`;
+  if (uploadState?.digestUnavailable) {
+    msg +=
+      " Note: this browser did not expose SHA-256, so chunks were checked for" +
+      " length but not content.";
+  }
   showUploadResult(msg);
   resetUpload();
   refreshResumable();
