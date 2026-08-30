@@ -509,3 +509,93 @@ func TestRunRearmRereadsTheIntervalWithoutPolling(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestSemverGreater_DescendantBuildIsNotOlderThanItsTag is the regression
+// gate for the downgrade bug found on bridge.ars.md (2026-08-30): the host
+// ran v0.1.9-65-g8b092ad, /api/updates reported latest 0.1.9 with
+// updateAvailable true, and Install was armed — pressing it would have
+// rolled the binary BACKWARDS 65 commits. With auto-install on, every edge
+// build would have reverted itself to the last tag on the next poll.
+//
+// The cause is spec-correct semver: a hyphenated suffix is a PRE-RELEASE,
+// and a pre-release sorts below its release. `git describe` output has to
+// be read as build metadata instead, which semver ignores when ordering.
+//
+// Both directions are pinned in one table on purpose. A fix that only
+// suppressed the downgrade would be trivially achievable by suppressing
+// EVERY update for a describe build, which is a worse bug and a silent one
+// — so the "still upgrades" rows below are the real assertion.
+func TestSemverGreater_DescendantBuildIsNotOlderThanItsTag(t *testing.T) {
+	cases := []struct {
+		name            string
+		latest, current string
+		want            bool
+		why             string
+	}{
+		// The reported case, verbatim.
+		{"the reported downgrade", "0.1.9", "0.1.9-65-g8b092ad", false,
+			"65 commits past the tag is not behind the tag"},
+		{"dirty descendant", "0.1.9", "0.1.9-65-g8b092ad-dirty", false,
+			"a dirty tree does not make a descendant older"},
+		{"exact tag, dirty tree", "0.1.9", "0.1.9-dirty", false,
+			"describe appends -dirty with no commit count on an exact tag"},
+		{"exact tag", "0.1.9", "0.1.9", false, "equal is not greater"},
+
+		// The half that must keep working: a genuine release still lands.
+		{"patch release over descendant", "0.1.10", "0.1.9-65-g8b092ad", true,
+			"a real release above the tag must still be offered"},
+		{"minor release over descendant", "0.2.0", "0.1.9-65-g8b092ad", true, ""},
+		{"major release over dirty descendant", "1.0.0", "0.1.9-65-g8b092ad-dirty", true, ""},
+		{"descendant of an older tag", "0.1.9", "0.1.8-3-gdeadbee", true,
+			"still behind by a whole patch release"},
+
+		// A hand-written pre-release must KEEP pre-release ordering. This is
+		// the row that fails if the describe pattern is loosened to any
+		// hyphenated suffix.
+		{"real prerelease sorts below its release", "0.2.0", "0.2.0-rc.1", true,
+			"rc.1 genuinely precedes 0.2.0 and must still upgrade"},
+		{"real prerelease is not a descendant", "0.2.0-rc.1", "0.2.0", false,
+			"the release is not superseded by its own rc"},
+		{"beta suffix untouched", "0.2.0", "0.2.0-beta1", true, ""},
+
+		// Unparseable current keeps the documented floor behaviour.
+		{"bare sha current still upgrades", "0.1.9", "abc1234", true,
+			"documented v0.0.0 floor for tagless builds"},
+		{"dev current still upgrades", "0.1.9", "dev", true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := semverGreater(c.latest, c.current); got != c.want {
+				t.Errorf("semverGreater(latest=%q, current=%q) = %v, want %v — %s",
+					c.latest, c.current, got, c.want, c.why)
+			}
+		})
+	}
+}
+
+// TestNormalizeDescribe pins the transform itself, separately from the
+// comparison, so a failure says which half broke.
+func TestNormalizeDescribe(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"0.1.9-65-g8b092ad", "0.1.9+65.g8b092ad"},
+		{"0.1.9-65-g8b092ad-dirty", "0.1.9+65.g8b092ad.dirty"},
+		{"0.1.9-dirty", "0.1.9+dirty"},
+		{"0.1.9-0-gabc1234", "0.1.9+0.gabc1234"},
+		// Left alone: releases, real pre-releases, and anything unparseable.
+		{"0.1.9", "0.1.9"},
+		{"0.2.0-rc.1", "0.2.0-rc.1"},
+		{"0.2.0-beta1", "0.2.0-beta1"},
+		{"abc1234", "abc1234"},
+		{"dev", "dev"},
+		{"", ""},
+		// A pre-release that merely CONTAINS digits and a g-word must not be
+		// mistaken for describe output — the pattern is end-anchored.
+		{"0.2.0-g12345", "0.2.0-g12345"},
+		{"0.2.0-12-nothex", "0.2.0-12-nothex"},
+	}
+	for _, c := range cases {
+		if got := normalizeDescribe(c.in); got != c.want {
+			t.Errorf("normalizeDescribe(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
