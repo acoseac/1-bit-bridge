@@ -43,6 +43,14 @@
         role also removes what SonarHTML flagged (a role=button with no
         keyboard handler), for the right reason rather than by adding an
         onkeydown attribute to satisfy the checker. */ -}}
+    {{- /* Interrupted-upload banner. Above the drop zone because it changes
+        what the operator should do next: pick the SAME folder rather than
+        start something else. */ -}}
+    <div class="resume-banner" id="upload-resume" hidden>
+      <p id="upload-resume-text"></p>
+      <button type="button" id="upload-resume-discard" class="btn">Discard it</button>
+    </div>
+
     <div id="upload-drop" class="upload-drop" aria-describedby="upload-drop-help">
       <p class="upload-drop-title">Drop files or a folder here</p>
       <p class="hint" id="upload-drop-help">

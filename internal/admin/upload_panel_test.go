@@ -377,3 +377,54 @@ func TestDropZoneIsNotAFakeButton(t *testing.T) {
 		t.Error("the two file inputs are the keyboard path and one is missing")
 	}
 }
+
+// TestResumeMatchesOnPathAndSizeNotPathAlone — adopting a staged session means
+// splicing already-transferred bytes onto whatever the operator picked THIS
+// time. Matching on path alone would adopt a session whose files have since
+// changed on disk, and the staged prefix would then belong to different
+// content — a silently corrupt file, which is the worst possible outcome for a
+// feature whose whole point is not re-uploading.
+func TestResumeMatchesOnPathAndSizeNotPathAlone(t *testing.T) {
+	js := readFile(t, "static/app.js")
+	i := strings.Index(js, "function sessionKey")
+	if i < 0 {
+		t.Fatal("no sessionKey — resume has no identity function")
+	}
+	end := strings.Index(js[i:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not delimit sessionKey")
+	}
+	body := js[i : i+end]
+	if !strings.Contains(body, ".size") {
+		t.Error("sessionKey ignores size, so a changed file would still match a staged session")
+	}
+	if !strings.Contains(body, ".sort()") {
+		t.Error("sessionKey does not sort, so pick order would decide whether a resume matches")
+	}
+}
+
+// TestResumeSkipsTheDuplicatePreflight — those hints belong to the original
+// create. On a resumed session the files ARE the staged ones, so re-applying
+// the deselect-by-default rule would drop exactly the work being resumed.
+func TestResumeSkipsTheDuplicatePreflight(t *testing.T) {
+	js := readFile(t, "static/app.js")
+	if !strings.Contains(js, "const dupes = existing ? [] : session.files.filter") {
+		t.Error("the duplicate pre-flight still runs on a resumed session")
+	}
+}
+
+func TestResumeBannerIsWiredBothWays(t *testing.T) {
+	tmpl := readFile(t, "templates/upload.html")
+	js := readFile(t, "static/app.js")
+	for _, id := range []string{"upload-resume", "upload-resume-text", "upload-resume-discard"} {
+		if !strings.Contains(tmpl, `id="`+id+`"`) {
+			t.Errorf("upload.html renders no %q", id)
+		}
+		if !strings.Contains(js, `"`+id+`"`) {
+			t.Errorf("app.js never references %q", id)
+		}
+	}
+	if !strings.Contains(js, "refreshResumable()") {
+		t.Error("the banner is never populated")
+	}
+}
