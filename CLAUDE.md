@@ -2315,6 +2315,164 @@ Generalisable lesson: when several surfaces state the same fact, a test that
 walks ONE of them proves nothing about the others — walk each from its own side,
 and count the surfaces before assuming there are two.
 
+### Cloud-readiness batch (PRs #797–#803 + iOS #1480, 2026-08-30)
+
+Came out of a page-by-page walk of the live public console. Seven bridge PRs,
+one iOS doc mirror. `ProtocolVersion` stays 1. Deployed to bridge.ars.md as
+`v0.1.9-73-g166daf8`.
+
+**Three of the walk's own findings were WRONG and were withdrawn.** Recorded
+because each was withdrawn for a reason a future reader would otherwise
+re-derive:
+
+- **Playlist / smart-mix tiles DO have mosaic covers** (17 of 19 on the live
+  bridge). They looked blank because `document.visibilityState` in an
+  automated browser tab is `"hidden"`, and `loading="lazy"` images never load
+  in a hidden tab — the first image request did not start until **14.3 s**
+  after navigation. **Any perceived-performance claim measured through browser
+  automation is suspect for this reason**; check `visibilityState` before
+  believing a timing. The one measurement that survived was over the wire
+  (49 portrait requests with a non-zero `transferSize`, so real 304s).
+- **The genre/composer axes must NOT gain a comma split.**
+  `internal/librarycat/genre.go` already implements the multi-value fold and
+  explicitly rejects comma ("Folk, World, & Country" is ONE genre); it is the
+  fourth entry in the do-not-unify family and mirrors iOS
+  `GenreNormalizer.swift`. The live library's "Pop, Rock" / "Classique" vs
+  "Clásica" untidiness is a LOCALE and source-tag problem, not a fold gap.
+- **The artist axis must NOT be folded bridge-side.** It keys on
+  `dupes.Normalize` over `"; "` segments — the client-mirrored partition, whose
+  stated design property is that the browser's list equals the phone's *by
+  construction*. Stripping `feat.`/role suffixes here (as `internal/enrich`'s
+  `matchfold` does for COMPARISON) would make the two disagree. It is a
+  Mirror-PR project needing an iOS `MetadataNormalizer` decision, not a bridge
+  fix.
+
+**Invariants worth not re-breaking:**
+
+- **A `git describe` build is a DESCENDANT of its tag, not a pre-release of
+  it** (#797). `make build` stamps `0.1.9-65-g8b092ad`; semver reads a
+  hyphenated suffix as a pre-release sorting BELOW `0.1.9`, so the updater
+  offered the tag as an "upgrade" and Install would have rolled the binary
+  back 65 commits — silently, on every poll, with auto-install on.
+  `normalizeDescribe` rewrites the suffix as BUILD METADATA
+  (`0.1.9+65.g8b092ad`), which semver ignores when ordering: equal to the tag
+  (no update) while `0.1.10` still compares greater (real updates still land).
+  **Both halves matter** — suppressing the downgrade alone is achievable by
+  suppressing every update, which is worse and quieter, so the "still
+  upgrades" rows are the real assertion. `appendBuildMeta` joins with `.` when
+  the tag ALREADY carries metadata: `v0.1.9+ci.1+65.g…` fails `semver.IsValid`,
+  `current` falls to the v0.0.0 floor, and the downgrade returns for that
+  input shape.
+- **`/api/jobs` has no `upscale` node, and never did** (#798). The Settings
+  prerequisite chip read `jobs.upscale.enabled`, so it was `undefined` on every
+  bridge and the chip could never say "active" — beside a checked toggle, on a
+  bridge with a live two-worker pool and 8,163 cached variants. It now reads
+  `/api/upscale/stats`, the endpoint the stats block on the same page already
+  polls. `TestSettingsPrereqsOnlyReadRealJobsFields` reflects over
+  `jobsSnapshotResponse` and fails on any `jobs.<field>` read app.js makes that
+  the endpoint does not return — **an undefined property read is not an error
+  in JS, so the control renders and silently reports the wrong state**.
+- **One byte formatter, binary, PB-deep** (#798). `formatBytes` stopped at GB
+  ("1048576 GB free" on a petabyte mount) and `player/format.js` was DECIMAL
+  while its docblock claimed it matched the operator pages. Binary is the
+  survivor: the numbers are compared against `df -h` on a Linux host.
+  `TestByteFormattersAgree` is the lockstep pin (the two files cannot share
+  code — classic script vs ES module).
+- **The `/` catch-all 404 absorbs Go's 405** (#798), verified with a probe, not
+  assumed: `POST /stats` renders 404. Nothing in the product issues one, and
+  the alternative is enumerating every pattern to tell them apart.
+  `/api/*` still answers the JSON envelope.
+- **Artist portraits are content-keyed and the token is VERIFIED** (#799). The
+  enricher overwrites `artist-<mbid>.jpg` in place, so there is no content key
+  in the id the way `local-<sha256>` covers have one;
+  `manifest.ArtworkFileVersion(mtime,size)` supplies it. **The handler
+  recomputes the token from the file rather than trusting `v=`** — the client's
+  token comes from a TTL-cached directory listing, so a portrait replaced
+  inside that window is requested under the OLD token, and answering that
+  `immutable` freezes the previous image in a viewer's cache for a year. A
+  mismatch degrades to the short max-age. The token lives in
+  `internal/manifest` because `internal/admin` must not import
+  `internal/enrich`.
+- **Admin sessions persist in the credentials file** (#800), reversing the
+  package doc's original call. Rejected alternatives, both from review: SQLite
+  puts session writes behind the scanner/enricher writer mutex for data
+  unrelated to the library; stateless signed cookies buy a key whose storage,
+  rotation and blast radius are all new problems, and a key in the same
+  directory gains nothing over the sessions. **Writes are graded by what losing
+  one costs**: login and LOGOUT synchronous (a revocation left in a debounce
+  window is UNDONE by a restart, so the logout silently is not one), LastUsedAt
+  on a 30 s debounce with `FlushSessions` at shutdown. `load()` seeds
+  `lastSessionFlush` or the first request of every boot fsyncs. Expired
+  sessions are DROPPED at load — restoring one lets a restart EXTEND a login.
+  Legacy files are detected by a top-level `passwordHash`, checked explicitly
+  because `encoding/json` ignores unknown fields and would decode the old shape
+  into an all-nil envelope.
+- **`/healthz` and `/readyz` bypass the session gate BEFORE the
+  auth-configured guard** (#800). Both previously 302'd to `/login`, and a 302
+  reads as healthy to most health checkers. They are two endpoints because they
+  drive different actions: a liveness failure restarts the process, a readiness
+  failure only drains it — and a bridge doing its first scan is alive and not
+  ready, so restarting it makes it start that scan again. The ordering matters
+  for exactly one case: public mode with no credential store is a running
+  process a restart cannot fix, so liveness answers 200 while readiness answers
+  503. Both disclose a status code and nothing else.
+- **`/v1/health` withholds `scanState` and the update triple from an
+  UNAUTHENTICATED caller** (#801, mirrored in iOS #1480). Unauthenticated
+  across the internet, `serverVersion` + `updateAvailable` enumerate every
+  reachable bridge and sort them by how far behind they are. **The scope was
+  set by reading `BridgeSourceClient.HealthResponse` field by field**, not by
+  principle: everything withheld is already `ScanState?` / `String?` / `Bool?`
+  there, while `libraryName`, `libraryRoots`, `certFingerprint`,
+  `serverVersion` and `startedAt` are NON-optional — withholding them fails
+  Codable decoding outright on every shipped app. Narrowing those needs an iOS
+  release making them optional first. `minClientVersion` stays unauthenticated
+  (client-compat floor, not disclosure) and was dropped by accident in the
+  first cut. An invalid token is unauthenticated, never 401 — a client holding
+  a revoked token would otherwise lose the endpoint list it needs to reconnect.
+- **Env overrides are DERIVED from the Config struct** (#802), 11 → 84
+  bindings. **Only `libraryRoots` uses the OS PATH separator**; everything else
+  is comma-separated, because `customEndpoints` holds URLs and
+  `metrics.allowCidrs` holds CIDRs — splitting `https://host:7788` on `:` gives
+  three fragments that then fail validation and vanish. Two legacy names
+  (`BRIDGE_MUSICBRAINZ_BASE_URL`, `BRIDGE_COVERART_BASE_URL`) are kept as
+  aliases; losing them sends an Atlas-configured bridge back to public
+  MusicBrainz at the self-hosted 150 ms pace. **Lesson worth more than the
+  feature**: the completeness test's first predicate accepted only `*bool`
+  among pointers — exactly what the implementation handled — so it could never
+  flag a forgotten kind, and missed all five `*int` fields. A completeness test
+  must be written from what the mechanism CAN express, not from what the code
+  currently does.
+- **`SeedFromEnv` seeds an EMPTY store only** (#802). Otherwise the env becomes
+  the credential rather than the seed and a rotated password is undone by the
+  next restart. It deliberately does NOT force a change at first login — the
+  secret is issued by the platform, there is no human there, and forcing a
+  change breaks the automation it exists for. `_PASSWORD_FILE` wins over the
+  inline form (a mounted secret is not in `ps`/`docker inspect`) and an
+  unreadable file FAILS startup rather than quietly installing a different
+  credential. The 12-rune floor applies to seeding only, never to
+  `ResetPassword`, which has a human at an interactive prompt.
+- **Logs default to JSON when stderr is not a terminal; HSTS is public-mode +
+  TLS only; `/metrics` gains `metrics.allowCidrs`** (#803). The HSTS loopback
+  exclusion is the load-bearing half — pinning HSTS for `localhost` poisons
+  that host name in the operator's browser for every other local service they
+  run. `/metrics` keeps loopback-always-allowed so the default posture is
+  unchanged; the CIDR list exists because loopback is UNREACHABLE from a
+  Prometheus outside the container's network namespace. An unparseable CIDR is
+  skipped, never fatal — it can only narrow the gate.
+
+**Process notes.** A negative control that fails to BUILD reads as "control
+invalid", never as a pass — and one that mutates the wrong line is worse,
+because it passes: a `perl -0pi` substitution for `s.lastSessionFlush = now`
+matched the FIRST occurrence (in `persistSessionsLocked`) rather than the
+intended one in `load()`, and the control passed while proving nothing. Check
+which line the mutation actually changed. Two bot findings were declined with
+evidence on the thread: `encoding/json`'s `omitempty` DOES drop a non-nil empty
+map (verified with a 10-line program — the test written for the "fix" was
+vacuous, which is how it was caught), and the nil checks in `Server.ready()`
+stay because a nil dereference in a liveness probe becomes an orchestrator
+restart loop rather than a stack trace.
+
+
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
 The bridge is licensed under the Functional Source License 1.1 with the MIT future
