@@ -1540,12 +1540,6 @@ function wireUpload(signal) {
     const picked = await collectFromDataTransfer(e.dataTransfer);
     stageFiles(picked);
   });
-  drop?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      filesInput?.click();
-    }
-  });
 
   document.getElementById("upload-cancel")?.addEventListener("click", resetUpload);
   document.getElementById("upload-start")?.addEventListener("click", startUpload);

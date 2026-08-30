@@ -3114,7 +3114,9 @@ label.checkbox.tray-switch {
   border-color: var(--accent-fill-edge);
   background: var(--accent-fill-soft);
 }
-.upload-drop:focus-visible,
+/* :focus-within only — the zone itself is not focusable (see upload.html);
+   this paints the ring when one of the sr-only file inputs inside takes
+   focus, since a <label> is not natively focusable. */
 .upload-drop:focus-within {
   outline: 2px solid var(--accent-fill-edge);
   outline-offset: 2px;

@@ -349,3 +349,31 @@ func TestAddMusicPageExplainsItselfWhenDisabled(t *testing.T) {
 		t.Error("the off-state panel has no action group for the tray gear to land in")
 	}
 }
+
+// TestDropZoneIsNotAFakeButton — the drop zone contains two label-wrapped file
+// inputs. A button must not have interactive descendants, so role="button"
+// there made the whole card announce as one button while holding two real
+// controls, and a screen reader may flatten or hide them.
+//
+// Dragging is inherently pointer-only; the keyboard path is those inputs.
+// SonarHTML flagged the missing keyboard handler, which was the right flag for
+// the wrong reason — the fix is dropping the role, not adding an onkeydown.
+func TestDropZoneIsNotAFakeButton(t *testing.T) {
+	tmpl := readFile(t, "templates/upload.html")
+	i := strings.Index(tmpl, `id="upload-drop"`)
+	if i < 0 {
+		t.Fatal("drop zone not found")
+	}
+	tag := tmpl[strings.LastIndex(tmpl[:i], "<"):]
+	tag = tag[:strings.Index(tag, ">")]
+	if strings.Contains(tag, `role="button"`) {
+		t.Errorf("the drop zone claims role=button while containing interactive children: %q", tag)
+	}
+	if strings.Contains(tag, "tabindex") {
+		t.Errorf("the drop zone is focusable but has nothing keyboard-activatable of its own: %q", tag)
+	}
+	// The real keyboard path must still be there.
+	if strings.Count(tmpl, `type="file"`) < 2 {
+		t.Error("the two file inputs are the keyboard path and one is missing")
+	}
+}

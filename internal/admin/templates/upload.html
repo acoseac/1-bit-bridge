@@ -34,8 +34,16 @@
       structure, including the folder you pick.
     </p>
 
-    <div id="upload-drop" class="upload-drop" tabindex="0" role="button"
-         aria-describedby="upload-drop-help">
+    {{- /* NOT role="button" + tabindex.
+        A button must not contain interactive descendants, and this one holds
+        two label-wrapped file inputs — so the whole card announced as a single
+        button while containing two real controls, and a screen reader may
+        flatten or hide them. Dragging is inherently pointer-only; the keyboard
+        path is those two inputs, which are natively accessible. Removing the
+        role also removes what SonarHTML flagged (a role=button with no
+        keyboard handler), for the right reason rather than by adding an
+        onkeydown attribute to satisfy the checker. */ -}}
+    <div id="upload-drop" class="upload-drop" aria-describedby="upload-drop-help">
       <p class="upload-drop-title">Drop files or a folder here</p>
       <p class="hint" id="upload-drop-help">
         FLAC, DSF, DFF, ALAC, MP3, WAV, AIFF and SACD ISOs, plus cover art
