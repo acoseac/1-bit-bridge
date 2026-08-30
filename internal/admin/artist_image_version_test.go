@@ -86,3 +86,23 @@ func TestArtworkFileVersionMovesWithTheFile(t *testing.T) {
 			"alias shape used elsewhere", a, len(a))
 	}
 }
+
+// TestArtworkFileVersionIsAllocationFree pins the reason the derivation
+// is fixed-size binary rather than fmt.Sprintf: it runs once per artist
+// on every directory sweep, and the string form cost three heap
+// allocations a call for a value that is two int64s.
+//
+// Asserting zero rather than "few" is what makes this a real gate — a
+// non-zero budget drifts upward one allocation at a time.
+func TestArtworkFileVersionIsAllocationFree(t *testing.T) {
+	mod := time.Unix(1_700_000_000, 12345)
+	// hex.EncodeToString necessarily allocates the returned string, so
+	// the budget is that one allocation and nothing else.
+	got := testing.AllocsPerRun(200, func() {
+		_ = manifest.ArtworkFileVersion(mod, 4096)
+	})
+	if got > 1 {
+		t.Errorf("ArtworkFileVersion allocates %.0f times per call, want at most 1 "+
+			"(the returned string). fmt.Sprintf on this path costs three.", got)
+	}
+}

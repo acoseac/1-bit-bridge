@@ -40,6 +40,7 @@ package manifest
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -202,6 +203,13 @@ func EnsureThumb(src, dst string, targetPx int) error {
 // for an image refetched from an upstream at most once per enrichment
 // pass, that is not a case that arises.
 func ArtworkFileVersion(mod time.Time, size int64) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d-%d", mod.UnixNano(), size)))
+	// Fixed-size binary rather than fmt.Sprintf: this runs once per
+	// artist on every directory sweep, and the string form cost three
+	// heap allocations a call (format, interface boxing, []byte
+	// conversion) for a value that is two int64s. (Gemini on PR #799.)
+	var buf [16]byte
+	binary.BigEndian.PutUint64(buf[0:8], uint64(mod.UnixNano()))
+	binary.BigEndian.PutUint64(buf[8:16], uint64(size))
+	sum := sha256.Sum256(buf[:])
 	return hex.EncodeToString(sum[:8])
 }
