@@ -3555,8 +3555,22 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			fmt.Fprintf(stderr, "adminauth: open %s: %v\n", adminAuthPath, err)
 			return 1
 		}
+		// Seed from the environment before refusing. On a host nobody
+		// has a shell on, `bridge admin reset-password` is not a step
+		// anyone can take — reading the credential from the platform's
+		// own secret mechanism is how a bridge gets provisioned without
+		// a human at the keyboard. Only ever seeds an EMPTY store, so a
+		// configured bridge whose environment still carries the variable
+		// is not reset on every restart.
+		if seeded, err := adminAuthStore.SeedFromEnv(); err != nil {
+			fmt.Fprintf(stderr, "adminauth: seed from %s: %v\n", adminauth.SeedSource(), err)
+			return 1
+		} else if seeded {
+			fmt.Fprintf(stderr, "adminauth: admin credential seeded from %s (user %q)\n",
+				adminauth.SeedSource(), adminAuthStore.Username())
+		}
 		if !adminAuthStore.IsInitialised() {
-			fmt.Fprintf(stderr, "adminauth: no admin credentials at %s — run `bridge admin reset-password` (or `bridge init --public` on a fresh install)\n", adminAuthPath)
+			fmt.Fprintf(stderr, "adminauth: no admin credentials at %s — set BRIDGE_ADMIN_PASSWORD (or BRIDGE_ADMIN_PASSWORD_FILE), or run `bridge admin reset-password` (or `bridge init --public` on a fresh install)\n", adminAuthPath)
 			return 1
 		}
 		loginLimiter = adminauth.NewRateLimiter()

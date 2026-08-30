@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,17 @@ import (
 // make the login path feel sluggish on weak hardware. Bump only via
 // a deliberate PR with target-host benchmarks.
 const adminBcryptCost = 12
+
+// minPasswordLen is the floor for an ENVIRONMENT-SEEDED credential.
+//
+// Deliberately not applied to ResetPassword, which has always accepted
+// any non-empty string: raising the floor there would break an
+// operator's existing script for a password they chose knowingly at an
+// interactive prompt. The seed path is different in kind — it is
+// unattended, the value arrives from automation, and nobody reads a
+// warning about it. A weak secret installed by a config typo, on a
+// public bridge, with nobody watching, is worth refusing outright.
+const minPasswordLen = 12
 
 // rawSessionBytes is the number of random bytes per session token.
 // 32 bytes → 256 bits → 43 base64url chars (no padding). Same
@@ -314,6 +326,137 @@ func (s *Store) CreateSession(username string) (string, error) {
 	}
 	s.mu.Unlock()
 	return raw, nil
+}
+
+// SeedFromEnv initialises the credential from the environment when the
+// store is empty, so a bridge can be provisioned without anyone typing
+// a password into it.
+//
+// This is the step that does not scale otherwise. `bridge admin
+// reset-password` is interactive and prints a generated secret to a
+// terminal; on a host nobody has a shell on, that is not a step anyone
+// can take. Reading the credential from the platform's own secret
+// mechanism is how every container-native service does this.
+//
+//	BRIDGE_ADMIN_USERNAME       — optional, defaults to "admin"
+//	BRIDGE_ADMIN_PASSWORD       — the secret
+//	BRIDGE_ADMIN_PASSWORD_FILE  — a path to read it from; wins over the
+//	                              inline form, because a mounted secret
+//	                              file does not appear in `ps`, `docker
+//	                              inspect`, or a crash dump of the
+//	                              environment the way a variable does
+//
+// Three properties worth stating, because each is a decision:
+//
+// It seeds ONLY an empty store. A configured bridge whose environment
+// still carries the variable must not have its password reset on every
+// restart — that would make the env the credential rather than the
+// seed, and a rotated password would be silently undone by a bounce.
+// Rotation stays `bridge admin reset-password`.
+//
+// It does NOT force a change at first login. That was in the plan and
+// is wrong for the case this exists for: the secret is issued by the
+// platform, there is no human at first login to change it, and a forced
+// change would break the automation the seeding is for. A human-issued
+// password is the operator's to manage.
+//
+// A password below minPasswordLen is REFUSED rather than trimmed or
+// padded. Seeding is a security-establishing act; quietly accepting a
+// weak secret because it arrived by automation is the wrong direction
+// to fail.
+//
+// Returns (seeded, error). seeded=false with a nil error means "no
+// credential in the environment", which is not an error — an
+// interactively-provisioned bridge is the normal case.
+//
+// The caller announces the seeding. This package logs nothing about it
+// on purpose: `bridge serve` already writes operator-facing lines to
+// stderr, and "your admin password was just set from the environment"
+// is something the person watching a first boot needs to see there, not
+// something to go looking for in a log.
+func (s *Store) SeedFromEnv() (bool, error) {
+	if s.IsInitialised() {
+		return false, nil
+	}
+	password, err := passwordFromEnv()
+	if err != nil {
+		return false, err
+	}
+	if password == "" {
+		return false, nil
+	}
+	username := strings.TrimSpace(os.Getenv("BRIDGE_ADMIN_USERNAME"))
+	if username == "" {
+		username = "admin"
+	}
+	if err := s.SetInitialPassword(username, password); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// passwordFromEnv reads the seed, preferring the file form.
+func passwordFromEnv() (string, error) {
+	if path := strings.TrimSpace(os.Getenv("BRIDGE_ADMIN_PASSWORD_FILE")); path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			// Loud: the operator asked for a file and it was unreadable.
+			// Falling back to the inline variable here would silently use
+			// a different credential than the one they configured.
+			return "", fmt.Errorf("read BRIDGE_ADMIN_PASSWORD_FILE %q: %w", path, err)
+		}
+		// A mounted secret file conventionally ends with a newline, and
+		// the trailing byte is not part of the password.
+		return strings.TrimSpace(string(raw)), nil
+	}
+	return strings.TrimSpace(os.Getenv("BRIDGE_ADMIN_PASSWORD")), nil
+}
+
+// SeedSource names which variable supplied the credential, for the
+// caller's startup banner.
+func SeedSource() string {
+	if strings.TrimSpace(os.Getenv("BRIDGE_ADMIN_PASSWORD_FILE")) != "" {
+		return "BRIDGE_ADMIN_PASSWORD_FILE"
+	}
+	return "BRIDGE_ADMIN_PASSWORD"
+}
+
+// SetInitialPassword installs an operator-supplied credential into an
+// empty store. The MintInitial twin for a password that already exists
+// rather than one being generated.
+//
+// bcrypt runs BEFORE the lock for the same reason MintInitial does: at
+// cost 12 it is ~250 ms, and s.mu also guards Verify and
+// ValidateSession, so hashing under it would stall all admin auth for
+// that window.
+func (s *Store) SetInitialPassword(username, password string) error {
+	if len(password) < minPasswordLen {
+		return fmt.Errorf("adminauth: password must be at least %d characters", minPasswordLen)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), adminBcryptCost)
+	if err != nil {
+		return fmt.Errorf("bcrypt: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.user != nil {
+		return ErrAlreadyInitialised
+	}
+	now := s.now()
+	s.user = &userRecord{
+		Username:          username,
+		PasswordHash:      string(hash),
+		CreatedAt:         now,
+		PasswordChangedAt: now,
+	}
+	if err := s.persist(); err != nil {
+		// Roll back so an unpersisted credential is never live in
+		// memory: the next restart would not have it, and an operator
+		// would be locked out by a bridge that had just accepted them.
+		s.user = nil
+		return err
+	}
+	return nil
 }
 
 // sessionExpired reports whether a session has crossed its idle
