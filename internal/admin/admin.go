@@ -1401,6 +1401,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /settings", s.pageSettings)
 	mux.HandleFunc("GET /diagnostics", s.pageDiagnostics)
 
+	// Orchestrator probes. Registered here, bypassed in
+	// isAuthBypassPath, and deliberately body-less — see
+	// handlers_probes.go for why there are two of them and why they
+	// disclose nothing.
+	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /readyz", s.readyz)
+
 	// Catch-all 404. Go's ServeMux prefers the most specific pattern, so
 	// this fires only when nothing above matched. Registered here rather
 	// than at the bottom of the function so it reads next to the other

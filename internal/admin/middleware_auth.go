@@ -92,6 +92,25 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// The bypass check runs BEFORE the auth-configured guard below,
+		// and only the probes depend on that ordering.
+		//
+		// Liveness must not be contingent on the credential file: a
+		// bridge in public mode with no admin store is misconfigured,
+		// but it is RUNNING, and answering 503 there tells an
+		// orchestrator to restart it — which cannot fix a missing file
+		// and produces a restart loop instead. readyz reports that
+		// state honestly (see Server.ready) so the instance still
+		// leaves rotation; it just does not get killed for it.
+		//
+		// Nothing else moves: the login form, static assets and
+		// /metrics are all reached only when an auth store exists, and
+		// path.Clean-normalizing first keeps a crafted path from
+		// prefix-matching a bypass entry.
+		if cp := path.Clean(r.URL.Path); cp == r.URL.Path && isProbePath(cp) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if s.deps.AdminAuth == nil {
 			// Misconfiguration: public mode without an auth store.
 			// Refuse rather than letting unauthenticated traffic
@@ -156,6 +175,8 @@ func isAuthBypassPath(path string) bool {
 		return true
 	case strings.HasPrefix(path, "/favicon"):
 		return true
+	case isProbePath(path):
+		return true
 	case path == "/metrics":
 		// /metrics is gated by its own loopbackOnly wrap at
 		// registration (see admin.go), so a same-host scraper needs no
@@ -164,4 +185,20 @@ func isAuthBypassPath(path string) bool {
 		return true
 	}
 	return false
+}
+
+// isProbePath reports whether a path is an orchestrator probe.
+//
+// Separate from isAuthBypassPath (which calls it) because the probes
+// are bypassed EARLIER than everything else in that set — ahead of the
+// auth-configured guard, not just ahead of the session check. Keeping
+// the predicate in one place is what stops the two call sites drifting
+// into disagreeing about which paths are probes.
+//
+// An orchestrator holds no session and must not be handed a 302 to
+// /login: a redirect reads as "healthy" to most health checkers, which
+// is the worst possible answer from a probe. Bypassing the gate is safe
+// because these disclose a status code and nothing else.
+func isProbePath(path string) bool {
+	return path == "/healthz" || path == "/readyz"
 }
