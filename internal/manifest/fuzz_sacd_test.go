@@ -23,6 +23,7 @@ package manifest
 import (
 	"bytes"
 	"io"
+	"path"
 	"testing"
 )
 
@@ -316,6 +317,23 @@ func FuzzSACDVirtualPathRoundTrip(f *testing.F) {
 		if gotContainer != container {
 			t.Fatalf("container round-trip: rendered %q from %q, parsed back %q",
 				p, container, gotContainer)
+		}
+		// The INDEX half of the property. Checking only the container
+		// would accept a renderer that maps an accepted index to a
+		// different accepted one — 7 rendering as "08.dff" round-trips
+		// its container perfectly and is still wrong, and on a
+		// multi-track disc it is wrong in the way that matters: two
+		// tracks colliding on one path, or a row whose path names
+		// another track.
+		_, file := path.Split(p)
+		gotIndex, ok := parseSACDVirtualIndex(file)
+		if !ok {
+			t.Fatalf("rendered %q but parseSACDVirtualIndex refused its file component %q",
+				p, file)
+		}
+		if gotIndex != index {
+			t.Fatalf("index round-trip: rendered %q for index %d, parsed back %d",
+				p, index, gotIndex)
 		}
 	})
 }
