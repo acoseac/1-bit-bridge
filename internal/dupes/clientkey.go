@@ -366,17 +366,32 @@ type pathDefaults struct {
 	discNumber  int
 }
 
+// UnknownArtist and UnknownAlbum are the placeholders the client shows
+// when a path is too shallow to derive a name from — the mirror of the
+// Swift defaults, and part of what this package guarantees agrees with
+// the phone.
+//
+// They are DISPLAY values, never search terms. A caller that persists a
+// resolved field onto a row (internal/upnpingest does, to give the
+// enricher something to match by) must drop them: written through, they
+// would send "Unknown Artist" to MusicBrainz, and any match it returned
+// would be attributed to an arbitrary track.
+const (
+	UnknownArtist = "Unknown Artist"
+	UnknownAlbum  = "Unknown Album"
+)
+
 // pathDefaultsFor mirrors MetadataNormalizer.pathDefaults(fullPath:
 // filename:).
 func pathDefaultsFor(fullPath, filename string) pathDefaults {
 	albumPath, disc := effectiveAlbumPath(fullPath)
 	albumComponents := splitPathComponents(albumPath)
 	title := deletePathExtension(filename)
-	album := "Unknown Album"
+	album := UnknownAlbum
 	if len(albumComponents) >= 1 {
 		album = albumComponents[len(albumComponents)-1]
 	}
-	artist := "Unknown Artist"
+	artist := UnknownArtist
 	if len(albumComponents) >= 2 {
 		artist = albumComponents[len(albumComponents)-2]
 	}
