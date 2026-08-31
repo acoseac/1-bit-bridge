@@ -39,8 +39,6 @@ let seed = {};
 let generation = 0;
 const gen = () => generation;
 
-boot();
-
 function boot() {
   audio.init();
   mountBar();
@@ -134,7 +132,10 @@ function renderSections() {
     // shell sidebar went on listing it two inches away.
     nav.appendChild(el("a", {
       class: "player-section", text: label,
-      attrs: { href, "data-route": "", "data-section": key },
+      // data-base is the UNSCOPED href. applySectionScope rewrites the
+      // live href from it on every route, so the scope can be added and
+      // removed without the base ever being lost to a previous rewrite.
+      attrs: { href, "data-base": href, "data-route": "", "data-section": key },
     }));
   }
 }
@@ -446,6 +447,50 @@ function revealActiveSection() {
   if (next !== null) nav.scrollLeft = next;
 }
 
+// The sections a source scope actually narrows.
+//
+// The four axes below all take `source=` on their endpoint. The rest do
+// not, and each for its own reason: Smart Mixes are generated from the
+// whole library's pool, Folders is filesystem-only by construction (its
+// query excludes routed rows outright), and Favorites and Playlists are
+// documents that can span every source at once — a playlist is not "on"
+// an upstream.
+//
+// Listing them unscoped inside a scoped context is what the reader
+// reported as "it reverts back to the library view": the rail offered a
+// way out of the scope that looked like a way around it.
+const SOURCE_SCOPED_SECTIONS = new Set(["albums", "artists", "composers", "genres"]);
+
+/**
+ * Carry the current source scope across the section rail, and hide the
+ * sections it cannot narrow.
+ *
+ * The links are static hrefs, so before this, clicking Artists inside
+ * Chord 2go dropped `?source=` and landed on the whole library — the
+ * scope survived a sort change (the toolbar mutates the live URL) but not
+ * a section change, which is a difference no reader could be expected to
+ * predict.
+ *
+ * Rewriting the href rather than intercepting the click keeps
+ * middle-click and open-in-new-tab honest: the address the anchor shows
+ * is the address it goes to.
+ */
+function applySectionScope() {
+  const source = new URLSearchParams(location.search).get("source") || "";
+  const scoped = source !== "";
+  const qs = scoped ? `?source=${encodeURIComponent(source)}` : "";
+  for (const a of document.querySelectorAll(".player-section")) {
+    const base = a.dataset.base;
+    if (!base) continue;
+    const keep = SOURCE_SCOPED_SECTIONS.has(a.dataset.section);
+    a.href = keep ? base + qs : base;
+    // Never hide the section the reader is ON, even when the scope cannot
+    // narrow it — a hand-typed /playlists?source=… would otherwise leave
+    // the rail with no active entry and no explanation.
+    a.hidden = scoped && !keep && !a.classList.contains("active");
+  }
+}
+
 function route() {
   const view = document.getElementById("player-view");
   const titleEl = document.getElementById("player-title");
@@ -468,6 +513,10 @@ function route() {
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
+  // Scope BEFORE reveal: applySectionScope hides the sections a source
+  // cannot narrow, which changes the strip's scroll geometry — measuring
+  // first would scroll to where the active entry used to be.
+  applySectionScope();
   revealActiveSection();
   updateSidebarNav(section);
 
@@ -615,3 +664,18 @@ window.addEventListener("scroll", () => {
   if (Math.abs((s.scrollY || 0) - window.scrollY) < 40) return;
   history.replaceState({ ...s, scrollY: window.scrollY }, "");
 }, { passive: true });
+
+// Entry point, LAST.
+//
+// boot() reaches most of this module, so every `const` and `let` it can
+// touch has to be initialised before it runs — and a top-level `boot()`
+// near the top of the file puts every declaration below it in the
+// temporal dead zone. That is not a theoretical hazard here: it has
+// silently emptied the rail twice, once for the sources TTL and once for
+// SOURCE_SCOPED_SECTIONS, and both times the only symptom was a
+// ReferenceError in the console and a page that rendered nothing.
+// Function declarations hoist, so calling it from the bottom changes
+// nothing except which half of the file is safe to declare in.
+//
+// TestPlayerBootCallIsLast keeps it here.
+boot();

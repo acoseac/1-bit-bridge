@@ -52,6 +52,22 @@ func seedHybridLibrary(t *testing.T, st *manifest.Store) {
 		mk("2go/CrossThere/02.flac", "CrossThere", "Cross Band", "Cross"),
 		mk("2go/CrossThere/03.flac", "CrossThere", "Cross Band", "Cross"),
 	}
+	// Composers are assigned per ALBUM, not per side, so the composer axis
+	// narrows unambiguously. Tagging every local track would put "Home
+	// Composer" on the SHARED album too — and that album belongs to both
+	// sources, so the composer would legitimately survive an upstream
+	// scope and the axis would not appear to filter at all. Home and
+	// Remote are each single-source.
+	for _, tr := range local {
+		if tr.Album == "Home" {
+			tr.Composer = "Home Composer"
+		}
+	}
+	for _, tr := range routed {
+		if tr.Album == "Remote" {
+			tr.Composer = "Away Composer"
+		}
+	}
 	for _, tr := range append(append([]*manifest.Track{}, local...), routed...) {
 		if err := st.UpsertTrack(ctx, tr); err != nil {
 			t.Fatal(err)
