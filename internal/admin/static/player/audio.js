@@ -154,7 +154,19 @@ async function handleSourceError(track, src) {
     offline: `"${name}" is on an upstream server that isn't reachable right now.`,
   }[reason] || `Playback failed for "${name}".`;
   emit();
-  setTimeout(() => advance(1, { auto: true }), 1200);
+  // Guarded, because 1200ms is long enough for the reader to act on the
+  // error they were just shown. advance() steps from the CURRENT index,
+  // so a timer that fires after they paused, picked another track, or
+  // replaced the queue would skip past whatever they chose — from a
+  // failure they had already dealt with.
+  //
+  // Identity on the track, not the index: a replaced queue can hold a
+  // different object at the same position.
+  setTimeout(() => {
+    if (state.playing && state.queue[state.index] === track) {
+      advance(1, { auto: true });
+    }
+  }, 1200);
 }
 
 /**

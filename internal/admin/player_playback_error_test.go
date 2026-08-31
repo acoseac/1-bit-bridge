@@ -131,3 +131,32 @@ func TestUPnPGroupLinksToItsManagementPage(t *testing.T) {
 			"on /upnp at once")
 	}
 }
+
+// TestFailureAutoAdvanceIsGuarded pins that the post-failure skip cannot
+// act on a decision the reader has already changed.
+//
+// 1200ms is long enough to pause, pick another track, or replace the
+// queue — and advance() steps from the CURRENT index, so a timer firing
+// afterwards skips past whatever they chose. Predates this change (the
+// timer was unguarded where it stood before), but the probe added ahead
+// of it widens the window, which is reason enough to close it here.
+func TestFailureAutoAdvanceIsGuarded(t *testing.T) {
+	fn := extractJSFunction(t,
+		readFile(t, filepath.Join("static", "player", "audio.js")), "handleSourceError")
+	i := strings.Index(fn, "setTimeout(")
+	if i < 0 {
+		t.Fatal("handleSourceError no longer schedules the post-failure advance")
+	}
+	body := fn[i:]
+	if !strings.Contains(body, "state.playing") {
+		t.Error("the auto-advance does not check that playback is still running; " +
+			"pausing after a failure would be undone 1200ms later")
+	}
+	// Identity on the TRACK, not the index: a replaced queue can hold a
+	// different object at the same position, and an index check would
+	// pass while pointing at something else entirely.
+	if !strings.Contains(body, "state.queue[state.index] === track") {
+		t.Error("the auto-advance does not check that the failed track is still " +
+			"the current one; picking another track would be skipped past")
+	}
+}
