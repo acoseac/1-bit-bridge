@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -170,6 +171,57 @@ type Ingester struct {
 	// direction (it delays a reap, never authorises one early). Bounded by
 	// the number of distinct servers configured in this process lifetime.
 	implausibleSince map[string]time.Time
+
+	// walkKey / walkItems are the LIVE progress of the walk currently in
+	// flight: the StableServerKey being walked, and how many items its
+	// callback has seen. Both are atomics read from outside runMu, because
+	// the whole point is to be readable WHILE the walk holds it.
+	//
+	// A walk of a 15,000-track upstream took minutes with nothing on
+	// screen — no counter, no in-flight marker, and the admin page does
+	// not even re-fetch after load. The filesystem scanner has had exactly
+	// this (Scanner.progress) since it was written; this is its twin.
+	//
+	// walkKey is "" when nothing is walking, which is also the signal the
+	// SSE publisher gates on. Cleared in the same defer that stops the
+	// walk, so a panicking or erroring walk cannot leave the UI showing a
+	// walk that has finished.
+	walkKey   atomic.Value // string
+	walkItems atomic.Int64
+}
+
+// WalkStatus is one upstream's live walk state.
+type WalkStatus struct {
+	// Key is upnpingest.StableServerKey for the server being walked —
+	// what upnp_track_routing.server_udn holds, NOT the device UDN.
+	Key     string
+	Walking bool
+	// Items is how many entries the walk callback has seen so far. It
+	// counts WALKED items, not written rows: the skip-if-unchanged path
+	// writes nothing for most of them, and a counter that only moved on
+	// writes would sit still through an unchanged re-walk — the exact
+	// case that most looks like a hang.
+	Items int64
+}
+
+// WalkProgress reports the walk in flight, if any. Atomic reads only —
+// no lock, no DB — so it is safe on an SSE tick.
+func (i *Ingester) WalkProgress() WalkStatus {
+	if i == nil {
+		return WalkStatus{}
+	}
+	key, _ := i.walkKey.Load().(string)
+	if key == "" {
+		return WalkStatus{}
+	}
+	return WalkStatus{Key: key, Walking: true, Items: i.walkItems.Load()}
+}
+
+// beginWalk marks a walk in flight and returns the closer that clears it.
+func (i *Ingester) beginWalk(key string) func() {
+	i.walkItems.Store(0)
+	i.walkKey.Store(key)
+	return func() { i.walkKey.Store("") }
 }
 
 // NewIngester wires the orchestrator. None of the args may be nil
@@ -400,6 +452,12 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 	}
 
 	walkStart := res.WalkStartedAt
+	// Scoped to the browse itself, not to ingestOne: the reconcile sweep
+	// and the orphan pass after it are DB work with their own duration,
+	// and reporting them as "walking 15,000" would be a counter that had
+	// stopped moving for a reason the reader cannot see.
+	endWalk := i.beginWalk(res.StableKey)
+	defer endWalk()
 	walkStats, walkErr := upnp.BrowseFoldersWalk(ctx, i.cdsClient, controlURL,
 		upnp.WalkOptions{
 			RootObjectID:        srv.EffectiveRootObjectID(),
@@ -420,6 +478,7 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 			}
 			pendingRouting = append(pendingRouting, rt)
 			res.Walked++
+			i.walkItems.Store(int64(res.Walked))
 			// Flush keyed on the routing slice — it grows on EVERY
 			// walked item (tracks only on changed ones), so it alone
 			// bounds the batch size.

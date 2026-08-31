@@ -173,3 +173,18 @@ func upnpSourceFor(srv config.UPnPUpstreamServerConfig, cache *upnp.ServerCache)
 	}
 	return admin.UPnPSource{Key: upnpingest.StableServerKey(srv), Name: name, Online: online}
 }
+
+// playerUPnPWalkAdapter reports the upstream walk in flight.
+//
+// Atomic reads on the ingester — no lock and no DB — which is what makes
+// it safe on the SSE fast tick, and why it is a separate closure from
+// the sources snapshot rather than a field added to it.
+func playerUPnPWalkAdapter(lc *upnpUpstreamLifecycle) func() admin.UPnPWalkStatus {
+	if lc == nil || lc.ingester == nil {
+		return nil
+	}
+	return func() admin.UPnPWalkStatus {
+		st := lc.ingester.WalkProgress()
+		return admin.UPnPWalkStatus{Key: st.Key, Walking: st.Walking, Items: st.Items}
+	}
+}

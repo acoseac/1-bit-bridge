@@ -3715,6 +3715,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		ProxyUPnPAudio:       playerUPnPAudioAdapter(upnpLC, logger),
 		UPnPHostOnline:       playerHostOnlineAdapter(upnpLC),
 		UPnPSources:          playerUPnPSourcesAdapter(upnpLC, cfgHolder),
+		UPnPWalkProgress:     playerUPnPWalkAdapter(upnpLC),
 		BeginPlaybackSession: playerSessionAdapter(sessions),
 		AdminAuth:            adminAuthStore,
 		LoginLimiter:         loginLimiter,

@@ -309,6 +309,17 @@ type Deps struct {
 	// from an unnamed upstream.
 	UPnPSources func() []UPnPSource
 
+	// UPnPWalkProgress reports the upstream walk in flight, if any.
+	// Atomic reads on the ingester — no lock, no DB — which is what makes
+	// it safe on the SSE fast tick. The sources snapshot beside it is NOT:
+	// it issues a COUNT(*) per configured upstream, which is why that one
+	// rides the 30s tick and this is a separate event rather than a field
+	// added to it.
+	//
+	// Nil-safe: absent → the event is never published and the page keeps
+	// its after-the-fact "last walk" line.
+	UPnPWalkProgress func() UPnPWalkStatus
+
 	// ProxyUPnPAudio streams an upstream UPnP MediaServer's bytes for a
 	// routed track, Range-preserving and bit-exact. Wired to the SAME
 	// upnpproxy.Proxy the /v1 download fast-path and the DLNA file
@@ -1577,6 +1588,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/upnp/servers", s.apiUPnPServerRemove)
 	mux.HandleFunc("PATCH /api/upnp/servers", s.apiUPnPServerUpdate)
 	mux.HandleFunc("POST /api/upnp/rescan", s.apiUPnPRescan)
+	mux.HandleFunc("GET /api/upnp/walk", s.apiUPnPWalk)
 	mux.HandleFunc("POST /api/restart", s.apiRestart)
 	mux.HandleFunc("GET /api/pair-qr", s.apiPairQR)
 	mux.HandleFunc("GET /api/backups", s.apiBackupsList)

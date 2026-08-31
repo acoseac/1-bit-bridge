@@ -153,7 +153,12 @@ type UPnPUpstreamServerState struct {
 	// (see admin.UPnPSource). Carried so the sources snapshot can derive
 	// the same source id the sidebar links to, without a second lookup
 	// that could disagree.
-	StableKey        string    `json:"stableKey,omitempty"`
+	StableKey string `json:"stableKey,omitempty"`
+	// SourceID is StableKey's facet id — the same value the sidebar rows,
+	// the sources event and the upnpwalk event carry, so this page can
+	// match a live progress frame to a row it already rendered without
+	// learning a second identity.
+	SourceID         string    `json:"sourceId,omitempty"`
 	Discovered       bool      `json:"discovered"`
 	ResolvedUDN      string    `json:"resolvedUDN,omitempty"`
 	FriendlyName     string    `json:"friendlyName,omitempty"`
@@ -188,6 +193,12 @@ func (s *Server) apiUPnPServers(w http.ResponseWriter, r *http.Request) {
 		// nil slice marshals to `"servers": null`, which breaks the
 		// frontend's array iteration. Empty (non-nil) marshals to `[]`.
 		if servers := s.deps.UPnPUpstream.ConfiguredServers(r.Context()); servers != nil {
+			// Derived here rather than asked of the provider: the id is a
+			// pure function of the stable key it already returns, and one
+			// derivation is one place for the two to agree.
+			for i := range servers {
+				servers[i].SourceID = sourceIDForRow(servers[i].StableKey)
+			}
 			resp.Servers = servers
 		}
 	}
