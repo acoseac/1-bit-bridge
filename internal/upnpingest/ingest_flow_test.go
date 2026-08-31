@@ -30,6 +30,10 @@ type stubSOAP struct {
 	mu       sync.Mutex
 	routes   []soapRoute
 	requests []string
+	// onCall runs on the WALK's own goroutine, before the response is
+	// built. It is the seam for observing state that only exists while a
+	// walk is in flight — see ingest_progress_test.go.
+	onCall func()
 }
 
 func newStubSOAP() *stubSOAP { return &stubSOAP{} }
@@ -39,6 +43,12 @@ func (s *stubSOAP) addRoute(action, body string) {
 }
 
 func (s *stubSOAP) Do(_ context.Context, req *http.Request) (*http.Response, error) {
+	// Outside the lock: the hook reads the ingester, not this stub, and
+	// holding s.mu across it would say nothing useful while risking a
+	// lock-order surprise if a future hook dispatches.
+	if s.onCall != nil {
+		s.onCall()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Find the next pending route whose action matches the request's

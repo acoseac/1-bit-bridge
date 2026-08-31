@@ -63,7 +63,7 @@ func readFrames(t *testing.T, body io.Reader, want int, deadline time.Duration) 
 // TestEventsStreamInitialSnapshot drives the SSE handler over a real
 // httptest.NewServer (httptest.NewRecorder buffers the body until the
 // handler returns, which never happens for a streaming endpoint) and
-// asserts the initial-snapshot publish lands all nine named events
+// asserts the initial-snapshot publish lands all eleven named events
 // with valid JSON shapes.
 func TestEventsStreamInitialSnapshot(t *testing.T) {
 	srv, _, _ := newTestServer(t)
@@ -93,9 +93,9 @@ func TestEventsStreamInitialSnapshot(t *testing.T) {
 		t.Fatalf("Cache-Control: got %q want no-cache", cc)
 	}
 
-	frames := readFrames(t, resp.Body, 10, 3*time.Second)
-	if len(frames) != 10 {
-		t.Fatalf("frames: got %d want 10 (got: %v)", len(frames), frames)
+	frames := readFrames(t, resp.Body, 11, 3*time.Second)
+	if len(frames) != 11 {
+		t.Fatalf("frames: got %d want 11 (got: %v)", len(frames), frames)
 	}
 	seen := map[string]bool{}
 	for _, f := range frames {
@@ -105,7 +105,7 @@ func TestEventsStreamInitialSnapshot(t *testing.T) {
 			t.Errorf("event %q invalid JSON: %v (raw: %q)", f.event, err, f.data)
 		}
 	}
-	for _, want := range []string{"stats", "pairing", "endpoints", "updates", "tailscale", "composition", "sources", "enrichment", "upscale", "analysis"} {
+	for _, want := range []string{"stats", "pairing", "endpoints", "updates", "tailscale", "composition", "sources", "enrichment", "upscale", "analysis", "upnpwalk"} {
 		if !seen[want] {
 			t.Errorf("missing initial-snapshot event %q", want)
 		}
@@ -131,9 +131,10 @@ func TestEventsStreamDiffSuppression(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Drain initial snapshot (10 named events incl. composition/sources/enrichment/upscale/analysis).
-	initial := readFrames(t, resp.Body, 10, 3*time.Second)
-	if len(initial) != 10 {
+	// Drain initial snapshot (11 named events incl. composition/sources/
+	// enrichment/upscale/analysis/upnpwalk).
+	initial := readFrames(t, resp.Body, 11, 3*time.Second)
+	if len(initial) != 11 {
 		t.Fatalf("initial snapshot incomplete: got %d frames", len(initial))
 	}
 
@@ -170,7 +171,7 @@ func TestEventsStreamWakesOnStateChange(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if got := readFrames(t, resp.Body, 10, 3*time.Second); len(got) != 10 {
+	if got := readFrames(t, resp.Body, 11, 3*time.Second); len(got) != 11 {
 		t.Fatalf("initial snapshot incomplete: %d frames", len(got))
 	}
 
@@ -221,7 +222,7 @@ func TestEventsStreamShutdown(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if got := readFrames(t, resp.Body, 10, 3*time.Second); len(got) != 10 {
+	if got := readFrames(t, resp.Body, 11, 3*time.Second); len(got) != 11 {
 		t.Fatalf("initial snapshot incomplete: %d frames", len(got))
 	}
 

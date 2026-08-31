@@ -2645,7 +2645,7 @@ function upnpConfiguredRowHTML(s) {
     skipTopLevelContainers: s.skipTopLevelContainers || [],
   });
   return `
-    <div class="upnp-upstream-row" data-name="${escapeHTML(s.name)}">
+    <div class="upnp-upstream-row" data-name="${escapeHTML(s.name)}" data-source-id="${escapeHTML(s.sourceId || "")}">
       <div class="upnp-upstream-head">
         <strong>${escapeHTML(s.name)}</strong>
         <span class="pill ${statusClass}">${statusText}</span>
@@ -2654,6 +2654,7 @@ function upnpConfiguredRowHTML(s) {
         <div>Friendly name: ${friendly}</div>
         <div>Routed tracks: <strong>${routed.toLocaleString()}</strong></div>
         <div>Last walk: ${lastWalk} (walked ${lastWalked.toLocaleString()}, reaped ${lastReaped.toLocaleString()})</div>
+        <div class="upnp-walk-live" hidden></div>
         ${errLine}
       </div>
       <div class="upnp-upstream-actions">
@@ -2662,6 +2663,53 @@ function upnpConfiguredRowHTML(s) {
         <button type="button" class="btn danger" data-upnp-remove data-identity="${escapeHTML(identity)}" data-name="${escapeHTML(s.name)}">Remove</button>
       </div>
     </div>`;
+}
+
+/**
+ * `upnpwalk` event: the live item count of the walk in flight.
+ *
+ * A walk of a 15,000-track upstream took minutes with nothing on screen,
+ * and this page does not re-fetch after load — so even the after-the-fact
+ * "Last walk" line only appeared on a manual reload. The event rides the
+ * 500ms tick, which is affordable only because its snapshot is atomic
+ * reads on the ingester; the sources event beside it costs a COUNT(*) per
+ * upstream and stays on the 30s tick for that reason.
+ *
+ * Matched on sourceId, not the server's name: the name is operator-
+ * editable and would stop matching after a rename.
+ *
+ * When a walk ENDS the configured list is re-fetched once, so the counts
+ * the walk just changed ("Last walk", "Routed tracks") land without a
+ * reload. Once, on the falling edge — not per frame.
+ */
+let upnpWasWalking = false;
+function applyUpnpWalk(data) {
+  const walking = !!(data && data.walking);
+  // Recorded BEFORE anything can return early. A frame arriving while the
+  // list is still loading would otherwise leave the transition
+  // unrecorded, and the closing frame would then find no rising edge to
+  // fall from — so the refresh that makes "Last walk" current never runs.
+  const wasWalking = upnpWasWalking;
+  upnpWasWalking = walking;
+
+  const rows = document.querySelectorAll(".upnp-upstream-row");
+  for (const row of rows) {
+    const line = row.querySelector(".upnp-walk-live");
+    if (!line) continue;
+    const mine = walking && data.sourceId && row.dataset.sourceId === data.sourceId;
+    line.hidden = !mine;
+    if (mine) {
+      const count = Number(data.items || 0);
+      line.textContent =
+        `Walking now — ${count.toLocaleString()} ${count === 1 ? "item" : "items"} so far…`;
+    }
+  }
+  // Gated on the container, not on the rows: this handler runs on EVERY
+  // page (the SSE stream is shared), and only the UPnP page has a list to
+  // refresh.
+  if (wasWalking && !walking && document.getElementById("upnp-configured-list")) {
+    void loadUpnpConfigured();
+  }
 }
 
 // loadUpnpDiscovered fetches /api/upnp/discovered and renders the
@@ -4593,6 +4641,7 @@ function startEventStream() {
   es.addEventListener("stats",       seen((e) => safeApply("stats",       e.data, applyStats)));
   es.addEventListener("composition", seen((e) => safeApply("composition", e.data, applyComposition)));
   es.addEventListener("sources",     seen((e) => safeApply("sources",     e.data, applySources)));
+  es.addEventListener("upnpwalk",    seen((e) => safeApply("upnpwalk",    e.data, applyUpnpWalk)));
   es.addEventListener("enrichment",  seen((e) => safeApply("enrichment",  e.data, applyEnrichment)));
   es.addEventListener("endpoints",   seen((e) => safeApply("endpoints",   e.data, applyEndpoints)));
   es.addEventListener("pairing",     seen((e) => safeApply("pairing",     e.data, applyPairing)));

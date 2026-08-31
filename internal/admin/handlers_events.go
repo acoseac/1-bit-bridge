@@ -221,6 +221,33 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		return marshalAndPublish("analysis", s.getAnalysisStatsSnapshot(ctx), &lastAnalysis)
 	}
 
+	// upnpwalk rides the FAST tick, which is only affordable because its
+	// snapshot is atomic reads on the ingester — no lock, no DB. The
+	// sources event next to it looks like the natural home for this and is
+	// not: it issues a COUNT(*) per configured upstream, which is exactly
+	// why it rides the 30s tick.
+	//
+	// wasWalking fires one final frame after the walk ends, the same latch
+	// publishStats uses for a finished scan — without it the last frame
+	// the client ever sees says "walking", and the progress line never
+	// clears.
+	var lastUPnPWalk []byte
+	// wasWalking is "the last frame we published said walking", set by the
+	// publisher itself rather than by the tick that calls it.
+	//
+	// The obvious form — assigning it in the fast-tick case — has a hole:
+	// the INITIAL snapshot can publish walking=true, the walk can then
+	// finish before the first tick, and the tick sees walking=false with
+	// wasWalking still false, so no closing frame is ever sent and the
+	// client's progress line stays up for the life of the connection.
+	// Setting it where the snapshot is taken closes that by construction.
+	wasWalking := false
+	publishUPnPWalk := func() error {
+		snap := s.getUPnPWalkSnapshot()
+		wasWalking = snap.Walking
+		return marshalAndPublish("upnpwalk", snap, &lastUPnPWalk)
+	}
+
 	// Initial snapshot — fires synchronously after headers so the
 	// page hydrates on connect without waiting for the first tick.
 	// Without this the dashboard would rely on its server-rendered
@@ -230,6 +257,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	for _, f := range []func() error{
 		publishStats, publishPairing, publishEndpoints, publishUpdates, publishTailscale,
 		publishComposition, publishSources, publishEnrichment, publishUpscale, publishAnalysis,
+		publishUPnPWalk,
 	} {
 		if err := f(); err != nil {
 			return
@@ -290,6 +318,18 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			wasUpscaleBusy = busy
+			// Same shape as the two gates above: the probe is cheap
+			// (atomic reads), and only a walk in flight — plus one frame
+			// after it ends — costs a publish.
+			walking := s.deps.UPnPWalkProgress != nil && s.deps.UPnPWalkProgress().Walking
+			if walking || wasWalking {
+				// publishUPnPWalk updates wasWalking from the snapshot it
+				// takes, so the closing frame flips it false and the next
+				// tick falls through.
+				if err := publishUPnPWalk(); err != nil {
+					return
+				}
+			}
 		case <-medTk.C:
 			if err := publishStats(); err != nil {
 				return
