@@ -196,3 +196,62 @@ func TestSectionLinksCarryTheSourceScope(t *testing.T) {
 			"tracking the scope after the first navigation")
 	}
 }
+
+// TestDetailLinksCarryTheSourceScope pins the other half of the reported
+// "it takes me back to browse".
+//
+// The rail's own links were fixed first; a tile's link is the same bug
+// one level down. Clicking an album inside an upstream landed on
+// /album/<id> with no scope, so the sidebar reverted to Browse and the
+// rail un-narrowed — the reader was out of the source without having
+// asked to leave.
+func TestDetailLinksCarryTheSourceScope(t *testing.T) {
+	src := readFile(t, filepath.Join("static", "player", "views.js"))
+	for _, spec := range []struct{ fn, what string }{
+		{"albumTile", "an album tile"},
+		{"artistTile", "an artist tile"},
+	} {
+		fn := extractJSFunction(t, src, spec.fn)
+		if !strings.Contains(fn, "scopedHref(") {
+			t.Errorf("%s builds its link without scopedHref; clicking it inside a "+
+				"source drops the scope and lands on the whole library", spec.what)
+		}
+	}
+	// The axis rows are built inline in renderAxis rather than in a named
+	// tile builder, so they are checked from that function's body.
+	if !strings.Contains(extractJSFunction(t, src, "renderAxis"), "scopedHref(") {
+		t.Error("the genre/composer rows build their links without scopedHref")
+	}
+	// And scopedHref must read the LIVE url rather than take the scope as
+	// an argument — a builder shared by a scoped and an unscoped grid would
+	// otherwise need a branch, which is where the missed call site lives.
+	sh := extractJSFunction(t, src, "scopedHref")
+	if !strings.Contains(sh, "location.search") {
+		t.Error("scopedHref no longer reads the live URL")
+	}
+	if !strings.Contains(sh, "encodeURIComponent(source)") {
+		t.Error("scopedHref does not encode the source into the href")
+	}
+}
+
+// TestCrumbsAreRootedAtTheSource pins the origin root the reader asked
+// for: "Chord 2go > Albums > Waltz for Debby".
+//
+// A failed name lookup must yield NO root rather than a placeholder — a
+// crumb reading "Source" tells the reader less than one that says
+// nothing, and the crumb is the one place a wrong label is load-bearing.
+func TestCrumbsAreRootedAtTheSource(t *testing.T) {
+	fn := extractJSFunction(t,
+		readFile(t, filepath.Join("static", "player", "views.js")), "sourceRootedCrumbs")
+	if !strings.Contains(fn, "api.sourceNames()") {
+		t.Error("the crumb root no longer resolves the source's name")
+	}
+	if !strings.Contains(fn, "if (!source) return items") {
+		t.Error("sourceRootedCrumbs no longer passes an unscoped page through " +
+			"unchanged; every crumb would grow a root")
+	}
+	if !strings.Contains(fn, "if (!name) return items") {
+		t.Error("an unresolvable source no longer degrades to no root; the crumb " +
+			"would show a placeholder where a real name belongs")
+	}
+}
