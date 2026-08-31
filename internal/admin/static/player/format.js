@@ -85,6 +85,7 @@ export function variantKindLabel(kind) {
 }
 
 const SKIP_LABELS = {
+  routed_upstream: "On an upstream server \u2014 variants not possible",
   dsd_bitstream: "DSD — variants not possible",
   lossy_source: "Lossy source — variants not possible",
   unknown_format: "Format unreadable — variants not possible",

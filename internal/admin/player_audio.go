@@ -176,6 +176,14 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 		variants = nil
 	}
 
+	// Hoisted: SoxCanDecode is the 30s-TTL toolchain probe behind a
+	// mutex, and its answer is fixed for the life of this request. A
+	// playlist can carry tens of thousands of paths, so calling it
+	// per track is a lock per track for one stable value. Matches
+	// browseTrackRow's call site, which already takes it as an
+	// argument. (Gemini on PR #814)
+	canDecode := s.soxCanDecode()
+
 	out := make([]playerTrackDTO, 0, len(paths))
 	for _, p := range paths {
 		row, ok := byPath[p]
@@ -207,8 +215,9 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 		// substitute sidecar but may well own two.
 		dto.Variants = describeVariants(variants[p], row)
 		dto.VariantSkip = fundamentalSkipReason(
-			row.IsDSD, row.Codec, floatOrNil(row.SampleRate), intOrNil(row.BitsPerSample),
-			p, s.soxCanDecode())
+			row.RoutedUDN != "", row.IsDSD, row.Codec,
+			floatOrNil(row.SampleRate), intOrNil(row.BitsPerSample),
+			p, canDecode)
 		out = append(out, dto)
 	}
 	return out, nil

@@ -178,3 +178,43 @@ func TestTrackSubgridColumnsMatchTheRow(t *testing.T) {
 			cols, cells, strings.TrimSpace(m[1]))
 	}
 }
+
+// TestToolchainProbeIsAskedOncePerRequest pins that the sox probe is
+// hoisted out of the per-track loop.
+//
+// deps.SoxCanDecode is the 30s-TTL toolchain cache behind a mutex and
+// its answer is fixed for the life of a request, so asking it per track
+// is a lock per track for one stable value. A playlist can carry tens of
+// thousands of paths.
+//
+// A source scan cannot pin this — the call reads identically wherever it
+// sits — so this counts real invocations through a real request.
+func TestToolchainProbeIsAskedOncePerRequest(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedHybridLibrary(t, srv.deps.Manifest)
+	withTestUpstream(srv, true)
+
+	var calls int
+	srv.deps.SoxCanDecode = func() func(string) bool {
+		calls++
+		return func(string) bool { return true }
+	}
+
+	albums := seededAlbumIDs(t, srv)
+	id, ok := albums["Split"]
+	if !ok {
+		t.Fatal("fixture album missing — this test has stopped checking anything")
+	}
+	_, body := playerGet(t, srv, "/api/player/albums/"+id)
+	tracks, _ := body["tracks"].([]any)
+	if len(tracks) < 2 {
+		t.Fatalf("album returned %d tracks; need at least 2 for the count to mean anything",
+			len(tracks))
+	}
+
+	if calls != 1 {
+		t.Errorf("the toolchain probe was asked %d times for %d tracks, want 1 — "+
+			"it is a mutex-guarded TTL cache and the answer cannot change mid-request",
+			calls, len(tracks))
+	}
+}
