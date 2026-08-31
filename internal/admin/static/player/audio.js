@@ -96,22 +96,9 @@ function onError() {
   switch (err.code) {
     case 1: // MEDIA_ERR_ABORTED — our own src reassignment.
       return;
-    case 4: { // MEDIA_ERR_SRC_NOT_SUPPORTED — the authoritative "can't decode".
-      markUnplayable(track);
-      state.skipped += 1;
-      if (state.skipped >= SKIP_STORM_LIMIT) {
-        // Stop rather than machine-gun through a whole DSD library.
-        state.error = `The next tracks can't play in this browser. ` +
-          `Use Download on the ones you want.`;
-        state.playing = false;
-        emit();
-        return;
-      }
-      state.error = `Can't play "${track.title || track.path}" in this browser.`;
-      emit();
-      setTimeout(() => advance(1, { auto: true }), 1200);
+    case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED — see handleSourceError.
+      void handleSourceError(track, state.el.src);
       return;
-    }
     default: { // 2 network / 3 decode — retry once, then surface.
       if (!track._retried) {
         track._retried = true;
@@ -125,6 +112,74 @@ function onError() {
       state.playing = false;
       emit();
     }
+  }
+}
+
+/**
+ * MEDIA_ERR_SRC_NOT_SUPPORTED does NOT mean "this browser cannot decode
+ * it". The element raises the same code when the source could not be
+ * fetched at all, so a missing file and an unreachable upstream both
+ * arrived here and were reported as a format problem — and, worse, the
+ * track was marked permanently unplayable for the session, so an upstream
+ * coming back up would not fix it.
+ *
+ * The server already distinguishes these: 404 for a track that is not
+ * there, 503 upstream_unavailable for a routed track whose server is
+ * down, and a 2xx for anything it served — which leaves decoding as the
+ * only remaining explanation.
+ */
+async function handleSourceError(track, src) {
+  const reason = await classifySourceFailure(src);
+  // Only a genuine decode failure is permanent. Marking the others would
+  // keep a track dead for the rest of the session over a condition that
+  // may have already cleared.
+  if (reason === "decode") markUnplayable(track);
+
+  const name = track.title || track.path;
+  state.skipped += 1;
+  if (state.skipped >= SKIP_STORM_LIMIT) {
+    // Stop rather than machine-gun through a whole DSD library. Worded
+    // for the cause rather than assuming the browser: a storm of 503s is
+    // one upstream being down, not a library the browser cannot play.
+    state.error = reason === "decode"
+      ? `The next tracks can't play in this browser. Use Download on the ones you want.`
+      : `The next tracks could not be loaded. Check the source is reachable.`;
+    state.playing = false;
+    emit();
+    return;
+  }
+  state.error = {
+    decode: `Can't play "${name}" in this browser.`,
+    missing: `"${name}" is no longer on this bridge.`,
+    offline: `"${name}" is on an upstream server that isn't reachable right now.`,
+  }[reason] || `Playback failed for "${name}".`;
+  emit();
+  setTimeout(() => advance(1, { auto: true }), 1200);
+}
+
+/**
+ * Why the element could not use the source: "decode", "missing",
+ * "offline", or "error" when the question cannot be answered.
+ *
+ * Asks for ONE byte and abandons the response as soon as the headers are
+ * in. fetch resolves on headers and streams the body lazily, so aborting
+ * there costs nothing even against a server that ignored the Range —
+ * which a plain GET would have turned into a second full download of the
+ * file that just failed.
+ */
+async function classifySourceFailure(url) {
+  if (!url) return "error";
+  const ctrl = new AbortController();
+  try {
+    const r = await fetch(url, { headers: { range: "bytes=0-0" }, signal: ctrl.signal });
+    ctrl.abort();
+    if (r.ok || r.status === 206) return "decode";
+    if (r.status === 404 || r.status === 410) return "missing";
+    if (r.status === 503) return "offline";
+    return "error";
+  } catch {
+    ctrl.abort();
+    return "error";
   }
 }
 
