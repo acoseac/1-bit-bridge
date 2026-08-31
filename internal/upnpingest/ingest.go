@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
@@ -665,6 +666,7 @@ func buildTrackAndRouting(w upnp.Walked, serverUDN string, walkStart time.Time) 
 		Enriched:    &enriched,
 		AlbumArtist: w.Artist, // best-effort fallback; the DIDL rarely separates
 	}
+	fillFromContainerPath(tr)
 	if w.TrackNumber > 0 {
 		tn := w.TrackNumber
 		tr.TrackNumber = &tn
@@ -701,6 +703,59 @@ func buildTrackAndRouting(w upnp.Walked, serverUDN string, walkStart time.Time) 
 		LastSeenAt:     walkStart,
 	}
 	return tr, rt
+}
+
+// fillFromContainerPath supplies an artist and album for a walked item
+// whose DIDL carried neither.
+//
+// The DIDL is the upstream's own metadata, and some servers publish very
+// little of it. Measured against a real Chord 2Go (MiniDLNA), 1,942 of
+// 15,283 items — 12.7%, and EVERY DSF among them, because MiniDLNA does
+// not read DSF tags — arrived with a title and nothing else. Such a row
+// reaches the enricher at its documented dead end: `t.Artist == "" ||
+// t.Album == ""` is skipped as skipReasonNoSearchTerms, so those tracks
+// could never gain cover art or MBIDs. On that library it was the whole
+// difference between 7,657 FLAC rows carrying artwork and 0 DSF rows.
+//
+// The values come from dupes.Resolve — the SAME resolution the catalog
+// and the iOS client already display these rows under — so filling from
+// it writes what is on screen anyway and cannot regroup anything. Two
+// consequences of that choice are load-bearing:
+//
+//   - NOT manifest's fillFromPath, whose rule is a plain two-directories-
+//     up and would take a disc subfolder as the album (Artist/Album/CD1/
+//     track → album "CD1"). dupes strips those via effectiveAlbumPath, so
+//     borrowing the scanner's rule here would REGRESS the 46 rows on that
+//     library that group correctly today, splitting each multi-disc set
+//     into one album per disc.
+//   - AlbumArtist is filled from the resolved artist only when the DIDL
+//     left it empty, which is exactly what Resolve's own albumArtist →
+//     artist fallback already yields. Album identity is therefore
+//     unchanged by construction, not merely in practice.
+//
+// The Unknown* placeholders are dropped rather than persisted: they are
+// display text, and as a search term "Unknown Artist" would attribute
+// whatever MusicBrainz returned to an arbitrary track.
+func fillFromContainerPath(tr *manifest.Track) {
+	if tr.Artist != "" && tr.Album != "" {
+		return
+	}
+	d := dupes.Resolve(dupes.Row{
+		Path:        tr.Path,
+		Title:       tr.Title,
+		Artist:      tr.Artist,
+		Album:       tr.Album,
+		AlbumArtist: tr.AlbumArtist,
+	})
+	if tr.Artist == "" && d.Artist != dupes.UnknownArtist {
+		tr.Artist = d.Artist
+	}
+	if tr.Album == "" && d.Album != dupes.UnknownAlbum {
+		tr.Album = d.Album
+	}
+	if tr.AlbumArtist == "" {
+		tr.AlbumArtist = tr.Artist
+	}
 }
 
 // walkFieldsEqual reports whether the walk-derived fields of `fresh`

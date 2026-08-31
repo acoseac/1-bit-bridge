@@ -2973,7 +2973,70 @@ one-line change to anyone who finds it.
   imported track, and whether the routed row is retired or left behind.
 - **Measure before designing either.** Routed tags come from DIDL, not from file
   tags, so a local copy and an upstream copy only land in the same duplicate
-  group if those agree. How well they agree on real hardware is UNMEASURED — and
-  if they disagree often, cross-source grouping is unreliable and both features
-  rest on sand. That measurement is minutes of work against a live 2Go and should
-  precede any policy work here.
+  group if those agree. That measurement has since been taken against a live 2Go
+  — see the next section — and the answer is that 12.7% of items arrive with no
+  artist and no album at all, which is enough on its own to make cross-source
+  grouping unreliable for that slice. Re-measure per upstream before any policy
+  work here; MiniDLNA is one server's behaviour, not the protocol's.
+
+### DIDL is not tags — routed rows fill artist/album from the container path (PR #813, 2026-08-31)
+
+Measured against a real Chord 2Go (MiniDLNA) on the LAN, 15,283 walked items:
+title 100%; artist / albumArtist / album / trackNumber 13,341 (87.3%); year
+13,176; duration + sampleRate 13,552; **discNumber 0%; bitsPerSample 0%**. The
+1,942 items carrying a title and nothing else are 1,730 DSF + 210 FLAC + 1 WAV
+— **every DSF on the server**, because MiniDLNA does not read DSF tags.
+
+- **A routed row with no artist or no album is unreachable to the enricher, and
+  nothing else will ever fix it.** `enrichOne` skips at `t.Artist == "" ||
+  t.Album == ""` (`skipReasonNoSearchTerms`) and stamps `enriched_at` so the row
+  is never polled again. The acoustic fallback that normally catches this
+  population cannot help here — it needs a local file to fingerprint. On that
+  library the split was total: **7,657 FLAC rows carried an `artworkMBID` and 0
+  of 1,730 DSF rows did.** The fix is `fillFromContainerPath` in
+  [ingest.go](internal/upnpingest/ingest.go), which supplies the two fields the
+  enricher searches by.
+- **The derivation MUST be `dupes.Resolve`, NOT manifest's `fillFromPath`.** The
+  scanner's rule is a plain two-directories-up, which for `Artist/Album/CD1/track`
+  puts "CD1" in the album field. `dupes` strips disc folders
+  (`effectiveAlbumPath`), and `dupes` is what the catalog and the iOS client
+  already resolve these rows through — so filling from it writes the values
+  ALREADY ON SCREEN and cannot regroup anything, while borrowing the scanner's
+  rule would REGRESS the 46 rows on that library that group correctly today,
+  splitting each multi-disc set into one album per disc. This is the fourth
+  member of the do-not-unify family: the two derivations look interchangeable
+  and are not.
+- **`dupes.UnknownArtist` / `UnknownAlbum` are display text and must never be
+  persisted.** They are now exported consts precisely so this caller can drop
+  them. Written through, "Unknown Artist" becomes a MusicBrainz search term, and
+  any release it matched would be attributed to an arbitrary track — strictly
+  worse than the skip it replaced, because a wrong cover looks right.
+- **Fill only; never rewrite a field the upstream supplied.** `Resolve` CLEANS
+  the names it returns (`cleanDisplayName` strips `[65616303]`-style numeric
+  brackets, `stripArtistDisambiguation` strips Discogs `*` suffixes), and the
+  reference library is full of both. Writing a resolved value over a present tag
+  would therefore silently normalise metadata the upstream owns — and because
+  `walkFieldsEqual` compares Artist and Album, every one of the 13,341 tagged
+  rows would differ from its stored twin on the next walk, re-upserting, resetting
+  `enriched_at` to 0 and pushing an `indexed_at` bump: a full re-enrichment pass
+  and a whole-library delta to every paired device, to change nothing anyone asked
+  for.
+- **Album identity is unchanged BY CONSTRUCTION, not by luck.** `Resolve`'s ladder
+  is `albumArtist → artist → path default`, so writing `Artist = d.Artist` and
+  `AlbumArtist = Artist` produces an identical `Resolved`, hence an identical
+  `AlbumIDOf`. Pinned by `TestFillingDoesNotMoveAlbumIdentity` — without it, every
+  affected album would change id on the next walk and each paired device would
+  watch one vanish and another appear.
+- **Deploy consequence, intended and bounded:** those 1,942 rows now differ from
+  their stored twins, so the first walk after this ships re-upserts them once —
+  `enriched_at` back to 0 (which is the point: they can finally be enriched) and
+  one `indexed_at` bump each. Tagged rows are untouched.
+- **Test lesson worth more than the fix.** `TestUpstreamMetadataAlwaysWins`
+  originally used the fixture `"Tagged Artist"` — which cleans to itself, so it
+  passed against code that overwrote unconditionally and pinned NOTHING. Only a
+  negative control exposed it. When a test asserts "we do not transform X", the
+  fixture must be a value the transformation would actually change. The same test
+  is also LAYERED: a both-present row is protected first by the early return, so
+  removing only the per-field guards leaves it green (removing both turns it red)
+  — the partial-row case is what covers the guards directly.
+
