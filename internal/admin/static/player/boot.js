@@ -392,6 +392,67 @@ function splitPath(pathname) {
     : { path, head: body.slice(0, slash), rest: body.slice(slash + 1) };
 }
 
+/**
+ * Where the section strip has to be scrolled for the active entry to be
+ * visible, or null when it should not move at all.
+ *
+ * Below 769px the strip is a horizontally-scrolling row, and it opens at
+ * scrollLeft 0 — so on the sections furthest right the marked entry sat
+ * off-screen and the strip looked like it had no active state. It was
+ * true of Folders before Sources existed; Sources only made the strip one
+ * entry longer.
+ *
+ * Two things it deliberately does NOT do:
+ *
+ *   - It does not move a strip whose active entry is already visible.
+ *     route() runs on every filter change too, so an unconditional
+ *     re-centre would yank the strip back from wherever the reader had
+ *     scrolled it, every time they touched a sort dropdown.
+ *   - It returns a scroll offset rather than calling scrollIntoView.
+ *     That method walks ANCESTORS, so on a page whose vertical position
+ *     the boost router is separately restoring — under its own
+ *     generation guard, because a stale offset landing last is a real
+ *     defect there — it is a second writer to the same scroll state.
+ *     Assigning the container's own scrollLeft cannot touch anything
+ *     else.
+ *
+ * Pure, and separated from the DOM read for that reason: the geometry is
+ * the part worth pinning, and it is testable without a browser.
+ */
+export function sectionScrollLeft({ navLeft, navWidth, scrollLeft, maxScroll, itemLeft, itemWidth }) {
+  // Not scrollable: the desktop rail is a vertical column, where every
+  // entry is visible and there is nothing to correct.
+  if (!(maxScroll > 0)) return null;
+  const itemStart = itemLeft - navLeft;
+  if (itemStart >= 0 && itemStart + itemWidth <= navWidth) return null;
+  // The leading margin is floored at zero so an entry WIDER than the strip
+  // lands on its start rather than its middle: a negative margin would
+  // scroll past the beginning of the label and show the reader the inside
+  // of a word. No shipped label is that wide, but the clamp costs nothing
+  // and the alternative is only correct by accident of the label set.
+  const margin = Math.max(0, (navWidth - itemWidth) / 2);
+  return Math.round(Math.max(0, Math.min(scrollLeft + itemStart - margin, maxScroll)));
+}
+
+/** Apply sectionScrollLeft to the live strip. */
+function revealActiveSection() {
+  const nav = document.getElementById("player-sections");
+  // aria-current, not the .active class: that attribute is the SEMANTIC
+  // marker for "you are here", so this keeps working for any future row
+  // in the rail that is not a .player-section — and route() already sets
+  // the two together, so it is not a second thing to remember.
+  const active = nav && nav.querySelector('[aria-current="page"]');
+  if (!active) return;
+  const navBox = nav.getBoundingClientRect();
+  const itemBox = active.getBoundingClientRect();
+  const next = sectionScrollLeft({
+    navLeft: navBox.left, navWidth: nav.clientWidth,
+    scrollLeft: nav.scrollLeft, maxScroll: nav.scrollWidth - nav.clientWidth,
+    itemLeft: itemBox.left, itemWidth: itemBox.width,
+  });
+  if (next !== null) nav.scrollLeft = next;
+}
+
 function route() {
   const view = document.getElementById("player-view");
   const titleEl = document.getElementById("player-title");
@@ -414,6 +475,7 @@ function route() {
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
+  revealActiveSection();
   updateSidebarNav(section);
 
   const setToolbar = (node) => {
