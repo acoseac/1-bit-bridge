@@ -15,13 +15,13 @@ import * as audio from "./audio.js";
 import { mount as mountBar } from "./nowplaying.js";
 import { el, clear, announce } from "./ui.js";
 import { wireVariantRefresh, clearVariantRefresh } from "./variants.js";
-import { api, abortReads } from "./api.js";
+import { abortReads } from "./api.js";
 import {
   renderAlbums, renderAlbum, renderArtists, renderArtist,
   renderGenres, renderComposers,
   renderAxisAlbums, renderFavorites, renderPlaylists, renderPlaylistDetail,
   renderMixDetail,
-  renderMixes, renderFolders, renderSearch, renderTracks, renderSources,
+  renderMixes, renderFolders, renderSearch, renderTracks,
 } from "./views.js";
 
 const SECTIONS = [
@@ -34,26 +34,6 @@ const SECTIONS = [
   ["genres", "Genres", "/genres"],
   ["folders", "Folders", "/folders"],
 ];
-
-// Sources is listed only on a bridge that HAS more than one, which is
-// why it is not in SECTIONS. Unlike Smart Mixes — whose page is where
-// its own switch lives, so hiding it would hide the feature — a facet
-// over a single filesystem library offers one choice and explains
-// nothing. The seed carries the answer so no request is needed to
-// decide whether to draw it.
-const SOURCES_SECTION = ["sources", "Sources", "/sources"];
-
-// How long a painted source rail is trusted before the next navigation
-// re-reads it.
-//
-// The rail carries LIVENESS, so it cannot be painted once and left: an
-// upstream that drops mid-session would keep its green dot for as long as
-// the tab stayed open. It equally cannot re-read on every route() call —
-// that is one request per navigation, the cost the banner's name lookup
-// was memoised to avoid. A TTL bounds it to at most one read per window
-// however much the reader clicks.
-const SOURCE_NAV_TTL_MS = 30_000;
-let sourceNavReadAt = 0;
 
 let seed = {};
 let generation = 0;
@@ -108,9 +88,6 @@ export function mountShell() {
   renderSections();
   wireSearchInput();
   route();
-  // Forced: a fresh shell has an empty group, and the mount is the one
-  // moment the reader is guaranteed to be looking at the rail.
-  void refreshSourceNav(true);
 }
 
 // PLAYER_HEADS is the set of first path segments the player owns — i.e. the
@@ -122,7 +99,7 @@ export function mountShell() {
 // TestPlayerHeadsMatchServerRoutes pins the two together.
 const PLAYER_HEADS = new Set([
   "albums", "artists", "favorites", "playlists", "mixes",
-  "composers", "genres", "folders", "search", "tracks", "sources",
+  "composers", "genres", "folders", "search", "tracks",
   "album", "artist", "genre", "composer", "playlist", "mix",
 ]);
 
@@ -148,8 +125,7 @@ function renderSections() {
   const nav = document.getElementById("player-sections");
   if (!nav) return;
   clear(nav);
-  const sections = seed.sourcesEnabled ? [...SECTIONS, SOURCES_SECTION] : SECTIONS;
-  for (const [key, label, href] of sections) {
+  for (const [key, label, href] of SECTIONS) {
     // Smart Mixes stays listed even when the feature is off. It used to
     // be skipped, which was coherent while the off-state said "enable
     // this in Settings" — there was nothing to go there for. The page is
@@ -161,100 +137,8 @@ function renderSections() {
       attrs: { href, "data-route": "", "data-section": key },
     }));
   }
-  // The sources group is painted asynchronously into this container, so
-  // renderSections stays synchronous and the rail's own sections are
-  // never waiting on a network read to appear.
-  nav.appendChild(el("div", { class: "player-source-group", attrs: { id: "player-source-group" } }));
 }
 
-/**
- * Paint each library source into the rail, with a dot for whether it is
- * reachable right now.
- *
- * This is where the status actually earns its keep: on the Sources page
- * it answers a question the reader went looking for, and in the rail it
- * answers one they did not have to ask. A source is a place their music
- * lives, so it belongs beside the other ways into the library rather than
- * one click behind them.
- *
- * Failures leave whatever is already painted. A rail that briefly shows a
- * stale dot is better than one that empties itself because a single read
- * timed out — and the next navigation past the TTL retries.
- */
-async function refreshSourceNav(force) {
-  if (!seed.sourcesEnabled) return;
-  const box = document.getElementById("player-source-group");
-  if (!box) return;
-  const now = Date.now();
-  if (!force && box.childElementCount > 0 && now - sourceNavReadAt < SOURCE_NAV_TTL_MS) return;
-  sourceNavReadAt = now;
-  let sources;
-  try {
-    sources = (await api.sources()).sources || [];
-  } catch {
-    return;
-  }
-  const box2 = document.getElementById("player-source-group");
-  if (!box2) return; // the shell was swapped out while the read was in flight
-  clear(box2);
-  if (!sources.length) return;
-  box2.appendChild(el("div", { class: "player-nav-group", text: "Sources" }));
-  for (const s of sources) {
-    box2.appendChild(sourceNavRow(s));
-  }
-  markActiveSource();
-}
-
-function sourceNavRow(s) {
-  const row = el("a", {
-    class: "player-source",
-    attrs: { href: `/albums?source=${encodeURIComponent(s.id)}`, "data-route": "", "data-source": s.id },
-  }, el("span", { class: "player-source-name", text: s.name }));
-  if (s.kind !== "upnp") return row;
-
-  // Three states, and the dot alone carries none of them: offline is a
-  // RING rather than a filled disc, so the difference survives greyscale
-  // and a red/green-colourblind reader, and the word itself is in the
-  // accessible name rather than only in a colour.
-  const [cls, label] = s.online === true
-    ? ["source-status-online", "Online"]
-    : s.online === false
-      ? ["source-status-offline", "Offline"]
-      : ["source-status-unknown", "Status unknown"];
-  // The status class goes on a WRAPPER, exactly as it does on the Sources
-  // page, not on the row. It sets `color`, and the dot reads that through
-  // currentcolor — put it on the row and the source's NAME turns red too,
-  // which reads as an error rather than a status and fights the rail's own
-  // "you are here" ink.
-  row.appendChild(el("span", { class: `source-status ${cls}` },
-    el("span", { class: "source-dot", attrs: { "aria-hidden": "true" } }),
-    // Visible on the page, where there is room for it; here it is in the
-    // accessible name only, so the rail stays one line per source.
-    el("span", { class: "visually-hidden", text: `, ${label}` })));
-  row.setAttribute("title", `${s.name} — ${label}`);
-  return row;
-}
-
-/** Mark the source row matching the current ?source=, if any. */
-function markActiveSource() {
-  const want = new URLSearchParams(location.search).get("source") || "";
-  for (const a of document.querySelectorAll(".player-source")) {
-    const active = want !== "" && a.dataset.source === want;
-    a.classList.toggle("active", active);
-    // aria-current, set alongside .active exactly as the section rows do
-    // — it is what the strip's reveal and assistive tech both read.
-    if (active) a.setAttribute("aria-current", "page");
-    else a.removeAttribute("aria-current");
-  }
-}
-
-/**
- * One delegated click handler for every internal link.
- *
- * Modifier-clicks and middle-clicks fall through to the browser
- * untouched — intercepting them would break "open in a new tab", which
- * is the one browser affordance a library grid most needs.
- */
 function wireLinks() {
   document.addEventListener("click", (e) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -456,7 +340,7 @@ function readTrail() {
  * though it has no section link of its own. Compared on the path, so a
  * query (/search?q=…, /folders?path=…) still matches.
  */
-const trailRoots = new Set(["/", "/search", SOURCES_SECTION[2], ...SECTIONS.map(([, , href]) => href)]);
+const trailRoots = new Set(["/", "/search", ...SECTIONS.map(([, , href]) => href)]);
 
 /**
  * The trail to store on the entry we are about to push.
@@ -523,11 +407,6 @@ function route() {
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
-  markActiveSource();
-  // TTL-guarded, so navigating around the library does not re-read the
-  // source list on every hop while a dropped upstream still turns its dot
-  // red within the window.
-  void refreshSourceNav(false);
   updateSidebarNav(section);
 
   const setToolbar = (node) => {
@@ -575,7 +454,6 @@ function route() {
     mixes: ["Smart Mixes", () => renderMixes(view, ctx)],
     mix: ["Mix", () => renderMixDetail(view, ctx)],
     folders: ["Folders", () => renderFolders(view, ctx)],
-    sources: ["Sources", () => renderSources(view, ctx)],
     search: ["Search", () => renderSearch(view, ctx)],
     tracks: ["Tracks", () => renderTracks(view, ctx)],
   };
@@ -652,7 +530,15 @@ function updateSidebarNav(section) {
   // unrendered. CSS.escape would also fix that; not building the selector
   // at all is one fewer thing to remember.
   const links = [...nav.querySelectorAll("a")];
-  const match = links.find((a) => a.dataset.playerSection === owner) ||
+  // A source scope wins over Browse. Both would otherwise light — every
+  // player route renders the player section — and two "you are here"
+  // marks tell the reader nothing. Same rule the server applies through
+  // pageData.SourceCurrent, restated here for the navigations it never
+  // sees. Compared as a VALUE, like `section` above: a source id off the
+  // query string must not be interpolated into a selector.
+  const source = new URLSearchParams(location.search).get("source") || "";
+  const match = (source !== "" && links.find((a) => a.dataset.sourceId === source)) ||
+    links.find((a) => a.dataset.playerSection === owner) ||
     links.find((a) => a.dataset.tab === "player" && !a.dataset.playerSection) ||
     null;
   for (const a of links) {

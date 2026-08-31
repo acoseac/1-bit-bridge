@@ -3,12 +3,12 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -416,107 +416,99 @@ func TestRoutedOnlineResolvesTheRoutingKeyNotTheDeviceUDN(t *testing.T) {
 	}
 }
 
-// TestSourcesFacetGateFollowsTheLibraryNotTheConfig pins both halves of
-// the gate's one signal.
+// TestSidebarListsUpstreamsWithStatus pins the nav group: the operator's
+// upstreams, each linking to the library scoped to it, each carrying
+// whether it is reachable.
 //
-// A configured upstream with no tracks must NOT open the facet: the
-// handler skips zero-track sources, so the page would show a lone "This
-// bridge" and the rail entry would lead nowhere. And routed tracks with
-// no config row MUST open it: removing the last upstream leaves the
-// ingest with nothing to start, so its orphan sweep never runs and the
-// facet is the only surface that explains where those tracks came from.
-func TestSourcesFacetGateFollowsTheLibraryNotTheConfig(t *testing.T) {
-	srv, cfg, _ := newTestServer(t)
-	if srv.sourcesFacetWorthShowing() {
-		t.Error("empty library: facet should stay hidden")
+// It lists what was CONFIGURED, not what has been ingested — the opposite
+// of the /api/player/sources rule, and deliberately: an upstream that has
+// not been walked yet is exactly when its status is most worth seeing.
+func TestSidebarListsUpstreamsWithStatus(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+
+	if rows := srv.sidebarSources(httptest.NewRequest(http.MethodGet, "/albums", nil)); len(rows) != 0 {
+		t.Fatalf("no upstreams configured, got %d rows", len(rows))
 	}
 
-	// A configured upstream is not enough on its own.
-	cfg.UPnPUpstream.Enabled = true
-	cfg.UPnPUpstream.Servers = []config.UPnPUpstreamServerConfig{
-		{Name: "Chord 2go", UDN: testUpstreamKey},
+	withTestUpstream(srv, false)
+	rows := srv.sidebarSources(httptest.NewRequest(http.MethodGet, "/albums", nil))
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
 	}
+	got := rows[0]
+	if got.ID != upstreamSourceID() {
+		t.Errorf("id = %q, want the facet id the source filter accepts", got.ID)
+	}
+	if got.Name != "Chord 2go" {
+		t.Errorf("name = %q", got.Name)
+	}
+	if got.Status != "offline" || got.Label != "Offline" {
+		t.Errorf("status/label = %q/%q, want offline/Offline", got.Status, got.Label)
+	}
+	if got.Current {
+		t.Error("row marked current on an unscoped URL")
+	}
+
+	// Status is a STRING and not the API's *bool because a Go template's
+	// `if` on a pointer tests non-nil — a pointer to false reads as true,
+	// and every offline upstream would render online.
 	withTestUpstream(srv, true)
-	if srv.sourcesFacetWorthShowing() {
-		t.Error("configured upstream with no ingested tracks: the facet page " +
-			"would show one row, so the rail entry must stay hidden")
-	}
-
-	seedHybridLibrary(t, srv.deps.Manifest)
-	srv.statsMu.Lock()
-	srv.statsDBValid = false
-	srv.statsMu.Unlock()
-	if !srv.sourcesFacetWorthShowing() {
-		t.Error("routed tracks present: facet must show")
-	}
-
-	// ...and it must stay shown once the config row is gone.
-	cfg.UPnPUpstream.Servers = nil
-	srv.deps.UPnPSources = nil
-	if !srv.sourcesFacetWorthShowing() {
-		t.Error("routed tracks with no config row: facet must still show, " +
-			"or the orphans have no surface at all")
+	if rows = srv.sidebarSources(httptest.NewRequest(http.MethodGet, "/albums", nil)); rows[0].Status != "online" {
+		t.Errorf("status = %q, want online", rows[0].Status)
 	}
 }
 
-// TestRenderSourcesClearsTheToolbar pins the one thing route() does NOT
-// do for a view.
+// TestSidebarMarksTheScopedUpstream pins that the group follows the view,
+// and — the half that would otherwise break an existing guard — that
+// Browse stands down while it does.
 //
-// Each view owns the toolbar. renderSources did not touch it, so arriving
-// from the album grid left its sort / quality / variant selects on screen
-// over the Sources page — and they still worked, writing ?sort= into the
-// Sources URL. Reproduced in a browser before it was fixed; a source scan
-// is what keeps it fixed, since nothing else connects the two views.
-func TestRenderSourcesClearsTheToolbar(t *testing.T) {
-	fn := extractJSFunction(t,
-		readFile(t, filepath.Join("static", "player", "views.js")), "renderSources")
-	if !strings.Contains(fn, "setToolbar(null)") {
-		t.Error("renderSources does not clear the toolbar; the previous view's " +
-			"controls will stay on screen and stay live")
+// Every player route renders the player section, so without the stand-down
+// both Browse and the source row carry aria-current and
+// TestPrimaryNavHighlightsEveryEntry fails. It is right to fail: two "you
+// are here" marks tell the reader nothing.
+func TestSidebarMarksTheScopedUpstream(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	withTestUpstream(srv, true)
+
+	scoped := httptest.NewRequest(http.MethodGet, "/albums?source="+upstreamSourceID(), nil)
+	rows := srv.sidebarSources(scoped)
+	if len(rows) != 1 || !rows[0].Current {
+		t.Fatalf("scoped URL did not mark the row: %+v", rows)
+	}
+
+	w := httptest.NewRecorder()
+	scoped.RemoteAddr = "127.0.0.1:54321"
+	srv.Handler().ServeHTTP(w, scoped)
+	body := w.Body.String()
+	if n := strings.Count(body, `aria-current="page"`); n != 1 {
+		t.Errorf("page carries %d aria-current marks, want exactly 1", n)
+	}
+	if !strings.Contains(body, `data-source-id="`+upstreamSourceID()+`"`) {
+		t.Error("the sidebar did not render the upstream row")
+	}
+	// The word rides the accessible name, never an aria-label on a
+	// descendant — that would replace the link's whole subtree in the name
+	// computation and drop the server's name (the pairing-badge trap).
+	if strings.Contains(body, `class="nav-source-status`) && !strings.Contains(body, `, Online</span>`) {
+		t.Error("the status word is not in the row's accessible name")
 	}
 }
 
-// TestSourceRailKeepsTheStatusColourOffTheRow pins the shape that a
-// screenshot caught and no assertion about the DOM would have.
+// TestSidebarSourceDotsRefreshFromTheSourcesEvent pins the id that lets
+// the live update match.
 //
-// The status classes set `color`, which the dot reads through
-// currentcolor. Applied to the ROW they also recolour the source's NAME,
-// so an offline upstream rendered as red text in the rail — which reads
-// as an error rather than a status, and fights the rail's own "you are
-// here" ink. They belong on a wrapper, exactly as on the Sources page.
-func TestSourceRailKeepsTheStatusColourOffTheRow(t *testing.T) {
-	fn := extractJSFunction(t,
-		readFile(t, filepath.Join("static", "player", "boot.js")), "sourceNavRow")
-	if strings.Contains(fn, "row.classList.add(cls)") {
-		t.Error("sourceNavRow puts the status class on the row; it recolours the " +
-			"source name as well as the dot")
+// The sidebar is server-rendered, and a boosted navigation never reloads
+// the shell — so without a refresh a dropped upstream keeps its green dot
+// for the whole session. app.js repaints from the `sources` SSE event,
+// matched on this id rather than on the operator-editable display name.
+func TestSidebarSourceDotsRefreshFromTheSourcesEvent(t *testing.T) {
+	js := readFile(t, filepath.Join("static", "app.js"))
+	fn := extractJSFunction(t, js, "applySidebarSourceStatus")
+	if !strings.Contains(fn, "srv.sourceId") {
+		t.Error("the sidebar dot update no longer matches on sourceId; matching " +
+			"on the display name stops working the moment an upstream is renamed")
 	}
-	if !strings.Contains(fn, "source-status ${cls}") {
-		t.Error("sourceNavRow no longer wraps the dot in a .source-status span; " +
-			"the dot has nothing to read its colour from")
-	}
-}
-
-// TestSourceRailRefreshesAndFollowsNavigation pins the two calls that
-// make the rail's dot mean anything.
-//
-// Without the refresh in route() the rail is painted once at mount and an
-// upstream that drops mid-session keeps its green dot for as long as the
-// tab stays open. Without markActiveSource there, following a source link
-// leaves the highlight on whichever source was picked first.
-func TestSourceRailRefreshesAndFollowsNavigation(t *testing.T) {
-	src := readFile(t, filepath.Join("static", "player", "boot.js"))
-	fn := extractJSFunction(t, src, "route")
-	for _, call := range []string{"markActiveSource()", "refreshSourceNav("} {
-		if !strings.Contains(fn, call) {
-			t.Errorf("route() no longer calls %s; the source rail stops tracking "+
-				"the current view", call)
-		}
-	}
-	// And the refresh must be TTL-guarded, or every hop around the library
-	// costs a request — the cost the banner's name lookup was memoised to
-	// avoid, reintroduced one level up.
-	if !strings.Contains(src, "SOURCE_NAV_TTL_MS") {
-		t.Error("the source rail refresh is no longer TTL-guarded")
+	if !strings.Contains(extractJSFunction(t, js, "applySources"), "applySidebarSourceStatus(") {
+		t.Error("applySources no longer refreshes the sidebar dots")
 	}
 }

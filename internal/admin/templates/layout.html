@@ -115,7 +115,7 @@
         of their own — .PlayerNav names those. Without the second clause,
         Browse and Smart mixes would both light on /mixes, because every
         player route renders the same tab AND the same section. */ -}}
-    <a href="/" data-tab="player"{{if and (eq .ActiveSection "player") (eq .PlayerNav "")}} aria-current="page"{{end}}>
+    <a href="/" data-tab="player"{{if and (eq .ActiveSection "player") (eq .PlayerNav "") (not .SourceCurrent)}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-browse"/></svg><span>Browse</span></a>
     <a href="/upload" data-tab="upload"{{if eq .ActiveTab "upload"}} aria-current="page"{{end}}>
       <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-add"/></svg><span>Add music</span></a>
@@ -141,6 +141,36 @@
         data-player-section="<section>" on the anchor with
         {{`{{if eq .PlayerNav "<section>"}}`}}, and the parity tests in
         page_init_parity_test.go will hold the three sides together. */ -}}
+
+    {{- /* The operator's upstream UPnP MediaServers, as their own group
+        between Library and Server: Library is THIS bridge, and a 2go on
+        the network is neither that nor a setting — it is another place
+        their music lives. Each row browses the library scoped to it, and
+        carries whether it is reachable right now.
+
+        Server-rendered rather than fetched, so the group is present on
+        first paint and on every operator page. The dots are refreshed
+        from the `sources` SSE event app.js already consumes; boot.js
+        re-marks the current row for navigations the server never sees.
+
+        Rendered only when the operator has configured an upstream — the
+        whole group is absent on a bridge with none. */ -}}
+    {{if .UPnPSources}}
+    <p class="nav-group">UPnP</p>
+    {{range .UPnPSources}}
+    <a href="/albums?source={{.ID}}" data-source-id="{{.ID}}"{{if .Current}} aria-current="page"{{end}}
+       title="{{.Name}} &mdash; {{.Label}}">
+      <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#i-upnp"/></svg><span>{{.Name}}</span>
+      <span class="nav-source-status source-{{.Status}}">
+        <span class="nav-source-dot" aria-hidden="true"></span>
+        {{- /* The word is in the accessible NAME, not an aria-label: a
+            descendant carrying one would replace this link's whole
+            subtree in the name computation and drop the server's name —
+            the trap the pairing badge documents two entries down. */ -}}
+        <span class="sr-only">, {{.Label}}</span>
+      </span></a>
+    {{end}}
+    {{end}}
 
     <p class="nav-group">Server</p>
     <a href="/devices" data-tab="devices"{{if eq .ActiveTab "devices"}} aria-current="page"{{end}}>
