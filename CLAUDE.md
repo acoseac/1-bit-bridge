@@ -2826,3 +2826,115 @@ button must not contain interactive descendants, so the card announced as one
 button while holding two controls. SonarCloud flagged the missing keyboard
 handler, which was the right flag for the wrong reason: the fix is dropping the
 role, not adding an `onkeydown` to satisfy the checker.
+
+### Library sources in the sidebar (PRs #807 / #808 / #809, 2026-08-31)
+
+A hybrid bridge serves its own filesystem AND one or more upstream UPnP
+MediaServers, and the player blended both into one set of grids with nothing to
+tell them apart. Upstreams now have their own first-level sidebar group between
+LIBRARY and SERVER — one row each, with whether it is reachable, linking to the
+library scoped to it — plus a `source=` filter on the album / artist / genre /
+composer endpoints. Admin-console only: no `/v1` change, no `ProtocolVersion`
+bump, no `PROTOCOL.md` change, no iOS mirror, no migration.
+
+- **`upnp_track_routing.server_udn` is the ingest's `StableServerKey`, NOT the
+  device's UDN** — lowercased UDN for a UDN-configured upstream,
+  `"manual:<sha256(url)>"` for one configured by description URL alone. The SSDP
+  cache is keyed on the RAW UDN as the device reported it. The two are equal
+  ONLY for a device whose UDN is already lowercase, and NEVER for a manual
+  entry. `routedOnline` handed the routing key straight to `UPnPHostOnline` (an
+  exact raw-UDN map lookup) and therefore answered "offline" about upstreams
+  that were up; `admin.UPnPSource` now carries BOTH spellings and liveness is
+  resolved on the config side, which is the only place that knows both.
+  **Anything wanting both membership and liveness must carry the pair** — one
+  lookup cannot serve both.
+- **A Go template's `if` on a POINTER tests non-nil.** `sidebarSourceRow.Status`
+  is a `string`, not the API's `*bool`: a pointer to `false` reads as TRUE, so
+  every offline upstream would have rendered online. Resolve three-way state to
+  a string before it reaches a template.
+- **Browse stands DOWN while a source row is current** (`pageData.SourceCurrent`
+  server-side; the same rule restated in `updateSidebarNav` for the navigations
+  the server never sees). Every player route renders the player section, so
+  without it both light and `TestPrimaryNavHighlightsEveryEntry` fails —
+  correctly, since two "you are here" marks tell the reader nothing.
+- **`boot();` MUST be the last statement in `boot.js`** (`TestPlayerBootCallIsLast`).
+  It reaches most of the module, so a top-level call near the TOP puts every
+  later `const`/`let` in the temporal dead zone. This emptied the entire player
+  TWICE in one sitting — the sources-rail TTL, then `SOURCE_SCOPED_SECTIONS` —
+  and both times there was **no failing test and no symptom but a
+  `ReferenceError` in the console and a page that rendered nothing**. Function
+  declarations hoist, so the call's position changes nothing else.
+- **A scoped count describes the albums ON SCREEN, not the tracks from that
+  source.** An album is shown when it holds ANY track from the source, and its
+  own page is not source-filtered — so the narrower per-source number would
+  contradict what the next click reveals. `librarycat.Artist`/`AxisEntry` gained
+  `AlbumTracks` (the per-album share, emitted alongside `AlbumIDs` by
+  `rankAlbums` so the two cannot drift) precisely so a filtered group can state
+  a TRUE total: without it a scoped artist grid reports whole-library numbers,
+  and the genre list stays SORTED by a count the reader can no longer see.
+  `narrowGroup` narrows the album IDS too, not just the counts — `AlbumIDs[0]`
+  is the group's cover tile, and a filtered list showing artwork from the
+  filtered-OUT source undoes the filter visually.
+- **Two different rules for two different questions, both deliberate.** The
+  SIDEBAR lists what the operator CONFIGURED (an upstream not yet walked is
+  exactly when its status is most worth seeing; its grid is empty until the
+  first walk, which is the honest answer). `/api/player/sources` lists only
+  sources that HAVE tracks (it is a facet over the library, and a row that
+  filters to nothing is a dead end). Don't unify them.
+- **`librarycat.SourceID` prefixes `"source:"` before hashing** so the source id
+  space is provably disjoint from the album/artist/axis one — a routing key can
+  never hash onto an album id and be admitted by the wrong filter.
+  `LocalSourceID` is the magic token `"local"`, outside the 16-hex alphabet by
+  construction. It has no nav entry since LIBRARY *is* this bridge; `?source=local`
+  still works on the wire.
+- **The section rail must carry `?source=` on its links, and narrow to the
+  sections a source can actually filter** (Albums / Artists / Composers /
+  Genres). The links are static hrefs, so before #809 clicking Artists inside an
+  upstream dropped the scope and landed on the whole library — the scope
+  survived a SORT change (the toolbar mutates the live URL) but not a SECTION
+  change. `applySectionScope` rewrites each href from an unscoped `data-base`
+  (deriving from the live href compounds the query string) and hides the rest —
+  Smart Mixes is whole-library-generated, Folders is filesystem-only by
+  construction, and Favorites/Playlists are documents that span every source at
+  once, so a playlist is not "on" an upstream. **The section the reader is ON is
+  never hidden.** Scope is applied BEFORE the strip reveal: hiding entries
+  changes the strip's scroll geometry.
+- **The mobile section strip reveals its active entry by assigning the
+  container's own `scrollLeft`, never `scrollIntoView`** (#808). That method
+  walks ANCESTORS, so on a page whose vertical position the boost router is
+  separately restoring — under its own generation guard, because a stale offset
+  landing last is a real defect there — it becomes a second writer to the same
+  scroll state. It also must NOT move a strip whose active entry is already
+  visible: `route()` runs on every filter change, so an unconditional re-centre
+  yanks the strip back from wherever the reader scrolled it. It queries
+  `[aria-current="page"]` rather than a class, so any future rail row works
+  without it knowing about them.
+- **`.sr-only` / `.visually-hidden` is `position: absolute`** — with no
+  positioned ancestor its containing block is the PAGE, so inside a
+  horizontally-scrolling container it escapes the overflow clip, sits at the far
+  end of the scrolled content, and extends the document's scroll width to match.
+  The whole page scrolled sideways because of a 1px span nobody can see.
+  `#primary-nav a` is already `position: relative`; `.player-source` had to be
+  given it.
+- **The sidebar is operator chrome, so its styles live in `app.css`** — player.css
+  must not reach into it, the same one-way rule its own header states in the
+  other direction (and `TestPlayerCSSDoesNotHijackOperatorTableClasses` enforces).
+
+**Process, three items worth keeping:**
+
+- **Deleting scattered JS needs cuts that end at the NEXT declaration.** Slicing
+  boot.js from a docblock down to `function route() {` swallowed five unrelated
+  functions in between. `TestAppJSHasNoCallsToDeletedHelpers` and
+  `TestEveryPushStateCarriesTheRouteTrail` both failed immediately and named
+  exactly what had gone — the same class the CSS selector-set rule covers.
+- **A parity test can pin the wrong half of a two-sided bug.**
+  `TestScopedSectionsAreRealSectionsTheServerActuallyFilters` drives the JS list
+  against the real endpoints and passes UNCHANGED against a build with the href
+  rewrite removed — i.e. against the exact reported failure. Negative-controlling
+  it is what exposed that; `TestSectionLinksCarryTheSourceScope` is the other
+  half. When a symptom has two possible causes, control the test against BOTH.
+- **CodeRabbit posts a "Review limit reached" comment when its plan's quota is
+  exhausted, and then simply does not review.** Two pushes on #807 drew no
+  review at all and it looked like a clean pass. **"No comments" is not
+  "approved"** — check for the rate-limit notice before reading silence as
+  agreement. (Gemini has its own daily quota; same trap, different shape.)
