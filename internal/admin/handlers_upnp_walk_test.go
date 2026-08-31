@@ -1,11 +1,15 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestUPnPWalkSnapshotReportsOnlyALiveWalk pins the shape the SSE gate
@@ -73,43 +77,143 @@ func TestUPnPServerRowsCarryTheFacetID(t *testing.T) {
 	if !strings.Contains(fn, "row.dataset.sourceId === data.sourceId") {
 		t.Error("applyUpnpWalk no longer matches on the facet id")
 	}
-	// The falling edge refetches once, so the counts the walk just changed
-	// land without a reload — and ONCE, not per frame.
-	if !strings.Contains(fn, "if (upnpWasWalking && !walking) void loadUpnpConfigured();") {
-		t.Error("applyUpnpWalk does not refresh the list when a walk ends; " +
+	// The transition is recorded BEFORE anything can return early: a frame
+	// arriving while the list is still loading would otherwise leave it
+	// unrecorded, and the closing frame would find no rising edge to fall
+	// from — so the refresh never runs.
+	// The boundary is the first RETURN, not the first DOM access. Checking
+	// "before the loop" passes against a version that returns early on an
+	// empty row list and records the state afterwards — which is exactly
+	// the bug, and exactly what that looser form let through.
+	// Comments stripped first. This repo comments densely and names the
+	// identifiers it discusses — the docblock on this very function says
+	// "before anything can return early", and a raw scan reads that prose
+	// as the return it is warning about. The sibling parity tests strip
+	// for the same reason; reusing their helper rather than a third copy.
+	fn = stripJSComments(fn)
+	prev := strings.Index(fn, "upnpWasWalking = walking")
+	if prev < 0 {
+		t.Fatal("applyUpnpWalk no longer records the walking state at all")
+	}
+	if ret := strings.Index(fn, "return"); ret >= 0 && ret < prev {
+		t.Error("applyUpnpWalk can return before recording the walking state; a " +
+			"frame arriving while the list is still loading would lose the " +
+			"transition, and the closing frame would find no rising edge to fall from")
+	}
+	// And the refetch happens once, on the falling edge, gated on the
+	// container — this handler runs on EVERY page, and only the UPnP page
+	// has a list to refresh.
+	if !strings.Contains(fn, "wasWalking && !walking") ||
+		!strings.Contains(fn, `getElementById("upnp-configured-list")`) ||
+		!strings.Contains(fn, "loadUpnpConfigured()") {
+		t.Error("applyUpnpWalk does not refresh the list once on the falling edge; " +
 			"\"Last walk\" and \"Routed tracks\" would stay stale until a reload")
 	}
 }
 
-// TestUPnPWalkEventIsGatedOnAWalkBeingInFlight pins that this event does
-// not turn the 500ms tick into a publish-every-tick.
+// TestUPnPWalkEventFollowsTheWalk drives the REAL SSE stream and asserts
+// on the frames it publishes, rather than on the shape of the source.
 //
-// It rides the fast tick only because its snapshot is atomic reads. The
-// sources event beside it looks like the natural home and is not: that
-// one issues a COUNT(*) per configured upstream, which is exactly why it
-// sits on the 30s tick.
-func TestUPnPWalkEventIsGatedOnAWalkBeingInFlight(t *testing.T) {
-	src := readFile(t, "handlers_events.go")
-	i := strings.Index(src, "case <-fastTk.C:")
-	if i < 0 {
-		t.Fatal("no fast tick in the SSE loop")
+// It covers three things a string match cannot: that an idle bridge
+// publishes nothing after the initial snapshot (the event rides the 500ms
+// tick, so an ungated publish would be four frames a second forever);
+// that a walk in flight does publish; and — the race — that a walk which
+// ENDS between the initial snapshot and the first tick still gets its
+// closing frame. Without that last one the client's progress line stays
+// up for the life of the connection.
+func TestUPnPWalkEventFollowsTheWalk(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+
+	var mu sync.Mutex
+	walking := true
+	items := int64(7)
+	srv.deps.UPnPWalkProgress = func() UPnPWalkStatus {
+		mu.Lock()
+		defer mu.Unlock()
+		return UPnPWalkStatus{Key: testUpstreamKey, Walking: walking, Items: items}
 	}
-	end := strings.Index(src[i:], "case <-medTk.C:")
-	if end < 0 {
-		t.Fatal("could not bound the fast-tick case")
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/api/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	fast := src[i : i+end]
-	if !strings.Contains(fast, "publishUPnPWalk()") {
-		t.Fatal("the walk event does not ride the fast tick; a progress counter " +
-			"that updates every 30s is not progress")
+	defer resp.Body.Close()
+
+	initial := readFrames(t, resp.Body, 11, 3*time.Second)
+	var opening *upnpWalkResponse
+	for _, f := range initial {
+		if f.event != "upnpwalk" {
+			continue
+		}
+		var got upnpWalkResponse
+		if err := json.Unmarshal([]byte(f.data), &got); err != nil {
+			t.Fatalf("decode upnpwalk: %v", err)
+		}
+		opening = &got
 	}
-	// The whole statement, brace included. A substring check on the
-	// condition alone passes against `walking || wasWalking || true`,
-	// which is precisely the mutation this is here to catch — verified by
-	// making it and watching the loose form stay green.
-	if !strings.Contains(fast, "if walking || wasWalking {") {
-		t.Error("the walk publish is not gated on a walk being in flight plus one " +
-			"final frame; an idle bridge would publish on every 500ms tick, and " +
-			"without the latch the last frame would say \"walking\" forever")
+	if opening == nil || !opening.Walking || opening.Items != 7 {
+		t.Fatalf("initial snapshot carried %+v, want the walk in flight", opening)
+	}
+
+	// End the walk. This is the race: it finishes after the initial
+	// snapshot said "walking" and before the first fast tick.
+	mu.Lock()
+	walking = false
+	mu.Unlock()
+
+	post := readFrames(t, resp.Body, 1, 5*time.Second)
+	var closing *upnpWalkResponse
+	for _, f := range post {
+		if f.event != "upnpwalk" {
+			continue
+		}
+		var got upnpWalkResponse
+		if err := json.Unmarshal([]byte(f.data), &got); err != nil {
+			t.Fatalf("decode upnpwalk: %v", err)
+		}
+		closing = &got
+	}
+	if closing == nil {
+		t.Fatalf("no closing frame after the walk ended; the client's progress "+
+			"line would stay up for the life of the connection (got %d frames: %v)",
+			len(post), post)
+	}
+	if closing.Walking {
+		t.Errorf("closing frame still says walking: %+v", closing)
+	}
+}
+
+// TestUPnPWalkEventIsSilentOnAnIdleBridge is the other half: the event
+// rides the 500ms tick, so an ungated publish would be four frames a
+// second on a bridge doing nothing.
+func TestUPnPWalkEventIsSilentOnAnIdleBridge(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.deps.UPnPWalkProgress = func() UPnPWalkStatus { return UPnPWalkStatus{} }
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/api/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if got := readFrames(t, resp.Body, 11, 3*time.Second); len(got) != 11 {
+		t.Fatalf("initial snapshot incomplete: %d frames", len(got))
+	}
+	// ~4 fast ticks. Diff suppression alone would not save an ungated
+	// publish here, because the first one would already have been sent.
+	for _, f := range readFrames(t, resp.Body, 1, 2*time.Second) {
+		if f.event == "upnpwalk" {
+			t.Errorf("idle bridge published an upnpwalk frame: %s", f.data)
+		}
 	}
 }

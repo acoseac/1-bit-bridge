@@ -232,9 +232,20 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// the client ever sees says "walking", and the progress line never
 	// clears.
 	var lastUPnPWalk []byte
+	// wasWalking is "the last frame we published said walking", set by the
+	// publisher itself rather than by the tick that calls it.
+	//
+	// The obvious form — assigning it in the fast-tick case — has a hole:
+	// the INITIAL snapshot can publish walking=true, the walk can then
+	// finish before the first tick, and the tick sees walking=false with
+	// wasWalking still false, so no closing frame is ever sent and the
+	// client's progress line stays up for the life of the connection.
+	// Setting it where the snapshot is taken closes that by construction.
 	wasWalking := false
 	publishUPnPWalk := func() error {
-		return marshalAndPublish("upnpwalk", s.getUPnPWalkSnapshot(), &lastUPnPWalk)
+		snap := s.getUPnPWalkSnapshot()
+		wasWalking = snap.Walking
+		return marshalAndPublish("upnpwalk", snap, &lastUPnPWalk)
 	}
 
 	// Initial snapshot — fires synchronously after headers so the
@@ -312,11 +323,13 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 			// after it ends — costs a publish.
 			walking := s.deps.UPnPWalkProgress != nil && s.deps.UPnPWalkProgress().Walking
 			if walking || wasWalking {
+				// publishUPnPWalk updates wasWalking from the snapshot it
+				// takes, so the closing frame flips it false and the next
+				// tick falls through.
 				if err := publishUPnPWalk(); err != nil {
 					return
 				}
 			}
-			wasWalking = walking
 		case <-medTk.C:
 			if err := publishStats(); err != nil {
 				return

@@ -2684,21 +2684,32 @@ function upnpConfiguredRowHTML(s) {
  */
 let upnpWasWalking = false;
 function applyUpnpWalk(data) {
-  const rows = document.querySelectorAll(".upnp-upstream-row");
-  if (!rows.length) return;
   const walking = !!(data && data.walking);
+  // Recorded BEFORE anything can return early. A frame arriving while the
+  // list is still loading would otherwise leave the transition
+  // unrecorded, and the closing frame would then find no rising edge to
+  // fall from — so the refresh that makes "Last walk" current never runs.
+  const wasWalking = upnpWasWalking;
+  upnpWasWalking = walking;
+
+  const rows = document.querySelectorAll(".upnp-upstream-row");
   for (const row of rows) {
     const line = row.querySelector(".upnp-walk-live");
     if (!line) continue;
     const mine = walking && data.sourceId && row.dataset.sourceId === data.sourceId;
     line.hidden = !mine;
     if (mine) {
-      const n = Number(data.items || 0).toLocaleString();
-      line.textContent = `Walking now — ${n} ${Number(data.items) === 1 ? "item" : "items"} so far…`;
+      const count = Number(data.items || 0);
+      line.textContent =
+        `Walking now — ${count.toLocaleString()} ${count === 1 ? "item" : "items"} so far…`;
     }
   }
-  if (upnpWasWalking && !walking) void loadUpnpConfigured();
-  upnpWasWalking = walking;
+  // Gated on the container, not on the rows: this handler runs on EVERY
+  // page (the SSE stream is shared), and only the UPnP page has a list to
+  // refresh.
+  if (wasWalking && !walking && document.getElementById("upnp-configured-list")) {
+    void loadUpnpConfigured();
+  }
 }
 
 // loadUpnpDiscovered fetches /api/upnp/discovered and renders the
