@@ -19,6 +19,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -737,7 +738,12 @@ func (s *Server) getCompositionSnapshot() compositionResponse {
 // Online is only meaningful when Monitored: a manual-URL-only upstream has
 // no SSDP presence to watch, so it's badged "manual", not a false "offline".
 type sourceServerRow struct {
-	Name         string `json:"name"`
+	Name string `json:"name"`
+	// SourceID is the facet id the sidebar's UPnP rows link to, so the
+	// live dot updates can match on identity rather than on the
+	// operator-editable display name. Empty for a row whose stable key
+	// the provider did not report.
+	SourceID     string `json:"sourceId,omitempty"`
 	RoutedTracks int    `json:"routedTracks"`
 	Online       bool   `json:"online"`
 	Monitored    bool   `json:"monitored"`
@@ -854,12 +860,16 @@ func (s *Server) getSourcesSnapshot(ctx context.Context) sourcesResponse {
 				n = budget
 			}
 			budget -= n
-			resp.Servers = append(resp.Servers, sourceServerRow{
+			row := sourceServerRow{
 				Name:         srv.Name,
 				RoutedTracks: n,
 				Online:       srv.Discovered,
 				Monitored:    srv.ConfiguredUDN != "",
-			})
+			}
+			if srv.StableKey != "" {
+				row.SourceID = librarycat.SourceID(srv.StableKey)
+			}
+			resp.Servers = append(resp.Servers, row)
 		}
 	}
 	return resp

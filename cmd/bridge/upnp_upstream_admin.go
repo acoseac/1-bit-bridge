@@ -117,7 +117,12 @@ func (a *upnpAdminAdapter) ConfiguredServers(ctx context.Context) []admin.UPnPUp
 	out := make([]admin.UPnPUpstreamServerState, 0, len(cfg.UPnPUpstream.Servers))
 	for _, srv := range cfg.UPnPUpstream.Servers {
 		row := admin.UPnPUpstreamServerState{
-			Name:          srv.Name,
+			Name: srv.Name,
+			// The routing key, so the sources snapshot can derive the same
+			// source id the sidebar links to. Computed here because this is
+			// where the config row is in hand — the DTO carries the device
+			// UDN, which is a different string (see admin.UPnPSource).
+			StableKey:     upnpingest.StableServerKey(srv),
 			ConfiguredUDN: srv.UDN,
 			ManualURL:     srv.ManualDescriptionURL,
 			// The three editable YAML fields, echoed verbatim so the

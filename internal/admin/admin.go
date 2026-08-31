@@ -296,6 +296,19 @@ type Deps struct {
 	// bridge couldn't ask would be worse than letting the user try.
 	UPnPHostOnline func(udn string) bool
 
+	// UPnPSources lists the configured upstream MediaServers for the
+	// player's source facet: the routing key their tracks carry, a
+	// display name, and current reachability. Config + SSDP cache only
+	// — no DB — so the click-driven source panel costs nothing.
+	//
+	// Separate from UPnPHostOnline because that one takes the DEVICE's
+	// UDN while the catalog only ever holds the ingest's stable routing
+	// key; see UPnPSource for why those differ and what goes wrong when
+	// one is passed to the other. Nil-safe: absent → the facet reports
+	// only the filesystem source, and any routed tracks show as coming
+	// from an unnamed upstream.
+	UPnPSources func() []UPnPSource
+
 	// ProxyUPnPAudio streams an upstream UPnP MediaServer's bytes for a
 	// routed track, Range-preserving and bit-exact. Wired to the SAME
 	// upnpproxy.Proxy the /v1 download fast-path and the DLNA file
@@ -1505,6 +1518,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/player/genres", s.apiPlayerGenres)
 	mux.HandleFunc("GET /api/player/composers", s.apiPlayerComposers)
 	mux.HandleFunc("GET /api/player/stats", s.apiPlayerStats)
+	mux.HandleFunc("GET /api/player/sources", s.apiPlayerSources)
 	// Playlists and smart mixes for the player. Separate from the
 	// operator-facing /api/playlists and /api/smart-playlists, which are
 	// summaries-only by design: these carry cover refs and hydrate their

@@ -392,6 +392,39 @@ function renderDistBar(barId, legendId, segs, total, kind) {
 // (replaceChildren) so the 30 s tick can't stack duplicate rows, and
 // visibility is assigned in both directions so removing the last upstream
 // re-hides the block.
+/**
+ * Repaint the sidebar's UPnP dots from the `sources` event.
+ *
+ * Matched on the source ID the server stamps into both the nav row and
+ * this payload — not on the display name, which is operator-editable and
+ * would silently stop matching after a rename.
+ *
+ * A row the payload does not mention is LEFT ALONE rather than blanked:
+ * the event lists configured upstreams, and anything else on that row is
+ * a state this function has no opinion about.
+ */
+function applySidebarSourceStatus(servers) {
+  const nav = document.getElementById("primary-nav");
+  if (!nav) return;
+  const byID = new Map();
+  for (const srv of servers) {
+    if (srv && srv.sourceId) byID.set(srv.sourceId, !!srv.online);
+  }
+  for (const a of nav.querySelectorAll("[data-source-id]")) {
+    const online = byID.get(a.dataset.sourceId);
+    if (online === undefined) continue;
+    const box = a.querySelector(".nav-source-status");
+    if (!box) continue;
+    box.classList.toggle("source-online", online);
+    box.classList.toggle("source-offline", !online);
+    const word = online ? "Online" : "Offline";
+    const label = box.querySelector(".sr-only");
+    if (label) label.textContent = `, ${word}`;
+    const name = a.querySelector("span:not(.nav-source-status):not(.sr-only)");
+    a.title = `${name ? name.textContent : a.dataset.sourceId} — ${word}`;
+  }
+}
+
 function applySources(data) {
   if (!data) return;
 
@@ -401,11 +434,17 @@ function applySources(data) {
   const routedTotal = data.routedTotal || 0;
   if (note) note.hidden = routedTotal === 0;
 
+  const servers = Array.isArray(data.servers) ? data.servers : [];
+  // The sidebar's UPnP group is server-rendered on every page, so its dots
+  // are only as fresh as the last full load — and a boosted navigation
+  // never reloads the shell. This event already carries the liveness and
+  // already fires on every page, so refreshing them here costs nothing and
+  // keeps a dropped upstream from staying green for the whole session.
+  applySidebarSourceStatus(servers);
+
   const list = document.getElementById("sources-list");
   const block = document.getElementById("sources-block");
   if (!list || !block) return;
-
-  const servers = Array.isArray(data.servers) ? data.servers : [];
   // The breakdown only earns its space when a UPnP upstream is actually in
   // the mix; a pure-filesystem bridge shows nothing but its headline total.
   const hasUPnP = !!data.upnpEnabled && (servers.length > 0 || routedTotal > 0);

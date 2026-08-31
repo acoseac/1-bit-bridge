@@ -3234,3 +3234,38 @@ label.checkbox.tray-switch {
   font-size: var(--text-sm);
 }
 .resume-banner p { margin: 0; flex: 1 1 16rem; }
+
+/* ---- UPnP sources in the sidebar ---- */
+
+/* The status that rides each upstream's nav row.
+ *
+ * #primary-nav a is already position:relative (for the active entry's
+ * ::before stub), so the .sr-only word inside is contained and cannot
+ * escape to extend the page — the trap that made the whole document
+ * scroll sideways when this lived in the player's own scrolling rail.
+ *
+ * flex:0 0 auto because `#primary-nav a > span` sets overflow:hidden and
+ * text-overflow:ellipsis for the NAME; without it a long server name
+ * would squeeze the dot away instead of truncating itself.
+ */
+.nav-source-status {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+.nav-source-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+/* Offline is a RING, online a filled disc. The shape is what carries the
+ * state in greyscale and for a red/green-colourblind reader; colour is a
+ * second channel, and the word itself is in the accessible name. */
+.nav-source-status.source-online { color: var(--ok); }
+.nav-source-status.source-offline { color: var(--danger); }
+.nav-source-status.source-offline .nav-source-dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.5px currentcolor;
+}

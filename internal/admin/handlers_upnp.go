@@ -148,6 +148,12 @@ type UPnPUpstreamServerState struct {
 	RootObjectID           string   `json:"rootObjectID,omitempty"`
 	SkipTopLevelContainers []string `json:"skipTopLevelContainers,omitempty"`
 
+	// StableKey is upnpingest.StableServerKey for this row — the value
+	// upnp_track_routing.server_udn holds, which is NOT the device UDN
+	// (see admin.UPnPSource). Carried so the sources snapshot can derive
+	// the same source id the sidebar links to, without a second lookup
+	// that could disagree.
+	StableKey        string    `json:"stableKey,omitempty"`
 	Discovered       bool      `json:"discovered"`
 	ResolvedUDN      string    `json:"resolvedUDN,omitempty"`
 	FriendlyName     string    `json:"friendlyName,omitempty"`

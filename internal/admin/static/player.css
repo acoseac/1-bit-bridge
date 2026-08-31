@@ -1085,3 +1085,21 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   background: var(--accent-soft); color: var(--accent);
 }
 .tile-variant-stale { background: var(--accent-warm-tint); color: var(--accent-warm); }
+
+/* ---- Library sources ---- */
+
+/* Only the scope banner remains here. The sources themselves live in the
+ * shell sidebar's UPnP group, which is operator chrome and therefore
+ * app.css territory — player.css must not reach into it, the same
+ * one-way rule its header states in the other direction. */
+
+/* The active-filter banner. Deliberately loud enough to notice on a
+ * grid that otherwise looks like a library missing most of its music,
+ * and it always carries the way out. */
+.scope-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 12px; padding: 7px 11px; border-radius: 8px;
+  background: var(--accent-soft); font-size: 0.82rem;
+}
+.scope-label { font-weight: 600; }
+.scope-clear { color: var(--accent); text-decoration: underline; }

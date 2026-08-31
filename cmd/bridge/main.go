@@ -3714,6 +3714,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// update interlock) rather than failing.
 		ProxyUPnPAudio:       playerUPnPAudioAdapter(upnpLC, logger),
 		UPnPHostOnline:       playerHostOnlineAdapter(upnpLC),
+		UPnPSources:          playerUPnPSourcesAdapter(upnpLC, cfgHolder),
 		BeginPlaybackSession: playerSessionAdapter(sessions),
 		AdminAuth:            adminAuthStore,
 		LoginLimiter:         loginLimiter,

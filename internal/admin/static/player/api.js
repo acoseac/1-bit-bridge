@@ -9,6 +9,37 @@
 const inflight = new Map();
 
 /** GET JSON, cancelling any earlier request under the same key. */
+/**
+ * The id -> display-name map for the source facet, fetched once.
+ *
+ * The scope banner needs a NAME and nothing else, and it renders on every
+ * scoped grid — so without this, changing a sort or paging an artist list
+ * re-fetched the whole source list each time. Worse, it shares getJSON's
+ * "sources" key with the Sources page itself, so the two could abort each
+ * other during a fast navigation.
+ *
+ * Deliberately NOT a cache over api.sources(). That response also carries
+ * LIVENESS, and the Sources page exists to show whether an upstream is up
+ * right now; memoising it would freeze the status dot for the life of the
+ * tab. Names are the stable half, so only the names are kept — renaming an
+ * upstream is a config edit, and its ingest needs a restart regardless.
+ *
+ * A failure clears the memo so the next banner retries rather than
+ * inheriting a rejection for the rest of the session.
+ */
+let sourceNamesPromise = null;
+function sourceNames() {
+  if (!sourceNamesPromise) {
+    sourceNamesPromise = getJSON("/api/player/sources", { key: "source-names" })
+      .then((d) => new Map((d.sources || []).map((s) => [s.id, s.name])))
+      .catch((err) => {
+        sourceNamesPromise = null;
+        throw err;
+      });
+  }
+  return sourceNamesPromise;
+}
+
 export async function getJSON(url, { key } = {}) {
   if (key && inflight.has(key)) {
     inflight.get(key).abort();
@@ -76,6 +107,8 @@ export const api = {
   albums: (params) => getJSON(`/api/player/albums?${qs(params)}`, { key: "albums" }),
   album: (id) => getJSON(`/api/player/albums/${encodeURIComponent(id)}`, { key: "detail" }),
   artists: (params) => getJSON(`/api/player/artists?${qs(params)}`, { key: "artists" }),
+  sources: () => getJSON("/api/player/sources", { key: "sources" }),
+  sourceNames: () => sourceNames(),
   artist: (id) => getJSON(`/api/player/artists/${encodeURIComponent(id)}`, { key: "detail" }),
   genres: (params) => getJSON(`/api/player/genres?${qs(params)}`, { key: "axis" }),
   composers: (params) => getJSON(`/api/player/composers?${qs(params)}`, { key: "axis" }),

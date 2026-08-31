@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -62,7 +63,17 @@ type pageData struct {
 	// player, two rail entries would light at once. layout.html branches
 	// on this; boot.js applies the same rule client-side for navigations
 	// that never reach the server.
-	PlayerNav       string
+	PlayerNav string
+	// UPnPSources are the operator's configured upstream MediaServers,
+	// listed as their own sidebar group. Empty on a bridge with none, and
+	// the group is then not rendered at all.
+	UPnPSources []sidebarSourceRow
+	// SourceCurrent is true when one of those rows is the current view.
+	// Browse reads it to stand DOWN: every player route renders the player
+	// section, so without this both Browse and the source row would light,
+	// and TestPrimaryNavHighlightsEveryEntry would fail — correctly, since
+	// two "you are here" marks tell the reader nothing.
+	SourceCurrent   bool
 	LibraryName     string
 	Fingerprint     string
 	ServerVersion   string
@@ -128,6 +139,59 @@ func activePlayerNav(active string, r *http.Request) string {
 	return playerNavEntry(section)
 }
 
+// sidebarSourceRow is one upstream in the sidebar's UPNP group.
+//
+// Status is a STRING, not the *bool the API carries, because a Go
+// template's `if` on a pointer tests non-nil — so a pointer to false
+// reads as true and every offline upstream would render online. Resolving
+// it here leaves the template with a plain three-way comparison.
+type sidebarSourceRow struct {
+	ID      string
+	Name    string
+	Status  string // "online" | "offline" | "unknown"
+	Label   string // the human word, for the accessible name and the tooltip
+	Current bool
+}
+
+// sidebarSources lists the configured upstreams for the nav group.
+//
+// Config plus the SSDP cache, no DB and no catalog — this runs on every
+// page render, including operator pages that have nothing to do with the
+// library.
+//
+// It lists what the operator CONFIGURED rather than what has been
+// ingested. That is the opposite of the Sources page's rule, and
+// deliberately so: this is a list of their upstreams, and an upstream
+// that has not been walked yet is exactly when its status is most worth
+// seeing. Its scoped grid is empty until the first walk, which is the
+// honest answer rather than a hidden one.
+func (s *Server) sidebarSources(r *http.Request) []sidebarSourceRow {
+	if s.deps.UPnPSources == nil {
+		return nil
+	}
+	srcs := s.deps.UPnPSources()
+	if len(srcs) == 0 {
+		return nil
+	}
+	// safeQuery, not r.URL.Query: a `+` in a source id would decode to a
+	// space. Ids are hex today, so this is guarding the rule rather than a
+	// live bug — but the rule is the one this console has broken twice.
+	want := safeQuery(r).Get("source")
+	out := make([]sidebarSourceRow, 0, len(srcs))
+	for _, src := range srcs {
+		id := librarycat.SourceID(src.Key)
+		status, label := "offline", "Offline"
+		if src.Online {
+			status, label = "online", "Online"
+		}
+		out = append(out, sidebarSourceRow{
+			ID: id, Name: src.Name, Status: status, Label: label,
+			Current: want != "" && want == id,
+		})
+	}
+	return out
+}
+
 func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, active string, data any) {
 	s.renderPageStatus(w, r, active, http.StatusOK, data)
 }
@@ -165,10 +229,20 @@ func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, active
 		w.Header().Set("Content-Security-Policy", "frame-ancestors 'self'")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 	}
+	sources := s.sidebarSources(r)
+	sourceCurrent := false
+	for _, src := range sources {
+		if src.Current {
+			sourceCurrent = true
+			break
+		}
+	}
 	envelope := pageData{
 		ActiveTab:       active,
 		ActiveSection:   sectionForTab(active),
 		PlayerNav:       activePlayerNav(active, r),
+		UPnPSources:     sources,
+		SourceCurrent:   sourceCurrent,
 		LibraryName:     cfg.LibraryName,
 		Fingerprint:     s.deps.Fingerprint,
 		ServerVersion:   version.ServerVersion,

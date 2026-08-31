@@ -139,13 +139,6 @@ function renderSections() {
   }
 }
 
-/**
- * One delegated click handler for every internal link.
- *
- * Modifier-clicks and middle-clicks fall through to the browser
- * untouched — intercepting them would break "open in a new tab", which
- * is the one browser affordance a library grid most needs.
- */
 function wireLinks() {
   document.addEventListener("click", (e) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -599,7 +592,15 @@ function updateSidebarNav(section) {
   // unrendered. CSS.escape would also fix that; not building the selector
   // at all is one fewer thing to remember.
   const links = [...nav.querySelectorAll("a")];
-  const match = links.find((a) => a.dataset.playerSection === owner) ||
+  // A source scope wins over Browse. Both would otherwise light — every
+  // player route renders the player section — and two "you are here"
+  // marks tell the reader nothing. Same rule the server applies through
+  // pageData.SourceCurrent, restated here for the navigations it never
+  // sees. Compared as a VALUE, like `section` above: a source id off the
+  // query string must not be interpolated into a selector.
+  const source = new URLSearchParams(location.search).get("source") || "";
+  const match = (source !== "" && links.find((a) => a.dataset.sourceId === source)) ||
+    links.find((a) => a.dataset.playerSection === owner) ||
     links.find((a) => a.dataset.tab === "player" && !a.dataset.playerSection) ||
     null;
   for (const a of links) {
