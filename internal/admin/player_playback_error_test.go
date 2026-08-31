@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // MEDIA_ERR_SRC_NOT_SUPPORTED does not mean "this browser cannot decode
@@ -28,7 +30,10 @@ func TestSourceFailureClassifierMapsTheServersOwnCodes(t *testing.T) {
 	fn := extractJSFunction(t,
 		readFile(t, filepath.Join("static", "player", "audio.js")), "classifySourceFailure")
 
-	script := fn + `
+	// The constant lives outside the extracted function, so the harness
+	// supplies it. Long here: this test is about the status mapping, and a
+	// deadline that could fire would make it about timing instead.
+	script := "const PROBE_TIMEOUT_MS = 60000;\n" + fn + `
 globalThis.AbortController = class { abort() {} get signal() { return null; } };
 const run = async (status) => {
   globalThis.fetch = async () => ({ ok: status >= 200 && status < 300, status });
@@ -132,14 +137,54 @@ func TestUPnPGroupLinksToItsManagementPage(t *testing.T) {
 	}
 }
 
+// TestStalePlaybackFailuresTouchNothing pins that a failure handler
+// which resumes after the reader has moved on writes no shared state.
+//
+// The probe is a round trip, and everything after it — the error text,
+// the skip-storm counter, the queue position — belongs to whatever is
+// playing NOW. Gemini caught the last line of this (the advance);
+// CodeRabbit caught the whole stretch, which is the one that matters:
+// guarding only the timer still let a stale handler overwrite the
+// message and count a skip against the wrong track.
+func TestStalePlaybackFailuresTouchNothing(t *testing.T) {
+	src := readFile(t, filepath.Join("static", "player", "audio.js"))
+	fn := extractJSFunction(t, src, "handleSourceError")
+
+	// Captured BEFORE the await, or it describes the state it was meant
+	// to detect a change in.
+	at := strings.Index(fn, "const at = playbackGen")
+	await := strings.Index(fn, "await classifySourceFailure(")
+	if at < 0 || await < 0 || at > await {
+		t.Fatal("handleSourceError does not capture the playback generation " +
+			"before awaiting the probe")
+	}
+	if !strings.Contains(fn, "if (at !== playbackGen) return;") {
+		t.Error("handleSourceError no longer discards a stale result; the error " +
+			"text and the skip counter would be written against another track")
+	}
+	// A counter, not track identity: playQueue clones its tracks, so
+	// identity catches a replaced queue and a different selection but NOT
+	// a re-load of the same track — a reader retrying the row that just
+	// failed would have the fresh attempt clobbered by the stale one.
+	for _, site := range []string{"function load(", "export function clearQueue("} {
+		i := strings.Index(src, site)
+		if i < 0 {
+			t.Fatalf("%s not found — this test has stopped checking anything", site)
+		}
+		end := strings.Index(src[i:], "\n}\n")
+		if end < 0 || !strings.Contains(src[i:i+end], "playbackGen += 1") {
+			t.Errorf("%s does not bump the playback generation; a suspended "+
+				"failure handler would not notice the track changed", site)
+		}
+	}
+}
+
 // TestFailureAutoAdvanceIsGuarded pins that the post-failure skip cannot
 // act on a decision the reader has already changed.
 //
 // 1200ms is long enough to pause, pick another track, or replace the
-// queue — and advance() steps from the CURRENT index, so a timer firing
-// afterwards skips past whatever they chose. Predates this change (the
-// timer was unguarded where it stood before), but the probe added ahead
-// of it widens the window, which is reason enough to close it here.
+// queue. Both conditions are needed: the generation catches a track
+// change, `playing` catches a plain pause, which changes no track at all.
 func TestFailureAutoAdvanceIsGuarded(t *testing.T) {
 	fn := extractJSFunction(t,
 		readFile(t, filepath.Join("static", "player", "audio.js")), "handleSourceError")
@@ -152,11 +197,71 @@ func TestFailureAutoAdvanceIsGuarded(t *testing.T) {
 		t.Error("the auto-advance does not check that playback is still running; " +
 			"pausing after a failure would be undone 1200ms later")
 	}
-	// Identity on the TRACK, not the index: a replaced queue can hold a
-	// different object at the same position, and an index check would
-	// pass while pointing at something else entirely.
-	if !strings.Contains(body, "state.queue[state.index] === track") {
-		t.Error("the auto-advance does not check that the failed track is still " +
-			"the current one; picking another track would be skipped past")
+	if !strings.Contains(body, "at === playbackGen") {
+		t.Error("the auto-advance does not check the playback generation; " +
+			"picking another track would be skipped past")
+	}
+}
+
+// TestSourceProbeCannotHangForever pins the deadline.
+//
+// A source that accepts the connection and then sends no headers leaves
+// fetch pending — and with it the error message, the skip and the
+// advance. The player would simply stop, with nothing on screen to say
+// why. The abort turns that into an ordinary "error", which the caller
+// already handles.
+func TestSourceProbeCannotHangForever(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; this test executes the shipped client source")
+	}
+	src := readFile(t, filepath.Join("static", "player", "audio.js"))
+	fn := extractJSFunction(t, src, "classifySourceFailure")
+	if !strings.Contains(src, "PROBE_TIMEOUT_MS =") {
+		t.Fatal("no probe deadline constant in audio.js")
+	}
+
+	// A fetch that NEVER settles on its own; only the abort can end it.
+	script := "const PROBE_TIMEOUT_MS = 50;\n" + fn + `
+globalThis.fetch = (url, opts) => new Promise((_, reject) => {
+  opts.signal.addEventListener("abort", () => reject(new Error("aborted")));
+});
+globalThis.AbortController = class {
+  constructor() { this.signal = new EventTarget(); }
+  abort() { this.signal.dispatchEvent(new Event("abort")); }
+};
+const t0 = Date.now();
+const reason = await classifySourceFailure("/x");
+console.log(JSON.stringify({ reason, elapsedUnderASecond: Date.now() - t0 < 1000 }));
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deadline.mjs")
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A hard ceiling of our own: without the deadline under test the
+	// script's await never settles, and while node happens to detect that
+	// and exit, relying on it would make a HANG look like an ordinary
+	// failure — or hang the suite on a runtime that does not.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, node, path).CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("the probe never returned — a source that sends no headers "+
+			"would stall the player with nothing on screen:\n%s", out)
+	}
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	var got struct {
+		Reason string `json:"reason"`
+		Quick  bool   `json:"elapsedUnderASecond"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("client returned %q: %v", out, err)
+	}
+	if got.Reason != "error" || !got.Quick {
+		t.Errorf("a never-answering source gave %q after a long wait (quick=%v); "+
+			"the player would stall with nothing on screen", got.Reason, got.Quick)
 	}
 }

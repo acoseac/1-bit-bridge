@@ -30,6 +30,22 @@ const state = {
   albumArt: null,
 };
 
+// Bumped every time the CURRENT track changes — a load, or the queue
+// being cleared. Anything that suspends and then wants to touch playback
+// state captures it first and bails when it no longer matches.
+//
+// A counter rather than comparing the track object: playQueue clones its
+// tracks, so identity catches a replaced queue and a different selection,
+// but NOT the same track being re-loaded — a reader retrying the row that
+// just failed would have their fresh attempt clobbered by the stale one.
+let playbackGen = 0;
+
+// How long the failure probe waits for response HEADERS. Short, because
+// the source has ALREADY failed to load by the time it runs — this only
+// decides which of four messages the reader gets, and a stalled probe
+// would hold up the skip.
+const PROBE_TIMEOUT_MS = 4000;
+
 export function subscribe(fn) {
   listeners.add(fn);
   fn(snapshot());
@@ -129,7 +145,13 @@ function onError() {
  * only remaining explanation.
  */
 async function handleSourceError(track, src) {
+  const at = playbackGen;
   const reason = await classifySourceFailure(src);
+  // The probe is a round trip, so the reader can have moved on. Every
+  // line below writes shared playback state — the error text, the
+  // skip-storm counter, the queue position — so a stale handler must
+  // return having touched none of it.
+  if (at !== playbackGen) return;
   // Only a genuine decode failure is permanent. Marking the others would
   // keep a track dead for the rest of the session over a condition that
   // may have already cleared.
@@ -163,7 +185,10 @@ async function handleSourceError(track, src) {
   // Identity on the track, not the index: a replaced queue can hold a
   // different object at the same position.
   setTimeout(() => {
-    if (state.playing && state.queue[state.index] === track) {
+    // Both conditions: the generation catches a different track, a
+    // replaced queue and a re-load of this same one, while `playing`
+    // catches a plain pause, which changes no track at all.
+    if (state.playing && at === playbackGen) {
       advance(1, { auto: true });
     }
   }, 1200);
@@ -182,14 +207,21 @@ async function handleSourceError(track, src) {
 async function classifySourceFailure(url) {
   if (!url) return "error";
   const ctrl = new AbortController();
+  // A source that accepts the connection and then sends no headers would
+  // leave this pending forever — and with it the error message, the skip
+  // and the advance. Aborting on a deadline turns that into an ordinary
+  // "error", which the caller already handles.
+  const deadline = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
   try {
     const r = await fetch(url, { headers: { range: "bytes=0-0" }, signal: ctrl.signal });
+    clearTimeout(deadline);
     ctrl.abort();
     if (r.ok || r.status === 206) return "decode";
     if (r.status === 404 || r.status === 410) return "missing";
     if (r.status === 503) return "offline";
     return "error";
   } catch {
+    clearTimeout(deadline);
     ctrl.abort();
     return "error";
   }
@@ -237,6 +269,7 @@ export function removeAt(i) {
 }
 
 export function clearQueue() {
+  playbackGen += 1;
   state.el?.pause();
   state.queue = [];
   state.index = -1;
@@ -266,6 +299,7 @@ function load(index, { autoplay }) {
   if (!track) return;
   const target = resolvePlayable(track, audioURL);
   if (!target) return;
+  playbackGen += 1;
   state.index = index;
   state.degraded = target.degraded;
   state.seekable = true;

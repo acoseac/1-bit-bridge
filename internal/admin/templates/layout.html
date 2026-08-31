@@ -158,12 +158,12 @@
     {{if .UPnPSources}}
     {{- /* The group heading carries the way to MANAGE these servers.
         Without it the sidebar names two different UPnP things — this
-        group, which browses an upstream's music, and Server > UPnP, which
+        group, which browses an upstream's music, and Server → UPnP, which
         adds and rescans them — with nothing connecting the two. A reader
         looking for "add a server" has no reason to look under Server.
 
         A group action rather than a nav row of its own: it must not carry
-        aria-current, because Server > UPnP is the canonical entry for
+        aria-current, because Server → UPnP is the canonical entry for
         that page and exactly one entry may be marked (see
         TestPrimaryNavHighlightsEveryEntry). A row that never lights when
         you are on its own target would read as broken; a heading action
