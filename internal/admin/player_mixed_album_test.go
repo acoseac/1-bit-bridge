@@ -26,66 +26,72 @@ func TestAlbumTracksCarryTheirSource(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	seedHybridLibrary(t, srv.deps.Manifest)
 	withTestUpstream(srv, true)
+	albums := seededAlbumIDs(t, srv)
 
-	albumIDs := map[string]string{}
+	// Split holds one local track and one routed one.
+	if got := albumTrackSources(t, srv, albums, "Split"); len(got) != 2 {
+		t.Errorf("the mixed album reports %v, want both sources", got)
+	}
+	// Home is local only: every row resolves to local, and none of them
+	// carries the field on the wire.
+	if got := albumTrackSources(t, srv, albums, "Home"); len(got) != 1 ||
+		got[0] != librarycat.LocalSourceID {
+		t.Errorf("local-only album reports %v, want just the filesystem", got)
+	}
+	// Remote is upstream only, and DOES name its upstream.
+	if got := albumTrackSources(t, srv, albums, "Remote"); len(got) != 1 ||
+		got[0] != upstreamSourceID() {
+		t.Errorf("upstream-only album reports %v, want just the upstream", got)
+	}
+}
+
+// seededAlbumIDs maps album title to catalog id for the fixture library.
+func seededAlbumIDs(t *testing.T, srv *Server) map[string]string {
+	t.Helper()
 	_, body := playerGet(t, srv, "/api/player/albums?limit=50")
 	rows, _ := body["albums"].([]any)
+	out := make(map[string]string, len(rows))
 	for _, r := range rows {
 		m, _ := r.(map[string]any)
 		title, _ := m["title"].(string)
 		id, _ := m["id"].(string)
-		albumIDs[title] = id
+		out[title] = id
 	}
+	return out
+}
 
-	sourcesOf := func(title string) []string {
-		t.Helper()
-		id, ok := albumIDs[title]
-		if !ok {
-			t.Fatalf("album %q not in the seeded library: %v", title, albumIDs)
-		}
-		w, d := playerGet(t, srv, "/api/player/albums/"+id)
-		if w.Code != http.StatusOK {
-			t.Fatalf("album detail %s = %d", title, w.Code)
-		}
-		tracks, _ := d["tracks"].([]any)
-		if len(tracks) == 0 {
-			t.Fatalf("album %q returned no tracks", title)
-		}
-		seen := map[string]bool{}
-		var out []string
-		for _, tr := range tracks {
-			m, _ := tr.(map[string]any)
-			// The wire omits the field for a filesystem track; the client
-			// reads that absence as local, and so does this.
-			src, _ := m["sourceId"].(string)
-			if src == "" {
-				src = librarycat.LocalSourceID
-			}
-			if !seen[src] {
-				seen[src] = true
-				out = append(out, src)
-			}
-		}
-		return out
+// albumTrackSources returns the distinct sources one album's tracks come
+// from, in first-appearance order.
+func albumTrackSources(t *testing.T, srv *Server, albums map[string]string, title string) []string {
+	t.Helper()
+	id, ok := albums[title]
+	if !ok {
+		t.Fatalf("album %q not in the seeded library: %v", title, albums)
 	}
-
-	// Split holds one local track and one routed one.
-	mixed := sourcesOf("Split")
-	if len(mixed) != 2 {
-		t.Errorf("the mixed album reports %v, want both sources", mixed)
+	w, d := playerGet(t, srv, "/api/player/albums/"+id)
+	if w.Code != http.StatusOK {
+		t.Fatalf("album detail %s = %d", title, w.Code)
 	}
-
-	// Home is local only: every row resolves to local, and none of them
-	// carries the field on the wire.
-	if got := sourcesOf("Home"); len(got) != 1 || got[0] != librarycat.LocalSourceID {
-		t.Errorf("local-only album reports %v, want just the filesystem", got)
+	tracks, _ := d["tracks"].([]any)
+	if len(tracks) == 0 {
+		t.Fatalf("album %q returned no tracks", title)
 	}
-
-	// Remote is upstream only, and DOES name its upstream.
-	got := sourcesOf("Remote")
-	if len(got) != 1 || got[0] != upstreamSourceID() {
-		t.Errorf("upstream-only album reports %v, want just the upstream", got)
+	seen := map[string]bool{}
+	var out []string
+	for _, tr := range tracks {
+		m, _ := tr.(map[string]any)
+		// The wire omits the field for a filesystem track; the client
+		// reads that absence as local, and so does this.
+		src, _ := m["sourceId"].(string)
+		if src == "" {
+			src = librarycat.LocalSourceID
+		}
+		if !seen[src] {
+			seen[src] = true
+			out = append(out, src)
+		}
 	}
+	return out
 }
 
 // TestMixedAlbumUIIsGatedOnActuallyBeingMixed pins that the split view

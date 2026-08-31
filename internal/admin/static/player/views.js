@@ -120,7 +120,14 @@ function scopedRoot(root) {
 
 function scopedHref(path) {
   const source = new URLSearchParams(location.search).get("source");
-  return source ? `${path}?source=${encodeURIComponent(source)}` : path;
+  if (!source) return path;
+  // Built through URL rather than concatenated: every caller today passes
+  // a bare path, but the day one passes "/albums?sort=title" a naive
+  // append produces a second "?" and a URL that silently means nothing.
+  // This also replaces an existing source= rather than duplicating it.
+  const u = new URL(path, location.origin);
+  u.searchParams.set("source", source);
+  return u.pathname + u.search;
 }
 
 /**
@@ -331,7 +338,13 @@ async function appendDeleteAction(actions, tracks, label) {
   actions.appendChild(btn);
 }
 
-export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
+export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }) {
+  // Captured BEFORE any await. The album fetch is abort-guarded, but the
+  // source-name lookup behind the crumb root is MEMOISED — after its
+  // first resolution it is not a request at all, so abortReads cannot
+  // reach it and a superseded render would sail past to write its crumb
+  // over the page that replaced it.
+  const at = gen();
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -369,7 +382,9 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
     ? [scopedRoot(CRUMB_ROOTS.artists),
        { label: a.albumArtist || "Unknown artist", href: scopedHref(`/artist/${a.artistId}`) }]
     : [scopedRoot(CRUMB_ROOTS.albums)];
-  setCrumb(crumbs(await sourceRootedCrumbs(trail, structural), albumName));
+  const crumbChain = await sourceRootedCrumbs(trail, structural);
+  if (gen() !== at) return;
+  setCrumb(crumbs(crumbChain, albumName));
   // The heading names the album, the way every other detail page names
   // its subject. It used to stay the generic word "Album", which left the
   // page with no heading of its own and put a category label between the
@@ -434,6 +449,8 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
   // refresh: deletion is synchronous, so its numbers are already true
   // when the response lands. Generation deliberately does not use it —
   // see variants.js.
+  const tracksPanel = d.tracks.length ? await albumTracksPanel(d.tracks, art) : null;
+  if (gen() !== at) return;
   const variants = variantPanel(d.variants, { albumIds: [id] }, rerenderView, { plain: true });
   appendIf(view, detailTabs(`album:${id}`, [
     // An empty track list is a truthy <ol>, so detailTabs would keep the
@@ -443,7 +460,7 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
     {
       id: "tracks", label: "Tracks",
       panel: d.tracks.length
-        ? await albumTracksPanel(d.tracks, art)
+        ? tracksPanel
         : emptyState("No tracks here",
             "This album's files are gone from the library — a rescan will remove it."),
     },
@@ -827,6 +844,9 @@ function monogram(name) {
 
 
 export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail }) {
+  // See renderAlbum: captured before any await, because the memoised
+  // source-name lookup is not reachable by abortReads.
+  const at = gen();
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -846,7 +866,9 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail 
   // the failure without preventing it. An empty name is the reachable
   // case, and it would leave the page with no heading at all.
   const artistName = d.artist.name || "Unknown artist";
-  setCrumb(crumbs(await sourceRootedCrumbs(trail, [scopedRoot(CRUMB_ROOTS.artists)]), artistName));
+  const artistCrumbs = await sourceRootedCrumbs(trail, [scopedRoot(CRUMB_ROOTS.artists)]);
+  if (gen() !== at) return;
+  setCrumb(crumbs(artistCrumbs, artistName));
   setAxisTitle(artistName);
   const portrait = d.hasImage
     ? artistImageURL(d.artist.artistMBID, 500, d.artist.imageVersion)
@@ -942,8 +964,25 @@ export async function renderAxisAlbums(view, ctx, kind) {
   // flight — and it survives the lookup failing, which is the case
   // where a way back matters most.
   const root = kind === "genre" ? CRUMB_ROOTS.genres : CRUMB_ROOTS.composers;
-  const chain = await sourceRootedCrumbs(ctx.trail, [scopedRoot(root)]);
-  ctx.setCrumb(crumbs(chain));
+  const base = crumbAncestors(ctx.trail, [scopedRoot(root)]);
+  ctx.setCrumb(crumbs(base));
+
+  // The source root is a SECOND paint, not a delay on the first. Awaiting
+  // the name before showing anything would have cost exactly the property
+  // the comment above describes — a crumb on screen while a lookup is in
+  // flight — and this one is a lookup too.
+  const myGen = ctx.gen();
+  let chain = base;
+  const rooted = await sourceRootedCrumbs(ctx.trail, [scopedRoot(root)]);
+  if (ctx.gen() !== myGen) return;
+  // Compared by LENGTH, not by reference: sourceRootedCrumbs builds its
+  // own array from the same ancestors, so it is never the same object
+  // even when it added nothing — and the only thing it can add is the one
+  // prepended root.
+  if (rooted.length !== base.length) {
+    chain = rooted;
+    ctx.setCrumb(crumbs(chain));
+  }
 
   // The label lookup is a second round trip, so the route can change
   // under it. api.genres/api.composers share the "axis" key and so abort
@@ -953,7 +992,6 @@ export async function renderAxisAlbums(view, ctx, kind) {
   // is what route() bumps on every navigation, so comparing it is the
   // reliable test rather than relying on which requests happen to share
   // a key.
-  const myGen = ctx.gen();
   let label = "";
   try {
     const r = await (kind === "genre" ? api.genres({ limit: 200 }) : api.composers({ limit: 200 }));

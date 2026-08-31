@@ -1,7 +1,10 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -229,7 +232,15 @@ func TestDetailLinksCarryTheSourceScope(t *testing.T) {
 	if !strings.Contains(sh, "location.search") {
 		t.Error("scopedHref no longer reads the live URL")
 	}
-	if !strings.Contains(sh, "encodeURIComponent(source)") {
+	// The VALUE must be encoded, but not by a named mechanism: URL's
+	// searchParams.set encodes inherently, and pinning encodeURIComponent
+	// would have failed a strictly better implementation. What must never
+	// appear is the raw value interpolated into a template string.
+	if strings.Contains(sh, "${source}") {
+		t.Error("scopedHref interpolates the raw source into the href")
+	}
+	if !strings.Contains(sh, `searchParams.set("source"`) &&
+		!strings.Contains(sh, "encodeURIComponent(source)") {
 		t.Error("scopedHref does not encode the source into the href")
 	}
 }
@@ -253,5 +264,56 @@ func TestCrumbsAreRootedAtTheSource(t *testing.T) {
 	if !strings.Contains(fn, "if (!name) return items") {
 		t.Error("an unresolvable source no longer degrades to no root; the crumb " +
 			"would show a placeholder where a real name belongs")
+	}
+}
+
+// TestScopedHrefPreservesAnExistingQuery runs the SHIPPED function under
+// node against a stubbed location.
+//
+// Every caller today passes a bare path, so this is forward-defense — but
+// the failure it prevents is silent: appending "?source=…" to a path that
+// already carries a query produces a second "?" and a URL that means
+// nothing, and nothing in the UI would look wrong until a link was
+// followed.
+func TestScopedHrefPreservesAnExistingQuery(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; this test executes the shipped client source")
+	}
+	fn := extractJSFunction(t,
+		readFile(t, filepath.Join("static", "player", "views.js")), "scopedHref")
+
+	script := fn + `
+globalThis.location = { search: "?source=abc%20def", origin: "http://x" };
+console.log(JSON.stringify([
+  scopedHref("/album/1"),
+  scopedHref("/albums?sort=title"),
+  scopedHref("/albums?source=stale"),
+]));
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scoped.mjs")
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	var got []string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("client returned %q: %v", out, err)
+	}
+	want := []string{
+		"/album/1?source=abc+def",
+		// The existing parameter survives and the separator is "&".
+		"/albums?sort=title&source=abc+def",
+		// A stale scope already on the path is REPLACED, not duplicated.
+		"/albums?source=abc+def",
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("scopedHref case %d = %q, want %q", i, got[i], w)
+		}
 	}
 }
