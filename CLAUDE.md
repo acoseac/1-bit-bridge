@@ -2938,3 +2938,42 @@ bump, no `PROTOCOL.md` change, no iOS mirror, no migration.
   review at all and it looked like a clean pass. **"No comments" is not
   "approved"** — check for the rate-limit notice before reading silence as
   agreement. (Gemini has its own daily quota; same trap, different shape.)
+
+### Cross-source duplicates and UPnP import — PARKED, and why (2026-08-31)
+
+Both were scoped, costed and deliberately NOT built. Recorded because the
+dangerous half is how easy the first one looks: `StreamTrackDupeRefsUnderPrefix`
+already takes an `includeRouted` flag, so "dedup across sources" reads as a
+one-line change to anyone who finds it.
+
+- **`outranks` has NO availability term.** The election is `lossless → bit depth
+  → sample rate → size → shallower path → shorter path → lexicographic`
+  ([internal/dupes/policy.go](internal/dupes/policy.go)), and nothing in it knows
+  whether a copy is on this bridge's own disk or on an upstream that is powered
+  off half the time. So flipping `includeRouted` to true would suppress a local
+  44.1/16 CD rip in favour of a 96/24 copy on a 2Go — and the copy the bridge can
+  ALWAYS serve is the one that disappears, precisely when the upstream is
+  unreachable. **Don't enable cross-source suppression without first deciding
+  where availability sits in that ranking**, because that placement IS the
+  product: availability first = always playable, sometimes lower quality;
+  availability last = best quality, sometimes unplayable.
+- **The status quo is the only option that cannot hide music the operator owns**,
+  which is why it was kept. Routed rows stay out of the dupe pass (their
+  lifecycle belongs to the ingest reconcile — the PR #370 invariant), so the same
+  recording in two places yields two rows, both counted, both served. The cost is
+  a visibly doubled album; the mixed-album source filter (PR #810) already lets
+  the reader see each side on its own, which is what made the display problem
+  tolerable enough to park the suppression one.
+- **Import ("copy the upstream's files into the bridge") is downstream of that
+  decision, not independent of it.** With suppression off every import doubles
+  the album until the upstream is removed; with it on, the availability question
+  above has already been answered by implication. The bytes are the easy part —
+  `internal/upnpproxy` already fetches them; the open questions are disk headroom
+  for a multi-terabyte upstream, resumability, what the next walk does with an
+  imported track, and whether the routed row is retired or left behind.
+- **Measure before designing either.** Routed tags come from DIDL, not from file
+  tags, so a local copy and an upstream copy only land in the same duplicate
+  group if those agree. How well they agree on real hardware is UNMEASURED — and
+  if they disagree often, cross-source grouping is unreliable and both features
+  rest on sand. That measurement is minutes of work against a live 2Go and should
+  precede any policy work here.
