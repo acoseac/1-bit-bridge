@@ -192,7 +192,7 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 			Disc: row.Disc, Track: row.Track, Duration: row.Duration,
 			SizeBytes: row.Size, Codec: row.Codec, RateHz: row.SampleRate,
 			Bits: row.BitsPerSample, IsDSD: row.IsDSD,
-			Routed: row.RoutedUDN != "",
+			Routed: row.RoutedUDN != "", SourceID: sourceIDForRow(row.RoutedUDN),
 			Play: playerPlayabilityDTO{
 				Kind:         playabilityKind(row.Codec, ext, row.IsDSD),
 				ContentType:  playerContentType(ext),
@@ -559,4 +559,18 @@ func intOrNil(v int) *int {
 		return nil
 	}
 	return &v
+}
+
+// sourceIDForRow maps a track's routing key to its facet id, or "" for a
+// filesystem track.
+//
+// Empty rather than LocalSourceID so the field stays absent on every row
+// of a pure-filesystem library — the client reads absence as local. The
+// argument is upnp_track_routing.server_udn, which is the ingest's stable
+// key and not the device UDN (see admin.UPnPSource).
+func sourceIDForRow(routingKey string) string {
+	if routingKey == "" {
+		return ""
+	}
+	return librarycat.SourceID(routingKey)
 }

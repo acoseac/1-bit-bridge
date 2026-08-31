@@ -779,6 +779,11 @@ type playerTrackDTO struct {
 	Bits      int     `json:"bits,omitempty"`
 	IsDSD     bool    `json:"isDsd,omitempty"`
 	Routed    bool    `json:"routed,omitempty"`
+	// SourceID names WHICH upstream a routed track came from, so an album
+	// spanning two places can say which rows are where. Absent for a
+	// filesystem track — the client reads absence as LocalSourceID, which
+	// keeps it off every row of a pure-filesystem library.
+	SourceID string `json:"sourceId,omitempty"`
 
 	Play playerPlayabilityDTO `json:"play"`
 

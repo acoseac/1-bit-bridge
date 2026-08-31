@@ -101,6 +101,61 @@ function sourceScopeBanner(sourceID) {
   return box;
 }
 
+/**
+ * A player route with the CURRENT source scope carried along.
+ *
+ * Detail pages had no scope in their URL, so clicking an album inside
+ * Chord 2go landed on /album/<id> — and the sidebar reverted to Browse,
+ * the rail un-narrowed, and the reader was out of the source without
+ * having asked to leave. The scoped GRIDS were fixed by rewriting the
+ * rail's own links; this is the same rule for the links a view builds.
+ *
+ * Reads the live URL rather than taking the scope as an argument, so a
+ * tile builder cannot be given the wrong one — and so a builder shared by
+ * a scoped and an unscoped grid needs no branch at all.
+ */
+function scopedRoot(root) {
+  return { label: root.label, href: scopedHref(root.href) };
+}
+
+function scopedHref(path) {
+  const source = new URLSearchParams(location.search).get("source");
+  if (!source) return path;
+  // Built through URL rather than concatenated: every caller today passes
+  // a bare path, but the day one passes "/albums?sort=title" a naive
+  // append produces a second "?" and a URL that silently means nothing.
+  // This also replaces an existing source= rather than duplicating it.
+  const u = new URL(path, location.origin);
+  u.searchParams.set("source", source);
+  return u.pathname + u.search;
+}
+
+/**
+ * The crumb ancestors, rooted at the library source when one is in scope.
+ *
+ * "Chord 2go > Albums > Waltz for Debby" answers, at a glance, the thing
+ * the source facet exists for: where this music actually lives. Without
+ * it a scoped detail page is indistinguishable from an unscoped one.
+ *
+ * The name is looked up rather than passed down because the scope
+ * survives navigation across four different views, and threading a label
+ * through all of them is four chances to drop it. A failed lookup yields
+ * no root rather than a placeholder: a crumb that says "Source" tells the
+ * reader less than one that says nothing.
+ */
+async function sourceRootedCrumbs(trail, structural) {
+  const items = crumbAncestors(trail, structural);
+  const source = new URLSearchParams(location.search).get("source");
+  if (!source) return items;
+  try {
+    const name = (await api.sourceNames()).get(source);
+    if (!name) return items;
+    return [{ label: name, href: scopedHref("/albums") }, ...items];
+  } catch {
+    return items;
+  }
+}
+
 // ---- Albums grid ----
 
 export async function renderAlbums(view, ctx) {
@@ -153,7 +208,7 @@ function emptyGridDetail({ needs, quality, scoped }) {
 
 function albumTile(a) {
   const q = qualityLabel(a.quality);
-  return link(`/album/${a.id}`, { class: "tile" },
+  return link(scopedHref(`/album/${a.id}`), { class: "tile" },
     cover(coverURL(a, 500), a.title),
     el("div", { class: "tile-body" },
       el("span", { class: "tile-title", text: a.title || "Unknown album" }),
@@ -283,7 +338,13 @@ async function appendDeleteAction(actions, tracks, label) {
   actions.appendChild(btn);
 }
 
-export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
+export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }) {
+  // Captured BEFORE any await. The album fetch is abort-guarded, but the
+  // source-name lookup behind the crumb root is MEMOISED — after its
+  // first resolution it is not a request at all, so abortReads cannot
+  // reach it and a superseded render would sail past to write its crumb
+  // over the page that replaced it.
+  const at = gen();
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -318,10 +379,12 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
   // to the list they were just in. The artist stays one click away as the
   // byline beside the cover either way.
   const structural = a.artistId
-    ? [CRUMB_ROOTS.artists,
-       { label: a.albumArtist || "Unknown artist", href: `/artist/${a.artistId}` }]
-    : [CRUMB_ROOTS.albums];
-  setCrumb(crumbs(crumbAncestors(trail, structural), albumName));
+    ? [scopedRoot(CRUMB_ROOTS.artists),
+       { label: a.albumArtist || "Unknown artist", href: scopedHref(`/artist/${a.artistId}`) }]
+    : [scopedRoot(CRUMB_ROOTS.albums)];
+  const crumbChain = await sourceRootedCrumbs(trail, structural);
+  if (gen() !== at) return;
+  setCrumb(crumbs(crumbChain, albumName));
   // The heading names the album, the way every other detail page names
   // its subject. It used to stay the generic word "Album", which left the
   // page with no heading of its own and put a category label between the
@@ -386,6 +449,8 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
   // refresh: deletion is synchronous, so its numbers are already true
   // when the response lands. Generation deliberately does not use it —
   // see variants.js.
+  const tracksPanel = d.tracks.length ? await albumTracksPanel(d.tracks, art) : null;
+  if (gen() !== at) return;
   const variants = variantPanel(d.variants, { albumIds: [id] }, rerenderView, { plain: true });
   appendIf(view, detailTabs(`album:${id}`, [
     // An empty track list is a truthy <ol>, so detailTabs would keep the
@@ -395,7 +460,7 @@ export async function renderAlbum(view, { id, setToolbar, setCrumb, trail }) {
     {
       id: "tracks", label: "Tracks",
       panel: d.tracks.length
-        ? trackList(d.tracks, art)
+        ? tracksPanel
         : emptyState("No tracks here",
             "This album's files are gone from the library — a rescan will remove it."),
     },
@@ -499,6 +564,118 @@ function bookletLink(booklet) {
  *   both true of the underlying files and both meaningless here, where
  *   the ORDER is the thing the user chose.
  */
+/**
+ * An album's track list, with a source filter when the album spans more
+ * than one place.
+ *
+ * A mixed album is an ordinary shape on a hybrid bridge — the same
+ * release ripped locally AND present on an upstream — and until this the
+ * page gave no sign of it: five rows, one track count, one modal quality
+ * chip, and nothing to say that two of them live somewhere that can go
+ * offline.
+ *
+ * The list is NOT filtered to the source you browsed in. An album is one
+ * release, and showing two of its five tracks because of how you arrived
+ * would read as tracks missing rather than as a filter.
+ */
+async function albumTracksPanel(tracks, art) {
+  const ids = albumSourceIDs(tracks);
+  if (ids.length < 2) return trackList(tracks, art);
+
+  let names;
+  try {
+    names = await api.sourceNames();
+  } catch {
+    // The split is real whether or not we can name the halves; without
+    // names there is nothing useful to label them with, so fall back to
+    // the plain list rather than to "Unknown source" twice.
+    return trackList(tracks, art);
+  }
+
+  const box = el("div");
+  let current = "";
+  const paint = () => {
+    clear(box);
+    box.appendChild(sourceFilterBar(ids, names, current, (v) => {
+      current = v;
+      paint();
+    }));
+    const shown = current
+      ? tracks.filter((t) => (t.sourceId || LOCAL_SOURCE_ID) === current)
+      : tracks;
+    // The per-track chip earns its cell only in the combined view: inside
+    // a filtered one every row has the same answer, which the button
+    // above already gives.
+    box.appendChild(trackList(shown, art, current ? {} : { sourceNames: names }));
+  };
+  paint();
+  return box;
+}
+
+/**
+ * Where one track of a mixed album lives.
+ *
+ * Only ever rendered when the album actually spans sources: on a
+ * single-source album every row would carry the same chip, which is
+ * wallpaper rather than information — the same reasoning that keeps the
+ * variant marks off tracks with nothing to say.
+ *
+ * Absence of `sourceId` means the filesystem. That is what keeps the
+ * field off every row of a pure-filesystem library, where the answer is
+ * never in question.
+ */
+function sourceChip(t, names) {
+  const id = t.sourceId || LOCAL_SOURCE_ID;
+  const name = names.get(id);
+  return name ? chip(name, "chip-quiet") : null;
+}
+
+// The facet id of the bridge's own filesystem, mirroring
+// librarycat.LocalSourceID. A track carries no sourceId when it is local,
+// so this is what absence resolves to.
+const LOCAL_SOURCE_ID = "local";
+
+/**
+ * The distinct sources an album's tracks come from, in a stable order.
+ *
+ * Derived from the TRACKS rather than from the album, because those are
+ * the rows actually on screen: hydrateTracks drops anything deleted or
+ * newly duplicate-suppressed since the catalog snapshot, and a chip
+ * describing a row that is not there would be worse than none.
+ */
+function albumSourceIDs(tracks) {
+  const seen = [];
+  for (const t of tracks || []) {
+    const id = t.sourceId || LOCAL_SOURCE_ID;
+    if (!seen.includes(id)) seen.push(id);
+  }
+  return seen;
+}
+
+/**
+ * The per-source filter shown above a mixed album's track list.
+ *
+ * "All" stays first and is the default, because an album is one release
+ * and playing it whole is the ordinary thing to want — a page that opened
+ * on a filtered subset would read as an album with missing tracks. The
+ * per-source views answer the other question: which of these can this
+ * bridge play on its own, and which need the upstream to be up.
+ */
+function sourceFilterBar(ids, names, current, onPick) {
+  const bar = el("div", { class: "source-filter", attrs: { role: "group",
+    "aria-label": "Filter tracks by source" } });
+  const opts = [["", "All"], ...ids.map((id) => [id, names.get(id) || "Unknown source"])];
+  for (const [value, label] of opts) {
+    const b = el("button", {
+      class: `source-filter-btn${value === current ? " active" : ""}`,
+      text: label, attrs: { type: "button", "aria-pressed": String(value === current) },
+      on: { click: () => onPick(value) },
+    });
+    bar.appendChild(b);
+  }
+  return bar;
+}
+
 function trackList(tracks, albumArt, opts = {}) {
   const list = el("ol", { class: "tracks" });
   let disc = null;
@@ -543,6 +720,12 @@ function trackRow(t, i, all, albumArt, opts = {}) {
     playable ? null : el("span", {
       class: "chip chip-warn", text: unplayableReason(t), attrs: { id: "why-" + i },
     })));
+  // Always appended, empty unless this album spans sources — the same
+  // constant-cell rule .track-why documents above. A conditional cell
+  // would put the 8-child rows' metadata in the 9-child rows' columns and
+  // nothing below the title would line up.
+  row.appendChild(el("span", { class: "track-src" },
+    opts.sourceNames ? sourceChip(t, opts.sourceNames) : null));
   row.appendChild(el("span", { class: "track-meta", text: formatChip(t) }));
   row.appendChild(variantMarks(t));
   row.appendChild(el("span", { class: "track-size", text: bytes(t.sizeBytes) }));
@@ -640,7 +823,7 @@ function artistTile(a) {
   const src = a.hasImage && a.artistMBID
     ? artistImageURL(a.artistMBID, 250, a.imageVersion)
     : coverURL(a, 250);
-  const tile = link(`/artist/${a.id}`, { class: "tile tile-round" },
+  const tile = link(scopedHref(`/artist/${a.id}`), { class: "tile tile-round" },
     cover(src, a.name),
     el("div", { class: "tile-body" },
       el("span", { class: "tile-title", text: a.name }),
@@ -661,6 +844,9 @@ function monogram(name) {
 
 
 export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail }) {
+  // See renderAlbum: captured before any await, because the memoised
+  // source-name lookup is not reachable by abortReads.
+  const at = gen();
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -680,7 +866,9 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail 
   // the failure without preventing it. An empty name is the reachable
   // case, and it would leave the page with no heading at all.
   const artistName = d.artist.name || "Unknown artist";
-  setCrumb(crumbs(crumbAncestors(trail, [CRUMB_ROOTS.artists]), artistName));
+  const artistCrumbs = await sourceRootedCrumbs(trail, [scopedRoot(CRUMB_ROOTS.artists)]);
+  if (gen() !== at) return;
+  setCrumb(crumbs(artistCrumbs, artistName));
   setAxisTitle(artistName);
   const portrait = d.hasImage
     ? artistImageURL(d.artist.artistMBID, 500, d.artist.imageVersion)
@@ -742,7 +930,7 @@ async function renderAxis(view, ctx, fetcher, kind, emptyTitle, emptyDetail) {
     banner: sourceScopeBanner(source),
     fetchPage: (offset) => fetcher({ source, offset, limit: PAGE }),
     pick: (r) => r.entries,
-    make: (e) => link(`/${kind}/${e.id}`, { class: "row" },
+    make: (e) => link(scopedHref(`/${kind}/${e.id}`), { class: "row" },
       el("span", { class: "row-title", text: e.name }),
       el("span", { class: "row-meta",
         text: `${plural(e.albumCount, "album")} · ${plural(e.trackCount, "track")}` })),
@@ -776,8 +964,25 @@ export async function renderAxisAlbums(view, ctx, kind) {
   // flight — and it survives the lookup failing, which is the case
   // where a way back matters most.
   const root = kind === "genre" ? CRUMB_ROOTS.genres : CRUMB_ROOTS.composers;
-  const chain = crumbAncestors(ctx.trail, [root]);
-  ctx.setCrumb(crumbs(chain));
+  const base = crumbAncestors(ctx.trail, [scopedRoot(root)]);
+  ctx.setCrumb(crumbs(base));
+
+  // The source root is a SECOND paint, not a delay on the first. Awaiting
+  // the name before showing anything would have cost exactly the property
+  // the comment above describes — a crumb on screen while a lookup is in
+  // flight — and this one is a lookup too.
+  const myGen = ctx.gen();
+  let chain = base;
+  const rooted = await sourceRootedCrumbs(ctx.trail, [scopedRoot(root)]);
+  if (ctx.gen() !== myGen) return;
+  // Compared by LENGTH, not by reference: sourceRootedCrumbs builds its
+  // own array from the same ancestors, so it is never the same object
+  // even when it added nothing — and the only thing it can add is the one
+  // prepended root.
+  if (rooted.length !== base.length) {
+    chain = rooted;
+    ctx.setCrumb(crumbs(chain));
+  }
 
   // The label lookup is a second round trip, so the route can change
   // under it. api.genres/api.composers share the "axis" key and so abort
@@ -787,7 +992,6 @@ export async function renderAxisAlbums(view, ctx, kind) {
   // is what route() bumps on every navigation, so comparing it is the
   // reliable test rather than relying on which requests happen to share
   // a key.
-  const myGen = ctx.gen();
   let label = "";
   try {
     const r = await (kind === "genre" ? api.genres({ limit: 200 }) : api.composers({ limit: 200 }));
