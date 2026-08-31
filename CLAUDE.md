@@ -3040,3 +3040,56 @@ title 100%; artist / albumArtist / album / trackNumber 13,341 (87.3%); year
   removing only the per-field guards leaves it green (removing both turns it red)
   — the partial-row case is what covers the guards directly.
 
+- **A routed track's variant-skip reason must say it is ROUTED, and that case
+  comes FIRST** (PR #814). With 0% bit depth from DIDL, every routed FLAC fell
+  into `fundamentalSkipReason`'s geometry test and the reader was told "Format
+  unreadable — variants not possible" about a file whose format is perfectly
+  well known — 13,519 tracks on the reference library. Routed DOMINATES every
+  other reason (the bridge has no local file to hand sox, so complete geometry
+  changes nothing), so reporting geometry would be a second wrong answer rather
+  than the first one fixed. It is a PARAMETER, not a check at the single call
+  site that needs it today: the two browse sites pass `false` because their
+  queries anti-join `upnp_track_routing` — verified empirically
+  (`/api/library/browse?path=2go` returns zero rows), not assumed — and this
+  session has been making UPnP first-class, so if routed rows are ever admitted
+  to Browse the reason is already there to pass. Pinned by
+  `TestRoutedTracksReportBeingOnAnUpstream` (which also re-states the whole
+  pre-existing truth table, so the fix cannot trade one wrong badge for another)
+  + `TestEverySkipReasonHasALabel` for the Go→JS half, since an unlabelled
+  reason renders as the raw identifier.
+- **`manualDescriptionURL` is CONFIGURED, VALIDATED, and UNIMPLEMENTED.**
+  `config.Validate` accepts it and `StableServerKey` has a whole
+  `manual:<sha256(url)>` branch, but `ingestOne` refuses it at runtime ("not yet
+  supported"), so that branch is dead in production and reachable only from
+  tests — which means the `manual:`-keyed half of `routedOnline` (PR #807) is
+  defensive-only and cannot be exercised against real hardware. Implementing it
+  needs THREE surfaces, not one: the walk's `ResolveControlURL`, `LiveHost` for
+  playback (a miss is a hard 503 `upnp_server_offline` with NO fallback, so the
+  library would ingest and then fail to play), and the online/offline status.
+  Until then a network that blocks SSDP multicast cannot add an upstream at all,
+  despite the config appearing to offer exactly that escape hatch. Known
+  limitation with an honest error, feature-review P2-29.
+- **The exempt bucket's "N of these need nothing" also absorbs routed tracks.**
+  `exempt = total - eligible`, and its docblock says "tracks this kind can never
+  apply to", so the BUCKET is right — but the phrase conflates "already fine"
+  with "impossible", for DSD and lossy as much as for routed. The per-track badge
+  is where the specific reason is told; left alone deliberately.
+- **The sox probe is hoisted out of the per-track loop, and only an invocation
+  COUNT can pin that.** `deps.SoxCanDecode` is the 30s-TTL toolchain cache behind
+  a mutex and its answer is fixed for the life of a request, so asking it per
+  track was a lock per track on a list that can be a 50k-path playlist. A source
+  scan cannot tell the two apart — the call reads identically wherever it sits —
+  so `TestToolchainProbeIsAskedOncePerRequest` counts real calls through a real
+  request. Its first negative control BROKE THE BUILD (the revert left
+  `canDecode` unused), which reads as "control invalid" rather than as evidence;
+  re-run keeping the symbol referenced, it goes red. Same trap as every other
+  "just disable this branch" mutation that deletes a variable's only use.
+- **Process: a rate-limited bot's silence is not a pass, and it recurs.**
+  CodeRabbit reviewed #813 genuinely (it lists the files it processed) but was
+  rate-limited through BOTH rounds of #814 — "Review limit reached … 96 included
+  PR review attempts over the past 7 days set your current allowance at 1 review
+  per hour." A day of heavy PR traffic exhausts it, which is exactly when review
+  matters most. Check for the notice before reading "no comments" as agreement;
+  the distinguishing marker is the "Files selected for processing" block, which a
+  real review has and a limit notice also carries — so match on
+  "Review limit reached", not on file counts.
