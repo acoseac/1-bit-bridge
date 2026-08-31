@@ -14,7 +14,11 @@ const PAGE = 60;
 
 // The album-grid filters filterAlbums accepts. Kept as one list so a new
 // axis is forwarded and preserved by every helper below at once.
-const AXIS_FILTERS = ["artist", "genre", "composer"];
+//
+// "source" belongs here for the same reason the other three do: it is a
+// query param the server intersects into the same allow-set, so it must
+// survive a sort change, a jump and a genre drill exactly as they do.
+const AXIS_FILTERS = ["artist", "genre", "composer", "source"];
 
 // The variant kinds a coverage readout reports, in the order they are
 // shown. One list, and the labels come from variantKindLabel — so the
@@ -58,6 +62,139 @@ function crumbAncestors(trail, structural) {
   return trail?.length ? trail : structural;
 }
 
+// ---- Sources ----
+
+/**
+ * The library-source facet: where this library's music actually comes
+ * from, and whether each place is reachable right now.
+ *
+ * On a hybrid bridge the grids blend the filesystem and every upstream
+ * UPnP MediaServer into one list, which is the right default — it is
+ * one library — but leaves no way to see the split or to browse one
+ * side of it. This page is that view, and each tile is a link into the
+ * album grid scoped to it.
+ *
+ * Not paged: a bridge has a handful of sources, not a wall of them.
+ */
+export async function renderSources(view, { gen }) {
+  const at = gen();
+  clear(view);
+  view.appendChild(spinner());
+  let d;
+  try {
+    d = await api.sources();
+  } catch (e) {
+    if (isAborted(e)) return;
+    clear(view);
+    view.appendChild(errorState(e));
+    return;
+  }
+  if (gen() !== at) return;
+  clear(view);
+  const sources = d.sources || [];
+  if (!sources.length) {
+    view.appendChild(emptyState("No sources yet",
+      "Add a library root and run a scan, or configure a UPnP server under Server → Devices."));
+    return;
+  }
+  view.appendChild(el("div", { class: "grid source-grid" }, ...sources.map(sourceTile)));
+}
+
+/**
+ * One source tile.
+ *
+ * The status line distinguishes three states, not two: `online` absent
+ * means the bridge could not ask (discovery unwired, or an upstream the
+ * operator has removed whose tracks are still in the manifest), and
+ * painting that red would accuse a server that is very likely up. The
+ * filesystem source has no such state and gets no dot at all.
+ */
+function sourceTile(s) {
+  const upnp = s.kind === "upnp";
+  const meta = [plural(s.albumCount || 0, "album"), plural(s.trackCount || 0, "track")].join(" · ");
+  return link(`/albums?source=${encodeURIComponent(s.id)}`, { class: "tile source-tile" },
+    el("div", { class: "source-mark" }, sourceIcon(upnp ? "upnp" : "roots")),
+    el("div", { class: "tile-body" },
+      el("span", { class: "tile-title", text: s.name }),
+      el("span", { class: "tile-sub", text: meta }),
+      upnp ? sourceStatus(s) : null));
+}
+
+/**
+ * The two sprite glyphs the shell already uses for exactly these things:
+ * the folder from the sidebar's Roots entry, and the broadcast arcs from
+ * its UPnP entry. Reused rather than invented so the facet names a
+ * source the same way the operator pages do — and a text glyph was the
+ * first attempt, which put a CLOUD beside a device sitting on the LAN.
+ *
+ * Built through the DOM because createElement cannot make SVG; the
+ * `source-ico` class is set through setAttribute for the same reason,
+ * and is styled in player.css.
+ */
+function sourceIcon(name) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("class", "source-ico");
+  // viewBox is an HTML attribute here, not a CSS property, and the
+  // presentation lives on this host element rather than on the sprite's
+  // <g> — a rule matching the source never crosses into the shadow tree
+  // <use> builds, which is why these icons render as blobs when styled
+  // from the wrong side.
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const use = document.createElementNS(NS, "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.appendChild(use);
+  return svg;
+}
+
+function sourceStatus(s) {
+  const [cls, label] = s.online === true
+    ? ["source-status-online", "Online"]
+    : s.online === false
+      ? ["source-status-offline", "Offline"]
+      : ["source-status-unknown", "Status unknown"];
+  return el("span", { class: `source-status ${cls}` },
+    el("span", { class: "source-dot", attrs: { "aria-hidden": "true" } }),
+    el("span", { text: label }));
+}
+
+/**
+ * The banner every browse grid shows while a source filter is active.
+ *
+ * Without it the filter is invisible: a scoped album grid looks exactly
+ * like a library that is missing most of its music, and the only clue is
+ * a query parameter. It carries the way out as well as the state, since
+ * the toolbar selects preserve the scope by design.
+ *
+ * The name is resolved from the sources list rather than passed down,
+ * because the scope survives navigation between four different grids and
+ * threading a label through all of them would mean four chances to drop
+ * it. A failed lookup still renders — with the generic wording, since
+ * being unable to name the source is not a reason to hide that one is
+ * applied.
+ */
+function sourceScopeBanner(sourceID) {
+  if (!sourceID) return null;
+  const box = el("div", { class: "scope-banner" });
+  const label = el("span", { class: "scope-label", text: "Filtered to one source" });
+  const clearURL = new URL(location.href);
+  clearURL.searchParams.delete("source");
+  box.append(label, link(clearURL.pathname + clearURL.search,
+    { class: "scope-clear", text: "Show all sources" }));
+  // Returned synchronously and named later, so the grid never waits on
+  // a second request to paint. The banner already says the true thing
+  // without the name; the name only makes it a better sentence.
+  api.sources().then((d) => {
+    const hit = (d.sources || []).find((s) => s.id === sourceID);
+    if (hit) label.textContent = `Showing ${hit.name}`;
+  }).catch(() => {
+    /* the banner's job is to say a filter is on; the name is a bonus */
+  });
+  return box;
+}
+
 // ---- Albums grid ----
 
 export async function renderAlbums(view, ctx) {
@@ -86,6 +223,7 @@ export async function renderAlbums(view, ctx) {
     containerClass: "grid",
     countNoun: "album",
     label: scopeLabel,
+    banner: sourceScopeBanner(scope.source),
     emptyTitle: "No albums here",
     emptyDetail: emptyGridDetail({ needs, quality, scoped: Object.keys(scope).length > 0 }),
   });
@@ -563,8 +701,10 @@ function variantGeometry(v) {
 
 export async function renderArtists(view, ctx) {
   ctx.setToolbar(null);
+  const source = ctx.params.get("source") || "";
   await renderPagedList(view, ctx, {
-    fetchPage: (offset) => api.artists({ offset, limit: PAGE }),
+    banner: sourceScopeBanner(source),
+    fetchPage: (offset) => api.artists({ source, offset, limit: PAGE }),
     pick: (r) => r.artists,
     make: artistTile,
     containerClass: "grid grid-round",
@@ -691,8 +831,10 @@ export function renderComposers(view, ctx) {
 
 async function renderAxis(view, ctx, fetcher, kind, emptyTitle, emptyDetail) {
   ctx.setToolbar(null);
+  const source = ctx.params.get("source") || "";
   await renderPagedList(view, ctx, {
-    fetchPage: (offset) => fetcher({ offset, limit: PAGE }),
+    banner: sourceScopeBanner(source),
+    fetchPage: (offset) => fetcher({ source, offset, limit: PAGE }),
     pick: (r) => r.entries,
     make: (e) => link(`/${kind}/${e.id}`, { class: "row" },
       el("span", { class: "row-title", text: e.name }),
@@ -793,7 +935,7 @@ function setAxisTitle(label) {
 async function renderPagedList(view, ctx, opts) {
   const { gen } = ctx;
   const { fetchPage, pick, make, containerClass = "rows",
-    emptyTitle, emptyDetail, countNoun = "", label = "" } = opts;
+    emptyTitle, emptyDetail, countNoun = "", label = "", banner = null } = opts;
 
   clear(view);
   view.appendChild(spinner());
@@ -853,11 +995,16 @@ async function renderPagedList(view, ctx, opts) {
         total = r.total ?? items.length;
         if (total === 0) {
           clear(view);
+          // The banner belongs on the EMPTY view too, and most of all
+          // there: "no albums here" with no sign of an active filter
+          // reads as a broken library rather than a narrow view.
+          if (banner) view.appendChild(banner);
           view.appendChild(emptyState(emptyTitle, emptyDetail));
           return;
         }
         if (!container) {
           clear(view);
+          if (banner) view.appendChild(banner);
           if (countNoun) {
             view.appendChild(el("p", { class: "muted small",
               text: label ? `${plural(total, countNoun)} in ${label}` : plural(total, countNoun) }));

@@ -76,6 +76,7 @@ export const api = {
   albums: (params) => getJSON(`/api/player/albums?${qs(params)}`, { key: "albums" }),
   album: (id) => getJSON(`/api/player/albums/${encodeURIComponent(id)}`, { key: "detail" }),
   artists: (params) => getJSON(`/api/player/artists?${qs(params)}`, { key: "artists" }),
+  sources: () => getJSON("/api/player/sources", { key: "sources" }),
   artist: (id) => getJSON(`/api/player/artists/${encodeURIComponent(id)}`, { key: "detail" }),
   genres: (params) => getJSON(`/api/player/genres?${qs(params)}`, { key: "axis" }),
   composers: (params) => getJSON(`/api/player/composers?${qs(params)}`, { key: "axis" }),

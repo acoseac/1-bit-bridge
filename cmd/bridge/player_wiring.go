@@ -4,10 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
+	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
 	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 )
 
@@ -107,4 +110,60 @@ func startCatalogInvalidator(ctx context.Context, nudge <-chan struct{}, srv *ad
 			}
 		}
 	}()
+}
+
+// playerUPnPSourcesAdapter lists the configured upstream MediaServers
+// for the player's source facet.
+//
+// Config + SSDP cache only — no DB, unlike the admin adapter's
+// ConfiguredServers, which issues a COUNT(*) per upstream. The facet
+// gets its counts from the library catalog instead, so this only has
+// to supply identity and liveness.
+//
+// The pairing of the two keys is the whole point (see admin.UPnPSource):
+// StableServerKey is what the manifest's routing rows carry, while the
+// SSDP cache is keyed on the raw UDN, and only the config row knows
+// both. Reads the live holder per call so an upstream added or removed
+// through the admin console shows up without a restart.
+func playerUPnPSourcesAdapter(lc *upnpUpstreamLifecycle, holder *config.RuntimeConfig) func() []admin.UPnPSource {
+	if lc == nil || lc.cache == nil || holder == nil {
+		return nil
+	}
+	return func() []admin.UPnPSource {
+		cfg := holder.Load()
+		if cfg == nil {
+			return nil
+		}
+		out := make([]admin.UPnPSource, 0, len(cfg.UPnPUpstream.Servers))
+		for _, srv := range cfg.UPnPUpstream.Servers {
+			name := strings.TrimSpace(srv.Name)
+			online := false
+			// Trimmed before the lookup for the same reason every other
+			// cache read here trims: a hand-edited bridge.yaml UDN with
+			// stray whitespace would otherwise miss the SSDP-clean key
+			// and false-report an upstream that is up as offline.
+			if udn := strings.TrimSpace(srv.UDN); udn != "" {
+				if info, ok := lc.cache.Get(udn); ok {
+					online = true
+					if name == "" {
+						name = info.FriendlyName
+					}
+				}
+			}
+			// A manual-URL entry has no UDN to look up and is not
+			// discoverable at all yet (see discoveryServerResolver's
+			// TODO), so false is the accurate answer rather than a
+			// pessimistic one. It also cannot be ingested today, so it
+			// contributes no tracks and the facet skips it anyway.
+			if name == "" {
+				name = "Upstream server"
+			}
+			out = append(out, admin.UPnPSource{
+				Key:    upnpingest.StableServerKey(srv),
+				Name:   name,
+				Online: online,
+			})
+		}
+		return out
+	}
 }

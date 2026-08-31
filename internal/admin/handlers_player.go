@@ -219,15 +219,35 @@ func albumDTO(a librarycat.Album, online func(string) *bool) playerAlbumDTO {
 	return d
 }
 
-// routedOnline reports upstream reachability for a UDN, or nil when
-// the answer is unknown (the dep is unwired). nil is NOT false: a
-// player that greyed out every routed album because it couldn't ask
-// would be worse than one that lets the user try.
-func (s *Server) routedOnline(udn string) *bool {
+// routedOnline reports upstream reachability for a ROUTING KEY, or nil
+// when the answer is unknown. nil is NOT false: a player that greyed
+// out every routed album because it couldn't ask would be worse than
+// one that lets the user try.
+//
+// The argument is Album.RoutedUDNs[0], which despite the field's name
+// is `upnp_track_routing.server_udn` — the ingest's StableServerKey,
+// not the device UDN the SSDP cache is keyed on (see admin.UPnPSource).
+// This used to hand that key straight to UPnPHostOnline, which is an
+// exact map lookup on the raw UDN, so it answered "offline" for any
+// upstream whose device reports a non-lowercase UDN and for every
+// manually-configured one, whose key is "manual:<hash>" and can never
+// match. UPnPSources resolves liveness on the side that holds both
+// spellings; UPnPHostOnline remains the fallback for a bridge wired
+// without it, where the old approximation is still better than nil.
+func (s *Server) routedOnline(routingKey string) *bool {
+	if byKey := s.sourceOnlineByKey(); byKey != nil {
+		if v, ok := byKey[routingKey]; ok {
+			return &v
+		}
+		// A key with no configured upstream is an orphan awaiting the
+		// next reap. Unknown, not offline — its tracks may well still
+		// play, since the routing row still carries a res URL.
+		return nil
+	}
 	if s.deps.UPnPHostOnline == nil {
 		return nil
 	}
-	v := s.deps.UPnPHostOnline(udn)
+	v := s.deps.UPnPHostOnline(routingKey)
 	return &v
 }
 
@@ -360,6 +380,17 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCover
 	if err != nil {
 		return nil, err
 	}
+	// The source filter intersects with the axis filters rather than
+	// replacing them, so "this genre, on that upstream" is a reachable
+	// view — and so following a genre link while scoped to one source
+	// stays scoped instead of silently widening back to the library.
+	sourceID, err := parseSourceFilter(get("source"))
+	if err != nil {
+		return nil, err
+	}
+	if src := sourceAlbumSet(cat, sourceID); src != nil {
+		allow = intersectAlbumSets(allow, src)
+	}
 	if allow != nil && len(allow) == 0 {
 		// A filter naming something that isn't there yields an EMPTY
 		// result, not an error: the id may simply have aged out of a
@@ -400,6 +431,23 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCover
 		idx = append(idx, i)
 	}
 	return idx, nil
+}
+
+// intersectAlbumSets narrows an allow-set by another, treating a nil
+// left side as "nothing narrowed yet" rather than as the empty set —
+// the same nil-vs-empty distinction axisAllowSet documents, which is
+// what keeps a lone source filter from reading as "no results".
+func intersectAlbumSets(allow, next map[string]struct{}) map[string]struct{} {
+	if allow == nil {
+		return next
+	}
+	out := make(map[string]struct{}, len(allow))
+	for id := range allow {
+		if _, in := next[id]; in {
+			out[id] = struct{}{}
+		}
+	}
+	return out
 }
 
 // axisAllowSet intersects the artist / genre / composer filters into one
@@ -557,11 +605,16 @@ func (s *Server) apiPlayerArtists(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	start, end := pageSlice(len(cat.Artists), offset, limit)
+	artists, err := narrowArtists(cat, r.URL.Query().Get("source"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	start, end := pageSlice(len(artists), offset, limit)
 	// One ReadDir for the whole page, not one stat per artist.
 	withImages := s.cachedArtistImages()
 	out := make([]playerArtistDTO, 0, end-start)
-	for _, a := range cat.Artists[start:end] {
+	for _, a := range artists[start:end] {
 		d := playerArtistDTO{
 			ID: a.ID, Name: a.Name, Bucket: a.Bucket,
 			TrackCount: a.TrackCount, AlbumCount: a.AlbumCount, ArtistMBID: a.ArtistMBID,
@@ -578,10 +631,10 @@ func (s *Server) apiPlayerArtists(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, d)
 	}
-	meta := playerPageMeta{Total: len(cat.Artists), Offset: start, Limit: limit,
+	meta := playerPageMeta{Total: len(artists), Offset: start, Limit: limit,
 		SnapshotAt: snapshotStamp(cat.BuiltAt)}
 	if start == 0 {
-		meta.Buckets = buildBuckets(len(cat.Artists), func(i int) string { return cat.Artists[i].Bucket })
+		meta.Buckets = buildBuckets(len(artists), func(i int) string { return artists[i].Bucket })
 	}
 	writeJSON(w, http.StatusOK, playerArtistsResponse{playerPageMeta: meta, Artists: out})
 }
@@ -605,7 +658,11 @@ func (s *Server) serveAxis(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	entries := pick(cat)
+	entries, err := narrowAxis(cat, pick(cat), r.URL.Query().Get("source"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	start, end := pageSlice(len(entries), offset, limit)
 	out := make([]playerAxisDTO, 0, end-start)
 	for _, e := range entries[start:end] {

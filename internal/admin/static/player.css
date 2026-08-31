@@ -1085,3 +1085,64 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   background: var(--accent-soft); color: var(--accent);
 }
 .tile-variant-stale { background: var(--accent-warm-tint); color: var(--accent-warm); }
+
+/* ---- Library sources ---- */
+
+/* Wider tiles than the album grid: a source tile is text, not artwork,
+ * and at 160px the names of real upstreams ("Chord 2go [2go-1234]")
+ * wrapped to three lines. */
+.source-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+
+/* .tile is display:block, so the row layout has to be declared here —
+ * setting only flex-direction stacks the glyph above the text, which is
+ * what it did until a browser showed it. */
+.source-tile {
+  display: flex; flex-direction: row; align-items: center; gap: 12px;
+  padding: 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-elev); transition: border-color .15s ease, box-shadow .15s ease;
+}
+.source-tile:hover { border-color: var(--accent); box-shadow: var(--elev-1); }
+.source-tile .tile-body { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 3px; }
+
+/* A glyph, not a cover: these have no artwork, and a monogram would
+ * imply they are an artist. */
+.source-mark {
+  flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px;
+  display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--fg);
+}
+/* Presentation on the <use> HOST, never on the sprite's <g> — see
+ * sourceIcon(). Mirrors .nav-ico's stroke setup, minus its rail-only
+ * dimming: at 40px on a card the icon is the tile's only image. */
+.source-ico {
+  width: 20px; height: 20px; display: block;
+  fill: none; stroke: currentcolor;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
+
+.source-status {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.75rem; color: var(--fg-muted);
+}
+.source-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; flex: 0 0 auto;
+}
+/* Colour is on the DOT's own inherited currentColor, and the word sits
+ * beside it: the state is never carried by hue alone, which is what
+ * keeps it readable for a red/green-colourblind operator and in a
+ * screenshot printed in grey. */
+.source-status-online { color: var(--ok); }
+.source-status-offline { color: var(--danger); }
+.source-status-unknown { color: var(--fg-muted); }
+
+/* The active-filter banner. Deliberately loud enough to notice on a
+ * grid that otherwise looks like a library missing most of its music,
+ * and it always carries the way out. */
+.scope-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 12px; padding: 7px 11px; border-radius: 8px;
+  background: var(--accent-soft); font-size: 0.82rem;
+}
+.scope-label { font-weight: 600; }
+.scope-clear { color: var(--accent); text-decoration: underline; }

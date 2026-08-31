@@ -92,6 +92,19 @@ type Album struct {
 	Routed     bool
 	RoutedUDNs []string
 
+	// SourceIDs are the library sources this album draws from, sorted:
+	// LocalSourceID when at least one track is a filesystem track, plus
+	// one SourceID per upstream contributing a track. An album with
+	// tracks from two places carries both, and matches a filter for
+	// either — membership is "has a track here", not "belongs here".
+	//
+	// Derived rather than left to the reader: `!Routed` happens to mean
+	// "has a local track" today, but only because Routed is itself
+	// `routedAll && len(udns) > 0`. Stacking a second derivation on
+	// that would make the source filter silently wrong the day either
+	// definition moved.
+	SourceIDs []string
+
 	// TrackPaths are the member paths, pre-sorted by (disc, track,
 	// path). Paths only, not hydrated rows: album detail re-queries by
 	// path so variant / analysis / favourite state is fresh without a
@@ -111,8 +124,17 @@ type Artist struct {
 	TrackCount int
 	AlbumCount int
 	AlbumIDs   []string
-	ArtistMBID string
-	AddedAt    int64
+	// AlbumTracks[i] is how many of this artist's tracks sit in
+	// AlbumIDs[i]. Aligned by construction — rankAlbums emits the two
+	// together and nothing else writes them.
+	//
+	// Here so a filtered view can state a TRUE count. TrackCount is
+	// whole-library, and an artist grid narrowed to one source that
+	// went on reporting it would be quietly wrong on every tile; the
+	// sum over the surviving albums is the honest number.
+	AlbumTracks []int
+	ArtistMBID  string
+	AddedAt     int64
 }
 
 // AxisEntry mirrors iOS LibraryAxisEntry field-for-field: one genre or
@@ -124,6 +146,12 @@ type AxisEntry struct {
 	Bucket      string
 	TrackCount  int
 	AlbumIDs    []string
+	// AlbumTracks[i] is how many of this group's tracks sit in
+	// AlbumIDs[i] — see Artist.AlbumTracks. Load-bearing for genres
+	// twice over: finishAxis ORDERS them by TrackCount, so a filtered
+	// list that kept the whole-library number would be sorted by
+	// something the reader cannot see.
+	AlbumTracks []int
 	RawVariants []string
 }
 
@@ -146,6 +174,16 @@ type Catalog struct {
 	Genres    []AxisEntry
 	Composers []AxisEntry
 	Stats     Stats
+
+	// SourceTracks counts tracks per source id (LocalSourceID or a
+	// SourceID). Accumulated during Build, where every row's own source
+	// is in hand, which makes it exact for free — the alternative was
+	// deriving it from albums, and an album spanning two sources cannot
+	// be split without asking the store per track.
+	//
+	// Read-only, like every other field here: the snapshot is published
+	// through an atomic.Pointer and shared by concurrent readers.
+	SourceTracks map[string]int
 
 	albumIndex  map[string]int
 	artistIndex map[string]int
@@ -210,11 +248,12 @@ func HashID(key string) string {
 // Builder accumulates rows into a Catalog. Not safe for concurrent
 // use; build one per snapshot.
 type Builder struct {
-	albums    map[string]*albumAcc
-	artists   map[string]*artistAcc
-	genres    map[string]*axisAcc
-	composers map[string]*axisAcc
-	stats     Stats
+	albums       map[string]*albumAcc
+	artists      map[string]*artistAcc
+	genres       map[string]*axisAcc
+	composers    map[string]*axisAcc
+	stats        Stats
+	sourceTracks map[string]int
 }
 
 type voteMap map[string]int
@@ -287,10 +326,11 @@ type axisAcc struct {
 // New returns an empty Builder.
 func New() *Builder {
 	return &Builder{
-		albums:    map[string]*albumAcc{},
-		artists:   map[string]*artistAcc{},
-		genres:    map[string]*axisAcc{},
-		composers: map[string]*axisAcc{},
+		albums:       map[string]*albumAcc{},
+		artists:      map[string]*artistAcc{},
+		genres:       map[string]*axisAcc{},
+		composers:    map[string]*axisAcc{},
+		sourceTracks: map[string]int{},
 	}
 }
 
@@ -301,9 +341,12 @@ func (b *Builder) Add(r Row) {
 	albumID := dupes.AlbumIDOf(res)
 
 	b.stats.Tracks++
+	sourceID := LocalSourceID
 	if r.RoutedUDN != "" {
 		b.stats.RoutedTracks++
+		sourceID = SourceID(r.RoutedUDN)
 	}
+	b.sourceTracks[sourceID]++
 
 	a := b.albums[albumID]
 	if a == nil {
@@ -423,12 +466,16 @@ func addAxis(dst map[string]*axisAcc, segs []Segment, albumID string) {
 // builds from the same rows in any order are DeepEqual.
 func (b *Builder) Build(now time.Time) *Catalog {
 	c := &Catalog{
-		BuiltAt:     now,
-		albumIndex:  make(map[string]int, len(b.albums)),
-		artistIndex: make(map[string]int, len(b.artists)),
-		genreIndex:  make(map[string]int, len(b.genres)),
-		compIndex:   make(map[string]int, len(b.composers)),
-		trackAlbum:  make(map[string]string, b.stats.Tracks),
+		BuiltAt: now,
+		// Handed over, not copied: the Builder is single-use and is
+		// dropped by its caller once Build returns, so nothing can write
+		// through the old reference afterwards.
+		SourceTracks: b.sourceTracks,
+		albumIndex:   make(map[string]int, len(b.albums)),
+		artistIndex:  make(map[string]int, len(b.artists)),
+		genreIndex:   make(map[string]int, len(b.genres)),
+		compIndex:    make(map[string]int, len(b.composers)),
+		trackAlbum:   make(map[string]string, b.stats.Tracks),
 	}
 
 	c.Albums = make([]Album, 0, len(b.albums))
@@ -507,10 +554,18 @@ func (a *albumAcc) finish(trackAlbum map[string]string) Album {
 	}
 
 	udns := make([]string, 0, len(a.udns))
+	// routedAll starts true and is cleared by the first filesystem
+	// track, so it is exactly "no local track here".
+	sourceIDs := make([]string, 0, len(a.udns)+1)
+	if !a.routedAll {
+		sourceIDs = append(sourceIDs, LocalSourceID)
+	}
 	for u := range a.udns {
 		udns = append(udns, u)
+		sourceIDs = append(sourceIDs, SourceID(u))
 	}
 	sort.Strings(udns)
+	sort.Strings(sourceIDs)
 
 	sortArtist := sortKey(albumArtist)
 	return Album{
@@ -543,24 +598,26 @@ func (a *albumAcc) finish(trackAlbum map[string]string) Album {
 
 		Routed:     a.routedAll && len(a.udns) > 0,
 		RoutedUDNs: udns,
+		SourceIDs:  sourceIDs,
 		TrackPaths: paths,
 	}
 }
 
 func (ar *artistAcc) finish() Artist {
 	name := ar.nameVotes.pick()
-	albumIDs := rankAlbums(ar.albums)
+	albumIDs, albumTracks := rankAlbums(ar.albums)
 	sn := sortKey(name)
 	return Artist{
-		ID:         HashID(ar.id),
-		Name:       name,
-		SortName:   sn,
-		Bucket:     bucket(sn),
-		TrackCount: ar.tracks,
-		AlbumCount: len(albumIDs),
-		AlbumIDs:   albumIDs,
-		ArtistMBID: ar.mbidVotes.pick(),
-		AddedAt:    ar.addedAt,
+		ID:          HashID(ar.id),
+		Name:        name,
+		SortName:    sn,
+		Bucket:      bucket(sn),
+		TrackCount:  ar.tracks,
+		AlbumCount:  len(albumIDs),
+		AlbumIDs:    albumIDs,
+		AlbumTracks: albumTracks,
+		ArtistMBID:  ar.mbidVotes.pick(),
+		AddedAt:     ar.addedAt,
 	}
 }
 
@@ -580,13 +637,15 @@ func finishAxis(src map[string]*axisAcc, composer bool) []AxisEntry {
 			sn = composerSortName(display, variants)
 		}
 		key := sortKey(sn)
+		albumIDs, albumTracks := rankAlbums(e.albums)
 		out = append(out, AxisEntry{
 			ID:          HashID(e.id),
 			DisplayName: display,
 			SortName:    key,
 			Bucket:      bucket(key),
 			TrackCount:  e.tracks,
-			AlbumIDs:    rankAlbums(e.albums),
+			AlbumIDs:    albumIDs,
+			AlbumTracks: albumTracks,
 			RawVariants: variants,
 		})
 	}
@@ -615,7 +674,11 @@ func finishAxis(src map[string]*axisAcc, composer bool) []AxisEntry {
 // desc, then album key asc. albumIDs[0] is the group's primary tile
 // cover, so a Set-order fold would reshuffle it on every rebuild —
 // this ordering is what makes it stable.
-func rankAlbums(counts map[string]int) []string {
+// Returns the in-group track counts alongside, aligned index for
+// index, so a caller narrowing the list can restate the total from the
+// albums that survived. Emitting them together is what keeps the two
+// slices aligned; nothing else may write either.
+func rankAlbums(counts map[string]int) ([]string, []int) {
 	keys := make([]string, 0, len(counts))
 	for k := range counts {
 		keys = append(keys, k)
@@ -626,10 +689,12 @@ func rankAlbums(counts map[string]int) []string {
 		}
 		return keys[i] < keys[j]
 	})
+	tracks := make([]int, len(keys))
 	for i, k := range keys {
+		tracks[i] = counts[k]
 		keys[i] = HashID(k)
 	}
-	return keys
+	return keys, tracks
 }
 
 func pickModalInt(votes map[int]int) int {

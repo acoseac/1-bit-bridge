@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -590,7 +591,7 @@ func timeAgo(t time.Time) string {
 // nav links.
 var playerRoutes = []string{
 	"/albums", "/artists", "/favorites", "/playlists", "/mixes",
-	"/composers", "/genres", "/folders", "/search", "/tracks",
+	"/composers", "/genres", "/folders", "/search", "/tracks", "/sources",
 	"/album/{id}", "/artist/{id}", "/genre/{id}", "/composer/{id}",
 	"/playlist/{id}", "/mix/{slug}",
 }
@@ -604,6 +605,12 @@ type playerPageData struct {
 	AtlasEnabled bool   `json:"atlasEnabled"`
 	MixesEnabled bool   `json:"mixesEnabled"`
 	LibraryName  string `json:"libraryName"`
+	// SourcesEnabled gates the Sources entry in the player rail. False
+	// on a bridge with no UPnP upstreams configured, where the facet
+	// would offer exactly one choice ("This bridge") and mean nothing —
+	// unlike Smart Mixes, whose page is where its own switch lives,
+	// there is nothing to go there for.
+	SourcesEnabled bool `json:"sourcesEnabled"`
 }
 
 // pagePlayer renders the player shell for every player route.
@@ -611,13 +618,39 @@ func (s *Server) pagePlayer(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.CfgHolder.Load()
 	section, id := playerSectionFor(r)
 	s.renderPage(w, r, "player", playerPageData{
-		Section:      section,
-		ID:           id,
-		Query:        r.URL.Query().Get("q"),
-		AtlasEnabled: cfg.Atlas.Enabled,
-		MixesEnabled: cfg.SmartPlaylists.EffectiveEnabled(),
-		LibraryName:  cfg.LibraryName,
+		Section:        section,
+		ID:             id,
+		Query:          r.URL.Query().Get("q"),
+		AtlasEnabled:   cfg.Atlas.Enabled,
+		MixesEnabled:   cfg.SmartPlaylists.EffectiveEnabled(),
+		LibraryName:    cfg.LibraryName,
+		SourcesEnabled: s.sourcesFacetWorthShowing(cfg),
 	})
+}
+
+// sourcesFacetWorthShowing reports whether this library actually draws
+// on more than one place, which is the only case where a source facet
+// says anything.
+//
+// Two signals, because neither alone is enough. A configured upstream
+// that has not been walked yet has no tracks, and hiding the facet
+// there would hide the thing the operator just set up. And routed
+// tracks can outlive their config row: removing the last upstream
+// leaves the ingest with nothing to start, so its orphan sweep never
+// runs and those tracks stay in the manifest indefinitely — with a
+// config-only gate the facet would vanish exactly when it is the only
+// surface that explains where they came from.
+//
+// Neither signal touches the catalog. The routed count comes from the
+// cached stats part the dashboard already reads every 5s, not from a
+// catalog build, which is the one thing on this path that can be slow
+// on a cold snapshot.
+func (s *Server) sourcesFacetWorthShowing(cfg *config.Config) bool {
+	if cfg != nil && len(cfg.UPnPUpstream.Servers) > 0 {
+		return true
+	}
+	_, routed := s.trackSourceCounts()
+	return routed > 0
 }
 
 // playerSectionFor derives (section, id) from the request path. The

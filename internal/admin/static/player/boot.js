@@ -21,7 +21,7 @@ import {
   renderGenres, renderComposers,
   renderAxisAlbums, renderFavorites, renderPlaylists, renderPlaylistDetail,
   renderMixDetail,
-  renderMixes, renderFolders, renderSearch, renderTracks,
+  renderMixes, renderFolders, renderSearch, renderTracks, renderSources,
 } from "./views.js";
 
 const SECTIONS = [
@@ -34,6 +34,14 @@ const SECTIONS = [
   ["genres", "Genres", "/genres"],
   ["folders", "Folders", "/folders"],
 ];
+
+// Sources is listed only on a bridge that HAS more than one, which is
+// why it is not in SECTIONS. Unlike Smart Mixes — whose page is where
+// its own switch lives, so hiding it would hide the feature — a facet
+// over a single filesystem library offers one choice and explains
+// nothing. The seed carries the answer so no request is needed to
+// decide whether to draw it.
+const SOURCES_SECTION = ["sources", "Sources", "/sources"];
 
 let seed = {};
 let generation = 0;
@@ -99,7 +107,7 @@ export function mountShell() {
 // TestPlayerHeadsMatchServerRoutes pins the two together.
 const PLAYER_HEADS = new Set([
   "albums", "artists", "favorites", "playlists", "mixes",
-  "composers", "genres", "folders", "search", "tracks",
+  "composers", "genres", "folders", "search", "tracks", "sources",
   "album", "artist", "genre", "composer", "playlist", "mix",
 ]);
 
@@ -125,7 +133,8 @@ function renderSections() {
   const nav = document.getElementById("player-sections");
   if (!nav) return;
   clear(nav);
-  for (const [key, label, href] of SECTIONS) {
+  const sections = seed.sourcesEnabled ? [...SECTIONS, SOURCES_SECTION] : SECTIONS;
+  for (const [key, label, href] of sections) {
     // Smart Mixes stays listed even when the feature is off. It used to
     // be skipped, which was coherent while the off-state said "enable
     // this in Settings" — there was nothing to go there for. The page is
@@ -347,7 +356,7 @@ function readTrail() {
  * though it has no section link of its own. Compared on the path, so a
  * query (/search?q=…, /folders?path=…) still matches.
  */
-const trailRoots = new Set(["/", "/search", ...SECTIONS.map(([, , href]) => href)]);
+const trailRoots = new Set(["/", "/search", SOURCES_SECTION[2], ...SECTIONS.map(([, , href]) => href)]);
 
 /**
  * The trail to store on the entry we are about to push.
@@ -461,6 +470,7 @@ function route() {
     mixes: ["Smart Mixes", () => renderMixes(view, ctx)],
     mix: ["Mix", () => renderMixDetail(view, ctx)],
     folders: ["Folders", () => renderFolders(view, ctx)],
+    sources: ["Sources", () => renderSources(view, ctx)],
     search: ["Search", () => renderSearch(view, ctx)],
     tracks: ["Tracks", () => renderTracks(view, ctx)],
   };
