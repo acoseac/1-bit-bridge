@@ -230,8 +230,20 @@ func isLossyCodecLabel(codec string) bool {
 // `canDecode` is nil-safe and fails OPEN (unwired ⇒ no badge), matching the
 // enqueue-side guards: the probe exists to explain refusals, never to invent
 // them.
-func fundamentalSkipReason(isDSD bool, codec string, sampleRate *float64, bitsPerSample *int, path string, canDecode func(string) bool) string {
+func fundamentalSkipReason(routed bool, isDSD bool, codec string, sampleRate *float64, bitsPerSample *int, path string, canDecode func(string) bool) string {
 	switch {
+	case routed:
+		// FIRST, because it dominates every other reason: the bridge has
+		// no local file to hand sox, so even a pristine 24/96 FLAC on an
+		// upstream can never gain a variant.
+		//
+		// It also has to be said explicitly rather than fall out of the
+		// geometry test below. DIDL-Lite has no bit-depth element — on a
+		// real Chord 2Go, 0 of 15,283 items published one — so every
+		// routed FLAC lands in unknown_format and the reader is told
+		// "Format unreadable" about a file whose format is perfectly
+		// well known. That was 13,519 tracks on the reference library.
+		return "routed_upstream"
 	case isDSD:
 		return "dsd_bitstream"
 	case isLossyCodecLabel(codec):
@@ -478,7 +490,11 @@ func toBrowseTrackRow(t manifest.ChildTrack, canDecode func(string) bool) browse
 		IsUpscaled:    t.IsUpscaled,
 		IsOptimized:   t.IsOptimized,
 		PathHash:      pathHash(t.Path),
-		SkipReason:    fundamentalSkipReason(t.IsDSD != nil && *t.IsDSD, t.Codec, t.SampleRate, t.BitsPerSample, t.Path, canDecode),
+		// Not routed: the folder browse queries anti-join
+		// upnp_track_routing, so an upstream row cannot reach this
+		// surface. If that ever changes, pass the row's real
+		// routed-ness — the reason above exists for it.
+		SkipReason: fundamentalSkipReason(false, t.IsDSD != nil && *t.IsDSD, t.Codec, t.SampleRate, t.BitsPerSample, t.Path, canDecode),
 	}
 }
 
@@ -730,7 +746,8 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 				// classifier so the two surfaces can't disagree.
 				sr := float64(t.SampleRate)
 				bps := t.BitsPerSample
-				if fundamentalSkipReason(t.IsDSD, t.Codec, &sr, &bps, t.Path, canDecode) == "" {
+				// Not routed: the projection walk excludes upstream rows.
+				if fundamentalSkipReason(false, t.IsDSD, t.Codec, &sr, &bps, t.Path, canDecode) == "" {
 					atTarget++
 				} else {
 					unknownFormat++

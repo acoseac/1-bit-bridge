@@ -265,3 +265,83 @@ console.log(JSON.stringify({ reason, elapsedUnderASecond: Date.now() - t0 < 1000
 			"the player would stall with nothing on screen", got.Reason, got.Quick)
 	}
 }
+
+// TestRoutedTracksReportBeingOnAnUpstream pins the reason a routed track
+// can never gain a variant.
+//
+// DIDL-Lite has no bit-depth element — 0 of 15,283 items on a real Chord
+// 2Go published one — so a routed FLAC has no bitsPerSample and falls
+// into the geometry test, which told the reader "Format unreadable" about
+// a file whose format is perfectly well known. On the reference library
+// that was 13,519 tracks, the overwhelming majority of what a 2Go user
+// browses.
+//
+// The routed case has to come FIRST rather than merely be added: it
+// dominates. The bridge has no local file to hand sox, so even a pristine
+// 24/96 FLAC with complete geometry is still unable to gain a variant,
+// and reporting its geometry as the blocker would be a second wrong
+// answer rather than the first one fixed.
+func TestRoutedTracksReportBeingOnAnUpstream(t *testing.T) {
+	rate, bits := 44100.0, 16
+
+	// The shape the 2Go actually publishes: FLAC, sample rate, no depth.
+	if got := fundamentalSkipReason(true, false, "FLAC", &rate, nil, "2go/a.flac", nil); got != "routed_upstream" {
+		t.Errorf("routed FLAC with no bit depth: got %q, want routed_upstream — "+
+			"the reader is told the format is unreadable when it is simply remote", got)
+	}
+	// Complete geometry, still routed: nothing about the file is the
+	// blocker, so a reason derived from the file would be wrong.
+	if got := fundamentalSkipReason(true, false, "FLAC", &rate, &bits, "2go/a.flac", nil); got != "routed_upstream" {
+		t.Errorf("routed FLAC with full geometry: got %q, want routed_upstream", got)
+	}
+	// Routed AND DSD: still routed. Both are true; the one the operator
+	// can act on is neither, but "on an upstream" is the one that would
+	// remain true if the file were transcodable.
+	if got := fundamentalSkipReason(true, true, "DSF", nil, nil, "2go/a.dsf", nil); got != "routed_upstream" {
+		t.Errorf("routed DSD: got %q, want routed_upstream", got)
+	}
+
+	// And local tracks are untouched — the whole existing truth table
+	// still has to hold, or this fix traded one wrong badge for another.
+	for _, tc := range []struct {
+		name  string
+		isDSD bool
+		codec string
+		rate  *float64
+		bits  *int
+		want  string
+	}{
+		{"local dsd", true, "DSF", nil, nil, "dsd_bitstream"},
+		{"local lossy", false, "MP3", &rate, &bits, "lossy_source"},
+		{"local no geometry", false, "FLAC", nil, nil, "unknown_format"},
+		{"local fine", false, "FLAC", &rate, &bits, ""},
+	} {
+		if got := fundamentalSkipReason(false, tc.isDSD, tc.codec, tc.rate, tc.bits, "a", nil); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestEverySkipReasonHasALabel pins the Go -> JS half.
+//
+// An unlabelled reason renders as the raw identifier: the reader sees
+// "routed_upstream" where a sentence belongs. Nothing else connects the
+// two files.
+func TestEverySkipReasonHasALabel(t *testing.T) {
+	labels := readFile(t, filepath.Join("static", "player", "format.js"))
+	i := strings.Index(labels, "const SKIP_LABELS = {")
+	if i < 0 {
+		t.Fatal("SKIP_LABELS not found — this test has stopped checking anything")
+	}
+	block := labels[i:]
+	if end := strings.Index(block, "};"); end > 0 {
+		block = block[:end]
+	}
+	for _, reason := range []string{
+		"routed_upstream", "dsd_bitstream", "lossy_source", "unknown_format", "no_decoder",
+	} {
+		if !strings.Contains(block, reason+":") {
+			t.Errorf("skip reason %q has no label; it would render as the raw identifier", reason)
+		}
+	}
+}

@@ -41,7 +41,7 @@ func TestFundamentalSkipReason(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			// nil canDecode = probe unwired: fail open, so every one of
 			// these expectations must be unchanged by the no_decoder work.
-			got := fundamentalSkipReason(c.isDSD, c.codec, c.rate, c.bits, "a/b.flac", nil)
+			got := fundamentalSkipReason(false, c.isDSD, c.codec, c.rate, c.bits, "a/b.flac", nil)
 			if got != c.want {
 				t.Errorf("fundamentalSkipReason(dsd=%v, codec=%q, rate=%v, bits=%v) = %q, want %q",
 					c.isDSD, c.codec, c.rate, c.bits, got, c.want)
@@ -82,26 +82,26 @@ func TestFundamentalSkipReason_NoDecoder(t *testing.T) {
 	// Stands in for SoxInfo.CanDecode on a build with no MP4 demuxer.
 	noMP4 := func(p string) bool { return !strings.HasSuffix(strings.ToLower(p), ".m4a") }
 
-	if got := fundamentalSkipReason(false, "ALAC", rate, bits, "A/B.m4a", noMP4); got != "no_decoder" {
+	if got := fundamentalSkipReason(false, false, "ALAC", rate, bits, "A/B.m4a", noMP4); got != "no_decoder" {
 		t.Errorf("undecodable ALAC = %q, want no_decoder — the tile would claim it is eligible", got)
 	}
-	if got := fundamentalSkipReason(false, "FLAC", rate, bits, "A/B.flac", noMP4); got != "" {
+	if got := fundamentalSkipReason(false, false, "FLAC", rate, bits, "A/B.flac", noMP4); got != "" {
 		t.Errorf("decodable FLAC = %q, want no badge", got)
 	}
 	// Nil-safe: an unwired probe must never invent a badge.
-	if got := fundamentalSkipReason(false, "ALAC", rate, bits, "A/B.m4a", nil); got != "" {
+	if got := fundamentalSkipReason(false, false, "ALAC", rate, bits, "A/B.m4a", nil); got != "" {
 		t.Errorf("unwired probe = %q, want no badge (fail open)", got)
 	}
 
 	// Ordering: file-intrinsic reasons outrank the toolchain-dependent one,
 	// so a track is described by what it IS wherever that is knowable.
-	if got := fundamentalSkipReason(true, "ALAC", rate, bits, "A/B.m4a", noMP4); got != "dsd_bitstream" {
+	if got := fundamentalSkipReason(false, true, "ALAC", rate, bits, "A/B.m4a", noMP4); got != "dsd_bitstream" {
 		t.Errorf("DSD + undecodable = %q, want dsd_bitstream", got)
 	}
-	if got := fundamentalSkipReason(false, "AAC", rate, bits, "A/B.m4a", noMP4); got != "lossy_source" {
+	if got := fundamentalSkipReason(false, false, "AAC", rate, bits, "A/B.m4a", noMP4); got != "lossy_source" {
 		t.Errorf("lossy + undecodable = %q, want lossy_source", got)
 	}
-	if got := fundamentalSkipReason(false, "ALAC", nil, nil, "A/B.m4a", noMP4); got != "unknown_format" {
+	if got := fundamentalSkipReason(false, false, "ALAC", nil, nil, "A/B.m4a", noMP4); got != "unknown_format" {
 		t.Errorf("no geometry + undecodable = %q, want unknown_format", got)
 	}
 }

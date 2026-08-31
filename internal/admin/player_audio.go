@@ -207,7 +207,8 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 		// substitute sidecar but may well own two.
 		dto.Variants = describeVariants(variants[p], row)
 		dto.VariantSkip = fundamentalSkipReason(
-			row.IsDSD, row.Codec, floatOrNil(row.SampleRate), intOrNil(row.BitsPerSample),
+			row.RoutedUDN != "", row.IsDSD, row.Codec,
+			floatOrNil(row.SampleRate), intOrNil(row.BitsPerSample),
 			p, s.soxCanDecode())
 		out = append(out, dto)
 	}
