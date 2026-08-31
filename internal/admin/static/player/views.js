@@ -76,7 +76,12 @@ function crumbAncestors(trail, structural) {
  *
  * Not paged: a bridge has a handful of sources, not a wall of them.
  */
-export async function renderSources(view, { gen }) {
+export async function renderSources(view, { gen, setToolbar }) {
+  // Every view owns the toolbar; route() does not reset it. Without this
+  // the album grid's sort/quality/variant selects stay on screen over the
+  // Sources page — and they still WORK, so changing "sort" there wrote
+  // ?sort= into the Sources URL and re-rendered the same page.
+  setToolbar(null);
   const at = gen();
   clear(view);
   view.appendChild(spinner());
@@ -186,9 +191,13 @@ function sourceScopeBanner(sourceID) {
   // Returned synchronously and named later, so the grid never waits on
   // a second request to paint. The banner already says the true thing
   // without the name; the name only makes it a better sentence.
-  api.sources().then((d) => {
-    const hit = (d.sources || []).find((s) => s.id === sourceID);
-    if (hit) label.textContent = `Showing ${hit.name}`;
+  //
+  // sourceNames, not sources: the map is memoised (the banner renders on
+  // every scoped grid) and it does not share the Sources page's request
+  // key, so the two cannot abort each other mid-navigation.
+  api.sourceNames().then((names) => {
+    const name = names.get(sourceID);
+    if (name) label.textContent = `Showing ${name}`;
   }).catch(() => {
     /* the banner's job is to say a filter is on; the name is a bonus */
   });

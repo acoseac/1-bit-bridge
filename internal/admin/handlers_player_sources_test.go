@@ -3,9 +3,12 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -413,31 +416,62 @@ func TestRoutedOnlineResolvesTheRoutingKeyNotTheDeviceUDN(t *testing.T) {
 	}
 }
 
-// TestSourcesFacetGateSeesOrphanedRoutedTracks pins the half a
-// config-only gate gets wrong.
+// TestSourcesFacetGateFollowsTheLibraryNotTheConfig pins both halves of
+// the gate's one signal.
 //
-// Removing the last upstream leaves the ingest with nothing to start,
-// so its orphan sweep never runs and those tracks stay in the manifest.
-// A gate that only read the config would hide the facet exactly then —
-// when it is the one surface that explains where they came from.
-func TestSourcesFacetGateSeesOrphanedRoutedTracks(t *testing.T) {
+// A configured upstream with no tracks must NOT open the facet: the
+// handler skips zero-track sources, so the page would show a lone "This
+// bridge" and the rail entry would lead nowhere. And routed tracks with
+// no config row MUST open it: removing the last upstream leaves the
+// ingest with nothing to start, so its orphan sweep never runs and the
+// facet is the only surface that explains where those tracks came from.
+func TestSourcesFacetGateFollowsTheLibraryNotTheConfig(t *testing.T) {
 	srv, cfg, _ := newTestServer(t)
-	if len(cfg.UPnPUpstream.Servers) != 0 {
-		t.Fatalf("fixture already configures %d upstreams; the point is zero",
-			len(cfg.UPnPUpstream.Servers))
+	if srv.sourcesFacetWorthShowing() {
+		t.Error("empty library: facet should stay hidden")
 	}
-	if srv.sourcesFacetWorthShowing(cfg) {
-		t.Error("empty library with no upstreams: facet should stay hidden")
+
+	// A configured upstream is not enough on its own.
+	cfg.UPnPUpstream.Enabled = true
+	cfg.UPnPUpstream.Servers = []config.UPnPUpstreamServerConfig{
+		{Name: "Chord 2go", UDN: testUpstreamKey},
+	}
+	withTestUpstream(srv, true)
+	if srv.sourcesFacetWorthShowing() {
+		t.Error("configured upstream with no ingested tracks: the facet page " +
+			"would show one row, so the rail entry must stay hidden")
 	}
 
 	seedHybridLibrary(t, srv.deps.Manifest)
-	// Drop the cached counts the way a fresh read would see them.
 	srv.statsMu.Lock()
 	srv.statsDBValid = false
 	srv.statsMu.Unlock()
+	if !srv.sourcesFacetWorthShowing() {
+		t.Error("routed tracks present: facet must show")
+	}
 
-	if !srv.sourcesFacetWorthShowing(cfg) {
-		t.Error("routed tracks present but no config row: facet must still show, " +
+	// ...and it must stay shown once the config row is gone.
+	cfg.UPnPUpstream.Servers = nil
+	srv.deps.UPnPSources = nil
+	if !srv.sourcesFacetWorthShowing() {
+		t.Error("routed tracks with no config row: facet must still show, " +
 			"or the orphans have no surface at all")
+	}
+}
+
+// TestRenderSourcesClearsTheToolbar pins the one thing route() does NOT
+// do for a view.
+//
+// Each view owns the toolbar. renderSources did not touch it, so arriving
+// from the album grid left its sort / quality / variant selects on screen
+// over the Sources page — and they still worked, writing ?sort= into the
+// Sources URL. Reproduced in a browser before it was fixed; a source scan
+// is what keeps it fixed, since nothing else connects the two views.
+func TestRenderSourcesClearsTheToolbar(t *testing.T) {
+	fn := extractJSFunction(t,
+		readFile(t, filepath.Join("static", "player", "views.js")), "renderSources")
+	if !strings.Contains(fn, "setToolbar(null)") {
+		t.Error("renderSources does not clear the toolbar; the previous view's " +
+			"controls will stay on screen and stay live")
 	}
 }

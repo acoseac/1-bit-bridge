@@ -1126,9 +1126,9 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 }
 .source-dot {
   width: 7px; height: 7px; border-radius: 50%;
-  background: currentColor; flex: 0 0 auto;
+  background: currentcolor; flex: 0 0 auto;
 }
-/* Colour is on the DOT's own inherited currentColor, and the word sits
+/* Colour is on the DOT's own inherited currentcolor, and the word sits
  * beside it: the state is never carried by hue alone, which is what
  * keeps it readable for a red/green-colourblind operator and in a
  * screenshot printed in grey. */

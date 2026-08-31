@@ -175,18 +175,7 @@ func (s *Server) apiPlayerSources(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
-	// Track counts come from the build, where each row's own source was
-	// in hand. Album counts are membership, so an album holding tracks
-	// from two places is counted by both — "has music here" is the
-	// question the row answers, and the track totals still sum to the
-	// library because those ARE attributed per track.
-	albums := map[string]int{}
-	for _, a := range cat.Albums {
-		for _, id := range a.SourceIDs {
-			albums[id]++
-		}
-	}
+	albums := albumCountsBySource(cat)
 
 	out := make([]playerSourceDTO, 0, len(cat.SourceTracks))
 	if n := cat.SourceTracks[librarycat.LocalSourceID]; n > 0 {
@@ -196,8 +185,34 @@ func (s *Server) apiPlayerSources(w http.ResponseWriter, r *http.Request) {
 			TrackCount: n, AlbumCount: albums[librarycat.LocalSourceID],
 		})
 	}
+	writeJSON(w, http.StatusOK, playerSourcesResponse{
+		Sources:    append(out, s.upstreamSourceRows(cat, albums)...),
+		SnapshotAt: snapshotStamp(cat.BuiltAt),
+	})
+}
 
-	upstream := make([]playerSourceDTO, 0, len(cat.SourceTracks))
+// albumCountsBySource counts album MEMBERSHIP per source, so an album
+// holding tracks from two places is counted by both — "has music here" is
+// the question the row answers. The track totals still sum to the library
+// because those ARE attributed per track, in the catalog build.
+func albumCountsBySource(cat *librarycat.Catalog) map[string]int {
+	albums := map[string]int{}
+	for _, a := range cat.Albums {
+		for _, id := range a.SourceIDs {
+			albums[id]++
+		}
+	}
+	return albums
+}
+
+// upstreamSourceRows builds the non-filesystem rows, largest first.
+//
+// A configured upstream with no tracks is skipped: this is a facet over
+// the library, and a row that filters to nothing is a dead end. Rows whose
+// upstream is no longer configured are kept — they are why the counts add
+// up the way they do — but get no name and no liveness rather than a guess.
+func (s *Server) upstreamSourceRows(cat *librarycat.Catalog, albums map[string]int) []playerSourceDTO {
+	out := make([]playerSourceDTO, 0, len(cat.SourceTracks))
 	seen := map[string]struct{}{}
 	for _, src := range s.upnpSources() {
 		id := librarycat.SourceID(src.Key)
@@ -206,14 +221,11 @@ func (s *Server) apiPlayerSources(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		online := src.Online
-		upstream = append(upstream, playerSourceDTO{
+		out = append(out, playerSourceDTO{
 			ID: id, Name: src.Name, Kind: sourceKindUPnP, Configured: true,
 			TrackCount: cat.SourceTracks[id], AlbumCount: albums[id], Online: &online,
 		})
 	}
-	// Orphans: routed tracks whose upstream is no longer configured.
-	// They have no name to show and no liveness to report, so they get
-	// neither rather than a guess.
 	for id, n := range cat.SourceTracks {
 		if id == librarycat.LocalSourceID {
 			continue
@@ -221,27 +233,23 @@ func (s *Server) apiPlayerSources(w http.ResponseWriter, r *http.Request) {
 		if _, known := seen[id]; known {
 			continue
 		}
-		upstream = append(upstream, playerSourceDTO{
+		out = append(out, playerSourceDTO{
 			ID: id, Name: "Removed upstream", Kind: sourceKindUPnP,
 			TrackCount: n, AlbumCount: albums[id],
 		})
 	}
-	// Largest first, then by name, then id: the ordering must not
-	// depend on map iteration or the rail reshuffles between reloads.
-	sort.Slice(upstream, func(i, j int) bool {
-		if upstream[i].TrackCount != upstream[j].TrackCount {
-			return upstream[i].TrackCount > upstream[j].TrackCount
+	// Largest first, then by name, then id: the ordering must not depend
+	// on map iteration or the rail reshuffles between reloads.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TrackCount != out[j].TrackCount {
+			return out[i].TrackCount > out[j].TrackCount
 		}
-		if upstream[i].Name != upstream[j].Name {
-			return upstream[i].Name < upstream[j].Name
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
 		}
-		return upstream[i].ID < upstream[j].ID
+		return out[i].ID < out[j].ID
 	})
-
-	writeJSON(w, http.StatusOK, playerSourcesResponse{
-		Sources:    append(out, upstream...),
-		SnapshotAt: snapshotStamp(cat.BuiltAt),
-	})
+	return out
 }
 
 // upnpSources returns the configured upstreams, or nil when the

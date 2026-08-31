@@ -10,6 +10,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
+	"github.com/acoseac/1-bit-bridge/internal/upnp"
 	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
 	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 )
@@ -136,34 +137,39 @@ func playerUPnPSourcesAdapter(lc *upnpUpstreamLifecycle, holder *config.RuntimeC
 		}
 		out := make([]admin.UPnPSource, 0, len(cfg.UPnPUpstream.Servers))
 		for _, srv := range cfg.UPnPUpstream.Servers {
-			name := strings.TrimSpace(srv.Name)
-			online := false
-			// Trimmed before the lookup for the same reason every other
-			// cache read here trims: a hand-edited bridge.yaml UDN with
-			// stray whitespace would otherwise miss the SSDP-clean key
-			// and false-report an upstream that is up as offline.
-			if udn := strings.TrimSpace(srv.UDN); udn != "" {
-				if info, ok := lc.cache.Get(udn); ok {
-					online = true
-					if name == "" {
-						name = info.FriendlyName
-					}
-				}
-			}
-			// A manual-URL entry has no UDN to look up and is not
-			// discoverable at all yet (see discoveryServerResolver's
-			// TODO), so false is the accurate answer rather than a
-			// pessimistic one. It also cannot be ingested today, so it
-			// contributes no tracks and the facet skips it anyway.
-			if name == "" {
-				name = "Upstream server"
-			}
-			out = append(out, admin.UPnPSource{
-				Key:    upnpingest.StableServerKey(srv),
-				Name:   name,
-				Online: online,
-			})
+			out = append(out, upnpSourceFor(srv, lc.cache))
 		}
 		return out
 	}
+}
+
+// upnpSourceFor resolves one configured upstream to its facet row.
+//
+// The UDN is trimmed before the cache lookup for the same reason every
+// other cache read here trims: a hand-edited bridge.yaml UDN with stray
+// whitespace would otherwise miss the SSDP-clean key and false-report an
+// upstream that is up as offline.
+//
+// A manual-URL entry has no UDN to look up and is not discoverable at all
+// yet (see discoveryServerResolver's TODO), so false is the accurate
+// answer rather than a pessimistic one. It also cannot be ingested today,
+// so it contributes no tracks and the facet skips it anyway.
+func upnpSourceFor(srv config.UPnPUpstreamServerConfig, cache *upnp.ServerCache) admin.UPnPSource {
+	name := strings.TrimSpace(srv.Name)
+	online := false
+	if udn := strings.TrimSpace(srv.UDN); udn != "" {
+		if info, ok := cache.Get(udn); ok {
+			online = true
+			if name == "" {
+				// Trimmed too: a whitespace-only friendly name would
+				// otherwise pass the empty check below and render as a
+				// blank row.
+				name = strings.TrimSpace(info.FriendlyName)
+			}
+		}
+	}
+	if name == "" {
+		name = "Upstream server"
+	}
+	return admin.UPnPSource{Key: upnpingest.StableServerKey(srv), Name: name, Online: online}
 }

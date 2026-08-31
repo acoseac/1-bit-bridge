@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -624,31 +623,35 @@ func (s *Server) pagePlayer(w http.ResponseWriter, r *http.Request) {
 		AtlasEnabled:   cfg.Atlas.Enabled,
 		MixesEnabled:   cfg.SmartPlaylists.EffectiveEnabled(),
 		LibraryName:    cfg.LibraryName,
-		SourcesEnabled: s.sourcesFacetWorthShowing(cfg),
+		SourcesEnabled: s.sourcesFacetWorthShowing(),
 	})
 }
 
-// sourcesFacetWorthShowing reports whether this library actually draws
-// on more than one place, which is the only case where a source facet
-// says anything.
+// sourcesFacetWorthShowing reports whether this library actually draws on
+// more than one place, which is the only case where a source facet says
+// anything.
 //
-// Two signals, because neither alone is enough. A configured upstream
-// that has not been walked yet has no tracks, and hiding the facet
-// there would hide the thing the operator just set up. And routed
-// tracks can outlive their config row: removing the last upstream
-// leaves the ingest with nothing to start, so its orphan sweep never
-// runs and those tracks stay in the manifest indefinitely — with a
-// config-only gate the facet would vanish exactly when it is the only
-// surface that explains where they came from.
+// ONE signal, deliberately, and it is not the config. apiPlayerSources
+// emits an upstream row only for a source that HAS tracks — a row that
+// filtered to nothing would be a dead end — so with no routed tracks the
+// facet has exactly one row to show no matter what the config says. An
+// earlier version also returned true for a configured upstream, on the
+// reasoning that hiding the facet would hide something the operator had
+// just set up; that put a rail entry in front of a page that then said
+// nothing. Server -> UPnP is where a configured-but-unwalked upstream is
+// visible, and it belongs there.
 //
-// Neither signal touches the catalog. The routed count comes from the
-// cached stats part the dashboard already reads every 5s, not from a
-// catalog build, which is the one thing on this path that can be slow
-// on a cold snapshot.
-func (s *Server) sourcesFacetWorthShowing(cfg *config.Config) bool {
-	if cfg != nil && len(cfg.UPnPUpstream.Servers) > 0 {
-		return true
-	}
+// Reading the library rather than the config also covers the case a
+// config check gets backwards: routed rows OUTLIVE their config row.
+// Removing the last upstream leaves the ingest with nothing to start, so
+// its orphan sweep never runs and those tracks stay in the manifest
+// indefinitely — exactly when the facet is the only surface that explains
+// where they came from.
+//
+// The count comes from the cached stats part the dashboard already reads
+// every 5s, not from a catalog build, which is the one thing on this path
+// that can be slow on a cold snapshot.
+func (s *Server) sourcesFacetWorthShowing() bool {
 	_, routed := s.trackSourceCounts()
 	return routed > 0
 }
