@@ -475,3 +475,48 @@ func TestRenderSourcesClearsTheToolbar(t *testing.T) {
 			"controls will stay on screen and stay live")
 	}
 }
+
+// TestSourceRailKeepsTheStatusColourOffTheRow pins the shape that a
+// screenshot caught and no assertion about the DOM would have.
+//
+// The status classes set `color`, which the dot reads through
+// currentcolor. Applied to the ROW they also recolour the source's NAME,
+// so an offline upstream rendered as red text in the rail — which reads
+// as an error rather than a status, and fights the rail's own "you are
+// here" ink. They belong on a wrapper, exactly as on the Sources page.
+func TestSourceRailKeepsTheStatusColourOffTheRow(t *testing.T) {
+	fn := extractJSFunction(t,
+		readFile(t, filepath.Join("static", "player", "boot.js")), "sourceNavRow")
+	if strings.Contains(fn, "row.classList.add(cls)") {
+		t.Error("sourceNavRow puts the status class on the row; it recolours the " +
+			"source name as well as the dot")
+	}
+	if !strings.Contains(fn, "source-status ${cls}") {
+		t.Error("sourceNavRow no longer wraps the dot in a .source-status span; " +
+			"the dot has nothing to read its colour from")
+	}
+}
+
+// TestSourceRailRefreshesAndFollowsNavigation pins the two calls that
+// make the rail's dot mean anything.
+//
+// Without the refresh in route() the rail is painted once at mount and an
+// upstream that drops mid-session keeps its green dot for as long as the
+// tab stays open. Without markActiveSource there, following a source link
+// leaves the highlight on whichever source was picked first.
+func TestSourceRailRefreshesAndFollowsNavigation(t *testing.T) {
+	src := readFile(t, filepath.Join("static", "player", "boot.js"))
+	fn := extractJSFunction(t, src, "route")
+	for _, call := range []string{"markActiveSource()", "refreshSourceNav("} {
+		if !strings.Contains(fn, call) {
+			t.Errorf("route() no longer calls %s; the source rail stops tracking "+
+				"the current view", call)
+		}
+	}
+	// And the refresh must be TTL-guarded, or every hop around the library
+	// costs a request — the cost the banner's name lookup was memoised to
+	// avoid, reintroduced one level up.
+	if !strings.Contains(src, "SOURCE_NAV_TTL_MS") {
+		t.Error("the source rail refresh is no longer TTL-guarded")
+	}
+}

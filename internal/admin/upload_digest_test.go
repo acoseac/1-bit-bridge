@@ -34,15 +34,26 @@ import (
 //
 // readFile normalizes CRLF, so the "\n}\n" terminator is present on every
 // platform (see its docblock — this has bitten three times).
+// The declaration forms this package's client sources actually use. Tried
+// in order, longest-prefix first so "async function" is not mistaken for a
+// plain "function" starting mid-token.
+var jsFunctionAnchors = []string{"export async function ", "export function ", "async function ", "function "}
+
 func extractJSFunction(t *testing.T, src, name string) string {
 	t.Helper()
-	start := strings.Index(src, "async function "+name+"(")
+	start := -1
+	for _, anchor := range jsFunctionAnchors {
+		if i := strings.Index(src, anchor+name+"("); i >= 0 {
+			start = i
+			break
+		}
+	}
 	if start < 0 {
-		t.Fatalf("app.js: no function %s", name)
+		t.Fatalf("no function %s in the source", name)
 	}
 	end := strings.Index(src[start:], "\n}\n")
 	if end < 0 {
-		t.Fatalf("app.js: unterminated function %s", name)
+		t.Fatalf("unterminated function %s", name)
 	}
 	return src[start : start+end+3]
 }
