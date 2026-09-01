@@ -502,6 +502,16 @@ type Deps struct {
 	// and the next full scan applies the policy.
 	TriggerDuplicatesPass func() bool
 
+	// DBFreeBytes reports free space on the volume holding the given
+	// path. Wired by cmd/bridge to transcode.AvailableDiskSpaceNearest.
+	//
+	// Injected rather than imported because internal/transcode imports
+	// internal/manifest, so manifest cannot import it back, and
+	// internal/admin deliberately does not import transcode either (the
+	// ArtistImageMBIDs / UpscaleSoxFLAC precedent). Nil skips the
+	// headroom check that guards a VACUUM against filling the volume.
+	DBFreeBytes func(path string) (int64, error)
+
 	// SmartMixRun / BackupRun expose the smart-mix regenerator's and
 	// backup ticker's last/next-run recorders for the Jobs page cards.
 	// Nil-safe: absent omits the field (feature off or test harness).
@@ -1505,6 +1515,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/analysis/sweep", s.apiAnalysisSweep)
 	mux.HandleFunc("GET /api/jobs", s.apiJobs)
 	mux.HandleFunc("GET /api/diagnostics", s.apiDiagnostics)
+	mux.HandleFunc("POST /api/database/compact", s.apiDatabaseCompact)
 	mux.HandleFunc("GET /api/doctor", s.apiDoctor)
 	// Log export. All GET: reads, not mutations, so csrfGuard passes them
 	// through as it does every other read on this listener. The exports are

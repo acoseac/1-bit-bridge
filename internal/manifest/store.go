@@ -54,6 +54,10 @@ var logger = logging.Component("manifest")
 type Store struct {
 	db *sql.DB
 	mu sync.Mutex // serializes ALL writers (see contract above)
+	// path is the database file this Store was opened against, retained
+	// so Compact can stat it and probe the volume's free space. Empty for
+	// any future non-file-backed Store; Compact refuses in that case.
+	path string
 	// now returns the timestamp used by every Store write path that
 	// writes a timestamp into a row (indexed_at on variants, enriched_at
 	// on tracks, etc.). Defaults to time.Now in production; tests
@@ -166,7 +170,7 @@ func OpenStore(path string) (*Store, error) {
 		db.Close() // release the handle + background goroutines; mirrors the migrate() error path below
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
-	s := &Store{db: db, now: time.Now}
+	s := &Store{db: db, now: time.Now, path: path}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err

@@ -291,6 +291,31 @@ func (s *Scanner) Roots() []string {
 // scanStallThreshold).
 func (s *Scanner) IsScanning() bool { return s.scanning.Load() }
 
+// ScanInFlight reports whether ANY scan is running — full `Scan` or the
+// watcher's `ScanSubtree`. This is the broader predicate; `IsScanning`
+// covers only the full scan, because it drives the admin badge and the
+// SSE fast tick, where a subtree scan is not what an operator means by
+// "scanning".
+//
+// Use this, not IsScanning, for anything that must not overlap a scan's
+// writes — `Store.Compact` is the first such caller, and the duplicate
+// restamping pass uses the same counter internally.
+func (s *Scanner) ScanInFlight() bool { return s.activeScans.Load() > 0 }
+
+// MarkScanInFlightForTests moves the in-flight counter directly. Test-only
+// seam for callers OUTSIDE this package (internal/admin's compaction
+// guard) that need the predicate true without standing up a real
+// long-running scan — far more fixture than such an assertion needs, and
+// the counter IS the predicate. Production code MUST NOT call it; the
+// name is deliberately unusable-looking.
+func (s *Scanner) MarkScanInFlightForTests(inFlight bool) {
+	if inFlight {
+		s.activeScans.Add(1)
+		return
+	}
+	s.activeScans.Add(-1)
+}
+
 // scanStallThreshold is how long a running scan may go without
 // committing a single row before the bridge stops advertising it to
 // clients as an active scan.

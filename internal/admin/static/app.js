@@ -5516,6 +5516,15 @@ function applyDiagnostics(d) {
     : `${(Number(d.mbCacheHitRatio) * 100).toFixed(1)}%`);
   setDiagText("diag-mb-lookups", lookups.toLocaleString());
 
+  // Database size and what a compaction would return. formatBytes is
+  // binary here as everywhere else (the #798 one-formatter decision).
+  setDiagText("diag-db-size", formatBytes(Number(d.databaseBytes) || 0));
+  const reclaim = Number(d.databaseReclaimableBytes) || 0;
+  const dbBytes = Number(d.databaseBytes) || 0;
+  setDiagText("diag-db-reclaimable", reclaim === 0
+    ? "nothing to reclaim"
+    : `${formatBytes(reclaim)} (${((reclaim / Math.max(dbBytes, 1)) * 100).toFixed(0)}%)`);
+
   setDiagText("diag-upscale-inflight", String(d.upscaleJobsInFlight ?? 0));
   setDiagText("diag-upscale-done", (Number(d.upscaleJobsCompletedTotal) || 0).toLocaleString());
   setDiagText("diag-upscale-p50", formatSeconds(d.upscaleDurationP50));
@@ -5823,7 +5832,50 @@ async function loadDiagnostics() {
   }
 }
 
+// wireDatabaseCompact arms the Compact button. Scoped to pageSignal() so a
+// boosted navigation away does not leave a second listener behind.
+function wireDatabaseCompact() {
+  const btn = document.getElementById("db-compact-btn");
+  const status = document.getElementById("db-compact-status");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    // Re-check rather than trusting `disabled`: a programmatic click
+    // walks straight past the attribute.
+    if (btn.dataset.busy === "1") return;
+    btn.dataset.busy = "1";
+    btn.disabled = true;
+    const previous = btn.textContent;
+    btn.textContent = "Compacting…";
+    if (status) status.textContent = "";
+    try {
+      const res = await API.post("/api/database/compact", {});
+      const reclaimed = Number(res.reclaimedBytes) || 0;
+      if (status) {
+        if (res.checkpointBusy) {
+          // The vacuum ran; a reader still held the old WAL snapshot, so
+          // the file has not shrunk yet. Saying "reclaimed 0" without
+          // this reads as a broken button.
+          status.textContent = "Compacted, but a reader still held the old snapshot — "
+            + "the space is returned once that clears. Re-run to confirm.";
+        } else if (reclaimed > 0) {
+          status.textContent = `Reclaimed ${formatBytes(reclaimed)}.`;
+        } else {
+          status.textContent = "Nothing to reclaim.";
+        }
+      }
+      loadDiagnostics();
+    } catch (err) {
+      if (status) status.textContent = "Compaction failed: " + err.message;
+    } finally {
+      btn.dataset.busy = "";
+      btn.disabled = false;
+      btn.textContent = previous;
+    }
+  }, { signal: pageSignal() });
+}
+
 function initDiagnostics() {
+  wireDatabaseCompact();
   // Actually STOP the interval while the tab is hidden, rather than only
   // refreshing on return. The first version of this carried a comment
   // saying it paused and did not: the timer kept firing every 5s in the
