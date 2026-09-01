@@ -1367,6 +1367,33 @@ type UPnPUpstreamPublicServer struct {
 	// error).
 	RoutedTracks int `json:"routedTracks"`
 
+	// DescriptionURL is the upstream's own SSDP LOCATION — the
+	// description-XML URL the bridge itself fetched it from (e.g.
+	// http://192.168.0.62:8200/rootDesc.xml).
+	//
+	// It exists so a client whose OWN SSDP discovery failed can still
+	// add this server directly, without the operator hunting for the
+	// address. iOS multicast is genuinely unreliable (local-network
+	// permission, some APs filter it), and the app already accepts a
+	// description URL in its manual add-server flow — this saves the
+	// typing, it does not enable anything that was impossible before.
+	//
+	// It cannot be derived client-side: the path is vendor-specific
+	// (MiniDLNA /rootDesc.xml, others /description.xml or /dd.xml), so
+	// host:port alone is not enough.
+	//
+	// EMPTY IN PUBLIC MODE, deliberately. A publicly-reachable bridge
+	// would otherwise hand every unauthenticated /v1/health caller a
+	// private LAN address — useless to a remote client, and a small
+	// disclosure of the operator's internal topology. Also empty for a
+	// server the bridge has not seen on the LAN (nothing to report) and
+	// for a manual-URL entry (the operator already has the URL).
+	//
+	// Treat it as a HINT, not a guarantee of reachability: it is
+	// reachable from the BRIDGE, which is not the same as reachable
+	// from the phone (a guest VLAN, or client isolation on the AP).
+	DescriptionURL string `json:"descriptionURL,omitempty"`
+
 	// Online reports whether this upstream is currently reachable from
 	// the bridge. For a UDN-configured upstream it's true iff the device
 	// is presently in the SSDP discovery cache (refreshed every M-SEARCH,

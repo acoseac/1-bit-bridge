@@ -67,16 +67,25 @@ func (a *upnpPublicAdapter) PublicServers(ctx context.Context) []api.UPnPUpstrea
 	if cfg == nil {
 		return nil
 	}
+	isPublic := cfg.IsPublic()
 	out := make([]api.UPnPUpstreamPublicServer, 0, len(cfg.UPnPUpstream.Servers))
 	for _, srv := range cfg.UPnPUpstream.Servers {
-		friendly, routed, online := lookupUPnPServerRuntime(ctx, srv, a.cache, a.store)
+		friendly, routed, online, descURL := lookupUPnPServerRuntime(ctx, srv, a.cache, a.store)
+		if isPublic {
+			// Never hand an internet-reachable /v1/health caller a
+			// private LAN address: unusable to them, and a small
+			// disclosure of the operator's internal topology. The
+			// whole point of the field is a phone on the SAME LAN.
+			descURL = ""
+		}
 		out = append(out, api.UPnPUpstreamPublicServer{
-			Name:          srv.Name,
-			ConfiguredUDN: srv.UDN,
-			PathPrefix:    srv.PathPrefix,
-			FriendlyName:  friendly,
-			RoutedTracks:  routed,
-			Online:        online,
+			Name:           srv.Name,
+			ConfiguredUDN:  srv.UDN,
+			PathPrefix:     srv.PathPrefix,
+			FriendlyName:   friendly,
+			RoutedTracks:   routed,
+			Online:         online,
+			DescriptionURL: descURL,
 		})
 	}
 	return out
@@ -104,7 +113,7 @@ func lookupUPnPServerRuntime(
 	srv config.UPnPUpstreamServerConfig,
 	cache *upnp.ServerCache,
 	store *manifest.Store,
-) (friendlyName string, routedTracks int, online bool) {
+) (friendlyName string, routedTracks int, online bool, descriptionURL string) {
 	// SSDP-keyed friendly-name + liveness lookup applies only to servers
 	// configured with a UDN — manual-URL entries don't get into the
 	// discovery cache (the M-SEARCH responder matches by UDN, and a
@@ -125,6 +134,7 @@ func lookupUPnPServerRuntime(
 	if udn != "" && cache != nil {
 		if info, ok := cache.Get(udn); ok {
 			friendlyName = info.FriendlyName
+			descriptionURL = info.DescriptionURL
 			online = true
 		}
 	}
@@ -141,7 +151,7 @@ func lookupUPnPServerRuntime(
 			routedTracks = n
 		}
 	}
-	return friendlyName, routedTracks, online
+	return friendlyName, routedTracks, online, descriptionURL
 }
 
 // installPublicProvider builds the public-surface adapter for the

@@ -120,6 +120,17 @@ An **invalid or expired** token is treated as unauthenticated, never as an error
   "updateReleaseNotesURL": "https://github.com/acoseac/1-bit-bridge/releases/tag/v0.1.0",
   "minClientVersion": "1.0.0",
   "upscaleEnabled": false,
+  "upnpUpstreamServers": [
+    {
+      "name": "Chord 2Go",
+      "configuredUDN": "uuid:4d696e69-444c-164e-9d41-00b78f5ae46a",
+      "pathPrefix": "2go",
+      "friendlyName": "Chord 2Go:2go-ars",
+      "descriptionURL": "http://192.168.0.62:8200/rootDesc.xml",
+      "routedTracks": 15283,
+      "online": true
+    }
+  ],
   "certNotAfter": "2027-05-26T10:15:04Z",
   "leCertNotAfter": "2026-08-22T12:00:00Z",
   "roots": [
@@ -133,6 +144,32 @@ An **invalid or expired** token is treated as unauthenticated, never as an error
 The four `latestServerVersion` / `updateAvailable` / `updateReleaseNotesURL` / `minClientVersion` fields are an additive extension landed in bridge 0.1.0; they are populated only when the bridge has an updater configured (it polls the GitHub Releases API in the background) and at least one successful poll has cached a result. All four are `omitempty` on the wire — older bridges ship the response without them, and iOS clients MUST tolerate their absence. `updateAvailable` is a JSON boolean carried as a `*bool` server-side, so once a poll has cached a result it is present as an explicit `true` **or** `false` (a "checked, up to date" result is `false`, not an omitted field); it is omitted only when no updater is configured. Clients should decode it as an optional boolean and treat absence as "unknown / not advertised".
 
 `upscaleEnabled` (additive since v1.2, `*bool` with `omitempty`) reports whether the bridge has the offline PCM-upscaling feature enabled in `bridge.yaml` AND a working `sox` binary available on PATH (a misconfigured server with the flag on but no sox advertises `false` here — graceful degradation). iOS uses this single capability flag to gate every variant-related UI surface for that bridge: when `false` (or the field is absent on a pre-v1.2 bridge), the picker, glyph, and "Generate upscaled" context menu items are all hidden — bridge rows in the library look identical to SMB / local rows, so the user sees no functionality they can't use. Operator opt-in is in `bridge.yaml`'s `upscale.enabled: true`; default is off. See "Upscaling (offline PCM variants)" below for the wire shape on `/v1/manifest` and `/v1/download` when the flag is on.
+
+#### `upnpUpstreamServers`
+
+Additive, `omitempty`. Present when the operator has configured one or more upstream UPnP MediaServers whose libraries this bridge ingests and re-serves. Order matches the operator's config so the list is stable across polls.
+
+The bridge is an **aggregator, not a discovery broker**: an upstream's tracks arrive in `/v1/manifest` as ordinary rows (prefixed with `pathPrefix`) and `/v1/download` proxies their bytes, so a client needs nothing from this block in order to play them. The block exists so a client can *attribute* and *filter* what it already has, and — via `descriptionURL` — optionally reach the upstream on its own.
+
+| field | type | meaning |
+|---|---|---|
+| `name` | string | Operator-chosen label. Always present. |
+| `configuredUDN` | string, omitempty | The `uuid:…` the entry is pinned to. Absent for a manual-URL entry. |
+| `pathPrefix` | string | Prepended to every ingested track's manifest path. **This is the membership key**: `track.path` starting with `<pathPrefix>/` identifies tracks routed via this upstream. Always present. |
+| `friendlyName` | string, omitempty | The upstream's own `<friendlyName>`. Absent until the bridge has seen it on the LAN. |
+| `descriptionURL` | string, omitempty | The upstream's SSDP `LOCATION` — see below. |
+| `routedTracks` | int | Count of manifest tracks routed via this upstream. `0` means the feature is wired but no ingest has landed yet. |
+| `online` | bool | Whether the upstream is currently reachable **from the bridge**. For a UDN entry, true iff it is presently in the discovery cache (evicted after ≈180 s), so powering the upstream off flips this false while the bridge itself stays up. |
+
+`descriptionURL` is the device-description XML URL the bridge itself fetched (e.g. `http://192.168.0.62:8200/rootDesc.xml`). It exists so a client whose OWN SSDP discovery failed can still add the upstream directly, without the operator hunting for the address — iOS multicast is genuinely unreliable (local-network permission, APs that filter it). It saves the typing; it does not enable anything that was impossible before.
+
+Three properties a client MUST respect:
+
+- **It is not derivable.** The path is vendor-specific (MiniDLNA `/rootDesc.xml`, others `/description.xml` or `/dd.xml`), so host:port from any other field is not enough. Use the string verbatim or not at all.
+- **It is a HINT, not a reachability guarantee.** It is reachable from the *bridge*, which is not the same as reachable from the *client* — a guest VLAN or AP client-isolation breaks the second without affecting the first. Treat a failure to connect as ordinary, and fall back to playing the upstream's tracks through the bridge.
+- **It is absent more often than present.** Omitted on a public-mode bridge (which would otherwise hand every unauthenticated caller a private LAN address), for an upstream not yet seen on the LAN, and for a manual-URL entry (the operator already has the URL). Absence never means "not trusted with it".
+
+A client that adds the upstream as its own source will then see the same albums twice — once via the bridge's manifest, once directly. That is expected and is the client's to reconcile; the bridge does not suppress either copy.
 
 `scanState.tracksIndexed` counts the bridge's **served** tracks — the same population `/v1/manifest` returns. Since the server-side duplicate filter (bridge v0.1.9, `duplicates.filter`, on by default), copies suppressed as duplicates are excluded here exactly as they are excluded from the manifest and its `total`, so a client comparing this number against its synced library is comparing like with like. This changed the VALUE for libraries containing duplicates, not the field's shape or presence.
 
