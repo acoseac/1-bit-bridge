@@ -662,6 +662,35 @@ type ScannerConfig struct {
 type LimitsConfig struct {
 	Manifest ManifestLimitsConfig `yaml:"manifest,omitempty"`
 	Write    WriteLimitsConfig    `yaml:"write,omitempty"`
+	Search   SearchLimitsConfig   `yaml:"search,omitempty"`
+}
+
+// SearchLimitsConfig controls the per-token-ID token bucket applied to
+// GET /v1/search — the one route a client calls per keystroke.
+//
+// Same pointer-typed shape as its siblings, for the same reason: an
+// explicit `0` is the documented opt-out and must not collapse with a
+// missing field.
+type SearchLimitsConfig struct {
+	RequestsPerMinute *int `yaml:"requestsPerMinute,omitempty"`
+	Burst             *int `yaml:"burst,omitempty"`
+}
+
+// EffectiveRPM returns the configured requests-per-minute; nil means the
+// default, an explicit zero is preserved and disables the limiter.
+func (m SearchLimitsConfig) EffectiveRPM() int {
+	if m.RequestsPerMinute == nil {
+		return DefaultSearchRequestsPerMinute
+	}
+	return *m.RequestsPerMinute
+}
+
+// EffectiveBurst returns the configured burst; nil means the default.
+func (m SearchLimitsConfig) EffectiveBurst() int {
+	if m.Burst == nil {
+		return DefaultSearchBurst
+	}
+	return *m.Burst
 }
 
 // WriteLimitsConfig controls the per-token-ID token bucket applied to
@@ -1994,7 +2023,19 @@ const (
 	// still bounds abuse. Raise the burst before raising the rate.
 	DefaultWriteRequestsPerMinute = 120
 	DefaultWriteBurst             = 300
-	DefaultBackupKeep             = 7
+
+	// DefaultSearchRequestsPerMinute / DefaultSearchBurst bound
+	// GET /v1/search, the one route a client calls per keystroke.
+	//
+	// A person types perhaps 5 characters a second at peak and a debounced
+	// client sends far fewer, so 600/min (10/s) sustained with a burst of
+	// 120 is well clear of any human — while a client stuck in a retry
+	// loop is bounded rather than free to hammer an FTS scan. Its own
+	// bucket rather than the write one: sharing would let typing consume
+	// the budget a playlist push needs.
+	DefaultSearchRequestsPerMinute = 600
+	DefaultSearchBurst             = 120
+	DefaultBackupKeep              = 7
 	// DefaultLibraryWatchDebounceSeconds is the per-directory
 	// event coalesce window when fsnotify-based watching is on.
 	// 10 seconds matches the documented default and is long

@@ -146,6 +146,7 @@ type Server struct {
 	bookletNudge           func(mbid string)            // optional fetch-priority nudge for the 202 path (WithBooklets)
 	manifestRateLimiter    *tokenRateLimiter            // per-token-ID token-bucket for /v1/manifest
 	writeRateLimiter       *tokenRateLimiter            // per-token-ID token-bucket for every mutating route
+	searchRateLimiter      *tokenRateLimiter            // per-token-ID token-bucket for /v1/search
 	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	healthCounts           *healthCountsCache           // TTL cache for /v1/health scan-state COUNT(*) scans
 	publicServers          *publicServersCache          // TTL cache for /v1/health UPnP upstream per-server COUNT(*) scans
@@ -434,6 +435,7 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		pairingRateLimiter:  newPairingRateLimiter(),
 		manifestRateLimiter: newTokenRateLimiter(cfg.Limits.Manifest.EffectiveRPM(), cfg.Limits.Manifest.EffectiveBurst()),
 		writeRateLimiter:    newTokenRateLimiter(cfg.Limits.Write.EffectiveRPM(), cfg.Limits.Write.EffectiveBurst()),
+		searchRateLimiter:   newTokenRateLimiter(cfg.Limits.Search.EffectiveRPM(), cfg.Limits.Search.EffectiveBurst()),
 		reachability:        newReachabilityCache(),
 		healthCounts:        newHealthCountsCache(),
 		publicServers:       newPublicServersCache(),
@@ -856,7 +858,7 @@ func (s *Server) StartPairingRateLimitGC() (stopFn func()) {
 func (s *Server) StartTokenRateLimitReapers() (stopFn func()) {
 	stop := make(chan struct{})
 	started := false
-	for _, l := range []*tokenRateLimiter{s.manifestRateLimiter, s.writeRateLimiter} {
+	for _, l := range []*tokenRateLimiter{s.manifestRateLimiter, s.writeRateLimiter, s.searchRateLimiter} {
 		if l == nil {
 			continue
 		}

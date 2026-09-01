@@ -1139,6 +1139,36 @@ Cancel a pending request OR acknowledge receipt of an approved token. Same `Auth
 
 The handler treats "already deleted" as success (returns 204), so a duplicate DELETE from a retrying iOS client is a no-op rather than a 404. This is the iOS-visible side of the read-many delivery contract.
 
+### `GET /v1/search?q=<text>[&limit=<int>]` (additive, since v1.11)
+
+Server-side library search over the FTS5 index the bridge already maintains. A client that has not finished (or does not want) a full manifest sync can still find a track.
+
+**It serves the SERVED set.** The index is populated by triggers on the `tracks` table, so it also contains duplicate-suppressed rows — the copies `/v1/manifest` deliberately withholds. Those are joined out here, so a search result can never surface a track the manifest does not.
+
+**Query semantics.** Input is tokenised on anything that is not a Unicode letter or digit, each surviving token is quoted, and tokens of three runes or more are prefix-expanded. FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, `*`, `"`, `^`, `:`) therefore have no special meaning — a query containing them is not an error, it simply searches for the words. Ranking is BM25.
+
+- `q` — required, **at least 2 runes** (counted in runes, not bytes, so a two-character CJK query is valid). Shorter is `400 query_too_short`.
+- `limit` — optional, default `25`, clamped to `100`. A non-numeric or non-positive value is `400 bad_request`.
+
+**Response** (`200 OK`):
+```json
+{
+  "tracks": [
+    { "path": "Aphex Twin/Selected Ambient Works/01 Xtal.flac",
+      "title": "Xtal", "artist": "Aphex Twin", "album": "Selected Ambient Works" }
+  ],
+  "truncated": false
+}
+```
+
+`path` is in the same slashless, library-relative form `/v1/manifest` emits, so it is a direct join key against a synced manifest. `title` / `artist` / `album` are `omitempty` display context, carried so a result list renders without a manifest lookup. `truncated` is a best-effort hint that more hits exist; it over-reports on an exact-limit boundary, which is the cost of not running a second count query per keystroke. `tracks` is always an array, never `null`.
+
+**Response** (`503 Service Unavailable`): `search_unavailable` — this bridge's SQLite driver has no FTS5 module. **Terminal, not transient**: the module is compiled in or it is not, for the process lifetime. Clients should gate on the `search` feature flag rather than probing.
+
+**Rate limit.** This is the one route a client calls per keystroke, so it draws from its own per-token bucket — `limits.search.requestsPerMinute` (default `600`) and `limits.search.burst` (default `120`). Well clear of a person typing; a stuck client is bounded. Exceeding it is the standard `429` + `Retry-After`.
+
+**Feature flag:** `search` in `/v1/health.features`, gated on the same runtime probe as the endpoint, so a bridge that advertises it can serve it.
+
 ## Error responses
 
 All errors are JSON:
@@ -1161,10 +1191,12 @@ All errors are JSON:
 |    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (or pre-v1.9 build) — no `/v1/smart-playlists` |
 |    404 | `favorites_not_supported` | Bridge build doesn't store favorites backups (pre-v1.10) — no `/v1/favorites` |
 |    409 | `stale`                  | PUT `/v1/playlists/{id}` or `/v1/favorites` carried a `lastModifiedAt` strictly older than the stored copy; body includes the full server copy |
-|    429 | `rate_limited`           | Per-IP pairing-create rate-limit, per-token `/v1/manifest` rate-limit, or per-token write rate-limit tripped |
+|    429 | `rate_limited`           | Per-IP pairing-create rate-limit, or a per-token `/v1/manifest`, write or search rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
 |    503 | `queue_full`             | Pending pairing requests at the cap               |
+|    503 | `search_unavailable`     | `GET /v1/search` on a bridge whose SQLite driver has no FTS5 module (terminal) |
+|    400 | `query_too_short`        | `GET /v1/search` with `q` shorter than 2 runes     |
 
 ### `/v1/manifest` rate limit (additive, since v1.2.x)
 

@@ -54,6 +54,13 @@ type FolderHit struct {
 	HitCount int
 }
 
+// searchHardCap bounds a user-controlled `limit` so it cannot drive an
+// unbounded slice allocation (CodeQL Sec/HIGH on PR #243). The admin
+// handler caps at 200 and the /v1 handler at 100, but the defense lives
+// at the trust boundary so any caller — internal API, CLI, test — gets
+// the same ceiling.
+const searchHardCap = 500
+
 // ErrSearchUnavailable surfaces when the FTS5 module is not
 // compiled into the SQLite driver (graceful-degradation path from
 // migration v7). Callers should map this to HTTP 503.
@@ -101,12 +108,6 @@ func (s *Store) SearchTracks(ctx context.Context, query string, limit int) ([]Tr
 	if limit <= 0 {
 		limit = 50
 	}
-	// Hard cap at the manifest layer so a user-controlled `limit`
-	// can't drive an unbounded slice allocation (CodeQL Sec/HIGH
-	// on PR #243). The admin handler already caps at 200, but
-	// this defense lives at the trust boundary so any future
-	// caller — internal API, CLI, test — gets the same ceiling.
-	const searchHardCap = 500
 	if limit > searchHardCap {
 		limit = searchHardCap
 	}
@@ -258,3 +259,87 @@ func sortFolderHits(hits []FolderHit) {
 		return a.Path < b.Path
 	})
 }
+
+// SearchServedTracks is the /v1-facing search: SearchTracks restricted to
+// the SERVED set.
+//
+// **This restriction is the whole reason a separate method exists.**
+// `tracks_fts` is populated by triggers on `tracks` (migration 7), so it
+// contains DUPLICATE-SUPPRESSED rows — copies that `/v1/manifest`
+// deliberately withholds. Serving the raw FTS result on `/v1` would put
+// those copies on the wire, contradicting every count beside them and
+// violating the served-population rule ("every number leaving /v1
+// describes the served set").
+//
+// The admin console keeps using SearchTracks unrestricted, which is
+// correct there: the admin surface is operator truth, and an operator
+// looking for a track wants to find its suppressed copy too.
+//
+// The join is on `tracks.path`, the PRIMARY KEY, so it is an index seek
+// per hit. Measured with EXPLAIN QUERY PLAN on a 2,000-track store, and
+// pinned by TestSearchServedTracksUsesTheIndexedPlan:
+//
+//	SCAN f VIRTUAL TABLE INDEX 32:M4
+//	SEARCH t USING INDEX sqlite_autoindex_tracks_1 (path=?)
+//
+// i.e. the MATCH drives and the join side is a lookup — not the full
+// table scan a review of the plan warned about. An EXISTS rewrite plans
+// identically; the join is kept for readability.
+//
+// Sanitisation is buildFTSMatchExpr's, unchanged: it strips every rune
+// that is not a Unicode letter or digit and double-quotes each surviving
+// token, so FTS5 operators cannot reach the MATCH. Do not add a second
+// layer.
+func (s *Store) SearchServedTracks(ctx context.Context, query string, limit int) ([]TrackHit, error) {
+	if avail, err := s.SearchAvailable(ctx); err != nil {
+		return nil, err
+	} else if !avail {
+		return nil, ErrSearchUnavailable
+	}
+	matchExpr := buildFTSMatchExpr(query)
+	if matchExpr == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > searchHardCap {
+		limit = searchHardCap
+	}
+	rows, err := s.db.QueryContext(ctx, servedSearchSQL, matchExpr, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search tracks_fts (served): %w", err)
+	}
+	defer rows.Close()
+	out := make([]TrackHit, 0, limit)
+	for rows.Next() {
+		var h TrackHit
+		if err := rows.Scan(&h.Path, &h.Title, &h.Artist, &h.Album); err != nil {
+			return nil, fmt.Errorf("scan served track hit: %w", err)
+		}
+		h.ParentPath = path.Dir(h.Path)
+		if h.ParentPath == "." {
+			h.ParentPath = ""
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate served track hits: %w", err)
+	}
+	return out, nil
+}
+
+// servedSearchSQL is a true const so the query-plan test can assert
+// against the exact statement the production path runs, and so it stays
+// clear of the assembled-query static-analysis rule.
+const servedSearchSQL = `
+		SELECT f.path,
+		       COALESCE(f.title, ''),
+		       COALESCE(f.artist, ''),
+		       COALESCE(f.album, '')
+		FROM tracks_fts f
+		JOIN tracks t ON t.path = f.path
+		WHERE tracks_fts MATCH ?
+		  AND t.dupe_suppressed = 0
+		ORDER BY rank
+		LIMIT ?`

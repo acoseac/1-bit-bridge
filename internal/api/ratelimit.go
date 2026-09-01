@@ -296,6 +296,13 @@ const (
 	// rateWrite is every mutating route. See writeLimitDefaults for how
 	// the budget was sized and why it is so generous.
 	rateWrite
+
+	// rateSearch is the per-keystroke read bucket — /v1/search only.
+	// Reads are otherwise rateNone because the artwork sweep legitimately
+	// bursts hundreds of requests; search is the exception, because a
+	// client calls it as fast as someone types, so it deserves a bound
+	// the other reads would be broken by.
+	rateSearch
 )
 
 // rateLimitWrite is the middleware for rateWrite routes. Same mechanics as
@@ -342,4 +349,29 @@ func reserveOrRetryAfter(l *tokenRateLimiter, tokenID string) (retryAfterSec int
 	}
 	res.Cancel()
 	return int(math.Ceil(delay.Seconds())), false
+}
+
+// rateLimitSearch is the middleware for rateSearch routes. Its own bucket
+// rather than the write one: a search is a read, and sharing the write
+// budget would let a person typing consume the budget their playlist push
+// needs.
+func (s *Server) rateLimitSearch(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.searchRateLimiter == nil || s.searchRateLimiter.disabled() {
+			next(w, r)
+			return
+		}
+		tokenID := tokenIDFromContext(r.Context())
+		if tokenID == "" {
+			next(w, r)
+			return
+		}
+		if retry, ok := reserveOrRetryAfter(s.searchRateLimiter, tokenID); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			writeError(w, http.StatusTooManyRequests, "rate_limited",
+				"too many search requests; retry after the Retry-After window")
+			return
+		}
+		next(w, r)
+	}
 }
