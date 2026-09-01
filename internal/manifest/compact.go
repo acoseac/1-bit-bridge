@@ -169,6 +169,14 @@ func (s *Store) Compact(ctx context.Context, freeBytes func(dir string) (int64, 
 // reports whether SQLite answered busy. The pragma returns three columns
 // (busy, log-pages, checkpointed-pages); busy=1 means a reader still held
 // the old snapshot and the WAL was left in place.
+//
+// A NON-WAL database is safe here and needs no special case, which was
+// raised in review and is measured rather than assumed: under
+// modernc.org/sqlite the pragma returns exactly ONE row in every journal
+// mode — `(0, 0, 0)` under WAL, `(0, -1, -1)` under DELETE and MEMORY —
+// so sql.ErrNoRows is not reachable and an ErrNoRows branch would be dead
+// code. busy reads 0 off WAL, which is the honest answer: there is no WAL
+// to leave behind, and VACUUM has already rewritten the file directly.
 func (s *Store) walCheckpointTruncate(ctx context.Context) (busy bool, err error) {
 	var b, logPages, checkpointed int64
 	if err := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").

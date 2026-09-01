@@ -2,12 +2,15 @@ package manifest
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 )
 
 func seedForCompact(t *testing.T, s *Store, n int) {
@@ -189,4 +192,40 @@ func TestScanInFlightCoversSubtreeScans(t *testing.T) {
 		t.Error("ScanInFlight still true after the scan returned")
 	}
 	_ = s
+}
+
+// TestWalCheckpointTruncateWorksOffWAL pins the review question about a
+// non-WAL database. Measured across journal modes: the pragma returns one
+// row in every mode, so sql.ErrNoRows is unreachable and the suggested
+// ErrNoRows branch would be dead code.
+//
+// A store opened by OpenStore is always WAL, so this drives the pragma
+// directly against a DELETE-mode database to cover the case an operator
+// could reach by putting dataDir on a mount where WAL is unsupported.
+func TestWalCheckpointTruncateWorksOffWAL(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", dsn.File(filepath.Join(dir, "t.db"), "_pragma=journal_mode(DELETE)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE t(x)"); err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode == "wal" {
+		t.Skip("could not open a non-WAL database; the assertion would be vacuous")
+	}
+	s := &Store{db: db, now: time.Now}
+	busy, err := s.walCheckpointTruncate(context.Background())
+	if err != nil {
+		t.Fatalf("wal_checkpoint(TRUNCATE) in %s mode: %v — if this is sql.ErrNoRows the "+
+			"review finding was right after all", mode, err)
+	}
+	if busy {
+		t.Errorf("busy = true in %s mode; there is no WAL to be busy with", mode)
+	}
 }
