@@ -70,6 +70,31 @@
 
   <div class="panel">
     <div class="panel-head">
+      <h2>Retention</h2>
+    </div>
+    <p class="hint">
+      Two tables grow for as long as the bridge runs. Registrations bound to a
+      revoked token are cleaned up automatically; everything else is kept
+      unless you set a window in Settings.
+    </p>
+    <dl class="composition">
+      <dt>Playback history</dt>
+      <dd id="diag-history-rows">—</dd>
+      <dt>Oldest event</dt>
+      <dd id="diag-history-oldest">—</dd>
+      <dt>Device registrations</dt>
+      <dd id="diag-device-rows">—</dd>
+    </dl>
+    <p class="hint">
+      Keeping everything is the recommended setting and the default. A
+      retention window degrades the &ldquo;Forgotten Favourites&rdquo; mix,
+      which looks for tracks you played a lot and haven&rsquo;t played
+      recently &mdash; so it has no earliest date to work back from.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
       <h2>Enrichment cache</h2>
     </div>
     <p class="hint">
