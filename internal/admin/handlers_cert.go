@@ -1,7 +1,10 @@
 package admin
 
 import (
+	"errors"
+	"io/fs"
 	"net/http"
+	"os"
 
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
@@ -23,6 +26,18 @@ import (
 // could fire by accident.
 func (s *Server) apiCertInfo(w http.ResponseWriter, r *http.Request) {
 	certPath, _ := s.certPaths()
+	// A MISSING cert is a distinct, reachable operator state — a deleted
+	// data/tls/, a partial restore, a hand-assembled data dir — and it has
+	// a specific remedy. Answering 500 with an opaque inspect error told
+	// the operator only that something broke. (Found by the console smoke
+	// pass, which hits every read-only route on a bridge that has never
+	// minted one.)
+	if _, statErr := os.Stat(certPath); errors.Is(statErr, fs.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "no-certificate",
+			"no TLS certificate at "+certPath+" — run `bridge cert rotate` to mint one "+
+				"(note that rotating invalidates every existing iOS pairing)")
+		return
+	}
 	info, err := servertls.Inspect(certPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "inspect-failed", err.Error())
