@@ -5525,6 +5525,18 @@ function applyDiagnostics(d) {
     ? "nothing to reclaim"
     : `${formatBytes(reclaim)} (${((reclaim / Math.max(dbBytes, 1)) * 100).toFixed(0)}%)`);
 
+  // Retention: the visibility half. An operator cannot sensibly choose a
+  // policy for a table whose size they have never seen.
+  const histRows = Number(d.playbackHistoryRows) || 0;
+  setDiagText("diag-history-rows", histRows === 0
+    ? "no events yet"
+    : `${histRows.toLocaleString()} events`);
+  setDiagText("diag-history-oldest", d.oldestPlaybackStartedAt
+    ? formatTimeAgo(new Date(d.oldestPlaybackStartedAt))
+    : "—");
+  const devRows = Number(d.deviceRegistrationRows) || 0;
+  setDiagText("diag-device-rows", devRows.toLocaleString());
+
   setDiagText("diag-upscale-inflight", String(d.upscaleJobsInFlight ?? 0));
   setDiagText("diag-upscale-done", (Number(d.upscaleJobsCompletedTotal) || 0).toLocaleString());
   setDiagText("diag-upscale-p50", formatSeconds(d.upscaleDurationP50));

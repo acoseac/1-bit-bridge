@@ -1,10 +1,14 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 func TestDatabaseCompactReclaimsAndReports(t *testing.T) {
@@ -84,5 +88,77 @@ func TestDiagnosticsCarriesDatabaseSize(t *testing.T) {
 	}
 	if _, ok := body["databaseReclaimableBytes"]; !ok {
 		t.Error("diagnostics response carries no databaseReclaimableBytes")
+	}
+}
+
+// TestDiagnosticsCarriesRetentionCounts pins the visibility half of the
+// retention work. The knobs default to off, so the numbers are the only
+// thing that turns "keep everything" from an inherited default into a
+// decision.
+func TestDiagnosticsCarriesRetentionCounts(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	h := s.Handler()
+	ctx := context.Background()
+
+	// Seed one registration and two events, one of them older.
+	if err := s.deps.Manifest.UpsertDeviceRegistration(ctx, "dev", "tok", "Phone"); err != nil {
+		t.Fatal(err)
+	}
+	oldest := time.Now().Add(-72 * time.Hour)
+	if err := s.deps.Manifest.InsertHistoryBatch(ctx, []manifest.PlaybackHistoryRow{
+		{DeviceToken: "dev", Path: "a.flac", StartedAt: oldest.UnixNano(), DurationUsed: 30},
+		{DeviceToken: "dev", Path: "b.flac", StartedAt: time.Now().UnixNano(), DurationUsed: 30},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/diagnostics", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := body["playbackHistoryRows"].(float64); got != 2 {
+		t.Errorf("playbackHistoryRows = %v, want 2", body["playbackHistoryRows"])
+	}
+	if got, _ := body["deviceRegistrationRows"].(float64); got != 1 {
+		t.Errorf("deviceRegistrationRows = %v, want 1", body["deviceRegistrationRows"])
+	}
+	ts, _ := body["oldestPlaybackStartedAt"].(string)
+	if ts == "" {
+		t.Fatal("oldestPlaybackStartedAt missing; the operator cannot see how far back the table goes")
+	}
+	parsed, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t.Fatalf("oldestPlaybackStartedAt %q is not RFC3339: %v", ts, err)
+	}
+	if d := parsed.Sub(oldest).Abs(); d > time.Second {
+		t.Errorf("oldestPlaybackStartedAt = %v, want ~%v", parsed, oldest)
+	}
+}
+
+// An EMPTY history table must omit the timestamp rather than emit a zero
+// one — the same trap the enrichmentProgress.lastEnrichedAt pointer
+// exists for: a client would parse 0001-01-01 as a real, very old date.
+func TestDiagnosticsOmitsTheOldestEventWhenHistoryIsEmpty(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/diagnostics", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := body["oldestPlaybackStartedAt"]; present {
+		t.Errorf("oldestPlaybackStartedAt present on an empty table: %v",
+			body["oldestPlaybackStartedAt"])
 	}
 }

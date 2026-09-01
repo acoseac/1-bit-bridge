@@ -64,6 +64,15 @@ type diagnosticsResponse struct {
 	DatabaseBytes            int64 `json:"databaseBytes"`
 	DatabaseReclaimableBytes int64 `json:"databaseReclaimableBytes"`
 
+	// Retention. Both tables grow without a bound unless the operator
+	// sets a window, and until now there was no way to see either size.
+	// Showing the number is what makes "keep everything" a decision
+	// rather than something inherited — and most operators, shown it,
+	// will correctly choose to keep everything.
+	PlaybackHistoryRows     int64  `json:"playbackHistoryRows"`
+	DeviceRegistrationRows  int64  `json:"deviceRegistrationRows"`
+	OldestPlaybackStartedAt string `json:"oldestPlaybackStartedAt,omitempty"` // RFC3339; omitted when the table is empty
+
 	ServerUptimeSeconds int64 `json:"serverUptime"`
 }
 
@@ -107,6 +116,18 @@ func (s *Server) diagnosticsSnapshot(ctx context.Context) diagnosticsResponse {
 		if ps, err := s.deps.Manifest.PageStats(ctx); err == nil {
 			resp.DatabaseBytes = ps.FileBytes
 			resp.DatabaseReclaimableBytes = ps.ReclaimedBytes
+		}
+		// Two COUNTs and a MIN. Degrade to zeros on error rather than
+		// failing the whole snapshot — same rule as every other block
+		// here: a diagnostics surface that 5xxes when one subsystem is
+		// unavailable is useless exactly when someone needs it.
+		if rc, err := s.deps.Manifest.RetentionCounts(ctx); err == nil {
+			resp.PlaybackHistoryRows = rc.PlaybackHistoryRows
+			resp.DeviceRegistrationRows = rc.DeviceRegistrationRows
+			if rc.OldestPlaybackStartedAt > 0 {
+				resp.OldestPlaybackStartedAt = time.Unix(0, rc.OldestPlaybackStartedAt).
+					UTC().Format(time.RFC3339)
+			}
 		}
 	}
 	resp.UpscaleDurationP50, resp.UpscaleDurationP99 = metrics.UpscaleDurationWindow.Snapshot()
