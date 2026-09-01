@@ -121,10 +121,17 @@ func (r *retentionSweeper) sweep(ctx context.Context) {
 // caller so shutdown waits for an in-flight pass rather than racing
 // Store.Close.
 func runRetentionSweeper(ctx context.Context, r *retentionSweeper) {
+	// time.NewTimer + defer Stop, NOT time.After: an abandoned time.After
+	// timer is not collected until it fires, so a cancelled ctx leaves a
+	// 5-minute timer alive. runServe is re-entered from the launcher menu,
+	// so those accumulate — the PR #290 convention, and this violated it.
+	// (Gemini MEDIUM, PR #822.)
+	settle := time.NewTimer(retentionSweepSettleDelay)
+	defer settle.Stop()
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(retentionSweepSettleDelay):
+	case <-settle.C:
 	}
 	r.sweep(ctx)
 
