@@ -172,11 +172,15 @@ func TestSendMSearchStreakResetsOnRestart(t *testing.T) {
 	// genuine data race, caught by -race on CI and not reproducible
 	// locally in 26 runs.
 	//
-	// The assertion is unaffected: Start is what resets the streak, Stop
-	// does not touch it, and the captured window still contains only the
-	// new run's lines.
-	buf := captureLogs(t)
+	// The assertion is unaffected: Start is what resets the streak and Stop
+	// does not touch it.
 	c.Stop()
+	// Capture AFTER Stop, not before: Stop logs its own line, and a window
+	// that contains it makes "only the new run's lines" a slightly loose
+	// claim. The count is on a specific message so it would pass either
+	// way — this just makes the buffer exactly what the comment says it
+	// is. (Gemini MEDIUM.)
+	buf := captureLogs(t)
 	c.noteSendResult(errors.New("boom"))
 
 	if got := countLines(buf, "M-SEARCH send failed"); got != 1 {
