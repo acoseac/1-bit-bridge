@@ -661,6 +661,36 @@ type ScannerConfig struct {
 // of scattering across the config surface.
 type LimitsConfig struct {
 	Manifest ManifestLimitsConfig `yaml:"manifest,omitempty"`
+	Write    WriteLimitsConfig    `yaml:"write,omitempty"`
+}
+
+// WriteLimitsConfig controls the per-token-ID token bucket applied to
+// every MUTATING /v1 route — playlist and favorites writes, the history
+// batch, the upscale submit/cancel/delete family, the Atlas ingest.
+//
+// Same pointer-typed shape as ManifestLimitsConfig, for the same reason:
+// an explicit `0` is the documented opt-out and MUST NOT be collapsed
+// with a missing field. Always read via EffectiveRPM / EffectiveBurst.
+type WriteLimitsConfig struct {
+	RequestsPerMinute *int `yaml:"requestsPerMinute,omitempty"`
+	Burst             *int `yaml:"burst,omitempty"`
+}
+
+// EffectiveRPM returns the configured requests-per-minute; nil means the
+// default, an explicit zero is preserved and disables the limiter.
+func (m WriteLimitsConfig) EffectiveRPM() int {
+	if m.RequestsPerMinute == nil {
+		return DefaultWriteRequestsPerMinute
+	}
+	return *m.RequestsPerMinute
+}
+
+// EffectiveBurst returns the configured burst; nil means the default.
+func (m WriteLimitsConfig) EffectiveBurst() int {
+	if m.Burst == nil {
+		return DefaultWriteBurst
+	}
+	return *m.Burst
 }
 
 // ManifestLimitsConfig controls the per-token-ID token bucket applied
@@ -1943,7 +1973,28 @@ const (
 	// burst > 0) disables the limit entirely — see manifestRateLimiter.
 	DefaultManifestRequestsPerMinute = 6
 	DefaultManifestBurst             = 3
-	DefaultBackupKeep                = 7
+
+	// DefaultWriteRequestsPerMinute / DefaultWriteBurst configure the
+	// per-token bucket on every MUTATING /v1 route.
+	//
+	// Deliberately generous, and the burst is the number that matters.
+	// iOS surfaces a 429 as a transport error and does NOT retry — that
+	// is why the manifest limiter exempts paginated pulls — so a bucket
+	// sized too tight does not slow a sync down, it BREAKS it. The
+	// traffic shape being absorbed is a burst, not a rate: a device
+	// coming back from a long offline window pushes every dirty playlist
+	// at once, then goes quiet. 300 covers a library with far more dirty
+	// playlists than any real one has; 120/min sustained still bounds a
+	// runaway client roughly two orders of magnitude below what an
+	// unlimited route allows, which is the whole point.
+	//
+	// Sizing lesson worth keeping: "10 per second with a burst of 10"
+	// fails a client that fires 50 requests in two seconds and then goes
+	// silent, while "2 per second with a burst of 300" passes it and
+	// still bounds abuse. Raise the burst before raising the rate.
+	DefaultWriteRequestsPerMinute = 120
+	DefaultWriteBurst             = 300
+	DefaultBackupKeep             = 7
 	// DefaultLibraryWatchDebounceSeconds is the per-directory
 	// event coalesce window when fsnotify-based watching is on.
 	// 10 seconds matches the documented default and is long

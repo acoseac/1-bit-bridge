@@ -159,6 +159,14 @@ type route struct {
 	// which the client reads as a transport error and retries (re-running
 	// the whole operation). Ignored on streaming routes.
 	writeDeadline time.Duration
+
+	// rateClass selects the per-token bucket this route draws from.
+	// EVERY entry must set it explicitly: the zero value (rateUnset) is
+	// invalid and the classification test refuses it. Unlike `kind`,
+	// whose zero value is the safe default, the permissive answer here is
+	// the dangerous one — a new route that forgets to choose would
+	// silently get no limit, which is the gap this exists to close.
+	rateClass rateClass
 }
 
 // routeRegistry returns the complete route table for this Server.
@@ -185,7 +193,7 @@ func (s *Server) routeRegistry() []route {
 		// ~the iOS UI's "still alive?" poll interval. A wedged
 		// CountTracks should surface as 5xx within 2 s rather
 		// than backing up the goroutine queue.
-		{pattern: "GET /v1/health", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.health)},
+		{pattern: "GET /v1/health", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.health)},
 
 		// Browse — short JSON responses except `/v1/read` and
 		// `/v1/download`, which stream file bytes.
@@ -193,30 +201,30 @@ func (s *Server) routeRegistry() []route {
 		// SMB-mounted library can legitimately take seconds on
 		// the cold path; 10 s leaves comfortable headroom while
 		// still bounding a hung mount.
-		{pattern: "GET /v1/list", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.list))},
-		{pattern: "GET /v1/stat", kind: boundedRoute, handler: s.authed(s.stat)},
-		{pattern: "GET /v1/read", kind: streamingRoute, handler: s.authed(s.read)},
-		{pattern: "GET /v1/download", kind: streamingRoute, handler: s.authed(s.download)},
+		{pattern: "GET /v1/list", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(10*time.Second, s.authed(s.list))},
+		{pattern: "GET /v1/stat", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.stat)},
+		{pattern: "GET /v1/read", kind: streamingRoute, rateClass: rateNone, handler: s.authed(s.read)},
+		{pattern: "GET /v1/download", kind: streamingRoute, rateClass: rateNone, handler: s.authed(s.download)},
 
 		// Manifest — 50k-track libraries produce 100+ MB streams.
 		// Rate-limit middleware wraps authed which wraps the
 		// streaming handler.
-		{pattern: "GET /v1/manifest", kind: streamingRoute, handler: s.authed(s.rateLimitManifest(s.manifestHandler))},
+		{pattern: "GET /v1/manifest", kind: streamingRoute, rateClass: rateManifest, handler: s.authed(s.rateLimitManifest(s.manifestHandler))},
 
 		// Artwork — bounded JPEG payloads (~600 px = ~50-200 KB).
-		{pattern: "GET /v1/artwork/{mbid}", kind: boundedRoute, handler: s.authed(s.artwork)},
-		{pattern: "GET /v1/artist-image/{mbid}", kind: boundedRoute, handler: s.authed(s.artistImage)},
+		{pattern: "GET /v1/artwork/{mbid}", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.artwork)},
+		{pattern: "GET /v1/artist-image/{mbid}", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.artistImage)},
 
 		// PDF album booklet — streamingRoute, NOT bounded: booklets run
 		// 10-64 MB, and over a slow Tailscale DERP relay (~1 MB/s) the
 		// bounded 60s write deadline would tear the transfer mid-file.
 		// Same classification rationale as /v1/download.
-		{pattern: "GET /v1/booklet/{mbid}", kind: streamingRoute, handler: s.authed(s.booklet)},
+		{pattern: "GET /v1/booklet/{mbid}", kind: streamingRoute, rateClass: rateNone, handler: s.authed(s.booklet)},
 
 		// Custom playlist / smart-mix cover art — operator-uploaded JPEGs
 		// (~600 px). 404 when none (iOS falls back to the auto-mosaic).
-		{pattern: "GET /v1/smart-playlist-image/{slug}", kind: boundedRoute, handler: s.authed(s.smartMixCover)},
-		{pattern: "GET /v1/playlist-image/{id}", kind: boundedRoute, handler: s.authed(s.playlistCover)},
+		{pattern: "GET /v1/smart-playlist-image/{slug}", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.smartMixCover)},
+		{pattern: "GET /v1/playlist-image/{id}", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.playlistCover)},
 
 		// Waveform — tiny binary peak-envelope sidecar (~1-25 KB).
 		// boundedRoute: it's a small file, no streaming exemption
@@ -225,11 +233,11 @@ func (s *Server) routeRegistry() []route {
 		// 2 s ctx-timeout like /v1/upscale/stats so a wedged
 		// CountAnalysis query surfaces as 5xx fast instead of
 		// backing up the goroutine queue under repeated polling.
-		{pattern: "GET /v1/waveform", kind: boundedRoute, handler: s.authed(s.waveform)},
+		{pattern: "GET /v1/waveform", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.waveform)},
 		// The spectrum is ~84 bytes — boundedRoute like its waveform
 		// sibling, never a streamingRoute.
-		{pattern: "GET /v1/spectrum", kind: boundedRoute, handler: s.authed(s.spectrum)},
-		{pattern: "GET /v1/analysis/stats", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.analysisStats))},
+		{pattern: "GET /v1/spectrum", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.spectrum)},
+		{pattern: "GET /v1/analysis/stats", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.analysisStats))},
 
 		// Upscale — small JSON responses on every endpoint
 		// (stats / batches / variants — never streams).
@@ -237,7 +245,7 @@ func (s *Server) routeRegistry() []route {
 		// requested folder before responding — a whole-library enqueue
 		// on a big SMB/FUSE-mounted root takes minutes, so it gets the
 		// long-op write deadline instead of the 60 s default.
-		{pattern: "POST /v1/upscale", kind: boundedRoute, handler: s.authed(s.upscaleRequest), writeDeadline: upscaleLongOpWriteDeadline},
+		{pattern: "POST /v1/upscale", kind: boundedRoute, rateClass: rateWrite, handler: s.authed(s.rateLimitWrite(s.upscaleRequest)), writeDeadline: upscaleLongOpWriteDeadline},
 		// 2 s ctx-timeout: /v1/upscale/stats is a cheap stats
 		// snapshot for operators / third-party tooling (the iOS
 		// management section that polled it at 5 s was removed
@@ -245,74 +253,74 @@ func (s *Server) routeRegistry() []route {
 		// today). The bound stands on its own: a wedged
 		// CountVariants query backs up at scary rates under any
 		// repeated polling. Surface as 5xx within 2 s instead.
-		{pattern: "GET /v1/upscale/stats", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.upscaleStats))},
+		{pattern: "GET /v1/upscale/stats", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.upscaleStats))},
 		// Diagnostics summary — atomic-counter + sliding-window
 		// reads only; no SQLite queries, no subprocess spawns, no
 		// disk-blocking work. 2 s ctx-timeout matches the other
 		// fast-query routes; the handler returns in <1 ms in
 		// steady state.
-		{pattern: "GET /v1/diagnostics", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.diagnostics))},
-		{pattern: "POST /v1/upscale/batch", kind: boundedRoute, handler: s.authed(s.upscaleBatchSubmit)},
-		{pattern: "GET /v1/upscale/batches", kind: boundedRoute, handler: s.authed(s.upscaleBatchList)},
-		{pattern: "DELETE /v1/upscale/batches/{id}", kind: boundedRoute, handler: s.authed(s.upscaleBatchCancel)},
+		{pattern: "GET /v1/diagnostics", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.diagnostics))},
+		{pattern: "POST /v1/upscale/batch", kind: boundedRoute, rateClass: rateWrite, handler: s.authed(s.rateLimitWrite(s.upscaleBatchSubmit))},
+		{pattern: "GET /v1/upscale/batches", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.upscaleBatchList)},
+		{pattern: "DELETE /v1/upscale/batches/{id}", kind: boundedRoute, rateClass: rateWrite, handler: s.authed(s.rateLimitWrite(s.upscaleBatchCancel))},
 		// The ?confirm=true all-variants shape deletes one fsync'd
 		// row + file per variant — tens of thousands of cached
 		// variants exceed the 60 s default, so long-op deadline.
-		{pattern: "DELETE /v1/upscale/variants", kind: boundedRoute, handler: s.authed(s.upscaleDelete), writeDeadline: upscaleLongOpWriteDeadline},
+		{pattern: "DELETE /v1/upscale/variants", kind: boundedRoute, rateClass: rateWrite, handler: s.authed(s.rateLimitWrite(s.upscaleDelete)), writeDeadline: upscaleLongOpWriteDeadline},
 
 		// DLNA renderer discovery — bounded JSON snapshot of the
 		// SSDP-discovered MediaRenderer cache. 2 s ctx-timeout
 		// matches the other fast-query routes; the handler is a
 		// single cache-snapshot RLock + JSON marshal, returns in
 		// <1 ms in steady state.
-		{pattern: "GET /v1/renderers", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.renderers))},
+		{pattern: "GET /v1/renderers", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.renderers))},
 
 		// Playlists — user-wide backup safe (any paired device can
 		// list / restore / update / delete). Small JSON on list /
 		// delete; PUT carries a (capped) playlist body. All bounded.
-		{pattern: "GET /v1/playlists", kind: boundedRoute, handler: s.authed(s.listPlaylists)},
-		{pattern: "GET /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.getPlaylist)},
-		{pattern: "PUT /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.putPlaylist)},
-		{pattern: "DELETE /v1/playlists/{id}", kind: boundedRoute, handler: s.authed(s.deletePlaylist)},
+		{pattern: "GET /v1/playlists", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.listPlaylists)},
+		{pattern: "GET /v1/playlists/{id}", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.getPlaylist)},
+		{pattern: "PUT /v1/playlists/{id}", kind: boundedRoute, rateClass: rateWrite, handler: s.authed(s.rateLimitWrite(s.putPlaylist))},
+		{pattern: "DELETE /v1/playlists/{id}", kind: boundedRoute, rateClass: rateWrite, handler: s.authed(s.rateLimitWrite(s.deletePlaylist))},
 
 		// Favorites — user-wide singleton backup document (any paired
 		// device reads/replaces the whole set; LWW-guarded). Small JSON
 		// on GET; PUT carries a (capped) document body. Both bounded.
-		{pattern: "GET /v1/favorites", kind: boundedRoute, handler: s.authed(s.getFavorites)},
-		{pattern: "PUT /v1/favorites", kind: boundedRoute, handler: s.authed(s.putFavorites)},
+		{pattern: "GET /v1/favorites", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.getFavorites)},
+		{pattern: "PUT /v1/favorites", kind: boundedRoute, rateClass: rateWrite, handler: s.authed(s.rateLimitWrite(s.putFavorites))},
 
 		// Playback telemetry — bulk insert from the iOS offline queue,
 		// plus the cursor-paged all-devices read feed (user-wide
 		// listening history; 2 s ctx-timeout matches the other
 		// fast-query routes).
-		{pattern: "POST /v1/history/batch", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.historyBatch))},
-		{pattern: "GET /v1/history", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.historyList))},
+		{pattern: "POST /v1/history/batch", kind: boundedRoute, rateClass: rateWrite, handler: withCtxTimeout(10*time.Second, s.authed(s.rateLimitWrite(s.historyBatch)))},
+		{pattern: "GET /v1/history", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.historyList))},
 
 		// Atlas rich-tier metadata (Phase 2) — the iOS app (holding the Atlas
 		// credential) ferries bios / descriptions / genres in via POST; the
 		// bridge caches them + serves them back to all the user's devices.
 		// Small JSON, single-row DB ops. 2 s ctx-timeout on the reads matches
 		// the other fast-query routes; 10 s on the ingest's couple of UPSERTs.
-		{pattern: "GET /v1/atlas-meta/release/{mbid}", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.atlasMetaRelease))},
-		{pattern: "GET /v1/atlas-meta/artist/{mbid}", kind: boundedRoute, handler: withCtxTimeout(2*time.Second, s.authed(s.atlasMetaArtist))},
-		{pattern: "POST /v1/atlas-ingest", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.atlasIngest))},
+		{pattern: "GET /v1/atlas-meta/release/{mbid}", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.atlasMetaRelease))},
+		{pattern: "GET /v1/atlas-meta/artist/{mbid}", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.atlasMetaArtist))},
+		{pattern: "POST /v1/atlas-ingest", kind: boundedRoute, rateClass: rateWrite, handler: withCtxTimeout(10*time.Second, s.authed(s.rateLimitWrite(s.atlasIngest)))},
 		// Phase-H bulk-harvest credential handoff from the iOS app — a single
 		// small atomic file write.
-		{pattern: "POST /v1/atlas-harvest/credential", kind: boundedRoute, handler: withCtxTimeout(5*time.Second, s.authed(s.atlasHarvestCredential))},
+		{pattern: "POST /v1/atlas-harvest/credential", kind: boundedRoute, rateClass: rateWrite, handler: withCtxTimeout(5*time.Second, s.authed(s.rateLimitWrite(s.atlasHarvestCredential)))},
 
 		// Server-generated smart playlists — a single fast cache read
 		// (bounded; generation is background/admin, never in-request).
-		{pattern: "GET /v1/smart-playlists", kind: boundedRoute, handler: withCtxTimeout(10*time.Second, s.authed(s.smartPlaylists))},
+		{pattern: "GET /v1/smart-playlists", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(10*time.Second, s.authed(s.smartPlaylists))},
 
 		// SSE — long-lived per-connection write stream; MUST opt
 		// out of the per-route write deadline.
-		{pattern: "GET /v1/events", kind: streamingRoute, handler: s.authed(s.events)},
-		{pattern: "GET /v1/pairing/{requestID}/events", kind: streamingRoute, handler: s.pairingEvents},
+		{pattern: "GET /v1/events", kind: streamingRoute, rateClass: rateNone, handler: s.authed(s.events)},
+		{pattern: "GET /v1/pairing/{requestID}/events", kind: streamingRoute, rateClass: rateNone, handler: s.pairingEvents},
 
 		// Pairing — small JSON / 204 responses (unauthed by
 		// design; pollSecret + cert pin are the trust anchors).
-		{pattern: "POST /v1/pairing/requests", kind: boundedRoute, handler: s.pairingRequest},
-		{pattern: "GET /v1/pairing/{requestID}", kind: boundedRoute, handler: s.pairingPoll},
-		{pattern: "DELETE /v1/pairing/{requestID}", kind: boundedRoute, handler: s.pairingDelete},
+		{pattern: "POST /v1/pairing/requests", kind: boundedRoute, rateClass: rateNone, handler: s.pairingRequest},
+		{pattern: "GET /v1/pairing/{requestID}", kind: boundedRoute, rateClass: rateNone, handler: s.pairingPoll},
+		{pattern: "DELETE /v1/pairing/{requestID}", kind: boundedRoute, rateClass: rateNone, handler: s.pairingDelete},
 	}
 }

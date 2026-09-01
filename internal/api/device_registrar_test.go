@@ -285,7 +285,7 @@ func TestReapDeviceSeen(t *testing.T) {
 // TestStartDeviceSeenReaperLifecycle pins the lifecycle contract:
 // start+stop exits cleanly with the registrar wired, and an unwired
 // Server returns a no-op stopFn that is safe to call (mirrors
-// StartManifestRateLimitReaper's nil path).
+// StartTokenRateLimitReapers' nil path).
 func TestStartDeviceSeenReaperLifecycle(t *testing.T) {
 	cfg := &config.Config{LibraryRoots: []string{t.TempDir()}, ListenAddress: ":7788", LibraryName: "T"}
 

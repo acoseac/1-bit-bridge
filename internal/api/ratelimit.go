@@ -57,21 +57,22 @@ func deviceTokenFromContext(ctx context.Context) string {
 	return ""
 }
 
-// manifestLimiterCleanupInterval is how often idle per-token limiters
+// tokenLimiterCleanupInterval is how often idle per-token limiters
 // are reaped from the in-memory map. A long-running bridge with a high
 // churn of paired clients would otherwise accumulate one *rate.Limiter
 // per ever-seen token forever.
-const manifestLimiterCleanupInterval = 10 * time.Minute
+const tokenLimiterCleanupInterval = 10 * time.Minute
 
-// manifestLimiterIdleTimeout is how long a limiter must go untouched
+// tokenLimiterIdleTimeout is how long a limiter must go untouched
 // before it's eligible for cleanup. Must be > a typical pagination
 // interval; 1 hour is generous and keeps a returning user's burst
 // budget intact across normal day-to-day use.
-const manifestLimiterIdleTimeout = 1 * time.Hour
+const tokenLimiterIdleTimeout = 1 * time.Hour
 
-// manifestRateLimiter is the per-token-ID token-bucket cache for the
-// /v1/manifest rate limit. Created once at Server construction time
-// and the reaper goroutine started via Start().
+// tokenRateLimiter is a per-token-ID token-bucket cache. One instance
+// backs /v1/manifest; a second backs the mutating routes (see
+// rateClass). Created at Server construction time, with the reaper
+// goroutine started via Start().
 //
 // Defense-in-depth, not security: every /v1/manifest caller IS already
 // authenticated. The limiter protects against a paired client that
@@ -80,25 +81,25 @@ const manifestLimiterIdleTimeout = 1 * time.Hour
 // 100+ MB manifest streams. Per-token rather than per-IP because IP
 // is unreliable behind Tailscale CGNAT and the token IS the actual
 // identity boundary.
-type manifestRateLimiter struct {
+type tokenRateLimiter struct {
 	mu         sync.Mutex
-	entries    map[string]*manifestLimiterEntry
+	entries    map[string]*tokenLimiterEntry
 	rate       rate.Limit
 	burst      int
 	reaperOnce sync.Once // enforces Start's "called multiple times → no-op" contract
 }
 
-type manifestLimiterEntry struct {
+type tokenLimiterEntry struct {
 	limiter  *rate.Limiter
 	lastSeen time.Time
 }
 
-// newManifestRateLimiter constructs the limiter with the given budget.
+// newTokenRateLimiter constructs the limiter with the given budget.
 // rpm <= 0 disables the limiter entirely (every Reserve() returns an
 // effectively-zero delay) — operator opt-out path for bridges where
 // the legitimate single-client traffic is bursty enough that any
 // limit causes friction. burst <= 0 falls back to 1.
-func newManifestRateLimiter(rpm, burst int) *manifestRateLimiter {
+func newTokenRateLimiter(rpm, burst int) *tokenRateLimiter {
 	r := rate.Limit(0)
 	if rpm > 0 {
 		r = rate.Limit(float64(rpm) / 60.0)
@@ -106,8 +107,8 @@ func newManifestRateLimiter(rpm, burst int) *manifestRateLimiter {
 	if burst < 1 {
 		burst = 1
 	}
-	return &manifestRateLimiter{
-		entries: make(map[string]*manifestLimiterEntry),
+	return &tokenRateLimiter{
+		entries: make(map[string]*tokenLimiterEntry),
 		rate:    r,
 		burst:   burst,
 	}
@@ -115,7 +116,7 @@ func newManifestRateLimiter(rpm, burst int) *manifestRateLimiter {
 
 // limiterFor returns the per-token-ID limiter, creating it lazily on
 // first call. Updates the lastSeen stamp for the reaper.
-func (m *manifestRateLimiter) limiterFor(tokenID string) *rate.Limiter {
+func (m *tokenRateLimiter) limiterFor(tokenID string) *rate.Limiter {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e, ok := m.entries[tokenID]; ok {
@@ -123,7 +124,7 @@ func (m *manifestRateLimiter) limiterFor(tokenID string) *rate.Limiter {
 		return e.limiter
 	}
 	lim := rate.NewLimiter(m.rate, m.burst)
-	m.entries[tokenID] = &manifestLimiterEntry{
+	m.entries[tokenID] = &tokenLimiterEntry{
 		limiter:  lim,
 		lastSeen: time.Now(),
 	}
@@ -131,11 +132,11 @@ func (m *manifestRateLimiter) limiterFor(tokenID string) *rate.Limiter {
 }
 
 // reapIdle drops entries whose lastSeen is older than
-// manifestLimiterIdleTimeout. Caller MUST hold m.mu.
-func (m *manifestRateLimiter) reapIdle(now time.Time) int {
+// tokenLimiterIdleTimeout. Caller MUST hold m.mu.
+func (m *tokenRateLimiter) reapIdle(now time.Time) int {
 	dropped := 0
 	for k, e := range m.entries {
-		if now.Sub(e.lastSeen) > manifestLimiterIdleTimeout {
+		if now.Sub(e.lastSeen) > tokenLimiterIdleTimeout {
 			delete(m.entries, k)
 			dropped++
 		}
@@ -151,10 +152,10 @@ func (m *manifestRateLimiter) reapIdle(now time.Time) int {
 // actually enforce it — every call spawned a fresh reaper, leaking
 // goroutines on accidental re-entry. Caught by Gemini Medium +
 // Greptile P2 on PR #194.
-func (m *manifestRateLimiter) Start(stop <-chan struct{}) {
+func (m *tokenRateLimiter) Start(stop <-chan struct{}) {
 	m.reaperOnce.Do(func() {
 		go func() {
-			t := time.NewTicker(manifestLimiterCleanupInterval)
+			t := time.NewTicker(tokenLimiterCleanupInterval)
 			defer t.Stop()
 			for {
 				select {
@@ -175,7 +176,7 @@ func (m *manifestRateLimiter) Start(stop <-chan struct{}) {
 // still lets some requests through. We treat rate <= 0 + burst > 0 as
 // "disabled" so an operator's rpm=0 setting falls open instead of
 // hard-failing the very first manifest call.
-func (m *manifestRateLimiter) disabled() bool {
+func (m *tokenRateLimiter) disabled() bool {
 	return m.rate <= 0
 }
 
@@ -268,4 +269,77 @@ func (s *Server) rateLimitManifest(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// rateClass says which bucket a route draws from. It is declared on every
+// entry in routeRegistry, and the classification test REFUSES rateUnset —
+// the zero value is deliberately invalid, because unlike routeKind (whose
+// zero, boundedRoute, is the safe default) the permissive answer here is
+// the dangerous one. A new route that forgets to choose would silently get
+// no limit at all, which is precisely the gap this closes.
+type rateClass int
+
+const (
+	// rateUnset is the zero value and is never valid. See above.
+	rateUnset rateClass = iota
+
+	// rateNone is a deliberate "no bucket": unauthenticated routes,
+	// routes that carry their own limiter (pairing), and reads whose
+	// legitimate traffic shape is a burst of hundreds (the artwork
+	// sweep). Choosing it is a decision; forgetting to choose is not.
+	rateNone
+
+	// rateManifest is the bespoke /v1/manifest bucket, which keeps its
+	// own budget and its own pagination exemption.
+	rateManifest
+
+	// rateWrite is every mutating route. See writeLimitDefaults for how
+	// the budget was sized and why it is so generous.
+	rateWrite
+)
+
+// rateLimitWrite is the middleware for rateWrite routes. Same mechanics as
+// rateLimitManifest — per-token bucket, cancel the reservation on refusal,
+// Retry-After rounded up — but a separate budget, because a manifest pull
+// and a playlist push have nothing in common except the token.
+//
+// MUST be wrapped AFTER authed() so the validated token ID is in context.
+// An empty token ID falls open, per the existing convention.
+func (s *Server) rateLimitWrite(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.writeRateLimiter == nil || s.writeRateLimiter.disabled() {
+			next(w, r)
+			return
+		}
+		tokenID := tokenIDFromContext(r.Context())
+		if tokenID == "" {
+			next(w, r)
+			return
+		}
+		if retry, ok := reserveOrRetryAfter(s.writeRateLimiter, tokenID); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			writeError(w, http.StatusTooManyRequests, "rate_limited",
+				"too many write requests; retry after the Retry-After window")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// reserveOrRetryAfter takes one token from the caller's bucket. Returns
+// ok=false plus the whole seconds a compliant client should wait.
+//
+// The reservation is CANCELLED on refusal so a rejected attempt does not
+// also drain the bucket — without that, every 429 stretches the recovery
+// window past what the response advertises. The delay rounds UP, because a
+// truncated 1.9s→1s window has the client wake before a token exists and
+// collect a second 429.
+func reserveOrRetryAfter(l *tokenRateLimiter, tokenID string) (retryAfterSec int, ok bool) {
+	res := l.limiterFor(tokenID).Reserve()
+	delay := res.Delay()
+	if delay <= 0 {
+		return 0, true
+	}
+	res.Cancel()
+	return int(math.Ceil(delay.Seconds())), false
 }
