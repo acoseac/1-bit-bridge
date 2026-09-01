@@ -29,8 +29,15 @@ type upnpUpstreamLifecycle struct {
 	ingester         *upnpingest.Ingester // exposed so the admin adapter can ForceRescan
 	tickerCancel     context.CancelFunc
 	ingestWg         sync.WaitGroup
-	adminState       *upnpAdminState // populated lazily on installAdminAdapter
-	log              *slog.Logger
+	// manualCancel / manualWg scope the manual-URL poller to this
+	// lifecycle rather than to the process. Started on the parent ctx it
+	// would outlive Stop(), which is a contract violation even though the
+	// app ctx would eventually reap it — and would leave a live goroutine
+	// behind any test that stops the lifecycle. (Gemini HIGH, PR #824.)
+	manualCancel context.CancelFunc
+	manualWg     sync.WaitGroup
+	adminState   *upnpAdminState // populated lazily on installAdminAdapter
+	log          *slog.Logger
 }
 
 // startUPnPUpstreamIfEnabled wires the MediaServer SSDP discovery +
@@ -90,6 +97,51 @@ func startUPnPUpstreamIfEnabled(
 		return &upnpUpstreamLifecycle{log: log}
 	}
 
+	// Manual-URL servers, refreshed into the SAME cache so the resolver,
+	// the api proxy's LiveHost and the online chip all see them without
+	// any of the three learning about a second source. Interval matches
+	// the SSDP TTL: EvictStale reaps entries the poller stops refreshing,
+	// and that is exactly how an unreachable manual URL comes to report
+	// offline.
+	//
+	// Known limitation, deliberately not addressed here: the two early
+	// returns above disable the whole upstream feature when no LAN
+	// interface is eligible or none can bind, which also disables manual
+	// URLs even though those need no multicast. Restructuring the
+	// lifecycle to run manual-only is a larger change than this one and
+	// would put the SSDP path at risk to serve a rarer case.
+	//
+	// `cfg` is the BOOT snapshot: UPnP upstream configuration is
+	// restart-bound (this whole function runs once, at startup), so the
+	// closures below read a stable value rather than a live one. Said
+	// plainly because an earlier comment here claimed they picked up a
+	// reload, which they do not. (Gemini MEDIUM.)
+	manualCtx, manualCancel := context.WithCancel(ctx)
+	manualPoller := upnp.NewManualPoller(upnp.ManualPollerConfig{
+		Cache:     cache,
+		Servers:   func() []upnp.ManualServer { return manualServersFrom(cfg) },
+		KnownUDNs: func() map[string]struct{} { return foreignConfiguredUDNs(cfg) },
+		Interval:  cfg.UPnPUpstream.EffectiveMSearchInterval(),
+		Timeout:   upnp.DefaultDiscoveryConfig().DetailFetchTimeout,
+		Logger:    log,
+	})
+	// Attach the poller to whichever lifecycle we end up returning, so
+	// Stop() cancels and JOINS it. Started on the parent ctx it would
+	// outlive Stop — the app ctx would reap it eventually, but a test that
+	// stops the lifecycle would be left with a live goroutine, and the
+	// lifecycle contract says Stop means stopped.
+	withManualPoller := func(l *upnpUpstreamLifecycle) *upnpUpstreamLifecycle {
+		l.manualCancel = manualCancel
+		if manualPoller != nil {
+			l.manualWg.Add(1)
+			go func() {
+				defer l.manualWg.Done()
+				manualPoller.Run(manualCtx)
+			}()
+		}
+		return l
+	}
+
 	// Wire the proxy on the api.Server — the ContentDirectory client
 	// the ingester uses is the same shape we'd pass to the proxy if it
 	// needed SOAP (it doesn't today; the proxy is plain HTTP), so we
@@ -113,11 +165,11 @@ func startUPnPUpstreamIfEnabled(
 		// Discovery already started — leave it running so /v1/servers
 		// (or the operator's debug curl against the cache) still works.
 		// The lifecycle's Stop will tear it down.
-		return &upnpUpstreamLifecycle{
+		return withManualPoller(&upnpUpstreamLifecycle{
 			discoveryClients: clients,
 			cache:            cache,
 			log:              log,
-		}
+		})
 	}
 
 	// Tick loop. The first tick runs after a short warm-up so SSDP has
@@ -127,13 +179,13 @@ func startUPnPUpstreamIfEnabled(
 	if scanEvery <= 0 {
 		scanEvery = 6 * time.Hour
 	}
-	life := &upnpUpstreamLifecycle{
+	life := withManualPoller(&upnpUpstreamLifecycle{
 		discoveryClients: clients,
 		cache:            cache,
 		ingester:         ingester,
 		tickerCancel:     cancel,
 		log:              log,
-	}
+	})
 	life.ingestWg.Add(1)
 	go life.runIngestLoop(tickCtx, ingester, scanEvery)
 
@@ -170,7 +222,11 @@ func (l *upnpUpstreamLifecycle) Stop() {
 	if l.tickerCancel != nil {
 		l.tickerCancel()
 	}
+	if l.manualCancel != nil {
+		l.manualCancel()
+	}
 	l.ingestWg.Wait()
+	l.manualWg.Wait()
 	for _, c := range l.discoveryClients {
 		c.Stop()
 	}
@@ -255,12 +311,27 @@ func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv confi
 			return info.ContentDirectoryControlURL, nil
 		}
 	}
-	// TODO (Bridge PR-D follow-up): support srv.ManualDescriptionURL —
-	// fetch + parse the description here and cache its controlURL. v1
-	// is SSDP-only. Until this lands, a UDN-less manual-URL entry can
-	// never resolve; the ingester reports it as "not yet supported"
-	// (not "not discoverable") and the admin form's field hint says
-	// the same. tracked: 2026-08-14 feature review P2-29.
+	// Manual-URL servers live in the SAME cache, under the ingest's
+	// StableServerKey (`manual:<sha256(url)>` when there is no UDN, the
+	// lowercased UDN when there is) rather than the device's own UDN —
+	// see internal/upnp/manual.go for why. So resolving one is the same
+	// cache lookup, against the other spelling.
+	//
+	// Tried for a UDN-configured server TOO, not just a UDN-less one:
+	// with both configured, the manual URL is the fallback for when SSDP
+	// has not found the device, and only reaching for it here makes that
+	// fallback real.
+	//
+	// The entry is written by the ManualPoller, which refreshes on the
+	// SSDP TTL cadence; a miss here means the URL has not answered yet
+	// (or has stopped), and the ingest reports that as not-discoverable,
+	// which is now the honest answer rather than a euphemism for
+	// unimplemented.
+	if strings.TrimSpace(srv.ManualDescriptionURL) != "" {
+		if info, ok := r.cache.Get(upnpingest.StableServerKey(srv)); ok {
+			return info.ContentDirectoryControlURL, nil
+		}
+	}
 	return "", nil
 }
 
@@ -350,4 +421,51 @@ func startUPnPDiscoveryAcrossInterfaces(
 		clients = append(clients, client)
 	}
 	return clients
+}
+
+// manualServersFrom projects the configured manual-URL servers into the
+// poller's shape, keyed by the ingest's StableServerKey so the cache
+// entry lands under the string every other subsystem uses.
+func manualServersFrom(cfg *config.Config) []upnp.ManualServer {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]upnp.ManualServer, 0, len(cfg.UPnPUpstream.Servers))
+	for _, srv := range cfg.UPnPUpstream.Servers {
+		if strings.TrimSpace(srv.ManualDescriptionURL) == "" {
+			continue
+		}
+		out = append(out, upnp.ManualServer{
+			Key:            upnpingest.StableServerKey(srv),
+			DescriptionURL: strings.TrimSpace(srv.ManualDescriptionURL),
+			Name:           srv.Name,
+		})
+	}
+	return out
+}
+
+// foreignConfiguredUDNs is the set of UDNs an operator configured
+// explicitly on some OTHER server entry. The manual poller refuses to
+// cache a device whose description reports one of these: it would then
+// sit in the cache under two identities and the ingest would walk one
+// upstream twice under two routing prefixes.
+//
+// "Foreign" is the load-bearing word. A server configured with BOTH a UDN
+// and a manual URL reports its own UDN, and rejecting it there would make
+// the manual URL useless for the operator who supplied both as a
+// belt-and-braces — exactly the case where SSDP is unreliable. The
+// poller compares against its own key and admits that one; this set only
+// carries the UDNs belonging to entries OTHER than the one being polled.
+// (Gemini HIGH + CodeRabbit Major, PR #824.)
+func foreignConfiguredUDNs(cfg *config.Config) map[string]struct{} {
+	if cfg == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(cfg.UPnPUpstream.Servers))
+	for _, srv := range cfg.UPnPUpstream.Servers {
+		if udn := strings.ToLower(strings.TrimSpace(srv.UDN)); udn != "" {
+			out[udn] = struct{}{}
+		}
+	}
+	return out
 }

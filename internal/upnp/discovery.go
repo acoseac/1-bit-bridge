@@ -50,6 +50,16 @@ type ServerInfo struct {
 	// upstream directly.
 	DescriptionURL string
 
+	// DeviceUDN is the device's OWN UDN as its description reports it.
+	//
+	// It is usually the same as UDN above, but NOT for a manual-URL
+	// server: there, UDN carries the ingest's StableServerKey
+	// (`manual:<sha256(url)>`) because routing rows, telemetry, LiveHost
+	// and the online chip all key on that string, while this field keeps
+	// the real identity for display and for the duplicate-configuration
+	// check. Empty when the description carried none.
+	DeviceUDN string
+
 	LastSeenAt time.Time
 }
 

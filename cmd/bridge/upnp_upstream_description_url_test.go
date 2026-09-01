@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
+	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
 )
 
 // A phone that cannot see the upstream itself can still be TOLD where it
@@ -135,4 +137,72 @@ func publicServersFor(t *testing.T, public bool) []api.UPnPUpstreamPublicServer 
 		cache: cacheWithServer(t),
 	}
 	return a.PublicServers(context.Background())
+}
+
+// TestResolveControlURLResolvesAManualServer pins the wiring half of the
+// manual-URL path: the cache entry the ManualPoller writes under the
+// StableServerKey must be what ResolveControlURL finds, because that is
+// the same string routing rows, telemetry and LiveHost all key on.
+func TestResolveControlURLResolvesAManualServer(t *testing.T) {
+	cache := upnp.NewServerCache()
+	srv := config.UPnPUpstreamServerConfig{
+		Name:                 "Cellar",
+		ManualDescriptionURL: "http://192.168.0.62:8200/rootDesc.xml",
+	}
+	key := upnpingest.StableServerKey(srv)
+	if !strings.HasPrefix(key, "manual:") {
+		t.Fatalf("fixture: StableServerKey = %q, want the manual: form", key)
+	}
+
+	r := &discoveryServerResolver{cache: cache}
+
+	// Before the poller has answered, a miss is honest: the ingest
+	// reports "has not answered yet" rather than claiming the feature is
+	// missing.
+	if got, err := r.ResolveControlURL(context.Background(), srv); err != nil || got != "" {
+		t.Fatalf("cold cache: got %q err=%v; want an empty resolution", got, err)
+	}
+
+	cache.Upsert(upnp.ServerInfo{
+		UDN:                        key,
+		FriendlyName:               "Cellar",
+		ContentDirectoryControlURL: "http://192.168.0.62:8200/ctl/ContentDir",
+		DescriptionURL:             srv.ManualDescriptionURL,
+		DeviceUDN:                  "uuid:cellar",
+		LastSeenAt:                 time.Now(),
+	})
+
+	got, err := r.ResolveControlURL(context.Background(), srv)
+	if err != nil {
+		t.Fatalf("ResolveControlURL: %v", err)
+	}
+	if got != "http://192.168.0.62:8200/ctl/ContentDir" {
+		t.Errorf("ResolveControlURL = %q, want the cached control URL", got)
+	}
+
+	// The device's OWN udn must not resolve it — nothing keys on that.
+	if _, ok := cache.Get("uuid:cellar"); ok {
+		t.Error("an entry exists under the device UDN; routing would disagree with the cache")
+	}
+}
+
+// TestLiveHostResolvesAManualServer pins the second surface: playback
+// proxying derives host:port from the same cached control URL, so it
+// works for a manual server without knowing manual servers exist.
+func TestLiveHostResolvesAManualServer(t *testing.T) {
+	cache := upnp.NewServerCache()
+	const key = "manual:abc123"
+	cache.Upsert(upnp.ServerInfo{
+		UDN:                        key,
+		ContentDirectoryControlURL: "http://192.168.0.62:8200/ctl/ContentDir",
+		LastSeenAt:                 time.Now(),
+	})
+	h := &serverCacheHostResolver{cache: cache}
+	got, ok := h.LiveHost(key)
+	if !ok {
+		t.Fatal("LiveHost missed a manual server; playback would 503 with no fallback")
+	}
+	if got != "192.168.0.62:8200" {
+		t.Errorf("LiveHost = %q, want the host:port from the cached control URL", got)
+	}
 }
