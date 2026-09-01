@@ -18,20 +18,26 @@ name: gate
 # GOTOOLCHAIN=local (it broke the first v0.1.7 image).
 #
 # A fifth job, `cross-platform`, runs the suite natively on Windows and
-# macOS. It is NOT part of the `gate` fan-in, and is still
-# continue-on-error.
+# macOS. It is now PART of the `gate` fan-in and blocks a merge.
 #
-# It landed that way because Windows had 30 pre-existing failures the
+# It did not start that way. Windows had 30 pre-existing failures the
 # moment it was first run — the largest test package had literally never
-# been built for that platform. That COMPILE and CORRECTNESS backlog is
-# closed (#624, #626, #629); what remains is a TIMING backlog, and that
-# is why promotion hasn't happened. The comment on the job itself carries
-# the detail and the bar promotion has to clear.
+# been built for that platform — and the job spent months as
+# continue-on-error while that backlog was worked down: #624 (make the
+# `manifest` test binary build for Windows at all), #626 (~21
+# POSIX-assuming fixtures), #629 (leaked handles), then a run of
+# timing-assumption fixes as they surfaced one at a time.
 #
-# Until then a red X there is informational — but worth reading rather
-# than ignoring: every failure so far has been a real portability defect
-# in a test, and both live bridges this project deploys to are non-macOS,
-# one of them Windows.
+# Promotion was gated on EVIDENCE rather than on one green run, and the
+# evidence is: 60 consecutive workflow runs audited on 2026-09-01 across
+# all branches, ZERO Windows failures, including 21 consecutive
+# successes on `main` back to 2026-08-30.
+#
+# A red X here now blocks. That is the point: every Windows failure this
+# project has ever seen was a real portability defect in a test, and a
+# permanently-amber leg is one nobody reads — which would mask the next
+# genuine regression on a platform that runs one of the two live
+# bridges.
 #
 # Cache: each job manages its own Go cache explicitly via actions/cache
 # rather than setup-go's built-in `cache: true`. The built-in cache keys
@@ -170,28 +176,34 @@ jobs:
   # `%` escaping). Windows is a target platform and one of the two live
   # production bridges.
   #
-  # NOT in the `gate` fan-in yet, and still continue-on-error.
+  # IN the `gate` fan-in as of 2026-09-01. A failure here blocks a merge.
   #
-  # The COMPILE and CORRECTNESS backlog is closed: #624 made the
+  # The COMPILE and CORRECTNESS backlog closed first: #624 made the
   # `manifest` test binary build for Windows at all (five fixture helpers
   # had been stranded behind a `//go:build !windows` file since #606, so
   # the largest test package — 21.6k lines — had never been built there),
   # #626 fixed ~21 POSIX-assuming fixtures, and #629 closed the leaked
   # handles.
   #
-  # What is left is a TIMING backlog, and it is the reason promotion has
-  # not happened yet. Windows is materially slower than the Linux runners
-  # (SQLite writes ~30/s vs ~1000/s in one measurement here) and its
-  # clock is coarser, so tests carrying an implicit "a fast machine"
-  # assumption fail intermittently rather than consistently. Five were
-  # found and fixed across #636's own runs — two clock-granularity, two
-  # timing-budget, one goroutine-burst deadline — and each fix was
-  # followed by a DIFFERENT one appearing on the next run.
+  # The TIMING backlog closed after it, and was the slower half. Windows
+  # is materially slower than the Linux runners (SQLite writes ~30/s vs
+  # ~1000/s in one measurement here) and its clock is coarser, so tests
+  # carrying an implicit "a fast machine" assumption failed
+  # intermittently rather than consistently — five across #636's own runs
+  # alone, each fix followed by a DIFFERENT one on the next. The last of
+  # them was #761, which replaced a sleep-based watcher-shutdown test
+  # that was BOTH flaky here and vacuous everywhere.
   #
-  # Promote only on EVIDENCE, not on one green run: several consecutive
-  # clean Windows runs across different PRs. Until then a red X here is
-  # informational, and worth reading — every one so far has been a real
-  # portability defect in a test, just not one that blocks a merge.
+  # The promotion bar was "several consecutive clean runs across
+  # different PRs", deliberately not one green run. Measured on
+  # 2026-09-01: 60 consecutive workflow runs audited across all
+  # branches, ZERO Windows failures; 21 consecutive successes on `main`
+  # going back to 2026-08-30.
+  #
+  # If a new flake appears, the response is to fix the test — that is
+  # what every previous one turned out to need. Demoting the leg is a
+  # two-line revert if it is ever genuinely the right call, but it costs
+  # the signal on a platform one of the two live bridges runs.
   #
   # `go vet` / `go test` directly rather than the `make` targets the
   # Linux jobs use: the Makefile's recipes assume a POSIX shell and
@@ -203,9 +215,6 @@ jobs:
   cross-platform:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Still outside the gate — see the block above for what has to
-    # happen first.
-    continue-on-error: true
     # 60, not 30: the per-package `go test -timeout 30m` below has to be
     # able to actually reach its ceiling on more than one slow package
     # without the job being killed out from under it first. A job killed
@@ -316,11 +325,11 @@ jobs:
   # explicit result check means a failed (or cancelled) dependency fails the
   # gate rather than letting a SKIP read as success.
   #
-  # `cross-platform` is intentionally absent from `needs:` — see its own
-  # comment above; it joins here once its first-run backlog is cleared.
+  # `cross-platform` joined this fan-in on 2026-09-01 — see its own
+  # comment above for the evidence the promotion was gated on.
   gate:
     name: gate
-    needs: [vet, test, build-all, go-version]
+    needs: [vet, test, build-all, go-version, cross-platform]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
@@ -330,8 +339,9 @@ jobs:
           if [ "${{ needs.vet.result }}" != "success" ] \
             || [ "${{ needs.test.result }}" != "success" ] \
             || [ "${{ needs.build-all.result }}" != "success" ] \
-            || [ "${{ needs.go-version.result }}" != "success" ]; then
-            echo "::error::gate failed (vet=${{ needs.vet.result }} test=${{ needs.test.result }} build-all=${{ needs.build-all.result }} go-version=${{ needs.go-version.result }})"
+            || [ "${{ needs.go-version.result }}" != "success" ] \
+            || [ "${{ needs['cross-platform'].result }}" != "success" ]; then
+            echo "::error::gate failed (vet=${{ needs.vet.result }} test=${{ needs.test.result }} build-all=${{ needs.build-all.result }} go-version=${{ needs.go-version.result }} cross-platform=${{ needs['cross-platform'].result }})"
             exit 1
           fi
-          echo "gate passed: vet, test -race, build-all, go-version all green"
+          echo "gate passed: vet, test -race, build-all, go-version, cross-platform all green"
