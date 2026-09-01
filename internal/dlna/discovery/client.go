@@ -202,6 +202,15 @@ type SSDPDiscoveryClient struct {
 	// No mutex: sendMSearch is called only from runTickLoop, which Start
 	// spawns exactly once and refuses to spawn again while running, so this
 	// field is owned by that single goroutine.
+	//
+	// That makes it a real constraint on TESTS, not just a note about
+	// production: a test calling noteSendResult directly must do so while
+	// no run loop is live — before Start, or after Stop, which joins the
+	// loop. One that did neither raced under -race on CI and was not
+	// reproducible locally in 26 runs, which is the shape this kind of bug
+	// takes. Adding a mutex to make that test safe would be paying
+	// production for a test's convenience; ordering the test correctly
+	// costs nothing.
 	sendErrStreak int
 
 	// wg tracks the two run-loop goroutines (runLoop, runTickLoop)

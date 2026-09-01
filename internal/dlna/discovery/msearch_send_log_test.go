@@ -164,9 +164,20 @@ func TestSendMSearchStreakResetsOnRestart(t *testing.T) {
 	if err := c.Start(context.Background()); err != nil {
 		t.Skipf("cannot bind a UDP socket in this environment: %v", err)
 	}
+	// Stop BEFORE driving the failure. sendErrStreak is deliberately
+	// unsynchronised because runTickLoop is its only production toucher
+	// (see the field's comment), and Stop joins that goroutine — so
+	// calling noteSendResult after it respects the single-owner invariant
+	// instead of racing the live loop. Calling it while the loop ran was a
+	// genuine data race, caught by -race on CI and not reproducible
+	// locally in 26 runs.
+	//
+	// The assertion is unaffected: Start is what resets the streak, Stop
+	// does not touch it, and the captured window still contains only the
+	// new run's lines.
 	buf := captureLogs(t)
-	c.noteSendResult(errors.New("boom"))
 	c.Stop()
+	c.noteSendResult(errors.New("boom"))
 
 	if got := countLines(buf, "M-SEARCH send failed"); got != 1 {
 		t.Errorf("a restarted client logged %d first-failure Warns, want 1 — with a "+
