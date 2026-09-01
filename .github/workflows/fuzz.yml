@@ -1,0 +1,144 @@
+name: fuzz
+
+# Nightly fuzzing. Until this landed, 32 fuzz targets existed and NONE of
+# them fuzzed: without `-fuzz` they run their seed corpora as ordinary
+# tests, which is worth having and is not fuzzing.
+#
+# FAN OUT, DO NOT ROTATE. Go permits one `-fuzz` per invocation, so the
+# obvious shape is "pick one target per night by day-of-year". That gives
+# each target five minutes a MONTH. A generated matrix instead runs every
+# target in parallel for five minutes EVERY night, at the same five
+# minutes of wall clock, with no target count to keep in step with the
+# tree — the discover job reads the list out of the source.
+#
+# `-fuzzminimizetime 1s` is NOT optional. Go's default minimization is
+# 60s and burns CPU WITHOUT incrementing the reported `execs`, and the run
+# still says PASS — so the failure mode is a job that looks like it ran
+# and did not. Measured on FuzzFoldForMatch (CLAUDE.md): 60s of fuzztime
+# alone executes 19,003 inputs and then sits at 0/sec for 43 seconds,
+# while adding `-fuzzminimizetime 1s` executes 1,302,362 in half the wall
+# clock.
+#
+# The repo is public, so runner minutes are free.
+
+on:
+  schedule:
+    # 03:20 UTC. Off the hour to avoid the top-of-hour scheduling crush,
+    # which delays cron runs on busy shared runners.
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Per-target fuzz duration (Go duration, e.g. 5m, 30m)"
+        required: false
+        default: "5m"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  # Read the target list out of the tree rather than maintaining a copy.
+  # `go test -list` prints matching test/fuzz names plus a trailing
+  # "ok <pkg>" (or "?  <pkg> [no test files]") line per package, so the
+  # script keys on the package line to attribute each name and drops the
+  # status lines.
+  discover:
+    name: discover targets
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - id: list
+        name: Enumerate fuzz targets
+        run: |
+          set -euo pipefail
+          go test -list 'Fuzz.*' ./... 2>/dev/null > /tmp/list.txt || true
+          python3 - <<'PY' > /tmp/targets.json
+          import json, re
+          pkg, out = None, []
+          for line in open('/tmp/list.txt'):
+              line = line.rstrip('\n')
+              m = re.match(r'^(?:ok|FAIL|\?)\s+(\S+)', line)
+              if m:
+                  pkg = m.group(1)
+                  # names collected since the last package line belong to it
+                  for i in range(len(out) - 1, -1, -1):
+                      if out[i]['package']:
+                          break
+                      out[i]['package'] = './' + pkg.split('1-bit-bridge/', 1)[-1]
+                  continue
+              if line.startswith('Fuzz'):
+                  out.append({'name': line, 'package': ''})
+          out = [t for t in out if t['package']]
+          print(json.dumps(out))
+          PY
+          echo "targets=$(cat /tmp/targets.json)" >> "$GITHUB_OUTPUT"
+          echo "count=$(python3 -c "import json;print(len(json.load(open('/tmp/targets.json'))))")" >> "$GITHUB_OUTPUT"
+          echo "Discovered targets:"
+          python3 -c "import json;[print(' ',t['package'],t['name']) for t in json.load(open('/tmp/targets.json'))]"
+
+  fuzz:
+    name: ${{ matrix.target.name }}
+    needs: discover
+    if: needs.discover.outputs.count != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      # One bad target must not cancel the other 31 — a complete nightly
+      # picture is the whole point of the fan-out.
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.discover.outputs.targets) }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-gobuild-fuzz-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-fuzz-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-fuzz-
+      - name: Fuzz
+        run: |
+          go test ${{ matrix.target.package }} \
+            -run XXX \
+            -fuzz '^${{ matrix.target.name }}$' \
+            -fuzztime ${{ inputs.fuzztime || '5m' }} \
+            -fuzzminimizetime 1s
+      # A crasher is written into testdata/fuzz/<Target>/ and is the whole
+      # value of the run. Upload it rather than auto-committing: a corpus
+      # commit from CI is noise, while a crasher deserves a human-reviewed
+      # PR that reproduces it.
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashers-${{ matrix.target.name }}
+          path: |
+            **/testdata/fuzz/**
+          if-no-files-found: ignore
+          retention-days: 30
