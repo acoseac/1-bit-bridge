@@ -125,6 +125,14 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.Limits.Write.Burst
 		out.Limits.Write.Burst = &v
 	}
+	if cfg.Limits.Search.RequestsPerMinute != nil {
+		v := *cfg.Limits.Search.RequestsPerMinute
+		out.Limits.Search.RequestsPerMinute = &v
+	}
+	if cfg.Limits.Search.Burst != nil {
+		v := *cfg.Limits.Search.Burst
+		out.Limits.Search.Burst = &v
+	}
 	if cfg.Integrity.VariantSweepIntervalSec != nil {
 		v := *cfg.Integrity.VariantSweepIntervalSec
 		out.Integrity.VariantSweepIntervalSec = &v
