@@ -89,6 +89,7 @@ type Config struct {
 	Artwork         ArtworkConfig        `yaml:"artwork,omitempty"`
 	Metrics         MetricsConfig        `yaml:"metrics,omitempty"`
 	Demo            DemoConfig           `yaml:"demo,omitempty"`
+	Retention       RetentionConfig      `yaml:"retention,omitempty"`
 
 	// DisableHTTP3 prevents the server from binding UDP ports and
 	// advertising Alt-Svc headers for HTTP/3 upgrades. Defaults to false.
@@ -659,6 +660,52 @@ type ScannerConfig struct {
 // /v1/manifest rate limit. Lives at the top of the YAML so future
 // per-endpoint or per-resource limits can join the same block instead
 // of scattering across the config surface.
+// RetentionConfig bounds the two tables that grow without one:
+// playback history and device registrations.
+//
+// Both knobs default to OFF (0 = keep forever). The reason is not that
+// growth is fine — it is that neither table is large today (~18k history
+// rows a year for a heavy listener, one registration per paired device),
+// so the real gap was that there was no bound available and no way to see
+// the size. The Diagnostics page now shows both counts; an operator who
+// looks and decides "off" has made a decision rather than inherited one.
+//
+// Orphaned device registrations — rows bound to a revoked auth token —
+// are reaped unconditionally and are NOT covered by these knobs. That is
+// garbage collection, not policy: such a row can never be used again.
+type RetentionConfig struct {
+	// PlaybackHistoryDays deletes playback events older than N days.
+	//
+	// **0 (the default) keeps everything, and that is the recommended
+	// setting.** Any non-zero value degrades the "Forgotten Favourites"
+	// smart mix, which selects tracks played a lot and NOT RECENTLY and
+	// therefore has no lower time bound at all — a track played twenty
+	// times two years ago and never since is precisely what it exists to
+	// surface, and a retention window deletes the evidence.
+	//
+	// Validation REFUSES 1-89 rather than clamping. The bounded smart-mix
+	// windows run to 90 days (HourWindow, SessionWindow, DeepCutsCutoff),
+	// so a 30-day retention would silently gut the time-of-day and
+	// session families. A value that quietly does something other than
+	// what it says is worse than a refusal.
+	PlaybackHistoryDays int `yaml:"playbackHistoryDays,omitempty"`
+
+	// DeviceRegistrationDays deletes registrations whose last-seen stamp
+	// is older than N days. 0 (the default) keeps them.
+	//
+	// This is the POLICY half only — a device that has not synced in a
+	// year may simply be in a drawer. Registrations bound to a revoked
+	// token are reaped regardless of this setting.
+	DeviceRegistrationDays int `yaml:"deviceRegistrationDays,omitempty"`
+}
+
+// MinPlaybackHistoryRetentionDays is the floor for a NON-ZERO
+// retention.playbackHistoryDays. It equals the longest bounded window any
+// smart-mix family reads (90 days: HourWindow / SessionWindow /
+// DeepCutsCutoff). Below it, those families silently lose data they need,
+// which is why validation refuses rather than clamps.
+const MinPlaybackHistoryRetentionDays = 90
+
 type LimitsConfig struct {
 	Manifest ManifestLimitsConfig `yaml:"manifest,omitempty"`
 	Write    WriteLimitsConfig    `yaml:"write,omitempty"`
@@ -2341,6 +2388,29 @@ func (c *Config) Validate() error {
 	// on unknown values would mask public-mode intent).
 	if _, err := c.Deployment.EffectiveMode(); err != nil {
 		return err
+	}
+
+	// Retention: a NON-ZERO playback-history window below the longest
+	// bounded smart-mix window is REFUSED, not clamped. 30 days would
+	// silently gut the time-of-day and session families, and a value that
+	// quietly does something other than what it says is worse than an
+	// error at load. Zero (keep forever) is always fine and is the
+	// default; negative is nonsense.
+	if d := c.Retention.PlaybackHistoryDays; d != 0 {
+		if d < 0 {
+			return errors.New("retention.playbackHistoryDays: must not be negative (0 = keep forever)")
+		}
+		if d < MinPlaybackHistoryRetentionDays {
+			return fmt.Errorf(
+				"retention.playbackHistoryDays: %d is below the %d-day floor — the smart-mix "+
+					"families read windows up to %d days, so a shorter retention would silently "+
+					"empty them. Use 0 to keep everything, or a value >= %d",
+				d, MinPlaybackHistoryRetentionDays, MinPlaybackHistoryRetentionDays,
+				MinPlaybackHistoryRetentionDays)
+		}
+	}
+	if c.Retention.DeviceRegistrationDays < 0 {
+		return errors.New("retention.deviceRegistrationDays: must not be negative (0 = keep forever)")
 	}
 
 	// LibraryRoots: loopback installs require at least one root at

@@ -2868,6 +2868,35 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// long-running bridges with high client churn. Defaults in
 	// internal/config.DefaultManifest* — operators tune via
 	// `limits: manifest:` in bridge.yaml.
+	// Retention sweep. Two tables have grown without a bound since v1.7:
+	// device_registrations (a row per device token that ever presented a
+	// valid bearer, with nothing removing one — not even token
+	// revocation) and playback_history (a row per play, forever).
+	//
+	// The orphan half is unconditional garbage collection; the two
+	// time-window halves are policy and default OFF. The config is read
+	// live on every pass, so a settings change lands on the next tick.
+	//
+	// bgWriters-joined: these are writers, and shutdown must not race
+	// Store.Close.
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		runRetentionSweeper(scanCtx, &retentionSweeper{
+			store: manifestStore,
+			liveToken: func() ([]string, error) {
+				toks := store.List()
+				ids := make([]string, 0, len(toks))
+				for _, t := range toks {
+					ids = append(ids, t.ID)
+				}
+				return ids, nil
+			},
+			cfg: cfgHolder.Load,
+			now: time.Now,
+		})
+	}()
+
 	stopManifestRL := apiSrv.StartTokenRateLimitReapers()
 	defer stopManifestRL()
 
