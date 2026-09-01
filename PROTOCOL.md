@@ -1161,7 +1161,7 @@ All errors are JSON:
 |    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (or pre-v1.9 build) — no `/v1/smart-playlists` |
 |    404 | `favorites_not_supported` | Bridge build doesn't store favorites backups (pre-v1.10) — no `/v1/favorites` |
 |    409 | `stale`                  | PUT `/v1/playlists/{id}` or `/v1/favorites` carried a `lastModifiedAt` strictly older than the stored copy; body includes the full server copy |
-|    429 | `rate_limited`           | Per-IP pairing-create rate-limit OR per-token `/v1/manifest` rate-limit tripped |
+|    429 | `rate_limited`           | Per-IP pairing-create rate-limit, per-token `/v1/manifest` rate-limit, or per-token write rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
 |    503 | `queue_full`             | Pending pairing requests at the cap               |
@@ -1179,6 +1179,20 @@ On exceeded, the server responds:
 Clients SHOULD respect `Retry-After` rather than retrying immediately. iOS surfaces 429 as a generic transport error today; typed handling with Retry-After parsing is a Mirror-PR follow-up.
 
 Operators can disable the limiter by setting `limits.manifest.requestsPerMinute: 0` in `bridge.yaml`.
+
+### Write rate limit (additive, since v1.10)
+
+Every **mutating** `/v1` route draws from a second per-token bucket, sized via `limits.write.requestsPerMinute` (default `120`) and `limits.write.burst` (default `300`). The routes covered are:
+
+`POST /v1/upscale` · `POST /v1/upscale/batch` · `DELETE /v1/upscale/batches/{id}` · `DELETE /v1/upscale/variants` · `PUT /v1/playlists/{id}` · `DELETE /v1/playlists/{id}` · `PUT /v1/favorites` · `POST /v1/history/batch` · `POST /v1/atlas-ingest` · `POST /v1/atlas-harvest/credential`
+
+Pairing routes are excluded: they are unauthenticated (no token to key a bucket on) and carry their own per-IP limiter. **Read routes are deliberately unlimited** — the artwork sweep legitimately issues hundreds of requests in a burst, and a bucket there would break it.
+
+The response shape is identical to the manifest limit — `429`, `Retry-After: <seconds>`, `{"error": "rate_limited", "message": "too many write requests; retry after the Retry-After window"}`.
+
+**The defaults are deliberately generous, and the burst is the number that matters.** The traffic shape being absorbed is a burst rather than a rate: a device returning from an offline window pushes every dirty playlist at once and then goes quiet. A burst of 300 covers far more than any real client sends; 120/min sustained still bounds a runaway roughly two orders of magnitude below an unlimited route. A client that legitimately trips this limit should be reported as a bug rather than worked around.
+
+Operators can disable it with `limits.write.requestsPerMinute: 0`.
 
 ## Pairing URL scheme
 

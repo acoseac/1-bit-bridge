@@ -117,6 +117,14 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.Limits.Manifest.Burst
 		out.Limits.Manifest.Burst = &v
 	}
+	if cfg.Limits.Write.RequestsPerMinute != nil {
+		v := *cfg.Limits.Write.RequestsPerMinute
+		out.Limits.Write.RequestsPerMinute = &v
+	}
+	if cfg.Limits.Write.Burst != nil {
+		v := *cfg.Limits.Write.Burst
+		out.Limits.Write.Burst = &v
+	}
 	if cfg.Integrity.VariantSweepIntervalSec != nil {
 		v := *cfg.Integrity.VariantSweepIntervalSec
 		out.Integrity.VariantSweepIntervalSec = &v

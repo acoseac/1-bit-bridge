@@ -17,7 +17,7 @@ import (
 
 func TestManifestRateLimiter_BurstThenBlock(t *testing.T) {
 	// 60 rpm / burst=1: first Reserve has zero delay, second is deferred.
-	rl := newManifestRateLimiter(60, 1)
+	rl := newTokenRateLimiter(60, 1)
 	lim := rl.limiterFor("a")
 
 	if d := lim.Reserve().Delay(); d != 0 {
@@ -29,7 +29,7 @@ func TestManifestRateLimiter_BurstThenBlock(t *testing.T) {
 }
 
 func TestManifestRateLimiter_PerTokenIsolation(t *testing.T) {
-	rl := newManifestRateLimiter(60, 1)
+	rl := newTokenRateLimiter(60, 1)
 	a := rl.limiterFor("token-a")
 	b := rl.limiterFor("token-b")
 
@@ -42,10 +42,10 @@ func TestManifestRateLimiter_PerTokenIsolation(t *testing.T) {
 }
 
 func TestManifestRateLimiter_DisabledWhenRPMZero(t *testing.T) {
-	if !newManifestRateLimiter(0, 3).disabled() {
+	if !newTokenRateLimiter(0, 3).disabled() {
 		t.Error("rpm=0 must report disabled")
 	}
-	if newManifestRateLimiter(6, 3).disabled() {
+	if newTokenRateLimiter(6, 3).disabled() {
 		t.Error("rpm>0 must not report disabled")
 	}
 }
@@ -91,11 +91,11 @@ func TestManifestLimitsConfig_EffectiveRPMPreservesExplicitZero(t *testing.T) {
 func intPtr(v int) *int { return &v }
 
 func TestManifestRateLimiter_ReaperDropsIdle(t *testing.T) {
-	rl := newManifestRateLimiter(6, 3)
+	rl := newTokenRateLimiter(6, 3)
 	rl.limiterFor("stale")
 	rl.limiterFor("fresh")
 	rl.mu.Lock()
-	rl.entries["stale"].lastSeen = time.Now().Add(-2 * manifestLimiterIdleTimeout)
+	rl.entries["stale"].lastSeen = time.Now().Add(-2 * tokenLimiterIdleTimeout)
 	dropped := rl.reapIdle(time.Now())
 	rl.mu.Unlock()
 	if dropped != 1 {

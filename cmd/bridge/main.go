@@ -2868,7 +2868,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// long-running bridges with high client churn. Defaults in
 	// internal/config.DefaultManifest* — operators tune via
 	// `limits: manifest:` in bridge.yaml.
-	stopManifestRL := apiSrv.StartManifestRateLimitReaper()
+	stopManifestRL := apiSrv.StartTokenRateLimitReapers()
 	defer stopManifestRL()
 
 	// deviceSeen debounce-map reaper. The map is keyed on the

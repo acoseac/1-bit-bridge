@@ -144,7 +144,8 @@ type Server struct {
 	bookletStore           BookletStore                 // nil unless WithBooklets wired — /v1/booklet availability lookups
 	bookletDir             string                       // on-disk PDF cache dir (WithBooklets)
 	bookletNudge           func(mbid string)            // optional fetch-priority nudge for the 202 path (WithBooklets)
-	manifestRateLimiter    *manifestRateLimiter         // per-token-ID token-bucket for /v1/manifest
+	manifestRateLimiter    *tokenRateLimiter            // per-token-ID token-bucket for /v1/manifest
+	writeRateLimiter       *tokenRateLimiter            // per-token-ID token-bucket for every mutating route
 	reachability           *reachabilityCache           // per-root probe TTL cache used by /v1/list, /v1/stat, /v1/health
 	healthCounts           *healthCountsCache           // TTL cache for /v1/health scan-state COUNT(*) scans
 	publicServers          *publicServersCache          // TTL cache for /v1/health UPnP upstream per-server COUNT(*) scans
@@ -431,7 +432,8 @@ func New(cfg *config.Config, store *auth.Store, mp ManifestProvider, fingerprint
 		resolver:            bridgefs.New(cfg.LibraryRoots),
 		manifest:            mp,
 		pairingRateLimiter:  newPairingRateLimiter(),
-		manifestRateLimiter: newManifestRateLimiter(cfg.Limits.Manifest.EffectiveRPM(), cfg.Limits.Manifest.EffectiveBurst()),
+		manifestRateLimiter: newTokenRateLimiter(cfg.Limits.Manifest.EffectiveRPM(), cfg.Limits.Manifest.EffectiveBurst()),
+		writeRateLimiter:    newTokenRateLimiter(cfg.Limits.Write.EffectiveRPM(), cfg.Limits.Write.EffectiveBurst()),
 		reachability:        newReachabilityCache(),
 		healthCounts:        newHealthCountsCache(),
 		publicServers:       newPublicServersCache(),
@@ -841,23 +843,32 @@ func (s *Server) StartPairingRateLimitGC() (stopFn func()) {
 	}
 }
 
-// StartManifestRateLimitReaper drains idle per-token entries from the
-// /v1/manifest limiter map on a 10-minute tick. Mirrors
-// StartPairingRateLimitGC's lifecycle contract — caller passes the
-// returned func to defer so the goroutine exits cleanly on shutdown.
-// Test harnesses can skip the call; the reaper is purely a memory-
-// pressure mitigation for long-running bridges with high client churn.
-func (s *Server) StartManifestRateLimitReaper() (stopFn func()) {
-	if s.manifestRateLimiter == nil {
-		return func() {
-			// No-op stopFn — the reaper goroutine was never
-			// spawned (limiter not wired). Return the same
-			// shape as the live path so callers can `defer` it
-			// unconditionally.
-		}
-	}
+// StartTokenRateLimitReapers drains idle per-token entries from BOTH
+// token-bucket maps — the /v1/manifest limiter and the write limiter — on
+// a 10-minute tick. Mirrors StartPairingRateLimitGC's lifecycle contract:
+// the caller defers the returned func so the goroutines exit cleanly on
+// shutdown.
+//
+// Both, not just the manifest one: each limiter keeps its own map keyed by
+// token ID, so a bridge with high client churn leaks an entry per
+// ever-seen token in whichever map has no reaper. Test harnesses can skip
+// the call; the reapers are purely a memory-pressure mitigation.
+func (s *Server) StartTokenRateLimitReapers() (stopFn func()) {
 	stop := make(chan struct{})
-	s.manifestRateLimiter.Start(stop)
+	started := false
+	for _, l := range []*tokenRateLimiter{s.manifestRateLimiter, s.writeRateLimiter} {
+		if l == nil {
+			continue
+		}
+		l.Start(stop)
+		started = true
+	}
+	if !started {
+		// No-op stopFn — no reaper goroutine was spawned (no limiter
+		// wired). Same shape as the live path so callers can `defer`
+		// it unconditionally.
+		return func() {}
+	}
 	return func() { close(stop) }
 }
 
@@ -873,13 +884,13 @@ func (s *Server) StartManifestRateLimitReaper() (stopFn func()) {
 // every touchDevice return path (pinned by
 // TestTouchDeviceClearsInflightAfterUpsertPanic).
 //
-// Lifecycle mirrors StartManifestRateLimitReaper: call once from
+// Lifecycle mirrors StartTokenRateLimitReapers: call once from
 // cmd/bridge, defer the returned stopFn. Test harnesses can skip the
 // call — the reaper is purely a memory bound.
 func (s *Server) StartDeviceSeenReaper() (stopFn func()) {
 	if s.deviceSeen == nil {
 		// Registrar not wired (WithDeviceRegistrar never called) —
-		// no-op stopFn, same shape as StartManifestRateLimitReaper's
+		// no-op stopFn, same shape as StartTokenRateLimitReapers'
 		// nil-limiter path so callers can `defer` unconditionally.
 		return func() {}
 	}
