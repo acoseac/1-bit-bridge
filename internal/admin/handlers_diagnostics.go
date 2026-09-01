@@ -15,6 +15,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -55,6 +56,14 @@ type diagnosticsResponse struct {
 	// Log events by level, since process start.
 	LogEventCounts map[string]uint64 `json:"logEventCounts"`
 
+	// Database file accounting. ReclaimableBytes is what a compaction
+	// would return to the filesystem — free pages that row reaping left
+	// behind. An operator cannot sensibly decide whether to compact a
+	// file whose size they have never seen, which is why this is here
+	// and not only behind the button.
+	DatabaseBytes            int64 `json:"databaseBytes"`
+	DatabaseReclaimableBytes int64 `json:"databaseReclaimableBytes"`
+
 	ServerUptimeSeconds int64 `json:"serverUptime"`
 }
 
@@ -64,8 +73,8 @@ type diagnosticsResponse struct {
 // snapshot, so this returns in well under a millisecond and — unlike the
 // composition and coverage snapshots on this server — needs no TTL cache.
 // It touches no database.
-func (s *Server) apiDiagnostics(w http.ResponseWriter, _ *http.Request) {
-	resp := s.diagnosticsSnapshot()
+func (s *Server) apiDiagnostics(w http.ResponseWriter, r *http.Request) {
+	resp := s.diagnosticsSnapshot(r.Context())
 
 	// No-store: these are point-in-time counters, and a browser cache hit
 	// would show an operator stale numbers while they are actively
@@ -80,7 +89,7 @@ func (s *Server) apiDiagnostics(w http.ResponseWriter, _ *http.Request) {
 // the page shows rather than reading the metrics package a second time. Two
 // readers of one set of counters is fine; two assemblies of them is how the
 // bundle and the page come to disagree about what the bridge reported.
-func (s *Server) diagnosticsSnapshot() diagnosticsResponse {
+func (s *Server) diagnosticsSnapshot(ctx context.Context) diagnosticsResponse {
 	resp := diagnosticsResponse{
 		LogEventCounts: metrics.LogEventCountsSnapshot(),
 	}
@@ -89,6 +98,17 @@ func (s *Server) diagnosticsSnapshot() diagnosticsResponse {
 	}
 
 	resp.SQLiteLockWaitP50, resp.SQLiteLockWaitP99 = metrics.SQLiteLockWaitWindow.Snapshot()
+
+	// Three PRAGMAs, microseconds. Degrade to zeros on error rather than
+	// failing the whole snapshot — same rule as the upscale counters
+	// below: a diagnostics surface that 5xxes when one subsystem is
+	// unavailable is useless exactly when someone needs it.
+	if s.deps.Manifest != nil {
+		if ps, err := s.deps.Manifest.PageStats(ctx); err == nil {
+			resp.DatabaseBytes = ps.FileBytes
+			resp.DatabaseReclaimableBytes = ps.ReclaimedBytes
+		}
+	}
 	resp.UpscaleDurationP50, resp.UpscaleDurationP99 = metrics.UpscaleDurationWindow.Snapshot()
 
 	hits, misses := metrics.MBCacheLookupsTotals()

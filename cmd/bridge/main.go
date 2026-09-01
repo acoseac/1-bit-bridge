@@ -3808,7 +3808,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		AutoOptimizeState:        autoOptimizeStateClosure(autoOptimizeEnabledFn, "", autoOptimizeSweepState),
 		TriggerAutoOptimizeSweep: nudgeTriggerClosure(autoOptimizeNudge),
 		TriggerDuplicatesPass:    nudgeTriggerClosure(duplicatesNudge),
-		FingerprintDegraded:      fingerprintDegradedReason,
+		// Free-space probe for the database compaction guard. Injected
+		// because internal/manifest cannot import internal/transcode (the
+		// dependency runs the other way) and internal/admin deliberately
+		// imports neither.
+		DBFreeBytes:         transcode.AvailableDiskSpaceNearest,
+		FingerprintDegraded: fingerprintDegradedReason,
 		// Fan-out over every cadence loop. Captured by value: the slice
 		// is fully appended by this point (every sweeper is wired above),
 		// so the closure sees the complete set.

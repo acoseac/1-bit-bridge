@@ -17,6 +17,7 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -236,7 +237,7 @@ func (s *Server) apiLogBundle(w http.ResponseWriter, r *http.Request) {
 	setDownloadHeaders(w, "text/plain; charset=utf-8", name)
 
 	s.writeBundleHeader(w, f.redact)
-	s.writeBundleDiagnostics(w)
+	s.writeBundleDiagnostics(r.Context(), w)
 	s.writeBundleDoctor(w, r, f.redact)
 	s.writeBundleLogTail(w, f)
 }
@@ -280,8 +281,8 @@ func (s *Server) writeBundleHeader(w http.ResponseWriter, redacted bool) {
 	fmt.Fprintln(w)
 }
 
-func (s *Server) writeBundleDiagnostics(w http.ResponseWriter) {
-	d := s.diagnosticsSnapshot()
+func (s *Server) writeBundleDiagnostics(ctx context.Context, w http.ResponseWriter) {
+	d := s.diagnosticsSnapshot(ctx)
 	fmt.Fprintf(w, "-- diagnostics ----------------------------------------------\n")
 	fmt.Fprintf(w, "sqlite lock wait p50/p99:  %.3f / %.3f s\n", d.SQLiteLockWaitP50, d.SQLiteLockWaitP99)
 	if d.MBCacheLookups > 0 {

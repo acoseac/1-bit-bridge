@@ -45,7 +45,27 @@
       <dd id="diag-sqlite-p50">—</dd>
       <dt>Lock wait (p99)</dt>
       <dd id="diag-sqlite-p99">—</dd>
+      <dt>Database size</dt>
+      <dd id="diag-db-size">—</dd>
+      <dt>Reclaimable</dt>
+      <dd id="diag-db-reclaimable">—</dd>
     </dl>
+    <p class="hint">
+      Deleting rows — duplicates, missing tracks, emptied trash — leaves free
+      pages behind. SQLite reuses them but never returns them to the
+      filesystem on its own. Compacting rewrites the file and hands the space
+      back.
+    </p>
+    <p class="hint">
+      It takes an exclusive lock for the duration, so the bridge will stall
+      for other requests while it runs, and it needs twice the current file
+      size free while it works. Refused outright while a library scan is
+      running.
+    </p>
+    <div class="panel-actions">
+      <button type="button" class="btn" id="db-compact-btn">Compact database</button>
+      <span class="hint" id="db-compact-status"></span>
+    </div>
   </div>
 
   <div class="panel">
