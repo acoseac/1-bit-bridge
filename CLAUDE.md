@@ -7,7 +7,14 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 - `make build` — builds `./bin/bridge` for the host OS.
 - `make build-all` — cross-compiles to `dist/bridge-<os>-<arch>{.exe}`.
 - `make test` — pure-Go race-enabled suite; ~150 tests across 10 packages.
-- **Fuzz targets exist and are NOT run by `make test`** (PR #704, 2026-08-16). 32 targets in
+- **Fuzz targets are fuzzed NIGHTLY in CI, and are NOT fuzzed by `make test`.**
+  `.github/workflows/fuzz.yml` fans every target out as a parallel matrix job at
+  `-fuzztime 5m -fuzzminimizetime 1s`; the target list is DISCOVERED from the tree via
+  `go test -list 'Fuzz.*' ./...`, so adding a target needs no workflow edit. Fan-out, not
+  rotation: one-target-per-night by day-of-year would give each target five minutes a
+  MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
+  deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. 34 targets in
   `fuzz_*_test.go` across `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes}`,
   covering the three untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
