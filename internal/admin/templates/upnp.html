@@ -141,10 +141,12 @@
         Manual description URL <small class="muted">(optional)</small>
         <input name="manualDescriptionURL" type="url" placeholder="http://192.168.0.62:8200/rootDesc.xml">
         <small class="muted">
-          <strong>Not yet supported.</strong> The bridge resolves servers via
-          SSDP discovery only for now — an entry configured with just this URL
-          (no UDN) is saved but never walked. Intended for networks where SSDP
-          can't reach the bridge; until that ships, configure the UDN instead.
+          For networks where the bridge's own SSDP can't reach the server —
+          multicast filtered by the access point, or the server on another
+          subnet. The bridge fetches this description on the discovery cadence
+          and walks the server just as if it had found it itself. A server the
+          bridge <em>can</em> discover needs only its UDN; if you give both,
+          the UDN wins and the URL is ignored.
         </small>
       </label>
       <label>

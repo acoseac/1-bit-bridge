@@ -62,8 +62,8 @@ func TestIngester_Run_ManualURLOnlyServerReportsNotYetSupported(t *testing.T) {
 	if manual.Err == nil {
 		t.Fatal("manual-URL-only server: Err = nil; want the not-yet-supported error")
 	}
-	if !strings.Contains(manual.Err.Error(), "not yet supported") {
-		t.Errorf("manual-URL-only server err = %q; want it to say the manual-URL path is not yet supported",
+	if !strings.Contains(manual.Err.Error(), "has not answered yet") {
+		t.Errorf("manual-URL-only server err = %q; want it to say the URL has not answered yet",
 			manual.Err)
 	}
 	if strings.Contains(manual.Err.Error(), "not discoverable") {

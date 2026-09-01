@@ -360,16 +360,14 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 		return
 	}
 	if controlURL == "" {
-		// Honest split: a UDN-less manual-URL entry can NEVER resolve —
-		// the discovery-cache resolver only looks up by UDN, and the
-		// manual-URL fetch path is unimplemented (see the TODO in
-		// cmd/bridge/upnp_upstream_wiring.go's ResolveControlURL).
-		// Reporting it as "not discoverable this tick" implied SSDP
-		// might find it next tick, which sent operators debugging a
-		// discovery problem that doesn't exist. Feature-review P2-29
-		// (2026-08-14).
+		// A manual-URL entry resolves through the SAME cache, under the
+		// StableServerKey the ManualPoller writes it to, so a miss here
+		// means the URL has not answered yet rather than that the
+		// feature is missing. Say which, because the operator's next
+		// step differs: an unreachable URL is a network or typo
+		// question, an undiscovered UDN is an SSDP one.
 		if strings.TrimSpace(srv.UDN) == "" && strings.TrimSpace(srv.ManualDescriptionURL) != "" {
-			res.Err = errors.New("manualDescriptionURL is not yet supported — the bridge resolves servers via SSDP only; configure the server's UDN")
+			res.Err = errors.New("manual description URL has not answered yet — check the URL is reachable from the bridge and serves a device description with a ContentDirectory service")
 			return
 		}
 		res.Err = errors.New("server not discoverable this tick")

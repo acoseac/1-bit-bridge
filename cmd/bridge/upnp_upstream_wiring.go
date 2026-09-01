@@ -90,6 +90,30 @@ func startUPnPUpstreamIfEnabled(
 		return &upnpUpstreamLifecycle{log: log}
 	}
 
+	// Manual-URL servers, refreshed into the SAME cache so the resolver,
+	// the api proxy's LiveHost and the online chip all see them without
+	// any of the three learning about a second source. Interval matches
+	// the SSDP TTL: EvictStale reaps entries the poller stops refreshing,
+	// and that is exactly how an unreachable manual URL comes to report
+	// offline.
+	//
+	// Known limitation, deliberately not addressed here: the two early
+	// returns above disable the whole upstream feature when no LAN
+	// interface is eligible or none can bind, which also disables manual
+	// URLs even though those need no multicast. Restructuring the
+	// lifecycle to run manual-only is a larger change than this one and
+	// would put the SSDP path at risk to serve a rarer case.
+	if poller := upnp.NewManualPoller(upnp.ManualPollerConfig{
+		Cache:     cache,
+		Servers:   func() []upnp.ManualServer { return manualServersFrom(cfg) },
+		KnownUDNs: func() map[string]struct{} { return configuredUDNs(cfg) },
+		Interval:  cfg.UPnPUpstream.EffectiveMSearchInterval(),
+		Timeout:   upnp.DefaultDiscoveryConfig().DetailFetchTimeout,
+		Logger:    log,
+	}); poller != nil {
+		go poller.Run(ctx)
+	}
+
 	// Wire the proxy on the api.Server — the ContentDirectory client
 	// the ingester uses is the same shape we'd pass to the proxy if it
 	// needed SOAP (it doesn't today; the proxy is plain HTTP), so we
@@ -255,12 +279,21 @@ func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv confi
 			return info.ContentDirectoryControlURL, nil
 		}
 	}
-	// TODO (Bridge PR-D follow-up): support srv.ManualDescriptionURL —
-	// fetch + parse the description here and cache its controlURL. v1
-	// is SSDP-only. Until this lands, a UDN-less manual-URL entry can
-	// never resolve; the ingester reports it as "not yet supported"
-	// (not "not discoverable") and the admin form's field hint says
-	// the same. tracked: 2026-08-14 feature review P2-29.
+	// Manual-URL servers live in the SAME cache, under the ingest's
+	// StableServerKey (`manual:<sha256(url)>`) rather than the device's
+	// own UDN — see internal/upnp/manual.go for why. So resolving one is
+	// the same cache lookup, against the other spelling.
+	//
+	// The entry is written by the ManualPoller, which refreshes on the
+	// SSDP TTL cadence; a miss here means the URL has not answered yet
+	// (or has stopped), and the ingest reports that as not-discoverable,
+	// which is now the honest answer rather than a euphemism for
+	// unimplemented.
+	if strings.TrimSpace(srv.ManualDescriptionURL) != "" {
+		if info, ok := r.cache.Get(upnpingest.StableServerKey(srv)); ok {
+			return info.ContentDirectoryControlURL, nil
+		}
+	}
 	return "", nil
 }
 
@@ -350,4 +383,43 @@ func startUPnPDiscoveryAcrossInterfaces(
 		clients = append(clients, client)
 	}
 	return clients
+}
+
+// manualServersFrom projects the configured manual-URL servers into the
+// poller's shape, keyed by the ingest's StableServerKey so the cache
+// entry lands under the string every other subsystem uses.
+func manualServersFrom(cfg *config.Config) []upnp.ManualServer {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]upnp.ManualServer, 0, len(cfg.UPnPUpstream.Servers))
+	for _, srv := range cfg.UPnPUpstream.Servers {
+		if strings.TrimSpace(srv.ManualDescriptionURL) == "" {
+			continue
+		}
+		out = append(out, upnp.ManualServer{
+			Key:            upnpingest.StableServerKey(srv),
+			DescriptionURL: strings.TrimSpace(srv.ManualDescriptionURL),
+			Name:           srv.Name,
+		})
+	}
+	return out
+}
+
+// configuredUDNs is the set of UDNs an operator configured explicitly.
+// The manual poller refuses to cache a device whose description reports
+// one of these: it would then sit in the cache twice — under its real UDN
+// and under manual:<sha> — and the ingest would walk it twice under two
+// routing prefixes, producing duplicate rows for one upstream.
+func configuredUDNs(cfg *config.Config) map[string]struct{} {
+	if cfg == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(cfg.UPnPUpstream.Servers))
+	for _, srv := range cfg.UPnPUpstream.Servers {
+		if udn := strings.ToLower(strings.TrimSpace(srv.UDN)); udn != "" {
+			out[udn] = struct{}{}
+		}
+	}
+	return out
 }
