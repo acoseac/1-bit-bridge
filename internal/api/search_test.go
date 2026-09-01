@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -181,5 +182,62 @@ func TestSearchFeatureFlagTracksTheRuntimeFact(t *testing.T) {
 	s.manifest = nil
 	if s.searchAvailable() {
 		t.Error("searchAvailable true with no manifest provider")
+	}
+}
+
+// TestSearchIsAdvertisedInHealth is the test whose ABSENCE let the
+// feature flag ship missing: an earlier edit to the health handler
+// silently failed, the endpoint shipped unadvertised, and nothing caught
+// it because the only assertion was on the searchAvailable HELPER —
+// which proves nothing about whether anything CALLS it.
+//
+// So it drives the real health handler and reads the real response,
+// against a manifest that actually supports search.
+func TestSearchIsAdvertisedInHealth(t *testing.T) {
+	st := &stubSearcher{available: true}
+	s := searchServer(t, st)
+
+	rr := httptest.NewRecorder()
+	s.health(rr, httptest.NewRequest(http.MethodGet, "/v1/health", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var got HealthResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rr.Body.String())
+	}
+	if !slices.Contains(got.Features, "search") {
+		t.Fatalf("`search` missing from /v1/health features: %v\n"+
+			"The endpoint exists but nothing advertises it, so no client will call it.",
+			got.Features)
+	}
+
+	// And it must disappear when FTS5 is absent — advertising a capability
+	// the endpoint would 503 is worse than not advertising it at all.
+	st.available = false
+	rr = httptest.NewRecorder()
+	s.health(rr, httptest.NewRequest(http.MethodGet, "/v1/health", nil))
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(got.Features, "search") {
+		t.Errorf("`search` advertised with FTS5 absent: %v", got.Features)
+	}
+}
+
+// TestSearchSwallowsAClientCancellation — this endpoint is called per
+// keystroke, so an abandoned request is the normal case. Reporting it as
+// 500 would bury real failures in the logs and error metrics.
+func TestSearchSwallowsAClientCancellation(t *testing.T) {
+	st := &stubSearcher{available: true, err: context.Canceled}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/search?q=abc", nil)
+	searchServer(t, st).search(rr, req)
+
+	if rr.Code >= 500 {
+		t.Errorf("a cancelled request answered %d; it must not read as a server fault", rr.Code)
+	}
+	if strings.Contains(rr.Body.String(), `"error"`) {
+		t.Errorf("a cancelled request wrote an error body: %s", rr.Body.String())
 	}
 }

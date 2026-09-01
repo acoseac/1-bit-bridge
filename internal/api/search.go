@@ -109,6 +109,15 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 
 	hits, err := searcher.SearchServedTracks(r.Context(), q, limit)
 	if err != nil {
+		// A CANCELLED request is the normal case here, not a fault. This
+		// endpoint is called per keystroke, so a client that keeps typing
+		// abandons the request in flight — reporting that as 500 would
+		// bury real failures under noise in the logs and in the error
+		// metrics, and the client is gone anyway so nothing reads the
+		// body. Return silently. (Gemini HIGH.)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		if errors.Is(err, manifest.ErrSearchUnavailable) {
 			// Terminal for this bridge, not transient: the FTS5 module is
 			// compiled in or it is not, for the process lifetime. The

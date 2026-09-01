@@ -1657,12 +1657,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// loudness + operatorDrivenUpscale + pairingEventsSupported +
 	// playbackHistory + playbackHistoryRead + playlistBackup +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
-	// smartPlaylists + spectrum + trackQuality + upscaleCompleteEvents +
-	// variantBumpsIndex + waveform). `trackQuality` was missing from this
-	// enumeration — and so from the count — until 2026-08-16; keep the
-	// list and the number in step when adding a flag, since the list is
-	// the only thing that makes the number checkable.
-	feats := make([]string, 0, 24)
+	// search + smartPlaylists + spectrum + trackQuality +
+	// upscaleCompleteEvents + variantBumpsIndex + waveform).
+	// `trackQuality` was missing from this enumeration — and so from the
+	// count — until 2026-08-16; keep the list and the number in step when
+	// adding a flag, since the list is the only thing that makes the
+	// number checkable.
+	feats := make([]string, 0, 25)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1775,6 +1776,15 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// `upscaleCompleteEvents` (p < r < u).
 	if s.dlnaEnabled && s.rendererDiscovery != nil {
 		feats = append(feats, "rendererDiscovery")
+	}
+	// `search` advertises GET /v1/search. Gated on a RUNTIME fact, not a
+	// config toggle: FTS5 is compiled into the SQLite driver or it is
+	// not, for the process lifetime, and a bridge whose probe failed at
+	// migration time must never advertise a capability its endpoint would
+	// 503. Alpha-sorted between rendererDiscovery and smartPlaylists
+	// (r < se < sm).
+	if s.searchAvailable() {
+		feats = append(feats, "search")
 	}
 	// `smartPlaylists` advertises GET /v1/smart-playlists (server-generated
 	// dynamic feeds). Gated on the store being wired AND the live toggle,
