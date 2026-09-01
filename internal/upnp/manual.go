@@ -195,7 +195,17 @@ func (p *ManualPoller) pollServer(ctx context.Context, srv ManualServer, knownUD
 	// — and the ingest would walk it twice under two routing prefixes,
 	// producing duplicate rows for one upstream. Refuse the manual entry
 	// and say so once.
-	if realUDN := strings.ToLower(strings.TrimSpace(desc.UDN)); realUDN != "" {
+	//
+	// UNLESS the UDN is this entry's OWN. A server configured with both a
+	// UDN and a manual URL has StableServerKey == its lowercased UDN, so
+	// the description it returns necessarily "matches a configured UDN" —
+	// itself. Rejecting there would make the manual URL useless to the
+	// operator who supplied both as a belt-and-braces, which is precisely
+	// the case where SSDP is unreliable and the fallback is wanted. There
+	// is no double-walk risk: the ingest walks per CONFIGURED SERVER,
+	// keyed on StableServerKey, so one entry is walked once however many
+	// ways its description was obtained.
+	if realUDN := strings.ToLower(strings.TrimSpace(desc.UDN)); realUDN != "" && realUDN != strings.ToLower(srv.Key) {
 		if _, dup := knownUDNs[realUDN]; dup {
 			p.warnOnce(srv.Key, func() {
 				p.log.Warn("UPnP manual server: this device is already configured by UDN — "+

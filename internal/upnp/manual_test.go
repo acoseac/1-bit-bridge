@@ -253,3 +253,68 @@ func TestManualPollerRunStopsOnContextCancel(t *testing.T) {
 		t.Fatal("Run did not return after ctx cancel")
 	}
 }
+
+// TestManualPollerAcceptsItsOwnUDNAsAFallback is the regression test both
+// reviewers asked for.
+//
+// A server configured with BOTH a UDN and a manual URL has
+// StableServerKey == its lowercased UDN, so the description it returns
+// necessarily "matches a configured UDN" — its own. The first version of
+// the duplicate guard rejected that, which made the manual URL useless to
+// the operator who supplied both as a belt-and-braces: exactly the case
+// where SSDP is unreliable and the fallback is the point.
+func TestManualPollerAcceptsItsOwnUDNAsAFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Mixed case on purpose: the key is lowercased, the device is not.
+		fmt.Fprint(w, descXML("uuid:Both-Ways", "Dual", "/ctl"))
+	}))
+	defer srv.Close()
+
+	cache := NewServerCache()
+	var buf bytes.Buffer
+	// The key StableServerKey produces for a UDN-configured server.
+	const key = "uuid:both-ways"
+	// This server's own UDN is in the configured set — as it always is
+	// when a UDN is configured.
+	known := map[string]struct{}{"uuid:both-ways": {}}
+	p := manualTestPoller(t, cache, []ManualServer{{
+		Key: key, DescriptionURL: srv.URL, Name: "Dual",
+	}}, known, &buf)
+
+	p.PollOnce(context.Background())
+
+	info, ok := cache.Get(key)
+	if !ok {
+		t.Fatalf("a server configured with BOTH a UDN and a manual URL was refused its own "+
+			"description; the manual URL is its SSDP fallback and this makes it useless.\nlog:\n%s",
+			buf.String())
+	}
+	if info.ContentDirectoryControlURL == "" {
+		t.Error("cached entry carries no control URL")
+	}
+	if strings.Contains(buf.String(), "already configured by UDN") {
+		t.Errorf("warned about a device being a duplicate of itself:\n%s", buf.String())
+	}
+}
+
+// And the guard must still fire for a DIFFERENT server's UDN — that is
+// the double-walk it exists to prevent.
+func TestManualPollerStillRefusesAnotherServersUDN(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, descXML("uuid:some-other-server", "Other", "/ctl"))
+	}))
+	defer srv.Close()
+
+	cache := NewServerCache()
+	var buf bytes.Buffer
+	known := map[string]struct{}{"uuid:some-other-server": {}}
+	p := manualTestPoller(t, cache, []ManualServer{{
+		Key: "manual:deadbeef", DescriptionURL: srv.URL, Name: "Manual",
+	}}, known, &buf)
+
+	p.PollOnce(context.Background())
+	if _, ok := cache.Get("manual:deadbeef"); ok {
+		t.Fatal("a manual URL pointing at a DIFFERENT server's configured UDN was cached; " +
+			"the ingest would walk that upstream twice under two routing prefixes")
+	}
+}

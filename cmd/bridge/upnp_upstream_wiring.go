@@ -29,8 +29,15 @@ type upnpUpstreamLifecycle struct {
 	ingester         *upnpingest.Ingester // exposed so the admin adapter can ForceRescan
 	tickerCancel     context.CancelFunc
 	ingestWg         sync.WaitGroup
-	adminState       *upnpAdminState // populated lazily on installAdminAdapter
-	log              *slog.Logger
+	// manualCancel / manualWg scope the manual-URL poller to this
+	// lifecycle rather than to the process. Started on the parent ctx it
+	// would outlive Stop(), which is a contract violation even though the
+	// app ctx would eventually reap it — and would leave a live goroutine
+	// behind any test that stops the lifecycle. (Gemini HIGH, PR #824.)
+	manualCancel context.CancelFunc
+	manualWg     sync.WaitGroup
+	adminState   *upnpAdminState // populated lazily on installAdminAdapter
+	log          *slog.Logger
 }
 
 // startUPnPUpstreamIfEnabled wires the MediaServer SSDP discovery +
@@ -103,15 +110,36 @@ func startUPnPUpstreamIfEnabled(
 	// URLs even though those need no multicast. Restructuring the
 	// lifecycle to run manual-only is a larger change than this one and
 	// would put the SSDP path at risk to serve a rarer case.
-	if poller := upnp.NewManualPoller(upnp.ManualPollerConfig{
+	//
+	// `cfg` is the BOOT snapshot: UPnP upstream configuration is
+	// restart-bound (this whole function runs once, at startup), so the
+	// closures below read a stable value rather than a live one. Said
+	// plainly because an earlier comment here claimed they picked up a
+	// reload, which they do not. (Gemini MEDIUM.)
+	manualCtx, manualCancel := context.WithCancel(ctx)
+	manualPoller := upnp.NewManualPoller(upnp.ManualPollerConfig{
 		Cache:     cache,
 		Servers:   func() []upnp.ManualServer { return manualServersFrom(cfg) },
-		KnownUDNs: func() map[string]struct{} { return configuredUDNs(cfg) },
+		KnownUDNs: func() map[string]struct{} { return foreignConfiguredUDNs(cfg) },
 		Interval:  cfg.UPnPUpstream.EffectiveMSearchInterval(),
 		Timeout:   upnp.DefaultDiscoveryConfig().DetailFetchTimeout,
 		Logger:    log,
-	}); poller != nil {
-		go poller.Run(ctx)
+	})
+	// Attach the poller to whichever lifecycle we end up returning, so
+	// Stop() cancels and JOINS it. Started on the parent ctx it would
+	// outlive Stop — the app ctx would reap it eventually, but a test that
+	// stops the lifecycle would be left with a live goroutine, and the
+	// lifecycle contract says Stop means stopped.
+	withManualPoller := func(l *upnpUpstreamLifecycle) *upnpUpstreamLifecycle {
+		l.manualCancel = manualCancel
+		if manualPoller != nil {
+			l.manualWg.Add(1)
+			go func() {
+				defer l.manualWg.Done()
+				manualPoller.Run(manualCtx)
+			}()
+		}
+		return l
 	}
 
 	// Wire the proxy on the api.Server — the ContentDirectory client
@@ -137,11 +165,11 @@ func startUPnPUpstreamIfEnabled(
 		// Discovery already started — leave it running so /v1/servers
 		// (or the operator's debug curl against the cache) still works.
 		// The lifecycle's Stop will tear it down.
-		return &upnpUpstreamLifecycle{
+		return withManualPoller(&upnpUpstreamLifecycle{
 			discoveryClients: clients,
 			cache:            cache,
 			log:              log,
-		}
+		})
 	}
 
 	// Tick loop. The first tick runs after a short warm-up so SSDP has
@@ -151,13 +179,13 @@ func startUPnPUpstreamIfEnabled(
 	if scanEvery <= 0 {
 		scanEvery = 6 * time.Hour
 	}
-	life := &upnpUpstreamLifecycle{
+	life := withManualPoller(&upnpUpstreamLifecycle{
 		discoveryClients: clients,
 		cache:            cache,
 		ingester:         ingester,
 		tickerCancel:     cancel,
 		log:              log,
-	}
+	})
 	life.ingestWg.Add(1)
 	go life.runIngestLoop(tickCtx, ingester, scanEvery)
 
@@ -194,7 +222,11 @@ func (l *upnpUpstreamLifecycle) Stop() {
 	if l.tickerCancel != nil {
 		l.tickerCancel()
 	}
+	if l.manualCancel != nil {
+		l.manualCancel()
+	}
 	l.ingestWg.Wait()
+	l.manualWg.Wait()
 	for _, c := range l.discoveryClients {
 		c.Stop()
 	}
@@ -280,9 +312,15 @@ func (r *discoveryServerResolver) ResolveControlURL(_ context.Context, srv confi
 		}
 	}
 	// Manual-URL servers live in the SAME cache, under the ingest's
-	// StableServerKey (`manual:<sha256(url)>`) rather than the device's
-	// own UDN — see internal/upnp/manual.go for why. So resolving one is
-	// the same cache lookup, against the other spelling.
+	// StableServerKey (`manual:<sha256(url)>` when there is no UDN, the
+	// lowercased UDN when there is) rather than the device's own UDN —
+	// see internal/upnp/manual.go for why. So resolving one is the same
+	// cache lookup, against the other spelling.
+	//
+	// Tried for a UDN-configured server TOO, not just a UDN-less one:
+	// with both configured, the manual URL is the fallback for when SSDP
+	// has not found the device, and only reaching for it here makes that
+	// fallback real.
 	//
 	// The entry is written by the ManualPoller, which refreshes on the
 	// SSDP TTL cadence; a miss here means the URL has not answered yet
@@ -406,12 +444,20 @@ func manualServersFrom(cfg *config.Config) []upnp.ManualServer {
 	return out
 }
 
-// configuredUDNs is the set of UDNs an operator configured explicitly.
-// The manual poller refuses to cache a device whose description reports
-// one of these: it would then sit in the cache twice — under its real UDN
-// and under manual:<sha> — and the ingest would walk it twice under two
-// routing prefixes, producing duplicate rows for one upstream.
-func configuredUDNs(cfg *config.Config) map[string]struct{} {
+// foreignConfiguredUDNs is the set of UDNs an operator configured
+// explicitly on some OTHER server entry. The manual poller refuses to
+// cache a device whose description reports one of these: it would then
+// sit in the cache under two identities and the ingest would walk one
+// upstream twice under two routing prefixes.
+//
+// "Foreign" is the load-bearing word. A server configured with BOTH a UDN
+// and a manual URL reports its own UDN, and rejecting it there would make
+// the manual URL useless for the operator who supplied both as a
+// belt-and-braces — exactly the case where SSDP is unreliable. The
+// poller compares against its own key and admits that one; this set only
+// carries the UDNs belonging to entries OTHER than the one being polled.
+// (Gemini HIGH + CodeRabbit Major, PR #824.)
+func foreignConfiguredUDNs(cfg *config.Config) map[string]struct{} {
 	if cfg == nil {
 		return nil
 	}
