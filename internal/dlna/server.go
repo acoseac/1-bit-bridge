@@ -679,23 +679,50 @@ func (s *Server) noteCallbackDivergence(service, callbackHost, remoteAddr string
 	if callbackHostMatchesSource(callbackHost, remoteAddr) {
 		return
 	}
-	key := callbackHost + "|" + remoteAddr
+	// Key on the source IP, NOT the raw remoteAddr. A GENA subscription
+	// renewal opens a NEW TCP connection with a new EPHEMERAL PORT, so
+	// keying on host:port makes every renewal a fresh key and the dedup
+	// does nothing in production — the exact flood this function exists to
+	// avoid. (Caught in review; the first version's test used one fixed
+	// port and therefore passed against the bug.)
+	key := callbackHost + "|" + sourceIPOf(remoteAddr)
+
 	s.callbackDivergeMu.Lock()
 	if s.callbackDivergeSeen == nil {
 		s.callbackDivergeSeen = make(map[string]struct{}, 8)
 	}
 	_, seen := s.callbackDivergeSeen[key]
-	if !seen && len(s.callbackDivergeSeen) < callbackDivergeSeenCap {
+	capped := !seen && len(s.callbackDivergeSeen) >= callbackDivergeSeenCap
+	if !seen && !capped {
 		s.callbackDivergeSeen[key] = struct{}{}
 	}
 	s.callbackDivergeMu.Unlock()
-	if seen {
+
+	// Suppress once the set is full, rather than logging every unseen key
+	// forever. A host manufacturing unique addresses must not be able to
+	// turn a diagnostic into a flood by exhausting the cap — which is
+	// what a log-on-capped path would let it do.
+	if seen || capped {
 		return
 	}
 	s.log.Warn("GENA callback host differs from the SUBSCRIBE source — accepted for now, will be refused in a future release",
 		slog.String("service", service),
 		slog.String("callbackHost", callbackHost),
-		slog.String("subscribeSource", remoteAddr))
+		// The IP, not host:port: the port is ephemeral noise that changes
+		// on every renewal, and the address is what a field report needs.
+		slog.String("subscribeSource", sourceIPOf(remoteAddr)))
+}
+
+// sourceIPOf strips the ephemeral port from a net/http RemoteAddr,
+// returning the bare host. Falls back to the input when it carries no
+// port (a reverse proxy rewrote it, or a test passed a bare host) —
+// callbackHostMatchesSource makes the same allowance.
+func sourceIPOf(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
 }
 
 // initialNotifyBody returns the GENA `<e:propertyset>` for a service's

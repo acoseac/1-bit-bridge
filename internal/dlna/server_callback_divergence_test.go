@@ -76,10 +76,14 @@ func Test_noteCallbackDivergence_WarnsOncePerPair(t *testing.T) {
 	var buf bytes.Buffer
 	s := newLogCaptureServer(&buf)
 
-	// Same divergent pair, many times: exactly one line. A control point
-	// that renews its subscription on a timer must not flood the log.
+	// Same divergent pair, many times — but with a DIFFERENT EPHEMERAL
+	// PORT each time, which is what a real subscription renewal looks
+	// like: a new TCP connection from the same host. A fixture that
+	// reuses one port passes against a key that includes the port, and
+	// therefore proves nothing. (That is exactly how the first version of
+	// this test went green against the bug review caught.)
 	for i := 0; i < 20; i++ {
-		s.noteCallbackDivergence("cds", "127.0.0.1", "192.168.1.9:49152")
+		s.noteCallbackDivergence("cds", "127.0.0.1", "192.168.1.9:"+itoa(49152+i))
 	}
 	if n := strings.Count(buf.String(), "GENA callback host differs"); n != 1 {
 		t.Fatalf("want exactly 1 warning for a repeated pair, got %d:\n%s", n, buf.String())
@@ -91,27 +95,66 @@ func Test_noteCallbackDivergence_WarnsOncePerPair(t *testing.T) {
 		t.Fatalf("warning must carry both addresses; got:\n%s", line)
 	}
 
-	// A DIFFERENT pair is a different observation and gets its own line.
+	// A DIFFERENT SOURCE HOST is a different observation and gets its own
+	// line — the dedup must collapse ports, not addresses.
 	s.noteCallbackDivergence("cds", "127.0.0.1", "192.168.1.10:49152")
 	if n := strings.Count(buf.String(), "GENA callback host differs"); n != 2 {
 		t.Fatalf("want 2 warnings after a second distinct pair, got %d:\n%s", n, buf.String())
 	}
 }
 
-func Test_noteCallbackDivergence_IsBounded(t *testing.T) {
+// Test_noteCallbackDivergence_CapSuppressesRatherThanFloods pins BOTH
+// halves of the bound: the map stops growing, AND the log stops. Logging
+// on the capped path would let a host manufacturing unique addresses turn
+// a diagnostic into exactly the flood the cap exists to prevent.
+func Test_noteCallbackDivergence_CapSuppressesRatherThanFloods(t *testing.T) {
 	var buf bytes.Buffer
 	s := newLogCaptureServer(&buf)
-	// Well past the cap. The set must stop growing; the warning count is
-	// allowed to keep rising (an unbounded map is the hazard, not an
-	// unbounded log from a host generating unique addresses).
-	for i := 0; i < callbackDivergeSeenCap*3; i++ {
-		s.noteCallbackDivergence("cds", "127.0.0.1", "10.0.0.1:"+itoa(i))
+	const over = callbackDivergeSeenCap * 3
+	for i := 0; i < over; i++ {
+		// Distinct SOURCE HOSTS (not just ports) so each is genuinely a
+		// new observation rather than a dedup hit.
+		s.noteCallbackDivergence("cds", "127.0.0.1", "10.0."+itoa(i/256)+"."+itoa(i%256)+":49152")
 	}
 	s.callbackDivergeMu.Lock()
 	n := len(s.callbackDivergeSeen)
 	s.callbackDivergeMu.Unlock()
 	if n > callbackDivergeSeenCap {
-		t.Fatalf("observation set grew past its cap: %d > %d", n, callbackDivergeSeenCap)
+		t.Errorf("observation set grew past its cap: %d > %d", n, callbackDivergeSeenCap)
+	}
+	lines := strings.Count(buf.String(), "GENA callback host differs")
+	if lines > callbackDivergeSeenCap {
+		t.Errorf("logged %d lines for %d distinct sources; the cap must suppress, not just stop recording", lines, over)
+	}
+}
+
+// Test_noteCallbackDivergence_LogsTheAddressWithoutThePort pins what a
+// field report actually needs: the source IP. The ephemeral port changes
+// on every renewal and is noise.
+func Test_noteCallbackDivergence_LogsTheAddressWithoutThePort(t *testing.T) {
+	var buf bytes.Buffer
+	s := newLogCaptureServer(&buf)
+	s.noteCallbackDivergence("cds", "127.0.0.1", "192.168.1.9:49152")
+	out := buf.String()
+	if !strings.Contains(out, "subscribeSource=192.168.1.9") {
+		t.Errorf("want the bare source IP in the line; got:\n%s", out)
+	}
+	if strings.Contains(out, "49152") {
+		t.Errorf("ephemeral port leaked into the line; got:\n%s", out)
+	}
+}
+
+func Test_sourceIPOf(t *testing.T) {
+	cases := map[string]string{
+		"192.168.1.9:49152": "192.168.1.9",
+		"[fe80::1]:49152":   "fe80::1",
+		"192.168.1.9":       "192.168.1.9", // no port — reverse proxy / test shape
+		"":                  "",
+	}
+	for in, want := range cases {
+		if got := sourceIPOf(in); got != want {
+			t.Errorf("sourceIPOf(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
