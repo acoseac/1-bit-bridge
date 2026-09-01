@@ -141,7 +141,7 @@ func TestLookupUPnPServerRuntime_TrimsWhitespaceUDN(t *testing.T) {
 		ContentDirectoryControlURL: "http://192.0.2.9:8200/ctl",
 		LastSeenAt:                 time.Now(),
 	})
-	friendly, _, online := lookupUPnPServerRuntime(
+	friendly, _, online, _ := lookupUPnPServerRuntime(
 		context.Background(),
 		config.UPnPUpstreamServerConfig{Name: "Padded", UDN: "  uuid:wsp  ", PathPrefix: "wsp"},
 		cache, openUPnPTestStore(t),

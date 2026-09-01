@@ -148,7 +148,7 @@ func (a *upnpAdminAdapter) ConfiguredServers(ctx context.Context) []admin.UPnPUp
 		// The admin DTO surfaces liveness via its own `Discovered` field
 		// (cache.Get below), so the shared helper's `online` is discarded
 		// here — only the public /v1/health DTO carries `online`.
-		row.FriendlyName, row.RoutedTracks, _ = lookupUPnPServerRuntime(ctx, srv, a.cache, a.store)
+		row.FriendlyName, row.RoutedTracks, _, _ = lookupUPnPServerRuntime(ctx, srv, a.cache, a.store)
 		// The admin DTO carries operator-internal fields the public
 		// DTO deliberately omits (Discovered / ResolvedUDN /
 		// Manufacturer / ControlURL / LastSeenAt). FriendlyName is

@@ -38,7 +38,19 @@ type ServerInfo struct {
 	ModelDescription           string
 	ModelName                  string
 	ContentDirectoryControlURL string
-	LastSeenAt                 time.Time
+
+	// DescriptionURL is the SSDP LOCATION the description was fetched
+	// from (e.g. http://192.168.0.62:8200/rootDesc.xml). Kept because
+	// it is the ONE string a client needs to add this server on its
+	// own, and it is not derivable from anything else here: the path
+	// is vendor-specific (MiniDLNA /rootDesc.xml, others
+	// /description.xml or /dd.xml), so it cannot be reconstructed from
+	// the control URL's host:port. /v1/health advertises it on LAN
+	// bridges so a phone whose own SSDP failed can still add the
+	// upstream directly.
+	DescriptionURL string
+
+	LastSeenAt time.Time
 }
 
 // ServerCache is a small thread-safe UDN -> ServerInfo map. Parallel
@@ -74,6 +86,9 @@ func (c *ServerCache) Upsert(info ServerInfo) {
 		}
 		if info.ContentDirectoryControlURL == "" {
 			info.ContentDirectoryControlURL = existing.ContentDirectoryControlURL
+		}
+		if info.DescriptionURL == "" {
+			info.DescriptionURL = existing.DescriptionURL
 		}
 		if info.LastSeenAt.IsZero() {
 			info.LastSeenAt = existing.LastSeenAt
@@ -686,6 +701,7 @@ func (c *MediaServerDiscoveryClient) fetchAndCacheDetails(runCtx context.Context
 		ModelDescription:           desc.ModelDescription,
 		ModelName:                  desc.ModelName,
 		ContentDirectoryControlURL: ctrlURL,
+		DescriptionURL:             location,
 		LastSeenAt:                 lastSeenAt,
 	})
 	// Stamp AFTER the Upsert, so a recorded UDN is always a cached one and
