@@ -138,8 +138,16 @@ func TestDiagnosticsCarriesRetentionCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("oldestPlaybackStartedAt %q is not RFC3339: %v", ts, err)
 	}
-	if d := parsed.Sub(oldest).Abs(); d > time.Second {
-		t.Errorf("oldestPlaybackStartedAt = %v, want ~%v", parsed, oldest)
+	// RFC3339 formats to SECOND precision, so compare against the truncated
+	// value — asserting against a nanosecond-precision time.Now() with a
+	// one-second tolerance is a flake waiting for a slow runner, and the
+	// Windows leg blocks merges now. (Gemini MEDIUM.)
+	if want := oldest.UTC().Truncate(time.Second); !parsed.Equal(want) {
+		t.Errorf("oldestPlaybackStartedAt = %v, want %v", parsed, want)
+	}
+
+	if avail, _ := body["retentionCountsAvailable"].(bool); !avail {
+		t.Error("retentionCountsAvailable is false on a working store; the UI would say 'unavailable'")
 	}
 }
 
