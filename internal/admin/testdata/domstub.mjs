@@ -20,7 +20,7 @@ Object.assign(doc, {
 globalThis.document = doc;
 globalThis.window = {
   document: doc, addEventListener: noop, removeEventListener: noop,
-  location: { pathname: '/', search: '', href: 'http://x/', assign: noop },
+  location: { pathname: '/', search: '', href: 'https://x/', assign: noop },
   history: { pushState: noop, replaceState: noop }, matchMedia: () => ({ matches: false, addEventListener: noop }),
   setInterval: () => 0, setTimeout: () => 0, clearInterval: noop, clearTimeout: noop,
   requestAnimationFrame: () => 0, scrollTo: noop, getComputedStyle: () => ({}),

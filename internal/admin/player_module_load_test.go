@@ -2,6 +2,7 @@ package admin
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,12 +89,12 @@ func runModuleUnderNode(t *testing.T, node, stub, module string) (string, error)
 	t.Helper()
 	script := fmt.Sprintf(`
 const t = setTimeout(() => { console.log('TIMEOUT'); process.exit(0); }, %d);
-await import('file://%s');
-try { await import('file://%s'); console.log('OK'); }
+await import(%q);
+try { await import(%q); console.log('OK'); }
 catch (e) { console.log('THROW: ' + e.constructor.name + ': ' + String(e.message).slice(0, 200)); }
 clearTimeout(t);
 process.exit(0);
-`, moduleLoadTimeout.Milliseconds(), stub, module)
+`, moduleLoadTimeout.Milliseconds(), fileURL(stub), fileURL(module))
 
 	cmd := exec.Command(node, "--input-type=module", "-e", script)
 	raw, err := cmd.CombinedOutput()
@@ -157,5 +158,53 @@ func TestPlayerModuleLoadCatchesATemporalDeadZone(t *testing.T) {
 	}
 	if !strings.Contains(out, "ReferenceError") {
 		t.Errorf("control produced %q; expected a ReferenceError from the temporal dead zone", out)
+	}
+}
+
+// fileURL turns an absolute filesystem path into a file:// URL node will
+// accept on every platform.
+//
+// The naive "file://" + path is POSIX-only: a Windows path is
+// `D:\a\x.js`, and both the backslashes and the missing leading slash
+// make `file://D:\a\x.js` invalid — node rejects it and every module
+// "fails to load" for a reason that has nothing to do with the module.
+// (Caught by the Windows gate leg, on the first PR after that leg started
+// blocking. The same class the internal/dsn helper exists for on the
+// SQLite side.)
+//
+// url.URL does the percent-escaping, which matters because a runner's
+// temp path can contain characters a hand-built URL would corrupt.
+func fileURL(p string) string {
+	// ToSlash alone is a NO-OP on POSIX, so a Windows-shaped path handed
+	// to this on a Mac keeps its backslashes — which is why the test
+	// below covers the Windows shape explicitly and why the ReplaceAll is
+	// here. Exactly the accommodation internal/dsn.File documents for
+	// SQLite URIs, for the same reason.
+	slashed := strings.ReplaceAll(filepath.ToSlash(p), `\`, "/")
+	// Windows absolute paths start with a drive letter, not a slash;
+	// file:// requires one (file:///D:/a/x.js).
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	u := url.URL{Scheme: "file", Path: slashed}
+	return u.String()
+}
+
+// TestFileURLHandlesBothPlatformShapes pins the builder against the
+// Windows shape explicitly, because the POSIX shape works by accident
+// with the naive concatenation and would not catch the bug.
+func TestFileURLHandlesBothPlatformShapes(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/home/runner/work/x.js", "file:///home/runner/work/x.js"},
+		{`D:\a\1-bit-bridge\x.js`, "file:///D:/a/1-bit-bridge/x.js"},
+		{`C:\Users\RUNNER~1\AppData\Local\Temp\t\boot.js`,
+			"file:///C:/Users/RUNNER~1/AppData/Local/Temp/t/boot.js"},
+		// A space must be escaped, not passed through.
+		{"/tmp/with space/x.js", "file:///tmp/with%20space/x.js"},
+	}
+	for _, tc := range cases {
+		if got := fileURL(tc.in); got != tc.want {
+			t.Errorf("fileURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
