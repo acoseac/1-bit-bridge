@@ -206,6 +206,14 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "GET /v1/read", kind: streamingRoute, rateClass: rateNone, handler: s.authed(s.read)},
 		{pattern: "GET /v1/download", kind: streamingRoute, rateClass: rateNone, handler: s.authed(s.download)},
 
+		// Library search. rateWrite is wrong (it reads) and rateNone is
+		// wrong too: this is the one route a client calls PER KEYSTROKE,
+		// so it gets its own bucket — generous enough that a person
+		// typing never trips it, tight enough that a stuck client is
+		// bounded. 5 s ctx-timeout: an FTS MATCH on a 50k-track library
+		// is milliseconds, so anything near this is a wedged query.
+		{pattern: "GET /v1/search", kind: boundedRoute, rateClass: rateSearch, handler: withCtxTimeout(5*time.Second, s.authed(s.rateLimitSearch(s.search)))},
+
 		// Manifest — 50k-track libraries produce 100+ MB streams.
 		// Rate-limit middleware wraps authed which wraps the
 		// streaming handler.
