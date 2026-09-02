@@ -2615,12 +2615,46 @@ because several routed endpoints answer 404 by design
 "routed and refusing" — the first version probed, produced four false
 positives, and taught exactly that.
 
+**The iOS mirror is DONE** (`acoseac/1-bit` #1515) and the two files are
+byte-identical again. **No Swift change was needed or made**:
+`HealthResponse.features` is `[String]?`, so the new flag decodes and is
+ignored, and a `BridgeFeatures` constant with no consumer would be speculative.
+Wiring `BridgeSourceClient` and deciding where server-side search belongs in the
+UI is a product decision left open on purpose — nothing on iOS calls
+`/v1/search` yet.
+
+**The guard is now BIDIRECTIONAL, and the converse direction was the one with
+real findings** (#835). `TestEveryDocumentedEndpointIsRouted` was written
+because an endpoint was documented and not routed;
+`TestEveryRoutedEndpointIsDocumented` was added because **six were routed and
+not documented** — the four `/v1/upscale/batch*` + `DELETE
+/v1/upscale/variants` routes appeared only in a rate-limit list and a demo-mode
+paragraph, and **`GET /v1/renderers` and `GET /v1/diagnostics` appeared nowhere
+at all**, despite both being live and both already having a `BridgeFeatures`
+constant on iOS. So the app depended on two endpoints the shared wire contract
+never described, and a third-party client author could not have written either.
+Now 41 routed / 38 with their own section / 3 exempted-with-reason, and zero
+documented-but-unrouted.
+
+Three things worth carrying forward from writing those contracts. **Read the
+status code out of the running handler, not out of the source** — that is what
+corrected `GET /v1/diagnostics`, which I had written as flag-gated from the
+flag's NAME when it is unconditionally wired. **Don't label a section with a
+version you cannot verify**: the spec's `since v1.x` labels are iOS app
+versions, so a bridge-side session cannot derive them — the first draft guessed
+two and one was wrong by a release. The headings name the **feature flag**
+instead (`operatorDrivenUpscale`, `deleteVariants`, `rendererDiscovery`,
+`diagnosticsSummary`), which is both checkable here and the thing a client
+actually keys on, since no client can ask a bridge its protocol era. And the
+guard deliberately accepts only a `### ` heading or a `**`METHOD /path`**`
+lead-in as a contract — **a mention in running prose does not count**, because
+that is precisely the state all six were already in.
+
 **Still open from the plan:** the CLAUDE.md structural split (invariants stay,
 per-PR narrative moves to an archive) — deliberately NOT done here. Moving
 content out of this file means future sessions stop auto-loading it, so
 deciding what is load-bearing is a judgement call worth making deliberately
-rather than at the end of a long batch. The `/v1/search` and write-rate-limit
-sections of `PROTOCOL.md` also await their iOS mirror.
+rather than at the end of a long batch.
 
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 
