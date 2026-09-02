@@ -32,6 +32,7 @@ func TestRouteRegistry_completeness(t *testing.T) {
 		"GET /v1/read",
 		"GET /v1/download",
 		"GET /v1/manifest",
+		"GET /v1/search",
 		"GET /v1/artwork/{mbid}",
 		"GET /v1/artist-image/{mbid}",
 		"GET /v1/booklet/{mbid}",

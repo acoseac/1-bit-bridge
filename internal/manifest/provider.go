@@ -315,3 +315,27 @@ func (p *Provider) LookupAnalysis(ctx context.Context, sourcePath string) (*Anal
 		Spectrum:      a.Spectrum,
 	}, nil
 }
+
+// SearchAvailable and SearchServedTracks forward to the store so
+// `GET /v1/search` works through the Provider — which is what
+// cmd/bridge actually passes to api.New.
+//
+// **These exist because the endpoint was inert without them.** The api
+// reaches for search via a type assertion on its ManifestProvider, and
+// the concrete type there is *Provider, not *Store. Without the
+// forwards the assertion failed on every bridge: the `search` feature
+// flag never appeared in /v1/health and the endpoint answered
+// 503 search_unavailable to everyone. The handler tests passed because
+// their stub implemented the methods directly — a test double more
+// capable than production, which is the shape of this whole class of
+// bug. `TestProviderSatisfiesTheSearchSurface` is the guard.
+func (p *Provider) SearchAvailable(ctx context.Context) (bool, error) {
+	return p.store.SearchAvailable(ctx)
+}
+
+// SearchServedTracks forwards the SERVED-set search — duplicate-
+// suppressed rows joined out. See Store.SearchServedTracks for why that
+// restriction is the point.
+func (p *Provider) SearchServedTracks(ctx context.Context, query string, limit int) ([]TrackHit, error) {
+	return p.store.SearchServedTracks(ctx, query, limit)
+}
