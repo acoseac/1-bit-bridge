@@ -512,6 +512,111 @@ Distinct from `upscale_disabled`. The pool's queue cap is operator-tunable via `
 
 **Asynchronous completion**: the response returns as soon as the jobs are queued. iOS discovers completed variants via the next `/v1/manifest` sync (which advertises the new `Track.variants` entries). For pool-level visibility while jobs are in flight (queue depth, lifetime totals, failure counts) the companion `GET /v1/upscale/stats` endpoint described below serves operators and third-party tooling; for per-track completion the manifest is still the authoritative signal.
 
+### Batched upscaling (additive, since v1.3)
+
+Where `POST /v1/upscale` enqueues one track or one folder and answers with a count, the batch surface **enrols a path into a tracked batch** the operator can watch and cancel. All three endpoints answer `503 upscale_disabled` when the feature is off or the sox pre-check failed at boot, and `403 demo_read_only` on a demo bridge.
+
+**`POST /v1/upscale/batch`** — enrol a path.
+
+```json
+{ "path": "Artist/Album", "kind": "upscale", "targetRate": 192000, "targetBits": 24 }
+```
+
+`path` is library-relative; `""` or `"."` means the whole library. `kind` is `"upscale"` (the default when omitted) or `"optimize"` — for `optimize`, **`targetRate` / `targetBits` are ignored**: the coordinator derives a family-preserving 16/44.1 or 16/48 target per track. Omitting the target fields (or sending `0`) means "use the bridge's configured default"; **`0` is the sentinel, and only `0`** — an out-of-range non-zero value is `400 bad_request`.
+
+**Response** (`202 Accepted`):
+
+```json
+{
+  "batchID": "…uuid…", "path": "Artist/Album",
+  "targetRate": 192000, "targetBits": 24,
+  "totalFiles": 120, "alreadyCovered": 40,
+  "projectedSizeBytes": 8100000000, "availableBytes": 240000000000,
+  "enqueuedCount": 80
+}
+```
+
+**Response** (`507 Insufficient Storage`): the disk pre-flight refused. Body carries `{error, projectedBytes, requiredBytes, availableBytes}` so a client can say *how much* is missing rather than "it failed".
+
+Other errors: `400 bad_request` (malformed JSON, path traversal, out-of-range target).
+
+**`GET /v1/upscale/batches?limit=<int>`** — recent batches, newest first. `limit` defaults to `100` and is accepted only in `1…500`; anything else **falls back to the default rather than erroring**, because this is a dashboard read where a bad query string should not blank the page.
+
+```json
+{
+  "batches": [
+    { "id": "…uuid…", "path": "Artist/Album",
+      "targetRate": 192000, "targetBits": 24, "status": "running",
+      "totalFiles": 120, "processedFiles": 61, "failedFiles": 0,
+      "skippedFiles": 2, "createdAt": 1756800000, "updatedAt": 1756801234 }
+  ],
+  "generatedAt": "2026-09-02T10:00:00Z"
+}
+```
+
+`skippedFiles` and `error` are `omitempty`. `createdAt` / `updatedAt` are Unix seconds.
+
+**`DELETE /v1/upscale/batches/{id}`** — cancel a batch. `{id}` is the `batchID` from the submit response. `204 No Content` on success; `400 bad_request` if `{id}` is not a UUID. Cancelling is idempotent at the wire level — a batch that has already finished still answers `204`.
+
+### `DELETE /v1/upscale/variants` (additive, since v1.3)
+
+Deletes cached variant sidecars and their rows. Three mutually-exclusive scopes:
+
+| Query | Scope |
+|---|---|
+| `?path=<rel>` | the variants of one exact source track |
+| `?prefix=<rel>` | every variant under a path prefix |
+| `?confirm=true` | **every variant on the bridge** |
+
+**The unscoped shape requires `confirm=true` explicitly** — an operator or script must opt in to deleting everything, and a bare `DELETE /v1/upscale/variants` is `400 bad_request` rather than a wipe. Sending both `path` and `prefix` is also `400`.
+
+**Response** (`200 OK`): `{"deletedCount": 12, "freedBytes": 1610612736, "deletedPaths": ["…"]}`.
+
+**Response** (`404 variant_not_found`): this bridge has no variant store wired, i.e. the `deleteVariants` capability is absent. Clients should gate on that flag rather than probing.
+
+**Partial deletes are not rolled back.** Each (unlink, row-delete) pair is idempotent, and the `bridge upscale --gc` sweep plus the integrity watcher reap anything left behind — so a `500 internal` mid-way means "some were deleted", not "none were".
+
+### `GET /v1/renderers` (additive, since v1.4)
+
+The bridge's SSDP MediaRenderer cache — the DLNA devices it can see on the LAN, so a phone that cannot run its own discovery (iOS Local Network permission, a filtered AP) can still list them.
+
+```json
+{
+  "renderers": [
+    { "udn": "uuid:…", "friendlyName": "Living Room",
+      "manufacturer": "Chord", "modelName": "2go",
+      "controlURL": "http://192.168.0.62:8200/AVTransport/control",
+      "eventURL": "…", "renderingControlURL": "…",
+      "sinkProtocolInfos": ["http-get:*:audio/flac:*"],
+      "lastSeenAt": "2026-09-02T10:00:00Z" }
+  ]
+}
+```
+
+`renderers` is always an array, never `null`. `manufacturer` / `modelDescription` / `modelName` / `eventURL` / `renderingControlURL` / `sinkProtocolInfos` are `omitempty`.
+
+**Response** (`404 not_found`): renderer discovery is not enabled on this bridge. Gate on the `rendererDiscovery` feature flag.
+
+### `GET /v1/diagnostics` (additive, since v1.4)
+
+Counters and structured state for an operator-facing health view — **no log text**. Atomic-counter and sliding-window reads only: no SQLite queries, no subprocess spawns, so it is safe to poll.
+
+```json
+{
+  "sqliteLockWaitP50": 0.001, "sqliteLockWaitP99": 0.012,
+  "mbCacheHitRatio": 0.87,
+  "upscaleJobsInFlight": 2, "upscaleJobsCompletedTotal": 15304,
+  "upscaleDurationP50": 4.1, "upscaleDurationP99": 19.7,
+  "tailscaleNodeState": "Running", "tailscalePeersOnline": 3,
+  "logEventCounts": { "ERROR": 2, "WARN": 11, "INFO": 940 },
+  "serverUptime": 86400
+}
+```
+
+Durations are **seconds**; `serverUptime` is seconds since process start, read from the same instant `/v1/health` reports. `tailscaleNodeState` is `"down"` on a bridge not running tsnet — which is why a client should hide the row rather than render a tailnet that was never configured.
+
+The endpoint is **unconditionally wired** on any bridge that has it, so `diagnosticsSummary` is always present in `features` and the flag's only job is to tell a client apart from a **pre-v1.4 bridge**, where the route does not exist and the request `404`s.
+
 ### `GET /v1/events` (additive, since v1.2)
 
 Server-sent events stream replacing per-resource polling for upscale stats and pairing approvals. Push delivery means iOS can react within tens of milliseconds instead of the 2–5s polling cadence the previous endpoints required, AND iOS doesn't burn radio cycles polling every few seconds while a management section is open.

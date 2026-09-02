@@ -64,11 +64,28 @@ func documentedEndpoints(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("read PROTOCOL.md: %v", err)
 	}
-	// Headings look like:  ### `GET /v1/foo?bar=<x>` (additive, since …)
-	re := regexp.MustCompile("(?m)^#+\\s+`(GET|POST|PUT|DELETE|PATCH) (/v1/[^`?\\s]+)")
+	// The spec introduces an endpoint's contract two ways, and both count:
+	//
+	//   ### `GET /v1/foo?bar=<x>` (additive, since …)      — its own section
+	//   **`GET /v1/foo`** — …                              — a lead-in inside
+	//                                                        a grouped family
+	//
+	// A heading may also carry TWO endpoints ("`GET /a` and `GET /b`").
+	// A bare mention in running prose deliberately does NOT count: that is
+	// exactly the state the upscale-batch endpoints were in — named in a
+	// rate-limit list and a demo-mode paragraph, with no contract anywhere.
+	res := []*regexp.Regexp{
+		regexp.MustCompile("(?m)^#+\\s+.*?`(GET|POST|PUT|DELETE|PATCH) (/v1/[^`?\\s]+)"),
+		regexp.MustCompile("(?m)^#+\\s+.*and `(GET|POST|PUT|DELETE|PATCH) (/v1/[^`?\\s]+)"),
+		regexp.MustCompile("(?m)^\\*\\*`(GET|POST|PUT|DELETE|PATCH) (/v1/[^`?\\s]+)"),
+	}
 	seen := map[string]struct{}{}
 	var out []string
-	for _, m := range re.FindAllStringSubmatch(string(spec), -1) {
+	var all [][]string
+	for _, re := range res {
+		all = append(all, re.FindAllStringSubmatch(string(spec), -1)...)
+	}
+	for _, m := range all {
 		// The docs use an alternation shorthand for sibling routes:
 		//   /v1/atlas-meta/{release|artist}/{mbid}
 		// Expand it so each real route is checked.
@@ -136,5 +153,72 @@ func TestSearchIsReachableThroughTheMux(t *testing.T) {
 	}
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("unauthenticated /v1/search = %d, want 401 (it is an authed route)", rr.Code)
+	}
+}
+
+// TestEveryRoutedEndpointIsDocumented is the INVERSE of the guard above,
+// and closes the other half of the same class.
+//
+// The forward guard exists because `/v1/search` was documented and not
+// routed. This one exists because six endpoints were the reverse —
+// routed, shipped, consumed by iOS, and with no contract in the spec:
+// the four `/v1/upscale/batch*` routes appeared only in a rate-limit
+// list and a demo-mode paragraph, and `/v1/renderers` and
+// `/v1/diagnostics` appeared nowhere at all despite both having a
+// `BridgeFeatures` constant on the iOS side.
+//
+// An undocumented endpoint is not a harmless omission. PROTOCOL.md is
+// the file the two repos keep byte-identical precisely so a client
+// author can write against it; anything reachable but unwritten is a
+// contract only the server knows, and it changes without anyone
+// noticing the change was a wire change.
+func TestEveryRoutedEndpointIsDocumented(t *testing.T) {
+	documented := map[string]struct{}{}
+	for _, ep := range documentedEndpoints(t) {
+		documented[ep] = struct{}{}
+	}
+
+	// Endpoints whose contract is documented INSIDE another section's
+	// prose rather than under their own heading or lead-in. Each needs a
+	// reason, because "add it to the list" must be a worse option than
+	// writing the section.
+	exempt := map[string]string{
+		"GET /v1/pairing/{}/events": "documented in the SSE section as the pollSecret-gated " +
+			"sibling of GET /v1/pairing/{requestId}, whose shape it shares",
+		"GET /v1/smart-playlist-image/{}": "documented with its full contract (bearer-authed, " +
+			"image/jpeg, 404 when none) in the smart-playlists imageHash paragraph",
+		"GET /v1/playlist-image/{}": "documented alongside its smart-mix twin in the same paragraph",
+	}
+
+	var missing []string
+	for _, rt := range newRouteRegistryTestServer(t).routeRegistry() {
+		ep := normalizeEndpoint(rt.pattern)
+		if _, ok := documented[ep]; ok {
+			continue
+		}
+		if _, ok := exempt[ep]; ok {
+			continue
+		}
+		missing = append(missing, rt.pattern)
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("%d routed endpoint(s) have no contract in PROTOCOL.md:\n  %s\n\n"+
+			"Give each one a `### ` section or a `**`METHOD /path`**` lead-in. A mention in "+
+			"running prose does not count — that is the state these were already in.\n"+
+			"If it genuinely belongs inside another section, add it to `exempt` WITH a reason.",
+			len(missing), strings.Join(missing, "\n  "))
+	}
+
+	// An exemption for a route that no longer exists is dead weight that
+	// makes the list look more considered than it is.
+	registered := map[string]struct{}{}
+	for _, rt := range newRouteRegistryTestServer(t).routeRegistry() {
+		registered[normalizeEndpoint(rt.pattern)] = struct{}{}
+	}
+	for ep := range exempt {
+		if _, ok := registered[ep]; !ok {
+			t.Errorf("exemption for %q no longer matches any route — remove it", ep)
+		}
 	}
 }
