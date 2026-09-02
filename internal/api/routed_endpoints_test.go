@@ -81,9 +81,10 @@ func documentedEndpoints(t *testing.T) []string {
 	}
 	seen := map[string]struct{}{}
 	var out []string
+	text := string(spec)
 	var all [][]string
 	for _, re := range res {
-		all = append(all, re.FindAllStringSubmatch(string(spec), -1)...)
+		all = append(all, re.FindAllStringSubmatch(text, -1)...)
 	}
 	for _, m := range all {
 		// The docs use an alternation shorthand for sibling routes:
@@ -190,8 +191,10 @@ func TestEveryRoutedEndpointIsDocumented(t *testing.T) {
 		"GET /v1/playlist-image/{}": "documented alongside its smart-mix twin in the same paragraph",
 	}
 
+	routes := newRouteRegistryTestServer(t).routeRegistry()
+
 	var missing []string
-	for _, rt := range newRouteRegistryTestServer(t).routeRegistry() {
+	for _, rt := range routes {
 		ep := normalizeEndpoint(rt.pattern)
 		if _, ok := documented[ep]; ok {
 			continue
@@ -213,7 +216,7 @@ func TestEveryRoutedEndpointIsDocumented(t *testing.T) {
 	// An exemption for a route that no longer exists is dead weight that
 	// makes the list look more considered than it is.
 	registered := map[string]struct{}{}
-	for _, rt := range newRouteRegistryTestServer(t).routeRegistry() {
+	for _, rt := range routes {
 		registered[normalizeEndpoint(rt.pattern)] = struct{}{}
 	}
 	for ep := range exempt {
