@@ -852,9 +852,16 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 	// portion with a stdin descriptor, and everything downstream is shared.
 	// Deciding here rather than at enqueue means a toolchain installed after
 	// a job was queued is picked up by the run.
-	route := decodeRouteFor(
-		SnapshotOrOpen(func() (SoxInfo, error) { return ProbeSox(ctx) }),
-		FFmpegAvailable(), j.SourceAbsPath)
+	// Only the MP4 family can route anywhere but sox-direct, and ProbeSox is
+	// a fork+exec — so gate on the cheap extension check and keep this
+	// function's documented "no probe per iteration" contract for every
+	// source that behaves exactly as it did before the fallback existed.
+	route := routeSoxDirect
+	if needsDecodeRouting(j.SourceAbsPath) {
+		route = decodeRouteFor(
+			SnapshotOrOpen(func() (SoxInfo, error) { return ProbeSox(ctx) }),
+			FFmpegAvailable(), j.SourceAbsPath)
+	}
 	input := []string{j.SourceAbsPath}
 	var geo sourceGeometry
 	if route == routeFFmpegPipe {

@@ -113,6 +113,20 @@ func resolveBin(look func() (string, error), fallback string) string {
 	return fallback
 }
 
+// needsDecodeRouting reports whether a source's decoder is in question at all.
+//
+// It exists to keep RunSox's documented performance contract — "we don't
+// repeat the probe here so a worker-pool body doesn't pay the LookPath cost
+// per iteration". ProbeSox is a fork+exec (measured: 7.9 ms; FFmpegAvailable
+// is 17 µs), and only the MP4 family can route anywhere but sox-direct, which
+// is what every source did before the fallback existed. So a FLAC/WAV/MP3 job
+// pays nothing and behaves exactly as it did, and only the sources whose
+// decoder is genuinely undecided pay one probe — against a transcode that
+// runs for seconds.
+func needsDecodeRouting(sourcePath string) bool {
+	return ffmpegRoutableExt[strings.ToLower(filepath.Ext(sourcePath))]
+}
+
 // decodeRouteFor picks the decoder for one source. Pure, so the policy is
 // testable without either binary installed.
 //

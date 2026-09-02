@@ -260,3 +260,35 @@ func TestFFmpegRoutableExtIsTheMP4FamilyOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestRunSoxDoesNotProbePerJobForSoxReadableSources pins RunSox's documented
+// performance contract — "we don't repeat the probe here so a worker-pool body
+// doesn't pay the LookPath cost per iteration".
+//
+// ProbeSox is a fork+exec (measured 7.9 ms against FFmpegAvailable's 17 µs),
+// so probing unconditionally would put 1,338 needless process spawns on an
+// auto-optimize backlog of that size. Only the MP4 family can route anywhere
+// but sox-direct; everything else must behave exactly as it did before the
+// fallback existed.
+func TestRunSoxDoesNotProbePerJobForSoxReadableSources(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/l/a.flac", false},
+		{"/l/a.wav", false},
+		{"/l/a.mp3", false},
+		{"/l/a.aiff", false},
+		{"/l/a.dsf", false},
+		{"/l/a.m4a", true},
+		{"/l/A.M4A", true},
+		{"/l/a.mp4", true},
+		{"/l/a.m4b", true},
+		{"/l/a.m4p", true},
+	} {
+		if got := needsDecodeRouting(tc.path); got != tc.want {
+			t.Errorf("needsDecodeRouting(%q) = %v, want %v — a false here costs a "+
+				"fork+exec on every job of that kind", tc.path, got, tc.want)
+		}
+	}
+}
