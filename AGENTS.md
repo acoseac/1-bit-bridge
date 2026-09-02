@@ -2,16 +2,22 @@
 
 Guidance for AI coding agents working in this repository. Assumes no prior
 knowledge of the project. [`CLAUDE.md`](CLAUDE.md) is the deeper
-institutional-knowledge companion (per-release design invariants, PR-by-PR
-"things that have bitten before" history) — consult it before touching
-concurrency, the wire protocol, or any subsystem flagged below.
+institutional-knowledge companion — its "things that have bitten before"
+section carries the project's invariants grouped by subsystem. Consult it
+before touching concurrency, the wire protocol, or any subsystem flagged
+below. The evidence behind each invariant (the measurement, the rejected
+alternative, the test that pins it, the PR) lives in
+[`ops/engineering-log.md`](ops/engineering-log.md); grep it by symbol or PR
+number when a rule looks arbitrary.
 
 **Agent-doc maintenance.** `CLAUDE.md` is the authority, and it is a living
 document: new invariants — the "things that have bitten before" entries a
 fix produces — go THERE, committed direct to `main` as that file's own
-convention prescribes. This file is the onboarding layer: project shape,
-build commands, module map. Keep it current when those change, and don't
-duplicate invariant history into it.
+convention prescribes, with the supporting record appended to
+`ops/engineering-log.md`. Only `CLAUDE.md` is auto-loaded into an agent
+session, so a finding written only into the log is inert. This file is the
+onboarding layer: project shape, build commands, module map. Keep it current
+when those change, and don't duplicate invariant history into it.
 
 (An earlier revision of this line said to treat `CLAUDE.md` as read-only and
 never edit it. That contradicted `CLAUDE.md`'s own "CLAUDE.md updates direct
@@ -33,7 +39,7 @@ request instead of walking an SMB tree.
   `hashicorp/mdns`, `quic-go`, `tailscale.com/tsnet`) — one static binary, no
   runtime deps.
 - Target platforms: macOS / Linux / Windows × amd64 / arm64. Tested primarily
-  on macOS. Current release line: v0.1.7; wire protocol: **v1** (additive only).
+  on macOS. Current release line: v0.1.9; wire protocol: **v1** (additive only).
 - **Bit-exact by mission: no server-side transcoding, ever.** `/v1/download`
   serves the file as-is via `http.ServeContent`.
 
@@ -321,7 +327,8 @@ the canonical copies — sync hosts FROM the repo, never edit in place.
 | `README.md` | User-facing intro, install, Tailscale modes |
 | `PROTOCOL.md` | Wire protocol v1 — source of truth |
 | `CONTRIBUTING.md` | Branch/PR conventions, mirror-PR rule, pre-push checklist |
-| `CLAUDE.md` | Deep agent knowledge: per-release invariants, PR history, external-review processes |
+| `CLAUDE.md` | Deep agent knowledge: invariants by subsystem, workflows, external-review processes |
+| `ops/engineering-log.md` | The record behind each invariant — measurement, rejected alternatives, tests, PRs (not auto-loaded) |
 | `SECURITY.md` | Vulnerability reporting, scope |
 | `docs/release-process.md` | Per-release doc/publish checklist |
 | `docs/docker.md`, `docs/deployment/public-vps.md` | Public operator guides |
