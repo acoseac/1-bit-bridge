@@ -280,12 +280,24 @@ func TestUploadBodyReaderStillKillsAStalledClient(t *testing.T) {
 // based extension means any progress at all keeps it alive, which is the
 // property the whole helper exists for.
 func TestUploadBodyReaderSurvivesATrickleUnderAnyByteThreshold(t *testing.T) {
+	// The budget is deliberately GENEROUS in absolute terms while keeping
+	// the structural property intact: the upload must outlive several
+	// windows (or the roll-forward is never exercised and the test proves
+	// nothing), and a single pause must sit far inside one window (or an
+	// ordinary scheduling stall fails a healthy upload).
+	//
+	// It was window=200ms / pause=25ms, which satisfied the structure with
+	// only 200ms of absolute slack — and a >200ms stall on a loaded CI
+	// runner is common. It failed once on macOS as
+	// `read tcp …: i/o timeout`, a false failure about the runner rather
+	// than the code. Same 3-window shape now, 5x the slack: a gap has to
+	// exceed a FULL SECOND to fail.
 	const (
-		window      = 200 * time.Millisecond
+		window      = 1 * time.Second
 		total       = 600 // bytes — far below any byte threshold worth having
 		chunk       = 20
-		pause       = 25 * time.Millisecond // 30 chunks ≈ 750ms >> window
-		readTimeout = 150 * time.Millisecond
+		pause       = 100 * time.Millisecond // 30 chunks ≈ 3s, i.e. 3 windows
+		readTimeout = 500 * time.Millisecond // < window, so the override is what is proven
 	)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := newUploadBodyReaderTuned(w, r.Body, window, window/2)
