@@ -183,9 +183,11 @@ it.
 log** — never only in the log, because nothing there reaches a session that has
 not gone looking for it.
 
-**Three claims in this file have gone stale and been corrected** (the WAV/AIFF
-extractor gap, the `deletedIds` field name, and "the bridge has no DLNA Search").
-Each cost a later session real time. **Check the code before believing any doc
+**Four claims in this file have gone stale and been corrected** — the WAV/AIFF
+extractor gap, the `deletedIds` field name, "the bridge has no DLNA Search", and
+`manualDescriptionURL` being unimplemented. Each cost a later session real time,
+and the fourth was written **after** the PR that falsified it, by a session that
+had this very warning in front of it. **Check the code before believing any doc
 about it, including this one** — and when you find a stale claim, correct it here
 rather than working around it.
 
@@ -253,6 +255,13 @@ lost my library."
   `WipeAllTracks`** — the latter CASCADE-deletes `upnp_track_routing`,
   destroying an entire upstream library and its cached enrichment on a mere
   root-count toggle. The folder wipe is part of it (folders flip form too).
+- **`wal_checkpoint(TRUNCATE)` runs AFTER `VACUUM`, never only before.** In WAL
+  mode the vacuum's own output lands in the WAL, so without the post-checkpoint
+  the file does not shrink by a byte and peak disk RISES. Measured: 5,623,808 →
+  5,623,808 with the WAL grown to 2.8 MB, then 2,572,288 once checkpointed. A
+  review proposed the pre-vacuum checkpoint alone, which would have shipped a
+  button that reports success and reclaims nothing — so assert on the FILE
+  shrinking, not on `freelist_count`, which reads 0 under the broken form.
 - **Migrations are append-only**; `sql` must be idempotent. A shipped migration
   is never rewritten — both live bridges already ran it, so editing it changes
   only fresh installs while diverging from what deployed DBs did.
@@ -608,10 +617,21 @@ lost my library."
   failure mode is persistent by nature: unsuppressed it produced **199,078 of
   the last 200,000 log lines**. The cost isn't disk — it's that every other line
   becomes unfindable.
-- **The manual-URL upstream path is CONFIGURED, VALIDATED and UNIMPLEMENTED** —
-  `ingestOne` refuses it at runtime, so the `manual:`-keyed halves of the
-  liveness code are defensive-only. Implementing it needs three surfaces
-  (walk, `LiveHost` for playback, status), not one.
+- **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
+  device's raw UDN.** They are equal only for a device whose UDN is already
+  lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
+  The SSDP cache is keyed on the raw UDN, so handing a routing key to a raw-UDN
+  lookup reports "offline" about upstreams that are up. Anything wanting both
+  membership and liveness must carry BOTH spellings — one lookup cannot serve
+  both. `librarycat.SourceID` prefixes `"source:"` before hashing so a routing
+  key can never collide with an album or artist id.
+- **A manually-configured upstream is cached under that same `StableServerKey`**,
+  which is what makes routing rows, telemetry, `LiveHost` and the online chip all
+  work from one insertion point. Implementing that path took three surfaces, not
+  one — the walk, `LiveHost` for playback, and status. (Until PR #824 `ingestOne`
+  refused it outright; **this entry still said "CONFIGURED, VALIDATED and
+  UNIMPLEMENTED" a day after that shipped** — the fourth stale claim of the kind.
+  Check the code.)
 - **UPnP ingest is skip-if-unchanged**, and `walkFieldsEqual`'s exclusions are
   load-bearing: `ModTime` (stamped at walkStart — including it defeats the skip)
   and the enricher-owned MBID fields (including them marks every enriched row
@@ -622,8 +642,11 @@ lost my library."
   "CD1" in the album field, while `dupes` strips disc folders and is what the
   catalog and iOS already resolve through, so the fill writes the values already
   on screen and cannot regroup anything. **Fill only; never rewrite a field the
-  upstream supplied**, and never persist the `Unknown Artist`/`Unknown Album`
-  display sentinels (they'd become MusicBrainz search terms).
+  upstream supplied**, and never persist the `dupes.UnknownArtist` /
+  `UnknownAlbum` display sentinels. Persisted, they become the enricher's search
+  terms, which resolves *some* release for "Unknown Artist" and attributes its
+  cover, bio and booklet to an arbitrary track — a wrong answer that looks like
+  a right one, so nobody reports it.
 - **A routed track's variant-skip reason says "routed", and that case comes
   FIRST** — DIDL supplies no bit depth, so every routed FLAC otherwise reports
   "format unreadable" about a file whose format is perfectly well known.
@@ -726,7 +749,7 @@ lost my library."
 - **The retention reap fails closed on an empty live-token set**, and the two
   empty forms are NOT interchangeable: `nil` deletes zero rows while
   `[]string{}` deletes EVERY row — and the caller builds the dangerous spelling.
-- **Retention refuses 1–89 days rather than clamping** — the bounded smart-mix
+- **`retention.playbackHistoryDays` refuses 1–89 rather than clamping** — the bounded smart-mix
   windows run to 90 days and would be silently gutted.
 - **The binary swap keeps `dst` present throughout** (`Remove(bak)` →
   `Link(dst,bak)` → `Rename(new,dst)`), with the old two-rename path kept only
@@ -940,6 +963,12 @@ lost my library."
   before believing a green suite about UI. `document.visibilityState` is
   `"hidden"` in an automated tab, so `loading="lazy"` images never load and any
   perceived-performance claim measured that way is suspect.
+- **A field deliberately left unsynchronised binds TESTS too.**
+  `sendErrStreak` is only ever touched from its own run loop, so a test calling
+  `noteSendResult` directly must do so with no loop live — before `Start`, or
+  after `Stop` (which joins it). One that did neither raced under `-race` on CI
+  and was not reproducible locally in 26 runs. Adding a mutex would pay
+  production for a test's convenience.
 - **Windows CI catches wall-clock assumptions** — ~15.6 ms granularity means two
   stamps milliseconds apart are not reliably ordered. Assert on counted events,
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes

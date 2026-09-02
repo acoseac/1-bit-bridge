@@ -3056,7 +3056,12 @@ title 100%; artist / albumArtist / album / trackNumber 13,341 (87.3%); year
   pre-existing truth table, so the fix cannot trade one wrong badge for another)
   + `TestEverySkipReasonHasALabel` for the Go→JS half, since an unlabelled
   reason renders as the raw identifier.
-- **`manualDescriptionURL` is CONFIGURED, VALIDATED, and UNIMPLEMENTED.**
+> **SUPERSEDED by PR #824 (2026-09-01), which implemented this path.**
+> `ingestOne` no longer refuses it — it now reports "has not answered yet",
+> a network/typo diagnostic. The paragraph below is why it needed three
+> surfaces rather than one, which is what #824 built. Kept for that reasoning.
+
+- **`manualDescriptionURL` WAS CONFIGURED, VALIDATED, and UNIMPLEMENTED.**
   `config.Validate` accepts it and `StableServerKey` has a whole
   `manual:<sha256(url)>` branch, but `ingestOne` refuses it at runtime ("not yet
   supported"), so that branch is dead in production and reachable only from
