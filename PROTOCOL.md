@@ -617,7 +617,7 @@ Counters and structured state for an operator-facing health view — **no log te
 
 Durations are **seconds**; `serverUptime` is seconds since process start, read from the same instant `/v1/health` reports. `tailscaleNodeState` is `"down"` on a bridge not running tsnet — which is why a client should hide the row rather than render a tailnet that was never configured.
 
-The endpoint is **unconditionally wired** on any bridge that has it, so `diagnosticsSummary` is always present in `features` and the flag's only job is to tell a client apart from a **pre-v1.4 bridge**, where the route does not exist and the request `404`s.
+The endpoint is **unconditionally wired** on any bridge that has it, so `diagnosticsSummary` is always present in `features`. The flag's only job is therefore to tell a client apart from a bridge **predating the endpoint**, where the route does not exist and the request `404`s — which is why it is still worth checking even though no live bridge omits it.
 
 ### `GET /v1/events` (additive, since v1.2)
 
