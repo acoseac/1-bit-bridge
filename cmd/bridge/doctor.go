@@ -255,6 +255,13 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			// "don't know" and stays silent rather than guessing.
 			dbPath := filepath.Join(cfg.DataDir, "bridge.db")
 			d.LibraryHasCodec = func(ctx context.Context, codec string) (bool, error) {
+				// The stat looks redundant against OpenStore's own error and
+				// was flagged as such — it is NOT. `OpenStore` on a missing
+				// path SUCCEEDS and CREATES the database (verified), so
+				// without this a `bridge doctor` run on a host that has never
+				// scanned would leave an empty bridge.db behind and then
+				// answer "no ALAC" from a database it had just made. A
+				// read-only diagnostic must not have that side effect.
 				if _, err := os.Stat(dbPath); err != nil {
 					return false, err
 				}

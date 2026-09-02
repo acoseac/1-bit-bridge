@@ -589,8 +589,8 @@ func checkBrowserOpener(_ context.Context, d Deps) Check {
 // probe would fail first and the branches below would never be reached.
 // Production MUST NOT mutate them (the soxLookPath / renameFunc convention).
 var (
-	probeSox        = transcode.ProbeSox
-	ffmpegAvailable = transcode.FFmpegAvailable
+	probeSox      = transcode.ProbeSox
+	missingFFmpeg = transcode.MissingFFmpegBinaries
 )
 
 func checkAudioToolchain(ctx context.Context, d Deps) Check {
@@ -616,13 +616,22 @@ func checkAudioToolchain(ctx context.Context, d Deps) Check {
 	// with no indication that installing one binary would fix it. Only warn
 	// when there is something to fix: the library actually holds ALAC, and
 	// upscaling (not merely analysis, which never touches ALAC) is on.
-	if d.UpscaleEnabled && !ffmpegAvailable() {
+	if missing := missingFFmpeg(); d.UpscaleEnabled && len(missing) > 0 {
 		if has, err := libraryHasALAC(ctx, d); err == nil && has {
-			return warn(checkNameAudioToolchain, "sox present; ALAC in library but ffmpeg missing",
+			// Name the binary that is actually absent. BOTH are required —
+			// ffprobe supplies the geometry the headerless pipe is described
+			// with and the duration the completeness guard compares against —
+			// and some distros package them separately, so a host with ffmpeg
+			// and no ffprobe is a real state. Telling that operator to
+			// "install ffmpeg" sends them to look at a binary they have.
+			return warn(checkNameAudioToolchain,
+				"sox present; ALAC in library but "+strings.Join(missing, " + ")+" missing",
 				"the library contains ALAC (.m4a) tracks, which no stock sox build can decode; "+
-					"install ffmpeg to upscale them (macOS: `brew install ffmpeg`; Debian/Ubuntu: "+
-					"`sudo apt install ffmpeg`; Windows: `choco install ffmpeg`). Everything else "+
-					"keeps working without it.")
+					"the bridge decodes them with ffmpeg, which needs BOTH `ffmpeg` and `ffprobe` "+
+					"(missing here: "+strings.Join(missing, ", ")+"). Install the ffmpeg package "+
+					"(macOS: `brew install ffmpeg`; Debian/Ubuntu: `sudo apt install ffmpeg`; "+
+					"Windows: `choco install ffmpeg`) — it ships both. Everything else keeps "+
+					"working without it.")
 		}
 	}
 	if info.Version != "" {

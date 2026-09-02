@@ -82,11 +82,24 @@ func (r decodeRoute) String() string {
 // be told the source rate and channel count, and the truncation guard has
 // nothing to compare against.
 func FFmpegAvailable() bool {
+	return len(MissingFFmpegBinaries()) == 0
+}
+
+// MissingFFmpegBinaries names which of the two are absent, in a stable order.
+//
+// It exists so a diagnostic can say what is actually wrong: a host with ffmpeg
+// but no ffprobe is a real state (some minimal distro packages split them), and
+// telling that operator to "install ffmpeg" sends them to look at a binary they
+// already have.
+func MissingFFmpegBinaries() []string {
+	var missing []string
 	if _, err := ffmpegLookPath(); err != nil {
-		return false
+		missing = append(missing, "ffmpeg")
 	}
-	_, err := ffprobeLookPath()
-	return err == nil
+	if _, err := ffprobeLookPath(); err != nil {
+		missing = append(missing, "ffprobe")
+	}
+	return missing
 }
 
 // resolveBin returns the absolute path the seam resolved, falling back to the
@@ -150,9 +163,13 @@ func probeSourceGeometry(ctx context.Context, srcAbs string) (sourceGeometry, er
 		}
 		switch k {
 		case "sample_rate":
-			g.SampleRate, _ = strconv.Atoi(v)
+			if n, err := strconv.Atoi(v); err == nil {
+				g.SampleRate = n
+			}
 		case "channels":
-			g.Channels, _ = strconv.Atoi(v)
+			if n, err := strconv.Atoi(v); err == nil {
+				g.Channels = n
+			}
 		case "duration":
 			g.Duration = parseProbeDuration(v)
 		}

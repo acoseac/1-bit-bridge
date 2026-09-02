@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -182,41 +183,18 @@ func TestSoxArgsFromSharesOneChain(t *testing.T) {
 		TargetSampleRate: 176400, TargetBits: 24, Quality: QualityVeryHigh,
 		OutputDir: t.TempDir(), Kind: JobKindUpscale,
 	}
-	direct, _, _, _ := j.soxArgsFrom([]string{j.SourceAbsPath}, "sox")
-	piped, _, _, _ := j.soxArgsFrom(soxStdinInputArgs(sourceGeometry{SampleRate: 44100, Channels: 2}), "ffmpeg+sox")
+	direct, _, _, directTmp := j.soxArgsFrom([]string{j.SourceAbsPath}, "sox")
+	piped, _, _, pipedTmp := j.soxArgsFrom(
+		soxStdinInputArgs(sourceGeometry{SampleRate: 44100, Channels: 2}), "ffmpeg+sox")
 
-	// Everything from the FLAC output marker onward must be identical.
-	// Cutting on the first "-b" would find the raw stream's bit depth on the
-	// piped side, comparing different things — the failure that caught this.
-	cut := func(a []string) []string {
-		for i := range a {
-			if a[i] == "-t" && i+1 < len(a) && a[i+1] == "flac" {
-				return a[i:]
-			}
-		}
-		t.Fatalf("no `-t flac` in %v", a)
-		return nil
-	}
-	d, p := cut(direct), cut(piped)
-	// The tmp token differs per call, so compare with it removed.
-	strip := func(a []string) string {
-		s := strings.Join(a, " ")
-		if i := strings.Index(s, ".flac."); i >= 0 {
-			if k := strings.Index(s[i:], sidecarTmpSuffix); k >= 0 {
-				s = s[:i] + s[i+k:]
-			}
-		}
-		return s
-	}
-	if strip(d) != strip(p) {
-		t.Errorf("the effects chain must be identical on both routes\ndirect: %s\npiped:  %s", strip(d), strip(p))
-	}
-	// -b <targetBits> precedes the output marker on both routes.
-	for _, a := range [][]string{direct, piped} {
-		joined := strings.Join(a, " ")
-		if !strings.Contains(joined, "-b 24 -t flac") {
-			t.Errorf("target bit depth must precede the FLAC output on both routes: %s", joined)
-		}
+	// Compare from the FLAC output marker onward, with each route's own temp
+	// path (which carries a fresh per-call token) replaced by a placeholder.
+	// Cutting on the first "-b" would find the RAW stream's bit depth on the
+	// piped side and compare different things — the bug that first caught this.
+	d := chainFromFLACMarker(t, direct, directTmp)
+	p := chainFromFLACMarker(t, piped, pipedTmp)
+	if !slices.Equal(d, p) {
+		t.Errorf("the effects chain must be identical on both routes\ndirect: %q\npiped:  %q", d, p)
 	}
 	if got := direct[1]; got != j.SourceAbsPath {
 		t.Errorf("direct route input = %q, want the source path", got)
@@ -224,6 +202,26 @@ func TestSoxArgsFromSharesOneChain(t *testing.T) {
 	if !strings.Contains(strings.Join(piped, " "), "-t raw -e float -b 32 -L -r 44100 -c 2 -") {
 		t.Errorf("piped route must describe the headerless stream: %v", piped)
 	}
+}
+
+// chainFromFLACMarker returns the argv from `-t flac` onward with tmpPath
+// swapped for a stable placeholder, so two routes' chains are comparable
+// despite each call minting its own temp token.
+func chainFromFLACMarker(t *testing.T, args []string, tmpPath string) []string {
+	t.Helper()
+	for i := range args {
+		if args[i] == "-t" && i+1 < len(args) && args[i+1] == "flac" {
+			out := slices.Clone(args[i:])
+			for k, v := range out {
+				if v == tmpPath {
+					out[k] = "<tmp>"
+				}
+			}
+			return out
+		}
+	}
+	t.Fatalf("no `-t flac` in %v", args)
+	return nil
 }
 
 // TestSettingsRecordTheDecoderThatRan — the settings blob is the forensic
