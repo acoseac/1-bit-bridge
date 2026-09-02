@@ -689,13 +689,13 @@ lost my library."
   store's debounce buffer. Same rule for the updater's auto-install restart.
 - **Atomic writes: stage, then rename with retry.** `RenameWithRetry` absorbs
   the Windows AV scan-on-close window; the deferred `Close` must be registered
-  AFTER the deferred `Remove` (LIFO — Windows won't unlink an open file). Each
-  site keeps its OWN `Chmod` / `Sync` / parent-dir fsync — **don't collapse them
-  into a shared `WriteBytes`**, which silently drops e.g. the auth store's
-  belt-and-braces `Chmod(0o600)`.
+  AFTER the deferred `Remove` (LIFO — Windows won't unlink an open file).
   `GenerateWithOptions` stages BOTH cert and key before renaming either, so a
   failure leaves the existing pair intact; **never pre-delete**, and never run an
-  orphan-cleanup `Remove` on a file already committed.
+  orphan-cleanup `Remove` on a file already committed. Each site keeps its OWN
+  `Chmod` / `Sync` / parent-dir fsync — **don't collapse them into a shared
+  `WriteBytes`**, which silently drops e.g. the auth store's belt-and-braces
+  `Chmod(0o600)`.
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
   otherwise rewrites `tokens.json` from a stale in-memory slice and deletes a
   sibling `bridge pair` mint. A reload failure ABORTS the flush.
