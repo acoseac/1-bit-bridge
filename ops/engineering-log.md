@@ -3242,7 +3242,19 @@ misreads that convention: it permits docs-ONLY changes to skip the branch, it
 does not forbid shipping an invariant with the code that motivates it —
 splitting them is how a rule ends up describing code that never landed.
 
-**Still open on #127** (needs an iOS half, so out of a bridge-only change):
-publishing the decoder list as a `supportedDecoders` wire field to replace
-iOS's hard-coded `upscaleSoxUnsupportedExtensions`, and the ineligibility
-alert text.
+**#127 is CLOSED, and its last two acceptance criteria were already moot when
+this shipped.** They read "replace iOS's hard-coded
+`upscaleSoxUnsupportedExtensions` with a bridge-reported `supportedDecoders`
+flag" and "update the `UpscaleIneligibilityReason.detail` alert text" — but
+**iOS PR #809 (2026-06-11) deleted the entire iOS-side upscale-REQUEST path**,
+including both symbols. Upscaling is operator-driven on the bridge; iOS only
+*consumes* variants, so it never asks "could the bridge decode this source?"
+and a `supportedDecoders` field would have no consumer. (`operatorDrivenUpscale`
+survives on iOS solely to HIDE stale upscale UI.)
+
+The issue's scope note was revised **2026-07-22, six weeks AFTER #809**, and
+still listed both as pending — and I relayed that checklist twice in one
+session before checking the iOS source. Same class as the four stale claims
+CLAUDE.md records, arriving from an issue tracker rather than a doc: **an
+acceptance criterion naming a symbol is a claim that the symbol exists.**
+Grep the other repo before quoting one.
