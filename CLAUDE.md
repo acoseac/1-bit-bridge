@@ -2584,6 +2584,37 @@ MEASUREMENT before any code was written, and both are worth keeping:
 - **`git add -A` with another branch's untracked files on disk sweeps them into
   your commit.** Use explicit paths.
 
+**The wiring-test lesson, which cost three separate bugs in one batch and is
+the most transferable thing here.** `/v1/search` shipped with a handler, a
+store method, a rate limiter and its own rate class, config, a health flag and
+a PROTOCOL.md section — and answered **404 in production**, twice over: no
+entry in `routeRegistry` (an edit to that file failed its assertion and never
+wrote), and `manifest.Provider` not forwarding the search surface the api
+type-asserts for. Both were found by curling the live bridge after deploying;
+every unit test was green throughout.
+
+The three instances, all the same shape — *a test that exercises everything
+except the wiring*:
+
+1. a **helper nothing called** — the health flag's `searchAvailable()` was
+   tested directly while nothing appended the flag (Gemini caught this one);
+2. a **type nothing constructs** — the handler tests' stub implemented
+   `SearchServedTracks` directly, so they proved nothing about
+   `*manifest.Provider`, which is what `cmd/bridge` actually passes;
+3. a **handler nothing dispatches to** — every search test called `s.search`
+   directly, so the mux was never exercised.
+
+So: **when a feature's test never touches the thing that connects it, the
+feature can be entirely dead and the suite entirely green.** Drive the real
+entry point — `Handler()`, the real `Provider`, the real endpoint — at least
+once per feature. `TestEveryDocumentedEndpointIsRouted` now closes the routing
+half by requiring every endpoint PROTOCOL.md documents to appear in the
+registry; it compares against the REGISTRY rather than probing responses,
+because several routed endpoints answer 404 by design
+(`pairing_not_supported`) and a response probe cannot tell "no route" from
+"routed and refusing" — the first version probed, produced four false
+positives, and taught exactly that.
+
 **Still open from the plan:** the CLAUDE.md structural split (invariants stay,
 per-PR narrative moves to an archive) — deliberately NOT done here. Moving
 content out of this file means future sessions stop auto-loading it, so
