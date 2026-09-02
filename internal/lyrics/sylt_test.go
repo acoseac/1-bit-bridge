@@ -110,6 +110,16 @@ func TestSYLTUTF16PerEntryBOMAndUnsortedEntries(t *testing.T) {
 	}
 }
 
+func TestSYLTDoubledMarkersNeverLeakARawNewline(t *testing.T) {
+	body, _ := ToLRC(mustParse(t, syltBody(3, 2, 1, []SYLTEntry{{1000, "\n\nFirst\n\n"}, {2000, "\nSec\nond\r\n"}})))
+	if body != "[00:01.000]First\n[00:02.000]Sec ond" {
+		t.Fatalf("doubled / interior markers:\n%q", body)
+	}
+	if _, ok := ParseSYLT([]byte{3, 'e', 'n', 'g', 2, 1, 'x', 'y'}); ok {
+		t.Fatal("a body with no terminator anywhere is malformed")
+	}
+}
+
 func TestSYLTClearEventAndEmptyLeadingEntry(t *testing.T) {
 	body, _ := ToLRC(mustParse(t, syltBody(3, 2, 1, []SYLTEntry{{0, ""}, {1000, "\nA"}, {2000, ""}, {9000, "\nB"}})))
 	if body != "[00:01.000]A\n[00:02.000]\n[00:09.000]B" {

@@ -14,12 +14,20 @@ func TestNormalizeIsDeterministic(t *testing.T) {
 	if a != b {
 		t.Fatalf("BOM / CRLF / trailing whitespace must not change the body:\n%q\n%q", a, b)
 	}
-	if Tag(a) != Tag(b) || len(Tag(a)) != 8 {
-		t.Fatalf("tag must be stable and 8 hex: %q %q", Tag(a), Tag(b))
+	da, db := Doc{Format: FormatLRC, Synced: true, Body: a}, Doc{Format: FormatLRC, Synced: true, Body: b}
+	if Tag(da) != Tag(db) || len(Tag(da)) != 8 {
+		t.Fatalf("tag must be stable and 8 hex: %q %q", Tag(da), Tag(db))
 	}
-	// NFC: a decomposed é folds to the precomposed form.
-	c, _ := Normalize("café")
-	d, _ := Normalize("café")
+	// Every client-visible field re-keys the tag, not just the body.
+	if Tag(Doc{Format: FormatText, Synced: false, Body: a}) == Tag(da) ||
+		Tag(Doc{Format: FormatLRC, Synced: true, Body: a, Language: "en"}) == Tag(da) {
+		t.Fatal("format / synced / language must participate in the tag")
+	}
+	// NFC: a decomposed é (e + COMBINING ACUTE ACCENT) folds to the
+	// precomposed form — explicit escapes so an editor's own NFC pass can't
+	// make this test vacuous.
+	c, _ := Normalize("cafe\u0301")
+	d, _ := Normalize("caf\u00e9")
 	if c != d {
 		t.Fatalf("NFC must fold: %q vs %q", c, d)
 	}
@@ -101,6 +109,19 @@ func TestPickPrecedenceAndTies(t *testing.T) {
 	if got.Doc.Body != "short" {
 		t.Fatalf("descriptor priority beats length: %q", got.Doc.Body)
 	}
+	// Equal source and priority: the longest body wins.
+	short := Candidate{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: "aa"}}
+	long := Candidate{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: "aaaa"}}
+	if got, _ := Pick([]Candidate{short, long}); got.Doc.Body != "aaaa" {
+		t.Fatalf("longest body wins: %q", got.Doc.Body)
+	}
+	// The same document twice (dhowden's Lyrics() accessor drops the frame
+	// language; the raw walk keeps it): the one carrying a language survives.
+	bare := Candidate{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: "dup"}}
+	rich := Candidate{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: "dup", Language: "en"}, Language: "en"}
+	if got, _ := Pick([]Candidate{bare, rich}); got.Language != "en" {
+		t.Fatalf("duplicate collapse keeps the language-bearing candidate: %+v", got)
+	}
 	if _, ok := Pick(nil); ok {
 		t.Fatal("no candidates → no pick")
 	}
@@ -109,5 +130,11 @@ func TestPickPrecedenceAndTies(t *testing.T) {
 func TestDescriptorPriority(t *testing.T) {
 	if DescriptorPriority("") != 0 || DescriptorPriority("Verse") != 1 || DescriptorPriority("Amazon Lyrics") != 2 {
 		t.Fatal("descriptor ladder")
+	}
+	if DescriptorPriority("Rapid Verse") != 1 || DescriptorPriority("Context") != 1 {
+		t.Fatal("short junk tokens match the whole descriptor only")
+	}
+	if DescriptorPriority("api") != 2 || DescriptorPriority("TEXT") != 2 {
+		t.Fatal("exact junk tokens still demote")
 	}
 }

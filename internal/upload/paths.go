@@ -73,11 +73,11 @@ var windowsReserved = map[string]bool{
 // companionExts are the non-audio files accepted alongside audio.
 //
 // The principle: a file that sits BESIDE audio in a curated library is
-// accepted; archives and executables are not. ".lrc" IS consumed since the
-// lyrics feature (the scanner reads <stem>.lrc as the track's synchronized
-// lyrics, served by /v1/lyrics); ".cue" is accepted but NOT consumed — the
-// bridge has no cue-sheet handling — so it round-trips for other players
-// without the UI implying it does something here.
+// accepted; archives and executables are not. ".lrc", ".ttml" and ".txt" ARE
+// consumed since the lyrics feature (the scanner reads <stem>.lrc / .ttml /
+// .txt as the track's lyrics, served by /v1/lyrics); ".cue" is accepted but
+// NOT consumed — the bridge has no cue-sheet handling — so it round-trips for
+// other players without the UI implying it does something here.
 //
 // ".png" is deliberately absent. The local-artwork path is JPEG-only by design
 // (internal/manifest/extractors.go validates both the MIME and the SOI magic),
@@ -87,6 +87,8 @@ var companionExts = map[string]bool{
 	".jpeg": true,
 	".pdf":  true,
 	".lrc":  true,
+	".ttml": true,
+	".txt":  true,
 	".cue":  true,
 }
 

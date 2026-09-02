@@ -926,7 +926,7 @@ func TestJunkFilesDoNotBlockTheWholeSession(t *testing.T) {
 		{Path: "Album/.DS_Store", Size: 6148},
 		{Path: "Album/01 Track.dsf", Size: 1000},
 		{Path: "Album/cover.jpg", Size: 500},
-		{Path: "Album/notes.txt", Size: 10},
+		{Path: "Album/notes.zip", Size: 10}, // .txt is a lyrics companion now; an archive is the junk
 		{Path: "Album/._01 Track.dsf", Size: 4096},
 	}, CreateOptions{})
 	if err != nil {

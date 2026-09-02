@@ -58,8 +58,9 @@ func ParseSYLT(body []byte) (SYLT, bool) {
 	rest := body[6:]
 	descriptor, rest, ok := readTerminated(rest, enc)
 	if !ok {
-		// Broken writers omit the descriptor terminator when it is empty.
-		descriptor, rest = "", body[6:]
+		// No terminator anywhere in the remainder — no entry could be read
+		// from it either (every entry needs one), so this is malformed.
+		return SYLT{}, false
 	}
 	var entries []SYLTEntry
 	for len(rest) > 0 {
@@ -187,6 +188,33 @@ func lrcTime(ms int64) string {
 	return fmt.Sprintf("%02d:%02d.%03d", ms/60000, (ms/1000)%60, ms%1000)
 }
 
+// splitMarkers strips EVERY leading / trailing newline marker from an entry
+// (a writer that doubles them must not leak a raw line break into a timed
+// LRC line, which the phone's parser would drop as a tagless continuation)
+// and reports which sides carried one. Interior newlines become spaces for
+// the same reason.
+func splitMarkers(text string) (body string, leading, trailing bool) {
+	leading = strings.HasPrefix(text, "\n") || strings.HasPrefix(text, "\r\n")
+	trailing = strings.HasSuffix(text, "\n") || strings.HasSuffix(text, "\r\n")
+	body = strings.Trim(text, "\r\n")
+	body = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(body)
+	return body, leading, trailing
+}
+
+// renderLine serializes one assembled line: a single entry is a plain timed
+// line, a run of syllables carries enhanced word tags.
+func renderLine(entries []SYLTEntry) (line string, wordTimed bool) {
+	if len(entries) == 1 {
+		return "[" + lrcTime(entries[0].Millis) + "]" + entries[0].Text, false
+	}
+	var b strings.Builder
+	b.WriteString("[" + lrcTime(entries[0].Millis) + "]")
+	for _, e := range entries {
+		b.WriteString("<" + lrcTime(e.Millis) + ">" + e.Text)
+	}
+	return b.String(), true
+}
+
 // ToLRC renders a frame as LRC with the SAME line-assembly rules the iOS
 // SYLT parser applies: a leading newline on an entry starts a line, a
 // trailing one ends it, marker-less line-spaced entries are one line each,
@@ -203,53 +231,35 @@ func ToLRC(s SYLT) (string, bool) {
 		if len(current) == 0 {
 			return
 		}
-		if len(current) == 1 {
-			lines = append(lines, "["+lrcTime(current[0].Millis)+"]"+current[0].Text)
-		} else {
-			var b strings.Builder
-			b.WriteString("[" + lrcTime(current[0].Millis) + "]")
-			for _, e := range current {
-				b.WriteString("<" + lrcTime(e.Millis) + ">" + e.Text)
-			}
-			lines = append(lines, b.String())
-			wordTimed = true
-		}
+		line, word := renderLine(current)
+		lines = append(lines, line)
+		wordTimed = wordTimed || word
 		current = nil
 	}
 	nextStartsLine := true
 	for _, e := range s.Entries {
-		text := e.Text
-		startsLine := nextStartsLine || wholeLine
-		nextStartsLine = false
-		if strings.HasPrefix(text, "\r\n") || strings.HasPrefix(text, "\n") {
-			text = strings.TrimPrefix(strings.TrimPrefix(text, "\r"), "\n")
-			startsLine = true
-		}
-		if strings.HasSuffix(text, "\r\n") || strings.HasSuffix(text, "\n") {
-			text = strings.TrimSuffix(strings.TrimSuffix(text, "\n"), "\r")
-			nextStartsLine = true
-		}
-		if startsLine && len(current) > 0 {
+		text, leading, trailing := splitMarkers(e.Text)
+		startsLine := nextStartsLine || wholeLine || leading
+		nextStartsLine = trailing
+		if startsLine {
 			flush()
 		}
-		if strings.TrimSpace(text) == "" {
-			// A truly EMPTY entry is a clear event — it ends whatever line
-			// is open and renders as an empty timed line (the LRC shape the
-			// phone reads as "nothing is sung now"). The dummy "" at 0 ms
-			// many writers prepend is not: nothing precedes it. A bare
-			// newline entry is only a line break.
-			if !strings.ContainsAny(e.Text, "\r\n") {
-				if len(current) > 0 {
-					flush()
-				}
-				if e.Millis > 0 || len(lines) > 0 {
-					lines = append(lines, "["+lrcTime(e.Millis)+"]")
-				}
-			}
-			nextStartsLine = true
+		if strings.TrimSpace(text) != "" {
+			current = append(current, SYLTEntry{Millis: e.Millis, Text: text})
 			continue
 		}
-		current = append(current, SYLTEntry{Millis: e.Millis, Text: text})
+		// A truly EMPTY entry is a clear event — it ends whatever line is
+		// open and renders as an empty timed line (the LRC shape the phone
+		// reads as "nothing is sung now"). The dummy "" at 0 ms many
+		// writers prepend is not: nothing precedes it. A bare newline entry
+		// is only a line break.
+		if !leading && !trailing {
+			flush()
+			if e.Millis > 0 || len(lines) > 0 {
+				lines = append(lines, "["+lrcTime(e.Millis)+"]")
+			}
+		}
+		nextStartsLine = true
 	}
 	flush()
 	return strings.Join(lines, "\n"), wordTimed

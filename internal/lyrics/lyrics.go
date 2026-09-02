@@ -143,10 +143,18 @@ func Normalize(body string) (string, bool) {
 	return s, true
 }
 
-// Tag is the first 8 lowercase hex of sha256(normalized body) — the same
-// short content-tag shape as waveformTag.
-func Tag(normalizedBody string) string {
-	sum := sha256.Sum256([]byte(normalizedBody))
+// Tag is the first 8 lowercase hex of the SHA-256 over the CANONICAL
+// document — format, synced flag, language and the normalized body, NUL-
+// joined — the same short content-tag shape as waveformTag. Every client-
+// visible field participates: a language-only or format-only change
+// (same body, a `.lrc` replacing an identical USLT) must re-key the ETag
+// and enter the manifest delta, not hide behind a body-only hash.
+func Tag(doc Doc) string {
+	synced := "0"
+	if doc.Synced {
+		synced = "1"
+	}
+	sum := sha256.Sum256([]byte(doc.Format + "\x00" + synced + "\x00" + doc.Language + "\x00" + doc.Body))
 	return hex.EncodeToString(sum[:4])
 }
 
@@ -192,20 +200,29 @@ func TextCandidate(text, language string, taggedSynced bool, priority int) (Cand
 		Language: language, Priority: priority}, true
 }
 
-// junkDescriptors are USLT descriptors some taggers stamp on every frame;
-// they carry no selection signal (the iOS parser's list).
-var junkDescriptors = map[string]bool{
+// Junk USLT descriptors some taggers stamp on every frame; they carry no
+// selection signal (the iOS parser's list). Single words match the WHOLE
+// descriptor only — "api" / "text" as substrings would demote "Rapid Verse"
+// or "Context" (CodeRabbit on bridge #840); the multi-word tokens match
+// anywhere.
+var junkExact = map[string]bool{
 	"lyrics": true, "unsynced": true, "default": true, "description": true,
-	"song lyrics": true, "text": true, "api": true, "amazon": true, "song id": true,
+	"text": true, "api": true,
 }
 
-// DescriptorPriority ranks an ID3 USLT descriptor for Pick.
+var junkSubstring = []string{"song lyrics", "amazon", "song id"}
+
+// DescriptorPriority ranks an ID3 USLT descriptor for Pick: 0 empty,
+// 1 a real descriptor, 2 junk.
 func DescriptorPriority(descriptor string) int {
 	d := strings.ToLower(strings.TrimSpace(descriptor))
 	if d == "" {
 		return 0
 	}
-	for junk := range junkDescriptors {
+	if junkExact[d] {
+		return 2
+	}
+	for _, junk := range junkSubstring {
 		if strings.Contains(d, junk) {
 			return 2
 		}

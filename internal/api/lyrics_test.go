@@ -102,10 +102,16 @@ func TestLyricsServesTheDocumentWithETag(t *testing.T) {
 	if doc.Format != "lrc" || !doc.Synced || doc.Body != "[00:01.000]Hello" || doc.Language != "en" {
 		t.Fatalf("document %+v", doc)
 	}
-	// The conditional request revalidates to 304.
-	resp = lyricsGet(t, hs, tok, rel, map[string]string{"If-None-Match": `"0123abcd"`})
-	if resp.StatusCode != http.StatusNotModified {
-		t.Fatalf("If-None-Match: %d", resp.StatusCode)
+	// The conditional request revalidates to 304 — strong, weak (`W/`) and
+	// wildcard forms alike (RFC 9110 weak comparison); a foreign tag does not.
+	for _, h := range []string{`"0123abcd"`, `W/"0123abcd"`, `*`, `"zzzz", W/"0123abcd"`} {
+		resp = lyricsGet(t, hs, tok, rel, map[string]string{"If-None-Match": h})
+		if resp.StatusCode != http.StatusNotModified {
+			t.Fatalf("If-None-Match %q: %d", h, resp.StatusCode)
+		}
+	}
+	if resp = lyricsGet(t, hs, tok, rel, map[string]string{"If-None-Match": `"other"`}); resp.StatusCode != 200 {
+		t.Fatalf("a non-matching If-None-Match must serve the body: %d", resp.StatusCode)
 	}
 }
 
@@ -160,5 +166,13 @@ func TestLyricsStaleWhenTheSourceDrifted(t *testing.T) {
 	})
 	if resp := lyricsGet(t, hsGone, tokGone, relGone, nil); resp.StatusCode != http.StatusGone {
 		t.Fatalf("missing sidecar → 410, got %d", resp.StatusCode)
+	}
+	// A stored sidecar name that is not a bare file name never reaches the
+	// filesystem: the row reads stale rather than resolving a path.
+	hsBad, tokBad, relBad := lyricsFixture(t, true, func(r *LyricsRecord, _ string) {
+		r.Source, r.SidecarName = "sidecar-lrc", "../../etc/passwd"
+	})
+	if resp := lyricsGet(t, hsBad, tokBad, relBad, nil); resp.StatusCode != http.StatusGone {
+		t.Fatalf("non-bare sidecar name → 410, got %d", resp.StatusCode)
 	}
 }

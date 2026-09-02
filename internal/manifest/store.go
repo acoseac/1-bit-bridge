@@ -1943,7 +1943,9 @@ var migrations = []migration{
 			source_mtime_ns INTEGER NOT NULL,
 			source_size     INTEGER NOT NULL,
 			indexed_at      INTEGER NOT NULL
-		);`,
+		);
+		CREATE INDEX IF NOT EXISTS idx_track_lyrics_lower
+			ON track_lyrics(unicode_lower(source_path));`,
 	},
 }
 
@@ -8621,8 +8623,11 @@ type LyricsRow struct {
 // the iOS delta carries exactly the rows whose lyricsTag moved.
 func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) error {
 	var oldTag string
+	hadRow := true
 	err := tx.QueryRowContext(ctx, `SELECT tag FROM track_lyrics WHERE source_path = ?`, t.Path).Scan(&oldTag)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
+		hadRow = false
+	} else if err != nil {
 		return err
 	}
 	bump := func() error {
@@ -8641,14 +8646,18 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 		return bump()
 	}
 	l := t.lyrics
-	if oldTag == l.Tag {
-		_, err := tx.ExecContext(ctx, `UPDATE track_lyrics SET source_mtime_ns = ?, source_size = ?, sidecar_name = ?, source = ?
-			WHERE source_path = ?`, l.SourceMTimeNS, l.SourceSize, l.SidecarName, l.Source, t.Path)
-		return err
-	}
 	synced := 0
 	if l.Synced {
 		synced = 1
+	}
+	if hadRow && oldTag == l.Tag {
+		// Same client-visible document: refresh the provenance (and every
+		// column the tag does not cover) without touching indexed_at.
+		_, err := tx.ExecContext(ctx, `UPDATE track_lyrics SET format = ?, synced = ?, body = ?, language = ?,
+			source = ?, sidecar_name = ?, source_mtime_ns = ?, source_size = ?
+			WHERE source_path = ?`, l.Format, synced, l.Body, l.Language,
+			l.Source, l.SidecarName, l.SourceMTimeNS, l.SourceSize, t.Path)
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO track_lyrics(source_path, format, synced, body, language, source, sidecar_name, tag,
@@ -8662,6 +8671,11 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 		t.Path, l.Format, synced, l.Body, l.Language, l.Source, l.SidecarName, l.Tag,
 		l.SourceMTimeNS, l.SourceSize, now); err != nil {
 		return err
+	}
+	// A `sidecar-rejected` row (empty tag) on a track that had none is not
+	// a client-visible change — nothing to sync.
+	if oldTag == l.Tag {
+		return nil
 	}
 	return bump()
 }

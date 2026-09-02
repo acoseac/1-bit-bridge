@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -37,23 +38,46 @@ type lyricsDocument struct {
 	Language string `json:"language,omitempty"`
 }
 
-// lyricsSourceDrifted mirrors analysisSourceDrifted, but against the
-// LYRICS SOURCE: the sidecar file when the row came from one (an edited
-// .lrc under an unchanged FLAC must read stale), else the audio file.
-func lyricsSourceDrifted(rec *LyricsRecord, audioAbs string, audio os.FileInfo) bool {
-	mtime, size := audio.ModTime().UnixNano(), audio.Size()
-	if strings.HasPrefix(rec.Source, "sidecar") && rec.SidecarName != "" {
-		info, err := os.Stat(filepath.Join(filepath.Dir(audioAbs), rec.SidecarName))
-		if err != nil {
-			return true
-		}
-		mtime, size = info.ModTime().UnixNano(), info.Size()
+// lyricsSourceInfo is the stat of the LYRICS SOURCE: the sidecar file when
+// the row came from one (an edited .lrc under an unchanged FLAC must read
+// stale), else the audio file. The sidecar is resolved through the SAME
+// traversal-checked resolver the audio path went through — a bare file
+// name beside the track, never a stored path joined blindly.
+func (s *Server) lyricsSourceInfo(rec *LyricsRecord, clientPath string, audio os.FileInfo) (os.FileInfo, bool) {
+	if !strings.HasPrefix(rec.Source, "sidecar") || rec.SidecarName == "" {
+		return audio, true
 	}
-	delta := rec.SourceMTimeNS - mtime
+	name := rec.SidecarName
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		return nil, false
+	}
+	_, info, err := s.resolver.ResolveChecked(path.Join(path.Dir(clientPath), name))
+	if err != nil || info.IsDir() {
+		return nil, false
+	}
+	return info, true
+}
+
+// lyricsSourceDrifted mirrors analysisSourceDrifted against the lyrics
+// source's stat.
+func lyricsSourceDrifted(rec *LyricsRecord, source os.FileInfo) bool {
+	delta := rec.SourceMTimeNS - source.ModTime().UnixNano()
 	if delta < 0 {
 		delta = -delta
 	}
-	return delta > analysisSourceMTimeToleranceNS || rec.SourceSize != size
+	return delta > analysisSourceMTimeToleranceNS || rec.SourceSize != source.Size()
+}
+
+// etagMatches implements If-None-Match's weak comparison (RFC 9110 §13.1.2):
+// `*` matches any current representation and a `W/` prefix is ignored.
+func etagMatches(header, etag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		c := strings.TrimSpace(candidate)
+		if c == "*" || strings.TrimPrefix(c, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // GET /v1/lyrics?path=<rel> — the track's lyrics document, or:
@@ -70,7 +94,7 @@ func (s *Server) lyrics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing path parameter")
 		return
 	}
-	abs, info, err := s.resolver.ResolveChecked(clientPath)
+	_, info, err := s.resolver.ResolveChecked(clientPath)
 	if ok := writeResolveError(w, r, err); ok {
 		return
 	}
@@ -88,20 +112,17 @@ func (s *Server) lyrics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lyrics_not_found", "no lyrics for this track")
 		return
 	}
-	if lyricsSourceDrifted(rec, abs, info) {
+	source, ok := s.lyricsSourceInfo(rec, clientPath, info)
+	if !ok || lyricsSourceDrifted(rec, source) {
 		writeError(w, http.StatusGone, "lyrics_stale", "lyrics are out of date relative to their source")
 		return
 	}
 	etag := `"` + rec.Tag + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-cache")
-	if match := r.Header.Get("If-None-Match"); match != "" {
-		for _, candidate := range strings.Split(match, ",") {
-			if strings.TrimSpace(candidate) == etag {
-				w.WriteHeader(http.StatusNotModified)
-				return
-			}
-		}
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
 	}
 	writeJSON(w, http.StatusOK, lyricsDocument{
 		Format: rec.Format, Synced: rec.Synced, Body: rec.Body, Language: rec.Language,

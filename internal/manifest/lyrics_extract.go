@@ -159,7 +159,16 @@ func applySidecarLyrics(absPath string, t *Track, ec *ExtractContext) {
 		return
 	}
 	info, err := os.Stat(abs)
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > lyrics.MaxBodyBytes {
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	// Remember the stat BEFORE any rejection below: a sidecar that yields
+	// nothing (empty, oversized, legacy-encoded, whitespace) still gets a
+	// `sidecar-rejected` provenance row, so the skip gate can compare its
+	// stat instead of re-extracting the audio file on every scan
+	// (CodeRabbit on bridge #840).
+	t.lyricsSidecar = &sidecarStat{name: name, mtimeNS: info.ModTime().UnixNano(), size: info.Size()}
+	if info.Size() <= 0 || info.Size() > lyrics.MaxBodyBytes {
 		return
 	}
 	raw, err := os.ReadFile(abs)
@@ -194,7 +203,6 @@ func applySidecarLyrics(absPath string, t *Track, ec *ExtractContext) {
 	}
 	c.SidecarName = name
 	t.lyricsCandidates = append(t.lyricsCandidates, c)
-	t.lyricsSidecar = &sidecarStat{name: name, mtimeNS: info.ModTime().UnixNano(), size: info.Size()}
 }
 
 // iso639ToBCP47 maps the three-letter ID3 language code to the tag the
@@ -269,45 +277,61 @@ func applyEmbeddedLyricsFromTag(m tag.Metadata, t *Track) {
 			t.lyricsCandidates = append(t.lyricsCandidates, c)
 		}
 	}
-	raw := m.Raw()
-	if raw == nil {
-		return
-	}
-	for key, v := range raw {
-		up := strings.ToUpper(key)
-		base := up
-		if i := strings.IndexByte(up, '_'); i > 0 {
-			base = up[:i]
-		}
-		switch base {
+	for key, v := range m.Raw() {
+		var c lyrics.Candidate
+		var ok bool
+		switch rawFrameBase(key) {
 		case "SYLT", "SLT":
-			body, ok := v.([]byte)
-			if !ok {
-				continue
-			}
-			s, ok := lyrics.ParseSYLT(body)
-			if !ok {
-				continue
-			}
-			lrc, _ := lyrics.ToLRC(s)
-			if nb, ok := lyrics.Normalize(lrc); ok {
-				t.lyricsCandidates = append(t.lyricsCandidates, lyrics.Candidate{
-					Source:   lyrics.SourceSYLT,
-					Doc:      lyrics.Doc{Format: lyrics.FormatLRC, Synced: true, Body: nb, Language: iso639ToBCP47(s.Language)},
-					Priority: lyrics.DescriptorPriority(s.Descriptor),
-				})
-			}
+			c, ok = syltCandidate(v)
 		case "USLT", "ULT":
-			c, ok := v.(*tag.Comm)
-			if !ok || c == nil {
-				continue
-			}
-			if cand, ok := lyrics.TextCandidate(c.Text, iso639ToBCP47(c.Language), false,
-				lyrics.DescriptorPriority(c.Description)); ok {
-				t.lyricsCandidates = append(t.lyricsCandidates, cand)
-			}
+			c, ok = usltCandidate(v)
+		}
+		if ok {
+			t.lyricsCandidates = append(t.lyricsCandidates, c)
 		}
 	}
+}
+
+// rawFrameBase folds dhowden's duplicate-frame keys ("SYLT_0", "USLT_2")
+// onto the frame id.
+func rawFrameBase(key string) string {
+	up := strings.ToUpper(key)
+	if i := strings.IndexByte(up, '_'); i > 0 {
+		return up[:i]
+	}
+	return up
+}
+
+func syltCandidate(v any) (lyrics.Candidate, bool) {
+	body, ok := v.([]byte)
+	if !ok {
+		return lyrics.Candidate{}, false
+	}
+	s, ok := lyrics.ParseSYLT(body)
+	if !ok {
+		return lyrics.Candidate{}, false
+	}
+	lrc, _ := lyrics.ToLRC(s)
+	nb, ok := lyrics.Normalize(lrc)
+	if !ok {
+		return lyrics.Candidate{}, false
+	}
+	lang := iso639ToBCP47(s.Language)
+	return lyrics.Candidate{
+		Source:   lyrics.SourceSYLT,
+		Doc:      lyrics.Doc{Format: lyrics.FormatLRC, Synced: true, Body: nb, Language: lang},
+		Language: lang,
+		Priority: lyrics.DescriptorPriority(s.Descriptor),
+	}, true
+}
+
+func usltCandidate(v any) (lyrics.Candidate, bool) {
+	c, ok := v.(*tag.Comm)
+	if !ok || c == nil {
+		return lyrics.Candidate{}, false
+	}
+	return lyrics.TextCandidate(c.Text, iso639ToBCP47(c.Language), false,
+		lyrics.DescriptorPriority(c.Description))
 }
 
 // resolveLyrics picks ONE document from the candidates and stamps the
@@ -319,17 +343,18 @@ func resolveLyrics(t *Track) {
 	}()
 	pick, ok := lyrics.Pick(t.lyricsCandidates)
 	if !ok {
-		t.lyrics = nil
+		t.lyrics = rejectedSidecarRow(t.lyricsSidecar)
 		return
 	}
 	body, ok := lyrics.Normalize(pick.Doc.Body)
 	if !ok {
-		t.lyrics = nil
+		t.lyrics = rejectedSidecarRow(t.lyricsSidecar)
 		return
 	}
+	doc := lyrics.Doc{Format: pick.Doc.Format, Synced: pick.Doc.Synced, Body: body, Language: pick.Doc.Language}
 	ex := &extractedLyrics{
-		Format: pick.Doc.Format, Synced: pick.Doc.Synced, Body: body,
-		Language: pick.Doc.Language, Source: string(pick.Source), Tag: lyrics.Tag(body),
+		Format: doc.Format, Synced: doc.Synced, Body: body,
+		Language: doc.Language, Source: string(pick.Source), Tag: lyrics.Tag(doc),
 		SourceMTimeNS: t.ModTime.UnixNano(), SourceSize: t.Size,
 	}
 	if pick.SidecarName != "" && t.lyricsSidecar != nil && t.lyricsSidecar.name == pick.SidecarName {
@@ -338,4 +363,22 @@ func resolveLyrics(t *Track) {
 		ex.SourceSize = t.lyricsSidecar.size
 	}
 	t.lyrics = ex
+}
+
+// LyricsSourceSidecarRejected marks a track whose sidecar exists but yielded
+// no document (empty, oversized, legacy-encoded, whitespace-only). The row
+// carries the sidecar's stat and an EMPTY tag — invisible to the manifest
+// (`lyricsTagSQL` NULLIFs it) and to /v1/lyrics (an empty body is 404) —
+// so the skip gate can compare the sidecar's stat instead of re-extracting
+// the audio file on every scan, and an edited sidecar still re-extracts.
+const LyricsSourceSidecarRejected = "sidecar-rejected"
+
+func rejectedSidecarRow(sc *sidecarStat) *extractedLyrics {
+	if sc == nil {
+		return nil
+	}
+	return &extractedLyrics{
+		Format: "none", Source: LyricsSourceSidecarRejected, SidecarName: sc.name,
+		SourceMTimeNS: sc.mtimeNS, SourceSize: sc.size,
+	}
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,7 +93,7 @@ func TestFLACVorbisLyricsAreExtracted(t *testing.T) {
 	if l == nil || l.Format != lyrics.FormatLRC || !l.Synced || l.Source != string(lyrics.SourceTextLRC) {
 		t.Fatalf("LRC-shaped LYRICS → synced text-lrc: %+v", l)
 	}
-	if l.Body != lrcBody || l.Tag != lyrics.Tag(lrcBody) || len(l.Tag) != 8 {
+	if l.Body != lrcBody || l.Tag != lyrics.Tag(lyrics.Doc{Format: "lrc", Synced: true, Body: lrcBody}) || len(l.Tag) != 8 {
 		t.Fatalf("body/tag: %+v", l)
 	}
 	if l.SidecarName != "" || l.SourceSize == 0 {
@@ -215,15 +214,26 @@ func TestSidecarLegacyEncodingIsSkippedAndTaglessLRCIsPlain(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "x.lrc"), []byte{0xC4, 0xE3, 0xBA, 0xC3, '\n'}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if l := extractLyrics(t, p); l != nil {
-		t.Fatalf("legacy-encoded sidecar must be skipped, got %+v", l)
+	l := extractLyrics(t, p)
+	if l == nil || l.Source != LyricsSourceSidecarRejected || l.Tag != "" || l.Body != "" || l.SidecarName != "x.lrc" {
+		t.Fatalf("a legacy-encoded sidecar yields a sidecar-rejected provenance row, got %+v", l)
+	}
+	// …which is what lets the skip gate settle: the same sidecar is not
+	// drift, an edited one is.
+	st := &TrackStat{LyricsSource: l.Source, LyricsSidecarName: l.SidecarName,
+		LyricsSourceMTimeNS: l.SourceMTimeNS, LyricsSourceSize: l.SourceSize}
+	if sidecarLyricsDrifted(p, st, nil) {
+		t.Fatal("an unchanged rejected sidecar must not re-extract every scan")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "x.lrc"), []byte("no tags here\nsecond"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	l := extractLyrics(t, p)
+	l = extractLyrics(t, p)
 	if l == nil || l.Source != string(lyrics.SourceSidecarText) || l.Format != lyrics.FormatText {
 		t.Fatalf("a tagless .lrc is plain text: %+v", l)
+	}
+	if !sidecarLyricsDrifted(p, st, nil) {
+		t.Fatal("an edited (now-valid) sidecar under a rejected row is drift")
 	}
 	// UTF-16 LE with BOM decodes.
 	u16 := []byte{0xFF, 0xFE}
@@ -250,7 +260,7 @@ func TestStoreLyricsRoundTripAndIndexedAtBump(t *testing.T) {
 	s.now = func() time.Time { return clock }
 
 	doc := &extractedLyrics{Format: "lrc", Synced: true, Body: lrcBody, Language: "en",
-		Source: "sylt", Tag: lyrics.Tag(lrcBody), SourceMTimeNS: 5, SourceSize: 6}
+		Source: "sylt", Tag: lyrics.Tag(lyrics.Doc{Format: "lrc", Synced: true, Body: lrcBody, Language: "en"}), SourceMTimeNS: 5, SourceSize: 6}
 	tr := &Track{Path: "a/x.flac", Size: 1, ModTime: time.Unix(0, 0).UTC(), lyrics: doc}
 	if err := s.UpsertTrack(ctx, tr); err != nil {
 		t.Fatal(err)
@@ -274,7 +284,7 @@ func TestStoreLyricsRoundTripAndIndexedAtBump(t *testing.T) {
 
 	// Stamp leg with an UNCHANGED tag: provenance refreshes, indexed_at holds.
 	clock = clock.Add(time.Hour)
-	same := &Track{Path: "a/x.flac", lyrics: &extractedLyrics{Format: "lrc", Synced: true, Body: lrcBody,
+	same := &Track{Path: "a/x.flac", lyrics: &extractedLyrics{Format: "lrc", Synced: true, Body: lrcBody, Language: "en",
 		Source: "sidecar-lrc", SidecarName: "x.lrc", Tag: doc.Tag, SourceMTimeNS: 77, SourceSize: 88}}
 	if err := s.StampExtractorVersionBatch(ctx, []*Track{same}); err != nil {
 		t.Fatal(err)
@@ -290,7 +300,7 @@ func TestStoreLyricsRoundTripAndIndexedAtBump(t *testing.T) {
 	// Stamp leg with a CHANGED body: row replaced, indexed_at advances.
 	clock = clock.Add(time.Hour)
 	changed := &Track{Path: "a/x.flac", lyrics: &extractedLyrics{Format: "text", Body: "new words",
-		Source: "text", Tag: lyrics.Tag("new words"), SourceMTimeNS: 1, SourceSize: 2}}
+		Source: "text", Tag: lyrics.Tag(lyrics.Doc{Format: "text", Body: "new words"}), SourceMTimeNS: 1, SourceSize: 2}}
 	if err := s.StampExtractorVersionBatch(ctx, []*Track{changed}); err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +329,28 @@ func TestStoreLyricsRoundTripAndIndexedAtBump(t *testing.T) {
 		t.Fatal("manifest lyricsTag empties with the row")
 	}
 
+	// A sidecar-rejected row (empty tag) on a lyric-less track persists its
+	// provenance WITHOUT bumping indexed_at — nothing client-visible moved.
+	base = indexedAt()
+	clock = clock.Add(time.Hour)
+	// Through the STAMP leg — the only leg that leaves indexed_at alone by
+	// itself, so a bump here could only come from the lyrics write.
+	rejected := &Track{Path: "a/x.flac",
+		lyrics: &extractedLyrics{Format: "none", Source: LyricsSourceSidecarRejected, SidecarName: "x.lrc", SourceMTimeNS: 3, SourceSize: 4}}
+	if err := s.StampExtractorVersionBatch(ctx, []*Track{rejected}); err != nil {
+		t.Fatal(err)
+	}
+	if indexedAt() != base {
+		t.Fatal("a rejected-sidecar row must not bump indexed_at")
+	}
+	if st, err := s.GetTrackStat(ctx, "a/x.flac"); err != nil || st == nil || st.LyricsSource != LyricsSourceSidecarRejected || st.LyricsSourceMTimeNS != 3 {
+		t.Fatalf("rejected-sidecar provenance reaches the skip gate: %+v %v", st, err)
+	}
+	rows, _ = s.ListTracks(ctx, nil)
+	if rows[0].LyricsTag != "" {
+		t.Fatal("a rejected-sidecar row must not advertise a lyricsTag")
+	}
+
 	// Batch upsert carries lyrics; DeleteTrack cascades.
 	if err := s.UpsertTrackBatch(ctx, []*Track{{Path: "b/y.flac", Size: 1, ModTime: time.Unix(0, 0).UTC(), lyrics: doc}}); err != nil {
 		t.Fatal(err)
@@ -341,7 +373,7 @@ func TestLookupLyricsFoldsCaseUnambiguously(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	doc := &extractedLyrics{Format: "text", Body: "w", Source: "text", Tag: lyrics.Tag("w")}
+	doc := &extractedLyrics{Format: "text", Body: "w", Source: "text", Tag: lyrics.Tag(lyrics.Doc{Format: "text", Body: "w"})}
 	if err := s.UpsertTrack(ctx, &Track{Path: "Artist/Song.flac", Size: 1, ModTime: time.Unix(0, 0).UTC(), lyrics: doc}); err != nil {
 		t.Fatal(err)
 	}
@@ -360,5 +392,4 @@ func TestLookupLyricsFoldsCaseUnambiguously(t *testing.T) {
 	if l, _ := s.LookupLyrics(ctx, "ARTIST/song.flac"); l != nil {
 		t.Fatal("two case-variants → ambiguous → nil")
 	}
-	_ = strings.ToLower
 }

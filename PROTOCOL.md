@@ -937,14 +937,18 @@ read — a legacy-encoded (GB18030 / Shift_JIS) sidecar is left to the
 client's own sidecar tier, which reads the file directly and runs its
 encoding ladder.
 
-Manifest: `Track.lyricsTag` (`omitempty`) — the first 8 hex of the
-NORMALIZED body's SHA-256 (BOM stripped, CRLF→LF, NFC, trailing whitespace
-trimmed per line). Column-derived at read time like `waveformTag`; absent =
-no lyrics. A row whose tag changed (appeared, changed, vanished) bumps its
-`indexed_at`, so a delta sync carries exactly the tracks whose lyrics moved;
-an edited sidecar under an unchanged audio file re-extracts on the next scan
-(the skip gate compares the sidecar's live stat), and a tag-identical
-re-extraction bumps nothing.
+Manifest: `Track.lyricsTag` (`omitempty`) — the first 8 hex of the SHA-256
+over the CANONICAL document: `format`, `synced`, `language` and the
+NORMALIZED body (BOM stripped, CRLF→LF, NFC, trailing whitespace trimmed per
+line), so every client-visible field re-keys it. Column-derived at read time
+like `waveformTag`; absent = no lyrics. A row whose tag changed (appeared,
+changed, vanished) bumps its `indexed_at`, so a delta sync carries exactly
+the tracks whose lyrics moved; an edited sidecar under an unchanged audio
+file re-extracts on the next scan (the skip gate compares the sidecar's live
+stat), and a tag-identical re-extraction bumps nothing. A sidecar that
+yields no document (empty, oversized, legacy-encoded) is remembered by its
+stat only — no tag, no endpoint — so it never re-extracts the audio file
+until it changes.
 
 Response `200`, `Content-Type: application/json`:
 
