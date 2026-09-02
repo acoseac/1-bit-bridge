@@ -26,6 +26,7 @@ reaches a session that has not gone looking for it.
 
 ## Index
 
+- [ALAC upscaling — the ffmpeg fallback, and three things only measurement settled (issue #127, 2026-09-02)](#alac-upscaling--the-ffmpeg-fallback-and-three-things-only-measurement-settled-issue-127-2026-09-02)
 - [File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)](#file-provenance-spectrum-floors-the-decode-filters-transition-band-and-the-v34v35-pair-prs-684688-ios-13381341-2026-08-14)
 - [2026-08-15 — the 2026-08-14 feature-review fix batch, bridge half (PRs #698 / #699)](#2026-08-15-the-2026-08-14-feature-review-fix-batch-bridge-half-prs-698-699)
 - [Favorites — singleton LWW document + the `favorites` smart-mix family (PRs #695 / #697, iOS #1347/#1351–#1353, 2026-08-14)](#favorites-singleton-lww-document-the-favorites-smart-mix-family-prs-695-697-ios-134713511353-2026-08-14)
@@ -3152,3 +3153,75 @@ names, and the PR provenance.
 - **Docker image runs as non-root `bridge` user** (PR #84). `mkdir -p /data && chown bridge:bridge /data` happens in the same `RUN` layer that creates the user, BEFORE `USER bridge` switches contexts. Without the explicit chown, `WORKDIR` / `VOLUME` create `/data` with `root:root` ownership and the runtime fails on first-run TLS-cert mint or manifest-DB create. Operators bind-mounting their own pre-owned volume override the in-image baseline naturally. **`VERSION` build-arg feeds `-ldflags`**: `-X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=${VERSION}` so `bridge version` reports the build identity; default arg is `"docker"` for unpinned builds. **Env-var overrides** (`BRIDGE_LISTEN_ADDRESS`, `BRIDGE_ADMIN_ADDRESS`, `BRIDGE_DATA_DIR`, `BRIDGE_LIBRARY_NAME`, `BRIDGE_LIBRARY_ROOTS`) are applied in `config.applyEnvOverrides` BETWEEN `applyDefaults` and `resolvePaths`, so relative paths from env inherit the same "relative-to-config-dir" semantics as YAML fields. `BRIDGE_LIBRARY_ROOTS` is colon-separated regardless of host OS — accepted universally because the only realistic container deployments are linux/amd64 + linux/arm64. Empty / unset env = no change. Documented precedence: env > yaml > defaults.
 - **Audio-analysis decode commits ONLY on a length-complete decode — gated by `decodedShortOfDuration` (probed duration), NOT exit code / `-xerror` / stderr matching** ([internal/analyze/decode.go](internal/analyze/decode.go), PRs #448 ffmpeg + #449 sox, found by the v0.1.7 pre-release review). BOTH decoders exit 0 on a truncated-but-openable source: ffmpeg conceals a mid-stream error and exits 0; sox opens a truncated FLAC via its intact front STREAMINFO, decodes ~half, prints `sox FAIL ... LOST_SYNC`, and exits 0. Pre-fix `decodeFrames` treated a clean exit as a clean decode and committed a PARTIAL waveform (wrong duration + biased ReplayGain/key/tempo) keyed to the file's mtime+size, so the scan-skip gate never re-analyzed it — a permanently-wrong sidecar (field case: a partially-uploaded rclone-to-B2 faststart m4a, non-zero-byte so it passes the #446 zero-byte skip). Fix: probe the expected duration once at `probeChannels` time (`sox --i -D` on the sox path, ffprobe `format=duration` on the ffmpeg path) and reject when the decoded length is < 90% of it (`minDecodedFraction`); nothing is committed so the candidate re-flows until fully re-uploaded. Unknown duration (probe miss → 0) skips the check (commit as before). **Two alternatives REJECTED, both empirically disproven — DON'T reintroduce:** (a) ffmpeg `-xerror` aborts on ANY decode error → also fails a glitchy-but-COMPLETE file (one concealed bad frame) → no sidecar + a permanent treadmill (a failed analysis writes NO row, so the candidate re-flows every sweep). (b) sox stderr-marker matching (`sox FAIL`/`LOST_SYNC`) CANNOT distinguish truncation from a glitchy-but-complete file — a 200-byte mid-stream flip on a 10s FLAC decodes to FULL length (sox resyncs to EOF) yet prints the SAME `sox FAIL ... LOST_SYNC`; the decoded-LENGTH check distinguishes them (truncated = short → reject; resynced-complete = full → commit). The `sox WARN ... MD5 checksum mismatch` line is ALSO a trap — it's a WARN (not FAIL) that fires on a valid tag-edited FLAC, so matching it would treadmill valid files. **`sox --i -D` is safe for VBR MP3** — verified it matches the decoded length within <0.1% both WITH and WITHOUT the Xing/Info tag, so it doesn't false-reject complete VBR MP3s. **All exec sites resolve via `resolveBin(soxLookPath,"sox")` / `resolveBin(ffprobeLookPath,"ffprobe")`** — absolute-path / `filepath.IsAbs` defense-in-depth, which ALSO keeps new code clear of SonarCloud `go:S4036` (it fires on bare-name execs in new code; the pre-existing bare-name execs across the repo are grandfathered, but new ones must use `resolveBin`). Locked by `TestDecodedShortOfDuration` + `TestRunAnalysisTruncatedFLACWritesNoSidecar` + `TestRunAnalysisGlitchyCompleteFLACCommits`.
 - **The orphan-sidecar sweeper's chunk-resume cursor compares in `filepath.WalkDir` traversal order, NOT raw string order** ([internal/integrity/sidecars.go](internal/integrity/sidecars.go), PR #466, Gemini-consulted ×2). `WalkDir` orders each directory's entries by BASE name and visits a directory before its children, so it walks all of `A/` before sibling `A-Bonus/` (base names `"A"` < `"A-Bonus"`) — but the separator (`/`=0x2F, `\`=0x5C) sorts AFTER `-`(0x2D), ` `(0x20), `.`(0x2E), `&`, `'`, so `A-Bonus/…` **<** `A/…` as a RAW string. Pre-fix `dirEntirelyBehindCursor` (`withSep < cursor`) + the file-skip (`path <= cursor`) therefore `SkipDir`'d the still-unwalked `A-Bonus` subtree on a resume tick, permanently missing its orphan `.flac` sidecars (opt-in sweeper, >`gcChunkSize`=5000-sidecar libraries only, disk-space-only, recoverable via the non-chunked `bridge upscale --gc`). The variant tree is nested + source-path-mirrored (`SidecarPath()`: `<OutputDir>/Artist/Album/Track.flac.<variantID>.flac`) with UNSANITIZED directory segments, so real music dir names (spaces, `-`, `&`, `'`) hit this constantly. **The PRIOR (PR #282-era, also Gemini-blessed) predicate encoded the SAME misconception** — its test asserted the `A/B` dir must be descended when the cursor is the sibling FILE `A/B.flac`, on the false belief that `A/B/02.flac` sorts AFTER `A/B.flac` (WalkDir visits it BEFORE; the dir subtree is fully swept before the sibling file → safe to prune). Fix: `pathWalkCompare(a,b)` compares segment-by-segment (a shorter ancestor path orders before a longer one that extends it), **zero-alloc via an index scan (NOT `strings.Split`** — it runs per-entry on the walk hot path, so a 50k–100k-sidecar library would pay 2 heap allocs/entry). `dirEntirelyBehindCursor` = ancestor-guard (`cursor==trimmed || HasPrefix(cursor, trimmed+sep)`, which also covers the trailing-slash / volume root) + `pathWalkCompare(trimmed, cursor) < 0`. **Don't reintroduce a raw-string `<=`/`<` path compare in any WalkDir-resume cursor; don't reintroduce `strings.Split` in `pathWalkCompare`.** Locked by `TestPathWalkCompare_MatchesActualWalkDirOrder` (records the REAL WalkDir order + asserts the helper reproduces it), `TestPathWalkCompare_ZeroAlloc`, `TestOrphanSidecarSweeper_SiblingDashDir_NotPruned` (fails on the raw-string predicate), + the corrected `TestDirEntirelyBehindCursor` table.
+
+---
+
+## ALAC upscaling — the ffmpeg fallback, and three things only measurement settled (issue #127, 2026-09-02)
+
+Closes the bridge half of issue #127. `POST /v1/upscale` has always routed
+everything through sox, and no stock sox build carries an MP4 demuxer — so
+ALAC, the one LOSSLESS format that clears `manifest.IsLossyCodec`,
+`canSetBitsPerSample` and `OptimizeEligible`, reached the decoder and could
+not be read. PR #440 made that reachable by populating MP4 geometry; #572
+restored an honest refusal. This makes it work.
+
+**Shape.** `ffmpeg -map 0:a:0 -f f32le -` piped into `sox -t raw -e float
+-b 32 -L -r <rate> -c <ch> -`, with the rest of the chain untouched.
+`SoxArgs` delegates to `soxArgsFrom(input, decoder)` so the two routes share
+ONE definition of gain-guard / target bits / FLAC output / rate / dither —
+a piped sidecar is the same transform on the same samples.
+`CanDecodeVia` consults the fallback, so all four eligibility call sites
+gained coverage at the seam that already centralises their fail-open policy.
+
+**Three measurements, each of which changed the design:**
+
+1. *ffmpeg exits 0 on a truncated source.* A half-truncated faststart `.m4a`
+   still reports `duration=8.000000` (the moov is intact) and the pipe exits 0
+   while producing **3.901s**. The sidecar is keyed on source mtime+size, so
+   nothing would ever regenerate it. Hence the duration guard.
+2. *A complete decode is exactly 1.000000.* Five shapes — 44.1/48/96/192 kHz,
+   mono and stereo, non-round durations — every one exactly 1.000000. This path
+   resamples, it does not re-time. So a 2% tolerance is generous, much tighter
+   than `internal/analyze`'s 0.90 (correct there, where the decode targets a
+   fixed 48 kHz).
+3. *A too-low input rate makes the output LONGER.* 44.1 kHz described as 22050
+   produced exactly 2.0x the duration, which a lower-bound-only guard **accepts**
+   while committing a half-speed variant. The guard is two-sided; the negative
+   control (lower bound only) turns exactly the two upper-bound cases red.
+
+**Raw, not `-f wav`.** WAV is self-describing and would remove the dependence
+on probed rate/channels — but ffmpeg cannot seek back to patch a header on a
+pipe, so it writes RIFF size `0xFFFFFFFF` and sox prints
+`WARN wav: Premature EOF on .wav input file` on EVERY successful job. Noise,
+and worse, a warning indistinguishable from the real truncation. Raw also has
+no 4 GiB ceiling. (The rate-mismatch risk raw reintroduces is what the
+two-sided guard covers.)
+
+**The allowlist is closed.** `ffmpegRoutableExt` is the MP4 family only, not
+"anything sox refused". Lossy and DSD are excluded upstream, so anything else
+reaching a refusal is a shape neither decoder was chosen for; routing it would
+convert an honest "sox can't read this" into a mysterious mid-job failure.
+Note `CanDecode`'s OTHER documented fail-open still applies: an extension
+absent from `soxFormatsForExt` (e.g. `.wma`) reaches sox and gets sox's own
+diagnostic — a test asserted `routeNone` for that and was wrong, not the code.
+
+**`RunSox` now returns the settings it used** (`(int64, string, error)`).
+The persist sites rebuilt them with `SoxArgs()`, which hardcodes the decoder
+and cannot know the route — so `"decoder"` would have named sox for every
+piped sidecar. Same lesson as `SoxArgs` handing back its temp path instead of
+letting `RunSox` re-derive a drifting one, one level up. ~29 test stubs
+followed, compiler-enforced.
+
+**Doctor.** `checkAudioToolchain` warns when upscale is on, the library holds
+ALAC (`Store.HasTracksWithCodec`, existence-only, counts suppressed and routed
+rows because the question is what the operator HAS), and ffmpeg is missing.
+It stays silent when there is no probe wired or the probe errors — a fresh
+install with no scan must not be told to install ffmpeg for a library it has
+not read. `probeSox` / `ffmpegAvailable` became seams because CI runners have
+neither binary, so the sox probe would fail first and the new branch would
+never be reached.
+
+**Still open on #127** (needs an iOS half, so out of a bridge-only change):
+publishing the decoder list as a `supportedDecoders` wire field to replace
+iOS's hard-coded `upscaleSoxUnsupportedExtensions`, and the ineligibility
+alert text.

@@ -38,9 +38,9 @@ func blockingBatchCoordinator(t *testing.T, s *manifest.Store) (*Coordinator, ch
 	p := NewPool(s, 4, 16)
 	t.Cleanup(p.Stop)
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		<-release
-		return spec.SourceSize * 2, nil
+		return spec.SourceSize * 2, "", nil
 	}
 	c, err := NewCoordinator(p, s, t.TempDir(), nil,
 		func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })

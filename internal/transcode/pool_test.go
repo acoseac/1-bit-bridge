@@ -45,10 +45,10 @@ func TestPoolEnqueueDeduplicates(t *testing.T) {
 
 	var startedOnce sync.Once
 	started := make(chan struct{})
-	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, string, error) {
 		startedOnce.Do(func() { close(started) })
 		<-ctx.Done() // hold the job in-flight until Stop()
-		return 0, ctx.Err()
+		return 0, "", ctx.Err()
 	}
 
 	spec := JobSpec{
@@ -277,11 +277,11 @@ func TestPoolFiresOnStateChangeAfterEnqueueAndCompletion(t *testing.T) {
 	// completion fire can't coalesce with it (see firstFireLatch /
 	// releaseGate). The fake runner also drops the real-sox dependency.
 	release := make(chan struct{})
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		if err := releaseGate(ctx, release); err != nil {
-			return 0, err
+			return 0, "", err
 		}
-		return 0, errors.New("synthetic failure")
+		return 0, "", errors.New("synthetic failure")
 	}
 
 	spec := JobSpec{
@@ -426,18 +426,18 @@ func TestPoolJobTimesOutAndCountsAsFailure(t *testing.T) {
 	started := make(chan struct{})
 	secondRan := make(chan struct{})
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		switch spec.SourceLibraryRel {
 		case "Music/Album/timeout.flac":
 			close(started)
 			<-ctx.Done()
-			return 0, ctx.Err()
+			return 0, "", ctx.Err()
 		case "Music/Album/recovery.flac":
 			close(secondRan)
-			return 1, nil
+			return 1, "", nil
 		default:
 			t.Errorf("unexpected runner spec: %q", spec.SourceLibraryRel)
-			return 0, nil
+			return 0, "", nil
 		}
 	}
 
@@ -511,13 +511,13 @@ func TestPoolActiveWorkersReflectsInflight(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, string, error) {
 		close(started)
 		<-release // hold the worker busy until the test releases it
 		// Synthetic failure → the runner-error terminal path (which, like
 		// every terminal path, clears the slot via finishJob). Avoids the
 		// variant FK that a success path's UpsertVariant would hit.
-		return 0, errors.New("synthetic failure")
+		return 0, "", errors.New("synthetic failure")
 	}
 
 	// Idle: one slot, not busy.
@@ -588,10 +588,10 @@ func TestPoolStopDuringJobSuppressesFailure(t *testing.T) {
 
 	started := make(chan struct{})
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, string, error) {
 		close(started)
 		<-ctx.Done()
-		return 0, ctx.Err()
+		return 0, "", ctx.Err()
 	}
 
 	spec := JobSpec{
@@ -644,14 +644,14 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	survivorRan := make(chan struct{})
 	releasePanic := make(chan struct{})
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		switch spec.SourceLibraryRel {
 		case "Music/Album/panic.flac":
 			// Block until the enqueue fire is observed so the panic-recovery
 			// fire below lands as a SEPARATE callback (see firstFireLatch /
 			// releaseGate) — otherwise it coalesces and the count flakes.
 			if err := releaseGate(ctx, releasePanic); err != nil {
-				return 0, err
+				return 0, "", err
 			}
 			close(panicked)
 			panic("synthetic transcode panic for slot-reclaim test")
@@ -661,10 +661,10 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 			// error branch instead of trying to write a foreign-key-
 			// invalid track_variants row. We're testing pool behaviour,
 			// not the store path.
-			return 0, errors.New("expected: not a real source file")
+			return 0, "", errors.New("expected: not a real source file")
 		default:
 			t.Errorf("unexpected runner spec: %q", spec.SourceLibraryRel)
-			return 0, nil
+			return 0, "", nil
 		}
 	}
 
@@ -778,8 +778,8 @@ func TestPoolFiresOnJobCompleteAfterUpsertVariant(t *testing.T) {
 	// Successful runner stub — RunSox isn't invoked, the worker
 	// reaches the UpsertVariant + callback path directly.
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 42, nil
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return 42, "", nil
 	}
 
 	type jobEvent struct {
@@ -886,11 +886,11 @@ func TestPoolDoesNotFireOnJobCompleteOnFailure(t *testing.T) {
 	// Block until the enqueue fire is observed so the failure-completion
 	// fire can't coalesce with it (see firstFireLatch / releaseGate).
 	release := make(chan struct{})
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		if err := releaseGate(ctx, release); err != nil {
-			return 0, err
+			return 0, "", err
 		}
-		return 0, soxErr
+		return 0, "", soxErr
 	}
 
 	var jobFires atomic.Int64
@@ -937,8 +937,8 @@ func TestPoolNilOnJobCompleteDoesNotPanic(t *testing.T) {
 	t.Cleanup(p.Stop)
 
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 1, nil
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return 1, "", nil
 	}
 	// Deliberately do NOT call SetOnJobComplete.
 
@@ -985,8 +985,8 @@ func TestPoolSetOnJobCompleteIsRaceSafe(t *testing.T) {
 	t.Cleanup(p.Stop)
 
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 1, nil
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return 1, "", nil
 	}
 
 	var fires atomic.Int64

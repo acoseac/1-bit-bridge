@@ -31,7 +31,7 @@ func TestPoolEnqueueRacingStopNoPanic(t *testing.T) {
 
 	// Fails immediately: workers drain + exit fast (no store write, no
 	// track seeding needed — processJob's failure path skips UpsertVariant).
-	stub := func(context.Context, JobSpec) (int64, error) { return 0, errors.New("stub") }
+	stub := func(context.Context, JobSpec) (int64, string, error) { return 0, "", errors.New("stub") }
 
 	for iter := 0; iter < 200; iter++ {
 		p := NewPool(store, 2, 128)

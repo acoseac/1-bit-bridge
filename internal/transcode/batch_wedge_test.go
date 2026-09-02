@@ -42,12 +42,12 @@ func wedgeCoordinator(t *testing.T, s *manifest.Store, fastPath string) (*Coordi
 	// than a test-owned channel means the deferred p.Stop can never wedge on
 	// wg.Wait() — Stop cancels stopCtx, which is exactly the signal a real
 	// runner (exec.CommandContext) honours.
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		if spec.SourceLibraryRel != fastPath {
 			<-ctx.Done()
-			return 0, ctx.Err()
+			return 0, "", ctx.Err()
 		}
-		return spec.SourceSize * 2, nil
+		return spec.SourceSize * 2, "", nil
 	}
 	c, err := NewCoordinator(p, s, t.TempDir(), nil,
 		func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })

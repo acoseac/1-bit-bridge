@@ -60,12 +60,12 @@ func TestPoolBackgroundOptimizeUsesUpscaleLane(t *testing.T) {
 	// test ends, so neither channel drains under us.
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	p.runner = func(ctx context.Context, _ JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, _ JobSpec) (int64, string, error) {
 		select {
 		case <-release:
 		case <-ctx.Done():
 		}
-		return 0, context.Canceled
+		return 0, "", context.Canceled
 	}
 	t.Cleanup(p.Stop)
 
@@ -144,7 +144,7 @@ func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 
 	var processed []JobKind
 	var processedMu sync.Mutex
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		firstJobOnce.Do(func() {
 			close(firstJobParked)
 			<-releaseFirst
@@ -152,7 +152,7 @@ func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 		processedMu.Lock()
 		processed = append(processed, spec.Kind)
 		processedMu.Unlock()
-		return 0, nil
+		return 0, "", nil
 	}
 	t.Cleanup(p.Stop)
 
@@ -259,11 +259,11 @@ func TestPoolUpscaleProgressUnderInterleavedLoad(t *testing.T) {
 
 	var processed []JobKind
 	var processedMu sync.Mutex
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		processedMu.Lock()
 		processed = append(processed, spec.Kind)
 		processedMu.Unlock()
-		return 0, nil
+		return 0, "", nil
 	}
 	t.Cleanup(p.Stop)
 
@@ -346,13 +346,13 @@ func TestPoolStopDrainsBothChannels(t *testing.T) {
 	// Stop() can drain both channels before any worker goroutine is even
 	// scheduled, leaving processed==0 — a real flake observed on CI.
 	firstProcessed := make(chan struct{}, 1)
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		processed.Add(1)
 		select {
 		case firstProcessed <- struct{}{}:
 		default:
 		}
-		return 0, nil
+		return 0, "", nil
 	}
 
 	mkSpec := func(i int, kind JobKind) JobSpec {
@@ -414,9 +414,9 @@ func TestPoolStatsQueueLenIsCombinedDepth(t *testing.T) {
 
 	// Park the worker so jobs queue rather than drain.
 	hold := make(chan struct{})
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		<-hold
-		return 0, nil
+		return 0, "", nil
 	}
 	t.Cleanup(func() {
 		close(hold)

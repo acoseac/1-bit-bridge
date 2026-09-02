@@ -81,8 +81,8 @@ func TestPoolPublisherBurstStaysGoroutineBounded(t *testing.T) {
 	// success branch (which fires BOTH a job-complete event AND
 	// a state-change event — the worst case for goroutine fan-out).
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 1, nil
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return 1, "", nil
 	}
 
 	// Slow callbacks deliberately — the publisher will be busy
@@ -351,8 +351,8 @@ func TestPoolPublisherJobCompleteFidelity(t *testing.T) {
 	p := NewPool(store, 4, jobs)
 	t.Cleanup(p.Stop)
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 1, nil
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return 1, "", nil
 	}
 
 	var mu sync.Mutex
@@ -437,8 +437,8 @@ func TestPoolPublisherStopDrainsBufferedEvents(t *testing.T) {
 	// jobCompleteChan before the slow callback drains them.
 	p := NewPool(store, 4, jobs)
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 1, nil
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return 1, "", nil
 	}
 
 	var jobCallbacks atomic.Int64
