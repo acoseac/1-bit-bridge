@@ -18,7 +18,7 @@ must also be **untracked** (`.gitignore`), not merely relocated:
 | `audit-2026-07-18.md` | A full codebase audit — effectively an exploit index, with `file:line` and fix sketches for every finding. Actionable against any bridge whose operator hasn't upgraded yet, which is why "the fixes are merged" is not on its own sufficient. | Untracked — `.gitignore: ops/*audit*.md` |
 | `1bit-audit-2026-07-18.md` | A second, independently-run audit of the same Go bridge (`internal/*` + `cmd/bridge`, 38 packages) — same exposure as above. | Untracked — `.gitignore: ops/*audit*.md` |
 
-### Not everything here is sensitive
+## Not everything here is sensitive
 
 Two different reasons put a file in `ops/`, and only the first is about secrecy:
 
