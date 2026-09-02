@@ -1165,7 +1165,7 @@ Server-side library search over the FTS5 index the bridge already maintains. A c
 
 **Response** (`503 Service Unavailable`): `search_unavailable` — this bridge's SQLite driver has no FTS5 module. **Terminal, not transient**: the module is compiled in or it is not, for the process lifetime. Clients should gate on the `search` feature flag rather than probing.
 
-**Rate limit.** This is the one route a client calls per keystroke, so it draws from its own per-token bucket — `limits.search.requestsPerMinute` (default `600`) and `limits.search.burst` (default `120`). Well clear of a person typing; a stuck client is bounded. Exceeding it is the standard `429` + `Retry-After`.
+**Rate limit.** This is the one route a client calls per keystroke, so it draws from its own per-token bucket — `limits.search.requestsPerMinute` (default `600`) and `limits.search.burst` (default `120`). Well clear of a person typing; a stuck client is bounded. Exceeding it is the standard `429` + `Retry-After`. Operators can disable it with `limits.search.requestsPerMinute: 0`, as with the manifest and write limiters.
 
 **Feature flag:** `search` in `/v1/health.features`, gated on the same runtime probe as the endpoint, so a bridge that advertises it can serve it.
 
@@ -1179,12 +1179,13 @@ All errors are JSON:
 | Status | `error` code             | When                                              |
 |-------:|--------------------------|---------------------------------------------------|
 |    202 | `pending`                | Artwork / artist-image enrichment not yet cached  |
-|    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream (terminal) |
 |    400 | `bad_request`            | Malformed path, missing required query param     |
 |    400 | `range_required`         | `/v1/read` called without a `Range` header        |
+|    400 | `query_too_short`        | `GET /v1/search` with `q` shorter than 2 runes    |
 |    401 | `unauthorized`           | Missing / invalid bearer token (or pollSecret)    |
 |    403 | `forbidden`              | Valid token, insufficient scope (reserved)        |
 |    404 | `not_found`              | Path does not exist in any library root; or artwork is not cached under the requested MBID + `size` |
+|    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream (terminal) |
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
 |    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |
@@ -1196,7 +1197,6 @@ All errors are JSON:
 |    503 | `scan_in_progress`       | Manifest requested while an initial scan is busy  |
 |    503 | `queue_full`             | Pending pairing requests at the cap               |
 |    503 | `search_unavailable`     | `GET /v1/search` on a bridge whose SQLite driver has no FTS5 module (terminal) |
-|    400 | `query_too_short`        | `GET /v1/search` with `q` shorter than 2 runes     |
 
 ### `/v1/manifest` rate limit (additive, since v1.2.x)
 
