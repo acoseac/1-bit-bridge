@@ -458,7 +458,7 @@ func runUpscaleWorker(
 		if ctx.Err() != nil {
 			return
 		}
-		size, err := transcode.RunSox(ctx, c.spec)
+		size, settings, err := transcode.RunSox(ctx, c.spec)
 		if err != nil {
 			if ctx.Err() == nil {
 				atomic.AddUint64(failCount, 1)
@@ -466,7 +466,6 @@ func runUpscaleWorker(
 			}
 			continue
 		}
-		_, settings, _, _ := c.spec.SoxArgs()
 		row := manifest.VariantRow{
 			SourcePath:    c.spec.SourceLibraryRel,
 			VariantID:     c.spec.VariantID(),

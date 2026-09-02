@@ -61,7 +61,7 @@ func TestDropInflightThenCompletionDoesNotReleaseTheResubmission(t *testing.T) {
 		default:
 		}
 	})
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		mu.Lock()
 		runCount++
 		id := runCount
@@ -73,7 +73,7 @@ func TestDropInflightThenCompletionDoesNotReleaseTheResubmission(t *testing.T) {
 		case <-ch:
 		case <-ctx.Done():
 		}
-		return 0, nil
+		return 0, "", nil
 	}
 	defer p.Stop()
 
@@ -166,9 +166,9 @@ func TestReleaseDedupFreesTheClaimItOwns(t *testing.T) {
 	done := make(chan struct{}, 4)
 
 	p := NewPool(nil, 1, 4)
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		done <- struct{}{}
-		return 0, nil
+		return 0, "", nil
 	}
 	defer p.Stop()
 
@@ -206,12 +206,12 @@ func TestClaimGenerationsAreMonotonicAndNonZero(t *testing.T) {
 	const n = 8
 	hold := make(chan struct{})
 	p := NewPool(nil, 1, n*2)
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		select {
 		case <-hold:
 		case <-ctx.Done():
 		}
-		return 0, nil
+		return 0, "", nil
 	}
 	defer func() { close(hold); p.Stop() }()
 

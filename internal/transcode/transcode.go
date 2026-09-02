@@ -621,6 +621,19 @@ func safeVariantFilename(srcBase, variantID string) string {
 // VariantSchemaVersion bump / regeneration is required — existing
 // sidecars stay valid.
 func (j JobSpec) SoxArgs() (args []string, settings string, finalPath string, tmpPath string) {
+	return j.soxArgsFrom([]string{j.SourceAbsPath}, "sox")
+}
+
+// soxArgsFrom is SoxArgs with the INPUT portion of the argv supplied by the
+// caller, so the sox-direct path and the ffmpeg-pipe path share one definition
+// of the effects chain. Everything downstream of the input — gain guard,
+// target bits, FLAC output, rate, dither — is identical either way, which is
+// what makes a piped sidecar the same transform as a direct one.
+//
+// `decoder` is recorded in the settings blob (the forensic record of what
+// produced this sidecar). It is NOT on the wire: `track_variants.sox_settings`
+// has no json tag on manifest.Variant.
+func (j JobSpec) soxArgsFrom(input []string, decoder string) (args []string, settings string, finalPath string, tmpPath string) {
 	rateFlag := "-v"
 	switch j.Quality {
 	case QualityHigh:
@@ -647,18 +660,17 @@ func (j JobSpec) SoxArgs() (args []string, settings string, finalPath string, tm
 	// RunSox can no longer recover finalPath by trimming the suffix.
 	finalPath = j.SidecarPath()
 	tmpPath = finalPath + "." + nextSidecarTmpToken() + sidecarTmpSuffix
-	args = []string{
-		"-G",
-		j.SourceAbsPath,
+	args = append([]string{"-G"}, input...)
+	args = append(args,
 		"-b", strconv.Itoa(j.TargetBits),
 		"-t", "flac",
 		tmpPath,
 		"rate", rateFlag, "-L", strconv.Itoa(j.TargetSampleRate),
 		"dither", "-s",
-	}
+	)
 	settings = fmt.Sprintf(
-		`{"resampler":"sox","quality":%q,"rateFlag":%q,"phase":"linear","targetRate":%d,"targetBits":%d,"guard":true,"schemaVersion":%q}`,
-		j.Quality, rateFlag, j.TargetSampleRate, j.TargetBits, VariantSchemaVersion)
+		`{"resampler":"sox","decoder":%q,"quality":%q,"rateFlag":%q,"phase":"linear","targetRate":%d,"targetBits":%d,"guard":true,"schemaVersion":%q}`,
+		decoder, j.Quality, rateFlag, j.TargetSampleRate, j.TargetBits, VariantSchemaVersion)
 	return args, settings, finalPath, tmpPath
 }
 
@@ -831,12 +843,35 @@ func ResolveTargetRate(flagValue string, sourceRate int) (int, error) {
 //
 // Output directory created if missing — `bridge upscale` only
 // guarantees DataDir exists, not the `transcoded` subdir.
-func RunSox(ctx context.Context, j JobSpec) (int64, error) {
+func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 	// Both paths come from SoxArgs's single SidecarPath() computation (Q2) —
 	// no re-hash here, and the rename target below is exactly the path sox
 	// wrote. tmpPath carries a per-job token, so it MUST be the value from
 	// THIS call (a second SoxArgs() would mint a different one).
-	args, _, finalPath, tmpPath := j.SoxArgs()
+	// Route BEFORE building the argv: the ffmpeg path replaces the input
+	// portion with a stdin descriptor, and everything downstream is shared.
+	// Deciding here rather than at enqueue means a toolchain installed after
+	// a job was queued is picked up by the run.
+	// Only the MP4 family can route anywhere but sox-direct, and ProbeSox is
+	// a fork+exec — so gate on the cheap extension check and keep this
+	// function's documented "no probe per iteration" contract for every
+	// source that behaves exactly as it did before the fallback existed.
+	route := routeSoxDirect
+	if needsDecodeRouting(j.SourceAbsPath) {
+		route = decodeRouteFor(
+			SnapshotOrOpen(func() (SoxInfo, error) { return ProbeSox(ctx) }),
+			FFmpegAvailable(), j.SourceAbsPath)
+	}
+	input := []string{j.SourceAbsPath}
+	var geo sourceGeometry
+	if route == routeFFmpegPipe {
+		var perr error
+		if geo, perr = probeSourceGeometry(ctx, j.SourceAbsPath); perr != nil {
+			return 0, "", perr
+		}
+		input = soxStdinInputArgs(geo)
+	}
+	args, settings, finalPath, tmpPath := j.soxArgsFrom(input, route.String())
 	// v1.4 source-mirrored layout: sidecars land under
 	// <OutputDir>/<libRel-dirname>/<filename>. The parent of
 	// finalPath may NOT exist yet (first variant in a new album
@@ -845,7 +880,7 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 	// needed MkdirAll(j.OutputDir); the per-file form is now
 	// the load-bearing call (CodeRabbit CRITICAL on PR D1).
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
-		return 0, fmt.Errorf("mkdir sidecar dir: %w", err)
+		return 0, "", fmt.Errorf("mkdir sidecar dir: %w", err)
 	}
 	// Defensive: clear any stale .tmp from a previous interrupted
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.
@@ -863,29 +898,48 @@ func RunSox(ctx context.Context, j JobSpec) (int64, error) {
 		}
 	}()
 
-	cmd := exec.CommandContext(ctx, "sox", args...)
-	// Capture combined stdout/stderr for the error path — sox
-	// writes its diagnostics to stderr and they're invaluable when
-	// debugging "this one file fails".
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return 0, fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
+	switch route {
+	case routeFFmpegPipe:
+		if err := runFFmpegPipe(ctx, args, geo, j.SourceAbsPath); err != nil {
+			return 0, "", err
+		}
+		// ffmpeg exits 0 on a truncated-but-openable source, so the exit
+		// code above cannot tell a partial decode from a whole one. Compare
+		// what was produced against what the container claims. Nothing is
+		// committed on a mismatch, so the candidate re-flows once the source
+		// is whole — the same self-healing shape internal/analyze uses.
+		if produced := probeOutputDuration(ctx, tmpPath); decodeLengthDisagrees(geo.Duration, produced) {
+			return 0, "", fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
+				ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel)
+		}
+	default:
+		// routeNone lands here too: sox is given the source and refuses
+		// it with its own diagnostic, which is a better error than one
+		// this function could invent.
+		cmd := exec.CommandContext(ctx, "sox", args...)
+		// Capture combined stdout/stderr for the error path — sox
+		// writes its diagnostics to stderr and they're invaluable when
+		// debugging "this one file fails".
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return 0, "", fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
+		}
 	}
 	// Atomic rename on success. Same FS as DataDir so this is a
 	// rename(2), not a copy.
 	if err := atomicwrite.RenameWithRetryCtx(ctx, tmpPath, finalPath); err != nil {
-		return 0, fmt.Errorf("rename sidecar: %w", err)
+		return 0, "", fmt.Errorf("rename sidecar: %w", err)
 	}
 	cleanup = false // success — keep the now-renamed final file
 	info, err := os.Stat(finalPath)
 	if err != nil {
-		return 0, fmt.Errorf("stat sidecar: %w", err)
+		return 0, "", fmt.Errorf("stat sidecar: %w", err)
 	}
 	logger.Debug("sox ok",
 		"path", j.SourceLibraryRel,
 		"variant", j.VariantID(),
 		"sidecar_bytes", info.Size())
-	return info.Size(), nil
+	return info.Size(), settings, nil
 }
 
 // SoxInfo is the result of ProbeSox: where sox lives, its version, and —
@@ -1140,7 +1194,11 @@ var soxFormatsForExt = map[string][]string{
 // (the per-track enqueuer, both batch walks, the auto-optimize sweeper) and
 // four copies of a safety default is four chances for one to drift.
 func CanDecodeVia(probe func() (SoxInfo, error), sourcePath string) bool {
-	return SnapshotOrOpen(probe).CanDecode(sourcePath)
+	// Consults the ffmpeg fallback too, so the four gate call sites keep
+	// asking one question ("can this be decoded at all?") and gained ALAC
+	// coverage without four separate edits — the same reason this policy was
+	// centralised here in the first place.
+	return decodeRouteFor(SnapshotOrOpen(probe), FFmpegAvailable(), sourcePath) != routeNone
 }
 
 // SnapshotOrOpen returns the probe's SoxInfo, or the ZERO value when the probe

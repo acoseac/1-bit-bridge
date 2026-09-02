@@ -546,6 +546,37 @@ lost my library."
   with the opposite urgency; enqueuing a library-wide sweep on the foreground
   lane re-opens exactly the head-of-line blocking the two-channel queue exists
   to prevent, with no bridge-side symptom.
+- **ALAC reaches the pipeline through an ffmpeg pipe, and the completeness
+  guard on it is TWO-SIDED.** No stock sox build has an MP4 demuxer, and ALAC
+  is the one LOSSLESS format that clears every upstream gate and then cannot be
+  decoded; `ffmpeg … -f f32le -` into `sox -t raw` fixes it with the effects
+  chain shared byte-for-byte (`soxArgsFrom` takes the input argv, so both routes
+  have ONE definition of gain-guard/rate/dither). Three things are measured, not
+  assumed: **ffmpeg exits 0 on a truncated source** — a half-truncated faststart
+  `.m4a` still reports its full 8.000s from an intact moov and produced 3.901s of
+  audio, silently, and the sidecar is keyed on source mtime+size so it would
+  never regenerate; **a complete decode is EXACTLY 1.000000** across 44.1/48/96/
+  192 kHz, mono and stereo, so a 2% tolerance is generous; and **an input rate
+  declared too LOW makes the output LONGER** (a 44.1 kHz source described as
+  22050 produced exactly 2.0x), which a lower-bound-only guard accepts while
+  committing a half-speed variant — `internal/analyze`'s one-sided form is right
+  for its own purpose, this one needs both bounds. **Raw, never `-f wav`**:
+  ffmpeg cannot seek back to patch a header on a pipe so it writes RIFF size
+  `0xFFFFFFFF`, and sox then prints `WARN wav: Premature EOF` on EVERY successful
+  job — noise, and indistinguishable from the real truncation this guards. The
+  fallback is an **allowlist of the MP4 family, not "anything sox refused"**:
+  lossy and DSD are already excluded upstream, so anything else reaching a
+  refusal is a shape neither decoder was chosen for, and routing it would turn an
+  honest refusal into a mystery failure. **The probe is gated on the extension**
+  — `ProbeSox` is a fork+exec (7.9 ms; `FFmpegAvailable` is 17 µs) and `RunSox`
+  documents that it does not probe per iteration, so only a source whose decoder
+  is genuinely undecided pays one. `RunSox` returns the settings it actually
+  used — the persist site cannot know the route, and a forensic record that
+  names the wrong decoder is worse than one that names none. **The doctor
+  warning names WHICH binary is absent**: `ffmpeg` and `ffprobe` are both
+  required (ffprobe supplies the pipe's geometry and the guard's duration) and
+  some distros package them apart, so blaming ffmpeg sends that operator to a
+  binary they already have.
 - **Analysis commits only on a length-complete decode**, gated by the probed
   duration — NOT exit code, `-xerror`, or stderr matching. Both decoders exit 0
   on a truncated-but-openable source, and a partial commit is keyed to

@@ -107,8 +107,8 @@ func newTestCoordinatorWithStubbedPool(t *testing.T, s *manifest.Store) (*Coordi
 	p := NewPool(s, 2, 16)
 	t.Cleanup(p.Stop)
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return spec.SourceSize * 2, nil // arbitrary non-zero size
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return spec.SourceSize * 2, "", nil // arbitrary non-zero size
 	}
 	dataDir := t.TempDir()
 	c, err := NewCoordinator(p, s, dataDir, nil, func(rel string) (string, error) { return "/tmp/abs/" + rel, nil })

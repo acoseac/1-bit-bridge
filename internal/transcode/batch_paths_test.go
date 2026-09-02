@@ -45,12 +45,12 @@ func blockRunner(t *testing.T, p *Pool) {
 	t.Helper()
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
 		select {
 		case <-release:
 		case <-ctx.Done():
 		}
-		return spec.SourceSize, nil
+		return spec.SourceSize, "", nil
 	}
 }
 

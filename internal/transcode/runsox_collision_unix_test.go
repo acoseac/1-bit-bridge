@@ -113,7 +113,7 @@ func TestRunSoxConcurrentSameSpecDoesNotStealTmp(t *testing.T) {
 	res := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			_, err := RunSox(context.Background(), spec)
+			_, _, err := RunSox(context.Background(), spec)
 			res <- err
 		}()
 	}

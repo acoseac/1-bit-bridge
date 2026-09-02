@@ -35,8 +35,8 @@ func TestPoolFsyncFailureSkipsUpsertAndFiresJobFailed(t *testing.T) {
 	// production this would never happen — RunSox writes a real
 	// sidecar. Combined with the synthetic fsync failure below
 	// it exercises the durability gate cleanly.
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 12345, nil
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return 12345, "", nil
 	}
 	fsyncErr := errors.New("synthetic ENOSPC at fsync")
 	p.fsyncFn = func(path string) error {
@@ -106,8 +106,8 @@ func TestPoolFsyncSuccessReachesUpsert(t *testing.T) {
 	p := NewPool(store, 1, 4)
 	t.Cleanup(p.Stop)
 
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, error) {
-		return 1, nil
+	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+		return 1, "", nil
 	}
 	// Default fsyncFn (fsyncFileAndParent) would fail on the mocked
 	// runner's never-written sidecar — swap to noop, same convention

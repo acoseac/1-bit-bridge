@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
 
@@ -246,6 +247,31 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			// The in-process caller sidesteps all of that via
 			// Deps.OwnedPorts.
 			d.OwnPIDFile = filepath.Join(cfg.DataDir, "server.pid")
+			// Codec probe for the ALAC/ffmpeg warning. Opened LAZILY, per
+			// call, and closed immediately: `bridge doctor` may run while
+			// `bridge serve` holds the same DB, and a doctor run must never
+			// keep a handle open across the rest of the report. A failure to
+			// open is returned, not swallowed — the check treats an error as
+			// "don't know" and stays silent rather than guessing.
+			dbPath := filepath.Join(cfg.DataDir, "bridge.db")
+			d.LibraryHasCodec = func(ctx context.Context, codec string) (bool, error) {
+				// The stat looks redundant against OpenStore's own error and
+				// was flagged as such — it is NOT. `OpenStore` on a missing
+				// path SUCCEEDS and CREATES the database (verified), so
+				// without this a `bridge doctor` run on a host that has never
+				// scanned would leave an empty bridge.db behind and then
+				// answer "no ALAC" from a database it had just made. A
+				// read-only diagnostic must not have that side effect.
+				if _, err := os.Stat(dbPath); err != nil {
+					return false, err
+				}
+				st, err := manifest.OpenStore(dbPath)
+				if err != nil {
+					return false, err
+				}
+				defer func() { _ = st.Close() }()
+				return st.HasTracksWithCodec(ctx, codec)
+			}
 		}
 	}
 	return d

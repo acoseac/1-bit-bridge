@@ -2230,6 +2230,28 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 // the latent risk on PR #68 even though no caller exercises it
 // today; this defensive shim makes the invariant structural rather
 // than relying on every future caller to remember.
+// HasTracksWithCodec reports whether any indexed track carries the given
+// codec, matched case-insensitively against the v25 `codec` column.
+//
+// Existence-only (`LIMIT 1`), so it costs a scan that stops at the first hit
+// rather than a full COUNT — this backs a `bridge doctor` line, not a metric.
+// Suppressed duplicates and UPnP-routed rows are deliberately INCLUDED: the
+// question is "does this operator have files of this kind", which is about the
+// library, not about what `/v1` serves.
+func (s *Store) HasTracksWithCodec(ctx context.Context, codec string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM tracks WHERE codec IS NOT NULL AND lower(codec) = lower(?) LIMIT 1`,
+		codec).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("has tracks with codec: %w", err)
+	}
+	return true, nil
+}
+
 // formatColumnBinds returns SQL-nullable binds for the v25 format-fact
 // columns (sample_rate / bits_per_sample / is_dsd / codec), derived
 // from the Track's own fields. Untouched values stay nil → SQL NULL,

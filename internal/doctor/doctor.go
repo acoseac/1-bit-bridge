@@ -136,6 +136,13 @@ type Deps struct {
 	// get pasted into issues.
 	FingerprintHasAPIKey bool
 
+	// LibraryHasCodec answers "does the indexed library contain any track
+	// with this codec?". Optional: nil (a caller with no manifest to hand —
+	// a first run, or a `bridge doctor` before any scan) SKIPS the checks
+	// that depend on it rather than guessing. An error is likewise treated
+	// as "don't know", never as "no".
+	LibraryHasCodec func(ctx context.Context, codec string) (bool, error)
+
 	// LogPath is the file the service unit redirects this bridge's stderr
 	// to — packaging.DefaultLogPath(). Empty (a foreground `bridge serve`,
 	// which logs to its terminal) makes checkLogSize a no-op rather than a
@@ -576,11 +583,21 @@ func checkBrowserOpener(_ context.Context, d Deps) Check {
 // hard-to-diagnose failure. ProbeSox's FormatsKnown lets us stay
 // conservative: a confirmed FLAC-absence fails the check; an unparseable
 // `sox --help` is treated as "FLAC present" rather than crying wolf.
+// probeSox / ffmpegAvailable are the test seams for checkAudioToolchain.
+// Without them this check is untestable anywhere the host toolchain differs
+// from the case under test — and CI runners have neither binary, so the sox
+// probe would fail first and the branches below would never be reached.
+// Production MUST NOT mutate them (the soxLookPath / renameFunc convention).
+var (
+	probeSox      = transcode.ProbeSox
+	missingFFmpeg = transcode.MissingFFmpegBinaries
+)
+
 func checkAudioToolchain(ctx context.Context, d Deps) Check {
 	if !d.UpscaleEnabled && !d.AnalysisEnabled {
 		return ok(checkNameAudioToolchain, "not enabled (sox not required)")
 	}
-	info, err := transcode.ProbeSox(ctx)
+	info, err := probeSox(ctx)
 	if err != nil {
 		if errors.Is(err, transcode.ErrSoxMissing) {
 			return fail(checkNameAudioToolchain, "sox not found",
@@ -593,11 +610,51 @@ func checkAudioToolchain(ctx context.Context, d Deps) Check {
 		return fail(checkNameAudioToolchain, "sox lacks FLAC support",
 			"the installed sox build can't handle FLAC, which the bridge's internal pipeline requires; Debian/Ubuntu: `sudo apt install libsox-fmt-all`, elsewhere reinstall sox with FLAC")
 	}
+	// ALAC is the one LOSSLESS format no stock sox build can read, and it
+	// clears every upstream eligibility gate — so an operator with ALAC in
+	// the library and no ffmpeg gets a pipeline that refuses those tracks
+	// with no indication that installing one binary would fix it. Only warn
+	// when there is something to fix: the library actually holds ALAC, and
+	// upscaling (not merely analysis, which never touches ALAC) is on.
+	if missing := missingFFmpeg(); d.UpscaleEnabled && len(missing) > 0 {
+		if has, err := libraryHasALAC(ctx, d); err == nil && has {
+			// Name the binary that is actually absent. BOTH are required —
+			// ffprobe supplies the geometry the headerless pipe is described
+			// with and the duration the completeness guard compares against —
+			// and some distros package them separately, so a host with ffmpeg
+			// and no ffprobe is a real state. Telling that operator to
+			// "install ffmpeg" sends them to look at a binary they have.
+			return warn(checkNameAudioToolchain,
+				"sox present; ALAC in library but "+strings.Join(missing, " + ")+" missing",
+				"the library contains ALAC (.m4a) tracks, which no stock sox build can decode; "+
+					"the bridge decodes them with ffmpeg, which needs BOTH `ffmpeg` and `ffprobe` "+
+					"(missing here: "+strings.Join(missing, ", ")+"). Install the ffmpeg package "+
+					"(macOS: `brew install ffmpeg`; Debian/Ubuntu: `sudo apt install ffmpeg`; "+
+					"Windows: `choco install ffmpeg`) — it ships both. Everything else keeps "+
+					"working without it.")
+		}
+	}
 	if info.Version != "" {
 		return ok(checkNameAudioToolchain, fmt.Sprintf("sox %s, FLAC supported", info.Version))
 	}
 	return ok(checkNameAudioToolchain, "sox present, FLAC supported")
 }
+
+// libraryHasALAC asks the manifest whether any indexed track is ALAC.
+//
+// Returns (false, error) when the caller supplied no probe, so the ALAC
+// warning is SKIPPED rather than fired on a guess — a fresh install with no
+// scan yet must not be told to install ffmpeg for a library it hasn't read.
+func libraryHasALAC(ctx context.Context, d Deps) (bool, error) {
+	if d.LibraryHasCodec == nil {
+		return false, errUnknownLibraryCodecs
+	}
+	return d.LibraryHasCodec(ctx, "ALAC")
+}
+
+// errUnknownLibraryCodecs marks "no probe was supplied", which every caller
+// treats as "don't know" — never as "no".
+var errUnknownLibraryCodecs = errors.New("library codec probe not available")
 
 // checkFingerprintToolchain verifies the acoustic-fingerprinting fallback can
 // actually run when it is switched on.

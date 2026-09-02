@@ -187,7 +187,7 @@ type Pool struct {
 	// cancelled stub to drive the per-job timeout branch without a
 	// real sox process. Same DI shape `manifest.Store.now` uses for
 	// the clock.
-	runner func(ctx context.Context, spec JobSpec) (int64, error)
+	runner func(ctx context.Context, spec JobSpec) (int64, string, error)
 
 	// jobTimeout is the per-job deadline applied via context.WithTimeout
 	// inside processJob. Defaults to defaultJobTimeout in NewPool;
@@ -1129,7 +1129,12 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	jobCtx, cancel := context.WithTimeout(p.stopCtx, p.jobTimeout)
 	defer cancel()
 
-	size, err := p.runner(jobCtx, job.spec)
+	// `settings` comes back FROM the run rather than being rebuilt here: it
+	// records the decoder the run actually used (sox direct vs the ffmpeg
+	// pipe), which a second `SoxArgs()` call cannot know. Same reason
+	// SoxArgs hands back its temp path instead of letting callers re-derive
+	// one that can drift.
+	size, settings, err := p.runner(jobCtx, job.spec)
 	if err != nil {
 		// Drop cancellation noise — Stop() during graceful
 		// shutdown shouldn't increment the failure counter or
@@ -1192,7 +1197,6 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		return
 	}
 
-	_, settings, _, _ := job.spec.SoxArgs()
 	sidecarPath := job.spec.SidecarPath()
 
 	// Durability: flush the freshly-renamed sidecar (and its parent
