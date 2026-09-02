@@ -512,9 +512,11 @@ Distinct from `upscale_disabled`. The pool's queue cap is operator-tunable via `
 
 **Asynchronous completion**: the response returns as soon as the jobs are queued. iOS discovers completed variants via the next `/v1/manifest` sync (which advertises the new `Track.variants` entries). For pool-level visibility while jobs are in flight (queue depth, lifetime totals, failure counts) the companion `GET /v1/upscale/stats` endpoint described below serves operators and third-party tooling; for per-track completion the manifest is still the authoritative signal.
 
-### Batched upscaling (additive, since v1.3)
+### Batched upscaling (additive; `operatorDrivenUpscale`)
 
 Where `POST /v1/upscale` enqueues one track or one folder and answers with a count, the batch surface **enrols a path into a tracked batch** the operator can watch and cancel. All three endpoints answer `503 upscale_disabled` when the feature is off or the sox pre-check failed at boot, and `403 demo_read_only` on a demo bridge.
+
+Gate on the **`operatorDrivenUpscale`** feature flag: it is present only when upscaling is active **and** a batch coordinator is wired, which is exactly the condition under which these three routes do anything. A bridge without the flag either lacks the routes entirely or would answer `503`.
 
 **`POST /v1/upscale/batch`** — enrol a path.
 
@@ -558,9 +560,9 @@ Other errors: `400 bad_request` (malformed JSON, path traversal, out-of-range ta
 
 **`DELETE /v1/upscale/batches/{id}`** — cancel a batch. `{id}` is the `batchID` from the submit response. `204 No Content` on success; `400 bad_request` if `{id}` is not a UUID. Cancelling is idempotent at the wire level — a batch that has already finished still answers `204`.
 
-### `DELETE /v1/upscale/variants` (additive, since v1.3)
+### `DELETE /v1/upscale/variants` (additive; `deleteVariants`)
 
-Deletes cached variant sidecars and their rows. Three mutually-exclusive scopes:
+Deletes cached variant sidecars and their rows. Gate on the **`deleteVariants`** feature flag — present only when upscaling is active and a deleter is wired. Three mutually-exclusive scopes:
 
 | Query | Scope |
 |---|---|
@@ -576,9 +578,9 @@ Deletes cached variant sidecars and their rows. Three mutually-exclusive scopes:
 
 **Partial deletes are not rolled back.** Each (unlink, row-delete) pair is idempotent, and the `bridge upscale --gc` sweep plus the integrity watcher reap anything left behind — so a `500 internal` mid-way means "some were deleted", not "none were".
 
-### `GET /v1/renderers` (additive, since v1.4)
+### `GET /v1/renderers` (additive; `rendererDiscovery`)
 
-The bridge's SSDP MediaRenderer cache — the DLNA devices it can see on the LAN, so a phone that cannot run its own discovery (iOS Local Network permission, a filtered AP) can still list them.
+Gate on the **`rendererDiscovery`** feature flag — present only when the DLNA server is enabled and the discovery client is wired; without it the route answers `404 not_found`. The endpoint exposes the bridge's SSDP MediaRenderer cache — the DLNA devices it can see on the LAN, so a phone that cannot run its own discovery (iOS Local Network permission, a filtered AP) can still list them.
 
 ```json
 {
@@ -597,7 +599,7 @@ The bridge's SSDP MediaRenderer cache — the DLNA devices it can see on the LAN
 
 **Response** (`404 not_found`): renderer discovery is not enabled on this bridge. Gate on the `rendererDiscovery` feature flag.
 
-### `GET /v1/diagnostics` (additive, since v1.4)
+### `GET /v1/diagnostics` (additive; `diagnosticsSummary`)
 
 Counters and structured state for an operator-facing health view — **no log text**. Atomic-counter and sliding-window reads only: no SQLite queries, no subprocess spawns, so it is safe to poll.
 
