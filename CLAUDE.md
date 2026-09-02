@@ -567,9 +567,16 @@ lost my library."
   fallback is an **allowlist of the MP4 family, not "anything sox refused"**:
   lossy and DSD are already excluded upstream, so anything else reaching a
   refusal is a shape neither decoder was chosen for, and routing it would turn an
-  honest refusal into a mystery failure. `RunSox` returns the settings it
-  actually used — the persist site cannot know the route, and a forensic record
-  that names the wrong decoder is worse than one that names none.
+  honest refusal into a mystery failure. **The probe is gated on the extension**
+  — `ProbeSox` is a fork+exec (7.9 ms; `FFmpegAvailable` is 17 µs) and `RunSox`
+  documents that it does not probe per iteration, so only a source whose decoder
+  is genuinely undecided pays one. `RunSox` returns the settings it actually
+  used — the persist site cannot know the route, and a forensic record that
+  names the wrong decoder is worse than one that names none. **The doctor
+  warning names WHICH binary is absent**: `ffmpeg` and `ffprobe` are both
+  required (ffprobe supplies the pipe's geometry and the guard's duration) and
+  some distros package them apart, so blaming ffmpeg sends that operator to a
+  binary they already have.
 - **Analysis commits only on a length-complete decode**, gated by the probed
   duration — NOT exit code, `-xerror`, or stderr matching. Both decoders exit 0
   on a truncated-but-openable source, and a partial commit is keyed to

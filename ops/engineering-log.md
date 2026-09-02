@@ -3221,6 +3221,27 @@ not read. `probeSox` / `ffmpegAvailable` became seams because CI runners have
 neither binary, so the sox probe would fail first and the new branch would
 never be reached.
 
+**Two things review and self-review changed.** (a) `FFmpegAvailable` is false
+when EITHER binary is absent, but the doctor warning blamed ffmpeg — a host
+with ffmpeg and no ffprobe (some distros package them apart) was told to
+install what it already had. `MissingFFmpegBinaries` names which.
+(b) Self-caught by re-reading `RunSox`'s own docblock, which says it does not
+probe "so a worker-pool body doesn't pay the LookPath cost per iteration": the
+route decision probed unconditionally. Measured 7.9 ms per `ProbeSox` fork+exec
+against 17 µs for `FFmpegAvailable`, i.e. 1,338 needless spawns on the current
+auto-optimize backlog. Gated on the extension — negative-controlled by counting
+real `soxLookPath` calls during one FLAC job: **1 unconditional, 0 gated**.
+
+**Two review findings declined**, both recorded on the PR thread. The
+`os.Stat` before `OpenStore` is NOT redundant: `OpenStore` on a missing path
+*succeeds and creates the file* (verified), so without it a `bridge doctor`
+run on a never-scanned host leaves an empty `bridge.db` and then answers "no
+ALAC" from a database it just made — the rationale is now a comment, since the
+check does look redundant. And "move the CLAUDE.md change to direct-to-main"
+misreads that convention: it permits docs-ONLY changes to skip the branch, it
+does not forbid shipping an invariant with the code that motivates it —
+splitting them is how a rule ends up describing code that never landed.
+
 **Still open on #127** (needs an iOS half, so out of a bridge-only change):
 publishing the decoder list as a `supportedDecoders` wire field to replace
 iOS's hard-coded `upscaleSoxUnsupportedExtensions`, and the ineligibility
