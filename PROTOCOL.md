@@ -1179,13 +1179,13 @@ All errors are JSON:
 | Status | `error` code             | When                                              |
 |-------:|--------------------------|---------------------------------------------------|
 |    202 | `pending`                | Artwork / artist-image enrichment not yet cached  |
-|    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream (terminal) |
 |    400 | `bad_request`            | Malformed path, missing required query param     |
 |    400 | `range_required`         | `/v1/read` called without a `Range` header        |
 |    400 | `query_too_short`        | `GET /v1/search` with `q` shorter than 2 runes    |
 |    401 | `unauthorized`           | Missing / invalid bearer token (or pollSecret)    |
 |    403 | `forbidden`              | Valid token, insufficient scope (reserved)        |
 |    404 | `not_found`              | Path does not exist in any library root; or artwork is not cached under the requested MBID + `size` |
+|    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream (terminal) |
 |    404 | `unknown_request`        | Pairing request ID unknown / cleaned up           |
 |    404 | `pairing_not_supported`  | Bridge build doesn't expose tap-to-pair           |
 |    404 | `events_not_supported`   | Bridge build doesn't expose `/v1/events` (pre-v1.2; iOS falls back to polling) |
