@@ -18,6 +18,24 @@ must also be **untracked** (`.gitignore`), not merely relocated:
 | `audit-2026-07-18.md` | A full codebase audit — effectively an exploit index, with `file:line` and fix sketches for every finding. Actionable against any bridge whose operator hasn't upgraded yet, which is why "the fixes are merged" is not on its own sufficient. | Untracked — `.gitignore: ops/*audit*.md` |
 | `1bit-audit-2026-07-18.md` | A second, independently-run audit of the same Go bridge (`internal/*` + `cmd/bridge`, 38 packages) — same exposure as above. | Untracked — `.gitignore: ops/*audit*.md` |
 
+### Not everything here is sensitive
+
+Two different reasons put a file in `ops/`, and only the first is about secrecy:
+
+1. **It must not be published** — the table above. Host coordinates, exploit
+   indexes. These are placeholdered or untracked.
+2. **It is internal working material** — `engineering-log.md`,
+   `settings-apply-semantics.md`, `plan-*.md`. Nothing in them is sensitive;
+   they simply aren't user-facing documentation, and `docs/` is the public
+   website. They are tracked, and normal.
+
+`engineering-log.md` is the record behind every invariant in `CLAUDE.md` — the
+measurement that settled it, the alternative that was rejected, the test that
+pins it, the PR. It was extracted from `CLAUDE.md` on 2026-09-02 because that
+file is auto-loaded into every agent session and had grown to 520 KB. **Only
+`CLAUDE.md` is auto-loaded**, so a finding written only into the log never
+reaches a session: put the *rule* in `CLAUDE.md` and the *record* here.
+
 **Don't move these back into `docs/`, and don't re-`git add` the untracked ones.** If a future
 document names a live host, an IP, a port-forward, a key path, or enumerates unfixed
 weaknesses, it belongs here — and if the sensitivity is in the *content* rather than merely
