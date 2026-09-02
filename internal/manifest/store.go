@@ -1920,6 +1920,31 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		version: 42,
+		name:    "track_lyrics (one normalized lyrics document per track, served by /v1/lyrics)",
+		// One row per track — the extractor's precedence pick (sidecar .lrc
+		// > SYLT > Vorbis SYNCEDLYRICS > LRC-shaped text > .ttml > plain
+		// text > .txt). `tag` is the normalized body's content tag;
+		// source_mtime_ns / source_size describe the LYRICS SOURCE (the
+		// sidecar when the row came from one, else the audio file) so
+		// /v1/lyrics can answer 410 when THAT file drifted. CASCADE rides
+		// the tracks PK — a rename inserts a new path and drops the old row
+		// with it (the next scan re-extracts under the new path).
+		sql: `CREATE TABLE IF NOT EXISTS track_lyrics (
+			source_path     TEXT PRIMARY KEY REFERENCES tracks(path) ON DELETE CASCADE,
+			format          TEXT NOT NULL,
+			synced          INTEGER NOT NULL,
+			body            TEXT NOT NULL,
+			language        TEXT NOT NULL DEFAULT '',
+			source          TEXT NOT NULL,
+			sidecar_name    TEXT NOT NULL DEFAULT '',
+			tag             TEXT NOT NULL,
+			source_mtime_ns INTEGER NOT NULL,
+			source_size     INTEGER NOT NULL,
+			indexed_at      INTEGER NOT NULL
+		);`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -2296,6 +2321,7 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// UnenrichedTracks) would then return a stale tag contradicting
 	// the track_analysis column.
 	clone.WaveformTag = ""
+	clone.LyricsTag = ""
 	// ArtworkVersion is column-derived (spliced from the artwork_version column
 	// at read time, same as Enriched / WaveformTag) and set ONLY by the
 	// premium-cover refetch path. Zero it before the blob marshal so a caller
@@ -2693,8 +2719,16 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		return err
 	}
 	defer stmt.Close()
+	now := s.now().UnixNano()
 	for _, t := range ts {
 		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.Path); err != nil {
+			return err
+		}
+		// The stamp leg carries the lyrics row too (the v7 backfill lands
+		// here for every byte-identical tag row); indexed_at bumps ONLY
+		// when the lyrics tag changed, so an unchanged library stays out of
+		// the iOS delta.
+		if err := writeLyricsRowTx(ctx, tx, t, now); err != nil {
 			return err
 		}
 	}
@@ -2724,7 +2758,13 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rate, bits, isDSD, codec := formatColumnBinds(t)
-	_, err = s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := s.now().UnixNano()
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5)
@@ -2785,7 +2825,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- version-stale stamp leg (StampExtractorVersionBatch), which
 			-- only runs when the row was proved byte-identical.
 			audio_md5 = excluded.audio_md5
-	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, s.now().UnixNano(),
+	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5)
 	if err != nil {
 		return err
@@ -2795,8 +2835,13 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	// content-changed-but-still-suppressed upsert keeps its tombstone
 	// (the row is still absent from the served set). Runs AFTER the
 	// row write so a fresh INSERT satisfies the EXISTS.
-	_, err = s.db.ExecContext(ctx, clearTombstoneIfServedSQL, t.Path)
-	return err
+	if err := writeLyricsRowTx(ctx, tx, t, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, clearTombstoneIfServedSQL, t.Path); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpsertTrackBatch writes (or replaces) many tracks inside a single
@@ -2921,6 +2966,11 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
 			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5); err != nil {
+			return err
+		}
+	}
+	for _, t := range ts {
+		if err := writeLyricsRowTx(ctx, tx, t, now); err != nil {
 			return err
 		}
 	}
@@ -3214,6 +3264,13 @@ type TrackStat struct {
 	Size        int64
 	MTimeNS     int64
 	ArtworkMBID string
+	// The lyrics row's provenance (empty when the track has none): what
+	// the skip gate compares a sidecar's live stat against so an edited
+	// or newly-added <stem>.lrc re-extracts a file whose audio is unchanged.
+	LyricsSource        string
+	LyricsSidecarName   string
+	LyricsSourceMTimeNS int64
+	LyricsSourceSize    int64
 	// ExtractorVersion is the `extractor_version` column — the
 	// manifest.ExtractorVersion that produced the row's tags. The
 	// scan-skip gate re-extracts any row whose stamp is < the current
@@ -3252,10 +3309,14 @@ type TrackStat struct {
 func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, error) {
 	var st TrackStat
 	err := s.db.QueryRowContext(ctx, `
-		SELECT size, mtime_ns, COALESCE(json_extract(tags_json, '$.artworkMBID'), ''),
-		       extractor_version
-		FROM tracks WHERE path = ?`, path).
-		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion)
+		SELECT t.size, t.mtime_ns, COALESCE(json_extract(t.tags_json, '$.artworkMBID'), ''),
+		       t.extractor_version,
+		       COALESCE(l.source, ''), COALESCE(l.sidecar_name, ''),
+		       COALESCE(l.source_mtime_ns, 0), COALESCE(l.source_size, 0)
+		FROM tracks t LEFT JOIN track_lyrics l ON l.source_path = t.path
+		WHERE t.path = ?`, path).
+		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion,
+			&st.LyricsSource, &st.LyricsSidecarName, &st.LyricsSourceMTimeNS, &st.LyricsSourceSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -3439,6 +3500,13 @@ const variantsAggSQL = `
 // read paths.
 const waveformTagSQL = `(SELECT NULLIF(waveform_tag, '')
 	 FROM track_analysis WHERE source_path = tracks.path) AS waveform_tag`
+
+// lyricsTagSQL splices the track_lyrics content tag onto each manifest
+// row (Track.LyricsTag) — same discipline as waveformTagSQL: column-
+// derived at read time, one indexed PK point-lookup per row, NULL when
+// the track carries no lyrics.
+const lyricsTagSQL = `(SELECT NULLIF(tag, '')
+	 FROM track_lyrics WHERE source_path = tracks.path) AS lyrics_tag`
 
 // replayGainSQL is the correlated-subquery suffix that splices the
 // offline-analysis ReplayGain track gain (dB) onto each row, or NULL when
@@ -3694,7 +3762,7 @@ func trackReadPredicates(servedOnly bool, since *time.Time) (string, []any) {
 }
 
 func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly bool) ([]Track, error) {
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
 	where, args := trackReadPredicates(servedOnly, since)
 	q += where + ` ORDER BY path ASC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -3712,7 +3780,8 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 		var ktRaw sql.NullString
 		var artVer sql.NullString
 		var bkTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
+		var lyTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -3724,6 +3793,7 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
+		t.LyricsTag = lyTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisScalars(&t, ktRaw)
 		out = append(out, t)
@@ -3767,7 +3837,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		// production crash deep in the streaming-manifest path.
 		return errors.New("StreamTracks: nil callback")
 	}
-	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks`
+	q := `SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks`
 	where, args := trackReadPredicates(servedOnly, sp)
 	q += where + ` ORDER BY path ASC`
 	// **QueryContext (not Query)** so a client disconnect mid-stream
@@ -3798,7 +3868,8 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		var ktRaw sql.NullString
 		var artVer sql.NullString
 		var bkTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
+		var lyTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
 			return err
 		}
 		t = Track{}
@@ -3810,6 +3881,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
+		t.LyricsTag = lyTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisScalars(&t, ktRaw)
 		if err := fn(&t); err != nil {
@@ -3852,7 +3924,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		limit = 1000
 	}
 	q := `
-		SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag FROM tracks
+		SELECT tags_json, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + ` FROM tracks
 		WHERE path > ?`
 	if servedOnly {
 		q += ` AND dupe_suppressed = 0`
@@ -3879,7 +3951,8 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		var ktRaw sql.NullString
 		var artVer sql.NullString
 		var bkTag sql.NullString
-		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag); err != nil {
+		var lyTag sql.NullString
+		if err := rows.Scan(&raw, &enrichedAt, &variantsRaw, &wfTag, &rg, &ktRaw, &artVer, &bkTag, &lyTag); err != nil {
 			return nil, err
 		}
 		var t Track
@@ -3891,6 +3964,7 @@ func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int,
 		t.WaveformTag = wfTag.String
 		t.ArtworkVersion = artVer.String
 		t.BookletTag = bkTag.String
+		t.LyricsTag = lyTag.String
 		spliceAnalysisReplayGain(&t, rg)
 		spliceAnalysisScalars(&t, ktRaw)
 		out = append(out, t)
@@ -8523,4 +8597,126 @@ func (s *Store) CountAnalysis(ctx context.Context) (int, int64, error) {
 		return 0, 0, err
 	}
 	return count, bytes.Int64, nil
+}
+
+// LyricsRow is one track_lyrics row.
+type LyricsRow struct {
+	SourcePath    string
+	Format        string
+	Synced        bool
+	Body          string
+	Language      string
+	Source        string
+	SidecarName   string
+	Tag           string
+	SourceMTimeNS int64
+	SourceSize    int64
+}
+
+// writeLyricsRowTx persists t.lyrics inside the caller's transaction:
+// upsert when present, DELETE when the extraction found none, and a
+// strict-advance bump of the parent's indexed_at ONLY when the content
+// tag changed (appeared, changed, or vanished) — a sidecar touch that left
+// the body identical refreshes the staleness columns and nothing else, so
+// the iOS delta carries exactly the rows whose lyricsTag moved.
+func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) error {
+	var oldTag string
+	err := tx.QueryRowContext(ctx, `SELECT tag FROM track_lyrics WHERE source_path = ?`, t.Path).Scan(&oldTag)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	bump := func() error {
+		_, err := tx.ExecContext(ctx, `
+			UPDATE tracks SET indexed_at = CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END
+			WHERE path = ?`, now, now, t.Path)
+		return err
+	}
+	if t.lyrics == nil {
+		if oldTag == "" {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM track_lyrics WHERE source_path = ?`, t.Path); err != nil {
+			return err
+		}
+		return bump()
+	}
+	l := t.lyrics
+	if oldTag == l.Tag {
+		_, err := tx.ExecContext(ctx, `UPDATE track_lyrics SET source_mtime_ns = ?, source_size = ?, sidecar_name = ?, source = ?
+			WHERE source_path = ?`, l.SourceMTimeNS, l.SourceSize, l.SidecarName, l.Source, t.Path)
+		return err
+	}
+	synced := 0
+	if l.Synced {
+		synced = 1
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO track_lyrics(source_path, format, synced, body, language, source, sidecar_name, tag,
+		                         source_mtime_ns, source_size, indexed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_path) DO UPDATE SET
+			format = excluded.format, synced = excluded.synced, body = excluded.body,
+			language = excluded.language, source = excluded.source, sidecar_name = excluded.sidecar_name,
+			tag = excluded.tag, source_mtime_ns = excluded.source_mtime_ns,
+			source_size = excluded.source_size, indexed_at = excluded.indexed_at`,
+		t.Path, l.Format, synced, l.Body, l.Language, l.Source, l.SidecarName, l.Tag,
+		l.SourceMTimeNS, l.SourceSize, now); err != nil {
+		return err
+	}
+	return bump()
+}
+
+const lyricsRowSelectSQL = `SELECT source_path, format, synced, body, language, source, sidecar_name, tag,
+	source_mtime_ns, source_size FROM track_lyrics`
+
+func scanLyricsRow(sc interface{ Scan(dest ...any) error }) (*LyricsRow, error) {
+	var l LyricsRow
+	var synced int
+	if err := sc.Scan(&l.SourcePath, &l.Format, &synced, &l.Body, &l.Language, &l.Source,
+		&l.SidecarName, &l.Tag, &l.SourceMTimeNS, &l.SourceSize); err != nil {
+		return nil, err
+	}
+	l.Synced = synced != 0
+	return &l, nil
+}
+
+// GetLyrics is the exact-path read (nil, nil when the track has none).
+func (s *Store) GetLyrics(ctx context.Context, sourcePath string) (*LyricsRow, error) {
+	l, err := scanLyricsRow(s.db.QueryRowContext(ctx, lyricsRowSelectSQL+` WHERE source_path = ?`, sourcePath))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return l, err
+}
+
+// LookupLyrics resolves an iOS-shaped path the way LookupAnalysis does:
+// exact, then the normalized form, then a case-insensitive match that
+// must be unambiguous.
+func (s *Store) LookupLyrics(ctx context.Context, sourcePath string) (*LyricsRow, error) {
+	if l, err := s.GetLyrics(ctx, sourcePath); err != nil || l != nil {
+		return l, err
+	}
+	cleaned := normalizePathForLookup(sourcePath)
+	if cleaned != sourcePath {
+		if l, err := s.GetLyrics(ctx, cleaned); err != nil || l != nil {
+			return l, err
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, lyricsRowSelectSQL+`
+		WHERE unicode_lower(source_path) = unicode_lower(?) LIMIT 2`, cleaned)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	l, err := scanLyricsRow(rows)
+	if err != nil {
+		return nil, err
+	}
+	if rows.Next() {
+		return nil, nil // ambiguous under case folding — refuse to guess
+	}
+	return l, rows.Err()
 }

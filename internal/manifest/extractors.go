@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"io"
 	"math"
 	"os"
@@ -105,6 +106,11 @@ func isValidDSDSampleRate(sr uint32) bool {
 type ExtractContext struct {
 	ArtworkCacheDir string    // <dataDir>/artwork; "" disables local-art
 	FolderArtCache  *sync.Map // dir-path string -> *folderArtPromise
+	// SidecarIndex memoizes one os.ReadDir per directory per scan so the
+	// lyrics sidecar lookup (extractor AND skip gate) costs no per-file
+	// directory reads: dir-path string -> *sidecarListing. nil → an
+	// unmemoized read per call.
+	SidecarIndex *sync.Map
 	// LibraryRootDirs is the cleaned ABSOLUTE set of configured library
 	// roots — callers must supply keys in the same path form the
 	// extraction absPaths use (the scanner walks absolute paths, so a
@@ -225,7 +231,16 @@ var Ext = map[string]bool{
 // it makes any FUTURE sacd.go fix re-expand existing virtual rows.
 // Unchanged non-ISO rows ride reExtractUnchanged's diff-guard onto the
 // light version stamp, so no library-wide re-enrich wave fires.
-const ExtractorVersion = 6
+// v7 (lyrics, Mirror-PR B1): every extraction now records the file's
+// lyrics — ID3 SYLT (rendered to LRC) / USLT, Vorbis SYNCEDLYRICS /
+// UNSYNCEDLYRICS / LYRICS, MP4 ©lyr, and <stem>.lrc / .ttml / .txt
+// sidecars — into the unexported Track.lyrics → track_lyrics (migration
+// v42), advertised as Track.lyricsTag. The bump re-opens every file once
+// so already-scanned libraries gain their rows; byte-identical tag rows
+// ride the version-stamp leg, which ALSO writes the lyrics row and bumps
+// indexed_at only when the tag actually changed, so the iOS delta sees
+// exactly the rows that gained lyrics.
+const ExtractorVersion = 7
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -244,6 +259,10 @@ func ExtractWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		return err
 	}
 	fillTrackNumberFromFilename(absPath, t)
+	// Lyrics: the sidecar beside the file joins the embedded candidates
+	// the format extractors collected, then ONE document is picked.
+	applySidecarLyrics(absPath, t, ec)
+	resolveLyrics(t)
 	return nil
 }
 
@@ -586,6 +605,7 @@ func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *
 	// AlbumArtist on hit. Runs AFTER populateFromTagMetadata so the
 	// override sees dhowden's last-wins value as the baseline.
 	applyMultiValueArtistsFromRaw(m, t)
+	applyEmbeddedLyricsFromTag(m, t)
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		extractLocalArtwork(absPath, t, m, ec)
 	}
@@ -1040,6 +1060,14 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 				case "artist":
 					if v := strings.TrimSpace(tg[1]); v != "" {
 						artists = append(artists, v)
+					}
+				case "syncedlyrics", "synced lyrics", "lrc":
+					if c, ok := lyrics.TextCandidate(tg[1], "", true, 0); ok {
+						t.lyricsCandidates = append(t.lyricsCandidates, c)
+					}
+				case "lyrics", "x-lyrics", "unsyncedlyrics", "unsynced lyrics":
+					if c, ok := lyrics.TextCandidate(tg[1], "", false, 0); ok {
+						t.lyricsCandidates = append(t.lyricsCandidates, c)
 					}
 				case "albumartist", "album artist":
 					// Both spellings exist in the wild — Picard /
@@ -1813,6 +1841,7 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		m, err := tag.ReadID3v2Tags(f)
 		if err == nil && m != nil {
 			populateFromTagMetadata(m, t)
+			applyEmbeddedLyricsFromTag(m, t)
 			dsfMeta = m
 		}
 	}

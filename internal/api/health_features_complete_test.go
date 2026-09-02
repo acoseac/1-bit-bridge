@@ -32,6 +32,7 @@ var wantAllHealthFeatures = []string{
 	"favorites",
 	"keyTempo",
 	"loudness",
+	"lyrics",
 	"operatorDrivenUpscale",
 	"pairingEventsSupported",
 	"playbackHistory",
@@ -88,6 +89,7 @@ func newAllFeaturesServer(t *testing.T) *Server {
 		WithRendererDiscovery(&stubRendererDiscovery{}).
 		WithFavoritesStore(mstore).
 		WithAnalysis(func() bool { return true }, stubAnalysisStore{}).
+		WithLyrics(stubLyricsStore{}).
 		WithHistoryStore(mstore).
 		WithPlaylistStore(mstore).
 		WithSmartPlaylistStore(mstore).

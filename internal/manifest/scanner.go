@@ -1141,6 +1141,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 	// rootDirs is the per-scan roots snapshot (cleaned) so the disc-
 	// subfolder parent-art fallback can't climb out of the library.
 	ec := &ExtractContext{
+		SidecarIndex:    new(sync.Map),
 		ArtworkCacheDir: s.artDir,
 		FolderArtCache:  &s.folderArt,
 		LibraryRootDirs: rootDirs,
@@ -1238,7 +1239,8 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			if existing != nil && existing.Size == pi.info.Size() &&
 				existing.MTimeNS == pi.info.ModTime().UnixNano() {
 				if existing.ExtractorVersion >= ExtractorVersion &&
-					!s.needsLocalArtworkRecovery(existing.ArtworkMBID) {
+					!s.needsLocalArtworkRecovery(existing.ArtworkMBID) &&
+					!sidecarLyricsDrifted(pi.abs, existing, ec) {
 					// Even on the early-skip path we MUST reset the
 					// missing_count for this row, otherwise a flap-
 					// then-restore on a mtime-equal file (the exact
