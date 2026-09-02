@@ -643,8 +643,10 @@ lost my library."
   catalog and iOS already resolve through, so the fill writes the values already
   on screen and cannot regroup anything. **Fill only; never rewrite a field the
   upstream supplied**, and never persist the `dupes.UnknownArtist` /
-  `UnknownAlbum` display sentinels — they would become MusicBrainz search terms,
-  and a wrong cover looks right.
+  `UnknownAlbum` display sentinels. Persisted, they become the enricher's search
+  terms, which resolves *some* release for "Unknown Artist" and attributes its
+  cover, bio and booklet to an arbitrary track — a wrong answer that looks like
+  a right one, so nobody reports it.
 - **A routed track's variant-skip reason says "routed", and that case comes
   FIRST** — DIDL supplies no bit depth, so every routed FLAC otherwise reports
   "format unreadable" about a file whose format is perfectly well known.
