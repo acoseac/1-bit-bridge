@@ -298,6 +298,33 @@ type AnalysisLookup struct {
 // Store.LookupAnalysis (case-insensitive) so iOS-shaped lowercased
 // paths from /v1/waveform resolve against the case-preserved rows —
 // same shape + rationale as LookupVariant.
+// LyricsLookup is the provider-level view of a track_lyrics row.
+type LyricsLookup struct {
+	SourcePath    string
+	Format        string
+	Synced        bool
+	Body          string
+	Language      string
+	Source        string
+	SidecarName   string
+	Tag           string
+	SourceMTimeNS int64
+	SourceSize    int64
+}
+
+// LookupLyrics resolves an iOS-shaped path to its lyrics row, or nil.
+func (p *Provider) LookupLyrics(ctx context.Context, sourcePath string) (*LyricsLookup, error) {
+	l, err := p.store.LookupLyrics(ctx, sourcePath)
+	if err != nil || l == nil {
+		return nil, err
+	}
+	return &LyricsLookup{
+		SourcePath: l.SourcePath, Format: l.Format, Synced: l.Synced, Body: l.Body,
+		Language: l.Language, Source: l.Source, SidecarName: l.SidecarName, Tag: l.Tag,
+		SourceMTimeNS: l.SourceMTimeNS, SourceSize: l.SourceSize,
+	}, nil
+}
+
 func (p *Provider) LookupAnalysis(ctx context.Context, sourcePath string) (*AnalysisLookup, error) {
 	a, err := p.store.LookupAnalysis(ctx, sourcePath)
 	if err != nil {

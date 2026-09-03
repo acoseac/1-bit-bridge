@@ -5,7 +5,11 @@
 // schema (com.acoseac.dsdplayer/LibraryModels.swift).
 package manifest
 
-import "time"
+import (
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/lyrics"
+)
 
 // Track is the on-wire shape for a single track, matching field-for-field
 // what the iOS Track model decodes. Optional fields use pointer types so
@@ -283,6 +287,15 @@ type Track struct {
 	// ProtocolVersion stays 1; pre-feature iOS ignores the unknown key.
 	WaveformTag string `json:"waveformTag,omitempty"`
 
+	// LyricsTag, when non-empty, advertises that GET /v1/lyrics?path=…
+	// serves a lyrics document for this track (Mirror-PR B1, additive —
+	// ProtocolVersion stays 1). The first 8 hex of the NORMALIZED body's
+	// SHA-256, so an edited sidecar or a re-tagged file re-keys and a
+	// client caching by tag re-fetches. Column-derived like WaveformTag:
+	// spliced from track_lyrics at read time (lyricsTagSQL), zeroed by
+	// marshalForStorage, never persisted in tags_json.
+	LyricsTag string `json:"lyricsTag,omitempty"`
+
 	// replayGainFromAnalysis is an internal, NON-WIRE marker (unexported ⇒
 	// json ignores it) set by spliceAnalysisReplayGain when it fills
 	// ReplayGainTrackDB from `track_analysis` because the source carried
@@ -329,6 +342,18 @@ type Track struct {
 	// unexported field, so every unchanged row takes that leg — the
 	// column would otherwise stay empty forever).
 	audioMD5 string
+
+	// lyrics is the resolved lyrics document the extractor found for this
+	// file — the one row `track_lyrics` holds. Unexported: it travels from
+	// the extractor into the store on BOTH write legs (upsert + the
+	// version-stamp leg, like audioMD5) and is never marshaled. nil = the
+	// file carries none (the store DELETES any stale row).
+	lyrics *extractedLyrics
+	// lyricsCandidates collects every source seen during one extraction;
+	// resolveLyrics picks one and clears it.
+	lyricsCandidates []lyrics.Candidate
+	// lyricsSidecar remembers the sidecar's stat for the staleness columns.
+	lyricsSidecar *sidecarStat
 }
 
 // Variant is one cached alternate rendering of a Track's source. The

@@ -375,6 +375,24 @@ func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath st
 // manifest.Store. Translates between manifest.VariantRow and
 // api.VariantSummary (the api-package-local projection). Same
 // upward-cycle-avoidance pattern variantStoreAdapter uses.
+// lyricsStoreAdapter implements api.LyricsStore on top of the manifest
+// provider — the sibling of analysisStoreAdapter.
+type lyricsStoreAdapter struct {
+	provider *manifest.Provider
+}
+
+func (a *lyricsStoreAdapter) LookupLyrics(ctx context.Context, sourcePath string) (*api.LyricsRecord, error) {
+	l, err := a.provider.LookupLyrics(ctx, sourcePath)
+	if err != nil || l == nil {
+		return nil, err
+	}
+	return &api.LyricsRecord{
+		SourcePath: l.SourcePath, Format: l.Format, Synced: l.Synced, Body: l.Body,
+		Language: l.Language, Source: l.Source, SidecarName: l.SidecarName, Tag: l.Tag,
+		SourceMTimeNS: l.SourceMTimeNS, SourceSize: l.SourceSize,
+	}, nil
+}
+
 type variantDeleterAdapter struct {
 	store *manifest.Store
 }
@@ -2688,6 +2706,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			return upscaleActiveFn() && liveCfg().Upscale.EffectiveOptimizeEnabled()
 		}).
 		WithAnalysis(analysisActiveFn, &analysisStoreAdapter{provider: provider}).
+		WithLyrics(&lyricsStoreAdapter{provider: provider}).
 		WithAnalysisStats(&analysisStatsAdapter{
 			enabled: analysisActiveFn,
 			store:   manifestStore,

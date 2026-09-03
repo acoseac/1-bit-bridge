@@ -923,6 +923,54 @@ Authenticated read-only snapshot of the analysis feature, mirroring the admin ti
 - `analysis.enabled: true` AND `sox` on PATH: full feature operates as documented (`waveform` + `loudness` + `keyTempo`).
 - `analysis.enabled: true` AND `sox` MISSING from PATH: bridge logs `.error` at startup, in-memory disables the feature, omits the `waveform`, `loudness`, and `keyTempo` flags. The rest of the server keeps running.
 
+### Lyrics (additive — Mirror-PR B1, v2.0)
+
+**`GET /v1/lyrics?path=<rel>`** serves ONE normalized lyrics document per
+track — the scanner's precedence pick across every source the file carries:
+a sidecar `<stem>.ttml` (word timing, agents, background vocals,
+translations) > a sidecar `<stem>.lrc` (the user's explicit override) > ID3
+`SYLT` (rendered to LRC; a run of syllable entries becomes ONE line carrying
+enhanced `<mm:ss.xxx>` word tags) > Vorbis `SYNCEDLYRICS` > LRC-shaped
+`USLT` / `©lyr` / `LYRICS` text > plain `USLT` / `©lyr` / `LYRICS` /
+`UNSYNCEDLYRICS` > `<stem>.txt` — the same order the app's own sidecar pick
+uses. Sidecars match by case-folded
+stem; only UTF-8 (with or without a BOM) and BOM-marked UTF-16 sidecars are
+read — a legacy-encoded (GB18030 / Shift_JIS) sidecar is left to the
+client's own sidecar tier, which reads the file directly and runs its
+encoding ladder.
+
+Manifest: `Track.lyricsTag` (`omitempty`) — the first 8 hex of the SHA-256
+over the CANONICAL document: `format`, `synced`, `language` and the
+NORMALIZED body (BOM stripped, CRLF→LF, NFC, trailing whitespace trimmed per
+line), so every client-visible field re-keys it. Column-derived at read time
+like `waveformTag`; absent = no lyrics. A row whose tag changed (appeared,
+changed, vanished) bumps its `indexed_at`, so a delta sync carries exactly
+the tracks whose lyrics moved; an edited sidecar under an unchanged audio
+file re-extracts on the next scan (the skip gate compares the sidecar's live
+stat), and a tag-identical re-extraction bumps nothing. A sidecar that
+yields no document (empty, oversized, legacy-encoded) is remembered by its
+stat only — no tag, no endpoint — so it never re-extracts the audio file
+until it changes.
+
+Response `200`, `Content-Type: application/json`:
+
+```json
+{"format": "lrc", "synced": true, "body": "[00:01.000]First line\n[00:04.500]Second", "language": "en"}
+```
+
+`format` is `lrc` | `text` | `ttml`; `language` (BCP-47) is omitted when
+unknown. Headers: `ETag: "<lyricsTag>"` + `Cache-Control: private,
+no-cache`; a matching `If-None-Match` answers `304`. `404 lyrics_not_found`
+when the bridge has no lyrics feature or the track has none; `410
+lyrics_stale` when the LYRICS SOURCE drifted since extraction — the
+sidecar's mtime/size when the row came from one, else the audio file's,
+under the same 2 s mtime tolerance as `/v1/waveform`. Bodies are ≤ 512 KiB.
+
+Feature flag: `lyrics` in `/v1/health` `features` (between `loudness` and
+`operatorDrivenUpscale`). `ProtocolVersion` stays 1 — a pre-lyrics client
+ignores `lyricsTag` and never calls the endpoint; a pre-lyrics bridge
+advertises no flag and the client's other tiers stand in.
+
 ### Atlas rich-tier metadata (additive — Phase 2)
 
 Optional artist-bio / album-description / genre enrichment from a self-hosted **Atlas** service (`github.com/acoseac/1-bit-atlas`), enabled via `atlas.enabled: true` in `bridge.yaml`. Disabled by default. **The open-source bridge never holds an Atlas credential.** The closed-source 1-bit app holds the Atlas `read:bridge` key, fetches per-entity rich metadata from Atlas, and **ferries it into the bridge**, which caches it (in standalone `release_atlas` / `artist_atlas` SQLite tables, MBID-keyed, never spliced into the manifest) and serves it back to all the user's devices. `ProtocolVersion` stays `1`.

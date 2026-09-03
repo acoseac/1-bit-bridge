@@ -245,6 +245,8 @@ func (s *Server) routeRegistry() []route {
 		// The spectrum is ~84 bytes — boundedRoute like its waveform
 		// sibling, never a streamingRoute.
 		{pattern: "GET /v1/spectrum", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.spectrum)},
+		// A lyrics document is ≤ 512 KiB JSON — bounded like its siblings.
+		{pattern: "GET /v1/lyrics", kind: boundedRoute, rateClass: rateNone, handler: s.authed(s.lyrics)},
 		{pattern: "GET /v1/analysis/stats", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(2*time.Second, s.authed(s.analysisStats))},
 
 		// Upscale — small JSON responses on every endpoint

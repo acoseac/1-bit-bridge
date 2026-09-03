@@ -137,6 +137,7 @@ type Server struct {
 	upscaleEnqueuer        UpscaleEnqueuer              // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
 	upscaleStatsProvider   UpscaleStatsProvider         // nil unless WithUpscaleStats wired (v1.2 management UI)
 	analysisStore          AnalysisStore                // nil unless WithAnalysis(true, as) called — /v1/waveform lookup
+	lyricsStore            LyricsStore                  // nil unless WithLyrics wired — /v1/lyrics lookup + the "lyrics" health flag
 	analysisEnabled        func() bool                  // LIVE; mirrors cfg.Analysis.Enabled AND the sox probe — gates the "waveform" health feature flag
 	analysisStatsProvider  AnalysisStatsProvider        // nil unless WithAnalysisStats wired — /v1/analysis/stats
 	batchCoordinator       BatchCoordinator             // nil unless WithBatchCoordinator wired (v1.3 operator-driven upscale)
@@ -695,6 +696,15 @@ func (s *Server) WithAnalysis(enabled func() bool, as AnalysisStore) *Server {
 }
 
 // analysisActive reports whether the analysis surface should answer.
+// WithLyrics attaches the track_lyrics lookup behind GET /v1/lyrics and
+// advertises the `lyrics` health feature. Optional; nil = the route
+// answers 404 lyrics_not_found and the flag is absent (a pre-lyrics
+// bridge shape).
+func (s *Server) WithLyrics(ls LyricsStore) *Server {
+	s.lyricsStore = ls
+	return s
+}
+
 func (s *Server) analysisActive() bool {
 	return s.analysisEnabled != nil && s.analysisEnabled()
 }
@@ -1651,10 +1661,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 24 covers the current maximum
+	// appends in lex order. Capacity 26 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaServer + favorites + keyTempo +
-	// loudness + operatorDrivenUpscale + pairingEventsSupported +
+	// loudness + lyrics + operatorDrivenUpscale + pairingEventsSupported +
 	// playbackHistory + playbackHistoryRead + playlistBackup +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
 	// search + smartPlaylists + spectrum + trackQuality +
@@ -1663,7 +1673,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 25)
+	feats := make([]string, 0, 26)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1733,6 +1743,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// analysis-active gate as `waveform`. Alpha-sorted between
 		// `keyTempo` and `operatorDrivenUpscale` (k < l < o).
 		feats = append(feats, "loudness")
+	}
+	// `lyrics` advertises GET /v1/lyrics?path=… plus the additive
+	// Track.lyricsTag (Mirror-PR B1). Gated on the store being wired, not
+	// on analysis. Alpha-sorted between `loudness` and
+	// `operatorDrivenUpscale` (lo < ly < o).
+	if s.lyricsStore != nil {
+		feats = append(feats, "lyrics")
 	}
 	if s.upscaleActive() {
 		if s.batchCoordinator != nil {
