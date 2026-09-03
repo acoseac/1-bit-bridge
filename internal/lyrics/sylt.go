@@ -248,19 +248,26 @@ func ToLRC(s SYLT) (string, bool) {
 			current = append(current, SYLTEntry{Millis: e.Millis, Text: text})
 			continue
 		}
-		// A truly EMPTY entry is a clear event — it ends whatever line is
-		// open and renders as an empty timed line (the LRC shape the phone
-		// reads as "nothing is sung now"). The dummy "" at 0 ms many
-		// writers prepend is not: nothing precedes it. A bare newline entry
-		// is only a line break.
-		if !leading && !trailing {
+		if isClearEvent(leading, trailing, e.Millis, len(lines)) {
 			flush()
-			if e.Millis > 0 || len(lines) > 0 {
-				lines = append(lines, "["+lrcTime(e.Millis)+"]")
-			}
+			lines = append(lines, "["+lrcTime(e.Millis)+"]")
+		} else if !leading && !trailing {
+			flush()
 		}
 		nextStartsLine = true
 	}
 	flush()
 	return strings.Join(lines, "\n"), wordTimed
+}
+
+// isClearEvent: a truly EMPTY entry (no newline marker) is a clear event —
+// it ends whatever line is open and renders as an empty timed line (the
+// LRC shape the phone reads as "nothing is sung now"). The dummy "" at
+// 0 ms many writers prepend is not: nothing precedes it. A bare newline
+// entry is only a line break.
+func isClearEvent(leading, trailing bool, millis int64, linesSoFar int) bool {
+	if leading || trailing {
+		return false
+	}
+	return millis > 0 || linesSoFar > 0
 }

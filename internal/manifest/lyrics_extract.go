@@ -183,6 +183,13 @@ func applySidecarLyrics(absPath string, t *Track, ec *ExtractContext) {
 	if !ok {
 		return
 	}
+	t.lyricsCandidates = append(t.lyricsCandidates, sidecarCandidate(name, body))
+}
+
+// sidecarCandidate classifies a sidecar's normalized body by its extension:
+// a tagged .lrc is synced LRC, a tagless one plain text, .ttml is TTML,
+// anything else plain text.
+func sidecarCandidate(name, body string) lyrics.Candidate {
 	var c lyrics.Candidate
 	switch sidecarSource(name) {
 	case lyrics.SourceSidecarLRC:
@@ -190,7 +197,6 @@ func applySidecarLyrics(absPath string, t *Track, ec *ExtractContext) {
 			c = lyrics.Candidate{Source: lyrics.SourceSidecarLRC,
 				Doc: lyrics.Doc{Format: lyrics.FormatLRC, Synced: true, Body: body}}
 		} else {
-			// A tagless .lrc is plain text and ranks as such.
 			c = lyrics.Candidate{Source: lyrics.SourceSidecarText,
 				Doc: lyrics.Doc{Format: lyrics.FormatText, Synced: false, Body: body}}
 		}
@@ -202,7 +208,7 @@ func applySidecarLyrics(absPath string, t *Track, ec *ExtractContext) {
 			Doc: lyrics.Doc{Format: lyrics.FormatText, Synced: false, Body: body}}
 	}
 	c.SidecarName = name
-	t.lyricsCandidates = append(t.lyricsCandidates, c)
+	return c
 }
 
 // iso639ToBCP47 maps the three-letter ID3 language code to the tag the

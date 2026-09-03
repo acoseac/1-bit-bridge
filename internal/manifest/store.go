@@ -8680,8 +8680,16 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 	return bump()
 }
 
-const lyricsRowSelectSQL = `SELECT source_path, format, synced, body, language, source, sidecar_name, tag,
-	source_mtime_ns, source_size FROM track_lyrics`
+// Two FULL literals rather than a shared prefix + suffix: a concatenated
+// query — even of two constants — trips SonarCloud's S2077 (the same class
+// the deletion-journal SQL was hand-marked for); spelling both out costs
+// one duplicated column list and nothing else.
+const lyricsRowByPathSQL = `SELECT source_path, format, synced, body, language, source, sidecar_name, tag,
+	source_mtime_ns, source_size FROM track_lyrics WHERE source_path = ?`
+
+const lyricsRowByFoldedPathSQL = `SELECT source_path, format, synced, body, language, source, sidecar_name, tag,
+	source_mtime_ns, source_size FROM track_lyrics
+	WHERE unicode_lower(source_path) = unicode_lower(?) LIMIT 2`
 
 func scanLyricsRow(sc interface{ Scan(dest ...any) error }) (*LyricsRow, error) {
 	var l LyricsRow
@@ -8696,7 +8704,7 @@ func scanLyricsRow(sc interface{ Scan(dest ...any) error }) (*LyricsRow, error) 
 
 // GetLyrics is the exact-path read (nil, nil when the track has none).
 func (s *Store) GetLyrics(ctx context.Context, sourcePath string) (*LyricsRow, error) {
-	l, err := scanLyricsRow(s.db.QueryRowContext(ctx, lyricsRowSelectSQL+` WHERE source_path = ?`, sourcePath))
+	l, err := scanLyricsRow(s.db.QueryRowContext(ctx, lyricsRowByPathSQL, sourcePath))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -8716,8 +8724,7 @@ func (s *Store) LookupLyrics(ctx context.Context, sourcePath string) (*LyricsRow
 			return l, err
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, lyricsRowSelectSQL+`
-		WHERE unicode_lower(source_path) = unicode_lower(?) LIMIT 2`, cleaned)
+	rows, err := s.db.QueryContext(ctx, lyricsRowByFoldedPathSQL, cleaned)
 	if err != nil {
 		return nil, err
 	}

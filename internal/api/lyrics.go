@@ -71,6 +71,9 @@ func lyricsSourceDrifted(rec *LyricsRecord, source os.FileInfo) bool {
 // etagMatches implements If-None-Match's weak comparison (RFC 9110 §13.1.2):
 // `*` matches any current representation and a `W/` prefix is ignored.
 func etagMatches(header, etag string) bool {
+	if header == "" {
+		return false
+	}
 	for _, candidate := range strings.Split(header, ",") {
 		c := strings.TrimSpace(candidate)
 		if c == "*" || strings.TrimPrefix(c, "W/") == etag {
@@ -120,7 +123,7 @@ func (s *Server) lyrics(w http.ResponseWriter, r *http.Request) {
 	etag := `"` + rec.Tag + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-cache")
-	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, etag) {
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
