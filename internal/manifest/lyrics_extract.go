@@ -36,9 +36,9 @@ type sidecarStat struct {
 }
 
 // sidecarLyricsExts in the order the skip gate and the extractor both
-// prefer (lyrics.Source ranks make .ttml lose to LRC-shaped embedded
-// sources; the ORDER here only decides which single file we read).
-var sidecarLyricsExts = []string{".lrc", ".ttml", ".txt"}
+// prefer — the same order as lyrics.Source's ranks (.ttml > .lrc > .txt),
+// so the single file we read is the one that would win the pick.
+var sidecarLyricsExts = []string{".ttml", ".lrc", ".txt"}
 
 type sidecarListing struct {
 	once  sync.Once

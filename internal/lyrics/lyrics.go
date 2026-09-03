@@ -42,29 +42,32 @@ type Doc struct {
 type Source string
 
 const (
+	SourceSidecarTTML  Source = "sidecar-ttml"
 	SourceSidecarLRC   Source = "sidecar-lrc"
 	SourceSYLT         Source = "sylt"
 	SourceVorbisSynced Source = "vorbis-synced"
 	SourceTextLRC      Source = "text-lrc" // USLT / ©lyr / LYRICS whose text is LRC-shaped
-	SourceSidecarTTML  Source = "sidecar-ttml"
 	SourceTextPlain    Source = "text"
 	SourceSidecarText  Source = "sidecar-txt"
 )
 
-// Rank orders sources; TTML sits below the synced LRC-shaped sources until
-// clients parse it (the app's TTML parser is a later PR — a bridge picking
-// a `.ttml` over a `.lrc` today would hand the phone nothing it can show).
+// Rank orders sources. A `.ttml` sidecar leads (word timing, agents,
+// background vocals, translations — richer than any LRC), then `.lrc`,
+// then the embedded synchronized tags, then LRC-shaped text, plain text,
+// `.txt`. Mirror B2 of the app's PR-7: the phone's sidecar pick prefers
+// `.ttml` in the same release, so the two sides never disagree about which
+// file a track's lyrics come from.
 func (s Source) Rank() int {
 	switch s {
-	case SourceSidecarLRC:
-		return 0
-	case SourceSYLT:
-		return 1
-	case SourceVorbisSynced:
-		return 2
-	case SourceTextLRC:
-		return 3
 	case SourceSidecarTTML:
+		return 0
+	case SourceSidecarLRC:
+		return 1
+	case SourceSYLT:
+		return 2
+	case SourceVorbisSynced:
+		return 3
+	case SourceTextLRC:
 		return 4
 	case SourceTextPlain:
 		return 5

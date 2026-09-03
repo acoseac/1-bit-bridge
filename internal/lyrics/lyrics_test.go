@@ -87,16 +87,16 @@ func TestPickPrecedenceAndTies(t *testing.T) {
 	ttml := Candidate{Source: SourceSidecarTTML, Doc: Doc{Format: FormatTTML, Synced: true, Body: "<tt/>"}}
 	txt := Candidate{Source: SourceSidecarText, Doc: Doc{Format: FormatText, Body: "T"}}
 	got, _ := Pick([]Candidate{txt, plain, ttml, lrc, sylt, sidecar})
+	if got.Source != SourceSidecarTTML {
+		t.Fatalf("sidecar .ttml must win: %v", got.Source)
+	}
+	got, _ = Pick([]Candidate{txt, plain, lrc, sylt, sidecar})
 	if got.Source != SourceSidecarLRC {
-		t.Fatalf("sidecar .lrc must win: %v", got.Source)
+		t.Fatalf("sidecar .lrc beats every embedded source: %v", got.Source)
 	}
 	got, _ = Pick([]Candidate{plain, lrc, sylt})
 	if got.Source != SourceSYLT {
 		t.Fatalf("SYLT beats LRC-shaped text: %v", got.Source)
-	}
-	got, _ = Pick([]Candidate{plain, ttml, lrc})
-	if got.Source != SourceTextLRC {
-		t.Fatalf("an LRC-shaped tag beats a .ttml until clients parse TTML: %v", got.Source)
 	}
 	got, _ = Pick([]Candidate{txt, plain})
 	if got.Source != SourceTextPlain {

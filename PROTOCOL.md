@@ -927,11 +927,13 @@ Authenticated read-only snapshot of the analysis feature, mirroring the admin ti
 
 **`GET /v1/lyrics?path=<rel>`** serves ONE normalized lyrics document per
 track — the scanner's precedence pick across every source the file carries:
-a sidecar `<stem>.lrc` (the user's explicit override) > ID3 `SYLT` (rendered
-to LRC; a run of syllable entries becomes ONE line carrying enhanced
-`<mm:ss.xxx>` word tags) > Vorbis `SYNCEDLYRICS` > LRC-shaped `USLT` /
-`©lyr` / `LYRICS` text > a `<stem>.ttml` sidecar > plain `USLT` / `©lyr` /
-`LYRICS` / `UNSYNCEDLYRICS` > `<stem>.txt`. Sidecars match by case-folded
+a sidecar `<stem>.ttml` (word timing, agents, background vocals,
+translations) > a sidecar `<stem>.lrc` (the user's explicit override) > ID3
+`SYLT` (rendered to LRC; a run of syllable entries becomes ONE line carrying
+enhanced `<mm:ss.xxx>` word tags) > Vorbis `SYNCEDLYRICS` > LRC-shaped
+`USLT` / `©lyr` / `LYRICS` text > plain `USLT` / `©lyr` / `LYRICS` /
+`UNSYNCEDLYRICS` > `<stem>.txt` — the same order the app's own sidecar pick
+uses. Sidecars match by case-folded
 stem; only UTF-8 (with or without a BOM) and BOM-marked UTF-16 sidecars are
 read — a legacy-encoded (GB18030 / Shift_JIS) sidecar is left to the
 client's own sidecar tier, which reads the file directly and runs its

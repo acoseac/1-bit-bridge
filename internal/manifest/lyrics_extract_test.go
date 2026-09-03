@@ -175,6 +175,21 @@ func TestSidecarLRCWinsAndDriftIsDetected(t *testing.T) {
 	if !sidecarLyricsDrifted(p, st, nil) {
 		t.Fatal("a vanished sidecar must read as drift")
 	}
+	// A .ttml beside the .lrc wins the pick (and the skip gate reads it as
+	// drift for an .lrc-sourced row).
+	ttmlSide := filepath.Join(dir, "Track One.ttml")
+	if err := os.WriteFile(ttmlSide, []byte(`<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="1s" end="2s">Hi</p></div></body></tt>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := extractLyrics(t, p); got == nil || got.Source != string(lyrics.SourceSidecarTTML) || got.Format != lyrics.FormatTTML {
+		t.Fatalf(".ttml beats .lrc: %+v", got)
+	}
+	if !sidecarLyricsDrifted(p, st, nil) {
+		t.Fatal("a .ttml appearing beside an .lrc-sourced row is drift")
+	}
+	if err := os.Remove(ttmlSide); err != nil {
+		t.Fatal(err)
+	}
 	// Embedded-sourced row: a .txt beside it never outranks it; a .lrc does.
 	emb := &TrackStat{LyricsSource: string(lyrics.SourceSYLT)}
 	if err := os.WriteFile(filepath.Join(dir, "Track One.txt"), []byte("plain"), 0o644); err != nil {
