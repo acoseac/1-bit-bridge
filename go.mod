@@ -7,7 +7,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/mdns v1.0.7
-	github.com/mewkiz/flac v1.0.13
+	github.com/mewkiz/flac v1.0.14
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
 	github.com/quic-go/quic-go v0.61.0
