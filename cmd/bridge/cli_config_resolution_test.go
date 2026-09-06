@@ -93,21 +93,24 @@ func stripGoComments(src string) string {
 				i++
 			}
 		case str, runeLit:
-			b.WriteByte(c)
+			// Contents dropped, delimiters kept. A production file whose
+			// error text or log message happens to contain "config.Load("
+			// is not a caller, and a guard that cries wolf gets deleted —
+			// which is the outcome this exists to prevent.
 			q := byte('"')
 			if state == runeLit {
 				q = '\''
 			}
 			if c == '\\' && i+1 < len(src) {
 				i++
-				b.WriteByte(src[i])
 			} else if c == q {
 				state = code
+				b.WriteByte(c)
 			}
 		case rawStr:
-			b.WriteByte(c)
 			if c == '`' {
 				state = code
+				b.WriteByte(c)
 			}
 		}
 	}
@@ -132,6 +135,39 @@ func stripGoComments(src string) string {
 // install, not on each command succeeding outright: `bridge optimize` still
 // legitimately refuses when `upscale.enabled` is false, and conflating the two
 // refusals is how the original defect stayed readable as "expected".
+
+// TestStripGoCommentsDropsProseAndLiterals pins the two things the guard's
+// scanner has to get right, because both were review findings rather than
+// hypotheticals.
+//
+// Comments: this package's commentary names the symbols it discusses — the very
+// fix that prompted the guard is explained in a comment mentioning
+// config.Load — so a raw text scan reports its own documentation as a caller.
+//
+// String contents: a production file whose error text or log message happens to
+// contain the call spelling is not a caller either. A guard that cries wolf gets
+// deleted, which is the outcome it exists to prevent. (Gemini, PR #853.)
+func TestStripGoCommentsDropsProseAndLiterals(t *testing.T) {
+	src := "package p\n" +
+		"// we deliberately avoid config.Load( here\n" +
+		"/* and config.Load( in a block comment */\n" +
+		"var msg = \"use config.Load( carefully\"\n" +
+		"var raw = `also config.Load( in a raw string`\n" +
+		"func f() { realCall() }\n"
+	got := stripGoComments(src)
+	if strings.Contains(got, "config.Load(") {
+		t.Errorf("stripGoComments left a config.Load( mention that is prose or literal text:\n%s", got)
+	}
+	if !strings.Contains(got, "realCall()") {
+		t.Errorf("stripGoComments dropped actual code:\n%s", got)
+	}
+
+	// And it must NOT hide a real call — the guard is worthless if the
+	// stripper eats the thing it is looking for.
+	if !strings.Contains(stripGoComments("package p\nfunc f() { config.Load(x) }\n"), "config.Load(") {
+		t.Error("stripGoComments removed a genuine call")
+	}
+}
 
 // TestTokenCmdResolvesPlatformConfigWithoutExplicitFlag pins the token tail.
 func TestTokenCmdResolvesPlatformConfigWithoutExplicitFlag(t *testing.T) {
