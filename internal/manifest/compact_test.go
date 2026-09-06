@@ -290,7 +290,19 @@ func TestCompactMeasuresTheWALToo(t *testing.T) {
 	}
 	defer s.Close()
 	ctx := context.Background()
-	seedForCompact(t, s, 2000)
+	// Small on purpose. The discriminating assertion only needs the WAL to
+	// be NON-EMPTY — a `before` measured from the main file alone is then
+	// already short by walBytes — so there is no reason to build the
+	// 131 MB WAL the first version of this fixture did. That version put
+	// real pressure on the temp volume under -race, which is its own
+	// hazard on a constrained runner and cost this batch a wedged gate.
+	//
+	// The ~10 s runtime is NOT the data volume and does not shrink with
+	// it: it is `busy_timeout(5000)` twice over, once for each checkpoint
+	// the held snapshot refuses. That wait is the point — the busy branch
+	// is the only place the clamp below can be observed — so don't
+	// "optimise" it by releasing the reader early.
+	seedForCompact(t, s, 200)
 
 	// The fixture has to REACH the state, or it pins nothing: reverting
 	// `before` to the main file alone leaves a test green unless the WAL
@@ -313,7 +325,7 @@ func TestCompactMeasuresTheWALToo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 1500; i++ {
+	for i := 0; i < 120; i++ {
 		if err := s.DeleteTrack(ctx, fmt.Sprintf("Artist%02d/Album/%05d Track.flac", i%20, i)); err != nil {
 			t.Fatalf("delete %d: %v", i, err)
 		}
