@@ -1077,7 +1077,7 @@ Releases *are* wired up: `.github/workflows/release.yml` runs goreleaser on tag 
 **Public-facing prose names the project entity as `ars.md`, not `acoseac`** (set 2026-06-02, PR #344). In any reader-facing text — the `1-bit.app/bridge/*` pages (in the `1bitapp` repo), README prose, GitHub release notes, the App Store description — refer to the entity that runs no backend / receives no data as **ars.md**. (This was named to match the former `support@ars.md` contact. The contact is now `support@1-bit.app` and the site is `coseac.swiss`, so the rationale is obsolete. The rule is unchanged pending a deliberate review of the entity name.) `acoseac` is reserved for things that are genuine identifiers and MUST stay verbatim: GitHub repo URLs (`github.com/acoseac/…`), the `acoseac.github.io` Pages domain, shields.io badge URLs, and the launchd / log / bundle identifiers (`com.acoseac.*`). The author's personal name "Arsenie Coseac" in footers also stays. Don't sweep-rename `acoseac` blindly — distinguish prose from identifiers.
 ## External consultation (Gemini)
 
-When you hit a non-obvious decision — Go concurrency subtleties, tsnet integration nuances, framework version-specific behaviors, algorithm tradeoffs that aren't covered in this CLAUDE.md or visible in the code — **formulate a focused question and share it with the user before implementing**. The user routes high-leverage queries through Gemini and relays the response back. The cost of one extra round-trip is small; the cost of shipping wrong is bot reviews, follow-up PRs, regressions visible to operators running the bridge.
+When you hit a non-obvious decision — Go concurrency subtleties, tsnet integration nuances, framework version-specific behaviors, algorithm tradeoffs that aren't covered in this CLAUDE.md or visible in the code — **consult rather than guess**. Two routes, and prefer the first: **`python3 ~/dev/gemini-review/consult.py --question-file q.md --context <file>`** sends one focused question directly (key at `~/dev/gemini.api`, header-only, never logged) and comes back in seconds, so a question no longer has to interrupt the work; **or** formulate the question and share it with the user, who routes it through Gemini and relays the response back. The direct route is what makes "don't stop, resolve it" achievable — see [docs/LoupeReviewCycle.md](docs/LoupeReviewCycle.md) § "Consulting mid-run". The cost of one extra round-trip is small; the cost of shipping wrong is bot reviews, follow-up PRs, regressions visible to operators running the bridge.
 
 The pattern that works:
 1. Diagnose the problem in your own words first — don't outsource the thinking.
@@ -1100,6 +1100,36 @@ The same "verify before acting" rule the DeepSeek triage runs on applies to the 
 Take the accurate half of a wrong finding when there is one — the backslash and Windows-fixture cases both yielded a useful test even though the proposed code change was rejected. And **reply on the thread with the evidence when declining**, so the same claim doesn't cost a fresh investigation next quarter.
 
 **Merging with review comments outstanding is a process failure, not a shortcut.** PRs #562 / #563 / #564 (2026-07-22) each merged with one commit and no fix round — #563 nine minutes after its review landed, #564 while a comment was still in flight. That deferred one Major (the FLAC preflight double-read, #568) and one High (unvalidated updater asset URLs, #569) into a separate remediation batch, and both were real. The documented loop — *"don't merge after round 1 — expect 2 rounds minimum"* — is what catches this; a same-day 9-PR batch is exactly when it gets skipped and exactly when it matters.
+
+## LOUPE — the recent-work review cycle (user-invoked by name)
+
+Full procedure: **[docs/LoupeReviewCycle.md](docs/LoupeReviewCycle.md)** — the
+bridge-side twin of the iOS repo's `docs/LoupeReviewCycle.md`. When the user says
+*"run LOUPE on last week"* / *"LOUPE the last N commits"* / *"LOUPE the enrich
+package"* / *"LOUPE since v0.1.9"*, that is a request for the whole loop: scope
+the window (or the package) → review it from two directions (PRISM batches +
+targeted read-only agents) → triage every finding against the code and the
+invariants in `## Things that have bitten before` → one written plan with its
+rejections → plan review → ship as file-disjoint PRs, **one per script run**,
+each negative-controlled red-first (`-count=1`, never a cached PASS) → bot sweep
+across all FOUR bots (Gemini, CodeRabbit, SonarCloud, **CodeQL**) with
+evidence-backed declines → merge → the `make fmt vet test build-all` gate → a
+dated CLAUDE.md entry → a deploy-and-journal field loop, where
+`journalctl -u 1-bit-bridge` outranks anything this file claims.
+
+**It runs end to end without stopping for approval**, and a *question* is not a
+stopping condition — measure it (module source under `$(go env GOMODCACHE)`, a
+three-line probe, `-gcflags=-m`, `go test -race`, a fuzz target), then consult
+Gemini over the API, then decide and record the decision. Escalate only for
+product direction, a production deploy, a wire change that commits the iOS side
+(the Mirror-PR contract above), or a refusal condition.
+
+It is the third named procedure beside PRISM (bug review) and VISTA (design
+briefs), and it uses PRISM as one phase. **The Gemini API key lives at
+`~/dev/gemini.api`** (override `GEMINI_API_KEY_FILE`), is sent as an
+`x-goog-api-key` header, and must never reach a URL, a log, or a commit; the
+three harnesses (`consult.py`, `relay.py`, `prism.py`) live at
+`~/dev/gemini-review/`, outside both repos, and work from here unchanged.
 
 ## External code review (DeepSeek sweep)
 
