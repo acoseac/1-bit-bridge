@@ -1302,6 +1302,16 @@ type Server struct {
 	coverage   atomic.Pointer[coverageSnapshot]
 	coverageSF singleflight.Group
 
+	// dbStats caches the database-accounting + retention row counts on
+	// GET /api/diagnostics for databaseStatsTTL. That block is the only
+	// database work on an endpoint the page polls every 5 s, and the
+	// MIN(started_at) in it is a full table scan (~9 ms at 90k rows,
+	// ~40 ms at 500k). The mutex is held across the recompute, which is
+	// the single-flight. See handlers_diagnostics.go.
+	dbStatsMu sync.Mutex
+	dbStats   *databaseStatsSnapshot
+	dbStatsAt time.Time
+
 	// library-meta retry guard: POST /api/library/enrichment/retry is
 	// per-PATH rate-limited (60s per normalized folder) so an operator
 	// can queue retries for DIFFERENT folders back-to-back while a

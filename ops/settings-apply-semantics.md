@@ -139,6 +139,8 @@ Classes describe *how the value is consumed*, not how important it is.
 | `scanIntervalSec` | **A** | `live` | `RunPeriodic` and the analysis sweeper both re-read a provider before each wait; the cadence rearm wakes them so the new value binds now. |
 | `backupIntervalHours` | **A** | `live` | Provider re-read before each wait. The ticker goroutine is now started **unconditionally** and parks when the interval is 0, which is what makes `0 → N` observable. |
 | `backupKeep` | **A** | `live` | Read at prune time, which is the only moment retention means anything. No rearm — there is no parked wait to disturb. |
+| `retentionPlaybackHistoryDays` | **A** | `live` | The daily sweeper reads `cfg` through the holder at the top of every pass, so the next tick sees the change. No rearm: the interval is a compile-time const, not a config field, so there is no parked wait to disturb — the same shape as `backupKeep` above. Validation refuses 1–89 (the bounded smart-mix windows run to 90 days) and anything above `MaxRetentionDays` (past ~349 years the cutoff timestamp overflows and the reap deletes the whole table). |
+| `retentionDeviceRegistrationDays` | **A** | `live` | Same loop, same pass. Orphaned registrations — rows bound to a revoked token — are reaped regardless of this setting; this is the policy half only. |
 | `updateAutoInstall` | **A** | `live` | Read at the top of every poll cycle. Symmetric in both directions — see the note below. |
 | `updateQuietHours` | **A** | `live` | Resolved at the auto-install gate, not at construction. |
 | `updateCheckIntervalHours` | **A** | `live` | The poll loop re-reads the cadence before each wait (rearm-woken), clamped by the same floor/default `New()` applies. |

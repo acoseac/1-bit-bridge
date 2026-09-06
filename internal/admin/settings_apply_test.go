@@ -369,6 +369,11 @@ func currentValuesForEveryPatchField(t *testing.T, cfg *config.Config) map[strin
 		"tailscaleMode":     string(mode),
 		"mdnsEnabled":       cfg.EffectiveMDNSEnabled(),
 		"dlnaEnabled":       cfg.DLNA.Enabled,
+		// Raw, not resolved: both default to a literal 0 meaning "keep
+		// everything", and there is no Effective* accessor to disagree
+		// with.
+		"retentionPlaybackHistoryDays":    cfg.Retention.PlaybackHistoryDays,
+		"retentionDeviceRegistrationDays": cfg.Retention.DeviceRegistrationDays,
 	}
 }
 
@@ -536,6 +541,15 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 		return 9, true
 	case "updateCheckIntervalHours":
 		return 3, true
+	// Both retention windows: clear of the 90-day floor and far under the
+	// ceiling, so the handler's NormalizeAndValidate accepts them and the
+	// matrix test actually DRIVES these fields instead of skipping them.
+	// Omitting them would leave the two newest patch fields checked only
+	// for the existence of a doc row.
+	case "retentionPlaybackHistoryDays":
+		return 365, true
+	case "retentionDeviceRegistrationDays":
+		return 180, true
 	// Strings. These three are Settings-page-only — no tray carries them —
 	// which is exactly why they went unchecked while their badges went
 	// stale. Omitting them here would leave the new page-scraping test

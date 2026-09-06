@@ -12,16 +12,29 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-func TestDatabaseCompactReclaimsAndReports(t *testing.T) {
-	s, _, _ := newTestServer(t)
-	h := s.Handler()
-
+// postCompact drives POST /api/database/compact through the REAL
+// Handler() and returns the recorder.
+//
+// One definition rather than the same five lines at every call site: the
+// content-type and the loopback RemoteAddr are not incidental — they are
+// what carries the request past csrfGuard and the loopback middleware, so
+// a copy that drifts on either would be testing the middleware's refusal
+// rather than the handler.
+func postCompact(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest("POST", "/api/database/compact", nil)
 	req.Header.Set("content-type", "application/json")
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
+	return rr
+}
 
+func TestDatabaseCompactReclaimsAndReports(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	h := s.Handler()
+
+	rr := postCompact(t, h)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
@@ -56,12 +69,7 @@ func TestDatabaseCompactSurfacesInsufficientDiskSpace(t *testing.T) {
 	s.deps.DBFreeBytes = func(string) (int64, error) { return 1, nil }
 	h := s.Handler()
 
-	req := httptest.NewRequest("POST", "/api/database/compact", nil)
-	req.Header.Set("content-type", "application/json")
-	req.RemoteAddr = "127.0.0.1:54321"
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
+	rr := postCompact(t, h)
 	if rr.Code != http.StatusInsufficientStorage {
 		t.Fatalf("status = %d, want 507; body=%s", rr.Code, rr.Body.String())
 	}
@@ -87,12 +95,7 @@ func TestDatabaseCompactRefusedDuringScan(t *testing.T) {
 	s.deps.Scanner.MarkScanInFlightForTests(true)
 	defer s.deps.Scanner.MarkScanInFlightForTests(false)
 
-	req := httptest.NewRequest("POST", "/api/database/compact", nil)
-	req.Header.Set("content-type", "application/json")
-	req.RemoteAddr = "127.0.0.1:54321"
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
+	rr := postCompact(t, h)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 while a scan is in flight; body=%s", rr.Code, rr.Body.String())
 	}
@@ -183,28 +186,9 @@ func TestDiagnosticsSaysWhenTheDatabaseStatsAreUnavailable(t *testing.T) {
 // so on a Windows checkout every newline-literal scan here would
 // otherwise find nothing and pass vacuously.
 func TestTheConsoleNeverCallsTheFreePageFloorAnEstimate(t *testing.T) {
-	b, err := staticFS.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := strings.ReplaceAll(string(b), "\r\n", "\n")
-
-	i := strings.Index(js, "function applyDiagnostics(")
-	if i < 0 {
-		t.Fatal("applyDiagnostics not found in app.js -- the scan is broken")
-	}
-	body := js[i:]
-	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
-		body = body[:j+1]
-	}
-	// COMMENTS ONLY, not stripJSNoise -- that also blanks string literals,
-	// and the literals are exactly what this scan is about. Stripping
-	// comments is not optional either: the code beside these strings
-	// explains the defect BY QUOTING IT, so an unstripped scan finds the
-	// commentary and reports the bug as still present. Same trap this
-	// repo's CSS guards already carry.
-	body = jsBlockCommentRe.ReplaceAllString(body, " ")
-	body = jsLineCommentRe.ReplaceAllString(body, " ")
+	body := jsFunctionBody(t, "function applyDiagnostics(")
+	// Vacuity guard: a window that no longer contains the thing under
+	// test would pass every assertion below while checking nothing.
 	if !strings.Contains(body, "diag-db-reclaimable") {
 		t.Fatal("applyDiagnostics no longer sets diag-db-reclaimable; the scan is looking at the wrong function")
 	}

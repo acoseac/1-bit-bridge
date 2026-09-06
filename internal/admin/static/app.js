@@ -3962,6 +3962,12 @@ function initSettings() {
       // coercing a blank field to 0 would silently turn backups off.
       backupIntervalHours: numOrUndef(fd.get("backupIntervalHours")),
       backupKeep: numOrUndef(fd.get("backupKeep")),
+      // Data retention. numOrUndef for the same reason as the interval
+      // above and a sharper one: 0 is the MEANINGFUL default here ("keep
+      // everything"), and it is also how an operator turns a window back
+      // off, so a blank box must send nothing rather than coerce to 0.
+      retentionPlaybackHistoryDays: numOrUndef(fd.get("retentionPlaybackHistoryDays")),
+      retentionDeviceRegistrationDays: numOrUndef(fd.get("retentionDeviceRegistrationDays")),
       // Enrich upstream base URLs, resolved from the source picker above
       // (blank = public MusicBrainz / Cover Art defaults; atlas = derived
       // <url>/ws/2 + <url>; custom = the raw Advanced fields). Server
@@ -5465,9 +5471,17 @@ function initMobileNav() {
 
 // ---- Diagnostics page ----
 
-// DIAGNOSTICS_POLL_MS: the numbers here are cheap (atomic counters and
-// sliding-window quantiles, no database), so this can poll rather than
-// ride the SSE stream. It is NOT on SSE deliberately: every field changes
+// DIAGNOSTICS_POLL_MS: most of these are cheap — atomic counters and
+// sliding-window quantiles — so this can poll rather than ride the SSE
+// stream. The database block is NOT cheap (its MIN(started_at) is a full
+// table scan: ~9 ms at 90k history rows, ~40 ms at 500k), which is why
+// the server puts that block behind a TTL rather than why this poll got
+// slower. This comment claimed "no database" for four days after the
+// compaction and retention panels made it false, and it was the stated
+// JUSTIFICATION for the interval — which is how the next database read
+// gets added to that handler.
+//
+// It is NOT on SSE deliberately: every field changes
 // continuously, so a diff-suppressed event would fire on every tick and
 // the frames would go to every open tab regardless of which page it is
 // showing. A poll scoped to this page costs nothing when nobody is
