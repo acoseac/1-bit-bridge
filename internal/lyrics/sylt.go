@@ -181,9 +181,31 @@ func EntriesLookLikeWholeLines(entries []SYLTEntry) bool {
 	return spaced*2 >= len(textual)
 }
 
+// maxLRCMillis is the widest timestamp `lineTag` — and the iOS LRCParser it
+// mirrors — will match: `\d{1,3}:\d{1,2}(?:[.,:]\d{1,3})?`, i.e. 999:59.999.
+const maxLRCMillis = 999*60000 + 59*1000 + 999
+
+// lrcTime renders one timestamp in the ONE shape both parsers accept.
+//
+// ParseSYLT reads a raw uint32 of milliseconds out of an untrusted frame, so a
+// garbage timestamp reaches 1,193 hours. Unclamped that rendered
+// `[1000:00.000]` — four minute digits, matching neither lineTag nor hoursTag
+// — inside a document syltCandidate stamps `format: lrc, synced: true`
+// regardless, so the phone silently dropped the line.
+//
+// Clamping rather than switching to the `[hh:mm:ss.xxx]` form above an hour is
+// deliberate: that form would rewrite the rendering of every legitimately
+// >1 h track (a delta wave for content that works today), and renderLine uses
+// this same helper for the enhanced `<mm:ss.xxx>` WORD tags, whose iOS grammar
+// is not mirrored in this repo — emitting hours there is an unverifiable
+// mirror risk. A >16.7-hour SYLT entry is garbage by construction; nothing
+// real is lost by pinning it to the end of the range.
 func lrcTime(ms int64) string {
 	if ms < 0 {
 		ms = 0
+	}
+	if ms > maxLRCMillis {
+		ms = maxLRCMillis
 	}
 	return fmt.Sprintf("%02d:%02d.%03d", ms/60000, (ms/1000)%60, ms%1000)
 }
