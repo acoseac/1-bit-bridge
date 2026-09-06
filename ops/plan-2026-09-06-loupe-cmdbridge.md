@@ -399,6 +399,19 @@ The highest-value three:
   `context.Background()` and writes the store), which falsifies CLAUDE.md's
   "Shutdown joins every background writer".
 
+**F17 [MEDIUM] `updateInfoAdapter.Install` drops three status fields** that
+`Status()` twelve lines away populates — `CanRollback`, `DeferredReason` and
+`RejectedVersion` (verified: `main.go`'s `Install` return literal omits all
+three). So when an install is deferred because playback sessions are active,
+the admin console gets `deferredReason: ""` and shows the operator nothing
+until an asynchronous status refresh lands. Two-line fix; deferred only because
+this batch already had two PRs in flight against `main.go`.
+
+**F18 [LOW] `cfg.Tailscale.EffectiveMode()` is validated after the background
+workers start**, so an invalid mode returns exit 2 having already launched
+`RunPeriodic` and `RunArtworkRescaleOnce` and then waits them out. Hoist it
+alongside the other config validations.
+
 Plus, from the PRISM pass and not yet triaged in depth: `bridge enrichment retry`
 accepting a positional path that `fs.Parse` silently drops, turning an intended
 subtree reset into a whole-library one; `variants move --dry-run` calling
