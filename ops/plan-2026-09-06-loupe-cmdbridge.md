@@ -429,3 +429,37 @@ accepting a positional path that `fs.Parse` silently drops, turning an intended
 subtree reset into a whole-library one; `variants move --dry-run` calling
 `os.MkdirAll`; and `duplicatesCmd` ignoring `--tier` / `--nested-only` under
 `--json`.
+
+---
+
+## Batch 2 — the deferred set (same day)
+
+All ten re-verified against post-merge `main` (`v0.1.9-133-g6eac676`) before
+planning; none had been fixed in passing. `main.go` is the contention point
+(F9's call site, F10's call site, F11, F16, F17, F18), so the two PRs that touch
+it run sequentially while the CLI one goes in parallel.
+
+| PR | Theme | Items | Files |
+|---|---|---|---|
+| A | The CLI surprises or lies to the operator | F12, F13, F14, F15, PRISM-1/2/3 | backup, manifest, enrichment, cert, variants, duplicates, status |
+| B | Live means live | F9, F10 | smartplaylists, upnp_upstream_wiring, main |
+| C | `runServe` lifecycle and reporting | F11, F16, F17, F18 | main, main_test |
+
+### The three PRISM items, now verified
+
+- **PRISM-1** `enrichmentRetryCmd` has no `fs.NArg()` guard, and `flag.Parse`
+  stops at the first non-flag argument. So `bridge enrichment retry
+  Artist/Album` — the positional form an operator will reach for — leaves
+  `--path` empty and resets **the whole library** instead of that subtree.
+  `library remove` already guards exactly this way (`fs.NArg() != 1`), so the
+  shape is established; four commands in the package have it and this one does
+  not.
+- **PRISM-2** `variantsMoveCmd` calls `os.MkdirAll(*to, …)` at variants.go:128,
+  before the `if *dryRun` branch at :151. A preview creates the destination
+  directory — the one thing `--dry-run` promises not to do ("list planned moves
+  without touching files or DB").
+- **PRISM-3** `--tier` and `--nested-only` are applied in `printDupeReport`
+  only. The `--json` branch encodes the whole report, so
+  `bridge duplicates --json --tier identical-audio` silently returns every
+  tier. `--limit` is unaffected — it is applied inside `buildDupeReport`, which
+  is why this reads as working until someone diffs the output.
