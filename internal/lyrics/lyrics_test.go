@@ -3,6 +3,7 @@ package lyrics
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeIsDeterministic(t *testing.T) {
@@ -136,5 +137,162 @@ func TestDescriptorPriority(t *testing.T) {
 	}
 	if DescriptorPriority("api") != 2 || DescriptorPriority("TEXT") != 2 {
 		t.Fatal("exact junk tokens still demote")
+	}
+}
+
+// TestPickDoesNotLaunderAFabricatedPriority pins the duplicate-merge rule.
+//
+// applyEmbeddedLyricsFromTag appends dhowden's m.Lyrics() FIRST with a
+// hardcoded Priority 0 — "empty descriptor", the best rank there is — and then
+// the raw frame walk appends the SAME frame with its real DescriptorPriority.
+// (Verified in the module source: metadataID3v2.Lyrics() returns
+// m.frames["USLT"].(*Comm).Text, literally the frame the walk re-reports.)
+// Keeping the first sighting let a junk descriptor launder itself back to 0
+// whenever the frame's language was absent or unmapped, so the junkExact /
+// junkSubstring demotion silently did nothing and the junk frame outranked a
+// clean sibling.
+func TestPickDoesNotLaunderAFabricatedPriority(t *testing.T) {
+	const junkBody = "Amazon-stamped body"
+	const cleanBody = "Clean sibling body!" // same length, so only Priority can decide
+	if len(junkBody) != len(cleanBody) {
+		t.Fatalf("fixture broken: bodies must be the same length (%d vs %d)",
+			len(junkBody), len(cleanBody))
+	}
+	cands := []Candidate{
+		// m.Lyrics() — no descriptor to classify, so a fabricated 0.
+		{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: junkBody}, Priority: 0},
+		// The same frame through the raw walk, with its real descriptor and no
+		// language to trigger the old "keep the richer" replacement.
+		{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: junkBody},
+			Priority: DescriptorPriority("Amazon")},
+		// A clean sibling frame that should therefore win.
+		{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: cleanBody}, Priority: 0},
+	}
+	got, ok := Pick(cands)
+	if !ok {
+		t.Fatal("Pick refused a non-empty set")
+	}
+	if got.Doc.Body != cleanBody {
+		t.Errorf("the junk-descriptor frame won: %q.\nIts real DescriptorPriority is %d, but the "+
+			"m.Lyrics() sighting re-entered it at 0 and the demotion did nothing.",
+			got.Doc.Body, DescriptorPriority("Amazon"))
+	}
+}
+
+// TestPickMergeKeepsTheRicherLanguage guards the half of the merge that was
+// already right: m.Lyrics() drops the frame's language, the raw walk keeps it,
+// and the surviving candidate must carry it.
+func TestPickMergeKeepsTheRicherLanguage(t *testing.T) {
+	body := "Same document twice"
+	got, ok := Pick([]Candidate{
+		{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: body}},
+		{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: body, Language: "ja"},
+			Language: "ja"},
+	})
+	if !ok {
+		t.Fatal("Pick refused a non-empty set")
+	}
+	if got.Doc.Language != "ja" || got.Language != "ja" {
+		t.Errorf("language lost on merge: Doc.Language=%q Language=%q", got.Doc.Language, got.Language)
+	}
+}
+
+// TestPickIsDeterministicUnderShuffle is the unit-test twin of
+// FuzzPickIsShuffleInvariant, on the one shape that actually exercises the
+// tie-break tail: same source rank, same priority, same body LENGTH, different
+// bodies. Two USLT frames with equal-length text is exactly that, and it is
+// how a randomised m.Raw() iteration order reaches Pick.
+//
+// This test exists because the negative control caught its absence: deleting
+// the whole tie-break tail left the suite green, because every fuzz seed
+// happened to differ on rank or priority before ever reaching it.
+func TestPickIsDeterministicUnderShuffle(t *testing.T) {
+	cands := []Candidate{
+		{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: "zzz"}},
+		{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: "aaa"}},
+		{Source: SourceTextPlain, Doc: Doc{Format: FormatText, Body: "mmm"}},
+	}
+	want, ok := Pick(append([]Candidate(nil), cands...))
+	if !ok {
+		t.Fatal("Pick refused a non-empty set")
+	}
+	for i := range cands {
+		for j := range cands {
+			rotated := append([]Candidate(nil), cands...)
+			rotated[i], rotated[j] = rotated[j], rotated[i]
+			got, _ := Pick(rotated)
+			if got.Doc.Body != want.Doc.Body {
+				t.Fatalf("Pick is order-dependent: %q with the input as given, %q after "+
+					"swapping %d and %d. Candidates arrive in Go map order, so this "+
+					"winner flips between scans.", want.Doc.Body, got.Doc.Body, i, j)
+			}
+		}
+	}
+}
+
+// TestStripBOMsIsLinearOnNestedBOMs is the regression for the quadratic
+// fixed-point loop both PR bots caught on #851.
+//
+// `"\xef\xbb"×n + BOM + "\xbf"×n` exposes exactly ONE new BOM per removal, so a
+// ReplaceAll-to-a-fixed-point does n full-body copies. At the size below that
+// is ~n² ≈ 10^10 bytes of copying — minutes — while the single-pass reducer is
+// one scan. Normalize's MaxBodyBytes check happens AFTER this, and the USLT /
+// ©lyr / Vorbis path reaches Normalize with no size gate at all, so the input
+// really is attacker-sized.
+//
+// The threshold is ~1000x the linear cost, so it cannot flake on a loaded CI
+// box while still being nowhere near the quadratic cost.
+func TestStripBOMsIsLinearOnNestedBOMs(t *testing.T) {
+	const depth = 60_000
+	var b strings.Builder
+	b.Grow(depth*3 + 3)
+	for i := 0; i < depth; i++ {
+		b.WriteString("\xef\xbb")
+	}
+	b.WriteString("\uFEFF")
+	for i := 0; i < depth; i++ {
+		b.WriteString("\xbf")
+	}
+	nested := b.String()
+
+	start := time.Now()
+	got := stripBOMs(nested)
+	elapsed := time.Since(start)
+
+	if strings.Contains(got, "\uFEFF") {
+		t.Errorf("a BOM survived: %d still present", strings.Count(got, "\uFEFF"))
+	}
+	if again := stripBOMs(got); again != got {
+		t.Errorf("stripBOMs is not a fixed point: %d bytes -> %d bytes on a second pass",
+			len(got), len(again))
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("stripBOMs took %v on a %d-byte nested input — that is the quadratic "+
+			"fixed-point shape, not a single pass", elapsed, len(nested))
+	}
+}
+
+// TestNormalizeStripsInteriorAndSplicedBOMs pins the two shapes FuzzNormalize
+// found, as readable cases rather than corpus hashes.
+func TestNormalizeStripsInteriorAndSplicedBOMs(t *testing.T) {
+	for _, tc := range []struct{ name, in string }{
+		{"BOM after a newline", "\n\uFEFF"},
+		{"BOM spliced from invalid neighbours", "\xef\xbb\uFEFF\xbf"},
+		{"interior BOM in real text", "first\uFEFFsecond"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, ok := Normalize(tc.in)
+			if ok && strings.Contains(out, "\uFEFF") {
+				t.Errorf("a BOM survived Normalize: %q", out)
+			}
+			if !ok {
+				return
+			}
+			again, ok2 := Normalize(out)
+			if !ok2 || again != out {
+				t.Errorf("Normalize is not idempotent: %q -> %q -> %q (ok=%v)",
+					tc.in, out, again, ok2)
+			}
+		})
 	}
 }

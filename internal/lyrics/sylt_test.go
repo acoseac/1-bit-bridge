@@ -135,3 +135,30 @@ func mustParse(t *testing.T, body []byte) SYLT {
 	}
 	return s
 }
+
+// TestLRCTimeClampsToTheParseableRange pins that every timestamp lrcTime emits
+// stays inside the ONE shape lineTag — and the iOS LRCParser it mirrors — will
+// match. ParseSYLT reads a raw uint32 of milliseconds from an untrusted frame,
+// so 1,193 hours is reachable; unclamped that rendered a four-digit minute
+// field matching neither lineTag nor hoursTag, inside a document syltCandidate
+// stamps synced regardless, and the phone dropped the line.
+func TestLRCTimeClampsToTheParseableRange(t *testing.T) {
+	for _, ms := range []int64{-1, 0, 1, 999, 59_999, 60_000, 3_600_000,
+		59_999_999, 60_000_000, 359_999_999, 4_294_967_295} {
+		line := "[" + lrcTime(ms) + "]lyric"
+		if !lineTag.MatchString(line) && !hoursTag.MatchString(line) {
+			t.Errorf("lrcTime(%d) rendered %q, which neither LRC regex accepts", ms, line)
+		}
+	}
+	if got := lrcTime(4_294_967_295); got != "999:59.999" {
+		t.Errorf("uint32 max should clamp to the end of the range, got %q", got)
+	}
+	if got := lrcTime(-5); got != "00:00.000" {
+		t.Errorf("negative should floor at zero, got %q", got)
+	}
+	// Everything inside the range is untouched — the clamp must not rewrite
+	// the rendering of legitimately long tracks.
+	if got := lrcTime(90 * 60 * 1000); got != "90:00.000" {
+		t.Errorf("a 90-minute timestamp was rewritten: %q", got)
+	}
+}

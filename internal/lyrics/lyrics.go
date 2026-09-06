@@ -90,8 +90,8 @@ type Candidate struct {
 }
 
 // Pick returns the best candidate: lowest rank, then lowest priority, then
-// the longest body. Exact duplicate bodies collapse (dhowden's `Lyrics()`
-// and the raw walk surface the same USLT twice).
+// the longest body, then a deterministic tail. Exact duplicate bodies collapse
+// (dhowden's `Lyrics()` and the raw walk surface the same USLT twice).
 func Pick(cands []Candidate) (Candidate, bool) {
 	if len(cands) == 0 {
 		return Candidate{}, false
@@ -101,35 +101,170 @@ func Pick(cands []Candidate) (Candidate, bool) {
 	for _, c := range cands {
 		key := string(c.Source) + "\x00" + c.Doc.Body
 		if i, dup := seen[key]; dup {
-			// Same document twice (dhowden's Lyrics() accessor drops the
-			// frame's language; the raw walk keeps it) — keep the richer.
-			if out[i].Language == "" && c.Language != "" {
-				out[i] = c
-			}
+			out[i] = mergeDuplicate(out[i], c)
 			continue
 		}
 		seen[key] = len(out)
 		out = append(out, c)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		if a.Source.Rank() != b.Source.Rank() {
-			return a.Source.Rank() < b.Source.Rank()
-		}
-		if a.Priority != b.Priority {
-			return a.Priority < b.Priority
-		}
-		return len(a.Doc.Body) > len(b.Doc.Body)
-	})
+	sort.SliceStable(out, func(i, j int) bool { return lessCandidate(out[i], out[j]) })
 	return out[0], true
 }
 
-// Normalize makes the body deterministic before hashing and storage: the
-// UTF-8 BOM goes, CRLF / CR become LF, NFC, trailing spaces and tabs per
-// line go, and the text ends in exactly one newline-free tail. Returns
-// ok=false for an empty body or one past MaxBodyBytes.
+// mergeDuplicate folds a second sighting of the SAME document — same Source
+// and Body, which is the whole dedup key — into the first. Every rule here is
+// an ORDER-INDEPENDENT aggregation, and has to be: Pick folds sightings in
+// whatever order they arrived, and they arrive partly from ranging over a Go
+// map.
+//
+//   - The surviving Doc is chosen by fields this function never mutates:
+//     synced first (a synchronized document is strictly more informative),
+//     then format, purely as a stable tie-break. Choosing it with
+//     lessCandidate looked right and was NOT — that comparator reads Priority,
+//     which this function raises, so the accumulator's own mutation fed back
+//     into the next comparison and three sightings folded to different answers
+//     under different orders. FuzzPickIsShuffleInvariant found that; nothing
+//     extractor-driven could have.
+//   - Priority takes the MAXIMUM. dhowden's m.Lyrics() has no descriptor to
+//     classify and is appended with a fabricated 0 — "empty descriptor", the
+//     best rank there is — while returning the SAME *tag.Comm the raw walk
+//     then re-reports with its real DescriptorPriority. Keeping the first
+//     sighting let a junk descriptor ("Amazon", "Song ID") launder itself back
+//     to 0 and defeat the junkExact / junkSubstring demotion entirely. Two
+//     REAL frames with an identical body only tie-break against OTHER bodies,
+//     where the pessimistic read is the safe one.
+//   - Language takes the smallest non-empty, because m.Lyrics() drops the
+//     frame's language while the raw walk keeps it. "First non-empty wins" is
+//     not order-independent once two sightings disagree.
+func mergeDuplicate(a, b Candidate) Candidate {
+	kept, dup := a, b
+	if (b.Doc.Synced && !a.Doc.Synced) ||
+		(b.Doc.Synced == a.Doc.Synced && b.Doc.Format < a.Doc.Format) {
+		kept, dup = b, a
+	}
+	if dup.Priority > kept.Priority {
+		kept.Priority = dup.Priority
+	}
+	// Across BOTH language fields on BOTH candidates: production sets
+	// Candidate.Language and Doc.Language together, but Pick is exported and
+	// nothing enforces that, so folding only one pair would reintroduce the
+	// arrival-order dependence this function exists to remove (CodeRabbit).
+	if lang := smallestNonEmpty(
+		smallestNonEmpty(a.Language, a.Doc.Language),
+		smallestNonEmpty(b.Language, b.Doc.Language),
+	); lang != "" {
+		kept.Language = lang
+		kept.Doc.Language = lang
+	}
+	if name := smallestNonEmpty(a.SidecarName, b.SidecarName); name != "" {
+		kept.SidecarName = name
+	}
+	return kept
+}
+
+// smallestNonEmpty is min() over the non-empty operands — commutative and
+// associative, which is what makes the language merge fold-order-independent.
+func smallestNonEmpty(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	case b < a:
+		return b
+	}
+	return a
+}
+
+// lessCandidate is a STRICT TOTAL order — deliberately total, not merely
+// good enough to sort. The candidate slice is built partly by ranging over
+// dhowden's `m.Raw()`, a Go map whose iteration order is randomised per run,
+// so any pair the comparator calls equal is decided by chance. That is not a
+// cosmetic wobble: an undecided pair flips the winner between scans, which
+// re-keys lyricsTag, which bumps indexed_at, which pushes the track into every
+// paired device's delta on every scan — the flapping-winner treadmill the
+// duplicate elector is a strict total order to avoid.
+func lessCandidate(a, b Candidate) bool {
+	if ar, br := a.Source.Rank(), b.Source.Rank(); ar != br {
+		return ar < br
+	}
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	if la, lb := len(a.Doc.Body), len(b.Doc.Body); la != lb {
+		return la > lb
+	}
+	// Nothing below expresses a preference — only that identical inputs always
+	// produce the identical winner.
+	if a.Doc.Body != b.Doc.Body {
+		return a.Doc.Body < b.Doc.Body
+	}
+	if a.Doc.Language != b.Doc.Language {
+		return a.Doc.Language < b.Doc.Language
+	}
+	if a.Doc.Format != b.Doc.Format {
+		return a.Doc.Format < b.Doc.Format
+	}
+	if a.Doc.Synced != b.Doc.Synced {
+		return a.Doc.Synced
+	}
+	return string(a.Source) < string(b.Source)
+}
+
+// stripBOMs removes every U+FEFF in ONE pass, including the ones that only
+// come into existence as it works.
+//
+// Two properties are load-bearing and neither is obvious:
+//
+//   - Deleting a U+FEFF splices its neighbours together and can form a NEW one
+//     out of them. `"\xef\xbb" + BOM + "\xbf"` is the minimal case: strip the
+//     middle BOM and the surrounding invalid bytes become `EF BB BF`.
+//     FuzzNormalize found it within a minute of the target existing.
+//   - The obvious answer — `strings.ReplaceAll` to a fixed point — is
+//     QUADRATIC, because each pass rescans and copies the whole string while
+//     exposing only one nesting level. Both PR bots flagged it independently
+//     and both were right: `"\xef\xbb"×n + BOM + "\xbf"×n` needs n passes, and
+//     Normalize's MaxBodyBytes check happens AFTER, so the input is unbounded
+//     at that point. The USLT / ©lyr / Vorbis path in particular reaches here
+//     with no size gate of any kind — dhowden hands over whatever the frame
+//     declared.
+//
+// Appending byte by byte and truncating whenever the output ENDS in a BOM is
+// linear and is a true fixed point: any complete `EF BB BF` in the output was
+// a suffix at the moment its final byte landed, so it was removed then; and a
+// truncation only shortens a suffix, so it can never splice a new one.
+func stripBOMs(body string) string {
+	const bom = "\uFEFF"
+	if !strings.Contains(body, bom) {
+		return body // the overwhelmingly common case, no allocation
+	}
+	out := make([]byte, 0, len(body))
+	for i := 0; i < len(body); i++ {
+		out = append(out, body[i])
+		if n := len(out); n >= 3 && out[n-3] == 0xEF && out[n-2] == 0xBB && out[n-1] == 0xBF {
+			out = out[:n-3]
+		}
+	}
+	return string(out)
+}
+
+// Normalize makes the body deterministic before hashing and storage: every
+// U+FEFF goes, CRLF / CR become LF, NFC, trailing spaces and tabs per line
+// go, and the text ends in exactly one newline-free tail. Returns ok=false
+// for an empty body or one past MaxBodyBytes.
+//
+// EVERY U+FEFF, not just a leading one, and that is a correctness requirement
+// rather than tidiness: Normalize must be IDEMPOTENT, because resolveLyrics
+// normalises a candidate body that TextCandidate or sidecarCandidate already
+// normalised. Trimming only the prefix was not — `"\n\uFEFF"` normalised to
+// `"\uFEFF"` (the BOM is not at index 0 on the first pass, and Go's
+// unicode.IsSpace does NOT count U+FEFF, so TrimSpace keeps it), and the
+// second pass then stripped it and REJECTED the now-empty body. A document
+// accepted as a candidate would be silently dropped at resolve time. Found by
+// FuzzNormalize within a minute of the target existing; a zero-width
+// no-break space carries nothing in a lyrics document in any case.
 func Normalize(body string) (string, bool) {
-	s := strings.TrimPrefix(body, "\uFEFF")
+	s := stripBOMs(body)
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	s = norm.NFC.String(s)
