@@ -20,7 +20,7 @@ import (
 // both unconditionally ("always construct, never stop", so the flag can be
 // hot), and `upscale.enabled` defaults to false, so every stock bridge runs
 // exactly this shape.
-func inactiveUpscaleFixture(t *testing.T) (*httptest.Server, string, *stubEnqueuer) {
+func gateFixture(t *testing.T, upscaleOn, optimizeOn bool) (*httptest.Server, string, *stubEnqueuer) {
 	t.Helper()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
@@ -39,12 +39,19 @@ func inactiveUpscaleFixture(t *testing.T) (*httptest.Server, string, *stubEnqueu
 	srv := New(cfg, store, nil, "fp").
 		WithUpscaleEnqueuer(stub).
 		WithVariantDeleter(&stubVariantDeleter{all: []VariantSummary{}, byPath: map[string][]VariantSummary{}}).
-		WithUpscale(func() bool { return false }, nil).
-		WithCarPlayOptimize(func() bool { return false })
+		WithUpscale(func() bool { return upscaleOn }, nil).
+		WithCarPlayOptimize(func() bool { return optimizeOn })
 
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw, stub
+}
+
+// inactiveUpscaleFixture is the both-flags-off case, named because that is the
+// state the defect lived in and most tests here want it.
+func inactiveUpscaleFixture(t *testing.T) (*httptest.Server, string, *stubEnqueuer) {
+	t.Helper()
+	return gateFixture(t, false, false)
 }
 
 // TestUpscaleRefusedWhenFeatureInactive pins the gate that the
@@ -136,25 +143,7 @@ func TestUpscaleGateRunsBeforePathResolution(t *testing.T) {
 // kind must still be accepted, or the two flags have collapsed into one.
 func TestUpscaleOptimizeKindRefusedWhenOnlyOptimizeIsOff(t *testing.T) {
 	t.Parallel()
-	tmp := t.TempDir()
-	root := filepath.Join(tmp, "Music")
-	if err := os.MkdirAll(filepath.Join(root, "Artist/Album"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash("Artist/Album/01.flac")),
-		[]byte("not really a flac"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.Config{LibraryRoots: []string{root}, ListenAddress: ":7788", LibraryName: "Test"}
-	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
-	raw, _, _ := store.Mint("test")
-	stub := newStubEnqueuer()
-	srv := New(cfg, store, nil, "fp").
-		WithUpscaleEnqueuer(stub).
-		WithUpscale(func() bool { return true }, nil).
-		WithCarPlayOptimize(func() bool { return false })
-	hs := httptest.NewServer(srv.Handler())
-	t.Cleanup(hs.Close)
+	hs, raw, stub := gateFixture(t, true /* upscale on */, false /* optimize off */)
 
 	resp := postJSON(t, hs, "/v1/upscale", raw,
 		UpscaleRequest{Path: "Artist/Album/01.flac", Kind: "optimize"})
