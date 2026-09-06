@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -188,10 +187,6 @@ func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
 	}
 }
 
-// We need the JSON helper from status.go's writeJSONIndent — declared
-// there.
-var _ = json.Marshal // keep encoding/json import used (helper lives in status.go)
-
 // buildDoctorDeps resolves the doctor.Deps from the environment:
 // config (if readable) plus per-OS default dirs. A best-effort
 // resolution is fine — doctor's checks handle missing inputs with
@@ -361,10 +356,6 @@ func ensureDoctorClean(w io.Writer, d doctor.Deps) int {
 	}
 	return 0
 }
-
-// `bridge doctor` uses os.Stdin but never reads; keep the signature
-// consistent with the other cmds for testability.
-var _ = os.Stdin
 
 // adminDoctorRunner returns the closure admin.Deps.DoctorRun is wired
 // with, so the console runs the SAME checks as `bridge doctor` from the

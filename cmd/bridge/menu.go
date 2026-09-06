@@ -504,7 +504,7 @@ func actPair(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s me
 // on "y" was a fat-finger hazard (PR #N). Mirrors the
 // `INSTALL-AS-ROOT` typed-phrase pattern from `actInstallService`.
 //
-// **Library files are NEVER touched by this command** — the wipe
+// **Library files are never touched BY THIS COMMAND** — the wipe
 // is `os.RemoveAll(cfgDir)` where `cfgDir` is the platform config
 // dir (`~/Library/Application Support/1-bit-bridge` on macOS, etc.)
 // containing only `bridge.yaml` + the `data/` subdirectory. The
@@ -512,6 +512,20 @@ func actPair(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s me
 // referenced by yaml text, not joined into any bridge-owned
 // filesystem location. The reassurance is printed to the operator
 // here because at least one user reached out asking exactly this.
+//
+// The wording used to make the stronger claim: that the bridge itself
+// could not delete library files at all, being read-only by design.
+// That stopped being true when the web upload / delete-as-trash
+// surface landed — `trash.Manager` unlinks inside a library root,
+// gated live on `library.allowDelete`, and runServe calls it "the
+// only thing in the bridge that removes library content". Scoping the
+// promise to THIS COMMAND keeps the reassurance the operator actually
+// asked for while leaving it true.
+//
+// TestUninstallPromptDoesNotClaimDeletionIsImpossible scans the
+// Fprint call sites in this file — not the whole source — because the
+// paragraph you are reading has to be able to describe the old claim
+// without tripping its own guard.
 func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
 	fmt.Fprintln(stdout)
 	if s.kind != packaging.KindNone {
@@ -542,8 +556,8 @@ func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer,
 		fmt.Fprintln(stdout, "    Will delete:")
 		fmt.Fprintf(stdout, "      • %s/ (config, data, certs, tokens)\n", cfgDir)
 		fmt.Fprintln(stdout, "    Will NOT touch:")
-		fmt.Fprintln(stdout, "      • your music library — bridge has no code path that")
-		fmt.Fprintln(stdout, "        can delete --library files (read-only by design)")
+		fmt.Fprintln(stdout, "      • your music library — this wipe removes only the config dir")
+		fmt.Fprintln(stdout, "        above; --library paths live outside it and are not touched")
 		fmt.Fprint(stdout, "  Type WIPE to confirm: ")
 		line, _ := in.ReadString('\n')
 		if strings.TrimSpace(line) == "WIPE" {
