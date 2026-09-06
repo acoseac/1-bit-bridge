@@ -84,7 +84,7 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 			"expired":         expired,
 			"expiringSoon":    expiringSoon,
 		}
-		return writeJSONIndent(stdout, stderr, envelope)
+		return writeJSONIndent(stdout, stderr, "cert info", envelope)
 	}
 	fmt.Fprintf(stdout, "Subject:     %s\n", info.Subject)
 	fmt.Fprintf(stdout, "Fingerprint: %s\n", info.Fingerprint)

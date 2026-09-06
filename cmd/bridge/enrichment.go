@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -587,7 +588,16 @@ func adminPortIsFixed(cfg *config.Config) bool {
 	if err != nil {
 		return false
 	}
-	return port != "" && port != "0"
+	// PARSE it. A text compare against "0" accepts "00", which config
+	// validation also accepts (validatePort runs Atoi, so every spelling of
+	// zero is a legal ephemeral port) — and probeLoopbackAddr preserves the
+	// text. That would have classified an ephemeral port as fixed and probed
+	// an address nothing can bind. (CodeRabbit, PR #856.)
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return n >= 1 && n <= 65535
 }
 
 // refuseIfBridgeMayBeRunning is the shared write gate for the CLI commands
@@ -597,6 +607,19 @@ func adminPortIsFixed(cfg *config.Config) bool {
 // Store.mu serialises writers within one process only, and busy_timeout is a
 // retry rather than a serializer, so "is anything else running?" is the
 // question these commands have to answer before touching the database.
+// The check runs TWICE on the prompting commands: once up front so an operator
+// on a running bridge is told immediately rather than after typing a
+// confirmation, and once right before the destructive call, because a bridge
+// can start while the prompt waits.
+//
+// The second probe NARROWS that window to the microseconds between it and the
+// call; it does not close it. Closing it needs an interprocess lock that
+// `bridge serve` also holds — deliberately not added here: a lockfile's own
+// failure mode is a stale lock after an unclean exit, which blocks restore at
+// exactly the moment an operator needs restore, and the daemon-side half is a
+// change to the serve path that this fix has no business making. The honest
+// summary is that this is a guard, not mutual exclusion, and the prompt still
+// says to stop the service.
 func refuseIfBridgeMayBeRunning(ctx context.Context, cfg *config.Config, cmd string, stderr io.Writer) bool {
 	addr := adminAddrOf(cfg)
 	if !adminPortIsFixed(cfg) {

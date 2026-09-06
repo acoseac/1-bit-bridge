@@ -56,6 +56,30 @@ func TestWriteGateAllowsWhenNothingIsListening(t *testing.T) {
 	}
 }
 
+// TestAdminPortIsFixedParsesRatherThanComparesText pins the port check against
+// alternative spellings of zero.
+//
+// It compared the raw port TEXT with "0", so "127.0.0.1:00" read as a fixed
+// port — and config validation accepts it, since validatePort runs Atoi and
+// every spelling of zero is a legal ephemeral port. The gate would then have
+// probed an address nothing can bind and reported the wrong reason.
+// (CodeRabbit, PR #856.)
+func TestAdminPortIsFixedParsesRatherThanComparesText(t *testing.T) {
+	for _, ephemeral := range []string{"127.0.0.1:0", "127.0.0.1:00", "127.0.0.1:000"} {
+		if adminPortIsFixed(&config.Config{AdminAddress: ephemeral}) {
+			t.Errorf("%s read as a FIXED port; every spelling of zero is ephemeral", ephemeral)
+		}
+	}
+	for _, bad := range []string{"127.0.0.1:99999", "127.0.0.1:-1", "127.0.0.1:http", "garbage"} {
+		if adminPortIsFixed(&config.Config{AdminAddress: bad}) {
+			t.Errorf("%s read as a fixed port", bad)
+		}
+	}
+	if !adminPortIsFixed(&config.Config{AdminAddress: "127.0.0.1:7789"}) {
+		t.Error("a real port did not read as fixed")
+	}
+}
+
 // TestWriteGateRefusesAnEphemeralAdminPortWithAnAccurateReason pins the port-0
 // branch.
 //
@@ -275,7 +299,7 @@ func TestEnrichmentRetryOfflineClearsFingerprintSuppression(t *testing.T) {
 func TestWriteJSONIndentKeepsErrorsOffTheJSONStream(t *testing.T) {
 	var out, errOut bytes.Buffer
 	// A channel cannot be marshalled — a reliable encoder failure.
-	if code := writeJSONIndent(&out, &errOut, map[string]any{"bad": make(chan int)}); code == 0 {
+	if code := writeJSONIndent(&out, &errOut, "doctor", map[string]any{"bad": make(chan int)}); code == 0 {
 		t.Fatal("expected a non-zero code from an unmarshalable value")
 	}
 	if strings.Contains(out.String(), "encode JSON") {
@@ -283,6 +307,11 @@ func TestWriteJSONIndentKeepsErrorsOffTheJSONStream(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "encode JSON") {
 		t.Errorf("the error did not reach stderr:\n%q", errOut.String())
+	}
+	// The prefix is the CALLER's, not a hard-coded "status:" — this helper is
+	// shared by three commands and the old prefix was wrong for two of them.
+	if !strings.HasPrefix(errOut.String(), "doctor: ") {
+		t.Errorf("the error does not name the calling command:\n%q", errOut.String())
 	}
 	// Whatever landed on stdout must still be parseable-or-empty, never prose.
 	if s := strings.TrimSpace(out.String()); s != "" {

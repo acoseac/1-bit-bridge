@@ -85,7 +85,7 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			"stats":     stats,
 			"endpoints": endpoints,
 		}
-		return writeJSONIndent(stdout, stderr, envelope)
+		return writeJSONIndent(stdout, stderr, "status", envelope)
 	}
 	return writeStatusHuman(stdout, stats, endpoints)
 }
@@ -165,7 +165,7 @@ func writeStatusHuman(w io.Writer, stats map[string]any, endpoints []any) int {
 	return 0
 }
 
-// writeJSONIndent encodes v to w, reporting any failure on errW.
+// writeJSONIndent encodes v to w, reporting any failure on errW under prefix.
 //
 // The error deliberately does NOT go to w. The encoder may already have
 // flushed a partial object, and appending prose to that produces a stream
@@ -173,12 +173,13 @@ func writeStatusHuman(w io.Writer, stats map[string]any, endpoints []any) int {
 // surfaces route through here — `bridge status`, `bridge doctor --json` and
 // `bridge cert info --json` — and doctor.go goes out of its way to keep its
 // own --fix progress off stdout for exactly this reason. The old form also
-// hard-coded a "status:" prefix that was wrong for two of the three callers.
-func writeJSONIndent(w io.Writer, errW io.Writer, v any) int {
+// hard-coded a "status:" prefix that was wrong for two of the three callers,
+// which is why the prefix is now the caller's to supply rather than dropped.
+func writeJSONIndent(w io.Writer, errW io.Writer, prefix string, v any) int {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(v); err != nil {
-		fmt.Fprintf(errW, "encode JSON: %v\n", err)
+		fmt.Fprintf(errW, "%s: encode JSON: %v\n", prefix, err)
 		return 1
 	}
 	return 0

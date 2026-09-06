@@ -113,6 +113,11 @@ func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader
 		}
 	}
 
+	// Re-probe after the confirmation wait — same reason as restore's.
+	if refuseIfBridgeMayBeRunning(ctx, cfg, "manifest clear-missing", stderr) {
+		return 1
+	}
+
 	store, err := manifest.OpenStore(dbPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "open manifest store: %v\n", err)

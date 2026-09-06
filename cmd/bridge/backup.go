@@ -151,6 +151,13 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		}
 	}
 
+	// Re-probe: a bridge can have started while the prompt waited. See
+	// refuseIfBridgeMayBeRunning's docblock for why this narrows the window
+	// rather than closing it. (CodeRabbit, PR #856.)
+	if refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+		return 1
+	}
+
 	targets := buildRestoreTargets(cfg, resolvedCfgPath)
 	if err := backup.Restore(snapshotDir, targets); err != nil {
 		fmt.Fprintf(stderr, "restore: %v\n", err)
