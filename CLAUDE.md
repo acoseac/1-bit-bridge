@@ -45,7 +45,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 
 | Package | Role |
 |---|---|
-| `cmd/bridge` | CLI: `init` / `serve` / `pair` / `scan` / `version`. Bare `bridge` on a real TTY drops into a context-aware launcher menu (`menu.go`); pipes / non-TTY callers fall through to `usage + exit 2` so automation is unchanged. Box / frame / shell-aware handoff helpers in `styles.go`. |
+| `cmd/bridge` | CLI: **28 subcommands** dispatched in `run()` — `init` / `serve` / `pair` / `scan` / `upscale` / `analyze` / `optimize` / `variants` / `artwork` / `enrichment` / `duplicates` / `fingerprint` / `doctor` / `update` / `backup` / `restore` / `token` / `cert` / `status` / `health` / `logs` / `library` / `admin` / `manifest` / `tsnet` / `start` / `stop` / `restart` / `version`. Bare `bridge` on a real TTY drops into a context-aware launcher menu (`menu.go`); pipes / non-TTY callers fall through to `usage + exit 2` so automation is unchanged. Box / frame / shell-aware handoff helpers in `styles.go`. |
 | `internal/config` | YAML loader with defaults + path-relative resolution + `Save()` for admin edits |
 | `internal/tls` | Self-signed ECDSA P-256 cert minter, SHA-256 fingerprint for iOS pinning |
 | `internal/auth` | Bearer-token store (hashed, atomic persist, cross-process pickup) |
@@ -73,11 +73,11 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **No server-side transcoding, ever.** 1-bit is bit-exact by mission. `/v1/download` serves the file as-is via `http.ServeContent`; never introduce a transcoding path.
 - **Rate limits respect the services.** MB anon is 1 req/s (we pace at 1.1s); CAA is IA-infrastructure and polite at 500ms; Deezer is ~50 req/5s (we pace at 120ms). User-Agent identifies the app + GitHub URL per MB's TOS.
 - **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design.
-- **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The ONLY other sanctioned writers are the operator-triggered "Retry missing" resets (`ResetEnrichedMisses` + `ResetEnrichedByArtistMBIDs`, PR #495 — behind POST /api/enrichment/retry, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the sanctioned manual `UPDATE tracks SET enriched_at = 0` recipe, productized + 60s rate-guarded). Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
-- **Admin console is loopback-only, no auth.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
+- **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
+- **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what `bridge.ars.md` actually runs; this bullet omitted that until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`.
 - **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with a 5s window to protect active media streams.
-- **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls `store.WipeAllTracks()` before the new scan so no stale rows survive. Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
+- **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
 
 **Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/dev/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo.
 
@@ -881,6 +881,91 @@ no failing test — which is the shape to expect in this area.
   is reversible and playlist deletion is a revivable tombstone, so either
   trigger silently destroys operator-uploaded content to reclaim a JPEG. An
   AST-based guard fails if a production caller appears.
+
+### The CLI and the serve wiring (`cmd/bridge`)
+
+The largest package in the repo — 52 production files, ~19k lines, `main.go`
+alone 4,698 — and until 2026-09-06 it had **no section here**. Its invariants
+were distributed by subject into the sections above (the `bgWriters` join under
+Scanner, `SetPostScanHook` under Job pools, the cadence rearm under Config),
+which is defensible for a rule about the scanner and useless for a rule about
+the wiring itself. The LOUPE run that swept it found five confirmed defects and
+four stale claims; the prior-art check explains why, at 20/12/2/6 `cmd/bridge`
+mentions across the four `ops/audit-*.md` files.
+
+- **"Always construct, never stop" removes a gate wherever the enclosing `if`
+  WAS the gate.** PR #781 converted `if analysisActive {` / `if upscaleActive {`
+  into bare blocks so both pools are always built — which is what makes the
+  flags hot — and converted every READER to a live predicate in the same commit.
+  The WRITE paths had no predicate to convert, so they silently lost theirs: the
+  analysis sweeper ran on the default config (`analysis.enabled` is **false**),
+  forking a decode per track and pushing a whole-library `indexed_at` delta to
+  every paired device 90 s after every boot, while `/v1/analysis/*` 404'd; and
+  `POST /v1/upscale` + `DELETE /v1/upscale/variants` gated on an adapter that is
+  now never nil, so any bearer-token holder could enqueue sox jobs on a bridge
+  advertising `upscaleEnabled: false`. **When a construction guard becomes
+  unconditional, enumerate what that guard was gating — the nil-ness of a
+  handle is a gate, and it stops being one.**
+- **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
+  belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
+  returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
+  nil arm reads the other way and is its own call. A disabled pass records NO
+  status, so the Jobs card keeps its last real breakdown.
+- **Feature gates on a mutation handler run BEFORE path resolution and the
+  folder walk.** Both checks depend only on the decoded body, and a request that
+  will be refused should not first cost a recursive `WalkDir`. Asserting on the
+  refusal STATUS cannot catch the ordering — 503-before and 404-after are both
+  "refused"; assert on which one comes back for a nonexistent path.
+- **Every subcommand tail resolves its config through `loadCLIConfig`.** The
+  `--config` flag defaults to the EMPTY string, so `config.Load(*configPath)`
+  resolves nothing and the command dies with `read config ""` on any host where
+  the operator did not pass `--config` — while the flag's own help promises the
+  `./bridge.yaml`-then-platform fallback only `loadCLIConfig` implements. Two
+  shared tails missed the migration and took six commands with them, including
+  `bridge token revoke`, the documented orphaned-token recovery path.
+  `TestNoSubcommandTailBypassesLoadCLIConfig` now sweeps the package against a
+  four-entry allowlist of sites holding an already-resolved concrete path.
+- **A GC or reaper whose "in use" set comes back EMPTY must refuse, not
+  proceed.** `runArtworkGC` treated an empty referenced set as "everything is an
+  orphan" and would unlink the whole cache — permanently for the scanner-written
+  `local-<sha256>-500.jpg` covers, which the mtime skip gate stops it from
+  regenerating. Its own docblock records this shipping once via a wrong DB path;
+  that fix corrected the path and left the shape. Reachable today by a `--config`
+  naming another install, or a run between a root flip's `WipeFilesystemTracks`
+  and the rescan. An empty set with an EMPTY cache is still a clean exit — check
+  the directory, not just the set.
+- **`LiveHost` must accept the routing key's spelling.** `upnp_track_routing.server_udn`
+  holds `StableServerKey` (lowercased); the SSDP cache is keyed on the raw
+  advertised UDN and nothing folds it. An upstream whose UDN carries any
+  uppercase character walked, routed and reached the phone — then 503'd
+  `upnp_server_offline` on EVERY byte fetch, across `/v1/download`,
+  `/dlna/file/{trackID}` and the web player. Exact `Get` first, folded scan as
+  fallback; the cache holds single digits of entries, and the fallback measures
+  **411 ns / 912 B at five upstreams**, which is noise against proxying a FLAC.
+  **Don't memoise it in package-level state** — `runServe` is re-entered
+  in-process by the launcher menu, so the memo outlives the cache it describes.
+- **An operator-facing promise is a contract with an expiry date.** The uninstall
+  prompt told operators the bridge "has no code path that can delete `--library`
+  files (read-only by design)" — true when written, false since delete-as-trash
+  landed. Scope such a promise to the COMMAND, not the product. Guard it by
+  driving the real function (`actUninstall` with a buffer), never by scanning the
+  source: this package's commentary names what it discusses, so a text scan
+  reports its own docblock.
+
+**The four stale claims this run corrected in THIS file** — all four sat in the
+"Don't regress these cross-cutting invariants" list at the top, which reads as
+the most authoritative place in the document and had drifted from the hardened
+sections that superseded it:
+
+1. **`WipeAllTracks` on a root flip** — the exact CASCADE the Scanner section
+   forbids and explains. No production path has ever called it.
+2. **Two sanctioned `enriched_at` resets** where there are four, two of them live.
+3. **"Admin console is loopback-only, no auth"** with no mention of public
+   mode's credentialed posture — which is what the VPS runs.
+4. **Five subcommands** in the architecture table where `run()` dispatches 28.
+
+**When you correct a rule in a hardened section, check the top-of-file list for
+its twin.** The top list is older, shorter, and read first.
 
 ### Auth, pairing, TLS and security posture
 

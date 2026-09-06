@@ -3467,3 +3467,142 @@ Four further blockers, in order of hardness:
 
 **Do not re-open this without re-running the count query first.** If
 `raw_has_key` is still 0, the work is a new ingest path, not a new endpoint.
+
+## LOUPE on the `cmd/bridge` surface (PRs #852 / #853 / #854 / #855, 2026-09-06)
+
+Surface-shaped run, not window-shaped: one Go package, 52 production files,
+19,375 lines, `main.go` alone 4,698. Plan and full triage in
+[`plan-2026-09-06-loupe-cmdbridge.md`](plan-2026-09-06-loupe-cmdbridge.md).
+
+### Phase 0 predicted the yield, and was right
+
+The bridge-side structural question is whether the surface has a `### ` section
+under `## Things that have bitten before`. **It did not** — eleven sections, none
+for the package that holds every wiring decision in the process. Prior-art agreed:
+`cmd/bridge` appears 20 / 12 / 2 / 6 times across the four `ops/audit-*.md` files,
+against a 19k-line surface, and `engineering-log.md` cited only 10 distinct files
+in it.
+
+The stated prediction was that an unswept surface should refute *fewer* findings
+than the ~70% baseline for hardened ground. It produced **five confirmed defects
+and four stale claims in CLAUDE.md itself**, three of the five reachable on the
+**default** configuration.
+
+### The dominant defect class: a construction guard that stopped guarding
+
+PR #781 ("always construct, never stop") converted `if analysisActive {` and
+`if upscaleActive {` into bare blocks so both pools are always built — correct,
+and the thing that makes those flags hot — and converted every READER to a live
+predicate in the same commit. The WRITE paths had nothing to convert, because
+**the enclosing `if` was their gate**:
+
+- `runAnalysisSweeper` took no `enabled` parameter at all. On the default config
+  (`analysis.enabled` is false) the bridge walked the library 90 s after every
+  boot, forked a decode per track, wrote waveform sidecars, and — because
+  `UpsertAnalysis` ends in `bumpIndexedAtByPathSQL` — pushed a **whole-library
+  delta to every paired device**, repeating on every scan interval and post-scan
+  nudge. `/v1/analysis/*` 404'd throughout and `bridge analyze` refused, so the
+  feature looked absent while costing everything.
+- `upscaleRequest` and `upscaleDelete` gated on `s.upscaleEnqueuer == nil` /
+  `s.variantDeleter == nil`, with comments still claiming nil meant "feature off
+  OR sox precheck failed". `upscale.enabled` also defaults false, so any
+  bearer-token holder could enqueue real sox jobs writing `track_variants` rows
+  and FLAC sidecars — with **no disk floor**, which lives only in the sweeper and
+  `Coordinator.Submit` — on a bridge whose `/v1/health` said `upscaleEnabled:
+  false`.
+
+`git show a25c8ba` is the whole diagnosis: `-	if analysisActive {` → `+	{`.
+
+**Why no test caught the API half**: `upscaleFixture` wired the enqueuer WITHOUT
+the feature predicate, which is precisely the production state that shipped. A
+fixture that cannot express "wired but disabled" cannot catch a missing gate.
+
+**The iOS side was checked rather than assumed** before restoring the gate:
+`DownloadCoordinator.swift:1607` states the dispatch precondition as
+`share.bridgeUpscaleEnabled == true` and `BridgePairingPersistence.swift:158`
+sets it from `health.upscaleEnabled`, so the shipped client cannot be broken by
+a 503 it never provokes.
+
+### Six commands could not find the platform config
+
+Measured, from an empty directory on a host with a normal install:
+
+```
+$ bridge token list
+config load failed: read config "": open : no such file or directory   (exit 2)
+$ bridge status                     # the loadCLIConfig control
+status: probe 127.0.0.1:7789: ...   # resolves fine
+```
+
+The empty `""` is the whole story. Sixteen files route through `loadCLIConfig`;
+`openTokenStoreFromCfg` and `bootstrapTranscodeCmd` still handed the flag's empty
+default to `config.Load`, taking `bridge token {list,rotate,expire,revoke}`,
+`bridge upscale` and `bridge optimize` with them — while all six advertised the
+`./bridge.yaml`-then-platform fallback in their own flag help. `bridge token
+revoke` is the documented orphaned-token recovery path, i.e. the one command an
+operator reaches for when something is already wrong.
+
+Both were one call in a shared tail, invisible from the subcommand owning the
+flag, so the fix carries a package-wide guard against a four-entry allowlist.
+
+### Two fail-closed guards
+
+**`runArtworkGC`** had no empty-referenced-set check: every file misses an empty
+`known`, so the whole cache is orphaned, and the scanner-written
+`local-<sha256>-500.jpg` covers never come back (the mtime skip gate stops
+re-extraction). Its own docblock records this shipping once via a hardcoded wrong
+DB path — that fix corrected the path and left the shape. The guard checks the
+*directory* too, so an empty store with an empty cache stays a clean exit.
+
+**`serverCacheHostResolver.LiveHost`** handed a `StableServerKey` (lowercased) to
+a raw-UDN cache lookup — CLAUDE.md's own documented "carry BOTH spellings" class,
+live on the byte path, where the admin badge had been fixed and the byte path had
+not. An upstream with any uppercase in its UDN 503'd every fetch.
+
+The `sync.Map` memo a reviewer proposed for the fallback was **declined on a
+measurement**:
+
+```
+BenchmarkLiveHostFoldedFallback/upstreams=1-12    297.9 ns/op    304 B/op   2 allocs/op
+BenchmarkLiveHostFoldedFallback/upstreams=5-12    410.6 ns/op    912 B/op   2 allocs/op
+BenchmarkLiveHostFoldedFallback/upstreams=20-12   994.6 ns/op   3216 B/op   2 allocs/op
+```
+
+Sub-microsecond once per request, on a path that proxies multi-megabyte FLACs,
+against a package-level memo that would outlive `runServe`'s in-process re-entry.
+
+### CLAUDE.md's own top-of-file list had drifted from the sections that superseded it
+
+Four claims corrected, all in **"Don't regress these cross-cutting invariants"** —
+the shortest, oldest, most authoritative-looking list in the file:
+
+| claim | reality |
+|---|---|
+| root flip calls `WipeAllTracks()` | calls `WipeFilesystemTracks`; `WipeAllTracks` has **zero** production callers and CASCADE-deletes `upnp_track_routing` — the exact destruction the Scanner section forbids and explains |
+| two sanctioned `enriched_at` resets | four, two of the omitted ones live callers |
+| "admin console is loopback-only, no auth" | true in loopback mode only; public mode is credentialed and is what the VPS runs |
+| five subcommands | `run()` dispatches 28 |
+
+The first is the dangerous shape this file already warns about: *a live imperative
+whose literal implementation reintroduces a fixed defect.* A session following it
+would compile, pass the suite, and destroy an upstream library on a root toggle.
+
+### Process notes worth keeping
+
+- **`relay.py` hardcoded the iOS primer.** Its `ROOT` pointed at
+  `~/dev/gemini-review`, so every prior bridge-side relay reviewed **Go against
+  Swift false-positive rules**. Fixed with a `--primer-dir` flag (default
+  unchanged); the bridge's Go primer lives at `~/dev/gemini-review-bridge/`.
+- **A negative control audits the tests you just wrote — including the ones you
+  wrote on review advice.** Taking the "fail closed on a nil predicate" change,
+  then re-running the control, showed that flipping it *back* to fail-open left
+  the whole suite green: the disabled-gate test passes a real predicate and
+  cannot see the nil arm. `TestAnalysisSweeperNilGateIsOff` closed that.
+- **Control BEFORE commit loses work.** One PR's control ran on an uncommitted
+  tree, and `git checkout --` took the fix with the mutation. The rule in
+  `docs/LoupeReviewCycle.md` is there for a reason and it is easy to skip when
+  the edit feels small.
+- **A source-scanning guard fires on its own docblock.** Twice in one run — the
+  `config.Load` sweep and the uninstall-prompt guard. This package's commentary
+  names what it discusses. Strip comments *and* string-literal contents, or
+  better, drive the real function.
