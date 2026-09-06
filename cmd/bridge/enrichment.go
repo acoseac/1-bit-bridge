@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -351,6 +352,19 @@ func enrichmentRetryCmd(ctx context.Context, args []string, stdout, stderr io.Wr
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// flag.Parse stops at the first non-flag argument, so a positional
+	// `bridge enrichment retry Artist/Album` — the form an operator reaches
+	// for — parses cleanly with --path still EMPTY, and the empty scope means
+	// the WHOLE LIBRARY. That is a whole-library delta to every paired device
+	// in place of one album. `library remove` guards exactly this way.
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "enrichment retry: unexpected argument %q\n", fs.Arg(0))
+		fmt.Fprintln(stderr, "  A subtree is given with the flag, not positionally:")
+		fmt.Fprintf(stderr, "    bridge enrichment retry --path %s\n", fs.Arg(0))
+		fmt.Fprintln(stderr, "  Without --path the retry covers the WHOLE library, so this is refused")
+		fmt.Fprintln(stderr, "  rather than silently widened.")
+		return 2
+	}
 	cfg, _, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "enrichment retry: load config: %v\n", err)
@@ -395,6 +409,35 @@ func enrichmentRetryCmd(ctx context.Context, args []string, stdout, stderr io.Wr
 	if err != nil {
 		fmt.Fprintf(stderr, "enrichment retry: %v\n", err)
 		return 1
+	}
+
+	// Clear the persisted AcoustID suppression markers as well.
+	//
+	// Both admin paths this command calls itself "the scripted equivalent
+	// of" do this (handlers_api.go for the global button,
+	// handlers_library_meta.go for the scoped one), and without it the
+	// command re-queues rows for the TEXT enricher while leaving every
+	// acoustid_nomatch_* / acoustid_veto_* marker standing for up to 30 days.
+	// Those markers cover exactly the tracks an operator runs this for — the
+	// ones the text ladder already failed on — so the command reported
+	// "re-queued N" while silently excluding the population fingerprinting
+	// exists to rescue.
+	//
+	// Best-effort: the enriched_at reset above has already committed and is
+	// the larger half of the job, so a failure here is reported and does not
+	// undo it. There is no in-process cache to drop offline; the SQLite rows
+	// are the whole job.
+	var cleared int64
+	if *pathScope == "" {
+		cleared, err = store.ClearAcoustIDSuppression(ctx)
+	} else {
+		cleared, err = store.ClearAcoustIDSuppressionUnderPrefix(ctx, *pathScope)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "enrichment retry: clearing fingerprint suppression failed: %v\n", err)
+		fmt.Fprintln(stderr, "  the enriched_at reset above still applied; re-run to retry the clear")
+	} else if cleared > 0 {
+		fmt.Fprintf(stdout, "Cleared %d fingerprint suppression marker(s).\n", cleared)
 	}
 	fmt.Fprintf(stdout, "enrichment retry: re-queued %d tracks (no bridge running).\n", n)
 	fmt.Fprintln(stdout, "  they enrich on the next `bridge serve`.")
@@ -528,6 +571,49 @@ func adminAddrOf(cfg *config.Config) string {
 		addr = config.DefaultAdminAddress
 	}
 	return probeLoopbackAddr(addr)
+}
+
+// adminPortIsFixed reports whether cfg's admin address names a port a probe
+// can actually dial.
+//
+// Port 0 is the documented "OS picks an ephemeral port" mode. A bridge running
+// on it IS listening — just not anywhere findable — so a probe of
+// "127.0.0.1:0" cannot answer "is a bridge up?", and the probe's fail-closed
+// default would report "a bridge is answering on 127.0.0.1:0", which is
+// actively false: nothing answers there. Callers that gate a write on
+// liveness use this to refuse with an accurate reason instead.
+func adminPortIsFixed(cfg *config.Config) bool {
+	_, port, err := net.SplitHostPort(probeLoopbackAddr(adminAddrOf(cfg)))
+	if err != nil {
+		return false
+	}
+	return port != "" && port != "0"
+}
+
+// refuseIfBridgeMayBeRunning is the shared write gate for the CLI commands
+// that mutate the store from a SECOND process. Returns true when the caller
+// must refuse; it has already explained why on stderr.
+//
+// Store.mu serialises writers within one process only, and busy_timeout is a
+// retry rather than a serializer, so "is anything else running?" is the
+// question these commands have to answer before touching the database.
+func refuseIfBridgeMayBeRunning(ctx context.Context, cfg *config.Config, cmd string, stderr io.Writer) bool {
+	addr := adminAddrOf(cfg)
+	if !adminPortIsFixed(cfg) {
+		fmt.Fprintf(stderr, "%s: adminAddress %q has no fixed port, so I cannot tell whether a bridge is running.\n", cmd, cfg.AdminAddress)
+		fmt.Fprintln(stderr, "  Writing to the store from a second process bypasses the single-writer")
+		fmt.Fprintln(stderr, "  contract, so this is refused rather than guessed. Set a real admin port,")
+		fmt.Fprintln(stderr, "  or stop the bridge and re-run against a config that names one.")
+		return true
+	}
+	if probeBridge(ctx, addr) == bridgeDown {
+		return false
+	}
+	fmt.Fprintf(stderr, "%s: a bridge is answering on %s.\n", cmd, addr)
+	fmt.Fprintln(stderr, "  Writing to the store from a second process bypasses the single-writer")
+	fmt.Fprintln(stderr, "  contract. Stop the service first, then re-run:")
+	fmt.Fprintf(stderr, "    sudo systemctl stop 1-bit-bridge && bridge %s && sudo systemctl start 1-bit-bridge\n", cmd)
+	return true
 }
 
 // bridgeLiveness is the tri-state result of probing the admin port.

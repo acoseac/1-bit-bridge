@@ -86,9 +86,17 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 // restore while serve is up would leave the SQLite WAL inconsistent
 // with the new main file, surface as silent corruption on next
 // query. The CLI surfaces this as a `--yes`-gated prompt rather
-// than enforcing a process check (no PID file today, and operators
-// know to stop their service before invasive operations).
-func restoreCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// than enforcing a process check.
+//
+// It ALSO refuses outright when a bridge is answering on the admin port.
+// The prompt is advice; the probe is the enforcement, and the two are not
+// interchangeable on the one command that renames a database over a
+// possibly-open one. (The docblock used to justify having no check with
+// "no PID file today" — false since cmd/bridge/pidfile.go landed;
+// writeServerPIDFile runs from runServe and doctor.go already reads
+// <dataDir>/server.pid. The admin probe is the cheaper signal and the one
+// every sibling CLI mutator already uses.)
+func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
@@ -115,10 +123,26 @@ func restoreCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	// Refuse while a bridge is up. backup.Restore unlinks the live -wal and
+	// -shm and renames a fresh bridge.db over the open one; with a writer
+	// running that is the WAL/main mismatch this command's own docblock
+	// describes as silent corruption. Every sibling CLI mutator gates the
+	// same way — tryLibraryViaAdmin and enrichmentRetryCmd both refuse on a
+	// reachable bridge — and this is the most destructive of the three.
+	if refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+		return 1
+	}
+
 	if !*autoYes {
 		fmt.Fprintf(stdout, "Restore from %s into %s?\n", snapshotDir, cfg.DataDir)
 		fmt.Fprintln(stdout, "WARNING: stop the bridge service first. Restoring while `bridge serve` is running can corrupt the live database.")
-		fmt.Fprint(stdout, "Type 'yes' to continue: ")
+		// F14: the PROMPT goes to stderr, the description stays on stdout.
+		// `bridge restore > log` is the natural way to capture a paper trail
+		// for an invasive operation, and it used to hide the question in the
+		// redirected stream and block with no visible cue. update.go asserts
+		// this as the repo convention and names `cert rotate` and `restore`
+		// as following it; neither did.
+		fmt.Fprint(stderr, "Type 'yes' to continue: ")
 		var resp string
 		_, _ = fmt.Fscanln(stdin, &resp)
 		if strings.TrimSpace(resp) != "yes" {

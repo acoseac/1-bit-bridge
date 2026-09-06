@@ -125,9 +125,15 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		return 0
 	}
 
-	if err := os.MkdirAll(*to, 0o755); err != nil {
-		fmt.Fprintf(stderr, "mkdir destination: %v\n", err)
-		return 1
+	// Not under --dry-run. The flag promises to "list planned moves without
+	// touching files or DB", and creating the destination directory is
+	// touching the filesystem — on a preview an operator may well be running
+	// against a path they have not decided on yet.
+	if !*dryRun {
+		if err := os.MkdirAll(*to, 0o755); err != nil {
+			fmt.Fprintf(stderr, "mkdir destination: %v\n", err)
+			return 1
+		}
 	}
 
 	var (

@@ -84,7 +84,7 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 			"expired":         expired,
 			"expiringSoon":    expiringSoon,
 		}
-		return writeJSONIndent(stdout, envelope)
+		return writeJSONIndent(stdout, stderr, envelope)
 	}
 	fmt.Fprintf(stdout, "Subject:     %s\n", info.Subject)
 	fmt.Fprintf(stdout, "Fingerprint: %s\n", info.Fingerprint)
@@ -142,7 +142,10 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fmt.Fprintln(stdout, "  • Invalidate every paired device's pinned fingerprint.")
 		fmt.Fprintln(stdout, "  • Every iOS device must re-pair (admin console QR or bridge:// link).")
 		fmt.Fprintln(stdout, "  • Restart the bridge to load the new cert.")
-		fmt.Fprint(stdout, "\nType 'yes' to continue: ")
+		// Prompt on stderr; the bullet list above stays on stdout. Same
+		// convention update.go states and `restore` now also honours —
+		// `bridge cert rotate > rotation.log` must not swallow the question.
+		fmt.Fprint(stderr, "\nType 'yes' to continue: ")
 		var resp string
 		_, _ = fmt.Fscanln(stdin, &resp)
 		if strings.TrimSpace(resp) != "yes" {

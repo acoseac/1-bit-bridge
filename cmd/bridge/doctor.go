@@ -66,7 +66,7 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *jsonOut {
-		if code := writeJSONIndent(stdout, jsonReportEnvelope(report)); code != 0 {
+		if code := writeJSONIndent(stdout, stderr, jsonReportEnvelope(report)); code != 0 {
 			return code
 		}
 		// Honour the "exit 1 if any fail" rule even on the JSON
