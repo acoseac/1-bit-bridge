@@ -195,6 +195,32 @@ func assertInSettingsPayload(t *testing.T, fields ...string) {
 	}
 }
 
+// TestACancelledRequestDoesNotPoisonTheDatabaseStatsCache.
+//
+// Both reads take the REQUEST's context. A browser navigating away
+// mid-poll, or an aborted bug-report download, cancels it and fails both
+// — and caching that result would answer "unavailable" to the next
+// fifteen seconds of perfectly good requests. That is exactly the
+// confident wrong answer the availability flags exist to prevent, and
+// the TTL introduced it.
+func TestACancelledRequestDoesNotPoisonTheDatabaseStatsCache(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := srv.databaseStats(dead); got.statsOK || got.countsOK {
+		t.Fatalf("a cancelled context produced a usable snapshot (%+v); the rest of this test "+
+			"assumes it cannot, so it would prove nothing", got)
+	}
+
+	// The very next caller has a good context and must get real numbers.
+	good := srv.databaseStats(context.Background())
+	if !good.statsOK || !good.countsOK {
+		t.Errorf("a cancelled request poisoned the cache: the next healthy request got "+
+			"statsOK=%v countsOK=%v", good.statsOK, good.countsOK)
+	}
+}
+
 // TestLogBundlePrintsWhatItPaysToCompute — the bundle has run three
 // PRAGMAs, two COUNTs and a MIN since the compaction work landed, and
 // printed none of them. That contradicts the split's stated purpose ("so

@@ -247,6 +247,22 @@ func (s *Server) databaseStats(ctx context.Context) databaseStatsSnapshot {
 			}
 		}
 	}
+	// NEVER cache a snapshot a cancelled request produced. Both reads take
+	// the request's context, so a browser that navigates away mid-poll —
+	// or an aborted bug-report download — fails both of them and yields
+	// statsOK=false, countsOK=false. Storing THAT would answer
+	// "unavailable" to the next fifteen seconds of perfectly good
+	// requests, which is the confident-wrong-answer shape the two
+	// availability flags exist to prevent, reintroduced by the cache that
+	// was meant to be cheap insurance.
+	//
+	// A genuine failure (a closed or broken store) still caches, and
+	// should: repeating a doomed full table scan every 5 s helps nobody.
+	// The distinction is whether the failure was about the DATABASE or
+	// about this REQUEST. (CodeRabbit, PR #861.)
+	if ctx.Err() != nil {
+		return snap
+	}
 	s.dbStats = &snap
 	s.dbStatsAt = time.Now()
 	return snap
