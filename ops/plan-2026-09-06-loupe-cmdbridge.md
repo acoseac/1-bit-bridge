@@ -441,9 +441,9 @@ it run sequentially while the CLI one goes in parallel.
 
 | PR | Theme | Items | State |
 |---|---|---|---|
-| [#856](https://github.com/acoseac/1-bit-bridge/pull/856) | The CLI surprises or lies to the operator | F12, F13, F14, F15, PRISM-1/2/3 | open |
-| [#857](https://github.com/acoseac/1-bit-bridge/pull/857) | Live means live | F9, F10 | open |
-| [#858](https://github.com/acoseac/1-bit-bridge/pull/858) | `runServe` lifecycle and reporting | F11, F16, F17, F18 | open |
+| [#856](https://github.com/acoseac/1-bit-bridge/pull/856) | The CLI surprises or lies to the operator | F12, F13, F14, F15, PRISM-1/2/3 | merged |
+| [#857](https://github.com/acoseac/1-bit-bridge/pull/857) | Live means live | F9, F10 | merged |
+| [#858](https://github.com/acoseac/1-bit-bridge/pull/858) | `runServe` lifecycle and reporting | F11, F16, F17, F18 | merged |
 
 **All thirteen deferred items are in flight; none was dropped.**
 
@@ -463,6 +463,35 @@ three were defects in the TESTS rather than in the fixes:
    so `case "duplicates", "dupes":` left it green — an alias added that way
    dispatches and stays undiscoverable, which is the precise failure the guard
    exists for.
+
+### Bot coverage — stated, not implied
+
+**Only #856 was reviewed by an LLM bot.** #857 and #858 received Gemini's
+"You have reached your daily quota limit" notice and CodeRabbit's rate-limit
+notice, and neither reviewed. SonarCloud's quality gate passed on all three and
+CodeQL ran on all three, so those two carry static analysis but **no LLM review**.
+That is the shape `docs/LoupeReviewCycle.md` warns about for a multi-PR day —
+this session opened seven PRs — and the doc's instruction is to say so rather
+than imply coverage. Worth re-requesting on #857/#858 the next day if a second
+opinion is wanted.
+
+CodeRabbit's three findings on #856 all had a real core and were taken, except
+the interprocess-lock half of the TOCTOU finding — declined in-thread because a
+stale lockfile after an unclean exit blocks `restore` at exactly the moment an
+operator reaches for `restore`, and the daemon-side half is a change to the
+serve path a CLI PR has no business making. The probe now runs a second time
+immediately before the destructive call, which narrows the window rather than
+closing it, and the docblock says so plainly.
+
+### Windows CI caught a rule this repo already documents
+
+Both new source-scanning guards in #858 read `main.go` with `\n` literals. The
+repo pins no `eol` in `.gitattributes`, so a Windows checkout has CRLF:
+`TestIntegrityAdaptersCarryACancellableContext` failed there outright, and
+`TestEveryDispatchedSubcommandAppearsInUsage` would have passed **vacuously**,
+which is worse. Fixed by normalizing at read time, verified by converting
+`main.go` to CRLF locally and re-running. The Windows failure was itself the
+negative control.
 
 ### Two production seams added, deliberately
 
