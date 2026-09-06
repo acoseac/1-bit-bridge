@@ -3,6 +3,7 @@ package lyrics
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeIsDeterministic(t *testing.T) {
@@ -226,5 +227,72 @@ func TestPickIsDeterministicUnderShuffle(t *testing.T) {
 					"winner flips between scans.", want.Doc.Body, got.Doc.Body, i, j)
 			}
 		}
+	}
+}
+
+// TestStripBOMsIsLinearOnNestedBOMs is the regression for the quadratic
+// fixed-point loop both PR bots caught on #851.
+//
+// `"\xef\xbb"×n + BOM + "\xbf"×n` exposes exactly ONE new BOM per removal, so a
+// ReplaceAll-to-a-fixed-point does n full-body copies. At the size below that
+// is ~n² ≈ 10^10 bytes of copying — minutes — while the single-pass reducer is
+// one scan. Normalize's MaxBodyBytes check happens AFTER this, and the USLT /
+// ©lyr / Vorbis path reaches Normalize with no size gate at all, so the input
+// really is attacker-sized.
+//
+// The threshold is ~1000x the linear cost, so it cannot flake on a loaded CI
+// box while still being nowhere near the quadratic cost.
+func TestStripBOMsIsLinearOnNestedBOMs(t *testing.T) {
+	const depth = 60_000
+	var b strings.Builder
+	b.Grow(depth*3 + 3)
+	for i := 0; i < depth; i++ {
+		b.WriteString("\xef\xbb")
+	}
+	b.WriteString("\uFEFF")
+	for i := 0; i < depth; i++ {
+		b.WriteString("\xbf")
+	}
+	nested := b.String()
+
+	start := time.Now()
+	got := stripBOMs(nested)
+	elapsed := time.Since(start)
+
+	if strings.Contains(got, "\uFEFF") {
+		t.Errorf("a BOM survived: %d still present", strings.Count(got, "\uFEFF"))
+	}
+	if again := stripBOMs(got); again != got {
+		t.Errorf("stripBOMs is not a fixed point: %d bytes -> %d bytes on a second pass",
+			len(got), len(again))
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("stripBOMs took %v on a %d-byte nested input — that is the quadratic "+
+			"fixed-point shape, not a single pass", elapsed, len(nested))
+	}
+}
+
+// TestNormalizeStripsInteriorAndSplicedBOMs pins the two shapes FuzzNormalize
+// found, as readable cases rather than corpus hashes.
+func TestNormalizeStripsInteriorAndSplicedBOMs(t *testing.T) {
+	for _, tc := range []struct{ name, in string }{
+		{"BOM after a newline", "\n\uFEFF"},
+		{"BOM spliced from invalid neighbours", "\xef\xbb\uFEFF\xbf"},
+		{"interior BOM in real text", "first\uFEFFsecond"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, ok := Normalize(tc.in)
+			if ok && strings.Contains(out, "\uFEFF") {
+				t.Errorf("a BOM survived Normalize: %q", out)
+			}
+			if !ok {
+				return
+			}
+			again, ok2 := Normalize(out)
+			if !ok2 || again != out {
+				t.Errorf("Normalize is not idempotent: %q -> %q -> %q (ok=%v)",
+					tc.in, out, again, ok2)
+			}
+		})
 	}
 }

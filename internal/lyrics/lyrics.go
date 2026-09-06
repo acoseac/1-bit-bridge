@@ -145,9 +145,19 @@ func mergeDuplicate(a, b Candidate) Candidate {
 	if dup.Priority > kept.Priority {
 		kept.Priority = dup.Priority
 	}
-	if lang := smallestNonEmpty(a.Language, b.Language); lang != "" {
+	// Across BOTH language fields on BOTH candidates: production sets
+	// Candidate.Language and Doc.Language together, but Pick is exported and
+	// nothing enforces that, so folding only one pair would reintroduce the
+	// arrival-order dependence this function exists to remove (CodeRabbit).
+	if lang := smallestNonEmpty(
+		smallestNonEmpty(a.Language, a.Doc.Language),
+		smallestNonEmpty(b.Language, b.Doc.Language),
+	); lang != "" {
 		kept.Language = lang
 		kept.Doc.Language = lang
+	}
+	if name := smallestNonEmpty(a.SidecarName, b.SidecarName); name != "" {
+		kept.SidecarName = name
 	}
 	return kept
 }
@@ -201,6 +211,43 @@ func lessCandidate(a, b Candidate) bool {
 	return string(a.Source) < string(b.Source)
 }
 
+// stripBOMs removes every U+FEFF in ONE pass, including the ones that only
+// come into existence as it works.
+//
+// Two properties are load-bearing and neither is obvious:
+//
+//   - Deleting a U+FEFF splices its neighbours together and can form a NEW one
+//     out of them. `"\xef\xbb" + BOM + "\xbf"` is the minimal case: strip the
+//     middle BOM and the surrounding invalid bytes become `EF BB BF`.
+//     FuzzNormalize found it within a minute of the target existing.
+//   - The obvious answer — `strings.ReplaceAll` to a fixed point — is
+//     QUADRATIC, because each pass rescans and copies the whole string while
+//     exposing only one nesting level. Both PR bots flagged it independently
+//     and both were right: `"\xef\xbb"×n + BOM + "\xbf"×n` needs n passes, and
+//     Normalize's MaxBodyBytes check happens AFTER, so the input is unbounded
+//     at that point. The USLT / ©lyr / Vorbis path in particular reaches here
+//     with no size gate of any kind — dhowden hands over whatever the frame
+//     declared.
+//
+// Appending byte by byte and truncating whenever the output ENDS in a BOM is
+// linear and is a true fixed point: any complete `EF BB BF` in the output was
+// a suffix at the moment its final byte landed, so it was removed then; and a
+// truncation only shortens a suffix, so it can never splice a new one.
+func stripBOMs(body string) string {
+	const bom = "\uFEFF"
+	if !strings.Contains(body, bom) {
+		return body // the overwhelmingly common case, no allocation
+	}
+	out := make([]byte, 0, len(body))
+	for i := 0; i < len(body); i++ {
+		out = append(out, body[i])
+		if n := len(out); n >= 3 && out[n-3] == 0xEF && out[n-2] == 0xBB && out[n-1] == 0xBF {
+			out = out[:n-3]
+		}
+	}
+	return string(out)
+}
+
 // Normalize makes the body deterministic before hashing and storage: every
 // U+FEFF goes, CRLF / CR become LF, NFC, trailing spaces and tabs per line
 // go, and the text ends in exactly one newline-free tail. Returns ok=false
@@ -217,20 +264,7 @@ func lessCandidate(a, b Candidate) bool {
 // FuzzNormalize within a minute of the target existing; a zero-width
 // no-break space carries nothing in a lyrics document in any case.
 func Normalize(body string) (string, bool) {
-	// To a FIXED POINT, not once: deleting a U+FEFF splices its neighbours
-	// together and can form a NEW one out of them. `"\xef\xbb" + BOM +
-	// "\xbf"` is the minimal case — strip the middle BOM and the surrounding
-	// invalid bytes become `EF BB BF`, which is a BOM. Each pass strictly
-	// shortens the string, so this terminates. FuzzNormalize found both this
-	// and the leading-only form it replaced.
-	s := body
-	for {
-		stripped := strings.ReplaceAll(s, "\uFEFF", "")
-		if stripped == s {
-			break
-		}
-		s = stripped
-	}
+	s := stripBOMs(body)
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	s = norm.NFC.String(s)
