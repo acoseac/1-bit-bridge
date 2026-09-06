@@ -59,9 +59,14 @@ func (s *Server) apiDatabaseCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, databaseCompactResponse{
-		BeforeBytes:    res.BeforeBytes,
-		AfterBytes:     res.AfterBytes,
-		ReclaimedBytes: res.BeforeBytes - res.AfterBytes,
+		BeforeBytes: res.BeforeBytes,
+		AfterBytes:  res.AfterBytes,
+		// Clamped: a compaction can never return a negative number of
+		// bytes, so if the arithmetic ever produces one the honest report
+		// is zero rather than a figure that reads as "it grew". Both
+		// sides are footprints now (see manifest.dbFootprint), which is
+		// what removed the way this used to go negative.
+		ReclaimedBytes: max(0, res.BeforeBytes-res.AfterBytes),
 		CheckpointBusy: res.CheckpointBusy,
 	})
 }

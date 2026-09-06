@@ -31,9 +31,45 @@ func TestDatabaseCompactReclaimsAndReports(t *testing.T) {
 	if got.BeforeBytes <= 0 || got.AfterBytes <= 0 {
 		t.Errorf("implausible sizes: %+v", got)
 	}
-	if got.ReclaimedBytes != got.BeforeBytes-got.AfterBytes {
-		t.Errorf("ReclaimedBytes = %d, want before-after = %d",
-			got.ReclaimedBytes, got.BeforeBytes-got.AfterBytes)
+	// NOT `ReclaimedBytes == BeforeBytes-AfterBytes`. That was the shipped
+	// assertion and it is a tautology: the handler computes the field from
+	// those same two, so it holds against a Compact that never vacuums at
+	// all, and it held against the negative figure the WAL-blind before
+	// size used to produce. Assert the two properties that can actually
+	// be false instead.
+	if got.AfterBytes > got.BeforeBytes {
+		t.Errorf("the compaction reported GROWTH: before=%d after=%d", got.BeforeBytes, got.AfterBytes)
+	}
+	if got.ReclaimedBytes < 0 {
+		t.Errorf("ReclaimedBytes = %d; a compaction cannot return a negative number of bytes",
+			got.ReclaimedBytes)
+	}
+}
+
+// TestDatabaseCompactSurfacesInsufficientDiskSpace drives the 507 branch,
+// which had never executed: newTestServer leaves Deps.DBFreeBytes nil, so
+// Compact's headroom check was skipped in every admin test and the
+// handler's ErrInsufficientDiskSpace mapping was unreachable.
+func TestDatabaseCompactSurfacesInsufficientDiskSpace(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	s.deps.DBFreeBytes = func(string) (int64, error) { return 1, nil }
+	h := s.Handler()
+
+	req := httptest.NewRequest("POST", "/api/database/compact", nil)
+	req.Header.Set("content-type", "application/json")
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInsufficientStorage {
+		t.Fatalf("status = %d, want 507; body=%s", rr.Code, rr.Body.String())
+	}
+	var env map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env["error"] != "insufficient-disk-space" {
+		t.Errorf("error code = %v, want insufficient-disk-space", env["error"])
 	}
 }
 
@@ -86,8 +122,46 @@ func TestDiagnosticsCarriesDatabaseSize(t *testing.T) {
 	if n, _ := v.(float64); n <= 0 {
 		t.Errorf("databaseBytes = %v, want a real file size", v)
 	}
-	if _, ok := body["databaseReclaimableBytes"]; !ok {
-		t.Error("diagnostics response carries no databaseReclaimableBytes")
+	// The FLOOR field, asserted by value rather than by key-presence. The
+	// shipped test only checked the key existed, which is why nothing
+	// could see that the number was being rendered as an estimate: it has
+	// no omitempty, so it is always present whatever it holds.
+	fp, ok := body["databaseFreePageBytes"]
+	if !ok {
+		t.Fatal("diagnostics response carries no databaseFreePageBytes")
+	}
+	if n, _ := fp.(float64); n < 0 {
+		t.Errorf("databaseFreePageBytes = %v; a floor cannot be negative", fp)
+	}
+	if avail, _ := body["databaseStatsAvailable"].(bool); !avail {
+		t.Error("databaseStatsAvailable = false against a healthy store")
+	}
+}
+
+// TestDiagnosticsSaysWhenTheDatabaseStatsAreUnavailable is the assertion
+// its retention twin never had either: RetentionCountsAvailable was only
+// ever asserted TRUE, so hoisting the flag out of its error branch left
+// every test green while the field's whole reason for existing
+// evaporated. Both flags are pinned in the false direction here.
+func TestDiagnosticsSaysWhenTheDatabaseStatsAreUnavailable(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	// A closed store fails every PRAGMA and every COUNT, which is the
+	// realistic shape of "the query failed" — and the one that used to
+	// render as a bridge with a 0-byte database that had never recorded
+	// anything.
+	if err := s.deps.Manifest.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snap := s.diagnosticsSnapshot(context.Background())
+	if snap.DatabaseStatsAvailable {
+		t.Error("DatabaseStatsAvailable = true against a closed store")
+	}
+	if snap.RetentionCountsAvailable {
+		t.Error("RetentionCountsAvailable = true against a closed store")
+	}
+	if snap.DatabaseBytes != 0 || snap.DatabaseFreePageBytes != 0 {
+		t.Errorf("unavailable stats must stay zero, got bytes=%d free=%d",
+			snap.DatabaseBytes, snap.DatabaseFreePageBytes)
 	}
 }
 
