@@ -318,12 +318,24 @@ every deployment in the field.
 
 ## Phase 5–7 — what shipped
 
-| PR | Theme | State |
-|---|---|---|
-| [#852](https://github.com/acoseac/1-bit-bridge/pull/852) | F1 + F2 — the two gates #781 removed | 3 review rounds |
-| [#853](https://github.com/acoseac/1-bit-bridge/pull/853) | F3 — CLI config resolution + a package-wide guard | 1 round |
-| [#854](https://github.com/acoseac/1-bit-bridge/pull/854) | F4 + F5 — fail closed in the artwork GC and `LiveHost` | 1 round |
-| [#855](https://github.com/acoseac/1-bit-bridge/pull/855) | F7 + F8 — the stale operator promise, dead keepalives | 1 round |
+| PR | Theme | Rounds | State |
+|---|---|---|---|
+| [#852](https://github.com/acoseac/1-bit-bridge/pull/852) | F1 + F2 — the two gates #781 removed | 3 | merged |
+| [#853](https://github.com/acoseac/1-bit-bridge/pull/853) | F3 — CLI config resolution + a package-wide guard | 1 | merged |
+| [#854](https://github.com/acoseac/1-bit-bridge/pull/854) | F4 + F5 — fail closed in the artwork GC and `LiveHost` | 1 | merged |
+| [#855](https://github.com/acoseac/1-bit-bridge/pull/855) | F7 + F8 — the stale operator promise, dead keepalives | 1 | merged |
+
+**A post-merge sweep found no new bot comments** on any of the four — every
+inline comment (6 / 1 / 2 / 1) was triaged before merge.
+
+**One CI note worth keeping.** #852's `test -race` leg hung on the runner for
+over an hour while the identical suite finished locally in 63 s and every other
+leg was green. Cancelling and re-running the `gate` workflow cleared it
+(`test -race=success` on the second attempt). The cancel does not take effect
+immediately — it needs a minute before `gh run rerun` is accepted. Worth
+distinguishing from a real hang: check whether the job is `in_progress` with a
+live test binary burning CPU, and reproduce locally before assuming the change
+is at fault.
 
 Docs (F6 + the new `### The CLI and the serve wiring` section + the engineering
 log record) went direct to `main` per the repo's docs-only convention.
