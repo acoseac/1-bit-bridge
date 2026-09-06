@@ -132,6 +132,25 @@ func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 
 // waitForSweep polls the recorder until a completed sweep newer than
 // `after` is visible or the deadline hits. Returns the lastEnd observed.
+// sweeperFixture is the shared preamble for the runAnalysisSweeper cadence
+// tests: a short settle delay so a test does not wait 90 s, plus a store and a
+// live pool, each torn down in reverse order via t.Cleanup.
+func sweeperFixture(t *testing.T) (*manifest.Store, *analyze.Pool) {
+	t.Helper()
+	oldSettle := analysisSweeperSettleDelay
+	analysisSweeperSettleDelay = 5 * time.Millisecond
+	t.Cleanup(func() { analysisSweeperSettleDelay = oldSettle })
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	pool := analyze.NewPool(store, 1, 8)
+	t.Cleanup(pool.Stop)
+	return store, pool
+}
+
 // alwaysAnalysisEnabled is the live-gate predicate for the cadence tests,
 // which are about WHEN a sweep runs rather than whether it may.
 func alwaysAnalysisEnabled() bool { return true }
@@ -191,17 +210,7 @@ func waitGate(t *testing.T, calls <-chan struct{}, which string) {
 // distinguishes "gated" from "ran against an empty library" — and an
 // empty-library assertion would pass either way.
 func TestRunAnalysisSweeperRespectsDisabledGate(t *testing.T) {
-	oldSettle := analysisSweeperSettleDelay
-	analysisSweeperSettleDelay = 5 * time.Millisecond
-	t.Cleanup(func() { analysisSweeperSettleDelay = oldSettle })
-
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	pool := analyze.NewPool(store, 1, 8)
-	defer pool.Stop()
+	store, pool := sweeperFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -267,17 +276,7 @@ func waitForSweep(t *testing.T, status *sweepStatus[admin.AnalysisSweepCounts], 
 // waiting out the periodic interval — and a nudge that arrived DURING
 // the settle window is drained by the initial sweep, not double-run.
 func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
-	oldSettle := analysisSweeperSettleDelay
-	analysisSweeperSettleDelay = 5 * time.Millisecond
-	t.Cleanup(func() { analysisSweeperSettleDelay = oldSettle })
-
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	pool := analyze.NewPool(store, 1, 8)
-	defer pool.Stop()
+	store, pool := sweeperFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -333,17 +332,7 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 // recorder carries a nextDue in the future; the admin card derives its
 // "next sweep in …" countdown from it browser-side.
 func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
-	oldSettle := analysisSweeperSettleDelay
-	analysisSweeperSettleDelay = 5 * time.Millisecond
-	t.Cleanup(func() { analysisSweeperSettleDelay = oldSettle })
-
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	pool := analyze.NewPool(store, 1, 8)
-	defer pool.Stop()
+	store, pool := sweeperFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
