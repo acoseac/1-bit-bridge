@@ -9,6 +9,22 @@ import (
 	"testing"
 )
 
+// readGoSourceLF returns a package file with CRLF normalized to LF.
+//
+// Not optional: this repo pins no `eol` in .gitattributes, so a Windows
+// checkout has CRLF, and every `\n`-literal scan below silently finds nothing
+// there. Both guards in this file did exactly that and only the Windows CI leg
+// noticed — the failure mode of the un-normalized form is a test that passes
+// vacuously on the platform it was written on.
+func readGoSourceLF(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
+}
+
 // TestEveryDispatchedSubcommandAppearsInUsage pins the two lists against each
 // other.
 //
@@ -21,11 +37,7 @@ import (
 // subcommands until this sweep, which is how far the drift had already gone
 // with no guard.
 func TestEveryDispatchedSubcommandAppearsInUsage(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(src)
+	body := readGoSourceLF(t, "main.go")
 
 	// The dispatcher's switch arms. Help aliases are dispatch, not
 	// subcommands, so they are excluded by the leading-dash / "help" filter.
@@ -88,11 +100,7 @@ func TestEveryDispatchedSubcommandAppearsInUsage(t *testing.T) {
 // used context.Background() — so an AllVariants walk or a DeleteVariant could
 // keep going after scanCancel(), straight into Store.Close().
 func TestIntegrityAdaptersCarryACancellableContext(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(src)
+	body := readGoSourceLF(t, "main.go")
 	for _, decl := range []string{
 		"func (a *integrityVariantListerAdapter) AllVariants()",
 		"func (a *integrityVariantDeleterAdapter) DeleteVariant(",
