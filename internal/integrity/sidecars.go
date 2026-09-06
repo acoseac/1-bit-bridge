@@ -159,6 +159,9 @@ type OrphanSidecarSweeper struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 	done      chan struct{}
+	// exited is closed when the run goroutine returns, so stopFn can
+	// JOIN it rather than merely signalling. See Start.
+	exited chan struct{}
 }
 
 // effectiveGracePeriod returns the per-instance grace override when
@@ -241,12 +244,34 @@ func (s *OrphanSidecarSweeper) Start(ctx context.Context) (stopFn func()) {
 	}
 	s.startOnce.Do(func() {
 		s.done = make(chan struct{})
-		go s.run(ctx, s.done)
+		s.exited = make(chan struct{})
+		go func() {
+			defer close(s.exited)
+			s.run(ctx, s.done)
+		}()
 	})
 	return func() {
 		s.stopOnce.Do(func() {
 			if s.done != nil {
 				close(s.done)
+			}
+			// JOIN, grace-bounded. Signalling alone left the caller free to
+			// close the manifest store while a tick was mid-DeleteVariant —
+			// the "database is closed" / SQLite-corruption class runServe's
+			// bgWriters wait exists to prevent. cmd/bridge defers this stop
+			// ahead of Store.Close, so waiting here is what makes that
+			// ordering mean anything.
+			//
+			// Bounded rather than unconditional: a wedged tick degrades to a
+			// log line, never a hung exit, matching the shutdown discipline
+			// everywhere else in this tree.
+			if s.exited != nil {
+				t := time.NewTimer(stopGrace)
+				defer t.Stop()
+				select {
+				case <-s.exited:
+				case <-t.C:
+				}
 			}
 		})
 	}
