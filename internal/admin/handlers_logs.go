@@ -296,6 +296,34 @@ func (s *Server) writeBundleDiagnostics(ctx context.Context, w http.ResponseWrit
 	fmt.Fprintf(w, "tailscale:                 %s, %d peers online\n",
 		d.TailscaleNodeState, d.TailscalePeersOnline)
 
+	// The database and retention numbers. This bundle has PAID for them
+	// since the compaction work landed -- diagnosticsSnapshot runs three
+	// PRAGMAs, two COUNTs and a MIN -- and printed none of them, which
+	// contradicts the split's whole stated purpose ("so the bug-report
+	// bundle embeds the SAME numbers the page shows ... two assemblies of
+	// them is how the bundle and the page come to disagree"). They also
+	// happen to be among the most useful things to know when triaging a
+	// stranger's bridge from a pasted text file.
+	//
+	// Raw byte counts, not a human-rounded string: this artifact is read
+	// by diffing two of them.
+	if d.DatabaseStatsAvailable {
+		fmt.Fprintf(w, "database file:             %d bytes, at least %d reclaimable by compaction\n",
+			d.DatabaseBytes, d.DatabaseFreePageBytes)
+	} else {
+		fmt.Fprintf(w, "database file:             unavailable (the page-accounting PRAGMAs failed)\n")
+	}
+	if d.RetentionCountsAvailable {
+		oldest := d.OldestPlaybackStartedAt
+		if oldest == "" {
+			oldest = "n/a"
+		}
+		fmt.Fprintf(w, "retention:                 %d playback events (oldest %s), %d device registrations\n",
+			d.PlaybackHistoryRows, oldest, d.DeviceRegistrationRows)
+	} else {
+		fmt.Fprintf(w, "retention:                 unavailable (the row-count queries failed)\n")
+	}
+
 	// Sorted so two bundles from the same bridge diff cleanly — Go map order
 	// is randomised, and a report whose lines shuffle between runs is
 	// needlessly hard to compare.

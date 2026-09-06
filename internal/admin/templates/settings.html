@@ -791,6 +791,49 @@
                value="{{.Data.BackupKeep}}">
         <p class="hint">Older snapshots are pruned after each successful run.</p>
       </div>
+
+      <h2 class="section-head">Data retention</h2>
+      {{/*
+        The Diagnostics page has told operators to "set a window in
+        Settings" since the retention work shipped, and there was no such
+        control: the fields were reachable only by hand-editing
+        bridge.yaml or by a derived environment variable whose name is
+        printed nowhere. The row counts live on Diagnostics; the decision
+        lives here.
+
+        Both default to 0 and 0 is the RECOMMENDED value. That is unusual
+        enough to say in the hint rather than leave implied — an empty
+        box next to a "keep" label reads like a missing setting.
+      */}}
+      <p class="hint">
+        Two tables grow for as long as the bridge runs. Keeping everything is
+        the default and the recommendation; the current sizes are on
+        <a href="/diagnostics">Diagnostics</a>. Registrations bound to a
+        revoked token are cleaned up automatically whatever you set here.
+      </p>
+      <div class="field">
+        <label for="retentionPlaybackHistoryDays">Keep playback history for (days)</label>
+        <input type="number" id="retentionPlaybackHistoryDays" name="retentionPlaybackHistoryDays"
+               min="0" max="36500" value="{{.Data.RetentionPlaybackHistoryDays}}">
+        <p class="hint">
+          0 keeps everything, and is what you want unless the table has become a
+          problem. Any window degrades the &ldquo;Forgotten Favourites&rdquo; mix,
+          which looks for tracks you played a lot and haven&rsquo;t played
+          recently &mdash; so it has no earliest date to work back from. Values
+          between 1 and 89 are refused: the other smart mixes read windows up to
+          90 days and a shorter retention would quietly empty them.
+        </p>
+      </div>
+      <div class="field">
+        <label for="retentionDeviceRegistrationDays">Forget unseen devices after (days)</label>
+        <input type="number" id="retentionDeviceRegistrationDays" name="retentionDeviceRegistrationDays"
+               min="0" max="36500" value="{{.Data.RetentionDeviceRegistrationDays}}">
+        <p class="hint">
+          0 keeps them. A device that has not synced in a year may simply be in a
+          drawer, so this is a policy rather than a cleanup &mdash; its history
+          stays, just without a device name attached.
+        </p>
+      </div>
     </div>
 
     <div id="settings-panel-endpoints" class="tab-pane" data-tab="endpoints">

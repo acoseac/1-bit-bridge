@@ -398,6 +398,17 @@ type settingsResponse struct {
 	// dashboard no longer surfaces this section.
 	BackupIntervalHours int `json:"backupIntervalHours,omitempty"`
 	BackupKeep          int `json:"backupKeep,omitempty"`
+
+	// Retention windows for the two tables that grow without a bound.
+	//
+	// No omitempty on either: 0 is the DEFAULT and the recommended
+	// setting ("keep everything"), so dropping it from the payload would
+	// make the field indistinguishable from one the server does not
+	// support -- and the control that renders it would come up blank.
+	// This is the same trap the pointer-typed limits fields exist for,
+	// one level out.
+	RetentionPlaybackHistoryDays    int `json:"retentionPlaybackHistoryDays"`
+	RetentionDeviceRegistrationDays int `json:"retentionDeviceRegistrationDays"`
 }
 
 // --- GET /api/stats ---
@@ -1890,11 +1901,14 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		IsSupervised:             isSupervised,
 		BackupIntervalHours:      cfg.Backup.EffectiveIntervalHours(),
 		BackupKeep:               cfg.Backup.EffectiveKeep(),
-		MDNSEnabled:              cfg.EffectiveMDNSEnabled(),
-		IsPublic:                 cfg.IsPublic(),
-		DLNAEnabled:              cfg.DLNA.Enabled,
-		DLNAListenAddress:        cfg.DLNA.EffectiveDLNAListenAddress(),
-		DLNABlockedByPublic:      cfg.IsPublic(),
+
+		RetentionPlaybackHistoryDays:    cfg.Retention.PlaybackHistoryDays,
+		RetentionDeviceRegistrationDays: cfg.Retention.DeviceRegistrationDays,
+		MDNSEnabled:                     cfg.EffectiveMDNSEnabled(),
+		IsPublic:                        cfg.IsPublic(),
+		DLNAEnabled:                     cfg.DLNA.Enabled,
+		DLNAListenAddress:               cfg.DLNA.EffectiveDLNAListenAddress(),
+		DLNABlockedByPublic:             cfg.IsPublic(),
 	}
 	// Tailscale mode: tolerate an unknown YAML value by falling back to the
 	// effective default so the UI shows a recognizable selection even if
@@ -1975,15 +1989,28 @@ type settingsPatch struct {
 	// Backup cadence + retention. Display-only until the settings
 	// consolidation; both are pointers so an omitted field is
 	// "unchanged" and an explicit 0 (disable the ticker) is a value.
-	BackupIntervalHours      *int    `json:"backupIntervalHours"`
-	BackupKeep               *int    `json:"backupKeep"`
-	LibraryName              *string `json:"libraryName,omitempty"`
-	ListenAddress            *string `json:"listenAddress,omitempty"`
-	AdminAddress             *string `json:"adminAddress,omitempty"`
-	ScanIntervalSec          *int    `json:"scanIntervalSec,omitempty"`
-	UpdateAutoInstall        *bool   `json:"updateAutoInstall,omitempty"`
-	UpdateQuietHours         *string `json:"updateQuietHours,omitempty"`
-	UpdateCheckIntervalHours *int    `json:"updateCheckIntervalHours,omitempty"`
+	BackupIntervalHours *int `json:"backupIntervalHours"`
+	BackupKeep          *int `json:"backupKeep"`
+	// Retention windows. Pointers for the usual reason and a sharper one
+	// than most: 0 is the meaningful default ("keep everything"), so an
+	// omitted field and an explicit zero must not collapse -- the second
+	// is how an operator turns a window back OFF.
+	//
+	// The Diagnostics page told operators to "set a window in Settings"
+	// from the day it shipped, and until now there was no such control:
+	// not in this struct, not in settings_apply.go, not in the template,
+	// not in ops/settings-apply-semantics.md. The knob was reachable only
+	// by hand-editing bridge.yaml or setting a derived env var whose name
+	// is printed nowhere.
+	RetentionPlaybackHistoryDays    *int    `json:"retentionPlaybackHistoryDays"`
+	RetentionDeviceRegistrationDays *int    `json:"retentionDeviceRegistrationDays"`
+	LibraryName                     *string `json:"libraryName,omitempty"`
+	ListenAddress                   *string `json:"listenAddress,omitempty"`
+	AdminAddress                    *string `json:"adminAddress,omitempty"`
+	ScanIntervalSec                 *int    `json:"scanIntervalSec,omitempty"`
+	UpdateAutoInstall               *bool   `json:"updateAutoInstall,omitempty"`
+	UpdateQuietHours                *string `json:"updateQuietHours,omitempty"`
+	UpdateCheckIntervalHours        *int    `json:"updateCheckIntervalHours,omitempty"`
 	// CustomEndpoints accepts the array form (programmatic clients)
 	// or the textarea form via CustomEndpointsText (web UI). Sending
 	// both is supported but redundant; the array form wins.
@@ -2231,6 +2258,38 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				report.live("backupKeep")
 			} else {
 				report.unchanged("backupKeep")
+			}
+		}
+		// Retention. LIVE with no rearm, exactly like backupKeep beside
+		// it: the daily sweeper reads cfg through the runtime holder at
+		// the top of every pass, so the next tick sees the change. There
+		// is no parked wait to disturb -- the interval is a compile-time
+		// const, not a config field.
+		//
+		// Until this arm existed the sweeper's own "read LIVE on every
+		// pass, so a settings change takes effect on the next tick rather
+		// than at the next restart" described a capability nothing could
+		// reach: the holder only ever moves through this handler, and
+		// there is no config-file watcher.
+		//
+		// Range checking is Config.Validate's, which this handler already
+		// runs -- the >= 90 day floor that protects the bounded smart-mix
+		// families, and the ceiling that keeps the cutoff arithmetic from
+		// overflowing into "delete everything".
+		if p.RetentionPlaybackHistoryDays != nil {
+			if *p.RetentionPlaybackHistoryDays != next.Retention.PlaybackHistoryDays {
+				next.Retention.PlaybackHistoryDays = *p.RetentionPlaybackHistoryDays
+				report.live("retentionPlaybackHistoryDays")
+			} else {
+				report.unchanged("retentionPlaybackHistoryDays")
+			}
+		}
+		if p.RetentionDeviceRegistrationDays != nil {
+			if *p.RetentionDeviceRegistrationDays != next.Retention.DeviceRegistrationDays {
+				next.Retention.DeviceRegistrationDays = *p.RetentionDeviceRegistrationDays
+				report.live("retentionDeviceRegistrationDays")
+			} else {
+				report.unchanged("retentionDeviceRegistrationDays")
 			}
 		}
 		if p.UpdateAutoInstall != nil {

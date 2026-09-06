@@ -92,10 +92,27 @@ type diagnosticsResponse struct {
 
 // apiDiagnostics handles GET /api/diagnostics.
 //
-// Every field reads either an atomic counter or a sliding-window quantile
-// snapshot, so this returns in well under a millisecond and — unlike the
-// composition and coverage snapshots on this server — needs no TTL cache.
-// It touches no database.
+// MOST fields read an atomic counter or a sliding-window quantile
+// snapshot and cost nothing. The database block does NOT: it runs three
+// PRAGMAs (microseconds, genuinely free) plus
+// `SELECT COUNT(*), COALESCE(MIN(started_at), 0) FROM playback_history`
+// and a second COUNT. There is no index on `started_at` — deliberately,
+// see the schema — so the MIN turns a covering-index count into a full
+// table SCAN. Measured against the real driver and schema:
+//
+//	rows      COUNT(*)+MIN   COUNT(*) alone   3 PRAGMAs
+//	18,000        1.02 ms          55 µs         7 µs
+//	90,000        9.02 ms         748 µs         8 µs
+//	500,000      39.55 ms        5.51 ms        12 µs
+//
+// The page polls this every 5 s while its tab is visible, so the block
+// sits behind databaseStatsTTL — the rule this server already follows for
+// its composition and coverage snapshots. This docblock said "It touches
+// no database" for four days after that stopped being true, with the
+// body's own "Three PRAGMAs" and "Two COUNTs and a MIN" comments directly
+// beneath it, and app.js carried a second copy of the same false claim as
+// the stated JUSTIFICATION for the 5 s poll. That is how the next
+// database read gets added here.
 func (s *Server) apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 	resp := s.diagnosticsSnapshot(r.Context())
 
@@ -122,37 +139,17 @@ func (s *Server) diagnosticsSnapshot(ctx context.Context) diagnosticsResponse {
 
 	resp.SQLiteLockWaitP50, resp.SQLiteLockWaitP99 = metrics.SQLiteLockWaitWindow.Snapshot()
 
-	// Three PRAGMAs, microseconds. Degrade to zeros on error rather than
-	// failing the whole snapshot — same rule as the upscale counters
-	// below: a diagnostics surface that 5xxes when one subsystem is
-	// unavailable is useless exactly when someone needs it.
-	if s.deps.Manifest != nil {
-		if ps, err := s.deps.Manifest.PageStats(ctx); err == nil {
-			resp.DatabaseStatsAvailable = true
-			resp.DatabaseBytes = ps.FileBytes
-			resp.DatabaseFreePageBytes = ps.FreePageBytes
-		}
-		// Two COUNTs and a MIN. Degrade to zeros on error rather than
-		// failing the whole snapshot — same rule as every other block
-		// here: a diagnostics surface that 5xxes when one subsystem is
-		// unavailable is useless exactly when someone needs it.
-		if rc, err := s.deps.Manifest.RetentionCounts(ctx); err == nil {
-			resp.RetentionCountsAvailable = true
-			resp.PlaybackHistoryRows = rc.PlaybackHistoryRows
-			resp.DeviceRegistrationRows = rc.DeviceRegistrationRows
-			// Gate on the ROW COUNT, not on the timestamp: the count is
-			// the direct answer to "is this table empty", while a
-			// timestamp of 0 would also be produced by a clock-skewed row
-			// (the ingest validator refuses non-positive startedAt, so
-			// that should be unreachable — but reading the count is both
-			// more direct and unreachable-proof). The stamp guard stays so
-			// a 0 can never render as 1970. (Gemini MEDIUM.)
-			if rc.PlaybackHistoryRows > 0 && rc.OldestPlaybackStartedAt > 0 {
-				resp.OldestPlaybackStartedAt = time.Unix(0, rc.OldestPlaybackStartedAt).
-					UTC().Format(time.RFC3339)
-			}
-		}
-	}
+	// The only database work on this handler, and the only part of it
+	// that is not free — see the docblock's measurements. Behind a TTL,
+	// which is what lets the 5 s poll stay a poll.
+	db := s.databaseStats(ctx)
+	resp.DatabaseStatsAvailable = db.statsOK
+	resp.DatabaseBytes = db.fileBytes
+	resp.DatabaseFreePageBytes = db.freePageBytes
+	resp.RetentionCountsAvailable = db.countsOK
+	resp.PlaybackHistoryRows = db.historyRows
+	resp.DeviceRegistrationRows = db.registrationRows
+	resp.OldestPlaybackStartedAt = db.oldestPlayback
 	resp.UpscaleDurationP50, resp.UpscaleDurationP99 = metrics.UpscaleDurationWindow.Snapshot()
 
 	hits, misses := metrics.MBCacheLookupsTotals()
@@ -176,6 +173,93 @@ func (s *Server) diagnosticsSnapshot(ctx context.Context) diagnosticsResponse {
 	resp.TailscaleNodeState = tailscaleStateLabel(metrics.TsnetNodeStateSnapshot())
 	resp.TailscalePeersOnline = metrics.TsnetPeersOnlineSnapshot()
 	return resp
+}
+
+// databaseStatsTTL bounds how stale the database block on
+// GET /api/diagnostics may be.
+//
+// The page polls every 5 s, so this cuts the query rate by three while
+// staying well inside "live" for numbers that move as slowly as a row
+// count and a file size. It is not a guess at an acceptable cost: it is
+// the rule this server already applies to its composition and coverage
+// snapshots, applied to the block that turned this handler into a
+// database reader.
+//
+// Compaction invalidates it explicitly, because that is the one moment an
+// operator is watching for the number to change.
+const databaseStatsTTL = 15 * time.Second
+
+// databaseStatsSnapshot is the cached half of the diagnostics response.
+// Unexported and unTAGGED: it is not a wire type, and the handler copies
+// each field into the DTO it owns.
+type databaseStatsSnapshot struct {
+	statsOK          bool
+	fileBytes        int64
+	freePageBytes    int64
+	countsOK         bool
+	historyRows      int64
+	registrationRows int64
+	oldestPlayback   string
+}
+
+// databaseStats returns the cached database block, recomputing it at most
+// once per databaseStatsTTL.
+//
+// The mutex is held ACROSS the recompute, which is the single-flight: a
+// second caller arriving mid-query waits and then finds the fresh entry
+// rather than issuing its own full table scan. That is the whole point on
+// a 5 s poll with several tabs open. It costs the second caller the query
+// duration, which is bounded by the same measurements the TTL is sized
+// from.
+//
+// Every failure degrades to a zero value with its availability flag
+// false, never to an error: a diagnostics surface that 5xxes when one
+// subsystem is unavailable is useless exactly when someone needs it, and
+// the flags are what stop a failed read from rendering as a bridge with
+// an empty database that has never recorded anything.
+func (s *Server) databaseStats(ctx context.Context) databaseStatsSnapshot {
+	s.dbStatsMu.Lock()
+	defer s.dbStatsMu.Unlock()
+	if s.dbStats != nil && time.Since(s.dbStatsAt) < databaseStatsTTL {
+		return *s.dbStats
+	}
+	var snap databaseStatsSnapshot
+	if s.deps.Manifest != nil {
+		if ps, err := s.deps.Manifest.PageStats(ctx); err == nil {
+			snap.statsOK = true
+			snap.fileBytes = ps.FileBytes
+			snap.freePageBytes = ps.FreePageBytes
+		}
+		if rc, err := s.deps.Manifest.RetentionCounts(ctx); err == nil {
+			snap.countsOK = true
+			snap.historyRows = rc.PlaybackHistoryRows
+			snap.registrationRows = rc.DeviceRegistrationRows
+			// Gate on the ROW COUNT, not on the timestamp: the count is
+			// the direct answer to "is this table empty", while a
+			// timestamp of 0 would also be produced by a clock-skewed row
+			// (the ingest validator refuses non-positive startedAt, so
+			// that should be unreachable — but reading the count is both
+			// more direct and unreachable-proof). The stamp guard stays so
+			// a 0 can never render as 1970. (Gemini MEDIUM, PR #829.)
+			if rc.PlaybackHistoryRows > 0 && rc.OldestPlaybackStartedAt > 0 {
+				snap.oldestPlayback = time.Unix(0, rc.OldestPlaybackStartedAt).
+					UTC().Format(time.RFC3339)
+			}
+		}
+	}
+	s.dbStats = &snap
+	s.dbStatsAt = time.Now()
+	return snap
+}
+
+// invalidateDatabaseStats drops the cached block so the next read is
+// fresh. Called after a compaction: that is the one moment an operator is
+// watching the number, and a TTL-stale "nothing changed" there would read
+// as a button that did nothing.
+func (s *Server) invalidateDatabaseStats() {
+	s.dbStatsMu.Lock()
+	s.dbStats = nil
+	s.dbStatsMu.Unlock()
 }
 
 // tailscaleStateLabel maps the tsnet collector's integer state to a

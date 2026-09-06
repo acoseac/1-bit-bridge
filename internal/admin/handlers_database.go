@@ -58,6 +58,9 @@ func (s *Server) apiDatabaseCompact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "compact-failed", err.Error())
 		return
 	}
+	// The one moment the operator is watching this number change; a
+	// TTL-stale read here would look like a button that did nothing.
+	s.invalidateDatabaseStats()
 	writeJSON(w, http.StatusOK, databaseCompactResponse{
 		BeforeBytes: res.BeforeBytes,
 		AfterBytes:  res.AfterBytes,
