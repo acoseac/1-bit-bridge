@@ -14,8 +14,8 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. 34 targets in
-  `fuzz_*_test.go` across `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes}`,
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. 37 targets in
+  `fuzz_*_test.go` across `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics}`,
   covering the three untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), and `fs.Resolver`. Without `-fuzz` they run their seed
@@ -232,6 +232,11 @@ lost my library."
   deliberate exclusions — the `UpsertTrack`/`UpsertTrackBatch` conflict arms,
   migration v34's `post()`, and `StampExtractorVersionBatch` (not an
   `indexed_at` writer at all). Don't "finish the job" by converting them.
+  A bump-only writer uses `bumpIndexedAtByPathSQL`. `TestIndexedAtAdvanceIsShared`
+  walks the named CONSTS and is blind to an inline literal in a function body —
+  which is how #840 reintroduced the dead `CASE WHEN` form — so
+  `TestNoHandRolledIndexedAtBump` sweeps every non-test file in the package and
+  classifies each assignment against the SQL literal that contains it.
 - **Any path predicate that writes, deletes, or bounds a scope MUST be a byte
   range, never `LIKE`.** Nothing sets `case_sensitive_like`, so `path LIKE
   'p/%'` matches a case-twin sibling — a DIFFERENT directory on a case-sensitive
@@ -420,6 +425,87 @@ lost my library."
   v1.x` labels are iOS app versions, which a bridge-side session cannot derive.
   Name the **feature flag** instead — it is checkable here and is what a client
   keys on, since no client can ask a bridge its protocol era.
+
+### Lyrics — the one document per track
+
+The surface landed whole in ONE PR (#840) and had no section here until a LOUPE
+run swept it; every rule below is from that sweep (PRs #849 / #850 / #851).
+**Three of the four defects were permanent and silent** — no error, no log line,
+no failing test — which is the shape to expect in this area.
+
+- **A bump-only writer uses `bumpIndexedAtByPathSQL`, never a hand-rolled
+  `CASE`.** `writeLyricsRowTx` shipped the exact
+  `CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END` form that
+  `indexedAtAdvanceSQL`'s docblock quotes verbatim as dead, so lyrics-changed
+  rows landed on a cursor clients already held and the track never reached the
+  phone. `StampExtractorVersionBatch` takes ONE `now` for a whole batch, which
+  is precisely the caller shape that collides. `TestIndexedAtAdvanceIsShared`
+  could not see it — it walks named CONSTS and this was an inline literal — so
+  `TestNoHandRolledIndexedAtBump` now sweeps every non-test file in the package
+  and classifies each `indexed_at =` against the SQL literal that contains it.
+- **The skip gate and the extractor must resolve a sidecar the SAME way, and
+  the gate's answer must be able to change.** Two non-convergent shapes both
+  re-extracted the audio file on every scan forever, invisibly (they land on
+  `reExtractUnchanged` → `versionStampOnly`, so there is not even `indexed_at`
+  churn to notice): a stale `sidecar-rejected` row that the nil branch declined
+  to DELETE because it gated on `oldTag == ""` rather than `!hadRow`; and
+  `sidecarLyricsDrifted` comparing the sidecar's EXTENSION rank when an empty,
+  oversized, legacy-encoded or TAGLESS `.lrc` resolves to something that loses.
+  `sidecarLyricsFile` answers WHICH file; `readSidecarCandidate` answers WHAT
+  IT IS WORTH — both shared, neither duplicated.
+- **`Pick`'s comparator is a strict TOTAL order.** Candidates arrive partly from
+  `range m.Raw()`, a Go map, so any pair the comparator leaves equal flips the
+  winner between scans → `lyricsTag` re-keys → `indexed_at` bumps → the track
+  re-enters every device's delta on every scan. Same rule as the dupe elector,
+  same reason. `mergeDuplicate` picks its surviving base with that same order,
+  not by arrival — the dedup key is only `(Source, Body)`, so a second sighting
+  can still differ in the derived fields.
+- **`m.Lyrics()`'s `Priority: 0` is FABRICATED.** dhowden's
+  `metadataID3v2.Lyrics()` returns `m.frames["USLT"].(*Comm).Text` — literally
+  the frame the raw walk then re-reports with its real `DescriptorPriority` —
+  so keeping the first sighting let an "Amazon" / "Song ID" descriptor launder
+  itself back to the best rank and `junkExact` / `junkSubstring` silently did
+  nothing. The merge keeps the LARGER priority: the real classification always
+  beats the fabricated one.
+- **Everything `lrcTime` emits must match `lineTag` or `hoursTag`.** `ParseSYLT`
+  reads a raw uint32 of milliseconds from an untrusted frame, so past 999
+  minutes it rendered `[1000:00.000]`, which neither regex accepts, inside a
+  document `syltCandidate` stamps `synced: true` regardless — the phone drops
+  the line. It is CLAMPED to 999:59.999, not promoted to `[hh:mm:ss.xxx]`:
+  that form would rewrite every legitimately >1 h track (a delta wave for
+  content that works today) and `renderLine` uses the same helper for the
+  enhanced `<mm:ss.xxx>` WORD tags, whose iOS grammar is not mirrored here.
+- **`Normalize` must be IDEMPOTENT, and `stripBOMs` must stay LINEAR.**
+  `resolveLyrics` normalises an already-normalised body, so the two passes
+  disagreeing silently drops a document that was accepted as a candidate.
+  Deleting a U+FEFF splices its neighbours and can form a NEW one
+  (`"\xef\xbb" + BOM + "\xbf"`), and Go's `unicode.IsSpace` does NOT count
+  U+FEFF, so `TrimSpace` keeps a lone BOM. **Don't "simplify" the byte-wise
+  reducer back to `ReplaceAll` in a loop** — that is quadratic on a nested
+  input, `MaxBodyBytes` is only checked AFTER it, and the USLT / ©lyr / Vorbis
+  path reaches `Normalize` with no size gate at all. Measured on a
+  180,003-byte nest: 3.967 s against 640 µs.
+- **The lyrics parsers are fuzzed, and the targets carry PROPERTIES.** The
+  package had zero targets against a policy that names the audio extractors as
+  one of the three untrusted-input surfaces. `FuzzParseSYLTToLRC` asserts every
+  emitted line is LRC-parseable (which is what catches the clamp class),
+  `FuzzNormalize` asserts idempotence + the cap + no CR, and
+  `FuzzPickIsShuffleInvariant` asserts the winner survives shuffling — that one
+  found a SECOND order-dependence, in `mergeDuplicate`, that no
+  extractor-driven test could reach.
+- **`sidecarLyricsExts` is `.ttml` > `.lrc` > `.txt`** — `Source.Rank()` order,
+  PROTOCOL.md's order, the app's order. `sidecarLyricsFile`'s own doc comment
+  said the opposite for three days.
+- **The scanner compares mtime EXACTLY; the API's 410 check uses a 2 s
+  tolerance.** Both are correct and they are not the same question. An external
+  review proposed importing the tolerance into `sidecarLyricsDrifted` — declined:
+  the primary skip gate compares the AUDIO file byte-exactly
+  (`scanner.go`, `existing.MTimeNS == pi.info.ModTime().UnixNano()`), so
+  loosening only the sidecar half would be the inconsistency, not the fix.
+- **Atlas cannot supply lyrics** — measured 2026-09-06 against the live
+  instance: `atlas_qobuz_track` holds 679,296 rows with **0** non-empty
+  `lyrics` and **0** whose retained `raw_payload` even carries the key, so
+  there is nothing to back-fill. See the engineering log before proposing it.
 
 ### Enrichment — MusicBrainz, Atlas, artwork, fingerprinting
 

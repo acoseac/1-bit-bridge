@@ -26,6 +26,7 @@ reaches a session that has not gone looking for it.
 
 ## Index
 
+- [LOUPE on the lyrics surface (PRs #849 / #850 / #851, 2026-09-06)](#loupe-on-the-lyrics-surface-prs-849--850--851-2026-09-06)
 - [ALAC upscaling — the ffmpeg fallback, and three things only measurement settled (issue #127, 2026-09-02)](#alac-upscaling--the-ffmpeg-fallback-and-three-things-only-measurement-settled-issue-127-2026-09-02)
 - [File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)](#file-provenance-spectrum-floors-the-decode-filters-transition-band-and-the-v34v35-pair-prs-684688-ios-13381341-2026-08-14)
 - [2026-08-15 — the 2026-08-14 feature-review fix batch, bridge half (PRs #698 / #699)](#2026-08-15-the-2026-08-14-feature-review-fix-batch-bridge-half-prs-698-699)
@@ -3258,3 +3259,211 @@ session before checking the iOS source. Same class as the four stale claims
 CLAUDE.md records, arriving from an issue tracker rather than a doc: **an
 acceptance criterion naming a symbol is a claim that the symbol exists.**
 Grep the other repo before quoting one.
+
+## LOUPE on the lyrics surface (PRs #849 / #850 / #851, 2026-09-06)
+
+The lyrics surface landed whole in ONE PR (#840) four days earlier and had no
+`### ` section under CLAUDE.md's `## Things that have bitten before` — nothing
+bound the code to any invariant. It was also the only untrusted-input parser
+family in the repo with **zero fuzz targets** (34 in the tree, none in
+`internal/lyrics`), against a stated policy that names the audio extractors as
+one of the three surfaces that must be fuzzed. Both absences are why this ran.
+
+**Prior, stated up front:** an unswept surface should refute far less than the
+~70 % false-positive baseline hardened ground produces. It did — 7 of 8 external
+findings and all 5 of my own held up.
+
+**Two directions:** a read of every production file with CLAUDE.md in hand, and
+an independent `consult.py` pass (gemini-3.8-flash, Go-framed, all four
+production files attached, my three findings disclosed up front so they could
+not be re-reported). `finish=STOP in=12231 think=62912 out=2272`.
+
+### The delta-loss regression (#849)
+
+`writeLyricsRowTx.bump()` shipped
+
+```sql
+SET indexed_at = CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END
+```
+
+which is quoted **verbatim** in `indexedAtAdvanceSQL`'s own docblock as the
+older form that "advances strictly relative to the row's OWN prior value only;
+its ELSE arm assigns the raw clock, so when the clock equals a value another row
+already holds the bumped row lands EXACTLY ON a cursor equal to that value and
+`indexed_at > since` excludes it." The docblock even records that this is why
+`TestRestampDuplicates_PolicyFlipUnsuppressesViaDelta` failed only on the
+windows-latest CI leg.
+
+`StampExtractorVersionBatch` computes `now` ONCE (store.go:2724) and loops, so
+every lyrics-changed row in a batch gets the identical raw clock while the
+interleaved `UpsertTrackBatch` leg pushes the library max ahead via `MAX+1`.
+That is the v7 lyrics backfill's own path, and home-pc is a Windows bridge.
+
+**Why the existing guard missed it.** `TestIndexedAtAdvanceIsShared` walks a map
+of six named CONSTS. This bump was an inline string literal inside a function
+body, so it was never a candidate — the guard was well built for the shape it
+was written against and blind to the shape a new writer actually takes.
+`TestNoHandRolledIndexedAtBump` now sweeps every non-test `.go` in the package.
+
+**Two review corrections to that guard, both taken:**
+
+- Gemini: sweep the whole package, not `store.go`. Verified before accepting —
+  `setBookletTagSQL` is in `booklets.go:114` and `applyDupeStampBumpSQL` in
+  `dupe_stamps.go:65`, genuinely outside the swept file. Control: a `CASE WHEN`
+  bump planted in `dupe_stamps.go` reddens the sweep.
+- CodeRabbit: classify against the containing SQL literal, not a 320-byte
+  lookahead, or a neighbour's `excluded.indexed_at` can vouch for an unapproved
+  bump. **Measured before agreeing: the nearest such marker is 581 bytes from a
+  plausible plant point, outside the old window, so the hole was structural
+  rather than reachable at any current site.** Taken anyway — #840's own bump
+  sat ~25 lines above that marker. Said so on the thread rather than
+  overclaiming.
+- CodeRabbit also caught a literal **U+201D** in a test comment where `''` was
+  meant. It was real, and it came from the python apply script — the trap this
+  repo already records ("a python heredoc writing Go can eat an escape level;
+  watch for full-width lookalikes"). Every added line on all three branches was
+  re-scanned; that was the only one.
+
+The second defect in the same function: the nil branch gated its early return on
+`oldTag == ""`, conflating "no row" with "a row that was never client-visible".
+A `sidecar-rejected` row carries `tag = ''` by construction, so deleting the
+sidecar left the row behind forever and `sidecarLyricsDrifted` then re-extracted
+the audio file on every scan for the life of the library.
+
+### Non-convergent skip gates (#850)
+
+`sidecarLyricsDrifted`'s embedded-source arm asked *"could a sidecar with this
+EXTENSION outrank the stored source?"* — a stateless test whose answer never
+changes. Two permanent loops: an empty / oversized / legacy-encoded `.lrc`
+yields no document but ranks 1 against an embedded `text` row's 5, and a
+**tagless** `.lrc` is demoted to `sidecar-txt` (rank 6) and loses while still
+ranking 1 by extension. Both re-open and re-parse the audio file on every scan.
+
+**Invisible by construction:** the re-extract lands on `reExtractUnchanged` →
+`versionStampOnly`, so there is no `indexed_at` churn, no client symptom, no log
+line — only NAS I/O, forever. `sidecarLyricsFile` already made the extractor and
+the gate agree about WHICH file; `readSidecarCandidate` now makes them agree
+about WHAT IT IS WORTH.
+
+**Rejected alternative:** adding `sidecar_mtime_ns` / `sidecar_size` columns
+(migration v43) would also be exact, but it is a schema change for a case the
+shared-helper form settles, and it would leave two implementations of "what does
+this sidecar resolve to" — which is the class of divergence that caused the bug.
+
+**Rejected finding (external, MEDIUM): "`sidecarLyricsDrifted` lacks an mtime
+tolerance".** Its premise is wrong. `analysisSourceMTimeToleranceNS` is an
+API-side concept for the 410 check; the scanner's own primary skip gate compares
+the AUDIO file byte-exactly (`existing.MTimeNS == pi.info.ModTime().UnixNano()`).
+If nanosecond jitter re-extracted files on this deployment the whole library
+would already be re-extracting. Loosening only the sidecar half would be the
+inconsistency, not the fix.
+
+### The pick's total order, and what fuzzing found (#851)
+
+`Pick`'s comparator ended at `(rank, priority, body length)` over a slice built
+partly by `range m.Raw()`. Any pair it left equal was decided by Go's randomised
+map order → the winner flips between scans → `lyricsTag` re-keys → `indexed_at`
+bumps → the track re-enters every device's delta on every scan.
+
+`m.Lyrics()`'s `Priority: 0` is **fabricated**: dhowden's
+`metadataID3v2.Lyrics()` returns `m.frames["USLT"].(*Comm).Text`, the same frame
+the raw walk re-reports with its real `DescriptorPriority`. Keeping the first
+sighting let an "Amazon" descriptor launder itself back to the best rank, so
+`junkExact` / `junkSubstring` did nothing whenever the frame's language was
+absent or unmapped.
+
+`lrcTime` could render `[1000:00.000]` from a raw uint32 past 999 minutes —
+four minute digits, matching neither `lineTag` nor `hoursTag` — inside a
+document `syltCandidate` stamps `synced: true` regardless. **Clamped, not
+promoted to `[hh:mm:ss.xxx]`:** the hours form (the external suggestion) would
+rewrite the rendering of every legitimately >1 h track, a delta wave for content
+that works today, and `renderLine` uses the same helper for the enhanced
+`<mm:ss.xxx>` WORD tags whose iOS grammar is not mirrored in this repo — an
+unverifiable mirror risk for zero real-world gain.
+
+**The three fuzz targets found two more defects within a minute of existing**,
+and the second was in the fix for the first finding above:
+
+1. `Normalize` was not idempotent, which matters because `resolveLyrics`
+   normalises an already-normalised body — so the two passes disagreeing means a
+   document accepted as a candidate is silently dropped at resolve time.
+   `"\n﻿"` → `"﻿"` → `""`: the BOM is not at index 0 on the first
+   pass, and Go's `unicode.IsSpace` does **not** count U+FEFF, so `TrimSpace`
+   keeps it. Fixed with a plain `ReplaceAll`, whereupon the target found
+   `"\xef\xbb" + BOM + "\xbf"` — **deleting a U+FEFF splices its neighbours into
+   a new one.** Now stripped to a fixed point.
+2. `mergeDuplicate` was order-dependent, in the code written for the
+   junk-descriptor fix. It chose the surviving base with `lessCandidate`, which
+   reads `Priority`, which the merge *raises*: the accumulator's own mutation
+   fed back into the next comparison, and three sightings of one document folded
+   to different answers under different arrival orders. Base selection now uses
+   only fields the merge never mutates (synced, then format); `Priority` takes
+   the max and `Language` the smallest non-empty — order-independent
+   aggregations, which is what a fold over map-ordered input requires.
+
+Post-fix fuzzing, `-fuzztime 150s -fuzzminimizetime 1s` each: **141.6M
+executions** (37.1M / 62.1M / 42.3M), zero crashers. Both crashers are committed
+as regression corpus under `internal/lyrics/testdata/fuzz/`.
+
+### Process failures in this run, recorded because they are cheap to repeat
+
+- **A negative control that proved nothing, twice.** The tie-break control
+  passed because no fuzz seed carried an actual tie (same rank, same priority,
+  same body *length*, different bodies) — every seed differed earlier in the
+  comparator and never reached the tail. And the max-priority control failed to
+  **BUILD** (`declared and not used: dup`), which a grep for `^--- FAIL` reads
+  as a pass. Both are already named in the LOUPE doc; both happened anyway.
+  Grep for `build failed` as well as `FAIL`.
+- **A control's restore reverted an uncommitted fix.** `mergeDuplicate`'s
+  canonicalisation was written, verified, and then destroyed by the next
+  control's `git checkout --`. Commit before controlling — also already in the
+  doc.
+- **CodeRabbit hit its rolling budget mid-run.** #849 got both bots; #850 got
+  Gemini only ("no feedback to provide"); #851 opened after the budget was
+  spent. Say which PRs went unreviewed rather than implying coverage.
+
+### Atlas cannot supply lyrics — measured, not assumed
+
+Asked alongside the review: could the bridge get lyrics from Atlas? The plumbing
+is better than expected and the answer is still no.
+
+Atlas has exactly one lyrics column (`atlas_qobuz_track.lyrics`, migration
+`0010_qobuz_enrichment.sql`), one extractor (`internal/ingest/qobuz/
+extractors.go` `extractLyrics`), a converger arm, and a live endpoint
+(`GET /v1/atlas/recording/{mbid}`, `AtlasRecordingResponse.Lyrics`). An
+integration test asserts the read path — by seeding the table with SQL.
+
+**Measured against the live instance, 2026-09-06:**
+
+```
+ with_lyrics | total  | raw_has_key
+-------------+--------+-------------
+           0 | 679296 |           0
+```
+
+Zero rows carry lyrics, and zero retained `raw_payload`s even carry the key — so
+there is nothing to back-fill. The bulk ingest path is `album/get`'s nested
+`tracks.items[]`, which does not return lyrics; only `handleTrack`'s `track/get`
+would, and `disable_refresh: true` has been set on the live qobuz block since
+2026-07-31. Filling it means ~679k `track/get` calls against a 240/min bucket.
+
+Four further blockers, in order of hardness:
+
+1. **Scope.** The bridge holds only a `bulk_harvest` bearer
+   (`internal/atlasharvest/state.go`); `/v1/atlas/recording/{mbid}` requires
+   `read:bridge`. The booklet endpoint is the precedent for accepting both.
+2. **`track_lyrics` is file-shaped** — `source_path` PK with `source_mtime_ns` /
+   `source_size` staleness columns that mean nothing for a network document, and
+   `writeLyricsRowTx` DELETEs the row whenever an extraction finds nothing, so a
+   network-sourced row would survive exactly until the next scan.
+3. **No attribution.** Atlas carries per-field `source` / `sourceUrl` for bios
+   and descriptions — its own code calls that "for CC-BY-SA / ToS compliance" —
+   and a separate auth-layer distinction for premium cover art. Lyrics have
+   neither, and their single source is a credentialed commercial DSP relaying a
+   third-party provider.
+4. **Plain text only.** No `lrc` / `ttml` / timing anywhere in Atlas, so it could
+   never drive the synced UI that SYLT and `.lrc` power — it would rank below
+   every local source by construction.
+
+**Do not re-open this without re-running the count query first.** If
+`raw_has_key` is still 0, the work is a new ingest path, not a new endpoint.
