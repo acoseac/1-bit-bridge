@@ -2838,7 +2838,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// the DLNA `/dlna/file/{trackID}` handler returned 404 for any
 	// UPnP-routed track (silent decline on cast), since it only knew
 	// the local filesystem resolver.
-	upnpLC := startUPnPUpstreamIfEnabled(ctx, cfg, manifestStore, apiSrv, logger)
+	//
+	// The ingest cadence follows scanIntervalSec LIVE, like RunPeriodic and the
+	// analysis sweeper — this loop was the third consumer and the only one that
+	// took the value at boot.
+	upnpIngestRearm := make(chan struct{}, 1)
+	cadenceRearms = append(cadenceRearms, upnpIngestRearm)
+	upnpLC := startUPnPUpstreamIfEnabled(ctx, cfg, manifestStore, apiSrv, logger,
+		liveInterval((*config.Config).ScanInterval), upnpIngestRearm)
 	defer upnpLC.Stop()
 
 	dlnaLC, dlnaEnabled := startDLNAIfEnabled(ctx, cfg, manifestStore, apiSrv.Resolver(), upnpLC, logger)
@@ -3103,7 +3110,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
-		runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActiveFn(),
+		runSmartPlaylistRegenerator(scanCtx, manifestStore, analysisActiveFn,
 			func() bool { return liveCfg().SmartPlaylists.EffectiveEnabled() },
 			liveInterval(func(c *config.Config) time.Duration {
 				return c.SmartPlaylists.EffectiveRegenerateInterval()
