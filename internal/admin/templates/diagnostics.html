@@ -47,14 +47,19 @@
       <dd id="diag-sqlite-p99">—</dd>
       <dt>Database size</dt>
       <dd id="diag-db-size">—</dd>
-      <dt>Reclaimable</dt>
+      <dt>Reclaimable (at least)</dt>
       <dd id="diag-db-reclaimable">—</dd>
     </dl>
     <p class="hint">
-      Deleting rows — duplicates, missing tracks, emptied trash — leaves free
-      pages behind. SQLite reuses them but never returns them to the
-      filesystem on its own. Compacting rewrites the file and hands the space
-      back.
+      Deleting rows — duplicates, missing tracks, emptied trash — leaves gaps
+      behind. SQLite reuses them but never returns them to the filesystem on
+      its own. Compacting rewrites the file and hands the space back.
+    </p>
+    <p class="hint">
+      The figure above is a floor, not an estimate. It counts only pages that
+      are completely empty; compacting also repacks the partly-used ones, and
+      deleting scattered rows leaves plenty of those and no empty pages at
+      all. A database showing no whole free pages can still shrink by half.
     </p>
     <p class="hint">
       It takes an exclusive lock for the duration, so the bridge will stall

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,9 +32,45 @@ func TestDatabaseCompactReclaimsAndReports(t *testing.T) {
 	if got.BeforeBytes <= 0 || got.AfterBytes <= 0 {
 		t.Errorf("implausible sizes: %+v", got)
 	}
-	if got.ReclaimedBytes != got.BeforeBytes-got.AfterBytes {
-		t.Errorf("ReclaimedBytes = %d, want before-after = %d",
-			got.ReclaimedBytes, got.BeforeBytes-got.AfterBytes)
+	// NOT `ReclaimedBytes == BeforeBytes-AfterBytes`. That was the shipped
+	// assertion and it is a tautology: the handler computes the field from
+	// those same two, so it holds against a Compact that never vacuums at
+	// all, and it held against the negative figure the WAL-blind before
+	// size used to produce. Assert the two properties that can actually
+	// be false instead.
+	if got.AfterBytes > got.BeforeBytes {
+		t.Errorf("the compaction reported GROWTH: before=%d after=%d", got.BeforeBytes, got.AfterBytes)
+	}
+	if got.ReclaimedBytes < 0 {
+		t.Errorf("ReclaimedBytes = %d; a compaction cannot return a negative number of bytes",
+			got.ReclaimedBytes)
+	}
+}
+
+// TestDatabaseCompactSurfacesInsufficientDiskSpace drives the 507 branch,
+// which had never executed: newTestServer leaves Deps.DBFreeBytes nil, so
+// Compact's headroom check was skipped in every admin test and the
+// handler's ErrInsufficientDiskSpace mapping was unreachable.
+func TestDatabaseCompactSurfacesInsufficientDiskSpace(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	s.deps.DBFreeBytes = func(string) (int64, error) { return 1, nil }
+	h := s.Handler()
+
+	req := httptest.NewRequest("POST", "/api/database/compact", nil)
+	req.Header.Set("content-type", "application/json")
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInsufficientStorage {
+		t.Fatalf("status = %d, want 507; body=%s", rr.Code, rr.Body.String())
+	}
+	var env map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env["error"] != "insufficient-disk-space" {
+		t.Errorf("error code = %v, want insufficient-disk-space", env["error"])
 	}
 }
 
@@ -86,8 +123,111 @@ func TestDiagnosticsCarriesDatabaseSize(t *testing.T) {
 	if n, _ := v.(float64); n <= 0 {
 		t.Errorf("databaseBytes = %v, want a real file size", v)
 	}
-	if _, ok := body["databaseReclaimableBytes"]; !ok {
-		t.Error("diagnostics response carries no databaseReclaimableBytes")
+	// The FLOOR field, asserted by value rather than by key-presence. The
+	// shipped test only checked the key existed, which is why nothing
+	// could see that the number was being rendered as an estimate: it has
+	// no omitempty, so it is always present whatever it holds.
+	fp, ok := body["databaseFreePageBytes"]
+	if !ok {
+		t.Fatal("diagnostics response carries no databaseFreePageBytes")
+	}
+	if n, _ := fp.(float64); n < 0 {
+		t.Errorf("databaseFreePageBytes = %v; a floor cannot be negative", fp)
+	}
+	if avail, _ := body["databaseStatsAvailable"].(bool); !avail {
+		t.Error("databaseStatsAvailable = false against a healthy store")
+	}
+}
+
+// TestDiagnosticsSaysWhenTheDatabaseStatsAreUnavailable is the assertion
+// its retention twin never had either: RetentionCountsAvailable was only
+// ever asserted TRUE, so hoisting the flag out of its error branch left
+// every test green while the field's whole reason for existing
+// evaporated. Both flags are pinned in the false direction here.
+func TestDiagnosticsSaysWhenTheDatabaseStatsAreUnavailable(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	// A closed store fails every PRAGMA and every COUNT, which is the
+	// realistic shape of "the query failed" — and the one that used to
+	// render as a bridge with a 0-byte database that had never recorded
+	// anything.
+	if err := s.deps.Manifest.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snap := s.diagnosticsSnapshot(context.Background())
+	if snap.DatabaseStatsAvailable {
+		t.Error("DatabaseStatsAvailable = true against a closed store")
+	}
+	if snap.RetentionCountsAvailable {
+		t.Error("RetentionCountsAvailable = true against a closed store")
+	}
+	if snap.DatabaseBytes != 0 || snap.DatabaseFreePageBytes != 0 {
+		t.Errorf("unavailable stats must stay zero, got bytes=%d free=%d",
+			snap.DatabaseBytes, snap.DatabaseFreePageBytes)
+	}
+}
+
+// TestTheConsoleNeverCallsTheFreePageFloorAnEstimate pins the half of the
+// fix that lives in the browser, because that is where the wrong answer
+// was actually rendered.
+//
+// databaseFreePageBytes is page_size x freelist_count -- only WHOLLY free
+// pages. Scattered deletion, which is what every reaping path here
+// produces, leaves intra-page fragmentation and no free pages: measured
+// on a 72.5 MB store with every second row deleted, freelist_count was 0
+// while a VACUUM returned half the file. The console printed "nothing to
+// reclaim", which an operator correctly reads as "do not press this".
+//
+// A Go test cannot execute the JS, but it can pin the strings that carry
+// the claim -- the same shape as this package's other static-asset
+// guards. CRLF is normalised first: nothing pins eol in .gitattributes,
+// so on a Windows checkout every newline-literal scan here would
+// otherwise find nothing and pass vacuously.
+func TestTheConsoleNeverCallsTheFreePageFloorAnEstimate(t *testing.T) {
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := strings.ReplaceAll(string(b), "\r\n", "\n")
+
+	i := strings.Index(js, "function applyDiagnostics(")
+	if i < 0 {
+		t.Fatal("applyDiagnostics not found in app.js -- the scan is broken")
+	}
+	body := js[i:]
+	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
+		body = body[:j+1]
+	}
+	// COMMENTS ONLY, not stripJSNoise -- that also blanks string literals,
+	// and the literals are exactly what this scan is about. Stripping
+	// comments is not optional either: the code beside these strings
+	// explains the defect BY QUOTING IT, so an unstripped scan finds the
+	// commentary and reports the bug as still present. Same trap this
+	// repo's CSS guards already carry.
+	body = jsBlockCommentRe.ReplaceAllString(body, " ")
+	body = jsLineCommentRe.ReplaceAllString(body, " ")
+	if !strings.Contains(body, "diag-db-reclaimable") {
+		t.Fatal("applyDiagnostics no longer sets diag-db-reclaimable; the scan is looking at the wrong function")
+	}
+
+	if strings.Contains(body, "nothing to reclaim") {
+		t.Error("app.js still renders \"nothing to reclaim\" for a zero free-page floor. " +
+			"That floor reads 0 on a database a compaction would halve, so the string is a " +
+			"confident wrong answer about the one number this panel exists to show.")
+	}
+	if !strings.Contains(body, "at least ") {
+		t.Error("app.js does not qualify the free-page figure with \"at least\"; " +
+			"it is a floor, not an estimate of what a compaction returns")
+	}
+	if strings.Contains(body, "databaseReclaimableBytes") {
+		t.Error("app.js still reads the old databaseReclaimableBytes field, which no longer exists " +
+			"on the wire -- the panel would render 0 for every bridge")
+	}
+	if !strings.Contains(body, "databaseFreePageBytes") {
+		t.Error("app.js does not read databaseFreePageBytes")
+	}
+	if !strings.Contains(body, "databaseStatsAvailable") {
+		t.Error("app.js does not branch on databaseStatsAvailable, so a failed PRAGMA renders as " +
+			"a real 0 B reading")
 	}
 }
 

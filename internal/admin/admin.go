@@ -503,7 +503,9 @@ type Deps struct {
 	TriggerDuplicatesPass func() bool
 
 	// DBFreeBytes reports free space on the volume holding the given
-	// path. Wired by cmd/bridge to transcode.AvailableDiskSpaceNearest.
+	// DIRECTORY — not a file. Wired by cmd/bridge to
+	// transcode.AvailableDiskSpaceNearest, whose Windows implementation
+	// is GetDiskFreeSpaceExW and refuses a file path outright.
 	//
 	// Injected rather than imported because internal/transcode imports
 	// internal/manifest, so manifest cannot import it back, and

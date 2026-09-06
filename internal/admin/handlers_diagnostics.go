@@ -56,13 +56,22 @@ type diagnosticsResponse struct {
 	// Log events by level, since process start.
 	LogEventCounts map[string]uint64 `json:"logEventCounts"`
 
-	// Database file accounting. ReclaimableBytes is what a compaction
-	// would return to the filesystem — free pages that row reaping left
-	// behind. An operator cannot sensibly decide whether to compact a
-	// file whose size they have never seen, which is why this is here
-	// and not only behind the button.
-	DatabaseBytes            int64 `json:"databaseBytes"`
-	DatabaseReclaimableBytes int64 `json:"databaseReclaimableBytes"`
+	// Database file accounting. An operator cannot sensibly decide
+	// whether to compact a file whose size they have never seen, which is
+	// why this is here and not only behind the button.
+	//
+	// DatabaseFreePageBytes is a FLOOR on what a compaction would return,
+	// not an estimate of it — see manifest.PageStats.FreePageBytes, where
+	// the measurement lives. Scattered deletion can leave it at ZERO on a
+	// database a VACUUM would halve, so the browser must never render a
+	// zero here as "nothing to reclaim".
+	DatabaseBytes         int64 `json:"databaseBytes"`
+	DatabaseFreePageBytes int64 `json:"databaseFreePageBytes"`
+	// DatabaseStatsAvailable distinguishes "the file is empty" from "the
+	// PRAGMAs failed", exactly as RetentionCountsAvailable does below.
+	// The flag landed on that block and not this one because that is the
+	// block a review happened to look at; the argument is identical.
+	DatabaseStatsAvailable bool `json:"databaseStatsAvailable"`
 
 	// Retention. Both tables grow without a bound unless the operator
 	// sets a window, and until now there was no way to see either size.
@@ -119,8 +128,9 @@ func (s *Server) diagnosticsSnapshot(ctx context.Context) diagnosticsResponse {
 	// unavailable is useless exactly when someone needs it.
 	if s.deps.Manifest != nil {
 		if ps, err := s.deps.Manifest.PageStats(ctx); err == nil {
+			resp.DatabaseStatsAvailable = true
 			resp.DatabaseBytes = ps.FileBytes
-			resp.DatabaseReclaimableBytes = ps.ReclaimedBytes
+			resp.DatabaseFreePageBytes = ps.FreePageBytes
 		}
 		// Two COUNTs and a MIN. Degrade to zeros on error rather than
 		// failing the whole snapshot — same rule as every other block

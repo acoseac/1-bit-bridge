@@ -59,9 +59,14 @@ func (s *Server) apiDatabaseCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, databaseCompactResponse{
-		BeforeBytes:    res.BeforeBytes,
-		AfterBytes:     res.AfterBytes,
-		ReclaimedBytes: res.BeforeBytes - res.AfterBytes,
+		BeforeBytes: res.BeforeBytes,
+		AfterBytes:  res.AfterBytes,
+		// One definition of the subtraction, and it lives beside the
+		// measurement that justifies its clamp — a busy checkpoint leaves
+		// peak disk genuinely HIGHER, and "reclaimed -815,760 bytes" is
+		// not a truthful rendering of that. CheckpointBusy carries the
+		// rest of the story.
+		ReclaimedBytes: res.ReclaimedBytes(),
 		CheckpointBusy: res.CheckpointBusy,
 	})
 }

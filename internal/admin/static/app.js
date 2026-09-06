@@ -5516,14 +5516,30 @@ function applyDiagnostics(d) {
     : `${(Number(d.mbCacheHitRatio) * 100).toFixed(1)}%`);
   setDiagText("diag-mb-lookups", lookups.toLocaleString());
 
-  // Database size and what a compaction would return. formatBytes is
-  // binary here as everywhere else (the #798 one-formatter decision).
-  setDiagText("diag-db-size", formatBytes(Number(d.databaseBytes) || 0));
-  const reclaim = Number(d.databaseReclaimableBytes) || 0;
-  const dbBytes = Number(d.databaseBytes) || 0;
-  setDiagText("diag-db-reclaimable", reclaim === 0
-    ? "nothing to reclaim"
-    : `${formatBytes(reclaim)} (${((reclaim / Math.max(dbBytes, 1)) * 100).toFixed(0)}%)`);
+  // Database size, and a FLOOR on what a compaction would return.
+  // formatBytes is binary here as everywhere else (the #798 one-formatter
+  // decision).
+  //
+  // The floor wording is load-bearing, not hedging. databaseFreePageBytes
+  // is page_size x freelist_count, which counts only WHOLLY free pages;
+  // VACUUM also repacks intra-page fragmentation, and scattered deletion
+  // is what every reaping path in this bridge produces. Measured: a
+  // 72.5 MB store with every second row deleted reports freelist_count 0
+  // while a VACUUM returns half the file. The old "nothing to reclaim"
+  // string told the operator not to press the button in exactly that
+  // case — a confident wrong answer about the one number the panel
+  // exists to show.
+  if (d.databaseStatsAvailable === false) {
+    setDiagText("diag-db-size", "unavailable");
+    setDiagText("diag-db-reclaimable", "unavailable");
+  } else {
+    const dbBytes = Number(d.databaseBytes) || 0;
+    const freePages = Number(d.databaseFreePageBytes) || 0;
+    setDiagText("diag-db-size", formatBytes(dbBytes));
+    setDiagText("diag-db-reclaimable", freePages === 0
+      ? "no whole free pages — compacting may still reclaim space"
+      : `at least ${formatBytes(freePages)} (${((freePages / Math.max(dbBytes, 1)) * 100).toFixed(0)}%)`);
+  }
 
   // Retention: the visibility half. An operator cannot sensibly choose a
   // policy for a table whose size they have never seen.
