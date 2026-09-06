@@ -51,6 +51,26 @@ import (
 // empty IN-list is harmless; it is harmless in one spelling only.
 var ErrNoLiveTokens = errors.New("manifest: refusing to reap device registrations against an empty live-token set")
 
+// ErrCutoffNotInThePast is returned by the two WINDOW reaps when the
+// cutoff they are handed is not a moment in the past.
+//
+// It is deliberately NOT symmetric with the `beforeNS <= 0` no-op beside
+// it. Zero means "disabled" -- callers spell "keep everything" that way
+// and the sweeper only calls with a window configured -- so a silent
+// no-op is the honest answer there. A cutoff at or after NOW says
+// "delete every row", which no caller can legitimately mean, and the
+// realistic way to produce one is an overflowed
+// `time.Now().AddDate(0, 0, -days).UnixNano()` (see
+// config.MaxRetentionDays, where the measurement lives).
+//
+// `config.Validate` already gates every input route the bridge has --
+// `Load` runs it after the env overrides, and the settings PATCH runs it
+// too -- so this is defence in depth rather than the gate. It is here
+// because internal/manifest is a library: a method that empties a table
+// when handed a future timestamp is a loaded gun regardless of who
+// validates upstream.
+var ErrCutoffNotInThePast = errors.New("manifest: retention cutoff is not in the past")
+
 // ReapOrphanDeviceRegistrations deletes registrations whose token_id is
 // not in liveTokenIDs — i.e. rows bound to an auth token that has since
 // been revoked or rotated away.
@@ -104,6 +124,9 @@ func (s *Store) ReapStaleDeviceRegistrations(ctx context.Context, beforeNS int64
 	if beforeNS <= 0 {
 		return 0, nil
 	}
+	if beforeNS >= s.now().UnixNano() {
+		return 0, ErrCutoffNotInThePast
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	res, err := s.db.ExecContext(ctx,
@@ -129,6 +152,9 @@ func (s *Store) ReapStaleDeviceRegistrations(ctx context.Context, beforeNS int64
 func (s *Store) ReapPlaybackHistory(ctx context.Context, beforeNS int64) (int64, error) {
 	if beforeNS <= 0 {
 		return 0, nil
+	}
+	if beforeNS >= s.now().UnixNano() {
+		return 0, ErrCutoffNotInThePast
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
