@@ -191,6 +191,14 @@ had this very warning in front of it. **Check the code before believing any doc
 about it, including this one** — and when you find a stale claim, correct it here
 rather than working around it.
 
+**The same rot reaches CODE COMMENTS, and there it is more dangerous**, because a
+comment is read as the reason for the code beside it. The retention LOUPE found
+`apiDiagnostics` claiming "It touches no database" with its own "Three PRAGMAs"
+and "Two COUNTs and a MIN" comments directly beneath, and `app.js` carrying a
+second copy of that claim as the stated JUSTIFICATION for a 5-second poll. Both
+were true when written. A false comment that explains a design choice is how the
+next change gets made on the same reasoning.
+
 ### Scanner, deletion passes, and manifest writes
 
 This is the highest-stakes area in the codebase: every bug here deletes rows
@@ -866,8 +874,9 @@ no failing test — which is the shape to expect in this area.
 - **The retention reap fails closed on an empty live-token set**, and the two
   empty forms are NOT interchangeable: `nil` deletes zero rows while
   `[]string{}` deletes EVERY row — and the caller builds the dangerous spelling.
-- **`retention.playbackHistoryDays` refuses 1–89 rather than clamping** — the bounded smart-mix
-  windows run to 90 days and would be silently gutted.
+  The rest of the retention and compaction rules now live under **### Database
+  compaction and retention** — including the CEILING those windows also need,
+  which this list did not have and which is the more dangerous half.
 - **The binary swap keeps `dst` present throughout** (`Remove(bak)` →
   `Link(dst,bak)` → `Rename(new,dst)`), with the old two-rename path kept only
   as the EXDEV fallback: a power loss between two renames is permanently
@@ -881,6 +890,104 @@ no failing test — which is the shape to expect in this area.
   is reversible and playlist deletion is a revivable tombstone, so either
   trigger silently destroys operator-uploaded content to reclaim a JPEG. An
   AST-based guard fails if a production caller appears.
+
+### Database compaction and retention
+
+The compact / reap / reclaim trio (#819 / #822 / #829) landed in one day and
+had **no section here** — its three rules were scattered across *Scanner* and
+*Config*, which is how the two most destructive `DELETE` statements in the tree
+came to be filed under "Config, settings and process lifecycle". Everything
+below is from the LOUPE run that swept it (#859 / #860 / #861). **Every
+operator-facing number this feature reports was measuring something other than
+what it claimed**, and none of it had a failing test.
+
+- **`wal_checkpoint(TRUNCATE)` runs AFTER `VACUUM`, never only before.** In WAL
+  mode the vacuum's output lands in the WAL, so without the post-checkpoint the
+  file does not shrink by a byte and peak disk RISES. Assert on the FILE
+  shrinking, not on `freelist_count`, which reads 0 under the broken form.
+- **A retention window must have a CEILING, and `beforeNS <= 0` is the wrong
+  half of the guard.** The cutoff is `now.AddDate(0,0,-days).UnixNano()`, and
+  `UnixNano` is undefined outside 1678–2262; past ~127,455 days it wraps, and
+  **145,092 values in [1, 400000] land POSITIVE and greater than now**, which
+  makes `DELETE … WHERE started_at < ?` match every row. `999999` — the
+  canonical "effectively infinite" placeholder — is one of them. The existing
+  `<= 0` no-op catches the harmless negative wrap and passes the dangerous
+  positive one. `config.MaxRetentionDays` refuses (never clamps, like the floor
+  beside it) and `manifest.ErrCutoffNotInThePast` is the belt. **`ErrNoLiveTokens`
+  does not help here** — it guards only the ORPHAN reap, so the registration
+  window is the half with no second line of defence.
+- **A window past ~56 years is a deliberate no-op, not a bug.** It reaches
+  before 1970, so the cutoff is negative and `<= 0` returns "delete nothing" —
+  the honest answer for a window longer than the bridge has existed. The
+  property to assert is "no accepted value lands at or after NOW", swept over
+  the whole accepted range.
+- **`freelist_count` is a FLOOR on what a compaction returns, never an
+  estimate.** It counts only WHOLLY free pages; VACUUM also repacks intra-page
+  fragmentation, which is what SCATTERED deletion produces — and scattered
+  deletion is what every reaping path here does. Measured on a 72.5 MB store
+  with every second row deleted: `freelist_count = 0` while VACUUM returned
+  **36,233,216 bytes, half the file**. The panel said "nothing to reclaim".
+  Never render a zero there as an answer to "should I compact"; it answers a
+  different, much narrower question. A fixture guard in `compact_test.go`
+  (`if pre.FreelistCount == 0 { t.Fatal(…) }`) shows this was hit during
+  development and worked around in the test rather than recognised.
+- **The compaction's before/after figures are FOOTPRINTS — main file plus
+  `-wal`.** An arbitrary share of the database lives in the WAL until a
+  checkpoint folds it back, and one open reader is enough to keep it there.
+  Measuring the main file alone reported `reclaimedBytes: -2330624` ("the
+  compaction added 2.3 MB") and made the headroom guard demand **8,192 bytes**
+  free for a vacuum needing ~4.6 MB.
+- **A compaction CAN legitimately raise peak disk, so the clamp is truth, not
+  tidying.** When the post-checkpoint is busy the WAL is not truncated and the
+  vacuum's output sits on top of the original — measured `before=132,823,160 →
+  after=133,638,920`. Nothing has been reclaimed *yet*;
+  `CompactResult.ReclaimedBytes()` reports 0 and `CheckpointBusy` carries the
+  rest. One definition of that subtraction, beside the measurement.
+- **A context cancellation during the post-VACUUM checkpoint is NOT a failed
+  compaction.** The vacuum already committed; returning an error tells the
+  operator the button failed after it did the work. It maps to `CheckpointBusy`.
+  The decision is the pure `checkpointOutcome` helper because the branch is
+  otherwise reachable only by winning a race, and a decision that cannot be
+  driven is a decision nothing pins.
+- **The free-space probe takes a DIRECTORY.** `transcode.AvailableDiskSpaceNearest`
+  advances only on `os.IsNotExist`, so an existing FILE goes straight through to
+  the platform probe. POSIX `statfs` accepts one; Windows `GetDiskFreeSpaceExW`
+  opens `lpDirectoryName` with `FILE_DIRECTORY_FILE` and returns
+  `ERROR_DIRECTORY` — so `POST /api/database/compact` 500'd on **every Windows
+  install**, always. Assert the CONTRACT (what gets handed to the probe is a
+  directory), not the symptom, so it fails on every platform.
+- **The scan guard is a check-then-act GUARD, not mutual exclusion — say
+  which.** It runs one direction only: a scan starting between the caller's
+  `ScanInFlight()` check and `Store.mu` still serialises behind the whole
+  vacuum, and two concurrent Compacts become two vacuums. A flag the scanner had
+  to honour was declined for the reason `bridge restore` narrows its window
+  rather than locking — the consequence is a stall, not corruption, and the flag
+  would let a wedged vacuum silence the scanner.
+- **`GET /api/diagnostics` is a database reader on a 5-second poll**, and its
+  docblock denied it for four days with the body's own "Three PRAGMAs" and "Two
+  COUNTs and a MIN" comments directly beneath — while `app.js` carried a second
+  copy of the same false claim as the JUSTIFICATION for the interval. There is
+  no index on `playback_history.started_at`, so the `MIN` turns a covering-index
+  count into a full SCAN: **1.0 ms at 18k rows, 9.0 ms at 90k, 39.6 ms at 500k**
+  (the three PRAGMAs are 7–12 µs and genuinely free). That block sits behind
+  `databaseStatsTTL`, invalidated after a compaction.
+- **Every availability flag needs a test in the FALSE direction.**
+  `RetentionCountsAvailable` was only ever asserted true, so hoisting it out of
+  its `err == nil` branch left every test green while the field's entire reason
+  for existing evaporated. Its twin on the page-stats block did not exist at all
+  — a failed PRAGMA rendered as a confident "0 B".
+- **A config field with no `settingsPatch` field is invisible to the matrix
+  guard.** `settings_matrix_doc_test.go` is bidirectional, but its universe is
+  `reflect.TypeOf(settingsPatch{})` — never `config.Config`. `retention.*` sat
+  outside that loop while the Diagnostics panel told operators to "set a window
+  in Settings", and there was no such control anywhere. **When you add a config
+  field an operator is meant to choose, add the patch field in the same PR** —
+  or the prose that names Settings is a promise nothing keeps.
+- **`Enrich`-style scan guards must strip COMMENTS before scanning JS**, for the
+  reason the CSS guards already record: the code beside a fixed string explains
+  the defect BY QUOTING IT, so an unstripped scan finds the commentary and
+  reports the bug as still present. `stripJSNoise` is the wrong tool when the
+  string literals ARE the subject — it blanks those too.
 
 ### The CLI and the serve wiring (`cmd/bridge`)
 

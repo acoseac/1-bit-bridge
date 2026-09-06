@@ -532,7 +532,7 @@ Playlists and listening history stopped being per-device silos (product call 202
 - **Playlists are id-scoped, not device-scoped.** `GetPlaylist(ctx, id)` / `ListPlaylists(ctx)` / `TombstonePlaylist(ctx, id)` carry NO device token; `UpsertPlaylist` keeps the deviceToken param but ONLY as last-writer provenance (`ON CONFLICT ... SET device_token = excluded.device_token`). The LWW stale guard (strictly-older `last_modified_at` → `ErrPlaylistStale` → 409 with full server copy) is the ONLY write gate. `ErrPlaylistOwnedByOther` + the `playlist_conflict` 409 are GONE — don't reintroduce an ownership guard without the multi-user user-id re-scope; PROTOCOL.md documents the old behaviour for pre-flag bridges. A tombstoned row revives on a newer-clock upsert (LWW decides, not the tombstone — `TestUpsertPlaylistRevivesTombstone`). `X-Device-Token` stays REQUIRED on all four routes (provenance + registration freshness), even though reads don't use it.
 - **`GET /v1/history` is the all-devices read feed** (bearer-auth, NO device-token requirement — deliberately). `ListHistory` LEFT JOINs `device_registrations` for source-device attribution; `HistoryEventOut.SourceDeviceToken` is a SECRET (recovery token) — wire DTOs MUST NOT expose it; the handler derives `deviceId` = first 16 hex of SHA-256(token) (`historyDeviceID`), documented in PROTOCOL.md so iOS can hash its own token to mark "this device". `SourceDeviceName` ≠ `DeviceName` (the latter is the OUTPUT hardware / DAC). `nextCursor` is 0 on a short/empty page — the handler mirrors the store's limit clamp (default 200 / max 1000) precisely so the short-page check is meaningful; don't remove the handler-side clamp "because the store already clamps".
 - **Feature flags `playbackHistoryRead` + `playlistsCrossDevice`** gate the behaviour for iOS (alpha-sorted; gated on the same store wirings as their sibling base flags; feats capacity now 14). Playlist write-path hardening rode along: path-id capped at 128 (`maxPlaylistIDLen`), item inserts hoisted onto one prepared statement (the per-item `ExecContext` re-prepared at every row — measurable at the 50k cap).
-- **Deferred, deliberately**: `playback_history` has NO retention policy; `deviceSeen`/`device_registrations` grow per distinct (valid-bearer-presented) device token with no reaper; both documented as future work, not bugs.
+- **Deferred, deliberately**: `playback_history` has NO retention policy; `deviceSeen`/`device_registrations` grow per distinct (valid-bearer-presented) device token with no reaper; both documented as future work, not bugs. *(Closed 2026-09-02 by PRs #819/#822/#829, and the closing work is itself reviewed in the 2026-09-06 LOUPE entry at the end of this file — the reaps shipped with an unbounded window that could delete the whole table.)*
 ---
 
 ## Review-batch invariants (PRs #372 / #373 / #374 / #375, 2026-06-11)
@@ -3715,3 +3715,208 @@ checking took one `grep` of the host's yaml.
 
 `smart-playlist regeneration families=12` and a `carPlayOptimize` feature flag on
 `/v1/health` confirm the other two gates still allow where they should.
+
+## 2026-09-06 — LOUPE on the retention / compact / reclaim trio (PRs #859 / #860 / #861)
+
+Surface, not a window: PRs **#819** (`a9258b4`, compaction + page stats),
+**#822** (`a1a89d7`, the two reaps + the daily sweeper) and **#829**
+(`c080f98`, the diagnostics retention panel), all merged 2026-09-02 and
+untouched since. 578 production lines, every one of them destructive or
+reporting on something destructive. Live on `bridge.ars.md` at
+`v0.1.9-142-g19b00dc` with both knobs at their default 0.
+
+**#829 was never in this log.** It merged after the *2026-09-01 improvement
+batch* entry was written and nothing added it — which is the same shape as a
+rule that lands in the log and never reaches `CLAUDE.md`.
+
+### Phase 0 — the structural finding
+
+The surface had **no `### ` section** under *Things that have bitten before*.
+Its three rules were distributed by subject: the `wal_checkpoint` ordering under
+**Scanner**, the fail-closed empty-token guard and the 90-day floor under
+**Config, settings and process lifecycle**. All three claims were still true —
+but a session about to edit `internal/manifest/retention.go` reads the Scanner
+section, which opens by declaring deletion passes "the highest-stakes area in
+the codebase", and finds nothing about the two most destructive `DELETE`
+statements in the tree. The run added the section.
+
+### The measurements
+
+**The overflow.** `now.AddDate(0, 0, -days).UnixNano()` with no ceiling. Go
+documents `UnixNano` as undefined outside 1678–2262. Sweeping `days ∈ [1,
+400000]`: **145,092 values produce a cutoff at or after now**, in two contiguous
+bands (`127455..213504` and `340959..400000`). Representative values, `now =
+2026-09-06`:
+
+```
+days         date          UnixNano()             verdict
+99,999       1752-11-22    -6851185200000000000   no-op (the <= 0 guard)
+127,455      1677-09-20    +9223360473709551616   WIPES THE TABLE
+200,000      1479-02-06    +2955472473709551616   WIPES
+365,000      1027-05-07    +7146216547419103232   WIPES
+999,999      -0712-10-10   +7622535168547758080   WIPES
+2,147,483,647 -5877584-02-27 -3446479029329846272 no-op
+```
+
+Driven end to end through the real `retentionSweeper.sweep()` against a real
+`manifest.Store`: `days=999999` took history 2→0 and registrations 1→0,
+**including a registration bound to a live, never-revoked token**, and logged
+`retention: reaped playback history past the window rows=2 days=999999` as a
+success. `ErrNoLiveTokens` guards only the orphan reap, so the registration
+window has no second line of defence; and the existing `beforeNS <= 0` no-op is
+inverted with respect to this — it catches the harmless direction.
+
+`MaxRetentionDays = 36500` (100 years) refuses rather than clamps, matching the
+floor's own stated reason. Writing the property test corrected the constant's
+rationale: a 100-year window reaches back past 1970, so its cutoff is *negative*
+and the `<= 0` no-op turns it into "delete nothing" — correct behaviour, but it
+means "the cutoff is positive" was the wrong property. The test sweeps the whole
+accepted range for the one that matters.
+
+**The freelist under-report.** `page_size × freelist_count` was documented as
+"what a Compact would return". Reproduced on a 72,474,624-byte store:
+
+```
+deletion pattern           freelist_count   floor        VACUUM returned
+every 2nd row                           0           0        36,233,216
+9 of every 10                      15,536  63,635,456        65,220,608
+the first 90% (contiguous)         15,920  65,208,320        65,216,512
+```
+
+On the real `tracks` schema the scattered case is milder and no better: floor
+81,920 against 5,398,800 actually reclaimed, a **66× understatement** the panel
+renders as "1 %". The console printed the literal string `"nothing to reclaim"`.
+`compact_test.go` carried a fixture guard — `if pre.FreelistCount == 0 {
+t.Fatal("fixture produced no free pages; the test would prove nothing") }` — so
+this was hit during development and worked around in the test.
+
+**The WAL-blind footprint.** `before` was `os.Stat` of the main file, taken
+before the pre-VACUUM checkpoint; `after` was taken once the mandatory
+post-checkpoint truncated the WAL to zero. Against a store whose WAL could not
+be checkpointed:
+
+```
+pre : .db=4,096       -wal=222,088,632
+post: .db=2,334,720   -wal=0
+{"beforeBytes":4096,"afterBytes":2334720,"reclaimedBytes":-2330624}
+```
+
+The headroom guard — whose entire job is preventing an ENOSPC mid-VACUUM —
+demanded 8,192 bytes free for a vacuum needing ~4.6 MB.
+
+**And then the fixture that proved it falsified the fix's own assertion.** With
+a reader parked on the old snapshot the post-checkpoint answers busy, the WAL is
+not truncated, and the vacuum's output sits in it on top of the original:
+`main=1,671,168 wal=131,151,992 before=132,823,160 after=133,638,920 busy=true`.
+Peak disk really has risen — exactly as `compact.go`'s header says it does
+without a post-checkpoint — so *"a compaction can never report growth"* is
+false. The clamp PRISM filed as a tidy-up is the only truthful rendering of that
+state, and it moved to `CompactResult.ReclaimedBytes()` so one definition sits
+beside the measurement that justifies it.
+
+**The Windows probe.** `Compact` handed `freeBytes` the database FILE.
+`transcode.AvailableDiskSpaceNearest` advances only on `os.IsNotExist`, so an
+existing file passes through. POSIX `statfs` accepts one — which is why macOS
+and the Linux VPS never noticed. Gemini consult (documented vs inferred,
+2026-09-06): Windows `GetDiskFreeSpaceExW` opens `lpDirectoryName` with
+`FILE_DIRECTORY_FILE`, so a regular file returns `STATUS_NOT_A_DIRECTORY` →
+`ERROR_DIRECTORY` (267), uniform across Windows versions, filesystems, `\\?\`
+and UNC. `compact_test.go` passes `nil` or a stub, so the blocking Windows CI
+leg had never driven the real probe. The new test asserts the CONTRACT, so it
+fails everywhere rather than only where the symptom appears.
+
+**The diagnostics poll.** `apiDiagnostics`'s docblock said *"It touches no
+database"* with the body's own "Three PRAGMAs" and "Two COUNTs and a MIN"
+comments directly beneath it, and `app.js` carried a second copy of the claim as
+the stated justification for `DIAGNOSTICS_POLL_MS = 5000`. `playback_history`
+has no index on `started_at` (deliberately — a `started_at` index would force a
+filesort in `ListHistory`), so the `MIN` turns a covering-index count into a
+full `SCAN`:
+
+```
+rows      COUNT(*)+MIN(started_at)   COUNT(*) alone   3 PRAGMAs
+18,000                     1.02 ms            55 µs       7 µs
+90,000                     9.02 ms           748 µs       8 µs
+500,000                   39.55 ms          5.51 ms      12 µs
+```
+
+Honestly sized: 1 ms every 5 s is not an emergency. The load-bearing half is
+that a false comment was the *justification for a design choice*, which is how
+the next database read gets added on the same reasoning.
+
+**The knob with no control.** The Diagnostics panel said "set a window in
+Settings" from the day it shipped. There was no such control — not in
+`settingsPatch`, `settings_apply.go`, `settings.html`, or
+`ops/settings-apply-semantics.md`. An env override *does* exist
+(`BRIDGE_RETENTION_PLAYBACK_HISTORY_DAYS`, derived reflectively — a claim I got
+wrong from a literal grep and had corrected by probing the real function), and
+`Save()` round-trips the block, but `EnvOverrideDocs()` has no production caller
+so the derived names are printed nowhere. Because nothing but the settings PATCH
+moves `cfgHolder` and there is no config-file watcher, the sweeper's own *"read
+LIVE on every pass, so a settings change takes effect on the next tick rather
+than at the next restart"* described a capability nothing could reach.
+`settings_matrix_doc_test.go` could not catch it: it is bidirectional, but its
+universe is `reflect.TypeOf(settingsPatch{})`, never `config.Config`.
+
+### Tests that pinned nothing — six, all found by mutation
+
+1. **`TestSweepSkipsTheOrphanReapWhenTheTokenSetCannotBeRead`.** #822's body
+   records finding the *first* version green against a sweeper that skipped
+   nothing, and fixing it with a `countingReaper`. The upgrade was real; the
+   FIXTURE still could not tell the guard it names from the one beside it, because
+   `(nil, error)` also satisfies `len(ids) == 0`. Counterfactual under one
+   weakened guard (`case err != nil && len(ids) == 0`): the partial-read fixture
+   FAILS, the shipped fixture PASSES.
+2. **The whole stale-device-registration branch** — deleting it left the entire
+   `cmd/bridge` suite green.
+3. **`TestPageStatsIsInternallyConsistent`** recomputed `PageSize*FreelistCount`
+   from `PageStats`' own output.
+4. **`TestDatabaseCompactReclaimsAndReports`** asserted `ReclaimedBytes ==
+   Before-After`, which the handler computes from those same two fields — it holds
+   against a `Compact` that never vacuums, against removing the mandatory
+   post-checkpoint, and against the negative figure above.
+5. **`TestDiagnosticsCarriesDatabaseSize`** checked only that the floor's KEY
+   existed; the field has no `omitempty`.
+6. **`RetentionCountsAvailable` was only ever asserted `true`** — hoisting it out
+   of its error branch leaves every test green while the field's whole reason
+   evaporates and the JS branch becomes dead code. The **507** mapping had never
+   executed at all: `newTestServer` leaves `Deps.DBFreeBytes` nil.
+
+### Process, recorded because it cost something
+
+- **A control whose mutation does not exercise the assertion proves nothing** —
+  the same rule as a fixture, one level up. Three of this run's controls passed
+  against tests that were genuinely weak: one mutation (`FreelistCount =
+  PageCount`) never produced the overstatement the assertion tests for; one
+  fixture never reached a WAL-heavy state; one branch had no test at all.
+- **A control whose mutation does not COMPILE proves nothing** — hit twice
+  (`case false:` removing `err`'s only use; `if false {` orphaning an import).
+  Both were replaced with the realistic wrong implementation, which is a better
+  control anyway.
+- **Commit before the control.** The JS-guard test was written after PR B's
+  commit and destroyed by the next control's `git checkout -- internal/`. It cost
+  nothing only because the apply script, not the tree, was the source of truth.
+- **Strip comments before scanning JS.** The JS guard's first run reported the
+  bug as still present: it had found the explanatory comment beside the fix, which
+  quotes the offending string. `stripJSNoise` is the wrong tool here — it blanks
+  string literals too, and the literals are the subject.
+- **A wedged gate was a DISK problem, and the recorded rule found it.** A
+  `make check` run stalled with `internal/manifest` at **0.0 % CPU** after
+  11 minutes. The stack dump put the wedge in
+  `TestListVariantsByPathPrefix_exactPrefixOnly` -> `OpenStore` -> `migrate` —
+  an unrelated test, blocked inside SQLite. `df -h` said **97 % full, 17 GB
+  free**, with a **27 GB** Go build cache and 1.4 GB of leftover test temp dirs;
+  my own new fixture was building a **131 MB WAL** on top of that. This is
+  exactly the shape already written down as *"when unrelated tests start
+  failing, check `df -h /` before reading the failures"* — reading the failure
+  first would have sent me hunting a phantom deadlock in the compaction code.
+  `go clean -cache -testcache` reclaimed 27 GB, and the fixture was cut to a
+  11 MB WAL, which is all the assertion ever needed: a `before` measured from
+  the main file alone is short by `walBytes` whatever `walBytes` is. Its ~10 s
+  runtime is unchanged and is `busy_timeout(5000)` twice, once per checkpoint
+  the held snapshot refuses — that wait is what reaches the busy branch, so it
+  must not be "optimised" away.
+- **Gemini hit its DAILY QUOTA on the first PR**, so no PR in this batch got a
+  Gemini review. CodeRabbit reviewed #859; SonarCloud and CodeQL passed. Recorded
+  rather than implied, per the rule that a rate-limited bot's silence is not
+  approval.
