@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
-	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // tokenCmd dispatches the `bridge token <subcommand>` family. Kept
@@ -68,7 +67,17 @@ Run "bridge token <subcommand> -h" for subcommand-specific flags.
 // eliminate the four-way duplicate the SonarCloud per-PR duplication
 // gate flagged.
 func openTokenStoreFromCfg(configPath string, stderr io.Writer) (*auth.Store, int) {
-	cfg, err := config.Load(configPath)
+	// loadCLIConfig, not config.Load: the flag's default is the EMPTY
+	// string, so config.Load received "" and every `bridge token`
+	// subcommand died with `read config "": open : no such file or
+	// directory` unless the operator passed --config explicitly — on a
+	// host with a perfectly good platform install, and while the flag's
+	// own help text promised the ./bridge.yaml-then-platform fallback
+	// that only loadCLIConfig implements. `bridge token revoke` is the
+	// documented recovery path for an orphaned token, so this was the
+	// one command an operator reaches for when something is already
+	// wrong.
+	cfg, _, err := loadCLIConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return nil, 2

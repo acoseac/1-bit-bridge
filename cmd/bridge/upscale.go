@@ -83,7 +83,11 @@ type transcodeBootstrapResult struct {
 // `gcMode == true` skips the sox precheck — GC sweeps only consult
 // the DB and the filesystem, no sox required.
 func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, configPath, qualityFlag string, gcMode bool) (*transcodeBootstrapResult, int) {
-	cfg, err := config.Load(configPath)
+	// loadCLIConfig, not config.Load — see openTokenStoreFromCfg for the
+	// same fix. This tail is shared by `bridge upscale` and
+	// `bridge optimize`, so both were unusable without an explicit
+	// --config.
+	cfg, _, err := loadCLIConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return nil, 2
