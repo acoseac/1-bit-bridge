@@ -292,14 +292,44 @@ func TestCompactMeasuresTheWALToo(t *testing.T) {
 	ctx := context.Background()
 	seedForCompact(t, s, 2000)
 
-	// A store mid-write has a WAL; the footprint must include it.
+	// The fixture has to REACH the state, or it pins nothing: reverting
+	// `before` to the main file alone leaves a test green unless the WAL
+	// actually holds a meaningful share of the database. A second
+	// connection parked in a read transaction is what gets there — it
+	// holds the old snapshot, so no checkpoint can complete and every
+	// subsequent write accumulates in -wal.
+	reader, err := sql.Open("sqlite", dsn.File(p, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	tx, err := reader.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback() //nolint:errcheck // the snapshot is released either way
+	var n int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM tracks").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 1500; i++ {
+		if err := s.DeleteTrack(ctx, fmt.Sprintf("Artist%02d/Album/%05d Track.flac", i%20, i)); err != nil {
+			t.Fatalf("delete %d: %v", i, err)
+		}
+	}
+
+	mainBytes, err := fileSize(p)
+	if err != nil {
+		t.Fatal(err)
+	}
 	walBytes := int64(0)
 	if fi, err := os.Stat(p + "-wal"); err == nil {
 		walBytes = fi.Size()
 	}
-	mainBytes, err := fileSize(p)
-	if err != nil {
-		t.Fatal(err)
+	if walBytes == 0 {
+		t.Fatal("the held read snapshot did not keep a WAL alive; this test would prove nothing " +
+			"about whether the before figure includes it")
 	}
 	foot, err := dbFootprint(p)
 	if err != nil {
@@ -308,27 +338,79 @@ func TestCompactMeasuresTheWALToo(t *testing.T) {
 	if foot != mainBytes+walBytes {
 		t.Errorf("dbFootprint = %d, want main %d + wal %d = %d", foot, mainBytes, walBytes, mainBytes+walBytes)
 	}
-	if walBytes == 0 {
-		t.Log("note: no WAL present at measurement time; the reclamation assertion below still holds")
-	}
 
-	for i := 0; i < 1500; i++ {
-		if err := s.DeleteTrack(ctx, fmt.Sprintf("Artist%02d/Album/%05d Track.flac", i%20, i)); err != nil {
-			t.Fatalf("delete %d: %v", i, err)
-		}
-	}
 	res, err := s.Compact(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The property that broke: a compaction can never report growth.
-	if res.AfterBytes > res.BeforeBytes {
-		t.Errorf("compaction reported growth: before=%d after=%d — the before figure is "+
-			"measuring less than the after figure", res.BeforeBytes, res.AfterBytes)
+	// The discriminating assertion: the before figure must count the WAL.
+	// Measuring the main file alone is what let a compaction report
+	// GROWTH, and what made the headroom guard demand 8,192 bytes free
+	// for a vacuum that needed ~4.6 MB.
+	if res.BeforeBytes < mainBytes+walBytes {
+		t.Errorf("BeforeBytes = %d, less than the footprint at entry (main %d + wal %d = %d); "+
+			"the WAL is not a cache and an arbitrary share of the database lives in it",
+			res.BeforeBytes, mainBytes, walBytes, mainBytes+walBytes)
 	}
+	// Writing this fixture is what showed that "a compaction can never
+	// report growth" is FALSE. With the reader still parked, the
+	// post-checkpoint answers BUSY, so the WAL is not truncated and the
+	// vacuum's own output sits in it on top of the original — peak disk
+	// really has risen, exactly as this file's header describes. Nothing
+	// has been reclaimed yet, and the honest report of that is ZERO.
+	if !res.CheckpointBusy {
+		t.Fatal("the held snapshot did not make the post-checkpoint busy; the clamp assertion " +
+			"below would be testing the ordinary path instead of the one it is for")
+	}
+	if got := res.ReclaimedBytes(); got != 0 {
+		t.Errorf("ReclaimedBytes = %d on a busy checkpoint; nothing has been returned to the "+
+			"filesystem yet and a negative figure reads as \"the compaction made it bigger\"", got)
+	}
+	t.Logf("held-WAL fixture: main=%d wal=%d before=%d after=%d busy=%v reclaimed=%d",
+		mainBytes, walBytes, res.BeforeBytes, res.AfterBytes, res.CheckpointBusy, res.ReclaimedBytes())
+
 	// And a missing -wal is not an error.
 	if _, err := dbFootprint(filepath.Join(dir, "no-such.db")); err == nil {
 		t.Error("dbFootprint on a missing database returned no error")
+	}
+}
+
+// TestCheckpointOutcomeTreatsACancelledContextAsBusyNotFailed pins the
+// branch a race would otherwise own.
+//
+// If the context dies during the mandatory post-VACUUM checkpoint, the
+// vacuum has ALREADY committed. Returning an error there tells the
+// operator the button failed after it did the work — the mirror image of
+// the failure compact.go's header exists to prevent, and
+// indistinguishable from a genuine one.
+func TestCheckpointOutcomeTreatsACancelledContextAsBusyNotFailed(t *testing.T) {
+	real := errors.New("disk went away")
+	for _, tc := range []struct {
+		name     string
+		busy     bool
+		err      error
+		wantBusy bool
+		wantErr  error
+	}{
+		{"clean checkpoint", false, nil, false, nil},
+		{"genuinely busy", true, nil, true, nil},
+		{"context cancelled", false, context.Canceled, true, nil},
+		{"deadline exceeded", false, context.DeadlineExceeded, true, nil},
+		{"wrapped cancellation", false, fmt.Errorf("pragma: %w", context.Canceled), true, nil},
+		{"a real failure still fails", false, real, false, real},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			busy, err := checkpointOutcome(tc.busy, tc.err)
+			if !errors.Is(err, tc.wantErr) && !(err == nil && tc.wantErr == nil) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if busy != tc.wantBusy {
+				t.Errorf("busy = %v, want %v", busy, tc.wantBusy)
+			}
+		})
 	}
 }
 

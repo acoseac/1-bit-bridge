@@ -61,12 +61,12 @@ func (s *Server) apiDatabaseCompact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, databaseCompactResponse{
 		BeforeBytes: res.BeforeBytes,
 		AfterBytes:  res.AfterBytes,
-		// Clamped: a compaction can never return a negative number of
-		// bytes, so if the arithmetic ever produces one the honest report
-		// is zero rather than a figure that reads as "it grew". Both
-		// sides are footprints now (see manifest.dbFootprint), which is
-		// what removed the way this used to go negative.
-		ReclaimedBytes: max(0, res.BeforeBytes-res.AfterBytes),
+		// One definition of the subtraction, and it lives beside the
+		// measurement that justifies its clamp — a busy checkpoint leaves
+		// peak disk genuinely HIGHER, and "reclaimed -815,760 bytes" is
+		// not a truthful rendering of that. CheckpointBusy carries the
+		// rest of the story.
+		ReclaimedBytes: res.ReclaimedBytes(),
 		CheckpointBusy: res.CheckpointBusy,
 	})
 }

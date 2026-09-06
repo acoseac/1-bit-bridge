@@ -125,6 +125,33 @@ type CompactResult struct {
 	CheckpointBusy bool
 }
 
+// ReclaimedBytes is what the compaction actually returned to the
+// filesystem, clamped at zero.
+//
+// The clamp is not defensive tidying — the negative case is REAL and
+// measured. When CheckpointBusy is true the WAL could not be truncated,
+// so nothing has been reclaimed YET and the vacuum's own output is
+// sitting in the WAL on top of the original: peak disk has genuinely
+// RISEN, exactly as this file's header describes. Driven against a store
+// with a reader parked on the old snapshot:
+//
+//	main=1,671,168  wal=131,151,992
+//	before=132,823,160  after=133,638,920  busy=true
+//
+// "Reclaimed -815,760 bytes" is not a truthful rendering of that. Zero
+// is, and CheckpointBusy is what carries the rest of the story — the
+// space comes back when the reader lets go.
+//
+// A METHOD rather than a field so there is one definition of the
+// subtraction. The admin handler owned it before, which put the clamp a
+// package away from the measurement that justifies it.
+func (r CompactResult) ReclaimedBytes() int64 {
+	if r.AfterBytes >= r.BeforeBytes {
+		return 0
+	}
+	return r.BeforeBytes - r.AfterBytes
+}
+
 // ErrInsufficientDiskSpace is returned when the volume holding the
 // database has less free space than the compaction needs.
 var ErrInsufficientDiskSpace = errors.New("manifest: not enough free disk space to compact")
@@ -235,11 +262,8 @@ func (s *Store) Compact(ctx context.Context, freeBytes func(dir string) (int64, 
 	// as CheckpointBusy instead, which is precisely what that field
 	// already means: the vacuum succeeded, the file has not shrunk yet,
 	// and it will.
-	busy, err := s.walCheckpointTruncate(ctx)
-	switch {
-	case err != nil && ctx.Err() != nil:
-		busy = true
-	case err != nil:
+	busy, err := checkpointOutcome(s.walCheckpointTruncate(ctx))
+	if err != nil {
 		return CompactResult{}, fmt.Errorf("manifest: post-VACUUM checkpoint: %w", err)
 	}
 
@@ -248,6 +272,35 @@ func (s *Store) Compact(ctx context.Context, freeBytes func(dir string) (int64, 
 		return CompactResult{}, fmt.Errorf("manifest: measure after compact: %w", err)
 	}
 	return CompactResult{BeforeBytes: before, AfterBytes: after, CheckpointBusy: busy}, nil
+}
+
+// checkpointOutcome classifies the post-VACUUM checkpoint's result.
+//
+// A pure function taking the checkpoint's own two return values, because
+// the branch it encodes is otherwise reachable only by winning a race —
+// cancelling a context in the window between VACUUM committing and the
+// checkpoint returning. A decision that cannot be driven directly is a
+// decision nothing pins, and this one was added precisely because the
+// untested direction is the one that lies to the operator.
+//
+// A CONTEXT error is not a failed compaction: the VACUUM has already
+// committed and only the checkpoint was interrupted, so the file will
+// shrink on the next one. Reporting it as an error tells the operator the
+// button failed AFTER it did the work — indistinguishable from a real
+// failure, and the mirror image of the "reports success and reclaims
+// nothing" outcome this file's header exists to prevent. It maps to
+// CheckpointBusy, which already means exactly that: the vacuum succeeded,
+// the file has not shrunk yet, and it will.
+//
+// Any OTHER error is still a real failure and is returned.
+func checkpointOutcome(busy bool, err error) (bool, error) {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return true, nil
+	case err != nil:
+		return false, err
+	}
+	return busy, nil
 }
 
 // dbFootprint reports what this database currently occupies on disk: the
