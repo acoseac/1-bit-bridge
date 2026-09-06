@@ -159,11 +159,28 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	if s.refuseUpscaleMutationInDemoMode(w) {
 		return
 	}
-	if s.upscaleEnqueuer == nil {
-		// Feature off (config flag false) OR sox precheck
-		// failed at startup. Both surface as the same wire code
-		// — operator privacy, and iOS only needs to know "no
-		// variant chrome here".
+	// TWO gates, and the second one is the load-bearing half.
+	//
+	// The nil check alone used to be the whole gate, because the wiring
+	// only built the enqueuer when the feature was active. Since the
+	// always-construct-never-stop conversion the adapter is ALWAYS
+	// non-nil, so nil-ness stopped meaning anything and this mutation
+	// path answered on a bridge whose /v1/health says upscaleEnabled:
+	// false — enqueuing real sox jobs that write track_variants rows and
+	// sidecars, with no disk floor (that guard lives only in the sweeper
+	// and Coordinator.Submit). upscale.enabled defaults to FALSE, so
+	// that was every stock bridge.
+	//
+	// upscaleActive() is the same live predicate that drives
+	// /v1/health.upscaleEnabled and the manifest variant gate, which is
+	// what keeps one answer across the whole surface.
+	//
+	// Logged at Warn rather than refused silently: an operator whose
+	// deployment was relying on the ungated path gets a reason in the
+	// journal instead of a bare 503.
+	if s.upscaleEnqueuer == nil || !s.upscaleActive() {
+		logger.Warn("upscale request refused: the feature is not active",
+			"reason", "upscale.enabled is false or sox is unusable")
 		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled, errMsgUpscalingNotEnabled)
 		return
 	}
@@ -281,8 +298,19 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	// upscale.
 	kind := strings.ToLower(strings.TrimSpace(req.Kind))
 	switch kind {
-	case "", "upscale", "optimize":
+	case "", "upscale":
 		// ok
+	case "optimize":
+		// The optimize KIND has its own flag on top of the master
+		// toggle. carPlayOptimizeEnabled is already AND-gated on
+		// upscaleActive by the wiring layer (see its field docs), so
+		// optimize is a strict subset of what the check above allows
+		// and this can only ever refuse MORE, never contradict it.
+		if s.carPlayOptimizeEnabled == nil || !s.carPlayOptimizeEnabled() {
+			logger.Warn("optimize request refused: the CarPlay optimize kind is not active")
+			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled, errMsgUpscalingNotEnabled)
+			return
+		}
 	default:
 		writeError(w, http.StatusBadRequest, "bad_request",
 			"unknown kind: "+req.Kind+` (expected "upscale" or "optimize")`)

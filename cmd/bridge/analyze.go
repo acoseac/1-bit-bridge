@@ -349,8 +349,27 @@ var analysisSweeperSettleDelay = 90 * time.Second
 // nudge is a buffered-1 channel; senders use a non-blocking send so a
 // pending nudge coalesces with the next sweep. status (nil-safe)
 // records the sweep lifecycle for the admin Jobs surface.
-func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir string, pool *analyze.Pool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
+//
+// # enabled is the LIVE analysis gate, and it is not optional
+//
+// The pool is constructed unconditionally (see runServe, "always
+// construct, never stop"), which is what makes analysis.enabled hot for
+// every READ surface. Before that conversion the sweeper sat inside
+// `if analysisActive {` and the block WAS its gate; the conversion moved
+// every reader to the live predicate and left the WRITE path with none,
+// so a default config (analysis.enabled is false) still forked a decode
+// per track and — because Store.UpsertAnalysis advances indexed_at —
+// pushed a whole-library delta to every paired device 90 s after every
+// boot, invisibly, with /v1/analysis/* still 404ing.
+//
+// Same shape and same rule as runFingerprintSweeper: a disabled pass
+// records NO status, so the Jobs card keeps the last real breakdown
+// instead of overwriting it with an empty one.
+func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir string, pool *analyze.Pool, enabled func() bool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
 	sweep := func() {
+		if enabled != nil && !enabled() {
+			return
+		}
 		status.sweepStarted()
 		// counts stays nil on failure/cancel so sweepFinished keeps the
 		// previous successful breakdown (see sweepStatus.sweepFinished).

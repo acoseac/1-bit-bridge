@@ -167,7 +167,10 @@ func deleteFixture(t *testing.T, wireDeleter bool) (*httptest.Server, string, *s
 	raw, _, _ := store.Mint("test")
 
 	srv := New(cfg, store, nil, "fp")
-	srv.upscaleEnabled = func() bool { return true } // so the /v1/health features path advertises (not used in this file)
+	// Live feature predicate. It advertises the /v1/health feature flag AND —
+	// since the delete handler gained the gate the nil-deleter check stopped
+	// providing — decides whether this endpoint answers at all.
+	srv.upscaleEnabled = func() bool { return true }
 
 	deleter := &stubVariantDeleter{
 		all:    []VariantSummary{},

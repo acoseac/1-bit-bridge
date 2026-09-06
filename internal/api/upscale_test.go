@@ -75,7 +75,15 @@ func upscaleFixture(t *testing.T, withEnqueuer bool) (*httptest.Server, string, 
 	stub := newStubEnqueuer()
 	srv := New(cfg, store, nil, "fp")
 	if withEnqueuer {
-		srv = srv.WithUpscaleEnqueuer(stub)
+		// Wire the LIVE predicates alongside the enqueuer, because that is
+		// what production does. This fixture used to wire the adapter alone,
+		// which quietly modelled the very state the handler shipped in: an
+		// enqueuer present while `upscaleActive()` said the feature was off.
+		// A fixture that cannot express "wired but disabled" cannot catch a
+		// missing gate — see TestUpscaleRefusedWhenFeatureInactive.
+		srv = srv.WithUpscaleEnqueuer(stub).
+			WithUpscale(func() bool { return true }, nil).
+			WithCarPlayOptimize(func() bool { return true })
 	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)

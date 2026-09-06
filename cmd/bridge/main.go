@@ -3032,6 +3032,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			defer bgWriters.Done()
 			runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
 				analyze.WaveformDirFor(cfg.DataDir), analysisPool,
+				analysisActiveFn,
 				liveInterval((*config.Config).ScanInterval),
 				analysisNudge, analysisRearm, analysisSweepState)
 		}()

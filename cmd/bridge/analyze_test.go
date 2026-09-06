@@ -132,6 +132,72 @@ func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 
 // waitForSweep polls the recorder until a completed sweep newer than
 // `after` is visible or the deadline hits. Returns the lastEnd observed.
+// alwaysAnalysisEnabled is the live-gate predicate for the cadence tests,
+// which are about WHEN a sweep runs rather than whether it may.
+func alwaysAnalysisEnabled() bool { return true }
+
+// TestRunAnalysisSweeperRespectsDisabledGate pins the gate that PR #781's
+// always-construct-never-stop conversion removed.
+//
+// Before that conversion the sweeper was wired inside `if analysisActive {`
+// and the block WAS the gate. The conversion moved every READ surface to the
+// live `analysisActiveFn` predicate and left the WRITE path ungated, so a
+// bridge on the DEFAULT config (analysis.enabled is false) still walked the
+// library 90 s after boot, forked a decode per track, and — because
+// Store.UpsertAnalysis advances indexed_at — pushed a whole-library delta to
+// every paired device, repeating on every scan interval and post-scan nudge.
+// /v1/analysis/* answered 404 throughout, so nothing surfaced it.
+//
+// Asserting on the STATUS rather than on the absence of waveform files is
+// deliberate: a disabled pass must record nothing at all (the same rule
+// runFingerprintSweeper follows), so the Jobs card keeps the last real
+// breakdown instead of being overwritten by an empty one. A sweep that ran
+// and found nothing would still stamp sweepStarted, which is what
+// distinguishes "gated" from "ran against an empty library" — and an
+// empty-library assertion would pass either way.
+func TestRunAnalysisSweeperRespectsDisabledGate(t *testing.T) {
+	oldSettle := analysisSweeperSettleDelay
+	analysisSweeperSettleDelay = 5 * time.Millisecond
+	t.Cleanup(func() { analysisSweeperSettleDelay = oldSettle })
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pool := analyze.NewPool(store, 1, 8)
+	defer pool.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	status := &sweepStatus[admin.AnalysisSweepCounts]{}
+	nudge := make(chan struct{}, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
+			pool, func() bool { return false }, staticInterval(time.Hour), nudge, nil, status)
+	}()
+
+	// Past the settle delay AND past a nudge — both sweep triggers, both of
+	// which must be refused while the feature is off.
+	time.Sleep(80 * time.Millisecond)
+	nudge <- struct{}{}
+	time.Sleep(80 * time.Millisecond)
+
+	if _, lastStart, lastEnd, _, _ := status.snapshot(); !lastStart.IsZero() || !lastEnd.IsZero() {
+		t.Errorf("a disabled sweeper recorded a sweep: lastStart=%v lastEnd=%v — the analysis.enabled gate is not being consulted", lastStart, lastEnd)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweeper did not exit on ctx cancel")
+	}
+}
+
 func waitForSweep(t *testing.T, status *sweepStatus[admin.AnalysisSweepCounts], after time.Time, deadline time.Duration) time.Time {
 	t.Helper()
 	stop := time.Now().Add(deadline)
@@ -179,7 +245,7 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 		// 1h interval: the ticker can't fire inside this test — any sweep
 		// after the initial one can only come from a nudge.
 		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, staticInterval(time.Hour), nudge, nil, status)
+			pool, alwaysAnalysisEnabled, staticInterval(time.Hour), nudge, nil, status)
 	}()
 
 	firstEnd := waitForSweep(t, status, time.Time{}, 5*time.Second)
@@ -235,7 +301,7 @@ func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
 	go func() {
 		defer close(done)
 		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, staticInterval(time.Hour), make(chan struct{}, 1), nil, status)
+			pool, alwaysAnalysisEnabled, staticInterval(time.Hour), make(chan struct{}, 1), nil, status)
 	}()
 	waitForSweep(t, status, time.Time{}, 5*time.Second)
 	_, _, _, nextDue, _ := status.snapshot()
