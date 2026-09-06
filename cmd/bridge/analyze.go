@@ -335,6 +335,36 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 // A var (not const) purely as the test seam — production never mutates.
 var analysisSweeperSettleDelay = 90 * time.Second
 
+// analysisSweeper holds what one auto-analysis pass needs. A struct rather
+// than a parameter list for the reason fingerprintSweeper and
+// autoOptimizeSweeper are: the loop and the pass want different things, and
+// threading nine values through the loop to reach the pass is how a gate goes
+// missing without anyone noticing.
+type analysisSweeper struct {
+	store     *manifest.Store
+	resolver  *bridgefs.Resolver
+	outputDir string
+	pool      *analyze.Pool
+	// enabled is the LIVE analysis gate.
+	//
+	// The pool is constructed unconditionally (see runServe, "always
+	// construct, never stop"), which is what makes analysis.enabled hot for
+	// every READ surface. Before that conversion the sweeper sat inside
+	// `if analysisActive {` and the block WAS its gate; the conversion moved
+	// every reader to the live predicate and left the WRITE path with none.
+	// So on a default config (analysis.enabled is false) the bridge still
+	// forked a decode per track 90 s after every boot and — because
+	// Store.UpsertAnalysis advances indexed_at — pushed a whole-library
+	// delta to every paired device, while /v1/analysis/* went on 404ing.
+	enabled func() bool
+}
+
+// active reports whether a pass may run. A nil predicate reads as OFF, not
+// on: this sweeper's whole failure mode was doing unrequested work, so the
+// direction to fail in is settled. (runFingerprintSweeper's nil arm reads the
+// other way; changing it belongs with its own tests, not here.)
+func (s *analysisSweeper) active() bool { return s != nil && s.enabled != nil && s.enabled() }
+
 // runAnalysisSweeper is the serve-side auto-analysis loop. After an
 // initial settle delay (let any startup scan land) and then on every
 // `interval` tick — or immediately on a `nudge` (the scanner's
@@ -350,24 +380,16 @@ var analysisSweeperSettleDelay = 90 * time.Second
 // pending nudge coalesces with the next sweep. status (nil-safe)
 // records the sweep lifecycle for the admin Jobs surface.
 //
-// # enabled is the LIVE analysis gate, and it is not optional
+// Same rule as runFingerprintSweeper: a disabled pass records NO status, so
+// the Jobs card keeps the last real breakdown instead of overwriting it with
+// an empty one.
 //
-// The pool is constructed unconditionally (see runServe, "always
-// construct, never stop"), which is what makes analysis.enabled hot for
-// every READ surface. Before that conversion the sweeper sat inside
-// `if analysisActive {` and the block WAS its gate; the conversion moved
-// every reader to the live predicate and left the WRITE path with none,
-// so a default config (analysis.enabled is false) still forked a decode
-// per track and — because Store.UpsertAnalysis advances indexed_at —
-// pushed a whole-library delta to every paired device 90 s after every
-// boot, invisibly, with /v1/analysis/* still 404ing.
-//
-// Same shape and same rule as runFingerprintSweeper: a disabled pass
-// records NO status, so the Jobs card keeps the last real breakdown
-// instead of overwriting it with an empty one.
-func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir string, pool *analyze.Pool, enabled func() bool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
+// The dependencies travel as an analysisSweeper — the same shape
+// fingerprintSweeper and autoOptimizeSweeper already use in this package,
+// and what keeps this entry point inside the parameter budget.
+func runAnalysisSweeper(ctx context.Context, s *analysisSweeper, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
 	sweep := func() {
-		if enabled != nil && !enabled() {
+		if !s.active() {
 			return
 		}
 		status.sweepStarted()
@@ -376,7 +398,7 @@ func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *br
 		var counts *admin.AnalysisSweepCounts
 		defer func() { status.sweepFinished(counts) }()
 
-		res, err := collectAnalysisCandidates(ctx, store, resolver, outputDir, "", false)
+		res, err := collectAnalysisCandidates(ctx, s.store, s.resolver, s.outputDir, "", false)
 		if err != nil {
 			// A cancelled context here is a normal shutdown, not a fault —
 			// same suppression the fingerprint sweeper applies (Gemini on
@@ -393,7 +415,7 @@ func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *br
 			if ctx.Err() != nil {
 				return
 			}
-			switch err := pool.Enqueue(c); {
+			switch err := s.pool.Enqueue(c); {
 			case err == nil:
 				enqueued++
 			case errors.Is(err, analyze.ErrQueueFull), errors.Is(err, analyze.ErrPoolClosed):

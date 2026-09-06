@@ -136,6 +136,17 @@ func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 // which are about WHEN a sweep runs rather than whether it may.
 func alwaysAnalysisEnabled() bool { return true }
 
+// waitGate blocks until the sweeper consults its enabled predicate, so an
+// assertion about what a DISABLED pass did cannot run before the pass happened.
+func waitGate(t *testing.T, calls <-chan struct{}, which string) {
+	t.Helper()
+	select {
+	case <-calls:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never evaluated the enabled gate", which)
+	}
+}
+
 // TestRunAnalysisSweeperRespectsDisabledGate pins the gate that PR #781's
 // always-construct-never-stop conversion removed.
 //
@@ -173,18 +184,32 @@ func TestRunAnalysisSweeperRespectsDisabledGate(t *testing.T) {
 	status := &sweepStatus[admin.AnalysisSweepCounts]{}
 	nudge := make(chan struct{}, 1)
 
+	// Synchronise on the gate actually being CONSULTED rather than sleeping.
+	// A fixed sleep lets a loaded runner reach the assertion before either
+	// trigger fires, and the test then passes against code that never asks —
+	// which is the exact failure it exists to catch. (CodeRabbit, PR #852.)
+	gateCalls := make(chan struct{}, 4)
+	disabled := func() bool {
+		select {
+		case gateCalls <- struct{}{}:
+		default:
+		}
+		return false
+	}
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, func() bool { return false }, staticInterval(time.Hour), nudge, nil, status)
+		runAnalysisSweeper(ctx, &analysisSweeper{
+			store: store, resolver: bridgefs.New([]string{t.TempDir()}),
+			outputDir: t.TempDir(), pool: pool, enabled: disabled,
+		}, staticInterval(time.Hour), nudge, nil, status)
 	}()
 
-	// Past the settle delay AND past a nudge — both sweep triggers, both of
-	// which must be refused while the feature is off.
-	time.Sleep(80 * time.Millisecond)
+	// Both sweep triggers, each waited for: the post-settle pass, then a nudge.
+	waitGate(t, gateCalls, "the post-settle sweep")
 	nudge <- struct{}{}
-	time.Sleep(80 * time.Millisecond)
+	waitGate(t, gateCalls, "the nudged sweep")
 
 	if _, lastStart, lastEnd, _, _ := status.snapshot(); !lastStart.IsZero() || !lastEnd.IsZero() {
 		t.Errorf("a disabled sweeper recorded a sweep: lastStart=%v lastEnd=%v — the analysis.enabled gate is not being consulted", lastStart, lastEnd)
@@ -244,8 +269,10 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 		defer close(done)
 		// 1h interval: the ticker can't fire inside this test — any sweep
 		// after the initial one can only come from a nudge.
-		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, alwaysAnalysisEnabled, staticInterval(time.Hour), nudge, nil, status)
+		runAnalysisSweeper(ctx, &analysisSweeper{
+			store: store, resolver: bridgefs.New([]string{t.TempDir()}),
+			outputDir: t.TempDir(), pool: pool, enabled: alwaysAnalysisEnabled,
+		}, staticInterval(time.Hour), nudge, nil, status)
 	}()
 
 	firstEnd := waitForSweep(t, status, time.Time{}, 5*time.Second)
@@ -300,8 +327,10 @@ func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, alwaysAnalysisEnabled, staticInterval(time.Hour), make(chan struct{}, 1), nil, status)
+		runAnalysisSweeper(ctx, &analysisSweeper{
+			store: store, resolver: bridgefs.New([]string{t.TempDir()}),
+			outputDir: t.TempDir(), pool: pool, enabled: alwaysAnalysisEnabled,
+		}, staticInterval(time.Hour), make(chan struct{}, 1), nil, status)
 	}()
 	waitForSweep(t, status, time.Time{}, 5*time.Second)
 	_, _, _, nextDue, _ := status.snapshot()
