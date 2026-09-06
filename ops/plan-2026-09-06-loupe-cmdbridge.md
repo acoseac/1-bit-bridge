@@ -439,11 +439,37 @@ planning; none had been fixed in passing. `main.go` is the contention point
 (F9's call site, F10's call site, F11, F16, F17, F18), so the two PRs that touch
 it run sequentially while the CLI one goes in parallel.
 
-| PR | Theme | Items | Files |
+| PR | Theme | Items | State |
 |---|---|---|---|
-| A | The CLI surprises or lies to the operator | F12, F13, F14, F15, PRISM-1/2/3 | backup, manifest, enrichment, cert, variants, duplicates, status |
-| B | Live means live | F9, F10 | smartplaylists, upnp_upstream_wiring, main |
-| C | `runServe` lifecycle and reporting | F11, F16, F17, F18 | main, main_test |
+| [#856](https://github.com/acoseac/1-bit-bridge/pull/856) | The CLI surprises or lies to the operator | F12, F13, F14, F15, PRISM-1/2/3 | open |
+| [#857](https://github.com/acoseac/1-bit-bridge/pull/857) | Live means live | F9, F10 | open |
+| [#858](https://github.com/acoseac/1-bit-bridge/pull/858) | `runServe` lifecycle and reporting | F11, F16, F17, F18 | open |
+
+**All thirteen deferred items are in flight; none was dropped.**
+
+### What the negative controls caught this batch
+
+Three of the seventeen mutations failed to go red on the first attempt, and all
+three were defects in the TESTS rather than in the fixes:
+
+1. **The `--dry-run` test used a fixture with no variants**, and
+   `variantsMoveCmd` returns early on an empty set — before the `MkdirAll` the
+   test was about. It passed against the unfixed code. That is CLAUDE.md's "a
+   fixture must be a value the transformation would actually change", caught
+   exactly where it should be.
+2. **The suppression-clear mutation flipped a CONDITION**, leaving the `else`
+   branch clearing anyway. Mutate the effect, not the branch that selects it.
+3. **The dispatcher/usage guard read only the FIRST quoted name per case arm**,
+   so `case "duplicates", "dupes":` left it green — an alias added that way
+   dispatches and stays undiscoverable, which is the precise failure the guard
+   exists for.
+
+### Two production seams added, deliberately
+
+`upnpIngestWarmup` (15 s) and `smartPlaylistSettleDelay` (120 s) became package
+vars, matching `analysisSweeperSettleDelay`. Neither loop's cadence was
+observable by a unit test at those values — which is how both kept a boot-frozen
+value this long. `internal/integrity` gained `stopGrace` for the same reason.
 
 ### The three PRISM items, now verified
 
