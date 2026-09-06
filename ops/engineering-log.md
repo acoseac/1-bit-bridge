@@ -3686,3 +3686,32 @@ refuses to guess about; they now reserve a real closed loopback port.
 notice and CodeRabbit's rate-limit notice. SonarCloud and CodeQL ran on all
 three. Seven PRs in one day is what exhausts them; the doc's instruction is to
 name the gap rather than let "no comments" read as approval.
+
+### The field loop — bridge.ars.md, 2026-09-06
+
+Deployed both batches together via `deploy/linux/deploy-bridge-vps.sh`, which
+worked unmodified: SHA-gated upload, detached two-step swap, `setcap`,
+health-polled verify, backup prune. Serving `v0.1.9-142-g19b00dc` from
+18:45:00 UTC with **zero journal warnings**. Rollback backup
+`bridge.old-20260906-184500`.
+
+**Four fixes verified on the live host rather than only in tests** — this is the
+half of LOUPE that a green suite cannot supply:
+
+| | before | after, on the host |
+|---|---|---|
+| `bridge token list` (no `--config`) | `read config ""` | resolves, and names both paths it tried |
+| `bridge enrichment retry Some/Album` | silent whole-library reset | refused, exit 2, points at `--path` |
+| `bridge manifest clear-missing` (bridge up) | proceeded | refused, names the answering address |
+| `bridge duplicates --json --tier identical-audio` | every tier | `['identical-audio']` |
+
+**A prediction this corrected.** The batch-1 write-up said to expect the
+auto-analysis sweep to go quiet after deploy. It did not, and should not have:
+`analysis.enabled: true` on this host, so the restored gate ALLOWS — the journal
+shows `auto-analysis sweep enqueued tracks count=30` two minutes after boot. The
+"goes quiet" behaviour is the DEFAULT-config case the defect was about; stating
+it as a deploy expectation without checking the target's config was sloppy, and
+checking took one `grep` of the host's yaml.
+
+`smart-playlist regeneration families=12` and a `carPlayOptimize` feature flag on
+`/v1/health` confirm the other two gates still allow where they should.
