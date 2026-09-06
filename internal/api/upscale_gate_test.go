@@ -102,6 +102,35 @@ func TestUpscaleDeleteRefusedWhenFeatureInactive(t *testing.T) {
 	}
 }
 
+// TestUpscaleGateRunsBeforePathResolution pins the ORDER, not just the answer.
+//
+// The kind routing used to sit after `ResolveChecked` and the recursive
+// folder walk, so a request that was going to be refused first cost a full
+// WalkDir over whatever directory it named. (CodeRabbit, PR #852.)
+//
+// A nonexistent path is the cheap way to observe the order without timing
+// anything: if the gate runs first the answer is 503, and if path resolution
+// runs first it is 404. Both are "refused", which is exactly why asserting on
+// the status alone in the other tests could not have caught this.
+func TestUpscaleGateRunsBeforePathResolution(t *testing.T) {
+	t.Parallel()
+	hs, tok, stub := inactiveUpscaleFixture(t)
+	resp := postJSON(t, hs, "/v1/upscale", tok,
+		UpscaleRequest{Path: "No/Such/Directory", Kind: "optimize"})
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		t.Error("got 404: the path was resolved before the feature gate ran, so a refused " +
+			"request still pays for a resolve and, on a real directory, a full recursive walk")
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status: got %d, want 503", resp.StatusCode)
+	}
+	if len(stub.calls) != 0 || len(stub.optimizeCalls) != 0 {
+		t.Errorf("enqueued work: upscale=%v optimize=%v", stub.calls, stub.optimizeCalls)
+	}
+}
+
 // TestUpscaleOptimizeKindRefusedWhenOnlyOptimizeIsOff pins the narrower arm:
 // the master toggle is on, but the CarPlay optimize KIND is off. The upscale
 // kind must still be accepted, or the two flags have collapsed into one.

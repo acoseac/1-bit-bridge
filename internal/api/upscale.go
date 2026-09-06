@@ -207,6 +207,37 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "path is required")
 		return
 	}
+	// Route by kind BEFORE resolving the path or walking the folder.
+	// Both remaining checks — the unknown-kind 400 and the optimize
+	// feature gate — depend only on the decoded body, and a request that
+	// is going to be refused should not first cost a full recursive
+	// WalkDir over whatever directory it named. (CodeRabbit, PR #852.)
+	//
+	// Empty / "upscale" → legacy upscale path (back-compat with pre-v1.x
+	// iOS clients that omit the field). "optimize" → CarPlay-targeted
+	// downsample. Unknown strings reject with a 400, so a future kind the
+	// server doesn't know about cannot silently downgrade to upscale.
+	kind := strings.ToLower(strings.TrimSpace(req.Kind))
+	switch kind {
+	case "", "upscale":
+		// ok
+	case "optimize":
+		// The optimize KIND has its own flag on top of the master
+		// toggle. carPlayOptimizeEnabled is already AND-gated on
+		// upscaleActive by the wiring layer (see its field docs), so
+		// optimize is a strict subset of what the master check allows
+		// and this can only ever refuse MORE, never contradict it.
+		if s.carPlayOptimizeEnabled == nil || !s.carPlayOptimizeEnabled() {
+			logger.Warn("optimize request refused: the CarPlay optimize kind is not active")
+			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled, errMsgUpscalingNotEnabled)
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"unknown kind: "+req.Kind+` (expected "upscale" or "optimize")`)
+		return
+	}
+
 	abs, info, err := s.resolver.ResolveChecked(libraryRel)
 	if err != nil {
 		// Same error mapping as serveFile — keeps the 400/404
@@ -288,33 +319,6 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		candidates = append(candidates, libraryRel)
-	}
-
-	// Normalise + route by kind. Empty / "upscale" → legacy upscale
-	// path (back-compat with pre-v1.x iOS clients that omit the
-	// field). "optimize" → CarPlay-targeted downsample. Unknown
-	// strings reject — surface a 400 so a future kind that the
-	// server doesn't know about doesn't silently downgrade to
-	// upscale.
-	kind := strings.ToLower(strings.TrimSpace(req.Kind))
-	switch kind {
-	case "", "upscale":
-		// ok
-	case "optimize":
-		// The optimize KIND has its own flag on top of the master
-		// toggle. carPlayOptimizeEnabled is already AND-gated on
-		// upscaleActive by the wiring layer (see its field docs), so
-		// optimize is a strict subset of what the check above allows
-		// and this can only ever refuse MORE, never contradict it.
-		if s.carPlayOptimizeEnabled == nil || !s.carPlayOptimizeEnabled() {
-			logger.Warn("optimize request refused: the CarPlay optimize kind is not active")
-			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled, errMsgUpscalingNotEnabled)
-			return
-		}
-	default:
-		writeError(w, http.StatusBadRequest, "bad_request",
-			"unknown kind: "+req.Kind+` (expected "upscale" or "optimize")`)
-		return
 	}
 
 	enqueued := 0
