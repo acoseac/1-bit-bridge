@@ -61,6 +61,8 @@ func startUPnPUpstreamIfEnabled(
 	store *manifest.Store,
 	apiSrv *api.Server,
 	logger *slog.Logger,
+	interval func() time.Duration,
+	rearm <-chan struct{},
 ) *upnpUpstreamLifecycle {
 	log := logger.With(slog.String("component", "upnp-upstream"))
 	if !cfg.UPnPUpstream.Enabled {
@@ -175,10 +177,6 @@ func startUPnPUpstreamIfEnabled(
 	// Tick loop. The first tick runs after a short warm-up so SSDP has
 	// time to populate the cache.
 	tickCtx, cancel := context.WithCancel(ctx)
-	scanEvery := time.Duration(cfg.ScanIntervalSec) * time.Second
-	if scanEvery <= 0 {
-		scanEvery = 6 * time.Hour
-	}
 	life := withManualPoller(&upnpUpstreamLifecycle{
 		discoveryClients: clients,
 		cache:            cache,
@@ -187,12 +185,12 @@ func startUPnPUpstreamIfEnabled(
 		log:              log,
 	})
 	life.ingestWg.Add(1)
-	go life.runIngestLoop(tickCtx, ingester, scanEvery)
+	go life.runIngestLoop(tickCtx, ingester, interval, rearm)
 
 	log.Info("UPnP upstream started",
 		slog.Int("interfaces", len(clients)),
 		slog.Int("servers_configured", len(cfg.UPnPUpstream.Servers)),
-		slog.Duration("scanInterval", scanEvery))
+		slog.Duration("scanInterval", ingestIntervalOf(interval)))
 	return life
 }
 
@@ -232,25 +230,70 @@ func (l *upnpUpstreamLifecycle) Stop() {
 	}
 }
 
+// upnpIngestWarmup is the SSDP warm-up window before the first ingest. A var
+// purely as the test seam — production never reassigns it — matching
+// analysisSweeperSettleDelay and friends. Without it the cadence behaviour of
+// runIngestLoop cannot be exercised in under 15 seconds, which is how it went
+// untested long enough to keep a boot-frozen ticker.
+var upnpIngestWarmup = 15 * time.Second
+
+// ingestIntervalOf resolves the cadence provider, falling back to the 6 h
+// default for a nil provider or a non-positive value. Unlike the sweepers in
+// jobstate.go, a zero here does NOT mean "park": scanIntervalSec has a
+// validated floor and the upstream walk has no nudge channel to wake it, so a
+// parked loop would be indistinguishable from a dead one.
+func ingestIntervalOf(interval func() time.Duration) time.Duration {
+	if interval == nil {
+		return 6 * time.Hour
+	}
+	if d := interval(); d > 0 {
+		return d
+	}
+	return 6 * time.Hour
+}
+
 // runIngestLoop fires Ingester.Run on the configured interval. First
 // tick lands after a 15 s warm-up so SSDP populates the cache.
-func (l *upnpUpstreamLifecycle) runIngestLoop(ctx context.Context, ingester *upnpingest.Ingester, interval time.Duration) {
+//
+// # The cadence is a provider, re-read every iteration, with a rearm
+//
+// This was a captured time.Duration feeding one time.NewTicker built before
+// the loop — the exact shape CLAUDE.md's cadence rule exists to forbid, and
+// the THIRD consumer of scanIntervalSec, after RunPeriodic and the analysis
+// sweeper. Both of those honour a settings change immediately; this one kept
+// its boot cadence forever while PATCH /api/settings answered
+// {"scanIntervalSec": {"status": "live"}}, which made that answer false for
+// any bridge with upnpUpstream.enabled.
+//
+// A timer per iteration rather than one ticker, because a ticker cannot change
+// period; the rearm re-reads without ingesting, because a settings save is not
+// a request to walk every upstream.
+func (l *upnpUpstreamLifecycle) runIngestLoop(ctx context.Context, ingester *upnpingest.Ingester, interval func() time.Duration, rearm <-chan struct{}) {
 	defer l.ingestWg.Done()
-	// Warm-up window for SSDP.
+	// Warm-up window for SSDP. NewTimer + Stop, not time.After: an abandoned
+	// After timer lives until it fires, and runServe is re-entered from the
+	// launcher menu (the PR #290 convention).
+	warm := time.NewTimer(upnpIngestWarmup)
+	defer warm.Stop()
 	select {
-	case <-time.After(15 * time.Second):
+	case <-warm.C:
 	case <-ctx.Done():
 		return
 	}
 	l.runOneIngest(ctx, ingester)
-	t := time.NewTicker(interval)
-	defer t.Stop()
 	for {
+		t := time.NewTimer(ingestIntervalOf(interval))
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
 			l.runOneIngest(ctx, ingester)
+		case <-rearm:
+			// Cadence changed: re-read on the next iteration. Deliberately
+			// no ingest here — a settings save is not a request to walk
+			// every upstream, which on a large library is minutes of work.
+			t.Stop()
 		}
 	}
 }
