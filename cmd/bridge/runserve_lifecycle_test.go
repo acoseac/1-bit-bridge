@@ -39,12 +39,22 @@ func TestEveryDispatchedSubcommandAppearsInUsage(t *testing.T) {
 	}
 	dispatch := body[start : start+end]
 
+	// EVERY quoted name in each case arm, not just the first: an alias arm
+	// (`case "duplicates", "dupes":`) dispatches both, and a first-match-only
+	// scan would let the alias be undiscoverable — which is exactly what this
+	// test's own negative control caught it doing.
 	var cmds []string
-	for _, m := range regexp.MustCompile(`case "([a-z][a-z-]*)"`).FindAllStringSubmatch(dispatch, -1) {
-		if m[1] == "help" {
-			continue
+	seen := map[string]bool{}
+	for _, arm := range regexp.MustCompile(`(?m)^\s*case ("[^:]*"):`).FindAllStringSubmatch(dispatch, -1) {
+		for _, q := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(arm[1], -1) {
+			name := q[1]
+			// Help aliases are dispatch, not subcommands.
+			if name == "help" || strings.HasPrefix(name, "-") || seen[name] {
+				continue
+			}
+			seen[name] = true
+			cmds = append(cmds, name)
 		}
-		cmds = append(cmds, m[1])
 	}
 	sort.Strings(cmds)
 	if len(cmds) < 20 {
