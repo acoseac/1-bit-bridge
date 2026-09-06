@@ -134,10 +134,10 @@ type Store struct {
 // TestIndexedAtAdvanceIsShared does.
 const indexedAtAdvanceSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)`
 
-// bumpIndexedAtByPathSQL is the whole statement for the four writers whose
+// bumpIndexedAtByPathSQL is the whole statement for the five writers whose
 // ONLY job is the bump (UpsertVariant / DeleteVariant / UpsertAnalysis /
-// DeleteAnalysis) — one const, four callers, so those four cannot drift
-// from each other at all. Binds: (clock, path).
+// DeleteAnalysis / writeLyricsRowTx) — one const, five callers, so those five
+// cannot drift from each other at all. Binds: (clock, path).
 const bumpIndexedAtByPathSQL = `
 		UPDATE tracks
 		   SET indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
@@ -8630,18 +8630,36 @@ func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) erro
 	} else if err != nil {
 		return err
 	}
+	// The bump goes through the SHARED statement, never a hand-rolled CASE:
+	// this writer's ONLY job is the bump, which is exactly what
+	// bumpIndexedAtByPathSQL is for. The older
+	// `CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ?` form advances
+	// only past the row's OWN prior value and assigns the raw clock
+	// otherwise, so a caller whose `now` sits at or below the library-wide
+	// max lands every bumped row ON a cursor a client already holds and
+	// `indexed_at > since` drops it — see indexedAtAdvanceSQL.
+	// StampExtractorVersionBatch is precisely that shape: one `now` for the
+	// whole batch, every lyrics-changed row bumped against it.
 	bump := func() error {
-		_, err := tx.ExecContext(ctx, `
-			UPDATE tracks SET indexed_at = CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END
-			WHERE path = ?`, now, now, t.Path)
+		_, err := tx.ExecContext(ctx, bumpIndexedAtByPathSQL, now, t.Path)
 		return err
 	}
 	if t.lyrics == nil {
-		if oldTag == "" {
+		if !hadRow {
 			return nil
 		}
+		// A row exists and this extraction found nothing — drop it, INCLUDING
+		// a `sidecar-rejected` row, whose tag is '' by construction. Gating
+		// the early return on `oldTag == ""` instead of `!hadRow` conflated
+		// "no row" with "an invisible row" and left the rejected row in place
+		// forever; sidecarLyricsDrifted then saw a stored `sidecar-` source
+		// with no sidecar on disk, reported drift, and re-extracted the audio
+		// file on every scan for the rest of the library's life.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM track_lyrics WHERE source_path = ?`, t.Path); err != nil {
 			return err
+		}
+		if oldTag == "" {
+			return nil // never client-visible: nothing to sync
 		}
 		return bump()
 	}

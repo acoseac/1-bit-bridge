@@ -2,6 +2,8 @@ package manifest
 
 import (
 	"context"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -381,5 +383,133 @@ func TestIndexedAtAdvanceIsShared(t *testing.T) {
 				"this writer's bump may no longer clear the library-wide max.\nStatement:\n%s\n\nwant it to contain:\n%s",
 				name, stmt, indexedAtAdvanceSQL)
 		}
+	}
+}
+
+// TestLyricsBumpClearsLibraryWideMax pins the delta-visibility contract for the
+// lyrics row's bump: it must clear the LIBRARY-WIDE max, not merely advance
+// past the bumped row's own prior value.
+//
+// The regression this catches shipped in PR #840 and is the exact form
+// indexedAtAdvanceSQL's docblock calls out as dead: a hand-rolled
+// `CASE WHEN indexed_at >= ? THEN indexed_at + 1 ELSE ? END`. Its ELSE arm
+// assigns the raw clock, so when the caller's clock sits at or below a value
+// another row already holds, the bumped row lands on or below a cursor a
+// client already has and `indexed_at > since` drops it — the track that just
+// gained lyrics never reaches the phone.
+//
+// StampExtractorVersionBatch is exactly that caller shape: it computes `now`
+// ONCE for the whole batch and loops, while the interleaved UpsertTrackBatch
+// leg is pushing the library max ahead via MAX+1. Windows' ~15.6 ms clock
+// granularity makes the collision routine; nanosecond clocks hide it, which is
+// why this test pins the clock instead of racing it.
+func TestLyricsBumpClearsLibraryWideMax(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	const t0 int64 = 1_000_000_000
+	s.now = func() time.Time { return time.Unix(0, t0) }
+	upsertParent(t, s, "Music/A/ahead.flac")
+	upsertParent(t, s, "Music/A/lyrical.flac")
+
+	// Another row carries the library-wide max — the state UpsertTrackBatch's
+	// MAX+1 arm produces while a stamp batch runs against an older `now`.
+	const ahead = t0 + 100_000
+	if _, err := s.db.Exec(`UPDATE tracks SET indexed_at = ? WHERE path = ?`,
+		ahead, "Music/A/ahead.flac"); err != nil {
+		t.Fatalf("seed library max: %v", err)
+	}
+
+	var before int64
+	if err := s.db.QueryRow(`SELECT indexed_at FROM tracks WHERE path = ?`,
+		"Music/A/lyrical.flac").Scan(&before); err != nil {
+		t.Fatalf("read indexed_at: %v", err)
+	}
+	if before >= ahead {
+		t.Fatalf("fixture broken: subject row %d already at/above the library max %d", before, ahead)
+	}
+
+	// The batch clock is BELOW the library max — a coarse clock, or simply a
+	// batch whose `now` was taken before the other leg advanced the max.
+	s.now = func() time.Time { return time.Unix(0, t0+10) }
+	if err := s.StampExtractorVersionBatch(context.Background(), []*Track{{
+		Path: "Music/A/lyrical.flac",
+		lyrics: &extractedLyrics{
+			Format: "lrc", Synced: true, Body: "[00:01.000]hello",
+			Source: "sylt", Tag: "deadbeef",
+		},
+	}}); err != nil {
+		t.Fatalf("StampExtractorVersionBatch: %v", err)
+	}
+
+	var after int64
+	if err := s.db.QueryRow(`SELECT indexed_at FROM tracks WHERE path = ?`,
+		"Music/A/lyrical.flac").Scan(&after); err != nil {
+		t.Fatalf("read indexed_at after stamp: %v", err)
+	}
+	if after <= before {
+		t.Errorf("lyrics bump did not advance the row at all: before=%d after=%d", before, after)
+	}
+	if after <= ahead {
+		t.Errorf("lyrics bump did not clear the library-wide max: after=%d, other row holds %d.\n"+
+			"A client whose cursor is %d will never receive this track's lyrics.", after, ahead, ahead)
+	}
+}
+
+// TestNoHandRolledIndexedAtBump sweeps store.go for every `indexed_at =`
+// assignment and fails on any that is neither the shared advance nor one of
+// the two exclusions indexedAtAdvanceSQL's docblock names.
+//
+// TestIndexedAtAdvanceIsShared cannot see this class: it walks a map of named
+// CONSTS, and PR #840's regression was an inline string literal inside a
+// function body, so it was never a candidate. The guard that pins a convention
+// has to sweep the same surface a new writer is actually written on.
+func TestNoHandRolledIndexedAtBump(t *testing.T) {
+	src, err := os.ReadFile("store.go")
+	if err != nil {
+		t.Fatalf("read store.go: %v", err)
+	}
+	text := string(src)
+	shared := squashSpace(indexedAtAdvanceSQL)
+
+	assign := regexp.MustCompile(`indexed_at\s*=`)
+	locs := assign.FindAllStringIndex(text, -1)
+	if len(locs) == 0 {
+		t.Fatal("no `indexed_at =` assignments found — the sweep is looking at the wrong file")
+	}
+	checked := 0
+	for _, loc := range locs {
+		// Skip prose: the docblocks discuss both forms by name.
+		lineStart := strings.LastIndexByte(text[:loc[0]], '\n') + 1
+		if strings.HasPrefix(strings.TrimSpace(text[lineStart:loc[0]]), "//") {
+			continue
+		}
+		checked++
+		end := loc[1] + 320
+		if end > len(text) {
+			end = len(text)
+		}
+		window := squashSpace(text[loc[0]:end])
+		switch {
+		case strings.Contains(window, shared):
+			// The shared advance, written out verbatim.
+		case strings.Contains(window, "excluded.indexed_at"):
+			// The UpsertTrack / UpsertTrackBatch conflict arms (and the
+			// track_lyrics insert, which carries a value computed elsewhere).
+		case strings.Contains(window, "track_analysis"):
+			// healTransitionBandBandwidths, migration v34's post(): frozen,
+			// append-only, both live bridges already ran it.
+		default:
+			line := 1 + strings.Count(text[:loc[0]], "\n")
+			t.Errorf("store.go:%d — hand-rolled indexed_at assignment.\n"+
+				"Every delta-visibility bump uses indexedAtAdvanceSQL (or\n"+
+				"bumpIndexedAtByPathSQL when the bump is the whole statement);\n"+
+				"the only exclusions are the upsert conflict arms and migration\n"+
+				"v34's post(). See indexedAtAdvanceSQL's docblock.\nSaw: %s",
+				line, window[:min(180, len(window))])
+		}
+	}
+	if checked < 5 {
+		t.Fatalf("only %d assignments classified — the sweep has gone inert", checked)
 	}
 }

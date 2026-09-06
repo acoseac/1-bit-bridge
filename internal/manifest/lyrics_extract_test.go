@@ -408,3 +408,66 @@ func TestLookupLyricsFoldsCaseUnambiguously(t *testing.T) {
 		t.Fatal("two case-variants → ambiguous → nil")
 	}
 }
+
+// TestStaleRejectedLyricsRowIsDeleted pins the other half of writeLyricsRowTx's
+// nil branch: a row that EXISTS must be dropped when the extraction finds
+// nothing, even when that row was never client-visible.
+//
+// A `sidecar-rejected` row (empty / oversized / legacy-encoded sidecar) carries
+// tag ” by construction. PR #840 gated the early return on `oldTag == ""`,
+// which conflated "no row" with "an invisible row": deleting the sidecar left
+// the rejected row behind forever, and sidecarLyricsDrifted then saw a stored
+// `sidecar-` source with no sidecar on disk, reported drift, and re-extracted
+// the audio file on every scan for the rest of the library's life.
+func TestStaleRejectedLyricsRowIsDeleted(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	const p = "Music/A/rejected.flac"
+	upsertParent(t, s, p)
+
+	// A sidecar was seen and yielded nothing: the provenance row goes in with
+	// an empty tag so the skip gate can compare its stat.
+	if err := s.StampExtractorVersionBatch(ctx, []*Track{{
+		Path:   p,
+		lyrics: rejectedSidecarRow(&sidecarStat{name: "rejected.txt", mtimeNS: 42, size: 7}),
+	}}); err != nil {
+		t.Fatalf("stamp rejected row: %v", err)
+	}
+	row, err := s.GetLyrics(ctx, p)
+	if err != nil || row == nil {
+		t.Fatalf("fixture broken: rejected row not persisted (row=%v err=%v)", row, err)
+	}
+	if row.Tag != "" || row.Source != LyricsSourceSidecarRejected {
+		t.Fatalf("fixture broken: want an empty-tag %q row, got tag=%q source=%q",
+			LyricsSourceSidecarRejected, row.Tag, row.Source)
+	}
+	var beforeIndexedAt int64
+	if err := s.db.QueryRow(`SELECT indexed_at FROM tracks WHERE path = ?`, p).Scan(&beforeIndexedAt); err != nil {
+		t.Fatalf("read indexed_at: %v", err)
+	}
+
+	// The sidecar is deleted; the next extraction resolves nothing at all.
+	if err := s.StampExtractorVersionBatch(ctx, []*Track{{Path: p}}); err != nil {
+		t.Fatalf("stamp empty extraction: %v", err)
+	}
+	row, err = s.GetLyrics(ctx, p)
+	if err != nil {
+		t.Fatalf("GetLyrics: %v", err)
+	}
+	if row != nil {
+		t.Errorf("stale %q row survived an empty extraction (source=%q tag=%q) — "+
+			"sidecarLyricsDrifted will re-extract this file on every scan forever",
+			LyricsSourceSidecarRejected, row.Source, row.Tag)
+	}
+
+	// It was never client-visible, so dropping it is not a delta event.
+	var afterIndexedAt int64
+	if err := s.db.QueryRow(`SELECT indexed_at FROM tracks WHERE path = ?`, p).Scan(&afterIndexedAt); err != nil {
+		t.Fatalf("read indexed_at after delete: %v", err)
+	}
+	if afterIndexedAt != beforeIndexedAt {
+		t.Errorf("dropping an invisible row bumped indexed_at (%d -> %d): every device "+
+			"pays a delta row for a document none of them ever had", beforeIndexedAt, afterIndexedAt)
+	}
+}
