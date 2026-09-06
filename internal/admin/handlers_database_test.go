@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +163,71 @@ func TestDiagnosticsSaysWhenTheDatabaseStatsAreUnavailable(t *testing.T) {
 	if snap.DatabaseBytes != 0 || snap.DatabaseFreePageBytes != 0 {
 		t.Errorf("unavailable stats must stay zero, got bytes=%d free=%d",
 			snap.DatabaseBytes, snap.DatabaseFreePageBytes)
+	}
+}
+
+// TestTheConsoleNeverCallsTheFreePageFloorAnEstimate pins the half of the
+// fix that lives in the browser, because that is where the wrong answer
+// was actually rendered.
+//
+// databaseFreePageBytes is page_size x freelist_count -- only WHOLLY free
+// pages. Scattered deletion, which is what every reaping path here
+// produces, leaves intra-page fragmentation and no free pages: measured
+// on a 72.5 MB store with every second row deleted, freelist_count was 0
+// while a VACUUM returned half the file. The console printed "nothing to
+// reclaim", which an operator correctly reads as "do not press this".
+//
+// A Go test cannot execute the JS, but it can pin the strings that carry
+// the claim -- the same shape as this package's other static-asset
+// guards. CRLF is normalised first: nothing pins eol in .gitattributes,
+// so on a Windows checkout every newline-literal scan here would
+// otherwise find nothing and pass vacuously.
+func TestTheConsoleNeverCallsTheFreePageFloorAnEstimate(t *testing.T) {
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := strings.ReplaceAll(string(b), "\r\n", "\n")
+
+	i := strings.Index(js, "function applyDiagnostics(")
+	if i < 0 {
+		t.Fatal("applyDiagnostics not found in app.js -- the scan is broken")
+	}
+	body := js[i:]
+	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
+		body = body[:j+1]
+	}
+	// COMMENTS ONLY, not stripJSNoise -- that also blanks string literals,
+	// and the literals are exactly what this scan is about. Stripping
+	// comments is not optional either: the code beside these strings
+	// explains the defect BY QUOTING IT, so an unstripped scan finds the
+	// commentary and reports the bug as still present. Same trap this
+	// repo's CSS guards already carry.
+	body = jsBlockCommentRe.ReplaceAllString(body, " ")
+	body = jsLineCommentRe.ReplaceAllString(body, " ")
+	if !strings.Contains(body, "diag-db-reclaimable") {
+		t.Fatal("applyDiagnostics no longer sets diag-db-reclaimable; the scan is looking at the wrong function")
+	}
+
+	if strings.Contains(body, "nothing to reclaim") {
+		t.Error("app.js still renders \"nothing to reclaim\" for a zero free-page floor. " +
+			"That floor reads 0 on a database a compaction would halve, so the string is a " +
+			"confident wrong answer about the one number this panel exists to show.")
+	}
+	if !strings.Contains(body, "at least ") {
+		t.Error("app.js does not qualify the free-page figure with \"at least\"; " +
+			"it is a floor, not an estimate of what a compaction returns")
+	}
+	if strings.Contains(body, "databaseReclaimableBytes") {
+		t.Error("app.js still reads the old databaseReclaimableBytes field, which no longer exists " +
+			"on the wire -- the panel would render 0 for every bridge")
+	}
+	if !strings.Contains(body, "databaseFreePageBytes") {
+		t.Error("app.js does not read databaseFreePageBytes")
+	}
+	if !strings.Contains(body, "databaseStatsAvailable") {
+		t.Error("app.js does not branch on databaseStatsAvailable, so a failed PRAGMA renders as " +
+			"a real 0 B reading")
 	}
 }
 
