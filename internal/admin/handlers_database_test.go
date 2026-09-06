@@ -12,16 +12,29 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-func TestDatabaseCompactReclaimsAndReports(t *testing.T) {
-	s, _, _ := newTestServer(t)
-	h := s.Handler()
-
+// postCompact drives POST /api/database/compact through the REAL
+// Handler() and returns the recorder.
+//
+// One definition rather than the same five lines at every call site: the
+// content-type and the loopback RemoteAddr are not incidental — they are
+// what carries the request past csrfGuard and the loopback middleware, so
+// a copy that drifts on either would be testing the middleware's refusal
+// rather than the handler.
+func postCompact(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest("POST", "/api/database/compact", nil)
 	req.Header.Set("content-type", "application/json")
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
+	return rr
+}
 
+func TestDatabaseCompactReclaimsAndReports(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	h := s.Handler()
+
+	rr := postCompact(t, h)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
@@ -56,12 +69,7 @@ func TestDatabaseCompactSurfacesInsufficientDiskSpace(t *testing.T) {
 	s.deps.DBFreeBytes = func(string) (int64, error) { return 1, nil }
 	h := s.Handler()
 
-	req := httptest.NewRequest("POST", "/api/database/compact", nil)
-	req.Header.Set("content-type", "application/json")
-	req.RemoteAddr = "127.0.0.1:54321"
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
+	rr := postCompact(t, h)
 	if rr.Code != http.StatusInsufficientStorage {
 		t.Fatalf("status = %d, want 507; body=%s", rr.Code, rr.Body.String())
 	}
@@ -87,12 +95,7 @@ func TestDatabaseCompactRefusedDuringScan(t *testing.T) {
 	s.deps.Scanner.MarkScanInFlightForTests(true)
 	defer s.deps.Scanner.MarkScanInFlightForTests(false)
 
-	req := httptest.NewRequest("POST", "/api/database/compact", nil)
-	req.Header.Set("content-type", "application/json")
-	req.RemoteAddr = "127.0.0.1:54321"
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
+	rr := postCompact(t, h)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 while a scan is in flight; body=%s", rr.Code, rr.Body.String())
 	}

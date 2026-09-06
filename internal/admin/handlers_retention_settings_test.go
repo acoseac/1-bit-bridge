@@ -161,11 +161,7 @@ func TestDatabaseStatsAreCachedAndInvalidatedByCompaction(t *testing.T) {
 	// first version of this test called the helper itself and went green
 	// against a compaction handler that had stopped calling it — the name
 	// said "InvalidatedByCompaction" and the wiring was never touched.
-	req := httptest.NewRequest("POST", "/api/database/compact", nil)
-	req.Header.Set("content-type", "application/json")
-	req.RemoteAddr = "127.0.0.1:54321"
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
+	rr := postCompact(t, srv.Handler())
 	if rr.Code != http.StatusOK {
 		t.Fatalf("compact: status %d, body %s", rr.Code, rr.Body.String())
 	}
