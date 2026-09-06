@@ -952,6 +952,41 @@ mentions across the four `ops/audit-*.md` files.
   source: this package's commentary names what it discusses, so a text scan
   reports its own docblock.
 
+- **A write gate on a second process is a GUARD, not mutual exclusion — say
+  which.** `bridge restore` and `bridge manifest clear-missing` mutate the store
+  from a second process, where `Store.mu` does not reach and `busy_timeout` is a
+  retry rather than a serializer. Both now refuse while a bridge answers on the
+  admin port, probing again immediately before the destructive call because one
+  can start while a confirmation prompt waits. That NARROWS the window; closing
+  it needs an interprocess lock `bridge serve` also holds, deliberately not
+  added — a stale lockfile after an unclean exit blocks `restore` at exactly the
+  moment an operator needs `restore`.
+- **`probeBridge` cannot answer for an ephemeral admin port, and must say so.**
+  It fails closed on anything but connection-refused, which is right; but
+  `adminAddress: …:0` names no port to dial, so the default produced "a bridge
+  is answering on 127.0.0.1:0" about an address where nothing can. Refuse with
+  the true reason. **PARSE the port** — a text compare against `"0"` accepts
+  `"00"`, and `validatePort` runs `Atoi`, so every spelling of zero is legal.
+- **`flag.Parse` stops at the first non-flag argument, so an unguarded
+  subcommand silently WIDENS its scope.** `bridge enrichment retry
+  Artist/Album` parsed with `--path` empty, and an empty scope is the whole
+  library: a whole-library `enriched_at` reset and a delta to every paired
+  device in place of one album. `library remove` had guarded this since PR #78.
+  Any command whose empty scope means "everything" needs `fs.NArg()`.
+- **A `stopFn` that signals is not a join.** `internal/integrity`'s watchers
+  closed a channel and returned, while `runServe` defers that stop ahead of
+  `Store.Close()` — an ordering that means nothing unless the stop waits. Both
+  loops now join, grace-bounded. **And the work has to be cancellable for the
+  wait to mean anything**: the adapters passed `context.Background()`, so the
+  wait would have delayed `Store.Close()` behind work that was never going to
+  stop.
+- **Anything reading Go source in a test must normalize CRLF first.** No
+  `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
+  `\n`-literal scan finds nothing. One such guard failed loudly on the Windows
+  leg; its sibling would have passed VACUOUSLY, which is worse. This rule was
+  already written under **Build, CI, and test discipline** and was still tripped
+  by a session that had read it — the platform leg is what closes that gap.
+
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as
 the most authoritative place in the document and had drifted from the hardened
