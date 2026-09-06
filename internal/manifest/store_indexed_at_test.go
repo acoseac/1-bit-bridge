@@ -472,9 +472,7 @@ func TestNoHandRolledIndexedAtBump(t *testing.T) {
 		t.Fatalf("read package dir: %v", err)
 	}
 	shared := squashSpace(indexedAtAdvanceSQL)
-	assign := regexp.MustCompile(`indexed_at\s*=`)
 	checked := 0
-
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -484,46 +482,55 @@ func TestNoHandRolledIndexedAtBump(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		text := string(src)
-		for _, loc := range assign.FindAllStringIndex(text, -1) {
-			// Skip prose: the docblocks discuss both forms by name.
-			lineStart := strings.LastIndexByte(text[:loc[0]], '\n') + 1
-			if strings.HasPrefix(strings.TrimSpace(text[lineStart:loc[0]]), "//") {
-				continue
-			}
-			checked++
-			// Classify against the SQL literal that CONTAINS the assignment,
-			// not a fixed lookahead: every one of these statements is a raw
-			// string, so the next backtick is the statement's own end. A byte
-			// window instead lets a neighbouring statement's `excluded.` or
-			// `track_analysis` vouch for an unapproved bump a few lines above
-			// it — and #840's bump sat ~25 lines above exactly such a marker.
-			rest := text[loc[0]:]
-			if i := strings.IndexByte(rest, '`'); i >= 0 {
-				rest = rest[:i]
-			}
-			window := squashSpace(rest)
-			switch {
-			case strings.Contains(window, shared):
-				// The shared advance, written out verbatim.
-			case strings.Contains(window, "excluded.indexed_at"):
-				// The UpsertTrack / UpsertTrackBatch conflict arms, and the
-				// track_lyrics insert, which carries a value computed above.
-			case strings.Contains(window, "track_analysis"):
-				// healTransitionBandBandwidths, migration v34's post(): frozen
-				// and append-only, both live bridges already ran it.
-			default:
-				line := 1 + strings.Count(text[:loc[0]], "\n")
-				t.Errorf("%s:%d — hand-rolled indexed_at assignment.\n"+
-					"Every delta-visibility bump uses indexedAtAdvanceSQL (or\n"+
-					"bumpIndexedAtByPathSQL when the bump is the whole statement);\n"+
-					"the only exclusions are the upsert conflict arms and migration\n"+
-					"v34's post(). See indexedAtAdvanceSQL's docblock.\nSaw: %s",
-					name, line, window[:min(180, len(window))])
-			}
-		}
+		checked += classifyIndexedAtAssignments(t, name, string(src), shared)
 	}
 	if checked < 7 {
 		t.Fatalf("only %d assignments classified across the package — the sweep has gone inert", checked)
 	}
+}
+
+var indexedAtAssign = regexp.MustCompile(`indexed_at\s*=`)
+
+// classifyIndexedAtAssignments checks one file and reports how many
+// assignments it classified, failing t for each that is neither the shared
+// advance nor a documented exclusion.
+func classifyIndexedAtAssignments(t *testing.T, name, text, shared string) int {
+	t.Helper()
+	checked := 0
+	for _, loc := range indexedAtAssign.FindAllStringIndex(text, -1) {
+		// Skip prose: the docblocks discuss both forms by name.
+		lineStart := strings.LastIndexByte(text[:loc[0]], '\n') + 1
+		if strings.HasPrefix(strings.TrimSpace(text[lineStart:loc[0]]), "//") {
+			continue
+		}
+		checked++
+		// Classify against the SQL literal that CONTAINS the assignment, not a
+		// fixed lookahead: every one of these statements is a raw string, so
+		// the next backtick is the statement's own end. A byte window instead
+		// lets a neighbouring statement's `excluded.` or `track_analysis`
+		// vouch for an unapproved bump a few lines above it.
+		stmt := text[loc[0]:]
+		if i := strings.IndexByte(stmt, '`'); i >= 0 {
+			stmt = stmt[:i]
+		}
+		window := squashSpace(stmt)
+		switch {
+		case strings.Contains(window, shared):
+			// The shared advance, written out verbatim.
+		case strings.Contains(window, "excluded.indexed_at"):
+			// The UpsertTrack / UpsertTrackBatch conflict arms, and the
+			// track_lyrics insert, which carries a value computed above.
+		case strings.Contains(window, "track_analysis"):
+			// healTransitionBandBandwidths, migration v34's post(): frozen and
+			// append-only, both live bridges already ran it.
+		default:
+			t.Errorf("%s:%d — hand-rolled indexed_at assignment.\n"+
+				"Every delta-visibility bump uses indexedAtAdvanceSQL (or\n"+
+				"bumpIndexedAtByPathSQL when the bump is the whole statement);\n"+
+				"the only exclusions are the upsert conflict arms and migration\n"+
+				"v34's post(). See indexedAtAdvanceSQL's docblock.\nSaw: %s",
+				name, 1+strings.Count(text[:loc[0]], "\n"), window[:min(180, len(window))])
+		}
+	}
+	return checked
 }
