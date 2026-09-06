@@ -136,6 +136,30 @@ func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 // which are about WHEN a sweep runs rather than whether it may.
 func alwaysAnalysisEnabled() bool { return true }
 
+// TestAnalysisSweeperNilGateIsOff pins the DIRECTION a missing predicate fails
+// in. Added because the negative control for the disabled-gate test proved it
+// could not see this: that test passes a real predicate, so flipping active()
+// to fail OPEN on nil left the whole suite green.
+//
+// The direction is not arbitrary. This sweeper's entire failure mode was doing
+// unrequested work — forking a decode per track and pushing a whole-library
+// indexed_at delta on a config that never asked for analysis — so a wiring
+// mistake that leaves the predicate nil must produce silence, not a library
+// walk. (runFingerprintSweeper's nil arm reads the other way; that is its own
+// call, made with its own tests.)
+func TestAnalysisSweeperNilGateIsOff(t *testing.T) {
+	if (&analysisSweeper{}).active() {
+		t.Error("a nil enabled predicate read as ACTIVE — a wiring mistake would " +
+			"silently re-enable the ungated sweep this gate exists to prevent")
+	}
+	if (*analysisSweeper)(nil).active() {
+		t.Error("a nil sweeper read as ACTIVE")
+	}
+	if !(&analysisSweeper{enabled: alwaysAnalysisEnabled}).active() {
+		t.Error("a live true predicate read as INACTIVE")
+	}
+}
+
 // waitGate blocks until the sweeper consults its enabled predicate, so an
 // assertion about what a DISABLED pass did cannot run before the pass happened.
 func waitGate(t *testing.T, calls <-chan struct{}, which string) {
