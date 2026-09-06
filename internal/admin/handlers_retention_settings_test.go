@@ -51,6 +51,16 @@ func TestSettingsPageRendersTheRetentionControls(t *testing.T) {
 		}
 	}
 
+	// THE HALF THE TEMPLATE CHECK CANNOT SEE. app.js builds its Save
+	// payload from an explicit allowlist, not a FormData dump, so a
+	// control that renders and is applied by the handler still saves
+	// NOTHING if nobody put it in that object — while the page reports
+	// "Saved." CLAUDE.md names this exact shape, and a negative control
+	// proved my template + handler tests blind to it: deleting the field
+	// from the allowlist left both of them green.
+	assertInSettingsPayload(t,
+		"retentionPlaybackHistoryDays", "retentionDeviceRegistrationDays")
+
 	// And the Diagnostics sentence that names Settings must point at a
 	// tab that exists, rather than at nothing.
 	dresp, err := http.Get(ts.URL + "/diagnostics")
@@ -147,12 +157,64 @@ func TestDatabaseStatsAreCachedAndInvalidatedByCompaction(t *testing.T) {
 			first.historyRows, second.historyRows)
 	}
 
-	srv.invalidateDatabaseStats()
+	// Drive the REAL endpoint, not invalidateDatabaseStats directly. The
+	// first version of this test called the helper itself and went green
+	// against a compaction handler that had stopped calling it — the name
+	// said "InvalidatedByCompaction" and the wiring was never touched.
+	req := httptest.NewRequest("POST", "/api/database/compact", nil)
+	req.Header.Set("content-type", "application/json")
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("compact: status %d, body %s", rr.Code, rr.Body.String())
+	}
+
 	third := srv.databaseStats(ctx)
 	if third.historyRows != first.historyRows+1 {
-		t.Errorf("after invalidation history rows = %d, want %d — a compaction must be able to "+
-			"force a fresh read, or the operator watches a stale number",
+		t.Errorf("after a compaction history rows = %d, want %d — the compaction must force a "+
+			"fresh read, or the operator presses the button and watches a stale number",
 			third.historyRows, first.historyRows+1)
+	}
+}
+
+// assertInSettingsPayload checks that each field name appears in the
+// object initSettings() sends to PATCH /api/settings.
+//
+// Comments are stripped first, for the reason this package's other
+// source scans strip them: the code beside these names explains the
+// defect BY NAMING IT, so an unstripped scan finds the commentary and
+// passes while the allowlist entry is gone. CRLF is normalised because
+// nothing pins eol in .gitattributes.
+func assertInSettingsPayload(t *testing.T, fields ...string) {
+	t.Helper()
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := strings.ReplaceAll(string(b), "\r\n", "\n")
+	i := strings.Index(js, "function initSettings(")
+	if i < 0 {
+		t.Fatal("initSettings not found in app.js — the scan is broken")
+	}
+	body := js[i:]
+	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
+		body = body[:j+1]
+	}
+	body = jsBlockCommentRe.ReplaceAllString(body, " ")
+	body = jsLineCommentRe.ReplaceAllString(body, " ")
+	// Vacuity guard: a window that no longer contains the payload builder
+	// would pass every assertion below while checking nothing.
+	if !strings.Contains(body, "backupKeep") {
+		t.Fatal("the initSettings window does not contain the settings payload — the scan is " +
+			"reading the wrong span")
+	}
+	for _, f := range fields {
+		if !strings.Contains(body, f+":") {
+			t.Errorf("%q renders as a control and is applied by the handler, but is not in "+
+				"app.js's Save payload — the operator would set it, be told \"Saved.\", and "+
+				"nothing would change", f)
+		}
 	}
 }
 
