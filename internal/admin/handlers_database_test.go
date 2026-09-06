@@ -186,28 +186,9 @@ func TestDiagnosticsSaysWhenTheDatabaseStatsAreUnavailable(t *testing.T) {
 // so on a Windows checkout every newline-literal scan here would
 // otherwise find nothing and pass vacuously.
 func TestTheConsoleNeverCallsTheFreePageFloorAnEstimate(t *testing.T) {
-	b, err := staticFS.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := strings.ReplaceAll(string(b), "\r\n", "\n")
-
-	i := strings.Index(js, "function applyDiagnostics(")
-	if i < 0 {
-		t.Fatal("applyDiagnostics not found in app.js -- the scan is broken")
-	}
-	body := js[i:]
-	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
-		body = body[:j+1]
-	}
-	// COMMENTS ONLY, not stripJSNoise -- that also blanks string literals,
-	// and the literals are exactly what this scan is about. Stripping
-	// comments is not optional either: the code beside these strings
-	// explains the defect BY QUOTING IT, so an unstripped scan finds the
-	// commentary and reports the bug as still present. Same trap this
-	// repo's CSS guards already carry.
-	body = jsBlockCommentRe.ReplaceAllString(body, " ")
-	body = jsLineCommentRe.ReplaceAllString(body, " ")
+	body := jsFunctionBody(t, "function applyDiagnostics(")
+	// Vacuity guard: a window that no longer contains the thing under
+	// test would pass every assertion below while checking nothing.
 	if !strings.Contains(body, "diag-db-reclaimable") {
 		t.Fatal("applyDiagnostics no longer sets diag-db-reclaimable; the scan is looking at the wrong function")
 	}

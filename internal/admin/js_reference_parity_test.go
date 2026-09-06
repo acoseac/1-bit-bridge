@@ -258,6 +258,40 @@ func TestAppJSHasNoCallsToDeletedHelpers(t *testing.T) {
 
 // stripJSNoise removes comments and string literals so an identifier
 // mentioned in prose or inside a string is not mistaken for code.
+// jsFunctionBody returns the source of the named top-level function in
+// static/app.js, from its declaration to the next one, with COMMENTS
+// stripped and CRLF normalised.
+//
+// Comments only — deliberately NOT stripJSNoise, which also blanks string
+// literals. Every caller here is asking a question ABOUT a literal ("does
+// the payload allowlist name this field", "does this still render
+// 'nothing to reclaim'"), so blanking them would make the scan pass
+// vacuously. Stripping comments is not optional either: this repo's
+// commentary names the identifiers and quotes the strings it discusses,
+// so an unstripped window answers yes to everything.
+//
+// CRLF is normalised at the read because nothing pins eol in a
+// .gitattributes — a Windows checkout would otherwise make the
+// newline-anchored window search find nothing and every assertion pass.
+func jsFunctionBody(t *testing.T, decl string) string {
+	t.Helper()
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := strings.ReplaceAll(string(b), "\r\n", "\n")
+	i := strings.Index(js, decl)
+	if i < 0 {
+		t.Fatalf("%s not found in app.js — the scan is broken", decl)
+	}
+	body := js[i:]
+	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
+		body = body[:j+1]
+	}
+	body = jsBlockCommentRe.ReplaceAllString(body, " ")
+	return jsLineCommentRe.ReplaceAllString(body, " ")
+}
+
 func stripJSNoise(s string) string {
 	s = jsBlockCommentRe.ReplaceAllString(s, " ")
 	s = jsLineCommentRe.ReplaceAllString(s, " ")

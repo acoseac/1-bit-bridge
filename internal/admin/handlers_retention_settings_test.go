@@ -175,30 +175,11 @@ func TestDatabaseStatsAreCachedAndInvalidatedByCompaction(t *testing.T) {
 }
 
 // assertInSettingsPayload checks that each field name appears in the
-// object initSettings() sends to PATCH /api/settings.
-//
-// Comments are stripped first, for the reason this package's other
-// source scans strip them: the code beside these names explains the
-// defect BY NAMING IT, so an unstripped scan finds the commentary and
-// passes while the allowlist entry is gone. CRLF is normalised because
-// nothing pins eol in .gitattributes.
+// object initSettings() sends to PATCH /api/settings. See jsFunctionBody
+// for why the window is comment-stripped and CRLF-normalised.
 func assertInSettingsPayload(t *testing.T, fields ...string) {
 	t.Helper()
-	b, err := staticFS.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := strings.ReplaceAll(string(b), "\r\n", "\n")
-	i := strings.Index(js, "function initSettings(")
-	if i < 0 {
-		t.Fatal("initSettings not found in app.js — the scan is broken")
-	}
-	body := js[i:]
-	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
-		body = body[:j+1]
-	}
-	body = jsBlockCommentRe.ReplaceAllString(body, " ")
-	body = jsLineCommentRe.ReplaceAllString(body, " ")
+	body := jsFunctionBody(t, "function initSettings(")
 	// Vacuity guard: a window that no longer contains the payload builder
 	// would pass every assertion below while checking nothing.
 	if !strings.Contains(body, "backupKeep") {
