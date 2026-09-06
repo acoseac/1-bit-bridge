@@ -3606,3 +3606,83 @@ would compile, pass the suite, and destroy an upstream library on a root toggle.
   `config.Load` sweep and the uninstall-prompt guard. This package's commentary
   names what it discusses. Strip comments *and* string-literal contents, or
   better, drive the real function.
+
+## LOUPE cmd/bridge, batch 2 — the deferred set (PRs #856 / #857 / #858, 2026-09-06)
+
+The ten findings the first batch recorded as deferred, plus the three PRISM
+items it had not triaged in depth. All thirteen shipped the same day; none was
+dropped. Plan and per-item detail in
+[`plan-2026-09-06-loupe-cmdbridge.md`](plan-2026-09-06-loupe-cmdbridge.md).
+
+### The two with real operator consequence
+
+**`bridge enrichment retry Artist/Album` reset the whole library.** `flag.Parse`
+stops at the first non-flag argument, so the positional form — the one an
+operator reaches for — parsed cleanly with `--path` **empty**, and an empty
+scope means every row. One album's intent, a whole-library `enriched_at` reset
+and a delta to every paired device. `library remove` had guarded this shape with
+`fs.NArg() != 1` since PR #78; four commands in the package had the guard and
+this one did not.
+
+**`integrity.VariantWatcher`'s `stopFn` signalled without waiting.** `runServe`
+defers that stop ahead of `manifestStore.Close()` — an ordering that means
+nothing unless the stop joins, because a tick can still be inside
+`DeleteVariant` when the store closes. Both long-lived loops in
+`internal/integrity` now join, grace-bounded. The adapters they call also passed
+`context.Background()`, so the work the new wait waits for was not cancellable:
+a wait in front of uninterruptible work only delays `Store.Close()` behind
+something that was never going to stop. They carry `scanCtx` now.
+
+### What the negative controls caught — three of seventeen, all test defects
+
+This is the batch's most reusable result. Every failed control was a defect in
+the TEST, not the fix:
+
+1. **A fixture that could not observe the change.** The `--dry-run` test used the
+   bare install fixture, which has no variants — and `variantsMoveCmd` returns
+   early on an empty set, *before* the `MkdirAll` under test. It passed against
+   unfixed code. CLAUDE.md's "a fixture must be a value the transformation would
+   actually change", caught exactly where it should be. The fix plants a variant
+   AND asserts the preview reached the move loop, so it cannot silently regress
+   to proving nothing again.
+2. **A mutation that hit the selector, not the effect.** Flipping
+   `if *pathScope == ""` left the `else` branch clearing suppression anyway.
+   Mutate what the code DOES, not the branch that chooses how.
+3. **A guard that read only the first name per `case` arm.** Mutating
+   `case "duplicates":` into `case "duplicates", "dupes":` left the
+   dispatcher/usage parity test green — an alias added that way dispatches and
+   stays undiscoverable, which is precisely the failure the guard exists for.
+
+### Windows CI caught a rule already written down here
+
+Both new source-scanning guards read `main.go` with `\n` literals. No
+`.gitattributes` pins `eol`, so a Windows checkout has CRLF:
+`TestIntegrityAdaptersCarryACancellableContext` failed outright and
+`TestEveryDispatchedSubcommandAppearsInUsage` would have passed **vacuously**.
+Normalized at read time; verified by converting `main.go` to CRLF locally and
+re-running, then restoring it byte-identically.
+
+**The rule was already in CLAUDE.md under "Build, CI, and test discipline" and
+was read during this very session.** Knowing a rule and applying it to code you
+are writing at that moment are different acts; the platform leg is what closes
+the gap, which is the argument for keeping the Windows leg blocking.
+
+### `probeBridge` cannot answer for an ephemeral admin port
+
+`adminAddress: 127.0.0.1:0` names no fixed port to dial, and `probeBridge` fails
+closed on anything but connection-refused — correct for a write gate, but it
+produced *"a bridge is answering on 127.0.0.1:0"* about an address where nothing
+answers and nothing can. The gate still refuses (unknowable liveness must fail
+closed) with the true reason. CodeRabbit then found the check compared port TEXT
+against `"0"`, so `:00` read as fixed — and `validatePort` runs `Atoi`, so every
+spelling of zero is a legal ephemeral port. Parse, don't compare.
+
+The config-precedence fixtures had been using `:0`, which the new gate correctly
+refuses to guess about; they now reserve a real closed loopback port.
+
+### Bot coverage, stated rather than implied
+
+**Only #856 got an LLM review.** #857 and #858 received Gemini's daily-quota
+notice and CodeRabbit's rate-limit notice. SonarCloud and CodeQL ran on all
+three. Seven PRs in one day is what exhausts them; the doc's instruction is to
+name the gap rather than let "no comments" read as approval.
