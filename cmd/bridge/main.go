@@ -1654,7 +1654,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "backup":
 		return backupCmd(args[1:], stdout, stderr)
 	case "restore":
-		return restoreCmd(args[1:], os.Stdin, stdout, stderr)
+		return restoreCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "token":
 		return tokenCmd(args[1:], stdout, stderr)
 	case "cert":
@@ -1670,7 +1670,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "admin":
 		return adminCmd(args[1:], os.Stdin, stdout, stderr)
 	case "manifest":
-		return manifestCmd(args[1:], os.Stdin, stdout, stderr)
+		return manifestCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "tsnet":
 		return tsnetCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "start":

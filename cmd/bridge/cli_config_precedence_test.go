@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,25 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
+
+// closedLoopbackPort returns a loopback port that is guaranteed free: it binds
+// one, reads the assigned number, and closes it. Deterministic where a
+// hardcoded port would be flaky on a busy machine.
+func closedLoopbackPort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a loopback port: %v", err)
+	}
+	_, port, err := net.SplitHostPort(l.Addr().String())
+	if err != nil {
+		t.Fatalf("split reserved addr: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close reserved listener: %v", err)
+	}
+	return port
+}
 
 // writeInstallAt drops a bridge.yaml at dir/bridge.yaml whose dataDir is
 // dir/data, and seeds its manifest DB with one track carrying
@@ -23,8 +43,13 @@ func writeInstallAt(t *testing.T, dir, trackPath string) string {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(dir, "bridge.yaml")
+	// A real, CLOSED loopback port — not :0. The CLI's write gate probes this
+	// address, and port 0 names no fixed port to probe, so the gate refuses
+	// (correctly, and by design: it fails closed rather than guessing). These
+	// tests are about config precedence, so they need an address that
+	// answers the liveness question cleanly with "nothing there".
 	body := "libraryRoots:\n  - " + lib + "\ndataDir: " +
-		filepath.Join(dir, "data") + "\nadminAddress: 127.0.0.1:0\n"
+		filepath.Join(dir, "data") + "\nadminAddress: 127.0.0.1:" + closedLoopbackPort(t) + "\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +107,7 @@ func TestManifestClearMissingPrefersLocalConfigOverPlatform(t *testing.T) {
 	writeInstallAt(t, platform, "production-track.flac")
 
 	var so, se bytes.Buffer
-	if code := manifestClearMissingCmd([]string{"--yes"}, strings.NewReader(""), &so, &se); code != 0 {
+	if code := manifestClearMissingCmd(context.Background(), []string{"--yes"}, strings.NewReader(""), &so, &se); code != 0 {
 		t.Fatalf("clear-missing exit %d: %s", code, se.String())
 	}
 
@@ -154,7 +179,7 @@ func TestManifestClearMissingFallsBackToPlatformConfig(t *testing.T) {
 	}
 
 	var so, se bytes.Buffer
-	if code := manifestClearMissingCmd([]string{"--yes"}, strings.NewReader(""), &so, &se); code != 0 {
+	if code := manifestClearMissingCmd(context.Background(), []string{"--yes"}, strings.NewReader(""), &so, &se); code != 0 {
 		t.Fatalf("clear-missing exit %d: %s", code, se.String())
 	}
 	if trackExists(t, platform, "production-track.flac") {

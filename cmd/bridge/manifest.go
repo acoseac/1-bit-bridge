@@ -23,7 +23,7 @@ import (
 // Destructive: requires typed `WIPE` confirmation by default. Mirrors
 // `bridge tsnet logout`'s exact-phrase pattern — a `[y/N]` fat-finger
 // prompt would be too easy to misuse on a destructive action.
-func manifestCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func manifestCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: bridge manifest <subcommand>")
 		fmt.Fprintln(stderr, "subcommands:")
@@ -32,7 +32,7 @@ func manifestCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "clear-missing":
-		return manifestClearMissingCmd(args[1:], stdin, stdout, stderr)
+		return manifestClearMissingCmd(ctx, args[1:], stdin, stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, "usage: bridge manifest <subcommand>")
 		fmt.Fprintln(stdout, "subcommands:")
@@ -60,7 +60,7 @@ func manifestCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // rows there. The resolved config + DB paths are printed before anything
 // is touched (on the --yes path too, so a scripted run leaves a record
 // of which database it hit).
-func manifestClearMissingCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("manifest clear-missing", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var yes bool
@@ -88,6 +88,14 @@ func manifestClearMissingCmd(args []string, stdin io.Reader, stdout, stderr io.W
 	fmt.Fprintf(stdout, "Config:   %s\n", resolvedCfgPath)
 	fmt.Fprintf(stdout, "Database: %s\n", dbPath)
 
+	// Refuse while a bridge is up. This is a two-table DELETE from a SECOND
+	// process, and Store.mu serialises writers within one process only —
+	// busy_timeout is a retry, not a serializer. enrichmentRetryCmd and
+	// tryLibraryViaAdmin both refuse the same state for the same reason.
+	if refuseIfBridgeMayBeRunning(ctx, cfg, "manifest clear-missing", stderr) {
+		return 1
+	}
+
 	if !yes {
 		fmt.Fprintln(stdout, "This will delete every track / folder row whose `missing_count > 0`")
 		fmt.Fprintln(stdout, "in the manifest DB above. Use this only when you KNOW a mount has")
@@ -103,6 +111,11 @@ func manifestClearMissingCmd(args []string, stdin io.Reader, stdout, stderr io.W
 			fmt.Fprintln(stderr, "aborted: confirmation phrase did not match")
 			return 1
 		}
+	}
+
+	// Re-probe after the confirmation wait — same reason as restore's.
+	if refuseIfBridgeMayBeRunning(ctx, cfg, "manifest clear-missing", stderr) {
+		return 1
 	}
 
 	store, err := manifest.OpenStore(dbPath)

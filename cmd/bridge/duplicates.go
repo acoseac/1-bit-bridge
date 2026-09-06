@@ -94,6 +94,13 @@ func duplicatesCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 1
 	}
 	if o.asJSON {
+		// Apply the same tier narrowing the human renderer does. These two
+		// flags used to be honoured only inside printDupeReport, so
+		// `--json --tier identical-audio` returned every tier and read as
+		// working right up until someone diffed it against the human output.
+		// (--limit is unaffected: buildDupeReport applies it, which is part
+		// of why this looked correct.)
+		report = narrowDupeReport(report, o)
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(report); err != nil {
@@ -104,6 +111,33 @@ func duplicatesCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	printDupeReport(stdout, report, o)
 	return 0
+}
+
+// narrowDupeReport returns report with only the tiers --tier / --nested-only
+// select. The counts outside Tiers (Scanned, GroupsTotal, MD5*) describe the
+// whole library and stay as they are: they are the denominator the selected
+// tiers are being read against, and silently rescoping them to the filter
+// would make a narrowed report look like a whole-library one.
+func narrowDupeReport(report *dupeReport, o *duplicatesOpts) *dupeReport {
+	if report == nil || (o.tier == "" && !o.nestedOnly) {
+		return report
+	}
+	// Copy: the caller's report is the one printDupeReport would render, and
+	// a filter that mutated it in place would make the two paths differ by
+	// call order.
+	narrowed := *report
+	kept := make([]dupeTierReport, 0, len(report.Tiers))
+	for _, tr := range report.Tiers {
+		if o.nestedOnly && tr.Tier != string(dupes.TierSelfNested) {
+			continue
+		}
+		if o.tier != "" && tr.Tier != o.tier {
+			continue
+		}
+		kept = append(kept, tr)
+	}
+	narrowed.Tiers = kept
+	return &narrowed
 }
 
 func validDupeTierName(s string) bool {
