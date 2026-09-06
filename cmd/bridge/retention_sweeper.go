@@ -53,6 +53,14 @@ type retentionSweeper struct {
 // sweep runs one pass. Errors are logged and swallowed: a failed
 // retention sweep costs nothing that the next tick does not recover.
 func (r *retentionSweeper) sweep(ctx context.Context) {
+	// A cancelled context is a shutdown, not a pass worth running. The
+	// three reaps each take Store.mu before they discover the context is
+	// dead, and each would log a Warn about a failure that is a clean
+	// exit -- an operator would go looking for a fault on every restart
+	// that lands inside a sweep.
+	if ctx.Err() != nil {
+		return
+	}
 	cfg := r.cfg()
 	if cfg == nil {
 		return
@@ -84,6 +92,8 @@ func (r *retentionSweeper) sweep(ctx context.Context) {
 			// Unreachable given the len check above; kept so a future
 			// caller change cannot turn this into a silent wipe.
 			logger.Warn("retention: orphan reap refused an empty live-token set")
+		case ctx.Err() != nil:
+			// Shutdown, not a failure. The next tick reruns the pass.
 		case err != nil:
 			logger.Warn("retention: orphan device-registration reap failed", "err", err)
 		case n > 0:
@@ -94,23 +104,40 @@ func (r *retentionSweeper) sweep(ctx context.Context) {
 	now := r.now()
 
 	// 2. Stale registrations — POLICY, default off.
-	if days := cfg.Retention.DeviceRegistrationDays; days > 0 {
+	if days := cfg.Retention.DeviceRegistrationDays; days > 0 && ctx.Err() == nil {
 		cutoff := now.AddDate(0, 0, -days).UnixNano()
-		if n, err := r.store.ReapStaleDeviceRegistrations(ctx, cutoff); err != nil {
+		switch n, err := r.store.ReapStaleDeviceRegistrations(ctx, cutoff); {
+		case ctx.Err() != nil:
+			// Shutdown, not a failure.
+		case errors.Is(err, manifest.ErrCutoffNotInThePast):
+			// config.MaxRetentionDays makes this unreachable from a
+			// validated config; kept because the store guard is the last
+			// thing standing between an overflowed window and an empty
+			// table, and a silent skip would hide that it fired.
+			logger.Warn("retention: refusing a stale-registration cutoff that is not in the past",
+				"days", days, "cutoff", cutoff)
+		case err != nil:
 			logger.Warn("retention: stale device-registration reap failed", "err", err)
-		} else if n > 0 {
+		case n > 0:
 			logger.Info("retention: reaped device registrations unseen past the window",
 				"rows", n, "days", days)
 		}
 	}
 
 	// 3. Playback history — POLICY, default off, and the config layer has
-	//    already refused any non-zero value below the 90-day floor.
-	if days := cfg.Retention.PlaybackHistoryDays; days > 0 {
+	//    already refused any non-zero value below the 90-day floor or
+	//    above the ceiling that keeps the cutoff arithmetic from wrapping.
+	if days := cfg.Retention.PlaybackHistoryDays; days > 0 && ctx.Err() == nil {
 		cutoff := now.AddDate(0, 0, -days).UnixNano()
-		if n, err := r.store.ReapPlaybackHistory(ctx, cutoff); err != nil {
+		switch n, err := r.store.ReapPlaybackHistory(ctx, cutoff); {
+		case ctx.Err() != nil:
+			// Shutdown, not a failure.
+		case errors.Is(err, manifest.ErrCutoffNotInThePast):
+			logger.Warn("retention: refusing a playback-history cutoff that is not in the past",
+				"days", days, "cutoff", cutoff)
+		case err != nil:
 			logger.Warn("retention: playback-history reap failed", "err", err)
-		} else if n > 0 {
+		case n > 0:
 			logger.Info("retention: reaped playback history past the window",
 				"rows", n, "days", days)
 		}

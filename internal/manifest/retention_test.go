@@ -201,6 +201,78 @@ func TestReapStaleDeviceRegistrationsHonoursTheCutoff(t *testing.T) {
 	}
 }
 
+// TestTheWindowReapsRefuseACutoffThatIsNotInThePast pins the belt under
+// config.MaxRetentionDays.
+//
+// A cutoff at or after now says "delete every row", which no caller can
+// legitimately mean. The realistic way to produce one is an overflowed
+// `now.AddDate(0, 0, -days).UnixNano()`; config validation refuses those
+// day counts, and this is what stands behind it for any other caller of
+// what is, after all, a library.
+//
+// Note the asymmetry with the `beforeNS <= 0` no-op above it: zero means
+// "disabled" and returns (0, nil), while a future cutoff is an ERROR,
+// because silence there would hide the one input that empties a table.
+func TestTheWindowReapsRefuseACutoffThatIsNotInThePast(t *testing.T) {
+	s := retentionStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	s.now = func() time.Time { return now }
+
+	if err := s.InsertHistoryBatch(ctx, []PlaybackHistoryRow{
+		{DeviceToken: "dev", Path: "a.flac", StartedAt: now.Add(-time.Hour).UnixNano(), DurationUsed: 60},
+		{DeviceToken: "dev", Path: "b.flac", StartedAt: now.Add(-400 * 24 * time.Hour).UnixNano(), DurationUsed: 60},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertDeviceRegistration(ctx, "dev", "tok", "Phone"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The measured overflow: days=999999 lands here, in the future.
+	overflowed := now.AddDate(0, 0, -999999).UnixNano()
+	if overflowed < now.UnixNano() {
+		t.Fatalf("fixture precondition: days=999999 was expected to overflow into the future, got %d "+
+			"against now %d — pick a different day count", overflowed, now.UnixNano())
+	}
+
+	for name, cutoff := range map[string]int64{
+		"the measured 999999-day overflow": overflowed,
+		"exactly now":                      now.UnixNano(),
+		"one nanosecond from now":          now.UnixNano() + 1,
+	} {
+		t.Run(name, func(t *testing.T) {
+			n, err := s.ReapPlaybackHistory(ctx, cutoff)
+			if !errors.Is(err, ErrCutoffNotInThePast) {
+				t.Errorf("ReapPlaybackHistory(%d): err = %v, want ErrCutoffNotInThePast", cutoff, err)
+			}
+			if n != 0 {
+				t.Errorf("ReapPlaybackHistory(%d) deleted %d rows", cutoff, n)
+			}
+			n, err = s.ReapStaleDeviceRegistrations(ctx, cutoff)
+			if !errors.Is(err, ErrCutoffNotInThePast) {
+				t.Errorf("ReapStaleDeviceRegistrations(%d): err = %v, want ErrCutoffNotInThePast", cutoff, err)
+			}
+			if n != 0 {
+				t.Errorf("ReapStaleDeviceRegistrations(%d) deleted %d rows", cutoff, n)
+			}
+		})
+	}
+
+	if got := countRows(t, s, "playback_history"); got != 2 {
+		t.Errorf("history rows = %d, want 2 — a future cutoff must delete nothing", got)
+	}
+	if got := countRows(t, s, "device_registrations"); got != 1 {
+		t.Errorf("registrations = %d, want 1 — a future cutoff must delete nothing", got)
+	}
+
+	// And a cutoff genuinely in the past still works, so the guard has not
+	// simply disabled the feature.
+	if n, err := s.ReapPlaybackHistory(ctx, now.AddDate(0, 0, -365).UnixNano()); err != nil || n != 1 {
+		t.Errorf("a real 365-day cutoff: n=%d err=%v; want 1 row reaped", n, err)
+	}
+}
+
 func TestRetentionCountsReportsBothTables(t *testing.T) {
 	s := retentionStore(t)
 	ctx := context.Background()

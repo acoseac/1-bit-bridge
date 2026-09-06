@@ -706,6 +706,40 @@ type RetentionConfig struct {
 // which is why validation refuses rather than clamps.
 const MinPlaybackHistoryRetentionDays = 90
 
+// MaxRetentionDays is the CEILING for either retention window, and it
+// exists because the arithmetic downstream overflows.
+//
+// `cmd/bridge/retention_sweeper.go` turns a window into a cutoff with
+// `time.Now().AddDate(0, 0, -days).UnixNano()`, and Go documents
+// `UnixNano` as undefined outside 1678-2262. Past ~127,455 days (~349
+// years) the value wraps, and it wraps in BOTH directions: some day
+// counts land negative, which is harmless because the reaps' own
+// `beforeNS <= 0` no-op catches them, and some land as a huge POSITIVE
+// number greater than now -- at which point
+// `DELETE ... WHERE started_at < ?` matches EVERY ROW IN THE TABLE.
+// Sweeping days over [1, 400000], 145,092 values do exactly that.
+//
+// The dangerous inputs are not exotic. Measured: 200000, 365000, 999999
+// and 1000000 all wipe the table. `999999` is the canonical "effectively
+// infinite" placeholder -- precisely what an operator hedging "set it
+// very high so it never actually deletes anything" reaches for, and they
+// get the opposite, silently, with the log line reporting success.
+//
+// 100 years is far past any real retention policy and far inside the
+// representable range. REFUSED rather than clamped, for the same reason
+// the floor above it is: a value that quietly does something other than
+// what it says is worse than an error at load.
+//
+// One thing the ceiling does NOT promise, because it does not need to:
+// a window longer than about 56 years reaches back past 1970, so the
+// cutoff is a NEGATIVE UnixNano and the reaps' `beforeNS <= 0` no-op
+// turns it into "delete nothing". That is the honest answer for a window
+// longer than the bridge has existed. The property that matters is only
+// that no accepted value produces a cutoff at or after NOW, and
+// TestNoAcceptedWindowProducesAFutureCutoff sweeps the entire accepted
+// range to prove it.
+const MaxRetentionDays = 36500
+
 type LimitsConfig struct {
 	Manifest ManifestLimitsConfig `yaml:"manifest,omitempty"`
 	Write    WriteLimitsConfig    `yaml:"write,omitempty"`
@@ -2449,9 +2483,29 @@ func (c *Config) Validate() error {
 				d, MinPlaybackHistoryRetentionDays, MinPlaybackHistoryRetentionDays,
 				MinPlaybackHistoryRetentionDays)
 		}
+		if d > MaxRetentionDays {
+			return fmt.Errorf(
+				"retention.playbackHistoryDays: %d is above the %d-day ceiling — past roughly "+
+					"349 years the cutoff timestamp overflows and the reap deletes the ENTIRE "+
+					"table rather than nothing. Use 0 to keep everything",
+				d, MaxRetentionDays)
+		}
 	}
-	if c.Retention.DeviceRegistrationDays < 0 {
-		return errors.New("retention.deviceRegistrationDays: must not be negative (0 = keep forever)")
+	// The same ceiling, for the same overflow. This half is the more
+	// dangerous one: ErrNoLiveTokens guards only the ORPHAN reap, so a
+	// wrapped cutoff here empties device_registrations including rows
+	// bound to live, working tokens.
+	if d := c.Retention.DeviceRegistrationDays; d != 0 {
+		if d < 0 {
+			return errors.New("retention.deviceRegistrationDays: must not be negative (0 = keep forever)")
+		}
+		if d > MaxRetentionDays {
+			return fmt.Errorf(
+				"retention.deviceRegistrationDays: %d is above the %d-day ceiling — past roughly "+
+					"349 years the cutoff timestamp overflows and the reap deletes EVERY "+
+					"registration, including ones bound to live tokens. Use 0 to keep them",
+				d, MaxRetentionDays)
+		}
 	}
 
 	// LibraryRoots: loopback installs require at least one root at
