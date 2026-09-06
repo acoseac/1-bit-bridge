@@ -343,6 +343,25 @@ type serverCacheHostResolver struct{ cache *upnp.ServerCache }
 
 func (r *serverCacheHostResolver) LiveHost(udn string) (string, bool) {
 	info, ok := r.cache.Get(udn)
+	if !ok {
+		// The caller passes `upnp_track_routing.server_udn`, which the
+		// ingest stamps with upnpingest.StableServerKey — a LOWERCASED
+		// UDN (or a `manual:<sha256>` key). The SSDP cache is keyed on the
+		// device's UDN exactly as advertised, and nothing on that path
+		// folds case. So an upstream whose UDN carries any uppercase
+		// character walked fine, landed routing rows, reached the phone —
+		// and then 503'd `upnp_server_offline` on EVERY byte fetch, across
+		// /v1/download, /dlna/file/{trackID} and the web player alike.
+		//
+		// This is CLAUDE.md's documented "anything wanting both membership
+		// and liveness must carry BOTH spellings" — the admin badge was
+		// fixed for it; the byte path was not.
+		//
+		// Exact hit first so the common case and the manual key stay O(1);
+		// the fallback is a linear scan of a cache that holds single digits
+		// of entries.
+		info, ok = r.lookupFolded(udn)
+	}
 	if !ok || info.ContentDirectoryControlURL == "" {
 		return "", false
 	}
@@ -354,6 +373,19 @@ func (r *serverCacheHostResolver) LiveHost(udn string) (string, bool) {
 		return "", false
 	}
 	return hostport, true
+}
+
+// lookupFolded finds a cache entry whose UDN matches `key` case-insensitively.
+// `key` is already a StableServerKey (lowercased), so only the cache side needs
+// folding. DeviceUDN is checked too: it carries the real device identity for an
+// entry inserted under a different key.
+func (r *serverCacheHostResolver) lookupFolded(key string) (upnp.ServerInfo, bool) {
+	for _, info := range r.cache.Snapshot() {
+		if strings.EqualFold(info.UDN, key) || strings.EqualFold(info.DeviceUDN, key) {
+			return info, true
+		}
+	}
+	return upnp.ServerInfo{}, false
 }
 
 // HostResolver returns the live-host lookup wired into this

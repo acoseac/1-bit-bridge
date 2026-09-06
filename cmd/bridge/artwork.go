@@ -137,6 +137,37 @@ func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	return runArtworkGC(ctx, stdout, stderr, store, artworkDir, *dryRun)
 }
 
+// artworkCacheHasFiles reports whether artworkDir holds at least one file
+// the GC would consider its own. Used only by the empty-referenced-set
+// refusal, so it stops at the first hit rather than walking the whole cache.
+//
+// A missing directory is "no files", not an error: a bridge that has never
+// cached artwork is the normal empty case, and the caller must not turn it
+// into a failure.
+func artworkCacheHasFiles(artworkDir string) (bool, error) {
+	found := false
+	err := filepath.WalkDir(artworkDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return filepath.SkipDir
+			}
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if _, ok := artworkCacheStem(filepath.Base(path)); ok {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
 func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun bool) int {
 	mbidsInUse, err := store.ArtworkMBIDsInUse(ctx)
 	if err != nil {
@@ -146,6 +177,43 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	known := make(map[string]bool, len(mbidsInUse))
 	for _, m := range mbidsInUse {
 		known[m] = true
+	}
+
+	// FAIL CLOSED on an empty referenced set. Every file in the cache
+	// misses an empty `known`, so the walk below would classify the whole
+	// cache as orphaned and unlink it — and the scanner-written
+	// `local-<sha256>-500.jpg` covers are NOT re-fetchable: the mtime skip
+	// gate means the scanner never re-reads those files, so the loss
+	// survives every subsequent scan until an ExtractorVersion bump or a
+	// row wipe.
+	//
+	// This is not hypothetical. The docblock above records this exact
+	// deletion shipping once, via a hardcoded DB path that opened an empty
+	// store; that fix corrected the path and left the shape that made a
+	// wrong path catastrophic rather than merely wrong. The routes that
+	// reach an empty set today are ordinary: a --config naming an install
+	// whose dataDir is not the one being walked, a run between a
+	// single<->multi root flip's WipeFilesystemTracks and the rescan that
+	// refills it, or simply a store that has never been scanned.
+	//
+	// An empty set with an empty cache is not an error — there is nothing
+	// to protect and nothing to do, so that exits 0 as before. The refusal
+	// is only for "the store says nothing is referenced, but files exist".
+	if len(known) == 0 {
+		populated, statErr := artworkCacheHasFiles(artworkDir)
+		if statErr != nil {
+			fmt.Fprintf(stderr, "artwork gc: cannot inspect %s: %v\n", artworkDir, statErr)
+			return 1
+		}
+		if populated {
+			fmt.Fprintf(stderr, "artwork gc: refusing — no track row references any artwork, but %s holds cached files.\n", artworkDir)
+			fmt.Fprintln(stderr, "  Every file would be treated as an orphan and removed, and scanner-extracted")
+			fmt.Fprintln(stderr, "  covers do not come back on the next scan (the mtime skip gate keeps the")
+			fmt.Fprintln(stderr, "  scanner from re-reading unchanged files).")
+			fmt.Fprintln(stderr, "  This usually means the wrong config/database: check that --config names the")
+			fmt.Fprintln(stderr, "  install whose dataDir you meant, and that a scan has run.")
+			return 1
+		}
 	}
 
 	var removed, kept, failed, skipped int
