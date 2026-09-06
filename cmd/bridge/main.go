@@ -457,10 +457,24 @@ func (a *inflightDropperAdapter) DropInflight(matches func(sourcePath string) bo
 // watcher reads them off its own VariantSnapshot type.
 type integrityVariantListerAdapter struct {
 	store *manifest.Store
+	// baseCtx is runServe's scanCtx. The integrity interfaces take no
+	// ctx, so without it these adapters used context.Background() and a
+	// tick could keep walking or deleting after shutdown began — the
+	// thing the joined stopFn now waits for, which only means something
+	// if the work is actually cancellable.
+	baseCtx context.Context
+}
+
+// ctx resolves baseCtx, tolerating a zero-value adapter in tests.
+func (a *integrityVariantListerAdapter) ctx() context.Context {
+	if a.baseCtx != nil {
+		return a.baseCtx
+	}
+	return context.Background()
 }
 
 func (a *integrityVariantListerAdapter) AllVariants() ([]integrity.VariantSnapshot, error) {
-	rows, err := a.store.AllVariants(context.Background())
+	rows, err := a.store.AllVariants(a.ctx())
 	if err != nil {
 		return nil, err
 	}
@@ -482,10 +496,24 @@ func (a *integrityVariantListerAdapter) AllVariants() ([]integrity.VariantSnapsh
 // VariantSummary type.
 type integrityVariantDeleterAdapter struct {
 	store *manifest.Store
+	// baseCtx is runServe's scanCtx. The integrity interfaces take no
+	// ctx, so without it these adapters used context.Background() and a
+	// tick could keep walking or deleting after shutdown began — the
+	// thing the joined stopFn now waits for, which only means something
+	// if the work is actually cancellable.
+	baseCtx context.Context
+}
+
+// ctx resolves baseCtx, tolerating a zero-value adapter in tests.
+func (a *integrityVariantDeleterAdapter) ctx() context.Context {
+	if a.baseCtx != nil {
+		return a.baseCtx
+	}
+	return context.Background()
 }
 
 func (a *integrityVariantDeleterAdapter) DeleteVariant(sourcePath, variantID string) error {
-	return a.store.DeleteVariant(context.Background(), sourcePath, variantID)
+	return a.store.DeleteVariant(a.ctx(), sourcePath, variantID)
 }
 
 // integritySidecarListerAdapter implements integrity.SidecarLister on
@@ -1416,6 +1444,12 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		Force:      force,
 		Sessions:   a.sessions,
 	})
+	// The same field set Status() returns, deliberately. Install used to drop
+	// CanRollback, DeferredReason and RejectedVersion — so when an install was
+	// DEFERRED (playback sessions in flight, st.DeferredReason =
+	// "sessions_active") the console got an empty reason and showed the
+	// operator nothing until an asynchronous status refresh happened to land.
+	// The reason is the whole point of a deferral.
 	return admin.UpdateStatus{
 		CurrentVersion:   st.CurrentVersion,
 		LatestVersion:    st.LatestVersion,
@@ -1426,6 +1460,9 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		LastError:        st.LastError,
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
+		CanRollback:      a.canRollback(),
+		DeferredReason:   st.DeferredReason,
+		RejectedVersion:  a.rejectedVersion(),
 	}, mapUpdaterError(err)
 }
 
@@ -2104,6 +2141,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// corruption class this guards (Gemini HIGH, post-merge review of #534).
 	// `WaitGroup.Wait` on a zero counter returns immediately, so exiting before
 	// any writer starts costs nothing.
+	// Fail on an invalid tailscale mode HERE, before the first background
+	// worker is spawned. The check used to live ~160 lines down, next to the
+	// tailscale wiring, by which point RunPeriodic and the artwork rescaler
+	// were already running — so a typo'd mode returned exit 2 having started
+	// real work, then paid a full shutdown drain to stop it. Nothing between
+	// here and there depends on the mode.
+	if _, modeErr := cfg.Tailscale.EffectiveMode(); modeErr != nil {
+		fmt.Fprintf(stderr, "config: %v\n", modeErr)
+		return 2
+	}
+
 	var bgWriters sync.WaitGroup
 	defer func() {
 		done := make(chan struct{})
@@ -2405,7 +2453,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// cap is configured, where it becomes the prerequisite for whole-library
 	// hi-res covers not filling a small host disk.
 	if cfg.Artwork.CacheMaxBytes > 0 {
-		go runArtworkCacheSweeper(scanCtx, artworkDir, cfg.Artwork.CacheMaxBytes, artworkCacheSweepInterval)
+		// bgWriters-joined: it os.Removes files under <dataDir>/artwork, and
+		// the documented shutdown contract is that nothing this loop starts
+		// outlives runServe's return. Leaving it fire-and-forget is what
+		// produced the intermittent "TempDir RemoveAll: directory not empty"
+		// the backup ticker's own comment records.
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			runArtworkCacheSweeper(scanCtx, artworkDir, cfg.Artwork.CacheMaxBytes, artworkCacheSweepInterval)
+		}()
 	}
 
 	// Periodic state-snapshot ticker. Captures bridge.db / tokens.json /
@@ -2592,7 +2649,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// runs ONLY from Run). Lives off scanCtx so a SIGINT cancels it alongside the
 	// scanner. Without this call, background update checks never fire and
 	// update.autoInstall is dead — only the manual "Check now" path works.
-	go upd.Run(scanCtx)
+	// bgWriters-joined: Run drives the opt-in auto-installer, so it can be
+	// mid-binary-swap when runServe returns.
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		upd.Run(scanCtx)
+	}()
 
 	updAdapter := updateInfoAdapter{
 		u:          upd,
@@ -3296,8 +3359,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		sweepInterval := cfg.VariantSweepInterval()
 		if sweepInterval > 0 {
 			variantWatcher := integrity.NewVariantWatcher(
-				&integrityVariantListerAdapter{store: manifestStore},
-				&integrityVariantDeleterAdapter{store: manifestStore},
+				&integrityVariantListerAdapter{store: manifestStore, baseCtx: scanCtx},
+				&integrityVariantDeleterAdapter{store: manifestStore, baseCtx: scanCtx},
 				func(paths, variantIDs []string) {
 					apiSrv.EventPublisher().Publish("upscale.deleted", api.UpscaleDeletedEvent{
 						Paths:      paths,

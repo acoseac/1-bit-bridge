@@ -47,6 +47,15 @@ var logger = logging.Component("integrity")
 // sweep fires immediately at boot — closes the "operator
 // deleted variant files while the bridge was down" case
 // without waiting for the first interval to elapse.
+// stopGrace bounds how long a stopFn waits for its run goroutine to return.
+//
+// A var, not a const, so the tests can shorten it — and shared by both
+// long-lived loops in this package so there is one answer to "how long does
+// shutdown wait for integrity work". Bounded rather than unconditional for the
+// reason every other wait in this tree is: a wedged tick must degrade to a log
+// line, never a hung process exit.
+var stopGrace = 5 * time.Second
+
 type VariantWatcher struct {
 	lister      VariantLister
 	deleter     VariantDeleter
@@ -70,6 +79,9 @@ type VariantWatcher struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 	done      chan struct{}
+	// exited is closed when the run goroutine returns, so stopFn can
+	// JOIN it rather than merely signalling. See Start.
+	exited chan struct{}
 }
 
 // VariantLister enumerates every row in the track_variants
@@ -172,7 +184,11 @@ func (w *VariantWatcher) Start(ctx context.Context) (stopFn func()) {
 	}
 	w.startOnce.Do(func() {
 		w.done = make(chan struct{})
-		go w.run(ctx, w.done)
+		w.exited = make(chan struct{})
+		go func() {
+			defer close(w.exited)
+			w.run(ctx, w.done)
+		}()
 	})
 	return func() {
 		w.stopOnce.Do(func() {
@@ -182,6 +198,24 @@ func (w *VariantWatcher) Start(ctx context.Context) (stopFn func()) {
 			// is the long-lived process-root context.
 			if w.done != nil {
 				close(w.done)
+			}
+			// JOIN, grace-bounded. Signalling alone left the caller free to
+			// close the manifest store while a tick was mid-DeleteVariant —
+			// the "database is closed" / SQLite-corruption class runServe's
+			// bgWriters wait exists to prevent. cmd/bridge defers this stop
+			// ahead of Store.Close, so waiting here is what makes that
+			// ordering mean anything.
+			//
+			// Bounded rather than unconditional: a wedged tick degrades to a
+			// log line, never a hung exit, matching the shutdown discipline
+			// everywhere else in this tree.
+			if w.exited != nil {
+				t := time.NewTimer(stopGrace)
+				defer t.Stop()
+				select {
+				case <-w.exited:
+				case <-t.C:
+				}
 			}
 		})
 	}
