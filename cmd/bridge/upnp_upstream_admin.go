@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -573,7 +572,3 @@ func sanitizeSkipList(in []string) []string {
 	}
 	return out
 }
-
-// Keep linter happy about the imported time package if the adapter
-// stops using it later.
-var _ = time.Time{}
