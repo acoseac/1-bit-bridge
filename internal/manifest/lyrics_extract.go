@@ -74,8 +74,10 @@ func sidecarNamesForDir(ec *ExtractContext, dir string) map[string]string {
 }
 
 // sidecarLyricsFile finds THE sidecar for an audio file: same stem
-// (case-folded), .lrc over .ttml over .txt. One answer shared by the
-// extractor and the skip gate so they can never disagree.
+// (case-folded), .ttml over .lrc over .txt — sidecarLyricsExts order, which
+// is Source.Rank() order, which is what PROTOCOL.md documents and what the
+// app's own sidecar pick uses. One answer shared by the extractor and the
+// skip gate so they can never disagree about WHICH file is the sidecar.
 func sidecarLyricsFile(absPath string, ec *ExtractContext) (name, abs string, ok bool) {
 	dir := filepath.Dir(absPath)
 	base := filepath.Base(absPath)
@@ -112,9 +114,27 @@ func sidecarLyricsDrifted(absPath string, st *TrackStat, ec *ExtractContext) boo
 		return storedIsSidecar
 	}
 	if !storedIsSidecar {
-		// A sidecar beside an embedded-sourced row matters only if it
-		// would win the pick; a .txt next to a SYLT never does.
-		return sidecarSource(name).Rank() < stored.Rank()
+		// A sidecar beside an embedded-sourced row matters only if it would
+		// win the pick — and the EXTENSION's nominal rank is not that answer.
+		// An empty / oversized / legacy-encoded `.lrc` yields no document at
+		// all, and a TAGLESS `.lrc` is demoted to sidecar-txt (rank 6); in
+		// both cases the embedded row keeps winning, while a nominal-rank
+		// test reports drift on every scan, forever, and re-reads the audio
+		// file each time — the loop the skip gate exists to prevent. So:
+		// take the cheap rank test as a fast path (a .txt next to a SYLT can
+		// never win, no read needed), then resolve the sidecar for real
+		// through the SAME helper the extractor uses. The read is <= 512 KiB
+		// from a directory whose listing is already memoized, and it happens
+		// only for the tracks that would otherwise be looping.
+		if sidecarSource(name).Rank() >= stored.Rank() {
+			return false
+		}
+		info, err := os.Stat(abs)
+		if err != nil || !info.Mode().IsRegular() {
+			return false
+		}
+		c, ok := readSidecarCandidate(abs, name, info)
+		return ok && c.Source.Rank() < stored.Rank()
 	}
 	if st.LyricsSidecarName != name {
 		return true
@@ -168,22 +188,33 @@ func applySidecarLyrics(absPath string, t *Track, ec *ExtractContext) {
 	// stat instead of re-extracting the audio file on every scan
 	// (CodeRabbit on bridge #840).
 	t.lyricsSidecar = &sidecarStat{name: name, mtimeNS: info.ModTime().UnixNano(), size: info.Size()}
+	if c, ok := readSidecarCandidate(abs, name, info); ok {
+		t.lyricsCandidates = append(t.lyricsCandidates, c)
+	}
+}
+
+// readSidecarCandidate resolves a sidecar to the candidate the pick would
+// actually see. It is the second half of the extractor/skip-gate agreement:
+// sidecarLyricsFile answers WHICH file, this answers WHAT IT IS WORTH. ok=
+// false for a sidecar that yields no document — empty, oversized,
+// legacy-encoded, or whitespace-only.
+func readSidecarCandidate(abs, name string, info os.FileInfo) (lyrics.Candidate, bool) {
 	if info.Size() <= 0 || info.Size() > lyrics.MaxBodyBytes {
-		return
+		return lyrics.Candidate{}, false
 	}
 	raw, err := os.ReadFile(abs)
 	if err != nil {
-		return
+		return lyrics.Candidate{}, false
 	}
 	text, ok := decodeSidecarText(raw)
 	if !ok {
-		return
+		return lyrics.Candidate{}, false
 	}
 	body, ok := lyrics.Normalize(text)
 	if !ok {
-		return
+		return lyrics.Candidate{}, false
 	}
-	t.lyricsCandidates = append(t.lyricsCandidates, sidecarCandidate(name, body))
+	return sidecarCandidate(name, body), true
 }
 
 // sidecarCandidate classifies a sidecar's normalized body by its extension:
@@ -311,6 +342,19 @@ func rawFrameBase(key string) string {
 func syltCandidate(v any) (lyrics.Candidate, bool) {
 	body, ok := v.([]byte)
 	if !ok {
+		return lyrics.Candidate{}, false
+	}
+	// Bound the input BEFORE parsing. ParseSYLT allocates one entry per
+	// terminated run (5-6 raw bytes each, ~24 B of []SYLTEntry) and sorts
+	// them, then ToLRC renders a >= 12-byte time tag per entry — so a frame
+	// costs roughly 2.4x its own size in transient heap, per scan worker,
+	// before Normalize gets to reject it at the end. dhowden does not cap
+	// this: readBytes (util.go) streams anything past readBytesMaxUpfront
+	// through io.CopyN, bounded only by the file. The limit is 2x
+	// MaxBodyBytes rather than 1x because a UTF-16 frame is two bytes per
+	// character raw against one rendered, so a LEGITIMATE frame can be
+	// larger than the document it produces.
+	if len(body) > 2*lyrics.MaxBodyBytes {
 		return lyrics.Candidate{}, false
 	}
 	s, ok := lyrics.ParseSYLT(body)

@@ -106,10 +106,14 @@ func isValidDSDSampleRate(sr uint32) bool {
 type ExtractContext struct {
 	ArtworkCacheDir string    // <dataDir>/artwork; "" disables local-art
 	FolderArtCache  *sync.Map // dir-path string -> *folderArtPromise
-	// SidecarIndex memoizes one os.ReadDir per directory per scan so the
-	// lyrics sidecar lookup (extractor AND skip gate) costs no per-file
-	// directory reads: dir-path string -> *sidecarListing. nil → an
-	// unmemoized read per call.
+	// SidecarIndex memoizes one os.ReadDir per directory so the lyrics
+	// sidecar lookup (extractor AND skip gate) costs no per-file directory
+	// reads: dir-path string -> *sidecarListing. nil → an unmemoized read
+	// per call. Unlike FolderArtCache — which is &s.folderArt, shared by
+	// every worker and replaced at the top of Scan — this one is built
+	// inside runScanWorker, so it is per WORKER per scan: a directory is
+	// read at most once per worker that touches it, and no listing outlives
+	// the scan that made it.
 	SidecarIndex *sync.Map
 	// LibraryRootDirs is the cleaned ABSOLUTE set of configured library
 	// roots — callers must supply keys in the same path form the
