@@ -89,17 +89,44 @@ func TestWriteGateRefusesAnEphemeralAdminPortWithAnAccurateReason(t *testing.T) 
 // destination directory is touching the filesystem, and on a preview the
 // operator may still be deciding where to point it.
 func TestVariantsMoveDryRunDoesNotCreateDestination(t *testing.T) {
+	ctx := context.Background()
 	dir := t.TempDir()
 	cfgPath := writeInstallAt(t, dir, "Artist/Album/01.flac")
-	dest := filepath.Join(dir, "not-yet-chosen")
 
+	// At least ONE variant, because variantsMoveCmd returns early on an empty
+	// set — before the MkdirAll this test is about. The first version of this
+	// test used the bare fixture and passed against the unfixed code, which is
+	// the "a fixture must be a value the transformation would actually change"
+	// trap; its negative control is what caught it.
+	store, err := manifest.OpenStore(manifest.DefaultDBPath(filepath.Join(dir, "data")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertVariant(ctx, manifest.VariantRow{
+		SourcePath:  "Artist/Album/01.flac",
+		VariantID:   "upscaled-v1-96000-24",
+		SidecarPath: filepath.Join(dir, "variants", "upscaled.flac"),
+		Format:      "flac",
+		SampleRate:  96000, BitsPerSample: 24, SizeBytes: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(dir, "not-yet-chosen")
 	var so, se bytes.Buffer
-	_ = variantsMoveCmd(context.Background(),
-		[]string{"--config", cfgPath, "--to", dest, "--dry-run"}, &so, &se)
+	_ = variantsMoveCmd(ctx, []string{"--config", cfgPath, "--to", dest, "--dry-run"}, &so, &se)
 
 	if _, err := os.Stat(dest); err == nil {
-		t.Errorf("--dry-run created %s; the flag promises not to touch the filesystem\nstdout:\n%s\nstderr:\n%s",
+		t.Errorf("--dry-run created %s; the flag promises to list planned moves "+
+			"\"without touching files or DB\"\nstdout:\n%s\nstderr:\n%s",
 			dest, so.String(), se.String())
+	}
+	if !strings.Contains(so.String(), "dry-run") {
+		t.Errorf("the preview did not reach the move loop, so this test proves nothing "+
+			"about MkdirAll:\nstdout:\n%s\nstderr:\n%s", so.String(), se.String())
 	}
 }
 
