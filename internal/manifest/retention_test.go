@@ -236,26 +236,28 @@ func TestTheWindowReapsRefuseACutoffThatIsNotInThePast(t *testing.T) {
 			"against now %d — pick a different day count", overflowed, now.UnixNano())
 	}
 
+	// One helper over both reaps rather than the same four assertions
+	// twice per case: the two windows are the same rule and reading them
+	// as one is the point. (SonarCloud go:S3776 via CodeRabbit, PR #859.)
+	mustRefuse := func(t *testing.T, what string, cutoff int64,
+		reap func(context.Context, int64) (int64, error)) {
+		t.Helper()
+		n, err := reap(ctx, cutoff)
+		if !errors.Is(err, ErrCutoffNotInThePast) {
+			t.Errorf("%s(%d): err = %v, want ErrCutoffNotInThePast", what, cutoff, err)
+		}
+		if n != 0 {
+			t.Errorf("%s(%d) deleted %d rows", what, cutoff, n)
+		}
+	}
 	for name, cutoff := range map[string]int64{
 		"the measured 999999-day overflow": overflowed,
 		"exactly now":                      now.UnixNano(),
 		"one nanosecond from now":          now.UnixNano() + 1,
 	} {
 		t.Run(name, func(t *testing.T) {
-			n, err := s.ReapPlaybackHistory(ctx, cutoff)
-			if !errors.Is(err, ErrCutoffNotInThePast) {
-				t.Errorf("ReapPlaybackHistory(%d): err = %v, want ErrCutoffNotInThePast", cutoff, err)
-			}
-			if n != 0 {
-				t.Errorf("ReapPlaybackHistory(%d) deleted %d rows", cutoff, n)
-			}
-			n, err = s.ReapStaleDeviceRegistrations(ctx, cutoff)
-			if !errors.Is(err, ErrCutoffNotInThePast) {
-				t.Errorf("ReapStaleDeviceRegistrations(%d): err = %v, want ErrCutoffNotInThePast", cutoff, err)
-			}
-			if n != 0 {
-				t.Errorf("ReapStaleDeviceRegistrations(%d) deleted %d rows", cutoff, n)
-			}
+			mustRefuse(t, "ReapPlaybackHistory", cutoff, s.ReapPlaybackHistory)
+			mustRefuse(t, "ReapStaleDeviceRegistrations", cutoff, s.ReapStaleDeviceRegistrations)
 		})
 	}
 

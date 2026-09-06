@@ -67,11 +67,31 @@ func TestRetentionWindowsAcceptEveryUsableValue(t *testing.T) {
 			t.Errorf("days=%d must be accepted: %v", days, err)
 		}
 	}
-	// One past the ceiling is refused; the ceiling itself is not.
-	cfg := retentionBaseConfig()
-	cfg.Retention.PlaybackHistoryDays = MaxRetentionDays + 1
-	if err := cfg.Validate(); err == nil {
-		t.Errorf("MaxRetentionDays+1 must be refused")
+	// One past the ceiling is refused; the ceiling itself is not. Both
+	// fields, not just the first: the registration window is the half
+	// with no ErrNoLiveTokens backstop, so an untested boundary there is
+	// the worse of the two to leave open. (CodeRabbit, PR #859.)
+	for _, tc := range []struct {
+		name string
+		set  func(*Config, int)
+	}{
+		{"playbackHistoryDays", func(c *Config, d int) { c.Retention.PlaybackHistoryDays = d }},
+		{"deviceRegistrationDays", func(c *Config, d int) { c.Retention.DeviceRegistrationDays = d }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := retentionBaseConfig()
+			tc.set(cfg, MaxRetentionDays)
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("the ceiling itself must be accepted: %v", err)
+			}
+			cfg = retentionBaseConfig()
+			tc.set(cfg, MaxRetentionDays+1)
+			if err := cfg.Validate(); err == nil {
+				t.Errorf("MaxRetentionDays+1 must be refused")
+			} else if !strings.Contains(err.Error(), "retention."+tc.name) {
+				t.Errorf("refused for the wrong reason: %v", err)
+			}
+		})
 	}
 }
 
