@@ -3030,8 +3030,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
-			runAnalysisSweeper(scanCtx, manifestStore, apiSrv.Resolver(),
-				analyze.WaveformDirFor(cfg.DataDir), analysisPool,
+			runAnalysisSweeper(scanCtx, &analysisSweeper{
+				store:     manifestStore,
+				resolver:  apiSrv.Resolver(),
+				outputDir: analyze.WaveformDirFor(cfg.DataDir),
+				pool:      analysisPool,
+				enabled:   analysisActiveFn,
+			},
 				liveInterval((*config.Config).ScanInterval),
 				analysisNudge, analysisRearm, analysisSweepState)
 		}()

@@ -132,6 +132,130 @@ func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 
 // waitForSweep polls the recorder until a completed sweep newer than
 // `after` is visible or the deadline hits. Returns the lastEnd observed.
+// sweeperFixture is the shared preamble for the runAnalysisSweeper cadence
+// tests: a short settle delay so a test does not wait 90 s, plus a store and a
+// live pool, each torn down in reverse order via t.Cleanup.
+func sweeperFixture(t *testing.T) (*manifest.Store, *analyze.Pool) {
+	t.Helper()
+	oldSettle := analysisSweeperSettleDelay
+	analysisSweeperSettleDelay = 5 * time.Millisecond
+	t.Cleanup(func() { analysisSweeperSettleDelay = oldSettle })
+
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	pool := analyze.NewPool(store, 1, 8)
+	t.Cleanup(pool.Stop)
+	return store, pool
+}
+
+// alwaysAnalysisEnabled is the live-gate predicate for the cadence tests,
+// which are about WHEN a sweep runs rather than whether it may.
+func alwaysAnalysisEnabled() bool { return true }
+
+// TestAnalysisSweeperNilGateIsOff pins the DIRECTION a missing predicate fails
+// in. Added because the negative control for the disabled-gate test proved it
+// could not see this: that test passes a real predicate, so flipping active()
+// to fail OPEN on nil left the whole suite green.
+//
+// The direction is not arbitrary. This sweeper's entire failure mode was doing
+// unrequested work — forking a decode per track and pushing a whole-library
+// indexed_at delta on a config that never asked for analysis — so a wiring
+// mistake that leaves the predicate nil must produce silence, not a library
+// walk. (runFingerprintSweeper's nil arm reads the other way; that is its own
+// call, made with its own tests.)
+func TestAnalysisSweeperNilGateIsOff(t *testing.T) {
+	if (&analysisSweeper{}).active() {
+		t.Error("a nil enabled predicate read as ACTIVE — a wiring mistake would " +
+			"silently re-enable the ungated sweep this gate exists to prevent")
+	}
+	if (*analysisSweeper)(nil).active() {
+		t.Error("a nil sweeper read as ACTIVE")
+	}
+	if !(&analysisSweeper{enabled: alwaysAnalysisEnabled}).active() {
+		t.Error("a live true predicate read as INACTIVE")
+	}
+}
+
+// waitGate blocks until the sweeper consults its enabled predicate, so an
+// assertion about what a DISABLED pass did cannot run before the pass happened.
+func waitGate(t *testing.T, calls <-chan struct{}, which string) {
+	t.Helper()
+	select {
+	case <-calls:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never evaluated the enabled gate", which)
+	}
+}
+
+// TestRunAnalysisSweeperRespectsDisabledGate pins the gate that PR #781's
+// always-construct-never-stop conversion removed.
+//
+// Before that conversion the sweeper was wired inside `if analysisActive {`
+// and the block WAS the gate. The conversion moved every READ surface to the
+// live `analysisActiveFn` predicate and left the WRITE path ungated, so a
+// bridge on the DEFAULT config (analysis.enabled is false) still walked the
+// library 90 s after boot, forked a decode per track, and — because
+// Store.UpsertAnalysis advances indexed_at — pushed a whole-library delta to
+// every paired device, repeating on every scan interval and post-scan nudge.
+// /v1/analysis/* answered 404 throughout, so nothing surfaced it.
+//
+// Asserting on the STATUS rather than on the absence of waveform files is
+// deliberate: a disabled pass must record nothing at all (the same rule
+// runFingerprintSweeper follows), so the Jobs card keeps the last real
+// breakdown instead of being overwritten by an empty one. A sweep that ran
+// and found nothing would still stamp sweepStarted, which is what
+// distinguishes "gated" from "ran against an empty library" — and an
+// empty-library assertion would pass either way.
+func TestRunAnalysisSweeperRespectsDisabledGate(t *testing.T) {
+	store, pool := sweeperFixture(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	status := &sweepStatus[admin.AnalysisSweepCounts]{}
+	nudge := make(chan struct{}, 1)
+
+	// Synchronise on the gate actually being CONSULTED rather than sleeping.
+	// A fixed sleep lets a loaded runner reach the assertion before either
+	// trigger fires, and the test then passes against code that never asks —
+	// which is the exact failure it exists to catch. (CodeRabbit, PR #852.)
+	gateCalls := make(chan struct{}, 4)
+	disabled := func() bool {
+		select {
+		case gateCalls <- struct{}{}:
+		default:
+		}
+		return false
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runAnalysisSweeper(ctx, &analysisSweeper{
+			store: store, resolver: bridgefs.New([]string{t.TempDir()}),
+			outputDir: t.TempDir(), pool: pool, enabled: disabled,
+		}, staticInterval(time.Hour), nudge, nil, status)
+	}()
+
+	// Both sweep triggers, each waited for: the post-settle pass, then a nudge.
+	waitGate(t, gateCalls, "the post-settle sweep")
+	nudge <- struct{}{}
+	waitGate(t, gateCalls, "the nudged sweep")
+
+	if _, lastStart, lastEnd, _, _ := status.snapshot(); !lastStart.IsZero() || !lastEnd.IsZero() {
+		t.Errorf("a disabled sweeper recorded a sweep: lastStart=%v lastEnd=%v — the analysis.enabled gate is not being consulted", lastStart, lastEnd)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweeper did not exit on ctx cancel")
+	}
+}
+
 func waitForSweep(t *testing.T, status *sweepStatus[admin.AnalysisSweepCounts], after time.Time, deadline time.Duration) time.Time {
 	t.Helper()
 	stop := time.Now().Add(deadline)
@@ -152,17 +276,7 @@ func waitForSweep(t *testing.T, status *sweepStatus[admin.AnalysisSweepCounts], 
 // waiting out the periodic interval — and a nudge that arrived DURING
 // the settle window is drained by the initial sweep, not double-run.
 func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
-	oldSettle := analysisSweeperSettleDelay
-	analysisSweeperSettleDelay = 5 * time.Millisecond
-	t.Cleanup(func() { analysisSweeperSettleDelay = oldSettle })
-
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	pool := analyze.NewPool(store, 1, 8)
-	defer pool.Stop()
+	store, pool := sweeperFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -178,8 +292,10 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 		defer close(done)
 		// 1h interval: the ticker can't fire inside this test — any sweep
 		// after the initial one can only come from a nudge.
-		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, staticInterval(time.Hour), nudge, nil, status)
+		runAnalysisSweeper(ctx, &analysisSweeper{
+			store: store, resolver: bridgefs.New([]string{t.TempDir()}),
+			outputDir: t.TempDir(), pool: pool, enabled: alwaysAnalysisEnabled,
+		}, staticInterval(time.Hour), nudge, nil, status)
 	}()
 
 	firstEnd := waitForSweep(t, status, time.Time{}, 5*time.Second)
@@ -216,17 +332,7 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 // recorder carries a nextDue in the future; the admin card derives its
 // "next sweep in …" countdown from it browser-side.
 func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
-	oldSettle := analysisSweeperSettleDelay
-	analysisSweeperSettleDelay = 5 * time.Millisecond
-	t.Cleanup(func() { analysisSweeperSettleDelay = oldSettle })
-
-	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	pool := analyze.NewPool(store, 1, 8)
-	defer pool.Stop()
+	store, pool := sweeperFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -234,8 +340,10 @@ func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runAnalysisSweeper(ctx, store, bridgefs.New([]string{t.TempDir()}), t.TempDir(),
-			pool, staticInterval(time.Hour), make(chan struct{}, 1), nil, status)
+		runAnalysisSweeper(ctx, &analysisSweeper{
+			store: store, resolver: bridgefs.New([]string{t.TempDir()}),
+			outputDir: t.TempDir(), pool: pool, enabled: alwaysAnalysisEnabled,
+		}, staticInterval(time.Hour), make(chan struct{}, 1), nil, status)
 	}()
 	waitForSweep(t, status, time.Time{}, 5*time.Second)
 	_, _, _, nextDue, _ := status.snapshot()

@@ -180,7 +180,11 @@ func (s *Server) upscaleDelete(w http.ResponseWriter, r *http.Request) {
 	if s.refuseUpscaleMutationInDemoMode(w) {
 		return
 	}
-	if s.variantDeleter == nil {
+	// Same two-gate shape as upscaleRequest, and for the same reason: the
+	// deleter is wired unconditionally now, so nil-ness alone stopped
+	// gating anything and this mutation answered on a bridge that
+	// advertises the feature as off.
+	if s.variantDeleter == nil || !s.upscaleActive() {
 		writeError(w, http.StatusNotFound, "variant_not_found", errMsgUpscalingNotEnabled)
 		return
 	}

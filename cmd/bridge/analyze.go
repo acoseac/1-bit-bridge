@@ -335,6 +335,36 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 // A var (not const) purely as the test seam — production never mutates.
 var analysisSweeperSettleDelay = 90 * time.Second
 
+// analysisSweeper holds what one auto-analysis pass needs. A struct rather
+// than a parameter list for the reason fingerprintSweeper and
+// autoOptimizeSweeper are: the loop and the pass want different things, and
+// threading nine values through the loop to reach the pass is how a gate goes
+// missing without anyone noticing.
+type analysisSweeper struct {
+	store     *manifest.Store
+	resolver  *bridgefs.Resolver
+	outputDir string
+	pool      *analyze.Pool
+	// enabled is the LIVE analysis gate.
+	//
+	// The pool is constructed unconditionally (see runServe, "always
+	// construct, never stop"), which is what makes analysis.enabled hot for
+	// every READ surface. Before that conversion the sweeper sat inside
+	// `if analysisActive {` and the block WAS its gate; the conversion moved
+	// every reader to the live predicate and left the WRITE path with none.
+	// So on a default config (analysis.enabled is false) the bridge still
+	// forked a decode per track 90 s after every boot and — because
+	// Store.UpsertAnalysis advances indexed_at — pushed a whole-library
+	// delta to every paired device, while /v1/analysis/* went on 404ing.
+	enabled func() bool
+}
+
+// active reports whether a pass may run. A nil predicate reads as OFF, not
+// on: this sweeper's whole failure mode was doing unrequested work, so the
+// direction to fail in is settled. (runFingerprintSweeper's nil arm reads the
+// other way; changing it belongs with its own tests, not here.)
+func (s *analysisSweeper) active() bool { return s != nil && s.enabled != nil && s.enabled() }
+
 // runAnalysisSweeper is the serve-side auto-analysis loop. After an
 // initial settle delay (let any startup scan land) and then on every
 // `interval` tick — or immediately on a `nudge` (the scanner's
@@ -349,61 +379,83 @@ var analysisSweeperSettleDelay = 90 * time.Second
 // nudge is a buffered-1 channel; senders use a non-blocking send so a
 // pending nudge coalesces with the next sweep. status (nil-safe)
 // records the sweep lifecycle for the admin Jobs surface.
-func runAnalysisSweeper(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir string, pool *analyze.Pool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
-	sweep := func() {
-		status.sweepStarted()
-		// counts stays nil on failure/cancel so sweepFinished keeps the
-		// previous successful breakdown (see sweepStatus.sweepFinished).
-		var counts *admin.AnalysisSweepCounts
-		defer func() { status.sweepFinished(counts) }()
-
-		res, err := collectAnalysisCandidates(ctx, store, resolver, outputDir, "", false)
-		if err != nil {
-			// A cancelled context here is a normal shutdown, not a fault —
-			// same suppression the fingerprint sweeper applies (Gemini on
-			// PR #619).
-			if ctx.Err() == nil {
-				logger.Warn("auto-analysis sweep: list tracks", "err", err)
-			}
+//
+// Same rule as runFingerprintSweeper: a disabled pass records NO status, so
+// the Jobs card keeps the last real breakdown instead of overwriting it with
+// an empty one.
+//
+// The dependencies travel as an analysisSweeper — the same shape
+// fingerprintSweeper and autoOptimizeSweeper already use in this package,
+// and what keeps this entry point inside the parameter budget.
+func runAnalysisSweeper(ctx context.Context, s *analysisSweeper, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.AnalysisSweepCounts]) {
+	runSweepLoop(ctx, status, analysisSweeperSettleDelay, interval, nudge, rearm, func() {
+		if !s.active() {
 			return
 		}
-		enqueued := 0
-		saturated := false
-	enqueueLoop:
-		for _, c := range res.candidates {
-			if ctx.Err() != nil {
-				return
-			}
-			switch err := pool.Enqueue(c); {
-			case err == nil:
-				enqueued++
-			case errors.Is(err, analyze.ErrQueueFull), errors.Is(err, analyze.ErrPoolClosed):
-				// Queue saturated (or shutting down) — leave the rest
-				// for the next tick rather than spinning.
-				saturated = true
-				break enqueueLoop
-			}
+		status.sweepStarted()
+		status.sweepFinished(s.sweep(ctx))
+	})
+}
+
+// sweep runs one pass: collect candidates, enqueue them, return the per-run
+// counts for the admin recorder — nil on failure or cancellation, so the
+// recorder keeps the last successful breakdown rather than replacing it with
+// an empty one.
+//
+// A method rather than a closure inside runAnalysisSweeper, matching
+// fingerprintSweeper.sweep. The loop is about WHEN a pass runs and this is
+// about what a pass DOES; keeping them in one function put both concerns past
+// the complexity ceiling and, more to the point, made the gate easy to miss
+// among the scheduling.
+func (s *analysisSweeper) sweep(ctx context.Context) *admin.AnalysisSweepCounts {
+	res, err := collectAnalysisCandidates(ctx, s.store, s.resolver, s.outputDir, "", false)
+	if err != nil {
+		// A cancelled context here is a normal shutdown, not a fault —
+		// same suppression the fingerprint sweeper applies (Gemini on
+		// PR #619).
+		if ctx.Err() == nil {
+			logger.Warn("auto-analysis sweep: list tracks", "err", err)
 		}
-		if enqueued > 0 {
-			if saturated {
-				logger.Info("auto-analysis sweep enqueued tracks (queue now full)", "count", enqueued)
-			} else {
-				logger.Info("auto-analysis sweep enqueued tracks", "count", enqueued)
-			}
-		}
-		counts = &admin.AnalysisSweepCounts{
-			Total:          res.total,
-			UpToDate:       res.skipped,
-			DSDExcluded:    res.dsdSkipped,
-			ZeroByte:       res.emptySkipped,
-			Missing:        res.missing,
-			Enqueued:       enqueued,
-			QueueSaturated: saturated,
+		return nil
+	}
+	enqueued, saturated, cancelled := s.enqueueAll(ctx, res.candidates)
+	if cancelled {
+		return nil
+	}
+	if enqueued > 0 {
+		if saturated {
+			logger.Info("auto-analysis sweep enqueued tracks (queue now full)", "count", enqueued)
+		} else {
+			logger.Info("auto-analysis sweep enqueued tracks", "count", enqueued)
 		}
 	}
+	return &admin.AnalysisSweepCounts{
+		Total:          res.total,
+		UpToDate:       res.skipped,
+		DSDExcluded:    res.dsdSkipped,
+		ZeroByte:       res.emptySkipped,
+		Missing:        res.missing,
+		Enqueued:       enqueued,
+		QueueSaturated: saturated,
+	}
+}
 
-	// Cadence (settle delay, one-drain semantics, tick-or-nudge) lives in
-	// the shared runSweepLoop — see its docstring for why the nudge is
-	// drained exactly once.
-	runSweepLoop(ctx, status, analysisSweeperSettleDelay, interval, nudge, rearm, sweep)
+// enqueueAll offers every candidate to the pool. `cancelled` reports a ctx
+// cancel mid-loop, which the caller turns into a nil count — a partial pass is
+// not a breakdown worth showing on the Jobs card.
+func (s *analysisSweeper) enqueueAll(ctx context.Context, candidates []analyze.AnalyzeSpec) (enqueued int, saturated, cancelled bool) {
+	for _, c := range candidates {
+		if ctx.Err() != nil {
+			return enqueued, saturated, true
+		}
+		switch err := s.pool.Enqueue(c); {
+		case err == nil:
+			enqueued++
+		case errors.Is(err, analyze.ErrQueueFull), errors.Is(err, analyze.ErrPoolClosed):
+			// Queue saturated (or shutting down) — leave the rest for the
+			// next tick rather than spinning.
+			return enqueued, true, false
+		}
+	}
+	return enqueued, saturated, false
 }
