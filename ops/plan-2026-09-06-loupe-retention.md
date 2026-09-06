@@ -728,6 +728,7 @@ silence as approval.
 | [#859](https://github.com/acoseac/1-bit-bridge/pull/859) | a ceiling on the two windows, and the two tests that pinned nothing | `54d4d99` |
 | [#860](https://github.com/acoseac/1-bit-bridge/pull/860) | the compaction reported numbers it could not support | `1adba6d` |
 | [#861](https://github.com/acoseac/1-bit-bridge/pull/861) | the retention control the console has been telling operators to use | `d33dab3` |
+| [#862](https://github.com/acoseac/1-bit-bridge/pull/862) | never cache a database snapshot a cancelled request produced | `f9c87a9` |
 
 All three merged with every CI leg green — including the **Windows** leg, which
 is where PR #860's probe fix would have shown up and where nothing had ever
@@ -740,6 +741,14 @@ inside the new test file. Two rounds of real de-duplication fixed it — a share
 shared `jsFunctionBody` for the two copies of the app.js window extraction. Both
 are improvements I would defend without the gate; the second is what took it
 green.
+
+**And the post-merge sweep found a defect this batch introduced.** CodeRabbit
+flagged, after #861 merged, that the new TTL caches a snapshot produced by a
+cancelled request — reintroducing the confident-wrong-answer class one layer
+below the place this batch fixed it. #862 skips the cache write on
+`ctx.Err() != nil`, and only then. Merging without waiting for bots was the
+user's call and the right one for throughput; the sweep afterwards is what
+makes it safe.
 
 **The same rule bit twice.** The `jsFunctionBody` refactor was written, tested,
 and then destroyed by the next control's `git checkout -- internal/` — the

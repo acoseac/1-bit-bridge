@@ -3916,6 +3916,19 @@ universe is `reflect.TypeOf(settingsPatch{})`, never `config.Config`.
   runtime is unchanged and is `busy_timeout(5000)` twice, once per checkpoint
   the held snapshot refuses — that wait is what reaches the busy branch, so it
   must not be "optimised" away.
+- **The post-merge sweep earned its keep, on a defect this batch INTRODUCED.**
+  CodeRabbit flagged, after #861 merged, that `databaseStats` caches a snapshot
+  produced by a cancelled request: both reads take the REQUEST's context, so a
+  browser navigating away mid-poll or an aborted bug-report download fails both
+  and yields `statsOK=false, countsOK=false` — cached for fifteen seconds and
+  answered to every healthy request in that window. That is exactly the
+  confident-wrong-answer shape the two availability flags exist to prevent,
+  reintroduced one layer down by the TTL that was meant to be cheap insurance.
+  Fixed in #862: skip the cache write when `ctx.Err() != nil`, and only then — a
+  genuine failure (a closed or broken store) still caches, because repeating a
+  doomed full table scan every 5 s helps nobody. **The distinction is whether the
+  failure was about the DATABASE or about the REQUEST**, and it is worth carrying
+  to any other TTL that takes a request context.
 - **Gemini hit its DAILY QUOTA on the first PR**, so no PR in this batch got a
   Gemini review. CodeRabbit reviewed #859; SonarCloud and CodeQL passed. Recorded
   rather than implied, per the rule that a rate-limited bot's silence is not

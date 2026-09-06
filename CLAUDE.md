@@ -971,6 +971,15 @@ what it claimed**, and none of it had a failing test.
   count into a full SCAN: **1.0 ms at 18k rows, 9.0 ms at 90k, 39.6 ms at 500k**
   (the three PRAGMAs are 7–12 µs and genuinely free). That block sits behind
   `databaseStatsTTL`, invalidated after a compaction.
+- **A TTL that takes a REQUEST context must not cache what a cancelled request
+  produced.** Both diagnostics reads take `r.Context()`, so a browser navigating
+  away mid-poll — or an aborted bug-report download — fails them and yields an
+  "unavailable" snapshot, which the cache then answers to every healthy request
+  for the next fifteen seconds. Skip the write on `ctx.Err() != nil` and ONLY
+  then: a genuine failure still caches, because repeating a doomed full table
+  scan every 5 s helps nobody. The distinction is whether the failure was about
+  the DATABASE or about the REQUEST. This one was introduced by the very batch
+  that fixed the confident-wrong-answer class, one layer down.
 - **Every availability flag needs a test in the FALSE direction.**
   `RetentionCountsAvailable` was only ever asserted true, so hoisting it out of
   its `err == nil` branch left every test green while the field's entire reason
