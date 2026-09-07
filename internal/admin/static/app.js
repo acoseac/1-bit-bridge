@@ -3945,6 +3945,9 @@ function initSettings() {
       // restart-required — the sweeper reads the flag live and the PATCH
       // nudges it, so an off→on flip starts work immediately.
       autoOptimizeEnabled: fd.get("autoOptimizeEnabled") === "on",
+      // DSD → PCM renditions. NOT restart-required — every DSD gate reads
+      // the caps live and the PATCH nudges the sweeper.
+      dsdRenderEnabled: fd.get("dsdRenderEnabled") === "on",
       // fsnotify library watcher opt-in. Restart-required — the
       // watcher goroutine starts at `bridge serve` startup.
       libraryWatchEnabled: fd.get("libraryWatchEnabled") === "on",
@@ -4446,14 +4449,40 @@ function renderWorkerGrid(r) {
 // don't vary; if the phase/guard ever becomes per-job, promote them to
 // ActiveJob fields so the label can't drift from the actual command.
 function signalChain(w) {
-  const src = fmtRate(w.sourceSampleRate) + (w.sourceBits ? `/${w.sourceBits}-bit` : "");
+  // A DSD source is named by its DSD multiple (DSD64 / DSD128 …), not as a
+  // 2822.4 kHz PCM rate — the nominal rate is the 1-bit stream's.
+  const src = (w.sourceIsDSD ? fmtDSD(w.sourceSampleRate) : fmtRate(w.sourceSampleRate)) +
+    (w.sourceBits && !w.sourceIsDSD ? `/${w.sourceBits}-bit` : "");
   const tgt = fmtRate(w.targetSampleRate) + (w.targetBits ? `/${w.targetBits}-bit` : "");
-  const kind = w.kind === "optimize" ? "Optimize" : "Upscale";
+  const kind = w.kind === "optimize" ? (w.sourceIsDSD ? "Optimize (DSD → PCM)" : "Optimize")
+    : w.kind === "pcm" ? "PCM render (DSD → PCM)" : "Upscale";
   const q = w.quality ? ` · SoX ${w.quality}` : "";
   // Gate the DSP labels on the same signal (a real sox conversion) that
   // gates the quality preset, so a placeholder/idle row stays terse.
   const dsp = w.quality ? " · linear phase · clip-guarded" : "";
   return `${kind}: ${src} ➔ ${tgt}${q}${dsp}`;
+}
+
+// fmtDSD names a nominal DSD rate by its multiple of 44.1 kHz ("DSD64"),
+// or of 48 kHz for that family ("DSD64 (48k)"); an off-family rate falls
+// back to the raw MHz figure so nothing is invented.
+function fmtDSD(hz) {
+  if (!hz) return "DSD";
+  if (hz % 44100 === 0) return `DSD${hz / 44100}`;
+  if (hz % 48000 === 0) return `DSD${hz / 48000} (48k)`;
+  return `DSD ${(hz / 1e6).toFixed(3)} MHz`;
+}
+
+// batchTargetLabel renders a Jobs-page batch row's target: an upscale
+// carries a literal rate; the per-track kinds carry TargetRate 0 (the
+// documented "family-preserved" sentinel) and are named by kind instead.
+// `kind` is empty on pre-v43 rows, whose optimize batches carry the
+// (0, 16) sentinel — derived here so the old rows read right too.
+function batchTargetLabel(r) {
+  const kind = r.kind || (r.targetRate === 0 && r.targetBits === 16 ? "optimize" : "upscale");
+  if (kind === "optimize") return "CarPlay-optimized · 16-bit · family rate";
+  if (kind === "pcm") return "DSD → PCM · 24-bit · 4× family rate";
+  return `${(r.targetRate / 1000).toFixed(1)} kHz · ${r.targetBits}-bit`;
 }
 
 function fmtRate(hz) {
@@ -4931,6 +4960,13 @@ function mountJobTrays() {
         hint: "Applies immediately. Spends disk and CPU on tracks nobody has " +
           "asked for yet, newest first, and stops before the variants volume fills.",
       },
+      {
+        field: "dsdRenderEnabled", type: "switch",
+        label: "DSD → PCM renditions",
+        hint: "Lets the sweep render DSD tracks to a compact PCM copy too (and the app " +
+          "request a faithful one). Applies immediately; needs ffmpeg with the DSD " +
+          "decoders on this host.",
+      },
     ],
     link: { href: "/settings?tab=audio", text: "Audio settings →" },
   });
@@ -5360,7 +5396,7 @@ function jobsRender(payload) {
     // `r.updatedAt` is RFC 3339 (server-side time.Time JSON
     // marshalling). `new Date(string)` parses it safely.
     const updated = new Date(r.updatedAt).toLocaleString();
-    const target = `${(r.targetRate / 1000).toFixed(1)} kHz · ${r.targetBits}-bit`;
+    const target = batchTargetLabel(r);
     tr.innerHTML = `
       <td data-label="Status"><span class="status status-${r.status}">${r.status}</span></td>
       <td data-label="Scope"><code>${escapeHTML(scopeLabel)}</code></td>

@@ -24,6 +24,7 @@ import (
 type stubBatchCoordinator struct {
 	submits   int
 	optimizes int
+	pcms      int
 }
 
 const (
@@ -52,6 +53,11 @@ func (s *stubBatchCoordinator) Submit(ctx context.Context, p string, rate, bits 
 
 func (s *stubBatchCoordinator) SubmitOptimize(ctx context.Context, p string) (BatchSubmitResult, error) {
 	s.optimizes++
+	return BatchSubmitResult{BatchID: "b", Path: p}, nil
+}
+
+func (s *stubBatchCoordinator) SubmitPCMRender(ctx context.Context, p string) (BatchSubmitResult, error) {
+	s.pcms++
 	return BatchSubmitResult{BatchID: "b", Path: p}, nil
 }
 

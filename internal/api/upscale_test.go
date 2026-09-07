@@ -23,6 +23,7 @@ import (
 type stubEnqueuer struct {
 	calls         []string
 	optimizeCalls []string
+	pcmCalls      []string
 	resultByRel   map[string]error // optional override per-rel; default nil = success
 	defaultErr    error            // applied to any rel not in resultByRel
 }
@@ -47,11 +48,27 @@ func (s *stubEnqueuer) EnqueueOptimize(libraryRelativePath string) error {
 	return s.defaultErr
 }
 
+func (s *stubEnqueuer) EnqueuePCMRender(libraryRelativePath string) error {
+	s.pcmCalls = append(s.pcmCalls, libraryRelativePath)
+	if err, ok := s.resultByRel[libraryRelativePath]; ok {
+		return err
+	}
+	return s.defaultErr
+}
+
 // upscaleFixture stands up a small library tree + the api server
 // wired with a stub enqueuer. Returns the live test server, a
 // valid bearer token, the library root, and the stub for per-test
 // configuration.
 func upscaleFixture(t *testing.T, withEnqueuer bool) (*httptest.Server, string, string, *stubEnqueuer) {
+	t.Helper()
+	return upscaleFixtureOpts(t, withEnqueuer, true)
+}
+
+// upscaleFixtureOpts is upscaleFixture with the DSD-render predicate
+// explicit, so a test can express "wired but the renditions are OFF" —
+// the state the `pcm` kind's 503 gate exists for.
+func upscaleFixtureOpts(t *testing.T, withEnqueuer, dsdRender bool) (*httptest.Server, string, string, *stubEnqueuer) {
 	t.Helper()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
@@ -83,7 +100,8 @@ func upscaleFixture(t *testing.T, withEnqueuer bool) (*httptest.Server, string, 
 		// missing gate — see TestUpscaleRefusedWhenFeatureInactive.
 		srv = srv.WithUpscaleEnqueuer(stub).
 			WithUpscale(func() bool { return true }, nil).
-			WithCarPlayOptimize(func() bool { return true })
+			WithCarPlayOptimize(func() bool { return true }).
+			WithDSDRender(func() bool { return dsdRender })
 	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)

@@ -150,6 +150,7 @@ Classes describe *how the value is consumed*, not how important it is.
 | `analysisEnabled` | **A** | `live` (+reason when sox is unusable) | Same shape as upscale. |
 | `smartPlaylistsEnabled` | **A** | `live` | Store wired unconditionally; the health flag and the endpoint both key off one `smartPlaylistsActive()`. The regenerator is started unconditionally and gated per run. |
 | `optimizeEnabled` | **A** | `live` | Health advertisement, admin projection gate and pre-generation sweeper all read it live. The sweeper is wired unconditionally within an active upscale pool. |
+| `dsdRenderEnabled` | **A** | `live` (+reason when ffmpeg lacks the DSD decoders) | Every DSD gate — the `dsdRender` health flag, the `pcm` kind, the enqueuer, the coordinator walks, the sweeper's candidate query and the admin coverage mirrors — reads one live caps closure (the flag ∧ the cached ffmpeg probe). A flip also nudges the auto-optimize sweeper. A restart would not install ffmpeg, so `live` + reason is the honest answer when the toolchain is missing. |
 | `libraryWatchEnabled` | C | `restart` | fsnotify watcher with a `scanWG` / `closing` drain contract guarding a SQLite-corruption vector. |
 | `enrichMusicBrainzBaseURL` | **A** | `live` | Read per use, and the politeness pacing **re-derives from the same live value** — see below. |
 | `enrichCoverArtBaseURL` | **A** | `live` | As above. |

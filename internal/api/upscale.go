@@ -37,10 +37,12 @@ import (
 //     stat fails; handler counts as "rejected" with a clear
 //     log line. Not a 5xx because a missing source is a
 //     scanner-reconciliation issue, not a server fault.
-//   - `ErrUpscaleIneligible` (typed): the source is DSD,
-//     already at/above target rate, or already has a fresh
-//     sidecar. Counted as "rejected" silently — the user
-//     can't take action.
+//   - `ErrUpscaleIneligible` (typed): the source fails the
+//     kind's gate (a DSD source for `upscale`, or for
+//     `optimize` / `pcm` while the DSD-render caps are off; a
+//     non-DSD source for `pcm`; already at/above target rate;
+//     a fresh sidecar already cached). Counted as "rejected"
+//     silently — the user can't take action.
 //   - any other error: treated as a server fault; the handler
 //     logs and counts as rejected.
 type UpscaleEnqueuer interface {
@@ -55,6 +57,14 @@ type UpscaleEnqueuer interface {
 	// handler can route on `UpscaleRequest.Kind` without a
 	// downcast / capability probe.
 	EnqueueOptimize(libraryRelativePath string) error
+
+	// EnqueuePCMRender is the faithful DSD → PCM rendition
+	// (`pcm-v1-<176400|192000>-24`): a DSD source decimated once on
+	// the bridge for a wired DAC that cannot take the file's DSD rate.
+	// Same error taxonomy; a non-DSD source is ErrUpscaleIneligible.
+	// Always-present on the interface for the same routing reason as
+	// EnqueueOptimize — the kind gate (dsdRender) runs in the handler.
+	EnqueuePCMRender(libraryRelativePath string) error
 }
 
 // redactWalkErr returns walkErr's message with the absolute host
@@ -232,9 +242,20 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled, errMsgUpscalingNotEnabled)
 			return
 		}
+	case "pcm":
+		// The faithful DSD → PCM rendition. Gated on the SAME live
+		// predicate the `dsdRender` health flag reads, BEFORE path
+		// resolution: a client asking for a kind this bridge does not
+		// advertise gets 503, never a 404 that leaks whether the path
+		// exists, and never a folder walk it is about to be refused.
+		if !s.dsdRenderActive() {
+			logger.Warn("pcm render request refused: DSD → PCM renditions are not active")
+			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled, errMsgUpscalingNotEnabled)
+			return
+		}
 	default:
 		writeError(w, http.StatusBadRequest, "bad_request",
-			"unknown kind: "+req.Kind+` (expected "upscale" or "optimize")`)
+			"unknown kind: "+req.Kind+` (expected "upscale", "optimize" or "pcm")`)
 		return
 	}
 
@@ -326,9 +347,12 @@ func (s *Server) upscaleRequest(w http.ResponseWriter, r *http.Request) {
 	queueFull := false
 	for _, c := range candidates {
 		var err error
-		if kind == "optimize" {
+		switch kind {
+		case "optimize":
 			err = s.upscaleEnqueuer.EnqueueOptimize(c)
-		} else {
+		case "pcm":
+			err = s.upscaleEnqueuer.EnqueuePCMRender(c)
+		default:
 			err = s.upscaleEnqueuer.EnqueueOne(c)
 		}
 		switch {

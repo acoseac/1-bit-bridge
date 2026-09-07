@@ -270,7 +270,13 @@ CarPlay-optimize**, **audio-analysis** (waveform, loudness,
 key/tempo), and **acoustic fingerprinting** features work inside the
 container. All are **off by default** and cost nothing until enabled. Bundling `ffmpeg` pushes the
 image to roughly **260 MB** (it dominates the size) — the deliberate
-trade for in-container audio processing.
+trade for in-container audio processing. The same `ffmpeg` decodes the
+**DSD → PCM renditions** (`upscale.dsdRender.enabled`, off by default):
+the image build asserts that its ffmpeg carries the `dsd_lsbf_planar`
+and `dst` decoders, so a base-image change that dropped them fails the
+build rather than the first render. Point `upscale.tempDir` at a local
+volume if the variants directory is network-mounted — render scratch
+(up to ~5 GB for an hour-long faithful render) must never land there.
 
 > There's no on-the-fly transcoding: the bridge pre-converts to FLAC
 > sidecars offline and serves them bit-exact, the same as any other

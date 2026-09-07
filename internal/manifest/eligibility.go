@@ -37,8 +37,11 @@ import (
 // optimizeEligibleSQL mirrors transcode.OptimizeEligible exactly:
 // lossless-PCM allowlist (with the legacy extension fallback for
 // codec-empty rows) AND above the CarPlay floor (rate > 48000 OR
-// bits > 16). DSD needs no explicit arm — DSF/DFF codecs fail the
-// allowlist, and codec-empty DSD files don't carry PCM extensions.
+// bits > 16). DSD needs no explicit arm HERE — DSF/DFF codecs fail the
+// allowlist, and codec-empty DSD files don't carry PCM extensions; the
+// DSD compact tier is the sibling dsdRenderEligibleSQL, composed under
+// EligibilityOpts.DSDRender exactly as transcode.OptimizeEligibleFor
+// composes the Go halves (PR #863).
 // SQLite LIKE is ASCII-case-insensitive, matching the Go ToLower ext
 // compare.
 //

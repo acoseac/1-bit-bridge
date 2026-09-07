@@ -155,11 +155,11 @@ func parseVariantDeleteRequest(q map[string][]string) (req AdminVariantDeleteReq
 	// valid kind or accept an unknown one.
 	kind := strings.ToLower(strings.TrimSpace(get("kind")))
 	switch kind {
-	case "", "upscale", "optimize":
+	case "", "upscale", "optimize", "pcm":
 		req.Kind = kind
 	default:
 		return req, "bad_request",
-			`unknown kind: ` + kind + ` (expected "upscale" or "optimize")`
+			`unknown kind: ` + kind + ` (expected "upscale", "optimize" or "pcm")`
 	}
 
 	if code, msg := checkDeleteShapeExclusive(q, hasPrefix, hasPath, hasIdentity); code != "" {

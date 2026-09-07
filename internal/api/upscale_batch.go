@@ -43,12 +43,15 @@ const (
 //
 // `Submit` enrolls a path into a new batch; `SubmitOptimize` is the
 // kind="optimize" sibling (CarPlay-optimized 16-bit family-preserving
-// FLAC, target auto-derived per-track); `Cancel` flips an existing
-// batch's status; `ListBatches` returns recent history for the admin
-// Jobs page.
+// FLAC, target auto-derived per-track); `SubmitPCMRender` is the
+// kind="pcm" sibling (the faithful DSD → PCM rendition, 24-bit at the
+// family's 4× base rate — DSD sources only, the rest of a mixed folder
+// is SKIPPED, not refused); `Cancel` flips an existing batch's status;
+// `ListBatches` returns recent history for the admin Jobs page.
 type BatchCoordinator interface {
 	Submit(ctx context.Context, libraryRelPath string, targetRate, targetBits int) (BatchSubmitResult, error)
 	SubmitOptimize(ctx context.Context, libraryRelPath string) (BatchSubmitResult, error)
+	SubmitPCMRender(ctx context.Context, libraryRelPath string) (BatchSubmitResult, error)
 	Cancel(id uuid.UUID) error
 	ListBatches(limit int) ([]BatchRow, error)
 	Throughput() BatchThroughput
@@ -87,6 +90,12 @@ type BatchRow struct {
 	Error          string `json:"error,omitempty"`
 	CreatedAt      int64  `json:"createdAt"`
 	UpdatedAt      int64  `json:"updatedAt"`
+	// Kind is the batch's job kind — "upscale", "optimize" or "pcm" —
+	// as recorded at submit (migration v43). Empty on rows written
+	// before the column existed; a reader wanting a kind for those can
+	// derive it from the (TargetRate == 0, TargetBits == 16) optimize
+	// sentinel the pre-v43 batches carry.
+	Kind string `json:"kind,omitempty"`
 }
 
 // BatchThroughput carries the rolling-average derived values the
@@ -252,9 +261,17 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 		res, err = s.batchCoordinator.Submit(r.Context(), libraryRel, req.TargetRate, req.TargetBits)
 	case "optimize":
 		res, err = s.batchCoordinator.SubmitOptimize(r.Context(), libraryRel)
+	case "pcm":
+		// Same gate as POST /v1/upscale's `pcm` arm: refuse BEFORE the
+		// coordinator walks anything, with the kind's own 503.
+		if !s.dsdRenderActive() {
+			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled, errMsgUpscalingNotEnabled)
+			return
+		}
+		res, err = s.batchCoordinator.SubmitPCMRender(r.Context(), libraryRel)
 	default:
 		writeError(w, http.StatusBadRequest, "bad_request",
-			`unknown kind: `+req.Kind+` (expected "upscale" or "optimize")`)
+			`unknown kind: `+req.Kind+` (expected "upscale", "optimize" or "pcm")`)
 		return
 	}
 	if err != nil {

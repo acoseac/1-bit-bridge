@@ -357,6 +357,7 @@ func currentValuesForEveryPatchField(t *testing.T, cfg *config.Config) map[strin
 		"smartPlaylistsEnabled":    cfg.SmartPlaylists.EffectiveEnabled(),
 		"optimizeEnabled":          cfg.Upscale.EffectiveOptimizeEnabled(),
 		"autoOptimizeEnabled":      cfg.Upscale.AutoOptimize.Enabled,
+		"dsdRenderEnabled":         cfg.Upscale.DSDRender.Enabled,
 		"libraryWatchEnabled":      cfg.LibraryWatch.Enabled,
 		"enrichMusicBrainzBaseURL": cfg.Enrich.MusicBrainzBaseURL,
 		"enrichCoverArtBaseURL":    cfg.Enrich.CoverArtBaseURL,
@@ -528,7 +529,7 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 	// and optimizeEnabled, which default ON.
 	case "libraryWatchEnabled", "atlasEnabled", "analysisEnabled",
 		"fingerprintEnabled", "upscaleEnabled", "autoOptimizeEnabled",
-		"updateAutoInstall", "dlnaEnabled":
+		"dsdRenderEnabled", "updateAutoInstall", "dlnaEnabled":
 		return true, true
 	case "smartPlaylistsEnabled", "optimizeEnabled":
 		return false, true

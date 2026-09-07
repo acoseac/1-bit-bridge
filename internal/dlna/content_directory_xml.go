@@ -313,13 +313,23 @@ func orderedVariants(vs []VariantInfo) []VariantInfo {
 			out = append(out, v)
 		}
 	}
+	// The DSD faithful tier sits between the compact copies and the
+	// upscales: a renderer that cannot decode DSD (the Chord 2Go's DFF
+	// case) gets a working PCM <res> before the (bigger) upscale ones,
+	// and a renderer that CAN still sees the source first.
+	for _, v := range vs {
+		if strings.HasPrefix(v.VariantID, "pcm-") {
+			out = append(out, v)
+		}
+	}
 	for _, v := range vs {
 		if strings.HasPrefix(v.VariantID, "upscaled") {
 			out = append(out, v)
 		}
 	}
 	for _, v := range vs {
-		if !strings.HasPrefix(v.VariantID, "optimized") && !strings.HasPrefix(v.VariantID, "upscaled") {
+		if !strings.HasPrefix(v.VariantID, "optimized") && !strings.HasPrefix(v.VariantID, "upscaled") &&
+			!strings.HasPrefix(v.VariantID, "pcm-") {
 			out = append(out, v)
 		}
 	}

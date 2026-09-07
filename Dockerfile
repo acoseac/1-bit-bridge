@@ -117,6 +117,11 @@ FROM alpine:${ALPINE_VERSION}
 # this — but the in-image baseline must be writable for fresh
 # `docker run -v 1-bit-bridge-state:/data` deployments to work.
 RUN apk add --no-cache ca-certificates tzdata sox ffmpeg chromaprint lsof && \
+    # The DSD → PCM renditions need ffmpeg's DSD decoders (and `dst` for
+    # DST-compressed DSDIFF). Assert at build time so a base-image change
+    # that drops them fails HERE, not at the first render in the field.
+    ffmpeg -hide_banner -decoders | grep -qE '^ *[A-Z.]{6} +dsd_lsbf_planar ' && \
+    ffmpeg -hide_banner -decoders | grep -qE '^ *[A-Z.]{6} +dst ' && \
     addgroup -S bridge && \
     adduser -S -G bridge bridge && \
     mkdir -p /data && \

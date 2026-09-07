@@ -226,6 +226,24 @@ type settingsResponse struct {
 	// NOT set restartRequired.
 	AutoOptimizeEnabled bool `json:"autoOptimizeEnabled"`
 
+	// DSDRenderEnabled is the DSD → PCM rendition gate
+	// (`upscale.dsdRender.enabled`): DSD sources join the optimize kind
+	// (the compact `optimized-dsd-*` tier, and therefore the pre-generation
+	// sweep) and the `pcm` kind exists. Hot-applying — every DSD gate reads
+	// the caps live — so a flip does NOT set restartRequired; whether
+	// anything RENDERS depends on ffmpeg carrying the dsd_* decoders,
+	// which the PATCH report's reason and the two fields below say.
+	DSDRenderEnabled bool `json:"dsdRenderEnabled"`
+	// DSDRenderFFmpegOK is the doctor's toolchain verdict for the
+	// renditions (ffmpeg on PATH with all four dsd_* decoders); nil when
+	// the verdict isn't wired (test harnesses).
+	DSDRenderFFmpegOK *bool `json:"dsdRenderFFmpegOK,omitempty"`
+	// DSDRenderFFmpegMissing / DSDRenderFFmpegHint are the template-only
+	// conveniences (the UpscaleSoxMissing shape): true iff the verdict is
+	// wired AND negative, with the bounded reason to show under the switch.
+	DSDRenderFFmpegMissing bool   `json:"-"`
+	DSDRenderFFmpegHint    string `json:"-"`
+
 	// UploadEnabled gates the console's file-upload surface. Default OFF —
 	// it is an open WRITE endpoint, so it holds the same line as every other
 	// feature that commits an operator to something. Deleting content is a
@@ -1887,6 +1905,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		SmartPlaylistsEnabled:    cfg.SmartPlaylists.EffectiveEnabled(),
 		OptimizeEnabled:          cfg.Upscale.EffectiveOptimizeEnabled(),
 		AutoOptimizeEnabled:      cfg.Upscale.AutoOptimize.Enabled,
+		DSDRenderEnabled:         cfg.Upscale.DSDRender.Enabled,
 		UploadEnabled:            cfg.Upload.Enabled,
 		AllowDelete:              cfg.Library.AllowDelete,
 		AutoOptimizeMaxPerSweep:  cfg.Upscale.AutoOptimize.EffectiveMaxPerSweep(),
@@ -2037,6 +2056,11 @@ type settingsPatch struct {
 	// Restart-required: the optimize closures + health advertisement
 	// are resolved once at `bridge serve` startup.
 	OptimizeEnabled *bool `json:"optimizeEnabled,omitempty"`
+	// DSDRenderEnabled is `upscale.dsdRender.enabled` (default OFF). Live:
+	// every DSD gate reads the caps per call; the flip nudges the
+	// auto-optimize sweeper so a newly-admitted DSD library starts
+	// rendering without waiting for the next tick.
+	DSDRenderEnabled *bool `json:"dsdRenderEnabled,omitempty"`
 
 	// AutoOptimizeEnabled toggles background pre-generation of CarPlay
 	// variants. HOT-APPLYING (no restartRequired): the sweeper reads the
@@ -2187,6 +2211,12 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// autoOptimizeFlipped: the pre-generation gate changed value.
 		// Hot-applies via a sweeper nudge instead of restartRequired.
 		autoOptimizeFlipped bool
+		// dsdRenderFlipped: the DSD → PCM rendition gate changed value
+		// (nudges the same sweeper — a newly-admitted DSD library should
+		// start rendering now, not at the next tick). dsdRenderOn: it was
+		// switched ON, so the toolchain verdict below applies.
+		dsdRenderFlipped bool
+		dsdRenderOn      bool
 	)
 	updateErr := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
 		if p.LibraryName != nil {
@@ -2394,6 +2424,23 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				report.live("optimizeEnabled")
 			} else {
 				report.unchanged("optimizeEnabled")
+			}
+		}
+		if p.DSDRenderEnabled != nil {
+			if *p.DSDRenderEnabled != next.Upscale.DSDRender.Enabled {
+				next.Upscale.DSDRender.Enabled = *p.DSDRenderEnabled
+				// HOT: the health flag, the `pcm` kind gate, the enqueuer,
+				// the coordinator walks and the sweeper all read the caps
+				// live (dsdRenderCapsFn). A flip ON is also a nudge — the
+				// sweeper's candidate query admits the DSD library from
+				// the next sweep, and the operator who just turned it on
+				// should not have to wait for the tick to see the Jobs
+				// card move (the autoOptimizeEnabled precedent).
+				dsdRenderFlipped = true
+				dsdRenderOn = *p.DSDRenderEnabled
+				report.live("dsdRenderEnabled")
+			} else {
+				report.unchanged("dsdRenderEnabled")
 			}
 		}
 		if p.AllowDelete != nil {
@@ -2758,12 +2805,20 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// The renditions' toolchain verdict, the same shape as the sox one
+	// above: the setting applied, but nothing renders without ffmpeg's
+	// dsd_* decoders, and a restart would not install them.
+	if dsdRenderOn && s.deps.DSDRenderToolchain != nil {
+		if ok, why := s.deps.DSDRenderToolchain(); !ok && why != "" {
+			report.set("dsdRenderEnabled", applyLive, "saved, but "+why+", so no DSD track will be rendered")
+		}
+	}
 	// Nudge on BOTH directions of the auto-optimize flip. On→off matters
 	// as much as off→on: the sweeper re-reads the flag and records a
 	// disabled sweep, so the Jobs card reflects the operator's change
 	// immediately instead of showing frozen numbers from the last real
 	// run until the next tick (which can be hours away).
-	if autoOptimizeFlipped && s.deps.TriggerAutoOptimizeSweep != nil {
+	if (autoOptimizeFlipped || dsdRenderFlipped) && s.deps.TriggerAutoOptimizeSweep != nil {
 		s.deps.TriggerAutoOptimizeSweep()
 	}
 

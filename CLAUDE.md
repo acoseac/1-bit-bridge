@@ -70,7 +70,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 
 **Don't regress these cross-cutting invariants:**
 
-- **No server-side transcoding, ever.** 1-bit is bit-exact by mission. `/v1/download` serves the file as-is via `http.ServeContent`; never introduce a transcoding path.
+- **No server-side transcoding, ever.** 1-bit is bit-exact by mission. `/v1/download` serves the file as-is via `http.ServeContent`; never introduce a transcoding path. Renditions — the `upscaled-` / `optimized-` PCM families and, since PR #863, the DSD `optimized-dsd-` / `pcm-` tiers — are OFFLINE sidecar files built by the job pool and served through `serveVariant`, i.e. the same `http.ServeContent` over a file that already exists; the rule is about the serving path, and a rendition never substitutes for the bit-exact source when the client asked for the source.
 - **Rate limits respect the services.** MB anon is 1 req/s (we pace at 1.1s); CAA is IA-infrastructure and polite at 500ms; Deezer is ~50 req/5s (we pace at 120ms). User-Agent identifies the app + GitHub URL per MB's TOS.
 - **TLS fingerprint is captured once.** The iOS pin is set during pairing via first-contact; rotating the server cert requires re-pairing. Don't mint a new cert on every `serve` run — `LoadOrGenerate` is sticky by design.
 - **`enriched_at` monotonicity.** Upsert resets to 0 on track change so the enricher re-runs; the enricher marks it to `time.Now().UnixNano()` on completion (success or skipped). The other sanctioned writers are a CLOSED SET of four — `ResetEnrichedMisses`, `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix` and `ResetEnrichedByPaths` (the first two behind POST /api/enrichment/retry since PR #495, scoped to enriched-but-incomplete rows so a full MB/CAA re-crawl is never triggered; the last is the fingerprint sweeper's explicit-path form). All four are live callers — this bullet listed only two until 2026-09-06, so an audit against it would have flagged two sanctioned writers as violations. Never touch it anywhere else — the query `WHERE enriched_at = 0` drives the worker.
@@ -659,9 +659,11 @@ no failing test — which is the shape to expect in this area.
   `0xFFFFFFFF`, and sox then prints `WARN wav: Premature EOF` on EVERY successful
   job — noise, and indistinguishable from the real truncation this guards. The
   fallback is an **allowlist of the MP4 family, not "anything sox refused"**:
-  lossy and DSD are already excluded upstream, so anything else reaching a
-  refusal is a shape neither decoder was chosen for, and routing it would turn an
-  honest refusal into a mystery failure. **The probe is gated on the extension**
+  lossy is excluded upstream and DSD takes its OWN route (`routeFFmpegDSDPipe`,
+  granted only by the fail-closed decoder probe — PR #863; this sentence read
+  "lossy and DSD are already excluded upstream" until then), so anything else
+  reaching a refusal is a shape neither decoder was chosen for, and routing it
+  would turn an honest refusal into a mystery failure. **The probe is gated on the extension**
   — `ProbeSox` is a fork+exec (7.9 ms; `FFmpegAvailable` is 17 µs) and `RunSox`
   documents that it does not probe per iteration, so only a source whose decoder
   is genuinely undecided pays one. `RunSox` returns the settings it actually
@@ -700,7 +702,9 @@ no failing test — which is the shape to expect in this area.
 - **`SetPostScanHook` REPLACES.** Append to `postScanNudges` and register one
   fan-out hook; a second registration silently unhooks the previous sweeper.
 - **No server-side transcoding, ever.** Conversion is offline; `/v1/download`
-  serves bit-exact via `http.ServeContent`.
+  serves bit-exact via `http.ServeContent`. The DSD → PCM renditions (PR #863)
+  are conversion in exactly that sense — a sidecar the job pool built earlier,
+  served as a file — never a decode in the request path.
 
 ### DLNA, UPnP and discovery
 

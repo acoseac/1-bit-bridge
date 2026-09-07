@@ -132,6 +132,7 @@ type Server struct {
 	inflightDropper        InflightDropper              // nil unless WithInflightDropper wired (transcode pool dedup)
 	upscaleEnabled         func() bool                  // LIVE; mirrors cfg.Upscale.Enabled AND the sox probe
 	carPlayOptimizeEnabled func() bool                  // LIVE predicate; gated AND-wise on upscaleEnabled by the wiring layer
+	dsdRenderEnabled       func() bool                  // LIVE predicate: the DSD-render caps (operator flag ∧ ffmpeg decoders), gated AND-wise on upscaleEnabled by the wiring layer
 	dlnaEnabled            bool                         // mirrors cfg.DLNA.Enabled AND shouldEnableDLNA(...) — opt-in LAN-only DLNA MediaServer
 	rendererDiscovery      RendererDiscoverySnapshotter // nil unless WithRendererDiscovery wired — opt-in SSDP MediaRenderer cache for /v1/renderers
 	upscaleEnqueuer        UpscaleEnqueuer              // nil unless WithUpscaleEnqueuer wired (Phase 2.5)
@@ -733,6 +734,27 @@ func (s *Server) WithAnalysisStats(p AnalysisStatsProvider) *Server {
 func (s *Server) WithCarPlayOptimize(enabled func() bool) *Server {
 	s.carPlayOptimizeEnabled = enabled
 	return s
+}
+
+// WithDSDRender wires the `dsdRender` health flag and the gate on the
+// `pcm` kind of POST /v1/upscale: the DSD → PCM renditions. Takes a
+// PREDICATE for the same reason WithCarPlayOptimize does — the operator
+// flag hot-applies and the ffmpeg capability behind it is a 30 s-cached
+// probe, so a captured bool would advertise a capability the bridge no
+// longer has (or hide one it just gained) until a restart. The wiring
+// layer folds `upscale.dsdRender.enabled` with the probe's HasDSD, so
+// this predicate is the SAME answer every DSD gate on the bridge gives
+// (transcode.DSDRenderCaps.Active). Nil reads as off.
+func (s *Server) WithDSDRender(enabled func() bool) *Server {
+	s.dsdRenderEnabled = enabled
+	return s
+}
+
+// dsdRenderActive is the one predicate the health flag and the `pcm`
+// kind gate share, so the two cannot disagree (the smartPlaylistsActive
+// shape). Off unless upscaling is active AND the caps say so.
+func (s *Server) dsdRenderActive() bool {
+	return s.upscaleActive() && s.dsdRenderEnabled != nil && s.dsdRenderEnabled()
 }
 
 // WithDLNA toggles the `dlnaServer` advertisement in
@@ -1661,19 +1683,19 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 26 covers the current maximum
+	// appends in lex order. Capacity 27 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
-	// demoMode + diagnosticsSummary + dlnaServer + favorites + keyTempo +
-	// loudness + lyrics + operatorDrivenUpscale + pairingEventsSupported +
-	// playbackHistory + playbackHistoryRead + playlistBackup +
-	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
-	// search + smartPlaylists + spectrum + trackQuality +
-	// upscaleCompleteEvents + variantBumpsIndex + waveform).
+	// demoMode + diagnosticsSummary + dlnaServer + dsdRender + favorites +
+	// keyTempo + loudness + lyrics + operatorDrivenUpscale +
+	// pairingEventsSupported + playbackHistory + playbackHistoryRead +
+	// playlistBackup + playlistsCrossDevice + pushEventsSupported +
+	// rendererDiscovery + search + smartPlaylists + spectrum +
+	// trackQuality + upscaleCompleteEvents + variantBumpsIndex + waveform).
 	// `trackQuality` was missing from this enumeration — and so from the
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 26)
+	feats := make([]string, 0, 27)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1721,6 +1743,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// to start in public deployment mode regardless of this flag.
 	if s.dlnaEnabled {
 		feats = append(feats, "dlnaServer")
+	}
+	// `dsdRender` advertises the DSD → PCM renditions: `POST /v1/upscale`
+	// accepts DSD sources for `kind: "optimize"` (the compact
+	// `optimized-dsd-*` tier) and the `kind: "pcm"` faithful tier, and
+	// the manifest's `Track.variants` may carry `appliedGainDB`. Gated on
+	// the same live predicate the kind gate uses (upscale active AND the
+	// operator flag AND ffmpeg with the dsd_* decoders), so a client never
+	// sees the flag on a bridge that would answer 503. Alpha-sorts between
+	// `dlnaServer` and `favorites` (dl < ds < f).
+	if s.dsdRenderActive() {
+		feats = append(feats, "dsdRender")
 	}
 	// `favorites` advertises GET/PUT /v1/favorites (the user-wide track +
 	// album favorites backup singleton). Gated on the store being wired so

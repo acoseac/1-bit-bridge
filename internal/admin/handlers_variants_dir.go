@@ -198,6 +198,7 @@ func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
 	out := map[string]int64{
 		"upscale":  0,
 		"optimize": 0,
+		"pcm":      0,
 	}
 	// Degrade to zeros when the manifest store isn't wired (e.g. upscaling
 	// disabled) rather than panicking — mirrors every sibling admin
@@ -214,6 +215,9 @@ func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
 	}
 	if v, ok := got["optimize"]; ok {
 		out["optimize"] = v
+	}
+	if v, ok := got["pcm"]; ok {
+		out["pcm"] = v
 	}
 	if unk, ok := got["unknown"]; ok && unk > 0 {
 		logging.Component("admin.variants-dir").Warn(

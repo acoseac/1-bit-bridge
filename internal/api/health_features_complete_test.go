@@ -29,6 +29,7 @@ var wantAllHealthFeatures = []string{
 	"demoMode",
 	"diagnosticsSummary",
 	"dlnaServer",
+	"dsdRender",
 	"favorites",
 	"keyTempo",
 	"loudness",
@@ -86,6 +87,7 @@ func newAllFeaturesServer(t *testing.T) *Server {
 		WithVariantDeleter(&stubVariantDeleter{}).
 		WithBatchCoordinator(&stubBatchCoordinator{}).
 		WithDLNA(true).
+		WithDSDRender(func() bool { return true }).
 		WithRendererDiscovery(&stubRendererDiscovery{}).
 		WithFavoritesStore(mstore).
 		WithAnalysis(func() bool { return true }, stubAnalysisStore{}).
