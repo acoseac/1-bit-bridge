@@ -298,6 +298,33 @@
         </small>
       </div>
 
+      <div class="field">
+        <label class="checkbox">
+          <input name="dsdRenderEnabled" type="checkbox" role="switch" {{if .Data.DSDRenderEnabled}}checked{{end}}>
+          DSD → PCM renditions
+        </label>
+        <small class="hint">
+          Renders each DSD track (DSF / DFF) to PCM <em>once</em>, on the bridge, so it
+          plays where DSD cannot: CarPlay, wireless outputs, the speaker, and a DAC that
+          cannot take the file's DSD rate. Two tiers — a compact 16-bit copy the
+          pre-generation sweep above builds alongside the CarPlay ones, and a faithful
+          24-bit copy at the family's high rate that the app requests when a DAC needs it.
+          Off by default: the sweep reads the whole DSD library once, and rendering needs
+          <code>ffmpeg</code> with the DSD decoders on the bridge host (every stock package
+          ships them). Only active while PCM upscaling (above) is enabled. A DAC that
+          takes DSD over DoP is never affected — the app keeps sending the original.
+          Applies immediately — no restart.
+        </small>
+        {{if .Data.DSDRenderFFmpegMissing}}
+          <p class="warn-banner">
+            <strong>ffmpeg cannot decode DSD here.</strong> Enabling will write the flag,
+            but nothing renders until it is fixed on the bridge host:
+            {{.Data.DSDRenderFFmpegHint}}. <code>bridge doctor</code> names the install
+            line for this host.
+          </p>
+        {{end}}
+      </div>
+
       <div id="upscale-stats" class="upscale-stats" hidden>
         <h3>Upscale stats</h3>
         <dl class="status-grid">

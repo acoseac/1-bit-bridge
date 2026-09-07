@@ -650,9 +650,19 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 				"carplay-optimize feature is not configured on this bridge")
 			return
 		}
+	case "pcm":
+		// The faithful DSD → PCM tier: wired (the two closures) AND the
+		// live caps active, the same predicate /v1/health's `dsdRender`
+		// reads through cmd/bridge.
+		if s.deps.DSDRenderEligible == nil || s.deps.TargetRateForPCMRender == nil ||
+			!s.eligibilityOpts().DSDRender {
+			writeError(w, http.StatusServiceUnavailable, "dsd-render-disabled",
+				"DSD → PCM renditions are not active on this bridge")
+			return
+		}
 	default:
 		writeError(w, http.StatusBadRequest, "invalid-kind",
-			`unknown kind: `+kind+` (expected "upscale" or "optimize")`)
+			`unknown kind: `+kind+` (expected "upscale", "optimize" or "pcm")`)
 		return
 	}
 
@@ -675,8 +685,11 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 	// kind so a track with only an upscale variant correctly shows
 	// as eligible under kind=optimize, and vice versa.
 	variantPrefix := manifest.VariantKindPrefixUpscaled
-	if kind == "optimize" {
+	switch kind {
+	case "optimize":
 		variantPrefix = manifest.VariantKindPrefixOptimized
+	case "pcm":
+		variantPrefix = manifest.VariantKindPrefixPCM
 	}
 	projections, err := s.deps.Manifest.ListTrackProjectionsUnderPrefix(r.Context(), normalised, variantPrefix)
 	if err != nil {
@@ -701,19 +714,42 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		if t.IsDSD {
-			// DSD (DSF/DFF) is 1-bit modulated and the SoX upscale
-			// pipeline rejects it — there's no meaningful "upscale"
-			// from a delta-sigma stream to a PCM resampler target.
-			// Pre-fix DSD tracks fell through to the rate>0 / bits>0
-			// branch (DSF reports e.g. rate=2822400, bits=1) AND
-			// ProjectedSize returned a non-zero value, so the UI
-			// surfaced an active "Upscale this folder" button. The
-			// submit then enqueued 0 tracks ("Batch enrolled · 0
-			// tracks queued"). Folding DSD into `unknownFormat` is
-			// honest: the UI already labels that bucket as "DSD,
-			// lossy, or unknown — they'll be skipped." User-reported
-			// on the v1.4 followup.
-			unknownFormat++
+			// A DSD source is never UPSCALED (a delta-sigma stream has
+			// no PCM rate to raise) — but under the DSD-render caps it
+			// IS the input of the optimize kind's compact tier and of
+			// the pcm kind, each at its own target. Gated per track on
+			// the same transcode.DSDRenderEligible the coordinator's
+			// walk uses, so this projection predicts what Submit does.
+			// Without caps (or for the upscale kind) it folds into
+			// `unknownFormat`, the "DSD, lossy, or unknown — they'll
+			// be skipped" bucket, as it always has.
+			if kind == "upscale" || s.deps.DSDRenderEligible == nil ||
+				!s.deps.DSDRenderEligible(t.Path, t.Codec, true, t.SampleRate, t.Compression) {
+				unknownFormat++
+				continue
+			}
+			var trackRate, trackBits int
+			if kind == "pcm" {
+				trackRate, trackBits = s.deps.TargetRateForPCMRender(t.SampleRate), 24
+			} else {
+				trackRate, trackBits = s.deps.TargetRateForOptimize(t.SampleRate), 16
+			}
+			if trackRate <= 0 {
+				unknownFormat++
+				continue
+			}
+			size := s.deps.ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample, trackRate, trackBits)
+			if size <= 0 {
+				continue
+			}
+			totalProjected += size
+			projectedFiles++
+			continue
+		}
+		if kind == "pcm" {
+			// The faithful tier is DSD-only: a PCM source needs nothing
+			// from it — at target for this kind, not skipped.
+			atTarget++
 			continue
 		}
 		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
@@ -819,9 +855,14 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 	// family scopes.
 	respTargetRate := rate
 	respTargetBits := bits
-	if kind == "optimize" {
+	switch kind {
+	case "optimize":
 		respTargetRate = 0
 		respTargetBits = 16
+	case "pcm":
+		// Per-track family rate (176.4k / 192k), signalled the same way.
+		respTargetRate = 0
+		respTargetBits = 24
 	}
 	writeJSON(w, http.StatusOK, browseProjectionResponse{
 		Path:                    normalised,

@@ -503,6 +503,17 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request) {
 			data.UpscaleSoxInstallHint = soxInstallHintForCurrentOS()
 		}
 	}
+	// The DSD → PCM renditions' toolchain: ffmpeg with the dsd_* decoders.
+	// Same shape as the sox block — the switch stays usable (the flag
+	// persists and hot-applies) and the page says why nothing would render.
+	if s.deps.DSDRenderToolchain != nil {
+		ok, why := s.deps.DSDRenderToolchain()
+		data.DSDRenderFFmpegOK = &ok
+		if !ok {
+			data.DSDRenderFFmpegMissing = true
+			data.DSDRenderFFmpegHint = why
+		}
+	}
 	// FLAC sub-check: the bridge forces `-t flac`, so a sox WITHOUT FLAC
 	// passes the availability check above but fails every job at runtime.
 	// Only flag it when sox itself IS present — a missing sox is already

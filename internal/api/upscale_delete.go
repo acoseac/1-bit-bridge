@@ -242,11 +242,11 @@ func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, e
 	// RunVariantDelete sees a known-clean value.
 	kind := strings.ToLower(strings.TrimSpace(get("kind")))
 	switch kind {
-	case "", "upscale", "optimize":
+	case "", "upscale", "optimize", "pcm":
 		req.Kind = kind
 	default:
 		return req, "bad_request",
-			`unknown kind: ` + kind + ` (expected "upscale" or "optimize")`
+			`unknown kind: ` + kind + ` (expected "upscale", "optimize" or "pcm")`
 	}
 
 	// Mutually-exclusive shape — `prefix` AND `path` together is
@@ -425,9 +425,14 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	case "upscale":
 		wantPrefix = "upscaled-"
 	case "optimize":
+		// Version-agnostic AND family-inclusive: `optimized-%` also
+		// matches the DSD compact tier (`optimized-dsd-v1-…`), which is
+		// the optimize KIND's own output.
 		wantPrefix = "optimized-"
+	case "pcm":
+		wantPrefix = "pcm-"
 	default:
-		return VariantDeleteResponse{}, fmt.Errorf("variant delete request: unknown kind %q (expected empty, \"upscale\", or \"optimize\")", req.Kind)
+		return VariantDeleteResponse{}, fmt.Errorf("variant delete request: unknown kind %q (expected empty, \"upscale\", \"optimize\" or \"pcm\")", req.Kind)
 	}
 	if wantPrefix != "" {
 		filtered := rows[:0]

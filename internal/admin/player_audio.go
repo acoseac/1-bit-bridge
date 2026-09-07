@@ -519,7 +519,10 @@ func describeVariants(rows []manifest.VariantRow, row manifest.CatalogTrackRow) 
 	out := make([]playerVariantDTO, 0, len(rows))
 	for _, kind := range []struct{ prefix, name string }{
 		{manifest.VariantKindPrefixUpscaled + "-", variantKindUpscale},
+		// `optimized-` also matches the DSD compact tier (`optimized-dsd-`),
+		// which is the optimize kind's own output.
 		{manifest.VariantKindPrefixOptimized + "-", variantKindOptimize},
+		{manifest.VariantKindPrefixPCM + "-", variantKindPCM},
 	} {
 		for _, v := range rows {
 			if !strings.HasPrefix(v.VariantID, kind.prefix) {
@@ -547,6 +550,7 @@ func describeVariants(rows []manifest.VariantRow, row manifest.CatalogTrackRow) 
 const (
 	variantKindUpscale  = "upscale"
 	variantKindOptimize = "optimize"
+	variantKindPCM      = "pcm"
 )
 
 // floatOrNil / intOrNil adapt the catalog row's plain zero-means-absent

@@ -782,18 +782,20 @@ func Test_DIDLForTrack_Variants_EmitsExtraResInOrder(t *testing.T) {
 		Variants: []VariantInfo{
 			// Deliberately out of desired emission order to prove sorting.
 			{VariantID: "upscaled-v2-176400-24", FileExtension: ".flac", Size: 900, BitDepth: 24, SampleRate: 176400},
+			{VariantID: "pcm-v1-176400-24", FileExtension: ".flac", Size: 800, BitDepth: 24, SampleRate: 176400},
 			{VariantID: "optimized-v2-48000-16", FileExtension: ".flac", Size: 300, BitDepth: 16, SampleRate: 48000},
 		},
 	}
 	got := DIDLForTrack(opts)
 
-	if n := countResElements(got); n != 3 {
-		t.Fatalf("2 variants should emit 3 <res> (source + 2), got %d: %s", n, got)
+	if n := countResElements(got); n != 4 {
+		t.Fatalf("3 variants should emit 4 <res> (source + 3), got %d: %s", n, got)
 	}
 	// Path-segment URLs (NOT query strings).
 	for _, want := range []string{
 		`http://h:7790/dlna/file/t1</res>`, // source <res> URL
 		`http://h:7790/dlna/file/t1/variant-optimized-v2-48000-16.flac</res>`,
+		`http://h:7790/dlna/file/t1/variant-pcm-v1-176400-24.flac</res>`,
 		`http://h:7790/dlna/file/t1/variant-upscaled-v2-176400-24.flac</res>`,
 	} {
 		if !strings.Contains(got, want) {
@@ -803,12 +805,15 @@ func Test_DIDLForTrack_Variants_EmitsExtraResInOrder(t *testing.T) {
 	if strings.Contains(got, "?variant=") {
 		t.Errorf("variant URL must be a path segment, not a query string: %s", got)
 	}
-	// Ordering: source, then optimized, then upscaled.
+	// Ordering: source, then optimized, then the DSD faithful tier
+	// (a renderer that cannot decode DSD gets a working PCM <res>
+	// before the bigger upscales), then upscaled.
 	srcIdx := strings.Index(got, "/dlna/file/t1</res>")
 	optIdx := strings.Index(got, "variant-optimized-")
+	pcmIdx := strings.Index(got, "variant-pcm-")
 	upIdx := strings.Index(got, "variant-upscaled-")
-	if !(srcIdx < optIdx && optIdx < upIdx) {
-		t.Errorf("expected order source < optimized < upscaled; got idx src=%d opt=%d up=%d", srcIdx, optIdx, upIdx)
+	if !(srcIdx < optIdx && optIdx < pcmIdx && pcmIdx < upIdx) {
+		t.Errorf("expected order source < optimized < pcm < upscaled; got idx src=%d opt=%d pcm=%d up=%d", srcIdx, optIdx, pcmIdx, upIdx)
 	}
 	// Variant <res> carries PCM bitsPerSample (no DSD gate) + its own rate.
 	if !strings.Contains(got, `sampleFrequency="48000"`) || !strings.Contains(got, `bitsPerSample="16"`) {

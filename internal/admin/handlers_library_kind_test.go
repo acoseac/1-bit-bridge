@@ -11,12 +11,14 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// fakeBatchCoordinator records every Submit / SubmitOptimize call
-// so the admin DTO's kind dispatch can be exercised without a
-// real transcode pipeline. Implements admin.AdminBatchCoordinator.
+// fakeBatchCoordinator records every Submit / SubmitOptimize /
+// SubmitPCMRender call so the admin DTO's kind dispatch can be
+// exercised without a real transcode pipeline. Implements
+// admin.AdminBatchCoordinator.
 type fakeBatchCoordinator struct {
 	submitCalls         []fakeBatchCall
 	submitOptimizeCalls []fakeBatchCall
+	submitPCMCalls      []fakeBatchCall
 }
 
 type fakeBatchCall struct {
@@ -43,6 +45,16 @@ func (f *fakeBatchCoordinator) SubmitPaths(_ context.Context, label string, path
 
 func (f *fakeBatchCoordinator) SubmitOptimizePaths(_ context.Context, label string, paths []string) (AdminBatchSubmitResult, error) {
 	f.submitOptimizeCalls = append(f.submitOptimizeCalls, fakeBatchCall{path: label, paths: paths})
+	return AdminBatchSubmitResult{Path: label, EnqueuedCount: len(paths)}, nil
+}
+
+func (f *fakeBatchCoordinator) SubmitPCMRender(_ context.Context, path string) (AdminBatchSubmitResult, error) {
+	f.submitPCMCalls = append(f.submitPCMCalls, fakeBatchCall{path: path})
+	return AdminBatchSubmitResult{Path: path, EnqueuedCount: 1}, nil
+}
+
+func (f *fakeBatchCoordinator) SubmitPCMRenderPaths(_ context.Context, label string, paths []string) (AdminBatchSubmitResult, error) {
+	f.submitPCMCalls = append(f.submitPCMCalls, fakeBatchCall{path: label, paths: paths})
 	return AdminBatchSubmitResult{Path: label, EnqueuedCount: len(paths)}, nil
 }
 

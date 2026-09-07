@@ -116,7 +116,21 @@ FROM alpine:${ALPINE_VERSION}
 # errors. Operators bind-mounting their own pre-owned volume override
 # this — but the in-image baseline must be writable for fresh
 # `docker run -v 1-bit-bridge-state:/data` deployments to work.
+# The DSD → PCM renditions decode through ffmpeg, so the image asserts its
+# own ffmpeg carries the decoders at BUILD time — a base-image change that
+# drops them then fails here rather than at the first render in the field.
+# ALL FOUR dsd_* names, because that is exactly what the runtime probe
+# requires (transcode.ffmpegCapabilities sets HasDSD only when every one is
+# present); asserting a subset would let such an image through the build and
+# fail it in production, which is the failure this check exists to prevent.
+# `dst` is checked in the same loop but is a SEPARATE capability: without it
+# plain DSF/DFF still renders and only DST-compressed DSDIFF is skipped.
 RUN apk add --no-cache ca-certificates tzdata sox ffmpeg chromaprint lsof && \
+    decoders="$(ffmpeg -hide_banner -decoders)" && \
+    for d in dsd_lsbf dsd_lsbf_planar dsd_msbf dsd_msbf_planar dst; do \
+        echo "$decoders" | grep -qE "^ *[A-Z.]{6} +$d " \
+          || { echo "ffmpeg is missing the $d decoder — the DSD renditions cannot run"; exit 1; }; \
+    done && \
     addgroup -S bridge && \
     adduser -S -G bridge bridge && \
     mkdir -p /data && \

@@ -578,6 +578,34 @@ type Deps struct {
 	// Nil keeps the pre-existing behaviour (wired == active).
 	OptimizeActive func() bool
 
+	// DSDRenderCaps is the LIVE DSD → PCM rendition capability, folded to
+	// the two bools the eligibility SQL mirrors bind (this package never
+	// imports transcode): `active` — DSD sources are eligible for the
+	// optimize kind's compact tier and the pcm kind; `dst` — DST-compressed
+	// DSDIFF is too. Wired in cmd/bridge/main.go to the same closure every
+	// other DSD gate reads. Nil-safe: absent reads as (false, false), which
+	// keeps every coverage number byte-identical to pre-v43.
+	DSDRenderCaps func() (active, dst bool)
+
+	// DSDRenderEligible is the per-track DSD gate the projection endpoint
+	// consults for kind=optimize (the compact tier) and kind=pcm — wired to
+	// transcode.DSDRenderEligible under the live caps. Nil-safe: absent,
+	// DSD rows keep counting as "variants not possible".
+	DSDRenderEligible func(sourcePath, codec string, isDSD bool, sourceRate int, compression string) bool
+
+	// TargetRateForPCMRender resolves the faithful tier's rate (176400 /
+	// 192000, by DSD family; 0 = ineligible). Wired to
+	// transcode.TargetRateForPCMRender. Nil-safe alongside
+	// DSDRenderEligible — absent, kind=pcm answers 503.
+	TargetRateForPCMRender func(sourceRate int) int
+
+	// DSDRenderToolchain reports whether ffmpeg with the dsd_* decoders is
+	// on the bridge host (the doctor's verdict), with a bounded reason
+	// when it is not. Backs the settings page's warning under the
+	// `dsdRenderEnabled` switch and the PATCH report's `+reason`. Nil-safe:
+	// absent, the switch carries no toolchain verdict.
+	DSDRenderToolchain func() (ok bool, why string)
+
 	// BatchCoordinator is the v1.3 admin Library Inspector's gateway
 	// to the transcode.Coordinator. Wired to a closure-based adapter
 	// in cmd/bridge/main.go (same decoupling pattern as
@@ -721,6 +749,8 @@ type AdminBatchCoordinator interface {
 	SubmitOptimize(ctx context.Context, libraryRelPath string) (AdminBatchSubmitResult, error)
 	SubmitPaths(ctx context.Context, label string, paths []string, targetRate, targetBits int) (AdminBatchSubmitResult, error)
 	SubmitOptimizePaths(ctx context.Context, label string, paths []string) (AdminBatchSubmitResult, error)
+	SubmitPCMRender(ctx context.Context, libraryRelPath string) (AdminBatchSubmitResult, error)
+	SubmitPCMRenderPaths(ctx context.Context, label string, paths []string) (AdminBatchSubmitResult, error)
 	Cancel(idHex string) error
 	ListBatches(limit int) ([]AdminBatchRow, error)
 	Throughput() AdminBatchThroughput
@@ -765,10 +795,14 @@ type AdminBatchRow struct {
 	// lossy, DSD, unknown format, etc.). Distinct from FailedFiles
 	// (per-job SoX failures during the run). The Jobs page renders
 	// "X tracks skipped" as a sub-line whenever this is > 0.
-	SkippedFiles int       `json:"skippedFiles,omitempty"`
-	Error        string    `json:"error,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	SkippedFiles int    `json:"skippedFiles,omitempty"`
+	Error        string `json:"error,omitempty"`
+	// Kind is the batch's job kind ("upscale" / "optimize" / "pcm"),
+	// recorded at submit since migration v43; empty on older rows, which
+	// the Jobs page derives from the (0, 16) optimize sentinel.
+	Kind      string    `json:"kind,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // AdminBatchThroughput is the wire shape returned by the
@@ -1668,14 +1702,20 @@ func (s *Server) Handler() http.Handler {
 	return s.boundaryMiddleware(s.csrfGuard(s.sessionMiddleware(mux)))
 }
 
-// scanCtx returns the parent context for admin-triggered scans.
 // eligibilityOpts is the DSD-render capability every eligibility SQL
-// mirror takes. PCM-only until the serve wiring threads
-// transcode.DSDRenderCaps into the admin deps; the zero value keeps every
-// coverage number byte-identical to pre-v43.
+// mirror takes, read LIVE from Deps.DSDRenderCaps so the coverage bars,
+// the projection endpoint and the sweep answer from one verdict. Absent
+// caps fold to the zero value, under which every number is byte-identical
+// to pre-v43.
 func (s *Server) eligibilityOpts() manifest.EligibilityOpts {
-	return manifest.EligibilityOpts{}
+	if s.deps.DSDRenderCaps == nil {
+		return manifest.EligibilityOpts{}
+	}
+	active, dst := s.deps.DSDRenderCaps()
+	return manifest.EligibilityOpts{DSDRender: active, DST: active && dst}
 }
+
+// scanCtx returns the parent context for admin-triggered scans.
 
 func (s *Server) scanCtx() context.Context {
 	if s.deps.ScanCtx != nil {

@@ -77,6 +77,7 @@ export function bytes(n) {
 const VARIANT_KIND_LABELS = {
   upscale: "Hi-res",
   optimize: "CarPlay",
+  pcm: "PCM",
 };
 
 /** The short label on a variant chip. */

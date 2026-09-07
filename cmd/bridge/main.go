@@ -978,6 +978,11 @@ func (a *upscaleBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, lib
 	return translateApiSubmitResult(res, err)
 }
 
+func (a *upscaleBatchCoordinatorAdapter) SubmitPCMRender(ctx context.Context, libraryRelPath string) (api.BatchSubmitResult, error) {
+	res, err := a.coord.SubmitPCMRender(ctx, libraryRelPath, a.outputDir())
+	return translateApiSubmitResult(res, err)
+}
+
 func (a *upscaleBatchCoordinatorAdapter) Cancel(id uuid.UUID) error {
 	return a.coord.Cancel(id)
 }
@@ -1002,6 +1007,7 @@ func (a *upscaleBatchCoordinatorAdapter) ListBatches(limit int) ([]api.BatchRow,
 			Error:          r.Error,
 			CreatedAt:      r.CreatedAt,
 			UpdatedAt:      r.UpdatedAt,
+			Kind:           r.Kind,
 		})
 	}
 	return out, nil
@@ -1070,6 +1076,16 @@ func (a *adminBatchCoordinatorAdapter) SubmitOptimize(ctx context.Context, libra
 	return translateAdminSubmitResult(res, err)
 }
 
+func (a *adminBatchCoordinatorAdapter) SubmitPCMRender(ctx context.Context, libraryRelPath string) (admin.AdminBatchSubmitResult, error) {
+	res, err := a.coord.SubmitPCMRender(ctx, libraryRelPath, a.outputDir())
+	return translateAdminSubmitResult(res, err)
+}
+
+func (a *adminBatchCoordinatorAdapter) SubmitPCMRenderPaths(ctx context.Context, label string, paths []string) (admin.AdminBatchSubmitResult, error) {
+	res, err := a.coord.SubmitPCMRenderPaths(ctx, label, paths, a.outputDir())
+	return translateAdminSubmitResult(res, err)
+}
+
 func (a *adminBatchCoordinatorAdapter) SubmitPaths(ctx context.Context, label string, paths []string, targetRate, targetBits int) (admin.AdminBatchSubmitResult, error) {
 	targetRate, targetBits = a.resolveTarget(ctx, targetRate, targetBits)
 	res, err := a.coord.SubmitPaths(ctx, label, paths, targetRate, targetBits, a.outputDir())
@@ -1127,6 +1143,7 @@ func (a *adminBatchCoordinatorAdapter) ListBatches(limit int) ([]admin.AdminBatc
 			FailedFiles:    r.FailedFiles,
 			SkippedFiles:   r.SkippedFiles,
 			Error:          r.Error,
+			Kind:           r.Kind,
 			// time.Time encoded as RFC 3339 — avoids JS Number
 			// precision loss on int64 ns values > 2^53. The
 			// iOS-facing api.BatchRow keeps int64 ns because Swift
@@ -2899,6 +2916,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			// the feature is on.
 			return upscaleActiveFn() && liveCfg().Upscale.EffectiveOptimizeEnabled()
 		}).
+		// The `dsdRender` flag and the `pcm` kind gate read the SAME caps
+		// every DSD gate on the bridge reads (dsdRenderCapsFn: the live
+		// flag ∧ the cached ffmpeg probe, fail-closed), so the health
+		// response cannot advertise a kind the enqueuer would refuse.
+		WithDSDRender(func() bool { return dsdRenderCapsFn().Active() }).
 		WithAnalysis(analysisActiveFn, &analysisStoreAdapter{provider: provider}).
 		WithLyrics(&lyricsStoreAdapter{provider: provider}).
 		WithAnalysisStats(&analysisStatsAdapter{
@@ -4283,6 +4305,44 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		OptimizeActive: func() bool {
 			live := liveCfg()
 			return live.Upscale.Enabled && live.Upscale.EffectiveOptimizeEnabled()
+		},
+		// The DSD-render caps, folded to the two bools the admin's SQL
+		// mirrors bind (admin never imports transcode): whether DSD
+		// sources are eligible at all, and whether DST-compressed ones
+		// are. The SAME closure every other gate reads, so the coverage
+		// numbers and the sweep cannot disagree.
+		DSDRenderCaps: func() (active, dst bool) {
+			c := dsdRenderCapsFn()
+			return c.Active(), c.Active() && c.DecodeDST
+		},
+		// The per-track DSD gates for the projection endpoint's optimize
+		// and pcm kinds (transcode.DSDRenderEligible / PCMRenderEligible
+		// under the live caps) and the pcm target resolver.
+		DSDRenderEligible: func() func(string, string, bool, int, string) bool {
+			if upscalePool == nil {
+				return nil
+			}
+			return func(path, codec string, isDSD bool, rate int, compression string) bool {
+				return transcode.DSDRenderEligible(path, codec, isDSD, rate, compression, dsdRenderCapsFn())
+			}
+		}(),
+		TargetRateForPCMRender: func() func(int) int {
+			if upscalePool == nil {
+				return nil
+			}
+			return transcode.TargetRateForPCMRender
+		}(),
+		// The doctor's verdict for the settings page: ok, or why the
+		// `dsdRender` switch would apply and render nothing.
+		DSDRenderToolchain: func() (ok bool, why string) {
+			ff := transcode.FFmpegSnapshot()
+			switch {
+			case !ff.Available():
+				return false, "ffmpeg (with ffprobe) is not on PATH on the bridge host"
+			case !ff.HasDSD:
+				return false, "this ffmpeg build lacks the dsd_* decoders (dsd_lsbf, dsd_lsbf_planar, dsd_msbf, dsd_msbf_planar)"
+			}
+			return true, ""
 		},
 		BatchCoordinator: func() admin.AdminBatchCoordinator {
 			// Closure-resolved so admin doesn't see a typed-nil
