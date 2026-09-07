@@ -466,15 +466,14 @@ func upscaleResumeDecision(ctx context.Context, store *manifest.Store, trackPath
 // already-at-target / not-PCM / source-missing counters. Pulled out
 // of runUpscaleBatch as the second of the cognitive-complexity
 // refactor's helpers — pure I/O over the tally values.
-func reportUpscaleSummary(stdout io.Writer, totalCandidates, toRun int, counters upscaleSkipCounters) {
-	reportUpscaleSummaryForKind(stdout, totalCandidates, toRun, counters, transcode.JobKindUpscale)
-}
-
-// reportUpscaleSummaryForKind is reportUpscaleSummary with the skip line
-// worded for the kind. The `notPCM` bucket means "this pipeline cannot
-// take this source", and for the DSD-only `pcm` kind the sources it
-// holds are PCM — calling them "non-PCM" would be exactly backwards.
-func reportUpscaleSummaryForKind(stdout io.Writer, totalCandidates, toRun int, counters upscaleSkipCounters, kind transcode.JobKind) {
+// The `kind` parameter is REQUIRED, not defaulted, and there is
+// deliberately no kind-blind wrapper: the first version of this had one
+// that hardcoded JobKindUpscale, the single call site kept calling it,
+// and `bridge render` went on reporting skipped PCM sources as "non-PCM"
+// while the helper's own test passed — the helper was tested, the
+// composition never was (CodeRabbit on PR #865). A required parameter
+// makes that a compile error instead of a silent wrong word.
+func reportUpscaleSummary(stdout io.Writer, totalCandidates, toRun int, counters upscaleSkipCounters, kind transcode.JobKind) {
 	fmt.Fprintf(stdout, "Found %d candidate track(s); %d need conversion.\n", totalCandidates, toRun)
 	if counters.alreadyAtTarget > 0 {
 		fmt.Fprintf(stdout, "Skipped %d track(s) already at or above target rate.\n", counters.alreadyAtTarget)
@@ -630,7 +629,7 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 			toRun++
 		}
 	}
-	reportUpscaleSummary(stdout, totalCandidates, toRun, counters)
+	reportUpscaleSummary(stdout, totalCandidates, toRun, counters, p.kind)
 
 	if p.dryRun {
 		printUpscaleDryRun(stdout, candidates)

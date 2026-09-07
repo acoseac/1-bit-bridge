@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -248,16 +249,61 @@ func TestReportUpscaleSummary_SkipWordingFollowsTheKind(t *testing.T) {
 		{transcode.JobKindPCMRender, "non-DSD"},
 	} {
 		var out bytes.Buffer
-		reportUpscaleSummaryForKind(&out, 3, 1, upscaleSkipCounters{notPCM: 2}, tc.kind)
+		reportUpscaleSummary(&out, 3, 1, upscaleSkipCounters{notPCM: 2}, tc.kind)
 		if !bytes.Contains(out.Bytes(), []byte(tc.want)) {
 			t.Errorf("kind %s: summary %q does not say %q", tc.kind, out.String(), tc.want)
 		}
 	}
-	// The legacy entry point keeps the historical wording byte-for-byte.
+	// The two historical kinds keep the exact sentence they always had.
 	var legacy bytes.Buffer
-	reportUpscaleSummary(&legacy, 3, 1, upscaleSkipCounters{notPCM: 2})
+	reportUpscaleSummary(&legacy, 3, 1, upscaleSkipCounters{notPCM: 2}, transcode.JobKindUpscale)
 	if !bytes.Contains(legacy.Bytes(), []byte("Skipped 2 non-PCM or unparseable track(s).")) {
-		t.Errorf("legacy summary changed: %q", legacy.String())
+		t.Errorf("legacy wording changed: %q", legacy.String())
+	}
+}
+
+// ...and the batch actually PASSES its kind to it. The test above
+// exercises the helper and passes whether or not the call site is wired —
+// which is exactly how the first version of this shipped a helper that
+// knew about kinds beside a call site that did not (CodeRabbit on
+// PR #865). This drives the real runUpscaleBatch and reads its stdout.
+func TestRunUpscaleBatch_SummaryUsesTheRunsKind(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind transcode.JobKind
+		src  renderSource
+		want string
+	}{
+		// A PCM source under the render kind: skipped, and the summary
+		// must call it non-DSD.
+		{"render skips a PCM source", transcode.JobKindPCMRender,
+			renderSource{rel: "A/01.flac", codec: "FLAC", rateHz: 96000, durationSec: 300, channels: 2}, "non-DSD"},
+		// A DSD source under upscale: skipped, and the historical
+		// wording is unchanged.
+		{"upscale skips a DSD source", transcode.JobKindUpscale,
+			renderSource{rel: "A/01.dsf", codec: "DSF", rateHz: 2822400, isDSD: true, durationSec: 300, channels: 2}, "non-PCM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, resolver, track := renderCLIFixture(t, tc.src)
+			if err := store.UpsertTrack(context.Background(), &track); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := runUpscaleBatch(context.Background(), &stdout, &stderr, store, &config.Config{}, resolver, runUpscaleParams{
+				targetRateFlag: "auto",
+				targetBits:     24,
+				quality:        transcode.QualityVeryHigh,
+				workers:        1,
+				kind:           tc.kind,
+				dsdCaps:        cliCapsDSDDST,
+			})
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			if !bytes.Contains(stdout.Bytes(), []byte(tc.want)) {
+				t.Errorf("summary %q does not say %q — the batch is not passing its kind through", stdout.String(), tc.want)
+			}
+		})
 	}
 }
 
