@@ -185,12 +185,15 @@ func (s *Server) apiVariantsDirPatch(w http.ResponseWriter, r *http.Request) {
 // JS reads `usedByKind.upscale` / `usedByKind.optimize` without
 // nil-map / missing-key gymnastics.
 //
-// A non-zero "unknown" bucket (variant_id matching neither
-// `upscaled-%` nor `optimized-%`) gets logged at notice level so
-// operators see drift in production; the UI ignores the bucket.
+// A non-zero "unknown" bucket (a variant_id matching none of
+// `upscaled-%`, `optimized-%` or `pcm-%`) gets logged at notice level so
+// operators see drift in production; the UI ignores the bucket. Note
+// `optimized-%` covers the DSD compact tier (`optimized-dsd-`) — one
+// bucket, deliberately, because it is the same family to every consumer.
 func (s *Server) probeUsedByKind(ctx context.Context) map[string]int64 {
 	// These bucket keys MUST stay in lockstep with the SQL CASE labels in
-	// manifest.CountVariantsByKind ("upscale" / "optimize" / "unknown") —
+	// manifest.CountVariantsByKind ("upscale" / "optimize" / "pcm" /
+	// "unknown") —
 	// that query is the producer of these names; drift here silently zeroes
 	// a dashboard tile. (Deliberately NOT tied to the transcode.JobKind enum:
 	// the labels are SQL-derived from the variant_id prefix, not the
