@@ -24,17 +24,22 @@ func TestDSDRenderDefaultsOff(t *testing.T) {
 // scratch directory: empty is fine, absolute-outside-the-library is fine,
 // relative and under-a-library-root are refused.
 func TestValidateRenderTempDir(t *testing.T) {
-	roots := []string{"/srv/music", "/mnt/nas/lib"}
+	// absTestPath, not "/srv/music": these must be absolute on the HOST.
+	// On Windows "/srv/music" has no volume, so the absolute-path check
+	// (correctly) refuses it before the under-a-root check this test is
+	// about — the same lesson TestValidateVariantsDirRejectsUnderLibraryRoot
+	// records, re-learned here on the windows-latest leg of PR #863.
+	roots := []string{absTestPath("srv", "music"), absTestPath("mnt", "nas", "lib")}
 	cases := []struct {
 		name    string
 		dir     string
 		wantErr string // substring; "" = must pass
 	}{
 		{"empty is the OS temp dir", "", ""},
-		{"absolute outside the roots", "/var/tmp/render", ""},
-		{"relative", "scratch/render", "absolute"},
-		{"under the first root", "/srv/music/.scratch", "library root"},
-		{"under the second root", "/mnt/nas/lib/tmp/render", "library root"},
+		{"absolute outside the roots", absTestPath("var", "tmp", "render"), ""},
+		{"relative", filepath.Join("scratch", "render"), "absolute"},
+		{"under the first root", absTestPath("srv", "music", ".scratch"), "library root"},
+		{"under the second root", absTestPath("mnt", "nas", "lib", "tmp", "render"), "library root"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,20 +61,23 @@ func TestValidateRenderTempDir(t *testing.T) {
 // finding (a contract with no observer).
 func TestValidateWiresRenderTempDir(t *testing.T) {
 	cfg := minimalValidAutoOptimizeConfig()
+	// Host-absolute roots (see TestValidateRenderTempDir): the under-root
+	// arm below must reach the containment check on Windows too.
+	cfg.LibraryRoots = []string{absTestPath("lib")}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("premise: the minimal config must validate: %v", err)
 	}
-	cfg.Upscale.TempDir = "relative/scratch"
+	cfg.Upscale.TempDir = filepath.Join("relative", "scratch")
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "upscale.tempDir") {
 		t.Fatalf("Validate() = %v, want an upscale.tempDir error for a relative scratch dir", err)
 	}
-	cfg.Upscale.TempDir = filepath.Join(cfg.LibraryRoots[0], "scratch")
+	cfg.Upscale.TempDir = absTestPath("lib", "scratch")
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "library root") {
 		t.Fatalf("Validate() = %v, want a library-root refusal for a scratch dir under a root", err)
 	}
-	cfg.Upscale.TempDir = "/var/tmp/render"
+	cfg.Upscale.TempDir = absTestPath("var", "tmp", "render")
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil for an absolute scratch dir outside the roots", err)
 	}
@@ -82,12 +90,13 @@ func TestValidateWiresRenderTempDir(t *testing.T) {
 func TestResolvePathsResolvesRenderTempDir(t *testing.T) {
 	cfg := minimalValidAutoOptimizeConfig()
 	cfg.Upscale.TempDir = "scratch"
-	cfg.resolvePaths("/etc/bridge")
-	if want := filepath.Join("/etc/bridge", "scratch"); cfg.Upscale.TempDir != want {
+	cfgDir := absTestPath("etc", "bridge")
+	cfg.resolvePaths(cfgDir)
+	if want := filepath.Join(cfgDir, "scratch"); cfg.Upscale.TempDir != want {
 		t.Errorf("TempDir = %q, want %q (resolved against the config dir)", cfg.Upscale.TempDir, want)
 	}
 	cfg2 := minimalValidAutoOptimizeConfig()
-	cfg2.resolvePaths("/etc/bridge")
+	cfg2.resolvePaths(cfgDir)
 	if cfg2.Upscale.TempDir != "" {
 		t.Errorf("empty TempDir resolved to %q, want it to stay empty (= the OS temp dir)", cfg2.Upscale.TempDir)
 	}

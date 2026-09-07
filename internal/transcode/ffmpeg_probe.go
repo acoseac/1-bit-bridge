@@ -185,8 +185,12 @@ func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	if len(s) > 80 {
-		s = s[:80] + "…"
+	// Truncate by RUNE, not byte: an 80-byte cut can land inside a
+	// multi-byte UTF-8 sequence (a localised ffmpeg message, a path with
+	// an accented character) and leave an invalid string in an error the
+	// operator reads (Gemini on PR #863).
+	if r := []rune(s); len(r) > 80 {
+		s = string(r[:80]) + "…"
 	}
 	return s
 }

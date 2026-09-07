@@ -163,7 +163,11 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 	// The scratch volume, probed only while DSD renditions are on — a
 	// PCM-only bridge never spends a statfs on a directory it never
 	// writes to. Same fail-CLOSED rule as the sidecar volume: with no
-	// reading there is no honouring the floor.
+	// reading there is no honouring the floor. The probe is the SAME
+	// nearest-existing-ancestor closure the sidecar volume uses
+	// (transcode.AvailableDiskSpaceNearest, wired in cmd/bridge/main.go),
+	// so a scratch directory that does not exist yet — it is created by
+	// the first render — is graded by its parent volume, never a skip.
 	var scratchFree int64
 	if sw.caps().Active() {
 		scratchDir := transcode.RenderScratchDir(sw.renderTempDir())
