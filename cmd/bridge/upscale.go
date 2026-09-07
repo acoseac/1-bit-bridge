@@ -71,6 +71,9 @@ type transcodeBootstrapResult struct {
 	quality   transcode.Quality
 	outputDir string
 	resolver  *bridgefs.Resolver
+	// tempDir is `upscale.tempDir` — where DSD-render scratch lives, and
+	// therefore what `--gc` purges stale scratch from.
+	tempDir string
 }
 
 // bootstrapTranscodeCmd runs the shared CLI scaffolding both
@@ -143,6 +146,7 @@ func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, configPath, qu
 		// consistent with where conversions actually land.
 		outputDir: cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		resolver:  bridgefs.New(cfg.LibraryRoots),
+		tempDir:   cfg.Upscale.TempDir,
 	}, 0
 }
 
@@ -173,7 +177,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	defer r.store.Close()
 
 	if *gc {
-		return runGC(ctx, stdout, stderr, r.store, r.outputDir)
+		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir)
 	}
 	return runUpscaleBatch(ctx, stdout, stderr, r.store, r.cfg, r.resolver, runUpscaleParams{
 		targetRateFlag: *targetRate,
@@ -462,7 +466,7 @@ func runUpscaleWorker(
 		if ctx.Err() != nil {
 			return
 		}
-		size, settings, err := transcode.RunSox(ctx, c.spec)
+		res, err := transcode.Run(ctx, c.spec)
 		if err != nil {
 			if ctx.Err() == nil {
 				atomic.AddUint64(failCount, 1)
@@ -477,10 +481,15 @@ func runUpscaleWorker(
 			Format:        "flac",
 			SampleRate:    c.spec.TargetSampleRate,
 			BitsPerSample: c.spec.TargetBits,
-			SizeBytes:     size,
+			SizeBytes:     res.SizeBytes,
 			SourceMTimeNS: c.spec.SourceMTimeNS,
 			SourceSize:    c.spec.SourceSize,
-			SoxSettings:   settings,
+			SoxSettings:   res.Settings,
+			// The DSD-rendition gain facts (nil for every PCM job) — the
+			// same two the serve-side pool persists, so a CLI-rendered
+			// rendition serves `appliedGainDB` like one the pool made.
+			AppliedGainDB: res.AppliedGainDB,
+			TruePeakDBTP:  res.TruePeakDBTP,
 			CreatedAt:     transcode.CreatedAtNow(),
 		}
 		if err := store.UpsertVariant(ctx, row); err != nil {
@@ -672,6 +681,16 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, outputDir 
 			return walkErr
 		}
 		if d.IsDir() {
+			// Dot-directories are never ours to reap: the variants dir
+			// holds only `<path>.<variantID>.flac` sidecars, so a hidden
+			// subtree is a foreign tenant's (a `.Trash`, an `.rclone`
+			// cache, an operator's `.scratch`) — and DSD-render scratch,
+			// which lives OUTSIDE the variants dir by design, must never
+			// be confused with an orphan sidecar if someone points
+			// `upscale.tempDir` beneath it anyway.
+			if path != outputDir && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if known[strings.ToLower(filepath.Clean(path))] {
@@ -819,7 +838,16 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 // three helpers (`runGCForwardSweep` / `gcCheckOutputDirBeforeReverseSweep`
 // / `runGCReverseSweep`). Behaviour is byte-identical; locked by the
 // existing GC test suite.
-func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string) int {
+func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir, tempDir string) int {
+	// DSD-render scratch first: the crash-orphan case the render's
+	// deferred remove cannot cover. Independent of the sidecar sweeps and
+	// bounded to the bridge-owned subdirectory, so it runs whatever they
+	// go on to report.
+	if n, err := transcode.PurgeStaleRenderScratch(tempDir); err != nil {
+		fmt.Fprintf(stderr, "render scratch purge: %v\n", err)
+	} else {
+		fmt.Fprintf(stdout, "GC render scratch: removed %d stale file(s).\n", n)
+	}
 	allRows, err := store.AllVariants(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list variants: %v\n", err)

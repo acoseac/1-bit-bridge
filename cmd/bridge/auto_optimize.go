@@ -75,15 +75,58 @@ type autoOptimizeSweeper struct {
 	// statfs would ENOENT).
 	diskFree func(dir string) (int64, error)
 
+	// lanes is the pool's worker count — the number of renders that can
+	// hold Stage A scratch AT THE SAME TIME. The scratch check below is a
+	// point check by design (no reservation ledger), so it has to bound
+	// the concurrent peak rather than one job: two workers each passing a
+	// one-job check can together drive the volume below the floor, and a
+	// render that runs out of scratch fails a job that was already
+	// admitted (CodeRabbit on PR #863). Nil or < 1 reads as one lane,
+	// which is the pre-#863 behaviour.
+	lanes func() int
+
 	// soxInfo returns the cached ProbeSox snapshot so planCandidate can
 	// refuse sources this build cannot decode. Wired to the same 30s-TTL
 	// cache the per-track enqueuer, the batch coordinator and the admin
 	// tile read. Nil-safe and fail-open, matching every other consumer.
 	soxInfo func() (transcode.SoxInfo, error)
+
+	// dsdCaps returns the live DSD-render capability. It decides whether
+	// the candidate query admits DSD sources at all (the compact
+	// `optimized-dsd-` tier rides this sweep) and whether the scratch
+	// volume is probed. Nil-safe and fail-CLOSED: unwired grants nothing.
+	dsdCaps func() transcode.DSDRenderCaps
+	// tempDir resolves the render scratch directory per sweep (empty =
+	// the OS temp dir); forwarded onto every DSD JobSpec and graded by
+	// the sweep's second disk budget. Nil-safe.
+	tempDir func() string
+}
+
+func (sw *autoOptimizeSweeper) caps() transcode.DSDRenderCaps {
+	if sw.dsdCaps == nil {
+		return transcode.DSDRenderCaps{}
+	}
+	return sw.dsdCaps()
+}
+
+func (sw *autoOptimizeSweeper) renderTempDir() string {
+	if sw.tempDir == nil {
+		return ""
+	}
+	return sw.tempDir()
+}
+
+// eligibilityOpts is the SQL form of the DSD-render caps the candidate
+// query takes (manifest cannot import transcode). The zero caps fold to
+// the zero opts, under which the query is byte-identical to pre-v43.
+func (sw *autoOptimizeSweeper) eligibilityOpts() manifest.EligibilityOpts {
+	caps := sw.caps()
+	return manifest.EligibilityOpts{DSDRender: caps.Active(), DST: caps.Active() && caps.DecodeDST}
 }
 
 // soxSnapshot takes ONE probe result per sweep. Hoisted for the same
 // consistency reason as the coordinator's walks, not for speed.
+
 func (sw *autoOptimizeSweeper) soxSnapshot() transcode.SoxInfo {
 	return transcode.SnapshotOrOpen(sw.soxInfo)
 }
@@ -103,7 +146,7 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		return &admin.AutoOptimizeSweepCounts{Disabled: true}
 	}
 
-	cands, err := sw.store.ListAutoOptimizeCandidates(ctx, sw.maxPerSweep())
+	cands, err := sw.store.ListAutoOptimizeCandidates(ctx, sw.maxPerSweep(), sw.eligibilityOpts())
 	if err != nil {
 		// A cancelled context here is a normal shutdown, not a fault —
 		// the suppression the analysis + fingerprint sweepers apply.
@@ -127,11 +170,33 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		return nil
 	}
 
+	// The scratch volume, probed only while DSD renditions are on — a
+	// PCM-only bridge never spends a statfs on a directory it never
+	// writes to. Same fail-CLOSED rule as the sidecar volume: with no
+	// reading there is no honouring the floor. The probe is the SAME
+	// nearest-existing-ancestor closure the sidecar volume uses
+	// (transcode.AvailableDiskSpaceNearest, wired in cmd/bridge/main.go),
+	// so a scratch directory that does not exist yet — it is created by
+	// the first render — is graded by its parent volume, never a skip.
+	var scratchFree int64
+	if sw.caps().Active() {
+		scratchDir := transcode.RenderScratchDir(sw.renderTempDir())
+		sf, serr := sw.diskFree(scratchDir)
+		if serr != nil {
+			if ctx.Err() == nil {
+				logger.Warn("auto-optimize sweep: render scratch disk probe failed; skipping sweep",
+					"dir", scratchDir, "err", serr)
+			}
+			return nil
+		}
+		scratchFree = sf
+	}
+
 	counts := &admin.AutoOptimizeSweepCounts{
 		MinFreeBytes: sw.minFreeBytes(),
 		FreeBytes:    freeBytes,
 	}
-	if aborted := sw.drainCandidates(ctx, cands, outputDir, freeBytes, counts); aborted {
+	if aborted := sw.drainCandidates(ctx, cands, outputDir, freeBytes, scratchFree, counts); aborted {
 		return nil
 	}
 
@@ -139,7 +204,7 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 	// predicate — deliberately, so the card's number and the sweeper's
 	// work cannot drift — and affordable because it runs once per sweep
 	// (default cadence: the scan interval), not per tick of anything hot.
-	if remaining, cerr := sw.store.CountAutoOptimizeCandidates(ctx); cerr == nil {
+	if remaining, cerr := sw.store.CountAutoOptimizeCandidates(ctx, sw.eligibilityOpts()); cerr == nil {
 		counts.Remaining = remaining
 	} else if ctx.Err() == nil {
 		logger.Warn("auto-optimize sweep: count remaining", "err", cerr)
@@ -170,7 +235,7 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, o
 	// test), and on a path that spends disk and CPU the Go gate stays
 	// authoritative — a mirror drift must under-generate, never
 	// mis-generate.
-	if !transcode.OptimizeEligible(c.Path, c.Codec, c.SampleRate, c.BitsPerSample) {
+	if !transcode.OptimizeEligibleFor(c.Path, c.Codec, c.SampleRate, c.BitsPerSample, c.IsDSD, c.Compression, sw.caps()) {
 		return transcode.JobSpec{}, 0, planIneligible
 	}
 	// Refuse what this sox build cannot decode. OptimizeEligible treats
@@ -184,7 +249,10 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, o
 	// batch failed every ALAC file with `sox FAIL formats: no handler for
 	// file extension 'm4a'`. Counting it Ineligible (not Unresolvable) is
 	// deliberate: the file is fine, the toolchain simply cannot read it.
-	if !soxInfo.CanDecode(c.Path) {
+	//
+	// PCM only: a DSD source decodes through ffmpeg, and its decodability
+	// is the ffmpeg half of the caps the gate above already consulted.
+	if !c.IsDSD && !soxInfo.CanDecode(c.Path) {
 		return transcode.JobSpec{}, 0, planIneligible
 	}
 	targetRate, terr := transcode.ResolveTargetRateForOptimize(c.SampleRate)
@@ -210,7 +278,7 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, o
 	// autoOptimizeCandidateSQL docblock: stamping a live stat would make
 	// freshly built variants read as stale on the next tick whenever the
 	// scanner hadn't caught up, regenerating them forever).
-	return transcode.JobSpec{
+	spec := transcode.JobSpec{
 		SourceAbsPath:    abs,
 		SourceLibraryRel: c.Path,
 		SourceMTimeNS:    c.MTimeNS,
@@ -227,13 +295,24 @@ func (sw *autoOptimizeSweeper) planCandidate(c manifest.AutoOptimizeCandidate, o
 		// CarPlay request the two-channel queue exists to protect. See the
 		// JobSpec.Background docstring.
 		Background: true,
-	}, projected, planEnqueue
+	}
+	if c.IsDSD {
+		// The render facts the two-stage chain and the pool's timeout
+		// consume; VariantID() lands in the `optimized-dsd-` family off
+		// SourceIsDSD. The nominal DSD rate is SourceSampleRate already.
+		spec.SourceIsDSD = true
+		spec.SourceCompression = c.Compression
+		spec.SourceChannels = c.Channels
+		spec.SourceDurationSec = c.DurationSec
+		spec.TempDir = sw.renderTempDir()
+	}
+	return spec, projected, planEnqueue
 }
 
 // drainCandidates submits the planned candidates, maintaining the running
 // disk budget. Returns true when the context was cancelled mid-drain, so
 // the caller can discard partial counts (shutdown is not a sweep result).
-func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []manifest.AutoOptimizeCandidate, outputDir string, freeBytes int64, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
+func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []manifest.AutoOptimizeCandidate, outputDir string, freeBytes, scratchFree int64, counts *admin.AutoOptimizeSweepCounts) (aborted bool) {
 	floor := counts.MinFreeBytes
 	var projectedTotal int64
 	defer func() { counts.ProjectedBytes = projectedTotal }()
@@ -264,6 +343,15 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 			counts.DiskFloorReached = true
 			return false
 		}
+		// The scratch volume, for a DSD render. A point check, not a
+		// running sum — scratch is freed per job, so the sweep's TOTAL is
+		// never held at once — but it is sized for every lane the pool can
+		// run concurrently, because that peak IS held at once. Stop rather
+		// than skip, for the same reason as above.
+		if scratch := spec.RenderScratchBytes() * int64(sw.laneCount()); scratch > 0 && scratchFree-scratch < floor {
+			counts.DiskFloorReached = true
+			return false
+		}
 		if sw.submit(spec, c.StaleVariantID != "", counts) {
 			projectedTotal += projected
 		}
@@ -272,6 +360,19 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 		}
 	}
 	return false
+}
+
+// laneCount is the concurrent-render bound the scratch check is sized
+// for. Nil or nonsensical reads as 1 — a single lane is the pre-#863
+// shape, and over-reading would refuse work a healthy volume can hold.
+func (sw *autoOptimizeSweeper) laneCount() int {
+	if sw.lanes == nil {
+		return 1
+	}
+	if n := sw.lanes(); n > 1 {
+		return n
+	}
+	return 1
 }
 
 // submit enqueues one spec and folds the outcome into counts. Returns

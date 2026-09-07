@@ -204,4 +204,7 @@ func TestJobKindWireConstants(t *testing.T) {
 	if string(JobKindOptimize) != "optimize" {
 		t.Errorf("JobKindOptimize = %q, want %q", JobKindOptimize, "optimize")
 	}
+	if string(JobKindPCMRender) != "pcm" {
+		t.Errorf("JobKindPCMRender = %q, want %q", JobKindPCMRender, "pcm")
+	}
 }

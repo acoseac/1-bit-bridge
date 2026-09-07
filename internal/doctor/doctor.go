@@ -61,7 +61,10 @@ const (
 	checkNameLibraryRoots   = "library-roots"
 	checkNameServiceManager = "service-manager"
 	checkNameAudioToolchain = "audio-toolchain"
-	checkNameFingerprint    = "fingerprint-toolchain"
+	// checkNameDSDRenderToolchain is the ffmpeg-decoder check behind the
+	// DSD → PCM renditions (`upscale.dsdRender.enabled`).
+	checkNameDSDRenderToolchain = "dsd-render-toolchain"
+	checkNameFingerprint        = "fingerprint-toolchain"
 )
 
 // Check is one line of the doctor report.
@@ -125,6 +128,15 @@ type Deps struct {
 	// job at runtime). Both false → the check is a no-op "not enabled".
 	UpscaleEnabled  bool
 	AnalysisEnabled bool
+
+	// DSDRenderEnabled mirrors cfg.Upscale.DSDRender.Enabled (folded with
+	// cfg.Upscale.Enabled by the caller — the master toggle covers it).
+	// When true, checkDSDRenderToolchain verifies ffmpeg is present with
+	// the four dsd_* decoders (and warns without the dst one). When false
+	// the check is a no-op — except that a library holding DSF / DFF gets
+	// a tip, because the feature exists for exactly that library and is
+	// opt-in by design.
+	DSDRenderEnabled bool
 
 	// FingerprintEnabled mirrors cfg.Fingerprint.Enabled. When true,
 	// checkFingerprintToolchain verifies fpcalc is present AND an AcoustID key
@@ -196,6 +208,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkBrowserOpener,
 		checkInotifyLimit,
 		checkAudioToolchain,
+		checkDSDRenderToolchain,
 		checkFingerprintToolchain,
 		checkLogSize,
 	}
@@ -655,6 +668,78 @@ func libraryHasALAC(ctx context.Context, d Deps) (bool, error) {
 // errUnknownLibraryCodecs marks "no probe was supplied", which every caller
 // treats as "don't know" — never as "no".
 var errUnknownLibraryCodecs = errors.New("library codec probe not available")
+
+// probeFFmpeg is checkDSDRenderToolchain's test seam — the same
+// convention as probeSox / missingFFmpeg: CI runners have no ffmpeg, so
+// without it none of the branches below are reachable. Production MUST
+// NOT mutate it.
+var probeFFmpeg = transcode.ProbeFFmpeg
+
+// checkDSDRenderToolchain verifies the ffmpeg decoders the DSD → PCM
+// renditions need: ALL FOUR dsd_* decoders (a build with only some of
+// them refuses every source, so it fails rather than half-works) and the
+// dst decoder for DST-compressed DSDIFF (absence is a warning — the
+// uncompressed majority still renders; DST rows stay ineligible until it
+// is present). Mirrors checkAudioToolchain's shape, including the no-op
+// when the feature is off — with one courtesy: a library that already
+// holds DSF / DFF gets a tip, since the feature exists for that library
+// and nothing else will ever mention it.
+func checkDSDRenderToolchain(ctx context.Context, d Deps) Check {
+	if !d.DSDRenderEnabled {
+		if has, err := libraryHasDSD(ctx, d); err == nil && has {
+			return warn(checkNameDSDRenderToolchain, "not enabled; the library holds DSD (DSF / DFF)",
+				"DSD plays only on a DoP-capable wired DAC. `upscale.dsdRender.enabled: true` renders each "+
+					"DSD track once to PCM on the bridge (needs ffmpeg with the dsd_* decoders — every stock "+
+					"ffmpeg package ships them) so it also plays on CarPlay, wireless outputs, the speaker "+
+					"and DACs that cannot take the file's DSD rate. Opt-in: the sweep reads the whole DSD "+
+					"library once.")
+		}
+		return ok(checkNameDSDRenderToolchain, "not enabled (ffmpeg DSD decoders not required)")
+	}
+	info, err := probeFFmpeg(ctx)
+	if err != nil {
+		if errors.Is(err, transcode.ErrFFmpegMissing) {
+			return fail(checkNameDSDRenderToolchain, "ffmpeg not found",
+				"upscale.dsdRender.enabled is on but "+strings.Join(info.MissingBinaries, " + ")+" isn't on PATH; "+
+					"install the ffmpeg package (macOS: `brew install ffmpeg`; Debian/Ubuntu: `sudo apt install ffmpeg`; "+
+					"Windows: `choco install ffmpeg`) — it ships both binaries and the dsd_* / dst decoders — "+
+					"or disable the feature in bridge.yaml")
+		}
+		return fail(checkNameDSDRenderToolchain, "ffmpeg not runnable",
+			"ffmpeg is on PATH but its decoder listing could not be read: "+err.Error())
+	}
+	if !info.HasDSD {
+		return fail(checkNameDSDRenderToolchain, "ffmpeg lacks the DSD decoders",
+			"this ffmpeg build does not carry all four of dsd_lsbf, dsd_lsbf_planar, dsd_msbf, dsd_msbf_planar "+
+				"(`ffmpeg -hide_banner -decoders | grep dsd_`); no DSD track can be rendered with it. Reinstall a "+
+				"stock ffmpeg package (brew / apt / choco all ship them) or disable upscale.dsdRender in bridge.yaml")
+	}
+	if !info.HasDST {
+		return warn(checkNameDSDRenderToolchain, "ffmpeg decodes DSD but not DST",
+			"DST-compressed DSDIFF (.dff files carrying a DST chunk) stays unrendered until the `dst` decoder "+
+				"is present (`ffmpeg -hide_banner -decoders | grep ' dst '`); plain DSF / DFF renders fine. "+
+				"Stock ffmpeg ≥ 3.0 ships it.")
+	}
+	return ok(checkNameDSDRenderToolchain, "ffmpeg decodes DSD and DST")
+}
+
+// libraryHasDSD asks the manifest whether any indexed track is DSF or
+// DFF, with libraryHasALAC's "no probe → don't know" rule.
+func libraryHasDSD(ctx context.Context, d Deps) (bool, error) {
+	if d.LibraryHasCodec == nil {
+		return false, errUnknownLibraryCodecs
+	}
+	for _, codec := range []string{"DSF", "DFF"} {
+		has, err := d.LibraryHasCodec(ctx, codec)
+		if err != nil {
+			return false, err
+		}
+		if has {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // checkFingerprintToolchain verifies the acoustic-fingerprinting fallback can
 // actually run when it is switched on.

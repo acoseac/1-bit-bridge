@@ -24,6 +24,12 @@ func TestIsVariantSidecarName(t *testing.T) {
 		// Version-agnostic: a pre-v2 or future-schema sidecar is still excluded.
 		{"Track.flac.upscaled-v1-96000-24.flac", true},
 		{"Track.flac.optimized-v3-44100-16.flac", true},
+		// DSD renditions: a `.dsf` / `.dff` source with the two DSD families.
+		// Without these two families in the regex every rendition under the
+		// variants dir indexes as a phantom track.
+		{"01 Track.dsf.pcm-v1-176400-24.flac", true},
+		{"01 Track.dsf.pcm-v1-192000-24.flac", true},
+		{"01 Track.dff.optimized-dsd-v1-44100-16.flac", true},
 		// Real library files — must NOT be excluded.
 		{"01 - Carol of the Bells.flac", false},
 		{"Symphony No. 5.flac", false},
@@ -42,6 +48,8 @@ func TestIsVariantSidecarName(t *testing.T) {
 		{"Song (Album).optimized-Mix.flac", false},
 		{"Track.flac.optimized-v2-44100.flac", false},   // variant ID missing the bits segment
 		{"Track.txt.optimized-v2-44100-16.flac", false}, // source is not a supported audio ext
+		{"Song.pcm-Mix.flac", false},                    // a `pcm-` infix that is not a variant ID
+		{"Track.dsf.pcm-v1-176400.flac", false},         // pcm variant ID missing the bits segment
 	}
 	for _, tc := range cases {
 		if got := isVariantSidecarName(tc.name); got != tc.want {

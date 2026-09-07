@@ -67,7 +67,7 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		// Same GC sweep — path-equality against the DB rows is
 		// prefix-agnostic, so both upscaled-* and optimized-* rows
 		// are preserved together.
-		return runGC(ctx, stdout, stderr, r.store, r.outputDir)
+		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir)
 	}
 
 	return runUpscaleBatch(ctx, stdout, stderr, r.store, r.cfg, r.resolver, runUpscaleParams{

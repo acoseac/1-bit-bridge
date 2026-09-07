@@ -27,10 +27,10 @@ func TestDropInflightRemovesMatchingEntries(t *testing.T) {
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	t.Cleanup(runnerCancel)
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, _ JobSpec) (int64, string, error) {
+	p.runner = func(ctx context.Context, _ JobSpec) (RunResult, error) {
 		runnerStarted <- struct{}{}
 		<-runnerCtx.Done()
-		return 0, "", ctx.Err()
+		return RunResult{SizeBytes: 0}, ctx.Err()
 	}
 
 	specA := JobSpec{
@@ -91,9 +91,9 @@ func TestDropInflightPredicateReceivesSourcePathOnly(t *testing.T) {
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	t.Cleanup(runnerCancel)
 	p.fsyncFn = noopFsync
-	p.runner = func(ctx context.Context, _ JobSpec) (int64, string, error) {
+	p.runner = func(ctx context.Context, _ JobSpec) (RunResult, error) {
 		<-runnerCtx.Done()
-		return 0, "", ctx.Err()
+		return RunResult{SizeBytes: 0}, ctx.Err()
 	}
 
 	spec := JobSpec{

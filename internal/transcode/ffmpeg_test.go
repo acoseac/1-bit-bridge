@@ -16,40 +16,79 @@ func soxThatReads(formats ...string) SoxInfo {
 func TestDecodeRouteFor(t *testing.T) {
 	stock := soxThatReads("flac", "wav", "aiff", "mp3", "vorbis")
 	withMP4 := soxThatReads("flac", "wav", "mp4", "m4a")
+	// A hypothetical sox build that CLAIMS a dsf reader: DSD must still
+	// never go sox-direct.
+	withDSF := soxThatReads("flac", "wav", "dsf")
 
 	cases := []struct {
-		name   string
-		info   SoxInfo
-		ffmpeg bool
-		path   string
-		want   decodeRoute
-		why    string
+		name string
+		info SoxInfo
+		ff   FFmpegInfo
+		path string
+		want decodeRoute
+		why  string
 	}{
-		{"flac goes direct even with ffmpeg present", stock, true, "/l/a.flac", routeSoxDirect,
+		{"flac goes direct even with ffmpeg present", stock, ffPresentNoDSD(), "/l/a.flac", routeSoxDirect,
 			"the fallback widens coverage; it must never change how a working source is decoded"},
-		{"alac routes to ffmpeg", stock, true, "/l/a.m4a", routeFFmpegPipe, ""},
-		{"alac without ffmpeg is refused", stock, false, "/l/a.m4a", routeNone,
+		{"flac goes direct even with DSD decoders present", stock, ffWithDSD(), "/l/a.flac", routeSoxDirect, ""},
+		{"alac routes to ffmpeg", stock, ffPresentNoDSD(), "/l/a.m4a", routeFFmpegPipe, ""},
+		{"alac without ffmpeg is refused", stock, ffAbsent(), "/l/a.m4a", routeNone,
 			"an honest refusal, the pre-fix behaviour"},
-		{"a sox build WITH mp4 still goes direct", withMP4, true, "/l/a.m4a", routeSoxDirect,
+		{"a sox build WITH mp4 still goes direct", withMP4, ffPresentNoDSD(), "/l/a.m4a", routeSoxDirect,
 			"sox-direct wins whenever sox can read it"},
-		{"uppercase extension routes", stock, true, "/l/A.M4A", routeFFmpegPipe, ""},
+		{"uppercase extension routes", stock, ffPresentNoDSD(), "/l/A.M4A", routeFFmpegPipe, ""},
 		// An extension absent from soxFormatsForExt is CanDecode's OTHER
 		// documented fail-open, so it reaches sox and gets sox's own
 		// diagnostic. The fallback must not quietly claim it.
-		{"an unlisted extension still fails open to sox", stock, true, "/l/a.wma", routeSoxDirect,
+		{"an unlisted extension still fails open to sox", stock, ffPresentNoDSD(), "/l/a.wma", routeSoxDirect,
 			"CanDecode fails open for extensions its map does not cover; the fallback does not change that"},
 		// FormatsKnown=false is CanDecode's documented fail-open: an
 		// unparseable `sox --help` must never disable a working install.
-		{"unparseable sox help fails open to direct", SoxInfo{}, false, "/l/a.m4a", routeSoxDirect,
+		{"unparseable sox help fails open to direct", SoxInfo{}, ffAbsent(), "/l/a.m4a", routeSoxDirect,
 			"fail-open is the whole point of FormatsKnown=false"},
+
+		// --- DSD: ffmpeg or nothing, and only with the decoders seen. ---
+		{"dsf routes to the DSD pipe when ffmpeg has the decoders", stock, ffWithDSD(), "/l/a.dsf", routeFFmpegDSDPipe, ""},
+		{"dff routes to the DSD pipe when ffmpeg has the decoders", stock, ffWithDSD(), "/l/a.dff", routeFFmpegDSDPipe, ""},
+		{"uppercase DFF routes", stock, ffWithDSD(), "/l/A.DFF", routeFFmpegDSDPipe, ""},
+		{"dsf is refused when ffmpeg lacks the DSD decoders", stock, ffPresentNoDSD(), "/l/a.dsf", routeNone,
+			"fail CLOSED: a build without dsd_* fails mid-job after a lane was claimed"},
+		{"dsf is refused when ffmpeg is absent", stock, ffAbsent(), "/l/a.dsf", routeNone, ""},
+		{"dsf is refused when the probe was unparseable", stock, FFmpegInfo{}, "/l/a.dsf", routeNone,
+			"DecodersKnown=false grants nothing — the opposite posture from sox's fail-open"},
+		{"dsf never goes sox-direct even when sox lists dsf", withDSF, ffWithDSD(), "/l/a.dsf", routeFFmpegDSDPipe,
+			"the DSD chain was measured against ffmpeg's decoder; a sox reader is not a substitute"},
+		{"dsf with a sox that lists dsf but no ffmpeg is still refused", withDSF, ffAbsent(), "/l/a.dsf", routeNone,
+			"a sox dsf reader must not become a back door into the DSD chain"},
+		// The unparseable-sox fail-open must not leak into the DSD class.
+		{"unparseable sox help does not open DSD", SoxInfo{}, ffAbsent(), "/l/a.dsf", routeNone,
+			"CanDecode's fail-open is for sox-readable shapes; DSD is decided by the ffmpeg probe alone"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := decodeRouteFor(tc.info, tc.ffmpeg, tc.path); got != tc.want {
+			if got := decodeRouteFor(tc.info, tc.ff, tc.path); got != tc.want {
 				t.Errorf("decodeRouteFor(%q) = %v, want %v\n%s", tc.path, got, tc.want, tc.why)
 			}
 		})
 	}
+}
+
+// ffPresentNoDSD is an ffmpeg whose binaries are on PATH and whose listing
+// parsed, but which was built without the DSD decoders.
+func ffPresentNoDSD() FFmpegInfo {
+	return FFmpegInfo{Path: "/usr/bin/ffmpeg", DecodersKnown: true, Decoders: []string{"aac", "alac", "flac"}}
+}
+
+// ffWithDSD is an ffmpeg carrying every decoder the render needs.
+func ffWithDSD() FFmpegInfo {
+	return FFmpegInfo{Path: "/usr/bin/ffmpeg", DecodersKnown: true,
+		Decoders: append([]string{"aac", "alac", "flac", dstDecoderName}, dsdDecoderNames...),
+		HasDSD:   true, HasDST: true}
+}
+
+// ffAbsent is a host with neither binary.
+func ffAbsent() FFmpegInfo {
+	return FFmpegInfo{MissingBinaries: []string{"ffmpeg", "ffprobe"}}
 }
 
 // TestCanDecodeViaCoversTheFallback pins that the four eligibility call sites
@@ -80,7 +119,11 @@ func TestCanDecodeViaCoversTheFallback(t *testing.T) {
 func withFFmpeg(t *testing.T, present bool) {
 	t.Helper()
 	oldFF, oldFP := ffmpegLookPath, ffprobeLookPath
-	t.Cleanup(func() { ffmpegLookPath, ffprobeLookPath = oldFF, oldFP })
+	resetFFmpegSnapshotForTest()
+	t.Cleanup(func() {
+		ffmpegLookPath, ffprobeLookPath = oldFF, oldFP
+		resetFFmpegSnapshotForTest()
+	})
 	if present {
 		ffmpegLookPath = func() (string, error) { return "/usr/bin/ffmpeg", nil }
 		ffprobeLookPath = func() (string, error) { return "/usr/bin/ffprobe", nil }
@@ -241,23 +284,30 @@ func TestSettingsRecordTheDecoderThatRan(t *testing.T) {
 	}
 }
 
-// TestFFmpegRoutableExtIsTheMP4FamilyOnly pins the allowlist directly. It is
-// deliberately NOT "route whatever sox refused": the upstream gates already
-// exclude lossy and DSD, so anything else reaching a refusal is a shape
+// TestDecodeClassForExtIsExactlyTheTwoFamilies pins the allowlist directly.
+// It is deliberately NOT "route whatever sox refused": the upstream gates
+// already exclude lossy, so anything else reaching a refusal is a shape
 // neither decoder was chosen for, and handing it to ffmpeg turns an honest
-// "sox can't read this" into a mysterious mid-job failure.
-func TestFFmpegRoutableExtIsTheMP4FamilyOnly(t *testing.T) {
-	want := map[string]bool{".m4a": true, ".mp4": true, ".m4b": true, ".m4p": true}
-	for ext := range ffmpegRoutableExt {
-		if !want[ext] {
-			t.Errorf("%q routes to ffmpeg but is not in the MP4 family — widening this set "+
-				"is a deliberate act, not a side effect", ext)
+// "sox can't read this" into a mysterious mid-job failure. Two families,
+// each with a measured chain behind it, and nothing else.
+func TestDecodeClassForExtIsExactlyTheTwoFamilies(t *testing.T) {
+	want := map[string]decodeClass{
+		".m4a": classMP4, ".mp4": classMP4, ".m4b": classMP4, ".m4p": classMP4,
+		".dsf": classDSD, ".dff": classDSD,
+	}
+	for ext, class := range decodeClassForExt {
+		if want[ext] != class {
+			t.Errorf("%q is routable as %v but is in neither family — widening this set "+
+				"is a deliberate act, not a side effect", ext, class)
 		}
 	}
-	for ext := range want {
-		if !ffmpegRoutableExt[ext] {
-			t.Errorf("%q must route to ffmpeg: it is where ALAC lives", ext)
+	for ext, class := range want {
+		if decodeClassForExt[ext] != class {
+			t.Errorf("%q must be class %v (got %v)", ext, class, decodeClassForExt[ext])
 		}
+	}
+	if decodeClassOf("/l/a.flac") != classSoxOnly || decodeClassOf("/l/A.DSF") != classDSD {
+		t.Error("decodeClassOf must be case-insensitive on the extension and default to sox-only")
 	}
 }
 
@@ -267,9 +317,9 @@ func TestFFmpegRoutableExtIsTheMP4FamilyOnly(t *testing.T) {
 //
 // ProbeSox is a fork+exec (measured 7.9 ms against FFmpegAvailable's 17 µs),
 // so probing unconditionally would put 1,338 needless process spawns on an
-// auto-optimize backlog of that size. Only the MP4 family can route anywhere
-// but sox-direct; everything else must behave exactly as it did before the
-// fallback existed.
+// auto-optimize backlog of that size. Only the MP4 and DSD families can route
+// anywhere but sox-direct; everything else must behave exactly as it did
+// before the fallback existed.
 func TestRunSoxDoesNotProbePerJobForSoxReadableSources(t *testing.T) {
 	for _, tc := range []struct {
 		path string
@@ -279,7 +329,9 @@ func TestRunSoxDoesNotProbePerJobForSoxReadableSources(t *testing.T) {
 		{"/l/a.wav", false},
 		{"/l/a.mp3", false},
 		{"/l/a.aiff", false},
-		{"/l/a.dsf", false},
+		{"/l/a.dsf", true},
+		{"/l/a.dff", true},
+		{"/l/A.DSF", true},
 		{"/l/a.m4a", true},
 		{"/l/A.M4A", true},
 		{"/l/a.mp4", true},

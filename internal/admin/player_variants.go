@@ -56,7 +56,7 @@ func (s *Server) variantSummaryFor(r *http.Request, paths []string, sourceBytes 
 		logger.Warn("player: resolve upscale target for variant summary", "err", err)
 		return out
 	}
-	counts, err := s.deps.Manifest.EligibleCountsForPaths(r.Context(), paths, rate, bits)
+	counts, err := s.deps.Manifest.EligibleCountsForPaths(r.Context(), paths, rate, bits, s.eligibilityOpts())
 	if err != nil {
 		logger.Warn("player: eligible counts for variant summary", "err", err)
 		return out

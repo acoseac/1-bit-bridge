@@ -89,6 +89,7 @@ reaches a session that has not gone looking for it.
 - [Cross-source duplicates and UPnP import — PARKED, and why (2026-08-31)](#cross-source-duplicates-and-upnp-import-parked-and-why-2026-08-31)
 - [DIDL is not tags — routed rows fill artist/album from the container path (PR #813, 2026-08-31)](#didl-is-not-tags-routed-rows-fill-artistalbum-from-the-container-path-pr-813-2026-08-31)
 - [The original "Things that have bitten before" list (2026-04 → 2026-08)](#the-original-things-that-have-bitten-before-list-2026-04-2026-08)
+- [DSD → PCM renditions on the bridge, B1 (PR #863, 2026-09-07)](#dsd--pcm-renditions-on-the-bridge-b1-pr-863-2026-09-07)
 
 ---
 
@@ -3933,3 +3934,190 @@ universe is `reflect.TypeOf(settingsPatch{})`, never `config.Config`.
   Gemini review. CodeRabbit reviewed #859; SonarCloud and CodeQL passed. Recorded
   rather than implied, per the rule that a rate-limited bot's silence is not
   approval.
+
+---
+
+## DSD → PCM renditions on the bridge, B1 (PR #863, 2026-09-07)
+
+The bridge renders a DSD track to PCM once so the app streams that instead
+of pulling the multi-GB source and converting on the phone — CarPlay,
+wireless outputs, the speaker, a DAC that cannot take the file's DSD rate.
+Two tiers: compact `optimized-dsd-v1-<44100|48000>-16` (rides the
+auto-optimize sweep) and faithful `pcm-v1-<176400|192000>-24` (on demand).
+Never "upscaled": it is decimation, and `upscaled-` is a taken family.
+**A rendition only ever substitutes for ON-DEVICE conversion, never for
+DoP** — `DSDConversionPolicy.never` and every DoP-capable route resolve
+exactly as before, which is the negative control for every iOS test to
+come. Six commits on `feat/dsd-render`; the API kind, the health flag, the
+settings row, admin and docs are PR B2.
+
+### The shape, and what measurement settled about it
+
+**Two-stage render, both tiers.** Stage A decodes at UNITY through ffmpeg
+(`-af volume=0.5`, `-f f32le -`) into sox, which resamples to the TARGET
+rate and writes an uncompressed SoX-native int32 scratch
+(`<tempDir>/1-bit-bridge-render/<token>.stageA.sox`); Stage B measures the
+scratch's true peak with `analyze.TruePeakDBTP` (the existing 4× polyphase
+meter, `decoderSox` passed explicitly); Stage C writes the FLAC with
+`gain <6.0206 + G> dither -s`, `G = clamp(0, 6, −TP_unity − 1 dBTP)` rounded
+to 0.1 dB. Both stages fail on any `clipped` line in sox's stderr. Recorded
+per row as `applied_gain_db` + `true_peak_dbtp`; on the wire as
+`appliedGainDB` (absent on every PCM variant — a pointer with `omitempty`,
+so a clamped `0.0` ships `0`).
+
+Six measurements (S1–S6, dev Mac, ffmpeg 8.1 + sox 14.4.2), each of which
+decided something:
+
+1. **`-G` does NOT scan the input** (S1). No temp file ever appeared in a
+   polled `--temp` dir during a 60 s / 176.4 kHz job, wall 0.48 s vs 0.43 s
+   without it, outputs differing by LSB rounding — it is `gain -h … gain -r`
+   reclaiming a FIXED headroom. So the PCM chain's `-G` costs no scratch,
+   and the DSD chain drops it: the ffmpeg-side ×0.5 IS the headroom, and
+   the peak has to come from a real measurement pass.
+2. **The ×0.5 must be on the ffmpeg side** (S6). `sox -v 0.5` still reports
+   `input clipped 23600 samples` on a peak-1.5 float pipe, because `-v`
+   applies AFTER the float→int32 conversion; ffmpeg's float `volume=0.5` is
+   exactly ×0.5 (`max|u·0.5 − h| = 0` over 705,600 frames).
+3. **The chain lands the level** (S2): a −20 dBFS DSD64 tone renders at RMS
+   −17.01 dB (= −23.01 + 6, exact) with `G = 6.0`; a −6 dBFS tone gets
+   `G = 4.8` (pcm tier) / `5.0` (compact), final peak −0.99 / −0.96; a
+   −0.5 dBFS tone gets `G = 0.0`; DSD256 −20 → `G = 6.0`, RMS −17.01;
+   `clipped 0/0` throughout. Stage C is `6.0206 + G` — an earlier draft
+   wrote `− 6` as well, which leaves the file 6 dB quiet and silently
+   discards the SACD compensation; the RMS pin at ±0.01 dB is what stops
+   that recurring.
+4. **ffprobe already reports fs/8** (S3): DSF 2822400 → `sample_rate=352800`
+   (`dsd_lsbf_planar`), DFF → 352800 (`dsd_msbf`), a DST DFF → `codec=dst`
+   352800, the 48 k family → 384000; durations all non-zero. So Stage A's
+   `-r` is `geo.SampleRate` VERBATIM, and `validateDSDGeometry` pins the
+   relationship the other way (`geo.SampleRate × 8 == tracks.sample_rate`,
+   else a typed refusal — a wrong pipe rate is a half-speed variant).
+5. **Scratch is sized at the TARGET rate** (S2): the `.sox` intermediate is
+   exactly `4 × ch × targetRate × s` (3 s stereo at 176.4 k = 4,233,648 B).
+   Sizing it at the fs/8 pipe rate would over-estimate 2–8× and refuse
+   valid jobs on a tight volume. An hour of 176.4 k stereo is 5.08 GB, of
+   44.1 k 1.27 GB — regardless of the source rate.
+6. **Wall-clock is comfortable** (S5): Stage A pcm tier over 30 s of audio —
+   DSD64 0.009 s/s (107×), DSD128 0.014 (73×), DSD256 0.022 (46×), DSD512
+   0.038 (26×). Expect 3–5× slower on the 2-vCPU VPS, i.e. an hour of DSD512
+   in ~10 min; `jobTimeoutFor = max(10 min, min(4 h, 2 × duration))` (DST
+   ×2) sits well inside that, with the duration falling back to
+   `size × 8 / (nominalRate × channels)` — the NOMINAL DSD rate, never the
+   fs/8 figure, which would inflate every timeout and budget 8×.
+
+Both `ffmpeg -decoders` listings on hand (brew 8.1, the VPS's apt 6.1.1)
+carry `dsd_lsbf`, `dsd_lsbf_planar`, `dsd_msbf`, `dsd_msbf_planar` and
+`dst`; the listing is stdout-only under `-hide_banner` (S4). The probe
+parses `CombinedOutput` anyway and is fail-CLOSED: unparseable output is
+"not capable", and a DSD path routes through ffmpeg ONLY when
+`FFmpegInfo.HasDSD` (all four decoders) is true — `decodeRouteFor` never
+consults sox for a DSD path at all.
+
+### The parts worth knowing without reading the diff
+
+- **`DSDRenderCaps{Enabled, DecodeDSD, DecodeDST}` is the ONE value every
+  gate receives** — the coordinator's walks, the per-track enqueuer, the
+  sweeper, and (as `EligibilityOpts{DSDRender, DST}` binds) the SQL
+  mirrors. It folds the operator flag with the cached probe, so a settings
+  flip applies at the next submit and a decoder-less ffmpeg keeps every DSD
+  source skipped exactly as before the feature existed.
+- **The SQL eligibility mirror takes the caps as BINDS, not as three const
+  variants** — one `dsdRenderEligibleSQL` with `? = 1` arms for the DSD gate
+  and the DST arm (`( ? = 1 OR compression != 'DST')`), so the admin
+  lockstep matrix runs every row under all three cap states. Migration v43
+  adds `tracks.compression` as an accelerator column BACKFILLED from
+  `tags_json` in the migration itself (idempotent, so existing rows are
+  right immediately and no rescan is needed); the SACD virtual rows
+  (`<iso>/st/NN.dff`) are excluded by GLOB until an SACD phase exists.
+- **The five `VariantRow` readers share ONE column list and scanner**
+  (`variantRowSelect` + `scanVariantRow`), so the two gain columns could
+  not drift between `GetVariant` / `LookupVariant` / `AllVariants` and the
+  two prefix lists.
+- **Scratch is a SECOND disk budget, on the temp volume, graded per job.**
+  The coordinator's pre-flight adds the LARGEST single candidate's
+  `RenderScratchBytes` (never the sum — scratch is freed per job and the
+  lanes bound concurrency); the sweeper probes
+  `RenderScratchDir(tempDir)` only while caps are on and stops with
+  `DiskFloorReached` when one job's scratch would breach the floor. On the
+  VPS the variants dir is a B2 FUSE mount and `/` has 23 GB, which is why
+  `upscale.tempDir` exists and is validated like `variantsDir` (absolute,
+  never under a library root).
+- **The crash case is a purge, not a hope.** A SIGKILL leaves Stage A's
+  deferred remove unrun, so `bridge serve` startup and `--gc` purge
+  `1-bit-bridge-render/*.stageA.sox` older than 12 h — inside the
+  bridge-owned subdirectory only. `runGCForwardSweep` also skips
+  dot-directories now: a `.Trash`, an rclone cache, or scratch an operator
+  pointed beneath the variants dir is never an orphan sidecar.
+- **Kinds are discriminated, not inferred.** `upscale_batches.kind` replaces
+  the `TargetRate = 0` sentinel that made optimize batches render as
+  "0.0 kHz · 16-bit"; `pcm` rides the FOREGROUND lane like an on-demand
+  CarPlay optimize (`routesToForegroundLane`), the sweep stays background.
+- **`DSDRenditionSchemaVersion = "v1"` versions the DSD recipe
+  independently of `VariantSchemaVersion` (`v2`)** — a decimation-recipe
+  change after the alias measurement (B4) must not invalidate 8,356 PCM
+  optimizes.
+
+### Tests, controls, and the one that could not fail
+
+Every commit carried its negative controls with the red set predicted BY
+NAME before running and the restore verified by `git diff --quiet`. Commit
+6's nine matched; its tenth — "the live-sox decodability check is applied
+to a DSD row again" — stayed GREEN, and the test was REMOVED rather than
+shipped: `decodeRouteFor` answers a DSD path from the ffmpeg snapshot
+alone, the same snapshot the caps fold, so the guard has no
+host-independent observer (on this Mac ffmpeg is present and the sox path
+says yes either way; on CI it is absent and the test would go red — a pin
+whose verdict depends on the host's toolchain is not a pin). The guard is
+kept as layering, and says so at the site.
+
+Two reconciliation traps fired on the way. `-run '^(TestA|TestB)$'` with
+PREFIX names anchors on the whole name and silently ran 5 of 18 new tests
+while reporting green — the declared-vs-executed count is what caught it.
+And a pre-existing shape pin (`TestRun_FullReportShape`, the doctor's
+ordered check list) went red on the new check — the right kind of red; the
+new name was added to its expectation.
+
+**Not in B1, by decision:** SACD ISO virtual tracks (no demuxer on the
+bridge; excluded at the gate), album-level gain consistency (per-track clip
+guard, recorded for a later pass), the alias measurement of ffmpeg's
+`dsd2pcm` noise shelf (B4 — the 50 kHz probe FFT decides whether `sinc`
+moves before `rate`), the CLI `bridge render` subcommand and DST fixtures
+(B3).
+
+**The review round found a fail-open the extension/codec split created, and
+it is the finding worth carrying forward.** `Run` picks its decode route
+from the source's EXTENSION plus the decoder probe; every eligibility gate
+admits a row on its CODEC column. Those are two different questions, and
+where they disagreed the job fell through to sox-direct: a host whose
+ffmpeg lacks the `dsd_*` decoders (`routeNone`) and a row the scanner
+stamped DSF/DFF whose filename says otherwise. sox then either fails with
+its own unrelated diagnostic — the operator never learns the decoders are
+missing — or, for a shape it happens to accept, publishes a file under a
+DSD variant id with NO clip guard, no measured true peak and no
+`appliedGainDB`. The whole two-stage design is in those three things, so
+the silent-success half is the dangerous one. `ErrDSDDecodeUnavailable`
+reconciles the two views in the one place both are known, and its test
+carries a vacuity guard: the same spec WITHOUT `SourceIsDSD` must get past
+the guard, so the two refusals cannot pass because the guard widened to
+every job.
+
+Three more from the same round, each real: batch DSD renders rode the
+FOREGROUND lane (`enqueueOptimizeJobs` left `Background` false, and that
+lane exists for the phone's on-demand request — a bulk batch of
+multi-minute renders would park it behind work the pool cannot preempt);
+the coordinator's batch path left `SourceChannels` / `SourceDurationSec` at
+zero, which the sweeper and both single-file enqueuers had always filled,
+so scratch sizing assumed stereo and the decode-completeness guard lost the
+manifest fallback it uses when ffprobe reports 0 — **its test passed
+throughout, because it constructs a `JobSpec` directly and no production
+caller on that path set the field**; and the sweep's scratch check was
+sized for ONE render while the pool runs `workers` of them at once. That
+last one is now sized by lane count rather than a reservation ledger —
+same guarantee, one injected dependency, conservative in the direction
+that refuses work rather than admitting work the volume cannot hold.
+
+And one of the new tests was itself the defect class this repo documents:
+`PurgeStaleRenderScratch("")` in a test deletes every `*.stageA.sox` older
+than 12 h under the SHARED OS temp dir, which on a machine that also runs a
+bridge is not the test's state to remove. The mapping and the
+missing-directory contract are provable separately, and now are.

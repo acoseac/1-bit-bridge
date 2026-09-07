@@ -1421,6 +1421,37 @@ type UpscaleConfig struct {
 	// AutoOptimize pre-generates `optimized-*` variants in the
 	// background instead of waiting for a device to ask. Opt-in.
 	AutoOptimize AutoOptimizeConfig `yaml:"autoOptimize,omitempty"`
+
+	// DSDRender gates the DSD → PCM renditions (`optimized-dsd-*` for
+	// CarPlay / wireless / speaker playback, `pcm-*` for a wired DAC
+	// that cannot take the file's DSD rate). Opt-in like `enabled` and
+	// `autoOptimize.enabled` themselves: flipping it on lets the
+	// auto-optimize sweep read the whole DSD library (a B2 mount, on the
+	// author's host) and adds an ffmpeg-with-DSD-decoders requirement,
+	// so it stays an explicit operator act. Ignored when `Enabled` is
+	// false (the master toggle covers every rendition kind).
+	DSDRender DSDRenderConfig `yaml:"dsdRender,omitempty"`
+
+	// TempDir is where a DSD render's Stage A scratch lives — int32
+	// audio at the target rate for the whole track, i.e. up to several
+	// GB per in-flight job — under a bridge-owned `1-bit-bridge-render/`
+	// subdirectory. Empty (the default) is the OS temp dir. It is
+	// deliberately NOT derived from VariantsDir: on a host whose variants
+	// dir is a network / FUSE mount the scratch must stay on local disk,
+	// where the two sox stages that read it back are not paying a
+	// round-trip per read. MUST be absolute when set and MUST NOT sit
+	// under a library root (validated like VariantsDir); the
+	// subdirectory itself is created on the first render.
+	TempDir string `yaml:"tempDir,omitempty"`
+}
+
+// DSDRenderConfig gates the DSD → PCM renditions. Its own struct rather
+// than a bare bool so the knobs a later slice adds (a rate cap, a tier
+// switch) land beside the flag they qualify.
+type DSDRenderConfig struct {
+	// Enabled turns the renditions on. Default false — see
+	// UpscaleConfig.DSDRender for why this is opt-in.
+	Enabled bool `yaml:"enabled,omitempty"`
 }
 
 // AutoOptimizeConfig gates and bounds the serve-side sweeper that
@@ -2305,6 +2336,7 @@ func (c *Config) resolvePaths(baseDir string) {
 	// redactSoxErr also trims defensively, since the admin hot-patch
 	// route can set this field without going through Load().
 	c.Upscale.VariantsDir = resolvePath(baseDir, c.Upscale.VariantsDir)
+	c.Upscale.TempDir = resolvePath(baseDir, c.Upscale.TempDir)
 }
 
 // resolvePath canonicalises a single config path against baseDir: an empty
@@ -2737,6 +2769,9 @@ func (c *Config) Validate() error {
 	if err := validateVariantsDir(c.Upscale.VariantsDir, c.LibraryRoots); err != nil {
 		return fmt.Errorf("upscale.variantsDir %q: %w", c.Upscale.VariantsDir, err)
 	}
+	if err := validateRenderTempDir(c.Upscale.TempDir, c.LibraryRoots); err != nil {
+		return fmt.Errorf("upscale.tempDir %q: %w", c.Upscale.TempDir, err)
+	}
 	// upscale / analysis worker + queue counts: zero is the documented
 	// "use the computed default" sentinel (EffectiveWorkers /
 	// EffectiveQueueCap substitute it), so a negative is always a typo.
@@ -2865,6 +2900,28 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 	// lockstep.
 	if matched := fsutil.IsUnderAny(variantsDir, libraryRoots); matched != "" {
 		return fmt.Errorf("must not be under library root %q (variants would tangle with source files)", matched)
+	}
+	return nil
+}
+
+// validateRenderTempDir checks `upscale.tempDir` against the same two
+// constraints as validateVariantsDir, for the same reasons: a relative
+// path resolves differently under `bridge serve` and the CLI, and a
+// scratch directory under a library root would surface multi-GB `.sox`
+// intermediates to the scanner's walk (they carry no audio extension, so
+// they would not index — but the read-only-library invariant holds for
+// every write, not only the ones that happen to be harmless). Empty is
+// the documented "OS temp dir" default and needs no check; existence is
+// not validated (the render creates the subdirectory).
+func validateRenderTempDir(tempDir string, libraryRoots []string) error {
+	if tempDir == "" {
+		return nil
+	}
+	if !filepath.IsAbs(tempDir) {
+		return errors.New("must be an absolute path")
+	}
+	if matched := fsutil.IsUnderAny(tempDir, libraryRoots); matched != "" {
+		return fmt.Errorf("must not be under library root %q (render scratch would land inside the read-only library)", matched)
 	}
 	return nil
 }

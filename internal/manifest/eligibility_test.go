@@ -186,7 +186,7 @@ func TestEligibleCountsForFolders(t *testing.T) {
 	seedVariantFor(t, s, "Done/01.flac", "upscaled-v2-192000-24")
 
 	paths := []string{"AtFloor", "HiRes", "DSD", "Lossy", "Unknown", "ExtFallback", "Done"}
-	got, err := s.EligibleCountsForFolders(context.Background(), paths, 192000, 24)
+	got, err := s.EligibleCountsForFolders(context.Background(), paths, 192000, 24, EligibilityOpts{})
 	if err != nil {
 		t.Fatalf("EligibleCountsForFolders: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestEligibleCountsForFolders_bindingOrder(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedFormatTrack(t, s, "Bind/01.flac", "FLAC", 100, 200, false)
 
-	got, err := s.EligibleCountsForFolders(context.Background(), []string{"Bind"}, 200, 100)
+	got, err := s.EligibleCountsForFolders(context.Background(), []string{"Bind"}, 200, 100, EligibilityOpts{})
 	if err != nil {
 		t.Fatalf("EligibleCountsForFolders: %v", err)
 	}
@@ -238,14 +238,14 @@ func TestEligibleRollupByPrefix(t *testing.T) {
 	seedFormatTrack(t, s, "DSD/01.dsf", "DSF", 2822400, 1, true)
 	seedVariantFor(t, s, "HiRes/01.flac", "optimized-v1-44100-16")
 
-	all, err := s.EligibleRollupByPrefix(context.Background(), "", 192000, 24)
+	all, err := s.EligibleRollupByPrefix(context.Background(), "", 192000, 24, EligibilityOpts{})
 	if err != nil {
 		t.Fatalf("EligibleRollupByPrefix(all): %v", err)
 	}
 	if all.Upscale != 2 || all.Optimize != 1 {
 		t.Errorf("whole library = %+v, want {Upscale:2 Optimize:1}", all)
 	}
-	one, err := s.EligibleRollupByPrefix(context.Background(), "HiRes", 192000, 24)
+	one, err := s.EligibleRollupByPrefix(context.Background(), "HiRes", 192000, 24, EligibilityOpts{})
 	if err != nil {
 		t.Fatalf("EligibleRollupByPrefix(HiRes): %v", err)
 	}

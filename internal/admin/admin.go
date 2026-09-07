@@ -1669,6 +1669,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 // scanCtx returns the parent context for admin-triggered scans.
+// eligibilityOpts is the DSD-render capability every eligibility SQL
+// mirror takes. PCM-only until the serve wiring threads
+// transcode.DSDRenderCaps into the admin deps; the zero value keeps every
+// coverage number byte-identical to pre-v43.
+func (s *Server) eligibilityOpts() manifest.EligibilityOpts {
+	return manifest.EligibilityOpts{}
+}
+
 func (s *Server) scanCtx() context.Context {
 	if s.deps.ScanCtx != nil {
 		return s.deps.ScanCtx

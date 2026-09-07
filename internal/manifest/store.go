@@ -1947,6 +1947,12 @@ var migrations = []migration{
 		CREATE INDEX IF NOT EXISTS idx_track_lyrics_lower
 			ON track_lyrics(unicode_lower(source_path));`,
 	},
+	{
+		version: 43,
+		name:    "DSD renditions: variant gain columns, batch kind, tracks.compression accelerator",
+		sql:     `-- columns added idempotently in post(); see addDSDRenditionColumns`,
+		post:    addDSDRenditionColumns,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -2020,6 +2026,62 @@ func backfillFormatColumns(db *sql.DB) error {
 			codec           = json_extract(tags_json, '$.codec')`)
 	if err != nil {
 		return fmt.Errorf("backfill format columns: %w", err)
+	}
+	return nil
+}
+
+// addDSDRenditionColumns is migration v43's post(): the DSD-rendition
+// columns, each added idempotently (the v25 shape — a duplicate ALTER is
+// skipped, any OTHER ALTER failure aborts so migrate() never stamps 43
+// over a partial schema), then the `tracks.compression` backfill.
+//
+//   - track_variants.applied_gain_db / true_peak_dbtp (REAL, NULL for
+//     every PCM variant): the clip-guarded gain a DSD rendition carries
+//     and the true peak it was measured against. NULL is "not a DSD
+//     rendition" — a clamped 0 dB gain is a stored 0, never NULL.
+//   - upscale_batches.kind ("upscale" / "optimize" / "pcm"): pre-v43
+//     optimize batches are recognised by their (target_rate=0,
+//     target_bits=16) sentinel; pcm batches need a real discriminator.
+//   - tracks.compression: the DSDIFF `CMPR` name (`DST` for DST-compressed
+//     DSDIFF) as a plain column, so the DSD-render eligibility SQL can
+//     exclude DST rows without json_extract on the browse path — the
+//     same reason the v25 format-fact columns exist.
+//
+// The backfill runs on EVERY attempt, outside the column-exists guard
+// (the v30 lesson: an ALTER that committed with a backfill that did not
+// must not be stamped over on the next start). Idempotent by
+// construction — it only fills NULLs from tags_json.
+func addDSDRenditionColumns(db *sql.DB) error {
+	for _, a := range []struct{ table, col, typ string }{
+		{"track_variants", "applied_gain_db", "REAL"},
+		{"track_variants", "true_peak_dbtp", "REAL"},
+		{"upscale_batches", "kind", "TEXT NOT NULL DEFAULT ''"},
+		{"tracks", "compression", "TEXT"},
+	} {
+		exists, err := atlasColumnExists(db, a.table, a.col)
+		if err != nil {
+			return fmt.Errorf("inspect %s.%s: %w", a.table, a.col, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.Exec("ALTER TABLE " + a.table + " ADD COLUMN " + a.col + " " + a.typ); err != nil {
+			return fmt.Errorf("add %s.%s: %w", a.table, a.col, err)
+		}
+	}
+	return backfillCompressionColumn(db)
+}
+
+// backfillCompressionColumn derives `tracks.compression` from tags_json
+// for every row that has none yet. Rows without the key stay NULL
+// (uncompressed / not DSDIFF), which every reader treats as "not DST".
+func backfillCompressionColumn(db *sql.DB) error {
+	if _, err := db.Exec(`
+		UPDATE tracks
+		   SET compression = json_extract(tags_json, '$.compression')
+		 WHERE compression IS NULL
+		   AND json_extract(tags_json, '$.compression') IS NOT NULL`); err != nil {
+		return fmt.Errorf("backfill tracks.compression: %w", err)
 	}
 	return nil
 }
@@ -2280,8 +2342,8 @@ func (s *Store) HasTracksWithCodec(ctx context.Context, codec string) (bool, err
 }
 
 // formatColumnBinds returns SQL-nullable binds for the v25 format-fact
-// columns (sample_rate / bits_per_sample / is_dsd / codec), derived
-// from the Track's own fields. Untouched values stay nil → SQL NULL,
+// columns (sample_rate / bits_per_sample / is_dsd / codec) and the v43
+// `compression` column, derived from the Track's own fields. Untouched values stay nil → SQL NULL,
 // preserving "unknown" for rows whose extractor couldn't determine
 // geometry. Pointer fields are nil-checked BEFORE dereference —
 // Track.SampleRate is *float64 and a blind deref would panic on
@@ -2289,7 +2351,7 @@ func (s *Store) HasTracksWithCodec(ctx context.Context, codec string) (bool, err
 // but the WAV/AIFF walkers and hand-built test fixtures may not).
 // Shared by UpsertTrack and UpsertTrackBatch so the two write paths
 // can't drift.
-func formatColumnBinds(t *Track) (rate, bits, isDSD, codec any) {
+func formatColumnBinds(t *Track) (rate, bits, isDSD, codec, compression any) {
 	if t.SampleRate != nil {
 		rate = int64(*t.SampleRate)
 	}
@@ -2302,7 +2364,12 @@ func formatColumnBinds(t *Track) (rate, bits, isDSD, codec any) {
 	if t.Codec != "" {
 		codec = t.Codec
 	}
-	return rate, bits, isDSD, codec
+	// v43: the DSDIFF compression name ("DST" when DST-compressed) as a
+	// plain column; NULL when the extractor stamped none.
+	if t.Compression != "" {
+		compression = t.Compression
+	}
+	return rate, bits, isDSD, codec, compression
 }
 
 func marshalForStorage(t *Track) ([]byte, error) {
@@ -2759,7 +2826,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rate, bits, isDSD, codec := formatColumnBinds(t)
+	rate, bits, isDSD, codec, compression := formatColumnBinds(t)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -2769,8 +2836,8 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
-		                   extractor_version, audio_md5)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   extractor_version, audio_md5, compression)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -2806,6 +2873,8 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			bits_per_sample = excluded.bits_per_sample,
 			is_dsd          = excluded.is_dsd,
 			codec           = excluded.codec,
+			-- v43 compression accelerator — same discipline as the four above.
+			compression     = excluded.compression,
 			-- extractor_version stamped on every upsert (constant per build).
 			-- The excluded.extractor_version assignment is MANDATORY: without
 			-- it a re-extracted (conflict) row keeps its stale stamp and would
@@ -2828,7 +2897,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 			-- only runs when the row was proved byte-identical.
 			audio_md5 = excluded.audio_md5
 	`, t.Path, t.Size, t.ModTime.UnixNano(), raw, now,
-		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5)
+		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression)
 	if err != nil {
 		return err
 	}
@@ -2872,15 +2941,16 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	// on PR #71). marshalForStorage failures abort the whole batch
 	// before any SQL touches the DB.
 	type row struct {
-		path     string
-		size     int64
-		mtime    int64
-		tagsRaw  []byte
-		rate     any
-		bits     any
-		isDSD    any
-		codec    any
-		audioMD5 string
+		path        string
+		size        int64
+		mtime       int64
+		tagsRaw     []byte
+		rate        any
+		bits        any
+		isDSD       any
+		codec       any
+		compression any
+		audioMD5    string
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -2888,17 +2958,18 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		if err != nil {
 			return err
 		}
-		rate, bits, isDSD, codec := formatColumnBinds(t)
+		rate, bits, isDSD, codec, compression := formatColumnBinds(t)
 		rows[i] = row{
-			path:     t.Path,
-			size:     t.Size,
-			mtime:    t.ModTime.UnixNano(),
-			tagsRaw:  raw,
-			rate:     rate,
-			bits:     bits,
-			isDSD:    isDSD,
-			codec:    codec,
-			audioMD5: t.audioMD5,
+			path:        t.Path,
+			size:        t.Size,
+			mtime:       t.ModTime.UnixNano(),
+			tagsRaw:     raw,
+			rate:        rate,
+			bits:        bits,
+			isDSD:       isDSD,
+			codec:       codec,
+			compression: compression,
+			audioMD5:    t.audioMD5,
 		}
 	}
 
@@ -2923,8 +2994,8 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at,
 		                   sample_rate, bits_per_sample, is_dsd, codec,
-		                   extractor_version, audio_md5)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   extractor_version, audio_md5, compression)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -2951,6 +3022,8 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			bits_per_sample = excluded.bits_per_sample,
 			is_dsd          = excluded.is_dsd,
 			codec           = excluded.codec,
+			-- v43 compression accelerator — same discipline as the four above.
+			compression     = excluded.compression,
 			-- extractor_version stamped on every upsert (constant per build).
 			-- The excluded.extractor_version assignment is MANDATORY: without
 			-- it a re-extracted (conflict) row keeps its stale stamp and would
@@ -2967,7 +3040,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	now := s.now().UnixNano()
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, now,
-			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5); err != nil {
+			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression); err != nil {
 			return err
 		}
 	}
@@ -3479,6 +3552,11 @@ func boolPtr(b bool) *bool { return &b }
 // binding) is safe here: the subquery has no user input. Track
 // path lookups use the existing prepared-statement parameter on
 // the outer SELECT.
+//
+// `appliedGainDB` is NULL for every PCM variant; json_object turns that
+// into a JSON null, which decodes to a nil *float64 and is dropped from
+// the wire by `omitempty` — so a PCM variant carries NO key, while a DSD
+// rendition clamped to 0 dB carries `0` (see Variant.AppliedGainDB).
 const variantsAggSQL = `
 	(SELECT json_group_array(json_object(
 	            'id',            v.variant_id,
@@ -3486,6 +3564,7 @@ const variantsAggSQL = `
 	            'sampleRate',    v.sample_rate,
 	            'bitsPerSample', v.bits_per_sample,
 	            'sizeBytes',     v.size_bytes,
+	            'appliedGainDB', v.applied_gain_db,
 	            'label',         v.variant_id))
 	 FROM track_variants v
 	 WHERE v.source_path = tracks.path) AS variants_json`
@@ -3663,15 +3742,24 @@ func scanTrackVariants(t *Track, raw []byte) {
 //   - `optimized-` → "Optimized FLAC 16/44.1" (CarPlay-targeted
 //     downsample, runtime-routed on iOS — invisible in the wand
 //     long-press menu for v1, but surfaces in admin web UI and
-//     server logs).
+//     server logs). The DSD compact tier `optimized-dsd-…` starts with
+//     the same prefix and reads the same way, deliberately.
+//   - `pcm-` → "PCM FLAC 24/176.4" (the faithful DSD rendition — a
+//     decimation, never "Upscaled": that prefix is a taken family with
+//     its own client-side semantics).
 //
 // **Don't reintroduce the hardcoded "Upscaled" literal** at any
-// new variant-label site — branch on the prefix.
+// new variant-label site — branch on the prefix. An UNKNOWN prefix
+// still labels itself "Upscaled" (back-compat with pre-discriminator
+// producers), which is exactly why a new family needs its own arm here.
 func humanLabelForVariant(v Variant) string {
 	rateLabel := formatSampleRateLabel(v.SampleRate)
 	kind := "Upscaled"
-	if strings.HasPrefix(v.ID, "optimized-") {
+	switch {
+	case strings.HasPrefix(v.ID, VariantKindPrefixOptimized+"-"):
 		kind = "Optimized"
+	case strings.HasPrefix(v.ID, VariantKindPrefixPCM+"-"):
+		kind = "PCM"
 	}
 	switch {
 	case v.Format == "flac":
@@ -6024,6 +6112,12 @@ type UpscaleBatchRow struct {
 	TargetRate int
 	// TargetBits is the resolved output bit depth (16/24/32).
 	TargetBits int
+	// Kind is the batch's job family — "upscale" / "optimize" / "pcm"
+	// (the transcode.JobKind wire values), migration v43. Pre-v43 rows
+	// carry "" and are recognised by the (TargetRate=0, TargetBits=16)
+	// sentinel the optimize submit used; readers keep that derivation
+	// for them rather than rewriting history.
+	Kind string
 	// Status is one of 'pending','running','completed','failed',
 	// 'cancelled','interrupted'. The CHECK constraint at the SQL
 	// layer enforces the enum; an invalid value rejects the insert.
@@ -6065,12 +6159,12 @@ func (s *Store) InsertUpscaleBatch(ctx context.Context, row UpscaleBatchRow) err
 		INSERT INTO upscale_batches
 			(id, path, target_rate, target_bits, status,
 			 total_files, processed_files, failed_files,
-			 error, created_at, updated_at, skipped_files)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+			 error, created_at, updated_at, skipped_files, kind)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`,
 		row.ID[:], row.Path, row.TargetRate, row.TargetBits, row.Status,
 		row.TotalFiles, row.ProcessedFiles, row.FailedFiles,
-		row.Error, row.CreatedAt, row.UpdatedAt, row.SkippedFiles,
+		row.Error, row.CreatedAt, row.UpdatedAt, row.SkippedFiles, row.Kind,
 	)
 	return err
 }
@@ -6182,7 +6276,7 @@ func (s *Store) ListUpscaleBatches(ctx context.Context, limit int) ([]UpscaleBat
 		SELECT id, path, target_rate, target_bits, status,
 		       total_files, processed_files, failed_files,
 		       COALESCE(error, ''), created_at, updated_at,
-		       skipped_files
+		       skipped_files, kind
 		  FROM upscale_batches
 		 ORDER BY created_at DESC
 		 LIMIT ?
@@ -6201,7 +6295,7 @@ func (s *Store) ListUpscaleBatches(ctx context.Context, limit int) ([]UpscaleBat
 			&idBlob, &row.Path, &row.TargetRate, &row.TargetBits, &row.Status,
 			&row.TotalFiles, &row.ProcessedFiles, &row.FailedFiles,
 			&row.Error, &row.CreatedAt, &row.UpdatedAt,
-			&row.SkippedFiles,
+			&row.SkippedFiles, &row.Kind,
 		); err != nil {
 			return nil, err
 		}
@@ -6279,6 +6373,17 @@ func (s *Store) RecoverInterruptedBatches(ctx context.Context, nowUnixNS int64) 
 const (
 	VariantKindPrefixUpscaled  = "upscaled"
 	VariantKindPrefixOptimized = "optimized"
+	// VariantKindPrefixOptimizedDSD is the DSD compact tier
+	// (`optimized-dsd-v1-<44100|48000>-16`). It STARTS WITH
+	// VariantKindPrefixOptimized on purpose: `LIKE 'optimized-%'` and
+	// every `optimized-` prefix check — the coverage counters, the
+	// sweeper's already-covered test, iOS routing — admit it unchanged.
+	// It exists as its own constant for the sidecar-name regex, which
+	// matches the whole `<prefix>-v<n>-<rate>-<bits>` segment.
+	VariantKindPrefixOptimizedDSD = VariantKindPrefixOptimized + "-dsd"
+	// VariantKindPrefixPCM is the DSD faithful tier
+	// (`pcm-v1-<176400|192000>-24`): a NEW family, never "upscaled".
+	VariantKindPrefixPCM = "pcm"
 )
 
 // childFolderRollupSelect is the shared SELECT-projection block used
@@ -6961,6 +7066,7 @@ func (s *Store) CountVariantsByKind(ctx context.Context) (map[string]int64, erro
 		  CASE
 		    WHEN variant_id LIKE 'upscaled-%'  THEN 'upscale'
 		    WHEN variant_id LIKE 'optimized-%' THEN 'optimize'
+		    WHEN variant_id LIKE 'pcm-%'       THEN 'pcm'
 		    ELSE 'unknown'
 		  END AS kind,
 		  COALESCE(SUM(size_bytes), 0) AS total
@@ -6974,6 +7080,7 @@ func (s *Store) CountVariantsByKind(ctx context.Context) (map[string]int64, erro
 	out := map[string]int64{
 		"upscale":  0,
 		"optimize": 0,
+		"pcm":      0,
 	}
 	for rows.Next() {
 		var kind string
@@ -7001,7 +7108,7 @@ type VariantKindStat struct {
 }
 
 // VariantStatsByKind returns per-kind file counts and combined byte
-// sizes, keyed "upscale" / "optimize" (and "unknown" only when that
+// sizes, keyed "upscale" / "optimize" / "pcm" (and "unknown" only when that
 // bucket is non-empty — defensive, should stay empty in practice).
 //
 // Sibling of `CountVariantsByKind` (which returns bytes only): this one
@@ -7009,8 +7116,8 @@ type VariantKindStat struct {
 // "Upscaled: N files (X)" / "Optimized: M files (Y)" honestly instead
 // of the conflated all-variants total the Settings tile showed before.
 //
-// The result map is **pre-seeded** with zero-valued "upscale" +
-// "optimize" entries, because a `GROUP BY` over an empty
+// The result map is **pre-seeded** with zero-valued "upscale" /
+// "optimize" / "pcm" entries, because a `GROUP BY` over an empty
 // `track_variants` returns zero rows — pre-seeding keeps the JSON
 // payload shape stable so the frontend never reads `undefined`.
 //
@@ -7022,6 +7129,7 @@ func (s *Store) VariantStatsByKind(ctx context.Context) (map[string]VariantKindS
 		  CASE
 		    WHEN variant_id LIKE 'upscaled-%'  THEN 'upscale'
 		    WHEN variant_id LIKE 'optimized-%' THEN 'optimize'
+		    WHEN variant_id LIKE 'pcm-%'       THEN 'pcm'
 		    ELSE 'unknown'
 		  END AS kind,
 		  COUNT(*) AS files,
@@ -7036,6 +7144,7 @@ func (s *Store) VariantStatsByKind(ctx context.Context) (map[string]VariantKindS
 	out := map[string]VariantKindStat{
 		"upscale":  {},
 		"optimize": {},
+		"pcm":      {},
 	}
 	for rows.Next() {
 		var kind string
@@ -7171,15 +7280,34 @@ type TrackProjection struct {
 	Codec string
 	// IsDSD distinguishes DSF / DFF tracks (which the upscale
 	// pipeline rejects — DSD is 1-bit modulated and not a SoX-
-	// resampleable source) from PCM. The admin projection loop
+	// resampleable source; the DSD-render tiers are the one exception,
+	// decoding through ffmpeg — transcode.OptimizeEligibleFor /
+	// PCMRenderEligible, gated on caps) from PCM. The admin projection loop
 	// folds DSD into the `unknownFormat` bucket so the surfaced
 	// "X tracks here can't be upscaled" count reflects reality;
 	// without this gate DSF folders showed a projectable size +
 	// active Upscale button, but the submit returned
 	// `enqueuedCount: 0`. User-reported on the v1.4 followup
 	// inspector polish.
-	IsDSD      bool
-	HasVariant bool
+	IsDSD bool
+	// Compression is the DSDIFF `CMPR` compression name — "DST" for
+	// DST-compressed DSDIFF, empty for DSF, uncompressed DFF and every
+	// PCM row — read from the v43 `tracks.compression` column. The
+	// DSD-render gates (transcode.DSDRenderEligible) refuse DST without
+	// ffmpeg's `dst` decoder, and this is what lets them do it from
+	// projected columns alone.
+	Compression string
+	// DurationSec / Channels are the DSD render's geometry — the same
+	// pair AutoOptimizeCandidate carries, for the same two consumers:
+	// transcode.JobSpec.SourceDurationSec (the decode-completeness
+	// guard's fallback when ffprobe reports 0, and the per-spec timeout)
+	// and SourceChannels (scratch sizing, which otherwise assumes
+	// stereo and under-reserves for a multichannel source). Read from
+	// tags_json for DSD rows ONLY and 0 elsewhere — "unknown", which
+	// every consumer treats as "fall back", never as a real value.
+	DurationSec float64
+	Channels    int
+	HasVariant  bool
 	// Suppressed marks a source that has failed conversion
 	// `variantFailureThreshold` consecutive times on THIS version of the
 	// file, recently enough to still count (migration v39). The batch walks
@@ -7271,6 +7399,11 @@ const trackProjectionSelect = `
 		       CAST(COALESCE(json_extract(t.tags_json, '$.bitsPerSample'), 0) AS INTEGER) AS bits,
 		       COALESCE(json_extract(t.tags_json, '$.codec'),              '') AS codec,
 		       CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'),         0) AS INTEGER) AS is_dsd,
+		       COALESCE(t.compression, '') AS compression,
+		       CASE WHEN CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'), 0) AS INTEGER) = 1
+		            THEN COALESCE(json_extract(t.tags_json, '$.duration'), 0) ELSE 0 END AS duration_sec,
+		       CASE WHEN CAST(COALESCE(json_extract(t.tags_json, '$.isDSD'), 0) AS INTEGER) = 1
+		            THEN CAST(COALESCE(json_extract(t.tags_json, '$.channels'), 0) AS INTEGER) ELSE 0 END AS channels,
 		       EXISTS(SELECT 1 FROM track_variants tv
 		               WHERE tv.source_path = t.path
 		                 AND tv.variant_id LIKE ?) AS has_variant,
@@ -7282,7 +7415,7 @@ func scanTrackProjections(rows *sql.Rows) ([]TrackProjection, error) {
 	for rows.Next() {
 		var tp TrackProjection
 		var isDSD, has, suppressed int
-		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &tp.Codec, &isDSD, &has, &suppressed); err != nil {
+		if err := rows.Scan(&tp.Path, &tp.Size, &tp.MTimeNS, &tp.SampleRate, &tp.BitsPerSample, &tp.Codec, &isDSD, &tp.Compression, &tp.DurationSec, &tp.Channels, &has, &suppressed); err != nil {
 			return nil, err
 		}
 		tp.IsDSD = isDSD != 0
@@ -7401,7 +7534,23 @@ type VariantRow struct {
 	SourceMTimeNS int64
 	SourceSize    int64
 	SoxSettings   string
+	// AppliedGainDB / TruePeakDBTP are the DSD-rendition gain facts
+	// (migration v43): the clip-guarded gain baked into the sidecar and
+	// the intermediate's true peak at unity decode. Nil on every PCM
+	// variant — NULL in the column, absent on the wire — so "not a DSD
+	// rendition" is a nil check, never a zero test (a clamped 0 dB gain
+	// is a real, stored 0).
+	AppliedGainDB *float64
+	TruePeakDBTP  *float64
 	CreatedAt     int64
+}
+
+// nullFloat maps an optional gain fact onto its SQL bind: nil → NULL.
+func nullFloat(p *float64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // UpsertVariant writes (or replaces) one row in `track_variants` AND
@@ -7433,8 +7582,9 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 		INSERT INTO track_variants
 			(source_path, variant_id, sidecar_path, format,
 			 sample_rate, bits_per_sample, size_bytes,
-			 source_mtime_ns, source_size, sox_settings, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+			 source_mtime_ns, source_size, sox_settings, created_at,
+			 applied_gain_db, true_peak_dbtp)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (source_path, variant_id) DO UPDATE SET
 			sidecar_path    = excluded.sidecar_path,
 			format          = excluded.format,
@@ -7444,10 +7594,13 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 			source_mtime_ns = excluded.source_mtime_ns,
 			source_size     = excluded.source_size,
 			sox_settings    = excluded.sox_settings,
-			created_at      = excluded.created_at
+			created_at      = excluded.created_at,
+			applied_gain_db = excluded.applied_gain_db,
+			true_peak_dbtp  = excluded.true_peak_dbtp
 	`, v.SourcePath, v.VariantID, v.SidecarPath, v.Format,
 		v.SampleRate, v.BitsPerSample, v.SizeBytes,
-		v.SourceMTimeNS, v.SourceSize, v.SoxSettings, v.CreatedAt); err != nil {
+		v.SourceMTimeNS, v.SourceSize, v.SoxSettings, v.CreatedAt,
+		nullFloat(v.AppliedGainDB), nullFloat(v.TruePeakDBTP)); err != nil {
 		return err
 	}
 	// Parent indexed_at bump. UPDATE on a missing parent is a no-op
@@ -7523,10 +7676,68 @@ func (s *Store) SetArtworkVersionAndBumpIndex(ctx context.Context, artworkMBID, 
 	return res.RowsAffected()
 }
 
+// variantRowSelect is the column list EVERY VariantRow reader selects
+// and scanVariantRow the one scanner for it — one definition, so the v43
+// gain columns (and any column added later) reach all five readers or
+// none of them, rather than the four that were remembered. The five
+// query constants below are named rather than built at the call site so
+// they stay compile-time constants (the go:S2077 shape).
+const variantRowSelect = `
+		SELECT source_path, variant_id, sidecar_path, format,
+		       sample_rate, bits_per_sample, size_bytes,
+		       source_mtime_ns, source_size, sox_settings, created_at,
+		       applied_gain_db, true_peak_dbtp
+		FROM track_variants`
+
+const (
+	getVariantSQL = variantRowSelect + `
+		WHERE source_path = ? AND variant_id = ?`
+	lookupVariantByLowerCaseSQL = variantRowSelect + `
+		WHERE unicode_lower(source_path) = unicode_lower(?) AND variant_id = ?
+		LIMIT 2`
+	allVariantsSQL = variantRowSelect + `
+		ORDER BY source_path ASC, variant_id ASC`
+	listVariantsByPathPrefixSQL = variantRowSelect + `
+		WHERE unicode_lower(source_path) LIKE unicode_lower(?) ESCAPE '\'
+		ORDER BY source_path ASC, variant_id ASC`
+	listVariantsForPathSQL = variantRowSelect + `
+		WHERE unicode_lower(source_path) = unicode_lower(?)
+		ORDER BY variant_id ASC`
+)
+
+// variantRowScanner is what *sql.Row and *sql.Rows have in common.
+type variantRowScanner interface{ Scan(dest ...any) error }
+
+// scanVariantRow reads one variantRowSelect row. The two gain columns
+// come back as sql.NullFloat64 and land as nil pointers when NULL —
+// which is every PCM variant.
+func scanVariantRow(sc variantRowScanner) (VariantRow, error) {
+	var (
+		v          VariantRow
+		gain, peak sql.NullFloat64
+	)
+	if err := sc.Scan(
+		&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
+		&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
+		&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
+		&gain, &peak,
+	); err != nil {
+		return VariantRow{}, err
+	}
+	if gain.Valid {
+		g := gain.Float64
+		v.AppliedGainDB = &g
+	}
+	if peak.Valid {
+		p := peak.Float64
+		v.TruePeakDBTP = &p
+	}
+	return v, nil
+}
+
 // GetVariant fetches one row by (source_path, variant_id). Returns
 // (nil, nil) if absent — same convention as GetTrack.
 func (s *Store) GetVariant(ctx context.Context, sourcePath, variantID string) (*VariantRow, error) {
-	var v VariantRow
 	// Exact match by design — `track_variants.source_path` is part
 	// of the SQL PRIMARY KEY and case-insensitive lookups would risk
 	// returning an arbitrary case-colliding row's sidecar path on
@@ -7534,16 +7745,7 @@ func (s *Store) GetVariant(ctx context.Context, sourcePath, variantID string) (*
 	// that hand in iOS-shaped paths from `share.normalize`. (Qodo
 	// on PR #126: variant lookup non-determinism could stream the
 	// wrong sidecar from /v1/download.)
-	err := s.db.QueryRowContext(ctx, `
-		SELECT source_path, variant_id, sidecar_path, format,
-		       sample_rate, bits_per_sample, size_bytes,
-		       source_mtime_ns, source_size, sox_settings, created_at
-		FROM track_variants
-		WHERE source_path = ? AND variant_id = ?
-	`, sourcePath, variantID).Scan(
-		&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
-		&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
-		&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt)
+	v, err := scanVariantRow(s.db.QueryRowContext(ctx, getVariantSQL, sourcePath, variantID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -7589,14 +7791,7 @@ func (s *Store) lookupVariantByLowerCase(ctx context.Context, cleanedSourcePath,
 	// `track_variants.source_path` rows under the same
 	// `variant_id` would otherwise let LIMIT 1 stream the wrong
 	// sidecar from /v1/download. (CodeRabbit on PR #126.)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_path, variant_id, sidecar_path, format,
-		       sample_rate, bits_per_sample, size_bytes,
-		       source_mtime_ns, source_size, sox_settings, created_at
-		FROM track_variants
-		WHERE unicode_lower(source_path) = unicode_lower(?) AND variant_id = ?
-		LIMIT 2
-	`, cleanedSourcePath, variantID)
+	rows, err := s.db.QueryContext(ctx, lookupVariantByLowerCaseSQL, cleanedSourcePath, variantID)
 	if err != nil {
 		return nil, err
 	}
@@ -7611,12 +7806,8 @@ func (s *Store) lookupVariantByLowerCase(ctx context.Context, cleanedSourcePath,
 		}
 		return nil, nil
 	}
-	var v VariantRow
-	if err := rows.Scan(
-		&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
-		&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
-		&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
-	); err != nil {
+	v, err := scanVariantRow(rows)
+	if err != nil {
 		return nil, err
 	}
 	if rows.Next() {
@@ -7677,25 +7868,15 @@ func (s *Store) AllSidecarPaths(ctx context.Context) (map[string]struct{}, error
 }
 
 func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_path, variant_id, sidecar_path, format,
-		       sample_rate, bits_per_sample, size_bytes,
-		       source_mtime_ns, source_size, sox_settings, created_at
-		FROM track_variants
-		ORDER BY source_path ASC, variant_id ASC
-	`)
+	rows, err := s.db.QueryContext(ctx, allVariantsSQL)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []VariantRow{}
 	for rows.Next() {
-		var v VariantRow
-		if err := rows.Scan(
-			&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
-			&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
-			&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
-		); err != nil {
+		v, err := scanVariantRow(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -7744,26 +7925,15 @@ func (s *Store) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]
 	if !scoped {
 		pattern = `%`
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_path, variant_id, sidecar_path, format,
-		       sample_rate, bits_per_sample, size_bytes,
-		       source_mtime_ns, source_size, sox_settings, created_at
-		FROM track_variants
-		WHERE unicode_lower(source_path) LIKE unicode_lower(?) ESCAPE '\'
-		ORDER BY source_path ASC, variant_id ASC
-	`, pattern)
+	rows, err := s.db.QueryContext(ctx, listVariantsByPathPrefixSQL, pattern)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []VariantRow{}
 	for rows.Next() {
-		var v VariantRow
-		if err := rows.Scan(
-			&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
-			&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
-			&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
-		); err != nil {
+		v, err := scanVariantRow(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -7783,26 +7953,15 @@ func (s *Store) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]
 // Returns `(out, rows.Err())` — same iterator-error discipline as
 // ListVariantsByPathPrefix.
 func (s *Store) ListVariantsForPath(ctx context.Context, sourcePath string) ([]VariantRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_path, variant_id, sidecar_path, format,
-		       sample_rate, bits_per_sample, size_bytes,
-		       source_mtime_ns, source_size, sox_settings, created_at
-		FROM track_variants
-		WHERE unicode_lower(source_path) = unicode_lower(?)
-		ORDER BY variant_id ASC
-	`, sourcePath)
+	rows, err := s.db.QueryContext(ctx, listVariantsForPathSQL, sourcePath)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []VariantRow{}
 	for rows.Next() {
-		var v VariantRow
-		if err := rows.Scan(
-			&v.SourcePath, &v.VariantID, &v.SidecarPath, &v.Format,
-			&v.SampleRate, &v.BitsPerSample, &v.SizeBytes,
-			&v.SourceMTimeNS, &v.SourceSize, &v.SoxSettings, &v.CreatedAt,
-		); err != nil {
+		v, err := scanVariantRow(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, v)

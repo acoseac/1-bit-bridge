@@ -47,6 +47,15 @@ func TestSoxInfoCanDecode(t *testing.T) {
 		{"stock/m4a (ALAC) refused", stock, "/lib/a.m4a", false},
 		{"stock/mp4 refused", stock, "/lib/a.mp4", false},
 
+		// DSD: no stock sox reads it, and the map entries are what keep
+		// this from being the fail-open below — without them a .dsf would
+		// read as "sox can decode it" on every host.
+		{"stock/dsf refused", stock, "/lib/a.dsf", false},
+		{"stock/dff refused", stock, "/lib/a.dff", false},
+		{"stock/uppercase DSF refused", stock, "/lib/A.DSF", false},
+		{"a build listing dsf can decode it", SoxInfo{FormatsKnown: true, Formats: []string{"dsf", "wav"}}, "/lib/a.dsf", true},
+		{"a build listing dsdiff can decode dff", SoxInfo{FormatsKnown: true, Formats: []string{"dsdiff", "wav"}}, "/lib/a.dff", true},
+
 		// Per-source coverage of the minimal-install case ProbeSox's
 		// HasFLAC field only answers globally.
 		{"minimal build refuses flac", minimal, "/lib/a.flac", false},
@@ -60,7 +69,9 @@ func TestSoxInfoCanDecode(t *testing.T) {
 		// Fail-open: extensions outside the map are shapes this guard
 		// wasn't written to judge. Refusing them here would silently
 		// narrow the pipeline as a side effect of an unrelated change.
-		{"unmapped ext (.dsf)", stock, "/lib/a.dsf", true},
+		// (.dsf used to be the example here; it is MAPPED now, deliberately
+		// — see the DSD rows above.)
+		{"unmapped ext (.wma)", stock, "/lib/a.wma", true},
 		{"unmapped ext (.mp3)", stock, "/lib/a.mp3", true},
 		{"no extension", stock, "/lib/bare", true},
 	}
