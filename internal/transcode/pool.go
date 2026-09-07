@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -183,16 +184,19 @@ type Pool struct {
 	onJobFailed func(path, variantID, errMsg string, durationSeconds float64, batchID uuid.UUID, failedAt time.Time)
 
 	// runner executes one transcode job under the supplied context.
-	// Defaults to RunSox in NewPool; tests inject a hang-until-ctx-
+	// Defaults to Run in NewPool; tests inject a hang-until-ctx-
 	// cancelled stub to drive the per-job timeout branch without a
 	// real sox process. Same DI shape `manifest.Store.now` uses for
-	// the clock.
-	runner func(ctx context.Context, spec JobSpec) (int64, string, error)
+	// the clock. RunResult rather than (size, settings) so a DSD
+	// rendition's measured gain reaches the variant row.
+	runner func(ctx context.Context, spec JobSpec) (RunResult, error)
 
-	// jobTimeout is the per-job deadline applied via context.WithTimeout
-	// inside processJob. Defaults to defaultJobTimeout in NewPool;
-	// tests override per-instance to drive the timeout branch in
-	// milliseconds without racing other tests on a package-level var.
+	// jobTimeout is the BASE per-job deadline; processJob widens it per
+	// spec through jobTimeoutFor (a long DSD source needs more than the
+	// fixed default) and applies the result via context.WithTimeout.
+	// Defaults to defaultJobTimeout in NewPool; tests override
+	// per-instance to drive the timeout branch in milliseconds without
+	// racing other tests on a package-level var.
 	jobTimeout time.Duration
 
 	// fsyncFn flushes a freshly-written variant's file (and on POSIX
@@ -358,7 +362,7 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 		activeJobs:   make([]atomic.Pointer[ActiveJob], workers),
 		stopCtx:      stopCtx,
 		stopCancel:   stopCancel,
-		runner:       RunSox,
+		runner:       Run,
 		jobTimeout:   defaultJobTimeout,
 		fsyncFn:      fsyncFileAndParent,
 		// stateChange capacity 1 — coalesce. jobComplete capacity
@@ -428,12 +432,13 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	claim := p.claimSeq
 	p.inflight[dedup] = claim
 	// Route per JobKind, demoted by JobSpec.Background. `JobKindOptimize`
-	// → optimizeJobs (foreground); every other kind (`JobKindUpscale` AND
-	// empty-Kind legacy default) → upscaleJobs (background), as does ANY
-	// job flagged Background. Routing is pinned by a pure helper so the
-	// test suite can assert the routing contract without spinning a Pool.
+	// and `JobKindPCMRender` → optimizeJobs (foreground); every other kind
+	// (`JobKindUpscale` AND empty-Kind legacy default) → upscaleJobs
+	// (background), as does ANY job flagged Background. Routing is pinned
+	// by a pure helper so the test suite can assert the routing contract
+	// without spinning a Pool.
 	jobsChan := p.upscaleJobs
-	if routesToOptimizeChannel(spec.Kind, spec.Background) {
+	if routesToForegroundLane(spec.Kind, spec.Background) {
 		jobsChan = p.optimizeJobs
 	}
 	select {
@@ -473,21 +478,68 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 // the rest of the Pool machinery, mirroring the friendlyErrorMessage /
 // isRenderGap test-affordance convention used elsewhere in the project.
 //
-// **Contract**: `JobKindOptimize` is the only kind that routes to the
+// **Contract**: `JobKindOptimize` and `JobKindPCMRender` route to the
 // optimize/foreground channel, AND only when the job is not flagged
-// background. Every other kind (`JobKindUpscale` AND the empty-Kind
-// zero value) routes to upscale/background. The empty default exists
-// because many legacy test fixtures + the pre-batch-feature
-// `bridge upscale` CLI invoke `JobSpec{...}` without setting Kind
-// explicitly.
+// background — both are what a phone is WAITING on (a CarPlay plug-in,
+// a DAC that cannot take this DSD rate). Every other kind
+// (`JobKindUpscale` AND the empty-Kind zero value) routes to
+// upscale/background. The empty default exists because many legacy test
+// fixtures + the pre-batch-feature `bridge upscale` CLI invoke
+// `JobSpec{...}` without setting Kind explicitly.
 //
 // The `background` demotion exists for the auto-optimize sweeper: its
 // jobs are `JobKindOptimize` (they must mint `optimized-*` variant
 // IDs) but nobody is waiting on them, so putting them on the
 // foreground lane would starve the on-demand CarPlay path they exist
 // to serve. See the `JobSpec.Background` docstring.
-func routesToOptimizeChannel(kind JobKind, background bool) bool {
-	return kind == JobKindOptimize && !background
+func routesToForegroundLane(kind JobKind, background bool) bool {
+	return (kind == JobKindOptimize || kind == JobKindPCMRender) && !background
+}
+
+// maxJobTimeout caps what jobTimeoutFor can widen a job to. Four hours
+// covers an hour of DSD512 on the slowest host this ships to with margin;
+// past it a job is a hung mount, not a long file.
+const maxJobTimeout = 4 * time.Hour
+
+// dstDecodeTimeoutFactor is the extra budget a DST-compressed DSDIFF gets:
+// ffmpeg's dst decoder is arithmetic-coded and materially slower than the
+// plain DSD unpackers.
+const dstDecodeTimeoutFactor = 2
+
+// jobTimeoutFor widens the pool's base deadline for a job whose source
+// duration is known: max(base, min(maxJobTimeout, 2 × duration)), with the
+// DST factor on top. The fixed default was sized for a PCM upscale; a
+// long DSD512 on a 2-vCPU host runs for minutes (measured ~26× realtime
+// on a fast Mac, so an hour is ~2–10 min there), and killing it at the
+// default would fail every long DSD source forever.
+//
+// When the manifest carries no duration for a DSD source the duration is
+// derived from its size: bytes × 8 / (nominal DSD rate × channels) — the
+// NOMINAL rate (2 822 400 for DSD64), never the decoder's fs/8 figure,
+// which would inflate the estimate 8× and every timeout with it. An
+// unknown channel count assumes stereo. A non-DSD source with no duration
+// keeps the base deadline exactly as before.
+func jobTimeoutFor(base time.Duration, spec JobSpec) time.Duration {
+	d := spec.SourceDurationSec
+	if d <= 0 && spec.SourceIsDSD && spec.SourceSize > 0 && spec.SourceSampleRate > 0 {
+		ch := spec.SourceChannels
+		if ch <= 0 {
+			ch = 2
+		}
+		d = float64(spec.SourceSize) * 8 / (float64(spec.SourceSampleRate) * float64(ch))
+	}
+	if d <= 0 || math.IsNaN(d) || math.IsInf(d, 0) {
+		return base
+	}
+	factor := 2.0
+	if strings.EqualFold(strings.TrimSpace(spec.SourceCompression), "DST") {
+		factor *= dstDecodeTimeoutFactor
+	}
+	want := time.Duration(math.Min(float64(maxJobTimeout), factor*d*float64(time.Second)))
+	if want < base {
+		return base
+	}
+	return want
 }
 
 // notifyStateChangeFn returns the current onStateChange callback
@@ -755,10 +807,11 @@ type ActiveJob struct {
 	SourceRel        string  // SourceLibraryRel — the display path
 	SourceSampleRate int     // Hz, 0 if unknown
 	SourceBits       int     // bit depth, 0 if unknown
+	SourceIsDSD      bool    // a DSF / DSDIFF source: the grid says "DSD64 → 176.4/24"
 	TargetSampleRate int     // Hz
 	TargetBits       int     // 16/24/32
 	Quality          Quality // resampler quality (very-high / high / medium)
-	Kind             JobKind // upscale / optimize
+	Kind             JobKind // upscale / optimize / pcm
 	StartedAtUnixMs  int64
 }
 
@@ -771,6 +824,7 @@ type ActiveJobView struct {
 	SourceRel        string `json:"sourceRel,omitempty"`
 	SourceSampleRate int    `json:"sourceSampleRate,omitempty"`
 	SourceBits       int    `json:"sourceBits,omitempty"`
+	SourceIsDSD      bool   `json:"sourceIsDSD,omitempty"`
 	TargetSampleRate int    `json:"targetSampleRate,omitempty"`
 	TargetBits       int    `json:"targetBits,omitempty"`
 	Quality          string `json:"quality,omitempty"`
@@ -791,6 +845,7 @@ func (p *Pool) ActiveWorkers() []ActiveJobView {
 			v.SourceRel = aj.SourceRel
 			v.SourceSampleRate = aj.SourceSampleRate
 			v.SourceBits = aj.SourceBits
+			v.SourceIsDSD = aj.SourceIsDSD
 			v.TargetSampleRate = aj.TargetSampleRate
 			v.TargetBits = aj.TargetBits
 			v.Quality = string(aj.Quality)
@@ -1119,6 +1174,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		SourceRel:        job.spec.SourceLibraryRel,
 		SourceSampleRate: job.spec.SourceSampleRate,
 		SourceBits:       job.spec.SourceBits,
+		SourceIsDSD:      job.spec.SourceIsDSD,
 		TargetSampleRate: job.spec.TargetSampleRate,
 		TargetBits:       job.spec.TargetBits,
 		Quality:          job.spec.Quality,
@@ -1126,7 +1182,8 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		StartedAtUnixMs:  startedAt.UnixMilli(),
 	})
 
-	jobCtx, cancel := context.WithTimeout(p.stopCtx, p.jobTimeout)
+	timeout := jobTimeoutFor(p.jobTimeout, job.spec)
+	jobCtx, cancel := context.WithTimeout(p.stopCtx, timeout)
 	defer cancel()
 
 	// `settings` comes back FROM the run rather than being rebuilt here: it
@@ -1134,7 +1191,8 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	// pipe), which a second `SoxArgs()` call cannot know. Same reason
 	// SoxArgs hands back its temp path instead of letting callers re-derive
 	// one that can drift.
-	size, settings, err := p.runner(jobCtx, job.spec)
+	res, err := p.runner(jobCtx, job.spec)
+	size, settings := res.SizeBytes, res.Settings
 	if err != nil {
 		// Drop cancellation noise — Stop() during graceful
 		// shutdown shouldn't increment the failure counter or
@@ -1145,7 +1203,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 				logger.Warn("pool: sox timed out",
 					"path", job.spec.SourceLibraryRel,
-					"timeout", p.jobTimeout,
+					"timeout", timeout,
 					"err", err)
 			} else {
 				logger.Warn("pool: sox failed",
@@ -1185,7 +1243,7 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		if !p.closed.Load() {
 			var errMsg string
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
-				errMsg = "sox timed out after " + p.jobTimeout.String()
+				errMsg = "sox timed out after " + timeout.String()
 			} else {
 				// Only pay for the (up to 4 KiB) stderr redaction passes on the
 				// non-timeout path — the timeout branch discards the result.

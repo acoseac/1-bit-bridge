@@ -16,7 +16,7 @@ import (
 // UNLESS the job is flagged background (the auto-optimize sweeper's
 // speculative pre-generation, which must not head-of-line block the
 // on-demand CarPlay path).
-func TestRoutesToOptimizeChannel(t *testing.T) {
+func TestRoutesToForegroundLane(t *testing.T) {
 	cases := []struct {
 		name       string
 		kind       JobKind
@@ -29,11 +29,15 @@ func TestRoutesToOptimizeChannel(t *testing.T) {
 		{"upscale/background", JobKindUpscale, true, false},
 		{"legacy-zero-value", JobKind(""), false, false},
 		{"future-unknown-kind", JobKind("future-unknown-kind"), false, false},
+		// An on-demand faithful DSD rendition is what a phone is waiting
+		// on (a DAC that cannot take this DSD rate); the sweeper's are not.
+		{"pcm/foreground", JobKindPCMRender, false, true},
+		{"pcm/background", JobKindPCMRender, true, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := routesToOptimizeChannel(c.kind, c.background); got != c.want {
-				t.Errorf("routesToOptimizeChannel(%q, background=%v) = %v, want %v",
+			if got := routesToForegroundLane(c.kind, c.background); got != c.want {
+				t.Errorf("routesToForegroundLane(%q, background=%v) = %v, want %v",
 					c.kind, c.background, got, c.want)
 			}
 		})
@@ -47,7 +51,7 @@ func TestRoutesToOptimizeChannel(t *testing.T) {
 // observation is the lane itself, not a timing artefact.
 //
 // Negative control: with the `background` arm removed from
-// routesToOptimizeChannel this fails on the optimizeJobs length.
+// routesToForegroundLane this fails on the optimizeJobs length.
 func TestPoolBackgroundOptimizeUsesUpscaleLane(t *testing.T) {
 	store := openTempStoreForPool(t)
 	t.Cleanup(func() { _ = store.Close() })
@@ -60,12 +64,12 @@ func TestPoolBackgroundOptimizeUsesUpscaleLane(t *testing.T) {
 	// test ends, so neither channel drains under us.
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	p.runner = func(ctx context.Context, _ JobSpec) (int64, string, error) {
+	p.runner = func(ctx context.Context, _ JobSpec) (RunResult, error) {
 		select {
 		case <-release:
 		case <-ctx.Done():
 		}
-		return 0, "", context.Canceled
+		return RunResult{SizeBytes: 0}, context.Canceled
 	}
 	t.Cleanup(p.Stop)
 
@@ -144,7 +148,7 @@ func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 
 	var processed []JobKind
 	var processedMu sync.Mutex
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (RunResult, error) {
 		firstJobOnce.Do(func() {
 			close(firstJobParked)
 			<-releaseFirst
@@ -152,7 +156,7 @@ func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 		processedMu.Lock()
 		processed = append(processed, spec.Kind)
 		processedMu.Unlock()
-		return 0, "", nil
+		return RunResult{SizeBytes: 0}, nil
 	}
 	t.Cleanup(p.Stop)
 
@@ -259,11 +263,11 @@ func TestPoolUpscaleProgressUnderInterleavedLoad(t *testing.T) {
 
 	var processed []JobKind
 	var processedMu sync.Mutex
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (RunResult, error) {
 		processedMu.Lock()
 		processed = append(processed, spec.Kind)
 		processedMu.Unlock()
-		return 0, "", nil
+		return RunResult{SizeBytes: 0}, nil
 	}
 	t.Cleanup(p.Stop)
 
@@ -346,13 +350,13 @@ func TestPoolStopDrainsBothChannels(t *testing.T) {
 	// Stop() can drain both channels before any worker goroutine is even
 	// scheduled, leaving processed==0 — a real flake observed on CI.
 	firstProcessed := make(chan struct{}, 1)
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (RunResult, error) {
 		processed.Add(1)
 		select {
 		case firstProcessed <- struct{}{}:
 		default:
 		}
-		return 0, "", nil
+		return RunResult{SizeBytes: 0}, nil
 	}
 
 	mkSpec := func(i int, kind JobKind) JobSpec {
@@ -414,9 +418,9 @@ func TestPoolStatsQueueLenIsCombinedDepth(t *testing.T) {
 
 	// Park the worker so jobs queue rather than drain.
 	hold := make(chan struct{})
-	p.runner = func(ctx context.Context, spec JobSpec) (int64, string, error) {
+	p.runner = func(ctx context.Context, spec JobSpec) (RunResult, error) {
 		<-hold
-		return 0, "", nil
+		return RunResult{SizeBytes: 0}, nil
 	}
 	t.Cleanup(func() {
 		close(hold)
