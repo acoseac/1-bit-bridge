@@ -45,7 +45,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 
 | Package | Role |
 |---|---|
-| `cmd/bridge` | CLI: **28 subcommands** dispatched in `run()` — `init` / `serve` / `pair` / `scan` / `upscale` / `analyze` / `optimize` / `variants` / `artwork` / `enrichment` / `duplicates` / `fingerprint` / `doctor` / `update` / `backup` / `restore` / `token` / `cert` / `status` / `health` / `logs` / `library` / `admin` / `manifest` / `tsnet` / `start` / `stop` / `restart` / `version`. Bare `bridge` on a real TTY drops into a context-aware launcher menu (`menu.go`); pipes / non-TTY callers fall through to `usage + exit 2` so automation is unchanged. Box / frame / shell-aware handoff helpers in `styles.go`. |
+| `cmd/bridge` | CLI: **30 subcommands** dispatched in `run()` — `init` / `serve` / `pair` / `scan` / `upscale` / `analyze` / `optimize` / `render` / `variants` / `artwork` / `enrichment` / `duplicates` / `fingerprint` / `doctor` / `update` / `backup` / `restore` / `token` / `cert` / `status` / `health` / `logs` / `library` / `admin` / `manifest` / `tsnet` / `start` / `stop` / `restart` / `version`. Bare `bridge` on a real TTY drops into a context-aware launcher menu (`menu.go`); pipes / non-TTY callers fall through to `usage + exit 2` so automation is unchanged. Box / frame / shell-aware handoff helpers in `styles.go`. |
 | `internal/config` | YAML loader with defaults + path-relative resolution + `Save()` for admin edits |
 | `internal/tls` | Self-signed ECDSA P-256 cert minter, SHA-256 fingerprint for iOS pinning |
 | `internal/auth` | Bearer-token store (hashed, atomic persist, cross-process pickup) |
@@ -612,6 +612,28 @@ no failing test — which is the shape to expect in this area.
   `inconclusive` is never suppressed.
 
 ### Job pools — upscale, optimize, analysis
+
+- **THREE CLI commands feed the same classifier and worker pool, split by
+  tier, and their DSD arms are gated per RUN.** `bridge upscale` (PCM →
+  higher-rate PCM), `bridge optimize` (PCM → 16/44.1|48, and DSD →
+  `optimized-dsd-v1-*` under the flag) and `bridge render` (DSD →
+  `pcm-v1-*-24`). `runUpscaleParams.dsdCaps` is probed once per run and its
+  ZERO VALUE refuses every DSD source, which is what keeps `upscale` and a
+  flag-less `optimize` byte-for-byte unchanged. **The admission itself
+  delegates to `transcode.OptimizeEligibleFor` / `PCMRenderEligible`** — the
+  same predicates the coordinator's walks and the auto-optimize sweeper use.
+  Don't hand-roll a local reading: a source the sweep renders and the CLI
+  refuses (or the reverse) is precisely the drift that indirection prevents.
+- **A DSD source SKIPS the `soxInfo.CanDecode` check in
+  `classifyUpscaleTrack`.** sox cannot open DSF/DFF at all — ffmpeg decodes
+  and sox takes the raw pipe — so asking sox would refuse every DSD
+  candidate. The route is decided, and fails CLOSED, inside `transcode.Run`
+  (`ErrDSDDecodeUnavailable`); this check is layering for the PCM path, never
+  the verdict. `ffmpegDSDCLIReady` refuses BEFORE the library walk, which is
+  the difference between one honest message and one failed job per DSD track;
+  `dst` is a NOTE there, never a refusal, because a build with the `dsd_*`
+  decoders and no `dst` renders plain DSF/DFF and skips only DST-compressed
+  DSDIFF.
 
 - **`Enqueue` fires `fireStateChange()` UNDER the lock, before the unlock**, in
   both pools. Workers are bounded by `Stop`'s `wg.Wait()`; `Enqueue` is not, so
