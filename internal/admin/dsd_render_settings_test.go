@@ -16,64 +16,72 @@ import (
 // nudges nothing; a toolchain the doctor rejects rides along as the
 // `+reason`, never a restart.
 func TestDSDRenderPatchIsLiveAndNudgesTheSweeper(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	nudges := 0
-	srv.deps.TriggerAutoOptimizeSweep = func() bool { nudges++; return true }
-
-	var resp settingsPatchResponse
-	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
-		map[string]any{"dsdRenderEnabled": true}, &resp); code != 200 {
-		t.Fatalf("patch: %d", code)
-	}
-	got := resp.Fields["dsdRenderEnabled"]
-	if got.Status != applyLive || got.Reason != "" {
-		t.Fatalf("flip on: status=%q reason=%q, want live with no reason", got.Status, got.Reason)
-	}
-	if resp.RestartRequired {
-		t.Error("flip on: RestartRequired = true, want false (every gate reads the caps live)")
-	}
-	if nudges != 1 {
-		t.Errorf("flip on: sweeper nudged %d times, want 1", nudges)
-	}
-	if !srv.deps.CfgHolder.Load().Upscale.DSDRender.Enabled {
-		t.Error("the flag did not persist into the live config")
+	// patchDSDRender flips the field and returns the per-field outcome.
+	patchDSDRender := func(t *testing.T, srv *Server, on bool) fieldApply {
+		t.Helper()
+		var resp settingsPatchResponse
+		if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+			map[string]any{"dsdRenderEnabled": on}, &resp); code != 200 {
+			t.Fatalf("patch dsdRenderEnabled=%v: %d", on, code)
+		}
+		if resp.RestartRequired {
+			t.Error("RestartRequired = true, want false (every DSD gate reads the caps live)")
+		}
+		return resp.Fields["dsdRenderEnabled"]
 	}
 
-	var read settingsResponse
-	if code := doJSON(t, srv.Handler(), "GET", "/api/settings", nil, &read); code != 200 {
-		t.Fatalf("get: %d", code)
-	}
-	if !read.DSDRenderEnabled {
-		t.Error("GET /api/settings does not report the flag on")
-	}
+	t.Run("flip on is live, persisted, and nudges the sweeper", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		nudges := 0
+		srv.deps.TriggerAutoOptimizeSweep = func() bool { nudges++; return true }
 
-	// Same value again: unchanged, no nudge.
-	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
-		map[string]any{"dsdRenderEnabled": true}, &resp); code != 200 {
-		t.Fatalf("repeat patch: %d", code)
-	}
-	if resp.Fields["dsdRenderEnabled"].Status != applyUnchanged {
-		t.Errorf("repeat: status=%q, want unchanged", resp.Fields["dsdRenderEnabled"].Status)
-	}
-	if nudges != 1 {
-		t.Errorf("repeat: sweeper nudged %d times, want still 1", nudges)
-	}
+		got := patchDSDRender(t, srv, true)
+		if got.Status != applyLive || got.Reason != "" {
+			t.Fatalf("status=%q reason=%q, want live with no reason", got.Status, got.Reason)
+		}
+		if nudges != 1 {
+			t.Errorf("sweeper nudged %d times, want 1", nudges)
+		}
+		if !srv.deps.CfgHolder.Load().Upscale.DSDRender.Enabled {
+			t.Error("the flag did not persist into the live config")
+		}
+		var read settingsResponse
+		if code := doJSON(t, srv.Handler(), "GET", "/api/settings", nil, &read); code != 200 {
+			t.Fatalf("get: %d", code)
+		}
+		if !read.DSDRenderEnabled {
+			t.Error("GET /api/settings does not report the flag on")
+		}
+	})
 
-	// Toolchain missing: still live (a restart would not install ffmpeg),
-	// with the doctor's reason so the switch does not look inert.
-	srv.deps.DSDRenderToolchain = func() (bool, string) { return false, "this ffmpeg build lacks the dsd_* decoders" }
-	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
-		map[string]any{"dsdRenderEnabled": false}, &resp); code != 200 {
-		t.Fatalf("off: %d", code)
-	}
-	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
-		map[string]any{"dsdRenderEnabled": true}, &resp); code != 200 {
-		t.Fatalf("on again: %d", code)
-	}
-	got = resp.Fields["dsdRenderEnabled"]
-	if got.Status != applyLive || !strings.Contains(got.Reason, "dsd_*") {
-		t.Errorf("toolchain missing: status=%q reason=%q, want live with the doctor's reason", got.Status, got.Reason)
-	}
+	t.Run("the same value again is unchanged and nudges nothing", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		nudges := 0
+		srv.deps.TriggerAutoOptimizeSweep = func() bool { nudges++; return true }
+
+		patchDSDRender(t, srv, true)
+		got := patchDSDRender(t, srv, true)
+		if got.Status != applyUnchanged {
+			t.Errorf("status=%q, want unchanged", got.Status)
+		}
+		if nudges != 1 {
+			t.Errorf("sweeper nudged %d times, want 1 (only the real flip)", nudges)
+		}
+	})
+
+	// A toolchain the doctor rejects is still LIVE — a restart would not
+	// install ffmpeg — carrying the verdict as the reason so the switch
+	// does not look inert.
+	t.Run("a rejected toolchain rides along as the reason, never a restart", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		srv.deps.TriggerAutoOptimizeSweep = func() bool { return true }
+		srv.deps.DSDRenderToolchain = func() (bool, string) { return false, "this ffmpeg build lacks the dsd_* decoders" }
+
+		got := patchDSDRender(t, srv, true)
+		if got.Status != applyLive || !strings.Contains(got.Reason, "dsd_*") {
+			t.Errorf("status=%q reason=%q, want live with the doctor's reason", got.Status, got.Reason)
+		}
+	})
 }
 
 // TestEligibilityOptsFollowTheCaps: the admin's SQL mirrors bind the live

@@ -67,12 +67,27 @@ func (s *stubBatchCoordinator) Throughput() BatchThroughput         { return Bat
 
 func batchFixture(t *testing.T) (*httptest.Server, string, *stubBatchCoordinator) {
 	t.Helper()
+	return batchFixtureWith(t, nil)
+}
+
+// batchFixtureWith is batchFixture with an optional decoration step, so a
+// sibling fixture can add wiring without forking the body — a second copy
+// would drift the moment this one gains a dependency, and that drift is
+// silent (the new tests would keep passing against a server the others no
+// longer describe). Taken as a PARAMETER rather than a package var
+// because these fixtures are used from `t.Parallel()` tests, where a
+// shared mutable hook is a data race the race detector would find.
+func batchFixtureWith(t *testing.T, decorate func(*Server) *Server) (*httptest.Server, string, *stubBatchCoordinator) {
+	t.Helper()
 	tmp := t.TempDir()
 	cfg := &config.Config{LibraryRoots: []string{tmp}, ListenAddress: ":7788", LibraryName: "T"}
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	raw, _, _ := store.Mint("batch")
 	stub := &stubBatchCoordinator{}
 	srv := New(cfg, store, nil, "fp").WithBatchCoordinator(stub)
+	if decorate != nil {
+		srv = decorate(srv)
+	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, raw, stub

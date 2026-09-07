@@ -4454,8 +4454,14 @@ function signalChain(w) {
   const src = (w.sourceIsDSD ? fmtDSD(w.sourceSampleRate) : fmtRate(w.sourceSampleRate)) +
     (w.sourceBits && !w.sourceIsDSD ? `/${w.sourceBits}-bit` : "");
   const tgt = fmtRate(w.targetSampleRate) + (w.targetBits ? `/${w.targetBits}-bit` : "");
-  const kind = w.kind === "optimize" ? (w.sourceIsDSD ? "Optimize (DSD → PCM)" : "Optimize")
-    : w.kind === "pcm" ? "PCM render (DSD → PCM)" : "Upscale";
+  // A DSD source names its decode in the label, because the two optimize
+  // shapes are different work: a PCM optimize is a resample, a DSD one is
+  // an ffmpeg decode plus decimation.
+  const kindLabels = { optimize: "Optimize", pcm: "PCM render (DSD → PCM)" };
+  let kind = kindLabels[w.kind] || "Upscale";
+  if (w.kind === "optimize" && w.sourceIsDSD) {
+    kind = "Optimize (DSD → PCM)";
+  }
   const q = w.quality ? ` · SoX ${w.quality}` : "";
   // Gate the DSP labels on the same signal (a real sox conversion) that
   // gates the quality preset, so a placeholder/idle row stays terse.

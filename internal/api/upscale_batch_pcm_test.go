@@ -3,29 +3,22 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
-
-	"github.com/acoseac/1-bit-bridge/internal/auth"
-	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // batchFixtureWithDSDRender is batchFixture with upscaling active and the
 // DSD-render predicate explicit — the `pcm` batch kind's 503 gate reads
-// it, so a fixture needs both states.
+// it, so a fixture needs both states. Built by DECORATING the sibling
+// rather than copying its wiring: a second copy would drift the moment
+// batchFixture gains a dependency, and that drift is silent (the pcm
+// tests would keep passing against a server the other tests no longer
+// describe).
 func batchFixtureWithDSDRender(t *testing.T, dsdRender bool) (*httptest.Server, string, *stubBatchCoordinator) {
 	t.Helper()
-	tmp := t.TempDir()
-	cfg := &config.Config{LibraryRoots: []string{tmp}, ListenAddress: ":7788", LibraryName: "T"}
-	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
-	raw, _, _ := store.Mint("batch")
-	stub := &stubBatchCoordinator{}
-	srv := New(cfg, store, nil, "fp").WithBatchCoordinator(stub).
-		WithUpscale(func() bool { return true }, nil).
-		WithDSDRender(func() bool { return dsdRender })
-	hs := httptest.NewServer(srv.Handler())
-	t.Cleanup(hs.Close)
-	return hs, raw, stub
+	return batchFixtureWith(t, func(s *Server) *Server {
+		return s.WithUpscale(func() bool { return true }, nil).
+			WithDSDRender(func() bool { return dsdRender })
+	})
 }
 
 // TestUpscaleBatchPCMKind: `kind: "pcm"` dispatches to SubmitPCMRender
