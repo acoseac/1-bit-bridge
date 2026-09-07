@@ -2458,14 +2458,18 @@ func shouldSkipDir(name string) bool {
 }
 
 // variantIDInfixRe matches a bridge variant ID EXACTLY:
-// `<kind>-v<schemaVersion>-<targetRate>-<targetBits>` (kind ∈ upscaled/optimized), e.g.
-// `optimized-v2-44100-16`, `upscaled-v2-176400-24`. Anchored to the whole segment so a
-// coincidental `.optimized-…` substring in a real filename doesn't match. Version-agnostic
-// (`v[0-9]+`) — a future schema bump must still be excluded. Mirrors the
-// `VariantKindPrefix*` LIKE-discriminator rationale (kept in `manifest` to avoid the
-// `transcode` import cycle).
+// `<kind>-v<schemaVersion>-<targetRate>-<targetBits>` (kind ∈ upscaled / optimized /
+// optimized-dsd / pcm — every VariantKindPrefix*), e.g. `optimized-v2-44100-16`,
+// `upscaled-v2-176400-24`, `optimized-dsd-v1-44100-16`, `pcm-v1-176400-24`. Anchored to
+// the whole segment so a coincidental `.optimized-…` substring in a real filename doesn't
+// match. Version-agnostic (`v[0-9]+`) — a future schema bump must still be excluded.
+// Mirrors the `VariantKindPrefix*` LIKE-discriminator rationale (kept in `manifest` to
+// avoid the `transcode` import cycle). A DSD rendition's source is a `.dsf` / `.dff`, so a
+// sidecar reads `01.dsf.pcm-v1-176400-24.flac` — without the two DSD families here every
+// rendition would index as a phantom track under the variants dir.
 var variantIDInfixRe = regexp.MustCompile(
-	`^(?:` + VariantKindPrefixUpscaled + `|` + VariantKindPrefixOptimized + `)-v[0-9]+-[0-9]+-[0-9]+$`)
+	`^(?:` + VariantKindPrefixUpscaled + `|` + VariantKindPrefixOptimized + `|` +
+		VariantKindPrefixOptimizedDSD + `|` + VariantKindPrefixPCM + `)-v[0-9]+-[0-9]+-[0-9]+$`)
 
 // isVariantSidecarName reports whether a file basename is one of the bridge's own
 // optimize/upscale transcode artifacts and therefore must NOT be indexed as a library

@@ -1311,6 +1311,12 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		SourceMTimeNS: job.spec.SourceMTimeNS,
 		SourceSize:    job.spec.SourceSize,
 		SoxSettings:   settings,
+		// The DSD-rendition gain facts (nil for every PCM job): what
+		// the manifest serves as `appliedGainDB`, and the column the
+		// admin reads back. Written here, beside the settings blob that
+		// carries the same numbers, so the two can never disagree.
+		AppliedGainDB: res.AppliedGainDB,
+		TruePeakDBTP:  res.TruePeakDBTP,
 		CreatedAt:     completedAt.UnixNano(),
 	}
 	// Use jobCtx, NOT p.stopCtx — the per-job timeout

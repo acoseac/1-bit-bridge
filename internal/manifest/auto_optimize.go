@@ -43,9 +43,22 @@ type AutoOptimizeCandidate struct {
 	BitsPerSample int
 	// Codec is the upper-case canonical codec string, empty on legacy
 	// pre-codec-column rows. Carried so the caller can re-run
-	// `transcode.OptimizeEligible` — the SQL below is a MIRROR of that
+	// `transcode.OptimizeEligibleFor` — the SQL below is a MIRROR of that
 	// gate, and on a write path the Go gate stays authoritative.
 	Codec string
+	// IsDSD / Compression are the DSD-render gate's inputs (the v25
+	// is_dsd column and the v43 compression accelerator), so the caller
+	// can re-run transcode.DSDRenderEligible on the row.
+	IsDSD       bool
+	Compression string
+	// DurationSec / Channels feed the DSD render job's geometry check
+	// and per-spec timeout (transcode.JobSpec.SourceDurationSec /
+	// SourceChannels). Read from tags_json for DSD rows ONLY — the two
+	// json_extract calls run per returned candidate, never in the WHERE
+	// — and 0 for everything else ("unknown", which the consumers treat
+	// as "fall back", never as a real value).
+	DurationSec float64
+	Channels    int
 	// StaleVariantID is non-empty when the candidate already holds SOME
 	// `optimized-*` variant — i.e. this is a REGENERATION, not a first
 	// generation. A candidate by definition has no FRESH variant (see
@@ -66,9 +79,13 @@ type AutoOptimizeCandidate struct {
 // that want an `optimized-*` variant.
 //
 // Plain-column throughout (the migration-v25 accelerator columns) — no
-// `json_extract`, so this stays cheap enough to run on every sweep
-// tick. Reuses `optimizeEligibleSQL`, which is the lockstep SQL mirror
-// of `transcode.OptimizeEligible` pinned by
+// `json_extract` in the WHERE, so this stays cheap enough to run on
+// every sweep tick (the two DSD-only extracts sit in the SELECT list and
+// cost one call per RETURNED row). Reuses `optimizeEligibleSQL`, the
+// lockstep SQL mirror of `transcode.OptimizeEligible`, OR-ed with
+// `dsdRenderEligibleSQL` (the mirror of transcode.DSDRenderEligible,
+// inert under a PCM-only EligibilityOpts) — together the mirror of
+// `transcode.OptimizeEligibleFor`, pinned by
 // `TestEligibilitySQLAgreesWithOptimizeEligible`.
 //
 // Both variant lookups are scoped to `optimized-%`: an upscaled variant
@@ -116,13 +133,19 @@ type AutoOptimizeCandidate struct {
 // spend order under a cap or a disk floor: the head of the queue is the
 // music most likely to be reached for next.
 //
-// BINDS (textual order): the transcode-failure suppression cutoff, then
+// BINDS (textual order): the two DSD-render binds (EligibilityOpts.binds
+// — dsdRender, dst), the transcode-failure suppression cutoff, then
 // limit. Both callers — ListAutoOptimizeCandidates and the COUNT wrapper —
-// must bind both, in that order.
+// must bind all four, in that order.
 const autoOptimizeCandidateSQL = `
 	SELECT t.path, t.size, t.mtime_ns,
 	       COALESCE(t.sample_rate, 0), COALESCE(t.bits_per_sample, 0),
 	       COALESCE(t.codec, ''),
+	       COALESCE(t.is_dsd, 0), COALESCE(t.compression, ''),
+	       CASE WHEN COALESCE(t.is_dsd, 0) = 1
+	            THEN COALESCE(json_extract(t.tags_json, '$.duration'), 0) ELSE 0 END,
+	       CASE WHEN COALESCE(t.is_dsd, 0) = 1
+	            THEN COALESCE(json_extract(t.tags_json, '$.channels'), 0) ELSE 0 END,
 	       COALESCE((SELECT sv.variant_id FROM track_variants sv
 	                  WHERE sv.source_path = t.path
 	                    AND sv.variant_id LIKE 'optimized-%'
@@ -133,7 +156,7 @@ const autoOptimizeCandidateSQL = `
 	   AND COALESCE(t.dupe_suppressed, 0) = 0
 	   AND NOT EXISTS (SELECT 1 FROM upnp_track_routing u
 	                    WHERE u.source_path = t.path)
-	   AND ` + optimizeEligibleSQL + `
+	   AND (` + optimizeEligibleSQL + ` OR ` + dsdRenderEligibleSQL + `)
 	   AND NOT EXISTS (SELECT 1 FROM track_variants fv
 	                    WHERE fv.source_path     = t.path
 	                      AND fv.variant_id      LIKE 'optimized-%'
@@ -155,22 +178,29 @@ const autoOptimizeCandidateSQL = `
 // so an unset one must not read as "unbounded".
 //
 // Read-only, so no `s.mu` (WAL handles concurrent readers).
-func (s *Store) ListAutoOptimizeCandidates(ctx context.Context, limit int) ([]AutoOptimizeCandidate, error) {
+func (s *Store) ListAutoOptimizeCandidates(ctx context.Context, limit int, opts EligibilityOpts) ([]AutoOptimizeCandidate, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, autoOptimizeCandidateSQL, s.VariantFailureCutoff(), limit)
+	rows, err := s.db.QueryContext(ctx, autoOptimizeCandidateSQL,
+		append(opts.binds(), s.VariantFailureCutoff(), limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("list auto-optimize candidates: %w", err)
 	}
 	defer rows.Close()
 	out := []AutoOptimizeCandidate{}
 	for rows.Next() {
-		var c AutoOptimizeCandidate
+		var (
+			c     AutoOptimizeCandidate
+			isDSD int
+		)
 		if err := rows.Scan(&c.Path, &c.Size, &c.MTimeNS,
-			&c.SampleRate, &c.BitsPerSample, &c.Codec, &c.StaleVariantID); err != nil {
+			&c.SampleRate, &c.BitsPerSample, &c.Codec,
+			&isDSD, &c.Compression, &c.DurationSec, &c.Channels,
+			&c.StaleVariantID); err != nil {
 			return nil, fmt.Errorf("scan auto-optimize candidate: %w", err)
 		}
+		c.IsDSD = isDSD != 0
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -184,8 +214,9 @@ func (s *Store) ListAutoOptimizeCandidates(ctx context.Context, limit int) ([]Au
 // binding -1 for the inner LIMIT is SQLite's "no limit", which is what
 // an uncapped count wants.
 //
-// TWO binds, and the order is load-bearing: the suppression cutoff comes
-// first (its `?` is in the WHERE clause) and the LIMIT second. Sharing the
+// FOUR binds, and the order is load-bearing: the two DSD-render binds
+// first (their `?`s sit inside the eligibility arm), then the suppression
+// cutoff (its `?` is in the WHERE clause) and the LIMIT last. Sharing the
 // statement is what keeps the card's number and the sweeper's selection in
 // agreement — but it also means a new bind has to be added at BOTH call
 // sites, which is how this broke when the debounce landed.
@@ -200,13 +231,13 @@ const autoOptimizeCandidateCountSQL = `SELECT COUNT(*) FROM (` + autoOptimizeCan
 // Shares the predicate with the listing by construction (one const, two
 // statements) so the number the card shows and the work the sweeper
 // does cannot drift.
-func (s *Store) CountAutoOptimizeCandidates(ctx context.Context) (int, error) {
+func (s *Store) CountAutoOptimizeCandidates(ctx context.Context, opts EligibilityOpts) (int, error) {
 	var n int
-	// Same bind order as the listing it wraps: the suppression cutoff (its
-	// `?` sits in the WHERE) then the LIMIT. -1 is SQLite's "no limit",
-	// which is what an uncapped count wants.
+	// Same bind order as the listing it wraps: the two DSD-render binds,
+	// the suppression cutoff (its `?` sits in the WHERE) then the LIMIT.
+	// -1 is SQLite's "no limit", which is what an uncapped count wants.
 	err := s.db.QueryRowContext(ctx, autoOptimizeCandidateCountSQL,
-		s.VariantFailureCutoff(), -1).Scan(&n)
+		append(opts.binds(), s.VariantFailureCutoff(), -1)...).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count auto-optimize candidates: %w", err)
 	}

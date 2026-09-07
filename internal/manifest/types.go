@@ -365,20 +365,29 @@ type Track struct {
 // `upscaled-v2-<targetRate>-<targetBits>` (e.g.
 // `upscaled-v2-176400-24`). The iOS variant resolver keys on the
 // `upscaled-` prefix to slot a variant into the share-level "prefer
-// upscaled" toggle; future variant kinds (e.g. `dsd-`) get their
-// own slots without touching legacy resolution.
+// upscaled" toggle; the other families — `optimized-v2-…`, and the
+// DSD renditions `optimized-dsd-v1-…` / `pcm-v1-…` — get their own
+// slots without touching legacy resolution.
+//
+// `AppliedGainDB` is present ONLY on a DSD rendition: the dB of gain
+// baked into the sidecar relative to the decoded DSD source (nominal
+// +6, clip-guarded per track, so it may be lower and can be 0). A
+// client wanting 0 dB attenuates by exactly this value. A pointer with
+// `omitempty` so a clamped 0 ships as `0` while a PCM variant ships no
+// key — the two are different facts.
 //
 // `Label` is a human-readable string the iOS picker renders directly
 // (e.g. "Upscaled FLAC 24/176.4"). Server-side construction so the
 // label can grow richer (target-rate-aware copy, source format hint)
 // without an iOS-side update.
 type Variant struct {
-	ID            string  `json:"id"`
-	Format        string  `json:"format"`
-	SampleRate    float64 `json:"sampleRate"`
-	BitsPerSample int     `json:"bitsPerSample"`
-	SizeBytes     int64   `json:"sizeBytes"`
-	Label         string  `json:"label"`
+	ID            string   `json:"id"`
+	Format        string   `json:"format"`
+	SampleRate    float64  `json:"sampleRate"`
+	BitsPerSample int      `json:"bitsPerSample"`
+	SizeBytes     int64    `json:"sizeBytes"`
+	AppliedGainDB *float64 `json:"appliedGainDB,omitempty"`
+	Label         string   `json:"label"`
 }
 
 // Folder is a lightweight folder record used by the scanner's skip logic

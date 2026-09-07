@@ -39,7 +39,7 @@ func TestVariantStatsByKind_PreseedsEmptyTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VariantStatsByKind: %v", err)
 	}
-	for _, kind := range []string{"upscale", "optimize"} {
+	for _, kind := range []string{"upscale", "optimize", "pcm"} {
 		st, ok := got[kind]
 		if !ok {
 			t.Errorf("missing pre-seeded key %q", kind)

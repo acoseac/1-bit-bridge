@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -233,5 +234,37 @@ func TestDSDRenderCaps_Active(t *testing.T) {
 	}
 	if !(DSDRenderCaps{Enabled: true, DecodeDSD: true}).Active() {
 		t.Error("flag + decoders is active")
+	}
+}
+
+// TestProjectedSize_DSDSourcePin records what the shared PCM projection
+// says about a DSD source, so nobody "fixes" it into DSD byte-math and
+// silently changes every pre-flight. With sourceBits = 1 the formula is
+// (targetRate / dsdRate) × targetBits × factor: a 1-second DSD64 stereo
+// source (705,600 bytes) projects to ≈0.98× itself for the faithful tier
+// and ≈0.14× for the compact tier at the shipped compression factors —
+// both CONSERVATIVE against the measured renditions (a decimated,
+// sinc-filtered 24-bit FLAC compresses better than the factor assumes),
+// which is the direction a disk pre-flight must err in.
+func TestProjectedSize_DSDSourcePin(t *testing.T) {
+	const dsd64Stereo1s = 2822400 * 2 / 8 // 705,600 bytes
+	src := float64(dsd64Stereo1s)
+	cases := []struct {
+		name         string
+		rate, bits   int
+		want         int64
+		wantSourceFr float64
+	}{
+		{"pcm 176.4/24", 176400, 24, int64(math.Round(src * (176400.0 / 2822400.0) * 24 * FLACCompressionFactor24Bit)), 0.975},
+		{"optimized 44.1/16", 44100, 16, int64(math.Round(src * (44100.0 / 2822400.0) * 16 * FLACCompressionFactor16Bit)), 0.1375},
+	}
+	for _, c := range cases {
+		got := ProjectedSize(dsd64Stereo1s, 2822400, 1, c.rate, c.bits, DefaultCompressionFactor(c.bits))
+		if got != c.want {
+			t.Errorf("%s: ProjectedSize = %d, want %d", c.name, got, c.want)
+		}
+		if frac := float64(got) / src; frac < c.wantSourceFr-0.001 || frac > c.wantSourceFr+0.001 {
+			t.Errorf("%s: projected/source = %.4f, want ≈%.4f", c.name, frac, c.wantSourceFr)
+		}
 	}
 }

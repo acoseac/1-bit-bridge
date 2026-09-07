@@ -116,7 +116,7 @@ func (s *Server) buildAlbumCoverage(ctx context.Context, cat *librarycat.Catalog
 	if err != nil {
 		return nil, err
 	}
-	eligible, err := s.deps.Manifest.AllEligibleKinds(ctx, rate, bits)
+	eligible, err := s.deps.Manifest.AllEligibleKinds(ctx, rate, bits, s.eligibilityOpts())
 	if err != nil {
 		return nil, err
 	}

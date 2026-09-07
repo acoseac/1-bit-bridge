@@ -216,7 +216,7 @@ func TestListAutoOptimizeCandidatesSkipsSuppressed(t *testing.T) {
 	seedFailTrack(t, s, "A/good.flac", 1000, 1700000000)
 	seedFailTrack(t, s, "A/doomed.flac", 1000, 1700000000)
 
-	before, err := s.ListAutoOptimizeCandidates(context.Background(), 100)
+	before, err := s.ListAutoOptimizeCandidates(context.Background(), 100, EligibilityOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestListAutoOptimizeCandidatesSkipsSuppressed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	after, err := s.ListAutoOptimizeCandidates(context.Background(), 100)
+	after, err := s.ListAutoOptimizeCandidates(context.Background(), 100, EligibilityOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}

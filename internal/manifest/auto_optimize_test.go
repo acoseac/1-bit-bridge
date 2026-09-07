@@ -59,7 +59,7 @@ func seedOptimizeVariant(t *testing.T, s *Store, path, variantID string, srcMTim
 
 func candidatePaths(t *testing.T, s *Store, limit int) []string {
 	t.Helper()
-	cands, err := s.ListAutoOptimizeCandidates(context.Background(), limit)
+	cands, err := s.ListAutoOptimizeCandidates(context.Background(), limit, EligibilityOpts{})
 	if err != nil {
 		t.Fatalf("ListAutoOptimizeCandidates: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestListAutoOptimizeCandidatesSelectionContract(t *testing.T) {
 	sm, ss := trackRowMTimeAndSize(t, s, staleVariant)
 	seedOptimizeVariant(t, s, staleVariant, "optimized-v2-48000-16", sm-1, ss-42)
 
-	cands, err := s.ListAutoOptimizeCandidates(ctx, 100)
+	cands, err := s.ListAutoOptimizeCandidates(ctx, 100, EligibilityOpts{})
 	if err != nil {
 		t.Fatalf("ListAutoOptimizeCandidates: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestListAutoOptimizeCandidatesSelectionContract(t *testing.T) {
 
 	// Count agrees with the (uncapped) listing — the card and the work
 	// must not be able to disagree.
-	n, cerr := s.CountAutoOptimizeCandidates(ctx)
+	n, cerr := s.CountAutoOptimizeCandidates(ctx, EligibilityOpts{})
 	if cerr != nil {
 		t.Fatalf("CountAutoOptimizeCandidates: %v", cerr)
 	}
@@ -255,7 +255,7 @@ func TestListAutoOptimizeCandidatesOrderAndLimit(t *testing.T) {
 		}
 	}
 	// The COUNT twin is deliberately uncapped.
-	n, err := s.CountAutoOptimizeCandidates(ctx)
+	n, err := s.CountAutoOptimizeCandidates(ctx, EligibilityOpts{})
 	if err != nil {
 		t.Fatalf("CountAutoOptimizeCandidates: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows(t *testing.T) {
 			"got %v — a superseded row is stale forever, so this re-generates every sweep "+
 			"and pushes a delta row to every paired device each time", got)
 	}
-	if n, err := s.CountAutoOptimizeCandidates(ctx); err != nil {
+	if n, err := s.CountAutoOptimizeCandidates(ctx, EligibilityOpts{}); err != nil {
 		t.Fatalf("CountAutoOptimizeCandidates: %v", err)
 	} else if n != 0 {
 		t.Errorf("CountAutoOptimizeCandidates = %d, want 0", n)
@@ -322,7 +322,7 @@ func TestListAutoOptimizeCandidatesIgnoresSupersededVariantRows(t *testing.T) {
 			"(two variant rows must not yield two candidates — that double-spends "+
 			"MaxPerSweep and over-reports the backlog)", got, path)
 	}
-	if n, err := s.CountAutoOptimizeCandidates(ctx); err != nil {
+	if n, err := s.CountAutoOptimizeCandidates(ctx, EligibilityOpts{}); err != nil {
 		t.Fatalf("CountAutoOptimizeCandidates: %v", err)
 	} else if n != 1 {
 		t.Errorf("CountAutoOptimizeCandidates = %d, want 1 (not double-counted)", n)

@@ -56,7 +56,7 @@ func TestEligibleRollupByPrefixToleratesTrailingSlash(t *testing.T) {
 	s := seedPrefixFixture(t)
 	ctx := context.Background()
 
-	bare, err := s.EligibleRollupByPrefix(ctx, "Album", 96000, 24)
+	bare, err := s.EligibleRollupByPrefix(ctx, "Album", 96000, 24, EligibilityOpts{})
 	if err != nil {
 		t.Fatalf("bare prefix: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestEligibleRollupByPrefixToleratesTrailingSlash(t *testing.T) {
 		t.Fatal("fixture seeded nothing eligible — test can't detect the bug")
 	}
 	for _, prefix := range []string{"Album/", "Album//", "Album///"} {
-		slashed, err := s.EligibleRollupByPrefix(ctx, prefix, 96000, 24)
+		slashed, err := s.EligibleRollupByPrefix(ctx, prefix, 96000, 24, EligibilityOpts{})
 		if err != nil {
 			t.Fatalf("prefix %q: %v", prefix, err)
 		}

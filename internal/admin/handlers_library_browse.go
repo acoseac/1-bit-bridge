@@ -394,7 +394,7 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		for i, f := range folders {
 			paths[i] = f.Path
 		}
-		eligible, err = s.deps.Manifest.EligibleCountsForFolders(r.Context(), paths, targetRate, targetBits)
+		eligible, err = s.deps.Manifest.EligibleCountsForFolders(r.Context(), paths, targetRate, targetBits, s.eligibilityOpts())
 		if err != nil {
 			logger.Warn("browse: eligible counts unavailable; tiles fall back to all-tracks denominators", "err", err)
 			eligible = nil
@@ -413,7 +413,7 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 		resp.SubtreeUpscaled = rollup.UpscaledTrackCount
 		resp.SubtreeOptimized = rollup.OptimizedTrackCount
 		resp.SubtreeSizeBytes = rollup.TotalSizeBytes
-		if ec, err := s.deps.Manifest.EligibleRollupByPrefix(r.Context(), normalised, targetRate, targetBits); err == nil {
+		if ec, err := s.deps.Manifest.EligibleRollupByPrefix(r.Context(), normalised, targetRate, targetBits, s.eligibilityOpts()); err == nil {
 			resp.SubtreeUpscaleEligible = intPtr(ec.Upscale)
 			resp.SubtreeOptimizeEligible = intPtr(ec.Optimize)
 		} else {

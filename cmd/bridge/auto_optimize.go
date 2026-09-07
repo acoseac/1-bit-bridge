@@ -84,6 +84,14 @@ type autoOptimizeSweeper struct {
 
 // soxSnapshot takes ONE probe result per sweep. Hoisted for the same
 // consistency reason as the coordinator's walks, not for speed.
+// eligibilityOpts is the DSD-render capability the candidate query
+// takes. PCM-only until the serve wiring threads transcode.DSDRenderCaps
+// into the sweeper; the zero value keeps the sweep's selection
+// byte-identical to pre-v43.
+func (sw *autoOptimizeSweeper) eligibilityOpts() manifest.EligibilityOpts {
+	return manifest.EligibilityOpts{}
+}
+
 func (sw *autoOptimizeSweeper) soxSnapshot() transcode.SoxInfo {
 	return transcode.SnapshotOrOpen(sw.soxInfo)
 }
@@ -103,7 +111,7 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 		return &admin.AutoOptimizeSweepCounts{Disabled: true}
 	}
 
-	cands, err := sw.store.ListAutoOptimizeCandidates(ctx, sw.maxPerSweep())
+	cands, err := sw.store.ListAutoOptimizeCandidates(ctx, sw.maxPerSweep(), sw.eligibilityOpts())
 	if err != nil {
 		// A cancelled context here is a normal shutdown, not a fault —
 		// the suppression the analysis + fingerprint sweepers apply.
@@ -139,7 +147,7 @@ func (sw *autoOptimizeSweeper) sweepOnce(ctx context.Context) *admin.AutoOptimiz
 	// predicate — deliberately, so the card's number and the sweeper's
 	// work cannot drift — and affordable because it runs once per sweep
 	// (default cadence: the scan interval), not per tick of anything hot.
-	if remaining, cerr := sw.store.CountAutoOptimizeCandidates(ctx); cerr == nil {
+	if remaining, cerr := sw.store.CountAutoOptimizeCandidates(ctx, sw.eligibilityOpts()); cerr == nil {
 		counts.Remaining = remaining
 	} else if ctx.Err() == nil {
 		logger.Warn("auto-optimize sweep: count remaining", "err", cerr)

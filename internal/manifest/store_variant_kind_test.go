@@ -290,6 +290,13 @@ func TestHumanLabelForVariant(t *testing.T) {
 		{"flac optimized 44.1", Variant{ID: "optimized-v2-44100-16", Format: "flac", SampleRate: 44100, BitsPerSample: 16}, "Optimized FLAC 16/44.1"},
 		{"non-flac upscaled keeps kind + upper format", Variant{ID: "upscaled-v2-192000-24", Format: "wav", SampleRate: 192000, BitsPerSample: 24}, "Upscaled WAV 24/192"},
 		{"non-flac optimized keeps kind + upper format", Variant{ID: "optimized-v2-48000-16", Format: "alac", SampleRate: 48000, BitsPerSample: 16}, "Optimized ALAC 16/48"},
+		// The DSD renditions: the faithful tier is its own family and
+		// label ("PCM", never "Upscaled" — an unknown prefix would fall
+		// to that default); the compact tier reads as Optimized because
+		// its prefix IS the optimize prefix.
+		{"pcm faithful rendition 44.1k family", Variant{ID: "pcm-v1-176400-24", Format: "flac", SampleRate: 176400, BitsPerSample: 24}, "PCM FLAC 24/176.4"},
+		{"pcm faithful rendition 48k family", Variant{ID: "pcm-v1-192000-24", Format: "flac", SampleRate: 192000, BitsPerSample: 24}, "PCM FLAC 24/192"},
+		{"optimized-dsd reads as Optimized", Variant{ID: "optimized-dsd-v1-44100-16", Format: "flac", SampleRate: 44100, BitsPerSample: 16}, "Optimized FLAC 16/44.1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
