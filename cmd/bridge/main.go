@@ -1797,6 +1797,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return analyzeCmd(ctx, args[1:], stdout, stderr)
 	case "optimize":
 		return optimizeCmd(ctx, args[1:], stdout, stderr)
+	case "render":
+		return renderCmd(ctx, args[1:], stdout, stderr)
 	case "variants":
 		return variantsCmd(ctx, args[1:], stdout, stderr)
 	case "artwork":
@@ -1883,6 +1885,11 @@ Subcommands:
            → 44.1k; 96/192k → 48k. Shrinks 100 MB hi-res FLAC to ~15-20 MB for fast
            CarPlay / cellular streaming with zero fidelity loss vs. what the head unit
            accepts.
+  render   Generate 24-bit PCM FLAC sidecars from DSD (DSF / DFF) sources — the faithful
+           tier, for a wired DAC that cannot take the file's DSD rate (requires ffmpeg +
+           sox and upscale.dsdRender.enabled). Family-preserving: DSD64/128/256 of the
+           44.1k family → 176.4k, the 48k family → 192k. The COMPACT DSD tier is built by
+           bridge optimize, which admits DSD sources under the same flag.
   variants Manage the transcoded-variant cache: bridge variants move --to <path>
            relocates every cached sidecar (and its DB row) onto another disk.
   artwork  Maintain on-disk artwork cache: bridge artwork --gc removes orphans.
