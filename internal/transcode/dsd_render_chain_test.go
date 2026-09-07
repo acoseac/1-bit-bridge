@@ -326,9 +326,20 @@ func TestParseSoxSettings_LegacyAndDSDBlobs(t *testing.T) {
 
 // --- real toolchain --------------------------------------------------------
 
+// requireSox gates a test that shells out to sox and nothing else. Kept
+// separate from requireSoxAndFFmpeg so a sox-only measurement is not
+// silently skipped on a host that simply has no ffmpeg.
+func requireSox(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("sox"); err != nil {
+		t.Skip("real sox not on PATH")
+	}
+}
+
 func requireSoxAndFFmpeg(t *testing.T) {
 	t.Helper()
-	for _, bin := range []string{"sox", "ffmpeg", "ffprobe"} {
+	requireSox(t)
+	for _, bin := range []string{"ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("real %s not on PATH", bin)
 		}

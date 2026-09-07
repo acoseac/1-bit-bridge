@@ -90,6 +90,7 @@ reaches a session that has not gone looking for it.
 - [DIDL is not tags — routed rows fill artist/album from the container path (PR #813, 2026-08-31)](#didl-is-not-tags-routed-rows-fill-artistalbum-from-the-container-path-pr-813-2026-08-31)
 - [The original "Things that have bitten before" list (2026-04 → 2026-08)](#the-original-things-that-have-bitten-before-list-2026-04-2026-08)
 - [DSD → PCM renditions on the bridge, B1 (PR #863, 2026-09-07)](#dsd--pcm-renditions-on-the-bridge-b1-pr-863-2026-09-07)
+- [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
 
 ---
 
@@ -4121,3 +4122,142 @@ And one of the new tests was itself the defect class this repo documents:
 than 12 h under the SHARED OS temp dir, which on a machine that also runs a
 bridge is not the test's state to remove. The mapping and the
 missing-directory contract are provable separately, and now are.
+
+---
+
+## DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)
+
+The design could not settle one question by reading: the decode chain
+decimates twice — ffmpeg's `dsd2pcm` from 2.8 MHz to 352.8 kHz, then sox to
+the tier's rate — and DSD's noise shelf carries essentially all of a 1-bit
+stream's power. If either stopband is shallow, the shelf folds into the
+baseband and every rendition ships a noise floor the source never had. A
+consult raised it; the plan recorded it as a MEASUREMENT item with a
+recorded fallback ("`sinc` BEFORE `rate` at 352.8k") to take if it failed.
+
+**It does not fail. The fallback is not needed.** Numbers below.
+
+### The fixtures, and the claim about them that was false
+
+`internal/transcode/testdata/gen/dsd_fixtures.py` is a pure-stdlib
+generator (the dev Mac has no numpy, and a fixture generator that needs a
+scientific stack is one nobody re-runs) writing three 1-second stereo
+DSD64 DSF files, ~713 KB each and committed: a 1 kHz −6 dBFS tone, a
+50 kHz alias probe, and a 19+20 kHz CCIF twin tone.
+
+**The modulator took three attempts and only instrumentation settled it.**
+The first was a 5th-order CIFB with feedback at all five integrators; it
+was stable and linear and had a **DC gain of 0.257**, so every fixture
+decoded ~12 dB below its intended level and all three tests failed with a
+genuine `sox reported clipping in stage C`. The replacement is a
+low-distortion CIFF (`b = [0.40, 0.20, 0.10, 0.05, 0.02]`, unity
+feed-forward, the input fed forward into the quantizer), verified BEFORE
+generating anything: with a DC input the output mean equals the input
+exactly (`mean(e) = 0.000000` over 200k samples) and every integrator
+state stays well under 1.
+
+⚠️ **Between those two, a throwaway harness reported "gain 2.0" across
+three different coefficient sets — a systematic factor that looked like a
+structural bug and was a PRINT BUG in the harness** (it printed
+`want {dc*0.5}` while passing `u = dc`). A constant factor across every
+variant of a parameter is evidence about the MEASUREMENT, not the subject.
+
+⚠️ **The generator's own docstring claimed a 5th-order loop "puts the
+in-band floor below −120 dBFS", and the tests were written to assert an
+absolute −110 dBFS bar on that basis. Both were wrong.** Rendered through
+the real chain the fixtures carry about **−104 dBFS of their own content**
+near 20 kHz: partly the NTF rising toward the band edge, mostly odd-order
+harmonics of the test tone (the 7th, 9th, 15th, 17th and 19th are all
+visible at ~−85 to −127 dBFS, ordinary for a 1-bit quantizer). An absolute
+bar therefore measures the modulator, not the decoder — and the first run
+duly "failed" at −91.8 dBFS while the pipeline was blameless. **A probe
+whose own floor sits above the bar cannot answer the question, however
+carefully the bar was chosen.**
+
+### The measurement that does work
+
+`TestDSDRender_AliasRejection` renders the 50 kHz probe through Stage A
+TWICE per tier: once with the shipping effect order (taken from the
+production `dsdStageAArgs`, not retyped) and once with a reference order
+that low-passes at the 352.8 kHz intermediate BEFORE decimating. A
+reference that filters while massively oversampled cannot alias, so any
+in-band energy the shipping order has and the reference does not is energy
+the shipping decimation folded down. Whatever both share is the fixture's,
+and subtracts out. Stage A is the right subject because Stage C only
+applies gain, dither and FLAC — none of which can fold a frequency — and
+both sides then sit at identical level with no normalisation to get wrong.
+
+| tier | shipping peak | reference peak | Δ peak | Δ band energy |
+|---|---|---|---|---|
+| faithful 176.4 kHz | −103.81 dBFS @ 19302 Hz | −103.80 dBFS | **+0.00 dB** | **+0.00 dB** |
+| compact 44.1 kHz | −105.01 dBFS @ 19497 Hz | −105.39 dBFS | **+0.38 dB** | **+0.46 dB** |
+
+Both assertions carry a 1.0 dB bar, about twice the worst measured
+difference. A coarse absolute pin (`peak ≤ −80 dBFS`) sits alongside them
+so an anti-alias filter that vanished entirely is still caught: with none
+at all the 50 kHz tone lands in band near −12 dBFS.
+
+**Why the compact tier's +0.38 dB is not aliasing.** Its shipping chain
+carries no low-pass — `rate`'s own anti-alias filter is the whole defence
+— so its reference has to ADD one at the audio band edge, and the two
+passband shapes differ slightly. What dsd2pcm hands sox is already
+band-limited: measured at the 352.8 kHz intermediate the residual shelf
+peaks near **−64 dBFS** per bin with about **−38 dB** of band energy in
+100–130 kHz, and sox's `rate -v` stopband is deeper than 100 dB, so the
+folded product sits far below the fixture's own −104 dBFS in-band content.
+
+### Two more numbers the same fixtures pinned
+
+**The clip guard lands on its ceiling.** `TestDSDRender_LevelParity`
+renders the 1 kHz fixture and measures the rendition's TRUE peak through
+the shipped `analyze.TruePeakDBTP`: applied gain **+5.00 dB**, rendered
+true peak **−0.97 dBTP** against the −1.0 dBTP target. That is the
+end-to-end pin on Stage C's `6.0206 + G` agreeing with
+`G = clamp(0, 6, −TP_unity − 1)` — the arithmetic an earlier draft got
+wrong by writing `6.0206 + G − 6`, which would have left every rendition
+6 dB quiet. Measuring the true peak rather than the spectrum is
+deliberate: the tone reads −1.78 dBFS, 0.76 dB under the ceiling, because
+1 kHz does not land on a bin and Blackman-Harris costs up to 0.83 dB of
+scalloping. **Assert on the meter; log the spectrum.**
+
+**Intermodulation is at the noise floor.** `TestDSDRender_CCIFIntermodulation`
+puts 19+20 kHz through at equal amplitude and finds the 1 kHz difference
+product at **−168.6 dBFS** against a −80 dBFS bar. The chain is linear.
+
+### The finishing low-pass, and a 61 dB measurement trap
+
+`TestDSDLowpassSincConvention` pins the two things `sinc -a 110 -t 10000
+-35000` does not state on its face. The response is **−6.02 dB at exactly
+35 kHz** and flat to 31 kHz, so `-t` is the FULL transition width CENTRED
+on the cutoff (30 kHz passband edge, 40 kHz stop edge) — the docblock's
+claim, now measured. And the stopband is **−116.8 dB at 40 kHz**,
+−131.4 dB at 60 kHz, past the 110 dB `-a` asks for.
+
+⚠️ **Getting that took two corrections, both of which produced confident
+wrong answers.** First, `sox -n -r 352800 … synth 2 sine 80000` generates
+at sox's **48 kHz default**, because sox binds options to the file that
+FOLLOWS them and `-r` after `-n` sets the OUTPUT rate — the 80 kHz request
+aliased to 16 kHz and every stopband frequency silently landed in the
+passband, so the whole sweep read −0.00 dB and looked like an inert
+filter. `-r` must precede `-n`. Second, and worse: **`sox … stats` over a
+short file after a steep FIR reports the edge TRANSIENT, not the
+stopband.** For the filtered 40 kHz tone, whole-file RMS reads
+**−64.56 dBFS** while the steady-state middle half reads **−125.85 dBFS**
+— a 61 dB error, in the direction that makes a 117 dB filter look like a
+55 dB one. `soxSteadyStateRMSdB` measures the middle half for exactly this
+reason.
+
+### What runs when
+
+The three fixture tests are gated on `BRIDGE_DSD_FIXTURE_TESTS=1` on top
+of the toolchain gate — they decode a megabyte of DSD through two
+subprocesses per case, which the ordinary suite should not pay for.
+`TestDSDLowpassSincConvention` needs only sox and is gated on SOX ALONE
+(it synthesises and filters with sox and never decodes DSD, so requiring
+ffmpeg would skip it on a host that can run it — CodeRabbit on #866).
+`fftSizeFor` picks the largest power of two that fits, capped at 65536: a
+1-second fixture decimates to 44 100 samples at the compact tier, BELOW
+65536, so a fixed-size FFT fatals on exactly the tier that decimates
+hardest. Callers log the size they got, so a reduced-resolution run says
+so in its own output.
+

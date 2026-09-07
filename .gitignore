@@ -54,3 +54,9 @@ ops/*audit*.md
 ops/*bug-review*.md
 ops/*review*.md
 ops/*findings*.md
+
+# Python bytecode from the fixture generator. It is regenerated on every
+# run of dsd_fixtures.py and churns on every Python version, so a tracked
+# copy is pure diff noise (one slipped in with the fixtures on #866).
+__pycache__/
+*.pyc
