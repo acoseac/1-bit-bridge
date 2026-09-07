@@ -1111,7 +1111,7 @@ All four routes require the `X-Device-Token` header (the durable recovery token)
 }
 ```
 
-`lastModifiedAt` is the client's wall-clock **UnixNano (UTC) integer** — the LWW guard key (never a float/string round-trip). Each item sets **either** `path` (local, resolvable) **or** `originFingerprint`+`originPath` (foreign/opaque) — never both, never neither (`400 bad_request` otherwise). `originFingerprint` is the owning bridge's colon-hex cert fingerprint, or the sentinel `"local"` / `"smb"`. `position` is the authoritative 0-based order. Body capped at 16 MiB.
+`lastModifiedAt` is the client's wall-clock **UnixNano (UTC) integer** — the LWW guard key (never a float/string round-trip). Each item sets **either** `path` (local, resolvable) **or** `originFingerprint`+`originPath` (foreign/opaque) — never both, never neither (`400 bad_request` otherwise). `originFingerprint` is the owning bridge's colon-hex cert fingerprint, or the sentinel `"local"` / `"smb"` / `"upnp"`. (The `upnp` sentinel was missing from this line until 2026-09-05 — `PlaylistSerialization.foreignFingerprint` has emitted it for `.upnp` shares since UPnP sources shipped, and the Favorites section below already listed all three, so a validator written to the two-sentinel form rejects playlist items iOS already sends.) `position` is the authoritative 0-based order. Body capped at 16 MiB.
 
 - **`200`** `{ "id": "…", "stored": true }` — accepted (inbound `lastModifiedAt` ≥ stored, or new).
 - **`409`** `stale` — inbound strictly older than the server copy; body carries the full server playlist so iOS can reconcile in one round-trip:
