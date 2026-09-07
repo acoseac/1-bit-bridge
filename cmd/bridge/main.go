@@ -562,6 +562,33 @@ type upscaleEnqueuerAdapter struct {
 	// (direct-construction tests) skips the check, matching its
 	// documented fail-open posture.
 	soxInfo func() (transcode.SoxInfo, error)
+	// dsdCaps returns the live DSD-render capability (the operator flag
+	// folded with the ffmpeg probe). Nil-safe and fail-CLOSED: unwired
+	// grants nothing, so a DSD source is refused exactly as before the
+	// renditions existed.
+	dsdCaps func() transcode.DSDRenderCaps
+	// tempDir resolves the render scratch directory per call (empty =
+	// the OS temp dir). Nil-safe.
+	tempDir func() string
+}
+
+func (a *upscaleEnqueuerAdapter) caps() transcode.DSDRenderCaps {
+	if a.dsdCaps == nil {
+		return transcode.DSDRenderCaps{}
+	}
+	return a.dsdCaps()
+}
+
+func (a *upscaleEnqueuerAdapter) renderTempDir() string {
+	if a.tempDir == nil {
+		return ""
+	}
+	return a.tempDir()
+}
+
+// isDSDTrack reads the manifest's own DSD flag (nil = unknown = not DSD).
+func isDSDTrack(track *manifest.Track) bool {
+	return track.IsDSD != nil && *track.IsDSD
 }
 
 // soxCanDecode reports whether the installed sox can read absPath.
@@ -599,12 +626,20 @@ func (a *upscaleEnqueuerAdapter) resolveAndLookupTrack(libraryRelativePath strin
 		// Silent reject (no remediation path beyond rescan).
 		return "", nil, api.ErrUpscaleIneligible
 	}
-	if track.IsDSD != nil && *track.IsDSD {
-		return "", nil, api.ErrUpscaleIneligible
-	}
-	// Refuse what this sox build cannot decode. Sits with the DSD filter
-	// because it answers the same question — "can the pipeline actually
-	// process this?" — and both callers must get the same answer.
+	// A DSD source (DSF / DSDIFF) is no longer refused HERE: it is the
+	// input of the two rendition kinds, and each caller decides — the
+	// upscale path (EnqueueOne) refuses it outright, the optimize and pcm
+	// paths gate it on the DSD-render caps (transcode.DSDRenderEligible).
+	// Its decodability is the ffmpeg half of those caps, not a sox
+	// question, so the live-sox refusal below is PCM-only. That is
+	// LAYERING, not a second verdict: decodeRouteFor answers a DSD path
+	// from the ffmpeg snapshot alone — the same snapshot the caps fold —
+	// so the check would agree either way; skipping it keeps the DSD
+	// refusal attributed to the caps gate and evaluates the route once.
+	//
+	// Refuse what this sox build cannot decode. It answers the same
+	// question as the eligibility gates — "can the pipeline actually
+	// process this?" — and every caller must get the same answer.
 	//
 	// The case that motivated it is ALAC: lossless, so IsLossyCodec
 	// doesn't exclude it; OptimizeEligible names "ALAC" outright; and
@@ -612,7 +647,7 @@ func (a *upscaleEnqueuerAdapter) resolveAndLookupTrack(libraryRelativePath strin
 	// SampleRate/BitsPerSample too. So it cleared every gate and reached
 	// a sox with no MP4 demuxer — the client had already been told the
 	// track was eligible (wand enabled on iOS) before the job failed.
-	if !a.soxCanDecode(abs) {
+	if !isDSDTrack(track) && !a.soxCanDecode(abs) {
 		return "", nil, api.ErrUpscaleIneligible
 	}
 	return abs, track, nil
@@ -666,35 +701,84 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 // `track` and returns the JobSpec on accept, or a typed error on
 // reject. Split out of `EnqueueOptimize` to keep that function's
 // cognitive complexity below the repo gate. Pure path / DB-free.
-func buildOptimizeSpec(track *manifest.Track, absPath, outputDir string) (transcode.JobSpec, error) {
+//
+// The gate is transcode.OptimizeEligibleFor: the PCM rule, OR the DSD
+// rule under `caps` — a DSD source becomes the compact `optimized-dsd-`
+// tier, with the render facts filled from its manifest row.
+func buildOptimizeSpec(track *manifest.Track, absPath, outputDir, tempDir string, caps transcode.DSDRenderCaps) (transcode.JobSpec, error) {
 	if track.SampleRate == nil || track.BitsPerSample == nil {
 		return transcode.JobSpec{}, api.ErrUpscaleIneligible
 	}
 	sourceHz := int(*track.SampleRate)
 	sourceBits := *track.BitsPerSample
-	if !transcode.OptimizeEligible(track.Path, track.Codec, sourceHz, sourceBits) {
+	if !transcode.OptimizeEligibleFor(track.Path, track.Codec, sourceHz, sourceBits, isDSDTrack(track), track.Compression, caps) {
 		return transcode.JobSpec{}, api.ErrUpscaleIneligible
 	}
 	target, err := transcode.ResolveTargetRateForOptimize(sourceHz)
 	if err != nil {
 		return transcode.JobSpec{}, fmt.Errorf("resolve optimize target rate: %w", err)
 	}
-	// `OptimizeEligible` above is the authoritative gate; the
+	// `OptimizeEligibleFor` above is the authoritative gate; the
 	// resolver always returns a real target now (does NOT re-evaluate
 	// "is the source at the floor" — a 44.1/24 candidate flows
 	// through with target=44.1k). Don't reintroduce a `target == 0`
 	// skip (Gemini bot review on PR #270).
-	return transcode.JobSpec{
+	return renditionSpec(track, absPath, outputDir, tempDir, sourceHz, sourceBits, target, 16, transcode.JobKindOptimize), nil
+}
+
+// buildPCMRenderSpec is buildOptimizeSpec's faithful-tier twin: the DSD
+// gate only (transcode.PCMRenderEligible under `caps` — a non-DSD source
+// is ineligible, which is the SINGLE-FILE refusal the batch walks
+// deliberately do not make), the family's 4× base rate, 24 bits, kind
+// pcm.
+func buildPCMRenderSpec(track *manifest.Track, absPath, outputDir, tempDir string, caps transcode.DSDRenderCaps) (transcode.JobSpec, error) {
+	if track.SampleRate == nil {
+		return transcode.JobSpec{}, api.ErrUpscaleIneligible
+	}
+	sourceHz := int(*track.SampleRate)
+	sourceBits := 0
+	if track.BitsPerSample != nil {
+		sourceBits = *track.BitsPerSample
+	}
+	if !transcode.PCMRenderEligible(track.Path, track.Codec, isDSDTrack(track), sourceHz, track.Compression, caps) {
+		return transcode.JobSpec{}, api.ErrUpscaleIneligible
+	}
+	target, err := transcode.ResolveTargetRateForPCMRender(sourceHz)
+	if err != nil {
+		return transcode.JobSpec{}, fmt.Errorf("resolve pcm render target rate: %w", err)
+	}
+	return renditionSpec(track, absPath, outputDir, tempDir, sourceHz, sourceBits, target, 24, transcode.JobKindPCMRender), nil
+}
+
+// renditionSpec assembles the JobSpec both rendition kinds share. For a
+// DSD source the render facts ride along from the manifest row: the
+// nominal DSD rate is SourceSampleRate already, and channels / duration /
+// compression / the scratch dir are what the chain's geometry check, the
+// completeness guard, the pool's timeout and Stage A read.
+func renditionSpec(track *manifest.Track, absPath, outputDir, tempDir string, sourceHz, sourceBits, targetRate, targetBits int, kind transcode.JobKind) transcode.JobSpec {
+	spec := transcode.JobSpec{
 		SourceAbsPath:    absPath,
 		SourceLibraryRel: track.Path,
 		SourceSampleRate: sourceHz,
 		SourceBits:       sourceBits,
-		TargetSampleRate: target,
-		TargetBits:       16,
+		TargetSampleRate: targetRate,
+		TargetBits:       targetBits,
 		Quality:          transcode.QualityVeryHigh,
 		OutputDir:        outputDir,
-		Kind:             transcode.JobKindOptimize,
-	}, nil
+		Kind:             kind,
+	}
+	if isDSDTrack(track) {
+		spec.SourceIsDSD = true
+		spec.SourceCompression = track.Compression
+		spec.TempDir = tempDir
+		if track.Channels != nil {
+			spec.SourceChannels = *track.Channels
+		}
+		if track.Duration != nil {
+			spec.SourceDurationSec = *track.Duration
+		}
+	}
+	return spec
 }
 
 // EnqueueOptimize is the CarPlay-targeted parallel of EnqueueOne.
@@ -714,7 +798,24 @@ func (a *upscaleEnqueuerAdapter) EnqueueOptimize(libraryRelativePath string) err
 	if err != nil {
 		return err
 	}
-	spec, err := buildOptimizeSpec(track, abs, a.outputDir())
+	spec, err := buildOptimizeSpec(track, abs, a.outputDir(), a.renderTempDir(), a.caps())
+	if err != nil {
+		return err
+	}
+	return a.finalizeAndEnqueue(spec, track.Path, false)
+}
+
+// EnqueuePCMRender is the faithful DSD rendition's per-track entry point
+// (`pcm-v1-<176400|192000>-24`). Same scaffolding, error taxonomy and
+// resumability gate as EnqueueOptimize; the only shape differences are
+// the gate (transcode.PCMRenderEligible — a non-DSD source is refused
+// with the typed ineligible error), the target resolver and the bits.
+func (a *upscaleEnqueuerAdapter) EnqueuePCMRender(libraryRelativePath string) error {
+	abs, track, err := a.resolveAndLookupTrack(libraryRelativePath)
+	if err != nil {
+		return err
+	}
+	spec, err := buildPCMRenderSpec(track, abs, a.outputDir(), a.renderTempDir(), a.caps())
 	if err != nil {
 		return err
 	}
@@ -725,6 +826,11 @@ func (a *upscaleEnqueuerAdapter) EnqueueOne(libraryRelativePath string) error {
 	abs, track, err := a.resolveAndLookupTrack(libraryRelativePath)
 	if err != nil {
 		return err
+	}
+	// DSD is never UPSCALED — it is not a PCM source. The renditions are
+	// the optimize / pcm kinds, which take it through their own gates.
+	if isDSDTrack(track) {
+		return api.ErrUpscaleIneligible
 	}
 	// Lossy sources are never upscaled (PROTOCOL.md documents the
 	// gate as "PCM"; upscaling decoded lossy audio adds no fidelity).
@@ -2691,6 +2797,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// and the admin tiles (so the Settings page does at most one
 	// fork-exec per 30 s window regardless of tile count). Declared here
 	// rather than beside the admin wiring because the gates need it first.
+	// Reclaim DSD-render scratch a crash left behind (SIGKILL / power loss
+	// skip the render's deferred remove). Bridge-owned subdirectory only,
+	// files older than the purge age; a fresh scratch another instance is
+	// writing is never touched.
+	if n, err := transcode.PurgeStaleRenderScratch(cfg.Upscale.TempDir); err != nil {
+		fmt.Fprintf(stderr, "render scratch purge: %v\n", err)
+	} else if n > 0 {
+		fmt.Fprintf(stderr, "render scratch purge: removed %d stale file(s)\n", n)
+	}
 	soxCache := &soxToolchainCache{}
 	// soxOK is the LIVE toolchain verdict. Lazy + cached rather than a
 	// boot snapshot: the probe is a fork-exec, and an operator who
@@ -2711,6 +2826,22 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// until shutdown.
 	upscaleActiveFn := func() bool { return liveCfg().Upscale.Enabled && soxOK("upscale") }
 	analysisActiveFn := func() bool { return liveCfg().Analysis.Enabled && soxOK("analysis") }
+	// dsdRenderCapsFn is the LIVE DSD-render capability every DSD gate
+	// reads — the coordinator's walks, the per-track enqueuer, the
+	// auto-optimize sweeper: the operator flag from the live config AND
+	// the cached ffmpeg decoder probe (FFmpegSnapshot, 30 s TTL — one
+	// fork-exec per window however many gates ask, and none at all while
+	// the flag is off). Fail-CLOSED by construction: a missing or
+	// decoder-less ffmpeg yields a zero-capability value and every DSD
+	// source stays skipped, exactly as before the renditions existed.
+	dsdRenderCapsFn := func() transcode.DSDRenderCaps {
+		if !upscaleActiveFn() || !liveCfg().Upscale.DSDRender.Enabled {
+			return transcode.DSDRenderCaps{}
+		}
+		ff := transcode.FFmpegSnapshot()
+		return transcode.DSDRenderCaps{Enabled: true, DecodeDSD: ff.HasDSD, DecodeDST: ff.HasDST}
+	}
+	liveRenderTempDir := func() string { return liveCfg().Upscale.TempDir }
 	// Boot-time courtesy log, once: an operator who enabled either
 	// feature without a usable sox gets told at startup rather than
 	// discovering it from a silent no-op.
@@ -3227,6 +3358,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// so the batch walk refuses sources this sox build cannot decode
 		// instead of enqueuing jobs that are certain to fail.
 		upscaleCoordinator.WithSoxInfo(soxCache.snapshot)
+		// The DSD-render caps every candidate walk consults, and the
+		// scratch dir every DSD JobSpec carries. The caps closure is live
+		// (a settings flip applies to the next submit); the scratch dir is
+		// the boot value — it is not a hot setting.
+		upscaleCoordinator.WithDSDRender(dsdRenderCapsFn).WithRenderTempDir(cfg.Upscale.TempDir)
 		// Seed the DB-backed target settings from the YAML bootstrap
 		// on first run. Once seeded, admin Settings edits become
 		// authoritative; YAML stays the bootstrap-only path.
@@ -3262,6 +3398,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			cfg:       cfg,
 			outputDir: liveVariantsDir,
 			soxInfo:   soxCache.snapshot,
+			dsdCaps:   dsdRenderCapsFn,
+			tempDir:   liveRenderTempDir,
 		})
 		apiSrv.WithBatchCoordinator(&upscaleBatchCoordinatorAdapter{
 			coord:     upscaleCoordinator,
@@ -3323,6 +3461,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				// this sox build can't decode is skipped instead of being
 				// re-enqueued and re-failed on every sweep.
 				soxInfo: soxCache.snapshot,
+				// The DSD-render caps decide whether the sweep's candidate
+				// query admits DSD sources at all (the compact tier), and
+				// the scratch dir is what the sweep grades its second disk
+				// budget on.
+				dsdCaps: dsdRenderCapsFn,
+				tempDir: liveRenderTempDir,
 				maxPerSweep: func() int {
 					if live := cfgHolder.Load(); live != nil {
 						return live.Upscale.AutoOptimize.EffectiveMaxPerSweep()

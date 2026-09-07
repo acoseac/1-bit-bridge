@@ -212,6 +212,18 @@ func TempBytesForRender(channels, targetRate int, durationSec float64) int64 {
 	return int64(math.Ceil(4 * float64(channels) * float64(targetRate) * durationSec))
 }
 
+// RenderScratchDir is renderScratchDir for callers outside the package —
+// the sweeper's scratch-volume probe and the CLI's `--gc` purge — so every
+// consumer agrees on where scratch lives.
+func RenderScratchDir(tempDir string) string { return renderScratchDir(tempDir) }
+
+// PurgeStaleRenderScratch is purgeStaleRenderScratch at the standard purge
+// age (renderScratchMaxAge), for `bridge serve` startup and `--gc`: the
+// crash case (SIGKILL, power loss) the deferred remove cannot cover.
+func PurgeStaleRenderScratch(tempDir string) (int, error) {
+	return purgeStaleRenderScratch(tempDir, renderScratchMaxAge, time.Now())
+}
+
 // renderScratchDir is where Stage A scratch lives: a bridge-owned
 // subdirectory of the configured temp dir (the OS temp dir when unset). On
 // the VPS the variants dir is a B2 FUSE mount, so scratch must never derive

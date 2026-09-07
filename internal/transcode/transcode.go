@@ -309,6 +309,27 @@ type JobSpec struct {
 	BatchID uuid.UUID
 }
 
+// RenderScratchBytes is the Stage A scratch this job holds on the temp
+// volume while it renders: int32 at the TARGET rate over the manifest's
+// duration, or the size-derived one when the manifest carries none
+// (dsdSizeDerivedDurationSec — stereo when the channel count is unknown).
+// 0 for a PCM job, which has no intermediate. The ONE derivation the
+// coordinator's pre-flight and the sweeper's running budget share.
+func (j JobSpec) RenderScratchBytes() int64 {
+	if !j.SourceIsDSD {
+		return 0
+	}
+	d := j.SourceDurationSec
+	if d <= 0 {
+		d = dsdSizeDerivedDurationSec(j.SourceSize, j.SourceSampleRate, j.SourceChannels)
+	}
+	ch := j.SourceChannels
+	if ch <= 0 {
+		ch = 2
+	}
+	return TempBytesForRender(ch, j.TargetSampleRate, d)
+}
+
 // VariantID returns the opaque identifier that uniquely names this
 // JobSpec's output variant. Convention:
 //

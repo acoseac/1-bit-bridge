@@ -924,10 +924,11 @@ type optimizeCandidates struct {
 
 // add appends one candidate and folds it into the run totals: the
 // projected sidecar size, and — for a DSD source — the scratch its render
-// holds. Duration is size-derived at the nominal DSD rate (a projection
-// carries none); channels are unknown from a projection too, so stereo —
-// a multichannel source over-estimates, which is the conservative
-// direction for a pre-flight.
+// holds (JobSpec.RenderScratchBytes, the same derivation the sweeper
+// budgets with). A projection carries neither duration nor channels, so
+// the duration is size-derived at the nominal DSD rate and the channel
+// count is stereo — a multichannel source over-estimates, which is the
+// conservative direction for a pre-flight.
 func (o *optimizeCandidates) add(t manifest.TrackProjection, absPath string, targetRate int, kind JobKind, targetBits int, compressionFct float64) {
 	o.cands = append(o.cands, optimizeCandidate{
 		path:        t.Path,
@@ -944,11 +945,10 @@ func (o *optimizeCandidates) add(t manifest.TrackProjection, absPath string, tar
 	})
 	o.totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
 		targetRate, targetBits, compressionFct)
-	if t.IsDSD {
-		scratch := TempBytesForRender(2, targetRate, dsdSizeDerivedDurationSec(t.Size, t.SampleRate, 0))
-		if scratch > o.maxRenderScratch {
-			o.maxRenderScratch = scratch
-		}
+	scratch := (JobSpec{SourceIsDSD: t.IsDSD, SourceSize: t.Size, SourceSampleRate: t.SampleRate,
+		TargetSampleRate: targetRate}).RenderScratchBytes()
+	if scratch > o.maxRenderScratch {
+		o.maxRenderScratch = scratch
 	}
 }
 

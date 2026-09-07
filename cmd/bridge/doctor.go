@@ -217,6 +217,7 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			d.LibraryRoots = cfg.LibraryRoots
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			d.UpscaleEnabled = cfg.Upscale.Enabled
+			d.DSDRenderEnabled = cfg.Upscale.Enabled && cfg.Upscale.DSDRender.Enabled
 			d.AnalysisEnabled = cfg.Analysis.Enabled
 			d.FingerprintEnabled = cfg.Fingerprint.Enabled
 			// Presence only — the doctor report must never carry the key.
