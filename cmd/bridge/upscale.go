@@ -291,12 +291,14 @@ func resolveCLITargetForKind(
 		// for a 1-bit stream, which is why OptimizeEligibleFor is the
 		// composite gate rather than OptimizeEligible alone.
 		if t.IsDSD != nil && *t.IsDSD {
-			r := transcode.TargetRateForOptimize(sourceRateHz)
-			if r <= 0 {
-				counters.alreadyAtTarget++
-				return 0, 0, true, 0
-			}
-			return r, 16, false, 0
+			// No rate guard: TargetRateForOptimize is total — it falls
+			// back to 48000 rather than returning 0 — and an off-family
+			// DSD rate was already refused upstream by
+			// DSDRenderEligible. A `<= 0` check here would guard a value
+			// the function cannot produce (Gemini on PR #865). The pcm
+			// arm above is the asymmetric case and keeps its check,
+			// because TargetRateForPCMRender genuinely CAN return 0.
+			return transcode.TargetRateForOptimize(sourceRateHz), 16, false, 0
 		}
 		if !transcode.OptimizeEligible(t.Path, t.Codec, sourceRateHz, sourceBits) {
 			counters.alreadyAtTarget++
@@ -347,15 +349,8 @@ func classifyUpscaleTrack(
 	if !matchesFilter(t.Path, p.filter) {
 		return nil, 0
 	}
-	trackIsDSD := t.IsDSD != nil && *t.IsDSD
-	// DSD is refused for `upscale` unconditionally — there is no PCM
-	// rate to raise on a 1-bit delta-sigma stream — and admitted for
-	// `optimize` / `pcm` only under this run's caps, through the SAME
-	// predicates the server-side walks use so the CLI cannot drift from
-	// them. Without the caps (the default, and every pre-rendition
-	// bridge) this is byte-for-byte the old unconditional refusal.
-	if trackIsDSD && !cliDSDKindAdmits(t, p) {
-		counters.notPCM++
+	trackIsDSD, rejected := classifyDSDShape(t, p, counters)
+	if rejected {
 		return nil, 0
 	}
 	// Lossy sources are never upscaled OR optimized (PROTOCOL.md
@@ -365,15 +360,6 @@ func classifyUpscaleTrack(
 	// OptimizeEligible below for kind=optimize) also counts lossy
 	// under the accurate `notPCM` bucket instead of alreadyAtTarget.
 	if manifest.IsLossyCodec(t.Codec) {
-		counters.notPCM++
-		return nil, 0
-	}
-	// A non-DSD source is never a `pcm` candidate: the faithful tier
-	// exists to give a DSD track a PCM form, and a PCM source already
-	// has one. Skipped, never an error — a `bridge render --filter
-	// <album>` over a mixed folder renders its DSD tracks and passes
-	// over the rest, mirroring buildPCMRenderCandidates.
-	if p.kind == transcode.JobKindPCMRender && !trackIsDSD {
 		counters.notPCM++
 		return nil, 0
 	}
@@ -445,20 +431,7 @@ func classifyUpscaleTrack(
 		TempDir:          p.tempDir,
 	}
 	if trackIsDSD {
-		// The render facts the chain and the pool consume: the flag that
-		// selects the two-stage chain and the DSD variant family, the
-		// compression tag that budgets a DST decode, and the geometry
-		// that sizes Stage A scratch and grades the decode's
-		// completeness when ffprobe reports no duration. Absent values
-		// stay zero — "unknown", which every consumer falls back from.
-		spec.SourceIsDSD = true
-		spec.SourceCompression = t.Compression
-		if t.Channels != nil {
-			spec.SourceChannels = *t.Channels
-		}
-		if t.Duration != nil {
-			spec.SourceDurationSec = *t.Duration
-		}
+		applyDSDSpecFacts(&spec, t)
 	}
 	if err := spec.FreshnessFromFile(); err != nil {
 		counters.sourceMissing++
@@ -1115,6 +1088,56 @@ func fingerprintFeatureReady(ctx context.Context, hasAPIKey bool, stderr io.Writ
 // conservative FormatsKnown gate matches soxFeatureReady. Extracted so the
 // per-subcommand call sites stay one line (and keeps analyzeCmd under the
 // cognitive-complexity budget).
+// classifyDSDShape answers the two source-shape questions the DSD
+// renditions add to the classifier, in one place so the parent stays
+// under the repo's cognitive-complexity gate (that gate is why
+// resolveCLITargetForKind was extracted in the first place, and the DSD
+// arms put the parent back over it — SonarCloud go:S3776 on PR #865).
+//
+// Returns (isDSD, rejected). A rejection has already bumped `notPCM` —
+// the accurate bucket for "this pipeline cannot take this source" —
+// and the caller skips the track silently.
+func classifyDSDShape(t manifest.Track, p runUpscaleParams, counters *upscaleSkipCounters) (isDSD, rejected bool) {
+	isDSD = t.IsDSD != nil && *t.IsDSD
+	// DSD is refused for `upscale` unconditionally — there is no PCM
+	// rate to raise on a 1-bit delta-sigma stream — and admitted for
+	// `optimize` / `pcm` only under this run's caps. Without the caps
+	// (the default, and every pre-rendition bridge) this is
+	// byte-for-byte the old unconditional refusal.
+	if isDSD && !cliDSDKindAdmits(t, p) {
+		counters.notPCM++
+		return isDSD, true
+	}
+	// The inverse: a non-DSD source is never a `pcm` candidate. The
+	// faithful tier exists to give a DSD track a PCM form, and a PCM
+	// source already has one. Skipped, never an error — a
+	// `bridge render --filter <album>` over a mixed folder renders its
+	// DSD tracks and passes over the rest, mirroring
+	// buildPCMRenderCandidates.
+	if !isDSD && p.kind == transcode.JobKindPCMRender {
+		counters.notPCM++
+		return isDSD, true
+	}
+	return isDSD, false
+}
+
+// applyDSDSpecFacts stamps the render facts the chain and the pool
+// consume: the flag that selects the two-stage chain and the DSD variant
+// family, the compression tag that budgets a DST decode, and the
+// geometry that sizes Stage A scratch and grades the decode's
+// completeness when ffprobe reports no duration. Absent values stay
+// zero — "unknown", which every consumer falls back from.
+func applyDSDSpecFacts(spec *transcode.JobSpec, t manifest.Track) {
+	spec.SourceIsDSD = true
+	spec.SourceCompression = t.Compression
+	if t.Channels != nil {
+		spec.SourceChannels = *t.Channels
+	}
+	if t.Duration != nil {
+		spec.SourceDurationSec = *t.Duration
+	}
+}
+
 // cliDSDKindAdmits answers whether THIS run's kind and caps admit a DSD
 // source, delegating to the same transcode predicates the coordinator's
 // walks and the auto-optimize sweeper use. Keeping the CLI on those

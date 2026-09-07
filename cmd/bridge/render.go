@@ -50,6 +50,29 @@ func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 
+	// The operator flag is read BEFORE bootstrapTranscodeCmd, which
+	// probes sox. On a host with no sox AND the feature off, bootstrap
+	// would answer "install sox" — sending the operator to install a
+	// toolchain for a feature they never enabled, then telling them it
+	// is disabled on the second run. The flag's absence is a
+	// CONFIGURATION answer and it is a pure file read, so it comes
+	// first. (CI caught this: the refusal test passes on a host with sox
+	// and fails on one without — the ordering was only ever visible
+	// there.) `bridge optimize` keeps its shipped order deliberately;
+	// changing an existing command's exit code on a sox-less host is not
+	// this PR's business.
+	//
+	// A config error falls THROUGH to bootstrap rather than being
+	// reported here, so the message and exit code stay in one place.
+	if !*gc {
+		if cfg, _, err := loadCLIConfig(*configPath); err == nil && !cfg.Upscale.DSDRender.Enabled {
+			fmt.Fprint(stderr, "DSD → PCM renditions are disabled in bridge.yaml (`upscale.dsdRender.enabled: false`).\n"+
+				"Set `upscale.dsdRender.enabled: true` and re-run. Enabling it also lets the\n"+
+				"auto-optimize sweep build the compact DSD tier, which reads every DSD source once.\n")
+			return 2
+		}
+	}
+
 	r, exitCode := bootstrapTranscodeCmd(ctx, stderr, *configPath, *quality, *gc)
 	if r == nil {
 		return exitCode
@@ -59,16 +82,9 @@ func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if *gc {
 		// Prefix-agnostic path-equality against the DB rows, so upscaled-,
 		// optimized-, optimized-dsd- and pcm- sidecars are all preserved.
+		// Deliberately NOT gated on the feature flag: cleanup must work on
+		// a bridge whose operator has just turned the feature off.
 		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir)
-	}
-
-	// The operator flag first — it is the one the deploy sets, and its
-	// absence is a configuration answer, not a toolchain one.
-	if !r.cfg.Upscale.DSDRender.Enabled {
-		fmt.Fprint(stderr, "DSD → PCM renditions are disabled in bridge.yaml (`upscale.dsdRender.enabled: false`).\n"+
-			"Set `upscale.dsdRender.enabled: true` and re-run. Enabling it also lets the\n"+
-			"auto-optimize sweep build the compact DSD tier, which reads every DSD source once.\n")
-		return 2
 	}
 	// Then the toolchain. Refusing HERE — before the library walk — is
 	// the difference between one honest message and one failed job per

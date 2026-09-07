@@ -12,10 +12,25 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
+// renderSource describes one fixture track. A struct rather than eight
+// positional parameters, so a call site reads as the source it describes.
+type renderSource struct {
+	rel         string
+	codec       string
+	rateHz      float64
+	isDSD       bool
+	compression string
+	durationSec float64
+	channels    int
+}
+
 // renderCLIFixture writes a real file (ResolveChecked stats it) and the
 // matching manifest row, returning everything classifyUpscaleTrack needs.
-func renderCLIFixture(t *testing.T, rel, codec string, rateHz float64, isDSD bool, compression string, durationSec float64, channels int) (*manifest.Store, *bridgefs.Resolver, manifest.Track) {
+func renderCLIFixture(t *testing.T, src renderSource) (*manifest.Store, *bridgefs.Resolver, manifest.Track) {
 	t.Helper()
+	rel, codec, rateHz := src.rel, src.codec, src.rateHz
+	isDSD, compression := src.isDSD, src.compression
+	durationSec, channels := src.durationSec, src.channels
 	dir := t.TempDir()
 	lib := filepath.Join(dir, "library")
 	abs := filepath.Join(lib, rel)
@@ -99,27 +114,37 @@ func TestClassifyUpscaleTrack_DSDKindArms(t *testing.T) {
 		{"pcm under caps takes the faithful tier", transcode.JobKindPCMRender, cliCapsDSD, true, 176400, 24, "pcm-v1-176400-24"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store, resolver, track := renderCLIFixture(t, "A/01.dsf", "DSF", 2822400, true, "", 300, 2)
+			store, resolver, track := renderCLIFixture(t, renderSource{rel: "A/01.dsf", codec: "DSF", rateHz: 2822400, isDSD: true, durationSec: 300, channels: 2})
 			c, counters, _ := classifyWith(t, store, resolver, track, tc.kind, tc.caps)
 			if !tc.admitted {
-				if c != nil {
-					t.Fatalf("candidate = %+v, want nil (refused)", c.spec)
-				}
-				if counters.notPCM != 1 {
-					t.Errorf("notPCM = %d, want 1 (the refusal is counted, not silent)", counters.notPCM)
-				}
+				assertDSDRefused(t, c, counters)
 				return
 			}
-			if c == nil {
-				t.Fatal("candidate = nil, want an enqueued DSD job")
-			}
-			if c.spec.TargetSampleRate != tc.wantRate || c.spec.TargetBits != tc.wantBits {
-				t.Errorf("target = %d/%d, want %d/%d", c.spec.TargetSampleRate, c.spec.TargetBits, tc.wantRate, tc.wantBits)
-			}
-			if got := c.spec.VariantID(); got != tc.wantVarID {
-				t.Errorf("VariantID = %q, want %q", got, tc.wantVarID)
-			}
+			assertDSDAdmitted(t, c, tc.wantRate, tc.wantBits, tc.wantVarID)
 		})
+	}
+}
+
+func assertDSDRefused(t *testing.T, c *upscaleCandidate, counters upscaleSkipCounters) {
+	t.Helper()
+	if c != nil {
+		t.Fatalf("candidate = %+v, want nil (refused)", c.spec)
+	}
+	if counters.notPCM != 1 {
+		t.Errorf("notPCM = %d, want 1 (the refusal is counted, not silent)", counters.notPCM)
+	}
+}
+
+func assertDSDAdmitted(t *testing.T, c *upscaleCandidate, wantRate, wantBits int, wantVarID string) {
+	t.Helper()
+	if c == nil {
+		t.Fatal("candidate = nil, want an enqueued DSD job")
+	}
+	if c.spec.TargetSampleRate != wantRate || c.spec.TargetBits != wantBits {
+		t.Errorf("target = %d/%d, want %d/%d", c.spec.TargetSampleRate, c.spec.TargetBits, wantRate, wantBits)
+	}
+	if got := c.spec.VariantID(); got != wantVarID {
+		t.Errorf("VariantID = %q, want %q", got, wantVarID)
 	}
 }
 
@@ -128,7 +153,7 @@ func TestClassifyUpscaleTrack_DSDKindArms(t *testing.T) {
 // budgets a DST decode, the geometry that sizes Stage A scratch and
 // grades the decode's completeness, and the scratch directory.
 func TestClassifyUpscaleTrack_DSDSpecCarriesTheRenderFacts(t *testing.T) {
-	store, resolver, track := renderCLIFixture(t, "A/01.dff", "DFF", 2822400, true, "DST", 612.5, 6)
+	store, resolver, track := renderCLIFixture(t, renderSource{rel: "A/01.dff", codec: "DFF", rateHz: 2822400, isDSD: true, compression: "DST", durationSec: 612.5, channels: 6})
 	c, _, _ := classifyWith(t, store, resolver, track, transcode.JobKindPCMRender, cliCapsDSDDST)
 	if c == nil {
 		t.Fatal("candidate = nil, want a DST job under DST-capable caps")
@@ -164,7 +189,7 @@ func TestClassifyUpscaleTrack_DSTNeedsItsOwnCapability(t *testing.T) {
 		{"with the dst decoder", cliCapsDSDDST, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store, resolver, track := renderCLIFixture(t, "A/01.dff", "DFF", 2822400, true, "DST", 300, 2)
+			store, resolver, track := renderCLIFixture(t, renderSource{rel: "A/01.dff", codec: "DFF", rateHz: 2822400, isDSD: true, compression: "DST", durationSec: 300, channels: 2})
 			c, _, _ := classifyWith(t, store, resolver, track, transcode.JobKindPCMRender, tc.caps)
 			if (c != nil) != tc.admitted {
 				t.Errorf("admitted = %v, want %v", c != nil, tc.admitted)
@@ -173,7 +198,7 @@ func TestClassifyUpscaleTrack_DSTNeedsItsOwnCapability(t *testing.T) {
 	}
 	// Control: the same caps that refuse DST admit a plain DFF, so the
 	// refusal above is about the compression and not the container.
-	store, resolver, track := renderCLIFixture(t, "A/02.dff", "DFF", 2822400, true, "", 300, 2)
+	store, resolver, track := renderCLIFixture(t, renderSource{rel: "A/02.dff", codec: "DFF", rateHz: 2822400, isDSD: true, durationSec: 300, channels: 2})
 	if c, _, _ := classifyWith(t, store, resolver, track, transcode.JobKindPCMRender, cliCapsDSD); c == nil {
 		t.Error("a plain DFF was refused by DST-less caps — the refusal is not scoped to compression")
 	}
@@ -184,7 +209,7 @@ func TestClassifyUpscaleTrack_DSTNeedsItsOwnCapability(t *testing.T) {
 // tracks and passes over the rest, exactly as the batch coordinator's
 // buildPCMRenderCandidates does.
 func TestClassifyUpscaleTrack_PCMSourceIsSkippedByTheRenderKind(t *testing.T) {
-	store, resolver, track := renderCLIFixture(t, "A/01.flac", "FLAC", 96000, false, "", 300, 2)
+	store, resolver, track := renderCLIFixture(t, renderSource{rel: "A/01.flac", codec: "FLAC", rateHz: 96000, durationSec: 300, channels: 2})
 	c, counters, _ := classifyWith(t, store, resolver, track, transcode.JobKindPCMRender, cliCapsDSDDST)
 	if c != nil {
 		t.Fatalf("candidate = %+v, want nil (a PCM source already has a PCM form)", c.spec)
@@ -203,7 +228,7 @@ func TestClassifyUpscaleTrack_PCMSourceIsSkippedByTheRenderKind(t *testing.T) {
 // abort: the rate is a header we do not trust, and one bogus row must
 // not end a library-wide run.
 func TestClassifyUpscaleTrack_OffFamilyDSDRateSkips(t *testing.T) {
-	store, resolver, track := renderCLIFixture(t, "A/01.dsf", "DSF", 3000000, true, "", 300, 2)
+	store, resolver, track := renderCLIFixture(t, renderSource{rel: "A/01.dsf", codec: "DSF", rateHz: 3000000, isDSD: true, durationSec: 300, channels: 2})
 	c, _, exit := classifyWith(t, store, resolver, track, transcode.JobKindPCMRender, cliCapsDSDDST)
 	if c != nil || exit != 0 {
 		t.Errorf("candidate = %v exit = %d, want a graceful skip", c, exit)
@@ -236,10 +261,19 @@ func TestReportUpscaleSummary_SkipWordingFollowsTheKind(t *testing.T) {
 	}
 }
 
-// `bridge render` refuses on the operator flag BEFORE it touches the
-// toolchain: the flag's absence is a configuration answer, and saying so
-// is more useful than an ffmpeg diagnostic for a feature the operator
-// never turned on.
+// `bridge render` refuses on the operator flag BEFORE bootstrap probes
+// sox. The flag's absence is a CONFIGURATION answer, and sending an
+// operator to install a toolchain for a feature they never enabled —
+// then telling them on the second run that it is disabled — is the worse
+// of the two orders.
+//
+// This test is also the one that caught the original ordering, and only
+// on CI: with sox installed the old code reached the flag check and
+// passed, and on a sox-less runner it answered "install sox" with exit 1.
+// The assertion below is host-independent BECAUSE the flag is read
+// first — if the order regresses, this goes red on every machine without
+// sox and stays green on every machine with it, which is exactly the
+// shape that hid it the first time.
 func TestRenderCmd_RefusesWhenTheFlagIsOff(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "bridge.yaml")
