@@ -4083,3 +4083,41 @@ guard, recorded for a later pass), the alias measurement of ffmpeg's
 `dsd2pcm` noise shelf (B4 — the 50 kHz probe FFT decides whether `sinc`
 moves before `rate`), the CLI `bridge render` subcommand and DST fixtures
 (B3).
+
+**The review round found a fail-open the extension/codec split created, and
+it is the finding worth carrying forward.** `Run` picks its decode route
+from the source's EXTENSION plus the decoder probe; every eligibility gate
+admits a row on its CODEC column. Those are two different questions, and
+where they disagreed the job fell through to sox-direct: a host whose
+ffmpeg lacks the `dsd_*` decoders (`routeNone`) and a row the scanner
+stamped DSF/DFF whose filename says otherwise. sox then either fails with
+its own unrelated diagnostic — the operator never learns the decoders are
+missing — or, for a shape it happens to accept, publishes a file under a
+DSD variant id with NO clip guard, no measured true peak and no
+`appliedGainDB`. The whole two-stage design is in those three things, so
+the silent-success half is the dangerous one. `ErrDSDDecodeUnavailable`
+reconciles the two views in the one place both are known, and its test
+carries a vacuity guard: the same spec WITHOUT `SourceIsDSD` must get past
+the guard, so the two refusals cannot pass because the guard widened to
+every job.
+
+Three more from the same round, each real: batch DSD renders rode the
+FOREGROUND lane (`enqueueOptimizeJobs` left `Background` false, and that
+lane exists for the phone's on-demand request — a bulk batch of
+multi-minute renders would park it behind work the pool cannot preempt);
+the coordinator's batch path left `SourceChannels` / `SourceDurationSec` at
+zero, which the sweeper and both single-file enqueuers had always filled,
+so scratch sizing assumed stereo and the decode-completeness guard lost the
+manifest fallback it uses when ffprobe reports 0 — **its test passed
+throughout, because it constructs a `JobSpec` directly and no production
+caller on that path set the field**; and the sweep's scratch check was
+sized for ONE render while the pool runs `workers` of them at once. That
+last one is now sized by lane count rather than a reservation ledger —
+same guarantee, one injected dependency, conservative in the direction
+that refuses work rather than admitting work the volume cannot hold.
+
+And one of the new tests was itself the defect class this repo documents:
+`PurgeStaleRenderScratch("")` in a test deletes every `*.stageA.sox` older
+than 12 h under the SHARED OS temp dir, which on a machine that also runs a
+bridge is not the test's state to remove. The mapping and the
+missing-directory contract are provable separately, and now are.
