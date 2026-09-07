@@ -84,6 +84,25 @@ func ResolveTargetRateForPCMRender(dsdRate int) (int, error) {
 	return t, nil
 }
 
+// dsdSizeDerivedDurationSec estimates a DSD source's duration from its byte
+// size: bytes × 8 / (nominal DSD rate × channels). The NOMINAL rate
+// (2 822 400 for DSD64), never the decoder's fs/8 pipe figure, which would
+// inflate the estimate 8× and every budget derived from it; an unknown
+// channel count assumes stereo. Exact for DSF and uncompressed DSDIFF
+// (the container overhead is negligible against the payload) and an
+// over-estimate for DST-compressed DSDIFF, which is the conservative
+// direction for the two consumers — the pool's per-job timeout and the
+// coordinator's scratch pre-flight. 0 when size or rate is unknown.
+func dsdSizeDerivedDurationSec(sizeBytes int64, nominalRate, channels int) float64 {
+	if sizeBytes <= 0 || nominalRate <= 0 {
+		return 0
+	}
+	if channels <= 0 {
+		channels = 2
+	}
+	return float64(sizeBytes) * 8 / (float64(nominalRate) * float64(channels))
+}
+
 // DSDRenderCaps folds policy and capability into the one value every DSD
 // gate receives, so a gate cannot consult one without the other:
 //

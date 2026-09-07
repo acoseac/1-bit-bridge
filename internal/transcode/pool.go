@@ -521,12 +521,8 @@ const dstDecodeTimeoutFactor = 2
 // keeps the base deadline exactly as before.
 func jobTimeoutFor(base time.Duration, spec JobSpec) time.Duration {
 	d := spec.SourceDurationSec
-	if d <= 0 && spec.SourceIsDSD && spec.SourceSize > 0 && spec.SourceSampleRate > 0 {
-		ch := spec.SourceChannels
-		if ch <= 0 {
-			ch = 2
-		}
-		d = float64(spec.SourceSize) * 8 / (float64(spec.SourceSampleRate) * float64(ch))
+	if d <= 0 && spec.SourceIsDSD {
+		d = dsdSizeDerivedDurationSec(spec.SourceSize, spec.SourceSampleRate, spec.SourceChannels)
 	}
 	if d <= 0 || math.IsNaN(d) || math.IsInf(d, 0) {
 		return base

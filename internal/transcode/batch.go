@@ -122,6 +122,19 @@ type Coordinator struct {
 	// check, matching the fail-open posture documented on SoxInfo.CanDecode.
 	soxInfo func() (SoxInfo, error)
 
+	// dsdRender returns the DSD-render capability (the operator flag
+	// folded with the ffmpeg decoder probe) every DSD gate in the
+	// candidate walks receives. Nil-safe, and — unlike soxInfo —
+	// FAIL-CLOSED: an unwired closure grants nothing, so a DSD source is
+	// skipped exactly as before the renditions existed. A rendition needs
+	// a decoder the probe has actually SEEN; there is no honest fail-open
+	// answer for it.
+	dsdRender func() DSDRenderCaps
+	// renderTempDir is where a DSD render's Stage A scratch lives (empty
+	// = the OS temp dir), forwarded onto every DSD JobSpec and graded by
+	// the scratch pre-flight.
+	renderTempDir string
+
 	mu sync.Mutex
 	// liveBatches is the in-memory mirror of pending+running rows so
 	// pool callbacks bump counters without re-reading SQLite on
@@ -186,6 +199,31 @@ type batchState struct {
 func (c *Coordinator) WithSoxInfo(fn func() (SoxInfo, error)) *Coordinator {
 	c.soxInfo = fn
 	return c
+}
+
+// WithDSDRender wires the DSD-render capability the candidate walks consult
+// (transcode.DSDRenderCaps folds the operator flag and the ffmpeg probe).
+// Same setter shape as WithSoxInfo, for the same reason; unwired = no DSD.
+func (c *Coordinator) WithDSDRender(fn func() DSDRenderCaps) *Coordinator {
+	c.dsdRender = fn
+	return c
+}
+
+// WithRenderTempDir sets the scratch directory forwarded onto DSD render
+// JobSpecs (Upscale.TempDir); empty keeps the OS temp dir.
+func (c *Coordinator) WithRenderTempDir(dir string) *Coordinator {
+	c.renderTempDir = dir
+	return c
+}
+
+// dsdCaps is the ONE capability snapshot a candidate walk takes — hoisted
+// out of the per-track loop for the same consistency reason as
+// soxSnapshot, and the zero value (grants nothing) when unwired.
+func (c *Coordinator) dsdCaps() DSDRenderCaps {
+	if c.dsdRender == nil {
+		return DSDRenderCaps{}
+	}
+	return c.dsdRender()
 }
 
 // soxSnapshot takes ONE probe result for a whole candidate walk. Hoisted out
@@ -525,6 +563,7 @@ func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string,
 		Path:           path,
 		TargetRate:     targetRate,
 		TargetBits:     targetBits,
+		Kind:           string(JobKindUpscale),
 		Status:         "pending",
 		TotalFiles:     len(cands),
 		ProcessedFiles: 0,
@@ -851,6 +890,13 @@ type optimizeCandidate struct {
 	sampleRate int
 	bits       int
 	targetRate int
+	// The rendition facts the JobSpec carries: kind + bits pick the family
+	// (`optimized-`, `optimized-dsd-`, `pcm-`); isDSD + compression select
+	// the two-stage decode chain and let the pool budget a DST decode.
+	isDSD       bool
+	compression string
+	kind        JobKind
+	targetBits  int
 }
 
 // optimizeCandidates is the aggregated result of `buildOptimizeCandidates`.
@@ -867,6 +913,43 @@ type optimizeCandidates struct {
 	// Distinct from len(cands) which is post-filter (only enqueue-
 	// able tracks).
 	projectionsSeen int
+	// maxRenderScratch is the largest Stage A intermediate any single DSD
+	// candidate will hold on the scratch volume (TempBytesForRender at the
+	// target rate). Zero when the batch renders no DSD. The LARGEST, not
+	// the sum: jobs run one per worker lane, so the sum over a
+	// whole-library batch would refuse every batch for scratch that is
+	// never held at once.
+	maxRenderScratch int64
+}
+
+// add appends one candidate and folds it into the run totals: the
+// projected sidecar size, and — for a DSD source — the scratch its render
+// holds. Duration is size-derived at the nominal DSD rate (a projection
+// carries none); channels are unknown from a projection too, so stereo —
+// a multichannel source over-estimates, which is the conservative
+// direction for a pre-flight.
+func (o *optimizeCandidates) add(t manifest.TrackProjection, absPath string, targetRate int, kind JobKind, targetBits int, compressionFct float64) {
+	o.cands = append(o.cands, optimizeCandidate{
+		path:        t.Path,
+		absPath:     absPath,
+		size:        t.Size,
+		mtimeNS:     t.MTimeNS,
+		sampleRate:  t.SampleRate,
+		bits:        t.BitsPerSample,
+		targetRate:  targetRate,
+		isDSD:       t.IsDSD,
+		compression: t.Compression,
+		kind:        kind,
+		targetBits:  targetBits,
+	})
+	o.totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
+		targetRate, targetBits, compressionFct)
+	if t.IsDSD {
+		scratch := TempBytesForRender(2, targetRate, dsdSizeDerivedDurationSec(t.Size, t.SampleRate, 0))
+		if scratch > o.maxRenderScratch {
+			o.maxRenderScratch = scratch
+		}
+	}
 }
 
 // SubmitOptimize is the CarPlay-targeted batch entry point.
@@ -904,21 +987,78 @@ func (c *Coordinator) SubmitOptimizePaths(ctx context.Context, label string, pat
 // not a scope.
 func (c *Coordinator) submitOptimizeProjections(ctx context.Context, path string, projections []manifest.TrackProjection, outputDir string) (*SubmitResult, error) {
 	picked := c.buildOptimizeCandidates(path, projections)
+	return c.submitRenditionProjections(ctx, path, picked, outputDir, JobKindOptimize, 16, "submit optimize")
+}
 
-	available, err := c.diskPreflight(outputDir, picked.totalProjected, "submit optimize")
+// SubmitPCMRender is the faithful DSD rendition's batch entry point
+// (`pcm-v1-<176400|192000>-24`): the optimize pipeline over the `pcm-`
+// coverage prefix, with the DSD gate in place of the PCM one. Batch scope
+// SKIPS every non-DSD / ineligible projection — a mixed FLAC+DSD album
+// renders its DSD tracks and never aborts, the FLACs counted into the
+// row's skipped_files like every other ineligible row. Only the
+// SINGLE-FILE enqueue path (the serve adapter) refuses a non-DSD source
+// with a typed error.
+func (c *Coordinator) SubmitPCMRender(ctx context.Context, path string, outputDir string) (*SubmitResult, error) {
+	if c.resolver == nil {
+		return nil, fmt.Errorf("submit pcm: no resolver wired — Coordinator can't build JobSpec absolute paths")
+	}
+	projections, err := c.store.ListTrackProjectionsUnderPrefix(ctx, path, manifest.VariantKindPrefixPCM)
+	if err != nil {
+		return nil, fmt.Errorf("submit pcm: list projections: %w", err)
+	}
+	return c.submitPCMRenderProjections(ctx, path, projections, outputDir)
+}
+
+// SubmitPCMRenderPaths is SubmitPCMRender over an explicit set of tracks
+// (see SubmitPaths for why the two scope forms are not interchangeable);
+// `label` is display only.
+func (c *Coordinator) SubmitPCMRenderPaths(ctx context.Context, label string, paths []string, outputDir string) (*SubmitResult, error) {
+	if c.resolver == nil {
+		return nil, fmt.Errorf("submit pcm: no resolver wired — Coordinator can't build JobSpec absolute paths")
+	}
+	projections, err := c.store.TrackProjectionsForPaths(ctx, paths, manifest.VariantKindPrefixPCM)
+	if err != nil {
+		return nil, fmt.Errorf("submit pcm: track projections: %w", err)
+	}
+	return c.submitPCMRenderProjections(ctx, label, projections, outputDir)
+}
+
+func (c *Coordinator) submitPCMRenderProjections(ctx context.Context, path string, projections []manifest.TrackProjection, outputDir string) (*SubmitResult, error) {
+	picked := c.buildPCMRenderCandidates(path, projections)
+	return c.submitRenditionProjections(ctx, path, picked, outputDir, JobKindPCMRender, 24, "submit pcm")
+}
+
+// submitRenditionProjections is the pipeline the optimize and pcm batch
+// entry points share once their candidates are picked: disk pre-flight
+// (the output volume for the sidecars and, when the batch renders DSD,
+// the scratch volume for the largest single Stage A intermediate), the
+// batch row, the empty-batch short-circuit, the enqueue. `path` is the
+// batch row's display label, not a scope; `op` prefixes diagnostics.
+func (c *Coordinator) submitRenditionProjections(ctx context.Context, path string, picked optimizeCandidates, outputDir string, kind JobKind, targetBits int, op string) (*SubmitResult, error) {
+	// The scratch check FIRST, graded on the temp volume. A DSD render's
+	// Stage A intermediate is int32 at the target rate for the whole
+	// track, and on the VPS it lives on a 23 GB root disk while the
+	// sidecars go to a B2 mount — the two volumes have nothing to do with
+	// each other, so neither check can stand in for the other.
+	if picked.maxRenderScratch > 0 {
+		if _, err := c.diskPreflight(renderScratchDir(c.renderTempDir), picked.maxRenderScratch, op+" (render scratch)"); err != nil {
+			return nil, err
+		}
+	}
+	available, err := c.diskPreflight(outputDir, picked.totalProjected, op)
 	if err != nil {
 		return nil, err
 	}
 
 	// Skip count = projections seen − enqueueable − already-covered.
-	// Captures every `continue` arm of `buildOptimizeCandidates` in
-	// one derivation rather than counting per-arm. Persisted on the
-	// batch row for the Jobs page sub-line ("12 tracks skipped").
+	// Captures every `continue` arm of the candidate walk in one
+	// derivation rather than counting per-arm. Persisted on the batch
+	// row for the Jobs page sub-line ("12 tracks skipped").
 	skipped := picked.projectionsSeen - len(picked.cands) - picked.alreadyCovered
 	if skipped < 0 {
 		skipped = 0 // defensive — should be impossible
 	}
-	batchID, err := c.initOptimizeBatchState(ctx, path, picked.cands, skipped)
+	batchID, err := c.initOptimizeBatchState(ctx, path, picked.cands, skipped, kind, targetBits)
 	if err != nil {
 		return nil, err
 	}
@@ -929,7 +1069,7 @@ func (c *Coordinator) submitOptimizeProjections(ctx context.Context, path string
 	// sit `running` indefinitely. CodeRabbit bot review on PR #270.
 	if len(picked.cands) == 0 {
 		if err := c.transitionStatus(batchID, "completed", "", c.clock()); err != nil {
-			c.logger.Warn("submit optimize: transition empty batch to completed",
+			c.logger.Warn(op+": transition empty batch to completed",
 				"batchID", batchID.String(), "err", err)
 		}
 		c.publishProgress(batchID)
@@ -937,7 +1077,7 @@ func (c *Coordinator) submitOptimizeProjections(ctx context.Context, path string
 			BatchID:            batchID,
 			Path:               path,
 			TargetRate:         0,
-			TargetBits:         16,
+			TargetBits:         targetBits,
 			TotalFiles:         0,
 			AlreadyCovered:     picked.alreadyCovered,
 			ProjectedSizeBytes: picked.totalProjected,
@@ -947,7 +1087,7 @@ func (c *Coordinator) submitOptimizeProjections(ctx context.Context, path string
 	}
 
 	if err := c.transitionStatus(batchID, "running", "", c.clock()); err != nil {
-		c.logger.Warn("submit optimize: transition to running",
+		c.logger.Warn(op+": transition to running",
 			"batchID", batchID.String(), "err", err)
 	}
 	enqueued := c.enqueueOptimizeJobs(batchID, picked.cands, outputDir)
@@ -956,7 +1096,7 @@ func (c *Coordinator) submitOptimizeProjections(ctx context.Context, path string
 		BatchID:            batchID,
 		Path:               path,
 		TargetRate:         0, // per-track varies; admin surfaces "Mobile optimization"
-		TargetBits:         16,
+		TargetBits:         targetBits,
 		TotalFiles:         enqueued,
 		AlreadyCovered:     picked.alreadyCovered,
 		ProjectedSizeBytes: picked.totalProjected,
@@ -970,6 +1110,13 @@ func (c *Coordinator) submitOptimizeProjections(ctx context.Context, path string
 // projected-size total. Resolver failures are logged-and-skipped
 // (treated as "skip silently" by the caller). Pure helper — no
 // side effects beyond logging.
+//
+// A DSD source (DSF / DSDIFF) is a compact-tier candidate
+// (`optimized-dsd-…`) when transcode.DSDRenderEligible admits it under
+// the wired caps. It decodes through ffmpeg, never sox, so the live-sox
+// refusal below does not apply to it; every other arm — coverage,
+// suppression, the family target rate, the resolver — is shared with the
+// PCM rows. With no caps wired a DSD row is skipped exactly as before.
 func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []manifest.TrackProjection) optimizeCandidates {
 	var (
 		out            optimizeCandidates
@@ -984,18 +1131,15 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 	out.projectionsSeen = len(projections)
 	// One probe result for the whole walk — see soxSnapshot: the TTL is 30s
 	// and a large walk can outlive it, so re-probing per track could apply two
-	// different policies within a single batch.
+	// different policies within a single batch. Same for the DSD caps.
 	soxInfo := c.soxSnapshot()
+	caps := c.dsdCaps()
 	for _, t := range projections {
 		if t.HasVariant {
 			out.alreadyCovered++
 			continue
 		}
 		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
-			continue
-		}
-		if t.IsDSD {
-			// DSD is structurally excluded from CarPlay routing.
 			continue
 		}
 		// Repeatedly-failed sources are skipped, or every submit re-enqueues
@@ -1007,21 +1151,27 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 		if t.Suppressed {
 			continue
 		}
-		if !OptimizeEligible(t.Path, t.Codec, t.SampleRate, t.BitsPerSample) {
-			continue
-		}
-		// Same live-sox refusal as the upscale walk above. OptimizeEligible
-		// deliberately treats .m4a as a PCM candidate ("ALAC-in-M4A is the
-		// common case"), which is correct as a FORMAT judgement and exactly
-		// why this second, build-dependent check is needed: whether the
-		// installed sox can actually open that container is a property of
-		// the build, not of the file.
-		//
-		// This is the arm that stops the auto-optimize treadmill: a hi-res
-		// ALAC would otherwise be re-selected and re-failed on every sweep,
-		// since a failed job writes no variant row to mark it covered.
-		if !soxInfo.CanDecode(t.Path) {
-			continue
+		if t.IsDSD {
+			if !DSDRenderEligible(t.Path, t.Codec, t.IsDSD, t.SampleRate, t.Compression, caps) {
+				continue
+			}
+		} else {
+			if !OptimizeEligible(t.Path, t.Codec, t.SampleRate, t.BitsPerSample) {
+				continue
+			}
+			// Same live-sox refusal as the upscale walk above. OptimizeEligible
+			// deliberately treats .m4a as a PCM candidate ("ALAC-in-M4A is the
+			// common case"), which is correct as a FORMAT judgement and exactly
+			// why this second, build-dependent check is needed: whether the
+			// installed sox can actually open that container is a property of
+			// the build, not of the file.
+			//
+			// This is the arm that stops the auto-optimize treadmill: a hi-res
+			// ALAC would otherwise be re-selected and re-failed on every sweep,
+			// since a failed job writes no variant row to mark it covered.
+			if !soxInfo.CanDecode(t.Path) {
+				continue
+			}
 		}
 		targetRate, terr := ResolveTargetRateForOptimize(t.SampleRate)
 		if terr != nil {
@@ -1034,17 +1184,7 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 				"path", t.Path, "err", err)
 			continue
 		}
-		out.cands = append(out.cands, optimizeCandidate{
-			path:       t.Path,
-			absPath:    absPath,
-			size:       t.Size,
-			mtimeNS:    t.MTimeNS,
-			sampleRate: t.SampleRate,
-			bits:       t.BitsPerSample,
-			targetRate: targetRate,
-		})
-		out.totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
-			targetRate, 16, compressionFct)
+		out.add(t, absPath, targetRate, JobKindOptimize, 16, compressionFct)
 	}
 	if resolveErrors > 0 {
 		c.logger.Info("submit optimize: filtered tracks with resolver failures",
@@ -1053,22 +1193,74 @@ func (c *Coordinator) buildOptimizeCandidates(batchPath string, projections []ma
 	return out
 }
 
+// buildPCMRenderCandidates is the faithful tier's candidate walk. Only a
+// DSD source can be one (transcode.PCMRenderEligible under the wired
+// caps — the same DSD gate the compact tier uses); everything else is
+// SKIPPED, never an error, so a mixed FLAC+DSD album renders its DSD
+// tracks and the FLACs land in skipped_files. Coverage is the `pcm-`
+// prefix the caller projected with: a track holding only an
+// `optimized-dsd-` variant is still a candidate here.
+func (c *Coordinator) buildPCMRenderCandidates(batchPath string, projections []manifest.TrackProjection) optimizeCandidates {
+	var (
+		out            optimizeCandidates
+		compressionFct = DefaultCompressionFactor(24)
+		resolveErrors  int
+	)
+	out.projectionsSeen = len(projections)
+	caps := c.dsdCaps()
+	for _, t := range projections {
+		if t.HasVariant {
+			out.alreadyCovered++
+			continue
+		}
+		if t.SampleRate <= 0 || t.BitsPerSample <= 0 {
+			continue
+		}
+		if t.Suppressed {
+			continue
+		}
+		if !t.IsDSD || !PCMRenderEligible(t.Path, t.Codec, t.IsDSD, t.SampleRate, t.Compression, caps) {
+			continue
+		}
+		targetRate, terr := ResolveTargetRateForPCMRender(t.SampleRate)
+		if terr != nil {
+			continue
+		}
+		absPath, err := c.resolver(t.Path)
+		if err != nil {
+			resolveErrors++
+			c.logger.Warn("submit pcm: resolve failed; skipping track",
+				"path", t.Path, "err", err)
+			continue
+		}
+		out.add(t, absPath, targetRate, JobKindPCMRender, 24, compressionFct)
+	}
+	if resolveErrors > 0 {
+		c.logger.Info("submit pcm: filtered tracks with resolver failures",
+			"batchPath", batchPath, "count", resolveErrors)
+	}
+	return out
+}
+
 // initOptimizeBatchState inserts the SQLite batch row and installs the
-// in-memory `liveBatches` entry. Returns the freshly-minted batch ID.
+// in-memory `liveBatches` entry for an optimize OR pcm batch (`kind` /
+// `targetBits` are what distinguish the two rows: TargetRate stays 0 —
+// per-track varies — for both). Returns the freshly-minted batch ID.
 // Caller transitions status separately.
-func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath string, cands []optimizeCandidate, skipped int) (uuid.UUID, error) {
+func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath string, cands []optimizeCandidate, skipped int, kind JobKind, targetBits int) (uuid.UUID, error) {
 	// Propagate entropy failure instead of uuid.Must's panic (API
 	// submission path; a transient CSPRNG error must not crash). Gemini r4.
 	batchID, err := uuid.NewRandom()
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("generate optimize batch uuid: %w", err)
+		return uuid.Nil, fmt.Errorf("generate %s batch uuid: %w", kind, err)
 	}
 	now := c.clock().UnixNano()
 	row := manifest.UpscaleBatchRow{
 		ID:             batchID,
 		Path:           batchPath,
 		TargetRate:     0, // per-track varies
-		TargetBits:     16,
+		TargetBits:     targetBits,
+		Kind:           string(kind),
 		Status:         "pending",
 		TotalFiles:     len(cands),
 		ProcessedFiles: 0,
@@ -1078,7 +1270,7 @@ func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath stri
 		UpdatedAt:      now,
 	}
 	if err := c.store.InsertUpscaleBatch(ctx, row); err != nil {
-		return uuid.Nil, fmt.Errorf("submit optimize: insert batch row: %w", err)
+		return uuid.Nil, fmt.Errorf("submit %s: insert batch row: %w", kind, err)
 	}
 	state := &batchState{
 		Row:          row,
@@ -1093,27 +1285,35 @@ func (c *Coordinator) initOptimizeBatchState(ctx context.Context, batchPath stri
 	return batchID, nil
 }
 
-// enqueueOptimizeJobs drains the candidate list into the pool. On
-// queue-full / pool-closed mid-batch, drops the never-enqueued tail
-// from `RemainingIDs` and persists the truncated row so a partial
-// enqueue still reaches a terminal status. Returns the count
-// successfully enqueued.
+// enqueueOptimizeJobs drains the candidate list (optimize or pcm — each
+// candidate carries its own kind and bits) into the pool. On queue-full /
+// pool-closed mid-batch, drops the never-enqueued tail from
+// `RemainingIDs` and persists the truncated row so a partial enqueue
+// still reaches a terminal status. Returns the count successfully
+// enqueued.
 func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCandidate, outputDir string) int {
 	enqueued := 0
+	tag := "optimize"
+	if len(cands) > 0 && cands[0].kind == JobKindPCMRender {
+		tag = "pcm"
+	}
 	for _, ca := range cands {
 		spec := JobSpec{
-			SourceAbsPath:    ca.absPath,
-			SourceLibraryRel: ca.path,
-			SourceMTimeNS:    ca.mtimeNS,
-			SourceSize:       ca.size,
-			SourceSampleRate: ca.sampleRate,
-			SourceBits:       ca.bits,
-			TargetSampleRate: ca.targetRate,
-			TargetBits:       16,
-			Quality:          QualityVeryHigh,
-			OutputDir:        outputDir,
-			BatchID:          batchID,
-			Kind:             JobKindOptimize,
+			SourceAbsPath:     ca.absPath,
+			SourceLibraryRel:  ca.path,
+			SourceMTimeNS:     ca.mtimeNS,
+			SourceSize:        ca.size,
+			SourceSampleRate:  ca.sampleRate,
+			SourceBits:        ca.bits,
+			SourceIsDSD:       ca.isDSD,
+			SourceCompression: ca.compression,
+			TargetSampleRate:  ca.targetRate,
+			TargetBits:        ca.targetBits,
+			Quality:           QualityVeryHigh,
+			OutputDir:         outputDir,
+			TempDir:           c.renderTempDir,
+			BatchID:           batchID,
+			Kind:              ca.kind,
 		}
 		err := c.pool.Enqueue(spec)
 		if errors.Is(err, ErrDuplicateInflight) {
@@ -1131,7 +1331,7 @@ func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCan
 	// Nothing left to report back → complete now (mirrors Submit). The liveness
 	// half of the predicate is what keeps a queue-full break that already set a
 	// terminal status from being clobbered — see completeIfDrained.
-	c.completeIfDrained(batchID, "optimize")
+	c.completeIfDrained(batchID, tag)
 	return enqueued
 }
 
