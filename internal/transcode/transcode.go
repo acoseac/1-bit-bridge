@@ -933,6 +933,15 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 		// dsd_render_chain.go.
 		return j.renderDSD(ctx)
 	}
+	// Fail closed the other way: a job the caller marked DSD that did NOT
+	// route to the DSD chain must not run at all. The route above is
+	// chosen from the EXTENSION + the decoder probe; the eligibility gates
+	// admit a row on its CODEC, and the probe can say no — so this is the
+	// one place the two views are reconciled. See ErrDSDDecodeUnavailable.
+	if j.SourceIsDSD {
+		return RunResult{}, fmt.Errorf("%w (route %s, source %q)",
+			ErrDSDDecodeUnavailable, route, filepath.Base(j.SourceAbsPath))
+	}
 	input := []string{j.SourceAbsPath}
 	var geo sourceGeometry
 	if route == routeFFmpegPipe {

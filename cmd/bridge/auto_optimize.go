@@ -75,6 +75,16 @@ type autoOptimizeSweeper struct {
 	// statfs would ENOENT).
 	diskFree func(dir string) (int64, error)
 
+	// lanes is the pool's worker count — the number of renders that can
+	// hold Stage A scratch AT THE SAME TIME. The scratch check below is a
+	// point check by design (no reservation ledger), so it has to bound
+	// the concurrent peak rather than one job: two workers each passing a
+	// one-job check can together drive the volume below the floor, and a
+	// render that runs out of scratch fails a job that was already
+	// admitted (CodeRabbit on PR #863). Nil or < 1 reads as one lane,
+	// which is the pre-#863 behaviour.
+	lanes func() int
+
 	// soxInfo returns the cached ProbeSox snapshot so planCandidate can
 	// refuse sources this build cannot decode. Wired to the same 30s-TTL
 	// cache the per-track enqueuer, the batch coordinator and the admin
@@ -333,12 +343,12 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 			counts.DiskFloorReached = true
 			return false
 		}
-		// The scratch volume, for a DSD render: the intermediate a single
-		// job holds must fit above the same floor. A point check, not a
-		// running sum — scratch is freed per job, and the sweep's jobs run
-		// one per worker lane, so the sum over a sweep is never held at
-		// once. Stop rather than skip, for the same reason as above.
-		if scratch := spec.RenderScratchBytes(); scratch > 0 && scratchFree-scratch < floor {
+		// The scratch volume, for a DSD render. A point check, not a
+		// running sum — scratch is freed per job, so the sweep's TOTAL is
+		// never held at once — but it is sized for every lane the pool can
+		// run concurrently, because that peak IS held at once. Stop rather
+		// than skip, for the same reason as above.
+		if scratch := spec.RenderScratchBytes() * int64(sw.laneCount()); scratch > 0 && scratchFree-scratch < floor {
 			counts.DiskFloorReached = true
 			return false
 		}
@@ -350,6 +360,19 @@ func (sw *autoOptimizeSweeper) drainCandidates(ctx context.Context, cands []mani
 		}
 	}
 	return false
+}
+
+// laneCount is the concurrent-render bound the scratch check is sized
+// for. Nil or nonsensical reads as 1 — a single lane is the pre-#863
+// shape, and over-reading would refuse work a healthy volume can hold.
+func (sw *autoOptimizeSweeper) laneCount() int {
+	if sw.lanes == nil {
+		return 1
+	}
+	if n := sw.lanes(); n > 1 {
+		return n
+	}
+	return 1
 }
 
 // submit enqueues one spec and folds the outcome into counts. Returns

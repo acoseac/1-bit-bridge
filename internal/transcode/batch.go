@@ -897,6 +897,14 @@ type optimizeCandidate struct {
 	compression string
 	kind        JobKind
 	targetBits  int
+	// channels / durationSec are the DSD render's geometry, carried from
+	// the projection so the batch path budgets scratch and grades the
+	// decode's completeness on the SOURCE's real shape. Zero means
+	// "unknown" — the consumers fall back (stereo for scratch sizing, a
+	// size-derived duration for the timeout), which is exactly what the
+	// batch path did for every job before PR #863 wired them.
+	channels    int
+	durationSec float64
 }
 
 // optimizeCandidates is the aggregated result of `buildOptimizeCandidates`.
@@ -942,10 +950,13 @@ func (o *optimizeCandidates) add(t manifest.TrackProjection, absPath string, tar
 		compression: t.Compression,
 		kind:        kind,
 		targetBits:  targetBits,
+		channels:    t.Channels,
+		durationSec: t.DurationSec,
 	})
 	o.totalProjected += ProjectedSize(t.Size, t.SampleRate, t.BitsPerSample,
 		targetRate, targetBits, compressionFct)
 	scratch := (JobSpec{SourceIsDSD: t.IsDSD, SourceSize: t.Size, SourceSampleRate: t.SampleRate,
+		SourceChannels: t.Channels, SourceDurationSec: t.DurationSec,
 		TargetSampleRate: targetRate}).RenderScratchBytes()
 	if scratch > o.maxRenderScratch {
 		o.maxRenderScratch = scratch
@@ -1307,6 +1318,8 @@ func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCan
 			SourceBits:        ca.bits,
 			SourceIsDSD:       ca.isDSD,
 			SourceCompression: ca.compression,
+			SourceChannels:    ca.channels,
+			SourceDurationSec: ca.durationSec,
 			TargetSampleRate:  ca.targetRate,
 			TargetBits:        ca.targetBits,
 			Quality:           QualityVeryHigh,
@@ -1314,6 +1327,16 @@ func (c *Coordinator) enqueueOptimizeJobs(batchID uuid.UUID, cands []optimizeCan
 			TempDir:           c.renderTempDir,
 			BatchID:           batchID,
 			Kind:              ca.kind,
+			// A batch is an operator bulk action, never latency-sensitive,
+			// and a DSD render is MINUTES where a PCM optimize is seconds
+			// — so a bulk DSD batch on the foreground lane would park the
+			// phone's own on-demand request behind up to maxJobTimeout of
+			// work the pool cannot preempt. Only DSD sources move: every
+			// pre-#863 batch carries isDSD false, so PCM laning is
+			// byte-identical (CodeRabbit on PR #863). The single-file
+			// enqueuers in cmd/bridge stay foreground — that IS the phone
+			// asking for this track now.
+			Background: ca.isDSD,
 		}
 		err := c.pool.Enqueue(spec)
 		if errors.Is(err, ErrDuplicateInflight) {

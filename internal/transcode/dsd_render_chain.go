@@ -117,6 +117,19 @@ var ErrDSDGeometryMismatch = errors.New("dsd render: decoder geometry disagrees 
 // arithmetic makes that unreachable; the check is the belt.
 var ErrDSDClipped = errors.New("dsd render: sox reported clipping")
 
+// ErrDSDDecodeUnavailable refuses a DSD job that did NOT route to the DSD
+// chain. Run picks its route from the source's EXTENSION plus the decoder
+// probe, while the eligibility gates admit a row on its CODEC — so two
+// shapes reach Run with SourceIsDSD set and a non-DSD route: a host whose
+// ffmpeg lacks the dsd_* decoders (routeNone), and a row the scanner
+// stamped DSF/DFF whose filename says otherwise. Both used to fall
+// through to sox-direct, where sox either fails with its own unrelated
+// diagnostic or — for a shape it happens to accept — publishes a file
+// under a DSD variant id with none of the DSD semantics: no clip guard,
+// no measured true peak, no appliedGainDB. Refusing is the fail-closed
+// answer and it names the real cause (CodeRabbit on PR #863).
+var ErrDSDDecodeUnavailable = errors.New("dsd render: source is DSD but the DSD decode route is unavailable")
+
 // ffmpegDSDDecodeArgs is ffmpegDecodeArgs plus the ×0.5 pre-attenuation —
 // see the chain docblock for why the attenuation lives here and not in sox.
 func ffmpegDSDDecodeArgs(srcAbs string) []string {

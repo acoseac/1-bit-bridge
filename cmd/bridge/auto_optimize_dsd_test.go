@@ -243,8 +243,11 @@ func TestAutoOptimizeSweepProbesScratchVolumeOnlyWithCaps(t *testing.T) {
 // TestAutoOptimizeSweepStopsWhenScratchDoesNotFit pins the second disk
 // budget: a DSD job whose Stage A scratch would push the scratch volume
 // under the floor STOPS the sweep (DiskFloorReached), and the same job
-// enqueues when the scratch fits. The check is a point check per job —
-// scratch is freed per job — so two identical jobs both fit when one does.
+// enqueues when the scratch fits. The check is a point check — scratch is
+// freed per job, so the sweep's TOTAL is never held at once — sized for
+// the number of lanes the pool can run CONCURRENTLY, because that peak
+// is. At one lane two identical jobs both fit when one does; at two they
+// do not, which is the last pair of subtests.
 func TestAutoOptimizeSweepStopsWhenScratchDoesNotFit(t *testing.T) {
 	const floor = 100 << 20
 	const durationSec = 300.0
@@ -293,6 +296,37 @@ func TestAutoOptimizeSweepStopsWhenScratchDoesNotFit(t *testing.T) {
 		}
 		if counts.Enqueued != 2 {
 			t.Errorf("Enqueued = %d, want both DSD jobs — swept %v", counts.Enqueued, strings.Join(sweptPaths(f), ", "))
+		}
+	})
+	// The same free space, with the pool able to run TWO renders at once:
+	// both would hold Stage A scratch simultaneously, so the point check
+	// has to be sized for the lane count or two individually-fitting jobs
+	// together breach the floor and a job that was already admitted fails
+	// mid-render (CodeRabbit on PR #863).
+	t.Run("does not fit once two lanes can hold scratch at once", func(t *testing.T) {
+		f := seed(t, floor+perJob+perJob/2)
+		f.sweeper.lanes = func() int { return 2 }
+		counts := f.sweeper.sweepOnce(context.Background())
+		if counts == nil {
+			t.Fatal("sweepOnce returned nil")
+		}
+		if !counts.DiskFloorReached {
+			t.Error("DiskFloorReached = false, want true (two concurrent renders need 2× the scratch)")
+		}
+		if counts.Enqueued != 0 {
+			t.Errorf("Enqueued = %d, want 0 — swept %v", counts.Enqueued, strings.Join(sweptPaths(f), ", "))
+		}
+	})
+	// A lane count of one (or an unwired probe) is the pre-#863 shape.
+	t.Run("one lane is the unwired shape", func(t *testing.T) {
+		f := seed(t, floor+perJob+perJob/2)
+		f.sweeper.lanes = func() int { return 1 }
+		counts := f.sweeper.sweepOnce(context.Background())
+		if counts == nil {
+			t.Fatal("sweepOnce returned nil")
+		}
+		if counts.DiskFloorReached || counts.Enqueued != 2 {
+			t.Errorf("one lane: DiskFloorReached=%v Enqueued=%d, want false / 2", counts.DiskFloorReached, counts.Enqueued)
 		}
 	})
 }

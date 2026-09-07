@@ -93,9 +93,17 @@ func TestExportedScratchHelpersMirrorTheInternals(t *testing.T) {
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("the fresh scratch must survive: %v", err)
 	}
-	// An empty tempDir means the OS temp dir — never an error, and never
-	// a walk of anything but the bridge-owned subdirectory.
-	if _, err := PurgeStaleRenderScratch(""); err != nil {
-		t.Errorf("PurgeStaleRenderScratch(\"\") = %v, want nil (OS temp dir)", err)
+	// An empty tempDir means the OS temp dir. Assert that MAPPING rather
+	// than running the purge against it: PurgeStaleRenderScratch("")
+	// would delete every *.stageA.sox older than 12 h under
+	// <os.TempDir()>/1-bit-bridge-render, which on a machine that also
+	// runs a bridge is state outside this test's sandbox (CodeRabbit on
+	// PR #863). The two halves of the contract are provable separately.
+	if got, want := RenderScratchDir(""), filepath.Join(os.TempDir(), renderScratchSubdir); got != want {
+		t.Errorf("RenderScratchDir(\"\") = %q, want %q", got, want)
+	}
+	// A bridge-owned directory that does not exist yet is not an error.
+	if n, err := PurgeStaleRenderScratch(t.TempDir()); n != 0 || err != nil {
+		t.Errorf("purge of a scratch-less tempDir = (%d, %v), want (0, nil)", n, err)
 	}
 }

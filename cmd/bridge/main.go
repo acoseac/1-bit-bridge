@@ -3480,6 +3480,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 					return config.DefaultAutoOptimizeMinFreeBytes
 				},
 				diskFree: transcode.AvailableDiskSpaceNearest,
+				lanes: func() int {
+					if live := cfgHolder.Load(); live != nil {
+						return live.Upscale.EffectiveWorkers()
+					}
+					return 1
+				},
 			}
 			autoOptimizeRearm := make(chan struct{}, 1)
 			cadenceRearms = append(cadenceRearms, autoOptimizeRearm)

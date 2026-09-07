@@ -38,20 +38,34 @@ func seedDSDBatchFixture(t *testing.T, s *manifest.Store) {
 		rate                     float64
 		bits                     int
 		isDSD                    bool
+		// durationSec / channels are the render geometry. Set on 01 only,
+		// so the same fixture proves both "carried when known" and
+		// "0 when the row has none" (the pre-v43 shape).
+		durationSec float64
+		channels    int
 	}{
-		{"DSD/01.dsf", "DSF", "", 2822400, 1, true},
-		{"DSD/02.dff", "DFF", "DST", 2822400, 1, true},
-		{"DSD/03.dff", "DFF", "", 3072000, 1, true},
-		{"DSD/Disc.iso/st/01.dff", "DFF", "", 2822400, 1, true},
-		{"DSD/04.flac", "FLAC", "", 96000, 24, false},
-		{"DSD/05.dsf", "DSF", "", 3000000, 1, true},
+		{"DSD/01.dsf", "DSF", "", 2822400, 1, true, 305.5, 6},
+		{"DSD/02.dff", "DFF", "DST", 2822400, 1, true, 0, 0},
+		{"DSD/03.dff", "DFF", "", 3072000, 1, true, 0, 0},
+		{"DSD/Disc.iso/st/01.dff", "DFF", "", 2822400, 1, true, 0, 0},
+		{"DSD/04.flac", "FLAC", "", 96000, 24, false, 0, 0},
+		{"DSD/05.dsf", "DSF", "", 3000000, 1, true, 0, 0},
 	}
 	for _, r := range rows {
 		rate, bits, isDSD := r.rate, r.bits, r.isDSD
-		if err := s.UpsertTrack(context.Background(), &manifest.Track{
+		tr := &manifest.Track{
 			Path: r.path, Size: 300_000_000, Codec: r.codec, Compression: r.compression,
 			SampleRate: &rate, BitsPerSample: &bits, IsDSD: &isDSD,
-		}); err != nil {
+		}
+		if r.durationSec > 0 {
+			d := r.durationSec
+			tr.Duration = &d
+		}
+		if r.channels > 0 {
+			c := r.channels
+			tr.Channels = &c
+		}
+		if err := s.UpsertTrack(context.Background(), tr); err != nil {
 			t.Fatalf("UpsertTrack %q: %v", r.path, err)
 		}
 	}
