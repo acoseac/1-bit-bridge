@@ -210,12 +210,27 @@ type runUpscaleParams struct {
 
 	// Kind discriminates upscale (zero-value / JobKindUpscale,
 	// legacy CLI behavior) from optimize (CarPlay-targeted
-	// downsample). Drives the classifier's eligibility predicate +
-	// target-rate resolution + JobSpec.Kind. For optimize, the
-	// global targetRateFlag is ignored (each track's family
-	// dictates target via TargetRateForOptimize) and targetBits is
-	// uniformly 16 (CarPlay floor).
+	// downsample) and pcm (the faithful DSD → PCM rendition).
+	// Drives the classifier's eligibility predicate + target-rate
+	// resolution + JobSpec.Kind. For optimize and pcm, the global
+	// targetRateFlag is ignored (each track's family dictates the
+	// target) and targetBits is uniform — 16 for optimize (the
+	// CarPlay floor), 24 for pcm.
 	kind transcode.JobKind
+
+	// dsdCaps is this run's DSD-render capability, probed ONCE per run
+	// like soxInfo (a one-shot process gains nothing from the 30 s TTL
+	// the server-side snapshot carries). The ZERO VALUE refuses every
+	// DSD source, which is exactly what `bridge upscale` and a
+	// `bridge optimize` on a bridge without the feature did before the
+	// renditions existed — so those two commands are unchanged unless
+	// the operator turned dsdRender on AND ffmpeg can decode.
+	dsdCaps transcode.DSDRenderCaps
+
+	// tempDir is upscale.tempDir — where a DSD render stages its Stage A
+	// scratch. Empty means the OS temp dir. Carried on every spec (the
+	// non-DSD kinds ignore it) so the CLI stages where the server does.
+	tempDir string
 }
 
 // upscaleCandidate carries the resolved JobSpec plus the
@@ -255,10 +270,33 @@ func resolveCLITargetForKind(
 	sourceRateHz int,
 	counters *upscaleSkipCounters,
 ) (target, bits int, skip bool, exitCode int) {
+	if p.kind == transcode.JobKindPCMRender {
+		// DSD-only, and its own family map: 44.1-family → 176400,
+		// 48-family → 192000. An off-family rate resolves to 0 —
+		// a header we do not trust — and is skipped, not an error.
+		r := transcode.TargetRateForPCMRender(sourceRateHz)
+		if r <= 0 {
+			counters.alreadyAtTarget++
+			return 0, 0, true, 0
+		}
+		return r, 24, false, 0
+	}
 	if p.kind == transcode.JobKindOptimize {
 		sourceBits := 0
 		if t.BitsPerSample != nil {
 			sourceBits = *t.BitsPerSample
+		}
+		// A DSD source under caps takes the compact tier at its family
+		// rate; the CarPlay floor that gates a PCM source has no meaning
+		// for a 1-bit stream, which is why OptimizeEligibleFor is the
+		// composite gate rather than OptimizeEligible alone.
+		if t.IsDSD != nil && *t.IsDSD {
+			r := transcode.TargetRateForOptimize(sourceRateHz)
+			if r <= 0 {
+				counters.alreadyAtTarget++
+				return 0, 0, true, 0
+			}
+			return r, 16, false, 0
 		}
 		if !transcode.OptimizeEligible(t.Path, t.Codec, sourceRateHz, sourceBits) {
 			counters.alreadyAtTarget++
@@ -309,7 +347,14 @@ func classifyUpscaleTrack(
 	if !matchesFilter(t.Path, p.filter) {
 		return nil, 0
 	}
-	if t.IsDSD != nil && *t.IsDSD {
+	trackIsDSD := t.IsDSD != nil && *t.IsDSD
+	// DSD is refused for `upscale` unconditionally — there is no PCM
+	// rate to raise on a 1-bit delta-sigma stream — and admitted for
+	// `optimize` / `pcm` only under this run's caps, through the SAME
+	// predicates the server-side walks use so the CLI cannot drift from
+	// them. Without the caps (the default, and every pre-rendition
+	// bridge) this is byte-for-byte the old unconditional refusal.
+	if trackIsDSD && !cliDSDKindAdmits(t, p) {
 		counters.notPCM++
 		return nil, 0
 	}
@@ -323,6 +368,15 @@ func classifyUpscaleTrack(
 		counters.notPCM++
 		return nil, 0
 	}
+	// A non-DSD source is never a `pcm` candidate: the faithful tier
+	// exists to give a DSD track a PCM form, and a PCM source already
+	// has one. Skipped, never an error — a `bridge render --filter
+	// <album>` over a mixed folder renders its DSD tracks and passes
+	// over the rest, mirroring buildPCMRenderCandidates.
+	if p.kind == transcode.JobKindPCMRender && !trackIsDSD {
+		counters.notPCM++
+		return nil, 0
+	}
 	// Refuse what this sox build cannot decode, mirroring the server-side
 	// gates (Coordinator's walks, EnqueueOne, the auto-optimize sweeper).
 	// ALAC is the case that matters: lossless, so IsLossyCodec lets it
@@ -330,7 +384,12 @@ func classifyUpscaleTrack(
 	// this it reached a sox with no MP4 demuxer and failed per file.
 	// Counted under notPCM: the accurate bucket for "this pipeline cannot
 	// take it", the same one DSD and lossy use.
-	if !p.soxInfo.CanDecode(t.Path) {
+	// A DSD source skips this: sox cannot read DSF/DFF at all — ffmpeg
+	// decodes it and sox only takes the raw pipe — so asking sox whether
+	// it can open the file would refuse every DSD candidate. The route
+	// itself is decided (and fail-closed) inside transcode.Run; this
+	// check is layering for the PCM path, not the verdict.
+	if !trackIsDSD && !p.soxInfo.CanDecode(t.Path) {
 		counters.notPCM++
 		return nil, 0
 	}
@@ -383,6 +442,23 @@ func classifyUpscaleTrack(
 		Quality:          p.quality,
 		OutputDir:        p.outputDir,
 		Kind:             p.kind, // zero-value preserves upscale for legacy callers
+		TempDir:          p.tempDir,
+	}
+	if trackIsDSD {
+		// The render facts the chain and the pool consume: the flag that
+		// selects the two-stage chain and the DSD variant family, the
+		// compression tag that budgets a DST decode, and the geometry
+		// that sizes Stage A scratch and grades the decode's
+		// completeness when ffprobe reports no duration. Absent values
+		// stay zero — "unknown", which every consumer falls back from.
+		spec.SourceIsDSD = true
+		spec.SourceCompression = t.Compression
+		if t.Channels != nil {
+			spec.SourceChannels = *t.Channels
+		}
+		if t.Duration != nil {
+			spec.SourceDurationSec = *t.Duration
+		}
 	}
 	if err := spec.FreshnessFromFile(); err != nil {
 		counters.sourceMissing++
@@ -418,12 +494,24 @@ func upscaleResumeDecision(ctx context.Context, store *manifest.Store, trackPath
 // of runUpscaleBatch as the second of the cognitive-complexity
 // refactor's helpers — pure I/O over the tally values.
 func reportUpscaleSummary(stdout io.Writer, totalCandidates, toRun int, counters upscaleSkipCounters) {
+	reportUpscaleSummaryForKind(stdout, totalCandidates, toRun, counters, transcode.JobKindUpscale)
+}
+
+// reportUpscaleSummaryForKind is reportUpscaleSummary with the skip line
+// worded for the kind. The `notPCM` bucket means "this pipeline cannot
+// take this source", and for the DSD-only `pcm` kind the sources it
+// holds are PCM — calling them "non-PCM" would be exactly backwards.
+func reportUpscaleSummaryForKind(stdout io.Writer, totalCandidates, toRun int, counters upscaleSkipCounters, kind transcode.JobKind) {
 	fmt.Fprintf(stdout, "Found %d candidate track(s); %d need conversion.\n", totalCandidates, toRun)
 	if counters.alreadyAtTarget > 0 {
 		fmt.Fprintf(stdout, "Skipped %d track(s) already at or above target rate.\n", counters.alreadyAtTarget)
 	}
 	if counters.notPCM > 0 {
-		fmt.Fprintf(stdout, "Skipped %d non-PCM or unparseable track(s).\n", counters.notPCM)
+		shape := "non-PCM"
+		if kind == transcode.JobKindPCMRender {
+			shape = "non-DSD"
+		}
+		fmt.Fprintf(stdout, "Skipped %d %s or unparseable track(s).\n", counters.notPCM, shape)
 	}
 	if counters.sourceMissing > 0 {
 		fmt.Fprintf(stdout, "Skipped %d track(s) with missing source files (run `bridge scan` to reconcile).\n", counters.sourceMissing)
@@ -1027,6 +1115,81 @@ func fingerprintFeatureReady(ctx context.Context, hasAPIKey bool, stderr io.Writ
 // conservative FormatsKnown gate matches soxFeatureReady. Extracted so the
 // per-subcommand call sites stay one line (and keeps analyzeCmd under the
 // cognitive-complexity budget).
+// cliDSDKindAdmits answers whether THIS run's kind and caps admit a DSD
+// source, delegating to the same transcode predicates the coordinator's
+// walks and the auto-optimize sweeper use. Keeping the CLI on those
+// functions rather than a local reading is what stops the two answers
+// drifting — a source the sweep renders and the CLI refuses (or the
+// reverse) is the drift this indirection exists to prevent.
+func cliDSDKindAdmits(t manifest.Track, p runUpscaleParams) bool {
+	rate := 0
+	if t.SampleRate != nil {
+		rate = int(*t.SampleRate)
+	}
+	switch p.kind {
+	case transcode.JobKindOptimize:
+		return transcode.OptimizeEligibleFor(t.Path, t.Codec, rate, 1, true, t.Compression, p.dsdCaps)
+	case transcode.JobKindPCMRender:
+		return transcode.PCMRenderEligible(t.Path, t.Codec, true, rate, t.Compression, p.dsdCaps)
+	default:
+		// `upscale`: never. A 1-bit delta-sigma stream has no PCM rate
+		// to raise, which is why EnqueueOne refuses it server-side too.
+		return false
+	}
+}
+
+// ffmpegDSDCLIReady is soxCLIReady's counterpart for the render command:
+// the DSD chain decodes through ffmpeg, so a missing binary or a build
+// without the decoders must refuse BEFORE the batch walks the library
+// rather than failing every job. Returns the caps on success so the run
+// probes once (the CLI is one-shot; the server's 30 s snapshot buys it
+// nothing) and `dst` rides along, since a build with the dsd_* decoders
+// and no `dst` renders plain DSF/DFF perfectly and skips only
+// DST-compressed DSDIFF — a warning, never a refusal.
+func ffmpegDSDCLIReady(ctx context.Context, stderr io.Writer) (transcode.DSDRenderCaps, bool) {
+	info, err := transcode.ProbeFFmpeg(ctx)
+	if err != nil {
+		if errors.Is(err, transcode.ErrFFmpegMissing) {
+			fmt.Fprintf(stderr, "%v\n\nThe DSD → PCM renditions decode through ffmpeg. Install it:\n", err)
+			printFFmpegInstallHint(stderr)
+		} else {
+			fmt.Fprintf(stderr, "ffmpeg precheck: %v\n", err)
+		}
+		return transcode.DSDRenderCaps{}, false
+	}
+	if !info.HasDSD {
+		fmt.Fprint(stderr, "ffmpeg is installed but this build does not carry all four DSD decoders\n"+
+			"(dsd_lsbf, dsd_lsbf_planar, dsd_msbf, dsd_msbf_planar), so no DSD track can be rendered.\n"+
+			"Check with `ffmpeg -hide_banner -decoders | grep dsd_`, then reinstall a stock package:\n")
+		printFFmpegInstallHint(stderr)
+		return transcode.DSDRenderCaps{}, false
+	}
+	if !info.HasDST {
+		fmt.Fprint(stderr, "Note: this ffmpeg has no `dst` decoder, so DST-compressed DSDIFF will be skipped.\n"+
+			"Plain DSF / DFF renders normally.\n")
+	}
+	return transcode.DSDRenderCaps{Enabled: true, DecodeDSD: true, DecodeDST: info.HasDST}, true
+}
+
+// printFFmpegInstallHint mirrors printSoxInstallHint. Every stock package
+// carries the dsd_* and dst decoders, so the plain package name is the
+// whole instruction — there is no ffmpeg equivalent of sox's separate
+// FLAC-handler split.
+func printFFmpegInstallHint(w io.Writer) {
+	switch runtime.GOOS {
+	case "darwin":
+		fmt.Fprint(w, "  brew install ffmpeg\n")
+	case "linux":
+		fmt.Fprint(w, "  Debian/Ubuntu:  sudo apt install ffmpeg\n")
+		fmt.Fprint(w, "  Fedora:         sudo dnf install ffmpeg\n")
+		fmt.Fprint(w, "  Arch:           sudo pacman -S ffmpeg\n")
+	case "windows":
+		fmt.Fprint(w, "  choco install ffmpeg\n")
+	default:
+		fmt.Fprint(w, "  Install `ffmpeg` via your platform's package manager, or see https://ffmpeg.org\n")
+	}
+}
+
 func soxCLIReady(ctx context.Context, stderr io.Writer, featureNeed string) bool {
 	info, err := transcode.ProbeSox(ctx)
 	if err != nil {

@@ -70,6 +70,19 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir)
 	}
 
+	// The compact tier admits DSD sources too, under the same operator
+	// flag + ffmpeg probe the server-side gates read. Probed only when
+	// the flag is on, so a bridge without the feature pays no fork+exec
+	// and behaves exactly as it did before the renditions existed.
+	var dsdCaps transcode.DSDRenderCaps
+	if r.cfg.Upscale.DSDRender.Enabled {
+		caps, ok := ffmpegDSDCLIReady(ctx, stderr)
+		if !ok {
+			fmt.Fprint(stderr, "Continuing with PCM sources only — DSD tracks will be skipped.\n")
+		}
+		dsdCaps = caps
+	}
+
 	return runUpscaleBatch(ctx, stdout, stderr, r.store, r.cfg, r.resolver, runUpscaleParams{
 		// targetRateFlag + targetBits are ignored for optimize
 		// (classifier branches on Kind and derives per-track).
@@ -84,5 +97,7 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		force:          *force,
 		outputDir:      r.outputDir,
 		kind:           transcode.JobKindOptimize,
+		dsdCaps:        dsdCaps,
+		tempDir:        r.tempDir,
 	})
 }
