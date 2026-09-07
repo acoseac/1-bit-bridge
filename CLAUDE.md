@@ -635,6 +635,55 @@ no failing test — which is the shape to expect in this area.
   decoders and no `dst` renders plain DSF/DFF and skips only DST-compressed
   DSDIFF.
 
+- **The DSD decimation was MEASURED and it does not alias — but the test that
+  says so is a DIFFERENTIAL, and an absolute in-band bar cannot replace it**
+  (PR B4; numbers + method in `ops/engineering-log.md`). The 5th-order fixtures
+  carry **about -104 dBFS of their OWN in-band content** near 20 kHz (the NTF
+  rising at the band edge, plus odd harmonics of the test tone — ordinary for a
+  1-bit quantizer), so an absolute floor measures the MODULATOR: the first draft
+  asserted -110 dBFS and duly "failed" at -91.8 with the pipeline blameless.
+  `TestDSDRender_AliasRejection` instead renders the 50 kHz probe through Stage A
+  twice — the shipping effect order (taken from `dsdStageAArgs`, not retyped) and
+  a reference that low-passes at the 352.8 kHz intermediate BEFORE decimating —
+  and asserts the difference. Measured **+0.00 dB** (faithful) and **+0.38 dB
+  peak / +0.46 dB energy** (compact), against a 1.0 dB bar. **So the design's
+  recorded "`sinc` BEFORE `rate`" fallback is NOT needed; don't take it without
+  re-running this.** The coarse `peak <= -80 dBFS` pin beside it exists only to
+  catch an anti-alias filter that vanished entirely.
+- **`sinc -a 110 -t 10000 -35000`: `-t` is the FULL transition width CENTRED on
+  the cutoff, and the stopband is -116.8 dB.** Measured — -6.02 dB at exactly
+  35 kHz, flat to 31 kHz, -131.4 dB by 60 kHz — so the 30 kHz passband edge /
+  40 kHz stop edge the docblock claims is what ships.
+  `TestDSDLowpassSincConvention` is gated on the toolchain alone (not the fixture
+  env var), so the convention pin fires on any toolchain-capable run.
+- **⚠️ `sox … stats` over a SHORT file after a steep FIR reports the edge
+  TRANSIENT, not the stopband — a 61 dB error, in the direction that makes a good
+  filter look broken.** The filtered 40 kHz tone reads **-64.56 dBFS**
+  whole-file against **-125.85 dBFS** steady-state, i.e. a 117 dB filter measures
+  as 55 dB. `soxSteadyStateRMSdB` takes the middle half for exactly this reason.
+  Sibling trap in the same sweep: **`-r` must PRECEDE `-n`** — sox binds options
+  to the file that FOLLOWS them, so `sox -n -r 352800 … synth … sine 80000` sets
+  the OUTPUT rate, generates at sox's 48 kHz default, and aliases the request to
+  16 kHz; every stopband frequency then silently lands in the passband and the
+  whole sweep reads -0.00 dB.
+- **Assert the clip guard on the TRUE PEAK; only log the spectrum.** The
+  rendition lands at **-0.97 dBTP** against its -1.0 target (applied gain
+  +5.00 dB on the -6 dBFS fixture), which is the end-to-end pin that Stage C's
+  `6.0206 + G` agrees with `G = clamp(0, 6, -TP_unity - 1)` — the arithmetic an
+  earlier draft got wrong as `6.0206 + G - 6`, which would have shipped every
+  rendition 6 dB quiet. The spectrum reads the tone 0.76 dB lower because 1 kHz
+  does not land on a bin and Blackman-Harris costs up to 0.83 dB of scalloping,
+  so a tone-based bar would have to be loose enough to hide a real error.
+- **The fixture generator's modulator is a low-distortion CIFF and it was
+  verified BEFORE anything was generated.** A first attempt used CIFB with
+  feedback at all five integrators: stable, linear, and **DC gain 0.257**, so
+  every fixture decoded ~12 dB low and all three tests failed on real clipping.
+  The shipped form is checked by DC probe (`mean(y) == u` exactly,
+  `mean(e) = 0.000000`). ⚠️ Between the two, a throwaway harness reported
+  "gain 2.0" across three different coefficient sets — **a constant factor across
+  every variant of a parameter is evidence about the MEASUREMENT, not the
+  subject**; it was a print bug (`want {dc*0.5}` while passing `u = dc`).
+
 - **`Enqueue` fires `fireStateChange()` UNDER the lock, before the unlock**, in
   both pools. Workers are bounded by `Stop`'s `wg.Wait()`; `Enqueue` is not, so
   firing after the unlock lets a preempted enqueuer resume after `Stop` closed
