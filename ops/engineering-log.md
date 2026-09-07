@@ -4252,8 +4252,9 @@ reason.
 The three fixture tests are gated on `BRIDGE_DSD_FIXTURE_TESTS=1` on top
 of the toolchain gate — they decode a megabyte of DSD through two
 subprocesses per case, which the ordinary suite should not pay for.
-`TestDSDLowpassSincConvention` needs only sox and is gated on the
-toolchain alone, so the convention pin fires on any toolchain-capable run.
+`TestDSDLowpassSincConvention` needs only sox and is gated on SOX ALONE
+(it synthesises and filters with sox and never decodes DSD, so requiring
+ffmpeg would skip it on a host that can run it — CodeRabbit on #866).
 `fftSizeFor` picks the largest power of two that fits, capped at 65536: a
 1-second fixture decimates to 44 100 samples at the compact tier, BELOW
 65536, so a fixed-size FFT fatals on exactly the tier that decimates

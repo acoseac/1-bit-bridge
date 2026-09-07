@@ -142,6 +142,12 @@ func runStageAVariant(t *testing.T, fixture string, effects []string, targetRate
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A length that is not a whole number of float64s means sox was cut
+	// off mid-sample; the loop below would silently drop the remainder and
+	// measure a file nobody wrote.
+	if len(raw) == 0 || len(raw)%8 != 0 {
+		t.Fatalf("stage A wrote %d bytes, not a non-zero multiple of 8 — sox was truncated", len(raw))
+	}
 	xs := make([]float64, len(raw)/8)
 	for i := range xs {
 		xs[i] = math.Float64frombits(binary.LittleEndian.Uint64(raw[i*8:]))
@@ -160,12 +166,12 @@ func decodeMono(t *testing.T, path string) []float64 {
 	if err != nil {
 		t.Fatalf("sox decode %s: %v", path, err)
 	}
-	n := len(out) / 8
-	xs := make([]float64, n)
-	for i := 0; i < n; i++ {
-		bits := uint64(out[i*8]) | uint64(out[i*8+1])<<8 | uint64(out[i*8+2])<<16 | uint64(out[i*8+3])<<24 |
-			uint64(out[i*8+4])<<32 | uint64(out[i*8+5])<<40 | uint64(out[i*8+6])<<48 | uint64(out[i*8+7])<<56
-		xs[i] = math.Float64frombits(bits)
+	if len(out) == 0 || len(out)%8 != 0 {
+		t.Fatalf("sox decode of %s wrote %d bytes, not a non-zero multiple of 8", path, len(out))
+	}
+	xs := make([]float64, len(out)/8)
+	for i := range xs {
+		xs[i] = math.Float64frombits(binary.LittleEndian.Uint64(out[i*8:]))
 	}
 	return xs
 }
@@ -229,6 +235,10 @@ func spectrumDBFS(t *testing.T, xs []float64, rate int, n int) ([]float64, float
 	t.Helper()
 	if len(xs) < n {
 		t.Fatalf("only %d samples, need %d for the FFT", len(xs), n)
+	}
+	if n < 2 {
+		// The window divides by n-1.
+		t.Fatalf("FFT size %d is too small to window", n)
 	}
 	// Skip the first 20% — the decimation filters have a transient, and a
 	// spur measured inside it belongs to the filter warming up, not the
@@ -335,6 +345,9 @@ func soxSteadyStateRMSdB(t *testing.T, freqHz int, effects []string) float64 {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(raw) == 0 || len(raw)%8 != 0 {
+		t.Fatalf("sox wrote %d bytes, not a non-zero multiple of 8 — the filtered tone is truncated", len(raw))
+	}
 	n := len(raw) / 8
 	if n < 1000 {
 		t.Fatalf("filtered tone is only %d samples", n)
@@ -372,7 +385,10 @@ func soxSteadyStateRMSdB(t *testing.T, freqHz int, effects []string) float64 {
 //	 1 kHz  +0.00    30 kHz  +0.00    35 kHz   -6.02
 //	20 kHz  +0.00    31 kHz  -0.01    40 kHz -116.84
 func TestDSDLowpassSincConvention(t *testing.T) {
-	requireSoxAndFFmpeg(t)
+	// sox only: this synthesises and filters with sox and never decodes
+	// DSD, so requiring ffmpeg would skip the convention pin on a host
+	// that can perfectly well run it.
+	requireSox(t)
 	ref := soxSteadyStateRMSdB(t, 1000, nil)
 	for _, tc := range []struct {
 		freq   int
@@ -529,6 +545,21 @@ func TestDSDRender_LevelParity(t *testing.T) {
 	if *res.AppliedGainDB <= 0 || *res.AppliedGainDB > 6 {
 		t.Errorf("applied gain %+.2f dB is outside the clamp — a -6 dBFS source should take most of the nominal +6",
 			*res.AppliedGainDB)
+	}
+	// The gain PERSISTED must be the gain the guard computes from the peak
+	// PERSISTED beside it. The range check above and the true-peak ceiling
+	// below can both pass while the recorded number is wrong — the ceiling
+	// measures what sox applied, not what we wrote down — and the recorded
+	// number is the one iOS subtracts to honour a 0 dB preference, so a
+	// divergence is silently audible on the device and nowhere else.
+	// Asserting against ClipGuardedGainDB pins the WIRING; the arithmetic
+	// itself has its own table in TestClipGuardedGainDB.
+	if res.TruePeakDBTP == nil {
+		t.Fatal("render reported no true peak — the applied gain has nothing to be derived from")
+	}
+	if want := ClipGuardedGainDB(*res.TruePeakDBTP); *res.AppliedGainDB != want {
+		t.Errorf("applied gain %+.3f dB but the guard computes %+.3f dB from the recorded true peak %.3f dBTP",
+			*res.AppliedGainDB, want, *res.TruePeakDBTP)
 	}
 	// The ceiling itself. Tolerance covers the 0.1 dB rounding of G plus
 	// the meter reading a 24-bit dithered file rather than the float

@@ -654,8 +654,9 @@ no failing test — which is the shape to expect in this area.
   the cutoff, and the stopband is -116.8 dB.** Measured — -6.02 dB at exactly
   35 kHz, flat to 31 kHz, -131.4 dB by 60 kHz — so the 30 kHz passband edge /
   40 kHz stop edge the docblock claims is what ships.
-  `TestDSDLowpassSincConvention` is gated on the toolchain alone (not the fixture
-  env var), so the convention pin fires on any toolchain-capable run.
+  `TestDSDLowpassSincConvention` is gated on **sox alone** — it synthesises and
+  filters with sox and never decodes DSD, so gating it on ffmpeg too would skip
+  the convention pin on a host that can run it (CodeRabbit on #866).
 - **⚠️ `sox … stats` over a SHORT file after a steep FIR reports the edge
   TRANSIENT, not the stopband — a 61 dB error, in the direction that makes a good
   filter look broken.** The filtered 40 kHz tone reads **-64.56 dBFS**

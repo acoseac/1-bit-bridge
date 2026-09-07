@@ -197,14 +197,41 @@ def build(path, sample_fn, label):
     print(f"  {label}: wrote {os.path.getsize(path)} bytes -> {path}", flush=True)
 
 
+def resolve_outdir(raw):
+    """Resolve the output directory, and require it to already exist.
+
+    The generator writes three ~700 KB files. Requiring an existing
+    directory rather than creating one turns a mistyped argument into an
+    immediate error instead of a stray tree somewhere, and gives every
+    later join a single resolved base to be checked against.
+    """
+    base = os.path.realpath(raw)
+    if not os.path.isdir(base):
+        raise SystemExit(f"output directory does not exist: {base}")
+    return base
+
+
+def out_path(base, name):
+    """Join a fixture name onto the resolved base and re-check the result.
+
+    `name` is a literal below, so this cannot currently escape — the check
+    is here so that stays true if someone later derives a name from input,
+    and so the path handed to open() is one that has been validated rather
+    than merely constructed.
+    """
+    p = os.path.realpath(os.path.join(base, name))
+    if os.path.dirname(p) != base:
+        raise SystemExit(f"refusing to write outside {base}: {p}")
+    return p
+
+
 def main():
-    outdir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..")
-    os.makedirs(outdir, exist_ok=True)
+    default = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    outdir = resolve_outdir(sys.argv[1] if len(sys.argv) > 1 else default)
     print(f"writing DSD64 fixtures to {outdir}")
-    build(os.path.join(outdir, "dsd64-1khz-m6dbfs.dsf"), tone(1000.0), "1 kHz -6 dBFS")
-    build(os.path.join(outdir, "dsd64-50khz-alias.dsf"), tone(50000.0), "50 kHz alias probe")
-    build(os.path.join(outdir, "dsd64-ccif-19-20khz.dsf"), twin_tone(19000.0, 20000.0), "CCIF 19+20 kHz")
+    build(out_path(outdir, "dsd64-1khz-m6dbfs.dsf"), tone(1000.0), "1 kHz -6 dBFS")
+    build(out_path(outdir, "dsd64-50khz-alias.dsf"), tone(50000.0), "50 kHz alias probe")
+    build(out_path(outdir, "dsd64-ccif-19-20khz.dsf"), twin_tone(19000.0, 20000.0), "CCIF 19+20 kHz")
     print("done")
 
 
