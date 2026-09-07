@@ -42,7 +42,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/google/uuid"
@@ -268,6 +267,11 @@ type JobSpec struct {
 	TargetBits       int // 16/24/32
 	Quality          Quality
 	OutputDir        string // <dataDir>/transcoded
+	// TempDir is where a DSD render's Stage A scratch lives (under a
+	// bridge-owned subdirectory). Empty means the OS temp dir. It is
+	// deliberately NOT derived from OutputDir — on the VPS the variants
+	// dir is a B2 FUSE mount and multi-GB scratch must stay on local disk.
+	TempDir string
 
 	// Kind discriminates the transcode class — upscale (default,
 	// zero-value preserves legacy behavior) or optimize (CarPlay-
@@ -672,13 +676,7 @@ func (j JobSpec) SoxArgs() (args []string, settings string, finalPath string, tm
 // produced this sidecar). It is NOT on the wire: `track_variants.sox_settings`
 // has no json tag on manifest.Variant.
 func (j JobSpec) soxArgsFrom(input []string, decoder string) (args []string, settings string, finalPath string, tmpPath string) {
-	rateFlag := "-v"
-	switch j.Quality {
-	case QualityHigh:
-		rateFlag = "-h"
-	case QualityMedium:
-		rateFlag = "-m"
-	}
+	rateFlag := j.rateFlag()
 	// Output goes to `<sidecar>.<token>.tmp` so the rename(2) at the
 	// end of `RunSox` is atomic. Sox normally picks the encoder
 	// from the output filename's last extension — which here is
@@ -882,6 +880,14 @@ func ResolveTargetRate(flagValue string, sourceRate int) (int, error) {
 // Output directory created if missing — `bridge upscale` only
 // guarantees DataDir exists, not the `transcoded` subdir.
 func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
+	r, err := Run(ctx, j)
+	return r.SizeBytes, r.Settings, err
+}
+
+// Run is RunSox's full-result form: the same job, returning RunResult so a
+// DSD rendition's measured gain travels with its size and settings. RunSox
+// stays as the (size, settings, error) view for the pool's runner seam.
+func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 	// Both paths come from SoxArgs's single SidecarPath() computation (Q2) —
 	// no re-hash here, and the rename target below is exactly the path sox
 	// wrote. tmpPath carries a per-job token, so it MUST be the value from
@@ -901,12 +907,17 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 			SnapshotOrOpen(func() (SoxInfo, error) { return ProbeSox(ctx) }),
 			FFmpegSnapshot(), j.SourceAbsPath)
 	}
+	if route == routeFFmpegDSDPipe {
+		// The DSD chain owns its own scratch, temp sidecar and publish; see
+		// dsd_render_chain.go.
+		return j.renderDSD(ctx)
+	}
 	input := []string{j.SourceAbsPath}
 	var geo sourceGeometry
 	if route == routeFFmpegPipe {
 		var perr error
 		if geo, perr = probeSourceGeometry(ctx, j.SourceAbsPath); perr != nil {
-			return 0, "", perr
+			return RunResult{}, perr
 		}
 		input = soxStdinInputArgs(geo)
 	}
@@ -919,7 +930,7 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 	// needed MkdirAll(j.OutputDir); the per-file form is now
 	// the load-bearing call (CodeRabbit CRITICAL on PR D1).
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
-		return 0, "", fmt.Errorf("mkdir sidecar dir: %w", err)
+		return RunResult{}, fmt.Errorf("mkdir sidecar dir: %w", err)
 	}
 	// Defensive: clear any stale .tmp from a previous interrupted
 	// run so SoX's open(O_CREAT) doesn't trip on prior crash debris.
@@ -938,11 +949,9 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 	}()
 
 	switch route {
-	case routeFFmpegDSDPipe:
-		return 0, "", fmt.Errorf("%w (%s)", errDSDRenderNotWired, j.SourceLibraryRel)
 	case routeFFmpegPipe:
-		if err := runFFmpegPipe(ctx, args, geo, j.SourceAbsPath); err != nil {
-			return 0, "", err
+		if _, err := runFFmpegPipe(ctx, args, ffmpegDecodeArgs(j.SourceAbsPath)); err != nil {
+			return RunResult{}, err
 		}
 		// ffmpeg exits 0 on a truncated-but-openable source, so the exit
 		// code above cannot tell a partial decode from a whole one. Compare
@@ -950,7 +959,7 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 		// committed on a mismatch, so the candidate re-flows once the source
 		// is whole — the same self-healing shape internal/analyze uses.
 		if produced := probeOutputDuration(ctx, tmpPath); decodeLengthDisagrees(geo.Duration, produced) {
-			return 0, "", fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
+			return RunResult{}, fmt.Errorf("%w: source %.3fs, produced %.3fs (%s)",
 				ErrFFmpegDecodeIncomplete, geo.Duration, produced, j.SourceLibraryRel)
 		}
 	default:
@@ -963,24 +972,21 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 		// debugging "this one file fails".
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return 0, "", fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
+			return RunResult{}, fmt.Errorf("sox: %w (stderr: %s)", err, strings.TrimSpace(string(out)))
 		}
 	}
 	// Atomic rename on success. Same FS as DataDir so this is a
 	// rename(2), not a copy.
-	if err := atomicwrite.RenameWithRetryCtx(ctx, tmpPath, finalPath); err != nil {
-		return 0, "", fmt.Errorf("rename sidecar: %w", err)
+	size, err := publishSidecar(ctx, tmpPath, finalPath)
+	if err != nil {
+		return RunResult{}, err
 	}
 	cleanup = false // success — keep the now-renamed final file
-	info, err := os.Stat(finalPath)
-	if err != nil {
-		return 0, "", fmt.Errorf("stat sidecar: %w", err)
-	}
 	logger.Debug("sox ok",
 		"path", j.SourceLibraryRel,
 		"variant", j.VariantID(),
-		"sidecar_bytes", info.Size())
-	return info.Size(), settings, nil
+		"sidecar_bytes", size)
+	return RunResult{SizeBytes: size, Settings: settings}, nil
 }
 
 // SoxInfo is the result of ProbeSox: where sox lives, its version, and —

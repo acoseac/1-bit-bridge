@@ -1,7 +1,6 @@
 package transcode
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -214,10 +213,3 @@ func lookupCachedPCMVariantID(rate, bits int) (string, bool) {
 	id, ok := pcmIDCache[[2]int{rate, bits}]
 	return id, ok
 }
-
-// errDSDRenderNotWired is what RunSox returns for a DSD route until the
-// two-stage render chain lands in this same PR. Nothing enqueues a DSD job
-// while the eligibility gates are unwired, so it is unreachable in
-// production — it exists so the route can be typed and tested ahead of the
-// chain.
-var errDSDRenderNotWired = errors.New("dsd render: decode chain not wired")

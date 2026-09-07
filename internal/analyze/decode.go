@@ -306,6 +306,19 @@ func decodeFrames(ctx context.Context, srcAbs string, channels int, tool decoder
 		channels = 1
 	}
 	name, args := decodeCommand(tool, srcAbs, channels)
+	return decodeFramesWith(ctx, tool, name, args, srcAbs, channels, expectedSec, onFrame)
+}
+
+// decodeFramesWith is decodeFrames with the decoder argv supplied by the
+// caller. It exists for the ONE reader that must not resample —
+// TruePeakDBTP measures a file at its native rate — while keeping the
+// process-reaping, the redacted stderr and the truncation guard in one
+// place. `tool` labels errors; `args` must emit the same headerless
+// little-endian float32 stream decodeArgs does.
+func decodeFramesWith(ctx context.Context, tool decoderTool, name string, args []string, srcAbs string, channels int, expectedSec float64, onFrame func(frame []float64)) (totalFrames int64, err error) {
+	if channels < 1 {
+		channels = 1
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

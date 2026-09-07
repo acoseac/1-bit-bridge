@@ -336,13 +336,13 @@ func soxStdinInputArgs(g sourceGeometry) []string {
 // Returns the produced duration so the caller can apply the completeness
 // guard against the source's, and the combined stderr of both processes for
 // the error path.
-func runFFmpegPipe(ctx context.Context, soxArgs []string, g sourceGeometry, srcAbs string) error {
-	ff := exec.CommandContext(ctx, resolveBin(ffmpegLookPath, "ffmpeg"), ffmpegDecodeArgs(srcAbs)...)
+func runFFmpegPipe(ctx context.Context, soxArgs, ffmpegArgs []string) (soxStderr string, err error) {
+	ff := exec.CommandContext(ctx, resolveBin(ffmpegLookPath, "ffmpeg"), ffmpegArgs...)
 	sx := exec.CommandContext(ctx, resolveBin(func() (string, error) { return soxLookPath("sox") }, "sox"), soxArgs...)
 
 	pipe, err := ff.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("ffmpeg stdout pipe: %w", err)
+		return "", fmt.Errorf("ffmpeg stdout pipe: %w", err)
 	}
 	sx.Stdin = pipe
 
@@ -351,14 +351,14 @@ func runFFmpegPipe(ctx context.Context, soxArgs []string, g sourceGeometry, srcA
 	sx.Stderr = &sxErr
 
 	if err := ff.Start(); err != nil {
-		return fmt.Errorf("start ffmpeg: %w", err)
+		return "", fmt.Errorf("start ffmpeg: %w", err)
 	}
 	if err := sx.Start(); err != nil {
 		// ffmpeg is already running with nothing to read its output;
 		// kill it rather than leaving it to fill a pipe buffer forever.
 		_ = ff.Process.Kill()
 		_ = ff.Wait()
-		return fmt.Errorf("start sox: %w", err)
+		return "", fmt.Errorf("start sox: %w", err)
 	}
 
 	// Wait on the READER first: os/exec documents that calling Wait on the
@@ -372,7 +372,7 @@ func runFFmpegPipe(ctx context.Context, soxArgs []string, g sourceGeometry, srcA
 	ffWaitErr := ff.Wait()
 
 	if soxWaitErr != nil {
-		return fmt.Errorf("sox: %w (sox stderr: %s) (ffmpeg stderr: %s)",
+		return sxErr.String(), fmt.Errorf("sox: %w (sox stderr: %s) (ffmpeg stderr: %s)",
 			soxWaitErr, strings.TrimSpace(sxErr.String()), strings.TrimSpace(ffErr.String()))
 	}
 	// ffmpeg's exit code alone is NOT a completeness signal — it exits 0 on a
@@ -380,7 +380,9 @@ func runFFmpegPipe(ctx context.Context, soxArgs []string, g sourceGeometry, srcA
 	// on a half-truncated faststart .m4a). That is what the duration guard is
 	// for. A NON-zero exit is still a real failure and is reported here.
 	if ffWaitErr != nil {
-		return fmt.Errorf("ffmpeg: %w (stderr: %s)", ffWaitErr, strings.TrimSpace(ffErr.String()))
+		return sxErr.String(), fmt.Errorf("ffmpeg: %w (stderr: %s)", ffWaitErr, strings.TrimSpace(ffErr.String()))
 	}
-	return nil
+	// sox's stderr is returned on SUCCESS too: sox exits 0 after a
+	// `clipped N samples` warning, and the DSD chain fails on that line.
+	return sxErr.String(), nil
 }
