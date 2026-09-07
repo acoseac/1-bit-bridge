@@ -192,6 +192,8 @@ type JobKind string
 const (
 	JobKindUpscale  JobKind = "upscale"
 	JobKindOptimize JobKind = "optimize"
+	// JobKindPCMRender is declared beside the DSD rendition helpers in
+	// dsd_render.go ("pcm": the faithful DSD → PCM tier).
 )
 
 // Quality presets map to SoX `rate` flag combinations. We keep the
@@ -241,7 +243,27 @@ type JobSpec struct {
 	// SourceBits is the source bit depth (16/24/32), 0 if unknown.
 	// Display-only — feeds the live worker grid's signal-chain string
 	// ("44.1/16 ➔ 176.4/24"); never used in target-rate/bits selection.
-	SourceBits       int
+	SourceBits int
+
+	// SourceIsDSD marks a DSF / DSDIFF source. It selects the DSD variant
+	// families in VariantID() (an optimize job on a DSD source is
+	// `optimized-dsd-…`, never `optimized-v2-…`) and the two-stage decode
+	// chain in RunSox. For a DSD source SourceSampleRate is the NOMINAL
+	// DSD rate (2 822 400 for DSD64) — what the manifest stores — not the
+	// fs/8 rate the decoder emits.
+	SourceIsDSD bool
+	// SourceChannels is the channel count when known (DSD renders need it
+	// to size scratch and validate the decoder's geometry); 0 if unknown.
+	SourceChannels int
+	// SourceDurationSec is the manifest's duration when known; the DSD
+	// render's completeness guard falls back to it when ffprobe reports
+	// 0, and the pool's per-job timeout is derived from it. 0 if unknown.
+	SourceDurationSec float64
+	// SourceCompression is the manifest's compression tag ("DST" for
+	// DST-compressed DSDIFF), forwarded so the pool can budget a DST
+	// decode. Empty for uncompressed sources.
+	SourceCompression string
+
 	TargetSampleRate int // Hz; e.g. 176400 / 192000
 	TargetBits       int // 16/24/32
 	Quality          Quality
@@ -286,13 +308,17 @@ type JobSpec struct {
 // VariantID returns the opaque identifier that uniquely names this
 // JobSpec's output variant. Convention:
 //
-//	upscaled-<schemaVersion>-<targetRate>-<targetBits>   // JobKindUpscale (default)
-//	optimized-<schemaVersion>-<targetRate>-<targetBits>  // JobKindOptimize
+//	upscaled-<schemaVersion>-<targetRate>-<targetBits>          // JobKindUpscale (default)
+//	optimized-<schemaVersion>-<targetRate>-<targetBits>         // JobKindOptimize, PCM source
+//	optimized-dsd-<dsdSchemaVersion>-<targetRate>-<targetBits>  // JobKindOptimize, DSD source
+//	pcm-<dsdSchemaVersion>-<targetRate>-<targetBits>            // JobKindPCMRender (DSD source only)
 //
-// e.g. `upscaled-v2-176400-24` or `optimized-v2-44100-16`. iOS keys
-// on the prefix to slot the variant into the share-level "prefer
-// upscaled" toggle vs. the runtime CarPlay-routing path. Future
-// variant kinds (e.g. PCM→DSD synthesis) get their own prefix.
+// e.g. `upscaled-v2-176400-24`, `optimized-v2-44100-16`,
+// `optimized-dsd-v1-44100-16` or `pcm-v1-176400-24`. iOS keys on the
+// prefix to slot the variant into the share-level "prefer upscaled"
+// toggle vs. the runtime CarPlay-routing path; the DSD families are
+// described in dsd_render.go. Future variant kinds (e.g. PCM→DSD
+// synthesis) get their own prefix.
 //
 // Hot path during manifest scan + every pool callback. The finite
 // (rate × bits) cross-product across all real DACs makes memoization
@@ -303,6 +329,18 @@ type JobSpec struct {
 // `upscaled-v2-*` for `(44100, 16)`, returning that for an optimize
 // job would silently emit the wrong variant ID into `track_variants`.
 func (j JobSpec) VariantID() string {
+	if j.Kind == JobKindPCMRender {
+		if id, ok := lookupCachedPCMVariantID(j.TargetSampleRate, j.TargetBits); ok {
+			return id
+		}
+		return fmt.Sprintf("%s-%s-%d-%d", VariantPrefixPCM, DSDRenditionSchemaVersion, j.TargetSampleRate, j.TargetBits)
+	}
+	if j.Kind == JobKindOptimize && j.SourceIsDSD {
+		if id, ok := lookupCachedOptimizedDSDVariantID(j.TargetSampleRate, j.TargetBits); ok {
+			return id
+		}
+		return fmt.Sprintf("%s-%s-%d-%d", VariantPrefixOptimizedDSD, DSDRenditionSchemaVersion, j.TargetSampleRate, j.TargetBits)
+	}
 	if j.Kind == JobKindOptimize {
 		if id, ok := lookupCachedOptimizeVariantID(j.TargetSampleRate, j.TargetBits); ok {
 			return id
@@ -852,15 +890,16 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 	// portion with a stdin descriptor, and everything downstream is shared.
 	// Deciding here rather than at enqueue means a toolchain installed after
 	// a job was queued is picked up by the run.
-	// Only the MP4 family can route anywhere but sox-direct, and ProbeSox is
-	// a fork+exec — so gate on the cheap extension check and keep this
-	// function's documented "no probe per iteration" contract for every
-	// source that behaves exactly as it did before the fallback existed.
+	// Only the MP4 and DSD families can route anywhere but sox-direct, and
+	// ProbeSox is a fork+exec — so gate on the cheap extension check and
+	// keep this function's documented "no probe per iteration" contract for
+	// every source that behaves exactly as it did before the fallback
+	// existed. FFmpegSnapshot is cached the same way ProbeSox is.
 	route := routeSoxDirect
 	if needsDecodeRouting(j.SourceAbsPath) {
 		route = decodeRouteFor(
 			SnapshotOrOpen(func() (SoxInfo, error) { return ProbeSox(ctx) }),
-			FFmpegAvailable(), j.SourceAbsPath)
+			FFmpegSnapshot(), j.SourceAbsPath)
 	}
 	input := []string{j.SourceAbsPath}
 	var geo sourceGeometry
@@ -899,6 +938,8 @@ func RunSox(ctx context.Context, j JobSpec) (int64, string, error) {
 	}()
 
 	switch route {
+	case routeFFmpegDSDPipe:
+		return 0, "", fmt.Errorf("%w (%s)", errDSDRenderNotWired, j.SourceLibraryRel)
 	case routeFFmpegPipe:
 		if err := runFFmpegPipe(ctx, args, geo, j.SourceAbsPath); err != nil {
 			return 0, "", err
@@ -1140,7 +1181,12 @@ func CreatedAtNow() int64 { return time.Now().UnixNano() }
 // MP4 support is allowed automatically with no code change here.
 //
 // Only shapes the pipeline can actually be handed are listed: lossy
-// sources (manifest.IsLossyCodec) and DSD are already excluded upstream.
+// sources (manifest.IsLossyCodec) are excluded upstream. The DSD entries
+// are LOAD-BEARING even though DSD never routes to sox-direct: an
+// extension absent from this map fails OPEN below, and a fail-open
+// "sox can read .dsf" would let the DSD chain be granted on a host whose
+// ffmpeg lacks the decoders (decodeRouteFor checks DSD first, but the
+// direct CanDecode callers do not go through it).
 var soxFormatsForExt = map[string][]string{
 	".flac": {"flac"},
 	".wav":  {"wav", "wavpcm"},
@@ -1151,6 +1197,8 @@ var soxFormatsForExt = map[string][]string{
 	".mp4":  {"mp4"},
 	".m4b":  {"mp4", "m4a"},
 	".m4p":  {"mp4", "m4a"},
+	".dsf":  {"dsf"},
+	".dff":  {"dff", "dsdiff"},
 }
 
 // CanDecode reports whether this sox build can read the given source file.
@@ -1197,8 +1245,10 @@ func CanDecodeVia(probe func() (SoxInfo, error), sourcePath string) bool {
 	// Consults the ffmpeg fallback too, so the four gate call sites keep
 	// asking one question ("can this be decoded at all?") and gained ALAC
 	// coverage without four separate edits — the same reason this policy was
-	// centralised here in the first place.
-	return decodeRouteFor(SnapshotOrOpen(probe), FFmpegAvailable(), sourcePath) != routeNone
+	// centralised here in the first place. The cached capability snapshot
+	// (not the bare LookPath) is what lets a DSD source answer "no" on a
+	// host whose ffmpeg was built without the DSD decoders.
+	return decodeRouteFor(SnapshotOrOpen(probe), FFmpegSnapshot(), sourcePath) != routeNone
 }
 
 // SnapshotOrOpen returns the probe's SoxInfo, or the ZERO value when the probe

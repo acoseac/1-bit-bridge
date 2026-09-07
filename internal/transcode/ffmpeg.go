@@ -24,7 +24,13 @@ import (
 // ffmpeg and piping PCM into the same sox chain.
 //
 // Everything sox can read still goes to sox directly. The fallback is
-// deliberately NOT "anything sox refuses" — see ffmpegRoutableExt.
+// deliberately NOT "anything sox refuses" — see decodeClassForExt.
+//
+// DSD (DSF / DSDIFF) is the second family here, and it is routed the other
+// way round: ALWAYS through ffmpeg, never sox-direct, and only when the
+// build carries the dsd_* decoders (see ffmpeg_probe.go). sox has no DSD
+// reader in any stock build, and a sox build that lists `dsf` would hand
+// the DSD chain a decoder nothing was measured against.
 
 // ErrFFmpegDecodeIncomplete is returned when the piped decode produced a
 // materially different duration than the source container reports. It means
@@ -41,37 +47,59 @@ var (
 	ffprobeLookPath = func() (string, error) { return exec.LookPath("ffprobe") }
 )
 
-// ffmpegRoutableExt is the closed set of source extensions the fallback will
-// handle: the MP4 container family, which is where ALAC lives.
+// decodeClass groups the source extensions whose decoder is in question.
+// Everything not listed is classSoxOnly: sox reads it or refuses it with its
+// own diagnostic, exactly as every source did before the ffmpeg fallback
+// existed.
+type decodeClass int
+
+const (
+	classSoxOnly decodeClass = iota // sox-direct or an honest sox refusal
+	classMP4                        // the MP4 container family, where ALAC lives
+	classDSD                        // DSF / DSDIFF — ffmpeg decodes, never sox
+)
+
+// decodeClassForExt is the closed allowlist of routable extensions.
 //
-// It is a allowlist rather than "route whatever sox refused" on purpose. The
-// upstream gates already exclude lossy (manifest.IsLossyCodec) and DSD, so
-// anything else reaching a refusal is a shape neither decoder was chosen for,
-// and handing it to ffmpeg would convert an honest "sox can't read this" into
-// a mysterious mid-job failure. Widening this set is a deliberate act with a
+// It is an allowlist rather than "route whatever sox refused" on purpose.
+// The upstream gates exclude lossy (manifest.IsLossyCodec), so anything
+// else reaching a refusal is a shape neither decoder was chosen for, and
+// handing it to ffmpeg would convert an honest "sox can't read this" into a
+// mysterious mid-job failure. Widening this set is a deliberate act with a
 // test behind it, not a side effect.
-var ffmpegRoutableExt = map[string]bool{
-	".m4a": true,
-	".mp4": true,
-	".m4b": true,
-	".m4p": true,
+var decodeClassForExt = map[string]decodeClass{
+	".m4a": classMP4,
+	".mp4": classMP4,
+	".m4b": classMP4,
+	".m4p": classMP4,
+	".dsf": classDSD,
+	".dff": classDSD,
+}
+
+func decodeClassOf(sourcePath string) decodeClass {
+	return decodeClassForExt[strings.ToLower(filepath.Ext(sourcePath))]
 }
 
 // decodeRoute names which decoder a source takes.
 type decodeRoute int
 
 const (
-	routeNone       decodeRoute = iota // neither decoder can read it
-	routeSoxDirect                     // sox reads the file itself
-	routeFFmpegPipe                    // ffmpeg decodes, sox resamples from stdin
+	routeNone          decodeRoute = iota // neither decoder can read it
+	routeSoxDirect                        // sox reads the file itself
+	routeFFmpegPipe                       // ffmpeg decodes, sox resamples from stdin
+	routeFFmpegDSDPipe                    // ffmpeg decodes DSD at fs/8, sox decimates from stdin
 )
 
+// String is the forensic `decoder` value recorded in sox_settings; it is
+// how an operator tells from a row which chain produced a sidecar.
 func (r decodeRoute) String() string {
 	switch r {
 	case routeSoxDirect:
 		return "sox"
 	case routeFFmpegPipe:
 		return "ffmpeg+sox"
+	case routeFFmpegDSDPipe:
+		return "ffmpeg-dsd+sox"
 	default:
 		return "none"
 	}
@@ -118,13 +146,13 @@ func resolveBin(look func() (string, error), fallback string) string {
 // It exists to keep RunSox's documented performance contract — "we don't
 // repeat the probe here so a worker-pool body doesn't pay the LookPath cost
 // per iteration". ProbeSox is a fork+exec (measured: 7.9 ms; FFmpegAvailable
-// is 17 µs), and only the MP4 family can route anywhere but sox-direct, which
-// is what every source did before the fallback existed. So a FLAC/WAV/MP3 job
-// pays nothing and behaves exactly as it did, and only the sources whose
-// decoder is genuinely undecided pay one probe — against a transcode that
-// runs for seconds.
+// is 17 µs), and only the MP4 and DSD families can route anywhere but
+// sox-direct, which is what every source did before the fallback existed. So
+// a FLAC/WAV/MP3 job pays nothing and behaves exactly as it did, and only the
+// sources whose decoder is genuinely undecided pay one probe — against a
+// transcode that runs for seconds.
 func needsDecodeRouting(sourcePath string) bool {
-	return ffmpegRoutableExt[strings.ToLower(filepath.Ext(sourcePath))]
+	return decodeClassOf(sourcePath) != classSoxOnly
 }
 
 // decodeRouteFor picks the decoder for one source. Pure, so the policy is
@@ -132,11 +160,22 @@ func needsDecodeRouting(sourcePath string) bool {
 //
 // sox-direct wins whenever sox can read the file — the fallback exists to
 // widen coverage, never to change how an already-working source is decoded.
-func decodeRouteFor(info SoxInfo, ffmpegOK bool, sourcePath string) decodeRoute {
+// DSD is the one exception, and it is checked FIRST: a DSD source routes
+// through ffmpeg or not at all, whatever sox claims to read, and only when
+// the probe has positively seen the dsd_* decoders (fail closed — a build
+// without them fails mid-job, after a lane was claimed).
+func decodeRouteFor(info SoxInfo, ff FFmpegInfo, sourcePath string) decodeRoute {
+	class := decodeClassOf(sourcePath)
+	if class == classDSD {
+		if ff.Available() && ff.HasDSD {
+			return routeFFmpegDSDPipe
+		}
+		return routeNone
+	}
 	if info.CanDecode(sourcePath) {
 		return routeSoxDirect
 	}
-	if ffmpegOK && ffmpegRoutableExt[strings.ToLower(filepath.Ext(sourcePath))] {
+	if ff.Available() && class == classMP4 {
 		return routeFFmpegPipe
 	}
 	return routeNone
