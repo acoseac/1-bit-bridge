@@ -10,15 +10,24 @@ import (
 // `pcm-` rows, and — the half that matters for a mixed store — the
 // optimize kind still leaves them alone while sweeping BOTH optimized
 // families (the DSD compact tier rides `optimized-dsd-`).
-func TestUpscaleDelete_kindNarrowsToPCM(t *testing.T) {
-	hs, raw, deleter, _ := deleteFixture(t, true)
-	seedMixedKindFixture(deleter)
-	deleter.all = append(deleter.all,
+// seedDSDKindFixture is seedMixedKindFixture plus the two DSD families —
+// one `pcm-` row and one `optimized-dsd-` row on the same source — which
+// is what makes the kind narrowing testable in both directions: `pcm`
+// must take exactly the first, `optimize` exactly the second alongside
+// the PCM optimizes it always swept.
+func seedDSDKindFixture(d *stubVariantDeleter) {
+	seedMixedKindFixture(d)
+	d.all = append(d.all,
 		VariantSummary{SourcePath: "Music/DSD/01.dsf", VariantID: "pcm-v1-176400-24",
 			SidecarPath: "/tmp/p1", SizeBytes: 5000},
 		VariantSummary{SourcePath: "Music/DSD/01.dsf", VariantID: "optimized-dsd-v1-44100-16",
 			SidecarPath: "/tmp/od1", SizeBytes: 400},
 	)
+}
+
+func TestUpscaleDelete_kindNarrowsToPCM(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	seedDSDKindFixture(deleter)
 
 	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true&kind=pcm", raw)
 	defer resp.Body.Close()
@@ -37,13 +46,7 @@ func TestUpscaleDelete_kindNarrowsToPCM(t *testing.T) {
 
 func TestUpscaleDelete_kindOptimizeSweepsBothOptimizedFamiliesNotPCM(t *testing.T) {
 	hs, raw, deleter, _ := deleteFixture(t, true)
-	seedMixedKindFixture(deleter)
-	deleter.all = append(deleter.all,
-		VariantSummary{SourcePath: "Music/DSD/01.dsf", VariantID: "pcm-v1-176400-24",
-			SidecarPath: "/tmp/p1", SizeBytes: 5000},
-		VariantSummary{SourcePath: "Music/DSD/01.dsf", VariantID: "optimized-dsd-v1-44100-16",
-			SidecarPath: "/tmp/od1", SizeBytes: 400},
-	)
+	seedDSDKindFixture(deleter)
 	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true&kind=optimize", raw)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
