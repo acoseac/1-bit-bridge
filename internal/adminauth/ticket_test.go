@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -201,7 +202,14 @@ func TestTicketFileHoldsNoUsableCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("ticket file mode = %04o, want 0600", perm)
+	// Windows has no POSIX permission bits — Go maps the whole mode onto one
+	// read-only flag, so a file written 0600 stats as 0666 and the assertion
+	// cannot hold there. Guard the ASSERTION, not the stat: an `err == nil &&`
+	// form would let the check vanish on any future breakage of the path
+	// itself, which is the shape the backup package already records.
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("ticket file mode = %04o, want 0600", perm)
+		}
 	}
 }
