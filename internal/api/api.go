@@ -30,6 +30,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -2049,14 +2050,29 @@ func (s *Server) appendTailscaleEndpoints(eps []advertise.Endpoint, portStr stri
 // URLs that differ only by the implicit https default
 // (`https://h` vs `https://h:443` would otherwise be distinct
 // strings to classStableUniqueURLs — Gemini medium on PR #295).
+//
+// **It is skipped entirely when customEndpoints already names that
+// HOST**, because `portStr` is the port this process listens on,
+// which is only the port clients dial when nothing remaps it. Behind
+// a proxy that does — the hosted layout, where each bridge listens on
+// a loopback high port and is published on one shared external port —
+// synthesizing it advertises an address no client can reach, and iOS
+// puts every advertised URL into its failover rotation. The operator
+// declaring the host in customEndpoints is them saying what the real
+// address is; the string dedupe downstream cannot see it, because the
+// two URLs differ in the port.
 func publicModeEndpoints(cfg *config.Config, portStr string) []advertise.Endpoint {
 	eps := make([]advertise.Endpoint, 0, len(cfg.CustomEndpoints)+1)
+	declared := make(map[string]bool, len(cfg.CustomEndpoints))
 	for _, raw := range cfg.CustomEndpoints {
 		if raw = strings.TrimSpace(raw); raw != "" {
 			eps = append(eps, advertise.Endpoint{URL: raw, Class: advertise.ClassCustom})
+			if h := endpointHost(raw); h != "" {
+				declared[h] = true
+			}
 		}
 	}
-	if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
+	if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" && !declared[strings.ToLower(d)] {
 		u := "https://" + d
 		if portStr != "443" {
 			u += ":" + portStr
@@ -2064,6 +2080,18 @@ func publicModeEndpoints(cfg *config.Config, portStr string) []advertise.Endpoin
 		eps = append(eps, advertise.Endpoint{URL: u, Class: advertise.ClassCustom})
 	}
 	return eps
+}
+
+// endpointHost is the lowercased hostname of an advertised URL, or "" if it has
+// none. Used to decide whether the operator has already declared the autocert
+// domain, which is a question about the HOST and not about the whole URL — the
+// existing string dedupe downstream only collapses a byte-identical pair.
+func endpointHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // classStableUniqueURLs applies the class-stable sort + dedupe + URL
