@@ -234,12 +234,18 @@
       <dt>Uptime</dt>
       <dd id="diag-uptime">—</dd>
     </dl>
+    {{if not .Data.Managed}}
     <p class="hint">
       The same counters are exposed in Prometheus text format at
       <a href="/metrics"><code>/metrics</code></a>, on this loopback
       listener only. Point a scraper at it if you want history — this page
       shows the current values, not a trend.
     </p>
+    {{else}}
+    <p class="hint">
+      This page shows the current values, not a trend.
+    </p>
+    {{end}}
   </div>
 </section>
 {{end}}

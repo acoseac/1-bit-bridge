@@ -222,6 +222,9 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			d.FingerprintEnabled = cfg.Fingerprint.Enabled
 			// Presence only — the doctor report must never carry the key.
 			d.FingerprintHasAPIKey = cfg.Fingerprint.ResolvedAPIKey() != ""
+			// Skips the two checks that are advice for whoever started
+			// the process — see doctor.Deps.Managed.
+			d.Managed = cfg.Deployment.IsManaged()
 			if host, port, ok := splitHostPort(cfg.ListenAddress); ok {
 				_ = host
 				d.APIPort = port

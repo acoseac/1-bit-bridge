@@ -1963,17 +1963,6 @@ dialog h2 { font-size: 18px; color: var(--fg); }
    * inactive tabs) disables display via the global rule. */
 }
 
-/* Hide the in-pane h2 section-head when tabs are active — the tab
- * label already names the section. Keeping the h2 in the markup
- * for accessibility (screen readers still announce it as a landmark)
- * and for the no-JS fallback below.
- *
- * The `.tabs-enabled` class is added by `initSettingsTabs()` AFTER
- * confirming the tab nav + panes exist. Without JS (or before the
- * init runs), the template renders every pane visible AND every
- * `<h2 class="section-head">` visible — the long-scroll fallback
- * Qodo on PR #129 asked for, so a JS regression can't lock
- * operators out of any Settings section. */
 /* Settings is one scrolling screen; every section heading is real and
  * stays visible. The rule that used to hide the first heading in each
  * pane belonged to the tabbed layout, where the tab label already said

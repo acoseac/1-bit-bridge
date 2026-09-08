@@ -423,6 +423,41 @@ sees the `dlnaServer` health flag, which is already the right behaviour.
 
 ---
 
+## Managed controls: the buttons, as against the fields
+
+`deployment.managedControls` is the sibling list for operator **actions**, which
+`managedSettings` cannot express — "restart this process" is not a field and has
+no value. A managed control is hidden by the console and **refused by its
+handler** (403 `managed_by_host`).
+
+| Control | Endpoints | Why it is not the tenant's |
+|---|---|---|
+| `restart` | `POST /api/restart` | Lifecycle belongs to whoever supervises the unit. |
+| `updates` | `POST /api/updates/{check,install,rollback}` | A fleet shares one binary path; an install here moves every tenant's version, or fails EROFS. |
+| `roots` | `POST` / `DELETE /api/roots` | The handler accepts **any** absolute directory that exists — no containment rule, deliberately, for a NAS mount — and the byte routes then serve what is under it. |
+| `variantsDir` | `POST /api/upscale/variants-dir` | Same shape, on the write side. |
+| `backups` | `POST /api/backups` | Restoring one is a CLI command the reader cannot run; the host's own snapshots are the ones that would be restored from. |
+
+Three rules, and they are not the same three as above:
+
+- **The refusal is the boundary; the hiding is a courtesy.** Every one of these
+  is a plain authenticated request a session holder can send by hand.
+- **The gate is applied at the route table**, not inside the handler. The route
+  table is where you go to ask what somebody with a session can do here.
+- **An unrecognised name manages NOTHING and only warns at startup.** Refusing it
+  would mean a binary rolled BACK during an incident fails to start for every
+  tenant on the host, with `Restart=always` making it a loop. The typo guard
+  therefore lives in the program that writes the file — the conductor's
+  `internal/provision/managed_controls_test.go`, pinned in both directions
+  against a copied name list.
+
+`DeploymentConfig.IsManaged()` (any control listed) is the separate predicate for
+surfaces that would otherwise hand the reader an instruction needing a shell on
+the host: the two `bridge doctor` checks that are advice for whoever started the
+process, `log-file-size`, the log export, and the Diagnostics `/metrics` pointer.
+
+---
+
 ## What a control plane must restart for
 
 **Six fields. Everything else applies live.**

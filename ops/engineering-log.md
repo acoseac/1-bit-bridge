@@ -4364,3 +4364,154 @@ and taking a tenant down. So the synthesised entry is skipped when
 there is them saying what the reachable address is, and there is no reason to
 also guess one. A `customEndpoint` for a different host still leaves the
 autocert domain advertised, which is the existing behaviour and is pinned.
+
+---
+
+## 2026-09-08 — The console on a bridge somebody else runs (managed controls)
+
+`deployment.managedSettings` shipped with the hosted work: a list of settings
+field names a control plane owns, hidden by the console and refused by the
+PATCH. Walking the tenant console after it landed, the settings it hides are
+not the problem. The **buttons** are, and `managedSettings` cannot express one
+— "restart this process" is not a field and has no value.
+
+### What a tenant could actually do
+
+Measured against the live tenant template, with a console session:
+
+- **`POST /api/roots` takes any absolute directory that exists.** `os.Stat`,
+  is-a-dir, basename-collision — no containment rule, deliberately, because a
+  self-hoster points it at a NAS mount. The console's file browser and the byte
+  routes then serve what is under it. Adding `/` on a shared host exposes every
+  world-readable file on the box. Other tenants' datasets are `0750`, so their
+  music was never reachable; `/etc`, the binaries and the tenant list were.
+- **`POST /api/upscale/variants-dir` returned 200** — the same shape on the
+  write side, bounded only by `ProtectSystem=strict` returning EROFS.
+- **`POST /api/updates/install`** would swap a binary that every tenant on the
+  host shares. It fails EROFS today, which is an obscure failure rather than a
+  refusal.
+- **`POST /api/restart`** — lifecycle is systemd's.
+- **`POST /api/backups`** writes a snapshot the tenant cannot restore from
+  (restore is a CLI command) out of a quota they can fill.
+
+An SSRF was checked and is **not** reachable: `POST /api/upnp/servers` takes a
+`manualDescriptionURL` the ingest walk later fetches, which on this host would
+reach the conductor's own `127.0.0.1:7800`. `Validate()` refuses
+`upnpUpstream.enabled` in public mode, so the adapter is nil and every
+`/api/upnp/*` route answers 404. Worth re-checking if public mode ever relaxes
+that.
+
+### The mechanism
+
+`deployment.managedControls`, a sibling list naming actions rather than fields:
+`restart`, `updates`, `roots`, `variantsDir`, `backups`. Hidden by the console
+and **refused by the handler**, because the console is not a boundary — each of
+these is a plain authenticated request a session holder can send by hand.
+
+The gate is applied at the **route table** (`s.managed(config.ManagedControlX,
+s.apiX)`) rather than inside each handler: the route table is where you go to
+ask what somebody with a session can do here, and a check forty lines into a
+handler answers that only if you already suspected it.
+
+An unrecognised name is a **no-op plus a startup warning**, not a config error.
+Gemini argued for failing closed — the tolerated form is silently permissive on
+a typo, which is the dangerous direction. Declined, and the reason is rollback
+rather than rollout: refusing an unknown name means a binary rolled BACK during
+an incident refuses to start for every tenant on the host, with `Restart=always`
+turning that into a loop. The typo it worried about is real, so the guard moved
+to the program that writes the file — `internal/provision/managed_controls_test.go`
+in the conductor pins both directions against a copied name list, and both were
+negative-controlled.
+
+### The console half
+
+`hideManagedSettings` hid individual `.field`s. A settings section is a heading,
+its prose and its controls as flat siblings, so a section whose every control is
+managed kept a heading and a paragraph about a switch that was no longer there.
+`collapseEmptySettingsSections()` collapses a section only when it had at least
+one `.field` and every one is hidden — one surviving control keeps the section,
+because the prose is usually about the one that survived — and hides a jump link
+whose pane has nothing left.
+
+Verified in a browser against a fixture bridge, not from the Go suite, because
+this repo has twice shipped a console defect with a green suite. With the tenant
+list: `Access` link hidden, `Acoustic fingerprinting` / `Audio analysis` /
+`Networking` / `Backups` headings hidden, restart button and Updates tab absent,
+and the eleven fields a tenant actually owns still there.
+
+Two things that the collapse exposed:
+
+- The restart button's writes were unguarded (`restartBtn.hidden = false` on a
+  `restartRequired` save). With the button dropped server-side that throws a
+  `TypeError` **after** a successful save, so the save reports "Save failed".
+- Hiding "Snapshot now" while `POST /api/backups` still answered would have left
+  the console and the API disagreeing, which is why `backups` is a control.
+
+### Diagnostics
+
+`bridge doctor --json` run as the live `bt-demo` user produced eleven `ok` and
+**two `warn`, both of them unactionable**: `service-manager` — "no user systemd
+session", hint "use `bridge init --no-service` and run `bridge serve`
+yourself" — and `browser-opener` — "install missing". A healthy appliance read
+as two problems, with instructions requiring a shell the reader does not have.
+`log-file-size` is the same class and prints an absolute host path into the
+report. All three skip when managed.
+
+`resolveLogFile`'s three wordings (a terminal, `journalctl -u 1-bit-bridge`,
+`docker logs`) are the same failure the function already exists to avoid — the
+container branch was added because the journald wording was wrong in a
+container. A managed bridge gets a fourth branch, ahead of the others, and it
+answers for all three export routes rather than only the status one.
+
+The Process panel's `/metrics` pointer is loopback-gated, so on a hosted bridge
+it offered a link that answers 403 to the reader being told to scrape it.
+
+### The defect the review found: Save was impossible on a managed bridge
+
+CodeRabbit flagged that the Save payload sends `false` / `""` / `0` for the
+three update fields once their pane is gone. Verified, and the consequence is
+larger than the finding: the payload is an explicit allowlist naming every
+field, `hideManagedSettings` sets `hidden` on the enclosing `.field` rather than
+removing the input, and a hidden input is still in `FormData`. So every managed
+field was being SUPPLIED on every save — and `managedFieldsIn` refuses the PATCH
+**whole** when any managed field is supplied.
+
+Renaming the library on the fixture, in a browser:
+
+```
+Save failed: these settings are managed by the control plane on this bridge and
+cannot be changed here: adminAddress, analysisEnabled, atlasEnabled,
+autoOptimizeEnabled, backupIntervalHours, backupKeep, dlnaEnabled,
+enrichCoverArtBaseURL, enrichMusicBrainzBaseURL, fingerprintEnabled,
+libraryWatchEnabled, listenAddress, mdnsEnabled, optimizeEnabled, tailscaleMode,
+updateAutoInstall, updateCheckIntervalHours, updateQuietHours, upscaleEnabled
+```
+
+Nineteen field names the operator never touched, in place of a rename. This was
+live on the hosted product, not introduced here — `managedSettings` shipped
+before this PR — and no test could see it, because the payload is built in JS
+and the suite has no engine to run it in. It took driving the real form.
+
+The fix is one rule, not three exemptions: **the console sends what it showed.**
+`dropUnofferedFields` drops any key whose control is absent from the form or
+inside something `hidden`, which covers a managed field, a collapsed section and
+a hidden pane alike. `dlnaEnabled` already did this for its own case (a disabled
+checkbox, Gemini on PR #342) — it was never generalised. Measured after:
+unmanaged sends 28 keys and saves; managed sends 8, exactly the unmanaged ones,
+and saves.
+
+The same review's other finding was that `managedControls` was published and
+never consumed, so `roots`, `variantsDir` and `backups` had refusing endpoints
+and rendering controls. Fixed server-side (a `Managed map[string]bool` on the
+page envelope) rather than in `app.js`, for the reason the restart button is:
+a control that appears and then vanishes when a fetch resolves is one somebody
+can click.
+
+### Corrected while here
+
+`settings.html` and `app.css` both described a tabbed show/hide layout with a
+`.tabs-enabled` class that `initSettingsTabs()` adds. It adds no such class and
+never has in this form — the layout is a jump list over one scrolling form, and
+app.css carried the *correct* description directly beneath the stale one. Third
+entry in this file's own "check the code before believing a doc about it"
+tally.

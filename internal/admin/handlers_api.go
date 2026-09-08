@@ -407,6 +407,18 @@ type settingsResponse struct {
 	// self-hosted install has none and the field is omitted.
 	ManagedSettings []string `json:"managedSettings,omitempty"`
 
+	// ManagedControls names the operator ACTIONS that control plane
+	// owns — the buttons, as against the fields above. Same contract:
+	// the console does not offer them and the endpoint refuses them.
+	ManagedControls []string `json:"managedControls,omitempty"`
+
+	// RestartManaged / UpdatesManaged are ManagedControls, read for
+	// the template, which has no membership test. Template-only, so
+	// they stay off the wire: the list above is the wire form and two
+	// spellings of one fact on one payload is how they drift apart.
+	RestartManaged bool `json:"-"`
+	UpdatesManaged bool `json:"-"`
+
 	// Populated by the page handler, not settingsResponseFromConfig:
 	// it is runtime state from the updater, not config.
 	Update *UpdateStatus `json:"update,omitempty"`
@@ -1888,6 +1900,9 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 	resp := settingsResponse{
 		LibraryName:              cfg.LibraryName,
 		ManagedSettings:          cfg.Deployment.ManagedSettings,
+		ManagedControls:          cfg.Deployment.ManagedControls,
+		RestartManaged:           cfg.Deployment.IsManagedControl(config.ManagedControlRestart),
+		UpdatesManaged:           cfg.Deployment.IsManagedControl(config.ManagedControlUpdates),
 		ListenAddress:            cfg.ListenAddress,
 		AdminAddress:             cfg.AdminAddress,
 		DataDir:                  cfg.DataDir,

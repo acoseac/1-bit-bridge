@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -986,6 +987,135 @@ type DeploymentConfig struct {
 	// Empty (the default, and every self-hosted install) manages nothing
 	// and changes no behaviour.
 	ManagedSettings []string `yaml:"managedSettings,omitempty"`
+
+	// ManagedControls names operator ACTIONS the control plane owns,
+	// as ManagedSettings does for settings fields.
+	//
+	// The two lists exist separately because they answer different
+	// questions. A managed setting is a value somebody else chose; a
+	// managed control is a button that must not exist here at all —
+	// "restart this process" is not a field, has no value, and cannot
+	// be expressed as one.
+	//
+	// A managed control is hidden by the console AND refused by its
+	// handler. The refusal is the half that matters: the console is a
+	// convenience, not a boundary, and every one of these is a plain
+	// authenticated POST that a session holder can send by hand.
+	//
+	// The names are ManagedControl* below. An unknown name is a no-op
+	// and is REPORTED at startup rather than refused — see
+	// UnknownManagedControls for why that direction.
+	//
+	// Empty (the default, and every self-hosted install) manages
+	// nothing and changes no behaviour.
+	ManagedControls []string `yaml:"managedControls,omitempty"`
+}
+
+// The managed-control names. Exported because the control plane writes
+// them into a tenant's bridge.yaml and its tests pin these spellings —
+// a string constant on both sides of a file is the only thing keeping
+// the two repos agreeing.
+const (
+	// ManagedControlRestart covers POST /api/restart. Process
+	// lifecycle belongs to whoever supervises the unit.
+	ManagedControlRestart = "restart"
+
+	// ManagedControlUpdates covers the three POST /api/updates/*
+	// actions. Fleet-managed installs share one binary path, so an
+	// install here is either a no-op, an obscure EROFS, or — on a
+	// layout where it succeeded — a version move for every tenant on
+	// the host, requested by one of them.
+	ManagedControlUpdates = "updates"
+
+	// ManagedControlRoots covers POST and DELETE /api/roots.
+	//
+	// This one is a containment boundary, not tidiness. The handler
+	// accepts any absolute directory that exists — deliberately, for
+	// a self-hosted operator pointing at a NAS mount — and the byte
+	// routes then serve what is under it. On a shared host that is
+	// every world-readable file on the box.
+	ManagedControlRoots = "roots"
+
+	// ManagedControlVariantsDir covers POST /api/upscale/variants-dir,
+	// which is the same "choose a directory outside my data" shape as
+	// roots, on the write side.
+	ManagedControlVariantsDir = "variantsDir"
+
+	// ManagedControlBackups covers POST /api/backups — "Snapshot now".
+	//
+	// Not a containment question like the two above: a snapshot writes a
+	// copy of this bridge's own database into its own data directory. It
+	// is here because RESTORING one is a CLI command, so on a deployment
+	// where the reader has no shell the button produces a file they
+	// cannot use out of a quota they can fill, while the host's own
+	// snapshots are the ones that would actually be restored from.
+	ManagedControlBackups = "backups"
+)
+
+// knownManagedControls is the closed set the current build understands.
+var knownManagedControls = []string{
+	ManagedControlRestart,
+	ManagedControlUpdates,
+	ManagedControlRoots,
+	ManagedControlVariantsDir,
+	ManagedControlBackups,
+}
+
+// KnownManagedControls returns the names this build understands, for the
+// startup warning that names the unrecognised ones. A copy, so a caller
+// cannot reorder the package's own list.
+func KnownManagedControls() []string {
+	return append([]string(nil), knownManagedControls...)
+}
+
+// IsManagedControl reports whether an operator action is control-plane
+// owned on this bridge. Exact comparison, for the reason
+// IsManagedSetting gives.
+func (d DeploymentConfig) IsManagedControl(name string) bool {
+	for _, m := range d.ManagedControls {
+		if m == name {
+			return true
+		}
+	}
+	return false
+}
+
+// IsManaged reports whether somebody other than the reader operates
+// this process.
+//
+// Keyed on ManagedControls rather than ManagedSettings, because the
+// controls are the half that says a person is not the operator here: a
+// self-hoster can plausibly pin a few settings from configuration
+// management and still be the one holding the machine, but nobody takes
+// their own restart button away.
+//
+// Used where the console would otherwise give advice that assumes a
+// shell on the host — read the journal, run the installer, point a
+// scraper at the loopback listener.
+func (d DeploymentConfig) IsManaged() bool {
+	return len(d.ManagedControls) > 0
+}
+
+// UnknownManagedControls returns the configured names this build does
+// not recognise, for a startup warning.
+//
+// Tolerated rather than refused, because the two failure directions are
+// not symmetric in the way they first look. Refusing an unknown name
+// means a control plane that learns a new one before its fleet has
+// been upgraded stops EVERY tenant on the host from booting — a config
+// file written by another program is not a typo an operator is standing
+// there to fix. Tolerating it means a misspelling (`restarts`) leaves
+// the control live, which is the silently-permissive direction and the
+// reason this returns the names instead of swallowing them: a warning
+// at startup is what turns a silent one into a visible one.
+func (d DeploymentConfig) UnknownManagedControls() []string {
+	var out []string
+	for _, m := range d.ManagedControls {
+		if !slices.Contains(knownManagedControls, m) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // IsManagedSetting reports whether a settings field is control-plane

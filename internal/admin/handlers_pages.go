@@ -79,7 +79,15 @@ type pageData struct {
 	ServerVersion   string
 	ProtocolVersion int
 	IsPublic        bool
-	Data            any
+	// Managed answers `{{if .Managed.roots}}` from any page's template.
+	// A map rather than a field per control: the set is config, and a
+	// bool per name would need a struct edit for every control added.
+	// Server-rendered rather than hidden by JS for the reason the
+	// restart button is — a control that appears and then vanishes is one
+	// somebody can click, and these are the controls the endpoint
+	// refuses.
+	Managed map[string]bool
+	Data    any
 }
 
 // playerNavEntry maps a player sub-section to the sidebar entry that
@@ -248,6 +256,7 @@ func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, active
 		ServerVersion:   version.ServerVersion,
 		ProtocolVersion: version.ProtocolVersion,
 		IsPublic:        cfg.IsPublic(),
+		Managed:         managedControlSet(cfg),
 		Data:            data,
 	}
 

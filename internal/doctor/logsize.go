@@ -42,6 +42,15 @@ const logSizeWarnBytes int64 = 256 << 20
 // `bridge serve` has no log file at all, and reporting on one would be
 // reporting on something that does not exist.
 func checkLogSize(_ context.Context, d Deps) Check {
+	// A managed bridge's log is the host's, in every sense that matters
+	// here: the remedy this check points at is the platform's rotation
+	// tool, and the reader has no shell to run it from. The console
+	// refuses the log EXPORT on the same grounds (resolveLogFile), so
+	// leaving the check would have one surface calling the log the
+	// host's business while the other names its path and size.
+	if d.Managed {
+		return ok(checkNameLogSize, "log kept by the host — check skipped")
+	}
 	if d.LogPath == "" {
 		return ok(checkNameLogSize, "no log file configured (logs go to the terminal)")
 	}

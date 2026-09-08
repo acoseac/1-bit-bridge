@@ -4,7 +4,15 @@
   <p class="lede">
     Fields marked <span class="badge warn">restart</span> require the server
     to restart before the change takes effect.
-    {{if .Data.IsSupervised}}
+    {{/* The three arms answer one question — "what do I do after saving a
+         restart-bound field?" — and the answer differs by who owns this
+         process. On a managed bridge the honest answer is "nothing, and
+         not by you": there is no button, so saying when it lands is the
+         only useful thing left to say. */}}
+    {{if .Data.RestartManaged}}
+      Saved either way — a change of that kind takes effect the next time
+      the host restarts this bridge.
+    {{else if .Data.IsSupervised}}
       Hit <em>Restart now</em> after saving — the service manager
       (launchd / systemd / SCM) will relaunch the bridge automatically.
     {{else}}
@@ -34,15 +42,20 @@
       keyboard nav relies on the role=tab/tablist/tabpanel
       pattern the JS already implements.
 
-      Panes are NOT marked `hidden` in the template (Qodo on PR
-      #129). `initSettingsTabs()` adds a `.tabs-enabled` class to
-      the page on init AND applies the `hidden` attribute to
-      non-active panes. Without JS or before init, every section
-      stays visible — operators can't be locked out of Settings
-      by a JS regression. The CSS rule that visually hides the
-      in-pane <h2 class="section-head"> when tabs are active is
-      also gated on `.tabs-enabled` so the no-JS fallback shows
-      every heading too.
+      Panes are NOT marked `hidden` and nothing hides them: the
+      layout is a jump LIST over one long scrolling form, so
+      `initSettingsTabs()` only scrolls and marks the active link
+      (plus a scrollspy). Without JS every section is still there
+      and still reachable — operators can't be locked out of
+      Settings by a JS regression.
+
+      This comment described a tabbed show/hide layout with a
+      `.tabs-enabled` class until 2026-09-08. There was no such
+      class in app.js by then, and app.css carried the same claim
+      directly above the rule that had replaced it. The one thing
+      that DOES hide a pane now is a control-plane-managed
+      deployment, from `collapseEmptySettingsSections()` — see
+      internal/admin/managed_controls.go.
     */}}
     <div class="settings-layout">
     <nav class="jump-nav" aria-label="Settings sections">
@@ -50,7 +63,7 @@
       <a class="jump-link" data-tab="enrichment" href="#settings-panel-enrichment">Metadata</a>
       <a class="jump-link" data-tab="audio" href="#settings-panel-audio">Audio</a>
       <a class="jump-link" data-tab="networking" href="#settings-panel-networking">Access</a>
-      <a class="jump-link" data-tab="updates" href="#settings-panel-updates">Updates</a>
+      {{if not .Data.UpdatesManaged}}<a class="jump-link" data-tab="updates" href="#settings-panel-updates">Updates</a>{{end}}
       <a class="jump-link" data-tab="backups" href="#settings-panel-backups">Backups</a>
       <a class="jump-link" data-tab="endpoints" href="#settings-panel-endpoints">Status</a>
     </nav>
@@ -140,7 +153,12 @@
         mirror on your own network.
       </p>
 
-      <div class="field">
+      {{/* `data-managed-with` because this picker has no server field of
+           its own — it RESOLVES into enrichMusicBrainzBaseURL and
+           enrichCoverArtBaseURL, so when the control plane owns those,
+           the picker is a control that changes nothing while the page
+           still says "Saved." hideManagedSettings hides it with them. */}}
+      <div class="field" data-managed-with="enrichMusicBrainzBaseURL">
         <label>Enrichment source
           <select name="enrichSource">
             <option value="musicbrainz" {{if eq .Data.EnrichSource "musicbrainz"}}selected{{end}}>MusicBrainz (public)</option>
@@ -150,7 +168,7 @@
         </label>
       </div>
 
-      <div class="field" id="enrich-atlas-field" {{if ne .Data.EnrichSource "atlas"}}hidden{{end}}>
+      <div class="field" id="enrich-atlas-field" data-managed-with="enrichMusicBrainzBaseURL" {{if ne .Data.EnrichSource "atlas"}}hidden{{end}}>
         <label>Atlas URL
           <input name="enrichAtlasURL" type="url" value="{{.Data.EnrichAtlasURL}}"
                  placeholder="https://atlas.example.com">
@@ -646,6 +664,12 @@
       </div>
     </div>
 
+    {{/* The whole Updates tab, not just its three managed fields: with
+         the cadence fields hidden the pane would still carry Check /
+         Install / Roll back, and installing here would move a binary
+         this bridge shares with every other tenant on the host. The
+         endpoints refuse it as well. */}}
+    {{if not .Data.UpdatesManaged}}
     <div id="settings-panel-updates" class="tab-pane" data-tab="updates">
       <h2 class="section-head">Updates</h2>
       <p class="lede">
@@ -780,6 +804,7 @@
       <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
     </div>
     </div>
+    {{end}}
 
     <div id="settings-panel-backups" class="tab-pane" data-tab="backups">
       <h2 class="section-head">Backups</h2>
@@ -787,7 +812,7 @@
         <div class="panel-head">
           <h2>Snapshots</h2>
           <span class="panel-actions">
-            <button type="button" id="backup-now" class="btn">Snapshot now</button>
+            {{if not $.Managed.backups}}<button type="button" id="backup-now" class="btn">Snapshot now</button>{{end}}
           </span>
         </div>
         <dl>
@@ -915,7 +940,11 @@
     */}}
     <div class="actions" id="restart-actions">
       <button type="submit" class="btn primary">Save</button>
-      <button type="button" id="restart-btn" class="btn" hidden data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">{{if .Data.IsSupervised}}Restart now{{else}}Stop now{{end}}</button>
+      {{/* Absent, not disabled, when the host owns the lifecycle: a
+           greyed button still says "this is yours, just not now". The
+           endpoint refuses it too (internal/admin/managed_controls.go)
+           — this only stops it being offered. */}}
+      {{if not .Data.RestartManaged}}<button type="button" id="restart-btn" class="btn" hidden data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">{{if .Data.IsSupervised}}Restart now{{else}}Stop now{{end}}</button>{{end}}
     </div>
     <p id="settings-msg" class="status" hidden></p>
   </form>
