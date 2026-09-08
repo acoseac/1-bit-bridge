@@ -162,6 +162,8 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 
 **Host audio toolchain (upscale + analysis):** because this host runs the audio-analysis feature (and can run upscale/optimize), it needs the audio toolchain installed via apt: `sudo apt install sox libsox-fmt-all ffmpeg`. `sox` drives the offline upscale/optimize pipeline and is the primary analysis decoder; **`libsox-fmt-all` supplies FLAC** — Debian/Ubuntu split it into a separate plugin package and the bridge forces `-t flac`, so plain `sox` alone fails the `internal/doctor` FLAC check; `ffmpeg`/`ffprobe` are the analysis fallback decoder for AAC/m4a that sox can't open, and — since PR #863 — the decoder for the DSD → PCM renditions (`upscale.dsdRender.enabled`): the apt build carries the `dsd_*` + `dst` decoders (verify with `ffmpeg -hide_banner -decoders | grep -E ' dsd_| dst '`; `bridge doctor`'s `dsd-render-toolchain` check says the same). Rendering scratch goes to `upscale.tempDir` (default under the system temp dir) — keep it on LOCAL disk, never on the B2 FUSE mount, and mind that a faithful 176.4 kHz render of an hour-long track stages ~5 GB there. The three prerequisites degrade INDEPENDENTLY, so read `bridge doctor` rather than assuming one verdict covers them: no `sox` (or no FLAC handler) turns `upscale.enabled` off at `bridge serve` startup and takes `analysis.enabled`'s primary decoder with it (the LookPath probe logs a `disabling` line); an `ffmpeg` missing any of the four `dsd_*` decoders leaves `upscale.dsdRender.enabled` written but INERT — `/v1/health` stops advertising `dsdRender` and every DSD job is refused with a typed error — while PCM upscaling carries on unaffected; and an `ffmpeg` that has the `dsd_*` decoders but not `dst` renders plain DSF/DFF normally and skips only DST-compressed DSDIFF. This is a systemd/apt-host prerequisite only — the Docker image bundles the same toolchain by default (see [`docs/docker.md`](docker.md)).
 
+**Set `upscale.tempDir` EXPLICITLY on this host — do not leave it empty.** The unit runs `PrivateTmp=yes`, so an empty `tempDir` (the "OS temp dir" default) puts the daemon's Stage A scratch inside a per-service mount namespace that **no CLI process can see**. `bridge --gc`'s `PurgeStaleRenderScratch` then sweeps the *real* `/tmp` and never the daemon's, so the one cleanup path for scratch orphaned by a SIGKILL or power loss silently covers nothing. (systemd wipes the private tmp on every restart, which is a second net, but it only fires on a restart.) `bridge.ars.md` is set to `/home/arsenie/bridge-data/tmp` — inside the unit's `ReadWritePaths` carve-out, on the same local ext4 root as `/tmp` (checked: `/tmp` here is **not** a separate tmpfs, so it is disk-backed either way and a multi-GB scratch cannot pressure RAM — verify with `findmnt /tmp` before assuming this on another host), and unambiguously not the B2 mount. The render creates the `1-bit-bridge-render/` subdirectory itself via `MkdirAll`, so only the parent needs to exist and be writable.
+
 **Host fingerprint toolchain (acoustic fingerprinting):** the fallback shells out to
 `fpcalc` (Chromaprint), which is a *separate* dependency from sox — it links its own
 FFmpeg and is unaffected by the `libsox-fmt-all` split above. Install per OS:
@@ -236,6 +238,23 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .leCertNotAfter'
 ```
 
 **Leave the `bridge.old-<ts>` backup ~24h** so a regression caught later has one-step rollback (`sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.broken && sudo mv /usr/local/bin/bridge.old-<ts> /usr/local/bin/bridge && sudo systemctl restart 1-bit-bridge`).
+
+**⚠️ A BINARY ROLLBACK MUST REVERT THE CONFIG IN THE SAME STEP WHENEVER THE DEPLOY ADDED A CONFIG KEY — ROLLING BACK PAST A CONFIG KEY CRASH-LOOPS THE SERVICE.** The loader is strict (`dec.KnownFields(true)` — a typo-catcher, so an unknown YAML key *fails the load*, it does not warn), and the unit is `Restart=always`. So an older binary meeting a newer config does not start, retries every 5 s, and the bridge is down — while `/usr/local/bin/bridge` looks perfectly fine and the rollback command above reports success. The one-step rollback in the previous paragraph is correct only for a deploy that changed no config. Concretely, `v0.1.9-154` (2026-09-08) introduced `upscale.dsdRender` and `upscale.tempDir`, so rolling back to `v0.1.9-149` or earlier requires the config backup too:
+
+```bash
+# Rollback for a deploy that ALSO added config keys. Config FIRST — while the
+# new binary is still running and can still read the new config, so there is no
+# window where the running binary and the on-disk config disagree.
+ls -1t /home/arsenie/bridge-data/bridge.yaml.bak-*   # the deploy leaves one per config change
+cp -p /home/arsenie/bridge-data/bridge.yaml.bak-<ts> /home/arsenie/bridge-data/bridge.yaml
+sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.broken
+sudo mv /usr/local/bin/bridge.old-<ts> /usr/local/bin/bridge
+sudo setcap cap_net_bind_service=+ep /usr/local/bin/bridge   # the swap drops the file capability
+sudo systemctl restart 1-bit-bridge
+systemctl is-active 1-bit-bridge && curl -s https://bridge.ars.md/v1/health | jq '.serverVersion'
+```
+
+**Validate a config edit BEFORE restarting, never after** — `bridge doctor --config <path>` loads and validates it in a throwaway process, so a bad key is a non-zero exit against a service that is still happily serving. Restarting first turns the same typo into a crash-loop you then have to diagnose from the journal. For the same reason, **deploy the binary first and edit the config second** when a release adds keys: the running (old) binary never sees a key it does not know, and the deploy stays independently verifiable before any behaviour changes.
 
 **The script prunes those backups itself, but only AFTER health confirms the new binary serves traffic** (`KEEP_BACKUPS`, default 2 — the immediate rollback plus one behind it). Pruning earlier could delete the rollback path while it is still the thing you need. Two details are load-bearing:
 
