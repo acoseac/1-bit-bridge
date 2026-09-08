@@ -179,11 +179,15 @@ func TestDatabaseStatsAreCachedAndInvalidatedByCompaction(t *testing.T) {
 // for why the window is comment-stripped and CRLF-normalised.
 func assertInSettingsPayload(t *testing.T, fields ...string) {
 	t.Helper()
-	body := jsFunctionBody(t, "function initSettings(")
+	// The allowlist lived inside initSettings' submit handler until it
+	// was extracted into its own function; this scan followed it. The
+	// vacuity guard below is what made that a loud failure rather than a
+	// silently-empty window, which is the whole reason it is here.
+	body := jsFunctionBody(t, "function buildSettingsPayload(")
 	// Vacuity guard: a window that no longer contains the payload builder
 	// would pass every assertion below while checking nothing.
 	if !strings.Contains(body, "backupKeep") {
-		t.Fatal("the initSettings window does not contain the settings payload — the scan is " +
+		t.Fatal("the buildSettingsPayload window does not contain the settings payload — the scan is " +
 			"reading the wrong span")
 	}
 	for _, f := range fields {
