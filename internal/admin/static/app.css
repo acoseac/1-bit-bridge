@@ -918,6 +918,23 @@ main {
 @media (max-width: 1023px) {
   body {
     grid-template-columns: minmax(0, 1fr);
+    /* `auto 1fr`, not the implicit `auto auto`.
+     *
+     * One column means the rail and the content well become two ROWS, and
+     * `body` carries `min-height: 100vh` with `align-content` at its initial
+     * `normal` — which behaves as STRETCH for grid. Leftover viewport height
+     * was therefore split evenly between the two rows, so on any page shorter
+     * than the screen the top bar sat in a row half the free space taller than
+     * itself and the content started an equal distance further down.
+     *
+     * Measured on a 375x812 viewport with a 65px bar and 541px of content:
+     * rows came out `167.758px 644.242px`, putting <main> at y=168 with 103px
+     * of nothing above it. Scroll that away and what is left on screen is a
+     * blank band where the menu button should be — which is exactly what it
+     * looked like, and why the button was reported as missing rather than as
+     * misplaced. With `auto 1fr` the rows are `65px 747px` and <main> starts
+     * at 65. */
+    grid-template-rows: auto 1fr;
   }
 
   /* The rail is a top bar here, so the content well starts at x=0 and the

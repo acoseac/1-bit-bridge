@@ -187,6 +187,7 @@ export async function renderAlbums(view, ctx) {
     banner: sourceScopeBanner(scope.source),
     emptyTitle: "No albums here",
     emptyDetail: emptyGridDetail({ needs, quality, scoped: Object.keys(scope).length > 0 }),
+    emptyAction: emptyGridAction({ needs, quality, scoped: Object.keys(scope).length > 0 }),
   });
 }
 
@@ -203,7 +204,25 @@ function emptyGridDetail({ needs, quality, scoped }) {
   if (needs !== "all") return "Every album that can take these already has them.";
   if (scoped) return "Nothing here matches the current filter.";
   if (quality !== "all") return "Nothing in the library matches this quality filter.";
-  return "Add a library root and run a scan.";
+  return "Add music through this page, or point the bridge at a library root and scan it.";
+}
+
+/**
+ * The button for a library that is genuinely empty — not one a filter emptied.
+ *
+ * It used to say only "Add a library root and run a scan", which is the right
+ * advice for someone with a shell on the host and impossible advice for anyone
+ * else: on a hosted bridge `libraryRoots` is a managed setting the console
+ * refuses to change, so the only way in is this page. It is the first thing a
+ * new library shows, and it pointed at the one door that is locked.
+ *
+ * Unconditional, matching the sidebar entry beside it: `/upload` explains
+ * itself when uploads are switched off, which is better than a console that
+ * silently offers no way to add anything.
+ */
+function emptyGridAction({ needs, quality, scoped }) {
+  if (needs !== "all" || scoped || quality !== "all") return null;
+  return { href: "/upload", label: "Add music" };
 }
 
 function albumTile(a) {
@@ -1045,7 +1064,8 @@ function setAxisTitle(label) {
 async function renderPagedList(view, ctx, opts) {
   const { gen } = ctx;
   const { fetchPage, pick, make, containerClass = "rows",
-    emptyTitle, emptyDetail, countNoun = "", label = "", banner = null } = opts;
+    emptyTitle, emptyDetail, emptyAction = null,
+    countNoun = "", label = "", banner = null } = opts;
 
   clear(view);
   view.appendChild(spinner());
@@ -1109,7 +1129,7 @@ async function renderPagedList(view, ctx, opts) {
           // there: "no albums here" with no sign of an active filter
           // reads as a broken library rather than a narrow view.
           if (banner) view.appendChild(banner);
-          view.appendChild(emptyState(emptyTitle, emptyDetail));
+          view.appendChild(emptyState(emptyTitle, emptyDetail, emptyAction));
           return;
         }
         if (!container) {

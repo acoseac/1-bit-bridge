@@ -116,10 +116,25 @@ export function spinner(label = "Loading…") {
   return el("p", { class: "player-status muted", text: label });
 }
 
-export function emptyState(title, detail) {
-  return el("div", { class: "player-empty" },
+export function emptyState(title, detail, action) {
+  const box = el("div", { class: "player-empty" },
     el("h2", { text: title }),
     detail ? el("p", { class: "muted", text: detail }) : null);
+  // An empty library is the one empty state with something to DO about it, so
+  // it gets a real control rather than a sentence describing one. `action` is
+  // `{ href, label }`; every other caller passes nothing and is unchanged.
+  if (action) {
+    // NOT the player's link() helper: that stamps data-route, which routes the
+    // click through the PLAYER, and an operator route like /upload is not a
+    // player path. `data-boost` hands it to the admin boost router instead,
+    // which swaps operator pages in place and is what keeps <audio> alive.
+    box.appendChild(el("a", {
+      class: "btn primary player-empty-action",
+      attrs: { href: action.href, "data-boost": "" },
+      text: action.label,
+    }));
+  }
+  return box;
 }
 
 export function errorState(err, retry) {

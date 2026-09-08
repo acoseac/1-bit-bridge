@@ -237,6 +237,11 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .player-status { padding: var(--space-5) 0; }
 .player-empty { padding: var(--space-6) 0; text-align: center; }
 .player-empty h2 { margin: 0 0 var(--space-2); font-size: 1.1rem; }
+/* The action an empty library offers. Its OWN class, never `.btn` — this file
+ * must not style operator classes, and app.css owns that one. `inline-flex`
+ * because .btn is written for <button> and an <a> is inline by default, so it
+ * would otherwise ignore the vertical padding and sit on the text baseline. */
+.player-empty-action { display: inline-flex; align-items: center; margin-top: var(--space-3); }
 
 .toolbar { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-4); }
 /* A toolbar with a feature tray under it. The tray has to live INSIDE
