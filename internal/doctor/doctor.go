@@ -160,6 +160,22 @@ type Deps struct {
 	// which logs to its terminal) makes checkLogSize a no-op rather than a
 	// complaint about a file that does not exist.
 	LogPath string
+
+	// Managed mirrors cfg.Deployment.IsManaged(): a control plane runs
+	// this process and whoever is reading the report has no shell on the
+	// host.
+	//
+	// It skips the two checks whose entire content is advice for the
+	// person who STARTED the bridge — "no user systemd session, use
+	// `bridge init --no-service`" and "no browser opener, install one".
+	// Both are correct about a hosted appliance and both are addressed to
+	// nobody: measured against a live tenant they were the only two
+	// warnings in the report, so a healthy install read as two problems
+	// with instructions its reader could not follow.
+	//
+	// Skipped rather than answered: the checks are not wrong, they are
+	// about a machine that is not the reader's.
+	Managed bool
 }
 
 // Report is the collection of checks from a single doctor run.
@@ -507,6 +523,9 @@ func checkLibraryRoots(_ context.Context, d Deps) Check {
 }
 
 func checkServiceManager(ctx context.Context, d Deps) Check {
+	if d.Managed {
+		return ok(checkNameServiceManager, "lifecycle managed by the host — check skipped")
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("launchctl"); err != nil {
@@ -566,6 +585,9 @@ func checkServiceManager(ctx context.Context, d Deps) Check {
 }
 
 func checkBrowserOpener(_ context.Context, d Deps) Check {
+	if d.Managed {
+		return ok("browser-opener", "console is reached over the network — check skipped")
+	}
 	var candidates []string
 	switch runtime.GOOS {
 	case "darwin":

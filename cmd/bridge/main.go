@@ -2086,6 +2086,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	//     deletion pass from wiping the manifest of a momentarily-
 	//     unreadable root, so the bridge can come up serving cached
 	//     state while a slow FUSE mount catches up.
+	// A managed-control name this build does not know manages NOTHING —
+	// the control stays live. Tolerated rather than refused so a control
+	// plane that learns a new name before its fleet is upgraded (or a
+	// binary rolled BACK during an incident) cannot stop every bridge on
+	// the host from booting; see config.DeploymentConfig.UnknownManagedControls
+	// for the whole argument. The warning is what keeps the permissive
+	// direction from also being the silent one.
+	if unknown := cfg.Deployment.UnknownManagedControls(); len(unknown) > 0 {
+		logger.Warn("deployment.managedControls: unrecognised name(s) — these manage nothing on this build, and the control they were meant to disable is still available",
+			"names", strings.Join(unknown, ", "),
+			"known", strings.Join(config.KnownManagedControls(), ", "))
+	}
+
 	if rootErrs := cfg.CheckLibraryRootsAccessible(); len(rootErrs) > 0 {
 		if cfg.IsPublic() {
 			for _, e := range rootErrs {

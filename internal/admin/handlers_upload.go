@@ -133,8 +133,14 @@ func writeUploadError(w http.ResponseWriter, err error) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInsufficientStorage)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error":            "insufficient_storage",
-			"message":          "not enough free space for this upload",
+			"error": "insufficient_storage",
+			// Said from the reader's side, not the filesystem's. The bridge
+			// cannot tell a full disk from a full ZFS quota — and does not
+			// need to, because "your library is full" is true of both and
+			// actionable in a way "insufficient free space" is not. On a
+			// hosted library the quota IS the library's size, so the old
+			// wording described a machine the reader has no access to.
+			"message":          "Your library is full. Free up space or remove something, then try again.",
 			"freeBytes":        ns.FreeBytes,
 			"neededBytes":      ns.NeedBytes,
 			"reclaimableBytes": ns.ReclaimableBytes,

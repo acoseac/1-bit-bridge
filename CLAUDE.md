@@ -878,6 +878,38 @@ no failing test — which is the shape to expect in this area.
 
 ### Config, settings and process lifecycle
 
+- **On a bridge somebody else runs, hiding a control is not refusing it.**
+  `deployment.managedSettings` covers settings FIELDS;
+  `deployment.managedControls` covers ACTIONS (`restart`, `updates`, `roots`,
+  `variantsDir`, `backups`) — hidden by the console AND refused by the
+  handler, because each is a plain authenticated request a session holder
+  can send by hand. The gate is applied at the ROUTE TABLE, which is where
+  you go to ask what a session can do. **`POST /api/roots` is the one that
+  was a security hole**: it takes any absolute directory that exists (no
+  containment rule, deliberately, for a NAS mount), and the byte routes then
+  serve what is under it — on a shared host, every world-readable file on
+  the box. An unrecognised control name is a no-op PLUS a startup warning,
+  never a config error: refusing would make a binary rolled BACK during an
+  incident fail to start for every tenant at once. The typo guard therefore
+  lives in the program that WRITES the file (the conductor's
+  `managed_controls_test.go`), pinned in both directions.
+- **A managed deployment must not be given advice that needs a shell on the
+  host.** `bridge doctor` run as a live tenant produced eleven `ok` and two
+  `warn`, both unactionable — "no user systemd session, use `bridge init
+  --no-service`" and "no browser opener, install one" — so a healthy
+  appliance read as two problems. Those two and `log-file-size` (which also
+  prints a host path into the tenant's report) skip on `Deps.Managed`; the
+  log EXPORT refuses for the same reason, ahead of the terminal / journald /
+  `docker logs` branches, and for all three export routes rather than only
+  status. Same for the Diagnostics `/metrics` pointer, which is
+  loopback-gated and answers 403 to the reader being told to scrape it.
+- **Hiding a settings field leaves its heading and its prose behind.**
+  Sections are flat siblings, so `collapseEmptySettingsSections()` hides a
+  heading only when its section had a `.field` and every one is now hidden,
+  and hides a jump link whose pane has nothing left. Verify this class of
+  change IN A BROWSER — the Go suite cannot see it, and dropping the restart
+  button server-side left two unguarded `restartBtn.hidden` writes that turn
+  a successful save into "Save failed".
 - **Never split a config field's halves.** Either EVERY consumer reads it live
   or every consumer takes it at boot. Hot-applying a cheap struct field while
   reporting `restart` makes `/v1/health` advertise a capability in the same

@@ -3036,6 +3036,63 @@ function hideManagedSettings(managed) {
   }
 }
 
+/**
+ * Collapse what hiding the fields left behind.
+ *
+ * `hideManagedSettings` hides controls; a settings section is a heading,
+ * its prose and its controls sitting as SIBLINGS under the pane, so a
+ * section whose every control is managed keeps a heading and a paragraph
+ * explaining a switch that is no longer on the page. On the hosted
+ * product that is most of two tabs.
+ *
+ * The rule is deliberately conservative: a section collapses only if it
+ * had at least one `.field` and every one of them is now hidden. One
+ * surviving control keeps the whole section, prose included, because the
+ * prose is usually about the control that survived.
+ *
+ * The tabs are jump links over one long form — not show/hide panes — so
+ * an emptied pane needs its link hidden too, or the nav offers a scroll
+ * to nothing.
+ */
+function collapseEmptySettingsSections() {
+  for (const pane of document.querySelectorAll(".tab-pane[data-tab]")) {
+    let head = null, group = [], sawField = false, allHidden = true;
+    const flush = () => {
+      if (head && sawField && allHidden) {
+        head.hidden = true;
+        for (const el of group) el.hidden = true;
+      }
+    };
+    for (const el of pane.children) {
+      if (el.classList.contains("section-head")) {
+        flush();
+        head = el; group = []; sawField = false; allHidden = true;
+        continue;
+      }
+      if (!head) continue;   // content before the first heading stays
+      group.push(el);
+      const fields = el.classList.contains("field")
+        ? [el]
+        : el.querySelectorAll(".field");
+      for (const f of fields) {
+        sawField = true;
+        if (!f.hidden) allHidden = false;
+      }
+    }
+    flush();
+
+    // Nothing left to scroll to: hide the pane and its jump link. Guarded
+    // on the pane having had fields at all, so a read-only pane (Status is
+    // panels and definition lists, no inputs) is never mistaken for empty.
+    const fields = pane.querySelectorAll(".field");
+    if (fields.length && Array.from(fields).every(f => f.hidden)) {
+      pane.hidden = true;
+      const link = document.querySelector(`.jump-link[data-tab="${CSS.escape(pane.dataset.tab)}"]`);
+      if (link) link.hidden = true;
+    }
+  }
+}
+
 function markRestartPending(pending) {
   try {
     if (pending) sessionStorage.setItem(RESTART_PENDING_KEY, "1");
@@ -3829,7 +3886,10 @@ function initSettings() {
   // Fire-and-forget — a failed read leaves every field visible, which is
   // the pre-existing behaviour and strictly better than a blank page.
   API.get("/api/settings")
-    .then(d => hideManagedSettings(d && d.managedSettings))
+    .then(d => {
+      hideManagedSettings(d && d.managedSettings);
+      collapseEmptySettingsSections();
+    })
     .catch(() => {});
   // The Updates panel lives on this page; its wiring used to sit in the
   // dashboard init, from when Stats and Settings were one page.
@@ -4068,9 +4128,16 @@ function initSettings() {
       // submits ~20 at once, and "some" leaves the operator to guess
       // which of their edits is the one still waiting.
       const pending = fieldsNeedingRestart(r);
+      // No button means the host owns the lifecycle (the template drops
+      // it when `restart` is a managed control), so telling the operator
+      // to restart names an action they have no way to take. The DOM is
+      // the signal on purpose: it IS the server's decision, so the two
+      // cannot disagree the way a second copy of the flag could.
       showMsg(msg, r.restartRequired ? "warn" : "ok",
         r.restartRequired
-          ? `Saved. Needs a restart to apply: ${pending.join(", ")}.`
+          ? (restartBtn
+            ? `Saved. Needs a restart to apply: ${pending.join(", ")}.`
+            : `Saved. Applies when the host next restarts this bridge: ${pending.join(", ")}.`)
           : "Saved.");
       // Sticky across navigation: a save that needs a restart must still
       // be pending when the operator comes back to this page. Never
@@ -4078,9 +4145,9 @@ function initSettings() {
       // restart another change is still waiting on.
       if (r.restartRequired) {
         markRestartPending(true);
-        restartBtn.hidden = false;
+        if (restartBtn) restartBtn.hidden = false;
       } else if (!restartPending()) {
-        restartBtn.hidden = true;
+        if (restartBtn) restartBtn.hidden = true;
       }
     } catch (err) {
       showMsg(msg, "err", "Save failed: " + err.message);

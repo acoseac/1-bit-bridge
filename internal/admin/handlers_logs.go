@@ -58,6 +58,18 @@ type logStatusResponse struct {
 
 // resolveLogFile returns the log path and its stat, or a reason it cannot.
 func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
+	// A managed bridge is somebody else's process. Every wording below
+	// this line tells the reader where to look for the log — a terminal,
+	// a journal, `docker logs` — and all three assume a shell on the
+	// host, which is the one thing a hosted tenant does not have. This
+	// is the same failure the branches below exist to avoid: a hint that
+	// is plausible, specific, and about a machine the reader cannot
+	// reach. Answering for all three export routes, not just the status
+	// one, because a refusal that depends on which endpoint you asked is
+	// not a refusal anyone can reason about.
+	if s.managedDeployment() {
+		return "", nil, "this bridge's logs are kept by the host that runs it, not in a file here"
+	}
 	path := strings.TrimSpace(s.deps.LogPath)
 	if path == "" {
 		return "", nil, "this bridge has no log file configured — it logs to the terminal it was started from"

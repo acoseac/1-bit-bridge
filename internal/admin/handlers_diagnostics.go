@@ -304,5 +304,12 @@ func tailscaleStateLabel(state int) string {
 // because every number here is point-in-time and a template-rendered one
 // would be stale the moment the page painted.
 func (s *Server) pageDiagnostics(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "diagnostics", map[string]any{})
+	s.renderPage(w, r, "diagnostics", map[string]any{
+		// The one server-rendered fact on the page, and it is about the
+		// READER rather than about the bridge: `/metrics` is gated to
+		// loopback (widened only by metrics.allowCIDRs), so on a hosted
+		// bridge the paragraph offering it points at a link that answers
+		// 403 for the person being told to point a scraper at it.
+		"Managed": s.managedDeployment(),
+	})
 }
