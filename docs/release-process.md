@@ -4,6 +4,30 @@ Extracted from CLAUDE.md. The per-release documentation-refresh procedure:
 which files to update, which NOT to touch, the process, gotchas, and the
 after-the-tag steps.
 
+## v0.2.0 gate: the privacy pages are part of the release
+
+Before tagging **v0.2.0**, re-read `1-bit.app/privacy` and `1-bit.app/bridge/privacy`
+against what this release actually does, and update them in the same release rather
+than after it. Both are currently scoped to earlier versions and describe the
+software as it behaved then.
+
+Two things to check specifically, because they are already inaccurate rather than
+merely out of date:
+
+- **Where enrichment traffic goes.** A bridge contacts `coverartarchive.org` for
+  cover art and the app contacts `api.deezer.com` **from the device** for artist
+  images. Any wording implying that outbound metadata lookups all originate
+  server-side is wrong, and has been for some time.
+- **What the tags carry.** Enrichment sends artist, album and track names read
+  from the user's own files. For a commercial album those are shared by
+  millions; for an unreleased mix or a personal recording they are unique to the
+  person who made them. Wording that calls this "anonymous metadata" overstates
+  it.
+
+Operators running their own bridge are unaffected by anything hosted; this gate is
+about the published pages being accurate, which is a property of the release and
+not of any deployment.
+
 ## Documentation refresh on each release
 
 > **User-facing docs moved (2026-06-09).** The overview / setup / features / troubleshooting /
