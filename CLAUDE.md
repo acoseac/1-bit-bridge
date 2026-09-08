@@ -878,6 +878,13 @@ no failing test — which is the shape to expect in this area.
 
 ### Config, settings and process lifecycle
 
+- **A hardening step on a CREATION path protects nothing that already
+  exists.** The `chmod 711` for the hosted product's media parent shipped
+  inside `bridge-tenant create`, so it reached no existing host — including
+  the one it was written for, where the directory was still world-listable
+  after the deploy. Anything meant to be true of a host belongs in the
+  installer, which runs on every deploy. Same shape as a migration that only
+  fires on a fresh install.
 - **On a bridge somebody else runs, hiding a control is not refusing it.**
   `deployment.managedSettings` covers settings FIELDS;
   `deployment.managedControls` covers ACTIONS (`restart`, `updates`, `roots`,
