@@ -116,10 +116,17 @@ export function spinner(label = "Loading…") {
   return el("p", { class: "player-status muted", text: label });
 }
 
-export function emptyState(title, detail) {
-  return el("div", { class: "player-empty" },
+export function emptyState(title, detail, action) {
+  const box = el("div", { class: "player-empty" },
     el("h2", { text: title }),
     detail ? el("p", { class: "muted", text: detail }) : null);
+  // An empty library is the one empty state with something to DO about it, so
+  // it gets a real control rather than a sentence describing one. `action` is
+  // `{ href, label }`; every other caller passes nothing and is unchanged.
+  if (action) {
+    box.appendChild(el("a", { class: "btn primary", href: action.href, text: action.label }));
+  }
+  return box;
 }
 
 export function errorState(err, retry) {

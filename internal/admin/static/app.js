@@ -282,6 +282,8 @@ function applyStats(s) {
   // re-evaluated serving — refresh that page's data on the true→false
   // edge (no dedicated SSE event; the Diagnostics-page precedent).
   if (dupesLastIsScanning && !s.isScanning) refreshDuplicatesPage();
+  // Same edge, for the upload page's "rescanning…" line.
+  if (dupesLastIsScanning && !s.isScanning) uploadNoteScanFinished();
   dupesLastIsScanning = !!s.isScanning;
   setText("tracks-indexed", s.tracksIndexed);
   setText("device-count", s.deviceCount);
@@ -2040,7 +2042,8 @@ function reportCommit(res) {
       " Note: this browser did not expose SHA-256, so chunks were checked for" +
       " length but not content.";
   }
-  showUploadResult(msg);
+  uploadAwaitingScan = !!res.committed;
+  showUploadResult(msg, !!res.committed);
   resetUpload();
   refreshResumable();
 }
@@ -2074,10 +2077,47 @@ function showUploadError(msg, details) {
   el.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
-function showUploadResult(msg) {
+function showUploadResult(msg, withBrowseLink) {
   const el = document.getElementById("upload-result");
   el.hidden = false;
   el.textContent = msg;
+  // A commit ends the upload page's job and begins a scan somewhere else, so
+  // without this the last thing shown is "rescanning the library." forever.
+  // Nothing said when it finished, and nothing offered a way onward — the
+  // operator was left on a page whose work was done, reading a progress
+  // message about work happening elsewhere.
+  //
+  // The link is added on commit, NOT when the scan reports finished, so it is
+  // there even if that report never arrives.
+  if (withBrowseLink) {
+    const a = document.createElement("a");
+    a.href = "/";
+    a.className = "btn primary";
+    a.textContent = "Browse your library";
+    el.appendChild(document.createElement("br"));
+    el.appendChild(a);
+  }
+}
+
+// Set when a commit started a scan, so the true→false isScanning edge can say
+// the library has caught up. Same shape as `dupesLastIsScanning` above, and for
+// the same reason: there is no dedicated SSE event for "a scan finished".
+let uploadAwaitingScan = false;
+
+// uploadNoteScanFinished rewrites the result line once the scan that a commit
+// triggered has ended. Best-effort by design — the browse link is already in
+// place from the commit itself, so missing this only costs a sentence.
+function uploadNoteScanFinished() {
+  if (!uploadAwaitingScan) return;
+  uploadAwaitingScan = false;
+  const el = document.getElementById("upload-result");
+  if (!el || el.hidden) return;
+  const link = el.querySelector("a");
+  el.textContent = el.textContent.replace(/ — rescanning[^.]*\./, " — your library is up to date.");
+  if (link) {
+    el.appendChild(document.createElement("br"));
+    el.appendChild(link);
+  }
 }
 
 function resetUpload() {
