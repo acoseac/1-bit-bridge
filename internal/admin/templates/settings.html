@@ -153,7 +153,12 @@
         mirror on your own network.
       </p>
 
-      <div class="field">
+      {{/* `data-managed-with` because this picker has no server field of
+           its own — it RESOLVES into enrichMusicBrainzBaseURL and
+           enrichCoverArtBaseURL, so when the control plane owns those,
+           the picker is a control that changes nothing while the page
+           still says "Saved." hideManagedSettings hides it with them. */}}
+      <div class="field" data-managed-with="enrichMusicBrainzBaseURL">
         <label>Enrichment source
           <select name="enrichSource">
             <option value="musicbrainz" {{if eq .Data.EnrichSource "musicbrainz"}}selected{{end}}>MusicBrainz (public)</option>
@@ -163,7 +168,7 @@
         </label>
       </div>
 
-      <div class="field" id="enrich-atlas-field" {{if ne .Data.EnrichSource "atlas"}}hidden{{end}}>
+      <div class="field" id="enrich-atlas-field" data-managed-with="enrichMusicBrainzBaseURL" {{if ne .Data.EnrichSource "atlas"}}hidden{{end}}>
         <label>Atlas URL
           <input name="enrichAtlasURL" type="url" value="{{.Data.EnrichAtlasURL}}"
                  placeholder="https://atlas.example.com">
@@ -807,7 +812,7 @@
         <div class="panel-head">
           <h2>Snapshots</h2>
           <span class="panel-actions">
-            <button type="button" id="backup-now" class="btn">Snapshot now</button>
+            {{if not $.Managed.backups}}<button type="button" id="backup-now" class="btn">Snapshot now</button>{{end}}
           </span>
         </div>
         <dl>

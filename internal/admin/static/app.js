@@ -3033,6 +3033,13 @@ function hideManagedSettings(managed) {
       const field = el.closest(".field") || el.closest("label") || el;
       field.hidden = true;
     }
+    // Controls with no server field of their own that RESOLVE into this
+    // one — the enrichment source picker becomes the two base URLs. Left
+    // visible they are the worst shape a settings page has: they change,
+    // they save, the page says "Saved.", and nothing happened.
+    for (const el of document.querySelectorAll(`[data-managed-with="${CSS.escape(name)}"]`)) {
+      el.hidden = true;
+    }
   }
 }
 
@@ -3056,41 +3063,85 @@ function hideManagedSettings(managed) {
  */
 function collapseEmptySettingsSections() {
   for (const pane of document.querySelectorAll(".tab-pane[data-tab]")) {
-    let head = null, group = [], sawField = false, allHidden = true;
-    const flush = () => {
-      if (head && sawField && allHidden) {
-        head.hidden = true;
-        for (const el of group) el.hidden = true;
-      }
-    };
-    for (const el of pane.children) {
-      if (el.classList.contains("section-head")) {
-        flush();
-        head = el; group = []; sawField = false; allHidden = true;
-        continue;
-      }
-      if (!head) continue;   // content before the first heading stays
-      group.push(el);
-      const fields = el.classList.contains("field")
-        ? [el]
-        : el.querySelectorAll(".field");
-      for (const f of fields) {
-        sawField = true;
-        if (!f.hidden) allHidden = false;
-      }
-    }
-    flush();
+    collapseSectionsIn(pane);
 
     // Nothing left to scroll to: hide the pane and its jump link. Guarded
     // on the pane having had fields at all, so a read-only pane (Status is
     // panels and definition lists, no inputs) is never mistaken for empty.
-    const fields = pane.querySelectorAll(".field");
-    if (fields.length && Array.from(fields).every(f => f.hidden)) {
+    const fields = Array.from(pane.querySelectorAll(".field"));
+    if (fields.length && fields.every(f => f.hidden)) {
       pane.hidden = true;
       const link = document.querySelector(`.jump-link[data-tab="${CSS.escape(pane.dataset.tab)}"]`);
       if (link) link.hidden = true;
     }
   }
+}
+
+/**
+ * Hide each `.section-head` in `pane` whose section has no visible field
+ * left, along with everything between it and the next heading.
+ *
+ * A section is a heading plus the siblings that follow it — there is no
+ * wrapper element — so this walks the pane's children and closes off the
+ * run whenever the next heading arrives (and once more at the end).
+ */
+function collapseSectionsIn(pane) {
+  let head = null, group = [], sawField = false, allHidden = true;
+  const flush = () => {
+    if (head && sawField && allHidden) {
+      head.hidden = true;
+      for (const el of group) el.hidden = true;
+    }
+  };
+  for (const el of pane.children) {
+    if (el.classList.contains("section-head")) {
+      flush();
+      head = el; group = []; sawField = false; allHidden = true;
+      continue;
+    }
+    if (!head) continue;   // content before the first heading stays
+    group.push(el);
+    for (const f of fieldsWithin(el)) {
+      sawField = true;
+      if (!f.hidden) allHidden = false;
+    }
+  }
+  flush();
+}
+
+/**
+ * Input name behind a settings-PATCH field, where the two differ.
+ *
+ * Three do: the endpoints textarea is sent under a `…Text` key, and the
+ * two enrich base URLs are derived from the source picker but are backed
+ * by raw inputs of their own names in the Advanced block, which is what
+ * `hideManagedSettings` hides when the control plane owns them.
+ */
+const PATCH_INPUT_NAMES = {
+  customEndpointsText: "customEndpoints",
+};
+
+/**
+ * Delete every key of `body` whose control this page did not offer.
+ *
+ * "Did not offer" is absent from the form, or inside something hidden —
+ * `hideManagedSettings` hides the enclosing `.field`, and the section and
+ * pane collapse hide their ancestors, so `closest("[hidden]")` catches
+ * all three. A field the caller already resolved to `undefined` is left
+ * alone; JSON.stringify drops it either way.
+ */
+function dropUnofferedFields(form, body) {
+  for (const key of Object.keys(body)) {
+    if (body[key] === undefined) continue;
+    const name = PATCH_INPUT_NAMES[key] || key;
+    const el = form.querySelector(`[name="${CSS.escape(name)}"]`);
+    if (!el || el.hidden || el.closest("[hidden]")) delete body[key];
+  }
+}
+
+/** The `.field` elements at or inside `el`. */
+function fieldsWithin(el) {
+  return el.classList.contains("field") ? [el] : el.querySelectorAll(".field");
 }
 
 function markRestartPending(pending) {
@@ -3887,7 +3938,7 @@ function initSettings() {
   // the pre-existing behaviour and strictly better than a blank page.
   API.get("/api/settings")
     .then(d => {
-      hideManagedSettings(d && d.managedSettings);
+      hideManagedSettings(d?.managedSettings);
       collapseEmptySettingsSections();
     })
     .catch(() => {});
@@ -4089,13 +4140,16 @@ function initSettings() {
       fingerprintEnabled: fd.get("fingerprintEnabled") === "on",
       fingerprintApiKey: (fd.get("fingerprintApiKey") || "").trim() || undefined,
       // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
-      // dropdown value is one of "cli" / "tsnet" / "disabled".
-      // mDNS checkbox is the FormData "on"/null shape — coerce
-      // to bool, with one caveat: in public mode the field is
-      // hidden, so fd.get returns null. Send a literal `false`
-      // in that case to keep the server's pointer-typed patch
-      // field happy (Validate refuses public+true anyway, so
-      // we never accidentally enable mDNS by sending false).
+      // dropdown value is one of "cli" / "tsnet" / "disabled";
+      // it stays offered in public mode (tailnet-routed public
+      // bridges are legitimate). The mDNS checkbox is the
+      // FormData "on"/null shape, coerced to bool — and in
+      // public mode its field is hidden, which dropUnofferedFields
+      // below now turns into an omission. This comment used to say
+      // the literal `false` was needed "to keep the server's
+      // pointer-typed patch field happy"; it is not, and an omitted
+      // pointer field is the honest way to say "not offered, so
+      // not changed".
       tailscaleMode: fd.get("tailscaleMode") || "",
       mdnsEnabled: fd.get("mdnsEnabled") === "on",
       // UPnP/DLNA toggle (restart-required). In public mode the checkbox
@@ -4108,6 +4162,25 @@ function initSettings() {
         ? undefined
         : fd.get("dlnaEnabled") === "on",
     };
+
+    // Send what the page SHOWED, and nothing else.
+    //
+    // This payload is an explicit allowlist that names every field, so a
+    // control the page did not offer was still being sent — as `false`,
+    // `""` or `0`, because that is what `fd.get` on a missing or hidden
+    // input coerces to. On a bridge with managed settings the PATCH is
+    // refused WHOLE if any managed field is supplied, so renaming the
+    // library failed with a wall of nineteen field names it had nothing
+    // to do with. Driven in a browser against a managed fixture, where
+    // the only editable field on the page could not be saved at all.
+    //
+    // `dlnaEnabled` above already did this for its own case (a disabled
+    // checkbox, Gemini on PR #342); this is the same rule for every
+    // field, keyed on whether the control is in the document and visible
+    // rather than on what its value coerced to — a checkbox legitimately
+    // reads `false` when it is offered and unticked.
+    dropUnofferedFields(form, body);
+
     try {
       const r = await API.patch("/api/settings", body);
       // Sync the Advanced raw inputs to what was actually saved so the
@@ -4133,12 +4206,13 @@ function initSettings() {
       // to restart names an action they have no way to take. The DOM is
       // the signal on purpose: it IS the server's decision, so the two
       // cannot disagree the way a second copy of the flag could.
-      showMsg(msg, r.restartRequired ? "warn" : "ok",
-        r.restartRequired
-          ? (restartBtn
-            ? `Saved. Needs a restart to apply: ${pending.join(", ")}.`
-            : `Saved. Applies when the host next restarts this bridge: ${pending.join(", ")}.`)
-          : "Saved.");
+      let saved = "Saved.";
+      if (r.restartRequired) {
+        saved = restartBtn
+          ? `Saved. Needs a restart to apply: ${pending.join(", ")}.`
+          : `Saved. Applies when the host next restarts this bridge: ${pending.join(", ")}.`;
+      }
+      showMsg(msg, r.restartRequired ? "warn" : "ok", saved);
       // Sticky across navigation: a save that needs a restart must still
       // be pending when the operator comes back to this page. Never
       // CLEAR it here — an unrelated hot-applied save doesn't undo a

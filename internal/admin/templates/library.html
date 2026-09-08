@@ -25,7 +25,7 @@
           <td class="num" data-label="Originals">{{.Tracks}}</td>
           <td class="num" data-label="Upscaled">{{.UpscaledTracks}}{{if .UpscaledBytes}} <span class="muted">({{bytesHuman .UpscaledBytes}})</span>{{end}}</td>
           <td class="num" data-label="Optimized">{{.OptimizedTracks}}{{if .OptimizedBytes}} <span class="muted">({{bytesHuman .OptimizedBytes}})</span>{{end}}</td>
-          <td class="row-actions" data-label="Actions"><button type="button" class="btn danger remove-root">Remove</button></td>
+          <td class="row-actions" data-label="Actions">{{if not $.Managed.roots}}<button type="button" class="btn danger remove-root">Remove</button>{{end}}</td>
         </tr>
         {{else}}
         <tr><td colspan="5"><em>No roots configured.</em></td></tr>
@@ -110,7 +110,7 @@
     </p>
 
     <div class="row-actions">
-      <button type="button" id="variants-change" class="btn">Change path…</button>
+      {{if not .Managed.variantsDir}}<button type="button" id="variants-change" class="btn">Change path…</button>{{end}}
       <button type="button" id="variants-retry-failures" class="btn">Retry failed transcodes</button>
       <button type="button" id="variants-clear" class="btn danger">Clear all variants…</button>
     </div>
@@ -176,6 +176,11 @@
     </form>
   </dialog>
 
+  {{/* Where this library reads from is the control plane's on a managed
+       bridge, and POST /api/roots refuses it there. Absent rather than
+       disabled: the tenant adds music through Upload, and a greyed form
+       would read as something they could earn. */}}
+  {{if not .Managed.roots}}
   <div class="panel">
     <h2>Add a root</h2>
     <form id="add-root-form">
@@ -190,5 +195,6 @@
       the root is added.
     </p>
   </div>
+  {{end}}
 </section>
 {{end}}

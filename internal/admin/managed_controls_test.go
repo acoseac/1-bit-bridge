@@ -302,3 +302,138 @@ func TestDiagnosticsDropsTheMetricsPointerWhenManaged(t *testing.T) {
 		t.Error("managed /diagnostics still points at the loopback-gated /metrics")
 	}
 }
+
+// TestLibraryPageDropsRootControlsWhenManaged — `POST /api/roots` refuses
+// on a managed bridge, so offering the form is offering a 403. This is
+// the page a tenant lands on to add music, which makes it the most likely
+// place to press something that cannot work.
+func TestLibraryPageDropsRootControlsWhenManaged(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	get := func(path string) string {
+		t.Helper()
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+
+	// NEGATIVE CONTROL FIRST — a page that never renders these cannot
+	// prove anything by not rendering them.
+	unmanaged := get("/library")
+	for _, want := range []string{`id="add-root-form"`, `id="variants-change"`} {
+		if !strings.Contains(unmanaged, want) {
+			t.Fatalf("self-hosted /library is missing %s — the assertion below would pass vacuously", want)
+		}
+	}
+
+	manageControls(t, srv, config.ManagedControlRoots, config.ManagedControlVariantsDir)
+	managed := get("/library")
+	for _, gone := range []string{`id="add-root-form"`, `class="btn danger remove-root"`, `id="variants-change"`} {
+		if strings.Contains(managed, gone) {
+			t.Errorf("managed /library still renders %s", gone)
+		}
+	}
+	// The roots TABLE stays — a tenant should still see where their music
+	// is read from, they just cannot change it.
+	if !strings.Contains(managed, `id="roots-body"`) {
+		t.Error("managed /library dropped the roots table along with the controls")
+	}
+}
+
+// TestSettingsDropsSnapshotWhenBackupsManaged — the button is hidden by
+// the section collapse on a tenant anyway, since its cadence fields are
+// managed. Hiding it on its own control means the console and the API
+// agree for the reason each of them decides, not by coincidence.
+func TestSettingsDropsSnapshotWhenBackupsManaged(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	get := func() string {
+		t.Helper()
+		resp, err := http.Get(ts.URL + "/settings")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	if !strings.Contains(get(), `id="backup-now"`) {
+		t.Fatal("self-hosted /settings has no Snapshot button — the assertion below would pass vacuously")
+	}
+	manageControls(t, srv, config.ManagedControlBackups)
+	if strings.Contains(get(), `id="backup-now"`) {
+		t.Error("managed /settings still offers Snapshot now")
+	}
+}
+
+// TestSettingsSaveSendsOnlyWhatThePageOffered guards the console half of
+// a defect that made a managed bridge's Settings page unusable.
+//
+// The Save payload is an explicit allowlist naming every field, so a
+// control the page did not offer was still sent — as false / "" / 0,
+// which is what fd.get on a missing or hidden input coerces to. A PATCH
+// supplying a managed field is refused WHOLE, so renaming the library
+// failed with a wall of nineteen unrelated field names. Driven in a
+// browser against a managed fixture before and after.
+//
+// A source scan, because the payload is built in JS and this suite has no
+// engine to run it in. It pins the call site, which is the part a later
+// refactor of the submit handler would drop.
+func TestSettingsSaveSendsOnlyWhatThePageOffered(t *testing.T) {
+	raw, err := os.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := strings.ReplaceAll(string(raw), "\r\n", "\n")
+
+	if !strings.Contains(src, "dropUnofferedFields(form, body);") {
+		t.Error("the settings submit handler no longer filters its payload — a managed bridge's Save will fail on fields the page never showed")
+	}
+	if !strings.Contains(src, "function dropUnofferedFields(") {
+		t.Error("dropUnofferedFields is gone")
+	}
+	// The rule is "absent OR hidden", and the hidden half is the one that
+	// matters: hideManagedSettings hides the enclosing .field rather than
+	// removing it, so a check for presence alone would still send it.
+	if !strings.Contains(src, `el.closest("[hidden]")`) {
+		t.Error("the filter no longer treats a hidden ancestor as not-offered — managed fields are hidden, not removed")
+	}
+}
+
+// TestManagedFieldHidesTheControlsThatResolveIntoIt — the enrichment
+// source picker has no server field of its own; it resolves into
+// enrichMusicBrainzBaseURL and enrichCoverArtBaseURL. Left visible when
+// the control plane owns those, it is the worst shape a settings page
+// has: it changes, it saves, the page says "Saved.", nothing happened.
+//
+// The template declares the relationship (`data-managed-with`) and the
+// JS acts on it. This asserts the declaration, which is the half that
+// would be lost by an unrelated edit to the enrichment markup; the
+// behaviour was driven in a browser.
+func TestManagedFieldHidesTheControlsThatResolveIntoIt(t *testing.T) {
+	raw, err := os.ReadFile("templates/settings.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if !strings.Contains(tmpl, `data-managed-with="enrichMusicBrainzBaseURL"`) {
+		t.Error("the enrichment source picker no longer declares which managed field it resolves into")
+	}
+
+	raw, err = os.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if !strings.Contains(js, "data-managed-with=") {
+		t.Error("hideManagedSettings no longer acts on data-managed-with")
+	}
+}

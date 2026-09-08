@@ -85,3 +85,19 @@ func (s *Server) managedDeployment() bool {
 	}
 	return cfg.Deployment.IsManaged()
 }
+
+// managedControlSet renders the configured controls as a map so a
+// template can ask `{{if .Managed.roots}}` without a FuncMap helper.
+//
+// Every known control gets a key, present or not, so a template naming
+// one that is not managed reads `false` rather than the zero value of a
+// missing key — which is the same thing here, but stops being so the
+// moment somebody writes `{{if not .Managed.typo}}` and gets a control
+// that is always shown.
+func managedControlSet(cfg *config.Config) map[string]bool {
+	out := make(map[string]bool, len(config.KnownManagedControls()))
+	for _, name := range config.KnownManagedControls() {
+		out[name] = cfg != nil && cfg.Deployment.IsManagedControl(name)
+	}
+	return out
+}

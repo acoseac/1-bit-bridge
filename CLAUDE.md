@@ -903,6 +903,16 @@ no failing test — which is the shape to expect in this area.
   `docker logs` branches, and for all three export routes rather than only
   status. Same for the Diagnostics `/metrics` pointer, which is
   loopback-gated and answers 403 to the reader being told to scrape it.
+- **The console must SEND only what it SHOWED.** The settings Save payload is
+  an explicit allowlist naming every field, `hideManagedSettings` sets `hidden`
+  on the enclosing `.field` rather than removing the input, and a hidden input
+  is still in `FormData` — so every managed field was supplied on every save,
+  and the PATCH is refused WHOLE when any managed field is supplied. Renaming
+  the library on a managed bridge failed with nineteen field names the operator
+  never touched. `dropUnofferedFields` drops any key whose control is absent or
+  inside something hidden; `dlnaEnabled` had done this for its own disabled-
+  checkbox case since PR #342 and it was never generalised. No Go test can see
+  this — the payload is built in JS — so it took driving the real form.
 - **Hiding a settings field leaves its heading and its prose behind.**
   Sections are flat siblings, so `collapseEmptySettingsSections()` hides a
   heading only when its section had a `.field` and every one is now hidden,

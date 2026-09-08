@@ -4466,6 +4466,47 @@ answers for all three export routes rather than only the status one.
 The Process panel's `/metrics` pointer is loopback-gated, so on a hosted bridge
 it offered a link that answers 403 to the reader being told to scrape it.
 
+### The defect the review found: Save was impossible on a managed bridge
+
+CodeRabbit flagged that the Save payload sends `false` / `""` / `0` for the
+three update fields once their pane is gone. Verified, and the consequence is
+larger than the finding: the payload is an explicit allowlist naming every
+field, `hideManagedSettings` sets `hidden` on the enclosing `.field` rather than
+removing the input, and a hidden input is still in `FormData`. So every managed
+field was being SUPPLIED on every save — and `managedFieldsIn` refuses the PATCH
+**whole** when any managed field is supplied.
+
+Renaming the library on the fixture, in a browser:
+
+```
+Save failed: these settings are managed by the control plane on this bridge and
+cannot be changed here: adminAddress, analysisEnabled, atlasEnabled,
+autoOptimizeEnabled, backupIntervalHours, backupKeep, dlnaEnabled,
+enrichCoverArtBaseURL, enrichMusicBrainzBaseURL, fingerprintEnabled,
+libraryWatchEnabled, listenAddress, mdnsEnabled, optimizeEnabled, tailscaleMode,
+updateAutoInstall, updateCheckIntervalHours, updateQuietHours, upscaleEnabled
+```
+
+Nineteen field names the operator never touched, in place of a rename. This was
+live on the hosted product, not introduced here — `managedSettings` shipped
+before this PR — and no test could see it, because the payload is built in JS
+and the suite has no engine to run it in. It took driving the real form.
+
+The fix is one rule, not three exemptions: **the console sends what it showed.**
+`dropUnofferedFields` drops any key whose control is absent from the form or
+inside something `hidden`, which covers a managed field, a collapsed section and
+a hidden pane alike. `dlnaEnabled` already did this for its own case (a disabled
+checkbox, Gemini on PR #342) — it was never generalised. Measured after:
+unmanaged sends 28 keys and saves; managed sends 8, exactly the unmanaged ones,
+and saves.
+
+The same review's other finding was that `managedControls` was published and
+never consumed, so `roots`, `variantsDir` and `backups` had refusing endpoints
+and rendering controls. Fixed server-side (a `Managed map[string]bool` on the
+page envelope) rather than in `app.js`, for the reason the restart button is:
+a control that appears and then vanishes when a fetch resolves is one somebody
+can click.
+
 ### Corrected while here
 
 `settings.html` and `app.css` both described a tabbed show/hide layout with a

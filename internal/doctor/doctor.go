@@ -60,6 +60,7 @@ const (
 	checkNameTLSCert        = "tls-cert"
 	checkNameLibraryRoots   = "library-roots"
 	checkNameServiceManager = "service-manager"
+	checkNameBrowserOpener  = "browser-opener"
 	checkNameAudioToolchain = "audio-toolchain"
 	// checkNameDSDRenderToolchain is the ffmpeg-decoder check behind the
 	// DSD → PCM renditions (`upscale.dsdRender.enabled`).
@@ -586,7 +587,7 @@ func checkServiceManager(ctx context.Context, d Deps) Check {
 
 func checkBrowserOpener(_ context.Context, d Deps) Check {
 	if d.Managed {
-		return ok("browser-opener", "console is reached over the network — check skipped")
+		return ok(checkNameBrowserOpener, "console is reached over the network — check skipped")
 	}
 	var candidates []string
 	switch runtime.GOOS {
@@ -599,10 +600,10 @@ func checkBrowserOpener(_ context.Context, d Deps) Check {
 	}
 	for _, c := range candidates {
 		if _, err := exec.LookPath(c); err == nil {
-			return ok("browser-opener", c)
+			return ok(checkNameBrowserOpener, c)
 		}
 	}
-	return warn("browser-opener", "no opener found",
+	return warn(checkNameBrowserOpener, "no opener found",
 		"install missing; bridge will still print the admin URL for you to paste manually")
 }
 
