@@ -60,9 +60,11 @@ func (s *Store) MintLoginTicket(username string) (string, error) {
 		return "", errors.New("too many live login tickets")
 	}
 	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate login ticket: %w", err)
-	}
+	// No error check: since Go 1.24 crypto/rand.Read never returns one — it
+	// crashes the program irrecoverably rather than handing back short or
+	// predictable bytes. A branch here would be unreachable, and would suggest
+	// to a reader that a weaker fallback exists somewhere.
+	rand.Read(buf)
 	raw := base64.RawURLEncoding.EncodeToString(buf)
 	if s.tickets == nil {
 		s.tickets = map[[sha256.Size]byte]loginTicket{}
