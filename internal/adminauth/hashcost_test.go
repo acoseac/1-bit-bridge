@@ -1,6 +1,9 @@
 package adminauth
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +27,7 @@ func TestShippedHashCostIsUnchanged(t *testing.T) {
 		t.Fatalf("adminBcryptCost = %d, want 12 — lowering it weakens every stored password", adminBcryptCost)
 	}
 	// With no override, the store must use the shipped value.
-	saved := testHashCost
+	saved := getTestHashCost()
 	SetTestHashCost(0)
 	defer SetTestHashCost(saved)
 	if got := hashCost(); got != adminBcryptCost {
@@ -32,13 +35,25 @@ func TestShippedHashCostIsUnchanged(t *testing.T) {
 	}
 }
 
-// The override is a plain variable, so nothing stops production code setting it.
-// This sweep is what stops it: the same shape as the manifest package's
-// hand-rolled-SQL guard, and for the same reason — a convention no test walks
-// is a convention that decays.
+// Nothing stops production code calling the setter at compile time. This walk is
+// what stops it — the same shape as the manifest package's hand-rolled-SQL
+// guard, and for the same reason: a convention no test walks is a convention
+// that decays.
+//
+// It parses each file and looks for CALL EXPRESSIONS rather than scanning text.
+// A text scan would report this repo's own commentary: the setter's docblock
+// names it, this file's comments name it, and CLAUDE.md records the same trap
+// twice — a guard that finds the sentence explaining a defect and reports the
+// defect as present. Parsing drops comments for free, and it distinguishes the
+// declaration (an *ast.FuncDecl) from a call without a special case.
 func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 	root := filepath.Join("..", "..")
+	const setter = "SetTestHashCost"
 	var offenders []string
+	// Files actually visited, so a walk that silently matches nothing — a wrong
+	// root, a skip rule that swallowed the tree — fails instead of passing
+	// vacuously.
+	visited := 0
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -53,37 +68,40 @@ func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return err
+		visited++
+		file, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			// A file this package cannot parse is not evidence of compliance.
+			offenders = append(offenders, path+": could not parse: "+perr.Error())
+			return nil
 		}
-		// Normalise line endings first: no .gitattributes pins eol, so a
-		// Windows checkout would otherwise make this scan find nothing and
-		// pass vacuously.
-		src := strings.ReplaceAll(string(raw), "\r\n", "\n")
-		// Look for CALLS, not the declaration itself: the setter necessarily
-		// lives in a non-test file, and a scan that flags its own definition
-		// reports a violation that can never be fixed.
-		for _, line := range strings.Split(src, "\n") {
-			if !strings.Contains(line, "SetTestHashCost(") {
-				continue
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-			if strings.Contains(line, "func SetTestHashCost(") {
-				continue
+			switch fn := call.Fun.(type) {
+			case *ast.Ident: // SetTestHashCost(…), from inside this package
+				if fn.Name == setter {
+					offenders = append(offenders, path)
+				}
+			case *ast.SelectorExpr: // adminauth.SetTestHashCost(…), from outside
+				if fn.Sel.Name == setter {
+					offenders = append(offenders, path)
+				}
 			}
-			// A mention inside a comment is documentation, not a call.
-			if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "//") {
-				continue
-			}
-			offenders = append(offenders, path+": "+strings.TrimSpace(line))
-		}
+			return true
+		})
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walking the tree: %v", err)
 	}
+	if visited == 0 {
+		t.Fatalf("walked %s and found no non-test Go files — the guard proved nothing", root)
+	}
 	if len(offenders) > 0 {
-		t.Errorf("non-test files call SetTestHashCost, which would weaken password hashing in production: %v", offenders)
+		t.Errorf("non-test files call %s, which would weaken password hashing in production: %v", setter, offenders)
 	}
 }
 
@@ -98,7 +116,7 @@ func TestHashesVerifyAcrossCosts(t *testing.T) {
 	if err := s.SetInitialPassword("admin", "correct horse battery staple"); err != nil {
 		t.Fatal(err)
 	}
-	saved := testHashCost
+	saved := getTestHashCost()
 	SetTestHashCost(0) // pretend the process now ships at cost 12
 	defer SetTestHashCost(saved)
 	if err := s.Verify("admin", "correct horse battery staple"); err != nil {

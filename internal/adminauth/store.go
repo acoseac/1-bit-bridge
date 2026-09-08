@@ -41,6 +41,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -65,24 +66,34 @@ const adminBcryptCost = 12
 // and this package alone measured 35 s without `-race` against 297 s with it.
 //
 // Production code must never set it, and nothing enforces that at compile time,
-// so TestNoProductionCodeLowersTheHashCost sweeps every non-test file in the
+// so TestNoProductionCodeLowersTheHashCost walks every non-test file in the
 // module and fails if any of them calls the setter.
 //
 // Verification is unaffected either way: bcrypt reads the cost from the stored
 // hash, so a store written at one cost still verifies at another.
-var testHashCost int
+//
+// It is atomic rather than a plain variable. The obvious shape is "set it once
+// in TestMain and never again", which needs no synchronisation — but two tests
+// have to prove the NO-OVERRIDE path, so they set it during the run, and a
+// store's own background writers can hash while they do. The repo has been here
+// before with sendErrStreak: a field left unsynchronised binds tests too, and
+// the failure is an intermittent `-race` report on CI that does not reproduce
+// locally. An atomic load beside a ~250 ms key derivation is not a cost worth
+// weighing.
+var testHashCost atomic.Int64
 
 // SetTestHashCost lowers the bcrypt work factor for the rest of the process.
-//
-// Call it from TestMain, BEFORE any test starts: it is a plain variable, and
-// setting it once before the suite runs is what keeps that safe under `-race`.
-// Passing 0 restores the shipped cost.
-func SetTestHashCost(cost int) { testHashCost = cost }
+// Passing 0 restores the shipped cost. Production code must never call it.
+func SetTestHashCost(cost int) { testHashCost.Store(int64(cost)) }
+
+// getTestHashCost reads the override. Exported to this package's tests so they
+// save and restore it without touching the variable directly.
+func getTestHashCost() int { return int(testHashCost.Load()) }
 
 // hashCost is the work factor used for a new hash.
 func hashCost() int {
-	if testHashCost > 0 {
-		return testHashCost
+	if c := getTestHashCost(); c > 0 {
+		return c
 	}
 	return adminBcryptCost
 }
