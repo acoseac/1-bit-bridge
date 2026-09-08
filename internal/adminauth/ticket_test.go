@@ -2,7 +2,10 @@ package adminauth
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,7 +91,7 @@ func TestExpiredTicketIsStillConsumed(t *testing.T) {
 	now = now.Add(LoginTicketTTL + time.Second)
 	_, _ = s.RedeemLoginTicket(raw)
 	s.mu.Lock()
-	n := len(s.tickets)
+	n := len(s.readTicketsLocked())
 	s.mu.Unlock()
 	if n != 0 {
 		t.Errorf("%d tickets still held after redeeming an expired one", n)
@@ -127,9 +130,86 @@ func TestLiveTicketsAreBounded(t *testing.T) {
 		t.Error("minting never refused; the live-ticket set is unbounded")
 	}
 	s.mu.Lock()
-	n := len(s.tickets)
+	n := len(s.readTicketsLocked())
 	s.mu.Unlock()
 	if n > maxLiveTickets {
 		t.Errorf("holding %d tickets, want at most %d", n, maxLiveTickets)
+	}
+}
+
+// The regression that unit tests could not see: `bridge admin login-link` runs
+// as a separate process from the serving bridge, so a ticket has to survive the
+// process that minted it. Two Store values over one path stand in for that.
+func TestTicketCrossesProcesses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "adminauth.json")
+
+	minting, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := minting.SetInitialPassword("admin", "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := minting.MintLoginTicket("admin")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	// A different Store over the same path — the serving bridge, which never
+	// shared memory with the CLI that minted.
+	serving, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := serving.RedeemLoginTicket(raw)
+	if err != nil {
+		t.Fatalf("a ticket minted by another process did not redeem: %v", err)
+	}
+	if user != "admin" {
+		t.Errorf("redeemed as %q, want admin", user)
+	}
+
+	// And it is spent everywhere, not just in the process that redeemed it.
+	if _, err := minting.RedeemLoginTicket(raw); !errors.Is(err, ErrTicketInvalid) {
+		t.Errorf("the minting process could still redeem a spent ticket: %v", err)
+	}
+}
+
+// The file must never contain a usable ticket, only its digest.
+func TestTicketFileHoldsNoUsableCredential(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "adminauth.json")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetInitialPassword("admin", "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := s.MintLoginTicket("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(s.ticketPath())
+	if err != nil {
+		t.Fatalf("reading the ticket file: %v", err)
+	}
+	if strings.Contains(string(body), raw) {
+		t.Fatal("the ticket file contains the ticket itself")
+	}
+	info, err := os.Stat(s.ticketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows has no POSIX permission bits — Go maps the whole mode onto one
+	// read-only flag, so a file written 0600 stats as 0666 and the assertion
+	// cannot hold there. Guard the ASSERTION, not the stat: an `err == nil &&`
+	// form would let the check vanish on any future breakage of the path
+	// itself, which is the shape the backup package already records.
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("ticket file mode = %04o, want 0600", perm)
+		}
 	}
 }
