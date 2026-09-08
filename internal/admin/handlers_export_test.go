@@ -29,6 +29,27 @@ func seedExportFixture(t *testing.T, st *manifest.Store) (deviceToken string) {
 	if err := st.UpsertDeviceRegistration(ctx, deviceToken, "tok-1", "Ada's iPhone"); err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
+	if err := st.UpsertPlaylist(ctx, deviceToken,
+		manifest.PlaylistRow{
+			ID: "5d9a2f4c-8e21-4c3a-9b77-0f1e2d3c4b5a", DeviceToken: deviceToken,
+			Name: "Late Night", LastModifiedAt: time.Now().UnixNano(),
+		},
+		[]manifest.PlaylistItemRow{{
+			Position: 0, Path: "Ada/Album/01 Song.flac", Title: "Song", Artist: "Ada",
+		}}); err != nil {
+		t.Fatalf("seed playlist: %v", err)
+	}
+	if err := st.UpsertFavorites(ctx, deviceToken, time.Now().UnixNano(),
+		[]manifest.FavoriteTrackRow{{
+			Path: "Ada/Album/01 Song.flac", Title: "Song", Artist: "Ada",
+			FavoritedAt: time.Now().UnixNano(),
+		}},
+		[]manifest.FavoriteAlbumRow{{
+			AlbumArtist: "Ada", Album: "Album", Year: 2026,
+			FavoritedAt: time.Now().UnixNano(),
+		}}); err != nil {
+		t.Fatalf("seed favorites: %v", err)
+	}
 	if err := st.InsertHistoryBatch(ctx, []manifest.PlaybackHistoryRow{{
 		DeviceToken:  deviceToken,
 		Path:         "Ada/Album/01 Song.flac",
@@ -100,6 +121,25 @@ func TestExportIsADownloadAndSelfDescribing(t *testing.T) {
 	}
 	if len(got.History) != 1 || got.History[0].DeviceName != "Ada's iPhone" {
 		t.Errorf("history = %+v; the device is named, not tokenised", got.History)
+	}
+	// The populated playlist and favourite paths, which nothing exercised until
+	// CodeRabbit pointed out that the fixture created neither — two loops that
+	// could have been wrong in any way and still passed.
+	if len(got.Playlists) != 1 || got.Playlists[0].Name != "Late Night" {
+		t.Fatalf("playlists = %+v", got.Playlists)
+	}
+	if len(got.Playlists[0].Items) != 1 || got.Playlists[0].Items[0].Title != "Song" {
+		t.Errorf("playlist items = %+v; a playlist without its items is not an export",
+			got.Playlists[0].Items)
+	}
+	if len(got.Favorites.Tracks) != 1 || got.Favorites.Tracks[0].Artist != "Ada" {
+		t.Errorf("favorite tracks = %+v", got.Favorites.Tracks)
+	}
+	if len(got.Favorites.Albums) != 1 || got.Favorites.Albums[0].Album != "Album" {
+		t.Errorf("favorite albums = %+v", got.Favorites.Albums)
+	}
+	if got.Favorites.Tracks[0].FavoritedAt == nil {
+		t.Error("favoritedAt is nil for a track that was favourited")
 	}
 }
 

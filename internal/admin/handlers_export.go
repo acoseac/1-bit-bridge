@@ -236,6 +236,11 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 		after = page[len(page)-1].ID
 	}
 	if len(out.History) >= exportHistoryCap {
+		// TRIM. The loop fetches 1000 at a time and only checks the cap between
+		// pages, so it can overshoot by up to 999 — and then `truncated.limit`
+		// would name a number the file does not honour. A small lie in the
+		// field whose whole job is to be honest about what is missing.
+		out.History = out.History[:exportHistoryCap]
 		out.Truncated = &exportTruncated{PlaybackHistory: true, Limit: exportHistoryCap}
 	}
 
