@@ -4261,3 +4261,106 @@ ffmpeg would skip it on a host that can run it — CodeRabbit on #866).
 hardest. Callers log the size they got, so a reduced-resolution run says
 so in its own output.
 
+
+## 2026-09-08 — the gate's twenty-five minutes were SQLite, not the tests
+
+The question was "why does the bridge CI take so long". The first answer was
+wrong in an instructive way, so both are recorded.
+
+**The wrong one.** `internal/adminauth` measured 35s without `-race` and 297s
+with it, and the cause was bcrypt: cost 12 is a deliberate ~250 ms per hash, the
+detector multiplies it, and the suite sets and resets passwords constantly.
+Hashing now reads the cost through `hashCost()`, which a suite may lower from
+`TestMain` via `SetTestHashCost`; the shipped constant is untouched and still
+pinned, and verification is unaffected because bcrypt reads the cost from the
+stored hash. `internal/adminauth` went 297s → 40s and `cmd/bridge` 85s → 61s.
+
+All real, and none of it the answer. That batch was written up as fixing the
+gate's ~20-minute race job on the strength of one package's measurement. The
+gate's own run then said:
+
+| package | race time on CI |
+|---|---|
+| `internal/manifest` | **1392s** |
+| `internal/admin` | 542s |
+| `cmd/bridge` | 172s |
+| `internal/transcode` | 131s |
+| `internal/adminauth` | 40s |
+
+The job was 25m18s. One package was 23 minutes of it. Extrapolating from the
+package that happened to be measured first is the mistake, not the measurement —
+the PR was retitled and corrected in place rather than quietly merged on the
+original claim.
+
+**The real one.** Inside `internal/manifest`, two compaction tests were 348s of
+600s locally. They seed 4,000 rows and delete thousands, and the cost is the
+driver: `modernc.org/sqlite` is pure Go, so every page operation is Go code the
+race detector instruments.
+
+| operation | normal | `-race` | ratio |
+|---|---|---|---|
+| `DeleteTracksBatch`, 2,000 rows | 1.43s | 69s | ~48x |
+| seed 4,000 rows, one at a time | — | 19.0s | |
+| seed 4,000 rows, batched | — | 6.8s | |
+| the `VACUUM` the tests are about | — | 0.2s | |
+
+Worth noting what was *ruled out* along the way, because the shape of the
+suspicion was reasonable and wrong: every foreign key into `tracks` is indexed
+(`track_variants`, `upnp_track_routing`, `track_analysis`, `track_lyrics`), the
+delete plan is `SEARCH tracks USING INDEX sqlite_autoindex_tracks_1 (path=?)`,
+and the batch scales linearly at ~0.7 ms/path without the detector. There is no
+production problem here; there is a test-time one.
+
+Two changes. The fixtures write through `UpsertTrackBatch` and
+`DeleteTracksBatch` — which exist for exactly this shape, and which the tests
+were simply not using. And the row count is build-tagged, 4,000 normally and 400
+under `-race`. Nothing in those tests is concurrent, so the detector has nothing
+to find, but the code paths still execute at the small size, so a race
+introduced into `Compact` or `PageStats` would still be caught. The
+fragmentation property needs the full size and is asserted in the `!race` build,
+which is what the macOS and Windows legs run. The one assertion that asks the
+fixture to *reproduce* the under-report is gated on that build, rather than left
+to pass vacuously at a size where it may not.
+
+`internal/manifest` under `-race`: 23 minutes → 6m15s. The batching changed
+nothing the fixture measures — the same run without `-race` reports the same
+numbers as before it.
+
+**A review round on the first batch** was worth having twice over. Gemini pointed
+out that `testHashCost`'s docblock said "call it only from `TestMain`, before any
+test starts" while two tests set it mid-run, which they have to, because they
+prove the no-override path — the `sendErrStreak` lesson again, and an atomic load
+beside a 250 ms key derivation costs nothing. It also pointed out that the
+production-code guard scanned lines for `SetTestHashCost(`, which is precisely
+the string this repo's own commentary contains: CLAUDE.md records that trap
+twice, and the setter's docblock names the symbol. The guard walks the AST now,
+which drops comments for free, separates the declaration from a call with no
+special case, catches a qualified call from another package, and fails if the
+walk visited no files at all.
+
+## 2026-09-08 — an endpoint synthesised from the wrong port
+
+In public mode the bridge advertises `https://<autocert.domain>:<its own listen
+port>` beside `customEndpoints`. Correct when the bridge answers on the port it
+listens on; wrong the moment anything remaps it.
+
+The hosted layout found it. Each tenant bridge listens on a loopback high port
+and is published behind one shared external port, declared in
+`customEndpoints`, and the live tenant advertised both:
+
+```
+"endpoints":["https://demo.cloud.1-bit.app:8443","https://demo.cloud.1-bit.app:20001"]
+```
+
+The second is a loopback port. iOS puts every advertised URL into its failover
+rotation, so it costs a timeout on rotation and appears in the source's endpoint
+list. The existing dedupe cannot collapse the pair: it compares URL strings, and
+these differ in exactly the part that is wrong.
+
+Leaving `autocert.domain` unset is not available — public mode refuses to start
+without it (`must be set in public mode`), which was established by trying it
+and taking a tenant down. So the synthesised entry is skipped when
+`customEndpoints` already names that **host**. An operator declaring the host
+there is them saying what the reachable address is, and there is no reason to
+also guess one. A `customEndpoint` for a different host still leaves the
+autocert domain advertised, which is the existing behaviour and is pinned.

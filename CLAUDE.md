@@ -419,6 +419,17 @@ lost my library."
   `URLSession.bytes(for:)`, which yields one `UInt8` per async step — 20M yields
   for a 20 MB file stalled the pipeline and surfaced as "Network connection lost"
   even over localhost. Don't add a server-side chunked mode that assumes it.
+- **Never advertise an endpoint synthesised from this process's own listen
+  port.** In public mode the bridge emits `https://<autocert.domain>:<listen
+  port>` beside `customEndpoints`. That is right only when nothing remaps the
+  port — behind a proxy that does (each hosted tenant listens on a loopback high
+  port and is published on one shared external port) it publishes an address no
+  client can reach, and iOS puts every advertised URL into its failover
+  rotation. The entry is skipped when `customEndpoints` already names that HOST;
+  the operator declaring it there is them saying what the reachable address is.
+  Host comparison, not URL comparison — the two differ in exactly the part that
+  is wrong, so the existing string dedupe cannot see it. `autocert.domain` cannot
+  simply be omitted: public mode refuses to start without it.
 - **mDNS TXT records carry `host` + `port`.** Without them iOS must
   NWConnection-resolve the Bonjour service to a hostport, which is unreliable;
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs
@@ -1406,6 +1417,27 @@ its twin.** The top list is older, shorter, and read first.
   a static file — there is no `.gitattributes` pinning `eol`.
 - **`filepath.ToSlash` is a no-op on POSIX**, so a Windows-shaped path handed to
   it on a Mac keeps its backslashes.
+- **CI's cost is SQLite under the race detector, not the tests' shape.**
+  `modernc.org/sqlite` is pure Go, so every page operation is Go code `-race`
+  instruments, and the multiplier is ~48x, not the usual eight: deleting 2,000
+  rows through `DeleteTracksBatch` measured **1.43s normally against 69s under
+  `-race`**. `internal/manifest` was 1392s of a 25m18s race job; nothing else was
+  close. **Before optimising a test, measure which PACKAGE the job is spending
+  its time in** — a batch that fixed `internal/adminauth` (297s → 40s, real) was
+  first written up as fixing the job, which it does not.
+- **A test fixture that bulk-loads or bulk-deletes rows uses the BATCH APIs.**
+  `UpsertTrackBatch` / `DeleteTracksBatch` exist because the one-at-a-time calls
+  each take `Store.mu` and run their own BEGIN/COMMIT/fsync; a fixture calling
+  the singular form pays that per row, under the detector. Seeding 4,000 rows:
+  19.0s against 6.8s.
+- **Size a SQLite-heavy fixture by build tag when the test has no concurrency.**
+  The compaction tests seed, delete and vacuum on one goroutine, so `-race` can
+  find nothing in them — but the code paths must still RUN there, so shrink the
+  fixture rather than skipping the test. The property that needs the full size is
+  asserted in the `!race` build, which is exactly what the macOS and Windows legs
+  run (`go test ./...`, whole suite, no `-race`, ~3 min). **Gate the
+  "does this fixture still reproduce the hazard" assertion on the full size**, or
+  it passes vacuously at the small one.
 - **Fuzz targets need `-fuzzminimizetime 1s`** — the 60s default burns CPU
   without incrementing `execs` while the run still says PASS, so the failure
   mode is a target that looks like it ran and did not.
