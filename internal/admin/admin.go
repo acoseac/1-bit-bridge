@@ -1541,6 +1541,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/history", s.apiHistorySummary)
 	mux.HandleFunc("GET /api/history/events", s.apiHistoryEvents)
 	mux.HandleFunc("GET /api/history/export", s.apiHistoryExport)
+	// Everything a person made, in one file — the portability answer, where
+	// the two lines above are per-type conveniences.
+	mux.HandleFunc("GET /api/export", s.apiExport)
 	mux.HandleFunc("GET /api/smart-playlists", s.apiSmartPlaylistsList)
 	mux.HandleFunc("POST /api/smart-playlists/regenerate", s.apiSmartPlaylistsRegenerate)
 	mux.HandleFunc("POST /api/smart-playlists/{slug}/regenerate", s.apiSmartPlaylistRegenerateOne)
