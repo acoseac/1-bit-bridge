@@ -2112,12 +2112,14 @@ function uploadNoteScanFinished() {
   uploadAwaitingScan = false;
   const el = document.getElementById("upload-result");
   if (!el || el.hidden) return;
-  const link = el.querySelector("a");
-  el.textContent = el.textContent.replace(/ — rescanning[^.]*\./, " — your library is up to date.");
-  if (link) {
-    el.appendChild(document.createElement("br"));
-    el.appendChild(link);
-  }
+  // The FIRST TEXT NODE, not el.textContent. The getter concatenates every
+  // descendant, so it returns the message plus the link's own label — and
+  // assigning that back flattens the element to one text node, destroying the
+  // link and leaving its words duplicated in the sentence. Rewriting the text
+  // node in place leaves the <br> and the <a> beside it untouched.
+  const text = [...el.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
+  if (!text) return;
+  text.nodeValue = text.nodeValue.replace(/ — rescanning[^.]*\./, " — your library is up to date.");
 }
 
 function resetUpload() {
@@ -7126,7 +7128,15 @@ function wireBoostRouter() {
   // (a[data-route]) are boot.js's job and are not matched here.
   document.addEventListener("click", (e) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    const a = e.target.closest("#primary-nav a, .subnav a");
+    // The persistent nav, plus any link that opts in with data-boost.
+    //
+    // A page-body link to an operator route is matched by NEITHER router
+    // otherwise: this one only looks at the nav, and the player's only looks
+    // at a[data-route] — which is not the answer for an operator route, since
+    // that handler routes every match through the player and /upload is not a
+    // player path (PLAYER_HEADS). So such a link was a full page load, which
+    // tears down the persistent DOM and stops playback.
+    const a = e.target.closest("#primary-nav a, .subnav a, a[data-boost]");
     if (!a) return;
     // Respect a link that explicitly opens elsewhere or downloads — a boost
     // swap would wrongly load it in place. None ship in the nav today; this

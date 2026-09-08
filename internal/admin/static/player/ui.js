@@ -124,7 +124,15 @@ export function emptyState(title, detail, action) {
   // it gets a real control rather than a sentence describing one. `action` is
   // `{ href, label }`; every other caller passes nothing and is unchanged.
   if (action) {
-    box.appendChild(el("a", { class: "btn primary", href: action.href, text: action.label }));
+    // NOT the player's link() helper: that stamps data-route, which routes the
+    // click through the PLAYER, and an operator route like /upload is not a
+    // player path. `data-boost` hands it to the admin boost router instead,
+    // which swaps operator pages in place and is what keeps <audio> alive.
+    box.appendChild(el("a", {
+      class: "btn primary player-empty-action",
+      attrs: { href: action.href, "data-boost": "" },
+      text: action.label,
+    }));
   }
   return box;
 }
