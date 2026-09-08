@@ -110,7 +110,7 @@ type loginResponse struct {
 // which half (wrong user vs wrong password) failed.
 func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	if s.deps.AdminAuth == nil || s.deps.LoginLimiter == nil {
-		writeError(w, http.StatusServiceUnavailable, "auth_disabled", "admin auth is not configured")
+		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
 		return
 	}
 	// Cap the JSON body size; the request shape is tiny and 1 KB
@@ -190,12 +190,57 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, loginResponse{Username: req.Username, Next: next})
 }
 
+// msgAuthNotConfigured is the one wording for "this build has no admin auth",
+// used by every handler that needs it.
+const msgAuthNotConfigured = "admin auth is not configured"
+
+// pageLoginTicket exchanges a one-time ticket for a console session.
+//
+// It exists so the hosted control plane can open an authenticated console for
+// the account that owns a tenant, without the user transcribing a generated
+// password — and so a self-hosting operator can do the same from a shell with
+// `bridge admin login-link`.
+//
+// The ticket travels in a URL, which is why it is single-use and stale within a
+// minute (adminauth.LoginTicketTTL), and why this handler redirects
+// immediately: the address bar should not keep a working credential, and a
+// reload must not replay one. Referrer-Policy is set so the value cannot leak
+// onward, and the ticket is never logged.
+func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
+	if s.deps.AdminAuth == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
+		return
+	}
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store")
+	username, err := s.deps.AdminAuth.RedeemLoginTicket(r.URL.Query().Get("t"))
+	if err != nil {
+		// Send them to the ordinary login form rather than explaining which of
+		// unknown, expired or already-used applies.
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	raw, err := s.deps.AdminAuth.CreateSession(username)
+	if err != nil {
+		logger.Error("admin create session from ticket", "err", err)
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	s.setSessionCookie(w, raw)
+	// Always the console root. A `next` parameter was considered and removed:
+	// validating it would make this the only handler passing a caller-supplied
+	// value to http.Redirect, and on a login path the safer answer is to have
+	// nothing to validate. Nothing needs it — the control plane wants the root,
+	// and the login form has its own.
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
 // apiLogout invalidates the current session (if any) and clears
 // the cookie. Returns 200 unconditionally — logout against an
 // already-expired session is a no-op, not an error.
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	if s.deps.AdminAuth == nil {
-		writeError(w, http.StatusServiceUnavailable, "auth_disabled", "admin auth is not configured")
+		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
 		return
 	}
 	if c, err := r.Cookie(sessionCookieName); err == nil {

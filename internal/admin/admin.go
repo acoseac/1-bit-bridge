@@ -1679,6 +1679,7 @@ func (s *Server) Handler() http.Handler {
 	// the sessionMiddleware's bypass list keeps /login reachable
 	// without a session.
 	mux.HandleFunc("GET /login", s.pageLogin)
+	mux.HandleFunc("GET /login/ticket", s.pageLoginTicket)
 	mux.HandleFunc("POST /login", s.apiLogin)
 	mux.HandleFunc("POST /logout", s.apiLogout)
 

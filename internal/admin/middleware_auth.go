@@ -171,6 +171,10 @@ func isAuthBypassPath(path string) bool {
 	switch {
 	case path == "/login":
 		return true
+	case path == "/login/ticket":
+		// Carries its own single-use credential; requiring a session to redeem
+		// one would defeat the purpose.
+		return true
 	case strings.HasPrefix(path, "/static/"):
 		return true
 	case strings.HasPrefix(path, "/favicon"):

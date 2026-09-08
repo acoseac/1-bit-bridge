@@ -168,6 +168,9 @@ type Store struct {
 	// mu.
 	sessionsDirty    bool
 	lastSessionFlush time.Time
+	// tickets are one-time console login credentials (ticket.go). In memory
+	// only, and guarded by mu with everything else here.
+	tickets map[[sha256.Size]byte]loginTicket
 }
 
 // OpenStore loads (or initialises as empty) the store at path. A
