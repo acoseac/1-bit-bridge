@@ -163,14 +163,49 @@ func (s *Store) writeTicketsLocked(tickets map[string]persistedTicket) error {
 	if err != nil {
 		return fmt.Errorf("encode login tickets: %w", err)
 	}
-	tmp := s.ticketPath() + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+	// A UNIQUE staging name, not "<path>.tmp". Two PROCESSES write this file —
+	// `bridge admin login-link` mints and the serving bridge redeems, which is
+	// the whole reason it is on disk — and Store.mu does not reach across them.
+	// On one fixed name they can interleave: A truncates and writes, B
+	// truncates and writes, A renames B's half-written bytes into place. The
+	// file then fails to parse and every live ticket is lost. os.CreateTemp
+	// gives each writer its own file, so a rename only ever commits bytes that
+	// writer produced. It also creates at 0600 modulo umask, and umask can only
+	// REMOVE bits, so the Chmod below is belt-and-braces against filesystems
+	// that widen on close — the convention auth.Store already follows.
+	//
+	// The read-modify-write is still not serialised between processes, so two
+	// simultaneous mints can lose one of the two tickets. That is survivable in
+	// a way a corrupt file is not: the caller mints again. An interprocess lock
+	// was declined for the reason `bridge restore` gives for narrowing rather
+	// than locking — a stale lockfile after an unclean exit would block the
+	// login path at exactly the moment an operator needs it.
+	dir, base := filepath.Split(s.ticketPath())
+	tmp, err := os.CreateTemp(dir, "."+base+"-*")
+	if err != nil {
+		return fmt.Errorf("stage login tickets: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod login tickets: %w", err)
+	}
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write login tickets: %w", err)
 	}
-	if err := atomicwrite.RenameWithRetry(tmp, s.ticketPath()); err != nil {
-		os.Remove(tmp)
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close login tickets: %w", err)
+	}
+	if err := atomicwrite.RenameWithRetry(tmpName, s.ticketPath()); err != nil {
 		return fmt.Errorf("commit login tickets: %w", err)
 	}
+	tmpName = "" // renamed away; the defer must not remove the committed file
 	return nil
 }
 
