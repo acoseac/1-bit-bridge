@@ -479,3 +479,68 @@ func TestReachableEndpoints_PublicModeDedupesAutocertAgainstCustom(t *testing.T)
 		t.Errorf("autocert + customEndpoint duplicate should dedupe to exactly 1; got %d (eps=%v)", count, eps)
 	}
 }
+
+// TestReachableEndpoints_PublicModeSkipsRemappedAutocertHost pins the hosted
+// layout, where the port this process listens on is NOT the port clients dial.
+//
+// Each tenant bridge listens on a loopback high port and is published behind a
+// proxy on one shared external port, declared in customEndpoints. Synthesizing
+// `https://<autocert.domain>:<listen port>` there advertises an address nothing
+// can reach, and iOS adds every advertised URL to its failover rotation. The
+// string dedupe downstream cannot collapse the pair, because the two URLs differ
+// in exactly the part that is wrong.
+//
+// `autocert.domain` cannot simply be left out: public mode refuses to start
+// without it.
+func TestReachableEndpoints_PublicModeSkipsRemappedAutocertHost(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: "127.0.0.1:20001",
+		Deployment:    config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:      config.AutocertConfig{Domain: "demo.cloud.example"},
+		// The operator's own statement of the address that works.
+		CustomEndpoints: []string{"https://demo.cloud.example:8443"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	eps := s.reachableEndpoints()
+	if !contains(eps, "https://demo.cloud.example:8443") {
+		t.Errorf("the declared endpoint must survive; got %v", eps)
+	}
+	if contains(eps, "https://demo.cloud.example:20001") {
+		t.Errorf("advertised the listen port for a host the operator already declared; got %v", eps)
+	}
+	if len(eps) != 1 {
+		t.Errorf("want exactly the declared endpoint, got %v", eps)
+	}
+}
+
+// A different host in customEndpoints must not suppress the autocert domain —
+// the skip is per-host, not "any customEndpoint at all".
+func TestReachableEndpoints_PublicModeKeepsAutocertWhenHostDiffers(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress:   ":443",
+		Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
+		CustomEndpoints: []string{"https://alt.example.com:443"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	eps := s.reachableEndpoints()
+	if !contains(eps, "https://bridge.example.com") {
+		t.Errorf("autocert domain dropped despite an unrelated customEndpoint; got %v", eps)
+	}
+}
+
+// Host comparison is case-insensitive, since DNS is and an operator may spell
+// the same host either way in the two fields.
+func TestReachableEndpoints_PublicModeAutocertHostMatchIsCaseInsensitive(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress:   "127.0.0.1:20001",
+		Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        config.AutocertConfig{Domain: "Demo.Cloud.Example"},
+		CustomEndpoints: []string{"https://demo.cloud.example:8443"},
+	}
+	s := &Server{cfgHolder: config.NewRuntimeConfig(cfg)}
+	eps := s.reachableEndpoints()
+	if contains(eps, "https://Demo.Cloud.Example:20001") {
+		t.Errorf("case difference defeated the host match; got %v", eps)
+	}
+}
