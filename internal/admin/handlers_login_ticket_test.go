@@ -122,29 +122,26 @@ func TestLoginTicketResponseDoesNotLeakTheCredential(t *testing.T) {
 	}
 }
 
-// `next` follows the same safety rule as the login form: relative paths only,
-// so a ticket link cannot be turned into an open redirect.
-func TestLoginTicketNextIsConstrained(t *testing.T) {
+// A ticket link takes nobody anywhere but the console root. The `next`
+// parameter was deliberately removed rather than validated: this would
+// otherwise be the only handler feeding a caller-supplied value to
+// http.Redirect, which is a question worth not having on a login path.
+func TestLoginTicketIgnoresAnyRedirectTarget(t *testing.T) {
 	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	for _, tc := range []struct{ next, want string }{
-		{"/library", "/library"},
-		{"https://evil.example/x", "/"},
-		{"//evil.example/x", "/"},
-		{"not-a-path", "/"},
-	} {
+	for _, next := range []string{"/library", "https://evil.example/x", "//evil.example/x", "not-a-path"} {
 		ticket, err := store.MintLoginTicket("admin")
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := noRedirectClient().Get(ts.URL + "/login/ticket?t=" + ticket + "&next=" + tc.next)
+		resp, err := noRedirectClient().Get(ts.URL + "/login/ticket?t=" + ticket + "&next=" + next)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := resp.Header.Get("Location"); got != tc.want {
-			t.Errorf("next=%q redirected to %q, want %q", tc.next, got, tc.want)
+		if got := resp.Header.Get("Location"); got != "/" {
+			t.Errorf("next=%q redirected to %q, want / — no caller-supplied target may be honoured", next, got)
 		}
 		resp.Body.Close()
 	}
