@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,9 +24,12 @@ func adminCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "bridge admin <subcommand>")
 		fmt.Fprintln(stderr, "  reset-password   Rotate the admin console password")
+		fmt.Fprintln(stderr, "  login-link       Print a one-time URL that logs a browser into the console")
 		return 2
 	}
 	switch args[0] {
+	case "login-link":
+		return adminLoginLink(args[1:], stdout, stderr)
 	case "reset-password":
 		return adminResetPasswordCmd(args[1:], stdin, stdout, stderr)
 	default:
@@ -155,4 +159,54 @@ func readPasswordTwice(stdin io.Reader, stdout, stderr io.Writer) (string, error
 // dead-ending the documented recovery path.
 func loadConfigForAdminCmd(override string) (*config.Config, string, error) {
 	return loadCLIConfig(override)
+}
+
+// adminLoginLink prints a single-use URL that exchanges for a console session.
+//
+// It exists for two callers: an operator who would rather not transcribe a
+// generated password, and the hosted control plane, which opens an authenticated
+// console for the account that owns a tenant. The ticket is stale within a
+// minute and cannot be redeemed twice — see adminauth.LoginTicketTTL.
+//
+// The URL is printed to stdout and nowhere else. It is a working credential for
+// its lifetime, so it must not be logged or echoed into a shell transcript that
+// outlives it.
+func adminLoginLink(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("admin login-link", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	username := fs.String("username", "admin", "account to log in as (single-user system; \"admin\" by default)")
+	base := fs.String("base", "", "absolute base URL to prefix, e.g. https://host:7789 (default: print the path only)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "all options must be passed as flags")
+		return 2
+	}
+	cfg, _, err := loadCLIConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	store, err := adminauth.OpenStore(filepath.Join(cfg.DataDir, "adminauth.json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "open adminauth store: %v\n", err)
+		return 1
+	}
+	if !store.IsInitialised() {
+		fmt.Fprintln(stderr, "no admin credentials yet — run `bridge admin reset-password` first")
+		return 1
+	}
+	ticket, err := store.MintLoginTicket(*username)
+	if err != nil {
+		fmt.Fprintf(stderr, "mint login ticket: %v\n", err)
+		return 1
+	}
+	path := "/login/ticket?t=" + url.QueryEscape(ticket)
+	if b := strings.TrimRight(strings.TrimSpace(*base), "/"); b != "" {
+		path = b + path
+	}
+	fmt.Fprintln(stdout, path)
+	return 0
 }
