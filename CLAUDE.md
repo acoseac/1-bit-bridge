@@ -1236,6 +1236,23 @@ its twin.** The top list is older, shorter, and read first.
   out-of-lock** — otherwise a concurrent poll hands iOS a token the revoke then
   destroys. Revoke-then-delete with bounded retry; `Delete` refuses an
   Expired-with-token row so the revoke lifecycle stays owned by `onTimer`.
+- **A console login ticket is PERSISTED, because the two halves are different
+  PROCESSES.** `bridge admin login-link` mints and the serving bridge redeems, so
+  an in-memory map is invisible to the redeemer and the feature never works — it
+  shipped that way, and every unit test passed because each minted and redeemed
+  inside one process. What is stored is the hex SHA-256 in a 0600 sidecar beside
+  the password hashes, so disk gains no credential it did not already hold, and
+  single-use plus the 60-second window still come from deleting the record on
+  presentation, before judging it. **Stage to a UNIQUE temp name**: `Store.mu`
+  does not reach across processes, so one fixed `.tmp` lets two writers interleave
+  and rename each other's half-written bytes into place, which loses every live
+  ticket. The read-modify-write is still unserialised across processes — losing
+  one of two simultaneous mints is survivable (mint again) in a way a corrupt file
+  is not, and an interprocess lock is declined for `bridge restore`'s reason: a
+  stale lockfile after an unclean exit blocks the login path exactly when it is
+  needed. `SameSite=Strict` is NOT the usual magic-link trap here — the app opens
+  the URL itself, and a navigation with no initiator is same-site (verified in a
+  real browser, not reasoned about).
 - **No per-IP rate cap on pairing requests** — double-NAT puts every LAN device
   behind one address. The bridge-wide pending cap plus the visible admin queue
   is the bound. The 6-digit code is drawn from `crypto/rand`.
