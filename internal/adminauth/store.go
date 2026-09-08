@@ -58,6 +58,35 @@ var logger = logging.Component("adminauth")
 
 const adminBcryptCost = 12
 
+// testHashCost, when positive, replaces adminBcryptCost for NEWLY GENERATED
+// hashes. It exists only so a test suite stops spending its time in key
+// derivation, which is otherwise the single largest cost in CI: bcrypt at cost
+// 12 is ~250 ms by design, the race detector multiplies that by roughly eight,
+// and this package alone measured 35 s without `-race` against 297 s with it.
+//
+// Production code must never set it, and nothing enforces that at compile time,
+// so TestNoProductionCodeLowersTheHashCost sweeps every non-test file in the
+// module and fails if any of them calls the setter.
+//
+// Verification is unaffected either way: bcrypt reads the cost from the stored
+// hash, so a store written at one cost still verifies at another.
+var testHashCost int
+
+// SetTestHashCost lowers the bcrypt work factor for the rest of the process.
+//
+// Call it from TestMain, BEFORE any test starts: it is a plain variable, and
+// setting it once before the suite runs is what keeps that safe under `-race`.
+// Passing 0 restores the shipped cost.
+func SetTestHashCost(cost int) { testHashCost = cost }
+
+// hashCost is the work factor used for a new hash.
+func hashCost() int {
+	if testHashCost > 0 {
+		return testHashCost
+	}
+	return adminBcryptCost
+}
+
 // minPasswordLen is the floor for an ENVIRONMENT-SEEDED credential.
 //
 // Deliberately not applied to ResetPassword, which has always accepted
@@ -230,7 +259,7 @@ func (s *Store) MintInitial(username string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("generate password: %w", err)
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), adminBcryptCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), hashCost())
 	if err != nil {
 		return "", fmt.Errorf("bcrypt: %w", err)
 	}
@@ -269,7 +298,7 @@ func (s *Store) ResetPassword(username, newPassword string) error {
 	// store state. A username-mismatch caller wastes the hash on the
 	// error path (rare) — acceptable for keeping the success path off the
 	// lock.
-	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), adminBcryptCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), hashCost())
 	if err != nil {
 		return fmt.Errorf("bcrypt: %w", err)
 	}
@@ -504,7 +533,7 @@ func (s *Store) SetInitialPassword(username, password string) error {
 	if utf8.RuneCountInString(password) < minPasswordLen {
 		return fmt.Errorf("adminauth: password must be at least %d characters", minPasswordLen)
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), adminBcryptCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), hashCost())
 	if err != nil {
 		return fmt.Errorf("bcrypt: %w", err)
 	}
