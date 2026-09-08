@@ -3930,6 +3930,137 @@ function mapEnrichSourceToBases(fd) {
   };
 }
 
+/**
+ * Build the PATCH body for a Settings save.
+ *
+ * An explicit allowlist, NOT a FormData dump: this payload IS the
+ * settings wire surface, so a control that renders without a line here
+ * saves nothing while the page still reports "Saved." — worse than not
+ * offering it, and caught exactly that way in a browser more than once.
+ * Adding a control to the template means adding it here in the same
+ * change.
+ *
+ * `enrichBases` is passed in rather than resolved here because resolving
+ * it can FAIL (an unparseable Atlas URL), and the caller is where that
+ * error has a message element to go to.
+ */
+function buildSettingsPayload(form, fd, enrichBases) {
+  const body = {
+    libraryName: fd.get("libraryName"),
+    listenAddress: fd.get("listenAddress"),
+    adminAddress: fd.get("adminAddress"),
+    scanIntervalSec: parseInt(fd.get("scanIntervalSec"), 10),
+    // Phase C update settings. Checkbox is "on"/null per FormData
+    // semantics; coerce to bool so the server's pointer-typed
+    // patch field always receives a real value (not null/missing).
+    updateAutoInstall: fd.get("updateAutoInstall") === "on",
+    updateQuietHours: fd.get("updateQuietHours") || "",
+    updateCheckIntervalHours: parseInt(fd.get("updateCheckIntervalHours") || "0", 10),
+    // Custom endpoints come in as a single textarea string ("URL\n
+    // URL\n…"). Send the textarea form — the server splits on
+    // newlines or commas and validates each entry. Sending the
+    // explicit string (not the parsed array) lets the server be
+    // the single source of truth on splitting/validation.
+    customEndpointsText: fd.get("customEndpoints") || "",
+    // v1.2 Audio quality opt-in — same checkbox-coerce-to-bool
+    // pattern as updateAutoInstall above so the server's
+    // pointer-typed patch field always receives a real value.
+    upscaleEnabled: fd.get("upscaleEnabled") === "on",
+    analysisEnabled: fd.get("analysisEnabled") === "on",
+    smartPlaylistsEnabled: fd.get("smartPlaylistsEnabled") === "on",
+    // CarPlay-optimize gate (default ON in YAML; only active while
+    // upscaleEnabled). Restart-required — the optimize closures are
+    // resolved once at `bridge serve` startup.
+    optimizeEnabled: fd.get("optimizeEnabled") === "on",
+    // Background pre-generation of those optimize variants. NOT
+    // restart-required — the sweeper reads the flag live and the PATCH
+    // nudges it, so an off→on flip starts work immediately.
+    autoOptimizeEnabled: fd.get("autoOptimizeEnabled") === "on",
+    // DSD → PCM renditions. NOT restart-required — every DSD gate reads
+    // the caps live and the PATCH nudges the sweeper.
+    dsdRenderEnabled: fd.get("dsdRenderEnabled") === "on",
+    // fsnotify library watcher opt-in. Restart-required — the
+    // watcher goroutine starts at `bridge serve` startup.
+    libraryWatchEnabled: fd.get("libraryWatchEnabled") === "on",
+    uploadEnabled: fd.get("uploadEnabled") === "on",
+    allowDelete: fd.get("allowDelete") === "on",
+    // Backup cadence + retention. These became editable with the
+    // settings consolidation and MUST be listed here: this payload is
+    // an explicit allowlist, not a FormData dump, so a field that
+    // renders but isn't mapped saves nothing while the page still
+    // reports "Saved." — which is worse than not offering it. Caught
+    // exactly that way in the browser.
+    //
+    // parseInt with a NaN guard rather than `|| 0`: 0 is a MEANINGFUL
+    // value for the interval (it disables the periodic ticker), so
+    // coercing a blank field to 0 would silently turn backups off.
+    backupIntervalHours: numOrUndef(fd.get("backupIntervalHours")),
+    backupKeep: numOrUndef(fd.get("backupKeep")),
+    // Data retention. numOrUndef for the same reason as the interval
+    // above and a sharper one: 0 is the MEANINGFUL default here ("keep
+    // everything"), and it is also how an operator turns a window back
+    // off, so a blank box must send nothing rather than coerce to 0.
+    retentionPlaybackHistoryDays: numOrUndef(fd.get("retentionPlaybackHistoryDays")),
+    retentionDeviceRegistrationDays: numOrUndef(fd.get("retentionDeviceRegistrationDays")),
+    // Enrich upstream base URLs, resolved from the source picker above
+    // (blank = public MusicBrainz / Cover Art defaults; atlas = derived
+    // <url>/ws/2 + <url>; custom = the raw Advanced fields). Server
+    // validates + normalizes; restart-required.
+    enrichMusicBrainzBaseURL: enrichBases.mb,
+    enrichCoverArtBaseURL: enrichBases.ca,
+    // Rich-tier Atlas metadata opt-in (bios/descriptions via the app
+    // ferry). Restart-required; same checkbox-coerce pattern.
+    atlasEnabled: fd.get("atlasEnabled") === "on",
+    // Acoustic fingerprinting: toggle + set-only key field. A blank key
+    // input means "keep the current key" — drop the field entirely
+    // (undefined → removed by JSON.stringify → server pointer stays
+    // nil) rather than relying on the server's blank-is-noop guard.
+    fingerprintEnabled: fd.get("fingerprintEnabled") === "on",
+    fingerprintApiKey: (fd.get("fingerprintApiKey") || "").trim() || undefined,
+    // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
+    // dropdown value is one of "cli" / "tsnet" / "disabled";
+    // it stays offered in public mode (tailnet-routed public
+    // bridges are legitimate). The mDNS checkbox is the
+    // FormData "on"/null shape, coerced to bool — and in
+    // public mode its field is hidden, which dropUnofferedFields
+    // below now turns into an omission. This comment used to say
+    // the literal `false` was needed "to keep the server's
+    // pointer-typed patch field happy"; it is not, and an omitted
+    // pointer field is the honest way to say "not offered, so
+    // not changed".
+    tailscaleMode: fd.get("tailscaleMode") || "",
+    mdnsEnabled: fd.get("mdnsEnabled") === "on",
+    // UPnP/DLNA toggle (restart-required). In public mode the checkbox
+    // is rendered `disabled`, so omit the field entirely there (undefined
+    // → dropped by JSON.stringify → server's pointer stays nil → no
+    // change). Coercing a disabled checkbox to false would silently
+    // overwrite a stored dlnaEnabled=true and trigger a spurious
+    // restartRequired (Gemini on PR #342).
+    dlnaEnabled: form.querySelector('input[name="dlnaEnabled"]')?.disabled
+      ? undefined
+      : fd.get("dlnaEnabled") === "on",
+  };
+
+  // Send what the page SHOWED, and nothing else.
+  //
+  // This payload is an explicit allowlist that names every field, so a
+  // control the page did not offer was still being sent — as `false`,
+  // `""` or `0`, because that is what `fd.get` on a missing or hidden
+  // input coerces to. On a bridge with managed settings the PATCH is
+  // refused WHOLE if any managed field is supplied, so renaming the
+  // library failed with a wall of nineteen field names it had nothing
+  // to do with. Driven in a browser against a managed fixture, where
+  // the only editable field on the page could not be saved at all.
+  //
+  // `dlnaEnabled` above already did this for its own case (a disabled
+  // checkbox, Gemini on PR #342); this is the same rule for every
+  // field, keyed on whether the control is in the document and visible
+  // rather than on what its value coerced to — a checkbox legitimately
+  // reads `false` when it is offered and unticked.
+  dropUnofferedFields(form, body);
+  return body;
+}
+
 function initSettings() {
   initSettingsTabs();
   // Hide control-plane-owned settings before anything else wires them:
@@ -4067,119 +4198,7 @@ function initSettings() {
       return;
     }
 
-    const body = {
-      libraryName: fd.get("libraryName"),
-      listenAddress: fd.get("listenAddress"),
-      adminAddress: fd.get("adminAddress"),
-      scanIntervalSec: parseInt(fd.get("scanIntervalSec"), 10),
-      // Phase C update settings. Checkbox is "on"/null per FormData
-      // semantics; coerce to bool so the server's pointer-typed
-      // patch field always receives a real value (not null/missing).
-      updateAutoInstall: fd.get("updateAutoInstall") === "on",
-      updateQuietHours: fd.get("updateQuietHours") || "",
-      updateCheckIntervalHours: parseInt(fd.get("updateCheckIntervalHours") || "0", 10),
-      // Custom endpoints come in as a single textarea string ("URL\n
-      // URL\n…"). Send the textarea form — the server splits on
-      // newlines or commas and validates each entry. Sending the
-      // explicit string (not the parsed array) lets the server be
-      // the single source of truth on splitting/validation.
-      customEndpointsText: fd.get("customEndpoints") || "",
-      // v1.2 Audio quality opt-in — same checkbox-coerce-to-bool
-      // pattern as updateAutoInstall above so the server's
-      // pointer-typed patch field always receives a real value.
-      upscaleEnabled: fd.get("upscaleEnabled") === "on",
-      analysisEnabled: fd.get("analysisEnabled") === "on",
-      smartPlaylistsEnabled: fd.get("smartPlaylistsEnabled") === "on",
-      // CarPlay-optimize gate (default ON in YAML; only active while
-      // upscaleEnabled). Restart-required — the optimize closures are
-      // resolved once at `bridge serve` startup.
-      optimizeEnabled: fd.get("optimizeEnabled") === "on",
-      // Background pre-generation of those optimize variants. NOT
-      // restart-required — the sweeper reads the flag live and the PATCH
-      // nudges it, so an off→on flip starts work immediately.
-      autoOptimizeEnabled: fd.get("autoOptimizeEnabled") === "on",
-      // DSD → PCM renditions. NOT restart-required — every DSD gate reads
-      // the caps live and the PATCH nudges the sweeper.
-      dsdRenderEnabled: fd.get("dsdRenderEnabled") === "on",
-      // fsnotify library watcher opt-in. Restart-required — the
-      // watcher goroutine starts at `bridge serve` startup.
-      libraryWatchEnabled: fd.get("libraryWatchEnabled") === "on",
-      uploadEnabled: fd.get("uploadEnabled") === "on",
-      allowDelete: fd.get("allowDelete") === "on",
-      // Backup cadence + retention. These became editable with the
-      // settings consolidation and MUST be listed here: this payload is
-      // an explicit allowlist, not a FormData dump, so a field that
-      // renders but isn't mapped saves nothing while the page still
-      // reports "Saved." — which is worse than not offering it. Caught
-      // exactly that way in the browser.
-      //
-      // parseInt with a NaN guard rather than `|| 0`: 0 is a MEANINGFUL
-      // value for the interval (it disables the periodic ticker), so
-      // coercing a blank field to 0 would silently turn backups off.
-      backupIntervalHours: numOrUndef(fd.get("backupIntervalHours")),
-      backupKeep: numOrUndef(fd.get("backupKeep")),
-      // Data retention. numOrUndef for the same reason as the interval
-      // above and a sharper one: 0 is the MEANINGFUL default here ("keep
-      // everything"), and it is also how an operator turns a window back
-      // off, so a blank box must send nothing rather than coerce to 0.
-      retentionPlaybackHistoryDays: numOrUndef(fd.get("retentionPlaybackHistoryDays")),
-      retentionDeviceRegistrationDays: numOrUndef(fd.get("retentionDeviceRegistrationDays")),
-      // Enrich upstream base URLs, resolved from the source picker above
-      // (blank = public MusicBrainz / Cover Art defaults; atlas = derived
-      // <url>/ws/2 + <url>; custom = the raw Advanced fields). Server
-      // validates + normalizes; restart-required.
-      enrichMusicBrainzBaseURL: enrichBases.mb,
-      enrichCoverArtBaseURL: enrichBases.ca,
-      // Rich-tier Atlas metadata opt-in (bios/descriptions via the app
-      // ferry). Restart-required; same checkbox-coerce pattern.
-      atlasEnabled: fd.get("atlasEnabled") === "on",
-      // Acoustic fingerprinting: toggle + set-only key field. A blank key
-      // input means "keep the current key" — drop the field entirely
-      // (undefined → removed by JSON.stringify → server pointer stays
-      // nil) rather than relying on the server's blank-is-noop guard.
-      fingerprintEnabled: fd.get("fingerprintEnabled") === "on",
-      fingerprintApiKey: (fd.get("fingerprintApiKey") || "").trim() || undefined,
-      // PR 4 — Tailscale + mDNS hot-reload fields. Tailscale
-      // dropdown value is one of "cli" / "tsnet" / "disabled";
-      // it stays offered in public mode (tailnet-routed public
-      // bridges are legitimate). The mDNS checkbox is the
-      // FormData "on"/null shape, coerced to bool — and in
-      // public mode its field is hidden, which dropUnofferedFields
-      // below now turns into an omission. This comment used to say
-      // the literal `false` was needed "to keep the server's
-      // pointer-typed patch field happy"; it is not, and an omitted
-      // pointer field is the honest way to say "not offered, so
-      // not changed".
-      tailscaleMode: fd.get("tailscaleMode") || "",
-      mdnsEnabled: fd.get("mdnsEnabled") === "on",
-      // UPnP/DLNA toggle (restart-required). In public mode the checkbox
-      // is rendered `disabled`, so omit the field entirely there (undefined
-      // → dropped by JSON.stringify → server's pointer stays nil → no
-      // change). Coercing a disabled checkbox to false would silently
-      // overwrite a stored dlnaEnabled=true and trigger a spurious
-      // restartRequired (Gemini on PR #342).
-      dlnaEnabled: form.querySelector('input[name="dlnaEnabled"]')?.disabled
-        ? undefined
-        : fd.get("dlnaEnabled") === "on",
-    };
-
-    // Send what the page SHOWED, and nothing else.
-    //
-    // This payload is an explicit allowlist that names every field, so a
-    // control the page did not offer was still being sent — as `false`,
-    // `""` or `0`, because that is what `fd.get` on a missing or hidden
-    // input coerces to. On a bridge with managed settings the PATCH is
-    // refused WHOLE if any managed field is supplied, so renaming the
-    // library failed with a wall of nineteen field names it had nothing
-    // to do with. Driven in a browser against a managed fixture, where
-    // the only editable field on the page could not be saved at all.
-    //
-    // `dlnaEnabled` above already did this for its own case (a disabled
-    // checkbox, Gemini on PR #342); this is the same rule for every
-    // field, keyed on whether the control is in the document and visible
-    // rather than on what its value coerced to — a checkbox legitimately
-    // reads `false` when it is offered and unticked.
-    dropUnofferedFields(form, body);
+    const body = buildSettingsPayload(form, fd, enrichBases);
 
     try {
       const r = await API.patch("/api/settings", body);
