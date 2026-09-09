@@ -3026,6 +3026,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if cfg.Atlas.HarvestEnabled && !cfg.Atlas.Enabled {
 		fmt.Fprintln(stderr, "atlas harvest: harvestEnabled requires atlas.enabled (bios are served via /v1/atlas-meta) — harvest disabled")
 	}
+	// Same shape one level down: the lyrics sweep rides the harvest
+	// credential, so it is inert without it and the operator has no way to
+	// tell from the outside — the console card simply never appears.
+	//
+	// A WARNING, not a validation error. Config.Validate is a pure shape
+	// check, and refusing to start over a combination that is merely useless
+	// rather than dangerous is how a binary rolled back during an incident
+	// fails to boot. Same reasoning as an unrecognised managed-control name.
+	// (Gemini, PR #888.)
+	if cfg.Atlas.LyricsEnabled && !(cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled) {
+		fmt.Fprintln(stderr, "atlas lyrics: lyricsEnabled requires atlas.enabled and atlas.harvestEnabled "+
+			"(the sweep rides the harvest credential) — network lyrics disabled")
+	}
 	// A demo bridge's bearer is public by construction (the static
 	// demo.tokenSHA256 ships inside every installed app), so an unpinned
 	// credential endpoint there lets anyone repoint the harvest pull at a

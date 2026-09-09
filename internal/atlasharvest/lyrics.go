@@ -258,13 +258,23 @@ func (c *Client) resolveRecording(ctx context.Context, st State, cand LyricsCand
 		var err error
 		entries, err = c.fetchReleaseTracks(ctx, st, cand.AlbumMBID)
 		if err != nil {
-			if errors.Is(err, errUnauthorized) || ctx.Err() != nil {
+			// The split is between an upstream that ANSWERED and one that
+			// failed to answer, and only the first is a fact about the album.
+			//
+			// Anything else — a 502, a 504, a timeout, a rate limit — is a
+			// fact about the network, so it propagates and stops the sweep
+			// with NOTHING stamped. Swallowing it here would reach
+			// MatchNone → statusUnresolved and park a perfectly real album
+			// behind a fortnight-long backoff because Atlas was restarting.
+			// Found by Gemini on PR #888, which also spotted why the existing
+			// transient test could not see it: that candidate carried a tagged
+			// recording MBID and never reached this call at all.
+			if !isUpstreamAnswered(err) {
 				return "", MatchNone, err
 			}
-			// A release Atlas does not know is a fact about this album, not a
-			// reason to abandon the sweep. Cache the empty answer so its other
-			// tracks do not each re-ask.
-			c.log().DebugContext(ctx, "atlaslyrics.release_fetch_failed",
+			// A release Atlas genuinely does not have is durable. Cache the
+			// empty answer so this album's other tracks do not each re-ask.
+			c.log().DebugContext(ctx, "atlaslyrics.release_unknown",
 				"album", cand.AlbumMBID, "error", err)
 			entries = nil
 		}

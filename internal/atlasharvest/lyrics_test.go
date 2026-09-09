@@ -3,6 +3,7 @@ package atlasharvest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -621,3 +622,86 @@ type discardMeta struct{}
 
 func (discardMeta) UpsertArtistMeta(context.Context, ArtistMeta) error   { return nil }
 func (discardMeta) UpsertReleaseMeta(context.Context, ReleaseMeta) error { return nil }
+
+// A transient failure on the RELEASE fetch must write no verdict either.
+//
+// The sibling test above uses a candidate carrying a tagged recording MBID,
+// which skips the release listing entirely — so it proved the recording leg and
+// said nothing about this one. A 502 here used to reach MatchNone and stamp
+// `unresolved` with a fourteen-day backoff, parking a real album because Atlas
+// was restarting. (Gemini, PR #888.)
+func TestATransientReleaseFetchFailureWritesNoVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		wantStamp bool
+		wantErr   bool
+	}{
+		// The upstream failed to answer: nothing is known, nothing is written.
+		{"502 bad gateway", http.StatusBadGateway, false, true},
+		{"503 unavailable", http.StatusServiceUnavailable, false, true},
+		// 4xx by number, transient by meaning — a rate limit says nothing
+		// about whether the album exists.
+		{"429 too many requests", http.StatusTooManyRequests, false, true},
+		{"408 request timeout", http.StatusRequestTimeout, false, true},
+		// The upstream ANSWERED: Atlas does not have this release. Durable, so
+		// the candidate is stamped and the sweep carries on.
+		{"404 not found", http.StatusNotFound, true, false},
+		{"400 bad request", http.StatusBadRequest, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := newFakeSink(LyricsCandidate{
+				Path: "a/x.flac", AlbumMBID: "alb", Title: "Song", DiscNumber: 1, TrackNumber: 1,
+			})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
+				LyricsPacing: time.Nanosecond}
+			st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
+
+			err := c.tickLyrics(context.Background(), st)
+			if tc.wantErr && err == nil {
+				t.Error("a transient failure did not stop the sweep")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("an answered 4xx stopped the sweep: %v", err)
+			}
+			got, stamped := sink.attempts["a/x.flac"]
+			if stamped != tc.wantStamp {
+				t.Errorf("stamped = %v (%q), want %v", stamped, got.status, tc.wantStamp)
+			}
+			if tc.wantStamp && got.status != statusUnresolved {
+				t.Errorf("status = %q, want unresolved", got.status)
+			}
+		})
+	}
+}
+
+// The classifier itself, because the whole transient/durable split rests on it
+// and it must read the CODE rather than the message.
+func TestIsUpstreamAnswered(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want bool
+	}{
+		{http.StatusNotFound, true}, {http.StatusBadRequest, true}, {http.StatusGone, true},
+		{http.StatusTooManyRequests, false}, {http.StatusRequestTimeout, false},
+		{http.StatusBadGateway, false}, {http.StatusInternalServerError, false},
+	} {
+		if got := isUpstreamAnswered(&httpStatusError{Code: tc.code}); got != tc.want {
+			t.Errorf("code %d = %v, want %v", tc.code, got, tc.want)
+		}
+	}
+	if isUpstreamAnswered(errors.New("dial tcp: connection refused")) {
+		t.Error("a transport error was read as an upstream answer")
+	}
+	if isUpstreamAnswered(nil) {
+		t.Error("nil was read as an upstream answer")
+	}
+	// A BODY quoting a 404 must not be mistaken for one — the substring trap.
+	if isUpstreamAnswered(&httpStatusError{Code: 503, Body: "upstream said: http 404: nope"}) {
+		t.Error("the body's text outvoted the status code")
+	}
+}
