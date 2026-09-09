@@ -1359,6 +1359,14 @@ type Server struct {
 	dbStats   *databaseStatsSnapshot
 	dbStatsAt time.Time
 
+	// lyricsStats caches the network lyrics-tier rollup on GET /api/jobs for
+	// lyricsStatsTTL. Same reason as dbStats above: it is a full scan with a
+	// JSON extraction per row on a polled endpoint. Measured 25.8 ms at 21,000
+	// tracks, which is not a number to pay every ten seconds per open tab.
+	lyricsStatsMu   sync.Mutex
+	lyricsStatsSnap *lyricsStatsSnapshot
+	lyricsStatsAt   time.Time
+
 	// library-meta retry guard: POST /api/library/enrichment/retry is
 	// per-PATH rate-limited (60s per normalized folder) so an operator
 	// can queue retries for DIFFERENT folders back-to-back while a
