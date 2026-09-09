@@ -49,6 +49,9 @@ func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if refuseFilterPositional(fs, "render", stderr) {
+		return 2
+	}
 
 	// The operator flag is read BEFORE bootstrapTranscodeCmd, which
 	// probes sox. On a host with no sox AND the feature off, bootstrap

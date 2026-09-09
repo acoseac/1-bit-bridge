@@ -44,6 +44,9 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if refuseFilterPositional(fs, "optimize", stderr) {
+		return 2
+	}
 
 	// Bootstrap-time gate: `cfg.Upscale.EffectiveOptimizeEnabled()`
 	// can only be checked after config load, so the
