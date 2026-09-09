@@ -1045,6 +1045,18 @@ func (c *Coordinator) submitPCMRenderProjections(ctx context.Context, path strin
 // the scratch volume for the largest single Stage A intermediate), the
 // batch row, the empty-batch short-circuit, the enqueue. `path` is the
 // batch row's display label, not a scope; `op` prefixes diagnostics.
+// laneCount is how many render jobs the pool can hold in flight at once, and
+// therefore how many Stage A scratch files the batch must budget for. Falls
+// back to one lane when the pool is absent (direct-construction tests) or
+// reports a non-positive count — the fail-safe direction is to under-promise
+// headroom, never to skip the multiplier.
+func (c *Coordinator) laneCount() int {
+	if c.pool == nil || c.pool.workers < 1 {
+		return 1
+	}
+	return c.pool.workers
+}
+
 func (c *Coordinator) submitRenditionProjections(ctx context.Context, path string, picked optimizeCandidates, outputDir string, kind JobKind, targetBits int, op string) (*SubmitResult, error) {
 	// The scratch check FIRST, graded on the temp volume. A DSD render's
 	// Stage A intermediate is int32 at the target rate for the whole
@@ -1052,7 +1064,21 @@ func (c *Coordinator) submitRenditionProjections(ctx context.Context, path strin
 	// sidecars go to a B2 mount — the two volumes have nothing to do with
 	// each other, so neither check can stand in for the other.
 	if picked.maxRenderScratch > 0 {
-		if _, err := c.diskPreflight(renderScratchDir(c.renderTempDir), picked.maxRenderScratch, op+" (render scratch)"); err != nil {
+		// Times the LANE COUNT. The pool runs EffectiveWorkers() jobs
+		// concurrently on distinct dedup keys, so a batch legitimately holds
+		// that many Stage A intermediates at once — and an intermediate is
+		// int32 at the target rate for the whole track (the docblock's own
+		// figure: 5.08 GB for an hour of stereo at 176.4 kHz). Grading the
+		// largest SINGLE job passed a pre-flight that four concurrent writes
+		// then blew through, and on a host whose tempDir is the root disk
+		// that is a system-wide ENOSPC rather than one failed job.
+		//
+		// The auto-optimize sweeper already answers this question correctly
+		// and says so in its own comment ("sized for every lane the pool can
+		// run concurrently, because that peak IS held at once"); this is the
+		// batch path catching up to it.
+		want := picked.maxRenderScratch * int64(c.laneCount())
+		if _, err := c.diskPreflight(renderScratchDir(c.renderTempDir), want, op+" (render scratch)"); err != nil {
 			return nil, err
 		}
 	}

@@ -177,8 +177,15 @@ func dsdExpectedDurationSec(probed, manifest float64) float64 {
 }
 
 // sameRateFamily reports whether two rates share a 44.1k / 48k family.
+//
+// Membership on BOTH sides, not agreement about membership. The equality form
+// answered true for a pair in NEITHER family — (32000, 32000) is
+// `false == false` twice — which is not what the name says and is not what
+// validateDSDGeometry wants from it. Not reachable today, since every pipe
+// rate is fs/8 of a DSD rate and every target is a 44.1/48 multiple, so this
+// is the contract being made to match the doc rather than a live fix.
 func sameRateFamily(a, b int) bool {
-	return (a%44100 == 0) == (b%44100 == 0) && (a%48000 == 0) == (b%48000 == 0)
+	return (a%44100 == 0 && b%44100 == 0) || (a%48000 == 0 && b%48000 == 0)
 }
 
 // validateDSDGeometry pins the relationship between what ffprobe reports

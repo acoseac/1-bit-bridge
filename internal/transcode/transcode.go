@@ -1284,7 +1284,30 @@ func CanDecodeVia(probe func() (SoxInfo, error), sourcePath string) bool {
 	// centralised here in the first place. The cached capability snapshot
 	// (not the bare LookPath) is what lets a DSD source answer "no" on a
 	// host whose ffmpeg was built without the DSD decoders.
-	return decodeRouteFor(SnapshotOrOpen(probe), FFmpegSnapshot(), sourcePath) != routeNone
+	//
+	// Gated on the extension, exactly as Run is, and for the same documented
+	// reason. FFmpegSnapshot re-checks binary presence LIVE on every call —
+	// two exec.LookPath PATH walks — even with a warm cache, and this
+	// function is called PER TRACK by four walks. Measured on this package:
+	//
+	//	CanDecodeVia on a .flac    20,881 ns/op    51 allocs/op
+	//	needsDecodeRouting            23.71 ns/op     0 allocs/op
+	//
+	// ~880x, on the sources that make up nearly the whole library — about a
+	// second of pure PATH-walking and 2.5M allocations per 50k-track walk.
+	//
+	// Behaviour-preserving by construction, not by inspection: decodeRouteFor
+	// reads `ff` only in the classDSD arm and in `ff.Available() && class ==
+	// classMP4`, and decodeClassForExt maps exactly the MP4 and DSD
+	// extensions with classSoxOnly as its zero value — precisely the set
+	// needsDecodeRouting selects. The zero FFmpegInfo passed on the gated
+	// path is inert there, and Available() answering false on it (see
+	// ffmpeg_probe.go) is what keeps that true if the arms ever change.
+	var ff FFmpegInfo
+	if needsDecodeRouting(sourcePath) {
+		ff = FFmpegSnapshot()
+	}
+	return decodeRouteFor(SnapshotOrOpen(probe), ff, sourcePath) != routeNone
 }
 
 // SnapshotOrOpen returns the probe's SoxInfo, or the ZERO value when the probe

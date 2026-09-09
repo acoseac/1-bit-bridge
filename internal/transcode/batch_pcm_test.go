@@ -44,7 +44,7 @@ func seedDSDBatchFixture(t *testing.T, s *manifest.Store) {
 		durationSec float64
 		channels    int
 	}{
-		{"DSD/01.dsf", "DSF", "", 2822400, 1, true, 305.5, 6},
+		{"DSD/01.dsf", "DSF", "", 2822400, 1, true, 30.55, 6},
 		{"DSD/02.dff", "DFF", "DST", 2822400, 1, true, 0, 0},
 		{"DSD/03.dff", "DFF", "", 3072000, 1, true, 0, 0},
 		{"DSD/Disc.iso/st/01.dff", "DFF", "", 2822400, 1, true, 0, 0},
@@ -54,7 +54,14 @@ func seedDSDBatchFixture(t *testing.T, s *manifest.Store) {
 	for _, r := range rows {
 		rate, bits, isDSD := r.rate, r.bits, r.isDSD
 		tr := &manifest.Track{
-			Path: r.path, Size: 300_000_000, Codec: r.codec, Compression: r.compression,
+			// Sized so the batch's scratch pre-flight — which is the
+			// LARGEST single intermediate times every lane the pool can
+			// run — stays a small fraction of any host's free disk. At
+			// the previous 300 MB the doubled requirement was 11.4 GB,
+			// which is inside the noise of a CI runner's headroom and
+			// would have made these laning tests fail for a reason that
+			// has nothing to do with laning.
+			Path: r.path, Size: 30_000_000, Codec: r.codec, Compression: r.compression,
 			SampleRate: &rate, BitsPerSample: &bits, IsDSD: &isDSD,
 		}
 		if r.durationSec > 0 {
@@ -75,7 +82,7 @@ func seedVariantOn(t *testing.T, s *manifest.Store, path, variantID string, rate
 	t.Helper()
 	if err := s.UpsertVariant(context.Background(), manifest.VariantRow{
 		SourcePath: path, VariantID: variantID, SidecarPath: "/tmp/" + variantID + ".flac", Format: "flac",
-		SampleRate: rate, BitsPerSample: bits, SizeBytes: 1, SourceMTimeNS: 1, SourceSize: 300_000_000,
+		SampleRate: rate, BitsPerSample: bits, SizeBytes: 1, SourceMTimeNS: 1, SourceSize: 30_000_000,
 		SoxSettings: "{}", CreatedAt: 1,
 	}); err != nil {
 		t.Fatal(err)

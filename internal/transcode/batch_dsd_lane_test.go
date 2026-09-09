@@ -103,12 +103,12 @@ func TestBatchDSDJobsCarryChannelsAndDuration(t *testing.T) {
 	if !ok {
 		t.Fatal("no spec for DSD/01.dsf")
 	}
-	if sp.SourceChannels != 6 || sp.SourceDurationSec != 305.5 {
-		t.Errorf("geometry = %d ch / %.1f s, want the seeded 6 / 305.5", sp.SourceChannels, sp.SourceDurationSec)
+	if sp.SourceChannels != 6 || sp.SourceDurationSec != 30.55 {
+		t.Errorf("geometry = %d ch / %.1f s, want the seeded 6 / 30.55", sp.SourceChannels, sp.SourceDurationSec)
 	}
 	// And the scratch estimate follows the real channel count rather than
 	// the stereo fallback — the number the sweep's disk budget grades.
-	if got, stereo := sp.RenderScratchBytes(), TempBytesForRender(2, 176400, 305.5); got <= stereo {
+	if got, stereo := sp.RenderScratchBytes(), TempBytesForRender(2, 176400, 30.55); got <= stereo {
 		t.Errorf("RenderScratchBytes = %d, want > the stereo estimate %d for a 6-channel source", got, stereo)
 	}
 	// A row with no duration/channels in the manifest reports zero —
