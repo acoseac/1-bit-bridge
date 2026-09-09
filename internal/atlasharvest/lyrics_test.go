@@ -216,6 +216,49 @@ func TestAStubbornlyPendingRecordingIsRearmedNotBuried(t *testing.T) {
 	}
 }
 
+// A recording that has been pending for maxPendingAttempts sweeps stops being
+// re-asked on the SHORT cadence and drops to the long one.
+//
+// Still not terminal — pending means Atlas has not answered, which is a fact
+// about the upstream — but at some point re-asking every two minutes forever is
+// just spending requests on a question that is not being answered.
+func TestAPerpetuallyPendingRecordingEscalatesToTheLongBackoff(t *testing.T) {
+	sink := newFakeSink(LyricsCandidate{
+		Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1", Attempts: maxPendingAttempts,
+	})
+	stub := &atlasStub{
+		recordings: map[string][]recordingResponse{"rec-1": {{Status: "pending"}}},
+		hits:       map[string]int{},
+	}
+	c, st := lyricsClient(t, stub, sink)
+	if err := c.tickLyrics(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	got := sink.attempts["a/x.flac"]
+	if got.status != statusPending {
+		t.Fatalf("status = %q, want pending — escalation must not rewrite the verdict", got.status)
+	}
+	if d := time.Until(time.Unix(0, got.nextAttemptAt)); d < 20*24*time.Hour {
+		t.Errorf("backoff is %v; after %d attempts it should escalate to %v",
+			d, maxPendingAttempts, lyricsMissBackoff)
+	}
+	// The control: one fewer attempt still gets the short cadence.
+	sink2 := newFakeSink(LyricsCandidate{
+		Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1", Attempts: maxPendingAttempts - 1,
+	})
+	stub2 := &atlasStub{
+		recordings: map[string][]recordingResponse{"rec-1": {{Status: "pending"}}},
+		hits:       map[string]int{},
+	}
+	c2, st2 := lyricsClient(t, stub2, sink2)
+	if err := c2.tickLyrics(context.Background(), st2); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Until(time.Unix(0, sink2.attempts["a/x.flac"].nextAttemptAt)); d > time.Hour {
+		t.Errorf("below the threshold the backoff is %v, want the short cadence", d)
+	}
+}
+
 // `unavailable` is a real miss and gets Atlas's own 30-day negative window,
 // which is when Atlas itself re-probes upstream.
 func TestUnavailableGetsTheLongBackoff(t *testing.T) {
@@ -323,7 +366,8 @@ func TestATransientFailureWritesNoVerdict(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer srv.Close()
-	c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second}
+	c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
+		LyricsPacing: time.Nanosecond}
 	st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
 	if err := c.tickLyrics(context.Background(), st); err != nil {
 		t.Fatalf("a 502 must not fail the sweep: %v", err)
@@ -344,7 +388,8 @@ func TestARejectedTokenStopsTheSweep(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
-	c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second}
+	c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
+		LyricsPacing: time.Nanosecond}
 	st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
 	err := c.tickLyrics(context.Background(), st)
 	if err == nil {

@@ -102,13 +102,24 @@ func MatchRelease(entries []ReleaseTrack, localTitle string, localDisc, localTra
 	// The position key, when the release lets us form one.
 	var byPos *ReleaseTrack
 	if localTrack > 0 {
-		disc := localDisc
-		if disc == 0 {
-			if m, single := soleMedium(entries); single {
-				disc = m
-			}
+		// On a SINGLE-medium release the medium's number is irrelevant: there
+		// is only one medium the track can be on, so take it whatever it is
+		// called. That covers two shapes an earlier `disc > 0` guard silently
+		// dropped — a release whose entries omit `medium_position` entirely
+		// (every one decodes to 0, and the guard then skipped positioning for
+		// the whole release), and a file mis-tagged with a disc number the
+		// release does not use.
+		//
+		// On a MULTI-medium release the local disc number is the only thing
+		// that can say which medium, so a file without one is refused rather
+		// than assumed onto medium 1 — 3,752 tracks in this library carry no
+		// disc number, and assuming would match disc 2's track N against disc
+		// 1's. (CodeRabbit, PR #888.)
+		disc, ok := localDisc, localDisc > 0
+		if m, single := soleMedium(entries); single {
+			disc, ok = m, true
 		}
-		if disc > 0 {
+		if ok {
 			for i := range entries {
 				if entries[i].MediumPosition == disc && entries[i].Position == localTrack {
 					byPos = &entries[i]
