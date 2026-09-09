@@ -81,8 +81,16 @@ type FFmpegInfo struct {
 
 // Available reports whether both binaries are on PATH — the MP4 fallback's
 // requirement, unchanged. DSD routing additionally needs HasDSD.
+//
+// The Path test is what makes the type's "the zero value grants nothing"
+// promise true. MissingBinaries is nil on a zero value, so len()==0 alone
+// answered TRUE for an FFmpegInfo nobody had probed — and every value that
+// SHOULD answer true has Path set, because ProbeFFmpeg assigns it before
+// probing and the missing-binaries early return does not. No production
+// caller passed a zero value, so this changes no answer today; it removes a
+// trap for the next one, starting with CanDecodeVia below.
 func (i FFmpegInfo) Available() bool {
-	return len(i.MissingBinaries) == 0
+	return i.Path != "" && len(i.MissingBinaries) == 0
 }
 
 // ffmpegProbeCommand is the test seam for ProbeFFmpeg (the soxProbeCommand
@@ -96,7 +104,10 @@ var ffmpegProbeCommand = exec.CommandContext
 // error still fails closed.
 func ProbeFFmpeg(ctx context.Context) (FFmpegInfo, error) {
 	info := FFmpegInfo{MissingBinaries: MissingFFmpegBinaries()}
-	if !info.Available() {
+	// The missing list directly, not Available(): Path is not set yet, and
+	// Available() now requires it. This is the constructor — it knows the
+	// fact first-hand and does not need the predicate.
+	if len(info.MissingBinaries) > 0 {
 		return info, fmt.Errorf("%w: %s", ErrFFmpegMissing, strings.Join(info.MissingBinaries, ", "))
 	}
 	info.Path = resolveBin(ffmpegLookPath, "ffmpeg")
