@@ -169,3 +169,42 @@ func TestConcurrentLyricsStatsReadsCollapse(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// A failed read serves the LAST GOOD snapshot and still stamps the clock.
+//
+// Two properties, and they pull in opposite directions, which is why both are
+// asserted here. Serving last-good keeps a card that was reading correctly a
+// moment ago from blanking on one transient error. Stamping anyway is what
+// stops the TTL from never tripping after a failure — without it every poll
+// re-runs a scan that is already failing, most likely because it is slow.
+func TestAFailedLyricsReadServesLastGoodAndBacksOff(t *testing.T) {
+	ctx := context.Background()
+	srv, cfg, _ := newTestServer(t)
+	cfg.Atlas.Enabled, cfg.Atlas.HarvestEnabled, cfg.Atlas.LyricsEnabled = true, true, true
+	srv.deps.CfgHolder.Store(cfg)
+
+	// One good read, so there is a last-good to fall back to.
+	good := srv.lyricsStats(ctx)
+	if good == nil {
+		t.Fatal("the first read produced nothing")
+	}
+	// Force the next read to fail, and to actually happen.
+	srv.lyricsStatsMu.Lock()
+	srv.lyricsStatsAt = time.Time{}
+	srv.lyricsStatsMu.Unlock()
+	if err := srv.deps.Manifest.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := srv.lyricsStats(ctx)
+	if got == nil {
+		t.Error("a failed read blanked the card instead of serving the last good snapshot")
+	}
+	srv.lyricsStatsMu.Lock()
+	stamped := srv.lyricsStatsAt
+	srv.lyricsStatsMu.Unlock()
+	if stamped.IsZero() {
+		t.Error("the clock was not stamped on failure — the TTL would never trip, " +
+			"so every poll re-runs a scan that is already failing")
+	}
+}
