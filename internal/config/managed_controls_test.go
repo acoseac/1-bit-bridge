@@ -107,3 +107,36 @@ func TestManagedControlsSurviveClone(t *testing.T) {
 		t.Fatalf("mutating the clone changed the live config: %q", got)
 	}
 }
+
+// TestEffectiveManagedSettingsDeduplicates.
+//
+// The docblock promises a de-duplicated set, and the first draft only checked
+// the IMPLIED fields against what was already there — so a bridge.yaml
+// repeating a name in managedSettings carried the repeat through to
+// GET /api/settings. Not a regression (the old code passed the slice
+// verbatim), but the new function claims otherwise, and a claim in a docblock
+// is the thing this repo treats as load-bearing. (CodeRabbit, PR #879.)
+func TestEffectiveManagedSettingsDeduplicates(t *testing.T) {
+	d := DeploymentConfig{
+		ManagedSettings: []string{"libraryName", "libraryName", "updateAutoInstall"},
+		ManagedControls: []string{ManagedControlUpdates},
+	}
+	got := d.EffectiveManagedSettings()
+	seen := map[string]int{}
+	for _, f := range got {
+		seen[f]++
+	}
+	for f, n := range seen {
+		if n > 1 {
+			t.Errorf("%q appears %d times in %v", f, n, got)
+		}
+	}
+	// updateAutoInstall is BOTH explicitly named and implied by `updates`,
+	// which is the overlap most likely to double up.
+	if seen["updateAutoInstall"] != 1 {
+		t.Errorf("updateAutoInstall appears %d times, want 1: %v", seen["updateAutoInstall"], got)
+	}
+	if !slices.IsSorted(got) {
+		t.Errorf("not sorted: %v", got)
+	}
+}

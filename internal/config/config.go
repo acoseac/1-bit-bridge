@@ -1123,8 +1123,8 @@ func (d DeploymentConfig) EffectiveManagedSettings() []string {
 	if len(d.ManagedSettings) == 0 && len(implied) == 0 {
 		return nil
 	}
-	out := append([]string(nil), d.ManagedSettings...)
-	for _, f := range implied {
+	var out []string
+	for _, f := range append(append([]string(nil), d.ManagedSettings...), implied...) {
 		if !slices.Contains(out, f) {
 			out = append(out, f)
 		}
