@@ -235,15 +235,16 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	// pay for it on every poll. Behind lyricsStatsTTL when it is on.
 	resp.Lyrics.Enabled = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled && cfg.Atlas.LyricsEnabled
 	if resp.Lyrics.Enabled {
-		ls := s.lyricsStats(ctx)
-		resp.Lyrics.Available = ls.ok
-		resp.Lyrics.SyncedRows = ls.syncedRows
-		resp.Lyrics.PlainRows = ls.plainRows
-		resp.Lyrics.Addressable = ls.addressable
-		resp.Lyrics.Instrumental = ls.byStatus[manifest.AtlasLyricsInstrumental]
-		resp.Lyrics.Unavailable = ls.byStatus[manifest.AtlasLyricsUnavailable]
-		resp.Lyrics.Pending = ls.byStatus[manifest.AtlasLyricsPending]
-		resp.Lyrics.Unresolved = ls.byStatus[manifest.AtlasLyricsUnresolved]
+		if ls := s.lyricsStats(ctx); ls != nil {
+			resp.Lyrics.Available = true
+			resp.Lyrics.SyncedRows = ls.syncedRows
+			resp.Lyrics.PlainRows = ls.plainRows
+			resp.Lyrics.Addressable = ls.addressable
+			resp.Lyrics.Instrumental = ls.byStatus[manifest.AtlasLyricsInstrumental]
+			resp.Lyrics.Unavailable = ls.byStatus[manifest.AtlasLyricsUnavailable]
+			resp.Lyrics.Pending = ls.byStatus[manifest.AtlasLyricsPending]
+			resp.Lyrics.Unresolved = ls.byStatus[manifest.AtlasLyricsUnresolved]
+		}
 	}
 
 	// Duplicates stamping. Policy is live config; the headline numbers
@@ -506,46 +507,71 @@ const lyricsStatsTTL = 30 * time.Second
 
 // lyricsStatsSnapshot is the cached half. Unexported and unTAGGED: not a wire
 // type — the handler copies each field into the DTO it owns.
+//
+// No `ok` field: a nil snapshot IS the unavailable state, which is what lets a
+// failed query serve the last good one instead of blanking the card.
 type lyricsStatsSnapshot struct {
-	ok          bool
 	syncedRows  int64
 	plainRows   int64
 	byStatus    map[string]int64
 	addressable int64
 }
 
-// lyricsStats returns the cached rollup, recomputing at most once per TTL.
+// lyricsStats returns the TTL-cached network-lyrics rollup, single-flighted so
+// concurrent polls collapse to one query. Mirrors getAnalysisCoverage's shape,
+// which is the pattern this endpoint already uses — /api/jobs is polled every
+// 10s per open tab, and this query is a full scan with a json_extract per row.
 //
-// The mutex is held ACROSS the recompute, which is the single-flight: a second
-// caller arriving mid-query waits and finds the fresh entry rather than issuing
-// its own scan — the point on a polled endpoint with several tabs open.
-func (s *Server) lyricsStats(ctx context.Context) lyricsStatsSnapshot {
+// Three things it takes from that sibling rather than from the diagnostics
+// cache, which holds its mutex across the query:
+//
+//   - The db context is DETACHED (the PR #373 singleflight rule). The result is
+//     shared by every queued caller, so one client hanging up must not
+//     synthesize a failure for the rest — and detaching removes the
+//     cancelled-request-poisons-the-cache case entirely rather than guarding it.
+//   - A failure serves LAST-GOOD (possibly nil), so a transient error does not
+//     blank a card that was reading correctly a moment ago.
+//   - The timestamp is stamped on failure TOO. Without it the TTL never trips
+//     after an error, so every poll re-runs a scan that is already failing —
+//     most likely because it is slow, which is exactly when hammering it is
+//     worst.
+func (s *Server) lyricsStats(ctx context.Context) *lyricsStatsSnapshot {
+	if s.deps.Manifest == nil {
+		return nil
+	}
 	s.lyricsStatsMu.Lock()
-	defer s.lyricsStatsMu.Unlock()
-	if s.lyricsStatsSnap != nil && time.Since(s.lyricsStatsAt) < lyricsStatsTTL {
-		return *s.lyricsStatsSnap
-	}
-	var snap lyricsStatsSnapshot
-	if s.deps.Manifest != nil {
-		if st, err := s.deps.Manifest.AtlasLyricsStats(ctx); err == nil {
-			snap.ok = true
-			snap.syncedRows = st.SyncedRows
-			snap.plainRows = st.PlainRows
-			snap.byStatus = st.ByStatus
-			snap.addressable = st.Addressable
-		}
-	}
-	// NEVER cache what a cancelled request produced. The read takes the
-	// request's context, so a browser navigating away mid-poll fails it and
-	// yields ok=false — storing THAT would answer "unavailable" to the next
-	// thirty seconds of perfectly good requests. A genuine failure still
-	// caches, and should: repeating a doomed scan every poll helps nobody.
-	// The distinction is whether the failure was about the DATABASE or about
-	// this REQUEST.
-	if ctx.Err() != nil {
+	if !s.lyricsStatsAt.IsZero() && time.Since(s.lyricsStatsAt) < lyricsStatsTTL {
+		snap := s.lyricsStatsSnap
+		s.lyricsStatsMu.Unlock()
 		return snap
 	}
-	s.lyricsStatsSnap = &snap
-	s.lyricsStatsAt = time.Now()
+	s.lyricsStatsMu.Unlock()
+	v, _, _ := s.lyricsStatsSF.Do("lyricsStats", func() (any, error) {
+		s.lyricsStatsMu.Lock()
+		if !s.lyricsStatsAt.IsZero() && time.Since(s.lyricsStatsAt) < lyricsStatsTTL {
+			snap := s.lyricsStatsSnap
+			s.lyricsStatsMu.Unlock()
+			return snap, nil
+		}
+		s.lyricsStatsMu.Unlock()
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotDBTimeout)
+		defer cancel()
+		st, err := s.deps.Manifest.AtlasLyricsStats(dbCtx)
+		s.lyricsStatsMu.Lock()
+		defer s.lyricsStatsMu.Unlock()
+		s.lyricsStatsAt = time.Now()
+		if err != nil {
+			logger.Warn("jobs: atlas lyrics stats", "err", err)
+			return s.lyricsStatsSnap, nil // last good, possibly nil
+		}
+		s.lyricsStatsSnap = &lyricsStatsSnapshot{
+			syncedRows:  st.SyncedRows,
+			plainRows:   st.PlainRows,
+			byStatus:    st.ByStatus,
+			addressable: st.Addressable,
+		}
+		return s.lyricsStatsSnap, nil
+	})
+	snap, _ := v.(*lyricsStatsSnapshot)
 	return snap
 }
