@@ -97,6 +97,13 @@ type Client struct {
 	// still record availability for the wire tag).
 	Booklets     BookletSink
 	BookletFiles BookletFileStore
+	// Lyrics wires the network lyrics tier (lyrics.go). Optional; nil disables
+	// it outright, the same way a nil Booklets disables booklets.
+	Lyrics LyricsSink
+	// LyricsPacing overrides the gap between recording requests. Zero = the
+	// lyricsPacing default, which is what production uses; the suite sets it
+	// so a budget-sized sweep is not 20 seconds of sleeping.
+	LyricsPacing time.Duration
 	// ScanInProgress reports whether a library (re)scan is currently running.
 	// Optional (nil = never in progress). Wired to manifest.Scanner.IsScanning
 	// in cmd/bridge so the booklet orphan GC (gcBooklets) is SKIPPED while a
@@ -259,6 +266,15 @@ func (c *Client) tick(ctx context.Context) {
 	c.refreshCovers(ctx)
 	if c.Booklets != nil {
 		c.tickBooklets(ctx, st)
+	}
+	// Routed through handleErr like every other leg, so an Atlas token
+	// rejection on this path wipes the credential rather than being swallowed
+	// — the defect the booklet FETCH leg had until it was given the same
+	// treatment.
+	if c.Lyrics != nil {
+		if err := c.tickLyrics(ctx, st); err != nil {
+			c.handleErr(ctx, "lyrics", err)
+		}
 	}
 }
 

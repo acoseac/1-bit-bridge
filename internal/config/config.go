@@ -499,6 +499,20 @@ type AtlasConfig struct {
 	// Validated at load as a plain https base URL — the same shape the
 	// handler enforces on the wire value.
 	HarvestBaseURL string `yaml:"harvestBaseUrl,omitempty"`
+	// LyricsEnabled turns on the network lyrics tier: for tracks with no
+	// embedded or sidecar lyrics, the bridge resolves a recording MBID through
+	// Atlas and stores the plain and synced documents Atlas relays from LRCLIB.
+	//
+	// Default FALSE, and deliberately so. Turning it on starts a recurring
+	// outbound sweep the operator did not have before — 9,454 addressable
+	// tracks on the library this was measured against — and each stored
+	// document strict-advances `indexed_at`, so it is also a delta every
+	// paired device syncs. A feature with those two properties does not switch
+	// itself on at upgrade.
+	//
+	// Rides the harvest credential, so it is inert unless HarvestEnabled is on
+	// and a credential has been provisioned.
+	LyricsEnabled bool `yaml:"lyricsEnabled,omitempty"`
 }
 
 // CanonicalHTTPSBase reduces a plain https base URL to `scheme://host`, or
