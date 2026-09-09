@@ -20,6 +20,17 @@ name: gate
 # A fifth job, `cross-platform`, runs the suite natively on Windows and
 # macOS. It is now PART of the `gate` fan-in and blocks a merge.
 #
+# A sixth, `dsd-measure`, installs sox + ffmpeg and runs the DSD render
+# measurements behind BRIDGE_DSD_FIXTURE_TESTS. They are gated because they
+# need a real audio toolchain — and until 2026-09-09 that variable appeared
+# NOWHERE outside the test file, so the alias-rejection differential, the
+# level-parity clip-guard pin and the CCIF intermodulation check had never
+# run in CI, on any branch, since they were written. CLAUDE.md cites their
+# numbers as what settled the decimation design. They take under three
+# seconds once the toolchain is installed, and they SKIP rather than fail on
+# a host without it — which is exactly why they have to be run somewhere on
+# purpose.
+#
 # It did not start that way. Windows had 30 pre-existing failures the
 # moment it was first run — the largest test package had literally never
 # been built for that platform — and the job spent months as
@@ -124,6 +135,45 @@ jobs:
       # slow CI down — let it use all the runner's cores.
       - name: test (race)
         run: make test P=$(nproc)
+
+  dsd-measure:
+    name: dsd-measure
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-gobuild-dsd-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-dsd-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-dsd-
+      - name: install the audio toolchain
+        # libsox-fmt-all because a minimal sox cannot read FLAC, which is
+        # what a rendition is written as; ffmpeg for the DSD decode itself.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sox libsox-fmt-all ffmpeg
+      - name: the toolchain this job exists to exercise
+        # Printed, not asserted. The tests SKIP on a build without the four
+        # dsd_* decoders rather than failing, so in a green log this is the
+        # only thing that distinguishes "measured" from "skipped".
+        run: |
+          sox --version | head -1
+          ffmpeg -hide_banner -decoders | grep -E 'dsd_|dst ' || true
+      - name: measure
+        run: make measure-dsd
 
   build-all:
     name: build-all
@@ -329,7 +379,7 @@ jobs:
   # comment above for the evidence the promotion was gated on.
   gate:
     name: gate
-    needs: [vet, test, build-all, go-version, cross-platform]
+    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
