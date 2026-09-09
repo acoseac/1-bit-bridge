@@ -51,34 +51,72 @@ func exportBundleOf(t *testing.T, srv *Server) map[string]any {
 	return got
 }
 
+// shrinkExportCaps makes the cap boundary reachable in a test. The property
+// under test is "a history that ENDS exactly at the cap must not read as
+// truncated", and reaching it at the production cap means 100,000 rows through
+// SQLite under -race — which would dominate the whole suite for one boundary.
+//
+// The RATIO is what the code depends on, not the magnitudes: the page size
+// must not divide the cap, or the loop can never overshoot and the two cases
+// become indistinguishable. TestExportPageSizeDoesNotDivideTheCap pins that
+// for the shipped values.
+func shrinkExportCaps(t *testing.T, cap, page int) {
+	t.Helper()
+	oldCap, oldPage := exportHistoryCap, exportHistoryPage
+	exportHistoryCap, exportHistoryPage = cap, page
+	t.Cleanup(func() { exportHistoryCap, exportHistoryPage = oldCap, oldPage })
+}
+
 // TestExportDoesNotClaimTruncationItDidNotDo is the boundary the old form got
 // wrong.
 //
-// The loop condition was checked BEFORE each fetch and pages were 1000, and
-// the cap is 100000 — an exact multiple — so `len` could never exceed the cap
-// and the `>= cap` test could not tell "the history ends here" from "the
-// history was cut off here". A store holding exactly the cap shipped
+// The loop condition was checked BEFORE each fetch, pages were 1000, and the
+// cap is 100000 — an exact multiple — so len could never exceed the cap and
+// the `>= cap` test could not tell "the history ends here" from "the history
+// was cut off here". A store holding exactly the cap shipped
 // `"truncated": {"playbackHistory": true}` about an export that omitted
 // nothing, in the one field whose whole job is honesty about what is missing.
-//
-// Driving 100k rows through SQLite under -race would dominate the suite, so
-// this asserts the property at a shrunken cap via the same arithmetic: a
-// history that ENDS exactly on a page boundary must not read as truncated.
 func TestExportDoesNotClaimTruncationItDidNotDo(t *testing.T) {
+	shrinkExportCaps(t, 10, 3)
 	srv, _, _ := newTestServer(t)
 	seedExportFixture(t, srv.deps.Manifest)
-	// Exactly two full pages and not one row more. Under the old form the
-	// equivalent shape at the real cap set the flag; here it must not.
-	seedHistoryRows(t, srv.deps.Manifest, 2*exportHistoryPage)
+	// The fixture already contributes one play, so seed cap-1 more to land
+	// EXACTLY on the cap.
+	seedHistoryRows(t, srv.deps.Manifest, exportHistoryCap-1)
 
 	got := exportBundleOf(t, srv)
-	if v, ok := got["truncated"]; ok {
-		t.Errorf("a complete history reported truncated: %v", v)
-	}
 	hist, _ := got["playbackHistory"].([]any)
-	if len(hist) < 2*exportHistoryPage {
-		t.Errorf("history has %d rows, want at least %d — the paging loop stopped early",
-			len(hist), 2*exportHistoryPage)
+	if len(hist) != exportHistoryCap {
+		t.Fatalf("history has %d rows, want exactly the cap (%d) — the fixture is not on the boundary",
+			len(hist), exportHistoryCap)
+	}
+	if v, ok := got["truncated"]; ok {
+		t.Errorf("a history that ENDS at the cap reported truncated: %v", v)
+	}
+}
+
+// TestExportReportsTruncationWhenItReallyTruncated is the other side, and the
+// reason the test above is not satisfied by simply never setting the flag.
+func TestExportReportsTruncationWhenItReallyTruncated(t *testing.T) {
+	shrinkExportCaps(t, 10, 3)
+	srv, _, _ := newTestServer(t)
+	seedExportFixture(t, srv.deps.Manifest)
+	seedHistoryRows(t, srv.deps.Manifest, exportHistoryCap*2)
+
+	got := exportBundleOf(t, srv)
+	hist, _ := got["playbackHistory"].([]any)
+	if len(hist) != exportHistoryCap {
+		t.Errorf("history has %d rows, want the cap (%d)", len(hist), exportHistoryCap)
+	}
+	tr, ok := got["truncated"].(map[string]any)
+	if !ok {
+		t.Fatalf("a genuinely truncated history reported no truncation: %v", got["truncated"])
+	}
+	if tr["playbackHistory"] != true {
+		t.Errorf("truncated.playbackHistory = %v, want true", tr["playbackHistory"])
+	}
+	if n, _ := tr["limit"].(float64); int(n) != exportHistoryCap {
+		t.Errorf("truncated.limit = %v, want %d", tr["limit"], exportHistoryCap)
 	}
 }
 

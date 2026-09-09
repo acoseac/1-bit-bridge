@@ -56,7 +56,11 @@ const exportFormat = "1-bit-bridge-export/1"
 // still a file a browser will open. When it bites, the bundle says so in
 // `truncated` rather than quietly handing over a partial history and calling it
 // an export.
-const exportHistoryCap = 100000
+// A var, not a const, so a test can shrink it: the boundary that matters is
+// "the history ends EXACTLY at the cap", and driving 100,000 rows through
+// SQLite under the race detector to reach it would dominate the suite.
+// Production never assigns to it.
+var exportHistoryCap = 100000
 
 // exportHistoryPage is one ListHistory call. Its own hard cap is 1000; asking
 // for more is silently clamped to 200, so this is the ceiling, not a
@@ -66,7 +70,7 @@ const exportHistoryCap = 100000
 // buildExport. If it were, the loop could never overshoot, and "the history
 // ends exactly at the cap" would be indistinguishable from "the history was
 // cut off at the cap".
-const exportHistoryPage = 999
+var exportHistoryPage = 999
 
 type exportPlaylist struct {
 	ID             string               `json:"id"`
