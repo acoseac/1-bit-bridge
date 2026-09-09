@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
+
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 )
 
@@ -85,6 +87,22 @@ type jobsEnrichment struct {
 	HarvestActive bool   `json:"harvestActive"`
 }
 
+// jobsLyrics is the network lyrics tier's card. `Available` reports whether
+// the counts could be read at all — a failed read must render as "unknown",
+// never as a confident zero, which is the shape a missing availability flag
+// produces and the one this console has been bitten by.
+type jobsLyrics struct {
+	Enabled      bool  `json:"enabled"`
+	Available    bool  `json:"available"`
+	SyncedRows   int64 `json:"syncedRows"`
+	PlainRows    int64 `json:"plainRows"`
+	Addressable  int64 `json:"addressable"`
+	Instrumental int64 `json:"instrumental"`
+	Unavailable  int64 `json:"unavailable"`
+	Pending      int64 `json:"pending"`
+	Unresolved   int64 `json:"unresolved"`
+}
+
 type jobsSmartMixes struct {
 	Enabled          bool         `json:"enabled"`
 	IntervalSec      int          `json:"intervalSec,omitempty"`
@@ -141,6 +159,7 @@ type jobsSnapshotResponse struct {
 	// all rather than a permanently-inactive one.
 	AutoOptimize *AutoOptimizeJobState `json:"autoOptimize,omitempty"`
 	Enrichment   jobsEnrichment        `json:"enrichment"`
+	Lyrics       jobsLyrics            `json:"lyrics"`
 	Duplicates   jobsDuplicates        `json:"duplicates"`
 	SmartMixes   jobsSmartMixes        `json:"smartMixes"`
 	Backups      jobsBackups           `json:"backups"`
@@ -210,6 +229,22 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	// running), so closure presence is not a signal here.
 	resp.Enrichment.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
 	resp.Enrichment.HarvestActive = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled
+
+	// Network lyrics tier. The counts are only READ when the feature is on:
+	// they cost a full scan, and a bridge that never enabled this should not
+	// pay for it on every poll. Behind lyricsStatsTTL when it is on.
+	resp.Lyrics.Enabled = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled && cfg.Atlas.LyricsEnabled
+	if resp.Lyrics.Enabled {
+		ls := s.lyricsStats(ctx)
+		resp.Lyrics.Available = ls.ok
+		resp.Lyrics.SyncedRows = ls.syncedRows
+		resp.Lyrics.PlainRows = ls.plainRows
+		resp.Lyrics.Addressable = ls.addressable
+		resp.Lyrics.Instrumental = ls.byStatus[manifest.AtlasLyricsInstrumental]
+		resp.Lyrics.Unavailable = ls.byStatus[manifest.AtlasLyricsUnavailable]
+		resp.Lyrics.Pending = ls.byStatus[manifest.AtlasLyricsPending]
+		resp.Lyrics.Unresolved = ls.byStatus[manifest.AtlasLyricsUnresolved]
+	}
 
 	// Duplicates stamping. Policy is live config; the headline numbers
 	// come from the persisted summary (one scan_state row — cheap on
@@ -454,4 +489,63 @@ func (s *Server) apiAutoOptimizeSweep(w http.ResponseWriter, _ *http.Request) {
 	}
 	trigger()
 	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
+}
+
+// lyricsStatsTTL bounds how stale the network lyrics block on GET /api/jobs
+// may be.
+//
+// Not a guess at an acceptable cost — the same rule this server already
+// applies to its database-accounting block, applied to the other query that
+// turned a polled handler into a full table scan. Measured at 25.8 ms over
+// 21,000 tracks: the addressable count is a scan with a `json_extract` per row
+// and two NOT EXISTS anti-joins, and the JSON predicate cannot use the
+// functional index on `$.musicBrainzAlbumID` because it is wrapped in
+// COALESCE. The Jobs page polls every 10 s, so this cuts the rate by three for
+// numbers that move once a sweep.
+const lyricsStatsTTL = 30 * time.Second
+
+// lyricsStatsSnapshot is the cached half. Unexported and unTAGGED: not a wire
+// type — the handler copies each field into the DTO it owns.
+type lyricsStatsSnapshot struct {
+	ok          bool
+	syncedRows  int64
+	plainRows   int64
+	byStatus    map[string]int64
+	addressable int64
+}
+
+// lyricsStats returns the cached rollup, recomputing at most once per TTL.
+//
+// The mutex is held ACROSS the recompute, which is the single-flight: a second
+// caller arriving mid-query waits and finds the fresh entry rather than issuing
+// its own scan — the point on a polled endpoint with several tabs open.
+func (s *Server) lyricsStats(ctx context.Context) lyricsStatsSnapshot {
+	s.lyricsStatsMu.Lock()
+	defer s.lyricsStatsMu.Unlock()
+	if s.lyricsStatsSnap != nil && time.Since(s.lyricsStatsAt) < lyricsStatsTTL {
+		return *s.lyricsStatsSnap
+	}
+	var snap lyricsStatsSnapshot
+	if s.deps.Manifest != nil {
+		if st, err := s.deps.Manifest.AtlasLyricsStats(ctx); err == nil {
+			snap.ok = true
+			snap.syncedRows = st.SyncedRows
+			snap.plainRows = st.PlainRows
+			snap.byStatus = st.ByStatus
+			snap.addressable = st.Addressable
+		}
+	}
+	// NEVER cache what a cancelled request produced. The read takes the
+	// request's context, so a browser navigating away mid-poll fails it and
+	// yields ok=false — storing THAT would answer "unavailable" to the next
+	// thirty seconds of perfectly good requests. A genuine failure still
+	// caches, and should: repeating a doomed scan every poll helps nobody.
+	// The distinction is whether the failure was about the DATABASE or about
+	// this REQUEST.
+	if ctx.Err() != nil {
+		return snap
+	}
+	s.lyricsStatsSnap = &snap
+	s.lyricsStatsAt = time.Now()
+	return snap
 }
