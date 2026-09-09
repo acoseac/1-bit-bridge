@@ -36,10 +36,7 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	dryRun := fs.Bool("dry-run", false, "list how many tracks would be analyzed without doing it")
 	force := fs.Bool("force", false, "re-analyze even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan waveform sidecars (files with no DB row); skips analysis")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if refuseFilterPositional(fs, "analyze", stderr) {
+	if !parseTranscodeArgs(fs, "analyze", args, stderr) {
 		return 2
 	}
 

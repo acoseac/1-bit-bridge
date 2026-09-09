@@ -41,10 +41,7 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	dryRun := fs.Bool("dry-run", false, "list candidates without converting")
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion. Shares the upscale GC path — preserves BOTH optimized-* and upscaled-* sidecars.")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if refuseFilterPositional(fs, "optimize", stderr) {
+	if !parseTranscodeArgs(fs, "optimize", args, stderr) {
 		return 2
 	}
 

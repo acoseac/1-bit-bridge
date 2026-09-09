@@ -111,10 +111,20 @@ func TestEveryFilterFlagsetGuardsItsPositionals(t *testing.T) {
 			continue
 		}
 		checked++
-		if !strings.Contains(body, "refuseFilterPositional(") {
-			t.Errorf("%s declares a --filter flag but never calls refuseFilterPositional. "+
+		// parseTranscodeArgs, not refuseFilterPositional: the guard has to
+		// run IMMEDIATELY after Parse, before the flag can be read, so the
+		// two steps are one call. Requiring the combined helper is what
+		// stops the next command from copying only the first half — which
+		// is how these four came to be missing a guard `enrichment retry`
+		// already had.
+		if !strings.Contains(body, "parseTranscodeArgs(") {
+			t.Errorf("%s declares a --filter flag but does not parse through parseTranscodeArgs. "+
 				"flag.Parse stops at the first non-flag argument, so a positional scope parses "+
 				"with --filter empty — and empty means the WHOLE LIBRARY.", f)
+		}
+		if strings.Contains(body, "fs.Parse(args)") && !strings.Contains(body, "func parseTranscodeArgs") {
+			t.Errorf("%s calls fs.Parse directly on a --filter flagset. Route it through "+
+				"parseTranscodeArgs so the positional guard cannot be left behind.", f)
 		}
 	}
 	if checked == 0 {
