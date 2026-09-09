@@ -85,6 +85,49 @@ type transcodeBootstrapResult struct {
 //
 // `gcMode == true` skips the sox precheck — GC sweeps only consult
 // the DB and the filesystem, no sox required.
+// parseTranscodeArgs parses a transcode-family command's flags and applies the
+// positional guard, returning false when the caller should exit 2.
+//
+// The two steps live together because they are one step: every command that
+// owns a --filter must run the guard IMMEDIATELY after Parse, before it can
+// read the flag and act on an empty scope. Two adjacent lines is two chances
+// for the next command to copy only the first — which is exactly how these
+// four came to be missing the guard `enrichment retry` already had.
+func parseTranscodeArgs(fs *flag.FlagSet, cmd string, args []string, stderr io.Writer) bool {
+	if err := fs.Parse(args); err != nil {
+		return false
+	}
+	return !refuseFilterPositional(fs, cmd, stderr)
+}
+
+// refuseFilterPositional is the fs.NArg() guard for the four transcode-family
+// commands whose scope flag is `--filter` and whose EMPTY scope means the
+// whole library.
+//
+// flag.Parse stops at the first non-flag argument, so `bridge render "Kind of
+// Blue"` — the form an operator reaches for, and the form each command's own
+// docblock all but invites by showing `--filter "Kind of Blue"` a line or two
+// above — parses cleanly with --filter still empty. The run then covers every
+// eligible track: hours of ffmpeg+2xsox per DSD track, GBs of sidecars, and
+// one indexed_at delta row per track to every paired device, with no
+// confirmation prompt and nothing on stdout before it starts but
+// "Found N candidate track(s)".
+//
+// PR #856 added exactly this guard to `enrichment retry`; the four --filter
+// commands were not swept. TestFilterCommandsRefuseAPositionalScope keeps the
+// class closed.
+func refuseFilterPositional(fs *flag.FlagSet, cmd string, stderr io.Writer) bool {
+	if fs.NArg() == 0 {
+		return false
+	}
+	fmt.Fprintf(stderr, "%s: unexpected argument %q\n", cmd, fs.Arg(0))
+	fmt.Fprintln(stderr, "  A scope is given with the flag, not positionally:")
+	fmt.Fprintf(stderr, "    bridge %s --filter %q\n", cmd, fs.Arg(0))
+	fmt.Fprintln(stderr, "  Without --filter the run covers the WHOLE library, so this is refused")
+	fmt.Fprintln(stderr, "  rather than silently widened.")
+	return true
+}
+
 func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, configPath, qualityFlag string, gcMode bool) (*transcodeBootstrapResult, int) {
 	// loadCLIConfig, not config.Load — see openTokenStoreFromCfg for the
 	// same fix. This tail is shared by `bridge upscale` and
@@ -100,7 +143,7 @@ func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, configPath, qu
 	// even if all the inputs are valid — operators must consciously
 	// opt in.
 	if !cfg.Upscale.Enabled {
-		fmt.Fprint(stderr, "Transcoding (upscale + optimize) is disabled in bridge.yaml.\n"+
+		fmt.Fprint(stderr, "Transcoding is disabled in bridge.yaml.\n"+
 			"Set `upscale.enabled: true` and restart `bridge serve`, then re-run this command.\n")
 		return nil, 2
 	}
@@ -162,7 +205,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	dryRun := fs.Bool("dry-run", false, "list candidates without converting")
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion")
-	if err := fs.Parse(args); err != nil {
+	if !parseTranscodeArgs(fs, "upscale", args, stderr) {
 		return 2
 	}
 	if *targetBits != 16 && *targetBits != 24 && *targetBits != 32 {

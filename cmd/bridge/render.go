@@ -46,7 +46,7 @@ func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	dryRun := fs.Bool("dry-run", false, "list candidates without rendering")
 	force := fs.Bool("force", false, "re-render even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips rendering. Shares the upscale GC path, which is prefix-agnostic — every variant family is preserved.")
-	if err := fs.Parse(args); err != nil {
+	if !parseTranscodeArgs(fs, "render", args, stderr) {
 		return 2
 	}
 
