@@ -49,7 +49,24 @@ const (
 	SourceTextLRC      Source = "text-lrc" // USLT / ©lyr / LYRICS whose text is LRC-shaped
 	SourceTextPlain    Source = "text"
 	SourceSidecarText  Source = "sidecar-txt"
+
+	// The two NETWORK sources. Everything above is derived from a file the
+	// operator has; these come from Atlas, which relays LRCLIB.
+	SourceAtlasLRC Source = "atlas-lrc" // synced LRC from Atlas
+	SourceAtlas    Source = "atlas"     // plain text from Atlas
 )
+
+// IsNetwork reports whether a document came from off this machine rather than
+// from a file the operator has.
+//
+// Three behaviours key on this and none of them should be spelled as a string
+// prefix at the call site: the scanner must not REAP such a row when a local
+// extraction finds nothing (there is no local file whose absence proves
+// anything), /v1/lyrics must not run the mtime drift check against an audio
+// file the document never came from, and the row carries no sidecar to stat.
+func (s Source) IsNetwork() bool {
+	return s == SourceAtlasLRC || s == SourceAtlas
+}
 
 // Rank orders sources. A `.ttml` sidecar leads (word timing, agents,
 // background vocals, translations — richer than any LRC), then `.lrc`,
@@ -57,6 +74,17 @@ const (
 // `.txt`. Mirror B2 of the app's PR-7: the phone's sidecar pick prefers
 // `.ttml` in the same release, so the two sides never disagree about which
 // file a track's lyrics come from.
+//
+// The two NETWORK tiers straddle the local ones rather than sitting below
+// them, and that is the app's DD3 rule — TIMING OUTRANKS SOURCE — expressed
+// in this ladder rather than restated beside it. Ranks 0-4 are the timed
+// local documents and 6-7 the untimed ones, so `atlas-lrc` goes at 5: above
+// every untimed document including the operator's own, because a synced
+// lyric is a different product from an unsynced one, and below every timed
+// local document, because between two timed documents the operator's file
+// is the better authority. Plain `atlas` is last outright — it beats
+// nothing, since any local document is at least as trustworthy and this one
+// is a guess made from a tag.
 func (s Source) Rank() int {
 	switch s {
 	case SourceSidecarTTML:
@@ -69,10 +97,14 @@ func (s Source) Rank() int {
 		return 3
 	case SourceTextLRC:
 		return 4
-	case SourceTextPlain:
+	case SourceAtlasLRC:
 		return 5
-	case SourceSidecarText:
+	case SourceTextPlain:
 		return 6
+	case SourceSidecarText:
+		return 7
+	case SourceAtlas:
+		return 8
 	}
 	return 99
 }

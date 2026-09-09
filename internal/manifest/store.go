@@ -20,6 +20,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // register "sqlite" driver (pure-Go, no cgo)
@@ -1952,6 +1953,44 @@ var migrations = []migration{
 		name:    "DSD renditions: variant gain columns, batch kind, tracks.compression accelerator",
 		sql:     `-- columns added idempotently in post(); see addDSDRenditionColumns`,
 		post:    addDSDRenditionColumns,
+	},
+	{
+		version: 44,
+		name:    "atlas_lyrics_attempt (the network lyrics tier's resolution + verdict + backoff)",
+		// The ATTEMPT, never the document — a successful fetch writes a
+		// track_lyrics row like any other source, and this table only ever
+		// says what Atlas was asked and what it answered.
+		//
+		// `album_mbid` and `recording_mbid_at_attempt` record the identity the
+		// attempt was made AGAINST; `recording_mbid` is the answer that came
+		// back. Keeping the question separate from the answer is the point. That is what makes a retag
+		// self-invalidating: the candidate query compares them to the track's
+		// CURRENT tags, so correcting a wrong album MBID discards the stale
+		// verdict — including a terminal `instrumental` — with no scanner
+		// hook, no extra write, and nothing to remember to call.
+		//
+		// `next_attempt_at` is a DUE TIME, never a tombstone: 0 means "due
+		// now". Nothing here is allowed to mean "never look again", because
+		// the sweeper's real gate is the ABSENCE of a track_lyrics row —
+		// which is what lets a track whose local lyric was later deleted come
+		// back and be re-fetched from its cached recording_mbid. `instrumental`
+		// is the one exception (see AtlasLyricsCandidates): it is a success
+		// that legitimately leaves no row, so status alone must exclude it.
+		//
+		// CASCADE rides the tracks PK, matching track_lyrics: a rename inserts
+		// a new path and takes the attempt with the old one.
+		sql: `CREATE TABLE IF NOT EXISTS atlas_lyrics_attempt (
+			source_path     TEXT PRIMARY KEY REFERENCES tracks(path) ON DELETE CASCADE,
+			album_mbid      TEXT NOT NULL DEFAULT '',
+			recording_mbid_at_attempt TEXT NOT NULL DEFAULT '',
+			recording_mbid  TEXT NOT NULL DEFAULT '',
+			status          TEXT NOT NULL,
+			attempts        INTEGER NOT NULL DEFAULT 0,
+			attempted_at    INTEGER NOT NULL,
+			next_attempt_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_atlas_lyrics_attempt_due
+			ON atlas_lyrics_attempt(next_attempt_at);`,
 	},
 }
 
@@ -8774,6 +8813,18 @@ type LyricsRow struct {
 	SourceSize    int64
 }
 
+// localOutranksStored reports whether a freshly-extracted local document
+// should displace the network document already in the row.
+//
+// STRICTLY better, never merely different: an equal rank leaves the stored row
+// alone. The two never collide in practice — no local source shares a rank with
+// a network one — but "not worse" would let an unknown future source with the
+// fallback rank 99 sit equal to another and take the row on alternating scans,
+// which is precisely the indexed_at flap this table has been bitten by before.
+func localOutranksStored(local, stored string) bool {
+	return lyrics.Source(local).Rank() < lyrics.Source(stored).Rank()
+}
+
 // writeLyricsRowTx persists t.lyrics inside the caller's transaction:
 // upsert when present, DELETE when the extraction found none, and a
 // strict-advance bump of the parent's indexed_at ONLY when the content
@@ -8781,13 +8832,34 @@ type LyricsRow struct {
 // the body identical refreshes the staleness columns and nothing else, so
 // the iOS delta carries exactly the rows whose lyricsTag moved.
 func writeLyricsRowTx(ctx context.Context, tx *sql.Tx, t *Track, now int64) error {
-	var oldTag string
+	var oldTag, oldSource string
 	hadRow := true
-	err := tx.QueryRowContext(ctx, `SELECT tag FROM track_lyrics WHERE source_path = ?`, t.Path).Scan(&oldTag)
+	err := tx.QueryRowContext(ctx, `SELECT tag, source FROM track_lyrics WHERE source_path = ?`,
+		t.Path).Scan(&oldTag, &oldSource)
 	if errors.Is(err, sql.ErrNoRows) {
 		hadRow = false
 	} else if err != nil {
 		return err
+	}
+	// A NETWORK row is not this function's to reap or to overwrite on sight.
+	//
+	// Every branch below reasons from a local extraction: a document found in
+	// the file or beside it, or the absence of one. That absence is evidence
+	// about the FILE, and for a row Atlas supplied it is evidence about
+	// nothing at all — so the unconditional DELETE that is right for a
+	// vanished sidecar would, against a network row, reap the document on the
+	// very next scan and every scan after it.
+	//
+	// Rank decides the rest. The local candidate takes the row only when it
+	// OUTRANKS what is stored, which is the ladder's "timing outranks source"
+	// rule doing the arbitration rather than a second copy of it here: an
+	// unsynced embedded tag does not displace a synced Atlas document, and any
+	// local document displaces plain `atlas`.
+	networkHeld := hadRow && lyrics.Source(oldSource).IsNetwork()
+	if networkHeld && (t.lyrics == nil || !localOutranksStored(t.lyrics.Source, oldSource)) {
+		// Nothing client-visible changed, so indexed_at is untouched — the
+		// row is byte-identical to what every paired device already holds.
+		return nil
 	}
 	// The bump goes through the SHARED statement, never a hand-rolled CASE:
 	// this writer's ONLY job is the bump, which is exactly what
