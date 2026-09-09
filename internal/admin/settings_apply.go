@@ -222,8 +222,23 @@ func soxDegradedMessage(probeErr error, hasFLAC, formatsKnown bool) string {
 // added to settingsPatch without a line here would be silently
 // changeable on a managed bridge, and nothing else would notice.
 // TestEveryPatchFieldCanBeManaged pins that every field is reachable.
+//
+// Ownership is IsManagedSettingOrImplied, not IsManagedSetting: a managed
+// CONTROL also owns the settings fields that perform it. Without that,
+// `managedControls: [updates, restart]` gated four routes while
+// `PATCH /api/settings {"updateAutoInstall": true}` still reached the
+// binary swap and the process restart both controls exist to refuse. The
+// gate is at the route table for the actions and here for the fields, and
+// both read the same declaration.
+//
+// The ManagedSettings length check is gone deliberately — a bridge can
+// declare controls and no settings, which was precisely the exposed shape.
 func managedFieldsIn(cfg *config.Config, p settingsPatch) []string {
-	if cfg == nil || len(cfg.Deployment.ManagedSettings) == 0 {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Deployment.ManagedSettings) == 0 &&
+		len(cfg.Deployment.SettingsImpliedByManagedControls()) == 0 {
 		return nil
 	}
 	var out []string
@@ -240,7 +255,7 @@ func managedFieldsIn(cfg *config.Config, p settingsPatch) []string {
 		if name == "" || name == "-" {
 			continue
 		}
-		if cfg.Deployment.IsManagedSetting(name) {
+		if cfg.Deployment.IsManagedSettingOrImplied(name) {
 			out = append(out, name)
 		}
 	}
