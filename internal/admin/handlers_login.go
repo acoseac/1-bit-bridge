@@ -207,12 +207,29 @@ const msgAuthNotConfigured = "admin auth is not configured"
 // reload must not replay one. Referrer-Policy is set so the value cannot leak
 // onward, and the ticket is never logged.
 func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store")
+	// Go's ServeMux matches a "GET " pattern for HEAD as well
+	// (net/http/server.go: "a pattern with the method GET matches both GET
+	// and HEAD requests"), and redemption DELETES the record before judging
+	// it — so a HEAD spends the credential. Anything that probes the link
+	// before the human clicks does that: a mail-security scanner, a chat
+	// unfurler, a corporate proxy, a prefetcher. The human's real GET then
+	// gets a bare redirect to /login and, by deliberate design, no
+	// explanation.
+	//
+	// 405 rather than a silent redirect: a HEAD asking about this URL is
+	// getting an honest answer about the method, and nothing is consumed.
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"a login link must be opened with GET")
+		return
+	}
 	if s.deps.AdminAuth == nil {
 		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
 		return
 	}
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Cache-Control", "no-store")
 	username, err := s.deps.AdminAuth.RedeemLoginTicket(r.URL.Query().Get("t"))
 	if err != nil {
 		// Send them to the ordinary login form rather than explaining which of
