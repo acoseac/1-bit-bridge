@@ -58,6 +58,16 @@ const exportFormat = "1-bit-bridge-export/1"
 // an export.
 const exportHistoryCap = 100000
 
+// exportHistoryPage is one ListHistory call. Its own hard cap is 1000; asking
+// for more is silently clamped to 200, so this is the ceiling, not a
+// preference.
+//
+// exportHistoryCap is deliberately NOT a multiple of it — see the trim in
+// buildExport. If it were, the loop could never overshoot, and "the history
+// ends exactly at the cap" would be indistinguishable from "the history was
+// cut off at the cap".
+const exportHistoryPage = 999
+
 type exportPlaylist struct {
 	ID             string               `json:"id"`
 	Name           string               `json:"name"`
@@ -118,7 +128,16 @@ type exportTruncated struct {
 	Limit           int  `json:"limit"`
 }
 
-// apiExport streams the bundle as a download.
+// apiExport assembles the bundle and writes it as a download.
+//
+// It BUFFERS: buildExport materialises the whole document before a byte goes
+// out, and SetIndent makes Encode marshal into one internal buffer and indent
+// into a second. Measured on 100k history rows — 24.5 MB in a single Write,
+// 51 MB of heap, 200 MB of totalAlloc. That is the cost of a readable file,
+// and it is bounded by exportHistoryCap, but it is not streaming and the word
+// was wrong here for a week. If the peak ever needs to come down, the fix is
+// to write the envelope by hand and Encode each history row into w as an
+// array element; the cap is what makes that unnecessary today.
 //
 // GET, and a read — so csrfGuard passes it like every other read on this
 // listener, the same reasoning the log and playlist exports already carry.
@@ -129,6 +148,16 @@ func (s *Server) apiExport(w http.ResponseWriter, r *http.Request) {
 	}
 	bundle, err := s.buildExport(r.Context())
 	if err != nil {
+		// A client that navigated away or cancelled the download fails every
+		// in-flight query with context.Canceled. That is not an operator
+		// problem, and logging it at Error puts a false alarm in the journal
+		// for an ordinary disconnect — the same distinction the diagnostics
+		// TTL draws between a failure about the DATABASE and one about the
+		// REQUEST. Nothing useful can be written to a gone connection either.
+		if r.Context().Err() != nil {
+			logger.Debug("admin export: client went away", "err", err)
+			return
+		}
 		logger.Error("admin export", "err", err)
 		writeError(w, http.StatusInternalServerError, "export_failed", "could not assemble the export")
 		return
@@ -146,8 +175,33 @@ func (s *Server) apiExport(w http.ResponseWriter, r *http.Request) {
 // buildExport assembles the bundle. Separate from the handler so the suite can
 // assert on the CONTENT rather than on a decoded HTTP body, which is where the
 // credential-leak check belongs.
+// exportCaps returns the history cap and page size for this server.
+//
+// Per-SERVER, not package-level. The boundary that matters ("the history ends
+// EXACTLY at the cap") needs 100,000 rows through SQLite under the race
+// detector to reach at the shipped value, so a test has to be able to shrink
+// it — and a package-level var doing that is a write the race detector can
+// legitimately pair with a concurrent handler's read, plus a torn read
+// between the loop's cap test and the trim. Reading both ONCE here, into
+// locals the rest of buildExport uses, removes that class entirely: a
+// concurrent change cannot land between the two uses because there is only
+// one read. (Gemini, PR #881.)
+//
+// Zero means "unset", so production carries the consts without a wiring step.
+func (s *Server) exportCaps() (capRows, page int) {
+	capRows, page = exportHistoryCap, exportHistoryPage
+	if s.testExportCap > 0 {
+		capRows = s.testExportCap
+	}
+	if s.testExportPage > 0 {
+		page = s.testExportPage
+	}
+	return capRows, page
+}
+
 func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 	st := s.deps.Manifest
+	capRows, pageSize := s.exportCaps()
 	out := &exportBundle{
 		Format:        exportFormat,
 		ExportedAt:    time.Now().UTC(),
@@ -159,8 +213,14 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 		History:   []exportPlay{},
 		Devices:   []exportDevice{},
 	}
+	// Guarded on the VALUE, not just the holder: the atomic pointer can be
+	// nil before the first Store, and this package already guards exactly
+	// that at managed_controls.go:49 and admin.go:2165. An unguarded deref
+	// here turns GET /api/export into a panic and a 500.
 	if s.deps.CfgHolder != nil {
-		out.LibraryName = s.deps.CfgHolder.Load().LibraryName
+		if cfg := s.deps.CfgHolder.Load(); cfg != nil {
+			out.LibraryName = cfg.LibraryName
+		}
 	}
 
 	summaries, err := st.ListAllPlaylistsForAdmin(ctx)
@@ -215,8 +275,17 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 	// The whole history, paged. ListHistory caps a single call at 1000, so one
 	// call would silently export the most recent page and nothing else.
 	var after int64
-	for len(out.History) < exportHistoryCap {
-		page, err := st.ListHistory(ctx, "", 1000, after)
+	truncated := false
+	for {
+		if len(out.History) >= capRows {
+			// The cap bit. Reached only by asking for one more row than the
+			// cap allows and being given it, which is what makes `truncated`
+			// a fact about the DATABASE rather than about this loop — see
+			// the short-page break below.
+			truncated = true
+			break
+		}
+		page, err := st.ListHistory(ctx, "", pageSize, after)
 		if err != nil {
 			return nil, fmt.Errorf("history: %w", err)
 		}
@@ -234,14 +303,30 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 			})
 		}
 		after = page[len(page)-1].ID
+		if len(page) < pageSize {
+			// A short page IS the last page — ListHistory returns fewer rows
+			// than asked for only when it has run out. Without this the loop
+			// spends one more round trip on every export whose history is not
+			// an exact multiple of the page size, i.e. almost every export,
+			// and — the half that matters — it could not tell "exactly at the
+			// cap" from "cut off at the cap".
+			break
+		}
 	}
-	if len(out.History) >= exportHistoryCap {
-		// TRIM. The loop fetches 1000 at a time and only checks the cap between
-		// pages, so it can overshoot by up to 999 — and then `truncated.limit`
-		// would name a number the file does not honour. A small lie in the
-		// field whose whole job is to be honest about what is missing.
-		out.History = out.History[:exportHistoryCap]
-		out.Truncated = &exportTruncated{PlaybackHistory: true, Limit: exportHistoryCap}
+	if len(out.History) > capRows {
+		// Trim to the cap. The loop can overshoot by up to page-size-1,
+		// because the cap is checked between pages and the last page is
+		// fetched whole. Overshooting deliberately: it is what lets the
+		// break above distinguish a history that ENDS at the cap (complete)
+		// from one that CONTINUES past it (truncated). With the old
+		// `>= cap` test, a library holding exactly exportHistoryCap rows
+		// shipped `"truncated": {"playbackHistory": true}` about an export
+		// that omitted nothing — a lie in the one field whose whole job is
+		// honesty about what is missing.
+		out.History = out.History[:capRows]
+	}
+	if truncated {
+		out.Truncated = &exportTruncated{PlaybackHistory: true, Limit: capRows}
 	}
 
 	devices, err := st.ListDeviceRegistrations(ctx)

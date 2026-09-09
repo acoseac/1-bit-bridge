@@ -1199,6 +1199,19 @@ type Server struct {
 	// config.RuntimeConfig.
 	mu sync.Mutex
 
+	// testExportCap / testExportPage shrink GET /api/export's history
+	// paging so a test can reach the cap boundary without 100,000 rows
+	// through SQLite under the race detector. Zero means "use the
+	// consts", so production never touches them.
+	//
+	// Per-server fields rather than package vars: a package-level seam is
+	// a write the race detector can pair with a concurrent handler's read
+	// from an earlier test's still-live httptest server. Set before the
+	// server serves anything, read once per request — the same
+	// construction-time convention the other unexported fields here follow.
+	testExportCap  int
+	testExportPage int
+
 	// pageTmpls is one template bundle per page. Each bundle pre-parses
 	// layout.html + the page's own .html file so rendering is a single
 	// ExecuteTemplate("layout", …) call.
