@@ -15,10 +15,14 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
   deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. 37 targets in
-  `fuzz_*_test.go` across `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics}`,
-  covering the three untrusted-input surfaces: the audio extractors (whole-file + the pure
+  `fuzz_*_test.go` across
+  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload}`,
+  covering the four untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
-  SOAP / DIDL / device description), and `fs.Resolver`. Without `-fuzz` they run their seed
+  SOAP / DIDL / device description), `fs.Resolver`, and the web-upload path validation
+  (`internal/upload`, which this list omitted until 2026-09-09).
+  **Count them by file:name pair** — `grep '^func Fuzz' | sort -u` says 36, because
+  `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
   (one target at a time — Go permits only one `-fuzz` per invocation).
@@ -1524,6 +1528,113 @@ its twin.** The top list is older, shorter, and read first.
   after `url.Parse` for a backslash host (Go refuses it outright), and claims
   that `omitempty` keeps a non-nil empty map. Reply on the thread with the
   evidence when declining.
+
+### <a name="loupe-2026-09-09"></a>2026-09-09 — LOUPE on the 2026-09-04..09 window
+
+The window's own three hardening batches (#849-851 lyrics, #852-858 CLI,
+#859-862 compaction) refuted almost everything, as expected. **Every
+confirmed finding was in the unswept half** — the DSD renditions, the login
+tickets, the export, managed controls — and the two worst were sites where
+a fix that landed IN THIS WINDOW did not reach a sibling.
+
+- **When a fix enumerates the sites it covers, the enumeration is the
+  defect.** #852 restored the live feature gate on `POST /v1/upscale` and
+  `DELETE /v1/upscale/variants` and its own test file says "**Both**
+  mutation handlers" — there are three, and the third,
+  `POST /v1/upscale/batch`, walks the WHOLE LIBRARY. Any bearer-token holder
+  could start a library-wide sox run on a bridge reporting
+  `upscaleEnabled: false`. #856 added the `fs.NArg()` positional guard to
+  `enrichment retry` and left the four `--filter` commands unswept, so
+  `bridge render "Kind of Blue"` rendered the library. **Grep for the
+  pattern, not the symptom, and write the sweep test in the same PR.**
+- **The suite proved both holes rather than catching them.**
+  `batchFixtureWith` never called `WithUpscale`, so every batch test ran
+  against a bridge with the feature OFF and asserted 202. **A fixture that
+  omits a live gate describes a different bridge than production** — the
+  flags belong in the BASE fixture, and a decorate hook can still override.
+- **A behaviour-preserving fix needs a test that fails without it.**
+  Reverting the `CanDecodeVia` extension gate left the whole package green.
+  Count what must not happen (`LookPath` calls) rather than timing anything,
+  and check the equivalence the fix rests on instead of asserting it in a
+  comment.
+- **`ExtractorVersion` was not bumped for the lyrics batch**, so #849/#850/
+  #851's three changes to what extraction PRODUCES were inert on every
+  already-scanned track, forever, with no error and no log line. Their own
+  tests pass because they call the extractor directly. **A test that calls
+  the extractor cannot see the skip gate.**
+- **A managed CONTROL must own the settings FIELD that performs it.** #876
+  gated the actions at the route table; `PATCH /api/settings` has no control
+  gate and `managedFieldsIn` consulted only `managedSettings`, so one
+  authenticated PATCH of `updateAutoInstall` reached the binary swap and the
+  process restart that `updates` and `restart` both exist to refuse. Derive
+  the implied field set FROM the control — telling the control plane to also
+  list them makes correctness depend on a second program getting a list
+  right, which is what route-table placement was chosen to avoid. **And
+  report the widened set to the console**, or every save on a managed bridge
+  supplies a refused field and the PATCH fails whole.
+- **The one unauthenticated endpoint deserves a second look at every write.**
+  `GET /login/ticket`'s miss branch rewrote the ticket file unconditionally
+  while its comment said "when pruning removed something" — `prunedTickets`
+  gave no way to ask. Measured 3.93 ms/req against 159 µs idle, and eight
+  flooding clients took an authenticated `GET /api/stats` from 278 µs to
+  33.1 ms, under the mutex `ValidateSession` takes. It was also an oracle for
+  "a login link is live now".
+- **`mux.HandleFunc("GET …")` also matches HEAD.** A HEAD burned the
+  one-time ticket, because redemption deletes before judging. Anything that
+  probes a link before the human clicks — a mail scanner, an unfurler, a
+  proxy — spends it.
+- **`truncated` must be a fact about the DATA, not about the loop.** The
+  export's cap check ran BEFORE each fetch with a page size that divided the
+  cap, so `len` could never exceed it: the trim was unreachable, its comment
+  described an impossible overshoot, and a history of exactly 100,000 rows
+  shipped `truncated: true` about an export that omitted nothing. The page
+  size now deliberately does NOT divide the cap, and a test pins that — if
+  they become commensurate the distinction collapses silently.
+- **A test seam is per-SERVER, never a package var.** Shrinking the export
+  cap through package globals is a write the race detector can pair with a
+  live handler's read, and `buildExport` read the cap twice, so a change
+  between them could panic the slice. Read once into locals; put the seam on
+  the struct.
+- **The scratch pre-flight is sized for every LANE**, not the largest single
+  job — the pool runs `EffectiveWorkers()` concurrently on distinct dedup
+  keys and holds that many Stage A intermediates at once. The docblock
+  asserted the opposite. The auto-optimize sweeper had it right all along.
+- **`FFmpegInfo`'s zero value granted the MP4 fallback** against its own "the
+  zero value grants nothing" docstring — a nil `MissingBinaries` has
+  `len() == 0`. Not live, but a trap for the extension gate, which passes
+  exactly that value.
+- **`pickPlayableVariant` had no `pcm-` arm**, so a DSD track whose only
+  rendition is the faithful tier read as unplayable in the web player — with
+  the FLAC sitting right there. `optimized-` covers `optimized-dsd-` by
+  prefix, which is why eight other prefix sites were swept and this one was
+  not.
+- **`BRIDGE_DSD_FIXTURE_TESTS` appeared nowhere outside the test file that
+  reads it**, so the alias-rejection differential, the level-parity clip
+  pin and the CCIF check had never run since they were written — while this
+  file cites their numbers as settling the decimation design. They take 2.8
+  seconds. Run on Debian trixie with apt sox 14.4.2 + ffmpeg they reproduce
+  every number here to the decimal (stopband −116.84 dB, alias delta +0.00 /
+  +0.38 dB, rendition −0.97 dBTP at +5.00 dB applied gain) — a VERIFICATION,
+  not a correction. `make measure-dsd` and a `dsd-measure` CI job now run
+  them. **A gated test that skips looks exactly like one that passed**, which
+  is why the job PRINTS the decoder list.
+- **The fuzz-target package list here omitted `internal/upload`** (2 targets),
+  and with it the web-upload path validation from the "three untrusted-input
+  surfaces" enumeration. Counting targets needs the file:name pair —
+  `grep '^func Fuzz' | sort -u` says 36, because `FuzzNormalize` exists in
+  both `internal/dupes` and `internal/lyrics`.
+- **`stripGoComments` blanks string LITERALS as well as comments.** A sweep
+  test anchored on a flag NAME (`fs.String("filter"`) matches nothing and
+  passes vacuously; anchor on the identifier. Only the `checked == 0` floor
+  caught it — every scan-based guard needs one.
+- **Two process failures worth more than the fixes.** I ran a negative
+  control BEFORE committing that round, and the control's `git checkout --`
+  restore took the uncommitted helper with it; the `git add -A` that followed
+  pushed a tree that did not build. *Commit before the control, always.* And
+  three DSD tests failed on a machine with 6.8 GB free and a 20 GB Go build
+  cache — `df -h /` before reading the failures, as this file already says.
+  With the lane multiplier those fixtures wanted 11.4 GB, so they were also
+  scaled down: **a unit test must not depend on the host's free disk.**
 
 ## Licensing — FSL-1.1-MIT (relicensed 2026-08-20; was MIT)
 

@@ -4515,3 +4515,167 @@ never has in this form — the layout is a jump list over one scrolling form, an
 app.css carried the *correct* description directly beneath the stale one. Third
 entry in this file's own "check the code before believing a doc about it"
 tally.
+
+---
+
+## 2026-09-09 — LOUPE on the 2026-09-04..09 window
+
+**Scope.** Base `4721a51` (2026-09-03, PR #840) → `de6d13e` (2026-09-09).
+200 files, +22,761 / −1,114. ~5,200 production Go lines across 13 packages,
+~10,800 test lines. Plan: [`ops/plan-2026-09-09-loupe-w5.md`](plan-2026-09-09-loupe-w5.md).
+Shipped as PRs **#878–#885**.
+
+**Review directions.** 13 PRISM batches (19,323 lines) through the Go primer
+on `gemini-3.8-flash`; five targeted read-only agents, one per surface, each
+with CLAUDE.md in hand; one dedicated quick-wins consult. Three sources
+converged independently on the export defects, which was the strongest signal
+in the batch.
+
+### The prior held
+
+The window contained three hardening batches that were themselves LOUPE
+output (#849–851 lyrics, #852–858 CLI, #859–862 compaction). They refuted
+almost everything. **Every confirmed finding was in the unswept half** — the
+DSD renditions, the login tickets, the export, managed controls — which is
+the prior the procedure tells you to carry, and it was right.
+
+### The two worst were inside the window's own fixes
+
+Both are the same shape: a correct fix that enumerated the sites it covered.
+
+- **#852** restored the live feature gate on `POST /v1/upscale` and
+  `DELETE /v1/upscale/variants`. Its own test file says *"**Both** mutation
+  handlers used to gate on their adapter being nil"* — there are three, and
+  the third (`POST /v1/upscale/batch`) walks the whole library. The suite
+  proved the hole rather than catching it: `batchFixtureWith` never called
+  `WithUpscale`, so every batch test ran against a bridge with the feature
+  OFF and asserted **202 Accepted**.
+- **#856** added the `fs.NArg()` positional guard to `enrichment retry` and
+  left the four `--filter` commands unswept. Driven against a scratch install:
+  `bridge render --dry-run "Kind of Blue"` → `Found 0 candidate track(s)`,
+  exit 0, filter empty, whole library in scope. The guarded sibling refuses
+  the identical shape with exit 2.
+
+### `ExtractorVersion` was 7, and the base commit set it
+
+#849/#850/#851 changed what extraction produces three times over (the LRC
+clamp, `mergeDuplicate` keeping the larger priority, `lessCandidate` becoming
+a strict total order). `scanner.go`'s skip gate compares
+`existing.ExtractorVersion >= ExtractorVersion` **and** unchanged size+mtime,
+both true for every row a v7 scan stamped. So all three fixes were inert on
+every already-scanned library, forever, with no error and no log line — and
+their own tests pass because they call the extractor directly.
+
+### The measurement that had never been measured
+
+`BRIDGE_DSD_FIXTURE_TESTS` appeared **nowhere** outside the test file reading
+it. `TestDSDRender_AliasRejection`, `_LevelParity` and `_CCIFIntermodulation`
+had never run on any branch since they were written — while CLAUDE.md cites
+their numbers as what settled the decimation design and as the reason the
+recorded "`sinc` BEFORE `rate`" fallback is unnecessary.
+
+Run on a Debian trixie container with apt `sox 14.4.2` + `ffmpeg` (all four
+`dsd_*` decoders plus `dst`), and again on the new CI job:
+
+| CLAUDE.md | measured |
+|---|---|
+| stopband −116.8 dB | −116.84 dB @ 40 kHz |
+| −6.02 dB at exactly 35 kHz | −6.02 dB @ 35 kHz |
+| −131.4 dB by 60 kHz | −131.35 dB @ 60 kHz |
+| alias +0.00 / +0.38 peak / +0.46 energy | +0.00 dB faithful; +0.38 / +0.46 compact |
+| −0.97 dBTP at +5.00 dB applied gain | −0.97 dBTP, applied gain +5.00 dB |
+| fixtures carry ~−104 dBFS own in-band | −103.81 dBFS @ 19302 Hz |
+
+**A verification, not a correction.** The numbers were right; they were
+unguarded. 2.8 seconds. `make measure-dsd` + a `dsd-measure` gate job now run
+them, and the job PRINTS the decoder list because a gated test that skips
+looks exactly like one that passed.
+
+### Measured, not argued
+
+- **`CanDecodeVia` against its own package's rule.** `-benchtime 2000x`:
+  `CanDecodeVia` on a `.flac` **20,881 ns/op, 51 allocs**; `MissingFFmpegBinaries`
+  13,833 ns/op; `needsDecodeRouting` (the gate `Run` uses) **23.71 ns/op, 0
+  allocs**. ~880×, four per-track call sites, ~1 s of PATH-walking and 2.5M
+  allocations per 50k-track walk.
+- **The login-ticket write.** 3.93 ms/req with a ticket outstanding against
+  159 µs idle (24.8×); eight unauthenticated flooding clients took an
+  authenticated `GET /api/stats` from 278 µs to 33.1 ms (118.9×). Control run
+  with no ticket outstanding: 1.1×, which isolates the cause. darwin/arm64 +
+  APFS, where a directory `Sync` is `F_FULLFSYNC`; the mechanism is
+  platform-independent.
+- **The export.** 100k history rows → 24,488,947 bytes in a **single**
+  `Write`, 51.4 MB heap delta, 200.4 MB totalAlloc. The docblock said
+  "streams".
+- **Go's ServeMux maps GET→HEAD**, confirmed with a 20-line probe against the
+  real `net/http` (two handler invocations for GET+HEAD, POST 405) rather
+  than from memory. `server.go:2485` says it in as many words.
+
+### Refuted, so the next run does not re-raise them
+
+- **"`renderDSD` applies +6 dB when the peak is unmeasured"** (PRISM, HIGH).
+  `analyze.TruePeakDBTP`'s `ok=false` is the **digital-silence** contract; a
+  real failure returns `err`, which `renderDSD` propagates. +6 dB of silence
+  is silence, and Stage C's `soxReportedClipping` fails the job rather than
+  publishing. The reviewer conflated `ok=false` with `ClipGuardedGainDB`'s
+  non-finite guard — a different condition.
+- **"DSD projected optimize-eligible when `dsdRender` is off"** (PRISM, HIGH).
+  `DSDRenderEligible`'s first line is `if !caps.Active() { return false }`.
+  **A batching artifact** — the predicate was in a different batch. This is
+  the failure the LOUPE doc warns about: slab Go by package, not by file.
+- **`s.config()`** proposed for the export's nil deref (agent). No such method
+  exists; the build caught it. The explicit guard the siblings use shipped.
+- **`purgeStaleRenderScratch` counting a concurrently-removed file** — the
+  file *is* gone; either behaviour is arguable.
+- **Constant-time comparison on ticket lookup** — `live[hex(sha256(raw))]`,
+  the same digest-keyed-map shape as `s.sessions` and `auth.Store`.
+
+### Process failures, which cost more than the fixes
+
+- **I ran a negative control before committing that round.** The control
+  mutates `upscale.go` and restores with `git checkout --`, which reverts to
+  the last COMMIT — so it took the uncommitted `parseTranscodeArgs` helper
+  with it, and the `git add -A` that followed **pushed a tree that did not
+  build**. *"Commit BEFORE the control, always"* is in the procedure. Repaired
+  in the next commit, which says so.
+- **A weak test, caught only by designing its control.** The first truncation
+  test seeded two page-sized batches and asserted "not truncated" — which the
+  OLD code also passes, because 2,000 rows are nowhere near a 100,000 cap. The
+  mutation left it green. Replaced with a per-server cap seam so the boundary
+  is reachable at cap=10/page=3.
+- **Three DSD tests failed on a machine with 6.8 GB free and a 20 GB Go build
+  cache.** `df -h /` before reading the failures, as CLAUDE.md already says.
+  With the lane multiplier those fixtures wanted 11.4 GB, so they were scaled
+  down 10×: a unit test must not depend on the host's free disk.
+- **`stripGoComments` blanks string LITERALS as well as comments**, so a sweep
+  anchored on `fs.String("filter"` matched nothing and passed vacuously. Only
+  the `checked == 0` floor caught it.
+
+### Bot coverage — stated rather than implied
+
+Gemini reviewed all eight PRs. **CodeRabbit reviewed two (#878, #879) and
+rate-limited on the other six**, posting *"You've used all 2 included reviews
+currently available. Your 85 included PR review attempts over the past 7 days
+set your current allowance at 2 reviews per hour."* Six PRs therefore carry
+**one** bot review, not two. SonarCloud and CodeQL ran on all eight; Sonar's
+one failure (#882, new-code duplication 5.4% > 3%) was real and fixed by
+folding parse-and-guard into a single call — which is the better shape anyway,
+because two adjacent lines is two chances for the next command to copy only
+the first.
+
+### Carried, with reasons
+
+- **The one-sided clip guard** (`ClipGuardedGainDB` clamps to `[0,6]`, so a
+  `> 0 dBTP` master can never get a rendition and the job fails
+  `ErrDSDClipped` forever). Escalated: letting the clamp go negative changes
+  what a rendition SOUNDS like. Both docblocks claiming the peak lands at or
+  below −1 dBTP "by construction" were false and are corrected.
+- **`Track.Channels` is written by the DFF extractor only**, so every DSF
+  budgets scratch as stereo while carrying a real duration — a 5.1 rip
+  under-reserves 3×. Stamping `channelNum` in the DSF extractor is an
+  extraction-logic change needing its own `ExtractorVersion` bump, which this
+  week has already spent once.
+- **The transcode CLI walk enumerates UPnP-routed rows** and reports them as
+  *"missing source files (run `bridge scan` to reconcile)"* — advice that
+  cannot work. Verbatim the defect #630 fixed for the analysis walk; needs a
+  `ListTracksLocal` reader.
