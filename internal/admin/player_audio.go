@@ -125,13 +125,22 @@ func variantFresh(v manifest.VariantRow, info os.FileInfo) bool {
 // pickPlayableVariant chooses a FLAC sidecar to prefer when the source
 // itself isn't universally playable.
 //
-// Prefers `optimized-` over `upscaled-`: optimized is the small
+// Prefers `optimized-` over `upscaled-` over `pcm-`: optimized is the small
 // CarPlay-floor copy, while an upscaled sidecar can be 176.4/24 — a 5x
 // bandwidth hit for a browser that will resample to the device rate
 // anyway. Don't "fix" this toward higher fidelity; the web player is
-// explicitly not a bit-exact path.
+// explicitly not a bit-exact path. `pcm-` (the faithful DSD tier) is last
+// for the same bandwidth reason: it is always 24-bit at the source's own
+// family rate.
+//
+// The `pcm-` arm is not optional. It is the ONLY sidecar a DSD source can
+// have when the compact tier is off, and a browser cannot play DSD at all —
+// so without it the player reported "unplayable" about a track with a
+// perfectly playable FLAC sitting right beside it, which is the single case
+// the faithful tier exists for. Note `optimized-` already covers
+// `optimized-dsd-` by prefix, which is why only this one was missing.
 func pickPlayableVariant(rows []manifest.VariantRow, info os.FileInfo) *manifest.VariantRow {
-	var upscaled *manifest.VariantRow
+	var upscaled, pcm *manifest.VariantRow
 	for i := range rows {
 		v := rows[i]
 		if !strings.EqualFold(v.Format, "flac") || !variantFresh(v, info) {
@@ -142,9 +151,14 @@ func pickPlayableVariant(rows []manifest.VariantRow, info os.FileInfo) *manifest
 			return &rows[i]
 		case strings.HasPrefix(v.VariantID, "upscaled-") && upscaled == nil:
 			upscaled = &rows[i]
+		case strings.HasPrefix(v.VariantID, "pcm-") && pcm == nil:
+			pcm = &rows[i]
 		}
 	}
-	return upscaled
+	if upscaled != nil {
+		return upscaled
+	}
+	return pcm
 }
 
 // hydrateTracks turns a catalog path list into wire rows, resolving

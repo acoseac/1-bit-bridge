@@ -374,7 +374,16 @@ type VariantPresence struct {
 	UpscaledFresh  bool
 	Optimized      bool
 	OptimizedFresh bool
-	// Bytes is the total size of this track's sidecars, both kinds.
+	// Bytes is the total size of this track's sidecars — EVERY family,
+	// including the `pcm-` faithful DSD tier, which the two flag pairs
+	// above deliberately do not track.
+	//
+	// The asymmetry is intentional and worth stating, because it looks like
+	// a bug: the flags answer "does this track have a PCM-tier copy, and is
+	// it fresh", which is what the coverage rollups ask; Bytes answers "how
+	// much disk do this track's sidecars occupy", where a pcm rendition
+	// counts like any other file. A third flag pair would be additive if a
+	// caller ever needs faithful-tier coverage; none does today.
 	Bytes int64
 }
 
