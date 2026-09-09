@@ -142,9 +142,12 @@ window**. Three PRs since changed what extraction *produces*:
 - `manifest/lyrics_extract.go` — `syltCandidate` rejects oversized frames.
 
 `scanner.go:1241` skips re-extraction when
-`existing.ExtractorVersion >= ExtractorVersion`, so on any track whose audio
-mtime+size are unchanged — essentially the whole library — the junk-descriptor
-lyric and the unparseable timestamp persist **forever**. Silent: no error, no log
+`existing.ExtractorVersion >= ExtractorVersion` **and** the audio file's size
+and mtime are unchanged. Both hold for every row a v7 scan already stamped and
+nobody has touched since — which, on a library scanned any time after #840
+shipped, is essentially all of them. For those rows the junk-descriptor lyric
+and the unparseable timestamp persist **forever**. (A row still stamped below 7,
+or one whose audio changed, re-extracts anyway and was never affected.) Silent: no error, no log
 line, and every fix's own test passes because it calls the extractor directly.
 There is no lyrics backfill trigger anywhere in `cmd/bridge` or `internal/admin`.
 
@@ -204,7 +207,7 @@ the source.
 
 Measured with the shipping Stage C argv on a scratch whose unity peak is 1.2:
 
-```
+```text
 sox WARN gain: gain clipped 262400 samples; decrease volume?
 sox WARN dither: dither clipped 229546 samples; decrease volume?
 exit=0
@@ -252,7 +255,7 @@ consults **only** `deployment.managedSettings`. Nothing couples a managed
 So on a bridge declaring `managedControls: [updates, restart]` with
 `updateAutoInstall` absent from `managedSettings`, one authenticated request —
 
-```
+```text
 PATCH /api/settings   {"updateAutoInstall": true}
 ```
 
@@ -388,7 +391,7 @@ sidecars, and one `indexed_at` delta row per track to every paired device.
 
 Driven against a scratch install:
 
-```
+```text
 $ bridge render --dry-run "Kind of Blue"
 Found 0 candidate track(s); 0 need conversion.        exit=0   ← accepted
 $ bridge enrichment retry "Kind of Blue"

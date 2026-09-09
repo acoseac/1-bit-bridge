@@ -282,6 +282,7 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 		// same kind on the same bridge. The `pcm` arm directly below has
 		// carried its own gate since it was added.
 		if s.carPlayOptimizeEnabled == nil || !s.carPlayOptimizeEnabled() {
+			logger.Warn("optimize batch refused: the CarPlay optimize kind is not active")
 			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
 				errMsgUpscalingNotEnabled)
 			return
