@@ -198,7 +198,22 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	if s.refuseUpscaleMutationInDemoMode(w) {
 		return
 	}
-	if s.batchCoordinator == nil {
+	// The THIRD mutation handler of this class, and the one with the largest
+	// scope: a batch walks the whole library rather than one path.
+	//
+	// PR #781's "always construct, never stop" conversion made
+	// WithBatchCoordinator unconditional so the flag could be hot, which is
+	// what stopped `== nil` from being a gate. PR #852 restored the live
+	// predicate on `POST /v1/upscale` and `DELETE /v1/upscale/variants` and
+	// enumerated those two only — its own test file says "BOTH mutation
+	// handlers" where there are three. Until this line, any bearer-token
+	// holder could start a whole-library sox run on a bridge whose
+	// /v1/health reports `upscaleEnabled: false`, and every finished job's
+	// UpsertVariant strict-advances indexed_at, so it was also a
+	// whole-library delta to every paired device.
+	if s.batchCoordinator == nil || !s.upscaleActive() {
+		logger.Warn("upscale batch refused: the feature is not active",
+			"reason", "upscale.enabled is false or sox is unusable")
 		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
 			errMsgUpscalingNotEnabled)
 		return
@@ -260,6 +275,18 @@ func (s *Server) upscaleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 		res, err = s.batchCoordinator.Submit(r.Context(), libraryRel, req.TargetRate, req.TargetBits)
 	case "optimize":
+		// Mirrors POST /v1/upscale's `optimize` arm: the CarPlay kind has
+		// its own flag, and optimize is a strict subset of what the master
+		// check allows, so this can only ever refuse MORE. Without it the
+		// per-path route answered 503 and this one answered 202 for the
+		// same kind on the same bridge. The `pcm` arm directly below has
+		// carried its own gate since it was added.
+		if s.carPlayOptimizeEnabled == nil || !s.carPlayOptimizeEnabled() {
+			logger.Warn("optimize batch refused: the CarPlay optimize kind is not active")
+			writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
+				errMsgUpscalingNotEnabled)
+			return
+		}
 		res, err = s.batchCoordinator.SubmitOptimize(r.Context(), libraryRel)
 	case "pcm":
 		// Same gate as POST /v1/upscale's `pcm` arm: refuse BEFORE the
@@ -329,7 +356,9 @@ func (s *Server) upscaleBatchCancel(w http.ResponseWriter, r *http.Request) {
 	if s.refuseUpscaleMutationInDemoMode(w) {
 		return
 	}
-	if s.batchCoordinator == nil {
+	// Same live gate as submit: a wired coordinator has not meant an active
+	// feature since PR #781.
+	if s.batchCoordinator == nil || !s.upscaleActive() {
 		writeError(w, http.StatusServiceUnavailable, errCodeUpscaleDisabled,
 			errMsgUpscalingNotEnabled)
 		return
