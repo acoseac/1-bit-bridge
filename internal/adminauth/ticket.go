@@ -63,7 +63,7 @@ func (s *Store) MintLoginTicket(username string) (string, error) {
 		return "", fmt.Errorf("no such admin user %q", username)
 	}
 	now := s.clock()
-	live := prunedTickets(s.readTicketsLocked(), now)
+	live, _ := prunedTickets(s.readTicketsLocked(), now)
 	if len(live) >= maxLiveTickets {
 		return "", errors.New("too many live login tickets")
 	}
@@ -97,12 +97,18 @@ func (s *Store) RedeemLoginTicket(raw string) (string, error) {
 	// Read from disk every time: the process that minted this is usually not
 	// the process redeeming it.
 	now := s.clock()
-	live := prunedTickets(s.readTicketsLocked(), now)
+	live, pruned := prunedTickets(s.readTicketsLocked(), now)
 	t, ok := live[key]
 	if !ok {
-		// Still rewrite when pruning removed something, so expired records do
-		// not accumulate on a store nobody successfully logs into.
-		_ = s.writeTicketsLocked(live)
+		// Rewrite ONLY when pruning removed something, so expired records do
+		// not accumulate on a store nobody successfully logs into. The gate
+		// is what the comment always claimed and the code never did: this
+		// branch is the unauthenticated one, so an ungated write here is a
+		// durable rename an anonymous caller can trigger at will, on the
+		// mutex every authenticated console request also takes.
+		if pruned {
+			_ = s.writeTicketsLocked(live)
+		}
 		return "", ErrTicketInvalid
 	}
 	// Delete before judging: a ticket presented once is used up either way, so a
@@ -112,6 +118,14 @@ func (s *Store) RedeemLoginTicket(raw string) (string, error) {
 		return "", err
 	}
 	if now.After(time.Unix(0, t.ExpiresAt)) {
+		return "", ErrTicketInvalid
+	}
+	// Re-assert the account under the lock we already hold. MintLoginTicket
+	// checks this, but the two happen in different PROCESSES with up to
+	// LoginTicketTTL between them, and CreateSession validates nothing — so
+	// a rename inside the window would otherwise mint a fully-privileged
+	// session for a username the store no longer has.
+	if s.user == nil || s.user.Username != t.Username {
 		return "", ErrTicketInvalid
 	}
 	return t.Username, nil
@@ -180,17 +194,31 @@ func (s *Store) writeTicketsLocked(tickets map[string]persistedTicket) error {
 	// was declined for the reason `bridge restore` gives for narrowing rather
 	// than locking — a stale lockfile after an unclean exit would block the
 	// login path at exactly the moment an operator needs it.
-	dir, base := filepath.Split(s.ticketPath())
-	tmp, err := os.CreateTemp(dir, "."+base+"-*")
+	// filepath.Dir, not the dir half of filepath.Split: Split returns "" for
+	// a path with no separator, and os.CreateTemp("") stages in os.TempDir()
+	// — a different filesystem on a normal Linux host, where the rename then
+	// fails EXDEV. Dir returns "." instead, which is what auth.Store and this
+	// package's own store.go already do. Production always passes an absolute
+	// path, so this is hardening, not a live fix.
+	path := s.ticketPath()
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return fmt.Errorf("stage login tickets: %w", err)
 	}
 	tmpName := tmp.Name()
+	// The two-defer idiom, matching persist() in this package's store.go and
+	// auth.Store: LIFO runs Close BEFORE Remove, which is what Windows needs
+	// (it will not unlink an open file), and it also closes the descriptor if
+	// anything between here and the rename panics. The explicit Close calls on
+	// the error paths below stay — a double Close returns an error nobody
+	// reads, and they make each path's intent legible on its own line.
+	// (Gemini, PR #880.)
 	defer func() {
 		if tmpName != "" {
 			_ = os.Remove(tmpName)
 		}
 	}()
+	defer func() { _ = tmp.Close() }()
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("chmod login tickets: %w", err)
@@ -199,24 +227,49 @@ func (s *Store) writeTicketsLocked(tickets map[string]persistedTicket) error {
 		tmp.Close()
 		return fmt.Errorf("write login tickets: %w", err)
 	}
+	// Sync before the rename, like every sibling persist site in the tree
+	// (adminauth/store.go, auth/auth.go, config/config.go).
+	// RenameWithRetry fsyncs the directory ENTRY; nothing else flushes the
+	// CONTENTS, so a crash could publish a durable entry to a file whose
+	// blocks were never written. Fail-safe either way — zeroed bytes fail
+	// json.Unmarshal and read as an empty set — but "each site keeps its own
+	// Chmod / Sync / parent-dir fsync" is the rule.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync login tickets: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close login tickets: %w", err)
 	}
-	if err := atomicwrite.RenameWithRetry(tmpName, s.ticketPath()); err != nil {
+	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
 		return fmt.Errorf("commit login tickets: %w", err)
 	}
 	tmpName = "" // renamed away; the defer must not remove the committed file
 	return nil
 }
 
-func prunedTickets(in map[string]persistedTicket, now time.Time) map[string]persistedTicket {
+// prunedTickets drops every expired record and reports whether it dropped
+// any.
+//
+// The bool is load-bearing, not a convenience: the miss branch of
+// RedeemLoginTicket is reached by an UNAUTHENTICATED, unthrottled request,
+// and it used to rewrite the file unconditionally while its own comment
+// said "still rewrite when pruning removed something". There was no way to
+// ask. Every bogus ticket probe therefore cost a CreateTemp + Write +
+// Chmod + Close + rename-with-parent-fsync, under the same s.mu that
+// ValidateSession takes on every authenticated console request — measured
+// at 3.93 ms/req against 159 us idle, with eight flooding clients taking an
+// authenticated GET /api/stats from 278 us to 33.1 ms. It was also a
+// one-request oracle for "a login link is live right now", and it handed
+// the documented cross-process clobber to an anonymous caller.
+func prunedTickets(in map[string]persistedTicket, now time.Time) (map[string]persistedTicket, bool) {
 	out := make(map[string]persistedTicket, len(in))
 	for k, t := range in {
 		if now.Before(time.Unix(0, t.ExpiresAt)) {
 			out[k] = t
 		}
 	}
-	return out
+	return out, len(out) != len(in)
 }
 
 // clock reads the injectable clock. Callers hold s.mu.
