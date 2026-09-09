@@ -85,6 +85,21 @@ type transcodeBootstrapResult struct {
 //
 // `gcMode == true` skips the sox precheck — GC sweeps only consult
 // the DB and the filesystem, no sox required.
+// parseTranscodeArgs parses a transcode-family command's flags and applies the
+// positional guard, returning false when the caller should exit 2.
+//
+// The two steps live together because they are one step: every command that
+// owns a --filter must run the guard IMMEDIATELY after Parse, before it can
+// read the flag and act on an empty scope. Two adjacent lines is two chances
+// for the next command to copy only the first — which is exactly how these
+// four came to be missing the guard `enrichment retry` already had.
+func parseTranscodeArgs(fs *flag.FlagSet, cmd string, args []string, stderr io.Writer) bool {
+	if err := fs.Parse(args); err != nil {
+		return false
+	}
+	return !refuseFilterPositional(fs, cmd, stderr)
+}
+
 // refuseFilterPositional is the fs.NArg() guard for the four transcode-family
 // commands whose scope flag is `--filter` and whose EMPTY scope means the
 // whole library.
@@ -190,10 +205,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	dryRun := fs.Bool("dry-run", false, "list candidates without converting")
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if refuseFilterPositional(fs, "upscale", stderr) {
+	if !parseTranscodeArgs(fs, "upscale", args, stderr) {
 		return 2
 	}
 	if *targetBits != 16 && *targetBits != 24 && *targetBits != 32 {
