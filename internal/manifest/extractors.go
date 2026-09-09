@@ -244,7 +244,24 @@ var Ext = map[string]bool{
 // ride the version-stamp leg, which ALSO writes the lyrics row and bumps
 // indexed_at only when the tag actually changed, so the iOS delta sees
 // exactly the rows that gained lyrics.
-const ExtractorVersion = 7
+// v8 (lyrics correctness, PRs #849 / #850 / #851): three changes to what
+// extraction PRODUCES, none of which could reach an already-scanned
+// library without this bump. `lrcTime` now clamps to 999:59.999, so a
+// SYLT entry past 999 minutes renders a line the phone can parse instead
+// of `[1000:00.000]`, which neither lineTag nor hoursTag accepts.
+// `mergeDuplicate` keeps the LARGER DescriptorPriority, which is the
+// whole fix that stops an "Amazon" / "Song ID" descriptor laundering
+// itself back to the best rank through m.Lyrics()'s fabricated
+// `Priority: 0`. And `lessCandidate` is a strict total order, so a pair
+// the old comparator left equal now resolves the same way on every scan
+// instead of flipping with Go's map iteration. Each changes the elected
+// document — i.e. lyricsTag — on affected files only, and the skip gate
+// at scanner.go's `existing.ExtractorVersion >= ExtractorVersion` would
+// otherwise have kept the old answer forever. Byte-identical tag rows
+// ride the version-stamp leg, whose writeLyricsRowTx bumps indexed_at
+// only when the tag actually moved (PR #849), so the client delta stays
+// bounded to the rows whose lyrics really changed.
+const ExtractorVersion = 8
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)

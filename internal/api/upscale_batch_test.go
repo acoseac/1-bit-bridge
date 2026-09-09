@@ -84,7 +84,17 @@ func batchFixtureWith(t *testing.T, decorate func(*Server) *Server) (*httptest.S
 	store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
 	raw, _, _ := store.Mint("batch")
 	stub := &stubBatchCoordinator{}
-	srv := New(cfg, store, nil, "fp").WithBatchCoordinator(stub)
+	// WithUpscale + WithCarPlayOptimize are part of the BASE fixture, not a
+	// decoration, because the handler's live gate is not optional: production
+	// wires the coordinator unconditionally, so a fixture that only wires the
+	// coordinator describes a bridge with the feature OFF. Until PR #877's
+	// LOUPE follow-up these tests asserted 202 on exactly that bridge — they
+	// were pinning the missing gate rather than the behaviour they name.
+	// A decorate func can still override either flag; the DSD-render fixture
+	// next door does.
+	srv := New(cfg, store, nil, "fp").WithBatchCoordinator(stub).
+		WithUpscale(func() bool { return true }, nil).
+		WithCarPlayOptimize(func() bool { return true })
 	if decorate != nil {
 		srv = decorate(srv)
 	}

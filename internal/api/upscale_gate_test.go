@@ -22,6 +22,15 @@ import (
 // exactly this shape.
 func gateFixture(t *testing.T, upscaleOn, optimizeOn bool) (*httptest.Server, string, *stubEnqueuer) {
 	t.Helper()
+	hs, raw, stub, _ := gateFixtureWithBatch(t, upscaleOn, optimizeOn)
+	return hs, raw, stub
+}
+
+// gateFixtureWithBatch is gateFixture plus a handle on the batch coordinator,
+// for the tests that need to assert the coordinator was never reached.
+func gateFixtureWithBatch(t *testing.T, upscaleOn, optimizeOn bool) (*httptest.Server, string, *stubEnqueuer, *stubBatchCoordinator) {
+	t.Helper()
+	batchStub := &stubBatchCoordinator{}
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "Music")
 	if err := os.MkdirAll(filepath.Join(root, "Artist/Album"), 0o755); err != nil {
@@ -36,15 +45,22 @@ func gateFixture(t *testing.T, upscaleOn, optimizeOn bool) (*httptest.Server, st
 	raw, _, _ := store.Mint("test")
 
 	stub := newStubEnqueuer()
+	// The batch coordinator is wired here for the same reason the enqueuer
+	// and the deleter are: production wires all three unconditionally, so a
+	// fixture that leaves one nil cannot observe the live gate at all. That
+	// is exactly why the batch hole survived PR #852 — upscale_batch_test.go
+	// builds its server without WithUpscale, so upscaleActive() was false
+	// there and its tests asserted 202 on a bridge with the feature off.
 	srv := New(cfg, store, nil, "fp").
 		WithUpscaleEnqueuer(stub).
 		WithVariantDeleter(&stubVariantDeleter{all: []VariantSummary{}, byPath: map[string][]VariantSummary{}}).
+		WithBatchCoordinator(batchStub).
 		WithUpscale(func() bool { return upscaleOn }, nil).
 		WithCarPlayOptimize(func() bool { return optimizeOn })
 
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
-	return hs, raw, stub
+	return hs, raw, stub, batchStub
 }
 
 // inactiveUpscaleFixture is the both-flags-off case, named because that is the
@@ -92,6 +108,83 @@ func TestUpscaleRefusedWhenFeatureInactive(t *testing.T) {
 					stub.calls, stub.optimizeCalls)
 			}
 		})
+	}
+}
+
+// TestUpscaleBatchRefusedWhenFeatureInactive is the third handler of the same
+// class, and the one PR #852 did not enumerate.
+//
+// A batch walks the WHOLE LIBRARY, so this was the largest-scope way for a
+// bearer-token holder to start real sox work on a bridge advertising
+// `upscaleEnabled: false` — and each finished job's UpsertVariant
+// strict-advances indexed_at, making it a whole-library delta to every paired
+// device as well.
+//
+// Asserting on the coordinator, not only the status: a 503 returned AFTER the
+// library walk would still be a walk the request should never have caused.
+func TestUpscaleBatchRefusedWhenFeatureInactive(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"", "upscale", "optimize", "pcm"} {
+		t.Run("kind="+kind, func(t *testing.T) {
+			hs, tok, _, batch := gateFixtureWithBatch(t, false, false)
+			resp := postJSON(t, hs, "/v1/upscale/batch", tok,
+				BatchRequest{Path: "", Kind: kind})
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusServiceUnavailable {
+				t.Errorf("status: got %d, want 503 — an inactive feature must refuse the batch path",
+					resp.StatusCode)
+			}
+			var env ErrorResponse
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				t.Fatalf("decode error envelope: %v", err)
+			}
+			if env.Error != errCodeUpscaleDisabled {
+				t.Errorf("wire error code: got %q, want %q", env.Error, errCodeUpscaleDisabled)
+			}
+			if batch.submits != 0 || batch.optimizes != 0 || batch.pcms != 0 {
+				t.Errorf("an inactive feature walked the library: submits=%d optimizes=%d pcms=%d",
+					batch.submits, batch.optimizes, batch.pcms)
+			}
+		})
+	}
+}
+
+// TestUpscaleBatchOptimizeKindHonoursItsOwnFlag pins the per-kind half.
+//
+// With the master flag ON and the CarPlay optimize flag OFF, `POST /v1/upscale`
+// answered 503 and `POST /v1/upscale/batch` answered 202 for the same kind on
+// the same bridge. The `pcm` arm beside it has always carried its own gate,
+// which is what made the omission visible.
+func TestUpscaleBatchOptimizeKindHonoursItsOwnFlag(t *testing.T) {
+	t.Parallel()
+	hs, tok, _, batch := gateFixtureWithBatch(t, true, false)
+	resp := postJSON(t, hs, "/v1/upscale/batch", tok, BatchRequest{Path: "", Kind: "optimize"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status: got %d, want 503 — the optimize kind has its own flag", resp.StatusCode)
+	}
+	if batch.optimizes != 0 {
+		t.Errorf("a disabled kind reached the coordinator: optimizes=%d", batch.optimizes)
+	}
+}
+
+// TestUpscaleBatchAcceptedWhenActive is the negative control for the two tests
+// above: with both flags on, the same requests reach the coordinator. Without
+// it, a handler that refused unconditionally would pass them both.
+func TestUpscaleBatchAcceptedWhenActive(t *testing.T) {
+	t.Parallel()
+	hs, tok, _, batch := gateFixtureWithBatch(t, true, true)
+	for _, kind := range []string{"upscale", "optimize"} {
+		resp := postJSON(t, hs, "/v1/upscale/batch", tok, BatchRequest{Path: "", Kind: kind})
+		if resp.StatusCode != http.StatusAccepted {
+			t.Errorf("kind=%s status: got %d, want 202 — an ACTIVE feature must still work", kind, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if batch.submits != 1 || batch.optimizes != 1 {
+		t.Errorf("active feature did not reach the coordinator: submits=%d optimizes=%d",
+			batch.submits, batch.optimizes)
 	}
 }
 
