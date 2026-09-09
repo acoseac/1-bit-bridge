@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // noRedirect keeps the 302 visible so the test can assert on it.
@@ -96,12 +97,25 @@ func TestLoginTicketAuthenticatesTheBrowser(t *testing.T) {
 // "/login" for one shape and "/login?why=expired" for another, as long as the
 // first case it happened to check was the bare one.
 func TestBadLoginTicketGrantsNothing(t *testing.T) {
-	srv, _, _ := newPublicTestServer(t, "correct horse battery staple")
+	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
+	// An EXPIRED ticket is the one of the three shapes that needs a real mint
+	// to produce, and without it this table proves the property only for
+	// tickets that never existed — while the notice speaks for all three.
+	// Milliseconds, then a sleep well past the ~15.6 ms wall-clock granularity
+	// the Windows leg has, so the expiry is a fact and not a race.
+	expired, err := store.MintLoginTicketTTL("admin", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
 	seen := map[string]int{}
-	for _, q := range []string{"", "?t=", "?t=nonsense", "?t=" + strings.Repeat("A", 43)} {
+	for _, q := range []string{
+		"", "?t=", "?t=nonsense", "?t=" + strings.Repeat("A", 43), "?t=" + expired,
+	} {
 		resp, err := noRedirectClient().Get(ts.URL + "/login/ticket" + q)
 		if err != nil {
 			t.Fatal(err)

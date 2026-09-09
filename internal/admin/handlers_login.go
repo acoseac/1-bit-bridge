@@ -56,8 +56,12 @@ type loginPageData struct {
 // ErrTicketInvalid means and therefore leaks nothing about whether a given
 // ticket ever existed. The instruction is the point: the natural response to a
 // login form is to click the link again, and that can never work.
+// The instruction stays SOURCE-NEUTRAL. These links are minted from two places
+// — the hosted uploader's share sheet and `bridge admin login-link` in a shell
+// — and naming either one tells the other half of the operators to go somewhere
+// that does not exist for them.
 const staleLinkNotice = "That sign-in link has expired or was already used — " +
-	"links are single-use. Open the uploader again in the app to get a new one."
+	"links are single-use. Request a new one to sign in."
 
 // pageLogin renders the standalone login form. Bypasses the page
 // nav (handled by the login.html template not extending layout).
@@ -265,6 +269,20 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	username, err := s.deps.AdminAuth.RedeemLoginTicket(r.URL.Query().Get("t"))
 	if err != nil {
+		if !errors.Is(err, adminauth.ErrTicketInvalid) {
+			// The ticket store could not be written — a full or read-only
+			// disk, not anything the holder of this link did. Redemption
+			// established NOTHING about the ticket, and the record is still on
+			// disk, so `link=stale` here would be false twice over: it names a
+			// cause that was never determined, and its advice is to fetch a
+			// fresh link, which will fail in exactly the same way. This branch
+			// is also the only signal an operator would get that the store has
+			// stopped being writable.
+			logger.Error("admin redeem login ticket", "err", err)
+			writeError(w, http.StatusInternalServerError, "ticket_store_unavailable",
+				"the login-ticket store could not be read or written")
+			return
+		}
 		// Still no explanation of WHICH of unknown, expired or already-used
 		// applies — but `link=stale` lets the form say that the link was the
 		// problem, which is the difference between "this is broken" and "get a
@@ -303,13 +321,34 @@ func isNonNavigationFetch(h http.Header) bool {
 	if m := h.Get("Sec-Fetch-Mode"); m != "" && !strings.EqualFold(m, "navigate") {
 		return true
 	}
-	if p := strings.ToLower(h.Get("Sec-Purpose")); strings.Contains(p, "prefetch") ||
-		strings.Contains(p, "prerender") {
-		return true
+	for _, k := range []string{"Sec-Purpose", "Purpose", "X-Purpose", "X-Moz"} {
+		if declaresSpeculation(h.Get(k)) {
+			return true
+		}
 	}
-	for _, k := range []string{"Purpose", "X-Purpose", "X-Moz"} {
-		switch strings.ToLower(strings.TrimSpace(h.Get(k))) {
-		case "prefetch", "preview", "prerender", "instant":
+	return false
+}
+
+// declaresSpeculation reports whether a purpose-style header value carries a
+// token naming a speculative fetch.
+//
+// TOKENS, not the whole value and not a substring. `Sec-Purpose` is a
+// structured field that really does arrive as `prefetch;anonymous-client-ip`,
+// and the three legacy spellings are specified nowhere at all, so any of them
+// can pick up a parameter or arrive as a list in front of a proxy. Matching the
+// whole value misses those and fails OPEN — which spends the ticket this guard
+// exists to protect. A bare substring match would close that hole and open a
+// worse one, refusing a real navigation whose value merely contained one of
+// these words.
+//
+// Split on both `,` and `;` so a list and a parameterised single value are the
+// same shape, and strip the quotes a structured-field string may carry.
+func declaresSpeculation(v string) bool {
+	for _, tok := range strings.FieldsFunc(v, func(r rune) bool {
+		return r == ',' || r == ';'
+	}) {
+		switch strings.ToLower(strings.Trim(tok, " \t\"")) {
+		case "prefetch", "prerender", "preview", "instant":
 			return true
 		}
 	}
