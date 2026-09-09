@@ -45,7 +45,19 @@ type loginPageData struct {
 	ServerVersion string
 	Username      string
 	Next          string
+	// Notice is a neutral explanation shown above the form, currently only for
+	// a login link that did not redeem. Empty renders nothing.
+	Notice string
 }
+
+// staleLinkNotice is what a user sees after a login link fails to redeem.
+//
+// It names the two recoverable causes together, which is exactly what
+// ErrTicketInvalid means and therefore leaks nothing about whether a given
+// ticket ever existed. The instruction is the point: the natural response to a
+// login form is to click the link again, and that can never work.
+const staleLinkNotice = "That sign-in link has expired or was already used — " +
+	"links are single-use. Open the uploader again in the app to get a new one."
 
 // pageLogin renders the standalone login form. Bypasses the page
 // nav (handled by the login.html template not extending layout).
@@ -59,11 +71,16 @@ func (s *Server) pageLogin(w http.ResponseWriter, r *http.Request) {
 	if s.deps.AdminAuth != nil {
 		username = s.deps.AdminAuth.Username()
 	}
+	notice := ""
+	if r.URL.Query().Get("link") == "stale" {
+		notice = staleLinkNotice
+	}
 	envelope := loginPageData{
 		LibraryName:   cfg.LibraryName,
 		ServerVersion: version.ServerVersion,
 		Username:      username,
 		Next:          next,
+		Notice:        notice,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -230,11 +247,34 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
 		return
 	}
+	// The HEAD case is refused above, which covers a prober that asks about the
+	// URL. This covers the one that FETCHES it: an unfurler, a prefetcher or a
+	// mail-security scanner issues a GET that is not a top-level navigation, and
+	// because redemption deletes before judging, that GET spends the credential
+	// and the human's real click then lands on a bare login form.
+	//
+	// Fails OPEN when the headers are absent. curl, an older browser and the
+	// operator's own shell flow send none of them, and turning those away would
+	// break the path this exists to serve. Only a request that POSITIVELY
+	// declares itself something other than a navigation is refused — and it is
+	// refused BEFORE the redeem, so nothing is consumed.
+	if isNonNavigationFetch(r.Header) {
+		writeError(w, http.StatusForbidden, "not_a_navigation",
+			"a login link must be opened by navigating to it")
+		return
+	}
 	username, err := s.deps.AdminAuth.RedeemLoginTicket(r.URL.Query().Get("t"))
 	if err != nil {
-		// Send them to the ordinary login form rather than explaining which of
-		// unknown, expired or already-used applies.
-		http.Redirect(w, r, "/login", http.StatusFound)
+		// Still no explanation of WHICH of unknown, expired or already-used
+		// applies — but `link=stale` lets the form say that the link was the
+		// problem, which is the difference between "this is broken" and "get a
+		// fresh one". It reveals nothing: it is the exact union of the three,
+		// and it is the same answer for a ticket that never existed.
+		//
+		// Load-bearing, because the obvious recovery is futile: re-opening the
+		// SAME link can never work once any touch has spent it, and without
+		// this the page gives a user no reason to think otherwise.
+		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
 		return
 	}
 	raw, err := s.deps.AdminAuth.CreateSession(username)
@@ -250,6 +290,30 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 	// nothing to validate. Nothing needs it — the control plane wants the root,
 	// and the login form has its own.
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// isNonNavigationFetch reports whether a request POSITIVELY declares itself
+// something other than a user navigation — a prefetch, a prerender, a preview
+// or a subresource fetch.
+//
+// Absent headers are not a declaration, so they pass. `Sec-Fetch-Mode` is sent
+// by every current browser on a top-level navigation; the rest are the older
+// and vendor spellings of "I am fetching this speculatively".
+func isNonNavigationFetch(h http.Header) bool {
+	if m := h.Get("Sec-Fetch-Mode"); m != "" && !strings.EqualFold(m, "navigate") {
+		return true
+	}
+	if p := strings.ToLower(h.Get("Sec-Purpose")); strings.Contains(p, "prefetch") ||
+		strings.Contains(p, "prerender") {
+		return true
+	}
+	for _, k := range []string{"Purpose", "X-Purpose", "X-Moz"} {
+		switch strings.ToLower(strings.TrimSpace(h.Get(k))) {
+		case "prefetch", "preview", "prerender", "instant":
+			return true
+		}
+	}
+	return false
 }
 
 // apiLogout invalidates the current session (if any) and clears
