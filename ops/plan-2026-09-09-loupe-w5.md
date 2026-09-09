@@ -625,12 +625,48 @@ byte-identical with the iOS mirror at the window's head.
 
 File-disjoint, so they go in parallel off `main` rather than stacked.
 
+**Every confirmed finding is dispositioned here.** Nothing is left implicit.
+
 | PR | Items | Files |
 |---|---|---|
-| 1 | P1 | `internal/admin/settings_apply.go`, `internal/config/config.go` |
-| 2 | P2, P3 | `internal/adminauth/ticket.go`, `internal/admin/handlers_login.go` |
-| 3 | P4 | `internal/admin/handlers_export.go` |
-| 4 | P5, P6, P11 (cmd) | `cmd/bridge/*` |
-| 5 | P8 → P7, P9, P10, P11 (transcode) | `internal/transcode/*` |
-| 6 | D1 + the rules from this run | `CLAUDE.md`, `ops/engineering-log.md` |
+| #878 | **P0a**, **P0b** | `internal/api/upscale_batch.go`, `internal/manifest/extractors.go` |
+| #879 | **P1** | `internal/admin/settings_apply.go`, `internal/config/config.go` |
+| #880 | **P2**, **P3** | `internal/adminauth/ticket.go`, `internal/admin/handlers_login.go` |
+| #881 | **P4** | `internal/admin/handlers_export.go` |
+| #882 | **P5**, **P6** (partial), **P11** (cmd) | `cmd/bridge/*` |
+| #883 | **P8** → **P7**, **P0c**, **P9**, **P10**, **P11** (transcode) | `internal/transcode/*` |
+| #884 | the DSD measurements that ran nowhere | `.github/workflows/gate.yml`, `Makefile` |
+| #885 | **P0e** | `internal/admin/player_audio.go`, `internal/manifest/catalog_refs.go` |
+| #886 | **D1** + the rules from this run | `CLAUDE.md`, `ops/engineering-log.md` |
+
+**Carried, with the reason:**
+
+- **P0d — the one-sided clip guard.** ESCALATED, not deferred. Letting the
+  clamp go negative would attenuate an over-modulated master to −1 dBTP like
+  every other source, which changes what a rendition SOUNDS like; keeping it
+  means a `> 0 dBTP` source can never get a rendition and the operator sees
+  "sox reported clipping in stage C". That is a product decision about the
+  bridge's own output, not a correctness fix, and it is the user's. The
+  docblocks claiming the peak lands at or below −1 dBTP "by construction" are
+  false either way and are corrected in #883.
+- **P0c's second half — `Track.Channels` is written by the DFF extractor
+  only**, so every DSF budgets as stereo while carrying a real duration, and a
+  5.1 rip under-reserves 3×. Stamping `channelNum` in the DSF extractor is an
+  EXTRACTION-LOGIC change, so it needs its own `ExtractorVersion` bump and a
+  library-wide re-extract — which #878 has just spent. Batching a second bump
+  into the same week would double that cost for one budget figure. Filed for
+  the next extraction change to ride along with; the lane multiplier in #883
+  is the half that removes the ENOSPC risk.
+- **P6's routed-row half** (`ListTracks` enumerating UPnP-routed rows and
+  reporting them as "missing source files, run `bridge scan`"). Needs a
+  `ListTracksLocal` reader with the same anti-join `autoOptimizeCandidateSQL`
+  already carries — a new store method, which is a different blast radius from
+  the rest of #882. The wrong ADVICE is the user-visible half and is worth its
+  own PR against a real hybrid fixture.
+- **P12 (the console surfaces #876 did not reach) and P13 (the export has no
+  affordance)** — product-surface decisions about where a control belongs, not
+  correctness fixes. Recorded for the user.
+- **P14** (the parity guard's two blind spots) — real but latent: all 31
+  current input names are alphanumeric, so the regex gap bites nothing today.
+  Filed with #886's rules so the next person touching that guard sees it.
 
