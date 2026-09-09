@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
+
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 )
 
@@ -85,6 +87,22 @@ type jobsEnrichment struct {
 	HarvestActive bool   `json:"harvestActive"`
 }
 
+// jobsLyrics is the network lyrics tier's card. `Available` reports whether
+// the counts could be read at all — a failed read must render as "unknown",
+// never as a confident zero, which is the shape a missing availability flag
+// produces and the one this console has been bitten by.
+type jobsLyrics struct {
+	Enabled      bool  `json:"enabled"`
+	Available    bool  `json:"available"`
+	SyncedRows   int64 `json:"syncedRows"`
+	PlainRows    int64 `json:"plainRows"`
+	Addressable  int64 `json:"addressable"`
+	Instrumental int64 `json:"instrumental"`
+	Unavailable  int64 `json:"unavailable"`
+	Pending      int64 `json:"pending"`
+	Unresolved   int64 `json:"unresolved"`
+}
+
 type jobsSmartMixes struct {
 	Enabled          bool         `json:"enabled"`
 	IntervalSec      int          `json:"intervalSec,omitempty"`
@@ -141,6 +159,7 @@ type jobsSnapshotResponse struct {
 	// all rather than a permanently-inactive one.
 	AutoOptimize *AutoOptimizeJobState `json:"autoOptimize,omitempty"`
 	Enrichment   jobsEnrichment        `json:"enrichment"`
+	Lyrics       jobsLyrics            `json:"lyrics"`
 	Duplicates   jobsDuplicates        `json:"duplicates"`
 	SmartMixes   jobsSmartMixes        `json:"smartMixes"`
 	Backups      jobsBackups           `json:"backups"`
@@ -210,6 +229,23 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	// running), so closure presence is not a signal here.
 	resp.Enrichment.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
 	resp.Enrichment.HarvestActive = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled
+
+	// Network lyrics tier. The counts are only READ when the feature is on:
+	// they cost a full scan, and a bridge that never enabled this should not
+	// pay for it on every poll. Behind lyricsStatsTTL when it is on.
+	resp.Lyrics.Enabled = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled && cfg.Atlas.LyricsEnabled
+	if resp.Lyrics.Enabled {
+		if ls := s.lyricsStats(ctx); ls != nil {
+			resp.Lyrics.Available = true
+			resp.Lyrics.SyncedRows = ls.syncedRows
+			resp.Lyrics.PlainRows = ls.plainRows
+			resp.Lyrics.Addressable = ls.addressable
+			resp.Lyrics.Instrumental = ls.byStatus[manifest.AtlasLyricsInstrumental]
+			resp.Lyrics.Unavailable = ls.byStatus[manifest.AtlasLyricsUnavailable]
+			resp.Lyrics.Pending = ls.byStatus[manifest.AtlasLyricsPending]
+			resp.Lyrics.Unresolved = ls.byStatus[manifest.AtlasLyricsUnresolved]
+		}
+	}
 
 	// Duplicates stamping. Policy is live config; the headline numbers
 	// come from the persisted summary (one scan_state row — cheap on
@@ -454,4 +490,88 @@ func (s *Server) apiAutoOptimizeSweep(w http.ResponseWriter, _ *http.Request) {
 	}
 	trigger()
 	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
+}
+
+// lyricsStatsTTL bounds how stale the network lyrics block on GET /api/jobs
+// may be.
+//
+// Not a guess at an acceptable cost — the same rule this server already
+// applies to its database-accounting block, applied to the other query that
+// turned a polled handler into a full table scan. Measured at 25.8 ms over
+// 21,000 tracks: the addressable count is a scan with a `json_extract` per row
+// and two NOT EXISTS anti-joins, and the JSON predicate cannot use the
+// functional index on `$.musicBrainzAlbumID` because it is wrapped in
+// COALESCE. The Jobs page polls every 10 s, so this cuts the rate by three for
+// numbers that move once a sweep.
+const lyricsStatsTTL = 30 * time.Second
+
+// lyricsStatsSnapshot is the cached half. Unexported and unTAGGED: not a wire
+// type — the handler copies each field into the DTO it owns.
+//
+// No `ok` field: a nil snapshot IS the unavailable state, which is what lets a
+// failed query serve the last good one instead of blanking the card.
+type lyricsStatsSnapshot struct {
+	syncedRows  int64
+	plainRows   int64
+	byStatus    map[string]int64
+	addressable int64
+}
+
+// lyricsStats returns the TTL-cached network-lyrics rollup, single-flighted so
+// concurrent polls collapse to one query. Mirrors getAnalysisCoverage's shape,
+// which is the pattern this endpoint already uses — /api/jobs is polled every
+// 10s per open tab, and this query is a full scan with a json_extract per row.
+//
+// Three things it takes from that sibling rather than from the diagnostics
+// cache, which holds its mutex across the query:
+//
+//   - The db context is DETACHED (the PR #373 singleflight rule). The result is
+//     shared by every queued caller, so one client hanging up must not
+//     synthesize a failure for the rest — and detaching removes the
+//     cancelled-request-poisons-the-cache case entirely rather than guarding it.
+//   - A failure serves LAST-GOOD (possibly nil), so a transient error does not
+//     blank a card that was reading correctly a moment ago.
+//   - The timestamp is stamped on failure TOO. Without it the TTL never trips
+//     after an error, so every poll re-runs a scan that is already failing —
+//     most likely because it is slow, which is exactly when hammering it is
+//     worst.
+func (s *Server) lyricsStats(ctx context.Context) *lyricsStatsSnapshot {
+	if s.deps.Manifest == nil {
+		return nil
+	}
+	s.lyricsStatsMu.Lock()
+	if !s.lyricsStatsAt.IsZero() && time.Since(s.lyricsStatsAt) < lyricsStatsTTL {
+		snap := s.lyricsStatsSnap
+		s.lyricsStatsMu.Unlock()
+		return snap
+	}
+	s.lyricsStatsMu.Unlock()
+	v, _, _ := s.lyricsStatsSF.Do("lyricsStats", func() (any, error) {
+		s.lyricsStatsMu.Lock()
+		if !s.lyricsStatsAt.IsZero() && time.Since(s.lyricsStatsAt) < lyricsStatsTTL {
+			snap := s.lyricsStatsSnap
+			s.lyricsStatsMu.Unlock()
+			return snap, nil
+		}
+		s.lyricsStatsMu.Unlock()
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotDBTimeout)
+		defer cancel()
+		st, err := s.deps.Manifest.AtlasLyricsStats(dbCtx)
+		s.lyricsStatsMu.Lock()
+		defer s.lyricsStatsMu.Unlock()
+		s.lyricsStatsAt = time.Now()
+		if err != nil {
+			logger.Warn("jobs: atlas lyrics stats", "err", err)
+			return s.lyricsStatsSnap, nil // last good, possibly nil
+		}
+		s.lyricsStatsSnap = &lyricsStatsSnapshot{
+			syncedRows:  st.SyncedRows,
+			plainRows:   st.PlainRows,
+			byStatus:    st.ByStatus,
+			addressable: st.Addressable,
+		}
+		return s.lyricsStatsSnap, nil
+	})
+	snap, _ := v.(*lyricsStatsSnapshot)
+	return snap
 }
