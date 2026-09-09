@@ -1,4 +1,4 @@
-.PHONY: build build-all test test-fast check fmt vet clean run check-go-version docker
+.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version docker
 
 BINARY      := bridge
 IMAGE       := 1-bit-bridge
@@ -57,6 +57,22 @@ test:
 # faster still: `go test ./internal/<pkg>/`.
 test-fast:
 	go test -p $(P) ./...
+
+# The DSD render measurements. Gated behind BRIDGE_DSD_FIXTURE_TESTS because
+# they need a real sox + ffmpeg (with the four dsd_* decoders); they SKIP
+# rather than fail without one, which is why they must be RUN somewhere on
+# purpose — in a summary line a skip and a pass look identical. Until
+# 2026-09-09 that variable appeared nowhere outside the test file, so the
+# alias-rejection differential, the level-parity clip-guard pin and the CCIF
+# intermodulation check had never run anywhere since they were written.
+#
+# Verified 2026-09-09 on Debian trixie with apt sox 14.4.2 + ffmpeg: the
+# numbers reproduce CLAUDE.md's to the decimal — stopband -116.84 dB, alias
+# delta +0.00 dB faithful / +0.38 dB compact, rendition -0.97 dBTP at a
+# +5.00 dB applied gain. Under three seconds once the toolchain is there.
+measure-dsd:
+	BRIDGE_DSD_FIXTURE_TESTS=1 go test ./internal/transcode/ \
+		-run 'TestDSDRender_|TestDSDLowpass|TestRunDSD' -count=1 -v
 
 # Per-change gate: format + vet + race tests, WITHOUT the 6-target
 # build-all (the dominant cost). Run the full `make fmt vet test build-all`
