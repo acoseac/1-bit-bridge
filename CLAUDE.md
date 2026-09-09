@@ -525,10 +525,81 @@ no failing test — which is the shape to expect in this area.
   the primary skip gate compares the AUDIO file byte-exactly
   (`scanner.go`, `existing.MTimeNS == pi.info.ModTime().UnixNano()`), so
   loosening only the sidecar half would be the inconsistency, not the fix.
-- **Atlas cannot supply lyrics** — measured 2026-09-06 against the live
-  instance: `atlas_qobuz_track` holds 679,296 rows with **0** non-empty
-  `lyrics` and **0** whose retained `raw_payload` even carries the key, so
-  there is nothing to back-fill. See the engineering log before proposing it.
+- **⚠️ "Atlas cannot supply lyrics" is STALE and was corrected 2026-09-09.**
+  It was true when measured on 2026-09-06 — `atlas_qobuz_track` held 679,296
+  rows with 0 non-empty `lyrics` — but that measured the QOBUZ mirror, and
+  Atlas has since grown an LRCLIB-backed surface at
+  `/v1/atlas/recording/{mbid}` that is nothing to do with it. The fifth stale
+  claim this file has shipped. **A negative result is about the thing you
+  measured, at the time you measured it** — scope such a bullet to the table
+  it looked in, or it reads as a standing verdict on the whole upstream.
+
+#### The network lyrics tier (`atlas-lrc` / `atlas`)
+
+- **A network row is not the scanner's to reap.** Every branch of
+  `writeLyricsRowTx` reasons from a LOCAL extraction, and its "nothing found"
+  arm DELETEs — right for a removed sidecar, and about a document Atlas
+  supplied it is evidence about nothing. Unguarded it reaps the row on the
+  very next scan and every scan after. Arbitration is `Source.Rank()`'s, not
+  a second copy of it: `atlas-lrc` at 5 sits above every UNTIMED local
+  document and below every timed one (the app's DD3 rule expressed in the
+  ladder), plain `atlas` at 8 beats nothing. `UpsertAtlasLyrics` applies the
+  same order in reverse and **refuses to demote**, so two sweeps cannot
+  alternate a track between documents — every write strict-advances
+  `indexed_at`, and a flap is a delta to every paired device per cycle.
+- **`/v1/lyrics` exempts network rows from the drift check**, and that is what
+  makes the tier work at all rather than a nicety. `lyricsSourceInfo` returns
+  the AUDIO file's stat for any non-sidecar source, so a row with no local
+  provenance compares zero against a real mtime and answers **410 forever**.
+  Binding the row to the audio file only moves the bug — a tagger writing a
+  genre changes that mtime and stales a document that never came from there.
+  Server-side only; `lyricsDocument` never carried the stat fields.
+- **The sweeper's gate is the ABSENCE of a `track_lyrics` row, never the
+  verdict.** That is what lets a track whose Atlas document was displaced by a
+  local one — or whose local one its owner deleted — come back and be
+  re-fetched from its cached recording MBID in one call. `instrumental` is the
+  ONE verdict that must exclude by status, because it is a success that
+  correctly leaves no row. And the attempt row records the identity it was
+  made AGAINST, not just the answer, so a retag invalidates a stale verdict by
+  construction — no scanner hook, nothing to remember to call.
+- **Corroboration, not duration, is the matcher's discriminator.** Atlas's
+  release listing carries no ISRC and no per-track artist, so the keys are
+  position, number, title and length. Measured over 752 tracks on 30 releases:
+  position+title agreeing gives a 134 ms median duration delta and **100%
+  within 30 s**; title-only and position-only give ~1.5 s medians and 82/87%.
+  A hard 4 s duration gate was proposed and is WRONG — only 77.9% of 447
+  position-matched pairs agree within 4 s (p90 **21.2 s**), so it discards a
+  fifth of correct matches. The veto applies ONLY to the uncorroborated tiers.
+  A file with no disc number must never be assumed onto medium 1 (3,752 tracks
+  here have none), and a title is used alone only when UNIQUE on the release
+  (1,275 albums here carry a duplicate title across 2,987 tracks).
+- **`pending` is a fact about the upstream, never about the track.** Atlas
+  warms on demand: over 32 unseen recordings every one resolved, median
+  **6.5 s**, p90 15.2 s, max 18.8 s. So a fixed 2-second re-probe — the
+  obvious design — sits below the median and misses most. The sweep warms its
+  batch on pass one and collects on pass two, and the 150 ms politeness
+  interval IS the delay. Never negative-cache it.
+- **Only an upstream that ANSWERED may write a verdict.** `doCapped` returns a
+  `*httpStatusError` and `isUpstreamAnswered` reads the CODE: 4xx durable,
+  **except 429 and 408**, which are 4xx by number and transient by meaning.
+  A 502 on the release fetch otherwise reaches `MatchNone` and parks a real
+  album for a fortnight. Same reason `isHTTPNotFound` no longer substring
+  matches `": http 404:"` — the error's last field is 512 bytes of response
+  BODY, so a failing upstream quoting a 404 read as a clean miss.
+- **The sweep stands down while a scan is in flight** (`ScanInProgress`, the
+  booklet GC's hook): both write `track_lyrics`, and a sweep landing seconds
+  before the scanner extracts a local document bumps `indexed_at` twice for
+  one track. The write budget is not a queue guard either — 9,454 addressable
+  tracks uncapped is 9,454 delta rows to every device at once.
+- **`/api/jobs` snapshots use TTL + singleflight, NOT the diagnostics cache's
+  mutex-across-the-query.** They look interchangeable and are not: the db
+  context is DETACHED (`context.WithoutCancel`), because the result is shared
+  by every queued caller and one client hanging up must not synthesize a
+  failure for the rest; a failure serves LAST-GOOD rather than blanking a
+  card; and the clock is stamped on failure TOO, or the TTL never trips and
+  every poll re-runs a scan that is already failing. `AtlasLyricsStats` is
+  25.8 ms at 21,000 tracks — the JSON predicate cannot use the functional
+  index on `$.musicBrainzAlbumID` because it is wrapped in COALESCE.
 
 ### Enrichment — MusicBrainz, Atlas, artwork, fingerprinting
 

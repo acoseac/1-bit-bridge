@@ -4679,3 +4679,148 @@ the first.
   *"missing source files (run `bridge scan` to reconcile)"* — advice that
   cannot work. Verbatim the defect #630 fixed for the analysis walk; needs a
   `ListTracksLocal` reader.
+
+## 2026-09-09 — The Atlas lyrics tier (#887 / #890 / #889)
+
+The bridge held 21,236 tracks with **10,911 carrying no lyrics at all**, and of
+the 10,325 that did, **968 were synced** — every one of them a `sidecar-lrc`.
+Atlas had grown an LRCLIB-backed surface at `/v1/atlas/recording/{mbid}`, so
+the question was whether the bare 10,911 could be filled, and at what risk.
+
+### What the brief got wrong, and how much it mattered
+
+The brief was written from a live session against the same two hosts and three
+of its contract claims still did not survive re-checking:
+
+| claim | measured |
+|---|---|
+| "Zero of 21,236 tracks carry a recording MBID" | **838 do.** `tags_json → $.musicBrainzTrackID` holds a RECORDING mbid (Picard's convention; the acoustic fallback writes it too). Three resolved at `/v1/atlas/recording/{mbid}` to titles matching the local tag exactly. They skip the release ladder entirely. |
+| release-track entries carry `isrc` and `artist_credit` | Neither exists. The keys are exactly `{medium_position, position, number, title, length_ms, recording_mbid}`. **ISRC matching was never available.** |
+| `?limit=` paginates; response carries `next_offset` | `limit` is IGNORED — `?limit=2` returned all 26 tracks and echoed `"limit": 250`. `offset` works; there is no `next_offset`. Page on offset against `total_count`. |
+
+Its numbers, by contrast, all reproduced to the row. The lesson is narrower
+than "don't trust the brief": the COUNTS came from SQL anyone can re-run, and
+the SHAPES came from reading a response once. The shapes are what rotted.
+
+### The blocker nothing had named
+
+An Atlas row written the obvious way answers **410 `lyrics_stale` on every
+request, forever**. `lyricsSourceInfo` returns the AUDIO file's stat for any
+source not prefixed `sidecar`, and `lyricsSourceDrifted` compares the row's
+provenance against it — so zeroed columns make `delta` the whole audio mtime.
+The lyrics would be fetched, stored, and never served.
+
+My first plan bound the row to the audio file's stat instead. Gemini caught
+that this only moves the bug: any tag edit changes that mtime, so a tagger
+writing a genre stales a document that never came from that file. It also
+corrected a claim of mine — that exempting network rows was "an API change".
+It is not: `lyricsDocument` is `{format, synced, body, language}` and the stat
+never reaches the wire.
+
+### The matcher, which is where a wrong answer is visible
+
+With no ISRC and no per-track artist, the keys are position, number, title and
+length. Gemini proposed a **mandatory 4-second duration assertion on every
+match**. Measured over 447 position-matched pairs from this library:
+
+```
+|delta| ms: median=693  p90=21227  p95=52654  max=654961
+within 1s 54.7% | 2s 65.7% | 4s 77.9% | 5s 79.1% | 30s 92.4%
+```
+
+A hard 4 s gate discards **a fifth of correct matches**. And the tail is not a
+multi-disc keying artefact — single-medium, disc-tagged pairs still show a p90
+of 14.6 s.
+
+What the data did say is that corroboration is the discriminator. Over 752
+tracks on 30 releases:
+
+```
+position AND title agree   37.0%   dur median  134 ms   97% <=5s   100% <=30s
+unique title only          18.1%   dur median 1440 ms   68% <=5s    82% <=30s
+position only              22.9%   dur median 1626 ms   65% <=5s    87% <=30s
+no match                   22.1%
+```
+
+So the ladder is ordered by independent evidence, and the veto applies ONLY to
+the two uncorroborated tiers — on a corroborated match, at 100% within 30 s, it
+could not fire without being wrong. Two keying traps are explicit: 3,752 tracks
+here carry no disc number (so positioning on a multi-medium release is refused
+rather than assumed onto medium 1), and 1,275 albums carry a duplicate title
+across 2,987 tracks (so a title is used alone only when unique on the release).
+
+### `pending`, and why the obvious retry is wrong
+
+Atlas never blocks its read path: the first request for an unseen recording
+returns `pending` and warms in the background. Gemini proposed a 2-second
+intra-sweep re-probe. Measured over **32 unseen recordings — every one
+resolved**: min 1.0 s, median **6.5 s**, p90 15.2 s, max 18.8 s. A 2-second
+probe sits below the median and misses most of them.
+
+The shipped form warms the whole batch on pass one and collects on pass two,
+so the 150 ms politeness interval IS the delay and no sleep is needed. The same
+run also sized the payoff: 23 available, 8 instrumental, 1 unavailable, and
+**18 of 32 (56%) carried synced LRC** against 4.6% of the library today.
+
+### What the negative controls found that the tests did not
+
+Two of them earned their keep by staying GREEN.
+
+**An unreachable corroboration arm.** Mutating `byPos == byTitle` changed
+nothing, because the arm below subsumes it: if the position and a unique title
+name the same entry, that entry's title folds equal by definition. Deleted; the
+survivor is strictly wider, since it also corroborates an ambiguous title the
+position agrees with.
+
+**A control that mutated the wrong function.** `perl -0pi -e s///` without `/g`
+replaced the FIRST occurrence, which was `getAnalysisCoverage`'s identical
+`context.WithoutCancel` line rather than the one under test. It passed, and a
+passing control reads as a passing test. Re-run against the right line it
+failed immediately. This is the wrong-occurrence trap already recorded in
+CONTRIBUTING; it cost nothing here only because the result looked too clean.
+
+And one process failure: three unrelated packages failed with *"no space left
+on device"* mid-gate. `df -h /` before reading failures, as the notes already
+say — 21k-track measurement stores plus a 10 GB build cache had filled the
+disk. This is the second time that exact line has had to be written.
+
+### Reviews
+
+Gemini's HIGH on #890 was correct and its diagnosis of the test gap was the
+more valuable half: a 502 on the release fetch reached `MatchNone` and stamped
+`unresolved` with a fourteen-day backoff, and the existing transient test could
+not see it because its candidate carried a tagged recording MBID and never
+reached that call. The fix made the classification structural — which then
+exposed `isHTTPNotFound` matching `": http 404:"` as a substring of an error
+whose last field is 512 bytes of response BODY.
+
+Its singleflight finding on #889 was also right, and I had simply copied the
+wrong sibling: `databaseStats` holds its mutex across the query and defends
+that in its docblock, but it serves `/api/diagnostics`. Every TTL cache on
+`/api/jobs` uses TTL + singleflight, and admin.go's comment on
+`analysisCoverage` names this exact endpoint and this exact 30-second window.
+
+Declined one, with numbers: the suggested CTE rewrite of the candidate query
+measured **37.47 ms against 37.31 ms** over a seeded 21,000-track store, both
+returning the same 400 rows. SQLite flattens it into the same plan, so the
+repeated `json_extract` is not being re-evaluated the way the suggestion
+assumed.
+
+CodeRabbit found a real edge case the live service does not currently produce:
+if Atlas omits `medium_position` every entry decodes to `0`, `soleMedium`
+answers `(0, true)`, and the `disc > 0` guard then skipped positioning for the
+WHOLE release. Fixed wider than proposed — on a single-medium release the
+medium's number is irrelevant, which also covers a file mis-tagged with a disc
+the release does not use.
+
+### End to end
+
+Against live Atlas with the brief's release (`02713146-…`, The Beatles
+1962–1966): sweep one wrote 1 document and left 2 pending; sweep two had all
+three, `atlas-lrc` and synced, at 830 / 1143 / 1255 bytes. Track 1 resolved to
+recording `1f518811-7cf9-4bdc-a656-0958e130f312` — the MBID the brief
+predicted — through the release ladder, with no tagged recording MBID supplied.
+
+Shipped default-OFF. `atlas.lyricsEnabled` starts a recurring outbound sweep
+the operator did not have, and every stored document is a delta every paired
+device syncs.
