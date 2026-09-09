@@ -56,15 +56,18 @@ func exportBundleOf(t *testing.T, srv *Server) map[string]any {
 // truncated", and reaching it at the production cap means 100,000 rows through
 // SQLite under -race — which would dominate the whole suite for one boundary.
 //
+// Per-SERVER, not package-level: a package var mutated by a test is a write
+// the race detector can pair with a concurrent read from an earlier test's
+// still-live httptest server, and buildExport read the cap twice, so a change
+// landing between those reads could panic the slice. (Gemini, PR #881.)
+//
 // The RATIO is what the code depends on, not the magnitudes: the page size
 // must not divide the cap, or the loop can never overshoot and the two cases
 // become indistinguishable. TestExportPageSizeDoesNotDivideTheCap pins that
 // for the shipped values.
-func shrinkExportCaps(t *testing.T, cap, page int) {
+func shrinkExportCaps(t *testing.T, srv *Server, capRows, page int) {
 	t.Helper()
-	oldCap, oldPage := exportHistoryCap, exportHistoryPage
-	exportHistoryCap, exportHistoryPage = cap, page
-	t.Cleanup(func() { exportHistoryCap, exportHistoryPage = oldCap, oldPage })
+	srv.testExportCap, srv.testExportPage = capRows, page
 }
 
 // TestExportDoesNotClaimTruncationItDidNotDo is the boundary the old form got
@@ -77,18 +80,19 @@ func shrinkExportCaps(t *testing.T, cap, page int) {
 // `"truncated": {"playbackHistory": true}` about an export that omitted
 // nothing, in the one field whose whole job is honesty about what is missing.
 func TestExportDoesNotClaimTruncationItDidNotDo(t *testing.T) {
-	shrinkExportCaps(t, 10, 3)
 	srv, _, _ := newTestServer(t)
+	const capRows = 10
+	shrinkExportCaps(t, srv, capRows, 3)
 	seedExportFixture(t, srv.deps.Manifest)
 	// The fixture already contributes one play, so seed cap-1 more to land
 	// EXACTLY on the cap.
-	seedHistoryRows(t, srv.deps.Manifest, exportHistoryCap-1)
+	seedHistoryRows(t, srv.deps.Manifest, capRows-1)
 
 	got := exportBundleOf(t, srv)
 	hist, _ := got["playbackHistory"].([]any)
-	if len(hist) != exportHistoryCap {
+	if len(hist) != capRows {
 		t.Fatalf("history has %d rows, want exactly the cap (%d) — the fixture is not on the boundary",
-			len(hist), exportHistoryCap)
+			len(hist), capRows)
 	}
 	if v, ok := got["truncated"]; ok {
 		t.Errorf("a history that ENDS at the cap reported truncated: %v", v)
@@ -98,15 +102,16 @@ func TestExportDoesNotClaimTruncationItDidNotDo(t *testing.T) {
 // TestExportReportsTruncationWhenItReallyTruncated is the other side, and the
 // reason the test above is not satisfied by simply never setting the flag.
 func TestExportReportsTruncationWhenItReallyTruncated(t *testing.T) {
-	shrinkExportCaps(t, 10, 3)
 	srv, _, _ := newTestServer(t)
+	const capRows = 10
+	shrinkExportCaps(t, srv, capRows, 3)
 	seedExportFixture(t, srv.deps.Manifest)
-	seedHistoryRows(t, srv.deps.Manifest, exportHistoryCap*2)
+	seedHistoryRows(t, srv.deps.Manifest, capRows*2)
 
 	got := exportBundleOf(t, srv)
 	hist, _ := got["playbackHistory"].([]any)
-	if len(hist) != exportHistoryCap {
-		t.Errorf("history has %d rows, want the cap (%d)", len(hist), exportHistoryCap)
+	if len(hist) != capRows {
+		t.Errorf("history has %d rows, want the cap (%d)", len(hist), capRows)
 	}
 	tr, ok := got["truncated"].(map[string]any)
 	if !ok {
@@ -115,8 +120,8 @@ func TestExportReportsTruncationWhenItReallyTruncated(t *testing.T) {
 	if tr["playbackHistory"] != true {
 		t.Errorf("truncated.playbackHistory = %v, want true", tr["playbackHistory"])
 	}
-	if n, _ := tr["limit"].(float64); int(n) != exportHistoryCap {
-		t.Errorf("truncated.limit = %v, want %d", tr["limit"], exportHistoryCap)
+	if n, _ := tr["limit"].(float64); int(n) != capRows {
+		t.Errorf("truncated.limit = %v, want %d", tr["limit"], capRows)
 	}
 }
 

@@ -56,11 +56,7 @@ const exportFormat = "1-bit-bridge-export/1"
 // still a file a browser will open. When it bites, the bundle says so in
 // `truncated` rather than quietly handing over a partial history and calling it
 // an export.
-// A var, not a const, so a test can shrink it: the boundary that matters is
-// "the history ends EXACTLY at the cap", and driving 100,000 rows through
-// SQLite under the race detector to reach it would dominate the suite.
-// Production never assigns to it.
-var exportHistoryCap = 100000
+const exportHistoryCap = 100000
 
 // exportHistoryPage is one ListHistory call. Its own hard cap is 1000; asking
 // for more is silently clamped to 200, so this is the ceiling, not a
@@ -70,7 +66,7 @@ var exportHistoryCap = 100000
 // buildExport. If it were, the loop could never overshoot, and "the history
 // ends exactly at the cap" would be indistinguishable from "the history was
 // cut off at the cap".
-var exportHistoryPage = 999
+const exportHistoryPage = 999
 
 type exportPlaylist struct {
 	ID             string               `json:"id"`
@@ -179,8 +175,33 @@ func (s *Server) apiExport(w http.ResponseWriter, r *http.Request) {
 // buildExport assembles the bundle. Separate from the handler so the suite can
 // assert on the CONTENT rather than on a decoded HTTP body, which is where the
 // credential-leak check belongs.
+// exportCaps returns the history cap and page size for this server.
+//
+// Per-SERVER, not package-level. The boundary that matters ("the history ends
+// EXACTLY at the cap") needs 100,000 rows through SQLite under the race
+// detector to reach at the shipped value, so a test has to be able to shrink
+// it — and a package-level var doing that is a write the race detector can
+// legitimately pair with a concurrent handler's read, plus a torn read
+// between the loop's cap test and the trim. Reading both ONCE here, into
+// locals the rest of buildExport uses, removes that class entirely: a
+// concurrent change cannot land between the two uses because there is only
+// one read. (Gemini, PR #881.)
+//
+// Zero means "unset", so production carries the consts without a wiring step.
+func (s *Server) exportCaps() (capRows, page int) {
+	capRows, page = exportHistoryCap, exportHistoryPage
+	if s.testExportCap > 0 {
+		capRows = s.testExportCap
+	}
+	if s.testExportPage > 0 {
+		page = s.testExportPage
+	}
+	return capRows, page
+}
+
 func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 	st := s.deps.Manifest
+	capRows, pageSize := s.exportCaps()
 	out := &exportBundle{
 		Format:        exportFormat,
 		ExportedAt:    time.Now().UTC(),
@@ -256,7 +277,7 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 	var after int64
 	truncated := false
 	for {
-		if len(out.History) >= exportHistoryCap {
+		if len(out.History) >= capRows {
 			// The cap bit. Reached only by asking for one more row than the
 			// cap allows and being given it, which is what makes `truncated`
 			// a fact about the DATABASE rather than about this loop — see
@@ -264,7 +285,7 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 			truncated = true
 			break
 		}
-		page, err := st.ListHistory(ctx, "", exportHistoryPage, after)
+		page, err := st.ListHistory(ctx, "", pageSize, after)
 		if err != nil {
 			return nil, fmt.Errorf("history: %w", err)
 		}
@@ -282,7 +303,7 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 			})
 		}
 		after = page[len(page)-1].ID
-		if len(page) < exportHistoryPage {
+		if len(page) < pageSize {
 			// A short page IS the last page — ListHistory returns fewer rows
 			// than asked for only when it has run out. Without this the loop
 			// spends one more round trip on every export whose history is not
@@ -292,7 +313,7 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 			break
 		}
 	}
-	if len(out.History) > exportHistoryCap {
+	if len(out.History) > capRows {
 		// Trim to the cap. The loop can overshoot by up to page-size-1,
 		// because the cap is checked between pages and the last page is
 		// fetched whole. Overshooting deliberately: it is what lets the
@@ -302,10 +323,10 @@ func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 		// shipped `"truncated": {"playbackHistory": true}` about an export
 		// that omitted nothing — a lie in the one field whose whole job is
 		// honesty about what is missing.
-		out.History = out.History[:exportHistoryCap]
+		out.History = out.History[:capRows]
 	}
 	if truncated {
-		out.Truncated = &exportTruncated{PlaybackHistory: true, Limit: exportHistoryCap}
+		out.Truncated = &exportTruncated{PlaybackHistory: true, Limit: capRows}
 	}
 
 	devices, err := st.ListDeviceRegistrations(ctx)
