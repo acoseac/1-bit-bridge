@@ -415,8 +415,12 @@ func (c *Client) NudgeBookletFetch(mbid string) {
 	}
 }
 
-// isHTTPNotFound matches do()'s formatted non-2xx error for a 404 — used to
+// isHTTPNotFound reports a 404 from the STATUS CODE, not from the message. The
+// substring form it replaced (`strings.Contains(err.Error(), ": http 404:")`)
+// could be satisfied by a response BODY quoting that text — the same class of
+// trap the enricher's HTTP-code parser is structural to avoid. Used to
 // detect a pre-booklet Atlas without changing do()'s error contract.
 func isHTTPNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), ": http 404:")
+	var he *httpStatusError
+	return errors.As(err, &he) && he.Code == http.StatusNotFound
 }

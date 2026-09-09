@@ -97,6 +97,13 @@ type Client struct {
 	// still record availability for the wire tag).
 	Booklets     BookletSink
 	BookletFiles BookletFileStore
+	// Lyrics wires the network lyrics tier (lyrics.go). Optional; nil disables
+	// it outright, the same way a nil Booklets disables booklets.
+	Lyrics LyricsSink
+	// LyricsPacing overrides the gap between recording requests. Zero = the
+	// lyricsPacing default, which is what production uses; the suite sets it
+	// so a budget-sized sweep is not 20 seconds of sleeping.
+	LyricsPacing time.Duration
 	// ScanInProgress reports whether a library (re)scan is currently running.
 	// Optional (nil = never in progress). Wired to manifest.Scanner.IsScanning
 	// in cmd/bridge so the booklet orphan GC (gcBooklets) is SKIPPED while a
@@ -259,6 +266,15 @@ func (c *Client) tick(ctx context.Context) {
 	c.refreshCovers(ctx)
 	if c.Booklets != nil {
 		c.tickBooklets(ctx, st)
+	}
+	// Routed through handleErr like every other leg, so an Atlas token
+	// rejection on this path wipes the credential rather than being swallowed
+	// — the defect the booklet FETCH leg had until it was given the same
+	// treatment.
+	if c.Lyrics != nil {
+		if err := c.tickLyrics(ctx, st); err != nil {
+			c.handleErr(ctx, "lyrics", err)
+		}
 	}
 }
 
@@ -614,9 +630,51 @@ func (c *Client) doCapped(st State, req *http.Request, out any, maxDecodeBytes i
 		return errUnauthorized
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("atlas %s: http %d: %s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return &httpStatusError{Code: resp.StatusCode, Path: req.URL.Path,
+			Body: strings.TrimSpace(string(snippet))}
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, maxDecodeBytes)).Decode(out)
+}
+
+// httpStatusError carries the upstream STATUS CODE structurally.
+//
+// Callers have to tell an upstream that ANSWERED (a 4xx about this resource)
+// from one that failed to answer (a 5xx, a timeout), because the two deserve
+// opposite treatment: the first is a durable fact worth caching, the second
+// must never write a verdict. Classifying that on the message text is the
+// substring trap this tree already records — a 4xx whose BODY happens to
+// mention "http 503" would be read as transient and retried forever.
+//
+// The Error() string is byte-identical to the fmt.Errorf it replaced, so every
+// log line and every existing assertion on the message is unchanged.
+type httpStatusError struct {
+	Code int
+	Path string
+	Body string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("atlas %s: http %d: %s", e.Path, e.Code, e.Body)
+}
+
+// isUpstreamAnswered reports whether the upstream gave a durable answer about
+// the resource rather than failing to serve it.
+//
+// 4xx EXCEPT 429 and 408. Both of those are 4xx by number and transient by
+// meaning — a rate limit and a request timeout say nothing about whether the
+// resource exists — and treating either as an answer would park a perfectly
+// real album behind a fortnight-long backoff for being asked at a busy moment.
+// 401 and 403 never reach here: doCapped turns them into errUnauthorized above,
+// so the credential-wipe path owns them.
+func isUpstreamAnswered(err error) bool {
+	var he *httpStatusError
+	if !errors.As(err, &he) {
+		return false
+	}
+	if he.Code == http.StatusTooManyRequests || he.Code == http.StatusRequestTimeout {
+		return false
+	}
+	return he.Code >= 400 && he.Code < 500
 }
 
 func joinURL(base, path string) string {

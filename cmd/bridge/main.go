@@ -51,6 +51,7 @@ import (
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/tlsacme"
 
@@ -172,6 +173,44 @@ func (a atlasHarvestSink) UpsertReleaseMeta(ctx context.Context, m atlasharvest.
 // BookletSink — a pass-through except BookletsToFetch, whose row type is
 // narrowed to the (mbid, etag) pair the fetch sweep needs (keeps the
 // atlasharvest package from importing internal/manifest).
+// Compile-time proof the adapters satisfy the harvest client's interfaces. The
+// conversion below is hand-written, so a signature change on either side would
+// otherwise surface as a feature that silently stopped being wired.
+var (
+	_ atlasharvest.LyricsSink  = lyricsSinkAdapter{}
+	_ atlasharvest.BookletSink = bookletSinkAdapter{}
+)
+
+// lyricsSinkAdapter converts between the store's candidate type and the
+// harvest client's, so internal/atlasharvest keeps its independence from
+// internal/manifest — the same shape as bookletSinkAdapter below.
+type lyricsSinkAdapter struct{ store *manifest.Store }
+
+func (l lyricsSinkAdapter) AtlasLyricsCandidates(ctx context.Context, now int64, limit int) ([]atlasharvest.LyricsCandidate, error) {
+	rows, err := l.store.AtlasLyricsCandidates(ctx, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]atlasharvest.LyricsCandidate, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, atlasharvest.LyricsCandidate{
+			Path: r.Path, AlbumMBID: r.AlbumMBID, TrackMBID: r.TrackMBID, CachedMBID: r.CachedMBID,
+			Title: r.Title, TrackNumber: r.TrackNumber, DiscNumber: r.DiscNumber,
+			DurationMS: r.DurationMS, Attempts: r.Attempts,
+		})
+	}
+	return out, nil
+}
+
+func (l lyricsSinkAdapter) UpsertAtlasLyrics(ctx context.Context, path string, doc lyrics.Doc, source lyrics.Source) (bool, error) {
+	return l.store.UpsertAtlasLyrics(ctx, path, doc, source)
+}
+
+func (l lyricsSinkAdapter) MarkAtlasLyricsAttempt(ctx context.Context, path, albumMBID, trackMBID,
+	resolvedMBID, status string, nextAttemptAt int64) error {
+	return l.store.MarkAtlasLyricsAttempt(ctx, path, albumMBID, trackMBID, resolvedMBID, status, nextAttemptAt)
+}
+
 type bookletSinkAdapter struct{ store *manifest.Store }
 
 func (b bookletSinkAdapter) DistinctAlbumReleaseMBIDs(ctx context.Context) ([]string, error) {
@@ -2987,6 +3026,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	if cfg.Atlas.HarvestEnabled && !cfg.Atlas.Enabled {
 		fmt.Fprintln(stderr, "atlas harvest: harvestEnabled requires atlas.enabled (bios are served via /v1/atlas-meta) — harvest disabled")
 	}
+	// Same shape one level down: the lyrics sweep rides the harvest
+	// credential, so it is inert without it and the operator has no way to
+	// tell from the outside — the console card simply never appears.
+	//
+	// A WARNING, not a validation error. Config.Validate is a pure shape
+	// check, and refusing to start over a combination that is merely useless
+	// rather than dangerous is how a binary rolled back during an incident
+	// fails to boot. Same reasoning as an unrecognised managed-control name.
+	// (Gemini, PR #888.)
+	if cfg.Atlas.LyricsEnabled && !(cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled) {
+		fmt.Fprintln(stderr, "atlas lyrics: lyricsEnabled requires atlas.enabled and atlas.harvestEnabled "+
+			"(the sweep rides the harvest credential) — network lyrics disabled")
+	}
 	// A demo bridge's bearer is public by construction (the static
 	// demo.tokenSHA256 ships inside every installed app), so an unpinned
 	// credential endpoint there lets anyone repoint the harvest pull at a
@@ -3027,6 +3079,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// credential. The cache dir failing to create degrades to
 		// availability-checks-only (no downloads, /v1/booklet answers 202)
 		// rather than disabling the feature.
+		// The network lyrics tier rides the same credential. Opt-in, and
+		// inert without it: nil leaves tickLyrics a no-op, exactly as a nil
+		// Booklets disables booklets.
+		if cfg.Atlas.LyricsEnabled {
+			harvestClient.Lyrics = lyricsSinkAdapter{store: manifestStore}
+		}
 		harvestClient.Booklets = bookletSinkAdapter{store: manifestStore}
 		if err := os.MkdirAll(bookletsDir, 0o700); err != nil {
 			fmt.Fprintf(stderr, "booklets: create cache dir: %v (downloads disabled)\n", err)
