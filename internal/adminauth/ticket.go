@@ -206,11 +206,19 @@ func (s *Store) writeTicketsLocked(tickets map[string]persistedTicket) error {
 		return fmt.Errorf("stage login tickets: %w", err)
 	}
 	tmpName := tmp.Name()
+	// The two-defer idiom, matching persist() in this package's store.go and
+	// auth.Store: LIFO runs Close BEFORE Remove, which is what Windows needs
+	// (it will not unlink an open file), and it also closes the descriptor if
+	// anything between here and the rename panics. The explicit Close calls on
+	// the error paths below stay — a double Close returns an error nobody
+	// reads, and they make each path's intent legible on its own line.
+	// (Gemini, PR #880.)
 	defer func() {
 		if tmpName != "" {
 			_ = os.Remove(tmpName)
 		}
 	}()
+	defer func() { _ = tmp.Close() }()
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("chmod login tickets: %w", err)
