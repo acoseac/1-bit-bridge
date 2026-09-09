@@ -1052,6 +1052,98 @@ const (
 	ManagedControlBackups = "backups"
 )
 
+// managedControlSettings maps a managed CONTROL onto the settings FIELDS
+// that reach the same effect through PATCH /api/settings.
+//
+// The controls are gated at the route table, which is where you go to ask
+// what a session can do — but a route is not the only way to reach an
+// action. `updateAutoInstall` is read LIVE by the updater's poll loop, and
+// `AutoInstallOpts` / `AutoInstallRestart` are wired unconditionally, so
+// setting it makes the bridge download a release, swap its own binary and
+// call the graceful-shutdown closure: the version move ManagedControlUpdates
+// exists to refuse, plus the process restart ManagedControlRestart exists to
+// refuse, from a plain authenticated PATCH with no console affordance
+// involved. `backupIntervalHours` and `backupKeep` fill the same quota
+// ManagedControlBackups refuses, on a timer, without touching the button.
+//
+// Derived from the control rather than duplicated into managedSettings on
+// purpose. The alternative — telling the control plane "also list these
+// five in managedSettings" — makes correctness depend on a SECOND program
+// getting a list right, which is exactly what putting the gate at the route
+// table was chosen to avoid. Here the refusal comes from the same
+// declaration the route gate reads, so the two cannot drift.
+//
+// updateAutoInstall appears under BOTH controls because it performs both
+// halves; a bridge declaring either one alone still refuses it, which is
+// the fail-closed direction. roots and variantsDir imply nothing: neither
+// has a settingsPatch field, so there is no second path to them.
+var managedControlSettings = map[string][]string{
+	ManagedControlUpdates: {
+		"updateAutoInstall",
+		"updateCheckIntervalHours",
+		"updateQuietHours",
+	},
+	ManagedControlRestart: {
+		"updateAutoInstall",
+	},
+	ManagedControlBackups: {
+		"backupIntervalHours",
+		"backupKeep",
+	},
+}
+
+// SettingsImpliedByManagedControls returns every settings field this
+// bridge's declared controls own, sorted and de-duplicated. Empty when
+// nothing is managed, which is every self-hosted install.
+func (d DeploymentConfig) SettingsImpliedByManagedControls() []string {
+	var out []string
+	for _, c := range d.ManagedControls {
+		for _, f := range managedControlSettings[c] {
+			if !slices.Contains(out, f) {
+				out = append(out, f)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// EffectiveManagedSettings is the union the console must be told about:
+// the fields the operator named, plus the ones the declared controls own.
+// Sorted, de-duplicated, and nil when nothing is managed so the wire field
+// stays omitted on every self-hosted install.
+//
+// The console hides what this names and then drops it from the Save
+// payload, so the widened refusal in managedFieldsIn never fires on an
+// ordinary save. Reporting the narrow set here while refusing the wide one
+// there is precisely the shape that produced the nineteen-name wall PR #877
+// fixed — a field rendered, submitted, and the whole PATCH refused.
+func (d DeploymentConfig) EffectiveManagedSettings() []string {
+	implied := d.SettingsImpliedByManagedControls()
+	if len(d.ManagedSettings) == 0 && len(implied) == 0 {
+		return nil
+	}
+	var out []string
+	for _, f := range append(append([]string(nil), d.ManagedSettings...), implied...) {
+		if !slices.Contains(out, f) {
+			out = append(out, f)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// IsManagedSettingOrImplied is IsManagedSetting widened by the controls.
+// This is the predicate a settings WRITE path wants; IsManagedSetting
+// alone answers the narrower "did the operator name this field", which is
+// what the console's hide pass and the report want.
+func (d DeploymentConfig) IsManagedSettingOrImplied(field string) bool {
+	if d.IsManagedSetting(field) {
+		return true
+	}
+	return slices.Contains(d.SettingsImpliedByManagedControls(), field)
+}
+
 // knownManagedControls is the closed set the current build understands.
 var knownManagedControls = []string{
 	ManagedControlRestart,

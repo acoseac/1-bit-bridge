@@ -405,6 +405,12 @@ type settingsResponse struct {
 	// ManagedSettings names the fields a control plane owns on this
 	// bridge. The console hides them and the PATCH refuses them; a
 	// self-hosted install has none and the field is omitted.
+	//
+	// This is the EFFECTIVE set — deployment.managedSettings plus the
+	// fields the declared managedControls own, because a control that
+	// gates a route must also own the settings field that performs the
+	// same action. The console must be told the wide set or it renders a
+	// field, submits it, and the PATCH is refused whole.
 	ManagedSettings []string `json:"managedSettings,omitempty"`
 
 	// ManagedControls names the operator ACTIONS that control plane
@@ -1899,7 +1905,7 @@ func (s *Server) apiTokensRevoke(w http.ResponseWriter, r *http.Request) {
 func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsResponse {
 	resp := settingsResponse{
 		LibraryName:              cfg.LibraryName,
-		ManagedSettings:          cfg.Deployment.ManagedSettings,
+		ManagedSettings:          cfg.Deployment.EffectiveManagedSettings(),
 		ManagedControls:          cfg.Deployment.ManagedControls,
 		RestartManaged:           cfg.Deployment.IsManagedControl(config.ManagedControlRestart),
 		UpdatesManaged:           cfg.Deployment.IsManagedControl(config.ManagedControlUpdates),
