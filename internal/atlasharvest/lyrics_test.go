@@ -705,3 +705,26 @@ func TestIsUpstreamAnswered(t *testing.T) {
 		t.Error("the body's text outvoted the status code")
 	}
 }
+
+// isHTTPNotFound reads the STATUS CODE, not the message.
+//
+// The substring form it replaced matched `": http 404:"` anywhere in the
+// formatted error — and the format is `atlas %s: http %d: %s`, whose last %s
+// is up to 512 bytes of the response BODY. An upstream that is failing and
+// quotes a 404 in its error page would have been read as a clean "no booklet
+// for this release" and the release marked unavailable.
+func TestIsHTTPNotFoundReadsTheCodeNotTheMessage(t *testing.T) {
+	if !isHTTPNotFound(&httpStatusError{Code: http.StatusNotFound, Path: "/v1/x"}) {
+		t.Error("a real 404 was not recognised")
+	}
+	for _, e := range []error{
+		&httpStatusError{Code: http.StatusBadGateway, Path: "/v1/x", Body: "upstream: http 404: nope"},
+		&httpStatusError{Code: http.StatusInternalServerError, Body: ": http 404:"},
+		errors.New("dial tcp: connection refused"),
+		nil,
+	} {
+		if isHTTPNotFound(e) {
+			t.Errorf("not a 404, but read as one: %v", e)
+		}
+	}
+}
