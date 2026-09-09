@@ -522,6 +522,25 @@ body.login-page {
   transform: scale(0.98);
 }
 
+.login-notice {
+  /* Attention, NOT danger: nothing was wrong with the credentials, a
+   * short-lived link simply went stale. --accent-warm is the ochre the
+   * rest of the console already uses for warning indicators, and it
+   * carries a dark-mode override so color-mix() resolves in both.
+   * Same plain-rgba-before-color-mix discipline as .login-error below,
+   * with the light-mode literal as the fallback. */
+  background: rgba(154, 82, 0, 0.10);
+  background: color-mix(in srgb, var(--accent-warm) 12%, transparent);
+  color: var(--accent-warm);
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(154, 82, 0, 0.3);
+  border: 1px solid color-mix(in srgb, var(--accent-warm) 30%, transparent);
+  font-size: 13px;
+  line-height: 1.45;
+  margin-bottom: 20px;
+}
+
 .login-error {
   /* Plain-rgba fallback before each color-mix() so legacy webviews
    * without color-mix() still get a tinted error background AND a

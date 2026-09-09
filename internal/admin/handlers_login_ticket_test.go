@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // noRedirect keeps the 302 visible so the test can assert on it.
@@ -69,18 +70,52 @@ func TestLoginTicketAuthenticatesTheBrowser(t *testing.T) {
 	if sessionCookie(replay) != nil {
 		t.Error("replaying the ticket produced a second session")
 	}
-	if loc := replay.Header.Get("Location"); loc != "/login" {
-		t.Errorf("a spent ticket redirected to %q, want /login", loc)
+	// `?link=stale` rather than a bare /login: the form has to be able to say
+	// the LINK was the problem, because re-opening the same one — the obvious
+	// recovery — can never work once any touch has spent it. What must not be
+	// revealed is WHICH of unknown/expired/already-used applies, and this
+	// marker is the union of all three; see TestBadLoginTicketGrantsNothing,
+	// which pins that indistinguishability directly.
+	if loc := replay.Header.Get("Location"); loc != "/login?link=stale" {
+		t.Errorf("a spent ticket redirected to %q, want /login?link=stale", loc)
 	}
 }
 
-// An unusable ticket must set no cookie and explain nothing.
+// An unusable ticket must set no cookie and DISTINGUISH NOTHING.
+//
+// This used to be phrased "explain nothing" and pinned by comparing Location
+// against a bare "/login". The redirect now carries `?link=stale`, which does
+// explain something — and the distinction matters, so it is stated rather than
+// quietly reinterpreted. What would be a leak is revealing WHICH of unknown,
+// expired or already-used applies, because that tells a caller whether a given
+// ticket ever existed. `?link=stale` is the union of the three and is returned
+// for a ticket that never existed, so it reveals nothing about any of them.
+//
+// So the assertion is now the property the original was reaching for through a
+// literal: every unusable shape must produce the IDENTICAL response. That is
+// strictly stronger — the old form would have passed a handler that returned
+// "/login" for one shape and "/login?why=expired" for another, as long as the
+// first case it happened to check was the bare one.
 func TestBadLoginTicketGrantsNothing(t *testing.T) {
-	srv, _, _ := newPublicTestServer(t, "correct horse battery staple")
+	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	for _, q := range []string{"", "?t=", "?t=nonsense", "?t=" + strings.Repeat("A", 43)} {
+	// An EXPIRED ticket is the one of the three shapes that needs a real mint
+	// to produce, and without it this table proves the property only for
+	// tickets that never existed — while the notice speaks for all three.
+	// Milliseconds, then a sleep well past the ~15.6 ms wall-clock granularity
+	// the Windows leg has, so the expiry is a fact and not a race.
+	expired, err := store.MintLoginTicketTTL("admin", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	seen := map[string]int{}
+	for _, q := range []string{
+		"", "?t=", "?t=nonsense", "?t=" + strings.Repeat("A", 43), "?t=" + expired,
+	} {
 		resp, err := noRedirectClient().Get(ts.URL + "/login/ticket" + q)
 		if err != nil {
 			t.Fatal(err)
@@ -88,10 +123,16 @@ func TestBadLoginTicketGrantsNothing(t *testing.T) {
 		if c := sessionCookie(resp); c != nil && c.Value != "" {
 			t.Errorf("query %q produced a session cookie", q)
 		}
-		if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/login" {
-			t.Errorf("query %q = %d -> %q, want a 302 to /login", q, resp.StatusCode, resp.Header.Get("Location"))
+		loc := resp.Header.Get("Location")
+		if resp.StatusCode != http.StatusFound || loc != "/login?link=stale" {
+			t.Errorf("query %q = %d -> %q, want a 302 to /login?link=stale",
+				q, resp.StatusCode, loc)
 		}
+		seen[loc]++
 		resp.Body.Close()
+	}
+	if len(seen) != 1 {
+		t.Errorf("unusable tickets are distinguishable by their redirect: %v", seen)
 	}
 }
 

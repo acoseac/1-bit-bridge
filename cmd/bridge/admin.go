@@ -25,6 +25,7 @@ func adminCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "bridge admin <subcommand>")
 		fmt.Fprintln(stderr, "  reset-password   Rotate the admin console password")
 		fmt.Fprintln(stderr, "  login-link       Print a one-time URL that logs a browser into the console")
+		fmt.Fprintln(stderr, "                   (--ttl extends its life for a cross-device hand-off)")
 		return 2
 	}
 	switch args[0] {
@@ -163,10 +164,12 @@ func loadConfigForAdminCmd(override string) (*config.Config, string, error) {
 
 // adminLoginLink prints a single-use URL that exchanges for a console session.
 //
-// It exists for two callers: an operator who would rather not transcribe a
-// generated password, and the hosted control plane, which opens an authenticated
-// console for the account that owns a tenant. The ticket is stale within a
-// minute and cannot be redeemed twice — see adminauth.LoginTicketTTL.
+// It exists for two callers with very different budgets, which is what `--ttl`
+// is for. An operator pastes this into a browser on the same machine, and the
+// 60-second default is right for them. The hosted control plane mints it while
+// the user is holding a PHONE; the URL then travels to another machine and waits
+// for a human to notice and click, and at 60 seconds that was failing every
+// time — see adminauth.LoginTicketTTL. Either way it cannot be redeemed twice.
 //
 // The URL is printed to stdout and nowhere else. It is a working credential for
 // its lifetime, so it must not be logged or echoed into a shell transcript that
@@ -177,6 +180,9 @@ func adminLoginLink(args []string, stdout, stderr io.Writer) int {
 	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	username := fs.String("username", "admin", "account to log in as (single-user system; \"admin\" by default)")
 	base := fs.String("base", "", "absolute base URL to prefix, e.g. https://host:7789 (default: print the path only)")
+	ttl := fs.Duration("ttl", adminauth.LoginTicketTTL,
+		fmt.Sprintf("how long the link stays valid (max %s) — raise it for a cross-device hand-off",
+			adminauth.MaxLoginTicketTTL))
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -198,7 +204,7 @@ func adminLoginLink(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "no admin credentials yet — run `bridge admin reset-password` first")
 		return 1
 	}
-	ticket, err := store.MintLoginTicket(*username)
+	ticket, err := store.MintLoginTicketTTL(*username, *ttl)
 	if err != nil {
 		fmt.Fprintf(stderr, "mint login ticket: %v\n", err)
 		return 1

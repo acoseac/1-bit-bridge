@@ -16,6 +16,7 @@
   </div>
   <h1>Sign in</h1>
   <p class="login-hint">Admin console for 1-bit Bridge.</p>
+  {{if .Notice}}<p class="login-notice" role="status">{{.Notice}}</p>{{end}}
   <form id="login-form" method="post" action="/login">
     <label for="username">Username</label>
     <input id="username" name="username" type="text" autocomplete="username"

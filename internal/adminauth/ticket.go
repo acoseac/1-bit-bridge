@@ -16,12 +16,30 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
-// LoginTicketTTL is how long a one-time console login ticket stays valid.
+// LoginTicketTTL is the DEFAULT lifetime of a one-time console login ticket.
 //
 // Deliberately short. A ticket travels in a URL, so it can land in shell
 // history, a browser's address bar and its history database; the defence is that
-// it is single-use and stale within a minute, not that those places are private.
+// it is single-use and stale quickly, not that those places are private.
+//
+// 60 seconds is calibrated for the flow this was WRITTEN for: `bridge admin
+// login-link` typed into a shell and pasted into a browser on the same machine.
+// A cross-device hand-off is a different budget, and it was failing at 60s: the
+// hosted control plane mints while the user is holding a PHONE, the URL then
+// travels by AirDrop or a message, and a human has to notice it on the other
+// machine and click. The mint itself is a sudo + `as_tenant` + bridge-binary
+// round trip before the share sheet even appears, so the clock is already
+// running. `bridge-tenant console-link` therefore passes its own TTL through
+// MintLoginTicketTTL; the default stays where it is correct.
 const LoginTicketTTL = 60 * time.Second
+
+// MaxLoginTicketTTL bounds what a caller may ask for.
+//
+// A ceiling rather than a free parameter, because what is being extended is how
+// long a live credential sitting in a URL stays live. Ten minutes covers a
+// cross-device hand-off with room for an unlock-the-laptop detour, and is still
+// far short of a window worth harvesting a browser history for.
+const MaxLoginTicketTTL = 10 * time.Minute
 
 // maxLiveTickets bounds the in-memory set. Tickets are minted by an operator (or
 // by a control plane acting for one), never by an anonymous request, so this is
@@ -52,8 +70,25 @@ var ErrTicketInvalid = errors.New("login ticket is not valid")
 // did not already hold, and the single-use, 60-second properties still come
 // from the record being deleted on presentation.
 func (s *Store) MintLoginTicket(username string) (string, error) {
+	return s.MintLoginTicketTTL(username, 0)
+}
+
+// MintLoginTicketTTL is MintLoginTicket with an explicit lifetime.
+//
+// A ttl of zero or less means LoginTicketTTL, so a caller with no opinion gets
+// the shell-local default. A ttl above MaxLoginTicketTTL is REFUSED rather than
+// silently clamped: the caller asked for something specific, and quietly
+// shortening it would leave an operator believing a link lives longer than it
+// does — which is this whole parameter's own bug, inverted.
+func (s *Store) MintLoginTicketTTL(username string, ttl time.Duration) (string, error) {
 	if username == "" {
 		return "", errors.New("login ticket needs a username")
+	}
+	if ttl <= 0 {
+		ttl = LoginTicketTTL
+	}
+	if ttl > MaxLoginTicketTTL {
+		return "", fmt.Errorf("login ticket ttl %s exceeds the %s maximum", ttl, MaxLoginTicketTTL)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,7 +111,7 @@ func (s *Store) MintLoginTicket(username string) (string, error) {
 	raw := base64.RawURLEncoding.EncodeToString(buf)
 	live[hashTicket(raw)] = persistedTicket{
 		Username:  username,
-		ExpiresAt: now.Add(LoginTicketTTL).UnixNano(),
+		ExpiresAt: now.Add(ttl).UnixNano(),
 	}
 	if err := s.writeTicketsLocked(live); err != nil {
 		return "", err

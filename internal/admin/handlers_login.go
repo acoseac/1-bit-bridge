@@ -45,7 +45,23 @@ type loginPageData struct {
 	ServerVersion string
 	Username      string
 	Next          string
+	// Notice is a neutral explanation shown above the form, currently only for
+	// a login link that did not redeem. Empty renders nothing.
+	Notice string
 }
+
+// staleLinkNotice is what a user sees after a login link fails to redeem.
+//
+// It names the two recoverable causes together, which is exactly what
+// ErrTicketInvalid means and therefore leaks nothing about whether a given
+// ticket ever existed. The instruction is the point: the natural response to a
+// login form is to click the link again, and that can never work.
+// The instruction stays SOURCE-NEUTRAL. These links are minted from two places
+// — the hosted uploader's share sheet and `bridge admin login-link` in a shell
+// — and naming either one tells the other half of the operators to go somewhere
+// that does not exist for them.
+const staleLinkNotice = "That sign-in link has expired or was already used — " +
+	"links are single-use. Request a new one to sign in."
 
 // pageLogin renders the standalone login form. Bypasses the page
 // nav (handled by the login.html template not extending layout).
@@ -59,11 +75,16 @@ func (s *Server) pageLogin(w http.ResponseWriter, r *http.Request) {
 	if s.deps.AdminAuth != nil {
 		username = s.deps.AdminAuth.Username()
 	}
+	notice := ""
+	if r.URL.Query().Get("link") == "stale" {
+		notice = staleLinkNotice
+	}
 	envelope := loginPageData{
 		LibraryName:   cfg.LibraryName,
 		ServerVersion: version.ServerVersion,
 		Username:      username,
 		Next:          next,
+		Notice:        notice,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -230,11 +251,48 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
 		return
 	}
+	// The HEAD case is refused above, which covers a prober that asks about the
+	// URL. This covers the one that FETCHES it: an unfurler, a prefetcher or a
+	// mail-security scanner issues a GET that is not a top-level navigation, and
+	// because redemption deletes before judging, that GET spends the credential
+	// and the human's real click then lands on a bare login form.
+	//
+	// Fails OPEN when the headers are absent. curl, an older browser and the
+	// operator's own shell flow send none of them, and turning those away would
+	// break the path this exists to serve. Only a request that POSITIVELY
+	// declares itself something other than a navigation is refused — and it is
+	// refused BEFORE the redeem, so nothing is consumed.
+	if isNonNavigationFetch(r.Header) {
+		writeError(w, http.StatusForbidden, "not_a_navigation",
+			"a login link must be opened by navigating to it")
+		return
+	}
 	username, err := s.deps.AdminAuth.RedeemLoginTicket(r.URL.Query().Get("t"))
 	if err != nil {
-		// Send them to the ordinary login form rather than explaining which of
-		// unknown, expired or already-used applies.
-		http.Redirect(w, r, "/login", http.StatusFound)
+		if !errors.Is(err, adminauth.ErrTicketInvalid) {
+			// The ticket store could not be written — a full or read-only
+			// disk, not anything the holder of this link did. Redemption
+			// established NOTHING about the ticket, and the record is still on
+			// disk, so `link=stale` here would be false twice over: it names a
+			// cause that was never determined, and its advice is to fetch a
+			// fresh link, which will fail in exactly the same way. This branch
+			// is also the only signal an operator would get that the store has
+			// stopped being writable.
+			logger.Error("admin redeem login ticket", "err", err)
+			writeError(w, http.StatusInternalServerError, "ticket_store_unavailable",
+				"the login-ticket store could not be read or written")
+			return
+		}
+		// Still no explanation of WHICH of unknown, expired or already-used
+		// applies — but `link=stale` lets the form say that the link was the
+		// problem, which is the difference between "this is broken" and "get a
+		// fresh one". It reveals nothing: it is the exact union of the three,
+		// and it is the same answer for a ticket that never existed.
+		//
+		// Load-bearing, because the obvious recovery is futile: re-opening the
+		// SAME link can never work once any touch has spent it, and without
+		// this the page gives a user no reason to think otherwise.
+		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
 		return
 	}
 	raw, err := s.deps.AdminAuth.CreateSession(username)
@@ -250,6 +308,51 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 	// nothing to validate. Nothing needs it — the control plane wants the root,
 	// and the login form has its own.
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// isNonNavigationFetch reports whether a request POSITIVELY declares itself
+// something other than a user navigation — a prefetch, a prerender, a preview
+// or a subresource fetch.
+//
+// Absent headers are not a declaration, so they pass. `Sec-Fetch-Mode` is sent
+// by every current browser on a top-level navigation; the rest are the older
+// and vendor spellings of "I am fetching this speculatively".
+func isNonNavigationFetch(h http.Header) bool {
+	if m := h.Get("Sec-Fetch-Mode"); m != "" && !strings.EqualFold(m, "navigate") {
+		return true
+	}
+	for _, k := range []string{"Sec-Purpose", "Purpose", "X-Purpose", "X-Moz"} {
+		if declaresSpeculation(h.Get(k)) {
+			return true
+		}
+	}
+	return false
+}
+
+// declaresSpeculation reports whether a purpose-style header value carries a
+// token naming a speculative fetch.
+//
+// TOKENS, not the whole value and not a substring. `Sec-Purpose` is a
+// structured field that really does arrive as `prefetch;anonymous-client-ip`,
+// and the three legacy spellings are specified nowhere at all, so any of them
+// can pick up a parameter or arrive as a list in front of a proxy. Matching the
+// whole value misses those and fails OPEN — which spends the ticket this guard
+// exists to protect. A bare substring match would close that hole and open a
+// worse one, refusing a real navigation whose value merely contained one of
+// these words.
+//
+// Split on both `,` and `;` so a list and a parameterised single value are the
+// same shape, and strip the quotes a structured-field string may carry.
+func declaresSpeculation(v string) bool {
+	for _, tok := range strings.FieldsFunc(v, func(r rune) bool {
+		return r == ',' || r == ';'
+	}) {
+		switch strings.ToLower(strings.Trim(tok, " \t\"")) {
+		case "prefetch", "prerender", "preview", "instant":
+			return true
+		}
+	}
+	return false
 }
 
 // apiLogout invalidates the current session (if any) and clears
