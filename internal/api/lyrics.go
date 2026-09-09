@@ -7,6 +7,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 )
 
 // LyricsStore answers GET /v1/lyrics — wired by WithLyrics.
@@ -60,7 +62,19 @@ func (s *Server) lyricsSourceInfo(rec *LyricsRecord, clientPath string, audio os
 
 // lyricsSourceDrifted mirrors analysisSourceDrifted against the lyrics
 // source's stat.
+//
+// A NETWORK document has no local source, so there is nothing here that could
+// drift and the check is skipped outright. Running it anyway would compare a
+// row whose provenance columns are zero against the audio file's real stat and
+// answer 410 to every request, forever — and even binding the row to the audio
+// file instead would only move the bug: an unrelated tag edit (a genre written
+// by a tagger) changes that file's mtime, and the lyrics would go stale on a
+// document that never came from it. Freshness for these rows is the sweeper's
+// business, not the endpoint's.
 func lyricsSourceDrifted(rec *LyricsRecord, source os.FileInfo) bool {
+	if lyrics.Source(rec.Source).IsNetwork() {
+		return false
+	}
 	delta := rec.SourceMTimeNS - source.ModTime().UnixNano()
 	if delta < 0 {
 		delta = -delta

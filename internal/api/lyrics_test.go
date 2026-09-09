@@ -176,3 +176,53 @@ func TestLyricsStaleWhenTheSourceDrifted(t *testing.T) {
 		t.Fatalf("non-bare sidecar name → 410, got %d", resp.StatusCode)
 	}
 }
+
+// A network document is served whatever the audio file's stat says.
+//
+// It has no local source: not a sidecar, and not the audio file it happens to
+// be attached to. Running the drift check against that file compares zeroed
+// provenance to a real stat and answers 410 to every request forever — and
+// even binding the row to the audio file only moves the bug, since a tagger
+// writing a genre changes that file's mtime and would stale a document that
+// never came from it.
+//
+// The three assertions are the three ways this can be got wrong: the row as
+// the sweeper writes it, the row after the audio file legitimately changes,
+// and the LOCAL row beside it that must still go stale.
+func TestNetworkLyricsAreNotStaledByTheAudioFile(t *testing.T) {
+	for _, source := range []string{"atlas-lrc", "atlas"} {
+		t.Run(source, func(t *testing.T) {
+			// As written by the sweeper: no provenance at all.
+			hs, tok, rel := lyricsFixture(t, true, func(r *LyricsRecord, _ string) {
+				r.Source, r.SidecarName = source, ""
+				r.SourceMTimeNS, r.SourceSize = 0, 0
+			})
+			if resp := lyricsGet(t, hs, tok, rel, nil); resp.StatusCode != http.StatusOK {
+				t.Errorf("a freshly-written network row → %d, want 200", resp.StatusCode)
+			}
+
+			// And after the audio file is retagged underneath it.
+			hs2, tok2, rel2 := lyricsFixture(t, true, func(r *LyricsRecord, srcAbs string) {
+				r.Source, r.SidecarName = source, ""
+				r.SourceMTimeNS, r.SourceSize = 0, 0
+				if err := os.WriteFile(srcAbs, []byte("audio-bytes-plus-a-new-genre-tag"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if resp := lyricsGet(t, hs2, tok2, rel2, nil); resp.StatusCode != http.StatusOK {
+				t.Errorf("a retagged audio file staled a network row → %d, want 200", resp.StatusCode)
+			}
+		})
+	}
+
+	// The exemption must be exactly as wide as the network sources. A local
+	// row with the same zeroed provenance still goes stale, which is what
+	// stops this from being "skip the check whenever provenance is missing".
+	hs, tok, rel := lyricsFixture(t, true, func(r *LyricsRecord, _ string) {
+		r.Source, r.SidecarName = "text", ""
+		r.SourceMTimeNS, r.SourceSize = 0, 0
+	})
+	if resp := lyricsGet(t, hs, tok, rel, nil); resp.StatusCode != http.StatusGone {
+		t.Errorf("a LOCAL row with no provenance → %d, want 410", resp.StatusCode)
+	}
+}
