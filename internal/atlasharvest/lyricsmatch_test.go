@@ -62,6 +62,14 @@ func TestMatchRelease(t *testing.T) {
 		{"an unknown local duration abstains rather than refusing",
 			single, "Renamed By Me", 1, 2, 0, "rec-2", MatchPosition},
 
+		// Atlas omitting medium_position decodes every entry to 0. A sole
+		// medium is still a sole medium, so the position key must form —
+		// before, the whole release silently lost position matching.
+		{"a release with no medium numbers still positions",
+			[]ReleaseTrack{rt(0, 1, "Alpha", 100000, "rec-1"), rt(0, 2, "Beta", 200000, "rec-2")},
+			"Beta", 0, 2, 200000, "rec-2", MatchCorroborated},
+		{"a mis-tagged disc on a single-medium release still positions",
+			single, "Renamed By Me", 7, 2, 200000, "rec-2", MatchPosition},
 		{"an empty release resolves nothing", nil, "Alpha", 1, 1, 100000, "", MatchNone},
 		{"nothing to match on", single, "", 0, 0, 0, "", MatchNone},
 	} {
