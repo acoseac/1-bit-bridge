@@ -137,12 +137,16 @@ func MatchRelease(entries []ReleaseTrack, localTitle string, localDisc, localTra
 	}
 
 	switch {
-	case byPos != nil && byTitle != nil && byPos.RecordingMBID == byTitle.RecordingMBID:
-		return *byPos, MatchCorroborated
+	// ONE corroboration rule, not two. An earlier draft led with
+	// `byPos == byTitle`, which this entirely subsumes: if the position and a
+	// unique title name the same entry, that entry's title folds equal to the
+	// local one by definition. Keeping both left the first arm unreachable —
+	// and a NEGATIVE CONTROL is what proved it, by mutating that arm and
+	// watching the suite stay green. This form is also strictly wider: it
+	// corroborates when the title is AMBIGUOUS across the release but the entry
+	// the position names is one of the ones carrying it, which is the "Intro"
+	// case a duplicate-title release presents — and 1,275 albums here have one.
 	case byPos != nil && folded != "" && foldTitle(byPos.Title) == folded:
-		// Corroborated even though the title was ambiguous across the release:
-		// the entry the position names is one of the ones carrying this title,
-		// so the two keys still agree about THIS entry.
 		return *byPos, MatchCorroborated
 	case byTitle != nil && durationAgrees(localDurationMS, byTitle.LengthMS):
 		return *byTitle, MatchTitle
