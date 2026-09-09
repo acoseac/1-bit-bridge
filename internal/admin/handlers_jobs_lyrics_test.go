@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -109,21 +110,20 @@ func TestJobsLyricsCardReportsTheRealCounts(t *testing.T) {
 	}
 }
 
-// The TTL is a single-flight cache over a measured 25.8 ms full scan, so a
-// second read inside the window must not re-issue the query.
+// The TTL collapses concurrent polls to one query, which is the point on an
+// endpoint polled every ten seconds per open tab over a measured 25.8 ms scan.
 func TestJobsLyricsCountsAreCached(t *testing.T) {
 	ctx := context.Background()
 	srv, cfg, _ := newTestServer(t)
 	cfg.Atlas.Enabled, cfg.Atlas.HarvestEnabled, cfg.Atlas.LyricsEnabled = true, true, true
 	srv.deps.CfgHolder.Store(cfg)
 
-	first := srv.lyricsStats(ctx)
-	if !first.ok {
-		t.Fatal("the first read failed")
+	if first := srv.lyricsStats(ctx); first == nil {
+		t.Fatal("the first read produced nothing")
 	}
 	at := srv.lyricsStatsAt
-	if srv.lyricsStatsSnap == nil {
-		t.Fatal("nothing was cached")
+	if at.IsZero() {
+		t.Fatal("nothing was stamped")
 	}
 	srv.lyricsStats(ctx)
 	if !srv.lyricsStatsAt.Equal(at) {
@@ -131,26 +131,41 @@ func TestJobsLyricsCountsAreCached(t *testing.T) {
 	}
 }
 
-// A cancelled REQUEST must not poison the cache for everyone else. This is the
-// distinction the database block was bitten by: a failure about the request is
-// not a failure about the database, and caching the former answers
-// "unavailable" to the next window of perfectly good requests.
-func TestACancelledRequestDoesNotPoisonTheLyricsCache(t *testing.T) {
+// A caller hanging up must not synthesize a failure for everyone queued behind
+// it — the PR #373 singleflight rule. The db context is detached, so a
+// cancelled REQUEST still yields a real snapshot rather than poisoning the
+// window for the next thirty seconds.
+func TestACancelledRequestStillYieldsRealLyricsCounts(t *testing.T) {
 	srv, cfg, _ := newTestServer(t)
 	cfg.Atlas.Enabled, cfg.Atlas.HarvestEnabled, cfg.Atlas.LyricsEnabled = true, true, true
 	srv.deps.CfgHolder.Store(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	snap := srv.lyricsStats(ctx)
-	if snap.ok {
-		t.Skip("the cancelled read still succeeded; nothing to prove here")
+	if snap := srv.lyricsStats(ctx); snap == nil {
+		t.Fatal("a cancelled request produced no snapshot — the db context is not detached")
 	}
-	if srv.lyricsStatsSnap != nil {
-		t.Fatal("a cancelled request cached its own failure")
+	// ...and the next healthy caller reads a real one too.
+	if snap := srv.lyricsStats(context.Background()); snap == nil {
+		t.Error("the cached snapshot was poisoned by the cancelled request")
 	}
-	// ...and a healthy request straight afterwards gets a real answer.
-	if got := srv.lyricsStats(context.Background()); !got.ok {
-		t.Error("the next healthy request inherited the cancelled read's failure")
+}
+
+// Concurrent callers collapse to ONE query, and none of them races.
+func TestConcurrentLyricsStatsReadsCollapse(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	cfg.Atlas.Enabled, cfg.Atlas.HarvestEnabled, cfg.Atlas.LyricsEnabled = true, true, true
+	srv.deps.CfgHolder.Store(cfg)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if snap := srv.lyricsStats(context.Background()); snap == nil {
+				t.Error("a concurrent caller got nothing")
+			}
+		}()
 	}
+	wg.Wait()
 }
