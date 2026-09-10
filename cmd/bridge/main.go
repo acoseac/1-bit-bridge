@@ -4051,6 +4051,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// library content.
 	trashMgr := trash.New(
 		scanner.Roots,
+		// The SAME resolver every byte route uses. A path names its own root;
+		// this is what reads that, and handing trash a second copy of the
+		// mapping is the defect it was built to close.
+		apiSrv.Resolver(),
 		func() bool {
 			live := cfgHolder.Load()
 			return live != nil && live.Library.AllowDelete

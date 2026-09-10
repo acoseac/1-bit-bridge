@@ -109,6 +109,44 @@ func pruneDescendants(in []string) []string {
 	return out
 }
 
+// spawnBackgroundSubtreeScanResolved scans the given MANIFEST-FORM directories,
+// routing each one to its own library root through the resolver.
+//
+// The sibling below takes a single root and joins onto it, which is right for
+// the upload path (one commit lands in one root) and wrong for anything whose
+// batch can span roots. In multi-root mode a stored path leads with the root's
+// basename, so joining it onto a caller-supplied root addresses a directory
+// under the wrong library — the same wrong-root join `internal/trash` had, one
+// layer up, and reached by the same delete.
+//
+// A directory that no longer resolves is skipped with a log line rather than
+// scanned somewhere else: the scan is a best-effort tidy, and there is no
+// second-best root.
+func (s *Server) spawnBackgroundSubtreeScanResolved(label string, relDirs []string) {
+	if s.deps.Scanner == nil || s.deps.Resolver == nil || len(relDirs) == 0 {
+		return
+	}
+	ctx := s.scanCtx()
+	s.bgScans.Add(1)
+	go func() {
+		defer s.bgScans.Done()
+		for _, rel := range relDirs {
+			if ctx.Err() != nil {
+				return
+			}
+			abs, err := s.deps.Resolver.Resolve(rel)
+			if err != nil {
+				logger.Warn("background subtree scan: unresolvable directory",
+					"label", label, "dir", rel, "err", err)
+				continue
+			}
+			if _, err := s.deps.Scanner.ScanSubtree(ctx, abs); err != nil && !errors.Is(err, ctx.Err()) {
+				logger.Error("background subtree scan failed", "label", label, "dir", abs, "err", err)
+			}
+		}
+	}()
+}
+
 // spawnBackgroundSubtreeScan scans the given library-relative directories under
 // root.
 //

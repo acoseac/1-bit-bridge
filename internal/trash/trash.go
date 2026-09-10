@@ -56,7 +56,33 @@ var (
 	ErrDisabled    = errors.New("trash: deleting is turned off")
 	ErrNotFound    = errors.New("trash: no such entry")
 	ErrInvalidPath = errors.New("trash: invalid path")
+	// ErrRootUnavailable is returned when a path names a library root this
+	// bridge no longer has — a root removed from the config, or renamed on
+	// disk, between the delete and the restore. It is a REFUSAL, never a
+	// fallback: picking some other root is precisely the bug this package
+	// shipped (see RootSplitter).
+	ErrRootUnavailable = errors.New("trash: the library root this path belongs to is not configured")
 )
+
+// RootSplitter maps a manifest-form library path onto the root that owns it
+// and the remainder below that root. Implemented by *fs.Resolver.
+//
+// This exists because the package used to hand-roll the mapping, and got it
+// wrong in the direction that deletes: in multi-root mode the scanner prefixes
+// every stored path with the root's basename (`relPath`), and joining that
+// whole string onto roots[0] addresses a path under the WRONG root. Ordinarily
+// it does not exist and every delete fails; where the names overlap it moves a
+// real, unrelated file to the trash, and the caller then retires the manifest
+// row of the file still sitting on disk. The player never sends a root, so the
+// implicit pick was the only pick.
+//
+// The rule that falls out of that, and the reason this is an interface rather
+// than a helper here: there is ONE mapping in this tree, `fs.Resolver`, the
+// same one every byte route already goes through. A second copy of it is the
+// defect, not the fix.
+type RootSplitter interface {
+	SplitRoot(clientPath string) (root, suffix string, err error)
+}
 
 // Entry is one trashed file.
 type Entry struct {
@@ -79,8 +105,13 @@ type Outcome struct {
 }
 
 // Result aggregates a batch.
+//
+// It carries no single root on purpose. A batch can legitimately span library
+// roots, so one root field could only ever describe whichever entry happened
+// to be last — and its consumer joined `Dirs` onto it to pick a subtree to
+// rescan, which is the same wrong-root join this package had internally.
+// `Paths` and `Dirs` are manifest-form, which already names the root.
 type Result struct {
-	Root     string
 	Outcomes []Outcome
 	Bytes    int64
 	OK       int
@@ -94,6 +125,7 @@ type Result struct {
 // Manager owns the trash for every configured root.
 type Manager struct {
 	roots   func() []string
+	split   RootSplitter
 	enabled func() bool
 	ttl     time.Duration
 	now     func() time.Time
@@ -115,12 +147,14 @@ func WithClock(fn func() time.Time) Option { return func(m *Manager) { m.now = f
 
 // New builds a Manager. `enabled` is read LIVE on every mutating call so the
 // setting hot-applies; a nil enabled means disabled, which is the safe
-// direction for a destructive feature.
-func New(roots func() []string, enabled func() bool, ttl time.Duration, opts ...Option) *Manager {
+// direction for a destructive feature. A nil `split` fails the same way, for
+// the same reason: without the mapping there is no safe guess about which
+// root a path belongs to.
+func New(roots func() []string, split RootSplitter, enabled func() bool, ttl time.Duration, opts ...Option) *Manager {
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	m := &Manager{roots: roots, enabled: enabled, ttl: ttl, now: time.Now}
+	m := &Manager{roots: roots, split: split, enabled: enabled, ttl: ttl, now: time.Now}
 	for _, o := range opts {
 		o(m)
 	}
@@ -161,33 +195,36 @@ func validRel(rel string) (string, error) {
 	return rel, nil
 }
 
-func (m *Manager) resolveRoot(want string) (string, error) {
-	roots := m.roots()
-	if len(roots) == 0 {
-		return "", ErrNotFound
-	}
+// rootMatches reports whether `root` is the one the caller named.
+//
+// Only ever a CONSTRAINT on the root the path itself resolved to — never a way
+// to choose one. The old form of this function answered "which root?" and
+// returned roots[0] for the empty request, which is how a path belonging to the
+// second root came to be addressed under the first. A caller that names a root
+// is now saying "refuse if it is not this one".
+func rootMatches(root, want string) bool {
 	if want == "" {
-		return roots[0], nil
+		return true
 	}
-	for _, r := range roots {
-		if fsutil.EvalSymlinksOrClean(r) == fsutil.EvalSymlinksOrClean(want) || filepath.Base(r) == want {
-			return r, nil
-		}
-	}
-	return "", ErrNotFound
+	return fsutil.EvalSymlinksOrClean(root) == fsutil.EvalSymlinksOrClean(want) ||
+		filepath.Base(root) == want
 }
 
 // Trash moves the given library-relative paths into the trash.
+//
+// `rootWant` constrains rather than selects: each path names its own root (see
+// RootSplitter), and a non-empty rootWant refuses anything that resolves
+// elsewhere. Passing "" — which every current caller does, the player included
+// — is therefore not "use the first root", it is "wherever each path lives".
 func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 	if !m.on() {
 		return nil, ErrDisabled
 	}
-	root, err := m.resolveRoot(rootWant)
-	if err != nil {
-		return nil, err
+	if m.split == nil {
+		return nil, ErrRootUnavailable
 	}
 	stamp := strconv.FormatInt(m.now().UTC().UnixNano(), 10)
-	res := &Result{Root: root}
+	res := &Result{}
 	dirs := map[string]struct{}{}
 
 	for _, raw := range rels {
@@ -200,7 +237,24 @@ func (m *Manager) Trash(rootWant string, rels []string) (*Result, error) {
 			continue
 		}
 		out.Path = rel
-		src := filepath.Join(root, filepath.FromSlash(rel))
+		// The root comes from the PATH, through the one mapping this tree
+		// has. `suffix` is what remains below it — in single-root mode the
+		// whole of `rel`, in multi-root mode `rel` minus the leading root
+		// basename. Joining `rel` itself here is the bug this replaced.
+		root, suffix, serr := m.split.SplitRoot(rel)
+		if serr != nil {
+			out.Status, out.Reason = "failed", ErrRootUnavailable.Error()
+			res.Failed++
+			res.Outcomes = append(res.Outcomes, out)
+			continue
+		}
+		if !rootMatches(root, rootWant) {
+			out.Status, out.Reason = "failed", "path belongs to a different library root"
+			res.Failed++
+			res.Outcomes = append(res.Outcomes, out)
+			continue
+		}
+		src := filepath.Join(root, filepath.FromSlash(suffix))
 		// Final containment check. On Windows this is the primary defense:
 		// the raw segment scan and path.Clean are both slash-based, so it is
 		// filepath.Join that would collapse a backslash traversal — which is

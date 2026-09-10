@@ -16,6 +16,9 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 	if !m.on() {
 		return nil, ErrDisabled
 	}
+	if m.split == nil {
+		return nil, ErrRootUnavailable
+	}
 	res := &Result{}
 	dirs := map[string]struct{}{}
 	for _, id := range ids {
@@ -35,8 +38,31 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
-		res.Root = root
-		dst := filepath.Join(root, filepath.FromSlash(rel))
+		// Where it goes back to. `rel` is manifest-form, so on a multi-root
+		// bridge its leading segment names the root and must be CONSUMED —
+		// joining `rel` whole onto `root` was the restore half of the same
+		// wrong-root bug Trash had, and it wrote into <root>/<rootBasename>/…
+		splitRoot, suffix, serr := m.split.SplitRoot(rel)
+		if serr != nil {
+			out.Status, out.Reason = "failed", ErrRootUnavailable.Error()
+			res.Failed++
+			res.Outcomes = append(res.Outcomes, out)
+			continue
+		}
+		// The root the file is SITTING under and the root the path CLAIMS
+		// have to agree. They can only differ for an entry trashed by the
+		// pre-fix code on a multi-root bridge, where the two were the same
+		// mistake; guessing which one the operator meant would move a file
+		// between libraries. Refuse and say so — the file stays in the trash
+		// directory, where it can still be retrieved by hand.
+		if fsutil.EvalSymlinksOrClean(splitRoot) != fsutil.EvalSymlinksOrClean(root) {
+			out.Status, out.Reason = "failed",
+				"this entry was trashed under a different library root than its path names; restore it by hand"
+			res.Failed++
+			res.Outcomes = append(res.Outcomes, out)
+			continue
+		}
+		dst := filepath.Join(root, filepath.FromSlash(suffix))
 		if fsutil.IsUnderAny(dst, []string{root}) == "" {
 			out.Status, out.Reason = "failed", "resolves outside the library root"
 			res.Failed++
@@ -123,7 +149,6 @@ func (m *Manager) Purge(ids []string) (*Result, error) {
 			res.Outcomes = append(res.Outcomes, out)
 			continue
 		}
-		res.Root = root
 		if info, ierr := os.Stat(src); ierr == nil {
 			out.Bytes = info.Size()
 		}
