@@ -251,7 +251,7 @@ func TestStableServerKey(t *testing.T) {
 // a reap against a baseline nobody had ever seen — the guard's own docblock
 // inverted.
 func TestAnUnknownBaselineNeverExpiresIntoAReap(t *testing.T) {
-	i := &Ingester{implausibleSince: map[string]time.Time{}}
+	i := &Ingester{implausibleSince: map[string]implausibleMark{}}
 	start := time.Unix(1_700_000_000, 0)
 
 	// Ten ticks, a full day apart — four times the grace window.
@@ -268,7 +268,7 @@ func TestAnUnknownBaselineNeverExpiresIntoAReap(t *testing.T) {
 	// everything": the SHAPE case, which is a fact about the upstream, still
 	// expires. An operator who really did empty a server must not be blocked
 	// forever.
-	j := &Ingester{implausibleSince: map[string]time.Time{}}
+	j := &Ingester{implausibleSince: map[string]implausibleMark{}}
 	if ok, _ := j.reapAuthorized("udn", 1, 1000, true, start); ok {
 		t.Fatal("the FIRST implausible walk was authorized; a transient rebuild must cost one tick")
 	}
@@ -278,7 +278,7 @@ func TestAnUnknownBaselineNeverExpiresIntoAReap(t *testing.T) {
 	}
 
 	// And a plausible walk clears the window immediately, whichever it was.
-	k := &Ingester{implausibleSince: map[string]time.Time{}}
+	k := &Ingester{implausibleSince: map[string]implausibleMark{}}
 	k.reapAuthorized("udn", 5, 0, false, start)
 	if ok, _ := k.reapAuthorized("udn", 1000, 1000, true, start.Add(time.Minute)); !ok {
 		t.Error("a plausible walk did not clear a window set by an unknown baseline")
@@ -310,5 +310,47 @@ func TestImplausibleReasonNamesWhichFact(t *testing.T) {
 					tc.walked, tc.baseline, tc.baselineKnown, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAChangeOfImplausibleReasonRestartsTheGrace — the two reasons share one
+// bookkeeping map, and separating their BEHAVIOUR without separating their
+// BOOKKEEPING made a window opened by one inheritable by the other.
+//
+// Seven hours of "we could not read our own baseline" (which never expires)
+// followed by the FIRST walk that is implausible by SHAPE used to authorize a
+// reap immediately: `elapsed` was measured from the unknown-baseline stamp, so
+// the "a transient rebuild costs at most one tick" rule was bypassed on the one
+// tick it exists for. (Gemini on #898; reproduced before fixing.)
+func TestAChangeOfImplausibleReasonRestartsTheGrace(t *testing.T) {
+	i := &Ingester{implausibleSince: map[string]implausibleMark{}}
+	t0 := time.Unix(1_700_000_000, 0)
+
+	// Seven hours of unreadable baseline — well past the six-hour grace.
+	i.reapAuthorized("udn", 5, 0, false, t0)
+	i.reapAuthorized("udn", 5, 0, false, t0.Add(3*time.Hour))
+
+	// The baseline now reads, and the upstream reports far fewer tracks. This
+	// is the FIRST implausible-SHAPE walk and must refuse.
+	if ok, elapsed := i.reapAuthorized("udn", 1, 1000, true, t0.Add(7*time.Hour)); ok {
+		t.Fatalf("the first implausible-shape walk was authorized (elapsed %v) — it "+
+			"inherited a window opened by an unreadable baseline", elapsed)
+	}
+
+	// ...and the shape window then runs from ITS OWN start, not from t0.
+	if ok, _ := i.reapAuthorized("udn", 1, 1000, true, t0.Add(7*time.Hour+implausibleWalkGrace-time.Minute)); ok {
+		t.Error("the shape grace expired early; it is still measured from the wrong start")
+	}
+	if ok, elapsed := i.reapAuthorized("udn", 1, 1000, true, t0.Add(7*time.Hour+implausibleWalkGrace)); !ok {
+		t.Errorf("the shape grace never expired (elapsed %v) — an operator who really "+
+			"emptied an upstream stays blocked", elapsed)
+	}
+
+	// The reverse direction too: a shape window must not be inherited by an
+	// unknown-baseline run, which would otherwise report a misleading age.
+	j := &Ingester{implausibleSince: map[string]implausibleMark{}}
+	j.reapAuthorized("udn", 1, 1000, true, t0)
+	if ok, elapsed := j.reapAuthorized("udn", 5, 0, false, t0.Add(9*time.Hour)); ok || elapsed != 0 {
+		t.Errorf("unknown-baseline inherited the shape window: authorized=%v elapsed=%v", ok, elapsed)
 	}
 }

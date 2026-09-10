@@ -270,7 +270,7 @@ func TestWalkLooksImplausible(t *testing.T) {
 // plausible walk in between RESETS the window (so an upstream that recovers
 // and later degrades again gets a fresh full grace, not a stale one).
 func TestReapAuthorized_GraceWindow(t *testing.T) {
-	ing := &Ingester{implausibleSince: make(map[string]time.Time)}
+	ing := &Ingester{implausibleSince: make(map[string]implausibleMark)}
 	base := time.Now().UTC()
 
 	if ok, _ := ing.reapAuthorized("srv", 0, 100, true, base); ok {
@@ -309,7 +309,7 @@ func TestReapAuthorized_GraceWindow(t *testing.T) {
 // early. (It also must not permanently wedge — the window is re-armed by
 // the next plausible walk.)
 func TestReapAuthorized_BackwardsClockDelaysReap(t *testing.T) {
-	ing := &Ingester{implausibleSince: make(map[string]time.Time)}
+	ing := &Ingester{implausibleSince: make(map[string]implausibleMark)}
 	base := time.Now().UTC()
 	if ok, _ := ing.reapAuthorized("srv", 0, 100, true, base); ok {
 		t.Fatal("first implausible walk authorised a reap")
