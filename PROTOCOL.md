@@ -1040,7 +1040,7 @@ NETWORK tier is exempt from that check and never answers `410`: it has no local
 provenance, so its stat fields are zero and comparing them against the audio
 file's would answer stale to every request, forever — and binding it to the
 audio file instead would only move the bug, since a tagger writing a genre
-changes an mtime the lyrics never came from. Freshness for those rows is the
+changes the mtime of a file the lyrics never came from. Freshness for those rows is the
 bridge's own business. Bodies are ≤ 512 KiB.
 
 Feature flag: `lyrics` in `/v1/health` `features` (between `loudness` and
