@@ -349,6 +349,41 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		known[strings.ToLower(filepath.Clean(k))] = struct{}{}
 	}
 
+	// FAIL CLOSED on an empty known-set. Every file under the variants dir
+	// misses an empty `known`, so the walk below would classify the whole
+	// rendition tree as orphaned and unlink it — hours of sox/ffmpeg on a real
+	// library, and nothing regenerates it until the operator asks again.
+	//
+	// The error arm above fails closed already; a query that SUCCEEDS and
+	// returns no rows did not, and the routes to it are ordinary. The reset
+	// procedure this repo's own CLAUDE.md documents is `rm -f bridge.db*` +
+	// restart, and `run` takes a tick at boot. A single<->multi root flip runs
+	// WipeFilesystemTracks, and `track_variants` CASCADEs on `tracks`, so the
+	// window between the wipe and the re-transcode reads zero rows too.
+	//
+	// The reverse direction of this same mechanism has had both guards since
+	// it was written (VariantWatcher.tick: `len(rows) == 0` plus the mount
+	// probe), with a test. The forward direction had neither. Same asymmetry
+	// runArtworkGC records in its own docblock, where the deletion shipped
+	// once.
+	//
+	// An empty set over an EMPTY directory is not an error — there is nothing
+	// to protect and nothing to do — so that returns quietly, as before. The
+	// refusal is only for "the catalog says nothing exists, but files do".
+	// Deliberately no operator override here: a background sweeper has nobody
+	// in the loop to express intent, which is what the two CLI GCs' explicit
+	// --allow-empty is for.
+	if len(known) == 0 {
+		empty, emptyErr := dirIsEmpty(s.outputDir)
+		if emptyErr == nil && !empty {
+			logger.Warn("orphan sidecar sweep: refusing — no variant row references any "+
+				"sidecar, but the variants directory holds files",
+				slog.String("variants_dir", s.outputDir),
+			)
+		}
+		return 0
+	}
+
 	grace := s.effectiveGracePeriod()
 	chunkSize := s.effectiveChunkSize()
 	tickStart := time.Now()
@@ -395,6 +430,24 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 			// dirEntirelyBehindCursor for the .-vs-/ collation gotcha).
 			if dirEntirelyBehindCursor(path, walkStartCursor) {
 				s.skippedDirsForTest.Add(1)
+				return filepath.SkipDir
+			}
+			// Foreign tenants under the variants volume are not ours to reap.
+			// `bridge upscale --gc` has pruned these since it was written and
+			// this sweeper — the same walk, unattended, on a timer — did not:
+			// with `variantsDir` on a dedicated volume, `.Trashes/<uid>/`,
+			// `.Trash-1000/` and an rclone VFS cache all sit under the walk
+			// root, and any `.flac` inside one is missing from `known` and
+			// older than the grace. Files an operator put in the Trash
+			// specifically so they could get them back.
+			//
+			// At the WALK rather than beside the known-set check, so it holds
+			// whatever the database says. Gated on d.IsDir(): SkipDir returned
+			// for a FILE skips the rest of its parent directory, which would
+			// silently end the sweep early. A symlinked .Trashes needs nothing
+			// extra — filepath.WalkDir does not follow symlinks, so it arrives
+			// as a non-directory entry and is never descended.
+			if path != s.outputDir && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil

@@ -46,7 +46,7 @@ func TestArtworkGCRefusesEmptyReferencedSet(t *testing.T) {
 	}
 
 	var so, se bytes.Buffer
-	if code := runArtworkGC(ctx, &so, &se, store, artworkDir, false); code == 0 {
+	if code := runArtworkGC(ctx, &so, &se, store, artworkDir, false, false); code == 0 {
 		t.Errorf("artwork gc exited 0 against an empty referenced set with files present — "+
 			"it treated the whole cache as orphaned.\nstdout:\n%s", so.String())
 	}
@@ -75,7 +75,7 @@ func TestArtworkGCEmptyStoreAndEmptyCacheIsClean(t *testing.T) {
 	defer store.Close()
 
 	var so, se bytes.Buffer
-	if code := runArtworkGC(ctx, &so, &se, store, filepath.Join(dir, "artwork"), false); code != 0 {
+	if code := runArtworkGC(ctx, &so, &se, store, filepath.Join(dir, "artwork"), false, false); code != 0 {
 		t.Errorf("artwork gc exited %d on an empty store with no cache directory; "+
 			"that is a fresh install, not a fault.\nstderr:\n%s", code, se.String())
 	}

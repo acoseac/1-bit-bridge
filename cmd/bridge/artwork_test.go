@@ -59,7 +59,7 @@ func TestArtworkGCRemovesOrphans(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	rc := runArtworkGC(context.Background(), &stdout, &stderr, store, artworkDir, false /* dryRun */)
+	rc := runArtworkGC(context.Background(), &stdout, &stderr, store, artworkDir, false /* dryRun */, false)
 	if rc != 0 {
 		t.Fatalf("runArtworkGC rc=%d, stderr=%s", rc, stderr.String())
 	}
@@ -121,7 +121,7 @@ func TestArtworkGCDryRunPreservesAll(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	rc := runArtworkGC(context.Background(), &stdout, &stderr, store, artworkDir, true /* dryRun */)
+	rc := runArtworkGC(context.Background(), &stdout, &stderr, store, artworkDir, true /* dryRun */, false)
 	if rc != 0 {
 		t.Fatalf("dry-run rc=%d, stderr=%s", rc, stderr.String())
 	}
@@ -154,7 +154,7 @@ func TestArtworkGCMissingDirIsOK(t *testing.T) {
 
 	missing := filepath.Join(dir, "artwork-not-yet")
 	var stdout, stderr bytes.Buffer
-	rc := runArtworkGC(context.Background(), &stdout, &stderr, store, missing, false)
+	rc := runArtworkGC(context.Background(), &stdout, &stderr, store, missing, false, false)
 	if rc != 0 {
 		t.Errorf("missing dir should succeed, got rc=%d stderr=%s", rc, stderr.String())
 	}

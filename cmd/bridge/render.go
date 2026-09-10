@@ -46,6 +46,7 @@ func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	dryRun := fs.Bool("dry-run", false, "list candidates without rendering")
 	force := fs.Bool("force", false, "re-render even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips rendering. Shares the upscale GC path, which is prefix-agnostic — every variant family is preserved.")
+	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
 	if !parseTranscodeArgs(fs, "render", args, stderr) {
 		return 2
 	}
@@ -84,7 +85,7 @@ func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		// optimized-, optimized-dsd- and pcm- sidecars are all preserved.
 		// Deliberately NOT gated on the feature flag: cleanup must work on
 		// a bridge whose operator has just turned the feature off.
-		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir)
+		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir, *allowEmpty)
 	}
 	// Then the toolchain. Refusing HERE — before the library walk — is
 	// the difference between one honest message and one failed job per

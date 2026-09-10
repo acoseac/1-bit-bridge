@@ -87,6 +87,7 @@ func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
 	gc := fs.Bool("gc", false, "remove cached artwork files no longer referenced by any track row")
 	dryRun := fs.Bool("dry-run", false, "list orphans without removing them (use with --gc)")
+	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no track row references any artwork (the library really was emptied); refused by default, because an empty catalog makes every cached file look like an orphan")
 	confirm := fs.String("confirm", "", "type "+artworkGCConfirmPhrase+" to authorize destructive deletion (required unless --dry-run)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -134,7 +135,7 @@ func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	defer store.Close()
 
 	artworkDir := filepath.Join(cfg.DataDir, artworkDirName)
-	return runArtworkGC(ctx, stdout, stderr, store, artworkDir, *dryRun)
+	return runArtworkGC(ctx, stdout, stderr, store, artworkDir, *dryRun, *allowEmpty)
 }
 
 // artworkCacheHasFiles reports whether artworkDir holds at least one file
@@ -168,7 +169,7 @@ func artworkCacheHasFiles(artworkDir string) (bool, error) {
 	return found, nil
 }
 
-func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun bool) int {
+func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, artworkDir string, dryRun, allowEmpty bool) int {
 	mbidsInUse, err := store.ArtworkMBIDsInUse(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list referenced artwork ids: %v\n", err)
@@ -199,7 +200,13 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// An empty set with an empty cache is not an error — there is nothing
 	// to protect and nothing to do, so that exits 0 as before. The refusal
 	// is only for "the store says nothing is referenced, but files exist".
-	if len(known) == 0 {
+	// `--allow-empty` is the operator saying the library really is empty, the
+	// same hatch the variant and waveform GCs offer. The refusal below has
+	// been un-escapable since it was written, so an operator who genuinely
+	// wiped their library could not reclaim the artwork cache at all — found
+	// by the sweep test that pins every --gc command against this flag, which
+	// is the shape that catches the site an enumeration misses.
+	if len(known) == 0 && !allowEmpty {
 		populated, statErr := artworkCacheHasFiles(artworkDir)
 		if statErr != nil {
 			fmt.Fprintf(stderr, "artwork gc: cannot inspect %s: %v\n", artworkDir, statErr)
@@ -212,6 +219,7 @@ func runArtworkGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 			fmt.Fprintln(stderr, "  scanner from re-reading unchanged files).")
 			fmt.Fprintln(stderr, "  This usually means the wrong config/database: check that --config names the")
 			fmt.Fprintln(stderr, "  install whose dataDir you meant, and that a scan has run.")
+			fmt.Fprintln(stderr, "  If the library really is empty and you want the cache gone, re-run with --allow-empty.")
 			return 1
 		}
 	}
