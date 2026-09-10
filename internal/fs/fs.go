@@ -359,11 +359,11 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 // a root that was unmounted or renamed between two operations, which callers
 // must refuse rather than fall back on.
 func (r *Resolver) SplitRoot(clientPath string) (root, suffix string, err error) {
+	// Returned straight through: every error path in resolveParts returns the
+	// zero root and suffix, so there is nothing for a check here to add.
+	// (Gemini on PR #892.)
 	root, suffix, _, err = r.resolveParts(clientPath)
-	if err != nil {
-		return "", "", err
-	}
-	return root, suffix, nil
+	return root, suffix, err
 }
 
 // ResolveChecked is Resolve plus an os.Stat; it returns ErrNotFound if the
