@@ -6,6 +6,9 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -40,13 +43,13 @@ func checkOmitemptyTimes(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked := 0
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		fname := name
+		f, err := parser.ParseFile(fset, filepath.Join(dir, fname), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
@@ -59,8 +62,15 @@ func checkOmitemptyTimes(t *testing.T, dir string) {
 				if field.Tag == nil {
 					continue
 				}
-				tag := field.Tag.Value
-				if !strings.Contains(tag, "json:") || !strings.Contains(tag, "omitempty") {
+				// Parsed, not substring-matched: `omitempty` in a SIBLING
+				// tag (bson, gorm) on a field whose json tag has none would
+				// otherwise read as a violation. (Gemini on #896.)
+				raw, err := strconv.Unquote(field.Tag.Value)
+				if err != nil {
+					continue
+				}
+				jsonTag, ok := reflect.StructTag(raw).Lookup("json")
+				if !ok || !slices.Contains(strings.Split(jsonTag, ",")[1:], "omitempty") {
 					continue
 				}
 				sel, ok := field.Type.(*ast.SelectorExpr)
@@ -71,10 +81,16 @@ func checkOmitemptyTimes(t *testing.T, dir string) {
 				if !ok || pkg.Name != "time" {
 					continue
 				}
-				checked++
-				var names []string
-				for _, id := range field.Names {
-					names = append(names, id.Name)
+				// (4) An EMBEDDED time.Time has no Names, and an empty name
+				// in the message is the one thing that would make this report
+				// unactionable.
+				name := "time.Time (embedded)"
+				if len(field.Names) > 0 {
+					var names []string
+					for _, id := range field.Names {
+						names = append(names, id.Name)
+					}
+					name = strings.Join(names, ", ")
 				}
 				t.Errorf("%s: %s is a VALUE time.Time tagged omitempty — it will ship "+
 					"\"0001-01-01T00:00:00Z\" rather than being omitted, and the client "+
@@ -82,12 +98,13 @@ func checkOmitemptyTimes(t *testing.T, dir string) {
 					"*time.Time and set it through zeroTime / nilIfZeroTime.\n"+
 					"NOTE: a template rendering it must move too — a nil pointer reaching "+
 					"a value parameter is a render-time error, not a compile-time one.",
-					filepath.Join(dir, name), strings.Join(names, ", "))
+					filepath.Join(dir, fname), name)
 			}
 			return true
 		})
 	}
-	// No vacuous-pass floor on `checked`: zero violations is the PASSING state
-	// and the count only rises when one appears. The scan's own health is
-	// covered by the parse failing loudly above.
+	// No vacuous-pass floor: zero violations is the PASSING state here, so a
+	// count would only ever rise when one appears. The scan's own health is
+	// covered by ParseFile failing loudly above — a directory that stopped
+	// yielding .go files would be a build failure long before it reached here.
 }
