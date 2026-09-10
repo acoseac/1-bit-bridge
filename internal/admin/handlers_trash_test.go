@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -213,5 +215,75 @@ func TestAllowDeleteReportsLive(t *testing.T) {
 	}
 	if status, _ := row["status"].(string); status != "live" {
 		t.Errorf("allowDelete status = %q, want live", status)
+	}
+}
+
+// TestTrashRefusesRoutedTracksItemized — a routed track's bytes live on an
+// upstream UPnP server and its stored path is a DIDL container path that means
+// nothing on this filesystem. The console hides Delete on those rows, but the
+// endpoint is a plain authenticated request, so the refusal has to hold here.
+//
+// Itemized rather than whole-batch: an album can hold both, and the local half
+// should still be deleted. Asserting on the batch STATUS could not catch a
+// whole-batch refusal — a 200 with nothing deleted and a 200 with the local
+// half deleted are the same code — so this asserts on what happened to each
+// path and on the file that had to survive.
+func TestTrashRefusesRoutedTracksItemized(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	resetSpaceCacheForTest()
+	t.Cleanup(resetSpaceCacheForTest)
+	wireTrash(t, srv)
+	enableDelete(t, srv, true)
+	root := cfg.LibraryRoots[0]
+	local := seedLibraryFile(t, root, "Artist/Album/01.flac", "mine")
+	// The routed row's path is seeded on disk TOO. Without the refusal the
+	// delete would succeed against this file, which is the point: the guard
+	// is what stops it, not the absence of a file to hit.
+	upstream := seedLibraryFile(t, root, "Artist/Album/02.flac", "theirs")
+
+	ctx := t.Context()
+	for _, rel := range []string{"Artist/Album/01.flac", "Artist/Album/02.flac"} {
+		if err := srv.deps.Manifest.UpsertTrack(ctx, &manifest.Track{Path: rel, Size: 5}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := srv.deps.Manifest.UpsertUPnPRouting(ctx, &manifest.UPnPRouting{
+		SourcePath: "Artist/Album/02.flac", ServerUDN: "upstream-key",
+		ObjectID: "1", ResURL: "http://10.0.0.5:8200/x", LastSeenAt: time.Unix(2, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var res map[string]any
+	if code := doJSON(t, srv.Handler(), "POST", "/api/library/trash",
+		map[string]any{"paths": []string{"Artist/Album/01.flac", "Artist/Album/02.flac"}},
+		&res); code != http.StatusOK {
+		t.Fatalf("trash = %d (%v)", code, res)
+	}
+	if ok, _ := res["ok"].(float64); int(ok) != 1 {
+		t.Errorf("ok = %v, want 1 — the local half must still be deleted", res["ok"])
+	}
+	if failed, _ := res["failed"].(float64); int(failed) != 1 {
+		t.Errorf("failed = %v, want 1 — the routed path must be refused", res["failed"])
+	}
+	if _, err := os.Stat(local); !os.IsNotExist(err) {
+		t.Error("the local track was not deleted; the refusal took the whole batch with it")
+	}
+	if body, err := os.ReadFile(upstream); err != nil || string(body) != "theirs" {
+		t.Errorf("the routed track's file was trashed (err=%v)", err)
+	}
+	// The reason has to say WHERE it lives, or the operator reads it as a bug.
+	var found bool
+	for _, o := range res["outcomes"].([]any) {
+		m := o.(map[string]any)
+		if m["path"] == "Artist/Album/02.flac" {
+			found = true
+			if r, _ := m["reason"].(string); !strings.Contains(r, "upstream") {
+				t.Errorf("reason = %q, want it to name the upstream server", r)
+			}
+		}
+	}
+	if !found {
+		t.Error("the routed path has no outcome of its own")
 	}
 }
