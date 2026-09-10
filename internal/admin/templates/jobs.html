@@ -128,6 +128,29 @@
       </p>
     </div>
 
+    <div class="panel job-card" id="job-lyrics-card" hidden>
+      <div class="panel-head">
+        <h2>Lyrics from Atlas</h2>
+        <span class="panel-actions">
+          <span class="badge" id="job-lyrics-state">—</span>
+        </span>
+      </div>
+      <dl>
+        <dt>Stored</dt>
+        <dd id="job-lyrics-stored">—</dd>
+        <dt>Still to try</dt>
+        <dd id="job-lyrics-addressable">—</dd>
+        <dt>Answered</dt>
+        <dd id="job-lyrics-answered">—</dd>
+      </dl>
+      <p class="hint" id="job-lyrics-hint">
+        For tracks with no embedded or sidecar lyrics, the bridge resolves a
+        recording through Atlas and stores what it relays from LRCLIB. Off by
+        default, and it rides the Atlas harvest credential.
+        <a href="/settings?tab=enrichment">Enrichment settings</a>
+      </p>
+    </div>
+
     <div class="panel job-card" id="job-ao-card" hidden>
       <div class="panel-head">
         <h2>CarPlay pre-generation</h2>

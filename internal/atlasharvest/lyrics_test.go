@@ -113,6 +113,11 @@ func lyricsClient(t *testing.T, stub *atlasStub, sink *fakeLyricsSink) (*Client,
 			HTTP:           srv.Client(),
 			RequestTimeout: 5 * time.Second,
 			LyricsPacing:   time.Nanosecond,
+			// The live gate belongs in the BASE fixture. A fixture that omits
+			// one describes a different bridge than production — which is how
+			// the upscale batch suite came to assert 202 against a bridge with
+			// the feature off (#878). A test wanting it off overrides here.
+			LyricsEnabled: func() bool { return true },
 		}, State{
 			Token:        "tok",
 			AtlasBaseURL: srv.URL,
@@ -367,7 +372,7 @@ func TestATransientFailureWritesNoVerdict(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
-		LyricsPacing: time.Nanosecond}
+		LyricsPacing: time.Nanosecond, LyricsEnabled: func() bool { return true }}
 	st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
 	if err := c.tickLyrics(context.Background(), st); err != nil {
 		t.Fatalf("a 502 must not fail the sweep: %v", err)
@@ -389,7 +394,7 @@ func TestARejectedTokenStopsTheSweep(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
-		LyricsPacing: time.Nanosecond}
+		LyricsPacing: time.Nanosecond, LyricsEnabled: func() bool { return true }}
 	st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
 	err := c.tickLyrics(context.Background(), st)
 	if err == nil {
@@ -715,7 +720,7 @@ func TestATransientReleaseFetchFailureWritesNoVerdict(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
-				LyricsPacing: time.Nanosecond}
+				LyricsPacing: time.Nanosecond, LyricsEnabled: func() bool { return true }}
 			st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
 
 			// The sweep never ends over ONE release. A release is not the run.
@@ -752,7 +757,7 @@ func TestAnUnansweredReleaseIsNotReaskedNextTick(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
-		LyricsPacing: time.Nanosecond}
+		LyricsPacing: time.Nanosecond, LyricsEnabled: func() bool { return true }}
 	st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
 
 	for i := 0; i < 3; i++ {
@@ -881,7 +886,7 @@ func TestADurableRecordingFailureWritesAVerdict(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
-				LyricsPacing: time.Nanosecond}
+				LyricsPacing: time.Nanosecond, LyricsEnabled: func() bool { return true }}
 			st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
 			if err := c.tickLyrics(context.Background(), st); err != nil {
 				t.Fatalf("tickLyrics: %v", err)
@@ -988,4 +993,61 @@ func TestTheSweepStandsDownWhenAScanSTARTS(t *testing.T) {
 	if len(sink.docs) != 1 {
 		t.Errorf("wrote %d documents, want 1 — the sweep did not stand down when the scan started", len(sink.docs))
 	}
+}
+
+// TestTheGateIsLiveAndFailsClosed — the sink is wired unconditionally now, so
+// the flag IS the gate. Two things follow and both are asserted here.
+//
+// It must be read per tick, or the console and the sweeper go on disagreeing:
+// /api/jobs has always read the flag live, while the sweeper took it at boot
+// inside the `if` that decided whether to wire the sink at all. That was
+// invisible only because a restart was the sole way to change the value.
+//
+// And a nil predicate must mean OFF. This feature makes outbound requests and
+// strict-advances `indexed_at` on every write, which is a delta to every paired
+// device — not a thing to guess about when nobody said.
+func TestTheGateIsLiveAndFailsClosed(t *testing.T) {
+	newFixture := func(t *testing.T) (*Client, State, *fakeLyricsSink) {
+		t.Helper()
+		sink := newFakeSink(LyricsCandidate{Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1"})
+		stub := &atlasStub{
+			recordings: map[string][]recordingResponse{"rec-1": {{Status: "available", Plain: "w"}}},
+			hits:       map[string]int{},
+		}
+		c, st := lyricsClient(t, stub, sink)
+		return c, st, sink
+	}
+
+	t.Run("nil predicate is off", func(t *testing.T) {
+		c, st, sink := newFixture(t)
+		c.LyricsEnabled = nil
+		if err := c.tickLyrics(context.Background(), st); err != nil {
+			t.Fatal(err)
+		}
+		if len(sink.docs) != 0 || len(sink.attempts) != 0 {
+			t.Error("an unwired gate ran the sweep; it must fail CLOSED")
+		}
+	})
+
+	t.Run("flipping the flag takes effect without a restart", func(t *testing.T) {
+		c, st, sink := newFixture(t)
+		on := false
+		c.LyricsEnabled = func() bool { return on }
+
+		if err := c.tickLyrics(context.Background(), st); err != nil {
+			t.Fatal(err)
+		}
+		if len(sink.docs) != 0 {
+			t.Fatal("the sweep ran with the flag off")
+		}
+		// Same Client, no re-wiring: this is the whole point of moving the
+		// gate out of the construction `if`.
+		on = true
+		if err := c.tickLyrics(context.Background(), st); err != nil {
+			t.Fatal(err)
+		}
+		if len(sink.docs) != 1 {
+			t.Errorf("wrote %d documents after the flag went on, want 1 — the gate is not live", len(sink.docs))
+		}
+	})
 }

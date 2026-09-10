@@ -362,6 +362,7 @@ func currentValuesForEveryPatchField(t *testing.T, cfg *config.Config) map[strin
 		"enrichMusicBrainzBaseURL": cfg.Enrich.MusicBrainzBaseURL,
 		"enrichCoverArtBaseURL":    cfg.Enrich.CoverArtBaseURL,
 		"atlasEnabled":             cfg.Atlas.Enabled,
+		"atlasLyricsEnabled":       cfg.Atlas.LyricsEnabled,
 		"fingerprintEnabled":       cfg.Fingerprint.Enabled,
 		// Blank is the documented no-op (the settings form submits this
 		// on every save, so a blank MUST keep the stored key).
@@ -527,7 +528,7 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 	// Every tray toggle: the fixture leaves these at their zero/default,
 	// and `true` differs from all of them EXCEPT smartPlaylistsEnabled
 	// and optimizeEnabled, which default ON.
-	case "libraryWatchEnabled", "atlasEnabled", "analysisEnabled",
+	case "libraryWatchEnabled", "atlasEnabled", "atlasLyricsEnabled", "analysisEnabled",
 		"fingerprintEnabled", "upscaleEnabled", "autoOptimizeEnabled",
 		"dsdRenderEnabled", "updateAutoInstall", "dlnaEnabled":
 		return true, true
