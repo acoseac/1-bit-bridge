@@ -210,9 +210,21 @@ func validateSegment(seg string) error {
 }
 
 // IsUnderStaging reports whether a library-relative path lies inside a staging
-// or trash directory. Those are dot-directories, so ValidateRelPath already
-// refuses to produce one; this is the belt-and-braces check for paths that
-// arrive from somewhere other than a client declaration.
+// or trash directory — i.e. whether any segment is dot-prefixed.
+//
+// **It has no production caller.** The docblock here used to call it "the
+// belt-and-braces check for paths that arrive from somewhere other than a
+// client declaration", which read as a live guard and was not one: what
+// actually keeps staging and trash out of the library is ValidateRelPath
+// refusing to produce a dot segment in the first place, and the scanner's own
+// dot-directory skip.
+//
+// Kept rather than deleted because it is a pure predicate with unit tests and a
+// FUZZ target (FuzzAcceptedExt's neighbour in fuzz_paths_test.go) over one of
+// the three untrusted-input surfaces, and dropping fuzz coverage to remove six
+// lines is the wrong trade. It is the right function to reach for if a path
+// ever does arrive from somewhere that has not been through ValidateRelPath —
+// what it must not do is imply that one already does.
 func IsUnderStaging(rel string) bool {
 	for _, seg := range strings.Split(rel, "/") {
 		if strings.HasPrefix(seg, ".") {

@@ -4029,23 +4029,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// The gate itself is cfg.Upload.Enabled, read per request by the
 	// handlers; the subsystem is wired unconditionally so the setting
 	// hot-applies (WIRED vs ACTIVE).
-	uploadMgr := upload.NewManager(upload.Config{
-		MaxFileBytes:    cfg.Upload.MaxFileBytes,
-		MaxSessionFiles: cfg.Upload.MaxSessionFiles,
-		MinFreeBytes:    cfg.Upload.MinFreeBytes,
-		SessionTTL:      time.Duration(cfg.Upload.SessionTTLSeconds) * time.Second,
-		ChunkBytes:      cfg.Upload.ChunkBytes,
-	}, scanner.Roots)
-	// bgWriters-joined: the sweeper unlinks staged files inside a library
-	// root, so it must finish before Store.Close the same way every other
-	// background writer does.
-	bgWriters.Add(1)
-	go func() {
-		defer bgWriters.Done()
-		uploadMgr.RunSweeper(scanCtx, uploadSweepInterval)
-	}()
-
-	// Trash. The gate is read LIVE on every mutating call, so
+	// Trash. Built BEFORE the upload manager because upload's 507 reports
+	// what emptying the trash would free, and an Option cannot be handed a
+	// manager that does not exist yet. The gate is read LIVE on every mutating call, so
 	// library.allowDelete hot-applies; a nil gate would fail closed, which is
 	// the right direction for the only thing in the bridge that removes
 	// library content.
@@ -4067,6 +4053,28 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	go func() {
 		defer bgWriters.Done()
 		trashMgr.RunSweeper(scanCtx, trashSweepInterval)
+	}()
+
+	uploadMgr := upload.NewManager(upload.Config{
+		MaxFileBytes:    cfg.Upload.MaxFileBytes,
+		MaxSessionFiles: cfg.Upload.MaxSessionFiles,
+		MinFreeBytes:    cfg.Upload.MinFreeBytes,
+		SessionTTL:      time.Duration(cfg.Upload.SessionTTLSeconds) * time.Second,
+		ChunkBytes:      cfg.Upload.ChunkBytes,
+	}, scanner.Roots,
+		// Without this every 507 answered `reclaimableBytes: 0` — the one
+		// value the field exists to be non-zero for. The comment on it says it
+		// "lets the UI turn a dead end into 'empty trash and resume'", and it
+		// had no production caller at all: the option was passed only by two
+		// tests, which is why they were green.
+		upload.WithReclaimable(trashMgr.Reclaimable))
+	// bgWriters-joined: the sweeper unlinks staged files inside a library
+	// root, so it must finish before Store.Close the same way every other
+	// background writer does.
+	bgWriters.Add(1)
+	go func() {
+		defer bgWriters.Done()
+		uploadMgr.RunSweeper(scanCtx, uploadSweepInterval)
 	}()
 
 	adminSrv, err := admin.New(admin.Deps{
