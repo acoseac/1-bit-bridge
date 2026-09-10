@@ -146,30 +146,36 @@ func TestEveryFilterFlagsetGuardsItsPositionals(t *testing.T) {
 func TestPathScopedCommandsRefuseAPositionalScope(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		run  func(stdout, stderr io.Writer) int
+		// arg is what the operator typed, and each row asserts on ITS OWN
+		// value: accepting either row's argument would pass a command that
+		// echoed the wrong one back. (CodeRabbit on #897.)
+		arg string
+		run func(arg string, stdout, stderr io.Writer) int
 	}{
-		{"duplicates", func(stdout, stderr io.Writer) int {
-			return duplicatesCmd(context.Background(), []string{"Miles Davis"}, stdout, stderr)
+		{"duplicates", "Miles Davis", func(arg string, stdout, stderr io.Writer) int {
+			return duplicatesCmd(context.Background(), []string{arg}, stdout, stderr)
 		}},
-		{"enrichment misses", func(stdout, stderr io.Writer) int {
-			return enrichmentCmd(context.Background(), []string{"misses", "Blue Note"}, stdout, stderr)
+		{"enrichment misses", "Blue Note", func(arg string, stdout, stderr io.Writer) int {
+			return enrichmentCmd(context.Background(), []string{"misses", arg}, stdout, stderr)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := tc.run(&stdout, &stderr)
-			if code == 0 {
-				t.Fatalf("a positional scope was accepted (exit 0) — the run covers the "+
-					"whole library and reports it as the scoped answer.\nstdout: %s", stdout.String())
+			// Exit 2, not merely non-zero: that is this CLI's code for invalid
+			// input, and 1 would mean the command ran and failed — which is
+			// the outcome being refused.
+			if code := tc.run(tc.arg, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit = %d, want 2 — a positional scope must be refused as invalid "+
+					"input, not run and reported as the scoped answer.\nstdout: %s",
+					code, stdout.String())
 			}
 			// The message has to show the flag form, or the operator is told
 			// "no" without being told how.
 			if !strings.Contains(stderr.String(), "--path") {
 				t.Errorf("refusal does not show the --path form:\n%s", stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "Miles Davis") &&
-				!strings.Contains(stderr.String(), "Blue Note") {
-				t.Errorf("refusal does not quote back what was typed:\n%s", stderr.String())
+			if !strings.Contains(stderr.String(), tc.arg) {
+				t.Errorf("refusal does not quote back %q:\n%s", tc.arg, stderr.String())
 			}
 		})
 	}
