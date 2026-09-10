@@ -134,6 +134,17 @@ func (a applyReport) live(field string) { a.set(field, applyLive, "") }
 // unchanged records that the field was supplied at its current value.
 func (a applyReport) unchanged(field string) { a.set(field, applyUnchanged, "") }
 
+// liveWithReason records a field that took effect immediately but whose effect
+// depends on wiring this bridge may not have — applied-but-inert.
+//
+// The sibling of restartBecause, and the same rule from the other side: the
+// reason is only ever about THIS bridge's runtime state, never a restatement of
+// what the field does. "Twenty near-identical strings is how the two that carry
+// information get skipped."
+func (a applyReport) liveWithReason(field, reason string) {
+	a.set(field, applyLive, reason)
+}
+
 // restart records that the field is persisted but needs a bounce.
 func (a applyReport) restart(field string) { a.set(field, applyRestart, "") }
 

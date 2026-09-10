@@ -206,6 +206,20 @@
         </small>
       </div>
 
+      <div class="field">
+        <label class="checkbox">
+          <input name="atlasLyricsEnabled" type="checkbox" role="switch" {{if .Data.AtlasLyricsEnabled}}checked{{end}}>
+          Lyrics for tracks that carry none
+        </label>
+        <small class="hint">
+          For tracks with no embedded or sidecar lyrics, resolves a recording
+          through Atlas and stores the plain and synced documents it relays
+          from LRCLIB. Your own files always win. Needs the two settings above
+          — rich metadata and the harvest credential — since it rides the same
+          connection. Off by default.
+        </small>
+      </div>
+
       <h2 class="section-head">Acoustic fingerprinting</h2>
       <p class="hint">
         Identifies tracks whose tags no text match can fix by fingerprinting

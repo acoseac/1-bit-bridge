@@ -141,7 +141,7 @@ type releaseTracksResponse struct {
 // paired device syncs it twice. The booklet GC skips on the same hook for a
 // related reason.
 func (c *Client) tickLyrics(ctx context.Context, st State) error {
-	if c.Lyrics == nil || c.scanInProgress() {
+	if c.Lyrics == nil || !c.lyricsActive() || c.scanInProgress() {
 		return nil
 	}
 	cands, err := c.Lyrics.AtlasLyricsCandidates(ctx, c.now().UnixNano(), lyricsCandidateBatch)
@@ -517,6 +517,13 @@ func (c *Client) fetchReleaseTracks(ctx context.Context, st State, albumMBID str
 // real seconds asleep — a budget-sized sweep at the production interval is 20+
 // seconds of pure sleep, and CI already pays enough for SQLite under the race
 // detector. Zero means the default, so production never has to set it.
+// lyricsActive reports whether the tier should run right now. Nil predicate =
+// off: see Client.LyricsEnabled for why the gate is here rather than in the
+// wiring, and why nil is not a thing to guess about.
+func (c *Client) lyricsActive() bool {
+	return c.LyricsEnabled != nil && c.LyricsEnabled()
+}
+
 // errReleaseUnavailable marks a release the upstream could not answer about.
 //
 // Distinct from an error that stops the sweep, because the two are different

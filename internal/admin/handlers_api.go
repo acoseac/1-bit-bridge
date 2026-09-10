@@ -275,6 +275,10 @@ type settingsResponse struct {
 	// / genres via the app ferry — distinct from the Enrich base URLs above,
 	// which are the artwork + MusicBrainz source). Restart-required.
 	AtlasEnabled bool `json:"atlasEnabled"`
+	// AtlasLyricsEnabled is the network lyrics tier's opt-in. Rides the same
+	// harvest credential as the bios, so it is inert without AtlasEnabled and
+	// the harvest — which the save reports as a reason rather than silently.
+	AtlasLyricsEnabled bool `json:"atlasLyricsEnabled"`
 	// Acoustic-fingerprint opt-in (fpcalc → AcoustID fallback for tracks no
 	// text match can fix). Restart-required: the sweeper goroutine and its
 	// fpcalc/key precheck run once at `bridge serve` startup.
@@ -1935,6 +1939,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		EnrichMusicBrainzBaseURL: cfg.Enrich.MusicBrainzBaseURL,
 		EnrichCoverArtBaseURL:    cfg.Enrich.CoverArtBaseURL,
 		AtlasEnabled:             cfg.Atlas.Enabled,
+		AtlasLyricsEnabled:       cfg.Atlas.LyricsEnabled,
 		FingerprintEnabled:       cfg.Fingerprint.Enabled,
 		FingerprintKeySet:        cfg.Fingerprint.ResolvedAPIKey() != "",
 		DuplicatesFilter:         resolvedDuplicatesFilter(cfg),
@@ -2110,6 +2115,17 @@ type settingsPatch struct {
 	// the /v1/atlas-ingest + /v1/atlas-meta routes and the atlasEnrichment
 	// health flag are wired once at `bridge serve` startup.
 	AtlasEnabled *bool `json:"atlasEnabled,omitempty"`
+	// AtlasLyricsEnabled is the network lyrics tier's opt-in. HOT-APPLIED: the
+	// sweep's sink is wired unconditionally and the flag is read live per tick
+	// (config.AtlasConfig.LyricsTierActive), the same predicate /api/jobs
+	// renders the card from.
+	//
+	// Its two halves used to disagree — the sweeper took the flag at boot,
+	// inside the `if` that decided whether to wire the sink, while the console
+	// read it live. Invisible while a restart was the only way to change the
+	// value; adding this field is exactly what would have made it bite, which
+	// is why the conversion landed with it rather than after.
+	AtlasLyricsEnabled *bool `json:"atlasLyricsEnabled,omitempty"`
 	// FingerprintEnabled is the acoustic-fingerprint opt-in. Restart-required:
 	// the sweeper goroutine + its fpcalc/key precheck are wired once at
 	// `bridge serve` startup (same rationale as UpscaleEnabled).
@@ -2567,6 +2583,34 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				report.restart("atlasEnabled")
 			} else {
 				report.unchanged("atlasEnabled")
+			}
+		}
+		if p.AtlasLyricsEnabled != nil {
+			if *p.AtlasLyricsEnabled != next.Atlas.LyricsEnabled {
+				next.Atlas.LyricsEnabled = *p.AtlasLyricsEnabled
+				// HOT: the sweep reads the flag per tick.
+				//
+				// The reason names THIS bridge's runtime state rather than
+				// restating the rule — the tier rides the harvest credential,
+				// so on a bridge without one the save is applied-but-inert and
+				// saying nothing would be the confident-wrong answer. On a
+				// bridge that has one there is nothing to add, and twenty
+				// near-identical strings is how the informative ones get
+				// skipped.
+				// The reason is only for someone turning it ON into a bridge
+				// that cannot run it. Reported on the way OFF as well, it told
+				// an operator who had just deliberately disabled the tier that
+				// their save needed two other settings — advice about a thing
+				// they had asked to stop. (Gemini on #894.)
+				switch {
+				case !*p.AtlasLyricsEnabled, next.Atlas.LyricsTierActive():
+					report.live("atlasLyricsEnabled")
+				default:
+					report.liveWithReason("atlasLyricsEnabled",
+						"saved, but the lyrics sweep needs Atlas enrichment and harvest turned on as well")
+				}
+			} else {
+				report.unchanged("atlasLyricsEnabled")
 			}
 		}
 		if p.FingerprintEnabled != nil {
