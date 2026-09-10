@@ -48,9 +48,9 @@ func TestAutocertStatusReturnsConfiguredSnapshot(t *testing.T) {
 		return AutocertStatusSnapshot{
 			Domain:      "bridge.example.com",
 			CertPresent: true,
-			NotAfter:    notAfter,
+			NotAfter:    &notAfter,
 			LastError:   "",
-			LastCheck:   lastCheck,
+			LastCheck:   &lastCheck,
 		}
 	}
 	ts := httptest.NewServer(srv.Handler())
@@ -88,7 +88,7 @@ func TestAutocertStatusSurfacesLastError(t *testing.T) {
 		return AutocertStatusSnapshot{
 			Domain:    "bridge.example.com",
 			LastError: "acme: rate limited",
-			LastCheck: time.Now().UTC(),
+			LastCheck: zeroTime(time.Now().UTC()),
 		}
 	}
 	ts := httptest.NewServer(srv.Handler())

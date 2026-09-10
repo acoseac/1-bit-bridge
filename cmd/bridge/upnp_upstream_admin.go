@@ -165,7 +165,7 @@ func (a *upnpAdminAdapter) ConfiguredServers(ctx context.Context) []admin.UPnPUp
 				row.ResolvedUDN = info.UDN
 				row.Manufacturer = info.Manufacturer
 				row.ControlURL = info.ContentDirectoryControlURL
-				row.LastSeenAt = info.LastSeenAt
+				row.LastSeenAt = timePtrIfSet(info.LastSeenAt)
 			}
 		}
 		// Last-walk telemetry stays admin-only — the public DTO
@@ -174,8 +174,8 @@ func (a *upnpAdminAdapter) ConfiguredServers(ctx context.Context) []admin.UPnPUp
 		// track lookup inside the shared helper uses.
 		key := upnpingest.StableServerKey(srv)
 		if pr, ok := last[key]; ok {
-			row.LastWalkStarted = pr.WalkStartedAt
-			row.LastWalkFinished = pr.WalkCompletedAt
+			row.LastWalkStarted = timePtrIfSet(pr.WalkStartedAt)
+			row.LastWalkFinished = timePtrIfSet(pr.WalkCompletedAt)
 			row.LastWalked = pr.Walked
 			row.LastReaped = pr.Reaped
 			if pr.Err != nil {

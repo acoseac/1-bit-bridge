@@ -154,8 +154,8 @@ func (s *Server) apiTokensSetLifecycle(w http.ResponseWriter, r *http.Request) {
 			ID:         tok.ID,
 			Name:       tok.Name,
 			CreatedAt:  tok.CreatedAt,
-			LastUsedAt: tok.LastUsedAt,
-			RotatedAt:  tok.RotatedAt,
+			LastUsedAt: zeroTime(tok.LastUsedAt),
+			RotatedAt:  zeroTime(tok.RotatedAt),
 			ExpiresAt:  tok.ExpiresAt,
 		})
 		return
@@ -177,8 +177,8 @@ func (s *Server) apiTokensSetLifecycle(w http.ResponseWriter, r *http.Request) {
 		ID:         t.ID,
 		Name:       t.Name,
 		CreatedAt:  t.CreatedAt,
-		LastUsedAt: t.LastUsedAt,
-		RotatedAt:  t.RotatedAt,
+		LastUsedAt: zeroTime(t.LastUsedAt),
+		RotatedAt:  zeroTime(t.RotatedAt),
 		ExpiresAt:  t.ExpiresAt,
 	})
 }

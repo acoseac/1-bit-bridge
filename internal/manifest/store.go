@@ -7141,9 +7141,17 @@ func (s *Store) CountVariantsByKind(ctx context.Context) (map[string]int64, erro
 // → Audio quality stats card, which need the *file* count (a single
 // source track may carry several upscaled targets, so file count ≠ the
 // DISTINCT-source counts `RollupByPrefix` returns).
+//
+// No `json:` tags. It is a rows.Scan target in this file, and CLAUDE.md's
+// stricter rule for the row structs here is that they must not gain any — the
+// only reason to add them would be handler convenience, which is exactly the
+// leak vector the rule guards. All three consumers copy the fields into admin
+// DTOs, so nothing changes but the loaded gun. (Contrast analysisScalars in
+// this file, which is tagged and is NOT a violation: it decodes a SQL
+// json_object, so the tags are structurally required.)
 type VariantKindStat struct {
-	Files int   `json:"files"`
-	Bytes int64 `json:"bytes"`
+	Files int
+	Bytes int64
 }
 
 // VariantStatsByKind returns per-kind file counts and combined byte

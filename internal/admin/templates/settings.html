@@ -768,7 +768,7 @@
             <span>· latest <code>{{.Data.Update.LatestVersion}}</code></span>
           {{else if .Data.Update.LastError}}
             <span class="badge idle">check failed</span>
-          {{else if .Data.Update.LastCheck.IsZero}}
+          {{else if not .Data.Update.LastCheck}}
             {{/* No poll has fired yet (bridge just started, default
                  check interval is 6h). Distinguish from the
                  "in-flight check" case below — pre-fix the operator
@@ -780,7 +780,7 @@
           {{end}}
         </dd>
         <dt>Last check</dt>
-        <dd id="update-last-check">{{if .Data.Update.LastCheck.IsZero}}never{{else}}{{timeAgo .Data.Update.LastCheck}}{{end}}</dd>
+        <dd id="update-last-check">{{timeAgoPtr .Data.Update.LastCheck}}</dd>
         {{- /* These two rows are toggled in place by app.js, which
                resolves each dd by id and then hides or reveals it
                together with its previousElementSibling dt. So both

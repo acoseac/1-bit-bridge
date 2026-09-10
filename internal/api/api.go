@@ -1503,9 +1503,17 @@ type ScanState struct {
 	// it just isn't progressing. Additive and omitempty, so older clients
 	// (which only read isScanning) are unaffected — ProtocolVersion
 	// stays 1.
-	ScanStalled   bool      `json:"scanStalled,omitempty"`
-	LastFullScan  time.Time `json:"lastFullScan,omitempty"`
-	TracksIndexed int       `json:"tracksIndexed"`
+	ScanStalled bool `json:"scanStalled,omitempty"`
+	// Pointer, not a value: `omitempty` does NOT drop a zero time.Time (it is
+	// a struct, and encoding/json's emptiness rule does not know about it), so
+	// the value form shipped "0001-01-01T00:00:00Z" on every bridge whose
+	// first scan had not completed. iOS declares this `Date?` and would have
+	// decoded a real, year-1 date instead of absence — the opposite of what
+	// the tag advertises. Same trap this repo already fixed in three other
+	// structs (cmd/bridge/tailscale.go, admin.go's tailscaleStatus,
+	// handlers_jobs.go's scannerJobs), each citing Qodo on PR #102.
+	LastFullScan  *time.Time `json:"lastFullScan,omitempty"`
+	TracksIndexed int        `json:"tracksIndexed"`
 
 	// PendingDeletions reports the count of rows across `tracks` and
 	// `folders` whose missing_count is > 0 but haven't yet reached the
@@ -1593,7 +1601,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		stalled := scanning && s.manifest.IsScanStalled()
 		scanState.IsScanning = scanning && !stalled
 		scanState.ScanStalled = stalled
-		scanState.LastFullScan = s.manifest.LastFullScan()
+		scanState.LastFullScan = nilIfZeroTime(s.manifest.LastFullScan())
 		// TTL-cached: /v1/health is unauthenticated and can be flooded, so the
 		// two COUNT(*) scans run at most ~once per healthCountsTTL rather than
 		// per request. See healthCountsCache.
@@ -2565,4 +2573,20 @@ func writeErrorLog(w http.ResponseWriter, r *http.Request, status int, code, use
 		}
 	}
 	writeError(w, status, code, userMsg)
+}
+
+// nilIfZeroTime is what makes `omitempty` mean what it says on a time field.
+//
+// encoding/json does not treat a zero time.Time as empty — it is a struct —
+// so a value field tagged omitempty ships "0001-01-01T00:00:00Z" and every
+// client parses a real, very old date where it should have seen absence. Every
+// optional time on a wire DTO in this package is therefore a *time.Time set
+// through here; TestNoOmitemptyValueTimeOnTheWire fails the build if one is
+// not.
+func nilIfZeroTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }

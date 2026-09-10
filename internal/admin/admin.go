@@ -707,11 +707,11 @@ type Deps struct {
 // surface, defined here so the admin package stays decoupled from
 // internal/tlsacme. Wired via the AutocertStatus closure.
 type AutocertStatusSnapshot struct {
-	Domain      string    `json:"domain,omitempty"`
-	CertPresent bool      `json:"certPresent"`
-	NotAfter    time.Time `json:"notAfter,omitempty"`
-	LastError   string    `json:"lastError,omitempty"`
-	LastCheck   time.Time `json:"lastCheck,omitempty"`
+	Domain      string     `json:"domain,omitempty"`
+	CertPresent bool       `json:"certPresent"`
+	NotAfter    *time.Time `json:"notAfter,omitempty"`
+	LastError   string     `json:"lastError,omitempty"`
+	LastCheck   *time.Time `json:"lastCheck,omitempty"`
 }
 
 // AdminBatchCoordinator is the admin-side interface the Library
@@ -1152,15 +1152,15 @@ var (
 // in cmd/bridge/main.go fills this from runtime.GOOS at construction
 // time — capability is fixed for the lifetime of the process.
 type UpdateStatus struct {
-	CurrentVersion   string    `json:"currentVersion"`
-	LatestVersion    string    `json:"latestVersion,omitempty"`
-	UpdateAvailable  bool      `json:"updateAvailable"`
-	ReleaseNotesURL  string    `json:"releaseNotesURL,omitempty"`
-	Channel          string    `json:"channel"`
-	LastCheck        time.Time `json:"lastCheck,omitempty"`
-	LastError        string    `json:"lastError,omitempty"`
-	MinClientVersion string    `json:"minClientVersion,omitempty"`
-	CanInstall       bool      `json:"canInstall"`
+	CurrentVersion   string     `json:"currentVersion"`
+	LatestVersion    string     `json:"latestVersion,omitempty"`
+	UpdateAvailable  bool       `json:"updateAvailable"`
+	ReleaseNotesURL  string     `json:"releaseNotesURL,omitempty"`
+	Channel          string     `json:"channel"`
+	LastCheck        *time.Time `json:"lastCheck,omitempty"`
+	LastError        string     `json:"lastError,omitempty"`
+	MinClientVersion string     `json:"minClientVersion,omitempty"`
+	CanInstall       bool       `json:"canInstall"`
 	// CanRollback reports whether a previous binary is actually on disk
 	// to roll back TO. POST /api/updates/rollback has existed with no
 	// caller since it shipped, and adding a button without this flag
