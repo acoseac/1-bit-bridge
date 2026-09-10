@@ -526,12 +526,51 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   list-style: none; padding: var(--space-4) 10px 4px; font-size: 0.78rem;
   text-transform: uppercase; letter-spacing: .06em; color: var(--fg-muted);
 }
-.track-num { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.track-num { color: var(--fg-muted); font-variant-numeric: tabular-nums; position: relative; }
 .track-title {
   background: none; border: 0; padding: 0; font: inherit; color: inherit;
   text-align: left; cursor: pointer;
 }
 .track-title:hover { color: var(--accent); }
+
+/* ---- The row that is playing -------------------------------------------
+ *
+ * Nothing on the page said which one, so a click at row 14 of a long
+ * album was acknowledged only by the dock at the bottom of the window,
+ * off-screen. Same three states as the dock, in the same vocabulary.
+ *
+ * The mark covers the NUMBER rather than taking a cell of its own —
+ * .tracks declares a fixed subgrid column count. The digit goes with
+ * visibility, not display, so the cell keeps the baseline the row is
+ * aligned on; that also takes the digit out of the accessibility tree,
+ * which is correct here because the <ol> supplies the position anyway and
+ * the title carries aria-current.
+ * ---------------------------------------------------------------------- */
+.track-current .track-n { visibility: hidden; }
+/* Present only on the current row — trackmarks.js injects it there and
+ * removes it again, so there is no hidden state to style. */
+.track-mark { display: grid; place-items: center; position: absolute; inset: 0; }
+.track-ico { width: 11px; height: 11px; fill: var(--accent); stroke: none; }
+.track-current .track-title { color: var(--accent); font-weight: 600; }
+/* Current-but-not-playing. Not display:none on the glyph: an empty cell
+ * beside an accented title reads as a rendering fault rather than a
+ * state, and this is the one of the three that persists. */
+.track-paused .track-ico { opacity: .5; }
+
+/* Waiting for the first bytes — the dock's ring, the same keyframes and
+ * the same reduced-motion answer, at row scale. */
+.track-waiting .track-ico { visibility: hidden; }
+.track-waiting .track-mark::after {
+  content: ""; position: absolute;
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  animation: np-spin 700ms linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .track-waiting .track-ico { visibility: visible; }
+  .track-waiting .track-mark::after { content: none; }
+}
 .track-unplayable .track-title { cursor: default; color: var(--fg-muted); }
 .track-unplayable .track-title:hover { color: var(--fg-muted); }
 .track-meta, .track-dur, .track-size { color: var(--fg-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
@@ -958,12 +997,27 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   /* Shuffle and repeat are the first to go when width runs out: they are
    * modes you set once, not controls you reach for mid-track. */
   .np-btn-toggle { display: none; }
-  /* Two lines is all the bar has room for down here — measured at 375px,
-   * the metadata column is 41px wide. So when the notice has something
-   * transient to say (loading, a converted copy, a playback error) it
-   * takes the artist's place rather than adding a third line and growing
-   * the dock: the artist is static and one tap away on the album page,
-   * and the notice is neither. */
+  /* The metadata column measured 41px at 375px: the title truncated to
+   * three characters, which is not a name — "Cold Six" rendered "Col…".
+   *
+   * Every pixel back comes from CHROME, not from a control. The dock's
+   * side insets, its horizontal padding, the column gap and the cover all
+   * give some up; all four transport targets keep their full size,
+   * because a 375px screen is exactly where a shrunken tap target is
+   * worst, and the mute button stays for the reason nowplaying.js records
+   * (the volume slider is hidden on touch, so it is the only way to
+   * silence the bar at all). Measured after: 95px. */
+  .npbar {
+    left: calc(var(--npbar-left, 0px) + 10px); right: 10px;
+    padding: 8px 10px; gap: var(--space-2);
+  }
+  .np-art { width: 40px; height: 40px; flex-basis: 40px; }
+  .np-now { gap: 10px; }
+  /* Two lines is all the height the bar has down here. So when the notice
+   * has something transient to say (loading, a converted copy, a playback
+   * error) it takes the artist's place rather than adding a third line and
+   * growing the dock: the artist is static and one tap away on the album
+   * page, and the notice is neither. */
   .np-meta:has(.np-notice:not(:empty)) .np-sub { display: none; }
   .track { grid-template-columns: 2rem 1fr auto; }
   .track-meta, .track-dl { display: none; }

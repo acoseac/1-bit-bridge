@@ -9,6 +9,7 @@ import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableRe
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce } from "./ui.js";
 import * as audio from "./audio.js";
 import { variantPanel, onVariantChange } from "./variants.js";
+import { bindTrackMarks } from "./trackmarks.js";
 
 const PAGE = 60;
 
@@ -719,6 +720,10 @@ function trackList(tracks, albumArt, opts = {}) {
     }
     list.appendChild(trackRow(t, i, tracks, albumArt, opts));
   });
+  // Every list, not just the album page's: the row that is playing is
+  // worth marking wherever a track list is rendered, and binding here is
+  // what makes that true without each of the six callers remembering to.
+  bindTrackMarks(list, tracks);
   return list;
 }
 
@@ -726,7 +731,21 @@ function trackRow(t, i, all, albumArt, opts = {}) {
   const playable = !t.play || t.play.kind !== "none";
   const row = el("li", { class: `track${playable ? "" : " track-unplayable"}` });
   const num = opts.collection ? i + 1 : (t.track || i + 1);
-  row.appendChild(el("span", { class: "track-num", text: String(num) }));
+  // The digit is wrapped so the now-playing mark can cover it without
+  // covering the cell — see trackmarks.js, which injects that mark into
+  // this cell rather than every row carrying one. At most one row is ever
+  // marked, and a playlist list can hold tens of thousands of rows, each
+  // of which would otherwise pay for an <svg><use> and the shadow tree it
+  // instantiates.
+  //
+  // Into the NUMBER's cell, note, and not a cell of its own: .tracks
+  // declares a fixed subgrid column count and
+  // TestTrackSubgridColumnsMatchTheRow holds trackRow to it, so a tenth
+  // append here would shift every column past it — the regression the
+  // column comment in player.css records, where a whole album rendered
+  // its Download links on lines of their own.
+  row.appendChild(el("span", { class: "track-num" },
+    el("span", { class: "track-n", text: String(num) })));
   const title = el("button", {
     class: "track-title", text: t.title || t.path,
     attrs: playable ? {} : { "aria-disabled": "true", "aria-describedby": "why-" + i },

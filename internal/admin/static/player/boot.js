@@ -15,6 +15,7 @@ import * as audio from "./audio.js";
 import { mount as mountBar } from "./nowplaying.js";
 import { el, clear, announce } from "./ui.js";
 import { wireVariantRefresh, clearVariantRefresh } from "./variants.js";
+import { clearTrackMarks } from "./trackmarks.js";
 import { abortReads } from "./api.js";
 import {
   renderAlbums, renderAlbum, renderArtists, renderArtist,
@@ -542,6 +543,11 @@ function route() {
   // installed a variant-refresh hook cannot have it fire after the user
   // has navigated somewhere else. Only two views ever set one.
   clearVariantRefresh();
+  // And once more for the now-playing row marks: the lists this route is
+  // about to replace are the only thing holding those bindings, and a
+  // subscription that outlived them would write into detached nodes for
+  // the life of the tab. trackList re-binds as it renders.
+  clearTrackMarks();
   // And the same reasoning once more, for the reads themselves: a fetch
   // the previous view started must not be able to paint. getJSON's
   // per-key abort cannot do this — two views with different keys race,
