@@ -2597,9 +2597,15 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				// bridge that has one there is nothing to add, and twenty
 				// near-identical strings is how the informative ones get
 				// skipped.
-				if next.Atlas.LyricsTierActive() {
+				// The reason is only for someone turning it ON into a bridge
+				// that cannot run it. Reported on the way OFF as well, it told
+				// an operator who had just deliberately disabled the tier that
+				// their save needed two other settings — advice about a thing
+				// they had asked to stop. (Gemini on #894.)
+				switch {
+				case !*p.AtlasLyricsEnabled, next.Atlas.LyricsTierActive():
 					report.live("atlasLyricsEnabled")
-				} else {
+				default:
 					report.liveWithReason("atlasLyricsEnabled",
 						"saved, but the lyrics sweep needs Atlas enrichment and harvest turned on as well")
 				}
