@@ -23,12 +23,25 @@ const state = {
   shuffleOrder: null,
   repeat: "off", // "off" | "all" | "one"
   playing: false,
+  loading: false,
   degraded: false,
   seekable: true,
   error: "",
   skipped: 0,
   albumArt: null,
 };
+
+/** readyState: the element has enough data to advance at least a little. */
+const HAVE_FUTURE_DATA = 3;
+/** readyState: the element believes it can play to the end uninterrupted. */
+const HAVE_ENOUGH_DATA = 4;
+
+/** How long before the end of a track its successor is warmed. */
+const PRIME_LEAD_S = 30;
+
+// The queue entry the preloader currently holds, so a prime is issued
+// once rather than re-issued on every timeupdate.
+let primedFor = null;
 
 // Bumped every time the CURRENT track changes — a load, or the queue
 // being cleared. Anything that suspends and then wants to touch playback
@@ -63,6 +76,7 @@ export function snapshot() {
     queue: state.queue,
     index: state.index,
     playing: state.playing,
+    loading: state.loading,
     shuffle: state.shuffle,
     repeat: state.repeat,
     degraded: state.degraded,
@@ -71,7 +85,52 @@ export function snapshot() {
     albumArt: state.albumArt,
     currentTime: state.el ? state.el.currentTime : 0,
     duration: state.el && Number.isFinite(state.el.duration) ? state.el.duration : 0,
+    buffered: bufferedAhead(),
   };
+}
+
+/**
+ * How far the browser has fetched from the playhead, in seconds.
+ *
+ * The end of the buffered range the playhead is INSIDE, not the end of
+ * the last range. A seek leaves the earlier range behind, and reporting
+ * its end would paint a buffer bar to the left of the thumb — fetched
+ * bytes, drawn behind where the reader now is.
+ *
+ * Read live off the element rather than tracked in state, the same way
+ * currentTime and duration are: TimeRanges is recomputed by the browser
+ * on every fetch, and mirroring it would be a second copy to keep true.
+ */
+function bufferedAhead() {
+  const el = state.el;
+  if (!el || !el.buffered || el.buffered.length === 0) return 0;
+  const t = el.currentTime;
+  for (let i = 0; i < el.buffered.length; i++) {
+    // A hair of tolerance at the near edge: straight after a seek the
+    // playhead can sit a few milliseconds ahead of the range the browser
+    // just opened for it, which reads as "nothing buffered" and blanks
+    // the bar for a beat.
+    if (el.buffered.start(i) <= t + 0.5 && el.buffered.end(i) > t) {
+      return el.buffered.end(i);
+    }
+  }
+  return 0;
+}
+
+/**
+ * `loading` means ONE thing: the player intends to be producing sound
+ * and is not, because it is waiting for bytes.
+ *
+ * Deliberately not "a fetch is in flight" — a paused element topping up
+ * its buffer is not something the reader is waiting on, and a spinner
+ * for it would cry wolf. Deliberately not readyState either: a track
+ * that has stalled mid-play still reports whatever it managed to
+ * buffer, and only the element knows it has starved.
+ */
+function setLoading(on) {
+  if (state.loading === !!on) return;
+  state.loading = !!on;
+  emit();
 }
 
 export function init() {
@@ -86,10 +145,42 @@ export function init() {
     document.body.appendChild(el);
   }
 
-  state.el.addEventListener("play", () => { state.playing = true; setSessionState("playing"); emit(); });
-  state.el.addEventListener("pause", () => { state.playing = false; setSessionState("paused"); persist(); emit(); });
+  state.el.addEventListener("play", () => {
+    state.playing = true;
+    // `play` fires the instant `paused` flips, which is BEFORE the
+    // element knows whether it has anything to play — so resuming into
+    // an empty buffer arrives here looking exactly like resuming into a
+    // full one. readyState is what tells them apart.
+    state.loading = state.el.readyState < HAVE_FUTURE_DATA;
+    setSessionState("playing");
+    emit();
+  });
+  state.el.addEventListener("pause", () => {
+    state.playing = false;
+    state.loading = false;
+    setSessionState("paused");
+    persist();
+    emit();
+  });
   state.el.addEventListener("ended", () => { advance(1, { auto: true }); });
-  state.el.addEventListener("timeupdate", throttle(() => { persist(); emit(); updatePositionState(); }, 900));
+  state.el.addEventListener("timeupdate", throttle(() => {
+    persist(); emit(); updatePositionState(); maybePrime();
+  }, 900));
+
+  // The element's own account of starving and recovering. Measured on a
+  // 200 KB/s link, `waiting` lands ~1 ms after `play` on a cold source —
+  // early enough to be the spinner's trigger rather than its
+  // confirmation.
+  state.el.addEventListener("waiting", () => setLoading(!state.el.paused));
+  state.el.addEventListener("playing", () => setLoading(false));
+  // `stalled` is the same wait by another name — the fetch itself has
+  // gone quiet — but it ALSO fires on a healthy element whose buffer is
+  // full and which has therefore stopped asking for bytes. The
+  // readyState guard is the whole difference between the two.
+  state.el.addEventListener("stalled", () => {
+    setLoading(!state.el.paused && state.el.readyState < HAVE_FUTURE_DATA);
+  });
+  state.el.addEventListener("emptied", () => setLoading(false));
   state.el.addEventListener("loadedmetadata", () => {
     // A non-finite duration means the source didn't report a length —
     // an upstream that ignored Range, typically. Binding a scrubber to
@@ -113,6 +204,9 @@ function onError() {
     case 1: // MEDIA_ERR_ABORTED — our own src reassignment.
       return;
     case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED — see handleSourceError.
+      // The probe below is a round trip, and a spinner left up across it
+      // says "still coming" about a source we already know did not load.
+      setLoading(false);
       void handleSourceError(track, state.el.src);
       return;
     default: { // 2 network / 3 decode — retry once, then surface.
@@ -126,6 +220,7 @@ function onError() {
       }
       state.error = `Playback failed for "${track.title || track.path}".`;
       state.playing = false;
+      state.loading = false;
       emit();
     }
   }
@@ -167,6 +262,7 @@ async function handleSourceError(track, src) {
       ? `The next tracks can't play in this browser. Use Download on the ones you want.`
       : `The next tracks could not be loaded. Check the source is reachable.`;
     state.playing = false;
+    state.loading = false;
     emit();
     return;
   }
@@ -242,6 +338,10 @@ export function playQueue(tracks, start = 0, { albumArt = null } = {}) {
   const idx = clampIndex(start);
   if (idx < 0) {
     state.error = "Nothing in this selection can play in a browser.";
+    // Nothing will load, so nothing is being waited for. Without this a
+    // spinner from the track the reader clicked a moment ago keeps
+    // turning underneath a message saying the new selection cannot play.
+    state.loading = false;
     emit();
     return;
   }
@@ -274,7 +374,9 @@ export function clearQueue() {
   state.queue = [];
   state.index = -1;
   state.playing = false;
+  state.loading = false;
   if (state.el) state.el.removeAttribute("src");
+  cancelPrime();
   persist();
   emit();
 }
@@ -304,6 +406,11 @@ function load(index, { autoplay }) {
   state.degraded = target.degraded;
   state.seekable = true;
   state.error = "";
+  // The wait starts at the CLICK, not at the element's first `waiting`.
+  // Asserting it here is what puts the spinner up on the same frame the
+  // title changes — otherwise the bar spends a beat looking like it is
+  // playing something silently, which is the whole complaint.
+  state.loading = !!autoplay;
   state.el.src = target.url;
   state.el.load();
   updateMetadata(track);
@@ -313,11 +420,15 @@ function load(index, { autoplay }) {
     // broken player.
     state.el.play().catch((e) => {
       state.playing = false;
+      state.loading = false;
       if (e && e.name === "NotAllowedError") state.error = "Press play to start.";
       emit();
     });
   }
-  primeNext();
+  // Whatever the preloader was warming is for a track that is no longer
+  // next — and if it IS this one, its bytes are in the HTTP cache, not
+  // in that element. Either way it must stop pulling.
+  cancelPrime();
   persist();
   emit();
 }
@@ -329,18 +440,64 @@ function load(index, { autoplay }) {
  * for a hi-res library means decoding hundreds of megabytes in JS.
  * This just gets the connection and the first bytes out of the way, so
  * the gap is tens of milliseconds instead of hundreds.
+ *
+ * "Near the end" was a comment rather than a behaviour: this ran from
+ * load(), so pressing play opened a SECOND preload:auto download at the
+ * same instant, for a track that would not be wanted for another three
+ * minutes, competing for the link with the one the reader was waiting
+ * for. Measured against a throttled 200 KB/s bridge with 4-minute
+ * 44.1/16 FLACs: at the moment the current track had 72 s buffered the
+ * preloader already held 45 s of the NEXT one — roughly 40% of the link
+ * spent ahead of a track nobody had asked for yet. On a LAN it is
+ * invisible; over a relayed Tailscale link it is the difference between
+ * playing and rebuffering, and it made the cold start the complaint was
+ * about measurably longer.
+ *
+ * Driven from timeupdate rather than from load() for that reason, and
+ * because the next track is not a fixed answer: shuffle, a queue edit
+ * or a repeat change between here and the end would leave a prime
+ * warming the wrong file.
  */
-function primeNext() {
-  if (!state.pre) return;
-  const next = peek(1);
-  if (!next) {
-    state.pre.removeAttribute("src");
-    return;
-  }
+function maybePrime() {
+  if (!state.pre || !state.el) return;
+  // repeat-one plays THIS track again, so the queue's next entry is not
+  // what comes next.
+  const next = state.repeat === "one" ? null : peek(1);
+  // A prime whose track is no longer the next one is pure competition:
+  // shuffle, a queue edit or a repeat change can all move that answer
+  // out from under a download already in flight.
+  if (primedFor && primedFor !== next) cancelPrime();
+  if (!next || primedFor === next) return;
+  const dur = state.el.duration;
+  // A source that reported no length — an upstream that ignored Range —
+  // cannot answer "how near the end are we". Fall back to the other
+  // signal that the link has room to spare: the element saying it
+  // expects to reach the end without stopping.
+  const near = Number.isFinite(dur) && dur > 0
+    ? dur - state.el.currentTime <= PRIME_LEAD_S
+    : state.el.readyState >= HAVE_ENOUGH_DATA;
+  if (!near) return;
   const target = resolvePlayable(next, audioURL);
   if (!target) return;
   state.pre.preload = "auto";
   state.pre.src = target.url;
+  primedFor = next;
+}
+
+/**
+ * Abandon whatever the preloader is holding.
+ *
+ * removeAttribute alone does NOT stop the fetch: the element keeps the
+ * resource it already selected and keeps pulling bytes for it. load() is
+ * what abandons it, and abandoning it is the entire point — a prime for
+ * a track that is no longer next must stop competing with the one that
+ * is.
+ */
+function cancelPrime() {
+  primedFor = null;
+  if (!state.pre || !state.pre.getAttribute("src")) return;
+  state.pre.removeAttribute("src");
+  state.pre.load();
 }
 
 function peek(delta) {
@@ -437,6 +594,7 @@ function nextPlayableFrom(start, delta) {
 
 function stopAtEnd() {
   state.playing = false;
+  state.loading = false;
   state.el.pause();
   emit();
 }

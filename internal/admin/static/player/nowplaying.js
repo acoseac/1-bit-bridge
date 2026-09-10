@@ -67,7 +67,12 @@ export function mount() {
   refs.shuffle = iconButton("Shuffle", "shuffle", () => audio.setShuffle(!audio.snapshot().shuffle), "toggle");
   refs.repeat = iconButton("Repeat off", "repeat", () => audio.cycleRepeat(), "toggle");
   refs.chip = el("span", { class: "np-chip" });
-  refs.notice = el("span", { class: "np-notice" });
+  // Polite, not assertive: this line carries "loading", "playing a
+  // converted copy" and the playback errors, none of which should
+  // interrupt what a screen reader is already saying. It is the only
+  // place any of those were ever stated, and until now none of them
+  // were announced at all.
+  refs.notice = el("span", { class: "np-notice", attrs: { "aria-live": "polite" } });
 
   // Volume is desktop-only: iOS Safari ignores audio.volume outright,
   // and a slider that does nothing is worse than no slider.
@@ -125,6 +130,26 @@ function setProgress(frac) {
   refs.rail.style.setProperty("--np-progress", pct);
 }
 
+/**
+ * How much of the track the browser has actually fetched, painted behind
+ * the played fill on the same two surfaces.
+ *
+ * The rail half is not decoration: below the phone breakpoint the whole
+ * numeric scrubber row is hidden, so the rail is the only place a phone
+ * can see the download at all.
+ *
+ * The property is --np-loaded and not --np-buffered on purpose: the
+ * COLOUR of this band is --np-buffer, and two names one character apart
+ * inside the same gradient declaration is a swap nobody would see in
+ * review. Positions are --np-progress / --np-loaded; colours are
+ * --np-track / --np-buffer.
+ */
+function setBuffered(frac) {
+  const pct = `${Math.max(0, Math.min(1, frac || 0)) * 100}%`;
+  refs.seek.style.setProperty("--np-loaded", pct);
+  refs.rail.style.setProperty("--np-loaded", pct);
+}
+
 function setVolumeFill(frac) {
   refs.volume.style.setProperty("--np-progress", `${Math.max(0, Math.min(1, frac || 0)) * 100}%`);
 }
@@ -135,9 +160,21 @@ function tick() {
   refs.elapsed.textContent = duration(s.currentTime) || "0:00";
   if (s.seekable && s.duration > 0) {
     refs.total.textContent = duration(s.duration);
+    setBuffered(s.buffered / s.duration);
     if (!refs.isScrubbing()) {
       refs.seek.value = String(Math.round((s.currentTime / s.duration) * 1000));
       setProgress(s.currentTime / s.duration);
+    }
+  } else if (s.seekable) {
+    // Loaded but the length is not in yet — the window this whole
+    // change is about. The previous track's total was still sitting
+    // there, which is a wrong number rather than a missing one, and its
+    // thumb was still parked wherever that track had got to.
+    refs.total.textContent = "0:00";
+    setBuffered(0);
+    if (!refs.isScrubbing()) {
+      refs.seek.value = "0";
+      setProgress(0);
     }
   }
 }
@@ -175,6 +212,12 @@ function apply(s) {
 
   swapIcon(refs.play, s.playing ? "pause" : "play");
   refs.play.setAttribute("aria-label", s.playing ? "Pause" : "Play");
+  // The button keeps the NAME of the action it performs — it still
+  // pauses, and a reader who has decided against the wait needs that to
+  // be true. Only its paint says "waiting", which is what the sighted
+  // half of this was missing: a pause glyph over a 0:00 timer is a
+  // player claiming to be playing something silently.
+  refs.play.classList.toggle("np-btn-busy", s.loading);
 
   // Shuffle is genuinely binary, so aria-pressed is the right role.
   refs.shuffle.setAttribute("aria-pressed", String(s.shuffle));
@@ -202,10 +245,21 @@ function apply(s) {
   }
 
   const notes = [];
+  // Two words for two different waits, because the reader can tell them
+  // apart and the distinction is what makes the line worth reading: at
+  // zero it is a track that has not started, anywhere else it is one
+  // that has stopped.
+  if (s.loading) notes.push(s.currentTime > 0 ? "Buffering…" : "Loading…");
   if (s.degraded) notes.push("playing a converted copy");
   if (!s.seekable) notes.push("seeking unavailable for this source");
   if (s.error) notes.push(s.error);
-  refs.notice.textContent = notes.join(" · ");
+  const notice = notes.join(" · ");
+  // Compared before writing. apply() runs on every throttled timeupdate,
+  // and assigning textContent replaces the text node whether or not the
+  // string differs — which an aria-live region reads as a fresh
+  // announcement, so an unguarded write would say "Loading…" once a
+  // second for as long as the wait lasted.
+  if (refs.notice.textContent !== notice) refs.notice.textContent = notice;
   refs.notice.classList.toggle("np-notice-error", !!s.error);
 }
 

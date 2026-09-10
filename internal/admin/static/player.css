@@ -60,6 +60,11 @@
   /* The unplayed part of a scrubber. Derived from --fg so it tracks both
    * themes without a second mapping. */
   --np-track: color-mix(in srgb, var(--fg) 16%, transparent);
+  /* The fetched-but-unplayed part, painted between the played fill and
+   * the untouched track so the three read as one ordering: what you have
+   * heard, what has arrived, what has not. Same --fg derivation as
+   * --np-track, one step stronger. */
+  --np-buffer: color-mix(in srgb, var(--fg) 34%, transparent);
 
   --_dark-cover-ring: inset 0 0 0 1px rgb(255 255 255 / 0.10);
   --_dark-cover-placeholder: linear-gradient(135deg, #1b2436, #141b28);
@@ -626,12 +631,20 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 
 /* Position line on the bar's top edge. Below the phone breakpoint the
  * numeric scrubber row is hidden, and before this there was then NO
- * position feedback at all on a phone. Two hard stops rather than a
- * gradient ramp: this is a measurement, not a fade. */
+ * position feedback at all on a phone. Hard stops rather than a
+ * gradient ramp: this is a measurement, not a fade.
+ *
+ * Three bands, not two: played, fetched, and not yet fetched. The middle
+ * one is the download, and on a phone this rail is the only surface it
+ * has — the scrubber that carries it on desktop is display:none down
+ * there. */
 .np-rail {
   position: absolute; inset: 0 0 auto; height: 2px;
   background: linear-gradient(to right,
-    var(--accent) var(--np-progress, 0%), transparent var(--np-progress, 0%));
+    var(--accent) var(--np-progress, 0%),
+    var(--np-buffer) var(--np-progress, 0%),
+    var(--np-buffer) var(--np-loaded, 0%),
+    transparent var(--np-loaded, 0%));
   pointer-events: none;
 }
 
@@ -661,6 +674,10 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
  * filled, which is the media-transport convention. */
 .np-ico { width: 18px; height: 18px; display: block; fill: currentcolor; stroke: none; }
 .np-btn {
+  /* Positioned for .np-btn-busy's ring, which has to sit ON the glyph
+   * rather than beside it — as a grid item it would auto-place into a
+   * second cell and widen the button. */
+  position: relative;
   display: grid; place-items: center;
   background: none; border: 0; color: var(--np-fg); cursor: pointer;
   min-width: 40px; min-height: 40px; border-radius: 50%; padding: 0;
@@ -684,6 +701,37 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 }
 .np-btn-play:hover { background: color-mix(in srgb, var(--accent) 82%, var(--np-bg)); }
 .np-btn-play .np-ico { width: 18px; height: 18px; }
+
+/* ---- Waiting for bytes -------------------------------------------------
+ *
+ * The reported gap: press play on a track whose bytes are still coming
+ * and the bar showed a PAUSE glyph over a 0:00 timer and a motionless
+ * scrubber — a player claiming to be playing something silently, with
+ * nothing anywhere to say a download was in progress.
+ *
+ * Three cues, because no single one survives every breakpoint or every
+ * reader: this ring replaces the transport glyph, the scrubber and rail
+ * grow a fetched band behind the played one, and .np-notice says
+ * "Loading…" / "Buffering…" in an aria-live region. visibility rather
+ * than display on the glyph — the button must not resize as it swaps.
+ * ---------------------------------------------------------------------- */
+.np-btn-busy .np-ico { visibility: hidden; }
+.np-btn-busy::after {
+  content: ""; position: absolute; inset: 0; margin: auto;
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentcolor 30%, transparent);
+  border-top-color: currentcolor;
+  animation: np-spin 700ms linear infinite;
+}
+@keyframes np-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  /* No spinner at all rather than a frozen one: a static three-quarter
+   * ring over a hidden glyph is a shape with no meaning. The other two
+   * cues are motion-free — the notice is text, and the fetched band is a
+   * measurement, which is data rather than decoration. */
+  .np-btn-busy .np-ico { visibility: visible; }
+  .np-btn-busy::after { content: none; }
+}
 
 /* ---- Shuffle / repeat --------------------------------------------------
  * The reported bug: these were indistinguishable on and off. Three causes,
@@ -728,10 +776,19 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   -webkit-appearance: none; appearance: none;
   width: 100%; height: 16px; background: transparent; cursor: pointer; margin: 0;
 }
+/* Shared with the volume slider, which never sets --np-loaded: at the
+ * 0% default the two middle stops collapse onto the first and it renders
+ * exactly as the two-stop form did. A stop that lands BEFORE the one
+ * ahead of it is clamped up to it by the gradient spec, which is also
+ * what makes "played past the buffer" (a fresh seek) paint correctly
+ * rather than backwards. */
 .np-seek::-webkit-slider-runnable-track, .np-vol::-webkit-slider-runnable-track {
   height: 4px; border-radius: var(--radius-pill);
   background: linear-gradient(to right,
-    var(--accent) var(--np-progress, 0%), var(--np-track) var(--np-progress, 0%));
+    var(--accent) var(--np-progress, 0%),
+    var(--np-buffer) var(--np-progress, 0%),
+    var(--np-buffer) var(--np-loaded, 0%),
+    var(--np-track) var(--np-loaded, 0%));
 }
 .np-seek::-webkit-slider-thumb, .np-vol::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
@@ -742,6 +799,14 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 }
 .np-seek::-moz-range-track, .np-vol::-moz-range-track {
   height: 4px; border-radius: var(--radius-pill); background: var(--np-track);
+}
+/* Firefox paints the played part as its own pseudo ON TOP of the track,
+ * so the fetched band only has to cover from 0 to --np-loaded and the
+ * progress pseudo hides the head of it. Scoped to .np-seek because the
+ * volume slider has no such thing to show. */
+.np-seek::-moz-range-track {
+  background: linear-gradient(to right,
+    var(--np-buffer) var(--np-loaded, 0%), var(--np-track) var(--np-loaded, 0%));
 }
 .np-seek::-moz-range-progress, .np-vol::-moz-range-progress {
   height: 4px; border-radius: var(--radius-pill); background: var(--accent);
@@ -893,6 +958,13 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   /* Shuffle and repeat are the first to go when width runs out: they are
    * modes you set once, not controls you reach for mid-track. */
   .np-btn-toggle { display: none; }
+  /* Two lines is all the bar has room for down here — measured at 375px,
+   * the metadata column is 41px wide. So when the notice has something
+   * transient to say (loading, a converted copy, a playback error) it
+   * takes the artist's place rather than adding a third line and growing
+   * the dock: the artist is static and one tap away on the album page,
+   * and the notice is neither. */
+  .np-meta:has(.np-notice:not(:empty)) .np-sub { display: none; }
   .track { grid-template-columns: 2rem 1fr auto; }
   .track-meta, .track-dl { display: none; }
 }
