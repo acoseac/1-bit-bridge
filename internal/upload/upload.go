@@ -33,6 +33,10 @@ var (
 	ErrNoSpace        = errors.New("upload: insufficient free space")
 	ErrIncomplete     = errors.New("upload: file incomplete")
 	ErrUnknownRoot    = errors.New("upload: not a configured library root")
+	// ErrStagedFileShort means the staged `.part` holds fewer bytes than the
+	// durable offset claims — the staged data is gone, so resuming would
+	// commit a zero-filled prefix. See resumeOffset.
+	ErrStagedFileShort = errors.New("upload: staged file is shorter than the durable offset")
 
 	// ErrLibraryNotWritable is a CONFIGURATION fault, not a server fault, and
 	// it is worth its own sentinel because the generic answer is actively
@@ -121,7 +125,8 @@ type Manager struct {
 	freeBytes func(dir string) (int64, error)
 
 	// reclaimable reports what a trash purge could return, for the NoSpace
-	// error. Nil until PR 5 wires it.
+	// error. Wired to trash.Manager.Reclaimable in cmd/bridge; nil only in a
+	// test that does not care, in which case the 507 reports zero.
 	reclaimable func(root string) int64
 
 	now func() time.Time
@@ -487,6 +492,27 @@ func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDi
 	}
 	defer func() { _ = f.Close() }()
 
+	// Refuse a staged file SHORTER than the offset claims, before truncating.
+	//
+	// os.Truncate grows as readily as it shrinks — on a short file it extends
+	// with zeros — and openStagedFile carries O_CREATE, so a `.part` that has
+	// gone missing beside a live `.meta` produces an st.Offset-byte run of
+	// zeros that the resume then appends to and commits. Only a client that
+	// declared a whole-file digest would catch it. The trigger is external
+	// (an operator tidying the staging dir, a snapshot restore of the staging
+	// volume), which makes this a missing assertion rather than a live bug —
+	// but the failure it admits is a silently corrupt file in the library,
+	// and the session is cheap to restart.
+	fi, err := f.Stat()
+	if err != nil {
+		return st.Offset, fmt.Errorf("stat staged file: %w", err)
+	}
+	if fi.Size() < st.Offset {
+		return st.Offset, fmt.Errorf(
+			"%w: staged file is %d bytes but the durable offset is %d — the staged data is "+
+				"gone; start the upload again", ErrStagedFileShort, fi.Size(), st.Offset)
+	}
+
 	// Discard anything past the durable offset: a dropped PUT leaves a tail
 	// that was never acknowledged.
 	if err := f.Truncate(st.Offset); err != nil {
@@ -668,7 +694,13 @@ func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutco
 	// RENAME_NOREPLACE is Linux-only, and the os.Link trick needs
 	// hardlinks, which the reference deployment's rclone/B2 mount does not
 	// provide. One bridge is one process, which is the scope that matters.
-	unlockDest := m.destLocks.lock(dest)
+	// Keyed on the case-FOLDED destination when the volume is
+	// case-insensitive. Two sessions committing `Artist/Album/Song.flac` and
+	// `artist/album/song.flac` are addressing ONE file on APFS/NTFS, but the
+	// raw byte string gives them different keys — so neither waits for the
+	// other, both os.Stat miss, and the second rename destroys the first.
+	// That is precisely the outcome this lock exists to prevent.
+	unlockDest := m.destLocks.lock(destLockKey(dest))
 	defer unlockDest()
 
 	if !doc.Overwrite {
@@ -705,6 +737,19 @@ func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutco
 // accident that happens to be correct is one edit away from not being. With
 // explicit positioning the offset is an assertion: a future change that drops
 // the truncate fails loudly instead of appending to garbage.
+// destLockKey folds a commit destination so two spellings of one file take one
+// lock.
+//
+// Folded UNCONDITIONALLY rather than probing the volume. On a case-insensitive
+// filesystem the fold is required — the two spellings are the same file, and
+// unfolded keys let both sessions past the collision check so the second rename
+// destroys the first. On a case-SENSITIVE one they are different files, and
+// folding only means two genuinely-distinct commits serialise behind one lock:
+// conservative, never wrong, and no filesystem probe on the commit path. The
+// existence check below still runs against the real path, so nothing about
+// which file is written changes.
+func destLockKey(dest string) string { return strings.ToLower(dest) }
+
 func openStagedFile(path string) (*os.File, error) {
 	// 0o644, not 0o600: this mode SURVIVES the commit rename, so it is the
 	// mode the file has once it is part of the library. 0o600 leaves an

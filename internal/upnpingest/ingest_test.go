@@ -238,3 +238,77 @@ func TestStableServerKey(t *testing.T) {
 		t.Errorf("same URL should produce same key: %q vs %q", k3, k1)
 	}
 }
+
+// TestAnUnknownBaselineNeverExpiresIntoAReap — the grace window is an escape
+// hatch for a fact about the UPSTREAM, and it was being applied to a fact about
+// US.
+//
+// walkLooksImplausible returns true for two different reasons: "the upstream
+// reported far fewer tracks than we last saw" (which can legitimately persist —
+// an operator really did empty it) and "ListUPnPTracksByServer failed, so we
+// could not read our own baseline". reapAuthorized gave both the same six-hour
+// window, so at the default 6h scan cadence the second or third tick authorized
+// a reap against a baseline nobody had ever seen — the guard's own docblock
+// inverted.
+func TestAnUnknownBaselineNeverExpiresIntoAReap(t *testing.T) {
+	i := &Ingester{implausibleSince: map[string]time.Time{}}
+	start := time.Unix(1_700_000_000, 0)
+
+	// Ten ticks, a full day apart — four times the grace window.
+	for n := 0; n < 10; n++ {
+		now := start.Add(time.Duration(n) * 24 * time.Hour)
+		ok, elapsed := i.reapAuthorized("udn", 5, 0, false, now)
+		if ok {
+			t.Fatalf("tick %d (%v elapsed): a reap was authorized with an unknown "+
+				"baseline — this deletes every row a partial walk did not reach", n, elapsed)
+		}
+	}
+
+	// NEGATIVE CONTROL, and the reason this is not just "the guard refuses
+	// everything": the SHAPE case, which is a fact about the upstream, still
+	// expires. An operator who really did empty a server must not be blocked
+	// forever.
+	j := &Ingester{implausibleSince: map[string]time.Time{}}
+	if ok, _ := j.reapAuthorized("udn", 1, 1000, true, start); ok {
+		t.Fatal("the FIRST implausible walk was authorized; a transient rebuild must cost one tick")
+	}
+	if ok, elapsed := j.reapAuthorized("udn", 1, 1000, true, start.Add(implausibleWalkGrace)); !ok {
+		t.Errorf("a genuinely-emptied upstream is still blocked after %v — the grace "+
+			"window no longer expires for the case it exists for", elapsed)
+	}
+
+	// And a plausible walk clears the window immediately, whichever it was.
+	k := &Ingester{implausibleSince: map[string]time.Time{}}
+	k.reapAuthorized("udn", 5, 0, false, start)
+	if ok, _ := k.reapAuthorized("udn", 1000, 1000, true, start.Add(time.Minute)); !ok {
+		t.Error("a plausible walk did not clear a window set by an unknown baseline")
+	}
+	if _, still := k.implausibleSince["udn"]; still {
+		t.Error("the bookkeeping survived a plausible walk")
+	}
+}
+
+// TestImplausibleReasonNamesWhichFact pins the split itself, since the two
+// reasons are now load-bearing rather than a shared boolean.
+func TestImplausibleReasonNamesWhichFact(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		walked, baseline int
+		baselineKnown    bool
+		want             implausibleWhy
+	}{
+		{"baseline unreadable", 5, 0, false, unknownBaseline},
+		{"baseline unreadable even with a full walk", 10_000, 0, false, unknownBaseline},
+		{"no baseline rows yet", 5, 0, true, plausible},
+		{"walked nothing", 0, 1000, true, implausibleShape},
+		{"walked far too little", 1, 1000, true, implausibleShape},
+		{"walked enough", 1000, 1000, true, plausible},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := implausibleReason(tc.walked, tc.baseline, tc.baselineKnown); got != tc.want {
+				t.Errorf("implausibleReason(%d, %d, %v) = %v, want %v",
+					tc.walked, tc.baseline, tc.baselineKnown, got, tc.want)
+			}
+		})
+	}
+}

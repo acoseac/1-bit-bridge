@@ -981,3 +981,71 @@ func TestHostilePathsAreRejectedNotAccepted(t *testing.T) {
 		t.Errorf("hostile paths were not reported: %+v", s.Rejected)
 	}
 }
+
+// TestResumeRefusesAStagedFileShorterThanItsOffset — os.Truncate GROWS as
+// readily as it shrinks, and openStagedFile carries O_CREATE. So a `.part`
+// that has gone missing beside a live `.meta` was recreated empty, extended to
+// st.Offset bytes of ZEROS, and resumed from there: the client's remaining
+// chunks land after a run of nulls and the file commits into the library.
+//
+// Only a whole-file digest would have caught it. The trigger is external — an
+// operator tidying the staging directory, a snapshot restore of the staging
+// volume — which makes this a missing assertion rather than a live bug, but
+// what it admits is a silently corrupt track and the session is cheap to
+// restart.
+func TestResumeRefusesAStagedFileShorterThanItsOffset(t *testing.T) {
+	m, root := newTestManager(t)
+	body := []byte("0123456789abcdefghij")
+	s := mustCreate(t, m, []FileDecl{{Path: "A/B/x.flac", Size: int64(len(body))}}, CreateOptions{})
+	fid := s.Files[0].ID
+
+	if _, err := m.WriteChunk(s.ID, fid, 0, bytes.NewReader(body[:10]), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// The staged bytes disappear while the meta record still claims ten.
+	if err := os.Remove(m.partPath(root, s.ID, fid)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := m.WriteChunk(s.ID, fid, 10, bytes.NewReader(body[10:]), nil, 0)
+	if !errors.Is(err, ErrStagedFileShort) {
+		t.Fatalf("resume error = %v, want ErrStagedFileShort — ten zero bytes would "+
+			"otherwise have been committed as the first half of this track", err)
+	}
+
+	// NEGATIVE CONTROL, in its own session because the one above is now at a
+	// refused offset: with the staged file INTACT the identical resume
+	// succeeds, so the assertion is about the missing bytes rather than about
+	// resuming at all.
+	s2 := mustCreate(t, m, []FileDecl{{Path: "A/B/y.flac", Size: int64(len(body))}}, CreateOptions{})
+	fid2 := s2.Files[0].ID
+	if _, err := m.WriteChunk(s2.ID, fid2, 0, bytes.NewReader(body[:10]), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.WriteChunk(s2.ID, fid2, 10, bytes.NewReader(body[10:]), nil, 0); err != nil {
+		t.Fatalf("a healthy resume was refused: %v", err)
+	}
+}
+
+// TestCommitLocksFoldCaseTwinDestinations — two sessions committing
+// `Artist/Album/Song.flac` and `artist/album/song.flac` address ONE file on
+// APFS/NTFS. Keyed on the raw byte string they took different locks, so neither
+// waited for the other, both existence checks could miss, and the second rename
+// destroyed the first — the outcome the lock exists to prevent.
+//
+// Asserted on the KEY rather than by racing two commits: the race is real but
+// timing-dependent, and what has to hold is that one file maps to one key.
+func TestCommitLocksFoldCaseTwinDestinations(t *testing.T) {
+	a := destLockKey("/srv/Music/Artist/Album/Song.flac")
+	b := destLockKey("/srv/Music/artist/album/song.flac")
+	if a != b {
+		t.Errorf("case twins take different locks (%q vs %q) — on a case-insensitive "+
+			"volume they are one file, and neither commit waits for the other", a, b)
+	}
+	// Distinct files still take distinct locks: the fold must not collapse
+	// everything into one global lock, which would serialise a folder upload.
+	if destLockKey("/srv/Music/A/1.flac") == destLockKey("/srv/Music/A/2.flac") {
+		t.Error("distinct destinations share a lock key")
+	}
+}

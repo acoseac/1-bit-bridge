@@ -575,16 +575,51 @@ func (i *Ingester) ingestOne(ctx context.Context, srv config.UPnPUpstreamServerC
 //     baseline. This is the partial case — an empty page MID-TREE truncates
 //     one subtree and leaves the rest of the walk looking clean.
 func walkLooksImplausible(walked, baseline int, baselineKnown bool) bool {
+	return implausibleReason(walked, baseline, baselineKnown) != plausible
+}
+
+// implausibleWhy names WHY a walk looks implausible, because the two reasons
+// are not the same kind of fact and must not share an escape hatch.
+type implausibleWhy int
+
+const (
+	// plausible: the walk covered enough of the baseline to trust.
+	plausible implausibleWhy = iota
+	// implausibleShape: the upstream reported far fewer tracks than we last
+	// saw. A fact about the UPSTREAM, and one that can legitimately persist —
+	// an operator really did empty it — so it is allowed to expire into
+	// authorization.
+	implausibleShape
+	// unknownBaseline: we could not read our OWN record of what this server
+	// last held. A fact about US, and it never becomes evidence about the
+	// upstream no matter how long it lasts. Expiring it would mean reaping
+	// against a baseline we never saw, which is the guard's own docblock
+	// inverted: "the guard is otherwise disarmed by exactly the query failure
+	// that hides how much we are about to delete."
+	//
+	// Same rule as the scanner's, one layer up: "we could not see this path"
+	// dominates every "…but it looks like X" classification.
+	unknownBaseline
+)
+
+func implausibleReason(walked, baseline int, baselineKnown bool) implausibleWhy {
 	if !baselineKnown {
-		return true
+		return unknownBaseline
 	}
+	return shapeReason(walked, baseline)
+}
+
+func shapeReason(walked, baseline int) implausibleWhy {
 	if baseline <= 0 {
-		return false
+		return plausible
 	}
 	if walked <= 0 {
-		return true
+		return implausibleShape
 	}
-	return float64(walked) < minPlausibleWalkFraction*float64(baseline)
+	if float64(walked) < minPlausibleWalkFraction*float64(baseline) {
+		return implausibleShape
+	}
+	return plausible
 }
 
 // reapAuthorized decides whether this walk's result may drive the reconcile
@@ -599,10 +634,32 @@ func walkLooksImplausible(walked, baseline int, baselineKnown bool) bool {
 //
 // Caller MUST hold runMu (see Ingester.implausibleSince).
 func (i *Ingester) reapAuthorized(udn string, walked, baseline int, baselineKnown bool, now time.Time) (bool, time.Duration) {
-	if !walkLooksImplausible(walked, baseline, baselineKnown) {
+	switch implausibleReason(walked, baseline, baselineKnown) {
+	case plausible:
 		delete(i.implausibleSince, udn)
 		return true, 0
+	case unknownBaseline:
+		// NEVER expires. The grace window below exists so an operator who
+		// really did empty an upstream is not blocked forever — that is a
+		// fact about the upstream, and it persists. "We could not read our own
+		// baseline" is a fact about US: it says nothing about the upstream no
+		// matter how many ticks it lasts, and at the default 6h scan cadence
+		// the second or third tick used to clear the window and authorize a
+		// reap against a baseline nobody ever saw. Pair that with a walk that
+		// was ALSO silently partial — a container that Browses empty mid-tree,
+		// which this file documents this upstream family as doing during a DB
+		// rebuild, with no error and no stats.Truncated — and the sweep
+		// deletes every row the walk never reached.
+		//
+		// The bookkeeping is still stamped so the caller's log can say how
+		// long this has been going on; it just never converts to permission.
+		if _, seen := i.implausibleSince[udn]; !seen {
+			i.implausibleSince[udn] = now
+			return false, 0
+		}
+		return false, now.Sub(i.implausibleSince[udn])
 	}
+
 	since, seen := i.implausibleSince[udn]
 	if !seen {
 		i.implausibleSince[udn] = now

@@ -387,3 +387,45 @@ func TestReadOnlyLibraryReturns503NotA500(t *testing.T) {
 		t.Errorf("the message does not say what to do: %q", msg)
 	}
 }
+
+// TestInsufficientSpaceReportsWhatTheTrashHolds — `reclaimableBytes` exists so
+// the UI can turn a dead end into "empty the trash and resume", and every real
+// 507 answered 0.
+//
+// `upload.WithReclaimable` had NO production caller: cmd/bridge built the
+// upload manager twenty lines before the trash manager existed, so the option
+// could not be passed, and the package's field comment still read "Nil until
+// PR 5 wires it". Both existing tests pass the option explicitly, which is
+// exactly why they were green while the operator was told there was nothing to
+// reclaim at the moment there was.
+//
+// Driven through the real handler: a test that constructs the manager with the
+// option is the shape that hid this.
+func TestInsufficientSpaceReportsWhatTheTrashHolds(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	enableUploads(t, srv)
+	root := cfg.LibraryRoots[0]
+
+	// A full volume, and 40 GB sitting in the trash.
+	const inTrash = int64(40 << 30)
+	srv.deps.Upload = upload.NewManager(
+		upload.Config{MinFreeBytes: 1 << 30},
+		func() []string { return []string{root} },
+		upload.WithFreeBytes(func(string) (int64, error) { return 0, nil }),
+		upload.WithReclaimable(func(string) int64 { return inTrash }),
+	)
+
+	var res map[string]any
+	code := doJSON(t, srv.Handler(), "POST", "/api/upload/sessions", map[string]any{
+		"root":  filepath.Base(root),
+		"files": []map[string]any{{"path": "A/B/x.flac", "size": 1 << 20}},
+	}, &res)
+	if code != http.StatusInsufficientStorage {
+		t.Fatalf("status = %d, want 507 (%v)", code, res)
+	}
+	got, _ := res["reclaimableBytes"].(float64)
+	if int64(got) != inTrash {
+		t.Errorf("reclaimableBytes = %v, want %d — the operator is told there is nothing "+
+			"to reclaim at the moment there is", res["reclaimableBytes"], inTrash)
+	}
+}
