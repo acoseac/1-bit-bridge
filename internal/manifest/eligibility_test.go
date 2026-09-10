@@ -227,6 +227,46 @@ func TestEligibleCountsForFolders_bindingOrder(t *testing.T) {
 	}
 }
 
+// TestEligibleCountsForPaths_bindingOrder is the IDENTITY-scoped twin, and it
+// is the one eligibility.go's docblock has named all along without it existing.
+//
+// The shared `eligibilityBinds` helper is pinned by the ForFolders sibling
+// above, so what is unpinned is not the helper — it is the `?` placement inside
+// eligibleCountsForPathsSQL, whose own bind (a json_each path array) has to
+// come AFTER the four target binds in textual order. Reorder that query and
+// only this scope breaks, silently: the coverage bars for an album or artist
+// go wrong while every folder-scoped number stays right.
+//
+// Same fixture logic as the sibling: a track at (rate=100, bits=200) against a
+// target of (rate=200, bits=100) is NOT eligible when bound correctly, and IS
+// under a transposition.
+func TestEligibleCountsForPaths_bindingOrder(t *testing.T) {
+	s := openTempStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	seedFormatTrack(t, s, "Bind/01.flac", "FLAC", 100, 200, false)
+
+	got, err := s.EligibleCountsForPaths(context.Background(), []string{"Bind/01.flac"}, 200, 100, EligibilityOpts{})
+	if err != nil {
+		t.Fatalf("EligibleCountsForPaths: %v", err)
+	}
+	if got.Upscale != 0 {
+		t.Errorf("Upscale = %d, want 0 — binding order regressed (rate/bits transposed, "+
+			"or the path array moved ahead of the target binds?)", got.Upscale)
+	}
+
+	// NEGATIVE CONTROL: the same track against a target it CAN reach must
+	// count, so the assertion above is about the binding rather than about a
+	// query that returns nothing.
+	got, err = s.EligibleCountsForPaths(context.Background(), []string{"Bind/01.flac"}, 200, 200, EligibilityOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Upscale != 1 {
+		t.Fatalf("Upscale = %d for a reachable target, want 1 — this query counts nothing, "+
+			"so the assertion above proves nothing", got.Upscale)
+	}
+}
+
 // TestEligibleRollupByPrefix pins the whole-subtree twin, including
 // the empty-prefix (whole library) branch.
 func TestEligibleRollupByPrefix(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -435,5 +436,81 @@ func TestManagedFieldHidesTheControlsThatResolveIntoIt(t *testing.T) {
 	js := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	if !strings.Contains(js, "data-managed-with=") {
 		t.Error("hideManagedSettings no longer acts on data-managed-with")
+	}
+}
+
+// TestManagedControlsAreEnforcedAtTheRouteTable is the guard
+// managed_controls.go's docblock has named all along without it existing.
+//
+// What the two tests above actually check is narrower than that docblock
+// claimed: TestManagedControlsRefuseTheRequest drives a hand-maintained literal
+// (`managedControlRoutes`), and TestEveryManagedControlNameGatesARoute walks the
+// reverse direction — every NAME gates something. Neither reads the route table,
+// so a new `s.managed(...)` route silently gets no behavioural coverage, and a
+// removed one leaves an entry asserting against a route that no longer exists.
+// The docblock said a new one "cannot be added without a decision"; it could.
+//
+// This closes the loop the honest way: parse admin.go's registrations, extract
+// every (control, method, path) actually wrapped in `s.managed`, and require
+// that set to EQUAL the table the behavioural test drives. Adding a managed
+// route without a test row fails here; deleting a route without pruning the row
+// fails here.
+//
+// It deliberately does NOT claim to catch "a route that SHOULD be managed and
+// is not" — nothing can decide that from source, and pretending otherwise is
+// how the original claim came to be wrong. What it guarantees is that the
+// declared set and the exercised set are the same set.
+func TestManagedControlsAreEnforcedAtTheRouteTable(t *testing.T) {
+	raw, err := os.ReadFile("admin.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CRLF-normalised at the read: nothing pins eol, so a Windows checkout
+	// would otherwise make this scan find nothing and pass vacuously.
+	src := strings.ReplaceAll(string(raw), "\r\n", "\n")
+
+	// mux.HandleFunc("<METHOD> <PATH>", s.managed(config.<Const>, ...
+	re := regexp.MustCompile(
+		`mux\.HandleFunc\("([A-Z]+) ([^"]+)",\s*s\.managed\(config\.(ManagedControl\w+)`)
+	constToName := map[string]string{
+		"ManagedControlRestart":     config.ManagedControlRestart,
+		"ManagedControlUpdates":     config.ManagedControlUpdates,
+		"ManagedControlRoots":       config.ManagedControlRoots,
+		"ManagedControlVariantsDir": config.ManagedControlVariantsDir,
+		"ManagedControlBackups":     config.ManagedControlBackups,
+	}
+
+	inSource := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		method, path, constName := m[1], m[2], m[3]
+		name, ok := constToName[constName]
+		if !ok {
+			t.Errorf("admin.go gates a route with config.%s, which this test does not "+
+				"know — add it here and to managedControlRoutes", constName)
+			continue
+		}
+		inSource[name+" "+method+" "+path] = true
+	}
+	if len(inSource) < 5 {
+		t.Fatalf("only %d managed routes scraped from admin.go — the registration shape "+
+			"changed and this test is no longer reading it", len(inSource))
+	}
+
+	inTable := map[string]bool{}
+	for _, rt := range managedControlRoutes {
+		inTable[rt.control+" "+rt.method+" "+rt.path] = true
+	}
+
+	for k := range inSource {
+		if !inTable[k] {
+			t.Errorf("admin.go gates %q but managedControlRoutes does not exercise it — "+
+				"the refusal is the security boundary and nothing drives it", k)
+		}
+	}
+	for k := range inTable {
+		if !inSource[k] {
+			t.Errorf("managedControlRoutes exercises %q, which admin.go does not gate — "+
+				"the row passes for some other reason, or the route moved", k)
+		}
 	}
 }

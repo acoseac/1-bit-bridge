@@ -7402,7 +7402,7 @@ func (s *Store) ListTrackProjectionsUnderPrefix(ctx context.Context, prefix, var
 	// placeholder. Bind `variantPrefix` first, `pattern` second.
 	// Swapping them silently returns zero rows because SQLite would
 	// search track paths for the variant-prefix string. Locked by
-	// TestListTrackProjectionsUnderPrefix_bindingOrder.
+	// TestListTrackProjectionsUnderPrefix_BindingOrder.
 	variantLike := variantPrefix + `-%`
 	rows, err := s.db.QueryContext(ctx,
 		trackProjectionSelect+`

@@ -132,3 +132,45 @@ func TestEveryFilterFlagsetGuardsItsPositionals(t *testing.T) {
 			"so this test would pass no matter what")
 	}
 }
+
+// TestPathScopedCommandsRefuseAPositionalScope is the --path half of the family
+// TestFilterCommandsRefuseAPositionalScope covers.
+//
+// `--filter` was never the whole class. `bridge duplicates "Miles Davis"` and
+// `bridge enrichment misses "Blue Note"` both parse with --path EMPTY, and an
+// empty path scope is the whole library: the prefix helpers emit a query with
+// no WHERE clause at all, so the operator gets a full-table answer presented as
+// the scoped one they asked for. Read-only, which is why these two survived
+// #856 (which fixed their sibling `enrichment retry`) and #882 (which fixed the
+// four --filter commands) — the class was closed twice and never swept.
+func TestPathScopedCommandsRefuseAPositionalScope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(stdout, stderr io.Writer) int
+	}{
+		{"duplicates", func(stdout, stderr io.Writer) int {
+			return duplicatesCmd(context.Background(), []string{"Miles Davis"}, stdout, stderr)
+		}},
+		{"enrichment misses", func(stdout, stderr io.Writer) int {
+			return enrichmentCmd(context.Background(), []string{"misses", "Blue Note"}, stdout, stderr)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := tc.run(&stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("a positional scope was accepted (exit 0) — the run covers the "+
+					"whole library and reports it as the scoped answer.\nstdout: %s", stdout.String())
+			}
+			// The message has to show the flag form, or the operator is told
+			// "no" without being told how.
+			if !strings.Contains(stderr.String(), "--path") {
+				t.Errorf("refusal does not show the --path form:\n%s", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "Miles Davis") &&
+				!strings.Contains(stderr.String(), "Blue Note") {
+				t.Errorf("refusal does not quote back what was typed:\n%s", stderr.String())
+			}
+		})
+	}
+}
