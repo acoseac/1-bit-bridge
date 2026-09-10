@@ -39,6 +39,15 @@ var (
 	classLiteralRe = regexp.MustCompile(`class:\s*["']([^"'$` + "`" + `]+)["']`)
 	// classList.add / toggle / remove("x")
 	classListRe = regexp.MustCompile(`classList\.(?:add|toggle|remove)\(["']([^"'$` + "`" + `]+)["']`)
+	// spriteIcon(name, "x"). createElement cannot make SVG, so that helper
+	// puts the class on through setAttribute — where the `class:` literal
+	// scrape above cannot see it, and neither can this one at the point of
+	// the write, because the helper receives it as a variable. The literal
+	// at the CALL SITE is the only place it appears, so that is where this
+	// looks. nowplaying.js's iconButton has the same gap for `np-ico` and
+	// is deliberately left alone; its other classes are written as
+	// per-branch literals precisely so the scrape above keeps seeing them.
+	spriteIconRe = regexp.MustCompile(`spriteIcon\([^,)]+,\s*["']([^"'$` + "`" + `]+)["']`)
 	// Any .name appearing in a stylesheet — selectors, not properties.
 	cssClassRe = regexp.MustCompile(`\.([A-Za-z][\w-]*)`)
 	// Comments are stripped BEFORE the scan. This file's own commentary
@@ -126,6 +135,9 @@ func emittedPlayerClasses(t *testing.T) []string {
 			}
 		}
 		for _, m := range classListRe.FindAllStringSubmatch(src, -1) {
+			set[m[1]] = true
+		}
+		for _, m := range spriteIconRe.FindAllStringSubmatch(src, -1) {
 			set[m[1]] = true
 		}
 	}

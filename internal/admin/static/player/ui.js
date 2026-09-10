@@ -24,6 +24,33 @@ export function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+/**
+ * An <svg><use> pointing at one of layout.html's transport sprite symbols.
+ *
+ * createElement cannot make SVG, so this goes through createElementNS and
+ * setAttribute — which also means `cls` never reaches
+ * TestPlayerEmittedClassesAreStyled's `class:` literal scrape, so a class
+ * passed here needs a rule that nothing will check for. nowplaying.js's
+ * iconButton documents the same gap for the same reason; it is left
+ * alone rather than folded in here, because its OTHER classes are written
+ * as per-branch literals precisely so that scrape can see them.
+ *
+ * Presentation belongs on this host element, never on the sprite's source
+ * <g>: a rule matching the original does not cross into the shadow tree
+ * that <use> builds from it.
+ */
+export function spriteIcon(name, cls) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", cls);
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `#i-np-${name}`);
+  svg.appendChild(use);
+  return svg;
+}
+
 /** An internal link that the router intercepts. */
 export function link(href, opts = {}, ...children) {
   return el("a", { ...opts, attrs: { ...(opts.attrs || {}), href, "data-route": "" } }, ...children);
