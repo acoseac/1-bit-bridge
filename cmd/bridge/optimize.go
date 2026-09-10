@@ -41,6 +41,7 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	dryRun := fs.Bool("dry-run", false, "list candidates without converting")
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion. Shares the upscale GC path — preserves BOTH optimized-* and upscaled-* sidecars.")
+	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
 	if !parseTranscodeArgs(fs, "optimize", args, stderr) {
 		return 2
 	}
@@ -67,7 +68,7 @@ func optimizeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		// Same GC sweep — path-equality against the DB rows is
 		// prefix-agnostic, so both upscaled-* and optimized-* rows
 		// are preserved together.
-		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir)
+		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir, *allowEmpty)
 	}
 
 	// The compact tier admits DSD sources too, under the same operator

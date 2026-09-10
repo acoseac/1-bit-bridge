@@ -21,6 +21,22 @@ type fakeSidecarLister struct {
 	known map[string]struct{}
 }
 
+// withLiveRow returns a known-set carrying one real sidecar path.
+//
+// An EMPTY known-set is now a refusal, because it is the state in which every
+// file on disk reads as an orphan — so a fixture that used one was describing
+// the very bridge the sweeper must not act on, while asserting that it acts.
+// One live row is also simply more honest: a library with orphans has variants.
+// The path names no file on disk, deliberately: a `track_variants` row whose
+// sidecar is gone is a real state (it is what the REVERSE sweeper exists for),
+// and seeding an actual file would add an entry to the walk and perturb the
+// chunk-cap arithmetic the caller is measuring.
+func withLiveRow(outputDir string) map[string]struct{} {
+	return map[string]struct{}{
+		filepath.Join(outputDir, "live-row.upscaled-v1-96000-24.flac"): {},
+	}
+}
+
 func (f *fakeSidecarLister) AllSidecarPaths(ctx context.Context) (map[string]struct{}, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -223,7 +239,7 @@ func TestOrphanSidecarSweeperRespectsChunkCap(t *testing.T) {
 	const testChunk = 100
 	totalEntries := testChunk + 50 // 150 entries → splits into 100 + 50
 	paths := seedTestSidecarTree(t, outputDir, "x", totalEntries)
-	lister := &fakeSidecarLister{known: map[string]struct{}{}}
+	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
 
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.chunkSizeForTest = testChunk
@@ -267,7 +283,7 @@ func TestOrphanSidecarSweeperRespectsChunkCap(t *testing.T) {
 func TestOrphanSidecarSweeperHonoursCancellation(t *testing.T) {
 	outputDir := t.TempDir()
 	seedTestSidecarTree(t, outputDir, "c", 200) // plenty to walk
-	lister := &fakeSidecarLister{known: map[string]struct{}{}}
+	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
@@ -297,8 +313,9 @@ func TestOrphanSidecarSweeperHonoursCancellation(t *testing.T) {
 // path: interval ≤ 0 → no goroutine spawned. The stopFn is still
 // safe to call (no-op).
 func TestOrphanSidecarSweeperStartIntervalZeroIsNoOp(t *testing.T) {
-	lister := &fakeSidecarLister{known: map[string]struct{}{}}
-	s := NewOrphanSidecarSweeper(lister, t.TempDir(), 0)
+	dir := t.TempDir()
+	lister := &fakeSidecarLister{known: withLiveRow(dir)}
+	s := NewOrphanSidecarSweeper(lister, dir, 0)
 	stop := s.Start(context.Background())
 	// stopFn must be idempotent and safe.
 	stop()
@@ -312,7 +329,7 @@ func TestOrphanSidecarSweeperStartIntervalZeroIsNoOp(t *testing.T) {
 func TestOrphanSidecarSweeperStartTickFires(t *testing.T) {
 	outputDir := t.TempDir()
 	seedTestSidecarTree(t, outputDir, "s", 3) // all orphan
-	lister := &fakeSidecarLister{known: map[string]struct{}{}}
+	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
@@ -366,7 +383,7 @@ func TestOrphanSidecarSweeperPreservesNonFlacFiles(t *testing.T) {
 		t.Fatalf("write flac: %v", err)
 	}
 
-	lister := &fakeSidecarLister{known: map[string]struct{}{}}
+	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	s.gracePeriodForTest = 1 * time.Nanosecond
 	ageFixtures(t, outputDir)
@@ -417,7 +434,7 @@ func TestOrphanSidecarSweeperGracePeriodProtectsConcurrentWrites(t *testing.T) {
 	// Empty known-set: the file is NOT in track_variants (writer's
 	// row hasn't committed yet). Without the grace gate, the sweeper
 	// would unlink immediately.
-	lister := &fakeSidecarLister{known: map[string]struct{}{}}
+	lister := &fakeSidecarLister{known: withLiveRow(outputDir)}
 	s := NewOrphanSidecarSweeper(lister, outputDir, 1*time.Hour)
 	// Grace period longer than test wall-clock — the fresh file's
 	// modtime (just now) is firmly inside the grace window.
@@ -682,5 +699,93 @@ func TestPathWalkCompare_ZeroAlloc(t *testing.T) {
 		_ = pathWalkCompare(a, b)
 	}); allocs != 0 {
 		t.Errorf("pathWalkCompare allocated %v times/run, want 0", allocs)
+	}
+}
+
+// TestOrphanSidecarSweepRefusesAnEmptyKnownSet is the guard the FORWARD sweep
+// did not have while its reverse twin had two.
+//
+// `AllSidecarPaths` returning zero rows with a nil error is an ordinary state,
+// not a fault: `rm -f bridge.db*` + restart is the reset procedure this repo's
+// own CLAUDE.md documents, and `run` takes a tick at boot; a single<->multi
+// root flip runs WipeFilesystemTracks and `track_variants` CASCADEs on
+// `tracks`. In that window every file under the variants directory misses an
+// empty `known` and the walk would unlink the whole rendition tree.
+func TestOrphanSidecarSweepRefusesAnEmptyKnownSet(t *testing.T) {
+	outputDir := t.TempDir()
+	seedTestSidecarTree(t, outputDir, "orphan", 3)
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: map[string]struct{}{}}, outputDir, time.Hour)
+	s.gracePeriodForTest = time.Nanosecond
+	ageFixtures(t, outputDir)
+
+	if n := s.tick(context.Background()); n != 0 {
+		t.Errorf("unlinked = %d, want 0 — an empty catalog must refuse, not reap everything", n)
+	}
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("%d files survive, want 3 — the rendition tree was reaped on an empty catalog", len(entries))
+	}
+
+	// NEGATIVE CONTROL, and what stops this passing against a sweeper that
+	// simply never unlinks anything: with ONE row in the catalog the same
+	// three orphans go.
+	s2 := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow(outputDir)}, outputDir, time.Hour)
+	s2.gracePeriodForTest = time.Nanosecond
+	if n := s2.tick(context.Background()); n != 3 {
+		t.Errorf("unlinked = %d with a populated catalog, want 3 — the refusal is now unconditional", n)
+	}
+}
+
+// TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir — an empty set
+// over an empty directory is not the hazard, it is a bridge that has never
+// transcoded anything. It must stay a silent no-op rather than a refusal an
+// operator has to interpret.
+func TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir(t *testing.T) {
+	outputDir := t.TempDir()
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: map[string]struct{}{}}, outputDir, time.Hour)
+	if n := s.tick(context.Background()); n != 0 {
+		t.Errorf("unlinked = %d, want 0", n)
+	}
+}
+
+// TestOrphanSidecarSweepSkipsDotDirectories — `bridge upscale --gc` has pruned
+// these since it was written; this sweeper, the same walk unattended on a
+// timer, did not. With `variantsDir` on a dedicated volume, `.Trashes/<uid>/`
+// and `.Trash-1000/` sit under the walk root, so any `.flac` inside one is
+// missing from the catalog and older than the grace: files an operator put in
+// the Trash specifically so they could get them back.
+//
+// Asserted with a POPULATED catalog, so it pins the walk prune rather than
+// riding on the empty-set refusal above.
+func TestOrphanSidecarSweepSkipsDotDirectories(t *testing.T) {
+	outputDir := t.TempDir()
+	trash := filepath.Join(outputDir, ".Trashes", "501")
+	if err := os.MkdirAll(trash, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rescued := filepath.Join(trash, "someones-album.flac")
+	if err := os.WriteFile(rescued, []byte("recoverable"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(outputDir, "real.upscaled-v1-96000-24.flac")
+	if err := os.WriteFile(orphan, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewOrphanSidecarSweeper(&fakeSidecarLister{known: withLiveRow(outputDir)}, outputDir, time.Hour)
+	s.gracePeriodForTest = time.Nanosecond
+	ageFixtures(t, outputDir)
+
+	// The real orphan still goes — this is not a sweeper that stopped working.
+	if n := s.tick(context.Background()); n != 1 {
+		t.Errorf("unlinked = %d, want 1 (the orphan beside the dot-dir)", n)
+	}
+	if _, err := os.Stat(rescued); err != nil {
+		t.Errorf("a file inside %s was unlinked: %v", trash, err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Error("the real orphan survived; the prune is too wide")
 	}
 }

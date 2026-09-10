@@ -84,7 +84,7 @@ func TestRunGCPurgesStaleRenderScratch(t *testing.T) {
 	touch(fresh, time.Hour)
 
 	var stdout, stderr bytes.Buffer
-	if rc := runGC(context.Background(), &stdout, &stderr, store, outputDir, tempDir); rc != 0 {
+	if rc := runGC(context.Background(), &stdout, &stderr, store, outputDir, tempDir, false); rc != 0 {
 		t.Fatalf("runGC exit=%d\nstdout=%s\nstderr=%s", rc, stdout.String(), stderr.String())
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {

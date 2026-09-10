@@ -36,6 +36,7 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	dryRun := fs.Bool("dry-run", false, "list how many tracks would be analyzed without doing it")
 	force := fs.Bool("force", false, "re-analyze even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan waveform sidecars (files with no DB row); skips analysis")
+	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no analysis row references any waveform (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
 	if !parseTranscodeArgs(fs, "analyze", args, stderr) {
 		return 2
 	}
@@ -64,7 +65,7 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 	outputDir := analyze.WaveformDirFor(cfg.DataDir)
 	if *gc {
-		return runAnalyzeGC(ctx, stdout, stderr, store, outputDir)
+		return runAnalyzeGC(ctx, stdout, stderr, store, outputDir, *allowEmpty)
 	}
 
 	resolver := bridgefs.New(cfg.LibraryRoots)
@@ -172,7 +173,7 @@ producer:
 // waveform output dir that no `track_analysis` row points at (plus
 // stale `.tmp` debris from interrupted runs). Mirrors the forward sweep
 // of `bridge upscale --gc`.
-func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string) int {
+func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string, allowEmpty bool) int {
 	rows, err := store.AllAnalysisRows(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list analysis rows: %v\n", err)
@@ -193,6 +194,13 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	if _, statErr := os.Stat(outputDir); errors.Is(statErr, fs.ErrNotExist) {
 		fmt.Fprintf(stdout, "analyze --gc: no waveform dir at %s; nothing to do\n", outputDir)
 		return 0
+	}
+	// Same refusal as `upscale --gc`, for the same reason: every file misses an
+	// empty `known`, so the walk below would classify the whole waveform cache
+	// as orphaned. Cheaper to rebuild than a PCM rendition, which is why this
+	// is the milder of the two — not a different rule.
+	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir, len(known), allowEmpty); code != 0 {
+		return code
 	}
 
 	var removed, kept int

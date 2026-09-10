@@ -205,6 +205,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	dryRun := fs.Bool("dry-run", false, "list candidates without converting")
 	force := fs.Bool("force", false, "re-convert even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion")
+	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
 	if !parseTranscodeArgs(fs, "upscale", args, stderr) {
 		return 2
 	}
@@ -220,7 +221,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	defer r.store.Close()
 
 	if *gc {
-		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir)
+		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir, *allowEmpty)
 	}
 	return runUpscaleBatch(ctx, stdout, stderr, r.store, r.cfg, r.resolver, runUpscaleParams{
 		targetRateFlag: *targetRate,
@@ -822,6 +823,44 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, outputDir 
 	return removed, kept, failed, 0
 }
 
+// gcRefuseEmptyKnownSetOverPopulatedDir is the FORWARD sweep's twin of
+// gcCheckOutputDirBeforeReverseSweep, and the direction that was missing.
+//
+// The reverse guard refuses to mass-delete ROWS when the directory reads empty.
+// Nothing refused to mass-delete FILES when the rows read empty — and the
+// forward sweep runs FIRST, so by the time the reverse guard fires the sidecars
+// are already gone. `bridge upscale --gc` has no `--confirm` gate either
+// (unlike `artwork --gc`'s typed phrase), so a single mistyped `--config` is
+// the whole distance.
+//
+// The routes to an empty catalog with a populated directory are ordinary: a
+// `--config` naming a different install, a DB restored from a snapshot older
+// than the renditions, or a run between a root flip's WipeFilesystemTracks and
+// the rescan that refills it.
+//
+// Unlike the background sweeper, there IS an operator here — someone who
+// really did empty their library is standing at the terminal — so this one has
+// an override. Intent is expressed by the person who has it, and the refusal
+// names the flag.
+//
+// An empty set over an empty directory exits 0 as before: nothing to protect,
+// nothing to do.
+func gcRefuseEmptyKnownSetOverPopulatedDir(stderr io.Writer, outputDir string, knownCount int, allowEmpty bool) int {
+	if knownCount > 0 || allowEmpty {
+		return 0
+	}
+	if reason := integrity.VariantsDirSweepBlockReason(outputDir); reason != "" {
+		// Missing, empty, or unreadable — there is nothing to lose.
+		return 0
+	}
+	fmt.Fprintf(stderr, "GC forward sweep: no variant row references any sidecar, but %q holds files.\n", outputDir)
+	fmt.Fprintln(stderr, "  Every file there would be treated as an orphan and removed.")
+	fmt.Fprintln(stderr, "  This usually means the wrong config/database: check that --config names the")
+	fmt.Fprintln(stderr, "  install whose variants directory you meant, and that a scan has run.")
+	fmt.Fprintln(stderr, "  If the library really is empty and you want the sidecars gone, re-run with --allow-empty.")
+	return 1
+}
+
 // gcCheckOutputDirBeforeReverseSweep enforces the "don't mass-delete
 // rows on a disappeared transcoded root" guard documented in PR #207.
 // Returns 0 on healthy state (proceed) or a non-zero exit code on
@@ -941,7 +980,7 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 // three helpers (`runGCForwardSweep` / `gcCheckOutputDirBeforeReverseSweep`
 // / `runGCReverseSweep`). Behaviour is byte-identical; locked by the
 // existing GC test suite.
-func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir, tempDir string) int {
+func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir, tempDir string, allowEmpty bool) int {
 	// DSD-render scratch first: the crash-orphan case the render's
 	// deferred remove cannot cover. Independent of the sidecar sweeps and
 	// bounded to the bridge-owned subdirectory, so it runs whatever they
@@ -964,6 +1003,10 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 	known := make(map[string]bool, len(allRows))
 	for _, r := range allRows {
 		known[strings.ToLower(filepath.Clean(r.SidecarPath))] = true
+	}
+
+	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir, len(known), allowEmpty); code != 0 {
+		return code
 	}
 
 	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, outputDir, known)
