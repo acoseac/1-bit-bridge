@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -211,5 +212,66 @@ func TestAFailedLyricsReadServesLastGoodAndBacksOff(t *testing.T) {
 	if stamped.IsZero() {
 		t.Error("the clock was not stamped on failure — the TTL would never trip, " +
 			"so every poll re-runs a scan that is already failing")
+	}
+}
+
+// TestTheLyricsCardAndTheSweepReadTheSamePredicate — the split this feature
+// shipped with, asserted from the console side.
+//
+// `/api/jobs` always read the flag live from the config holder. The sweeper
+// took it at boot, inside the `if` that decided whether to wire its sink at
+// all. The two could not disagree while a restart was the only way to change
+// the value — and adding a settings field is exactly what would have made them,
+// with the card reporting `enabled: true` over a sweep that was never wired.
+//
+// Both sides now call config.AtlasConfig.LyricsTierActive. This pins the
+// console half: the card follows a PATCH within the same process, with no
+// restart, and it follows the WHOLE predicate rather than the one field — the
+// tier rides the harvest credential, so a bridge without one must not be told
+// the tier is running. (The sweeper half is
+// TestTheGateIsLiveAndFailsClosed in internal/atlasharvest.)
+func TestTheLyricsCardAndTheSweepReadTheSamePredicate(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	cfg.Atlas.Enabled = true
+	cfg.Atlas.HarvestEnabled = true
+	cfg.Atlas.LyricsEnabled = false
+	srv.deps.CfgHolder.Store(cfg)
+	h := srv.Handler()
+
+	enabled := func() bool {
+		t.Helper()
+		var got jobsSnapshotResponse
+		if code := doJSON(t, h, "GET", "/api/jobs", nil, &got); code != 200 {
+			t.Fatalf("jobs: %d", code)
+		}
+		return got.Lyrics.Enabled
+	}
+	if enabled() {
+		t.Fatal("the card reports the tier on with the flag off")
+	}
+
+	var resp settingsPatchResponse
+	if code := doJSON(t, h, "PATCH", "/api/settings",
+		map[string]any{"atlasLyricsEnabled": true}, &resp); code != 200 {
+		t.Fatalf("patch: %d", code)
+	}
+	// LIVE, not restart: the sink is wired unconditionally and the flag is the
+	// gate. A `restart` here would mean the console and the sweeper had gone
+	// back to disagreeing about when the change lands.
+	if got := string(resp.Fields["atlasLyricsEnabled"].Status); got != string(applyLive) {
+		t.Errorf("apply status = %q, want live", got)
+	}
+	if !enabled() {
+		t.Error("the card did not follow the PATCH — the flag is not read live")
+	}
+
+	// The WHOLE predicate, not the one field: turning off the credential the
+	// tier rides must take the card with it, or an operator is told a sweep is
+	// running that cannot authenticate.
+	cfg = config.Clone(srv.deps.CfgHolder.Load())
+	cfg.Atlas.HarvestEnabled = false
+	srv.deps.CfgHolder.Store(cfg)
+	if enabled() {
+		t.Error("the card reports the tier on without the harvest credential it rides")
 	}
 }

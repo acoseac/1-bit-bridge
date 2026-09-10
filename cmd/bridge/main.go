@@ -3079,11 +3079,22 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// credential. The cache dir failing to create degrades to
 		// availability-checks-only (no downloads, /v1/booklet answers 202)
 		// rather than disabling the feature.
-		// The network lyrics tier rides the same credential. Opt-in, and
-		// inert without it: nil leaves tickLyrics a no-op, exactly as a nil
-		// Booklets disables booklets.
-		if cfg.Atlas.LyricsEnabled {
-			harvestClient.Lyrics = lyricsSinkAdapter{store: manifestStore}
+		// The network lyrics tier rides the same credential. The sink is wired
+		// UNCONDITIONALLY and the flag is the gate, read live per tick — the
+		// "always construct, never stop" shape, so `atlas.lyricsEnabled` hot-
+		// applies rather than needing a restart. Wiring it inside an `if` made
+		// the nil-ness of the sink the gate, which the console could not see:
+		// /api/jobs read the flag live while the sweeper had taken it at boot.
+		// config.AtlasConfig.LyricsTierActive is the single definition both
+		// now read.
+		harvestClient.Lyrics = lyricsSinkAdapter{store: manifestStore}
+		// apiSrv.ConfigHolder() rather than the `cfgHolder` local, which is
+		// not bound until below this block — the holder itself is a stable
+		// pointer, so reading it through the accessor per call is the same
+		// object with no ordering dependency to get wrong later.
+		harvestClient.LyricsEnabled = func() bool {
+			live := apiSrv.ConfigHolder().Load()
+			return live != nil && live.Atlas.LyricsTierActive()
 		}
 		harvestClient.Booklets = bookletSinkAdapter{store: manifestStore}
 		if err := os.MkdirAll(bookletsDir, 0o700); err != nil {

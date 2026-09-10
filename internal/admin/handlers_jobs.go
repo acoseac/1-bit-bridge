@@ -233,7 +233,10 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	// Network lyrics tier. The counts are only READ when the feature is on:
 	// they cost a full scan, and a bridge that never enabled this should not
 	// pay for it on every poll. Behind lyricsStatsTTL when it is on.
-	resp.Lyrics.Enabled = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled && cfg.Atlas.LyricsEnabled
+	// The SAME predicate the sweeper reads. Spelling the conjunction out here
+	// while the sweeper spelled it out there is what let the two disagree:
+	// this side was live, that side was a boot-time `if`.
+	resp.Lyrics.Enabled = cfg.Atlas.LyricsTierActive()
 	if resp.Lyrics.Enabled {
 		if ls := s.lyricsStats(ctx); ls != nil {
 			resp.Lyrics.Available = true

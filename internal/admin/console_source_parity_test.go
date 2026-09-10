@@ -144,3 +144,66 @@ func TestByteFormattersAgree(t *testing.T) {
 			"operator page has shown binary for its whole life.", appBase[1])
 	}
 }
+
+// jobsCardFieldRe finds the reads the JOBS PAGE makes. `renderJobCards` binds
+// the snapshot to `j`, where `renderSettingsPrereqs` binds it to `jobs`, so the
+// two directions of this contract need different anchors.
+var jobsCardFieldRe = regexp.MustCompile(`\bj\.([A-Za-z_][A-Za-z0-9_]*)`)
+
+// TestEveryJobsFieldIsRenderedSomewhere is the direction the sibling above did
+// not have, and the one that would have caught #891 on the day it landed.
+//
+// That PR's stated purpose was to give `AtlasLyricsStats` a caller: "a Jobs
+// card". It populated `jobsSnapshotResponse.Lyrics`, added a test asserting the
+// JSON, and touched no template and no JS — so the field marshalled correctly
+// into a response nothing read. `rg -i lyric` over templates/ and static/
+// returned one hit, in an unrelated sentence about uploads. The feature was
+// invisible, and the endpoint paid a full-table scan every thirty seconds to
+// produce numbers no pixel consumed.
+//
+// The sibling walks JS → Go: every `jobs.<field>` names a real field. It cannot
+// see a field nobody reads. This walks Go → JS, which is the repo's
+// both-directions idiom (TestEveryDocumentedEndpointIsRouted /
+// ...IsDocumented) applied to the one contract that had only one side.
+//
+// A test asserting the DTO is not evidence the console renders it. That is the
+// "test passes while the wiring is dead" shape this tree keeps meeting, and it
+// is why this reads the console source rather than the handler.
+func TestEveryJobsFieldIsRenderedSomewhere(t *testing.T) {
+	rt := reflect.TypeOf(jobsSnapshotResponse{})
+	var tags []string
+	for i := 0; i < rt.NumField(); i++ {
+		tag := rt.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		tags = append(tags, strings.Split(tag, ",")[0])
+	}
+	// Vacuous-pass guard, the same one the sibling carries: a reflection walk
+	// that stops finding fields reports no problems, which is the single
+	// outcome that hides the drift.
+	if len(tags) < 5 {
+		t.Fatalf("only %d json fields found on jobsSnapshotResponse — the reflection "+
+			"walk is broken, so this test proves nothing", len(tags))
+	}
+
+	body := stripJSNoise(readConsoleJS(t, "static/app.js"))
+	read := map[string]bool{}
+	for _, re := range []*regexp.Regexp{jobsCardFieldRe, jobsFieldRe} {
+		for _, m := range re.FindAllStringSubmatch(body, -1) {
+			read[m[1]] = true
+		}
+	}
+	if len(read) == 0 {
+		t.Fatal("no snapshot field reads found in app.js — the scan is broken")
+	}
+
+	for _, tag := range tags {
+		if !read[tag] {
+			t.Errorf("/api/jobs returns %q and app.js never reads it.\n"+
+				"A field the console does not render is a query the endpoint runs for "+
+				"nobody — and if it was meant to be rendered, nothing else will say so.\n"+
+				"Render it, or drop it from the response.", tag)
+		}
+	}
+}

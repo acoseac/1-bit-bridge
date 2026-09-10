@@ -546,6 +546,30 @@ func CanonicalHTTPSBase(raw string) string {
 
 // CanonicalHarvestBaseURL is the configured pin in canonical form, or "" when
 // unset/invalid (= unpinned). Shares CanonicalHTTPSBase with the handler.
+// LyricsTierActive is the ONE definition of whether the network lyrics tier
+// should be doing anything.
+//
+// It exists because the two halves of `lyricsEnabled` disagreed. The sweeper's
+// sink was wired once at boot, inside `if cfg.Atlas.LyricsEnabled`, while
+// `/api/jobs` read the flag live from the config holder. That was invisible
+// while the only way to change the value was a restart — and the moment the
+// field became patchable, one authenticated save would have made the card
+// report `enabled: true` with nothing sweeping: "the page says Saved, nothing
+// happened."
+//
+// Resolved toward LIVE, so enabling a default-off opt-in tier costs no restart:
+// the sink is now wired unconditionally and the sweep consults this per tick,
+// which is the "always construct, never stop" shape the job pools use. The rule
+// that comes with it is that EVERY reader converts in the same commit — PR #781
+// left the write paths behind and that cost #852 and #878 — so the sweeper and
+// the console both call this rather than each spelling the conjunction out.
+//
+// All three terms are load-bearing: the tier rides the harvest credential, and
+// harvest only writes anything that is served when Atlas enrichment is on.
+func (a AtlasConfig) LyricsTierActive() bool {
+	return a.Enabled && a.HarvestEnabled && a.LyricsEnabled
+}
+
 func (a AtlasConfig) CanonicalHarvestBaseURL() string {
 	return CanonicalHTTPSBase(a.HarvestBaseURL)
 }

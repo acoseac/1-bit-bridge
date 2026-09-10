@@ -4011,6 +4011,7 @@ function buildSettingsPayload(form, fd, enrichBases) {
     // Rich-tier Atlas metadata opt-in (bios/descriptions via the app
     // ferry). Restart-required; same checkbox-coerce pattern.
     atlasEnabled: fd.get("atlasEnabled") === "on",
+    atlasLyricsEnabled: fd.get("atlasLyricsEnabled") === "on",
     // Acoustic fingerprinting: toggle + set-only key field. A blank key
     // input means "keep the current key" — drop the field entirely
     // (undefined → removed by JSON.stringify → server pointer stays
@@ -5445,6 +5446,35 @@ function renderJobCards(j) {
     setText("job-ao-last", ao.running ? "sweeping now" : agoOrDash(ao.lastFinishedAt));
     setText("job-ao-next", formatInFuture(ao.nextDueAt));
     setText("job-ao-counts", formatAutoOptimizeResult(last));
+  }
+
+  // Network lyrics (Atlas). Hidden entirely when the tier is off: the card
+  // explains a feature that is not running, and the Enrichment settings link
+  // in the hint is where it gets turned on.
+  //
+  // `available` is a fact about the READ, not about the tier — a failed
+  // counts query must render as unknown rather than as a confident zero,
+  // which is what a card keyed on the numbers alone would show.
+  const lyr = j.lyrics;
+  const lyrCard = document.getElementById("job-lyrics-card");
+  if (lyrCard) lyrCard.hidden = !(lyr && lyr.enabled);
+  if (lyr && lyr.enabled) {
+    setBadge("job-lyrics-state", "running", "on");
+    if (lyr.available) {
+      setText("job-lyrics-stored",
+        `${lyr.syncedRows} synced · ${lyr.plainRows} plain`);
+      setText("job-lyrics-addressable",
+        lyr.addressable === 0 ? "nothing left" : `${lyr.addressable} tracks`);
+      // The three terminal-ish answers, so "still to try" not falling to zero
+      // has a visible explanation beside it.
+      setText("job-lyrics-answered",
+        `${lyr.instrumental} instrumental · ${lyr.unavailable} none found · ` +
+        `${lyr.pending} warming · ${lyr.unresolved} unmatched`);
+    } else {
+      setText("job-lyrics-stored", "—");
+      setText("job-lyrics-addressable", "—");
+      setText("job-lyrics-answered", "counts unavailable");
+    }
   }
 
   // Duplicate serving.

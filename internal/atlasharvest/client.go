@@ -104,6 +104,17 @@ type Client struct {
 	// lyricsPacing default, which is what production uses; the suite sets it
 	// so a budget-sized sweep is not 20 seconds of sleeping.
 	LyricsPacing time.Duration
+	// LyricsEnabled is read LIVE, per tick, so the setting hot-applies.
+	//
+	// The sink above is wired unconditionally and this is the gate — "always
+	// construct, never stop", the shape the job pools use. Constructing
+	// conditionally instead made the nil-ness of `Lyrics` the gate, and a gate
+	// that lives in a boot-time `if` cannot be turned on without a restart,
+	// while every reader on the console was already reading the flag live.
+	//
+	// Nil means OFF. A nil predicate on a feature that makes outbound requests
+	// and writes `indexed_at` is not a thing to guess about.
+	LyricsEnabled func() bool
 	// ScanInProgress reports whether a library (re)scan is currently running.
 	// Optional (nil = never in progress). Wired to manifest.Scanner.IsScanning
 	// in cmd/bridge so the booklet orphan GC (gcBooklets) is SKIPPED while a
