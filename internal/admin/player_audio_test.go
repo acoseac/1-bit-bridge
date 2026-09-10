@@ -1,9 +1,9 @@
 package admin
 
 import (
-	"go/ast"
 	"go/parser"
 	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -70,14 +70,24 @@ func TestPlayerMIMEDivergesFromDLNA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ast.Inspect(f, func(n ast.Node) bool {
-		sel, ok := n.(*ast.SelectorExpr)
-		if !ok {
-			return true
+	// Checked at the IMPORT, not the selector. A selector check matches only
+	// the default package name, so `import dlnaMIME "…/internal/dlna"` would
+	// call `dlnaMIME.defaultMIMEForExtension` straight past it. The import is
+	// also the stricter question: this file has no business reaching into the
+	// renderer-interop package at all, whatever it calls. (CodeRabbit on #897.)
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			continue
 		}
-		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "dlna" {
-			t.Errorf("player_audio.go calls dlna.%s — two contracts, two tables", sel.Sel.Name)
+		if strings.HasSuffix(path, "/internal/dlna") {
+			name := "(default)"
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			t.Errorf("player_audio.go imports %s as %s — two contracts, two tables, and "+
+				"the DLNA table maps .flac to audio/x-flac, which browsers refuse",
+				path, name)
 		}
-		return true
-	})
+	}
 }
