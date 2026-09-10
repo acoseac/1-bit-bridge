@@ -22,8 +22,13 @@ import (
 // handler, because the route table is where you go to ask "what can
 // somebody with a session do here" — a check buried forty lines into a
 // handler answers that question only if you already suspected it.
-// TestManagedControlsAreEnforcedAtTheRouteTable walks the registered
-// routes so a new one cannot be added without a decision.
+// TestManagedControlsAreEnforcedAtTheRouteTable parses the registrations and
+// requires the set of routes actually wrapped here to EQUAL the set the
+// behavioural test drives — so a managed route cannot be added without
+// coverage, and one cannot be removed leaving a row that passes for some other
+// reason. It does NOT claim to notice a route that SHOULD be managed and is
+// not; nothing can decide that from source, and this comment claimed it for
+// months while no test of that name existed at all.
 
 // managedControlMessages says WHY the control is absent, in the terms of
 // the person who just pressed it. "Forbidden" answers a question nobody

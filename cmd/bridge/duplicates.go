@@ -75,6 +75,9 @@ func duplicatesCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if refusePositionalScope(fs, "duplicates", "path", stderr) {
+		return 2
+	}
 	if o.tier != "" && !validDupeTierName(o.tier) {
 		fmt.Fprintf(stderr, "duplicates: --tier must be one of different-format, different-audio, same-format, identical-audio, inconclusive, self-nested (got %q)\n", o.tier)
 		return 2

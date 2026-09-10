@@ -97,6 +97,11 @@ func enrichmentMissesCmd(ctx context.Context, args []string, stdout, stderr io.W
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// Its own sibling subcommand, `enrichment retry`, has had this guard since
+	// PR #856; this one was never swept.
+	if refusePositionalScope(fs, "enrichment misses", "path", stderr) {
+		return 2
+	}
 	if *facet != "" && !validMissFacetName(*facet) {
 		fmt.Fprintf(stderr, "enrichment misses: --facet must be one of artwork, artist, release (got %q)\n", *facet)
 		return 2

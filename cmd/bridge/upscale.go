@@ -117,13 +117,28 @@ func parseTranscodeArgs(fs *flag.FlagSet, cmd string, args []string, stderr io.W
 // commands were not swept. TestFilterCommandsRefuseAPositionalScope keeps the
 // class closed.
 func refuseFilterPositional(fs *flag.FlagSet, cmd string, stderr io.Writer) bool {
+	return refusePositionalScope(fs, cmd, "filter", stderr)
+}
+
+// refusePositionalScope is refuseFilterPositional generalised over the name of
+// the scope flag, because `--filter` was never the whole family.
+//
+// The same shape reaches `bridge duplicates` and `bridge enrichment misses`,
+// whose scope flag is `--path` and whose empty scope is likewise the whole
+// library: `bridge duplicates "Miles Davis"` parses with --path empty, and
+// StreamTrackDupeRefsUnderPrefix on an empty prefix runs with no WHERE clause
+// at all — a full-table stream over a 50k-track library, presented as the
+// scoped answer the operator asked for. Read-only, so the cost is a wrong
+// answer and wasted I/O rather than data loss, which is why these two were
+// still unswept after #856 and #882 each closed a neighbour.
+func refusePositionalScope(fs *flag.FlagSet, cmd, scopeFlag string, stderr io.Writer) bool {
 	if fs.NArg() == 0 {
 		return false
 	}
 	fmt.Fprintf(stderr, "%s: unexpected argument %q\n", cmd, fs.Arg(0))
 	fmt.Fprintln(stderr, "  A scope is given with the flag, not positionally:")
-	fmt.Fprintf(stderr, "    bridge %s --filter %q\n", cmd, fs.Arg(0))
-	fmt.Fprintln(stderr, "  Without --filter the run covers the WHOLE library, so this is refused")
+	fmt.Fprintf(stderr, "    bridge %s --%s %q\n", cmd, scopeFlag, fs.Arg(0))
+	fmt.Fprintf(stderr, "  Without --%s the run covers the WHOLE library, so this is refused\n", scopeFlag)
 	fmt.Fprintln(stderr, "  rather than silently widened.")
 	return true
 }

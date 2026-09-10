@@ -111,9 +111,10 @@ type fieldApply struct {
 
 // applyReport accumulates per-field outcomes while the settings PATCH
 // runs. Keyed by the field's JSON tag on settingsPatch, which
-// TestApplyReportFieldNamesAreRealPatchFields pins — a typo here would
-// name a field no caller can correlate with what it sent, and nothing
-// else in the codebase connects the two.
+// TestMatrixDocMatchesWhatTheHandlerReports pins by driving the real handler
+// for every documented field and reading resp.Fields[field] back — a typo here
+// names a field no caller can correlate with what it sent, and that test is
+// what notices, because the status it reads comes back empty.
 //
 // A map rather than a slice so recording the same field twice is
 // idempotent: RuntimeConfig.Update calls its closure once today, and a

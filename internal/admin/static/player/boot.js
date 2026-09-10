@@ -625,13 +625,21 @@ function route() {
 // fall back to Browse, which is the entry without a data-player-section.
 //
 // Kept in step with playerNavEntry (handlers_pages.go) by
-// TestSidebarPlayerNavAgreesWithBoot.
+// TestPlayerNavEntriesMatchTheLayout, which walks playerRoutes, playerNavEntry
+// and the layout's data-player-section attributes. The `detailOwner` map below
+// is the one pair it does not read — see the note there.
 function updateSidebarNav(section) {
   const nav = document.getElementById("primary-nav");
   if (!nav) return;
   // A detail route belongs to its grid's entry: /mix/x is Smart mixes and
-  // /playlist/x is Playlists, not Browse. Kept in step with the server's
-  // playerNavEntry by TestPlayerNavEntriesMatchTheLayout.
+  // /playlist/x is Playlists, not Browse.
+  //
+  // NOT pinned against the server's playerNavEntry: that test walks the
+  // layout's declared sections, and this map is a client-side detail-route
+  // mapping with no server counterpart to compare against while the sidebar
+  // declares no player sections at all (Playlists and Smart mixes were removed
+  // as duplicates of Browse's section rail). The cost of drift is a nav entry
+  // that fails to light on a detail route.
   const detailOwner = { mix: "mixes", playlist: "playlists" };
   const owner = detailOwner[section] || section;
   // Compared as a value, not interpolated into a selector. `section` is a
