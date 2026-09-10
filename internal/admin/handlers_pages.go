@@ -20,6 +20,7 @@ var tmplFuncs = template.FuncMap{
 	"bytesHuman":  bytesHuman,
 	"uptimeHuman": uptimeHuman,
 	"timeAgo":     timeAgo,
+	"timeAgoPtr":  timeAgoPtr,
 	"formatTime":  func(t time.Time) string { return t.Format("2006-01-02 15:04:05 MST") },
 	"basename":    filepath.Base,
 	// json embeds a value as a JSON literal inside a <script
@@ -437,8 +438,8 @@ func (s *Server) pageDevices(w http.ResponseWriter, r *http.Request) {
 		// projections in step.
 		rows = append(rows, tokenRow{
 			ID: t.ID, Name: t.Name,
-			CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt,
-			RotatedAt: t.RotatedAt, ExpiresAt: t.ExpiresAt,
+			CreatedAt: t.CreatedAt, LastUsedAt: zeroTime(t.LastUsedAt),
+			RotatedAt: zeroTime(t.RotatedAt), ExpiresAt: t.ExpiresAt,
 			ClientVersion: t.LastClientVersion,
 		})
 	}
@@ -646,6 +647,26 @@ func uptimeHuman(d time.Duration) string {
 	default:
 		return d.String()
 	}
+}
+
+// timeAgoPtr is timeAgo for an OPTIONAL time.
+//
+// text/template auto-indirects a pointer argument for a value parameter, but a
+// NIL pointer is an execution error ("nil pointer evaluating"), which fails the
+// whole page rather than rendering "never". So the moment a DTO field this
+// template touches becomes a *time.Time — which is what makes `omitempty`
+// mean what it says — every call site has to move with it, and that is the
+// half no Go type check can see: the template compiles either way and breaks
+// at render.
+//
+// One helper rather than `{{if .X}}{{timeAgo .X}}{{else}}never{{end}}` at each
+// site: timeAgo already answers "never" for a zero time, so the nil case is
+// the same answer and belongs in the same place.
+func timeAgoPtr(t *time.Time) string {
+	if t == nil {
+		return "never"
+	}
+	return timeAgo(*t)
 }
 
 func timeAgo(t time.Time) string {

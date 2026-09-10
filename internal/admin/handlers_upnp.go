@@ -158,19 +158,19 @@ type UPnPUpstreamServerState struct {
 	// the sources event and the upnpwalk event carry, so this page can
 	// match a live progress frame to a row it already rendered without
 	// learning a second identity.
-	SourceID         string    `json:"sourceId,omitempty"`
-	Discovered       bool      `json:"discovered"`
-	ResolvedUDN      string    `json:"resolvedUDN,omitempty"`
-	FriendlyName     string    `json:"friendlyName,omitempty"`
-	Manufacturer     string    `json:"manufacturer,omitempty"`
-	ControlURL       string    `json:"contentDirectoryControlURL,omitempty"`
-	LastSeenAt       time.Time `json:"lastSeenAt,omitempty"`
-	LastWalkStarted  time.Time `json:"lastWalkStartedAt,omitempty"`
-	LastWalkFinished time.Time `json:"lastWalkFinishedAt,omitempty"`
-	LastWalked       int       `json:"lastWalkedCount,omitempty"`
-	LastReaped       int       `json:"lastReapedCount,omitempty"`
-	LastWalkErr      string    `json:"lastWalkErr,omitempty"`
-	RoutedTracks     int       `json:"routedTracks"`
+	SourceID         string     `json:"sourceId,omitempty"`
+	Discovered       bool       `json:"discovered"`
+	ResolvedUDN      string     `json:"resolvedUDN,omitempty"`
+	FriendlyName     string     `json:"friendlyName,omitempty"`
+	Manufacturer     string     `json:"manufacturer,omitempty"`
+	ControlURL       string     `json:"contentDirectoryControlURL,omitempty"`
+	LastSeenAt       *time.Time `json:"lastSeenAt,omitempty"`
+	LastWalkStarted  *time.Time `json:"lastWalkStartedAt,omitempty"`
+	LastWalkFinished *time.Time `json:"lastWalkFinishedAt,omitempty"`
+	LastWalked       int        `json:"lastWalkedCount,omitempty"`
+	LastReaped       int        `json:"lastReapedCount,omitempty"`
+	LastWalkErr      string     `json:"lastWalkErr,omitempty"`
+	RoutedTracks     int        `json:"routedTracks"`
 }
 
 // upnpServersResponse is the wire shape of GET /api/upnp/servers.

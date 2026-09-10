@@ -120,7 +120,7 @@ func TestApiUPnPServers_WiredEmitsConfiguredAndDiscoveryState(t *testing.T) {
 			ResolvedUDN:   "uuid:4d696e69-444c-164e-9d41-00b78f5ae46a",
 			FriendlyName:  "Chord 2Go:2go-ars",
 			ControlURL:    "http://192.168.0.62:8200/ctl/ContentDir",
-			LastSeenAt:    time.Unix(1_700_000_000, 0).UTC(),
+			LastSeenAt:    zeroTime(time.Unix(1_700_000_000, 0).UTC()),
 			LastWalked:    15283,
 			LastReaped:    0,
 			RoutedTracks:  15283,

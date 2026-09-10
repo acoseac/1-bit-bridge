@@ -35,7 +35,7 @@
           <td data-label="Name">{{.Name}}{{if .ClientVersion}} <small class="muted">app {{.ClientVersion}}</small>{{end}}</td>
           <td data-label="ID"><code>{{.ID}}</code></td>
           <td data-label="Created">{{timeAgo .CreatedAt}}</td>
-          <td data-label="Last used">{{timeAgo .LastUsedAt}}</td>
+          <td data-label="Last used">{{timeAgoPtr .LastUsedAt}}</td>
           <td class="expires-cell" data-label="Expires">
             {{if .ExpiresAt}}{{timeAgo .ExpiresAt}}{{else}}<em>never</em>{{end}}
           </td>

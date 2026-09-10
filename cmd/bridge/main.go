@@ -1550,7 +1550,7 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		UpdateAvailable:  s.UpdateAvailable,
 		ReleaseNotesURL:  s.ReleaseNotesURL,
 		Channel:          s.Channel,
-		LastCheck:        s.LastCheck,
+		LastCheck:        timePtrIfSet(s.LastCheck),
 		LastError:        s.LastError,
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
@@ -1618,7 +1618,7 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		UpdateAvailable:  st.UpdateAvailable,
 		ReleaseNotesURL:  st.ReleaseNotesURL,
 		Channel:          st.Channel,
-		LastCheck:        st.LastCheck,
+		LastCheck:        timePtrIfSet(st.LastCheck),
 		LastError:        st.LastError,
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
@@ -3983,9 +3983,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		return admin.AutocertStatusSnapshot{
 			Domain:      st.Domain,
 			CertPresent: st.CertPresent,
-			NotAfter:    st.NotAfter,
+			NotAfter:    timePtrIfSet(st.NotAfter),
 			LastError:   st.LastError,
-			LastCheck:   st.LastCheck,
+			LastCheck:   timePtrIfSet(st.LastCheck),
 		}
 	}
 

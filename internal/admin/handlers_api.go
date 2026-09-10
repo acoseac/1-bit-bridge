@@ -64,15 +64,15 @@ func writeCfgUpdateErr(w http.ResponseWriter, err error) {
 // --- response shapes ---
 
 type statsResponse struct {
-	LibraryName     string    `json:"libraryName"`
-	ProtocolVersion int       `json:"protocolVersion"`
-	ServerVersion   string    `json:"serverVersion"`
-	UptimeSec       int64     `json:"uptimeSec"`
-	StartedAt       time.Time `json:"startedAt"`
-	TracksIndexed   int       `json:"tracksIndexed"`
-	IsScanning      bool      `json:"isScanning"`
-	ScanProgress    int64     `json:"scanProgress"`
-	LastFullScan    time.Time `json:"lastFullScan,omitempty"`
+	LibraryName     string     `json:"libraryName"`
+	ProtocolVersion int        `json:"protocolVersion"`
+	ServerVersion   string     `json:"serverVersion"`
+	UptimeSec       int64      `json:"uptimeSec"`
+	StartedAt       time.Time  `json:"startedAt"`
+	TracksIndexed   int        `json:"tracksIndexed"`
+	IsScanning      bool       `json:"isScanning"`
+	ScanProgress    int64      `json:"scanProgress"`
+	LastFullScan    *time.Time `json:"lastFullScan,omitempty"`
 	// Library composition — an honest breakdown of what the bridge
 	// holds. TracksIndexed above is originals-only (the `tracks`
 	// table never includes variants); these surface the variant
@@ -138,8 +138,8 @@ type tokenRow struct {
 	ID         string     `json:"id"`
 	Name       string     `json:"name"`
 	CreatedAt  time.Time  `json:"createdAt"`
-	LastUsedAt time.Time  `json:"lastUsedAt,omitempty"`
-	RotatedAt  time.Time  `json:"rotatedAt,omitempty"`
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+	RotatedAt  *time.Time `json:"rotatedAt,omitempty"`
 	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
 	// ClientVersion is the device's most recent self-reported
 	// X-Client-Version (auth.Token.LastClientVersion). Empty for
@@ -564,7 +564,7 @@ func (s *Server) getStatsSnapshot() statsResponse {
 		TracksIndexed:       part.tracks,
 		IsScanning:          s.deps.Scanner.IsScanning(),
 		ScanProgress:        s.deps.Scanner.ScanProgress(),
-		LastFullScan:        s.deps.Scanner.LastFullScan(),
+		LastFullScan:        zeroTime(s.deps.Scanner.LastFullScan()),
 		TracksWithUpscaled:  part.upscaledTracks,
 		TracksWithOptimized: part.optimizedTracks,
 		VariantFiles:        part.variantFiles,
@@ -1804,8 +1804,8 @@ func (s *Server) apiTokensList(w http.ResponseWriter, r *http.Request) {
 			ID:            t.ID,
 			Name:          t.Name,
 			CreatedAt:     t.CreatedAt,
-			LastUsedAt:    t.LastUsedAt,
-			RotatedAt:     t.RotatedAt,
+			LastUsedAt:    zeroTime(t.LastUsedAt),
+			RotatedAt:     zeroTime(t.RotatedAt),
 			ExpiresAt:     t.ExpiresAt,
 			ClientVersion: t.LastClientVersion,
 		})
