@@ -14,14 +14,19 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. 37 targets in
-  `fuzz_*_test.go` across
-  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload}`,
-  covering the four untrusted-input surfaces: the audio extractors (whole-file + the pure
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **38** targets across **ten** packages —
+  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
+  and the newest one, `atlasharvest`'s `FuzzMatchRelease`, lives in
+  `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
+  greps only the latter undercounts. (This entry said 37 across nine until
+  2026-09-10: the sixth stale claim of the kind, and in the paragraph that
+  warns about them.) They cover
+  the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
-  SOAP / DIDL / device description), `fs.Resolver`, and the web-upload path validation
-  (`internal/upload`, which this list omitted until 2026-09-09).
-  **Count them by file:name pair** — `grep '^func Fuzz' | sort -u` says 36, because
+  SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
+  (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
+  release matcher (`internal/atlasharvest`).
+  **Count them by file:name pair** — `grep '^func Fuzz' | sort -u` says 37, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -268,6 +273,21 @@ lost my library."
   concurrent readers). The mutex also protects multi-statement transactions and
   `SELECT sidecars → DELETE rows → os.Remove` ordering — `busy_timeout` is a
   retry, not a serializer. Don't set `SetMaxOpenConns(1)`.
+- **A manifest path names its own root — map it with `fs.Resolver`, never by
+  joining onto one.** In multi-root mode `relPath` prefixes every stored path
+  with the root's basename, so `filepath.Join(roots[0], rel)` addresses a path
+  under the WRONG root with the routing segment still in it. `internal/trash`
+  hand-rolled exactly that and delete was broken on every multi-root bridge —
+  and where two roots' directory names overlap it trashed a real, unrelated file
+  and then reaped the manifest row of the file still on disk (`retireAndRescan`
+  passes threshold **1**). `Resolver.SplitRoot` returns `(root, suffix)` from the
+  same computation that produces the absolute path, past the same containment
+  check, under ONE lock snapshot — so `Resolve` and `SplitRoot` cannot disagree.
+  A path naming a root this bridge no longer has is a REFUSAL
+  (`ErrRootUnavailable`), never a fallback; a caller-supplied root CONSTRAINS
+  rather than selects. Anything that joins manifest-form dirs onto a
+  caller-supplied root has the same bug one layer up — `spawnBackgroundSubtreeScan`
+  did, so a batch spanning roots resolves per-dir instead.
 - **A single↔multi root flip calls `WipeFilesystemTracks`, never
   `WipeAllTracks`** — the latter CASCADE-deletes `upnp_track_routing`,
   destroying an entire upstream library and its cached enrichment on a mere
@@ -384,6 +404,19 @@ lost my library."
   `Some(false)`. Same trap with `omitempty time.Time`: Go does NOT drop a zero
   time, so it ships `"0001-01-01T00:00:00Z"` and the client parses a real,
   very-old date — use `*time.Time`.
+- **An optional time on a wire DTO is a `*time.Time`, and a guard enforces it.**
+  This rule was stated here, fixed correctly in three structs, and violated in
+  TEN fields across five files — including the `/v1/health` DTO iOS decodes.
+  Documenting it three times did not stop the eleventh, so
+  `TestNoOmitemptyValueTimeOnTheWire` (an AST walk over `internal/api` +
+  `internal/admin`) now fails the build on a value `time.Time` tagged
+  `omitempty`. **Check the client's optionality before converting one** — omitting
+  a field a shipped app declares non-optional breaks its decode, which is why
+  `/v1/health`'s withholding scope was set by reading the iOS Codable rather than
+  by principle. **And move the TEMPLATES in the same commit**: `timeAgo` takes a
+  value, text/template auto-indirects a pointer, and a NIL pointer is an
+  execution error that fails the whole page rather than rendering "never". That
+  half no Go type check can see.
 - **Delta manifests omit the `folders` block** (full-sync only), and `since`
   filters on `indexed_at`, never mtime.
 - **A served→suppressed transition writes a `manifest_deletions` tombstone in
@@ -547,6 +580,44 @@ no failing test — which is the shape to expect in this area.
   same order in reverse and **refuses to demote**, so two sweeps cannot
   alternate a track between documents — every write strict-advances
   `indexed_at`, and a flap is a delta to every paired device per cycle.
+- **A release is not the RUN.** Any release-fetch error used to abort the whole
+  sweep, and the candidate query is `ORDER BY albumMBID, t.path` — deterministic
+  — so one unanswerable release aborted at the same point on every 60-second
+  tick while healthy albums drained out of the candidate set and the failing one
+  migrated toward the front. The tier went silent for the whole library with one
+  warn line. Skip the ALBUM and continue; abort only on auth or a cancelled
+  context, which are facts about the run. **The skip needs a cooldown or it
+  trades a stalled tier for a hammered upstream**, and the cooldown must not
+  RE-cool on a candidate it is already suppressing: pushing `until` forward every
+  tick means it never expires, which is the negative cache it exists not to be.
+  Two sentinels, not one.
+- **`isUpstreamAnswered` governs BOTH legs.** The release leg had it and the
+  recording leg did not, so a durable 404 wrote no verdict — and the candidate
+  query gates on the ABSENCE of a row, so the track returned every sweep forever.
+  At `LIMIT 400` over a deterministic order, a few hundred stale
+  `musicBrainzTrackID`s hold every slot and nothing else is ever considered.
+- **An UNRECOGNISED upstream status is transient, and never written verbatim.**
+  Falling through to `documentFrom` stamped `unavailable` with a thirty-day
+  backoff — a durable verdict about the TRACK from a sentence about the UPSTREAM
+  this build could not read. Stamping nothing is the other half of the trap (the
+  candidate returns every tick), so it takes `pending`'s short backoff. Never the
+  upstream's own string: `status` is a column the candidate and stats queries
+  switch on.
+- **The scan guard is per CANDIDATE, not per sweep.** A pass is
+  `lyricsCandidateBatch` × `lyricsPacing` of pure pacing — longer than the poll
+  interval at the defaults — so a scan starting a second in ran entirely inside
+  the sweep, which is the double `indexed_at` bump the guard exists to prevent.
+- **`Addressable` must carry the candidate query's `instrumental` arm.**
+  `instrumental` is a success that correctly leaves no `track_lyrics` row, so a
+  count that only asks "no lyrics, has an MBID" counts it forever: a quarter of
+  Atlas's measured mix, and a finished tier renders as a stalled job. It is a
+  named const beside the candidate query, with the same retag invalidation, so
+  the two cannot drift.
+- **`atlas.lyricsEnabled` is LIVE, through `AtlasConfig.LyricsTierActive`.** Its
+  two halves disagreed: `/api/jobs` read the flag live while the sweeper took it
+  at boot inside the `if` that decided whether to wire the sink. Invisible while
+  a restart was the only way to change it — and adding a `settingsPatch` field is
+  exactly what makes it bite. One predicate, both readers.
 - **`/v1/lyrics` exempts network rows from the drift check**, and that is what
   makes the tier work at all rather than a nicety. `lyricsSourceInfo` returns
   the AUDIO file's stat for any non-sidecar source, so a row with no local
@@ -859,6 +930,26 @@ no failing test — which is the shape to expect in this area.
   importing both) fails on divergence.
 - **`SetPostScanHook` REPLACES.** Append to `postScanNudges` and register one
   fan-out hook; a second registration silently unhooks the previous sweeper.
+- **Every reaper fails closed on an EMPTY referenced set, and the CLI ones offer
+  a way past it.** A query that succeeds and returns no rows is not a fault, and
+  the routes to it are ordinary: `rm -f bridge.db*` + restart (the reset this
+  file documents, and `run` takes a boot tick), or the window between a root
+  flip's `WipeFilesystemTracks` — which CASCADEs `track_variants` — and the
+  rescan. `runArtworkGC` and `VariantWatcher.tick` had the guard;
+  `OrphanSidecarSweeper.tick`, `upscale --gc`'s FORWARD sweep and `analyze --gc`
+  did not, and `upscale --gc`'s reverse guard fires only after the forward sweep
+  has already unlinked. An empty set over an EMPTY directory stays a silent
+  no-op. A BACKGROUND sweeper gets no override (nobody is in the loop to express
+  intent); the CLI ones take `--allow-empty`, and a sweep test pins that every
+  `--gc` command offers it — which is how `artwork --gc` was found to have
+  carried an un-escapable refusal since it was written.
+- **A sidecar walk prunes dot-directories at the WALK.** With `variantsDir` on
+  its own volume, `.Trashes/<uid>/` and `.Trash-1000/` sit under the walk root,
+  so any `.flac` inside one is missing from the catalog and older than the grace
+  — files an operator put in the Trash to get back. Gate on `d.IsDir()`:
+  `SkipDir` returned for a FILE skips the rest of its parent directory and ends
+  the sweep early. `filepath.WalkDir` does not follow symlinks, so a symlinked
+  `.Trashes` needs nothing extra.
 - **No server-side transcoding, ever.** Conversion is offline; `/v1/download`
   serves bit-exact via `http.ServeContent`. The DSD → PCM renditions (PR #863)
   are conversion in exactly that sense — a sidecar the job pool built earlier,
@@ -924,6 +1015,16 @@ no failing test — which is the shape to expect in this area.
   and the enricher-owned MBID fields (including them marks every enriched row
   changed forever). The ROUTING row is still upserted every walk. Baseline load
   failure degrades to nil, never fatal.
+- **A reap grace expires for a fact about the UPSTREAM, never about our own
+  READ.** `walkLooksImplausible` is true for two reasons — the upstream reported
+  far fewer tracks than we last saw, and `ListUPnPTracksByServer` failed so the
+  baseline is unknown — and `reapAuthorized` gave both the same 6 h window. At
+  the default 6 h cadence the second or third tick authorized a reap against a
+  baseline nobody had seen, which is the guard's own docblock inverted; pair it
+  with a silently-partial walk (a container that Browses empty mid-tree: no
+  error, no `stats.Truncated`) and the sweep deletes every unvisited row. The
+  reasons are now named and only `implausibleShape` can expire. Same rule as the
+  scanner's, one layer up.
 - **Routed rows fill artist/album from the container path via `dupes.Resolve`,
   never manifest's `fillFromPath`** — the scanner's two-directories-up rule puts
   "CD1" in the album field, while `dupes` strips disc folders and is what the
@@ -1300,6 +1401,13 @@ mentions across the four `ops/audit-*.md` files.
   library: a whole-library `enriched_at` reset and a delta to every paired
   device in place of one album. `library remove` had guarded this since PR #78.
   Any command whose empty scope means "everything" needs `fs.NArg()`.
+- **The positional-scope class covers `--path`, not just `--filter`.** It was
+  closed twice without being swept: #856 fixed `enrichment retry`, #882 fixed the
+  four `--filter` commands, and `bridge duplicates` / `bridge enrichment misses`
+  still parsed with `--path` empty — where an empty path scope emits a query with
+  no `WHERE` clause at all, so a full-table answer comes back presented as the
+  scoped one. Read-only, which is exactly why it survived both passes. Grep for
+  the PATTERN (a flag whose empty value means everything), not the symptom.
 - **A `stopFn` that signals is not a join.** `internal/integrity`'s watchers
   closed a channel and returned, while `runServe` defers that stop ahead of
   `Store.Close()` — an ordering that means nothing unless the stop waits. Both
@@ -1471,6 +1579,14 @@ its twin.** The top list is older, shorter, and read first.
   comment that hid 46 KB of app.js from a guard test.
 - **Dynamically-composed class names (`class="status-${x}"`) are not dead
   because no literal exists.** Check composition before deleting.
+- **`/api/jobs` is guarded in BOTH directions.**
+  `TestSettingsPrereqsOnlyReadRealJobsFields` walks JS→Go (every `jobs.<field>`
+  names a real field) and cannot see a field nobody reads;
+  `TestEveryJobsFieldIsRenderedSomewhere` walks Go→JS. #891's stated purpose was
+  "a Jobs card" and it touched no template and no JS — the endpoint ran a
+  full-table scan every thirty seconds for numbers no pixel consumed, and the DTO
+  test passed. Of the twelve top-level fields, `lyrics` was the only one with
+  zero reads.
 - **An SSE list handler needs an explicit empty-list teardown branch.** A restart
   wipes the in-memory pairing store, so the next snapshot is `[]`, and
   `applyPairing([])` must clear the optimistic-action latch and hide the panel —
@@ -1525,6 +1641,32 @@ its twin.** The top list is older, shorter, and read first.
   production passes a different concrete type), and a handler nothing dispatches
   to. Drive the real entry point — `Handler()`, the real Provider, the real
   endpoint — at least once per feature.
+- **A docblock that names a test is a claim, and six of them were false.** Two
+  stood in for an invariant nothing pinned at all; one was a false safety claim
+  on a security boundary (`managed_controls.go` said a test "walks the registered
+  routes so a new one cannot be added without a decision" — no test of that name
+  had ever existed). `TestEveryCitedTestNameExists` sweeps the tree for cited
+  `Test…` names with no definition. Write the guard or name the test that
+  actually covers the invariant; do not leave prose asserting a check that is
+  not there.
+- **A guard that scans SOURCE must parse, or strip comments, when the thing it
+  forbids is named in the commentary beside it.** `player_audio.go`'s docblock
+  says "Deliberately NOT `dlna.defaultMIMEForExtension`" — a text scan finds that
+  and reports the rule as broken, which it did on the first run. Walk the AST, or
+  strip; and anchor on an IDENTIFIER, never a string literal, because
+  `stripGoComments` blanks literals too.
+- **A fixture that omits a live gate describes a different bridge than
+  production.** The gate belongs in the BASE fixture with a test overriding it
+  both ways, and a fixture that wires a dependency the production path does not
+  cannot see that gap at all — `upload.WithReclaimable` had two tests passing the
+  option and zero production callers, so every 507 answered
+  `reclaimableBytes: 0`. When only the wiring can be wrong, check the wiring.
+- **Commit BEFORE the negative control.** `git checkout --` and
+  `git restore --source=HEAD` revert the whole file, so a control run against an
+  uncommitted round silently takes the round with it. This file already recorded
+  the lesson; I hit it twice in one session anyway. And a control that fails to
+  BUILD reads as "control invalid", never as a pass — revert the test fixture
+  alongside the production line so the control compiles.
 - **Negative-control every load-bearing assertion**, and check what the mutation
   actually did. A control that fails to BUILD reads as "control invalid", never
   as a pass — and most "just disable this branch" edits delete a variable's only
@@ -1599,6 +1741,45 @@ its twin.** The top list is older, shorter, and read first.
   after `url.Parse` for a backslash host (Go refuses it outright), and claims
   that `omitempty` keeps a non-nil empty map. Reply on the thread with the
   evidence when declining.
+
+### <a name="review-2026-09-10"></a>2026-09-10 — full-codebase review
+
+Three parallel sweeps (the unreviewed Atlas lyrics tier; the least-audited
+packages; a mechanical invariant sweep across all 46) plus a pass on the exposed
+API/admin surface. Shipped as PRs #892–#899. **The worst defect was not in the
+new code**: `internal/trash` had never worked on a multi-root bridge, and in the
+overlapping-names case it trashed a real file and reaped the manifest row of the
+one still on disk. The unswept window supplied the rest.
+
+- **The mechanical sweeps came back CLEAN, and that is worth as much as the
+  findings.** `indexed_at` (17 sites), `LIKE` on path predicates (104 + 24),
+  cutoff arithmetic (20), ticker validation (52), goroutine lifecycle (55),
+  unbounded caches, error-string status parsing (8), `http.Client` probe/mutation
+  separation (24), defer ordering (11). Don't re-derive these; the record is in
+  `ops/engineering-log.md`.
+- **Where the defects actually were: code nobody had reviewed, and the seam
+  between two subsystems.** Six of the seven PRs fixed something in the
+  2026-09-09 lyrics window or at a boundary — trash↔fs, upload↔trash,
+  console↔sweeper, one GC's guard versus its sibling's. A rule held inside each
+  package and did not cross.
+- **The same enumeration failure, three more times.** A fix that lists the sites
+  it covers misses one: the empty-set guard existed in two of five reapers, the
+  positional-scope guard in five of seven commands, the `omitempty` time rule in
+  three of thirteen structs. Every one was fixed by grepping for the PATTERN and
+  writing the sweep test in the same PR — and each sweep found a site the
+  enumeration had missed (`artwork --gc`, `internal/upload`).
+- **Two tests asserted the defect in their own comments.** `TestAtlasLyricsStats`
+  said "a/3 is addressable and still has no row" about an instrumental track that
+  the candidate query will never offer again;
+  `TestATransientReleaseFetchFailureWritesNoVerdict` asserted `wantErr: true` on
+  a sweep-ending bug, with one candidate seeded so it could not tell "skipped"
+  from "over". A test can encode the bug and pass forever.
+- **Three findings came from bots and were real**, and one suggested patch was
+  wrong in both halves — Gemini saw a redundant lock acquisition in the lyrics
+  cooldown and the defect underneath it was that the cooldown re-armed itself
+  every tick and never expired; the proposed guard compared a WRAPPED error with
+  `==` and inverted the condition. Take the observation, verify the mechanism,
+  write your own fix.
 
 ### <a name="loupe-2026-09-09"></a>2026-09-09 — LOUPE on the 2026-09-04..09 window
 

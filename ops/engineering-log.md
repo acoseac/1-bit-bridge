@@ -4824,3 +4824,109 @@ predicted — through the release ladder, with no tagged recording MBID supplied
 Shipped default-OFF. `atlas.lyricsEnabled` starts a recurring outbound sweep
 the operator did not have, and every stored document is a delta every paired
 device syncs.
+
+---
+
+## 2026-09-10 — full-codebase review (PRs #892–#899)
+
+Three parallel sweeps plus a pass on the exposed API/admin surface. Rules are in
+`CLAUDE.md`; this is the record behind them.
+
+### The measurements
+
+**The multi-root trash chain, traced end to end.** `relPath(root, abs, multiRoot=true)`
+returns `filepath.Base(root) + "/" + rel` (`scanner.go:2358-2367`), so a stored
+path leads with the root basename. The player is the only Delete UI and posts
+`{paths}` with no `root` (`player/api.js:145`). `resolveRoot("")` returned
+`roots[0]`. `Trash` then did `filepath.Join(root, rel)` — the routing segment
+still in the path, under the wrong root.
+
+Ordinary case: `os.Stat` fails, every outcome `"failed"` with a raw ENOENT.
+Overlap case: `res.Paths` collects the manifest-form path only on SUCCESS
+(`trash.go:243`), and `retireAndRescan` passes it to
+`IncrementMissingTracksAndDeleteAtThreshold(paths, 1)` — threshold **1**, so the
+row is reaped immediately.
+
+Negative control: restoring `filepath.Join(m.roots()[0], rel)` fails four of the
+five package tests. The first attempt at that control did not COMPILE (`suffix`
+went unused), which reads as "control invalid" — `_ = suffix` was added so it
+compiles and the control means something.
+
+**The lyrics cooldown re-armed itself.** Measured before fixing, two ticks 5 ms
+apart against a 502-ing release: `first=…12.35228`, `second=…12.357936`,
+`extended=true`. Both skip arms called `coolRelease`, so `until` moved forward on
+every tick; the candidate ordering guarantees a tick every 60 s, so the window
+never expired. Found by Gemini on #893 as "a redundant write-lock acquisition";
+the suggested patch (`if err != errReleaseUnavailable`) could not work — the
+errors are wrapped, so `==` never matches the sentinel, and the condition is
+inverted. Fixed with a second sentinel (`errReleaseCooling`).
+
+**CodeQL `go/log-injection`, re-verified rather than recalled.** Five alerts on
+#892 (105–109). Probe through the real `logging.Init` handler with
+`dir = "ok\n{\"level\":\"ERROR\",\"msg\":\"FORGED ADMIN ACTION\"}\rmore"` emits:
+
+```
+{"time":"…","level":"WARN","msg":"…","component":"probe","dir":"ok\n{\"level\":\"ERROR\",…}\rmore"}
+```
+
+One physical line, CR/LF escaped inside the quoted field. Dismissed on those
+grounds. CLAUDE.md asks for this to be checked empirically each time rather than
+recalled, and it is a ten-line probe.
+
+**The word-boundary claim, checked rather than reasoned about.** Gemini said
+`citedAsAWholeIdentifier` was redundant because `\b` already excludes
+`SetTestHashCost`. Against
+`"SetTestHashCost allowTestAssetHost TestApply TestEveryCitedTestNameExists x.TestLogin"`:
+
+```
+\bTest[A-Z][A-Za-z0-9_]{5,}  -> [TestEveryCitedTestNameExists]
+\bTest[A-Z][A-Za-z0-9_]*     -> [TestApply TestEveryCitedTestNameExists TestLogin]
+```
+
+Both points confirmed: the helper never fired, and the `{5,}` floor silently
+ignored every cited name under ten characters.
+
+**The lyrics tier's live gate, driven in a browser.** Seeded bridge on
+`127.0.0.1:7799`. Card visible with `offsetParent !== null` (not a bare
+`hidden === false`, which this repo has been lied to by). Settings switch →
+server stores `atlasLyricsEnabled: false` → page reports `Live` → card gone on
+the next poll. No restart in that loop.
+
+**The zero-time fix, verified on the wire.** After the change, `/api/tokens` for
+a never-used token: `{"id":…,"name":"probe","createdAt":…}` — `lastUsedAt` and
+`rotatedAt` absent. `/api/tls/status` on a loopback bridge: `{"certPresent":false}`
+— `notAfter` and `lastCheck` absent. `/devices` renders `never`; both affected
+pages end in `</html>` rather than erroring mid-body.
+
+### Rejected alternatives
+
+- **Genericising the shared GC refusal to "database row"** (Gemini, #895).
+  Parameterised instead: the operator is deciding whether to pass
+  `--allow-empty`, and *which* catalog is empty is the fact that turns on.
+- **`runtime.Caller` path resolution in the AST guard** (Gemini, #896). Every
+  source-reading guard in this tree reads relative to the package dir; one
+  resolving differently from its nine neighbours is the drift, not the fix.
+- **Deleting `upload.IsUnderStaging`** as dead code. It carries a fuzz target
+  over an untrusted-input surface; dropping fuzz coverage to remove six lines is
+  the wrong trade. The false claim in its docblock was the defect, and that was
+  corrected.
+- **Making `atlas.lyricsEnabled` restart-bound** rather than live. Defensible —
+  the card would key on the runtime wiring and the matrix row would say
+  `restart` — but enabling a default-off opt-in tier should not cost a restart,
+  and the split had to be resolved one way or the other in the same commit that
+  added the PATCH field.
+
+### What the sweeps found clean
+
+`indexed_at` (17 write sites), `LIKE` on path predicates (104 `LIKE` + 24
+byte-range), cutoff arithmetic (20 sites, defended three deep), ticker/timer
+validation (52), goroutine lifecycle (55 `go func`), unbounded caches (3
+`sync.Map`, 3 `LoadOrStore`, ~20 maps), error-string status parsing (8),
+`http.Client` probe/mutation separation (24), defer `Close`/`Remove` ordering
+(11), wire-type discipline in `internal/api`, the scanner's deletion-loop
+ordering, and `internal/{smartplaylist,smartplaylistgen,librarycat,supervision,lrucache,dsn,fsutil,metrics}`.
+
+One finding chased and dropped: `POST /v1/upscale/batch` carries no
+`writeDeadline` override while the two smaller-scope upscale routes get 15
+minutes. The whole-library submit is DB + in-memory only (`Enqueue` is
+`select`/`default`, non-blocking), so 60 s is not a realistic ceiling.
