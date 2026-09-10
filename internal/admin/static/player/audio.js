@@ -103,7 +103,7 @@ export function snapshot() {
  */
 function bufferedAhead() {
   const el = state.el;
-  if (!el || !el.buffered || el.buffered.length === 0) return 0;
+  if (!el?.buffered?.length) return 0;
   const t = el.currentTime;
   for (let i = 0; i < el.buffered.length; i++) {
     // A hair of tolerance at the near edge: straight after a seek the
@@ -384,7 +384,7 @@ export function clearQueue() {
   state.index = -1;
   state.playing = false;
   state.loading = false;
-  if (state.el) state.el.removeAttribute("src");
+  abandon(state.el);
   cancelPrime();
   persist();
   emit();
@@ -493,20 +493,33 @@ function maybePrime() {
   primedFor = next;
 }
 
-/**
- * Abandon whatever the preloader is holding.
- *
- * removeAttribute alone does NOT stop the fetch: the element keeps the
- * resource it already selected and keeps pulling bytes for it. load() is
- * what abandons it, and abandoning it is the entire point — a prime for
- * a track that is no longer next must stop competing with the one that
- * is.
- */
+/** Abandon whatever the preloader is holding. */
 function cancelPrime() {
   primedFor = null;
-  if (!state.pre || !state.pre.getAttribute("src")) return;
-  state.pre.removeAttribute("src");
-  state.pre.load();
+  abandon(state.pre);
+}
+
+/**
+ * Stop `el` pulling bytes for the resource it is holding.
+ *
+ * Neither pause() nor removeAttribute does it. Measured against a
+ * throttled 60 KB/s bridge on a 40 MB source, reading networkState and
+ * buffered.end: playing at 1.7 s buffered / NETWORK_LOADING; three
+ * seconds after pause(), 4.3 s / still LOADING; three seconds after
+ * removeAttribute("src"), 6.7 s and STILL growing. Only load() takes it
+ * to NETWORK_EMPTY and drops the buffer. A paused element filling its
+ * buffer is not an anomaly — it is exactly what makes the preloader work.
+ *
+ * Shared because the two callers diverged inside a single change: the
+ * preloader's cancel had the load() and clearQueue's did not, 120 lines
+ * apart, so clearing the queue left the current track downloading to the
+ * end in the background. One definition rather than two sites each
+ * remembering. On an element with no src it is a no-op and logs nothing.
+ */
+function abandon(el) {
+  if (!el?.getAttribute("src")) return;
+  el.removeAttribute("src");
+  el.load();
 }
 
 function peek(delta) {

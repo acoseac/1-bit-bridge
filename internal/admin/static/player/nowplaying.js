@@ -188,27 +188,7 @@ function apply(s) {
   }
   document.body.classList.add("has-player-bar");
 
-  clear(refs.art);
-  const t = s.track;
-  if (s.albumArt) {
-    const img = el("img", { attrs: { src: s.albumArt, alt: "", loading: "lazy" } });
-    // The cover is the largest target in the bar and it pointed nowhere,
-    // while the title beside it linked to the album. Same destination.
-    if (t.albumId) {
-      const a = link(`/album/${t.albumId}`, { class: "np-art-link" });
-      a.setAttribute("aria-label", `Go to ${t.album || "album"}`);
-      a.appendChild(img);
-      refs.art.appendChild(a);
-    } else {
-      refs.art.appendChild(img);
-    }
-  }
-  clear(refs.title);
-  refs.title.appendChild(
-    t.albumId ? link(`/album/${t.albumId}`, { text: t.title || t.path })
-      : document.createTextNode(t.title || t.path));
-  refs.sub.textContent = t.artist || "";
-  refs.chip.textContent = formatChip(t);
+  paintTrack(s);
 
   swapIcon(refs.play, s.playing ? "pause" : "play");
   refs.play.setAttribute("aria-label", s.playing ? "Pause" : "Play");
@@ -244,6 +224,39 @@ function apply(s) {
     setProgress(0);
   }
 
+  paintNotice(s);
+}
+
+/** The cover, the title, the artist and the format chip. */
+function paintTrack(s) {
+  const t = s.track;
+  clear(refs.art);
+  if (s.albumArt) {
+    const img = el("img", { attrs: { src: s.albumArt, alt: "", loading: "lazy" } });
+    // The cover is the largest target in the bar and it pointed nowhere,
+    // while the title beside it linked to the album. Same destination.
+    if (t.albumId) {
+      const a = link(`/album/${t.albumId}`, { class: "np-art-link" });
+      a.setAttribute("aria-label", `Go to ${t.album || "album"}`);
+      a.appendChild(img);
+      refs.art.appendChild(a);
+    } else {
+      refs.art.appendChild(img);
+    }
+  }
+  clear(refs.title);
+  refs.title.appendChild(
+    t.albumId ? link(`/album/${t.albumId}`, { text: t.title || t.path })
+      : document.createTextNode(t.title || t.path));
+  refs.sub.textContent = t.artist || "";
+  refs.chip.textContent = formatChip(t);
+}
+
+/**
+ * The one line that says what is true about this playback right now:
+ * waiting, playing something converted, unseekable, or failed.
+ */
+function paintNotice(s) {
   const notes = [];
   // Two words for two different waits, because the reader can tell them
   // apart and the distinction is what makes the line worth reading: at

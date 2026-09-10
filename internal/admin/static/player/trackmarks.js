@@ -46,38 +46,60 @@ export function clearTrackMarks() {
 }
 
 function apply(s) {
-  // A view can re-render its list without a route change — the album
-  // page's source filter does — leaving the previous <ol> detached with
-  // this holding the only reference to it. Dropping it here is what saves
-  // every caller from having to remember to unbind.
-  //
-  // Only once it has BEEN connected, though. trackList binds and then
-  // returns the <ol> for its caller to append, so at bind time the list
-  // is detached and looks exactly like a discarded one — a plain
-  // isConnected filter dropped every binding on the spot, in the same
-  // synchronous apply() that subscribe() fires, and nothing was ever
-  // marked. A list that is built and never appended stays until the
-  // route head clears it, which is bounded and the harmless direction.
-  bound = bound.filter((b) => {
-    b.seen = b.seen || b.list.isConnected;
-    return !b.seen || b.list.isConnected;
-  });
+  bound = bound.filter(stillLive);
   const cur = s.track ? s.track.path : null;
-  const state = !cur ? "" : s.loading ? "loading" : s.playing ? "playing" : "paused";
-  for (const b of bound) {
-    const at = cur === null ? -1 : b.paths.indexOf(cur);
-    // apply runs on every emit — roughly once a second from timeupdate —
-    // and a playlist list can hold tens of thousands of rows. The early
-    // exit is what keeps this from being tens of thousands of DOM writes
-    // per second for a value that changes a handful of times per track;
-    // the querySelectorAll below it is O(rows) and must stay behind it.
-    if (at === b.at && state === b.state) continue;
-    const rows = b.list.querySelectorAll(".track");
-    if (b.at >= 0 && rows[b.at]) paint(rows[b.at], "");
-    if (at >= 0 && rows[at]) paint(rows[at], state);
-    b.at = at;
-    b.state = state;
-  }
+  const state = playState(s, cur);
+  for (const b of bound) applyTo(b, cur, state);
+}
+
+/**
+ * Whether a binding still refers to a list on the page.
+ *
+ * A view can re-render its list without a route change — the album page's
+ * source filter does — leaving the previous <ol> detached with this
+ * holding the only reference to it. Dropping it here is what saves every
+ * caller from having to remember to unbind.
+ *
+ * Only once it has BEEN connected, though. trackList binds and then
+ * RETURNS the <ol> for its caller to append, so at bind time the list is
+ * detached and looks exactly like a discarded one — a plain isConnected
+ * filter dropped every binding on the spot, inside the same synchronous
+ * apply() that subscribe() fires, and nothing was ever marked. A list
+ * that is built and never appended stays until the route head clears it,
+ * which is bounded and the harmless direction.
+ */
+function stillLive(b) {
+  b.seen = b.seen || b.list.isConnected;
+  return !b.seen || b.list.isConnected;
+}
+
+/** The dock's three states, named, or "" when nothing is playing. */
+function playState(s, cur) {
+  if (!cur) return "";
+  if (s.loading) return "loading";
+  return s.playing ? "playing" : "paused";
+}
+
+function applyTo(b, cur, state) {
+  const at = cur === null ? -1 : b.paths.indexOf(cur);
+  // apply runs on every emit — roughly once a second from timeupdate —
+  // and a playlist list can hold tens of thousands of rows. This early
+  // exit is what keeps it from being tens of thousands of DOM writes per
+  // second for a value that changes a handful of times per track; the
+  // querySelectorAll below must stay behind it.
+  if (at === b.at && state === b.state) return;
+  const rows = b.list.querySelectorAll(".track");
+  // `b.at !== at` is what makes a STATE change an update rather than a
+  // teardown. Clearing the row unconditionally would remove the mark and
+  // paint() would rebuild it a line later — on every play/pause and every
+  // rebuffer, which is several times a second on a link that stutters.
+  // That is the shadow-tree cost this mark is lazy to avoid, paid on a
+  // loop; and it strips and restores aria-current each time, which a
+  // screen reader can read as the row becoming current all over again.
+  if (b.at >= 0 && b.at !== at && rows[b.at]) paint(rows[b.at], "");
+  if (at >= 0 && rows[at]) paint(rows[at], state);
+  b.at = at;
+  b.state = state;
 }
 
 function paint(row, state) {
