@@ -19,7 +19,7 @@ func TestGCRefusesAnEmptyCatalogOverAPopulatedVariantsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	if code := gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, dir, 0, false); code == 0 {
+	if code := gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, dir, "variant row", "variants directory", 0, false); code == 0 {
 		t.Fatal("an empty catalog over a populated variants dir was allowed to sweep")
 	}
 	// The message has to name the way OUT, or the operator whose library
@@ -33,24 +33,48 @@ func TestGCRefusesAnEmptyCatalogOverAPopulatedVariantsDir(t *testing.T) {
 	}
 }
 
+// TestGCRefusalNamesTheCatalogItIsTalkingAbout — the helper is shared by
+// `upscale --gc` (variant rows, the variants directory) and `analyze --gc`
+// (analysis rows, the waveform directory). A refusal that says "no variant row
+// references any sidecar" during a waveform GC sends the operator to the wrong
+// table, at the moment they are deciding whether to pass --allow-empty.
+// (Gemini on #895.)
+func TestGCRefusalNamesTheCatalogItIsTalkingAbout(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.waveform.bin"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, dir, "analysis row", "waveform directory", 0, false)
+	out := stderr.String()
+	for _, want := range []string{"analysis row", "waveform directory"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal does not say %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "variant") {
+		t.Errorf("a waveform GC's refusal talks about variants:\n%s", out)
+	}
+}
+
 func TestGCEmptyCatalogGuardLetsTheDeliberateCaseThrough(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.upscaled-v1-96000-24.flac"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	if code := gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, dir, 0, true); code != 0 {
+	if code := gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, dir, "variant row", "variants directory", 0, true); code != 0 {
 		t.Errorf("--allow-empty was refused anyway (exit %d): %s", code, stderr.String())
 	}
 	// An empty catalog over an EMPTY dir is a bridge that never transcoded
 	// anything, not the hazard — it must stay a silent pass.
 	stderr.Reset()
-	if code := gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, t.TempDir(), 0, false); code != 0 {
+	if code := gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, t.TempDir(), "variant row", "variants directory", 0, false); code != 0 {
 		t.Errorf("an empty catalog over an empty dir was refused (exit %d)", code)
 	}
 	// And a populated catalog is never the guard's business.
 	stderr.Reset()
-	if code := gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, dir, 7, false); code != 0 {
+	if code := gcRefuseEmptyKnownSetOverPopulatedDir(&stderr, dir, "variant row", "variants directory", 7, false); code != 0 {
 		t.Errorf("a populated catalog was refused (exit %d)", code)
 	}
 }

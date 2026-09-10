@@ -845,18 +845,27 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, outputDir 
 //
 // An empty set over an empty directory exits 0 as before: nothing to protect,
 // nothing to do.
-func gcRefuseEmptyKnownSetOverPopulatedDir(stderr io.Writer, outputDir string, knownCount int, allowEmpty bool) int {
+// `rowNoun` and `dirNoun` name what THIS command manages. The helper is shared
+// by `upscale --gc` (variant rows, the variants directory) and `analyze --gc`
+// (analysis rows, the waveform directory), and a refusal that says "no variant
+// row references any sidecar" during a waveform GC sends the operator to the
+// wrong table. Parameterised rather than genericised to "database row": the
+// operator is standing at a terminal deciding whether to pass --allow-empty,
+// and which catalog is empty is the fact that decision turns on.
+// (Gemini on #895.)
+func gcRefuseEmptyKnownSetOverPopulatedDir(stderr io.Writer, outputDir, rowNoun, dirNoun string, knownCount int, allowEmpty bool) int {
 	if knownCount > 0 || allowEmpty {
 		return 0
 	}
+	// The probe asks "missing, empty, or unreadable?", which is not
+	// variant-specific despite the name — there is nothing to lose either way.
 	if reason := integrity.VariantsDirSweepBlockReason(outputDir); reason != "" {
-		// Missing, empty, or unreadable — there is nothing to lose.
 		return 0
 	}
-	fmt.Fprintf(stderr, "GC forward sweep: no variant row references any sidecar, but %q holds files.\n", outputDir)
+	fmt.Fprintf(stderr, "GC forward sweep: no %s references any sidecar, but %q holds files.\n", rowNoun, outputDir)
 	fmt.Fprintln(stderr, "  Every file there would be treated as an orphan and removed.")
-	fmt.Fprintln(stderr, "  This usually means the wrong config/database: check that --config names the")
-	fmt.Fprintln(stderr, "  install whose variants directory you meant, and that a scan has run.")
+	fmt.Fprintf(stderr, "  This usually means the wrong config/database: check that --config names the\n"+
+		"  install whose %s you meant, and that a scan has run.\n", dirNoun)
 	fmt.Fprintln(stderr, "  If the library really is empty and you want the sidecars gone, re-run with --allow-empty.")
 	return 1
 }
@@ -1005,7 +1014,8 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		known[strings.ToLower(filepath.Clean(r.SidecarPath))] = true
 	}
 
-	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir, len(known), allowEmpty); code != 0 {
+	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir,
+		"variant row", "variants directory", len(known), allowEmpty); code != 0 {
 		return code
 	}
 

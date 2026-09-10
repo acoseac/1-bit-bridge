@@ -199,7 +199,8 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// empty `known`, so the walk below would classify the whole waveform cache
 	// as orphaned. Cheaper to rebuild than a PCM rendition, which is why this
 	// is the milder of the two — not a different rule.
-	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir, len(known), allowEmpty); code != 0 {
+	if code := gcRefuseEmptyKnownSetOverPopulatedDir(stderr, outputDir,
+		"analysis row", "waveform directory", len(known), allowEmpty); code != 0 {
 		return code
 	}
 
