@@ -165,12 +165,34 @@ func (c *Client) tickLyrics(ctx context.Context, st State) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Re-checked per candidate, not just at the top. A full pass is
+		// `lyricsCandidateBatch` × `lyricsPacing` of pure pacing — at the
+		// defaults, longer than the poll interval — so a scan starting a
+		// second after the sweep began would run entirely inside it. Both
+		// write `track_lyrics`, and a sweep landing seconds before the
+		// scanner extracts a local document bumps `indexed_at` twice for one
+		// track: two deltas to every paired device for one change.
+		if c.scanInProgress() {
+			c.log().DebugContext(ctx, "atlaslyrics.stood_down_for_scan")
+			break
+		}
 		if written >= lyricsSweepBudget {
 			break
 		}
 		mbid, tier, err := c.resolveRecording(ctx, st, cand, releases)
-		if err != nil {
-			return err // transport or auth: the whole sweep stops, nothing stamped
+		switch {
+		case errors.Is(err, errReleaseUnavailable):
+			// One release could not be answered about. Skip it — and every
+			// other track on it, via the cooldown — rather than ending the
+			// sweep, which used to hand the whole library's worth of
+			// candidates to a release that fails identically every tick.
+			// Nothing is stamped: the upstream answered nothing.
+			c.coolRelease(cand.AlbumMBID)
+			c.log().DebugContext(ctx, "atlaslyrics.release_skipped",
+				"album", cand.AlbumMBID, "error", err)
+			continue
+		case err != nil:
+			return err // auth, or a cancelled context: facts about the RUN
 		}
 		if mbid == "" {
 			c.stamp(ctx, cand, "", statusUnresolved, lyricsUnresolvedBackoff)
@@ -255,6 +277,13 @@ func (c *Client) resolveRecording(ctx context.Context, st State, cand LyricsCand
 	}
 	entries, ok := releases[cand.AlbumMBID]
 	if !ok {
+		// A release that failed to answer recently is not asked again until
+		// its cooldown expires. Checked HERE rather than at the top of the
+		// sweep because a candidate carrying a tagged recording MBID never
+		// needs the release listing at all, and should not be held up by it.
+		if c.releaseCooling(cand.AlbumMBID) {
+			return "", MatchNone, fmt.Errorf("%w: cooling after a recent failure", errReleaseUnavailable)
+		}
 		var err error
 		entries, err = c.fetchReleaseTracks(ctx, st, cand.AlbumMBID)
 		if err != nil {
@@ -269,8 +298,17 @@ func (c *Client) resolveRecording(ctx context.Context, st State, cand LyricsCand
 			// Found by Gemini on PR #888, which also spotted why the existing
 			// transient test could not see it: that candidate carried a tagged
 			// recording MBID and never reached this call at all.
+			//
+			// It propagates as errReleaseUnavailable, which the sweep skips
+			// and cools rather than aborting on. Auth and a cancelled context
+			// are the exceptions and keep propagating as themselves: those
+			// are facts about the RUN, and continuing would mean asking an
+			// upstream that will refuse every remaining candidate identically.
 			if !isUpstreamAnswered(err) {
-				return "", MatchNone, err
+				if errors.Is(err, errUnauthorized) || ctx.Err() != nil {
+					return "", MatchNone, err
+				}
+				return "", MatchNone, fmt.Errorf("%w: %v", errReleaseUnavailable, err)
 			}
 			// A release Atlas genuinely does not have is durable. Cache the
 			// empty answer so this album's other tracks do not each re-ask.
@@ -303,6 +341,24 @@ func (c *Client) applyRecording(ctx context.Context, st State, cand LyricsCandid
 		// the track: it must NOT write a terminal verdict, or a thirty-second
 		// outage sidelines every track in flight for thirty days. Leaving the
 		// attempt row untouched re-offers this candidate on the next sweep.
+		//
+		// A DURABLE one is a fact about the track, and leaving it unstamped is
+		// its own trap: the candidate query gates on the ABSENCE of a row, so
+		// an unstamped miss is re-offered every sweep forever. The query is
+		// `LIMIT 400` over a deterministic order, so once 400 such rows
+		// accumulate — a stale musicBrainzTrackID is all it takes — they hold
+		// every slot and no other track is ever considered again.
+		//
+		// The split is `isUpstreamAnswered`'s, the same one the release leg
+		// uses: a code came back, and 4xx is durable EXCEPT 429 and 408, which
+		// are 4xx by number and transient by meaning. Anything that never
+		// reached the app is a transport error rather than an
+		// *httpStatusError, so it takes the transient arm by construction.
+		if isUpstreamAnswered(err) {
+			c.log().DebugContext(ctx, "atlaslyrics.recording_unknown", "mbid", mbid, "error", err)
+			c.stamp(ctx, cand, mbid, statusUnavailable, lyricsMissBackoff)
+			return false, statusUnavailable, nil
+		}
 		c.log().DebugContext(ctx, "atlaslyrics.recording_fetch_failed", "error", err)
 		return false, "", nil
 	}
@@ -319,6 +375,19 @@ func (c *Client) applyRecording(ctx context.Context, st State, cand LyricsCandid
 	case statusUnavailable:
 		c.stamp(ctx, cand, mbid, statusUnavailable, lyricsMissBackoff)
 		return false, statusUnavailable, nil
+	case statusAvailable:
+		// Falls through to the document read below.
+	default:
+		// A status this build does not know — "", or a `queued` /
+		// `rate_limited` a later Atlas grows. Previously it fell through to
+		// documentFrom, failed, and was stamped `unavailable` with a
+		// thirty-day backoff: a durable verdict about the TRACK derived from
+		// a sentence about the UPSTREAM we could not read. `pending` was
+		// special-cased for exactly that reason, so an UNRECOGNISED status
+		// defaulting to a durable miss is the wrong direction. Stamp nothing
+		// and let the next sweep ask again.
+		c.log().WarnContext(ctx, "atlaslyrics.unknown_status", "status", rec.Status, "mbid", mbid)
+		return false, "", nil
 	}
 
 	doc, source, ok := documentFrom(rec)
@@ -426,6 +495,61 @@ func (c *Client) fetchReleaseTracks(ctx context.Context, st State, albumMBID str
 // real seconds asleep — a budget-sized sweep at the production interval is 20+
 // seconds of pure sleep, and CI already pays enough for SQLite under the race
 // detector. Zero means the default, so production never has to set it.
+// errReleaseUnavailable marks a release the upstream could not answer about.
+//
+// Distinct from an error that stops the sweep, because the two are different
+// facts: an auth failure or a cancelled context is about the RUN, and one
+// release timing out is about one release. Conflating them meant a single
+// unanswerable release aborted the whole tick — and since the candidate query
+// is ordered, deterministically the same one every tick, while healthy albums
+// drained out of the candidate set and the failing one migrated toward the
+// front. The tier went silent for the whole library with one warn line.
+var errReleaseUnavailable = errors.New("atlaslyrics: release unavailable")
+
+// lyricsReleaseCooldown is how long a release that failed to answer is left
+// alone.
+//
+// Skipping without it would trade a stalled tier for a hammered upstream: the
+// candidate ordering puts the same release in front of the sweep on the next
+// tick, 60 seconds later, forever. An hour is long enough that a degraded
+// upstream is asked ~24 times a day instead of ~1,440, and short enough that a
+// restart-shaped outage costs the album one cycle rather than a fortnight —
+// which is what a durable verdict would have cost it, and why this is not one.
+const lyricsReleaseCooldown = time.Hour
+
+// coolRelease marks a release as not-worth-asking-about until the cooldown
+// expires. Prunes on write: the map is bounded by the number of releases
+// failing at once, and writes only happen on failure, so the sweep is O(1)
+// amortised against a map that cannot grow with a healthy upstream.
+func (c *Client) coolRelease(mbid string) {
+	if mbid == "" {
+		return
+	}
+	now := c.now()
+	c.releaseCoolMu.Lock()
+	defer c.releaseCoolMu.Unlock()
+	if c.releaseCool == nil {
+		c.releaseCool = make(map[string]time.Time)
+	}
+	for k, until := range c.releaseCool {
+		if !now.Before(until) {
+			delete(c.releaseCool, k)
+		}
+	}
+	c.releaseCool[mbid] = now.Add(lyricsReleaseCooldown)
+}
+
+// releaseCooling reports whether a release is inside its cooldown.
+func (c *Client) releaseCooling(mbid string) bool {
+	if mbid == "" {
+		return false
+	}
+	c.releaseCoolMu.RLock()
+	until, ok := c.releaseCool[mbid]
+	c.releaseCoolMu.RUnlock()
+	return ok && c.now().Before(until)
+}
+
 func (c *Client) pace(ctx context.Context) {
 	d := c.LyricsPacing
 	if d <= 0 {

@@ -479,6 +479,10 @@ func TestAtlasLyricsStats(t *testing.T) {
 	seedAtlasTrack(t, s, "a/2.flac", "album-1", "", "Two", 1, 2, 100)
 	seedAtlasTrack(t, s, "a/3.flac", "album-1", "", "Three", 1, 3, 100)
 	seedAtlasTrack(t, s, "a/4.flac", "", "", "No MBID", 1, 4, 100)
+	// The witness for `addressable`: an MBID, no lyrics row, no verdict. It is
+	// what stops the assertion below from passing just because everything got
+	// excluded.
+	seedAtlasTrack(t, s, "a/5.flac", "album-1", "", "Five", 1, 5, 100)
 
 	if _, err := s.UpsertAtlasLyrics(ctx, "a/1.flac", atlasDoc("[00:01.00] x", true), lyrics.SourceAtlasLRC); err != nil {
 		t.Fatal(err)
@@ -505,9 +509,27 @@ func TestAtlasLyricsStats(t *testing.T) {
 	if got.ByStatus[AtlasLyricsAvailable] != 2 || got.ByStatus[AtlasLyricsInstrumental] != 1 {
 		t.Errorf("statuses: %v", got.ByStatus)
 	}
-	// a/3 is addressable and still has no row; a/4 carries no MBID at all.
+	// a/5 is the only one left to act on. a/4 carries no MBID at all — and
+	// a/3 is INSTRUMENTAL, which is a success that correctly leaves no
+	// `track_lyrics` row: the candidate query will never offer it again, so
+	// counting it as outstanding floors the operator's remaining-work number
+	// at the instrumental population and makes a finished tier read as a
+	// stalled one. (This test asserted the opposite, and said so in a comment.)
 	if got.Addressable != 1 {
-		t.Errorf("addressable = %d, want 1", got.Addressable)
+		t.Errorf("addressable = %d, want 1 — a/5 only", got.Addressable)
+	}
+
+	// A RETAG invalidates the verdict, here as in the candidate query. An
+	// instrumental answer was about one recording; moved to another album,
+	// the track is addressable again. Without this the exclusion would be a
+	// permanent one keyed on a path.
+	seedAtlasTrack(t, s, "a/3.flac", "album-2", "", "Three", 1, 3, 100)
+	got, err = s.AtlasLyricsStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Addressable != 2 {
+		t.Errorf("addressable after a retag = %d, want 2 — the stale verdict must stop excluding", got.Addressable)
 	}
 }
 
