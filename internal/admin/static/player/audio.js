@@ -180,7 +180,16 @@ export function init() {
   state.el.addEventListener("stalled", () => {
     setLoading(!state.el.paused && state.el.readyState < HAVE_FUTURE_DATA);
   });
-  state.el.addEventListener("emptied", () => setLoading(false));
+  // `emptied` is also fired by load()'s own abort — and as a QUEUED task,
+  // so it lands one tick AFTER the synchronous block that set loading and
+  // called play(), and one tick BEFORE the `play` that would set it back.
+  // Clearing unconditionally therefore blinks the spinner off in the gap.
+  // Measured at 1 ms on a warm source, which is exactly the kind of
+  // margin that stops being 1 ms on someone else's machine. It only means
+  // "nothing is being waited for" when nothing intends to play.
+  state.el.addEventListener("emptied", () => {
+    if (state.el.paused) setLoading(false);
+  });
   state.el.addEventListener("loadedmetadata", () => {
     // A non-finite duration means the source didn't report a length —
     // an upstream that ignored Range, typically. Binding a scrubber to
