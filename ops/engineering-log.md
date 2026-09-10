@@ -4930,3 +4930,122 @@ One finding chased and dropped: `POST /v1/upscale/batch` carries no
 `writeDeadline` override while the two smaller-scope upscale routes get 15
 minutes. The whole-library submit is DB + in-memory only (`Enqueue` is
 `select`/`default`, non-blocking), so 60 s is not a realistic ceiling.
+
+## 2026-09-10 — the web player never said it was downloading (#901)
+
+Reported as UX: *"when you play a track, the download process is nowhere
+visible, so until it downloads you sit and wait and it looks like nothing
+happens."* Two defects underneath it, one of which was making the wait longer.
+
+### The measurements
+
+**The dead window.** `audio.js` set `playing = true` on the element's `play`
+event, which fires the instant `paused` flips rather than when sound starts. On
+a throttled fixture (a bandwidth-limiting reverse proxy in front of a loopback
+bridge, 60–250 KB/s, +150 ms) a cold 16 MB FLAC spent **1,869 ms** showing a
+pause glyph over a `0:00` timer and a motionless scrubber. The bar also kept the
+PREVIOUS track's total duration and thumb position across the load, so the one
+number on screen during the wait was a wrong one rather than a missing one.
+
+**`waiting` is early enough to be the trigger.** Traced on a cold source: `play`
+at t=2 ms, `waiting` at t=3 ms, `playing` at t=1,867 ms. So the element's own
+starvation event lands ~1 ms after `play` and does not need to be anticipated —
+but `load()` asserts `loading` anyway, so the spinner is up on the same frame
+the title changes rather than a task later.
+
+**The preloader was competing with the track being waited for.** `primeNext`
+ran from `load()` while its docblock said "near the end of this one". Measured
+at 200 KB/s with 4-minute 44.1/16 FLACs: at the moment the current track had
+72 s buffered, the preloader already held **45 s of the next one** — roughly 40%
+of the link spent ahead of a track not wanted for another three minutes. Moved
+to `timeupdate` at 30 s remaining; verified firing at exactly −25 s after a seek
+into the window.
+
+**`emptied` is a queued task, and it lands in the gap.** `load()`'s own abort
+fires `emptied` one tick AFTER the synchronous block that sets `loading` and
+calls `play()`, and one tick BEFORE the `play` that would set it back — so
+clearing on it unconditionally blinked the spinner off. Measured at 1 ms.
+Guarded on `paused`, since `emptied` only means "nothing is being waited for"
+when nothing intends to play.
+
+**`pause()` and `removeAttribute("src")` do not stop a fetch.** On the real
+element at 60 KB/s against a 40 MB source: playing at 1.7 s buffered /
+`NETWORK_LOADING`; three seconds after `pause()`, 4.3 s and still LOADING; three
+seconds after `removeAttribute("src")`, 6.7 s and STILL growing. Only `load()`
+reaches `NETWORK_EMPTY` and drops the buffer. `cancelPrime` knew this and
+`clearQueue`, 120 lines away, did not — both now go through one `abandon(el)`.
+
+**An interrupted `play()` rejects, and the rejection is a microtask.** Clicking
+a second track while the first is still loading rejects the first with
+`AbortError`, *"The play() request was interrupted by a new load request"*.
+Because the rejection is a microtask queued by the interrupting load and the new
+track's `play` event is a task queued after it, the unguarded clear is always
+undone one tick later: negative-controlled at **cleared t=16 ms, restored
+t=24 ms, first `playing` t=1,926 ms** — an 8 ms flicker, not the 1.9 s loss the
+ordering suggests. Guarded regardless, because that ordering is the only thing
+keeping it small and a stale `NotAllowedError` would otherwise write "Press play
+to start." about a track nobody is waiting on. **The first draft of this entry
+claimed the 1.9 s; the control is what corrected it.**
+
+**The phone dock's metadata column was 41px at 375px** — "Cold Six" rendered
+`Col…`. Now 95px, measured, from chrome only (side insets, padding, column gap,
+cover); all four transport targets keep full size.
+
+### Rejected alternatives
+
+- **A `data-playback-state` attribute instead of the three row classes**
+  (CodeRabbit, #901, citing "player.css must not style operator classes"). That
+  guideline is about the OPERATOR CONSOLE's classes — a bare `.rows` rule in
+  player.css once collapsed every table in the console, which is why
+  `TestPlayerCSSDoesNotHijackOperatorTableClasses` looks for name collisions
+  with app.css. `track-current` / `track-paused` / `track-waiting` /
+  `np-btn-busy` appear zero times in app.css and app.js. The change would also
+  REMOVE coverage: `TestPlayerEmittedClassesAreStyled` scrapes
+  `classList.toggle` literals, and data attributes are outside its reach.
+- **An `<svg><use>` mark in every row.** At most one row is ever marked and a
+  playlist list can hold tens of thousands, each paying for a shadow tree
+  instantiated from the sprite. Injected into the current row and removed again
+  instead — which then needed the `b.at !== at` guard, or a state change tore it
+  down and rebuilt it on every play/pause.
+- **A frame sampler for the spinner traces.** `requestAnimationFrame` is dead in
+  an automated tab, so it reports one sample and looks like a pass. Used a
+  MutationObserver on the button's class instead — microtask-driven, not
+  visibility-throttled.
+
+### The process failure worth more than the fixes
+
+**CodeRabbit was rate-limited from its FIRST review on this PR, and the notice
+is an HTML comment inside its walkthrough body** — not a comment of its own. So
+after two fix rounds the PR read exactly like a clean pass: no new comments, all
+twelve checks green, SonarCloud at zero. This file already carried "a
+rate-limited bot's silence is not approval"; what was missing was that there is
+nothing to *see*. The allowance is derived from recent use — one review per hour
+off 88 attempts in 7 days — so it binds hardest on a multi-PR day, which is
+already the day review gets skipped.
+
+Detection is a grep, not an eyeball
+(`gh api …/issues/<pr>/comments --jq '.[].body' | grep -c "rate limited by
+coderabbit"`), and the remedy is to ask: `@coderabbitai review` picked up both
+incremental commits and `/gemini review` did the same, each in under a minute,
+and both came back clean.
+
+**The marker is TRANSIENT, which the first draft of this entry got wrong.**
+Running that grep against #901 after the fact returns 0 — CodeRabbit EDITS the
+rate-limit block out of its walkthrough when the review eventually runs
+(comment id 5622280491, created 16:50:38Z, updated 17:46:44Z, three minutes
+after the `@coderabbitai review` request). So the grep answers "am I blocked
+right now", not "was this PR reviewed". The after-the-fact question is whether
+the bot left any review or inline comment at all.
+
+Which is how **#900 turned up: merged at 12:54:12Z, nineteen minutes after
+opening, with the notice still standing — zero CodeRabbit reviews and zero
+inline comments, to this day.** Its notice reads "wait 18 minutes for your next
+included review"; nobody waited. That PR is the live instance of this rule, not
+a hypothetical, and it was found by testing the documented command rather than
+trusting it. Rule in CLAUDE.md under **Build, CI, and test discipline**, with a
+pointer from **Bot-review discipline**.
+
+Two of the three CodeRabbit findings and both Gemini findings were real; four of
+the five were in code this PR added, and the fifth (`clearQueue`) was a rule this
+PR's own docblock stated one function away — the enumeration failure this file
+records over and over.

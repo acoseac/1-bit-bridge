@@ -1729,11 +1729,32 @@ its twin.** The top list is older, shorter, and read first.
   fresh SHA after retargeting. Capture each child's fork point BEFORE amending
   its parent. `git add -A` with another branch's untracked files on disk sweeps
   them into your commit; use explicit paths.
-- **A rate-limited bot's silence is not approval.** CodeRabbit and Gemini each
-  post a quota notice and then don't review; "no comments" after a quota notice
-  means unreviewed. The `test (windows-latest)` leg was non-blocking until
-  2026-09-01 — a permanently-red non-blocking leg hides every genuine regression
-  behind it.
+- **A rate-limited bot's silence is not approval — and CodeRabbit's notice is
+  both invisible and TRANSIENT.** Both bots post a quota notice and then don't
+  review; "no comments" after one means unreviewed. CodeRabbit's is an HTML
+  COMMENT inside its walkthrough body
+  (`<!-- … rate limited by coderabbit.ai -->`), NOT a comment of its own, so
+  every way of listing the thread reads as normally-reviewed. The allowance is
+  derived from RECENT USE — one review per *hour* off ~88 attempts in 7 days —
+  so it binds hardest on a multi-PR day, which is already the day this file says
+  review gets skipped.
+  **While you are blocked**, the marker is greppable and that is when it
+  matters: `gh api repos/acoseac/1-bit-bridge/issues/<pr>/comments --jq
+  '.[].body' | grep -c "rate limited by coderabbit"`. **Afterwards it is not**:
+  CodeRabbit EDITS the marker out of the walkthrough when the review finally
+  runs, so a later 0 is not evidence a review happened. Auditing after the fact
+  asks a different question — whether the bot left any review or inline comment
+  at all. Ask for the pass rather than waiting it out: `@coderabbitai review`
+  picks up the incremental commits and `/gemini review` does the same, both
+  inside a minute. CodeRabbit's real pass says "Review finished"; Gemini's says
+  it has no comments to address. Anything less than one of those is not a round.
+  **#900 is the live instance**: merged nineteen minutes after opening with the
+  notice standing, and it carries zero CodeRabbit reviews and zero inline
+  comments to this day. #901 was limited from its FIRST review too, which left
+  both fix rounds unread while all twelve checks stayed green — it was only
+  caught by looking for the notice on purpose.
+- The `test (windows-latest)` leg was non-blocking until 2026-09-01 — a
+  permanently-red non-blocking leg hides every genuine regression behind it.
 - **Merging with review comments outstanding is a process failure**, not a
   shortcut — expect two rounds minimum. Verify a bot's severity label before
   acting: recurring false positives here include `windows.Errno` vs
@@ -1959,6 +1980,8 @@ The same "verify before acting" rule the DeepSeek triage runs on applies to the 
 Take the accurate half of a wrong finding when there is one — the backslash and Windows-fixture cases both yielded a useful test even though the proposed code change was rejected. And **reply on the thread with the evidence when declining**, so the same claim doesn't cost a fresh investigation next quarter.
 
 **Merging with review comments outstanding is a process failure, not a shortcut.** PRs #562 / #563 / #564 (2026-07-22) each merged with one commit and no fix round — #563 nine minutes after its review landed, #564 while a comment was still in flight. That deferred one Major (the FLAC preflight double-read, #568) and one High (unvalidated updater asset URLs, #569) into a separate remediation batch, and both were real. The documented loop — *"don't merge after round 1 — expect 2 rounds minimum"* — is what catches this; a same-day 9-PR batch is exactly when it gets skipped and exactly when it matters.
+
+**And check the bot actually reviewed before counting the round.** A rate-limited CodeRabbit hides its notice in an HTML comment inside the walkthrough, so a PR with no new comments after a fix round looks identical to a clean pass — full rule, the grep that detects it, and the two commands that ask for the pass, under **### Build, CI, and test discipline**.
 
 ## LOUPE — the recent-work review cycle (user-invoked by name)
 
