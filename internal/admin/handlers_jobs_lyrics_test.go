@@ -275,3 +275,41 @@ func TestTheLyricsCardAndTheSweepReadTheSamePredicate(t *testing.T) {
 		t.Error("the card reports the tier on without the harvest credential it rides")
 	}
 }
+
+// TestDisablingTheLyricsTierIsNotAdvisedAboutPrerequisites — the
+// applied-but-inert reason is for someone turning the tier ON into a bridge
+// that cannot run it. Reported on the way OFF it told an operator who had just
+// deliberately disabled the feature that their save needed two other settings
+// turned on: advice about a thing they had asked to stop. (Gemini on #894.)
+func TestDisablingTheLyricsTierIsNotAdvisedAboutPrerequisites(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	cfg.Atlas.Enabled = false
+	cfg.Atlas.HarvestEnabled = false
+	cfg.Atlas.LyricsEnabled = true
+	srv.deps.CfgHolder.Store(cfg)
+
+	var resp settingsPatchResponse
+	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+		map[string]any{"atlasLyricsEnabled": false}, &resp); code != 200 {
+		t.Fatalf("patch: %d", code)
+	}
+	got := resp.Fields["atlasLyricsEnabled"]
+	if string(got.Status) != string(applyLive) {
+		t.Errorf("status = %q, want live", got.Status)
+	}
+	if got.Reason != "" {
+		t.Errorf("turning the tier OFF carried the reason %q — that is advice about "+
+			"enabling it, given to someone who just disabled it", got.Reason)
+	}
+
+	// NEGATIVE CONTROL: turning it ON with the prerequisites still off DOES
+	// carry the reason, so the assertion above is about the direction rather
+	// than about the reason having been dropped.
+	if code := doJSON(t, srv.Handler(), "PATCH", "/api/settings",
+		map[string]any{"atlasLyricsEnabled": true}, &resp); code != 200 {
+		t.Fatalf("patch: %d", code)
+	}
+	if resp.Fields["atlasLyricsEnabled"].Reason == "" {
+		t.Error("enabling the tier on a bridge that cannot run it reported no reason")
+	}
+}
