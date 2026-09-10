@@ -680,25 +680,37 @@ func TestATransientReleaseFetchFailureWritesNoVerdict(t *testing.T) {
 		name      string
 		status    int
 		wantStamp bool
-		wantErr   bool
 	}{
 		// The upstream failed to answer: nothing is known, nothing is written.
-		{"502 bad gateway", http.StatusBadGateway, false, true},
-		{"503 unavailable", http.StatusServiceUnavailable, false, true},
+		{"502 bad gateway", http.StatusBadGateway, false},
+		{"503 unavailable", http.StatusServiceUnavailable, false},
 		// 4xx by number, transient by meaning — a rate limit says nothing
 		// about whether the album exists.
-		{"429 too many requests", http.StatusTooManyRequests, false, true},
-		{"408 request timeout", http.StatusRequestTimeout, false, true},
+		{"429 too many requests", http.StatusTooManyRequests, false},
+		{"408 request timeout", http.StatusRequestTimeout, false},
 		// The upstream ANSWERED: Atlas does not have this release. Durable, so
 		// the candidate is stamped and the sweep carries on.
-		{"404 not found", http.StatusNotFound, true, false},
-		{"400 bad request", http.StatusBadRequest, true, false},
+		{"404 not found", http.StatusNotFound, true},
+		{"400 bad request", http.StatusBadRequest, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sink := newFakeSink(LyricsCandidate{
-				Path: "a/x.flac", AlbumMBID: "alb", Title: "Song", DiscNumber: 1, TrackNumber: 1,
-			})
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// TWO candidates on DIFFERENT releases. With one, this test could
+			// not tell "this candidate was skipped" from "the sweep ended" —
+			// which is how it passed for the whole life of the code that
+			// ended the sweep. The second release always answers, so it is
+			// the witness: if the sweep survived the first failure it reached
+			// this one.
+			sink := newFakeSink(
+				LyricsCandidate{Path: "a/x.flac", AlbumMBID: "alb", Title: "Song", DiscNumber: 1, TrackNumber: 1},
+				LyricsCandidate{Path: "b/y.flac", AlbumMBID: "other", Title: "Other", DiscNumber: 1, TrackNumber: 1},
+			)
+			var otherHits int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "other") {
+					otherHits++
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
 				w.WriteHeader(tc.status)
 			}))
 			defer srv.Close()
@@ -706,12 +718,12 @@ func TestATransientReleaseFetchFailureWritesNoVerdict(t *testing.T) {
 				LyricsPacing: time.Nanosecond}
 			st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
 
-			err := c.tickLyrics(context.Background(), st)
-			if tc.wantErr && err == nil {
-				t.Error("a transient failure did not stop the sweep")
+			// The sweep never ends over ONE release. A release is not the run.
+			if err := c.tickLyrics(context.Background(), st); err != nil {
+				t.Fatalf("one release failing ended the whole sweep: %v", err)
 			}
-			if !tc.wantErr && err != nil {
-				t.Errorf("an answered 4xx stopped the sweep: %v", err)
+			if otherHits == 0 {
+				t.Error("the second release was never reached — the sweep stopped at the first")
 			}
 			got, stamped := sink.attempts["a/x.flac"]
 			if stamped != tc.wantStamp {
@@ -721,6 +733,71 @@ func TestATransientReleaseFetchFailureWritesNoVerdict(t *testing.T) {
 				t.Errorf("status = %q, want unresolved", got.status)
 			}
 		})
+	}
+}
+
+// TestAnUnansweredReleaseIsNotReaskedNextTick — skipping alone would trade a
+// stalled tier for a hammered upstream: the candidate ordering is
+// deterministic, so the same release leads the next tick, 60 seconds later,
+// forever. The cooldown is what makes the skip an improvement rather than a
+// trade.
+func TestAnUnansweredReleaseIsNotReaskedNextTick(t *testing.T) {
+	sink := newFakeSink(LyricsCandidate{
+		Path: "a/x.flac", AlbumMBID: "alb", Title: "Song", DiscNumber: 1, TrackNumber: 1,
+	})
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
+		LyricsPacing: time.Nanosecond}
+	st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
+
+	for i := 0; i < 3; i++ {
+		if err := c.tickLyrics(context.Background(), st); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	if hits != 1 {
+		t.Errorf("the failing release was requested %d times across three ticks, want 1", hits)
+	}
+	if _, stamped := sink.attempts["a/x.flac"]; stamped {
+		t.Error("a verdict was written about a release the upstream never answered about")
+	}
+
+	// The cooldown DOES NOT MOVE while it is in force. Skipping a cooling
+	// release and re-cooling it look identical from outside — both mean "no
+	// request was made" — and the second pushes `until` forward on every tick.
+	// The candidate ordering guarantees a tick every 60 seconds, so an
+	// extending window never expires and the album is suppressed for the life
+	// of the process: the negative cache this is specifically not meant to be.
+	// (Gemini on PR #893 saw the redundant lock; this is what was underneath.)
+	c.releaseCoolMu.RLock()
+	untilAfterFirstSkip := c.releaseCool["alb"]
+	c.releaseCoolMu.RUnlock()
+	if err := c.tickLyrics(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	c.releaseCoolMu.RLock()
+	untilAfterSecondSkip := c.releaseCool["alb"]
+	c.releaseCoolMu.RUnlock()
+	if !untilAfterSecondSkip.Equal(untilAfterFirstSkip) {
+		t.Errorf("the cooldown moved from %v to %v on a tick that made no request — "+
+			"an extending window never expires", untilAfterFirstSkip, untilAfterSecondSkip)
+	}
+
+	// And it EXPIRES — it is a pause, not a negative cache. Without this the
+	// test would also pass against a permanent suppression.
+	c.releaseCoolMu.Lock()
+	c.releaseCool["alb"] = time.Now().Add(-time.Second)
+	c.releaseCoolMu.Unlock()
+	if err := c.tickLyrics(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 2 {
+		t.Errorf("hits = %d after the cooldown lapsed, want 2 — the release is never asked about again", hits)
 	}
 }
 
@@ -771,5 +848,144 @@ func TestIsHTTPNotFoundReadsTheCodeNotTheMessage(t *testing.T) {
 		if isHTTPNotFound(e) {
 			t.Errorf("not a 404, but read as one: %v", e)
 		}
+	}
+}
+
+// TestADurableRecordingFailureWritesAVerdict is the other half of the
+// transient/durable split on the RECORDING leg, which had only the transient
+// half — and so classified everything as transient.
+//
+// An unstamped miss is not free: the candidate query gates on the ABSENCE of a
+// row, so the track is re-offered on every sweep forever. The query is
+// LIMIT 400 over a deterministic order, so a few hundred stale
+// musicBrainzTrackIDs hold every slot and no other track is ever considered.
+func TestADurableRecordingFailureWritesAVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		wantStamp bool
+	}{
+		// The upstream ANSWERED: it does not know this recording. Durable.
+		{"404 not found", http.StatusNotFound, true},
+		{"400 bad request", http.StatusBadRequest, true},
+		// 4xx by number, transient by meaning.
+		{"429 too many requests", http.StatusTooManyRequests, false},
+		{"408 request timeout", http.StatusRequestTimeout, false},
+		// Never reached the app at all.
+		{"502 bad gateway", http.StatusBadGateway, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := newFakeSink(LyricsCandidate{Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1"})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			c := &Client{Lyrics: sink, HTTP: srv.Client(), RequestTimeout: 5 * time.Second,
+				LyricsPacing: time.Nanosecond}
+			st := State{Token: "t", AtlasBaseURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour)}
+			if err := c.tickLyrics(context.Background(), st); err != nil {
+				t.Fatalf("tickLyrics: %v", err)
+			}
+			got, stamped := sink.attempts["a/x.flac"]
+			if stamped != tc.wantStamp {
+				t.Fatalf("stamped = %v (%q), want %v", stamped, got.status, tc.wantStamp)
+			}
+			if tc.wantStamp && got.status != statusUnavailable {
+				t.Errorf("status = %q, want unavailable", got.status)
+			}
+			if len(sink.docs) != 0 {
+				t.Error("a failure stored a document")
+			}
+		})
+	}
+}
+
+// TestAnUnrecognisedStatusIsTransientNotDurable — the switch knows
+// instrumental / pending / unavailable / available. Anything else used to fall
+// through to documentFrom, fail, and be stamped `unavailable` with a
+// THIRTY-DAY backoff: a durable verdict about the TRACK derived from a
+// sentence about the UPSTREAM that this build could not read. `pending` exists
+// as its own case for exactly that reason, so an UNKNOWN status defaulting to
+// a durable miss is backwards.
+//
+// It is not left unstamped either, which was this fix's first shape: with no
+// row the candidate query re-offers the track every 60-second tick, one
+// request and one warn line per track forever. The verdict written is
+// `pending` — the closed-set value that already means "answered, not yet
+// actionable" — never the upstream's own string, which would put an
+// unrecognised token in a column the candidate and stats queries switch on.
+// (Gemini on PR #893.)
+func TestAnUnrecognisedStatusIsTransientNotDurable(t *testing.T) {
+	for _, status := range []string{"", "queued", "rate_limited"} {
+		t.Run("status="+status, func(t *testing.T) {
+			sink := newFakeSink(LyricsCandidate{Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1"})
+			stub := &atlasStub{
+				recordings: map[string][]recordingResponse{"rec-1": {{Status: status, Plain: "words"}}},
+				hits:       map[string]int{},
+			}
+			c, st := lyricsClient(t, stub, sink)
+			if err := c.tickLyrics(context.Background(), st); err != nil {
+				t.Fatalf("tickLyrics: %v", err)
+			}
+			got, ok := sink.attempts["a/x.flac"]
+			if !ok {
+				t.Fatal("nothing was stamped — the track is re-asked on every tick forever")
+			}
+			if got.status != statusPending {
+				t.Errorf("status = %q, want %q — a durable verdict must not come from a "+
+					"status this build could not read", got.status, statusPending)
+			}
+			if got.status == status {
+				t.Errorf("the upstream's own string %q was written into the status column", status)
+			}
+			if got.nextAttemptAt == 0 {
+				t.Error("no backoff was set, so the throttle does nothing")
+			}
+			// And it stores nothing either: a body arriving under a status
+			// this build cannot interpret is not a document it may serve.
+			if len(sink.docs) != 0 {
+				t.Error("an unrecognised status stored a document")
+			}
+		})
+	}
+}
+
+// TestTheSweepStandsDownWhenAScanSTARTS — the guard was sampled once, at the
+// top. A full pass is lyricsCandidateBatch × lyricsPacing of pure pacing, which
+// at the defaults is longer than the poll interval, so a scan beginning a
+// second in ran entirely inside the sweep. Both write track_lyrics; a sweep
+// landing seconds before the scanner extracts a local document bumps
+// indexed_at twice for one track.
+func TestTheSweepStandsDownWhenAScanSTARTS(t *testing.T) {
+	sink := newFakeSink(
+		LyricsCandidate{Path: "a/1.flac", AlbumMBID: "alb", TrackMBID: "rec-1"},
+		LyricsCandidate{Path: "a/2.flac", AlbumMBID: "alb", TrackMBID: "rec-2"},
+		LyricsCandidate{Path: "a/3.flac", AlbumMBID: "alb", TrackMBID: "rec-3"},
+	)
+	stub := &atlasStub{
+		recordings: map[string][]recordingResponse{
+			"rec-1": {{Status: "available", Plain: "one"}},
+			"rec-2": {{Status: "available", Plain: "two"}},
+			"rec-3": {{Status: "available", Plain: "three"}},
+		},
+		hits: map[string]int{},
+	}
+	c, st := lyricsClient(t, stub, sink)
+
+	// A scan that begins after the first candidate is written — the shape a
+	// single sample at the top of the sweep cannot see.
+	scanning := false
+	c.ScanInProgress = func() bool {
+		sink.mu.Lock()
+		started := len(sink.docs) >= 1
+		sink.mu.Unlock()
+		scanning = scanning || started
+		return scanning
+	}
+	if err := c.tickLyrics(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.docs) != 1 {
+		t.Errorf("wrote %d documents, want 1 — the sweep did not stand down when the scan started", len(sink.docs))
 	}
 }

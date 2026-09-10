@@ -159,6 +159,23 @@ func MatchRelease(entries []ReleaseTrack, localTitle string, localDisc, localTra
 	// case a duplicate-title release presents — and 1,275 albums here have one.
 	case byPos != nil && folded != "" && foldTitle(byPos.Title) == folded:
 		return *byPos, MatchCorroborated
+
+	// Two keys that name DIFFERENT entries are in open conflict, and a
+	// conflict is evidence against both. Reaching this line means the
+	// corroboration arm already declined, i.e. the local title does not fold
+	// equal to the entry the position names — so the position and the title
+	// are each asserting the other is wrong.
+	//
+	// The arms below used to be tried anyway, and the fall-through was the
+	// dangerous half: a unique title match vetoed on duration handed control
+	// to the position match whose title the local file CONTRADICTS. On a
+	// mis-tagged rip, or a reissue that reorders, that stores one song's
+	// lyrics under another and stamps it `available` — the wrong answer that
+	// looks like a right one. Corroboration is this matcher's discriminator;
+	// this is that principle applied to disagreement rather than agreement.
+	case byPos != nil && byTitle != nil && byPos != byTitle:
+		return ReleaseTrack{}, MatchNone
+
 	case byTitle != nil && durationAgrees(localDurationMS, byTitle.LengthMS):
 		return *byTitle, MatchTitle
 	case byPos != nil && durationAgrees(localDurationMS, byPos.LengthMS):

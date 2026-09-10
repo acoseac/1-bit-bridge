@@ -120,6 +120,22 @@ type Client struct {
 	bookletPriorityOnce sync.Once
 	bookletPriorityCh   chan string
 
+	// releaseCool holds a per-release "do not ask again before" stamp for the
+	// lyrics sweep, so one upstream that cannot answer about one release is
+	// skipped rather than re-requested on every tick. See coolRelease.
+	//
+	// In-process on purpose, and NOT an attempt row: only an upstream that
+	// ANSWERED may write a verdict, and a transport failure has answered
+	// nothing about the album. Losing this on restart is correct — a restart
+	// is exactly when it is worth asking again.
+	//
+	// Guarded because the map is long-lived rather than per-sweep and this
+	// package is growing an operator surface over the same state; the run
+	// loop is its only writer today, but "today" is how the rest of this file
+	// got its comments.
+	releaseCoolMu sync.RWMutex
+	releaseCool   map[string]time.Time
+
 	// SubmitInterval is the re-submit cadence (re-submitting is idempotent at
 	// Atlas, but cheap to skip) — catches artists added since the last submit.
 	SubmitInterval time.Duration

@@ -83,6 +83,35 @@ const atlasLyricsCandidateSQL = `
 	 ORDER BY COALESCE(json_extract(t.tags_json, '$.musicBrainzAlbumID'), ''), t.path
 	 LIMIT ?`
 
+// atlasLyricsAddressableSQL counts the tracks the tier could still act on.
+//
+// It carries the SAME instrumental arm as atlasLyricsCandidateSQL, and that is
+// the whole reason it is a named const beside it rather than an inline query
+// forty lines away. `instrumental` is the one verdict that is a SUCCESS while
+// leaving no `track_lyrics` row behind — so without this arm every instrumental
+// track satisfies "no lyrics, has an MBID" forever. On Atlas's own measured mix
+// that is a quarter of the addressable set, and the operator's remaining-work
+// number floors there and never reaches zero: a tier that has finished reads as
+// a stalled job.
+//
+// The identity comparison is the candidate query's too, not decoration: a
+// retag has to invalidate a stale verdict here for the same reason it does
+// there, or a track whose album MBID changed would be excluded on the strength
+// of an answer about a different recording.
+const atlasLyricsAddressableSQL = `
+	SELECT COUNT(*) FROM tracks t
+	 WHERE NOT EXISTS (SELECT 1 FROM track_lyrics l WHERE l.source_path = t.path)
+	   AND NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)
+	   AND t.dupe_suppressed = 0
+	   AND (COALESCE(json_extract(t.tags_json, '$.musicBrainzAlbumID'), '') != ''
+	     OR COALESCE(json_extract(t.tags_json, '$.musicBrainzTrackID'), '') != '')
+	   AND NOT EXISTS (
+	         SELECT 1 FROM atlas_lyrics_attempt a
+	          WHERE a.source_path = t.path
+	            AND a.status = 'instrumental'
+	            AND a.album_mbid = COALESCE(json_extract(t.tags_json, '$.musicBrainzAlbumID'), '')
+	            AND a.recording_mbid_at_attempt = COALESCE(json_extract(t.tags_json, '$.musicBrainzTrackID'), ''))`
+
 // AtlasLyricsCandidates returns tracks with no lyrics that the network tier is
 // due to try, ordered by album so a caller can serve a whole release from one
 // listing fetch — 9,454 candidates spanned 1,088 releases when this was
@@ -263,13 +292,6 @@ func (s *Store) AtlasLyricsStats(ctx context.Context) (AtlasLyricsStats, error) 
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
-	err = s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM tracks t
-		 WHERE NOT EXISTS (SELECT 1 FROM track_lyrics l WHERE l.source_path = t.path)
-		   AND NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)
-		   AND t.dupe_suppressed = 0
-		   AND (COALESCE(json_extract(t.tags_json, '$.musicBrainzAlbumID'), '') != ''
-		     OR COALESCE(json_extract(t.tags_json, '$.musicBrainzTrackID'), '') != '')`).
-		Scan(&out.Addressable)
+	err = s.db.QueryRowContext(ctx, atlasLyricsAddressableSQL).Scan(&out.Addressable)
 	return out, err
 }

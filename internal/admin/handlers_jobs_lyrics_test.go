@@ -104,9 +104,14 @@ func TestJobsLyricsCardReportsTheRealCounts(t *testing.T) {
 		t.Errorf("statuses: instrumental=%d pending=%d, want 1/1",
 			got.Lyrics.Instrumental, got.Lyrics.Pending)
 	}
-	// a/3 and a/4 still have no row and carry an album MBID.
-	if got.Lyrics.Addressable != 2 {
-		t.Errorf("addressable = %d, want 2", got.Lyrics.Addressable)
+	// a/4 only. a/3 is INSTRUMENTAL — a success that correctly leaves no
+	// `track_lyrics` row — so the candidate query will never offer it again;
+	// counting it as outstanding floors this number at the instrumental
+	// population and makes a finished tier read as a stalled job. a/4 is
+	// `pending`, which is a fact about the upstream and genuinely still to do.
+	if got.Lyrics.Addressable != 1 {
+		t.Errorf("addressable = %d, want 1 — a/4 only; a/3 is instrumental and terminal",
+			got.Lyrics.Addressable)
 	}
 }
 

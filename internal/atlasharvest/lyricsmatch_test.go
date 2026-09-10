@@ -39,6 +39,16 @@ func TestMatchRelease(t *testing.T) {
 		{"unique title when the position is wrong", single, "Beta", 1, 9, 200000, "rec-2", MatchTitle},
 		{"position when the title disagrees", single, "Renamed By Me", 1, 2, 200000, "rec-2", MatchPosition},
 
+		// Two keys naming DIFFERENT entries are in open conflict, and a
+		// conflict is evidence against both. "Beta" is unique on this release
+		// and sits at position 2; asked about position 1 with a duration that
+		// vetoes Beta, the switch used to fall through to position 1 —
+		// "Alpha" — whose title the local file contradicts, and store Alpha's
+		// lyrics under Beta at MatchPosition. The veto rejecting one key is
+		// not permission to use the other.
+		{"a vetoed unique title does not fall through to a contradicting position",
+			single, "Beta", 1, 1, 100000, "", MatchNone},
+
 		// A duplicate title names nothing on its own...
 		{"ambiguous title alone resolves nothing", single, "Intro", 0, 0, 30000, "", MatchNone},
 		// ...but the position still corroborates it, because the entry the
