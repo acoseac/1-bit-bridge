@@ -989,9 +989,22 @@ a sidecar `<stem>.ttml` (word timing, agents, background vocals,
 translations) > a sidecar `<stem>.lrc` (the user's explicit override) > ID3
 `SYLT` (rendered to LRC; a run of syllable entries becomes ONE line carrying
 enhanced `<mm:ss.xxx>` word tags) > Vorbis `SYNCEDLYRICS` > LRC-shaped
-`USLT` / `©lyr` / `LYRICS` text > plain `USLT` / `©lyr` / `LYRICS` /
-`UNSYNCEDLYRICS` > `<stem>.txt` — the same order the app's own sidecar pick
-uses. Sidecars match by case-folded
+`USLT` / `©lyr` / `LYRICS` text > **synced `atlas-lrc`** > plain `USLT` /
+`©lyr` / `LYRICS` / `UNSYNCEDLYRICS` > `<stem>.txt` > **plain `atlas`** — the
+same order the app's own sidecar pick uses for the local tiers.
+
+The two `atlas` entries are the optional NETWORK tier (bridge-side
+`atlas.lyricsEnabled`, default off): for a track carrying no lyrics of its own,
+the bridge resolves a recording through a self-hosted Atlas and stores what it
+relays from LRCLIB. They STRADDLE the local sources rather than sitting below
+them, which is the app's own "timing outranks source" rule expressed in one
+ladder: a synced network document beats every UNTIMED local one, including the
+operator's own `.txt`, because a synced lyric is a different product from an
+unsynced one — and loses to every TIMED local one, because between two timed
+documents the operator's file is the better authority. Plain `atlas` is last
+outright; any local document is at least as trustworthy. A bridge with the tier
+off never produces either, and the wire shape is identical whichever tier won —
+`source` is not a wire field. Sidecars match by case-folded
 stem; only UTF-8 (with or without a BOM) and BOM-marked UTF-16 sidecars are
 read — a legacy-encoded (GB18030 / Shift_JIS) sidecar is left to the
 client's own sidecar tier, which reads the file directly and runs its
@@ -1022,12 +1035,21 @@ no-cache`; a matching `If-None-Match` answers `304`. `404 lyrics_not_found`
 when the bridge has no lyrics feature or the track has none; `410
 lyrics_stale` when the LYRICS SOURCE drifted since extraction — the
 sidecar's mtime/size when the row came from one, else the audio file's,
-under the same 2 s mtime tolerance as `/v1/waveform`. Bodies are ≤ 512 KiB.
+under the same 2 s mtime tolerance as `/v1/waveform`. A document from the
+NETWORK tier is exempt from that check and never answers `410`: it has no local
+provenance, so its stat fields are zero and comparing them against the audio
+file's would answer stale to every request, forever — and binding it to the
+audio file instead would only move the bug, since a tagger writing a genre
+changes the mtime of a file the lyrics never came from. Freshness for those rows is the
+bridge's own business. Bodies are ≤ 512 KiB.
 
 Feature flag: `lyrics` in `/v1/health` `features` (between `loudness` and
 `operatorDrivenUpscale`). `ProtocolVersion` stays 1 — a pre-lyrics client
 ignores `lyricsTag` and never calls the endpoint; a pre-lyrics bridge
-advertises no flag and the client's other tiers stand in.
+advertises no flag and the client's other tiers stand in. The network tier
+carries NO flag of its own and needs none: it changes which document a bridge
+has, never the shape of what it serves, so a client cannot tell and does not
+have to.
 
 ### Atlas rich-tier metadata (additive — Phase 2)
 
