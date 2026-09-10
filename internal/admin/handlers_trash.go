@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -70,10 +71,45 @@ func writeTrashError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, trash.ErrInvalidPath):
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	case errors.Is(err, trash.ErrRootUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "trash_unavailable", err.Error())
 	default:
 		logger.Error("trash request failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "the request failed")
 	}
+}
+
+// refuseRoutedPaths splits a delete batch into the paths this bridge owns and
+// an itemized refusal for the ones it does not.
+//
+// The console hides Delete on a routed row, which is the half a person sees;
+// this is the half that holds, because the endpoint is a plain authenticated
+// request. A routing-lookup FAILURE refuses too — "we could not tell" must not
+// resolve to "go ahead and delete", which is the standing rule everywhere a
+// classification gates a deletion in this tree.
+func (s *Server) refuseRoutedPaths(ctx context.Context, paths []string) (local []string, refused []trashOutcomeDTO) {
+	if s.deps.Manifest == nil {
+		return paths, nil
+	}
+	for _, p := range paths {
+		rt, err := s.deps.Manifest.GetUPnPRouting(ctx, p)
+		switch {
+		case err != nil:
+			logger.Error("trash: routing lookup", "path", p, "err", err)
+			refused = append(refused, trashOutcomeDTO{
+				Path: p, Status: "failed",
+				Reason: "could not tell whether this track is on an upstream server",
+			})
+		case rt != nil:
+			refused = append(refused, trashOutcomeDTO{
+				Path: p, Status: "failed",
+				Reason: "this track lives on an upstream server; delete it there",
+			})
+		default:
+			local = append(local, p)
+		}
+	}
+	return local, refused
 }
 
 func trashResultDTOOf(res *trash.Result) trashResultDTO {
@@ -95,7 +131,7 @@ func trashResultDTOOf(res *trash.Result) trashResultDTO {
 // explicit operator delete should not linger for three scans. That path already
 // unlinks sidecars and writes manifest_deletions tombstones, so synced clients
 // drop the tracks too — no new deletion machinery.
-func (s *Server) retireAndRescan(r *http.Request, label, root string, paths, dirs []string) {
+func (s *Server) retireAndRescan(r *http.Request, label string, paths, dirs []string) {
 	if len(paths) > 0 && s.deps.Manifest != nil {
 		if _, err := s.deps.Manifest.IncrementMissingTracksAndDeleteAtThreshold(r.Context(), paths, 1); err != nil {
 			logger.Error("retire trashed rows", "err", err)
@@ -107,7 +143,9 @@ func (s *Server) retireAndRescan(r *http.Request, label, root string, paths, dir
 	if scanDirs, full := planScanDirs(dirs, maxSubtreeScans); full {
 		s.spawnBackgroundScan(label)
 	} else {
-		s.spawnBackgroundSubtreeScan(label, root, scanDirs)
+		// Resolved, not joined onto one root: a delete batch can span library
+		// roots, and `dirs` is manifest-form, which already names the root.
+		s.spawnBackgroundSubtreeScanResolved(label, scanDirs)
 	}
 }
 
@@ -127,13 +165,21 @@ func (s *Server) apiTrashAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "no paths given")
 		return
 	}
-	res, err := m.Trash(req.Root, req.Paths)
+	// A routed track's bytes live on an upstream UPnP server, and its
+	// "path" is a DIDL container path that means nothing on this filesystem.
+	// Refused per-path rather than for the whole batch: an album can hold
+	// both, and the local half should still be deleted.
+	local, refused := s.refuseRoutedPaths(r.Context(), req.Paths)
+	res, err := m.Trash(req.Root, local)
 	if err != nil {
 		writeTrashError(w, err)
 		return
 	}
-	s.retireAndRescan(r, "post-delete scan", res.Root, res.Paths, res.Dirs)
-	writeJSON(w, http.StatusOK, trashResultDTOOf(res))
+	s.retireAndRescan(r, "post-delete scan", res.Paths, res.Dirs)
+	dto := trashResultDTOOf(res)
+	dto.Outcomes = append(dto.Outcomes, refused...)
+	dto.Failed += len(refused)
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // --- GET /api/library/trash ---
@@ -185,7 +231,7 @@ func (s *Server) apiTrashRestore(w http.ResponseWriter, r *http.Request) {
 	// A restored file is new to the manifest again; the subtree scan indexes
 	// it. Nothing to retire.
 	if len(res.Dirs) > 0 {
-		s.retireAndRescan(r, "post-restore scan", res.Root, nil, res.Dirs)
+		s.retireAndRescan(r, "post-restore scan", nil, res.Dirs)
 	}
 	writeJSON(w, http.StatusOK, trashResultDTOOf(res))
 }

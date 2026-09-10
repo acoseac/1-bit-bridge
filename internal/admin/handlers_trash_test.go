@@ -23,6 +23,7 @@ func wireTrash(t *testing.T, srv *Server) {
 	t.Helper()
 	srv.deps.TrashManager = trash.New(
 		srv.deps.Scanner.Roots,
+		srv.deps.Resolver,
 		func() bool {
 			c := srv.deps.CfgHolder.Load()
 			return c != nil && c.Library.AllowDelete

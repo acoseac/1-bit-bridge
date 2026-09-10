@@ -317,8 +317,17 @@ function select(name, value, options) {
 // appendDeleteAction adds a Delete button to a detail toolbar when the console
 // allows deleting. It is fire-and-forget: a failure to learn the setting leaves
 // the toolbar as it was, which is the safe direction for a destructive control.
+//
+// ROUTED tracks are excluded here, not just refused server-side. Their bytes
+// live on an upstream UPnP server and their "path" is a DIDL container path
+// that means nothing on this filesystem, so the endpoint refuses them — and a
+// button that renders, is pressed, and then reports a failure reads as a broken
+// console rather than as somebody else’s library. An album spanning both
+// keeps its button for the local half and says what it is leaving alone.
 async function appendDeleteAction(actions, tracks, label) {
-  const paths = (tracks || []).map((t) => t.path).filter(Boolean);
+  const all = (tracks || []).filter((t) => t && t.path);
+  const routed = all.filter((t) => t.routed).length;
+  const paths = all.filter((t) => !t.routed).map((t) => t.path);
   if (!paths.length) return;
   let cfg;
   try {
@@ -333,9 +342,14 @@ async function appendDeleteAction(actions, tracks, label) {
     on: {
       click: async () => {
         const n = paths.length;
+        const upstream = routed
+          ? `\n\n${routed} track${routed === 1 ? "" : "s"} on an upstream server ` +
+            `${routed === 1 ? "is" : "are"} left alone.`
+          : "";
         if (!confirm(
           `Move ${n} file${n === 1 ? "" : "s"} from "${label}" to the trash?\n\n` +
-          `They stay recoverable from the Library page until the trash is emptied.`)) {
+          `They stay recoverable from the Library page until the trash is emptied.` +
+          upstream)) {
           return;
         }
         btn.disabled = true;

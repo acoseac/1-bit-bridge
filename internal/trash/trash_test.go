@@ -7,13 +7,41 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 )
 
 func newTestManager(t *testing.T, opts ...Option) (*Manager, string) {
 	t.Helper()
 	root := t.TempDir()
 	on := true
-	return New(func() []string { return []string{root} }, func() bool { return on }, DefaultTTL, opts...), root
+	// The REAL resolver, not a stub: the bug this fixture missed for the
+	// life of the package was in how a stored path maps onto a root, and a
+	// hand-written splitter here would have agreed with the hand-written
+	// mapping that was wrong.
+	return New(func() []string { return []string{root} }, bridgefs.New([]string{root}),
+		func() bool { return on }, DefaultTTL, opts...), root
+}
+
+// newTwoRootManager is the fixture this package never had. Every test above
+// uses one root, which is exactly the shape in which the multi-root bug is
+// invisible: with a single root a stored path carries no root basename, so
+// joining it onto roots[0] is correct by accident.
+func newTwoRootManager(t *testing.T, opts ...Option) (m *Manager, first, second string) {
+	t.Helper()
+	// Named, not t.TempDir() twice: the stored-path form is
+	// "<root basename>/…", so the basenames are load-bearing input.
+	base := t.TempDir()
+	first = filepath.Join(base, "Music")
+	second = filepath.Join(base, "NAS")
+	for _, d := range []string{first, second} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roots := []string{first, second}
+	return New(func() []string { return roots }, bridgefs.New(roots),
+		func() bool { return true }, DefaultTTL, opts...), first, second
 }
 
 func seed(t *testing.T, root, rel, body string) string {
@@ -320,7 +348,7 @@ func TestTrashRefusedWhenDisabled(t *testing.T) {
 	seed(t, root, "A/x.flac", "audio")
 	roots := func() []string { return []string{root} }
 
-	off := New(roots, func() bool { return false }, DefaultTTL)
+	off := New(roots, bridgefs.New([]string{root}), func() bool { return false }, DefaultTTL)
 	if _, err := off.Trash("", []string{"A/x.flac"}); !errors.Is(err, ErrDisabled) {
 		t.Errorf("Trash with the gate off = %v, want ErrDisabled", err)
 	}
@@ -330,9 +358,19 @@ func TestTrashRefusedWhenDisabled(t *testing.T) {
 	if _, err := off.Restore([]string{"1/A/x.flac"}); !errors.Is(err, ErrDisabled) {
 		t.Errorf("Restore with the gate off = %v, want ErrDisabled", err)
 	}
-	nilGate := New(roots, nil, DefaultTTL)
+	nilGate := New(roots, bridgefs.New([]string{root}), nil, DefaultTTL)
 	if _, err := nilGate.Trash("", []string{"A/x.flac"}); !errors.Is(err, ErrDisabled) {
 		t.Errorf("Trash with a nil gate = %v, want ErrDisabled — an unwired gate must fail CLOSED", err)
+	}
+	// The splitter fails closed the same way, and for the same reason: with
+	// no mapping there is no safe guess about which root a path belongs to,
+	// and guessing is the whole defect.
+	nilSplit := New(roots, nil, func() bool { return true }, DefaultTTL)
+	if _, err := nilSplit.Trash("", []string{"A/x.flac"}); !errors.Is(err, ErrRootUnavailable) {
+		t.Errorf("Trash with a nil splitter = %v, want ErrRootUnavailable", err)
+	}
+	if _, err := nilSplit.Restore([]string{"1/A/x.flac"}); !errors.Is(err, ErrRootUnavailable) {
+		t.Errorf("Restore with a nil splitter = %v, want ErrRootUnavailable", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "A", "x.flac")); err != nil {
 		t.Error("a file was trashed while the feature was off")
@@ -425,5 +463,169 @@ func TestReclaimableIsCachedButInvalidatedByEveryMutation(t *testing.T) {
 	}
 	if got := m.Reclaimable(root); got != 0 {
 		t.Fatalf("Reclaimable = %d after emptying the trash, want 0", got)
+	}
+}
+
+// --- Multi-root ---
+//
+// A stored path on a multi-root bridge leads with the root's basename
+// (manifest's `relPath`), and this package used to join that whole string onto
+// roots[0]. Ordinarily the result does not exist and every delete fails; where
+// the two roots' names overlap it moves a real, unrelated file — and the caller
+// then retires the manifest row of the file still sitting on disk.
+//
+// Every other test in this file uses one root, which is the one shape in which
+// the bug cannot appear.
+
+// TestTrashOnMultiRootUsesThePathsOwnRoot is the regression test. It fails
+// against the pre-fix code with "no such file or directory".
+func TestTrashOnMultiRootUsesThePathsOwnRoot(t *testing.T) {
+	m, first, second := newTwoRootManager(t)
+	// The file the operator selected: it lives under the SECOND root, and its
+	// stored path says so.
+	want := seed(t, second, "Miles Davis/Kind of Blue/01.flac", "second")
+	// The decoy: the exact path the pre-fix join addressed, under the FIRST
+	// root. Overlapping directory names are why people have two roots.
+	decoy := seed(t, first, "NAS/Miles Davis/Kind of Blue/01.flac", "first")
+
+	res, err := m.Trash("", []string{"NAS/Miles Davis/Kind of Blue/01.flac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK != 1 || res.Failed != 0 {
+		t.Fatalf("ok=%d failed=%d, want 1/0 — outcomes: %+v", res.OK, res.Failed, res.Outcomes)
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Error("the selected file is still on disk; the delete went somewhere else")
+	}
+	if body, err := os.ReadFile(decoy); err != nil || string(body) != "first" {
+		t.Errorf("the file under the OTHER root was touched (err=%v) — this is the "+
+			"case where the wrong-root join trashes real content", err)
+	}
+	// The trash lives inside the root that owned the file, so the move is a
+	// same-filesystem rename rather than a cross-device copy.
+	if under := filepath.Join(second, DirName); !strings.HasPrefix(mustSoleTrashed(t, m).Root, second) {
+		t.Errorf("entry filed under %q, want a root at %q", mustSoleTrashed(t, m).Root, under)
+	}
+}
+
+// mustSoleTrashed returns the single trashed entry, failing if there is not
+// exactly one — a count assertion the callers would otherwise each repeat.
+func mustSoleTrashed(t *testing.T, m *Manager) Entry {
+	t.Helper()
+	entries, err := m.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("List() = %d entries, want 1", len(entries))
+	}
+	return entries[0]
+}
+
+// TestRestoreOnMultiRootReturnsThePathToItsOwnRoot pins the other half. The
+// pre-fix restore joined the stored path whole onto the root it found the
+// trashed file under, writing to <root>/<rootBasename>/… — a directory the
+// scanner would then index as a new artist.
+func TestRestoreOnMultiRootReturnsThePathToItsOwnRoot(t *testing.T) {
+	m, first, second := newTwoRootManager(t)
+	rel := "NAS/Miles Davis/Kind of Blue/01.flac"
+	orig := seed(t, second, "Miles Davis/Kind of Blue/01.flac", "second")
+
+	if res, err := m.Trash("", []string{rel}); err != nil || res.OK != 1 {
+		t.Fatalf("trash: %v (ok=%d)", err, res.OK)
+	}
+	res, err := m.Restore([]string{mustSoleTrashed(t, m).ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK != 1 {
+		t.Fatalf("restore ok=%d failed=%d: %+v", res.OK, res.Failed, res.Outcomes)
+	}
+	if body, err := os.ReadFile(orig); err != nil || string(body) != "second" {
+		t.Errorf("the file did not come back to where it was (err=%v)", err)
+	}
+	// The shape the pre-fix code produced: the root basename repeated inside
+	// the root. Asserted explicitly because it is silent — the file exists,
+	// just in a directory nobody asked for.
+	if _, err := os.Stat(filepath.Join(second, "NAS")); !os.IsNotExist(err) {
+		t.Error("restore created <root>/NAS/… — the stored path's root segment was not consumed")
+	}
+	if _, err := os.Stat(filepath.Join(first, "NAS", "Miles Davis")); !os.IsNotExist(err) {
+		t.Error("restore wrote into the wrong root")
+	}
+}
+
+// TestTrashRefusesAPathNamingAnUnconfiguredRoot — a root removed from the
+// config, or renamed on disk, between two operations. The answer is a refusal,
+// never a fallback: falling back to some other root IS the bug.
+func TestTrashRefusesAPathNamingAnUnconfiguredRoot(t *testing.T) {
+	m, first, _ := newTwoRootManager(t)
+	decoy := seed(t, first, "Gone/Artist/01.flac", "first")
+
+	res, err := m.Trash("", []string{"Gone/Artist/01.flac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK != 0 || res.Failed != 1 {
+		t.Fatalf("ok=%d failed=%d, want 0/1", res.OK, res.Failed)
+	}
+	if got := res.Outcomes[0].Reason; !strings.Contains(got, "not configured") {
+		t.Errorf("reason = %q, want it to name the missing root", got)
+	}
+	if _, err := os.Stat(decoy); err != nil {
+		t.Error("a file was trashed for a path naming a root that does not exist")
+	}
+}
+
+// TestTrashRootWantConstrainsRatherThanSelects — a caller naming a root is
+// saying "refuse if it is not this one". The old resolveRoot answered "which
+// root?" and returned roots[0] for the empty request, which is how a second
+// root's path came to be addressed under the first.
+func TestTrashRootWantConstrainsRatherThanSelects(t *testing.T) {
+	m, first, second := newTwoRootManager(t)
+	target := seed(t, second, "Album/01.flac", "second")
+
+	res, err := m.Trash(filepath.Base(first), []string{"NAS/Album/01.flac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed != 1 {
+		t.Fatalf("failed=%d, want 1 — a path outside the named root must be refused", res.Failed)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Error("the file was trashed despite naming a different root")
+	}
+	// NEGATIVE CONTROL: the same path with the RIGHT root goes through, so
+	// the assertion above is about the constraint and not about the path.
+	if res, err := m.Trash(filepath.Base(second), []string{"NAS/Album/01.flac"}); err != nil || res.OK != 1 {
+		t.Fatalf("naming the owning root: err=%v ok=%d, want 1", err, res.OK)
+	}
+}
+
+// TestRestoreRefusesAnOccupiedOriginOnTheSecondRoot — the origin check already
+// existed; this pins that it still fires once `dst` is computed from the
+// path's own root rather than roots[0], where it would be checking a path in
+// the wrong library.
+func TestRestoreRefusesAnOccupiedOriginOnTheSecondRoot(t *testing.T) {
+	m, _, second := newTwoRootManager(t)
+	rel := "NAS/Album/01.flac"
+	seed(t, second, "Album/01.flac", "original")
+
+	if res, err := m.Trash("", []string{rel}); err != nil || res.OK != 1 {
+		t.Fatalf("trash: %v", err)
+	}
+	// Re-ripped while the old copy sat in the trash.
+	seed(t, second, "Album/01.flac", "re-ripped")
+
+	res, err := m.Restore([]string{mustSoleTrashed(t, m).ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed != 1 {
+		t.Fatalf("failed=%d, want 1 — restore must not overwrite an occupied origin", res.Failed)
+	}
+	if body, _ := os.ReadFile(filepath.Join(second, "Album", "01.flac")); string(body) != "re-ripped" {
+		t.Error("restore overwrote the file at the original path")
 	}
 }

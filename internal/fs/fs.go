@@ -195,13 +195,24 @@ func FoldRootBasename(root string) string {
 	return basenameFolder.String(filepath.Base(root))
 }
 
-// Resolve maps a client-supplied relative path to an absolute server path.
-// It guarantees the returned path is within one of the configured roots.
-// The existence of the path is NOT checked here — callers that care can
-// os.Stat after; Resolve is a pure safety / routing operation.
-func (r *Resolver) Resolve(clientPath string) (string, error) {
+// resolveParts is the whole of the path-safety pipeline, returning every part
+// of its answer: the root that owns the path, the remainder BELOW that root,
+// and the absolute on-disk path.
+//
+// It exists so `Resolve` and `SplitRoot` cannot disagree about which root owns
+// a path. They previously could not, because `SplitRoot` did not exist and
+// every caller that needed the pair re-derived it — which is how
+// `internal/trash` came to join a multi-root manifest path onto roots[0] and
+// delete out of the wrong library. A caller wanting the pair now gets it from
+// the same computation that produced the absolute path, past the same
+// containment check, under ONE lock snapshot (`info` is replaced atomically
+// with roots/basenameIndex, so splitting the snapshot would reintroduce the
+// disagreement one level down).
+//
+// Unexported: the two wrappers below are the API.
+func (r *Resolver) resolveParts(clientPath string) (root, suffix, abs string, err error) {
 	if strings.ContainsRune(clientPath, 0) {
-		return "", ErrBadPath
+		return "", "", "", ErrBadPath
 	}
 
 	// Reject any ".." segment in the raw input *before* canonicalizing.
@@ -215,7 +226,7 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	for start, i := 0, 0; i <= len(clientPath); i++ {
 		if i == len(clientPath) || clientPath[i] == '/' {
 			if clientPath[start:i] == ".." {
-				return "", ErrBadPath
+				return "", "", "", ErrBadPath
 			}
 			start = i + 1
 		}
@@ -249,17 +260,13 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	info := r.info
 	r.mu.RUnlock()
 
-	var (
-		root   string
-		suffix string
-	)
 	switch {
 	case len(roots) == 1:
 		root = roots[0]
 		suffix = clean
 	case clean == "":
 		// Multi-root with an empty path — ambiguous. Refuse.
-		return "", ErrUnknownRoot
+		return "", "", "", ErrUnknownRoot
 	default:
 		// Split off the first path segment (the root basename) without
 		// strings.SplitN's slice allocation. Equivalent to
@@ -271,7 +278,7 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 		}
 		full, ok := basenameIndex[head]
 		if !ok {
-			return "", ErrUnknownRoot
+			return "", "", "", ErrUnknownRoot
 		}
 		root = full
 	}
@@ -286,11 +293,11 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 		var err error
 		ri.abs, err = filepath.Abs(root)
 		if err != nil {
-			return "", err
+			return "", "", "", err
 		}
 		ri.prefix = strings.TrimSuffix(ri.abs, string(filepath.Separator)) + string(filepath.Separator)
 	} else if ri.absErr != nil {
-		return "", ri.absErr
+		return "", "", "", ri.absErr
 	}
 
 	// Join via filepath.Join which also does final cleaning with native
@@ -310,19 +317,53 @@ func (r *Resolver) Resolve(clientPath string) (string, error) {
 	// FuzzResolveContainment seeds exactly this shape (`..\..\windows`) and
 	// asserts the containment property, so the guarantee is pinned rather
 	// than merely asserted here.
-	abs := filepath.Join(root, filepath.FromSlash(suffix))
+	abs = filepath.Join(root, filepath.FromSlash(suffix))
 	absAbs, err := filepath.Abs(abs)
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	// ri.prefix's TrimSuffix handles the filesystem-root case (rootAbs ==
 	// "/" on Unix or "C:\" on Windows): without it the prefix would be
 	// "//" / "C:\\" and never match, 400-ing every request against a
 	// root-mounted library (Docker mount directly to /).
 	if absAbs != ri.abs && !strings.HasPrefix(absAbs, ri.prefix) {
-		return "", ErrBadPath
+		return "", "", "", ErrBadPath
 	}
-	return absAbs, nil
+	return root, suffix, absAbs, nil
+}
+
+// Resolve maps a client-supplied relative path to an absolute server path.
+// It guarantees the returned path is within one of the configured roots.
+// The existence of the path is NOT checked here — callers that care can
+// os.Stat after; Resolve is a pure safety / routing operation.
+func (r *Resolver) Resolve(clientPath string) (string, error) {
+	_, _, abs, err := r.resolveParts(clientPath)
+	return abs, err
+}
+
+// SplitRoot maps a client-supplied relative path onto the root that owns it
+// and the path's remainder below that root, forward-slashed.
+//
+// In single-root mode `suffix` is the path unchanged. In multi-root mode the
+// leading segment is the root's basename (`relPath` in the scanner writes it
+// that way so the resolver can route back), and it is CONSUMED — `suffix` is
+// what remains. Callers that join `suffix` onto something other than `root`
+// are the reason this returns both: the pair is only meaningful together.
+//
+// The result has already passed the same containment check `Resolve` applies,
+// so a caller joining `root` + `suffix` lands inside `root` by construction —
+// which matters on Windows, where that check is the primary defence rather
+// than a backstop (see resolveParts).
+//
+// Returns ErrUnknownRoot when the leading segment names no configured root:
+// a root that was unmounted or renamed between two operations, which callers
+// must refuse rather than fall back on.
+func (r *Resolver) SplitRoot(clientPath string) (root, suffix string, err error) {
+	root, suffix, _, err = r.resolveParts(clientPath)
+	if err != nil {
+		return "", "", err
+	}
+	return root, suffix, nil
 }
 
 // ResolveChecked is Resolve plus an os.Stat; it returns ErrNotFound if the
