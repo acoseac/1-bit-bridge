@@ -363,6 +363,7 @@ export function enqueue(tracks) {
   const add = tracks.filter(Boolean).map((t) => ({ ...t }));
   state.queue = state.queue.concat(add);
   reshuffle();
+  maybePrime();
   persist();
   emit();
 }
@@ -373,6 +374,7 @@ export function removeAt(i) {
   if (i < state.index) state.index -= 1;
   else if (i === state.index) load(clampIndex(state.index), { autoplay: state.playing });
   reshuffle();
+  maybePrime();
   persist();
   emit();
 }
@@ -427,7 +429,28 @@ function load(index, { autoplay }) {
     // A rejected play() outside a user gesture is NotAllowedError.
     // Surfacing it is the point: a swallowed rejection reads as a
     // broken player.
+    //
+    // Generation-guarded for the same reason handleSourceError is, and
+    // it is not theoretical: an INTERRUPTED play() rejects too. Measured
+    // in Chrome — clicking a second track while the first is still
+    // loading rejects the first with AbortError, "The play() request was
+    // interrupted by a new load request". Unguarded, that handler then
+    // clears the spinner and the playing flag of the track the reader
+    // actually chose.
+    //
+    // The damage is bounded, and the bound is worth writing down rather
+    // than overstating: the rejection is a MICROTASK queued by the
+    // interrupting load, and the new track's `play` event is a TASK
+    // queued after it, so the clear is always undone one tick later.
+    // Measured on the guardless build, cleared at t=16 ms and restored
+    // at t=24 ms against a first `playing` at 1,926 ms — an 8 ms flicker
+    // of both flags, not the 1.9 s loss the ordering might suggest. It
+    // is guarded because the ordering is the only thing making it small,
+    // and because a stale NotAllowedError would otherwise write "Press
+    // play to start." about a track nobody is waiting on.
+    const at = playbackGen;
     state.el.play().catch((e) => {
+      if (at !== playbackGen) return;
       state.playing = false;
       state.loading = false;
       if (e && e.name === "NotAllowedError") state.error = "Press play to start.";
@@ -466,6 +489,14 @@ function load(index, { autoplay }) {
  * because the next track is not a fixed answer: shuffle, a queue edit
  * or a repeat change between here and the end would leave a prime
  * warming the wrong file.
+ *
+ * Which is why every mutator that can MOVE that answer calls this too —
+ * setShuffle, cycleRepeat, enqueue, removeAt. timeupdate does not fire
+ * while paused, so a reader who pauses near the end of a track and then
+ * reshuffles would otherwise leave the preloader downloading a track
+ * that is no longer next, with nothing to notice until playback resumes.
+ * Calling it costs nothing when the answer has not moved: the primedFor
+ * check returns immediately.
  */
 function maybePrime() {
   if (!state.pre || !state.el) return;
@@ -640,12 +671,14 @@ export function setVolume(v) {
 export function setShuffle(on) {
   state.shuffle = !!on;
   reshuffle();
+  maybePrime();
   persist();
   emit();
 }
 
 export function cycleRepeat() {
   state.repeat = state.repeat === "off" ? "all" : state.repeat === "all" ? "one" : "off";
+  maybePrime();
   persist();
   emit();
 }
