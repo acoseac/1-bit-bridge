@@ -38,7 +38,6 @@ func TestNoOmitemptyValueTimeOnTheWire(t *testing.T) {
 
 func checkOmitemptyTimes(t *testing.T, dir string) {
 	t.Helper()
-	fset := token.NewFileSet()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -48,63 +47,78 @@ func checkOmitemptyTimes(t *testing.T, dir string) {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		fname := name
-		f, err := parser.ParseFile(fset, filepath.Join(dir, fname), nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			st, ok := n.(*ast.StructType)
-			if !ok {
-				return true
-			}
-			for _, field := range st.Fields.List {
-				if field.Tag == nil {
-					continue
-				}
-				// Parsed, not substring-matched: `omitempty` in a SIBLING
-				// tag (bson, gorm) on a field whose json tag has none would
-				// otherwise read as a violation. (Gemini on #896.)
-				raw, err := strconv.Unquote(field.Tag.Value)
-				if err != nil {
-					continue
-				}
-				jsonTag, ok := reflect.StructTag(raw).Lookup("json")
-				if !ok || !slices.Contains(strings.Split(jsonTag, ",")[1:], "omitempty") {
-					continue
-				}
-				sel, ok := field.Type.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Time" {
-					continue
-				}
-				pkg, ok := sel.X.(*ast.Ident)
-				if !ok || pkg.Name != "time" {
-					continue
-				}
-				// (4) An EMBEDDED time.Time has no Names, and an empty name
-				// in the message is the one thing that would make this report
-				// unactionable.
-				name := "time.Time (embedded)"
-				if len(field.Names) > 0 {
-					var names []string
-					for _, id := range field.Names {
-						names = append(names, id.Name)
-					}
-					name = strings.Join(names, ", ")
-				}
-				t.Errorf("%s: %s is a VALUE time.Time tagged omitempty — it will ship "+
-					"\"0001-01-01T00:00:00Z\" rather than being omitted, and the client "+
-					"parses a year-1 date where the tag promised absence. Make it a "+
-					"*time.Time and set it through zeroTime / nilIfZeroTime.\n"+
-					"NOTE: a template rendering it must move too — a nil pointer reaching "+
-					"a value parameter is a render-time error, not a compile-time one.",
-					filepath.Join(dir, fname), name)
-			}
-			return true
-		})
+		checkFileForOmitemptyTimes(t, filepath.Join(dir, name))
 	}
 	// No vacuous-pass floor: zero violations is the PASSING state here, so a
 	// count would only ever rise when one appears. The scan's own health is
-	// covered by ParseFile failing loudly above — a directory that stopped
-	// yielding .go files would be a build failure long before it reached here.
+	// covered by ParseFile failing loudly — a directory that stopped yielding
+	// .go files would be a build failure long before it reached here.
+}
+
+// checkFileForOmitemptyTimes reports every value-typed time.Time tagged
+// omitempty in one file.
+func checkFileForOmitemptyTimes(t *testing.T, path string) {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		st, ok := n.(*ast.StructType)
+		if !ok {
+			return true
+		}
+		for _, field := range st.Fields.List {
+			if !isOmitemptyValueTime(field) {
+				continue
+			}
+			t.Errorf("%s: %s is a VALUE time.Time tagged omitempty — it will ship "+
+				"\"0001-01-01T00:00:00Z\" rather than being omitted, and the client "+
+				"parses a year-1 date where the tag promised absence. Make it a "+
+				"*time.Time and set it through zeroTime / nilIfZeroTime.\n"+
+				"NOTE: a template rendering it must move too — a nil pointer reaching "+
+				"a value parameter is a render-time error, not a compile-time one.",
+				path, fieldName(field))
+		}
+		return true
+	})
+}
+
+// isOmitemptyValueTime reports whether a field is a non-pointer time.Time whose
+// JSON tag carries omitempty.
+//
+// The tag is PARSED, not substring-matched: an `omitempty` in a sibling
+// bson/gorm tag on a field whose json tag has none would otherwise read as a
+// violation. (Gemini on #896.)
+func isOmitemptyValueTime(field *ast.Field) bool {
+	if field.Tag == nil {
+		return false
+	}
+	raw, err := strconv.Unquote(field.Tag.Value)
+	if err != nil {
+		return false
+	}
+	jsonTag, ok := reflect.StructTag(raw).Lookup("json")
+	if !ok || !slices.Contains(strings.Split(jsonTag, ",")[1:], "omitempty") {
+		return false
+	}
+	sel, ok := field.Type.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Time" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "time"
+}
+
+// fieldName renders a field's name for the report. An EMBEDDED time.Time has no
+// Names, and an empty name is the one thing that would make this unactionable.
+func fieldName(field *ast.Field) string {
+	if len(field.Names) == 0 {
+		return "time.Time (embedded)"
+	}
+	var names []string
+	for _, id := range field.Names {
+		names = append(names, id.Name)
+	}
+	return strings.Join(names, ", ")
 }
