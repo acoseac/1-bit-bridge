@@ -181,6 +181,10 @@ func (c *Client) tickLyrics(ctx context.Context, st State) error {
 		}
 		mbid, tier, err := c.resolveRecording(ctx, st, cand, releases)
 		switch {
+		case errors.Is(err, errReleaseCooling):
+			// Already cooling. Skip WITHOUT re-cooling: extending the window
+			// on every tick is what turns a pause into a permanent one.
+			continue
 		case errors.Is(err, errReleaseUnavailable):
 			// One release could not be answered about. Skip it — and every
 			// other track on it, via the cooldown — rather than ending the
@@ -282,7 +286,7 @@ func (c *Client) resolveRecording(ctx context.Context, st State, cand LyricsCand
 		// sweep because a candidate carrying a tagged recording MBID never
 		// needs the release listing at all, and should not be held up by it.
 		if c.releaseCooling(cand.AlbumMBID) {
-			return "", MatchNone, fmt.Errorf("%w: cooling after a recent failure", errReleaseUnavailable)
+			return "", MatchNone, errReleaseCooling
 		}
 		var err error
 		entries, err = c.fetchReleaseTracks(ctx, st, cand.AlbumMBID)
@@ -384,9 +388,27 @@ func (c *Client) applyRecording(ctx context.Context, st State, cand LyricsCandid
 		// thirty-day backoff: a durable verdict about the TRACK derived from
 		// a sentence about the UPSTREAM we could not read. `pending` was
 		// special-cased for exactly that reason, so an UNRECOGNISED status
-		// defaulting to a durable miss is the wrong direction. Stamp nothing
-		// and let the next sweep ask again.
+		// defaulting to a durable miss is the wrong direction.
+		//
+		// Stamped TRANSIENTLY rather than not at all: with no row the
+		// candidate query re-offers this track on every 60-second tick — one
+		// request and one warn line per track, forever — which is the same
+		// hammering the release cooldown exists to prevent. `pending`'s short
+		// backoff already means "the upstream answered and we cannot act on it
+		// yet", and it escalates through maxPendingAttempts like any other
+		// warming recording.
+		//
+		// Deliberately NOT the upstream's own string: `status` is a column the
+		// candidate and stats queries switch on, so writing an unrecognised
+		// value there would put an upstream-controlled token where this build's
+		// SQL expects a closed set.
+		//
+		// Returns "" rather than statusPending so pass two does not collect it:
+		// pass two exists to re-ask a recording Atlas is WARMING, and asking
+		// again in the same tick about a status we could not read is the extra
+		// request this arm is trying to avoid. (Gemini on PR #893.)
 		c.log().WarnContext(ctx, "atlaslyrics.unknown_status", "status", rec.Status, "mbid", mbid)
+		c.stamp(ctx, cand, mbid, statusPending, lyricsPendingBackoff)
 		return false, "", nil
 	}
 
@@ -505,6 +527,18 @@ func (c *Client) fetchReleaseTracks(ctx context.Context, st State, albumMBID str
 // drained out of the candidate set and the failing one migrated toward the
 // front. The tier went silent for the whole library with one warn line.
 var errReleaseUnavailable = errors.New("atlaslyrics: release unavailable")
+
+// errReleaseCooling is errReleaseUnavailable's "and we already knew that"
+// variant: the release is inside a cooldown a previous tick set.
+//
+// Distinct because the sweep must NOT re-cool on it. Both arms skip the
+// candidate, and from outside they look identical — neither makes a request —
+// but re-cooling pushes `until` forward every tick. The candidate ordering
+// guarantees a tick every 60 seconds, so an extending window never expires and
+// the album is suppressed for the life of the process: the negative cache this
+// is specifically not meant to be. (Gemini on PR #893 saw the redundant lock
+// acquisition; the extension is what was underneath it.)
+var errReleaseCooling = fmt.Errorf("%w: cooling after a recent failure", errReleaseUnavailable)
 
 // lyricsReleaseCooldown is how long a release that failed to answer is left
 // alone.

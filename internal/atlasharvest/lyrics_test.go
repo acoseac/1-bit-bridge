@@ -767,9 +767,29 @@ func TestAnUnansweredReleaseIsNotReaskedNextTick(t *testing.T) {
 		t.Error("a verdict was written about a release the upstream never answered about")
 	}
 
-	// The cooldown EXPIRES — it is a pause, not a negative cache. Without
-	// this the test would also pass against a permanent suppression, which
-	// would lose the album for the life of the process.
+	// The cooldown DOES NOT MOVE while it is in force. Skipping a cooling
+	// release and re-cooling it look identical from outside — both mean "no
+	// request was made" — and the second pushes `until` forward on every tick.
+	// The candidate ordering guarantees a tick every 60 seconds, so an
+	// extending window never expires and the album is suppressed for the life
+	// of the process: the negative cache this is specifically not meant to be.
+	// (Gemini on PR #893 saw the redundant lock; this is what was underneath.)
+	c.releaseCoolMu.RLock()
+	untilAfterFirstSkip := c.releaseCool["alb"]
+	c.releaseCoolMu.RUnlock()
+	if err := c.tickLyrics(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	c.releaseCoolMu.RLock()
+	untilAfterSecondSkip := c.releaseCool["alb"]
+	c.releaseCoolMu.RUnlock()
+	if !untilAfterSecondSkip.Equal(untilAfterFirstSkip) {
+		t.Errorf("the cooldown moved from %v to %v on a tick that made no request — "+
+			"an extending window never expires", untilAfterFirstSkip, untilAfterSecondSkip)
+	}
+
+	// And it EXPIRES — it is a pause, not a negative cache. Without this the
+	// test would also pass against a permanent suppression.
 	c.releaseCoolMu.Lock()
 	c.releaseCool["alb"] = time.Now().Add(-time.Second)
 	c.releaseCoolMu.Unlock()
@@ -880,13 +900,22 @@ func TestADurableRecordingFailureWritesAVerdict(t *testing.T) {
 	}
 }
 
-// TestAnUnrecognisedStatusWritesNothing — the switch knows instrumental /
-// pending / unavailable / available. Anything else used to fall through to
-// documentFrom, fail, and be stamped `unavailable` with a thirty-day backoff:
-// a durable verdict about the TRACK derived from a sentence about the UPSTREAM
-// that this build could not read. `pending` exists as its own case for exactly
-// that reason, so an UNKNOWN status defaulting to a durable miss is backwards.
-func TestAnUnrecognisedStatusWritesNothing(t *testing.T) {
+// TestAnUnrecognisedStatusIsTransientNotDurable — the switch knows
+// instrumental / pending / unavailable / available. Anything else used to fall
+// through to documentFrom, fail, and be stamped `unavailable` with a
+// THIRTY-DAY backoff: a durable verdict about the TRACK derived from a
+// sentence about the UPSTREAM that this build could not read. `pending` exists
+// as its own case for exactly that reason, so an UNKNOWN status defaulting to
+// a durable miss is backwards.
+//
+// It is not left unstamped either, which was this fix's first shape: with no
+// row the candidate query re-offers the track every 60-second tick, one
+// request and one warn line per track forever. The verdict written is
+// `pending` — the closed-set value that already means "answered, not yet
+// actionable" — never the upstream's own string, which would put an
+// unrecognised token in a column the candidate and stats queries switch on.
+// (Gemini on PR #893.)
+func TestAnUnrecognisedStatusIsTransientNotDurable(t *testing.T) {
 	for _, status := range []string{"", "queued", "rate_limited"} {
 		t.Run("status="+status, func(t *testing.T) {
 			sink := newFakeSink(LyricsCandidate{Path: "a/x.flac", AlbumMBID: "alb", TrackMBID: "rec-1"})
@@ -898,8 +927,19 @@ func TestAnUnrecognisedStatusWritesNothing(t *testing.T) {
 			if err := c.tickLyrics(context.Background(), st); err != nil {
 				t.Fatalf("tickLyrics: %v", err)
 			}
-			if got, ok := sink.attempts["a/x.flac"]; ok {
-				t.Errorf("an unrecognised status wrote the verdict %q", got.status)
+			got, ok := sink.attempts["a/x.flac"]
+			if !ok {
+				t.Fatal("nothing was stamped — the track is re-asked on every tick forever")
+			}
+			if got.status != statusPending {
+				t.Errorf("status = %q, want %q — a durable verdict must not come from a "+
+					"status this build could not read", got.status, statusPending)
+			}
+			if got.status == status {
+				t.Errorf("the upstream's own string %q was written into the status column", status)
+			}
+			if got.nextAttemptAt == 0 {
+				t.Error("no backoff was set, so the throttle does nothing")
 			}
 			// And it stores nothing either: a body arriving under a status
 			// this build cannot interpret is not a document it may serve.
