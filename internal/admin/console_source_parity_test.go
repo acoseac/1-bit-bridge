@@ -181,7 +181,7 @@ var (
 // claim more than this contract is about. A container read is the honest bar
 // there.
 func jobsFieldPaths(rt reflect.Type, prefix string) []string {
-	for rt.Kind() == reflect.Ptr {
+	for rt.Kind() == reflect.Pointer {
 		rt = rt.Elem()
 	}
 	var out []string
@@ -197,7 +197,7 @@ func jobsFieldPaths(rt reflect.Type, prefix string) []string {
 			path = prefix + "." + name
 		}
 		ft := f.Type
-		for ft.Kind() == reflect.Ptr {
+		for ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
 		if ft.Kind() == reflect.Struct && strings.HasPrefix(ft.Name(), "jobs") {
