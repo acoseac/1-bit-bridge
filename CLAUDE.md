@@ -1579,14 +1579,26 @@ its twin.** The top list is older, shorter, and read first.
   comment that hid 46 KB of app.js from a guard test.
 - **Dynamically-composed class names (`class="status-${x}"`) are not dead
   because no literal exists.** Check composition before deleting.
-- **`/api/jobs` is guarded in BOTH directions.**
+- **`/api/jobs` is guarded in BOTH directions, down to the LEAF.**
   `TestSettingsPrereqsOnlyReadRealJobsFields` walks JS→Go (every `jobs.<field>`
   names a real field) and cannot see a field nobody reads;
   `TestEveryJobsFieldIsRenderedSomewhere` walks Go→JS. #891's stated purpose was
   "a Jobs card" and it touched no template and no JS — the endpoint ran a
   full-table scan every thirty seconds for numbers no pixel consumed, and the DTO
-  test passed. Of the twelve top-level fields, `lyrics` was the only one with
-  zero reads.
+  test passed. **The first version of that guard walked the twelve CONTAINERS
+  and was satisfied by `j.lyrics` alone** — so "`lyrics` was the only field with
+  zero reads" was true at the only level it looked, and the nine numbers inside
+  were as unguarded as `lyrics` had been. Walked recursively it found six more
+  leaves marshalled for nobody (`scanner.isScanning`, `scanner.lastFullScan`,
+  `enrichment.source` — all read off `/api/stats` instead — plus
+  `analysis.intervalSec`, `coverage.totalLocal`, `smartMixes.analysisAssisted`).
+  Two mechanisms make the recursive form work, and both are negative-controlled:
+  it resolves the JS's local and parameter aliases (`const lyr = j.lyrics`;
+  `renderAnalysisCoverage(an.coverage)` → `cov.eligible`), and it strips
+  COMMENTS ONLY — most nested reads sit inside `${…}` template interpolations,
+  which `stripJSNoise` blanks. Recursion stops at the exported shared types
+  (`*JobRunState` and kin), which have other consumers. **A guard that checks
+  containers proves nothing about their contents.**
 - **An SSE list handler needs an explicit empty-list teardown branch.** A restart
   wipes the in-memory pairing store, so the next snapshot is `[]`, and
   `applyPairing([])` must clear the optimistic-action latch and hide the panel —

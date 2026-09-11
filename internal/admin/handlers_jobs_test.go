@@ -25,8 +25,8 @@ func TestApiJobsNilSafeDefaults(t *testing.T) {
 	if got.Scanner.IntervalSec != 3600 {
 		t.Errorf("scanner.intervalSec = %d, want 3600", got.Scanner.IntervalSec)
 	}
-	if got.Scanner.LastFullScan != nil || got.Scanner.NextScanDue != nil {
-		t.Errorf("scanner timestamps should be omitted before any scan: %+v", got.Scanner)
+	if got.Scanner.NextScanDue != nil {
+		t.Errorf("scanner.nextScanDue should be omitted before any scan: %+v", got.Scanner)
 	}
 	if got.Analysis.Enabled || got.Analysis.Active {
 		t.Errorf("analysis should be off by default: %+v", got.Analysis)
@@ -36,9 +36,6 @@ func TestApiJobsNilSafeDefaults(t *testing.T) {
 	}
 	if got.Fingerprint != nil {
 		t.Errorf("fingerprint should be omitted without a closure: %+v", got.Fingerprint)
-	}
-	if got.Enrichment.Source == "" {
-		t.Error("enrichment.source should always resolve (default = musicbrainz)")
 	}
 	if got.Enrichment.HarvestActive {
 		t.Error("harvestActive should be false without the closure")
@@ -108,8 +105,11 @@ func TestApiJobsWiredSections(t *testing.T) {
 	if cov == nil {
 		t.Fatal("analysis.coverage missing")
 	}
-	if cov.TotalLocal != 3 || cov.DSDExcluded != 1 || cov.Eligible != 2 || cov.Analysed != 1 {
-		t.Errorf("coverage = %+v, want total 3 / dsd 1 / eligible 2 / analysed 1", cov)
+	// Eligible is total − excluded, so 2 here IS the "3 local, 1 DSD" fixture
+	// — the total itself is no longer on the wire, since the card only ever
+	// rendered the parts.
+	if cov.DSDExcluded != 1 || cov.Eligible != 2 || cov.Analysed != 1 {
+		t.Errorf("coverage = %+v, want dsd 1 / eligible 2 / analysed 1", cov)
 	}
 	if got.Analysis.Sweep == nil || got.Analysis.Sweep.Last == nil || got.Analysis.Sweep.Last.Total != 3 {
 		t.Errorf("analysis.sweep not surfaced: %+v", got.Analysis.Sweep)
@@ -122,9 +122,6 @@ func TestApiJobsWiredSections(t *testing.T) {
 	}
 	if got.Backups.Run == nil {
 		t.Errorf("backups.run not surfaced: %+v", got.Backups)
-	}
-	if !got.SmartMixes.AnalysisAssisted {
-		t.Error("smartMixes.analysisAssisted should mirror analysis.active")
 	}
 
 	// Enabled-but-inactive analysis reads as degraded sox_missing.
@@ -148,11 +145,13 @@ func TestApiJobsWiredSections(t *testing.T) {
 	if code := doJSON(t, h, "GET", "/api/jobs", nil, &got); code != 200 {
 		t.Fatalf("jobs post-scan: %d", code)
 	}
-	if got.Scanner.LastFullScan == nil || got.Scanner.NextScanDue == nil {
-		t.Fatalf("scanner timestamps missing after scan: %+v", got.Scanner)
+	if got.Scanner.NextScanDue == nil {
+		t.Fatalf("scanner.nextScanDue missing after scan: %+v", got.Scanner)
 	}
-	if d := got.Scanner.NextScanDue.Sub(*got.Scanner.LastFullScan); d != time.Hour {
-		t.Errorf("nextScanDue - lastFullScan = %v, want 1h (intervalSec 3600)", d)
+	// lastFullScan is not on the wire any more (the console reads it off
+	// /api/stats), so the derivation is checked against the scanner directly.
+	if d := got.Scanner.NextScanDue.Sub(srv.deps.Scanner.LastFullScan()); d != time.Hour {
+		t.Errorf("nextScanDue - scanner.LastFullScan() = %v, want 1h (intervalSec 3600)", d)
 	}
 }
 
