@@ -158,8 +158,11 @@ var jobsCardFieldRe = regexp.MustCompile(`\bj\.([A-Za-z_][A-Za-z0-9_]*)`)
 //	                                                          (parameter alias)
 //	j.scanner?.intervalSec                                    (direct)
 var (
-	// const|let|var <alias> = <path>  — the path may chain and may use ?.
-	jsAliasRe = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\??\.[A-Za-z_]\w*)+)`)
+	// const|let|var <alias> = <path>  — the path may chain, may use ?., and
+	// may be a bare identifier: `const snap = j` binds the whole snapshot,
+	// and a `+` here (at least one member) silently dropped exactly that
+	// case, which a negative control caught before a review comment could.
+	jsAliasRe = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\??\.[A-Za-z_]\w*)*)`)
 	// function <name>(<oneParam>)
 	jsOneParamFnRe = regexp.MustCompile(`\bfunction\s+([A-Za-z_]\w*)\s*\(\s*([A-Za-z_]\w*)\s*\)`)
 	// <ident>(?.).<prop> — every member read, root ident captured
@@ -206,66 +209,203 @@ func jobsFieldPaths(rt reflect.Type, prefix string) []string {
 	return out
 }
 
+// jsTopLevelFnRe matches a top-level function declaration and captures its
+// name and its (possibly empty) parameter list.
+var jsTopLevelFnRe = regexp.MustCompile(`(?m)^function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)`)
+
+// jsFunctionBodies splits a console module into its top-level function
+// declarations, name → source from the declaration to the next one. The
+// same "\nfunction " boundary the reference-parity scan in this package
+// already uses; it is coarse (a nested function is part of its parent) and
+// that is fine here — a nested helper's reads belong to the parent's scope
+// as far as aliases go.
+func jsFunctionBodies(src string) map[string]string {
+	out := map[string]string{}
+	locs := jsTopLevelFnRe.FindAllStringSubmatchIndex(src, -1)
+	for i, loc := range locs {
+		name := src[loc[2]:loc[3]]
+		end := len(src)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		out[name] = src[loc[0]:end]
+	}
+	return out
+}
+
 // jobsReadPaths returns every property path app.js reads off the /api/jobs
 // snapshot, rooted at the snapshot and with aliases resolved: `lyr.syncedRows`
 // after `const lyr = j.lyrics` comes back as "lyrics.syncedRows", and
 // `cov.eligible` inside a one-parameter function that is called with
 // `an.coverage` comes back as "analysis.coverage.eligible".
 //
+// Aliases are scoped to the FUNCTION BODY they are declared in. The first
+// draft collected every one-parameter function's parameter into a single map
+// keyed on the parameter name — and app.js has seven one-arg functions whose
+// parameter is `s` and seven whose parameter is `r`. None is called with a
+// snapshot path today, so nothing crossed; but the moment one was, reads
+// inside the other six would have been attributed to it, which is a false
+// pass in the direction that matters. So: each body resolves against its own
+// const/let/var bindings plus its own parameter, and a parameter is bound
+// only when some call site passes it an expression that itself resolves.
+//
 // Both roots are accepted — `j` is renderJobCards' binding and `jobs` is
 // renderSettingsPrereqs' — so a field the settings prerequisites read counts
 // as rendered, which is what the top-level guard already allowed.
-func jobsReadPaths(body string) map[string]bool {
-	norm := func(s string) string { return strings.ReplaceAll(s, "?.", ".") }
-	// Alias → the expression it was bound to, un-resolved.
-	alias := map[string]string{}
-	for _, m := range jsAliasRe.FindAllStringSubmatch(body, -1) {
-		alias[m[1]] = norm(m[2])
+//
+// What it follows: member chains, `?.`, const/let/var aliases (including a
+// bare re-alias of the root, `const snap = j`), and a one-parameter helper's
+// parameter when a call site hands it a resolvable expression. What it does
+// NOT follow: a value that comes back out of a call (`const lyr = pick(j)`),
+// which would need return-flow analysis. That is a deliberate stop, and the
+// direction it fails in is the safe one — such a read is reported as MISSING
+// and names the path, so the author sees it at once; it can never quietly
+// satisfy a field nothing reads.
+func jobsReadPaths(src string) map[string]bool {
+	sc := newJobsScopes(src)
+	sc.bindParams()
+	return sc.reads()
+}
+
+// jobsScopes is the per-function view of app.js the resolver works from:
+// each body's const/let/var aliases, its single parameter name if it has
+// exactly one, and — once bindParams has run — what that parameter is bound
+// to at a resolvable call site.
+type jobsScopes struct {
+	bodies map[string]string            // fn → source
+	locals map[string]map[string]string // fn → alias → expression
+	param  map[string]string            // fn → its one parameter name
+	bound  map[string]string            // fn → snapshot path its parameter carries
+}
+
+func newJobsScopes(src string) *jobsScopes {
+	sc := &jobsScopes{
+		bodies: jsFunctionBodies(src),
+		locals: map[string]map[string]string{},
+		param:  map[string]string{},
+		bound:  map[string]string{},
 	}
-	// Parameter aliases: function f(p) called as f(<expr>).
-	for _, m := range jsOneParamFnRe.FindAllStringSubmatch(body, -1) {
-		fn, param := m[1], m[2]
-		callRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(fn) + `\(\s*([A-Za-z_]\w*(?:\??\.[A-Za-z_]\w*)*)\s*\)`)
-		if c := callRe.FindStringSubmatch(body); c != nil {
-			alias[param] = norm(c[1])
+	for name, body := range sc.bodies {
+		m := map[string]string{}
+		for _, a := range jsAliasRe.FindAllStringSubmatch(body, -1) {
+			m[a[1]] = jsNormPath(a[2])
+		}
+		sc.locals[name] = m
+		if fm := jsOneParamFnRe.FindStringSubmatch(body); fm != nil && fm[1] == name {
+			sc.param[name] = fm[2]
 		}
 	}
-	// Resolve an expression to a snapshot-rooted path, following aliases.
-	// Bounded so a cycle (`const a = b.x; const b = a.y`) cannot spin.
-	var resolve func(expr string, depth int) (string, bool)
-	resolve = func(expr string, depth int) (string, bool) {
-		if depth > 8 {
-			return "", false
-		}
-		root, rest, _ := strings.Cut(expr, ".")
-		if root == "j" || root == "jobs" {
-			return rest, rest != ""
-		}
-		bound, ok := alias[root]
-		if !ok {
-			return "", false
-		}
-		base, ok := resolve(bound, depth+1)
-		if !ok {
-			return "", false
-		}
-		if rest == "" {
-			return base, true
-		}
-		return base + "." + rest, true
+	return sc
+}
+
+// jsNormPath folds optional chaining into plain member access.
+func jsNormPath(s string) string { return strings.ReplaceAll(s, "?.", ".") }
+
+// resolve turns an expression seen inside fn into a snapshot-rooted path:
+// "" for the root itself, "lyrics.syncedRows" for a chain, false when the
+// expression does not lead back to `j` or `jobs` at all. Depth-bounded so a
+// cycle (`const a = b.x; const b = a.y`) cannot spin.
+func (sc *jobsScopes) resolve(fn, expr string) (string, bool) {
+	return sc.walk(fn, jsNormPath(expr), 0)
+}
+
+func (sc *jobsScopes) walk(fn, expr string, depth int) (string, bool) {
+	if depth > 8 {
+		return "", false
 	}
-	read := map[string]bool{}
-	for _, m := range jsMemberReadRe.FindAllStringSubmatch(body, -1) {
-		path, ok := resolve(norm(m[1]+m[2]), 0)
-		if !ok {
+	root, rest, _ := strings.Cut(expr, ".")
+	if root == "j" || root == "jobs" {
+		// The root itself resolves to the empty path, so a direct re-alias
+		// (`const snap = j`) and a helper handed the whole snapshot both
+		// work; joinPath folds the empty base away.
+		return rest, true
+	}
+	base, ok := sc.baseOf(fn, root, depth)
+	if !ok {
+		return "", false
+	}
+	return joinPath(base, rest), true
+}
+
+// baseOf resolves a bare identifier inside fn: a local alias first, then
+// the function's own parameter if a call site has bound it.
+func (sc *jobsScopes) baseOf(fn, ident string, depth int) (string, bool) {
+	if expr := sc.locals[fn][ident]; expr != "" {
+		return sc.walk(fn, expr, depth+1)
+	}
+	if sc.param[fn] == ident && sc.bound[fn] != "" {
+		return sc.bound[fn], true
+	}
+	return "", false
+}
+
+func joinPath(base, rest string) string {
+	switch {
+	case rest == "":
+		return base
+	case base == "":
+		return rest
+	default:
+		return base + "." + rest
+	}
+}
+
+// bindParams discovers, from call sites, what each one-parameter function's
+// parameter carries — resolved in the CALLER's scope. Iterated because a
+// helper can pass its own parameter on (`function A(x) { B(x.sub) }`), so a
+// binding can depend on one found in an earlier round; bounded, since app.js
+// is not going to nest that more than a handful deep.
+func (sc *jobsScopes) bindParams() {
+	for round := 0; round < 4; round++ {
+		if !sc.bindRound() {
+			return
+		}
+	}
+}
+
+func (sc *jobsScopes) bindRound() (changed bool) {
+	for callee, p := range sc.param {
+		if p == "" || sc.bound[callee] != "" {
 			continue
 		}
-		// Every prefix of a read is itself a read: `lyrics.syncedRows`
-		// also establishes `lyrics`, and `analysis.coverage.eligible`
-		// establishes `analysis.coverage`.
-		parts := strings.Split(path, ".")
-		for i := 1; i <= len(parts); i++ {
-			read[strings.Join(parts[:i], ".")] = true
+		if path, ok := sc.findBinding(callee); ok {
+			sc.bound[callee] = path
+			changed = true
+		}
+	}
+	return changed
+}
+
+// findBinding returns the first call site of callee whose argument resolves.
+func (sc *jobsScopes) findBinding(callee string) (string, bool) {
+	callRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(callee) + `\(\s*([A-Za-z_]\w*(?:\??\.[A-Za-z_]\w*)*)\s*\)`)
+	for caller, body := range sc.bodies {
+		c := callRe.FindStringSubmatch(body)
+		if c == nil {
+			continue
+		}
+		if path, ok := sc.resolve(caller, c[1]); ok {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+// reads collects every member read that resolves to a snapshot path, with
+// every prefix of a path counted too: `lyrics.syncedRows` also establishes
+// `lyrics`, and `analysis.coverage.eligible` establishes `analysis.coverage`.
+func (sc *jobsScopes) reads() map[string]bool {
+	read := map[string]bool{}
+	for fn, body := range sc.bodies {
+		for _, m := range jsMemberReadRe.FindAllStringSubmatch(body, -1) {
+			path, ok := sc.resolve(fn, m[1]+m[2])
+			if !ok || path == "" {
+				continue
+			}
+			parts := strings.Split(path, ".")
+			for i := 1; i <= len(parts); i++ {
+				read[strings.Join(parts[:i], ".")] = true
+			}
 		}
 	}
 	return read
