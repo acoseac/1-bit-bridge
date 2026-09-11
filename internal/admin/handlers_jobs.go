@@ -42,13 +42,17 @@ const lastBackupCacheTTL = 30 * time.Second
 // the create path skips Prune, so that number has no ceiling.
 const backupListTimeout = 5 * time.Second
 
-// jobsScanner — the library scanner card. NextScanDue derives from
-// LastFullScan + interval (RunPeriodic's static ticker cadence);
-// omitted until a first scan has completed.
+// jobsScanner — the library scanner card. NextScanDue derives from the
+// scanner's last full scan + interval (RunPeriodic's static ticker
+// cadence); omitted until a first scan has completed.
+//
+// isScanning and lastFullScan are NOT here, deliberately: the console reads
+// both off the /api/stats SSE payload (applyStats), and the jobs card never
+// read them from this snapshot — they were two of six fields
+// TestEveryJobsFieldIsRenderedSomewhere found being marshalled for nobody
+// once it walked leaves instead of containers.
 type jobsScanner struct {
 	IntervalSec    int        `json:"intervalSec"`
-	IsScanning     bool       `json:"isScanning"`
-	LastFullScan   *time.Time `json:"lastFullScan,omitempty"`
 	NextScanDue    *time.Time `json:"nextScanDue,omitempty"`
 	WatcherEnabled bool       `json:"watcherEnabled"`
 }
@@ -65,7 +69,6 @@ type jobsAnalysisCoverage struct {
 	Stale            int `json:"stale,omitempty"`
 	DSDExcluded      int `json:"dsdExcluded"`
 	ZeroByteExcluded int `json:"zeroByteExcluded"`
-	TotalLocal       int `json:"totalLocal"`
 }
 
 // jobsAnalysis — the audio-analysis card. Sweep/Coverage omitted when
@@ -75,7 +78,6 @@ type jobsAnalysis struct {
 	Enabled        bool                  `json:"enabled"`
 	Active         bool                  `json:"active"`
 	DegradedReason string                `json:"degradedReason,omitempty"`
-	IntervalSec    int                   `json:"intervalSec"`
 	Sweep          *AnalysisSweepState   `json:"sweep,omitempty"`
 	Coverage       *jobsAnalysisCoverage `json:"coverage,omitempty"`
 }
@@ -83,8 +85,7 @@ type jobsAnalysis struct {
 // jobsEnrichment — gates only; live pending/matched/missing counts ride
 // the existing SSE `enrichment` event.
 type jobsEnrichment struct {
-	Source        string `json:"source"`
-	HarvestActive bool   `json:"harvestActive"`
+	HarvestActive bool `json:"harvestActive"`
 }
 
 // jobsLyrics is the network lyrics tier's card. `Available` reports whether
@@ -104,10 +105,9 @@ type jobsLyrics struct {
 }
 
 type jobsSmartMixes struct {
-	Enabled          bool         `json:"enabled"`
-	IntervalSec      int          `json:"intervalSec,omitempty"`
-	AnalysisAssisted bool         `json:"analysisAssisted"`
-	Run              *JobRunState `json:"run,omitempty"`
+	Enabled     bool         `json:"enabled"`
+	IntervalSec int          `json:"intervalSec,omitempty"`
+	Run         *JobRunState `json:"run,omitempty"`
 }
 
 type jobsBackups struct {
@@ -183,22 +183,14 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		WatcherEnabled: cfg.LibraryWatch.Enabled,
 	}
 	if sc := s.deps.Scanner; sc != nil {
-		resp.Scanner.IsScanning = sc.IsScanning()
-		if last := sc.LastFullScan(); !last.IsZero() {
-			l := last
-			resp.Scanner.LastFullScan = &l
-			if cfg.ScanIntervalSec > 0 {
-				due := last.Add(time.Duration(cfg.ScanIntervalSec) * time.Second)
-				resp.Scanner.NextScanDue = &due
-			}
+		if last := sc.LastFullScan(); !last.IsZero() && cfg.ScanIntervalSec > 0 {
+			due := last.Add(time.Duration(cfg.ScanIntervalSec) * time.Second)
+			resp.Scanner.NextScanDue = &due
 		}
 	}
 
 	// Audio analysis.
-	resp.Analysis = jobsAnalysis{
-		Enabled:     cfg.Analysis.Enabled,
-		IntervalSec: cfg.ScanIntervalSec, // sweeper rides the scan cadence
-	}
+	resp.Analysis = jobsAnalysis{Enabled: cfg.Analysis.Enabled}
 	if a := s.deps.AnalysisActive; a != nil {
 		resp.Analysis.Active = a()
 	}
@@ -227,7 +219,6 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	// HarvestActive is CONFIG-derived — the HarvestForceSubmit closure
 	// is wired unconditionally (it returns false when the client isn't
 	// running), so closure presence is not a signal here.
-	resp.Enrichment.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
 	resp.Enrichment.HarvestActive = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled
 
 	// Network lyrics tier. The counts are only READ when the feature is on:
@@ -266,10 +257,7 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	}
 
 	// Smart mixes.
-	resp.SmartMixes = jobsSmartMixes{
-		Enabled:          cfg.SmartPlaylists.EffectiveEnabled(),
-		AnalysisAssisted: resp.Analysis.Active,
-	}
+	resp.SmartMixes = jobsSmartMixes{Enabled: cfg.SmartPlaylists.EffectiveEnabled()}
 	if cfg.SmartPlaylists.EffectiveEnabled() {
 		resp.SmartMixes.IntervalSec = int(cfg.SmartPlaylists.EffectiveRegenerateInterval() / time.Second)
 	}
@@ -447,7 +435,6 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 			Stale:            cov.AnalysedStale,
 			DSDExcluded:      cov.DSDExcluded,
 			ZeroByteExcluded: cov.ZeroByteExcluded,
-			TotalLocal:       cov.TotalLocal,
 		}
 		s.analysisCoverageMu.Lock()
 		s.analysisCoverage = snap
