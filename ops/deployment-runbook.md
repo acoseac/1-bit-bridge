@@ -239,7 +239,7 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .leCertNotAfter'
 
 **Leave the `bridge.old-<ts>` backup ~24h** so a regression caught later has one-step rollback (`sudo mv /usr/local/bin/bridge /usr/local/bin/bridge.broken && sudo mv /usr/local/bin/bridge.old-<ts> /usr/local/bin/bridge && sudo systemctl restart 1-bit-bridge`).
 
-**⚠️ A BINARY ROLLBACK MUST REVERT THE CONFIG IN THE SAME STEP WHENEVER THE DEPLOY ADDED A CONFIG KEY — ROLLING BACK PAST A CONFIG KEY CRASH-LOOPS THE SERVICE.** The loader is strict (`dec.KnownFields(true)` — a typo-catcher, so an unknown YAML key *fails the load*, it does not warn), and the unit is `Restart=always`. So an older binary meeting a newer config does not start, retries every 5 s, and the bridge is down — while `/usr/local/bin/bridge` looks perfectly fine and the rollback command above reports success. The one-step rollback in the previous paragraph is correct only for a deploy that changed no config. Concretely, `v0.1.9-154` (2026-09-08) introduced `upscale.dsdRender` and `upscale.tempDir`, so rolling back to `v0.1.9-149` or earlier requires the config backup too:
+**⚠️ A BINARY ROLLBACK MUST REVERT THE CONFIG IN THE SAME STEP WHENEVER THE DEPLOY ADDED A CONFIG KEY — ROLLING BACK PAST A CONFIG KEY CRASH-LOOPS THE SERVICE.** The loader is strict (`dec.KnownFields(true)` — a typo-catcher, so an unknown YAML key *fails the load*, it does not warn), and the unit is `Restart=always`. So an older binary meeting a newer config does not start, retries every 5 s, and the bridge is down — while `/usr/local/bin/bridge` looks perfectly fine and the rollback command above reports success. The one-step rollback in the previous paragraph is correct only for a deploy that changed no config. Concretely, `v0.1.9-154` (2026-09-08) introduced `upscale.dsdRender` and `upscale.tempDir`, so rolling back to `v0.1.9-149` or earlier requires the config backup too — and the [release deploy ledger](#release-deploy-ledger) below records every key each later deploy added:
 
 ```bash
 # Rollback for a deploy that ALSO added config keys. Config FIRST — while the
@@ -492,6 +492,68 @@ Public read-only demo bridge (the iOS "Add demo bridge" target). Full coordinate
 - **A LAN host with its own allowlisted egress works as a pure TCP relay:** `ssh -J <RELAY-SSH> -i ~/.ssh/<VPS-SSH-KEY> <VPS-SSH>`. `-J` tunnels only TCP, so the key never leaves the workstation and no binary transits the relay — strictly better than copying either. To make the deploy script take that route, set **`SSH_OPTS="-J <RELAY-SSH>"`** (in `deploy/linux/.env` or inline). **Not `HOST`** — `HOST` is passed as ssh's target argument, so a ProxyJump form there cannot work; an earlier revision of this note said otherwise. An option whose *value* contains spaces (a full `ProxyCommand`) needs `~/.ssh/config` instead, since `SSH_OPTS` is word-split.
 - **Verification never needs SSH.** `/v1/health` on `:443` is open to everyone, so poll `serverVersion` there to confirm a deploy landed — which is what the script now does.
 
+
+## Release deploy ledger
+
+One row per deploy that changed the config surface or carries checks that must
+be run afterwards. **Read the row before deploying**: the "config keys" column
+is the rollback hazard (the loader is strict — an older binary meeting a newer
+key crash-loops; see the rollback note under bridge.ars.md), and the "after"
+column is the list of things a deploy is not finished until someone has looked
+at. A check that only lives in a to-do note on one machine is a check nobody
+runs; that is how the #849–#851 verification sat unrun for four days on a
+bridge that already had the fix.
+
+| Version | Date | Hosts | Config keys added since the previous row | After the restart |
+|---|---|---|---|---|
+| `v0.1.9-154` | 2026-09-08 | bridge.ars.md | `upscale.dsdRender.*`, `upscale.tempDir` (#863) | `bridge doctor` → `dsd-render-toolchain` ok; `/v1/health` advertises `dsdRender`; `upscale.tempDir` set explicitly (PrivateTmp) |
+| **`v0.2.0`** | pending | bridge.ars.md → home-pc → demo | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; a config that does not name them needs nothing. | see the checklist below |
+
+### `v0.2.0` post-deploy checklist
+
+Run on **each** host, in order. The lyrics items are the #849 / #850 / #851
+verification that was written on 2026-09-06 and never run — those PRs have
+been live on bridge.ars.md since the `-154` deploy, so the numbers are
+measurable today, and the v0.2.0 restart is the first scan cycle anyone will
+be watching.
+
+1. **Version and flags.** `curl -s https://<host>/v1/health | jq '.serverVersion, .features'` —
+   expect `0.2.0` (bare, on the release artifact) and `lyrics` present;
+   `dsdRender` present on a host with the ffmpeg `dsd_*` decoders; `dlnaArtwork`
+   ABSENT on bridge.ars.md and the demo (public mode never starts the DLNA
+   listener) and present on home-pc if `dlna.enabled` is on there.
+2. **The one-time re-extraction.** `ExtractorVersion` goes 7 → 10 on both
+   production bridges (they run `-154`, before v8 at `-175`), so the startup
+   scan re-reads every audio file's tags once. On bridge.ars.md that is a full
+   pass over the B2 mount — expect `scanState.isScanning: true` for a long time
+   and iOS incremental rescans to defer (see "After a deploy" below). Confirm
+   it ENDS: `isScanning: false` and `tracksIndexed` back at the pre-deploy
+   value. A count that dropped means suppression or reaping changed something
+   and wants the Duplicates page before anything else.
+3. **#850, the loud one.** `journalctl -u 1-bit-bridge --since '<restart>' --no-pager | grep -c 're-extract'`
+   after the first full scan, then again after the NEXT periodic scan
+   (`scanner.scanIntervalSec`, default 6 h). The first count is the whole
+   library (the version bump); the second must be near zero. A second count
+   that is a steady fraction of the library is the sidecar-skip-gate
+   disagreement #850 fixed still happening on that host — every track with an
+   empty / tagless / legacy-encoded `<stem>.lrc|.txt` beside it re-opening on
+   every scan.
+4. **Scan wall-clock, cycle over cycle.** From the journal's scan start/finish
+   lines on the second and third periodic scans. Same reason as 3; the number
+   to record is the steady-state, not the re-extraction pass.
+5. **#849, silent by nature.** Add a `.lrc` beside a track on the library
+   root, trigger a scan (`POST /api/scan` on a loopback console; a restart on
+   a public one), and confirm the phone receives the lyrics on a DELTA sync —
+   `/v1/manifest?since=` carries the track with a new `lyricsTag` — not only
+   on a full sync. Remove the file afterwards and confirm the row goes.
+6. **Nightly fuzz.** The next `fuzz.yml` run is green and the matrix shows
+   **39** targets — the list is discovered from the tree, so the count is the
+   check that the new `internal/lyrics` target was picked up.
+7. **Config keys.** `bridge doctor --config <path>` exits 0 BEFORE any edit
+   that adds `atlas.lyricsEnabled` or `deployment.managedControls`; the
+   rollback note applies from the moment either is written.
+8. **Mark the verify note folded.** `~/Desktop/to-do/2026-09-06-loupe-lyrics-verify.md`
+   is superseded by items 3–6 here; it should say so at the top.
 
 ## Diagnosing client behavior from the journal
 

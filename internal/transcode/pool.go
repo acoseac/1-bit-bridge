@@ -1202,9 +1202,15 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 					"timeout", timeout,
 					"err", err)
 			} else {
+				// The REDACTED message, same as the row and the SSE
+				// frame below. sox's stderr quotes the absolute source
+				// path and, for a DSD render, the scratch directory —
+				// the raw err carried both into the journal while
+				// `path` beside it already names the file in the
+				// library-relative form the privacy page promises.
 				logger.Warn("pool: sox failed",
 					"path", job.spec.SourceLibraryRel,
-					"err", err)
+					"err", redactSoxErr(err.Error(), job.spec))
 				// One strike against this file version. Only HERE:
 				// shutdown is excluded by the enclosing !p.closed gate,
 				// and the timeout branch above is excluded because a
@@ -1463,6 +1469,25 @@ func redactSoxErr(s string, spec JobSpec) string {
 	if outDir := strings.TrimRight(spec.OutputDir, `/\`); outDir != "" {
 		s = strings.ReplaceAll(s, outDir+"/", "")
 		s = strings.ReplaceAll(s, outDir+`\`, "")
+	}
+	// Pass 2b: the DSD render's Stage A scratch — the third absolute-path
+	// family, added with the renditions (PR #863) and missed by the two
+	// passes above. `upscale.tempDir` (or the OS temp dir when it is empty)
+	// is an absolute HOST path that lands in sox's argv as Stage A's output
+	// and Stage B/C's input, so a failing stage names it in stderr and a
+	// mkdir failure names it in the PathError. The scratch basename is an
+	// opaque token, so the prefix goes and the name stays; the bare
+	// directory (a mkdir error) becomes a placeholder rather than a hole in
+	// the sentence. Then the configured tempDir itself, for a MkdirAll that
+	// failed on the parent. Longest first, so the scratch subdirectory is
+	// consumed before its parent could match inside it. A no-op for every
+	// PCM job — nothing in a sox-direct run mentions the directory.
+	scratch := strings.TrimRight(renderScratchDir(spec.TempDir), `/\`)
+	s = strings.ReplaceAll(s, scratch+"/", "")
+	s = strings.ReplaceAll(s, scratch+`\`, "")
+	s = strings.ReplaceAll(s, scratch, "<render-scratch>")
+	if tmp := strings.TrimRight(spec.TempDir, `/\`); tmp != "" {
+		s = strings.ReplaceAll(s, tmp, "<tempDir>")
 	}
 	// Pass 3: drop leading prefixes the sox runner / exec wrapper
 	// adds.

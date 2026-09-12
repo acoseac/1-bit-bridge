@@ -729,3 +729,41 @@ func TestBatchWalkFailsOpenWithoutProbe(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactSoxErr_ScrubsRenderScratchDir locks the third absolute-path
+// family the DSD renditions added. `upscale.tempDir` (or the OS temp dir) is
+// an absolute HOST path that lands in sox's argv — Stage A's output, Stage
+// B/C's input — so a failing stage names it in stderr, and a mkdir failure
+// names it in the PathError. Neither the SourceAbsPath pass nor the
+// OutputDir pass can see it. The scratch basename is an opaque token, so the
+// prefix goes and the name stays; the bare directory becomes a placeholder.
+func TestRedactSoxErr_ScrubsRenderScratchDir(t *testing.T) {
+	spec := JobSpec{
+		SourceAbsPath:    "/mnt/music/Artist/Album/01.dsf",
+		SourceLibraryRel: "Artist/Album/01.dsf",
+		OutputDir:        "/mnt/bridge-variants",
+		TempDir:          "/home/arsenie/bridge-data/tmp",
+		Kind:             JobKindPCMRender,
+	}
+	scratch := renderScratchDir(spec.TempDir)
+	cases := map[string]string{
+		"stage output": "sox FAIL formats: can't open output file `" + scratch + "/7f3a9c.raw': No space left on device",
+		"mkdir":        "mkdir render scratch dir: mkdir " + scratch + ": permission denied",
+		"parent":       "mkdir render scratch dir: mkdir /home/arsenie/bridge-data/tmp: read-only file system",
+	}
+	for name, in := range cases {
+		got := redactSoxErr(in, spec)
+		if strings.Contains(got, "/home/arsenie") {
+			t.Errorf("%s: redactSoxErr leaked the scratch host path: %q", name, got)
+		}
+	}
+	if got := redactSoxErr(cases["stage output"], spec); !strings.Contains(got, "7f3a9c.raw") {
+		t.Errorf("the opaque scratch basename should survive: %q", got)
+	}
+	// An empty TempDir means the OS temp dir — still an absolute host path.
+	spec.TempDir = ""
+	in := "sox FAIL formats: can't open input file `" + renderScratchDir("") + "/abc.raw': No such file"
+	if got := redactSoxErr(in, spec); strings.Contains(got, renderScratchDir("")) {
+		t.Errorf("OS temp dir scratch leaked: %q", got)
+	}
+}
