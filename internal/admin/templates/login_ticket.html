@@ -3,7 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+{{/* MUST equal loginTicketReferrerPolicy (handlers_login.go): the meta is
+     parsed after the header and is the policy the document keeps. Never
+     `no-referrer` — under it a form POST carries `Origin: null` and the CSRF
+     guard refuses the Continue button. */}}
+<meta name="referrer" content="strict-origin">
 <title>Sign in — 1-bit Bridge</title>
 <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png?v=2">
 <link rel="stylesheet" href="/static/app.css">
