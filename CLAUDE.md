@@ -27,7 +27,8 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** — `grep '^func Fuzz' | sort -u` says 38, because
+  **Count them by file:name pair** to get 39 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 38, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -554,13 +555,19 @@ no failing test — which is the shape to expect in this area.
   format / synced / source agreeing.
 - **A sparse-timed body is PLAIN, and the rule lives in the CLASSIFICATION,
   not in `LooksLikeLRC`.** `LooksLikeLRC` is any-line on both sides and must
-  stay so; the app's `LRCParser.parse` applies `timedCoverageIsTooSparse`
-  (fewer than 2 timed TEXT lines beside any untimed text, or under 25 % of
-  the non-blank lines → the whole text is an unsynced document) and
-  `TextCandidate` mirrors it through `TimedCoverage` +
-  `TimedCoverageIsTooSparse`, constants and truth table lifted from the
-  Swift tests verbatim (iOS #1759). Before it, a Genius transcript with one
-  `[4:20]` cue was a rank-4 `text-lrc` stub outranking the complete plain
+  stay so; the app's `LRCParser.parse` returns the plain document when
+  `timed.isEmpty || timedCoverageIsTooSparse(...)` (fewer than 2 timed TEXT
+  lines beside any untimed text, or under 25 % of the non-blank lines), and
+  `IsSyncedLRCBody` mirrors BOTH arms — `TimedCoverage` for the counts,
+  `TimedCoverageIsTooSparse` line for line with the app's function, guard
+  included, constants and truth table lifted from the Swift tests verbatim
+  (iOS #1759). **Keep the `timed > 0` arm outside the sparse function**: the
+  app's guard answers "not sparse" for zero timed lines because the app never
+  asks it that, so a body whose only tags are clear events (`Prose\n[00:12.00]`)
+  is caught by `timed.isEmpty` there and must be caught by `timed > 0` here —
+  Gemini saw the outcome on #904 and proposed dropping the guard, which would
+  have broken the verbatim truth table. Before it, a Genius transcript with
+  one `[4:20]` cue was a rank-4 `text-lrc` stub outranking the complete plain
   document in the same file. The phone was never at risk — it re-parses the
   body and reads `synced` as advisory — so a divergence here shows up only
   as the bridge's election and stored verdict, silently. `ExtractorVersion`

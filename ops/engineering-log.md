@@ -5103,16 +5103,35 @@ landed at `-175`, so the v0.2.0 deploy re-extracts once from v7 whatever this
 says — v7→v9 in one pass. The version-stamp leg keeps the client delta to the
 rows whose tag actually moved.
 
+### The second arm, found in review
+
+Gemini (HIGH on #904) saw that `TimedCoverageIsTooSparse(0, n)` answers
+"not sparse", so a body whose only tags are CLEAR EVENTS — `Prose\n[00:12.00]`,
+LRC-shaped to `LooksLikeLRC`, zero timed TEXT lines — classified as synced,
+while the app's parse returns the plain document. Real divergence; wrong
+patch. The proposed fix dropped `timedLines > 0` from the guard, which is
+exactly the app's guard (`guard untimedLines > 0, timedLines > 0`) and would
+have broken the verbatim truth-table row `(0, 5) → false`. The app never asks
+the sparse function about zero timed lines because `parse` decides
+`timed.isEmpty` FIRST — so the bridge mirrors both arms, in `IsSyncedLRCBody`:
+`LooksLikeLRC && timed > 0 && !sparse`. Reproduced red with a throwaway test
+before the fix; the case is in the table now. Take the observation, verify the
+mechanism, write your own fix — this file's standing rule, again.
+
 ### Controls and coverage
 
 Red-first against the OLD rule with the new helpers present (so the control
 compiled): predicted red `TestTextCandidateRanksASparseTimedBodyAsPlain` +
 `TestSparseVerdictReKeysTheTag`, predicted green the truth table and the
 counter test — exactly that. New `FuzzTextCandidateClassification` pins the
-verdict to the predicate on both halves and the three derived fields to each
-other: 7,181,247 execs in 20 s, 0 failures. All four `internal/lyrics` targets
-fuzzed 20 s each at `-fuzzminimizetime 1s`, clean. Not changed: the `.lrc`
-sidecar classification (`sidecarCandidate`) and the Atlas `documentFrom`
-promotion still use bare `LooksLikeLRC` — a sparse `.lrc` is the operator's
-explicit file and LRCLIB's synced field is fully timed by construction; both
-would be a one-line adoption of the same helper if a case ever shows up.
+verdict to the predicate re-derived from its PARTS (reading it back from
+`IsSyncedLRCBody` would be a tautology) and the three derived fields to each
+other: 7,181,247 execs in 20 s on the first form, 6,027,703 after the second
+arm landed, 0 failures. All four `internal/lyrics` targets fuzzed 20 s each at
+`-fuzzminimizetime 1s`, clean. Both new tests were restructured for SonarCloud
+S3776 (a table with one comparison; the fuzz body split into two helpers) —
+the repo's standing response to that rule. Not changed: the `.lrc` sidecar
+classification (`sidecarCandidate`) and the Atlas `documentFrom` promotion
+still use bare `LooksLikeLRC` — a sparse `.lrc` is the operator's explicit
+file and LRCLIB's synced field is fully timed by construction; both would be a
+one-line adoption of `IsSyncedLRCBody` if a case ever shows up.

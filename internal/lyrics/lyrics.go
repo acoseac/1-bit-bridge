@@ -367,8 +367,22 @@ const (
 	MinimumTimedShare = 0.25
 )
 
+// IsSyncedLRCBody is the app's whole synced-or-plain decision for an
+// LRC-shaped body, in one place: `LooksLikeLRC`, then `parse`'s
+// `!timed.isEmpty && !timedCoverageIsTooSparse(...)`. TextCandidate keys on
+// it; the fuzz property asserts the verdict against it.
+func IsSyncedLRCBody(body string) bool {
+	if !LooksLikeLRC(body) {
+		return false
+	}
+	timed, untimed := TimedCoverage(body)
+	return timed > 0 && !TimedCoverageIsTooSparse(timed, untimed)
+}
+
 // TimedCoverageIsTooSparse is `LRCParser.timedCoverageIsTooSparse`, line for
-// line: the guard, the count floor, then the share.
+// line: the guard, the count floor, then the share. Zero timed lines is NOT
+// sparse here — the app decides `timed.isEmpty` before it ever asks; see
+// IsSyncedLRCBody for the arm that carries that case.
 func TimedCoverageIsTooSparse(timedLines, untimedLines int) bool {
 	if untimedLines <= 0 || timedLines <= 0 {
 		return false
@@ -443,27 +457,38 @@ func LooksLikeLRC(text string) bool {
 	return false
 }
 
-// TextCandidate classifies a text blob: LRC-shaped text whose timed lines
-// are not a sparse minority of its text is a synced LRC document
-// (`text-lrc`, or `vorbis-synced` when the tag itself claimed sync);
-// anything else is plain text. Returns ok=false for an empty body.
+// TextCandidate classifies a text blob: LRC-shaped text that carries at
+// least one timed TEXT line, and whose timed lines are not a sparse minority
+// of its text, is a synced LRC document (`text-lrc`, or `vorbis-synced` when
+// the tag itself claimed sync); anything else is plain text. Returns
+// ok=false for an empty body.
 //
-// The sparse rule sits HERE, in the classification, and LooksLikeLRC stays
-// any-line — the same split as the app, whose `looksLikeLRC` is any-line and
-// whose `parse` applies `timedCoverageIsTooSparse` (iOS #1759). Before it, a
-// transcript with one `[4:20]` cue became a `text-lrc` row with
-// `synced: true`: rank 4, above the complete plain document (rank 6) in the
-// same file's other frame, and a stored verdict the bridge itself could not
-// stand behind. The phone was already protected — it re-parses the body and
-// treats `synced` as advisory — so the fix is to the bridge's own election
-// and to what it stores. A tag that CLAIMED sync (Vorbis SYNCEDLYRICS) over a
-// sparse body is plain too: the app parses the body, not the tag name.
+// The rule sits HERE, in the classification, and LooksLikeLRC stays any-line
+// — the same split as the app, whose `looksLikeLRC` is any-line and whose
+// `parse` returns the plain document when `timed.isEmpty ||
+// timedCoverageIsTooSparse(...)` (iOS #1759). BOTH arms are mirrored:
+// TimedCoverageIsTooSparse is the app's function line for line, guard
+// included, so it answers "not sparse" for zero timed lines — the app never
+// asks it that, because `timed.isEmpty` is decided first. A body whose only
+// tags are clear events (`Prose\n[00:12.00]`) therefore has to be caught by
+// the `timed > 0` arm here, exactly as it is caught there; folding it into
+// the guard instead would break the verbatim truth table (gemini on #904
+// saw the outcome and proposed that patch).
+//
+// Before this, a transcript with one `[4:20]` cue became a `text-lrc` row
+// with `synced: true`: rank 4, above the complete plain document (rank 6)
+// in the same file's other frame, and a stored verdict the bridge itself
+// could not stand behind. The phone was already protected — it re-parses
+// the body and treats `synced` as advisory — so the fix is to the bridge's
+// own election and to what it stores. A tag that CLAIMED sync (Vorbis
+// SYNCEDLYRICS) over such a body is plain too: the app parses the body, not
+// the tag name.
 func TextCandidate(text, language string, taggedSynced bool, priority int) (Candidate, bool) {
 	body, ok := Normalize(text)
 	if !ok {
 		return Candidate{}, false
 	}
-	if LooksLikeLRC(body) && !TimedCoverageIsTooSparse(TimedCoverage(body)) {
+	if IsSyncedLRCBody(body) {
 		src := SourceTextLRC
 		if taggedSynced {
 			src = SourceVorbisSynced
