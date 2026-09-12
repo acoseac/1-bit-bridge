@@ -184,12 +184,17 @@ type TrackInfo struct {
 	Year            int
 	TrackNumber     int
 
-	// ArtworkURL is the pre-resolved absolute URL (e.g.,
-	// "http://192.168.0.14:7790/v1/artwork/{mbid}") that DIDL-Lite
-	// embeds as `<upnp:albumArtURI>`. Empty = no artwork. The
-	// bridge-side adapter constructs this from manifest.Track's
-	// ArtworkMBID + the request's server URL.
-	ArtworkURL string
+	// ArtworkKey is the track's cover key — the `/v1/artwork/{key}`
+	// path segment, `artworkVersion ?? artworkMBID`, i.e. the value the
+	// iOS client stores as the album's `artworkHash`. Empty = no cover
+	// known. The CDS composes the per-request `<upnp:albumArtURI>` from
+	// it (`ArtworkURLFor(serverURL, key)`) and ONLY when the server
+	// mounts the artwork route (WithAlbumArtURIs), so a key on a bridge
+	// without the route never becomes a URI that 404s. It replaced a
+	// pre-resolved `ArtworkURL` field whose doc said the adapter filled
+	// it from the request's server URL — the adapter has no request, and
+	// nothing ever set it.
+	ArtworkKey string
 
 	// Variants are the offline-cached alternate renderings of this
 	// track (upscaled hi-res FLAC and/or CarPlay/cellular-optimized
@@ -231,7 +236,15 @@ func findVariant(variants []VariantInfo, variantID string) (VariantInfo, bool) {
 // DIDLTrackOpts shape that `DIDLForTrack` expects. Kept private
 // because it's a one-line struct copy plus the server URL / UA
 // fields — callers shouldn't need to do this themselves.
-func (t TrackInfo) toDIDLOpts(serverURL, userAgent, parentID string) DIDLTrackOpts {
+//
+// `albumArt` is the server-level gate (ServerConfig.Artwork != nil): the
+// albumArtURI is composed from ArtworkKey against THIS request's serverURL
+// only when the route that serves it is mounted.
+func (t TrackInfo) toDIDLOpts(serverURL, userAgent, parentID string, albumArt bool) DIDLTrackOpts {
+	artworkURL := ""
+	if albumArt {
+		artworkURL = ArtworkURLFor(serverURL, t.ArtworkKey)
+	}
 	return DIDLTrackOpts{
 		TrackID:         t.TrackID,
 		ParentID:        parentID,
@@ -251,7 +264,7 @@ func (t TrackInfo) toDIDLOpts(serverURL, userAgent, parentID string) DIDLTrackOp
 		IsDSD:           t.IsDSD,
 		Codec:           t.Codec,
 		FileExtension:   t.FileExtension,
-		ArtworkURL:      t.ArtworkURL,
+		ArtworkURL:      artworkURL,
 		Variants:        t.Variants,
 		ServerURL:       serverURL,
 		UserAgent:       userAgent,
@@ -332,6 +345,31 @@ type searchAction struct {
 	SortCriteria   string `xml:"SortCriteria"`
 }
 
+// cdsConfig holds the server-level ContentDirectory switches.
+type cdsConfig struct {
+	albumArt bool
+}
+
+// CDSOption configures ContentDirectoryHandler.
+type CDSOption func(*cdsConfig)
+
+// WithAlbumArtURIs makes the CDS emit `<upnp:albumArtURI>` — composed per
+// request as ArtworkURLFor(serverURL, TrackInfo.ArtworkKey) — on every item
+// with a key and on every folder container whose direct child tracks carry
+// one. The Server passes it exactly when ServerConfig.Artwork is wired, so
+// the URI can never point at a route this listener does not mount.
+func WithAlbumArtURIs() CDSOption {
+	return func(c *cdsConfig) { c.albumArt = true }
+}
+
+// didlEnv is the per-request half of DIDL emission: the server URL the
+// renderer reached us on (for `<res>` and albumArtURI) and whether the
+// albumArtURI is emitted at all.
+type didlEnv struct {
+	serverURL string
+	albumArt  bool
+}
+
 // ContentDirectoryHandler returns an http.HandlerFunc that dispatches
 // incoming SOAP requests against the ContentDirectory:1 service. The
 // handler:
@@ -353,7 +391,16 @@ type searchAction struct {
 // Injected as a function rather than a static string so the handler
 // adapts to multi-interface deployments (the renderer might dial us
 // via a Tailscale IP on one request and the LAN IP on another).
-func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Request) string) http.HandlerFunc {
+//
+// `opts` are the server-level switches: WithAlbumArtURIs makes every item
+// and every folder container that holds tracks carry `<upnp:albumArtURI>`
+// composed against the per-request server URL. Off by default, and the
+// server turns it on exactly when it mounts the route the URI points at.
+func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Request) string, opts ...CDSOption) http.HandlerFunc {
+	var cfg cdsConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	// One folder-index cache per handler (i.e. per server lifetime),
 	// shared across all Browse requests. Generation-keyed, so it rebuilds
 	// only when the library moves.
@@ -367,9 +414,9 @@ func ContentDirectoryHandler(lib LibrarySource, serverURLFunc func(r *http.Reque
 		_, actionName := ParseSOAPAction(r.Header.Get("SOAPAction"))
 		switch actionName {
 		case "Browse":
-			handleBrowse(w, r, lib, fc, serverURLFunc(r))
+			handleBrowse(w, r, lib, fc, didlEnv{serverURL: serverURLFunc(r), albumArt: cfg.albumArt})
 		case "Search":
-			handleSearch(w, r, lib, serverURLFunc(r))
+			handleSearch(w, r, lib, didlEnv{serverURL: serverURLFunc(r), albumArt: cfg.albumArt})
 		case "GetSearchCapabilities":
 			handleGetSearchCapabilities(w)
 		case "GetSortCapabilities":
@@ -474,7 +521,8 @@ func handleGetSystemUpdateID(w http.ResponseWriter) {
 // LAN-exposed surface.
 const maxSOAPBodyBytes = 1 << 20 // 1 MB
 
-func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc *folderIndexCache, serverURL string) {
+func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc *folderIndexCache, emit didlEnv) {
+	serverURL := emit.serverURL
 	r.Body = http.MaxBytesReader(w, r.Body, maxSOAPBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -576,6 +624,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 					ID: node.ObjectID, ParentID: node.ParentID, Title: node.Name,
 					ChildCount: len(node.ChildFolderIDs) + len(node.ChildTrackIDs),
 					UPnPClass:  "object.container.storageFolder",
+					ArtworkURL: folderArtworkURL(folderIndex, node, emit),
 				})
 				break
 			}
@@ -592,7 +641,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 			// ("2") automatically.
 			if t, ok := folderIndex.LookupTrack(browse.ObjectID); ok {
 				parentID := FolderObjectID(relParentDirFromRelPath(t.RelativePath))
-				selfDIDL = DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID))
+				selfDIDL = DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID, emit.albumArt))
 				break
 			}
 			// Unknown ObjectID under BrowseMetadata — same `NoSuchObject`
@@ -745,7 +794,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 			folderIndex.TopLevelTrackIDs,
 			foldersRootObjectID,
 			browse,
-			serverURL,
+			emit,
 			ua,
 		)
 		numberReturned = len(didlElements)
@@ -770,7 +819,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 			// PR-pending change to numeric ObjectID also flips
 			// this parentID in lockstep so the parent/child IDs
 			// remain consistent.
-			didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua, allTracksObjectID)))
+			didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua, allTracksObjectID, emit.albumArt)))
 		}
 		numberReturned = len(slice)
 		totalMatches = len(tracks)
@@ -787,7 +836,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 				node.ChildTrackIDs,
 				node.ObjectID,
 				browse,
-				serverURL,
+				emit,
 				ua,
 			)
 			numberReturned = len(didlElements)
@@ -850,7 +899,8 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 // criteria yields zero matches (NumberReturned=0) rather than a SOAP
 // fault, so a controller that sends an exotic expression sees an empty
 // result rather than an error that might abort its session.
-func handleSearch(w http.ResponseWriter, r *http.Request, lib LibrarySource, serverURL string) {
+func handleSearch(w http.ResponseWriter, r *http.Request, lib LibrarySource, emit didlEnv) {
+	serverURL := emit.serverURL
 	r.Body = http.MaxBytesReader(w, r.Body, maxSOAPBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -882,7 +932,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request, lib LibrarySource, ser
 		// the BrowseMetadata track branch — so a controller can navigate
 		// from a search result back into the Folders hierarchy.
 		parentID := FolderObjectID(relParentDirFromRelPath(t.RelativePath))
-		didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID)))
+		didlElements = append(didlElements, DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID, emit.albumArt)))
 	}
 	numberReturned := len(slice)
 
@@ -1093,9 +1143,10 @@ func browseFolderChildren(
 	childTrackIDs []string,
 	parentID string,
 	browse browseAction,
-	serverURL string,
+	emit didlEnv,
 	ua string,
 ) []string {
+	serverURL := emit.serverURL
 	total := len(childFolderIDs) + len(childTrackIDs)
 	if total == 0 {
 		return nil
@@ -1128,6 +1179,7 @@ func browseFolderChildren(
 				ID: node.ObjectID, ParentID: parentID, Title: node.Name,
 				ChildCount: len(node.ChildFolderIDs) + len(node.ChildTrackIDs),
 				UPnPClass:  "object.container.storageFolder",
+				ArtworkURL: folderArtworkURL(folderIndex, node, emit),
 			}))
 			continue
 		}
@@ -1138,9 +1190,28 @@ func browseFolderChildren(
 		if !ok {
 			continue
 		}
-		out = append(out, DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID)))
+		out = append(out, DIDLForTrack(t.toDIDLOpts(serverURL, ua, parentID, emit.albumArt)))
 	}
 	return out
+}
+
+// folderArtworkURL is the cover a folder CONTAINER advertises: the first
+// direct child track (in the node's sorted-by-path order) that carries an
+// ArtworkKey, composed against the request's server URL. Empty when the
+// server does not mount the artwork route, when the folder holds no tracks
+// directly (an artist folder whose children are album folders advertises
+// nothing — there is no single cover to name), or when none of its tracks
+// has a key. Direct children only, deliberately: climbing into sub-folders
+// would make a multi-disc album's parent inherit disc 1's cover by accident
+// of sort order, and "the folder's own tracks" is the album-shaped case the
+// Folders axis exists for. First-non-empty rather than a frequency count —
+// tracks in one folder overwhelmingly share one key, the order is
+// deterministic, and the cost is O(children) per emitted container.
+func folderArtworkURL(folderIndex *FolderIndex, node FolderNode, emit didlEnv) string {
+	if !emit.albumArt {
+		return ""
+	}
+	return ArtworkURLFor(emit.serverURL, folderIndex.artworkKeyFor(node))
 }
 
 // clampPage computes the [lo, hi) slice window for a Browse response

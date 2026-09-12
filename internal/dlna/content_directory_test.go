@@ -801,13 +801,21 @@ func Test_TrackInfo_toDIDLOpts_PreservesFields(t *testing.T) {
 		AlbumArtist: "AA", Composer: "Comp", Genre: "G", Year: 1965, TrackNumber: 3,
 		Size: 1000, DurationSeconds: 60.5, SampleRateHz: 44100, BitsPerSample: 16,
 		Channels: 2, IsDSD: false, Codec: "FLAC", FileExtension: ".flac",
-		ArtworkURL: "http://art/x",
+		ArtworkKey: "abc-def",
 	}
-	opts := track.toDIDLOpts("http://server", "TestUA", "1")
+	opts := track.toDIDLOpts("http://server", "TestUA", "1", true)
 	if opts.TrackID != "abc" || opts.Title != "T" || opts.Year != 1965 ||
 		opts.ServerURL != "http://server" || opts.UserAgent != "TestUA" ||
 		opts.ParentID != "1" {
 		t.Errorf("toDIDLOpts dropped fields: %+v", opts)
+	}
+	// The albumArtURI is composed against THIS request's server URL, and
+	// only when the server mounts the route it points at.
+	if opts.ArtworkURL != "http://server/dlna/artwork/abc-def" {
+		t.Errorf("ArtworkURL = %q, want the key composed under ArtworkPathPrefix", opts.ArtworkURL)
+	}
+	if off := track.toDIDLOpts("http://server", "TestUA", "1", false); off.ArtworkURL != "" {
+		t.Errorf("without the route the key must not become a URI, got %q", off.ArtworkURL)
 	}
 }
 

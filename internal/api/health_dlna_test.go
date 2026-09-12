@@ -108,3 +108,51 @@ func TestHealthOmitsDLNAServerByDefault(t *testing.T) {
 		}
 	}
 }
+
+// TestHealthAdvertisesDLNAArtworkOnlyWithListenerAndArtworkDir drives the
+// real router for every corner of the `dlnaArtwork` AND-gate. iOS keys
+// emitting a renderer's `<upnp:albumArtURI>` on this flag, so a false
+// positive is the strict-renderer item decline the gate exists to prevent,
+// and a false negative is a cover the renderer could have shown.
+func TestHealthAdvertisesDLNAArtworkOnlyWithListenerAndArtworkDir(t *testing.T) {
+	cases := []struct {
+		name          string
+		dlna, artwork bool
+		want          bool
+	}{
+		{"listener + artwork dir", true, true, true},
+		{"listener, no artwork dir (ServeArtwork would 503)", true, false, false},
+		{"artwork dir, no listener (route lives on the DLNA mux)", false, true, false},
+		{"neither", false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			cfg := &config.Config{LibraryRoots: []string{tmp}, ListenAddress: ":7788", LibraryName: "Test"}
+			store, _ := auth.OpenStore(filepath.Join(tmp, "tokens.json"))
+			srv := New(cfg, store, nil, "fp").WithDLNA(tc.dlna)
+			if tc.artwork {
+				srv.WithArtworkDirs(fakeArtworkDirs{dir: filepath.Join(tmp, "artwork")})
+			}
+			hs := httptest.NewServer(srv.Handler())
+			t.Cleanup(hs.Close)
+			resp := authGet(t, hs, "/v1/health", "")
+			body := readAllOrFail(t, resp)
+			resp.Body.Close()
+			var got HealthResponse
+			if err := jsonUnmarshalForTest(body, &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			found := false
+			for _, f := range got.Features {
+				if f == "dlnaArtwork" {
+					found = true
+				}
+			}
+			if found != tc.want {
+				t.Fatalf("dlnaArtwork advertised=%v, want %v; features %v", found, tc.want, got.Features)
+			}
+			assertAlphaSorted(t, got.Features)
+		})
+	}
+}

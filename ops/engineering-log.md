@@ -5135,3 +5135,72 @@ classification (`sidecarCandidate`) and the Atlas `documentFrom` promotion
 still use bare `LooksLikeLRC` — a sparse `.lrc` is the operator's explicit
 file and LRCLIB's synced field is fully timed by construction; both would be a
 one-line adoption of `IsSyncedLRCBody` if a case ever shows up.
+
+## 2026-09-12 — covers for DLNA renderers: `/dlna/artwork/{key}` + `dlnaArtwork` (A2)
+
+The second bridge-side item the iOS fix sessions handed over. iOS #1780 shipped
+the `albumArtist` half of DLNA L12 and pinned `hint.artworkURL == nil`, because
+the bridge served covers only on the bearer-authed HTTPS listener and a renderer
+cannot send a bearer token. The bridge's own ContentDirectory had the same hole
+one layer down: `TrackInfo.ArtworkURL` existed, its docblock said the adapter
+filled it "from the request's server URL", and nothing ever set it — the adapter
+has no request. So neither the app casting to a renderer nor a third-party
+control point browsing the bridge's CDS ever saw a cover.
+
+### Extract, don't fork
+
+The obvious shape — a second handler in `internal/dlna` opening the cache dir —
+would have been a second copy of the three-way miss split, the size ladder, the
+16-hex alias resolution and the fail-open on a DB fault, drifting from the first
+at the next change. Instead `api.(*Server).artwork` became a one-line wrapper
+over the exported `ServeArtwork(w, r, key)`, and the dlna package consumes it as
+an INTERFACE (`ArtworkSource`) handed in through `ServerConfig.Artwork` — the
+same shape as the UPnP proxy injection, so `internal/dlna` still never imports
+`internal/api`. `TestServeArtworkAnswersExactlyLikeTheV1Route` drives the real
+v1 router and `ServeArtwork` with the same seven keys (hit, pending, no_image,
+not_found, alias, bad key, `?size=`) under GET and HEAD and compares status,
+body and the four contract headers — so re-inlining the v1 handler, or forking a
+branch, fails there.
+
+### The gate is one field, in the dlna Server
+
+Two designs were possible for "when does the CDS emit `albumArtURI`": the
+adapter withholds the key when no route is mounted (fail-open: a key on a
+server without the route becomes a URI that 404s), or the Server gates the
+emission on the same field that mounts the route (fail-closed). The strict
+renderer that declines a whole item over a 404'd `albumArtURI` is the PR #560
+`duration` class, so the Server owns it: `WithAlbumArtURIs()` is passed to the
+CDS handler exactly when `cfg.Artwork != nil`, and `toDIDLOpts` composes the URI
+only under that flag. Negative-controlled both ways: ignoring the gate reddened
+the "no source: no URI" subtest AND the `toDIDLOpts` test; dropping the mount
+reddened the "with source" subtest; dropping the method gate reddened the 405
+test; blanking `folderArtworkURL` reddened the container assertions alone.
+
+### The key is the app's key
+
+`TrackInfo.ArtworkKey` is `artworkVersion ?? artworkMBID` — the `/v1/artwork/{key}`
+segment and the value iOS persists as `Album.artworkHash` (`LibraryScanner.
+persistUnfetchedArtworkKeys`). Preferring the 16-hex alias over the MBID costs one
+indexed point lookup per cover fetch (`idx_tracks_artwork_version`) and buys the
+same thing it buys the phone: a premium re-fetch changes the URL, so a renderer
+caching covers by URL sees the new cover. Folder containers advertise the first
+keyed DIRECT child in the node's sorted-by-path order — deterministic, O(children)
+per emitted container, and deliberately not descending, so a multi-disc parent
+folder does not inherit disc 1's cover by accident of sort order.
+
+### The flag
+
+`dlnaArtwork` sits between `diagnosticsSummary` and `dlnaServer` and is
+AND-gated — `dlnaEnabled && artworkDirs != nil` — for the same reason
+`rendererDiscovery` is: the route lives on the DLNA mux, and without an artwork
+dir `ServeArtwork` answers 503 to every key. The four-corner test drives the real
+router; the feats capacity comment went 27 → 28 and `wantAllHealthFeatures` gained
+the entry (the fixture had to gain `WithArtworkDirs` for the flag to appear —
+which is the completeness guard doing its job). "Demo mode" turned out to be
+moot: the DLNA listener never starts in public mode, which is what the demo
+bridge is, so `/dlna/file/` has no demo branch to mirror and neither does this.
+
+What R2 (iOS) needs: gate on `dlnaArtwork`; URL = DLNA base (the SSDP
+`LOCATION`'s origin, the same base `/dlna/file/{trackID}` uses) +
+`/dlna/artwork/` + the album's `artworkHash`; never emit against a bridge
+without the flag.

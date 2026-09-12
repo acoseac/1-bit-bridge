@@ -28,6 +28,7 @@ var wantAllHealthFeatures = []string{
 	"deleteVariants",
 	"demoMode",
 	"diagnosticsSummary",
+	"dlnaArtwork",
 	"dlnaServer",
 	"dsdRender",
 	"favorites",
@@ -87,6 +88,7 @@ func newAllFeaturesServer(t *testing.T) *Server {
 		WithVariantDeleter(&stubVariantDeleter{}).
 		WithBatchCoordinator(&stubBatchCoordinator{}).
 		WithDLNA(true).
+		WithArtworkDirs(fakeArtworkDirs{dir: t.TempDir()}). // dlnaArtwork = dlnaServer AND an artwork dir
 		WithDSDRender(func() bool { return true }).
 		WithRendererDiscovery(&stubRendererDiscovery{}).
 		WithFavoritesStore(mstore).

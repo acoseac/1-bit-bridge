@@ -291,12 +291,31 @@ func artworkETag(info os.FileInfo) string {
 // don't want to expose our server as a proxy and a miss simply means
 // "enrichment hasn't caught up yet, try again later".
 func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
+	s.ServeArtwork(w, r, r.PathValue("mbid"))
+}
+
+// ServeArtwork is the ONE read path for a cached release cover, keyed the
+// way `/v1/artwork/{key}` is keyed: a MusicBrainz UUID, a scanner
+// `local-<sha256>`, or a 16-hex `artworkVersion` alias. It is exported so
+// the DLNA listener's `/dlna/artwork/{key}` can serve the SAME bytes with
+// the same size ladder, cache headers, ETag and miss shapes — a renderer
+// cannot send a bearer token, so the LAN-only DLNA mux is the only place a
+// third-party control point can fetch a cover from, and forking this
+// handler there would be two copies of one contract (the three-way miss
+// split, the alias resolution, the fail-open on a DB fault). The v1 route
+// wraps it with `r.PathValue("mbid")`; the DLNA route wraps it with the
+// path segment after its own prefix. Everything that governs the v1 route
+// — auth, rate class, deadlines — is the caller's, not this function's.
+//
+// `?size=` is honoured from the request either way, so the two routes
+// agree on which file a size selects.
+func (s *Server) ServeArtwork(w http.ResponseWriter, r *http.Request, key string) {
 	if s.artworkDirs == nil {
 		writeError(w, http.StatusServiceUnavailable, "scan_in_progress",
 			"artwork service not ready")
 		return
 	}
-	mbid := r.PathValue("mbid")
+	mbid := key
 	if !artworkMBIDPattern.MatchString(mbid) {
 		writeError(w, http.StatusBadRequest, "bad_request",
 			"mbid must be a MusicBrainz UUID, local-<sha256> hash, or 16-hex artwork version")

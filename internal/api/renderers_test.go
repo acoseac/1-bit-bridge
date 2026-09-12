@@ -124,6 +124,16 @@ func TestHealthFeatures_RendererDiscoveryAlphaSort(t *testing.T) {
 			want:  []string{"diagnosticsSummary", "dlnaServer", "variantBumpsIndex"},
 		},
 		{
+			name:  "dlnaArtwork sits between diagnosticsSummary and dlnaServer",
+			gates: []string{"dlna", "artworkDirs"},
+			want:  []string{"diagnosticsSummary", "dlnaArtwork", "dlnaServer", "variantBumpsIndex"},
+		},
+		{
+			name:  "an artwork dir without the DLNA listener advertises no dlnaArtwork",
+			gates: []string{"artworkDirs"},
+			want:  []string{"diagnosticsSummary", "variantBumpsIndex"},
+		},
+		{
 			name:  "dlnaServer + rendererDiscovery",
 			gates: []string{"dlna", "rendererDiscovery"},
 			want: []string{
@@ -208,6 +218,9 @@ func simulateFeaturesList(gates []string) []string {
 	feats := make([]string, 0, 10)
 	feats = appendUpscaleEarlyFeatures(feats, g)
 	feats = append(feats, "diagnosticsSummary")
+	if g("dlna") && g("artworkDirs") {
+		feats = append(feats, "dlnaArtwork")
+	}
 	if g("dlna") {
 		feats = append(feats, "dlnaServer")
 	}

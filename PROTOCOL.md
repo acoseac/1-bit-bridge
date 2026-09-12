@@ -611,6 +611,20 @@ Gate on the **`rendererDiscovery`** feature flag — present only when the DLNA 
 
 **Response** (`404 not_found`): renderer discovery is not enabled on this bridge. Gate on the `rendererDiscovery` feature flag.
 
+### DLNA listener: `GET /dlna/artwork/{key}` (additive; `dlnaArtwork`)
+
+The bridge's opt-in DLNA MediaServer (`dlnaServer`) runs on its own LAN-only HTTP listener, beside the bearer-authed `/v1` API. That listener has always served track bytes at `/dlna/file/{trackID}` **without authentication** — a renderer cannot send a bearer token, and the LAN-only bind (refused outright in public deployment mode) is the gate. Cover art was the gap: `/v1/artwork/{key}` lives on the authed listener, so a DLNA renderer or third-party control point browsing the bridge's ContentDirectory had no cover it could fetch, and the CDS emitted no `<upnp:albumArtURI>` at all.
+
+**`GET /dlna/artwork/{key}`** (also `HEAD`; every other method answers `405`) serves **exactly what `GET /v1/artwork/{key}` serves** — the same read path, not a copy: the same three key shapes (release UUID, `local-<sha256>`, 16-hex `artworkVersion` alias), the same `?size=` ladder, the same `Content-Type: image/jpeg` / `Cache-Control` / `ETag` on a hit, and the same `202 pending` / `404 no_image` / `404 not_found` / `400` miss shapes with the same JSON error bodies. The key is **opaque and non-enumerable**: nothing lists covers, a nested path or an empty key is a plain `404`, and a caller can only fetch a cover whose key it already holds. `/dlna/file/`'s posture, applied to covers.
+
+**The key is the app's own cover key.** `{key}` is `artworkVersion ?? artworkMBID` — the `/v1/artwork/{key}` segment, and the value the iOS client persists as an album's `artworkHash`. So a client that already fetches covers from `/v1/artwork/{key}` composes a renderer-reachable cover URL as `<dlna base>` + `/dlna/artwork/` + that same key, where `<dlna base>` is the `http://<host>:<port>` of the bridge's DLNA listener (the SSDP `LOCATION`'s origin — the same base `/dlna/file/{trackID}` uses), and lands on the bytes it already caches.
+
+**The bridge's own CDS uses it.** With the route mounted, every `<item>` whose track has a cover key carries `<upnp:albumArtURI>` composed against the *request's* host (the same per-interface rule the `<res>` file URL follows), and every folder `<container>` whose direct child tracks carry a key advertises the first one in path order (an artist folder whose children are album folders advertises none — there is no single cover to name). A bridge without the route emits **no** `albumArtURI` anywhere: the emission and the mount are gated on the same condition, never on a track merely having a key.
+
+**Feature flag: `dlnaArtwork`** in `/v1/health` `features` (alpha-sorted between `diagnosticsSummary` and `dlnaServer`). Present only when the DLNA listener is up (`dlnaServer`) AND the bridge's artwork read path is wired — the AND-gating `rendererDiscovery` uses. **A client MUST gate emitting a renderer-facing `albumArtURI` on this flag**, never on `dlnaServer` alone and never on the bridge version: a strict renderer that 404s the `albumArtURI` may decline the whole item (the same class as the `duration` attribute lesson), so the URI must never be emitted against a bridge that lacks the route. Pre-flag bridges have no route and advertise no flag; a client that keys on the flag emits nothing to them and loses nothing it had.
+
+Not on a public-mode bridge, ever: the DLNA listener does not start there (`ShouldEnableDLNA`), so neither `/dlna/file/` nor this route exists on the demo bridge or on any internet-reachable deployment. `ProtocolVersion` stays `1`.
+
 ### `GET /v1/diagnostics` (additive; `diagnosticsSummary`)
 
 Counters and structured state for an operator-facing health view — **no log text**. Atomic-counter and sliding-window reads only: no SQLite queries, no subprocess spawns, so it is safe to poll.
@@ -725,7 +739,7 @@ Snapshot of the upscale feature's runtime + on-disk state: how many jobs are que
 
 ### `GET /v1/artwork/{mbid}?size=<int>` and `GET /v1/artist-image/{mbid}`
 
-Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBID. `size` defaults to 500 px for album artwork.
+Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBID. `size` defaults to 500 px for album artwork. The same album covers are also served, unauthenticated on the LAN-only DLNA listener, at `/dlna/artwork/{key}` — see "DLNA listener" above; that route is this one's read path under a different mux, keyed identically.
 
 **Artwork keys** (the `{mbid}` segment of `/v1/artwork/`) accept three shapes: a MusicBrainz release UUID, a `local-<sha256>` sentinel (scanner-extracted embedded/folder art), or — since the right-sizing batch — a bare **16-hex artwork content-version tag** (the manifest's `artworkVersion` field). The 16-hex ALIAS exists because clients key their cover caches on `artworkVersion ?? artworkMBID`; the server resolves the tag to the underlying MBID and serves the same bytes. An unresolvable tag answers `404 not_found`. `/v1/artist-image` stays strict-UUID.
 

@@ -991,6 +991,24 @@ no failing test — which is the shape to expect in this area.
   a non-numeric prefix like `"f-"+hex` re-opens a silent int-parse rejection at
   every drill-down level. Root advertises exactly two
   containers and `BrowseMetadata`'s childCount must equal that count.
+- **`/dlna/artwork/{key}` is `/v1/artwork/{key}`'s read path under the DLNA
+  mux, and the CDS emits `albumArtURI` ONLY when that route is mounted.**
+  `api.(*Server).ServeArtwork` is the one implementation (the v1 handler is
+  a one-line wrapper; `TestServeArtworkAnswersExactlyLikeTheV1Route` pins the
+  two byte-for-byte across hit, the three miss shapes, bad key and alias);
+  the dlna package takes it as `ServerConfig.Artwork` (an interface, so it
+  never imports api) and gates BOTH the mount and the `<upnp:albumArtURI>`
+  emission on that one field — never on a track merely carrying a key,
+  because a strict renderer that 404s the URI may decline the whole item
+  (the PR #560 duration lesson). The key is `artworkVersion ?? artworkMBID`
+  (`TrackInfo.ArtworkKey`), i.e. the value iOS stores as `Album.artworkHash`,
+  so the app's renderer-facing URI and the bridge's own DIDL compose the
+  same URL; the URL is built per REQUEST against `r.Host` like `<res>`.
+  Folder containers advertise the first keyed DIRECT child in path order —
+  no descent, so a multi-disc parent does not inherit disc 1 by sort order.
+  `dlnaArtwork` in `/v1/health` is AND-gated (`dlnaEnabled && artworkDirs`),
+  and iOS must gate its own emission on it, not on `dlnaServer`. No demo-mode
+  branch is needed: the listener never starts in public mode.
 - **The folder index is built LAZILY per Browse call** — pre-building it at the
   top of `handleBrowse` puts an O(N) walk on the flat-list hot path.
   `TrackInfo.RelativePath` is the load-bearing source in production; the
