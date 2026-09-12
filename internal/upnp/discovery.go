@@ -100,6 +100,15 @@ func (c *ServerCache) Upsert(info ServerInfo) {
 		if info.DescriptionURL == "" {
 			info.DescriptionURL = existing.DescriptionURL
 		}
+		// Every descriptive field, including this one: the alive-refresh
+		// the SSDP handler sends on each announcement is `{UDN,
+		// LastSeenAt}`, and a field missing from this list is blanked by
+		// it. TestServerCacheUpsertPreservesEveryDescriptiveField fills
+		// every string field by reflection so the next one cannot be
+		// missed the way this one was.
+		if info.DeviceUDN == "" {
+			info.DeviceUDN = existing.DeviceUDN
+		}
 		if info.LastSeenAt.IsZero() {
 			info.LastSeenAt = existing.LastSeenAt
 		}

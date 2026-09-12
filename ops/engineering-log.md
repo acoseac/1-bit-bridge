@@ -5204,3 +5204,59 @@ What R2 (iOS) needs: gate on `dlnaArtwork`; URL = DLNA base (the SSDP
 `LOCATION`'s origin, the same base `/dlna/file/{trackID}` uses) +
 `/dlna/artwork/` + the album's `artworkHash`; never emit against a bridge
 without the flag.
+
+## 2026-09-12 — three review findings: the SYLT bare CR, the Upsert merge, the sanitizer floor
+
+Three findings handed over with the R1 brief, unrelated to the release prep;
+one PR, each verified against the code before anything was written.
+
+### SYLT: a bare `\r` is a marker (REAL, MEDIUM — a mirror that stopped mirroring)
+
+`hasNewlineMarker` / `splitMarkers` documented themselves as the VERBATIM
+mirror of the phone's `entriesLookLikeWholeLines` rule and checked `\n` and
+`\r\n`. The phone's rule gained a bare `\r` in iOS #1564 (2026-09-03,
+"parser hardening — SYLT byte order, x-bg flush, dedup voices, caps, clamps"),
+in all three places it matters — the whole-line heuristic, `carriesMarker`
+and the prefix/suffix strip. Nine days later the bridge still merged: the
+`strings.Trim(text, "\r\n")` stripped the CR from the body while `leading` /
+`trailing` read false, so ToLRC treated the next entry as a continuation. The
+first two fixtures written for it PASSED on the old code — two CR-marked
+entries 3.5 s apart are rescued by the whole-line gap heuristic, which is the
+kind of accident that hides a mirror drift for months; the mixed-marker
+fixture (`One\r`, `Two\n`, `Three\r\n`, `Four`) is the one that fails.
+Fix: `\r` and `\n` as prefix and suffix, which covers CRLF on both sides.
+`ExtractorVersion` 9 → 10 — the rendered LRC for a CR-only frame changes, so
+its tag changes, and both production bridges are at v7 regardless.
+`FuzzParseSYLTToLRC` re-run 20 s: 4.8M execs, clean.
+
+### `ServerCache.Upsert` blanked `DeviceUDN` on every alive-refresh (REAL, LATENT)
+
+The merge preserved the cached descriptive fields one by one and `DeviceUDN`
+was not on the list, so the `{UDN, LastSeenAt}` refresh the SSDP handler sends
+on every announcement would blank it. Not reachable today: only the
+manual-URL poller sets `DeviceUDN`, under `manual:<sha256(url)>`, and no partial
+refresh ever lands on that key (SSDP upserts under the device's real UDN).
+Fixed anyway, and the test is reflective — it fills every string field of
+`ServerInfo` and asserts each survives a partial refresh — so the NEXT field
+added to the struct is covered the day it is declared rather than the day it is
+found. The instance was one line; the class is the test.
+
+### `sanitizePathComponent` returned "" for a control-only title (REAL, LOW — unreachable)
+
+Confirmed by reading: a title of `\x01` survives `TrimSpace` (not whitespace),
+every byte is dropped, and the function returns ""; `joinPath` skips the empty
+component, so the child folder's path is its parent's. Then the attempt to
+write the walk-level test found the reason the rating is LOW: `encoding/xml`
+refuses `&#1;` and the raw byte alike — "illegal character code U+0001" — and
+the only control characters XML 1.0 permits below U+0020 are TAB / LF / CR,
+which `TrimSpace` removes before the sanitizer runs. Through the DIDL walk the
+collapse cannot happen. The floor is still worth its three lines because the
+sanitizer is a plain function with no idea who calls it: `"_"` for a non-empty
+input with nothing to keep, and both callers moved to
+`sanitizePathComponentOrEmpty` plus the ObjectID fallback AFTER sanitizing
+(`containerPathComponent`; `synthesizeFilename`, which otherwise produced
+`.flac` / `01 - .flac`), unique where the floor is not, and a title that IS
+`.` keeps its sentinel. The first control on the container arm stayed GREEN —
+nothing could drive it, for the same XML reason — so the arm was extracted
+into a helper the test can call. A control that cannot go red is a test that
+pins nothing; extract until it can.

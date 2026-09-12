@@ -308,3 +308,62 @@ func TestLooksLikeAudioItem_AcceptsByClassMimeOrExtension(t *testing.T) {
 		}
 	}
 }
+
+// The floor: nothing that reaches sanitizePathComponent non-empty leaves it
+// empty, so no caller can build a path that skips a level. Through the real
+// walk this was unreachable — encoding/xml rejects every character the
+// sanitizer drops (U+0000–U+001F except TAB / LF / CR, which TrimSpace
+// removes first), so a DIDL title cannot arrive as `\x01` — but the
+// sanitizer is a plain function any future caller can hand a raw string, and
+// a "" it returns is a folder that collapses onto its parent.
+func TestSanitizePathComponent_NeverReturnsEmptyForNonEmptyInput(t *testing.T) {
+	for _, in := range []string{"\x01", "\x00\x1f", "\t\x02\t", "/", "\\"} {
+		if got := sanitizePathComponent(in); got == "" {
+			t.Errorf("sanitizePathComponent(%q) = \"\"; a non-empty input must never sanitize to nothing", in)
+		}
+	}
+	// A track title of control characters falls back to the item ID form
+	// rather than yielding a dot-file.
+	got := synthesizeFilename(Object{ID: "id7", Title: "\x01\x02", Res: "http://h/x.flac"})
+	if got == "" || strings.HasPrefix(got, ".") || strings.HasPrefix(got, "01 - .") {
+		t.Errorf("synthesizeFilename = %q; a control-only title must not produce a dot-file or an empty stem", got)
+	}
+	got = synthesizeFilename(Object{ID: "id7", Title: "\x01", TrackNumber: 1, Res: "http://h/x.flac"})
+	if got == "01 - .flac" {
+		t.Errorf("synthesizeFilename = %q; the stem must not be empty", got)
+	}
+}
+
+// Both callers fall back to the ObjectID AFTER sanitizing, so a title with
+// nothing to keep names its folder / stem by ID rather than by the "_" floor —
+// unique per object where the floor is not. (Container titles reach this only
+// by direct construction — encoding/xml refuses the bytes — so the container
+// arm is pinned through containerPathComponent, the helper the walk calls.)
+func TestPathComponentFallbacks_UseTheObjectIDAfterSanitizing(t *testing.T) {
+	if got := sanitizePathComponentOrEmpty("\x01\x02"); got != "" {
+		t.Fatalf("OrEmpty(%q) = %q, want \"\" so the caller can fall back", "\x01\x02", got)
+	}
+	if got := sanitizePathComponentOrEmpty("."); got != "_" {
+		t.Fatalf("OrEmpty(\".\") = %q, want the traversal sentinel", got)
+	}
+	for _, c := range []struct{ title, id, want string }{
+		{"Album", "64$0$1", "Album"},
+		{"", "64$0$1", "_64$0$1"},
+		{"  ", "64$0$1", "_64$0$1"},
+		{"\x01\x02", "64$0$1", "_64$0$1"}, // the collapse case: never "", never the parent's path
+		{"\x01", "64$0$2", "_64$0$2"},     // and two such siblings stay distinct
+		{".", "64$0$3", "_"},              // a title that IS "." keeps the sentinel
+	} {
+		if got := containerPathComponent(c.title, c.id); got != c.want {
+			t.Errorf("containerPathComponent(%q, %q) = %q, want %q", c.title, c.id, got, c.want)
+		}
+	}
+	got := synthesizeFilename(Object{ID: "64$0$1$7", Title: "\x01\x02", TrackNumber: 3, Res: "http://h/x.flac"})
+	if got != "03 - _64$0$1$7.flac" {
+		t.Errorf("synthesizeFilename = %q, want the ID form", got)
+	}
+	// A title that IS "." keeps today's sentinel, not the ID.
+	if got := synthesizeFilename(Object{ID: "id", Title: ".", Res: "http://h/x.flac"}); got != "_.flac" {
+		t.Errorf("synthesizeFilename(\".\") = %q, want \"_.flac\"", got)
+	}
+}

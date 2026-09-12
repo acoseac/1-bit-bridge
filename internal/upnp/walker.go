@@ -243,14 +243,7 @@ func (w *walker) recurse(ctx context.Context, objectID, pathSoFar string, depth 
 				continue
 			}
 		}
-		title := strings.TrimSpace(ct.Title)
-		if title == "" {
-			// A folder with no title would collide with siblings —
-			// fall back to the volatile ObjectID for the path
-			// component to keep paths unique.
-			title = "_" + ct.ID
-		}
-		childPath := joinPath(pathSoFar, sanitizePathComponent(title))
+		childPath := joinPath(pathSoFar, containerPathComponent(ct.Title, ct.ID))
 		if err := w.recurse(ctx, ct.ID, childPath, depth+1, false); err != nil {
 			return err
 		}
@@ -320,7 +313,16 @@ func synthesizeFilename(it Object) string {
 	if title == "" {
 		return ""
 	}
-	title = sanitizePathComponent(title)
+	// Sanitize, and if the title had nothing to keep, take the ID form the
+	// empty-title branch takes — the same fallback for the same fact,
+	// applied AFTER the sanitizer as well as before it, so the stem is
+	// never empty (".flac", "01 - .flac") or the bare floor when an ID is
+	// there to name the track.
+	if stem := sanitizePathComponentOrEmpty(title); stem != "" {
+		title = stem
+	} else {
+		title = sanitizePathComponent("_" + strings.TrimSpace(it.ID))
+	}
 	if it.TrackNumber > 0 {
 		return fmt.Sprintf("%02d - %s%s", it.TrackNumber, title, dotIfExt(ext))
 	}
@@ -355,6 +357,27 @@ func pathComponentNeedsSanitize(s string) bool {
 // ASCII-conservative: anything else (Unicode letters, spaces, punctuation
 // in titles) is preserved.
 func sanitizePathComponent(s string) string {
+	if out := sanitizePathComponentOrEmpty(s); out != "" {
+		return out
+	}
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	// A non-empty input that was nothing but the bytes the sanitizer drops
+	// used to come back "", which joinPath then skipped — a child folder
+	// whose path was its PARENT's. Unreachable through the DIDL walk
+	// (encoding/xml refuses every dropped byte except the whitespace
+	// TrimSpace removes first), but this is a plain function and the next
+	// caller may not parse XML; a non-empty input never sanitizes to
+	// nothing. Callers that can do better take the OrEmpty form and fall
+	// back to the ObjectID, which is unique where this floor is not.
+	return "_"
+}
+
+// sanitizePathComponentOrEmpty is sanitizePathComponent without the floor:
+// "" when nothing survives, so a caller holding a better fallback (the
+// ObjectID) can tell "nothing to keep" from a title that IS "_".
+func sanitizePathComponentOrEmpty(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
@@ -398,6 +421,20 @@ func sanitizePathComponent(s string) string {
 		return "_"
 	}
 	return out
+}
+
+// containerPathComponent is the path segment a container contributes: its
+// sanitized title, or — when the title is empty or has nothing the sanitizer
+// keeps — the volatile ObjectID in the `_<id>` form. A folder with no usable
+// title would collide with its siblings, or worse collapse onto its PARENT's
+// path when joinPath skipped an empty component; the ObjectID is unique where
+// the sanitizer's "_" floor is not. Decided AFTER sanitizing, so a title that
+// only looked non-empty takes the same fallback the empty one does.
+func containerPathComponent(title, id string) string {
+	if name := sanitizePathComponentOrEmpty(title); name != "" {
+		return name
+	}
+	return sanitizePathComponent("_" + id)
 }
 
 // joinPath joins path components with '/'. Empty components are skipped.
