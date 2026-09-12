@@ -113,6 +113,19 @@ func (fi *FolderIndex) LookupTrack(trackID string) (TrackInfo, bool) {
 	return t, ok
 }
 
+// artworkKeyFor returns the ArtworkKey of the first direct child track of
+// `node` that carries one, in ChildTrackIDs order (sorted by path, so the
+// answer is stable across Browse calls), or "" when none does. Direct
+// children only — see folderArtworkURL for why it does not descend.
+func (fi *FolderIndex) artworkKeyFor(node FolderNode) string {
+	for _, id := range node.ChildTrackIDs {
+		if t, ok := fi.LookupTrack(id); ok && t.ArtworkKey != "" {
+			return t.ArtworkKey
+		}
+	}
+	return ""
+}
+
 // TrackCount returns the total number of tracks indexed. Used by the
 // All Tracks container's `childCount` attribute — equivalent to
 // `len(lib.ListTrackInfos())` but reuses the already-built index.

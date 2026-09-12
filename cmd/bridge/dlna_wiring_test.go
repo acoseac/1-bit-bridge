@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -59,6 +60,33 @@ func Test_manifestTrackToDLNATrackInfo_FileExtensionFallback(t *testing.T) {
 			if got.AbsolutePath != tc.absPath {
 				t.Errorf("AbsolutePath = %q; want %q (must NOT be backfilled from t.Path)",
 					got.AbsolutePath, tc.absPath)
+			}
+		})
+	}
+}
+
+// Test_manifestTrackToDLNATrackInfo_ArtworkKeyIsTheAppsRetryKey pins the
+// cross-repo agreement behind `/dlna/artwork/{key}`: the CDS keys a cover
+// the way the iOS client persists `Album.artworkHash` — `artworkVersion ??
+// artworkMBID`, the `/v1/artwork/{key}` segment — so the bridge's own DIDL
+// and an app emitting `albumArtURI` for a renderer compose the same URL.
+func Test_manifestTrackToDLNATrackInfo_ArtworkKeyIsTheAppsRetryKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		mbid    string
+		version string
+		want    string
+	}{
+		{"no cover identity → no key", "", "", ""},
+		{"MBID only → the MBID", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+		{"scanner local hash → the hash", "local-" + strings.Repeat("ab", 32), "", "local-" + strings.Repeat("ab", 32)},
+		{"version alias present → the alias wins, as on the phone", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "0123456789abcdef", "0123456789abcdef"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := manifest.Track{Path: "A/B/01.flac", ArtworkMBID: tc.mbid, ArtworkVersion: tc.version}
+			if got := manifestTrackToDLNATrackInfo(tr, "/srv/A/B/01.flac", "").ArtworkKey; got != tc.want {
+				t.Errorf("ArtworkKey = %q, want %q", got, tc.want)
 			}
 		})
 	}

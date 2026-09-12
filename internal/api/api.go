@@ -758,6 +758,16 @@ func (s *Server) dsdRenderActive() bool {
 	return s.upscaleActive() && s.dsdRenderEnabled != nil && s.dsdRenderEnabled()
 }
 
+// dlnaArtworkActive is the `dlnaArtwork` feature gate — the DLNA listener
+// is up AND the artwork read path is wired. cmd/bridge hands this server to
+// the DLNA listener as its ArtworkSource whenever it starts the listener,
+// so "listener up" is also "route mounted"; the second term is what keeps
+// the flag honest on a bridge whose artwork dir is unwired (ServeArtwork
+// would 503).
+func (s *Server) dlnaArtworkActive() bool {
+	return s.dlnaEnabled && s.artworkDirs != nil
+}
+
 // WithDLNA toggles the `dlnaServer` advertisement in
 // /v1/health.features. The bridge's actual DLNA MediaServer runs on
 // its own parallel http.Server bound LAN-only (and optionally
@@ -1692,10 +1702,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     of whether the transcode pool exists.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 27 covers the current maximum
+	// appends in lex order. Capacity 28 covers the current maximum
 	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
-	// demoMode + diagnosticsSummary + dlnaServer + dsdRender + favorites +
-	// keyTempo + loudness + lyrics + operatorDrivenUpscale +
+	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
+	// favorites + keyTempo + loudness + lyrics + operatorDrivenUpscale +
 	// pairingEventsSupported + playbackHistory + playbackHistoryRead +
 	// playlistBackup + playlistsCrossDevice + pushEventsSupported +
 	// rendererDiscovery + search + smartPlaylists + spectrum +
@@ -1704,7 +1714,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 27)
+	feats := make([]string, 0, 28)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1744,6 +1754,20 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// the upscale gate above is split into two blocks instead of a
 	// single contiguous one.
 	feats = append(feats, "diagnosticsSummary")
+	// `dlnaArtwork` advertises `/dlna/artwork/{key}` on the DLNA listener:
+	// the same bytes as `/v1/artwork/{key}`, unauthenticated on the LAN
+	// like `/dlna/file/`, so a renderer — which cannot send a bearer
+	// token — can fetch the cover an `<upnp:albumArtURI>` names. An iOS
+	// build gates emitting that URI to a renderer on this flag: a strict
+	// renderer that 404s the albumArtURI may decline the whole item, so
+	// the URI must never be emitted against a bridge that lacks the
+	// route. AND-gated like `rendererDiscovery`: the DLNA listener must be
+	// up (the route lives on its mux) and the artwork read path must be
+	// wired (without it ServeArtwork answers 503 to every key). Alpha-sorts
+	// between `diagnosticsSummary` and `dlnaServer` (dia < dlnaA < dlnaS).
+	if s.dlnaArtworkActive() {
+		feats = append(feats, "dlnaArtwork")
+	}
 	// `dlnaServer` advertises the bridge's opt-in LAN-only DLNA
 	// MediaServer (`internal/dlna/` package, parallel http.Server bound
 	// LAN/Tailnet-only). iOS clients can use this to choose between

@@ -68,6 +68,15 @@ type ServerConfig struct {
 	UPnPRouting upnpproxy.RoutingLookup
 	UPnPProxy   *upnpproxy.Proxy
 
+	// Artwork, when non-nil, mounts `/dlna/artwork/{key}` (ArtworkHandler)
+	// and makes the ContentDirectory emit `<upnp:albumArtURI>` on items and
+	// on the folder containers that hold them. nil keeps both off: no route,
+	// and no URI pointing at a route that is not there — a strict renderer
+	// that 404s an albumArtURI may decline the whole item, so the emission is
+	// gated on the SAME field as the mount rather than on the track carrying
+	// a key. Optional; the wiring layer passes the api server.
+	Artwork ArtworkSource
+
 	// UDN is the device's stable unique identifier WITH the `uuid:`
 	// prefix (e.g. "uuid:f1b3a5c2-..."). Required. Should remain stable
 	// across bridge restarts so renderers don't re-add us on every
@@ -450,6 +459,10 @@ func (s *Server) mountHandlers() {
 	s.mux.Handle("/dlna/cds.xml", SCPDHandler(ContentDirectorySCPDXML))
 	s.mux.Handle("/dlna/cm.xml", SCPDHandler(ConnectionManagerSCPDXML))
 
+	var cdsOpts []CDSOption
+	if s.cfg.Artwork != nil {
+		cdsOpts = append(cdsOpts, WithAlbumArtURIs())
+	}
 	cdsHandler := ContentDirectoryHandler(s.cfg.Library, func(r *http.Request) string {
 		// Per-request serverURL — PREFER the request's Host header so the
 		// DIDL <res> file URLs are reachable from whichever interface /
@@ -470,11 +483,19 @@ func (s *Server) mountHandlers() {
 			return "http://" + r.Host
 		}
 		return s.cfg.ServerURL
-	})
+	}, cdsOpts...)
 	s.mux.Handle("/dlna/cds/control", cdsHandler)
 	s.mux.Handle("/dlna/cm/control", ConnectionManagerHandler())
 
-	s.mux.Handle("/dlna/file/", FileHandler(s.cfg.Library, s.cfg.UPnPRouting, s.cfg.UPnPProxy))
+	s.mux.Handle(FilePathPrefix, FileHandler(s.cfg.Library, s.cfg.UPnPRouting, s.cfg.UPnPProxy))
+
+	// Cover bytes for third-party control points, under `/dlna/file/`'s
+	// posture (LAN-only, unauthenticated, opaque key, GET/HEAD). Mounted
+	// only when the wiring handed in a source — the CDS's albumArtURI
+	// emission keys on the same field (see ServerConfig.Artwork).
+	if s.cfg.Artwork != nil {
+		s.mux.Handle(ArtworkPathPrefix, ArtworkHandler(s.cfg.Artwork))
+	}
 
 	// Silence-flush asset: served as a static 1-second PCM WAV at
 	// `/dlna/silence.wav`. iOS dispatches `SetAVTransportURI(<base>

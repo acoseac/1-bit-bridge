@@ -46,11 +46,18 @@ type dlnaLifecycle struct {
 //
 // The returned `enabled` bool tells the api.Server wiring whether to
 // advertise `dlnaServer` in /v1/health.features.
+//
+// `artwork` is the cover read path the listener mounts as
+// `/dlna/artwork/{key}` and the CDS advertises as `<upnp:albumArtURI>` —
+// the api server, whose ServeArtwork IS `/v1/artwork/{key}`. Passed in
+// rather than looked up so the api package stays un-imported here and the
+// two listeners provably serve one function. nil leaves both off.
 func startDLNAIfEnabled(
 	ctx context.Context,
 	cfg *config.Config,
 	store *manifest.Store,
 	resolver *bridgefs.Resolver,
+	artwork dlna.ArtworkSource,
 	upnpLC *upnpUpstreamLifecycle,
 	logger *slog.Logger,
 ) (lc *dlnaLifecycle, enabled bool) {
@@ -152,6 +159,7 @@ func startDLNAIfEnabled(
 		Library:            library,
 		UPnPRouting:        dlnaUPnPRouting,
 		UPnPProxy:          dlnaUPnPProxy,
+		Artwork:            artwork,
 		UDN:                udn,
 		FriendlyName:       cfg.DLNA.EffectiveDLNAFriendlyName(),
 		Manufacturer:       "1-bit",
@@ -695,6 +703,15 @@ func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string)
 		Codec:         t.Codec,
 		FileExtension: strings.ToLower(filepath.Ext(extSource)),
 		Size:          t.Size,
+		// The cover key is what the iOS client stores as the album's
+		// `artworkHash` — `artworkVersion ?? artworkMBID`, the stable
+		// `/v1/artwork/{key}` segment — so the bridge's own CDS and an app
+		// emitting `albumArtURI` for a renderer compose the SAME URL and
+		// land on the same cache file. The 16-hex version alias is
+		// preferred over the MBID for the same reason iOS prefers it: a
+		// premium re-fetch changes the alias, so a renderer that caches
+		// covers by URL sees the new cover rather than its stale copy.
+		ArtworkKey: dlnaArtworkKey(t),
 	}
 	if t.Duration != nil {
 		ti.DurationSeconds = *t.Duration
@@ -721,6 +738,16 @@ func manifestTrackToDLNATrackInfo(t manifest.Track, absPath, libraryRoot string)
 		ti.Channels = *t.Channels
 	}
 	return ti
+}
+
+// dlnaArtworkKey is `artworkVersion ?? artworkMBID` — the `/v1/artwork/{key}`
+// segment, and the value iOS persists as `Album.artworkHash`. Empty when the
+// track has no cover identity at all.
+func dlnaArtworkKey(t manifest.Track) string {
+	if t.ArtworkVersion != "" {
+		return t.ArtworkVersion
+	}
+	return t.ArtworkMBID
 }
 
 // dlnaVariantsFromRows converts manifest variant rows into the DLNA-local
