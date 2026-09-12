@@ -329,11 +329,104 @@ func Tag(doc Doc) string {
 }
 
 // The iOS `LRCParser` line-tag shapes: `[mm:ss]`, `[mm:ss.xx]`, `[mm:ss,xx]`,
-// `[mm:ss:xx]`, `[hh:mm:ss.xx]`, with full-width brackets accepted.
+// `[mm:ss:xx]`, `[hh:mm:ss.xx]`, with full-width brackets accepted. wordTag
+// and metaTag are the app's other two patterns, used by TimedCoverage to
+// count lines the way its parse loop does.
 var (
 	lineTag  = regexp.MustCompile(`^\s*[\[［【]\s*-?\d{1,3}:\d{1,2}(?:[.,:]\d{1,3})?\s*[\]］】]`)
 	hoursTag = regexp.MustCompile(`^\s*[\[［【]\s*-?\d{1,2}:\d{1,2}:\d{1,2}[.,]\d{1,3}\s*[\]］】]`)
+	// `<mm:ss.xx>` / `(mm:ss.xx)` anywhere in a line (enhanced LRC / A2).
+	wordTag = regexp.MustCompile(`[<(]\s*-?\d{1,3}:\d{1,2}(?:[.,:]\d{1,3})?\s*[>)]`)
+	// `[key:value]`, key alphabetic — an ID tag only when the key is one the
+	// app's `LRCParser.metadataKeys` names; any other is a section header.
+	metaTag = regexp.MustCompile(`^\s*\[([A-Za-z][A-Za-z0-9_-]*):(.*)\]\s*$`)
 )
+
+// lrcMetadataKeys mirrors `LRCParser.metadataKeys`: the ID tags a reader must
+// never show. A `[Chorus: Rihanna]` line matches metaTag's shape and is NOT
+// here, so it counts as text — on both sides.
+var lrcMetadataKeys = map[string]bool{
+	"ar": true, "ti": true, "al": true, "au": true, "by": true, "length": true,
+	"re": true, "ve": true, "tool": true, "id": true,
+	"offset": true, "la": true, "lang": true, "language": true,
+}
+
+// The app's sparse-coverage rule (`LRCParser.timedCoverageIsTooSparse`, iOS
+// #1759), constants included. A synced document needs at least
+// MinimumTimedLines timed TEXT lines when the body also carries untimed
+// ones, and the timed lines must be at least MinimumTimedShare of the
+// non-blank text lines. Below either bar the timestamps are cue markers in a
+// transcript — a Genius-style lyric sheet with one `[4:20]` — and the body
+// is a PLAIN document. A body with no untimed text is never sparse: one
+// timed `♪` is still an instrumental verdict.
+//
+// The two sides must classify one blob alike, so these are the app's numbers
+// and the truth-table test is lifted from its test suite verbatim.
+const (
+	MinimumTimedLines = 2
+	MinimumTimedShare = 0.25
+)
+
+// TimedCoverageIsTooSparse is `LRCParser.timedCoverageIsTooSparse`, line for
+// line: the guard, the count floor, then the share.
+func TimedCoverageIsTooSparse(timedLines, untimedLines int) bool {
+	if untimedLines <= 0 || timedLines <= 0 {
+		return false
+	}
+	if timedLines < MinimumTimedLines {
+		return true
+	}
+	return float64(timedLines) < MinimumTimedShare*float64(timedLines+untimedLines)
+}
+
+// TimedCoverage counts a body's lines the way the app's parse loop does — the
+// inputs to TimedCoverageIsTooSparse. A source line is TIMED when it carries
+// at least one line tag and text survives after the line tags and any word
+// tags are removed (an empty timed line is a clear event, not text); UNTIMED
+// when it is non-blank, carries no line tag, and is not a known LRC ID tag.
+// Blank lines count for nothing. Several tags on one line are one source
+// line, as in the app, where each stamp yields a LyricLine but the coverage
+// counter increments once.
+//
+// The body is expected normalized (LF line ends, no BOM, trailing whitespace
+// trimmed) — every caller reaches here through Normalize.
+func TimedCoverage(body string) (timed, untimed int) {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		rest, stamps := consumeLineTags(line)
+		if stamps == 0 {
+			if m := metaTag.FindStringSubmatch(line); m != nil && lrcMetadataKeys[strings.ToLower(m[1])] {
+				continue
+			}
+			untimed++
+			continue
+		}
+		if strings.TrimSpace(wordTag.ReplaceAllString(rest, "")) != "" {
+			timed++
+		}
+	}
+	return timed, untimed
+}
+
+// consumeLineTags strips every leading line tag — hours form first, as the
+// app's consumeLineTag tries them — and returns the remainder with the count.
+func consumeLineTags(line string) (rest string, n int) {
+	rest = line
+	for {
+		loc := hoursTag.FindStringIndex(rest)
+		if loc == nil {
+			loc = lineTag.FindStringIndex(rest)
+		}
+		if loc == nil {
+			return rest, n
+		}
+		rest = rest[loc[1]:]
+		n++
+	}
+}
 
 // LooksLikeLRC reports whether any line carries an LRC time tag — the
 // promotion rule an unsynchronized text tag gets on both sides.
@@ -350,15 +443,27 @@ func LooksLikeLRC(text string) bool {
 	return false
 }
 
-// TextCandidate classifies a text blob: LRC-shaped text is a synced LRC
-// document (`text-lrc`, or `vorbis-synced` when the tag itself claimed
-// sync); anything else is plain text. Returns ok=false for an empty body.
+// TextCandidate classifies a text blob: LRC-shaped text whose timed lines
+// are not a sparse minority of its text is a synced LRC document
+// (`text-lrc`, or `vorbis-synced` when the tag itself claimed sync);
+// anything else is plain text. Returns ok=false for an empty body.
+//
+// The sparse rule sits HERE, in the classification, and LooksLikeLRC stays
+// any-line — the same split as the app, whose `looksLikeLRC` is any-line and
+// whose `parse` applies `timedCoverageIsTooSparse` (iOS #1759). Before it, a
+// transcript with one `[4:20]` cue became a `text-lrc` row with
+// `synced: true`: rank 4, above the complete plain document (rank 6) in the
+// same file's other frame, and a stored verdict the bridge itself could not
+// stand behind. The phone was already protected — it re-parses the body and
+// treats `synced` as advisory — so the fix is to the bridge's own election
+// and to what it stores. A tag that CLAIMED sync (Vorbis SYNCEDLYRICS) over a
+// sparse body is plain too: the app parses the body, not the tag name.
 func TextCandidate(text, language string, taggedSynced bool, priority int) (Candidate, bool) {
 	body, ok := Normalize(text)
 	if !ok {
 		return Candidate{}, false
 	}
-	if LooksLikeLRC(body) {
+	if LooksLikeLRC(body) && !TimedCoverageIsTooSparse(TimedCoverage(body)) {
 		src := SourceTextLRC
 		if taggedSynced {
 			src = SourceVorbisSynced

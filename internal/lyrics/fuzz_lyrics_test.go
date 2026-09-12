@@ -169,3 +169,66 @@ func FuzzPickIsShuffleInvariant(f *testing.F) {
 		}
 	})
 }
+
+// FuzzTextCandidateClassification pins the classification to the predicate it
+// is defined by, on both halves of the verdict.
+//
+// TextCandidate's synced verdict is `LooksLikeLRC(body) && !sparse(body)`, and
+// the mirror with the app (iOS #1759) holds only if that is ALL it is: a body
+// the app's parse would return `.unsynced` — no line tag, or a sparse
+// minority of timed lines — must never leave here `synced: true`, and a body
+// with a real timeline must never be demoted. The three derived fields
+// (format, synced, source) have to agree with each other and with the verdict,
+// because the phone switches its parser on `format` and the store ranks on
+// `source`. The counter itself is bounded by the line count, and a body with
+// no untimed text is never sparse — one timed `♪` is an instrumental verdict,
+// not a stub.
+func FuzzTextCandidateClassification(f *testing.F) {
+	f.Add("We found love in a hopeless place\nShine a light through an open door\n[04:20.00]Yellow diamonds in the light\nAnd we're standing side by side\nAs your shadow crosses mine", false)
+	f.Add("[00:10.00]A\n[00:20.00]B\nProse 1\nProse 2\nProse 3\nProse 4\nProse 5\nProse 6", false)
+	f.Add("[00:10.00]A\n[00:20.00]B\nProse 1\nProse 2\nProse 3\nProse 4\nProse 5\nProse 6\nProse 7", true)
+	f.Add("Intro\n[00:12.00]Hi", false)
+	f.Add("[00:12.00]Hi\n[00:15.00]", true)
+	f.Add("[00:00.00]♪", false)
+	f.Add("[ar:Artist]\n[Chorus: Rihanna]\n[00:10.00]A\n[00:12.00]B", false)
+	f.Add("\ufeff[00:01.00]bom\r\n[00:02.00]crlf", true)
+	f.Add("[00:10.00]<00:10.50>\nProse", false)
+	f.Add("", false)
+	f.Fuzz(func(t *testing.T, in string, taggedSynced bool) {
+		c, ok := TextCandidate(in, "", taggedSynced, 0)
+		if !ok {
+			return
+		}
+		body := c.Doc.Body
+		if again, ok2 := Normalize(body); !ok2 || again != body {
+			t.Fatalf("a candidate body must be a Normalize fixed point: %q", body)
+		}
+		timed, untimed := TimedCoverage(body)
+		nonBlank := 0
+		for _, line := range strings.Split(body, "\n") {
+			if strings.TrimSpace(line) != "" {
+				nonBlank++
+			}
+		}
+		if timed < 0 || untimed < 0 || timed+untimed > nonBlank {
+			t.Fatalf("TimedCoverage(%q) = (%d, %d) over %d non-blank lines", body, timed, untimed, nonBlank)
+		}
+		if TimedCoverageIsTooSparse(timed, 0) {
+			t.Fatalf("a body with no untimed text is never sparse (timed=%d)", timed)
+		}
+		wantSynced := LooksLikeLRC(body) && !TimedCoverageIsTooSparse(timed, untimed)
+		if c.Doc.Synced != wantSynced {
+			t.Fatalf("synced=%v but the predicate says %v for %q (timed=%d untimed=%d)",
+				c.Doc.Synced, wantSynced, body, timed, untimed)
+		}
+		switch {
+		case c.Doc.Synced && c.Doc.Format != FormatLRC,
+			!c.Doc.Synced && c.Doc.Format != FormatText:
+			t.Fatalf("format %q disagrees with synced=%v", c.Doc.Format, c.Doc.Synced)
+		case c.Doc.Synced && taggedSynced && c.Source != SourceVorbisSynced,
+			c.Doc.Synced && !taggedSynced && c.Source != SourceTextLRC,
+			!c.Doc.Synced && c.Source != SourceTextPlain:
+			t.Fatalf("source %q disagrees with synced=%v taggedSynced=%v", c.Source, c.Doc.Synced, taggedSynced)
+		}
+	})
+}
