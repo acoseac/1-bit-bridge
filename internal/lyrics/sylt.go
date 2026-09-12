@@ -140,9 +140,16 @@ func decodeUTF16(b []byte, enc byte) string {
 	return strings.TrimPrefix(string(utf16.Decode(units)), "\uFEFF")
 }
 
+// hasNewlineMarker reports whether an entry carries a leading or trailing
+// newline marker — the phone's `entriesLookLikeWholeLines` predicate.
+//
+// A bare `\r` counts, as it does on the phone since iOS #1564 — older Mac
+// taggers wrote CR-only markers, and this mirror stayed on `\n` / `\r\n`
+// for nine days after the app added it. Checking `\r` and `\n` covers CRLF
+// on both sides, so the three-marker rule is two prefixes and two suffixes.
 func hasNewlineMarker(s string) bool {
-	return strings.HasPrefix(s, "\n") || strings.HasPrefix(s, "\r\n") ||
-		strings.HasSuffix(s, "\n") || strings.HasSuffix(s, "\r\n")
+	return strings.HasPrefix(s, "\r") || strings.HasPrefix(s, "\n") ||
+		strings.HasSuffix(s, "\r") || strings.HasSuffix(s, "\n")
 }
 
 // EntriesLookLikeWholeLines mirrors the iOS rule VERBATIM: no entry carries
@@ -215,9 +222,13 @@ func lrcTime(ms int64) string {
 // LRC line, which the phone's parser would drop as a tagless continuation)
 // and reports which sides carried one. Interior newlines become spaces for
 // the same reason.
+//
+// The marker set is hasNewlineMarker's — `\r`, `\n`, `\r\n` — and the two must
+// agree: a marker the Trim below strips but this pair does not report is
+// exactly the bare-CR case that merged two lines into one.
 func splitMarkers(text string) (body string, leading, trailing bool) {
-	leading = strings.HasPrefix(text, "\n") || strings.HasPrefix(text, "\r\n")
-	trailing = strings.HasSuffix(text, "\n") || strings.HasSuffix(text, "\r\n")
+	leading = strings.HasPrefix(text, "\r") || strings.HasPrefix(text, "\n")
+	trailing = strings.HasSuffix(text, "\r") || strings.HasSuffix(text, "\n")
 	body = strings.Trim(text, "\r\n")
 	body = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(body)
 	return body, leading, trailing

@@ -572,6 +572,18 @@ no failing test — which is the shape to expect in this area.
   body and reads `synced` as advisory — so a divergence here shows up only
   as the bridge's election and stored verdict, silently. `ExtractorVersion`
   went to 9 for it, per the every-extraction-change rule and v8's precedent.
+- **The SYLT marker set is `\r`, `\n`, `\r\n` — the phone's — and a "VERBATIM
+  mirror" has to be re-read when the original moves.** iOS #1564 (2026-09-03)
+  made a bare `\r` count in `entriesLookLikeWholeLines`, `carriesMarker` and
+  the prefix/suffix strip because CR-only taggers exist; `hasNewlineMarker` /
+  `splitMarkers` stayed on `\n` / `\r\n` for nine days while
+  `strings.Trim(text, "\r\n")` kept stripping the CR from the body — so
+  `leading` / `trailing` read false and ToLRC merged the next entry onto the
+  open line. `TestToLRCTreatsABareCarriageReturnAsAMarker` pins it; the
+  two-entry cases were rescued by the whole-line gap heuristic by accident,
+  which is why the mixed-marker fixture is the one that fails.
+  `ExtractorVersion` went to 10 for it. When an iOS lyrics PR touches
+  `ID3v2Parser`'s SYLT arm, diff `sylt.go` against it in the same week.
 - **`sidecarLyricsExts` is `.ttml` > `.lrc` > `.txt`** — `Source.Rank()` order,
   PROTOCOL.md's order, the app's order. `sidecarLyricsFile`'s own doc comment
   said the opposite for three days.
@@ -1044,6 +1056,25 @@ no failing test — which is the shape to expect in this area.
   membership and liveness must carry BOTH spellings — one lookup cannot serve
   both. `librarycat.SourceID` prefixes `"source:"` before hashing so a routing
   key can never collide with an album or artist id.
+- **`ServerCache.Upsert`'s merge must carry EVERY descriptive field, and the
+  test that pins it is reflective.** The SSDP handler refreshes a known UDN
+  with `{UDN, LastSeenAt}` on every announcement and the merge preserved the
+  cached fields one by one — `DeviceUDN` was added to `ServerInfo` and not to
+  the list, so any partial refresh blanked it. Latent today (only the
+  manual-URL poller sets it, under a key no SSDP refresh lands on), and the
+  next field would have met the same list.
+  `TestServerCacheUpsertPreservesEveryDescriptiveField` fills every string
+  field by reflection, so a field is covered the day it is declared.
+- **A path component that sanitizes to NOTHING is a folder that collapses onto
+  its parent.** `sanitizePathComponent` returned "" for a control-only title
+  and `joinPath` skipped the empty component. Unreachable through the DIDL
+  walk — `encoding/xml` refuses every byte the sanitizer drops except the
+  whitespace `TrimSpace` removes first — but it is a plain function any future
+  caller can hand a raw string. Now: the floor is `"_"`, and both callers use
+  `sanitizePathComponentOrEmpty` + the ObjectID fallback AFTER sanitizing
+  (`containerPathComponent`, `synthesizeFilename`), which is unique where the
+  floor is not. Pin the fallback through the helper, not the walk: the walk
+  fixture cannot construct the input.
 - **A manually-configured upstream is cached under that same `StableServerKey`**,
   which is what makes routing rows, telemetry, `LiveHost` and the online chip all
   work from one insertion point. Implementing that path took three surfaces, not

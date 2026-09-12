@@ -275,7 +275,15 @@ var Ext = map[string]bool{
 // `synced` as advisory), so the bump is for the bridge's own election and
 // the honesty of what it stores; the version-stamp leg keeps the delta to
 // the rows whose tag actually moved.
-const ExtractorVersion = 9
+// v10 (SYLT bare-CR markers, mirror of iOS #1564): `hasNewlineMarker` and
+// `splitMarkers` count a bare `\r` as a newline marker, as the phone has
+// since 2026-09-03. A CR-only writer's frame rendered with its lines merged
+// (the Trim stripped the CR from the body while `leading` / `trailing`
+// read false) and its whole-line heuristic misjudged; the LRC `ToLRC`
+// produces for such a file changes, so its lyricsTag changes, and only a
+// bump reaches an already-scanned row. Both production bridges still sit
+// at v7, so this is the same single re-extraction as v8 and v9.
+const ExtractorVersion = 10
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
