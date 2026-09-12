@@ -14,19 +14,21 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **38** targets across **ten** packages —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **39** targets across **ten** packages —
   `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest}` —
-  and the newest one, `atlasharvest`'s `FuzzMatchRelease`, lives in
+  and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
   greps only the latter undercounts. (This entry said 37 across nine until
   2026-09-10: the sixth stale claim of the kind, and in the paragraph that
-  warns about them.) They cover
+  warns about them; 38 until 2026-09-12, when `internal/lyrics` gained
+  `FuzzTextCandidateClassification`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
   (`internal/upload`, which this list omitted until 2026-09-09), and the Atlas
   release matcher (`internal/atlasharvest`).
-  **Count them by file:name pair** — `grep '^func Fuzz' | sort -u` says 37, because
+  **Count them by file:name pair** to get 39 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 38, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -545,10 +547,31 @@ no failing test — which is the shape to expect in this area.
   package had zero targets against a policy that names the audio extractors as
   one of the three untrusted-input surfaces. `FuzzParseSYLTToLRC` asserts every
   emitted line is LRC-parseable (which is what catches the clamp class),
-  `FuzzNormalize` asserts idempotence + the cap + no CR, and
+  `FuzzNormalize` asserts idempotence + the cap + no CR,
   `FuzzPickIsShuffleInvariant` asserts the winner survives shuffling — that one
   found a SECOND order-dependence, in `mergeDuplicate`, that no
-  extractor-driven test could reach.
+  extractor-driven test could reach — and `FuzzTextCandidateClassification`
+  pins the synced verdict to `LooksLikeLRC && !sparse` on both halves, with
+  format / synced / source agreeing.
+- **A sparse-timed body is PLAIN, and the rule lives in the CLASSIFICATION,
+  not in `LooksLikeLRC`.** `LooksLikeLRC` is any-line on both sides and must
+  stay so; the app's `LRCParser.parse` returns the plain document when
+  `timed.isEmpty || timedCoverageIsTooSparse(...)` (fewer than 2 timed TEXT
+  lines beside any untimed text, or under 25 % of the non-blank lines), and
+  `IsSyncedLRCBody` mirrors BOTH arms — `TimedCoverage` for the counts,
+  `TimedCoverageIsTooSparse` line for line with the app's function, guard
+  included, constants and truth table lifted from the Swift tests verbatim
+  (iOS #1759). **Keep the `timed > 0` arm outside the sparse function**: the
+  app's guard answers "not sparse" for zero timed lines because the app never
+  asks it that, so a body whose only tags are clear events (`Prose\n[00:12.00]`)
+  is caught by `timed.isEmpty` there and must be caught by `timed > 0` here —
+  Gemini saw the outcome on #904 and proposed dropping the guard, which would
+  have broken the verbatim truth table. Before it, a Genius transcript with
+  one `[4:20]` cue was a rank-4 `text-lrc` stub outranking the complete plain
+  document in the same file. The phone was never at risk — it re-parses the
+  body and reads `synced` as advisory — so a divergence here shows up only
+  as the bridge's election and stored verdict, silently. `ExtractorVersion`
+  went to 9 for it, per the every-extraction-change rule and v8's precedent.
 - **`sidecarLyricsExts` is `.ttml` > `.lrc` > `.txt`** — `Source.Rank()` order,
   PROTOCOL.md's order, the app's order. `sidecarLyricsFile`'s own doc comment
   said the opposite for three days.

@@ -261,7 +261,21 @@ var Ext = map[string]bool{
 // ride the version-stamp leg, whose writeLyricsRowTx bumps indexed_at
 // only when the tag actually moved (PR #849), so the client delta stays
 // bounded to the rows whose lyrics really changed.
-const ExtractorVersion = 8
+// v9 (sparse timed coverage, mirror of iOS #1759): TextCandidate now ranks
+// an LRC-shaped body whose timed lines are a SPARSE minority of its text —
+// fewer than lyrics.MinimumTimedLines, or under lyrics.MinimumTimedShare
+// of the non-blank lines — as PLAIN text (`text`, format `text`,
+// `synced: false`) rather than `text-lrc` / `vorbis-synced`. A Genius-style
+// transcript with one `[4:20]` cue was a rank-4 synced stub outranking the
+// complete plain document in the same file's other frame, and a stored
+// verdict the bridge could not stand behind. Same class as v8's
+// lessCandidate change: it alters the ELECTED document on affected files,
+// i.e. lyricsTag, and nothing but this bump reaches an already-scanned
+// row. The phone is protected either way (it re-parses the body and treats
+// `synced` as advisory), so the bump is for the bridge's own election and
+// the honesty of what it stores; the version-stamp leg keeps the delta to
+// the rows whose tag actually moved.
+const ExtractorVersion = 9
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)

@@ -5049,3 +5049,89 @@ Two of the three CodeRabbit findings and both Gemini findings were real; four of
 the five were in code this PR added, and the fifth (`clearQueue`) was a rule this
 PR's own docblock stated one function away — the enumeration failure this file
 records over and over.
+
+## 2026-09-12 — a sparse-timed body is plain (mirror of iOS #1759)
+
+The iOS fix sessions closed with two items that turned out to be bridge work.
+This is the first: the phone's `LRCParser.parse` gained
+`timedCoverageIsTooSparse(timedLines:untimedLines:)` (#1759) so a Genius-style
+transcript with one `[4:20]` cue is the WHOLE text as an unsynced document, not
+a one-line synced stub that outranked every other tier and stopped the producer
+chain. The bridge's `TextCandidate` still ran the any-line `LooksLikeLRC` rule
+alone, so the same body left the scanner as `text-lrc`, `format: lrc`,
+`synced: true` — rank 4, above the complete plain document (rank 6) in the same
+file's other USLT frame.
+
+### Where the rule sits, and why not in `LooksLikeLRC`
+
+`LooksLikeLRC` is documented on both sides as the any-line promotion rule and
+the app's `looksLikeLRC` stays any-line — a BOM-prefixed single-line USLT already
+diverged once (2026-09-04) when only one side stripped the BOM, and that is the
+class a shared predicate exists to prevent. The app put its fix in `parse`; the
+bridge's equivalent is the CLASSIFICATION, so `TextCandidate` now reads
+`LooksLikeLRC(body) && !TimedCoverageIsTooSparse(TimedCoverage(body))`.
+
+The counter mirrors the app's parse loop, not a simplification of it: a source
+line is TIMED when it carries at least one line tag AND text survives after the
+line tags and any `<mm:ss.xx>` / `(mm:ss.xx)` word tags are removed (an empty
+timed line is a clear event); UNTIMED when it is non-blank, has no line tag, and
+is not one of the fourteen `LRCParser.metadataKeys` ID tags — `[Chorus:
+Rihanna]` matches the `[key:value]` shape and counts as text on both sides.
+Several tags on one line are ONE source line. The constants (2, 0.25) and the
+six-row truth table are lifted from `LRCParserTests.swift` verbatim.
+
+### What the phone sees — nothing different
+
+`BridgeLyricsPayload.synced` is declared "advisory — the parser decides", and
+`format: lrc` routes to the same `LRCParser.parse` while `format: text` routes
+to `PlainTextLyricsParser.parse`, which hands LRC-shaped text BACK to
+`LRCParser.parse`. So a stale `text-lrc` row and the corrected `text` row
+produce the identical document on any #1759 build. The fix is for the bridge's
+own election (multi-frame files) and for the stored verdict being one it can
+stand behind; a divergence here has no phone-side symptom, which is the shape
+that makes the mirror worth pinning rather than the shape that makes it urgent.
+
+### `ExtractorVersion` 8 → 9
+
+Considered leaving it: the wire consumer derives the same document either way.
+Bumped anyway, on three grounds. The standing rule is *every* extraction-logic
+change; v8's own docblock bumped for `lessCandidate` — an ordering change of
+exactly this class — with the rationale that it "changes the elected document,
+i.e. lyricsTag, on affected files only", which is precisely what this does. And
+the cost is nil for both production bridges: they run `v0.1.9-154`, before v8
+landed at `-175`, so the v0.2.0 deploy re-extracts once from v7 whatever this
+says — v7→v9 in one pass. The version-stamp leg keeps the client delta to the
+rows whose tag actually moved.
+
+### The second arm, found in review
+
+Gemini (HIGH on #904) saw that `TimedCoverageIsTooSparse(0, n)` answers
+"not sparse", so a body whose only tags are CLEAR EVENTS — `Prose\n[00:12.00]`,
+LRC-shaped to `LooksLikeLRC`, zero timed TEXT lines — classified as synced,
+while the app's parse returns the plain document. Real divergence; wrong
+patch. The proposed fix dropped `timedLines > 0` from the guard, which is
+exactly the app's guard (`guard untimedLines > 0, timedLines > 0`) and would
+have broken the verbatim truth-table row `(0, 5) → false`. The app never asks
+the sparse function about zero timed lines because `parse` decides
+`timed.isEmpty` FIRST — so the bridge mirrors both arms, in `IsSyncedLRCBody`:
+`LooksLikeLRC && timed > 0 && !sparse`. Reproduced red with a throwaway test
+before the fix; the case is in the table now. Take the observation, verify the
+mechanism, write your own fix — this file's standing rule, again.
+
+### Controls and coverage
+
+Red-first against the OLD rule with the new helpers present (so the control
+compiled): predicted red `TestTextCandidateRanksASparseTimedBodyAsPlain` +
+`TestSparseVerdictReKeysTheTag`, predicted green the truth table and the
+counter test — exactly that. New `FuzzTextCandidateClassification` pins the
+verdict to the predicate re-derived from its PARTS (reading it back from
+`IsSyncedLRCBody` would be a tautology) and the three derived fields to each
+other: 7,181,247 execs in 20 s on the first form, 6,027,703 after the second
+arm landed, 0 failures. All four `internal/lyrics` targets fuzzed 20 s each at
+`-fuzzminimizetime 1s`, clean. Both new tests were restructured for SonarCloud
+S3776 (a table with one comparison; the fuzz body split into two helpers) —
+the repo's standing response to that rule. Not changed: the `.lrc` sidecar
+classification (`sidecarCandidate`) and the Atlas `documentFrom` promotion
+still use bare `LooksLikeLRC` — a sparse `.lrc` is the operator's explicit
+file and LRCLIB's synced field is fully timed by construction; both would be a
+one-line adoption of `IsSyncedLRCBody` if a case ever shows up.
