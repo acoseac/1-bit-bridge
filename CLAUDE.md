@@ -1590,6 +1590,32 @@ its twin.** The top list is older, shorter, and read first.
   Continue. Negative control: putting the redeem back on the GET turns exactly
   eight of the fourteen ticket tests red (`TestOpeningTheLinkDoesNotSpendIt`
   drives three navigation-shaped previews before the click).
+- **The interstitial is served under `Referrer-Policy: strict-origin`, NEVER
+  `no-referrer` — a form POST from a `no-referrer` page carries
+  `Origin: null`, and the CSRF guard refuses the Continue button** (2026-09-12,
+  the second field report on the uploader link, one build after #909: Continue
+  answered with the 36-byte `admin refused: cross-origin request`, which Safari
+  on iOS saved as `ticket.txt`; macOS the same; reproduced with curl against the
+  live tenant — `Origin: null` gets that body, the page's real origin redeems).
+  The Fetch standard's "append a request `Origin` header" serializes a non-GET,
+  non-`cors` request's origin as `null` under `no-referrer` — a plain form
+  navigation is exactly that shape. The console's own requests never show it
+  because `fetch()` runs in `cors` mode, which the rule exempts, and the login
+  form serves `same-origin`; **no test saw it because `redeemTicket` sent no
+  `Origin` at all and `csrfGuard` checks the header only when present**, while
+  the leak test pinned the very `no-referrer` that broke the button. Header AND
+  `<meta name="referrer">` must agree (the meta is parsed later and is what the
+  document keeps) — `loginTicketReferrerPolicy` is the one constant.
+  `strict-origin` keeps what `no-referrer` was chosen for and more: the Referer
+  carries the origin alone, never the address holding the ticket, same-origin
+  subresources included, and it nulls the Origin only on an https→http
+  downgrade. `TestLoginTicketRedeemsUnderTheOriginABrowserSends` reads the
+  policy the GET serves, derives the Origin the spec says a browser sends
+  under it, and submits that — a regression is red by construction. **The
+  transferable rule: a test that exercises a form POST must send the `Origin`
+  a browser would derive from the served policy, never omit it.** Negative
+  control: `no-referrer` on both header and meta turns exactly the two policy
+  tests red.
 - **No per-IP rate cap on pairing requests** — double-NAT puts every LAN device
   behind one address. The bridge-wide pending cap plus the visible admin queue
   is the bound. The 6-digit code is drawn from `crypto/rand`.
