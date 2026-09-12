@@ -1568,6 +1568,28 @@ its twin.** The top list is older, shorter, and read first.
   needed. `SameSite=Strict` is NOT the usual magic-link trap here — the app opens
   the URL itself, and a navigation with no initiator is same-site (verified in a
   real browser, not reasoned about).
+- **A login link is REDEEMED ON THE POST of its interstitial, never on the GET
+  — a link preview is a navigation-shaped GET no header guard can tell from the
+  click** (2026-09-12, the hosted uploader link: every link the phone shared
+  landed on `/login?link=stale`). The HEAD-405 and the declared-prefetch-403
+  only cover probers that SAY what they are; iOS's share sheet, Messages on
+  both ends, Slack and mail clients draw their preview by loading the URL
+  through a real browser engine, which declares `Sec-Fetch-Mode: navigate`
+  exactly like the human's click that follows — so redeem-on-GET spent the
+  ticket while the share sheet was still opening. `GET /login/ticket` now
+  renders `login_ticket.html`, a one-button page with NO script (a previewer
+  runs scripts; it does not click), and `POST /login/ticket` — an EMPTY body
+  with the ticket in the action's query, the one bodiless shape `csrfGuard`
+  admits without a Content-Type check — is what redeems. **The GET consults no
+  store**: a ticket that never existed gets the same page as a live one, so
+  it is neither the "is this link live" oracle the miss branch used to be nor
+  a file read under the console's mutex; a bare `?t=` is sent to
+  `/login?link=stale` because a button that can only fail is not a page. The
+  URL shape is unchanged, so `bridge admin login-link` and the control
+  plane's `console-link` need nothing — the operator's link just gained a
+  Continue. Negative control: putting the redeem back on the GET turns exactly
+  eight of the fourteen ticket tests red (`TestOpeningTheLinkDoesNotSpendIt`
+  drives three navigation-shaped previews before the click).
 - **No per-IP rate cap on pairing requests** — double-NAT puts every LAN device
   behind one address. The bridge-wide pending cap plus the visible admin queue
   is the bound. The 6-digit code is drawn from `crypto/rand`.

@@ -215,32 +215,60 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 // used by every handler that needs it.
 const msgAuthNotConfigured = "admin auth is not configured"
 
-// pageLoginTicket exchanges a one-time ticket for a console session.
-//
-// It exists so the hosted control plane can open an authenticated console for
-// the account that owns a tenant, without the user transcribing a generated
-// password — and so a self-hosting operator can do the same from a shell with
-// `bridge admin login-link`.
-//
-// The ticket travels in a URL, which is why it is single-use and stale within a
-// minute (adminauth.LoginTicketTTL), and why this handler redirects
-// immediately: the address bar should not keep a working credential, and a
-// reload must not replay one. Referrer-Policy is set so the value cannot leak
-// onward, and the ticket is never logged.
-func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
+// loginTicketPageData feeds login_ticket.html — the interstitial a login
+// link lands on before anything is redeemed.
+type loginTicketPageData struct {
+	LibraryName   string
+	ServerVersion string
+	// Ticket is the raw credential, carried ONLY as the query of the form's
+	// POST action — never in a link, never in a script, never logged.
+	Ticket string
+}
+
+// setLoginTicketHeaders is the header set both halves of the login-link flow
+// share. The ticket travels in a URL, so nothing between the browser and the
+// bridge may cache the exchange, and no onward request may carry the address
+// as a referrer.
+func setLoginTicketHeaders(w http.ResponseWriter) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
+}
+
+// pageLoginTicket is the GET half of a login link: it renders a one-button
+// interstitial and REDEEMS NOTHING.
+//
+// The link exists so the hosted control plane can open an authenticated
+// console for the account that owns a tenant, without the user transcribing a
+// generated password — and so a self-hosting operator can do the same from a
+// shell with `bridge admin login-link`. The ticket travels in a URL, which is
+// why it is single-use and short-lived (adminauth.LoginTicketTTL by default).
+//
+// It used to redeem on this GET, and the guards below — HEAD refused, a
+// declared prefetch refused — only cover the probers that SAY what they are.
+// The one that spent the ticket in the field said nothing of the sort: a link
+// PREVIEW. iOS's share sheet, Messages on both ends, Slack, a mail client —
+// each loads the URL through a real browser engine to draw a card, and that
+// load declares itself a navigation (`Sec-Fetch-Mode: navigate`, a Safari UA),
+// exactly like the human's click that follows it. Redeem-on-GET cannot tell
+// the two apart, so the credential was spent while the share sheet was still
+// opening, and the human landed on `/login?link=stale` every time
+// (2026-09-12, the hosted uploader link). What a previewer never does is press
+// a button: the GET renders a form whose POST is the redemption, and the
+// human's one click is what spends the ticket.
+//
+// Nothing here touches the ticket store, for the same reason the miss branch
+// was un-oracled: an unauthenticated GET that answered "is this ticket live"
+// would be one, and it would put a file read under the mutex every
+// authenticated console request takes. A ticket that never existed gets the
+// same page as a live one; the POST is where the answer is.
+func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
+	setLoginTicketHeaders(w)
 	// Go's ServeMux matches a "GET " pattern for HEAD as well
 	// (net/http/server.go: "a pattern with the method GET matches both GET
-	// and HEAD requests"), and redemption DELETES the record before judging
-	// it — so a HEAD spends the credential. Anything that probes the link
-	// before the human clicks does that: a mail-security scanner, a chat
-	// unfurler, a corporate proxy, a prefetcher. The human's real GET then
-	// gets a bare redirect to /login and, by deliberate design, no
-	// explanation.
-	//
-	// 405 rather than a silent redirect: a HEAD asking about this URL is
-	// getting an honest answer about the method, and nothing is consumed.
+	// and HEAD requests"). Nothing is consumed on a GET any more, so a HEAD
+	// could be answered — but 405 is the honest reply to a prober asking
+	// about the method, and it keeps the page off the shapes a scanner
+	// harvests.
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
@@ -251,17 +279,54 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
 		return
 	}
-	// The HEAD case is refused above, which covers a prober that asks about the
-	// URL. This covers the one that FETCHES it: an unfurler, a prefetcher or a
-	// mail-security scanner issues a GET that is not a top-level navigation, and
-	// because redemption deletes before judging, that GET spends the credential
-	// and the human's real click then lands on a bare login form.
-	//
-	// Fails OPEN when the headers are absent. curl, an older browser and the
-	// operator's own shell flow send none of them, and turning those away would
-	// break the path this exists to serve. Only a request that POSITIVELY
-	// declares itself something other than a navigation is refused — and it is
-	// refused BEFORE the redeem, so nothing is consumed.
+	// A request that POSITIVELY declares itself a prefetch or a subresource
+	// gets nothing to render — not for the ticket's sake (the GET spends
+	// nothing now) but so a speculative loader does not warm a page it will
+	// never show. Fails OPEN when the headers are absent, as before.
+	if isNonNavigationFetch(r.Header) {
+		writeError(w, http.StatusForbidden, "not_a_navigation",
+			"a login link must be opened by navigating to it")
+		return
+	}
+	ticket := r.URL.Query().Get("t")
+	if ticket == "" {
+		// Nothing to continue with. The same page the POST would send a bad
+		// ticket to — a link with no ticket is a stale link's shape.
+		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
+		return
+	}
+	cfg := s.deps.CfgHolder.Load()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Framing guard, as on the login form: this page carries a button that
+	// spends a credential, so no origin may embed it.
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	w.Header().Set("X-Frame-Options", "DENY")
+	envelope := loginTicketPageData{
+		LibraryName:   cfg.LibraryName,
+		ServerVersion: version.ServerVersion,
+		Ticket:        ticket,
+	}
+	if err := s.loginTmpl.ExecuteTemplate(w, "login_ticket", envelope); err != nil {
+		logger.Error("render login ticket page", "err", err)
+	}
+}
+
+// apiRedeemLoginTicket is the POST half: the interstitial's one button. It
+// exchanges the ticket for a console session and redirects, so the address
+// bar never keeps a working credential and a reload cannot replay one.
+//
+// The form posts an EMPTY body with the ticket in the action's query —
+// csrfGuard admits a bodiless POST without a Content-Type check, and a
+// cross-site page cannot forge this request without the ticket itself, which
+// is the whole secret. The Origin allowlist still applies.
+func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
+	setLoginTicketHeaders(w)
+	if s.deps.AdminAuth == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth_disabled", msgAuthNotConfigured)
+		return
+	}
+	// A POST is not something a previewer or a prefetcher issues, but the
+	// guard is free and keeps the two halves' refusals identical.
 	if isNonNavigationFetch(r.Header) {
 		writeError(w, http.StatusForbidden, "not_a_navigation",
 			"a login link must be opened by navigating to it")
@@ -312,7 +377,9 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 
 // isNonNavigationFetch reports whether a request POSITIVELY declares itself
 // something other than a user navigation — a prefetch, a prerender, a preview
-// or a subresource fetch.
+// or a subresource fetch. Note what it cannot see: a link preview drawn by a
+// real browser engine declares itself a navigation, which is why redemption
+// moved off the GET altogether (pageLoginTicket).
 //
 // Absent headers are not a declaration, so they pass. `Sec-Fetch-Mode` is sent
 // by every current browser on a top-level navigation; the rest are the older

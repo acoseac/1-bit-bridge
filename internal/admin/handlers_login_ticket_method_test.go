@@ -10,15 +10,12 @@ import (
 //
 // mux.HandleFunc("GET /login/ticket", …) also matches HEAD — Go's ServeMux
 // documents it in as many words ("a pattern with the method GET matches both
-// GET and HEAD requests") — and redemption DELETES the record before judging
-// it. So anything that probes the link before the human clicks spends the
-// credential: a mail-security scanner, a chat unfurler, a corporate proxy, a
-// prefetcher. The human's real GET then gets a bare redirect to /login and,
-// by deliberate design, no explanation of why.
-//
-// The assertion that matters is the SECOND one: the same ticket must still
-// work afterwards. A 405 alone would pass against a handler that refused the
-// HEAD after already redeeming.
+// GET and HEAD requests"). Redemption used to happen on the GET and delete the
+// record before judging it, so a HEAD from a mail-security scanner, a chat
+// unfurler or a corporate proxy spent the credential. The GET spends nothing
+// now, but the HEAD stays refused — it is the honest answer to a prober asking
+// about the method — and the assertion that matters is still the SECOND one:
+// the human's flow works afterwards.
 func TestHeadDoesNotConsumeTheLoginTicket(t *testing.T) {
 	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
 	ts := httptest.NewServer(srv.Handler())
@@ -46,15 +43,15 @@ func TestHeadDoesNotConsumeTheLoginTicket(t *testing.T) {
 		t.Error("HEAD handed out a session cookie")
 	}
 
-	get, err := noRedirectClient().Get(url)
-	if err != nil {
-		t.Fatal(err)
-	}
+	page := openLink(t, ts.URL, "?t="+ticket)
+	assertInterstitial(t, page, ticket)
+	page.Body.Close()
+	get := redeemTicket(t, ts.URL, "?t="+ticket)
 	defer get.Body.Close()
 	if get.StatusCode != http.StatusFound {
-		t.Fatalf("the human's GET after a HEAD: status = %d, want 302 — the HEAD burned the ticket", get.StatusCode)
+		t.Fatalf("the human's click after a HEAD: status = %d, want 302 — the HEAD burned the ticket", get.StatusCode)
 	}
 	if sessionCookie(get) == nil {
-		t.Error("the human's GET after a HEAD got no session cookie — the HEAD burned the ticket")
+		t.Error("the human's click after a HEAD got no session cookie — the HEAD burned the ticket")
 	}
 }

@@ -47,7 +47,7 @@ Wire protocol stays at v1 — everything here is additive. A paired iOS app on a
 
 ## For operators
 
-**Console login links.** `bridge admin login-link` mints a one-time, 60-second link that opens the console signed in — and it now survives a phone-to-laptop hand-off and the minting process exiting, because the ticket is persisted rather than held in memory; the endpoint is hardened as the one anonymous caller on the box (#868, #872, #880, #886).
+**Console login links.** `bridge admin login-link` mints a one-time, 60-second link that opens the console signed in — and it now survives a phone-to-laptop hand-off and the minting process exiting, because the ticket is persisted rather than held in memory; the endpoint is hardened as the one anonymous caller on the box (#868, #872, #880, #886). The link now lands on a one-button page and is spent by the Continue click, not by opening it, so a link preview — a share sheet, Messages, a mail client — can no longer use it up before you do.
 
 **Hosted-tenant posture.** `deployment.managedSettings` hides and refuses settings fields the tenant does not own; `deployment.managedControls` does the same for actions — restart, updates, roots, the variants directory, backups — and a managed control owns the setting that performs it (#782, #876, #877, #879). `bridge doctor` skips advice that needs a shell on a host the tenant does not have (#876).
 
