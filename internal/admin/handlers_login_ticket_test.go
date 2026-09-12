@@ -25,14 +25,21 @@ func sessionCookie(resp *http.Response) *http.Cookie {
 	return nil
 }
 
-// redeemTicket is the interstitial's one button: a bodiless POST with the
-// ticket in the query, exactly the request the rendered form makes.
+// redeemTicket is the interstitial's one button, submitted the way a browser
+// submits a form with no successful controls: `Content-Type:
+// application/x-www-form-urlencoded` with an EMPTY body (Content-Length: 0),
+// the ticket in the action's query. The content type is deliberate — a nil
+// body with no content type would pass csrfGuard even if the form grew a
+// named control and a real browser started sending a urlencoded body the
+// guard 415s (CodeRabbit on #909); assertInterstitial pins the other half,
+// that the form has no such control.
 func redeemTicket(t *testing.T, base, query string, decorate ...func(*http.Request)) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, base+"/login/ticket"+query, nil)
+	req, err := http.NewRequest(http.MethodPost, base+"/login/ticket"+query, strings.NewReader(""))
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for _, d := range decorate {
 		d(req)
 	}
@@ -86,6 +93,18 @@ func assertInterstitial(t *testing.T, resp *http.Response, ticket string) {
 	if strings.Count(body, ticket) != 1 {
 		t.Errorf("the ticket appears %d times in the page, want exactly once (the form action)",
 			strings.Count(body, ticket))
+	}
+	// The form must have NO successful control: a browser encodes any named
+	// field into a urlencoded body, and csrfGuard refuses a body-bearing POST
+	// that is not JSON — the click would 415. The empty body is the contract
+	// redeemTicket submits under.
+	start := strings.Index(body, "<form")
+	end := strings.Index(body, "</form>")
+	if start < 0 || end < start {
+		t.Fatal("no form in the interstitial")
+	}
+	if form := body[start:end]; strings.Contains(form, " name=") {
+		t.Errorf("the form carries a named control — a browser would post a body the CSRF guard refuses:\n%s", form)
 	}
 }
 
