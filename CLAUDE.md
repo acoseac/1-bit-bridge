@@ -937,6 +937,17 @@ no failing test — which is the shape to expect in this area.
   required (ffprobe supplies the pipe's geometry and the guard's duration) and
   some distros package them apart, so blaming ffmpeg sends that operator to a
   binary they already have.
+- **`redactSoxErr` must know EVERY absolute-path family a job can name, and the
+  journal gets the redacted message too.** sox's stderr quotes its argv, so a
+  failing job names the absolute source path and — for a DSD render — the
+  Stage A scratch under `upscale.tempDir` (or the OS temp dir): a THIRD family
+  the two original passes (source, `OutputDir`) could not see, added with the
+  renditions and found by the v0.2.0 logging audit. Pass 2b strips the scratch
+  directory and the configured tempDir; and `pool: sox failed` logs
+  `redactSoxErr(err.Error(), spec)`, not the raw `err` — the raw form put the
+  absolute path in the journal beside a `path` attribute that already named the
+  file the way the privacy page promises (library-relative). A new absolute
+  path in any job's argv needs a pass here in the same PR.
 - **Analysis commits only on a length-complete decode**, gated by the probed
   duration — NOT exit code, `-xerror`, or stderr matching. Both decoders exit 0
   on a truncated-but-openable source, and a partial commit is keyed to

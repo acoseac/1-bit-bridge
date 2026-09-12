@@ -5260,3 +5260,66 @@ input with nothing to keep, and both callers moved to
 nothing could drive it, for the same XML reason — so the arm was extracted
 into a helper the test can call. A control that cannot go red is a test that
 pins nothing; extract until it can.
+
+## 2026-09-12 — v0.2.0 release prep: the logging audit found the third path family
+
+`docs/release-process.md` step 1 is a logging audit against the CURRENT surface
+before privacy copy is drafted. The 194-commit window since `v0.1.9-154` was
+swept for raw bearer tokens, client IPs and absolute paths in slog lines and
+`writeError` bodies across the surfaces it added: login tickets, the export
+bundle, the network lyrics tier, the DSD renditions, managed controls.
+
+### Clean
+
+- **Login tickets**: every error is a fixed sentence (`ErrTicketInvalid`, "too
+  many live login tickets", "login ticket ttl … exceeds …"); the raw ticket
+  never enters an error or a log line.
+- **Network lyrics tier**: `atlaslyrics.*` lines carry MBIDs, counts, statuses,
+  byte lengths and a match tier — "never the text", and never a path.
+- **Export bundle**: no credentials by construction (the docblock's ⚠️), and its
+  paths are library-relative — the user's own playlists and history.
+- **Managed controls**, `/v1/lyrics`: fixed strings only.
+- The `/v1` access logger still omits the client IP; the two IP-bearing lines
+  in the tree (failed admin logins in public mode, DLNA Browse/Search at INFO
+  on the LAN listener) predate the window and are the two exceptions the
+  privacy page already names.
+
+### The finding: `pool: sox failed` and the render scratch
+
+`redactSoxErr` scrubbed two absolute-path families — `SourceAbsPath` (→ the
+library-relative form) and the `OutputDir` prefix — for the variant-failure ROW
+and the SSE frame. Two gaps:
+
+1. The **log line** logged the raw `err`. sox quotes its argv in stderr
+   (`can't open input file '/mnt/music/Artist/Album/01.flac'`), so every failed
+   job wrote the absolute library path into the journal, beside a `path`
+   attribute that already named the file library-relative. Pre-existing since
+   the pool, not window-introduced — but the window is what made it visible.
+2. The DSD renditions (#863) added a **third family**: the Stage A scratch under
+   `upscale.tempDir` (or `os.TempDir()`), an absolute HOST path in sox's argv as
+   Stage A's output and Stage B/C's input, and in the `mkdir render scratch
+   dir:` PathError. Neither pass could see it; on bridge.ars.md that is
+   `/home/arsenie/bridge-data/tmp/1-bit-bridge-render/<token>.raw`, which is
+   exactly the kind of string the bug-report bundle exists not to carry.
+
+Pass 2b strips `renderScratchDir(spec.TempDir)` (prefix gone, opaque basename
+kept; the bare directory becomes `<render-scratch>`) and then the configured
+tempDir (`<tempDir>`), longest first; a no-op on every PCM job. The log line
+logs the redacted message, computed the same way as the row. Red-first
+(`TestRedactSoxErr_ScrubsRenderScratchDir` — stage output, mkdir, parent, OS
+temp dir; `TestPoolLogsTheRedactedFailure` drives the real pool with a
+sox-shaped error and reads slog's default handler through a locked buffer).
+Two negative controls: the raw-err log line reddened the pool test; deleting
+Pass 2b reddened both. The first attempt at the second control was INVALID —
+the perl pattern did not match and the tests stayed green — which is the
+"control that mutates nothing" trap this file records; the rerun used an
+exact block deletion and was checked to have removed 1,180 bytes.
+
+### Left for the operator (policy copy lives in the 1bitapp repo)
+
+The privacy page's "absolute filesystem paths appear only when the orphan
+sidecar sweep is enabled" is stronger than the tree: an I/O failure on a
+bridge-OWNED file (the adminauth store, the ticket sidecar, the SQLite DB) logs
+the OS error, which names that file under the data dir. Not the library, and
+error-only — but the sentence should say "in normal operation". Noted in the
+R1 status file with the other v0.2.0 privacy-page items.
