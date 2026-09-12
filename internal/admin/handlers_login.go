@@ -225,12 +225,44 @@ type loginTicketPageData struct {
 	Ticket string
 }
 
+// loginTicketReferrerPolicy is the referrer policy both halves of the
+// login-link flow serve, and the template's `<meta name="referrer">` MUST
+// carry the same value — the meta is parsed after the header and is what the
+// document ends up with.
+//
+// `strict-origin`, NOT `no-referrer`, and the difference is the whole
+// uploader link (2026-09-12, the second field report on it, one build after
+// the first): the ticket travels in this page's URL, so the referrer policy
+// exists to keep that address out of every onward request. `no-referrer` does
+// that — and ALSO turns the interstitial's own button into a request the CSRF
+// guard refuses. Per the Fetch standard ("append a request `Origin` header"),
+// a non-GET request whose mode is not `cors` — a plain form submission, i.e.
+// a navigation — serializes its `Origin` as `null` when the document's
+// referrer policy is `no-referrer`. Safari on both iOS and macOS did exactly
+// that: Continue arrived as `POST /login/ticket` with `Origin: null`,
+// originMatchesAdmin refused it, and the phone saved the 36-byte
+// "admin refused: cross-origin request" as `ticket.txt`. The console's own
+// requests never showed it because `fetch()` defaults to `cors` mode, which
+// that rule exempts — this page is the first plain form the admin serves
+// whose submission has to pass the Origin allowlist (the login form two
+// functions up serves `same-origin` and never hit it either).
+//
+// Under `strict-origin` the same rule leaves the Origin intact (it nulls only
+// on an https→http downgrade, which the redemption is not), and the Referer
+// carries the ORIGIN alone — never the path, so the ticket still reaches no
+// onward request, same-origin subresource fetches included, which is a
+// stricter version of what `no-referrer` was chosen for. Pinned by
+// TestLoginTicketRedeemsUnderTheOriginABrowserSends, which derives the Origin
+// from the served policy the way the spec does and submits it.
+const loginTicketReferrerPolicy = "strict-origin"
+
 // setLoginTicketHeaders is the header set both halves of the login-link flow
 // share. The ticket travels in a URL, so nothing between the browser and the
 // bridge may cache the exchange, and no onward request may carry the address
-// as a referrer.
+// as a referrer — see loginTicketReferrerPolicy for why that is
+// `strict-origin` and not `no-referrer`.
 func setLoginTicketHeaders(w http.ResponseWriter) {
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Referrer-Policy", loginTicketReferrerPolicy)
 	w.Header().Set("Cache-Control", "no-store")
 }
 

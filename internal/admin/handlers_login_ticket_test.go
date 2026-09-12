@@ -285,8 +285,17 @@ func TestLoginTicketResponseDoesNotLeakTheCredential(t *testing.T) {
 	}
 	check := func(what string, resp *http.Response) {
 		t.Helper()
-		if got := resp.Header.Get("Referrer-Policy"); got != "no-referrer" {
-			t.Errorf("%s: Referrer-Policy = %q, want no-referrer", what, got)
+		// `strict-origin`: the Referer carries the origin alone, never this
+		// page's address (which holds the ticket). NOT `no-referrer` — that
+		// keeps the address out of the Referer too, and also makes the
+		// browser send the button's POST with `Origin: null`, which the CSRF
+		// guard refuses; TestLoginTicketRedeemsUnderTheOriginABrowserSends
+		// is the pin on that half.
+		if got := resp.Header.Get("Referrer-Policy"); got != loginTicketReferrerPolicy {
+			t.Errorf("%s: Referrer-Policy = %q, want %q", what, got, loginTicketReferrerPolicy)
+		}
+		if got := resp.Header.Get("Referrer-Policy"); strings.EqualFold(got, "no-referrer") {
+			t.Errorf("%s: Referrer-Policy is no-referrer — a form POST from this page arrives as Origin: null", what)
 		}
 		if got := resp.Header.Get("Cache-Control"); !strings.Contains(got, "no-store") {
 			t.Errorf("%s: Cache-Control = %q, want no-store", what, got)
@@ -326,5 +335,119 @@ func TestLoginTicketIgnoresAnyRedirectTarget(t *testing.T) {
 			t.Errorf("next=%q redirected to %q, want / — no caller-supplied target may be honoured", next, got)
 		}
 		resp.Body.Close()
+	}
+}
+
+// browserFormPostOrigin is the `Origin` a browser puts on a plain form
+// submission from a page whose document referrer policy is `policy`, per the
+// Fetch standard's "append a request `Origin` header" (§4.1): for a non-GET
+// request whose mode is not `cors` — a navigation is one — the serialized
+// origin becomes `null` under `no-referrer`, `null` under the strict/downgrade
+// family only when the request is an https→http downgrade, `null` under
+// `same-origin` only when the target is cross-origin, and the real origin
+// otherwise. The interstitial's Continue is same-origin and not a downgrade,
+// so only `no-referrer` can null it — which is exactly what the field saw.
+//
+// A test that submits the button WITHOUT an Origin (the older shape here)
+// cannot see this: csrfGuard checks the header only when it is present, and a
+// browser always sends one on a POST.
+func browserFormPostOrigin(policy, pageOrigin string, downgrade, crossOrigin bool) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "no-referrer":
+		return "null"
+	case "no-referrer-when-downgrade", "strict-origin", "strict-origin-when-cross-origin":
+		if downgrade {
+			return "null"
+		}
+	case "same-origin":
+		if crossOrigin {
+			return "null"
+		}
+	}
+	return pageOrigin
+}
+
+// interstitialReferrerPolicy reads the policy the interstitial actually
+// delivers — the `<meta name="referrer">` if the page carries one (parsed
+// after the header, it is what the document keeps), else the header — and
+// insists the two agree, because a header the meta silently overrides is how
+// this regresses without either pin noticing.
+func interstitialReferrerPolicy(t *testing.T, resp *http.Response, body string) string {
+	t.Helper()
+	header := resp.Header.Get("Referrer-Policy")
+	const open = `<meta name="referrer" content="`
+	i := strings.Index(body, open)
+	if i < 0 {
+		return header
+	}
+	rest := body[i+len(open):]
+	j := strings.Index(rest, `"`)
+	if j < 0 {
+		t.Fatalf("unterminated referrer meta in the interstitial")
+	}
+	meta := rest[:j]
+	if !strings.EqualFold(meta, header) {
+		t.Errorf("the interstitial's <meta name=\"referrer\"> says %q but its header says %q — the meta wins, and they must agree", meta, header)
+	}
+	return meta
+}
+
+// The interstitial's one button must redeem under the Origin a REAL browser
+// puts on it — which the page's own referrer policy decides. Served with
+// `no-referrer` (as it was for one build) the button's POST arrives with
+// `Origin: null`, csrfGuard refuses it as cross-origin, and the human who
+// clicked Continue gets a 36-byte text file instead of the console (2026-09-12,
+// Safari on iOS and on macOS alike). So this test does not choose an Origin:
+// it reads the policy the GET serves, derives the Origin the Fetch standard
+// says a same-origin, non-downgrade form POST carries under it, and submits
+// exactly that. A regression to `no-referrer` turns it red by construction.
+func TestLoginTicketRedeemsUnderTheOriginABrowserSends(t *testing.T) {
+	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// The public origin the fixture's allowlist admits (bridge.example.com,
+	// proxy-terminated so the port is opaque) — the address bar of the
+	// browser that opened the link.
+	const pageOrigin = "https://bridge.example.com:7789"
+
+	ticket, err := store.MintLoginTicket("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := openLink(t, ts.URL, "?t="+ticket)
+	b, err := io.ReadAll(page.Body)
+	page.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := interstitialReferrerPolicy(t, page, string(b))
+	origin := browserFormPostOrigin(policy, pageOrigin, false, false)
+
+	resp := redeemTicket(t, ts.URL, "?t="+ticket, func(req *http.Request) {
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		req.Header.Set("Sec-Fetch-Dest", "document")
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/" {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Continue under the browser's Origin %q (policy %q) = %d -> %q %q, want a 302 to / with a session",
+			origin, policy, resp.StatusCode, resp.Header.Get("Location"), strings.TrimSpace(string(body)))
+	}
+	if sessionCookie(resp) == nil {
+		t.Fatal("Continue under the browser's Origin set no session cookie")
+	}
+
+	// And the shape the field saw, stated directly so the refusal it hits is
+	// legible: an opaque origin is still refused — that is the CSRF guard
+	// doing its job for a sandboxed or cross-site page — which is WHY the
+	// page must not be served under a policy that produces one.
+	nulled := redeemTicket(t, ts.URL, "?t="+ticket, func(req *http.Request) {
+		req.Header.Set("Origin", "null")
+	})
+	defer nulled.Body.Close()
+	if nulled.StatusCode != http.StatusForbidden {
+		t.Errorf("a POST with Origin: null = %d, want 403 — the allowlist must keep refusing an opaque origin", nulled.StatusCode)
 	}
 }
