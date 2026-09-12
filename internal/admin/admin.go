@@ -1461,6 +1461,7 @@ func New(deps Deps) (*Server, error) {
 	loginTmpl, err := template.New("").Funcs(tmplFuncs).ParseFS(
 		templateFS,
 		"templates/login.html",
+		"templates/login_ticket.html",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("admin: parse login.html: %w", err)
@@ -1705,6 +1706,7 @@ func (s *Server) Handler() http.Handler {
 	// without a session.
 	mux.HandleFunc("GET /login", s.pageLogin)
 	mux.HandleFunc("GET /login/ticket", s.pageLoginTicket)
+	mux.HandleFunc("POST /login/ticket", s.apiRedeemLoginTicket)
 	mux.HandleFunc("POST /login", s.apiLogin)
 	mux.HandleFunc("POST /logout", s.apiLogout)
 

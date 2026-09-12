@@ -1,0 +1,30 @@
+{{define "login_ticket"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Sign in — 1-bit Bridge</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png?v=2">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-page">
+<main class="login-card">
+  <div class="login-brand">
+    <img class="brand-mark" src="/static/bridge-mark.png?v=2" alt="" width="40" height="40">
+    <span class="name">{{.LibraryName}}</span>
+  </div>
+  <h1>Sign in</h1>
+  <p class="login-hint">This link signs you in to the console for {{.LibraryName}} — no password needed. It works once; Continue is what uses it.</p>
+  {{/* The one click that spends the ticket. An EMPTY body, the ticket in the
+       action's query: a link preview loads this page and never presses the
+       button, and csrfGuard admits a bodiless POST. No script on this page —
+       a previewer runs scripts; it does not click. */}}
+  <form method="post" action="/login/ticket?t={{.Ticket}}">
+    <button type="submit">Continue</button>
+  </form>
+  <p class="login-foot">bridge {{.ServerVersion}}</p>
+</main>
+</body>
+</html>
+{{end}}

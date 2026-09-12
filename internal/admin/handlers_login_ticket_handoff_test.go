@@ -13,16 +13,13 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 )
 
-// A GET that is not a navigation must not spend the ticket.
+// A GET that positively declares itself a non-navigation is refused outright.
 //
-// HEAD is refused elsewhere, and that covers a prober which ASKS about the URL.
-// This is the one that FETCHES it: an unfurler, a prefetcher, a mail-security
-// scanner. Because redemption deletes before judging, such a GET spends the
-// credential and the human's real click then lands on a bare login form.
-//
-// The assertion that matters is the SECOND one — the same ticket must still
-// work afterwards. A 403 alone would pass against a handler that refused the
-// prefetch after already redeeming it.
+// The GET spends nothing any more, so the refusal is no longer what protects
+// the ticket — that is the POST split. It stays because a speculative loader
+// should not warm a page it will never show, and because the two halves
+// refuse the same shapes. The assertion that matters is still the SECOND one:
+// the human's flow works afterwards.
 func TestAPrefetchDoesNotConsumeTheLoginTicket(t *testing.T) {
 	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
 	ts := httptest.NewServer(srv.Handler())
@@ -32,17 +29,9 @@ func TestAPrefetchDoesNotConsumeTheLoginTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	url := ts.URL + "/login/ticket?t=" + ticket
-
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	pre, err := noRedirectClient().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pre := openLink(t, ts.URL, "?t="+ticket, func(req *http.Request) {
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+	})
 	pre.Body.Close()
 	if pre.StatusCode != http.StatusForbidden {
 		t.Errorf("prefetch status = %d, want 403", pre.StatusCode)
@@ -51,18 +40,17 @@ func TestAPrefetchDoesNotConsumeTheLoginTicket(t *testing.T) {
 		t.Error("a prefetch was handed a session cookie")
 	}
 
-	nav, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nav.Header.Set("Sec-Fetch-Mode", "navigate")
-	get, err := noRedirectClient().Do(nav)
-	if err != nil {
-		t.Fatal(err)
-	}
+	page := openLink(t, ts.URL, "?t="+ticket, func(req *http.Request) {
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+	})
+	assertInterstitial(t, page, ticket)
+	page.Body.Close()
+	get := redeemTicket(t, ts.URL, "?t="+ticket, func(req *http.Request) {
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+	})
 	defer get.Body.Close()
 	if sessionCookie(get) == nil {
-		t.Fatal("the human's navigation after a prefetch got no session cookie — " +
+		t.Fatal("the human's click after a prefetch got no session cookie — " +
 			"the prefetch burned the ticket")
 	}
 }
@@ -72,8 +60,7 @@ func TestAPrefetchDoesNotConsumeTheLoginTicket(t *testing.T) {
 // carry. `Sec-Purpose` is a structured field that arrives as
 // `prefetch;anonymous-client-ip` in the wild, and the three legacy spellings
 // are specified nowhere, so a proxy may hand back a list or a q-value. Each
-// such case is one an exact match misses, and a miss here fails OPEN: the
-// ticket is spent by the machine and the human's click lands on a bare form.
+// such case is one an exact match misses.
 func TestSpeculativeFetchHeadersDoNotConsumeTheLoginTicket(t *testing.T) {
 	for _, h := range []struct{ key, value string }{
 		{"Sec-Purpose", "prefetch"},
@@ -98,7 +85,7 @@ func TestSpeculativeFetchHeadersDoNotConsumeTheLoginTicket(t *testing.T) {
 
 // A real navigation must still get through, so the guard cannot be "refuse
 // anything that mentions one of these words". These are the near-misses a bare
-// substring match would turn away.
+// substring match would turn away — on both halves.
 func TestANavigationIsNotMistakenForSpeculation(t *testing.T) {
 	for _, h := range []struct{ key, value string }{
 		{"Sec-Purpose", "prefetching-is-not-a-token"},
@@ -114,28 +101,27 @@ func TestANavigationIsNotMistakenForSpeculation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req, err := http.NewRequest(http.MethodGet, ts.URL+"/login/ticket?t="+ticket, nil)
-			if err != nil {
-				t.Fatal(err)
+			decorate := func(req *http.Request) { req.Header.Set(h.key, h.value) }
+			page := openLink(t, ts.URL, "?t="+ticket, decorate)
+			if page.StatusCode != http.StatusOK {
+				t.Errorf("a navigation carrying %s: %s was refused as speculative (%d)",
+					h.key, h.value, page.StatusCode)
 			}
-			req.Header.Set(h.key, h.value)
-			resp, err := noRedirectClient().Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
+			page.Body.Close()
+			resp := redeemTicket(t, ts.URL, "?t="+ticket, decorate)
 			defer resp.Body.Close()
 			if sessionCookie(resp) == nil {
-				t.Errorf("a navigation carrying %s: %s was refused as speculative",
+				t.Errorf("a click carrying %s: %s was refused as speculative",
 					h.key, h.value)
 			}
 		})
 	}
 }
 
-// assertTicketSurvives drives one speculative request, then the human's real
-// navigation to the SAME url.
+// assertTicketSurvives drives one speculative request against each half, then
+// the human's real click.
 //
-// The second half is the assertion that matters: a 403 alone would pass against
+// The last half is the assertion that matters: a 403 alone would pass against
 // a handler that refused the prefetch after already redeeming it.
 func assertTicketSurvives(t *testing.T, speculative func(*http.Request)) {
 	t.Helper()
@@ -147,29 +133,24 @@ func assertTicketSurvives(t *testing.T, speculative func(*http.Request)) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	url := ts.URL + "/login/ticket?t=" + ticket
-
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	speculative(req)
-	resp, err := noRedirectClient().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", resp.StatusCode)
-	}
-	if sessionCookie(resp) != nil {
-		t.Error("a speculative fetch was handed a session cookie")
+	for _, half := range []struct {
+		name string
+		do   func() *http.Response
+	}{
+		{"GET", func() *http.Response { return openLink(t, ts.URL, "?t="+ticket, speculative) }},
+		{"POST", func() *http.Response { return redeemTicket(t, ts.URL, "?t="+ticket, speculative) }},
+	} {
+		resp := half.do()
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403", half.name, resp.StatusCode)
+		}
+		if sessionCookie(resp) != nil {
+			t.Errorf("%s: a speculative fetch was handed a session cookie", half.name)
+		}
 	}
 
-	get, err := noRedirectClient().Get(url)
-	if err != nil {
-		t.Fatal(err)
-	}
+	get := redeemTicket(t, ts.URL, "?t="+ticket)
 	defer get.Body.Close()
 	if sessionCookie(get) == nil {
 		t.Error("the ticket was burned by a speculative fetch")
@@ -179,8 +160,8 @@ func assertTicketSurvives(t *testing.T, speculative func(*http.Request)) {
 // Fails OPEN, deliberately. curl, an older browser and the operator's own
 // `bridge admin login-link` flow send no fetch-metadata headers at all, and
 // turning those away would break the path the guard exists to serve. Absent is
-// not a declaration.
-func TestABareGetWithNoFetchMetadataStillRedeems(t *testing.T) {
+// not a declaration — on either half.
+func TestABareRequestWithNoFetchMetadataStillReachesTheConsole(t *testing.T) {
 	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -189,16 +170,16 @@ func TestABareGetWithNoFetchMetadataStillRedeems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	get, err := noRedirectClient().Get(ts.URL + "/login/ticket?t=" + ticket)
-	if err != nil {
-		t.Fatal(err)
-	}
+	page := openLink(t, ts.URL, "?t="+ticket)
+	assertInterstitial(t, page, ticket)
+	page.Body.Close()
+	get := redeemTicket(t, ts.URL, "?t="+ticket)
 	defer get.Body.Close()
 	if get.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302", get.StatusCode)
 	}
 	if sessionCookie(get) == nil {
-		t.Error("a header-less GET — curl, or the operator's shell flow — was refused")
+		t.Error("a header-less click — curl, or the operator's shell flow — was refused")
 	}
 }
 
@@ -210,10 +191,7 @@ func TestAFailedRedeemPointsAtAStaleLink(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	resp, err := noRedirectClient().Get(ts.URL + "/login/ticket?t=never-existed")
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := redeemTicket(t, ts.URL, "?t=never-existed")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302", resp.StatusCode)
@@ -305,10 +283,7 @@ func TestAnUnwritableTicketStoreIsNotAStaleLink(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-	resp, err := noRedirectClient().Get(ts.URL + "/login/ticket?t=" + ticket)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := redeemTicket(t, ts.URL, "?t="+ticket)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
