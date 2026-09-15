@@ -11,38 +11,70 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// The coverage fixtures' two shapes, and the one mtime/size pair every
+// row in this file shares — a variant is FRESH only while it matches its
+// source's, so the seeds and the sidecars have to agree on both.
+const (
+	fixtureHiRate, fixtureHiBits = 96000.0, 24
+	fixtureCDRate, fixtureCDBits = 44100.0, 16
+	fixtureSize                  = 1000
+)
+
+func fixtureMTime() time.Time { return time.Unix(7, 0) }
+
+// fixtureTrack builds one tagged track. The pointer fields are why this
+// is a function rather than a literal: each track needs its OWN rate,
+// bits and isDSD addresses, and a shared helper is the cheapest way to
+// stop a future fixture aliasing them.
+func fixtureTrack(path, title, album string, rate float64, bits int) *manifest.Track {
+	no := false
+	return &manifest.Track{
+		Path: path, Title: title, Album: album, AlbumArtist: "Artist", Artist: "Artist",
+		Codec: "FLAC", Size: fixtureSize, ModTime: fixtureMTime(),
+		SampleRate: &rate, BitsPerSample: &bits, IsDSD: &no,
+	}
+}
+
+func seedTracks(t *testing.T, st *manifest.Store, tracks ...*manifest.Track) {
+	t.Helper()
+	for _, tr := range tracks {
+		if err := st.UpsertTrack(t.Context(), tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// addVariant writes one sidecar row against `path`, stamped fresh.
+func addVariant(t *testing.T, st *manifest.Store, path, variantID string, rate, bits int) {
+	t.Helper()
+	if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: path, VariantID: variantID, SidecarPath: path + ".x",
+		Format: "FLAC", SampleRate: rate, BitsPerSample: bits, SizeBytes: 100,
+		SourceMTimeNS: fixtureMTime().UnixNano(), SourceSize: fixtureSize,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// addOptimizedVariant is the CarPlay copy every test here reaches for.
+func addOptimizedVariant(t *testing.T, st *manifest.Store, path string) {
+	t.Helper()
+	addVariant(t, st, path, "optimized-v2-48000-16", 48000, 16)
+}
+
 // seedCoverageLibrary stages three albums with deliberately different
 // variant states: one fully CarPlay-covered, one untouched, and one
 // CD-quality album that can never take a CarPlay copy at all.
 func seedCoverageLibrary(t *testing.T, st *manifest.Store) {
 	t.Helper()
-	hi, hiBits, no := 96000.0, 24, false
-	cd, cdBits := 44100.0, 16
-	mk := func(path, title, album string, rate float64, bits int) *manifest.Track {
-		return &manifest.Track{
-			Path: path, Title: title, Album: album, AlbumArtist: "Artist", Artist: "Artist",
-			Codec: "FLAC", Size: 1000, ModTime: time.Unix(7, 0),
-			SampleRate: &rate, BitsPerSample: &bits, IsDSD: &no,
-		}
-	}
-	for _, tr := range []*manifest.Track{
-		mk("Hi/Covered/01.flac", "a", "Covered", hi, hiBits),
-		mk("Hi/Covered/02.flac", "b", "Covered", hi, hiBits),
-		mk("Hi/Bare/01.flac", "c", "Bare", hi, hiBits),
-		mk("Cd/Redbook/01.flac", "d", "Redbook", cd, cdBits),
-	} {
-		if err := st.UpsertTrack(t.Context(), tr); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedTracks(t, st,
+		fixtureTrack("Hi/Covered/01.flac", "a", "Covered", fixtureHiRate, fixtureHiBits),
+		fixtureTrack("Hi/Covered/02.flac", "b", "Covered", fixtureHiRate, fixtureHiBits),
+		fixtureTrack("Hi/Bare/01.flac", "c", "Bare", fixtureHiRate, fixtureHiBits),
+		fixtureTrack("Cd/Redbook/01.flac", "d", "Redbook", fixtureCDRate, fixtureCDBits),
+	)
 	for _, p := range []string{"Hi/Covered/01.flac", "Hi/Covered/02.flac"} {
-		if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
-			SourcePath: p, VariantID: "optimized-v2-48000-16", SidecarPath: p + ".x",
-			Format: "FLAC", SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
-			SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
-		}); err != nil {
-			t.Fatal(err)
-		}
+		addOptimizedVariant(t, st, p)
 	}
 }
 
@@ -261,14 +293,7 @@ func TestClockStaleCoverageIsServedNotAwaited(t *testing.T) {
 	// what the auto-optimize sweeper does, and it deliberately does NOT
 	// bump the catalog epoch — which is the entire reason coverage
 	// carries a TTL at all.
-	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
-		SourcePath: "Hi/Bare/01.flac", VariantID: "optimized-v2-48000-16",
-		SidecarPath: "Hi/Bare/01.flac.x", Format: "FLAC",
-		SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
-		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	addOptimizedVariant(t, srv.deps.Manifest, "Hi/Bare/01.flac")
 	expireCoverage(t, srv)
 
 	if got := coverageOf(t, srv, "Bare"); got.Covered != 0 {
@@ -296,14 +321,7 @@ func TestAKnownWrongCoverageSnapshotIsRebuiltSynchronously(t *testing.T) {
 		t.Fatalf("seeded Bare optimize covered = %d, want 0", got.Covered)
 	}
 
-	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
-		SourcePath: "Hi/Bare/01.flac", VariantID: "optimized-v2-48000-16",
-		SidecarPath: "Hi/Bare/01.flac.x", Format: "FLAC",
-		SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
-		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	addOptimizedVariant(t, srv.deps.Manifest, "Hi/Bare/01.flac")
 	srv.InvalidateLibraryCatalog() // a scan landed
 
 	if got := coverageOf(t, srv, "Bare"); got.Covered != 1 {
@@ -400,23 +418,10 @@ func TestAConcurrentRebuildForAnotherTargetDoesNotJoinTheFlight(t *testing.T) {
 // generated sidecar anywhere.
 func seedVariantFreeLibrary(t *testing.T, st *manifest.Store) {
 	t.Helper()
-	hi, hiBits, no := 96000.0, 24, false
-	cd, cdBits := 44100.0, 16
-	mk := func(path, title, album string, rate float64, bits int) *manifest.Track {
-		return &manifest.Track{
-			Path: path, Title: title, Album: album, AlbumArtist: "Artist", Artist: "Artist",
-			Codec: "FLAC", Size: 1000, ModTime: time.Unix(7, 0),
-			SampleRate: &rate, BitsPerSample: &bits, IsDSD: &no,
-		}
-	}
-	for _, tr := range []*manifest.Track{
-		mk("Hi/Bare/01.flac", "a", "Bare", hi, hiBits),
-		mk("Cd/Redbook/01.flac", "b", "Redbook", cd, cdBits),
-	} {
-		if err := st.UpsertTrack(t.Context(), tr); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedTracks(t, st,
+		fixtureTrack("Hi/Bare/01.flac", "a", "Bare", fixtureHiRate, fixtureHiBits),
+		fixtureTrack("Cd/Redbook/01.flac", "b", "Redbook", fixtureCDRate, fixtureCDBits),
+	)
 }
 
 // countCoverageBuilds installs the test hook and returns a reader for it.
@@ -503,14 +508,7 @@ func TestANeedsFilterStillBuildsCoverageWithoutVariants(t *testing.T) {
 func TestOneVariantIsEnoughToBuildCoverage(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	seedVariantFreeLibrary(t, srv.deps.Manifest)
-	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
-		SourcePath: "Cd/Redbook/01.flac", VariantID: "upscaled-v2-96000-24",
-		SidecarPath: "Cd/Redbook/01.flac.x", Format: "FLAC",
-		SampleRate: 96000, BitsPerSample: 24, SizeBytes: 100,
-		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	addVariant(t, srv.deps.Manifest, "Cd/Redbook/01.flac", "upscaled-v2-96000-24", 96000, 24)
 	builds := countCoverageBuilds(t, srv)
 
 	_, albums := albumsPage(t, srv, "")
