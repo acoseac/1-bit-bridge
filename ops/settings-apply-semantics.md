@@ -467,8 +467,6 @@ process, `log-file-size`, the log export, and the Diagnostics `/metrics` pointer
 |---|---|---|
 | `listenAddress` | The `/v1` listener bind | Provisioning-time setting |
 | `adminAddress` | The admin listener bind | Provisioning-time setting |
-| `upscaleEnabled` | `transcode.Pool` — enqueue / stop / publisher-drain ordering has a history of production panics | Provisioning-time setting |
-| `analysisEnabled` | `analyze.Pool` — same invariants | Provisioning-time setting |
 | `dlnaEnabled` | HTTP listener + per-interface SSDP advertisers | Irrelevant to a cloud tenant: no LAN to advertise on |
 | `libraryWatchEnabled` | fsnotify watcher behind a `scanWG` / `closing` drain guarding a SQLite-corruption vector | The one deliberate maybe — see below |
 | `atlasEnabled` | An API field *and* a file-backed harvest state store; converting one half is what rule 1 forbids | Convertible, but as a whole-field lifecycle change |
@@ -479,10 +477,28 @@ Two of them (`listenAddress`, `adminAddress`) will never convert. The rest are
 supervised restart at provision time costs nothing — which is why the stack
 stopped here rather than taking on runtime pool teardown.
 
+`upscaleEnabled` and `analysisEnabled` used to be listed here, reading
+"`transcode.Pool` / `analyze.Pool` — enqueue / stop / publisher-drain ordering
+has a history of production panics". **PR #781 made both live** and they should
+have left in the same commit: the pools are now constructed unconditionally and
+never stopped before shutdown, and one shared live predicate gates the health
+flag, the manifest variant gate and every enqueue path — which is exactly what
+the per-field matrix above has said since. The header has counted **six** all
+along; these two rows are what made it eight, and the arithmetic is the only
+reason the drift was visible at all.
+
+It mattered: this table is what a control plane reads when deciding whether a
+setting can be offered to a tenant who is refused the `restart` control, and on
+its old wording the answer for these two was "no — they would set a switch that
+does nothing until someone restarts them". The true answer is `live`, with a
+reason when the toolchain is missing, because a restart cannot install sox.
+
 Do not read this table as the source of truth on its own:
 `TestMatrixDocMatchesWhatTheHandlerReports` drives the real handler for every row
-above, so the answer the bridge gives is the answer the control plane should
-trust, and this file is checked against it rather than the other way round.
+of the PER-FIELD MATRIX further up — not for this summary, which is prose and
+drifted for exactly that reason. The answer the bridge gives is the answer the
+control plane should trust; when the two disagree, the handler wins and this file
+is wrong.
 
 ### When to reopen `libraryWatchEnabled`
 
