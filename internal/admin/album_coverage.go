@@ -101,8 +101,36 @@ const coverageTTL = 30 * time.Second
 //
 // A failure degrades to nil rather than to an error: the grid's job is
 // to show albums, and losing a badge is not a reason to lose the page.
-func (s *Server) albumCoverageFor(r *http.Request, cat *librarycat.Catalog) map[string]albumCoverage {
+func (s *Server) albumCoverageFor(r *http.Request, cat *librarycat.Catalog, needsFilter bool) map[string]albumCoverage {
 	if s.deps.Manifest == nil {
+		return nil
+	}
+	// Nothing to say, so do not pay to say it.
+	//
+	// The grid's badge is drawn from PRESENCE — `covered` and `stale`.
+	// With no `track_variants` row anywhere, `AllVariantPresence` comes
+	// back empty, `foldPresence` is never reached, and every album's
+	// coverage is a denominator and nothing else: covered 0, stale 0 for
+	// all of them, which renders no badge on any tile. The expensive
+	// half — `AllEligibleKinds`, a full scan of `tracks` carrying three
+	// EXISTS subqueries — would be computed entirely to be discarded.
+	//
+	// The `needs=` filter is the ONE consumer that reads the denominator
+	// alone ("albums that still need CarPlay copies" is a real question
+	// with zero variants — the answer is "all the eligible ones"), so it
+	// forces the build. That is not an optimisation detail: `filterAlbums`
+	// treats a nil snapshot as "drop the filter", so skipping the build
+	// under a `needs=` query would quietly answer with the UNFILTERED
+	// library rather than with nothing.
+	//
+	// This is the cloud tenant's case and every fresh bridge's — the
+	// hosted template ships with upscale and optimize off, so those
+	// libraries never hold a variant at all and paid two whole-library
+	// reads per page load for a badge that could not appear.
+	//
+	// Checked BEFORE the snapshot is consulted, so a skipped answer is
+	// never stored and cannot be read back by a later `needs=` request.
+	if !needsFilter && !s.libraryHasAnyVariant(r.Context()) {
 		return nil
 	}
 	cfg := s.deps.CfgHolder.Load()
@@ -123,6 +151,23 @@ func (s *Server) albumCoverageFor(r *http.Request, cat *librarycat.Catalog) map[
 		return c.byAlbum
 	}
 	return s.rebuildCoverage(r.Context(), cat, epoch, rate, bits)
+}
+
+// libraryHasAnyVariant answers the cheap half of "is coverage worth
+// building", and fails OPEN.
+//
+// An error here means we do not know, and the honest response to not
+// knowing is to do what the bridge did before this gate existed: build
+// the snapshot. Failing closed would drop every badge in the library on
+// a transient database error, silently and for a full page — much worse
+// than paying for a scan.
+func (s *Server) libraryHasAnyVariant(ctx context.Context) bool {
+	any, err := s.deps.Manifest.AnyVariantExists(ctx)
+	if err != nil {
+		logger.Warn("player: probe for any variant", "err", err)
+		return true
+	}
+	return any
 }
 
 // rebuildCoverage is the single owner of the coverage singleflight.

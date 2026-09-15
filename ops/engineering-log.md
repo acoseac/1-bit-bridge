@@ -5323,3 +5323,95 @@ bridge-OWNED file (the adminauth store, the ticket sidecar, the SQLite DB) logs
 the OS error, which names that file under the data dir. Not the library, and
 error-only — but the sentence should say "in normal operation". Noted in the
 R1 status file with the other v0.2.0 privacy-page items.
+
+## 2026-09-15 — the album grid's coverage snapshot: two fixes, one measured complaint
+
+Reported as "the album list is loading slowly". It was, and the cause was one
+function.
+
+### The blocking rebuild (#911)
+
+`albumCoverageFor` runs on every `/api/player/albums` request and rebuilt
+synchronously whenever its 30 s TTL had lapsed. Thirty seconds is shorter than
+any realistic gap between visits, so the cost landed on essentially EVERY visit
+rather than on an unlucky one.
+
+Measured live against bridge.ars.md, 21,431 tracks, from the browser:
+
+| request | cold | warm |
+|---|---|---|
+| `/api/player/albums` | **252 ms**, and **853 ms** under a concurrent sweep | 19 ms |
+| `/api/player/artists` — same catalog, no coverage | 48 ms | — |
+
+The subtraction is the isolation: artists proves the catalog was warm in both,
+so the whole spread is coverage. `AllEligibleKinds` full-scans `tracks` with
+three `EXISTS` subqueries; `AllVariantPresence` folds `track_variants`; both
+build a map per track.
+
+`catalog.go` had already split staleness into known-wrong (synchronous) and
+clock-stale (serve, refresh behind), and recorded why — "blocking a page load on
+a guess is what made an occasional visitor pay a full fold on essentially every
+visit". Coverage never got the split. **Scope checked rather than asserted**:
+`albumCoverageFor` has exactly one caller and is the only site in
+`internal/admin` calling the `All*` whole-library store methods, so this was the
+only blocking whole-library rebuild on an interactive path. Every other TTL
+snapshot in the package sits on a POLLED endpoint.
+
+**Review round 1 found a real defect underneath it**, from Gemini and CodeRabbit
+independently: `coverageSF.Do` was keyed on the constant `"coverage"`, so a
+caller whose `(epoch, rate, bits)` differed from the flight in progress JOINED
+it and was handed a map built for a different upscale TARGET — rendered as this
+target's bars, and used by `filterAlbums` to answer `needs=`. The flight's
+internal re-check cannot catch it: it compares the LEADER's captured identity,
+satisfied by construction. Pre-existing, but widened here, because a background
+refresh is a longer-lived flight than the synchronous rebuild it replaced.
+
+This is the one place coverage must NOT copy the catalog, whose flight is keyed
+on a constant deliberately: a catalog joiner gets "a consistent snapshot, merely
+not the newest", which is true of a library view, whereas a coverage snapshot
+for a different `(rate, bits)` is not an older answer to the same question but
+an answer to a different one. Reproduced by the negative control — 192000/24 and
+44100/16 give 4 upscale-eligible tracks and 0, and with the constant key the
+44.1k caller received 4, with one fold instead of two.
+
+**Declined** the second half of Gemini's finding (a per-target set in place of
+the single `coverageRefreshing` bool). `refreshCoverageAsync` is reachable only
+from the branch where the cached snapshot's epoch, rate and bits ALL equal the
+request's; a differing identity is a cache MISS that takes the synchronous path
+and never consults the flag. `s.coverage` holds one snapshot, so at most one
+identity can be clock-stale at a time and such a set would have at most one
+member. Argument written onto the function, because it was read as a starvation
+bug once and will be again.
+
+### Not paying for a badge that cannot appear (#913)
+
+The grid's badge is drawn from PRESENCE — `covered` and `stale`. With no
+`track_variants` row anywhere, `AllVariantPresence` returns empty, `foldPresence`
+is never reached, and every album's coverage is a denominator and nothing else,
+which renders no badge on any tile. The expensive half was computed in full to be
+discarded.
+
+That is the hosted tenant's case and every fresh bridge's: the cloud template
+ships upscale and optimize off, so those libraries hold no variant at all.
+
+Measured at 5,000 tracks / 417 albums: `AnyVariantExists` **66.5 µs** against a
+full coverage build of **6.27 ms**, a 94x gap that WIDENS with library size —
+the probe is an index probe with an early exit, the build is O(tracks). `EXISTS`
+rather than the existing `CountVariants` for exactly that reason: a gate must not
+scale with the thing it exists to avoid. It fails OPEN, since not knowing should
+do what the bridge did before the gate existed.
+
+**The trap here is not the cost, it is `needs=`.** That filter reads the
+denominator alone — "which albums still need CarPlay copies" is a real question
+on a library that has never made one — and `filterAlbums` treats a nil snapshot
+as *drop the filter*. Skipping the build under a `needs=` query would therefore
+answer with the whole UNFILTERED library, carrying a total, as though it were the
+filtered set. The gate is conditioned on the filter for that reason, and
+`TestANeedsFilterStillBuildsCoverageWithoutVariants` is the guard.
+
+A fixture note worth keeping: the first version of that test used
+`needs=upscale`, which cannot tell "applied" from "dropped" on this seed —
+BOTH albums are upscale-eligible against the default target, so the filtered and
+unfiltered answers are identical. `needs=optimize` narrows genuinely, because a
+CD-quality album is already at the CarPlay target. A fixture must be a value the
+transformation would actually change.

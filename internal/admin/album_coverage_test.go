@@ -11,38 +11,70 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// The coverage fixtures' two shapes, and the one mtime/size pair every
+// row in this file shares — a variant is FRESH only while it matches its
+// source's, so the seeds and the sidecars have to agree on both.
+const (
+	fixtureHiRate, fixtureHiBits = 96000.0, 24
+	fixtureCDRate, fixtureCDBits = 44100.0, 16
+	fixtureSize                  = 1000
+)
+
+func fixtureMTime() time.Time { return time.Unix(7, 0) }
+
+// fixtureTrack builds one tagged track. The pointer fields are why this
+// is a function rather than a literal: each track needs its OWN rate,
+// bits and isDSD addresses, and a shared helper is the cheapest way to
+// stop a future fixture aliasing them.
+func fixtureTrack(path, title, album string, rate float64, bits int) *manifest.Track {
+	no := false
+	return &manifest.Track{
+		Path: path, Title: title, Album: album, AlbumArtist: "Artist", Artist: "Artist",
+		Codec: "FLAC", Size: fixtureSize, ModTime: fixtureMTime(),
+		SampleRate: &rate, BitsPerSample: &bits, IsDSD: &no,
+	}
+}
+
+func seedTracks(t *testing.T, st *manifest.Store, tracks ...*manifest.Track) {
+	t.Helper()
+	for _, tr := range tracks {
+		if err := st.UpsertTrack(t.Context(), tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// addVariant writes one sidecar row against `path`, stamped fresh.
+func addVariant(t *testing.T, st *manifest.Store, path, variantID string, rate, bits int) {
+	t.Helper()
+	if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: path, VariantID: variantID, SidecarPath: path + ".x",
+		Format: "FLAC", SampleRate: rate, BitsPerSample: bits, SizeBytes: 100,
+		SourceMTimeNS: fixtureMTime().UnixNano(), SourceSize: fixtureSize,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// addOptimizedVariant is the CarPlay copy every test here reaches for.
+func addOptimizedVariant(t *testing.T, st *manifest.Store, path string) {
+	t.Helper()
+	addVariant(t, st, path, "optimized-v2-48000-16", 48000, 16)
+}
+
 // seedCoverageLibrary stages three albums with deliberately different
 // variant states: one fully CarPlay-covered, one untouched, and one
 // CD-quality album that can never take a CarPlay copy at all.
 func seedCoverageLibrary(t *testing.T, st *manifest.Store) {
 	t.Helper()
-	hi, hiBits, no := 96000.0, 24, false
-	cd, cdBits := 44100.0, 16
-	mk := func(path, title, album string, rate float64, bits int) *manifest.Track {
-		return &manifest.Track{
-			Path: path, Title: title, Album: album, AlbumArtist: "Artist", Artist: "Artist",
-			Codec: "FLAC", Size: 1000, ModTime: time.Unix(7, 0),
-			SampleRate: &rate, BitsPerSample: &bits, IsDSD: &no,
-		}
-	}
-	for _, tr := range []*manifest.Track{
-		mk("Hi/Covered/01.flac", "a", "Covered", hi, hiBits),
-		mk("Hi/Covered/02.flac", "b", "Covered", hi, hiBits),
-		mk("Hi/Bare/01.flac", "c", "Bare", hi, hiBits),
-		mk("Cd/Redbook/01.flac", "d", "Redbook", cd, cdBits),
-	} {
-		if err := st.UpsertTrack(t.Context(), tr); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedTracks(t, st,
+		fixtureTrack("Hi/Covered/01.flac", "a", "Covered", fixtureHiRate, fixtureHiBits),
+		fixtureTrack("Hi/Covered/02.flac", "b", "Covered", fixtureHiRate, fixtureHiBits),
+		fixtureTrack("Hi/Bare/01.flac", "c", "Bare", fixtureHiRate, fixtureHiBits),
+		fixtureTrack("Cd/Redbook/01.flac", "d", "Redbook", fixtureCDRate, fixtureCDBits),
+	)
 	for _, p := range []string{"Hi/Covered/01.flac", "Hi/Covered/02.flac"} {
-		if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
-			SourcePath: p, VariantID: "optimized-v2-48000-16", SidecarPath: p + ".x",
-			Format: "FLAC", SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
-			SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
-		}); err != nil {
-			t.Fatal(err)
-		}
+		addOptimizedVariant(t, st, p)
 	}
 }
 
@@ -261,14 +293,7 @@ func TestClockStaleCoverageIsServedNotAwaited(t *testing.T) {
 	// what the auto-optimize sweeper does, and it deliberately does NOT
 	// bump the catalog epoch — which is the entire reason coverage
 	// carries a TTL at all.
-	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
-		SourcePath: "Hi/Bare/01.flac", VariantID: "optimized-v2-48000-16",
-		SidecarPath: "Hi/Bare/01.flac.x", Format: "FLAC",
-		SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
-		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	addOptimizedVariant(t, srv.deps.Manifest, "Hi/Bare/01.flac")
 	expireCoverage(t, srv)
 
 	if got := coverageOf(t, srv, "Bare"); got.Covered != 0 {
@@ -296,14 +321,7 @@ func TestAKnownWrongCoverageSnapshotIsRebuiltSynchronously(t *testing.T) {
 		t.Fatalf("seeded Bare optimize covered = %d, want 0", got.Covered)
 	}
 
-	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
-		SourcePath: "Hi/Bare/01.flac", VariantID: "optimized-v2-48000-16",
-		SidecarPath: "Hi/Bare/01.flac.x", Format: "FLAC",
-		SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
-		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	addOptimizedVariant(t, srv.deps.Manifest, "Hi/Bare/01.flac")
 	srv.InvalidateLibraryCatalog() // a scan landed
 
 	if got := coverageOf(t, srv, "Bare"); got.Covered != 1 {
@@ -392,5 +410,118 @@ func TestAConcurrentRebuildForAnotherTargetDoesNotJoinTheFlight(t *testing.T) {
 	}
 	if builds.Load() != 2 {
 		t.Errorf("folds = %d, want 2 — the two targets must each build their own", builds.Load())
+	}
+}
+
+// seedVariantFreeLibrary is the hosted tenant's shape and every fresh
+// bridge's: real albums, a mix of eligible and not, and not one
+// generated sidecar anywhere.
+func seedVariantFreeLibrary(t *testing.T, st *manifest.Store) {
+	t.Helper()
+	seedTracks(t, st,
+		fixtureTrack("Hi/Bare/01.flac", "a", "Bare", fixtureHiRate, fixtureHiBits),
+		fixtureTrack("Cd/Redbook/01.flac", "b", "Redbook", fixtureCDRate, fixtureCDBits),
+	)
+}
+
+// countCoverageBuilds installs the test hook and returns a reader for it.
+//
+// Drains before restoring, for the reason the concurrency test's cleanup
+// records: a background refresher can still be inside the hook when a
+// test ends, and the cleanup's write would race its read.
+func countCoverageBuilds(t *testing.T, srv *Server) func() int {
+	t.Helper()
+	var n atomic.Int32
+	coverageBuiltHookForTests = func() { n.Add(1) }
+	t.Cleanup(func() {
+		srv.WaitForCatalogRefresh()
+		coverageBuiltHookForTests = nil
+	})
+	return func() int { return int(n.Load()) }
+}
+
+// TestAVariantFreeLibraryDoesNotBuildCoverage — with no sidecar anywhere,
+// every album's coverage is a denominator and nothing else, so no tile can
+// carry a badge. Computing that costs a full scan of `tracks` with three
+// EXISTS subqueries, per page load, to produce something discarded. This is
+// the hosted tenant's case: the cloud template ships upscale and optimize
+// off, so those libraries never hold a variant at all.
+func TestAVariantFreeLibraryDoesNotBuildCoverage(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedVariantFreeLibrary(t, srv.deps.Manifest)
+	builds := countCoverageBuilds(t, srv)
+
+	_, albums := albumsPage(t, srv, "")
+	if len(albums) != 2 {
+		t.Fatalf("got %d albums, want 2", len(albums))
+	}
+	if n := builds(); n != 0 {
+		t.Errorf("coverage folded %d time(s) for a library with no variants — the whole "+
+			"answer would have been discarded", n)
+	}
+	for _, a := range albums {
+		if _, ok := a["variants"]; ok {
+			t.Errorf("album %v carries a variants block with no variants in the library", a["title"])
+		}
+	}
+}
+
+// TestANeedsFilterStillBuildsCoverageWithoutVariants is the other half,
+// and it guards a trap rather than a cost. The `needs=` filter reads the
+// DENOMINATOR, which exists with or without a single sidecar — "which
+// albums still need CarPlay copies" is a real question on a library that
+// has never made one, and the answer is "all the eligible ones".
+//
+// Skipping the build here would not merely lose the filter: `filterAlbums`
+// treats a nil snapshot as "drop the filter", so the response would be the
+// whole UNFILTERED library, presented with a total, as though it were the
+// filtered set.
+func TestANeedsFilterStillBuildsCoverageWithoutVariants(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedVariantFreeLibrary(t, srv.deps.Manifest)
+	builds := countCoverageBuilds(t, srv)
+
+	// `needs=optimize`, not `needs=upscale`: both seeded albums are
+	// upscale-eligible against the default target, so that filter cannot
+	// tell "applied" from "dropped" — the answer is the whole library
+	// either way. Optimize narrows genuinely, because the CD album is
+	// already at the CarPlay target and can never want a copy.
+	total, albums := albumsPage(t, srv, "needs=optimize")
+	if n := builds(); n == 0 {
+		t.Fatal("needs=optimize answered without folding coverage — the filter reads the " +
+			"denominator, and a nil snapshot silently drops it")
+	}
+	got := titlesOf(albums)
+	if total != 1 || !got["Bare"] {
+		t.Errorf("needs=optimize → total %d %v, want just Bare", total, got)
+	}
+	if got["Redbook"] {
+		t.Error("an album already at the CarPlay target was listed as needing a copy — the " +
+			"filter was dropped and the unfiltered library came back")
+	}
+}
+
+// TestOneVariantIsEnoughToBuildCoverage pins the gate's edge: the skip is
+// keyed on the library holding NO sidecar, not on the album in front of
+// you having none, so a single row anywhere restores the old behaviour for
+// every tile.
+func TestOneVariantIsEnoughToBuildCoverage(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedVariantFreeLibrary(t, srv.deps.Manifest)
+	addVariant(t, srv.deps.Manifest, "Cd/Redbook/01.flac", "upscaled-v2-96000-24", 96000, 24)
+	builds := countCoverageBuilds(t, srv)
+
+	_, albums := albumsPage(t, srv, "")
+	if n := builds(); n != 1 {
+		t.Errorf("coverage folded %d time(s), want 1 — one sidecar anywhere is enough", n)
+	}
+	var seen bool
+	for _, a := range albums {
+		if _, ok := a["variants"]; ok {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Error("no album carried a variants block although the library holds a sidecar")
 	}
 }

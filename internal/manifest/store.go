@@ -8174,6 +8174,26 @@ func (s *Store) CountVariants(ctx context.Context) (int, int64, error) {
 	return count, bytes.Int64, nil
 }
 
+// AnyVariantExists reports whether the library holds a single generated
+// sidecar, of any kind.
+//
+// EXISTS rather than CountVariants, and the difference is the whole
+// point: this answers a yes/no that SQLite settles with one index probe
+// and an early exit, where a COUNT walks every row of a table that has
+// one per generated file. The caller asks it on a page load to decide
+// whether a much more expensive question is worth asking at all, so it
+// must not itself scale with the thing it is trying to avoid.
+//
+// Read-only; no s.mu.
+func (s *Store) AnyVariantExists(ctx context.Context) (bool, error) {
+	var any bool
+	row := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM track_variants)`)
+	if err := row.Scan(&any); err != nil {
+		return false, err
+	}
+	return any, nil
+}
+
 // AnalysisRow is the on-disk record for one track's offline audio
 // analysis (the `track_analysis` table). Phase 1 carries the waveform
 // sidecar pointer + content tag + freshness fields; a later phase adds
