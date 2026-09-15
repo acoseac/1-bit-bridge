@@ -479,8 +479,8 @@ stopped here rather than taking on runtime pool teardown.
 
 `upscaleEnabled` and `analysisEnabled` used to be listed here, reading
 "`transcode.Pool` / `analyze.Pool` — enqueue / stop / publisher-drain ordering
-has a history of production panics". **PR #781 made both live** and they should
-have left in the same commit: the pools are now constructed unconditionally and
+has a history of production panics". **PR #781 made both live** and these rows
+should have been deleted in the same commit: the pools are now constructed unconditionally and
 never stopped before shutdown, and one shared live predicate gates the health
 flag, the manifest variant gate and every enqueue path — which is exactly what
 the per-field matrix above has said since. The header has counted **six** all
