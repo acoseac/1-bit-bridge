@@ -394,3 +394,129 @@ func TestAConcurrentRebuildForAnotherTargetDoesNotJoinTheFlight(t *testing.T) {
 		t.Errorf("folds = %d, want 2 — the two targets must each build their own", builds.Load())
 	}
 }
+
+// seedVariantFreeLibrary is the hosted tenant's shape and every fresh
+// bridge's: real albums, a mix of eligible and not, and not one
+// generated sidecar anywhere.
+func seedVariantFreeLibrary(t *testing.T, st *manifest.Store) {
+	t.Helper()
+	hi, hiBits, no := 96000.0, 24, false
+	cd, cdBits := 44100.0, 16
+	mk := func(path, title, album string, rate float64, bits int) *manifest.Track {
+		return &manifest.Track{
+			Path: path, Title: title, Album: album, AlbumArtist: "Artist", Artist: "Artist",
+			Codec: "FLAC", Size: 1000, ModTime: time.Unix(7, 0),
+			SampleRate: &rate, BitsPerSample: &bits, IsDSD: &no,
+		}
+	}
+	for _, tr := range []*manifest.Track{
+		mk("Hi/Bare/01.flac", "a", "Bare", hi, hiBits),
+		mk("Cd/Redbook/01.flac", "b", "Redbook", cd, cdBits),
+	} {
+		if err := st.UpsertTrack(t.Context(), tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// countCoverageBuilds installs the test hook and returns a reader for it.
+func countCoverageBuilds(t *testing.T) func() int {
+	t.Helper()
+	var n atomic.Int32
+	coverageBuiltHookForTests = func() { n.Add(1) }
+	t.Cleanup(func() { coverageBuiltHookForTests = nil })
+	return func() int { return int(n.Load()) }
+}
+
+// TestAVariantFreeLibraryDoesNotBuildCoverage — with no sidecar anywhere,
+// every album's coverage is a denominator and nothing else, so no tile can
+// carry a badge. Computing that costs a full scan of `tracks` with three
+// EXISTS subqueries, per page load, to produce something discarded. This is
+// the hosted tenant's case: the cloud template ships upscale and optimize
+// off, so those libraries never hold a variant at all.
+func TestAVariantFreeLibraryDoesNotBuildCoverage(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedVariantFreeLibrary(t, srv.deps.Manifest)
+	builds := countCoverageBuilds(t)
+
+	_, albums := albumsPage(t, srv, "")
+	if len(albums) != 2 {
+		t.Fatalf("got %d albums, want 2", len(albums))
+	}
+	if n := builds(); n != 0 {
+		t.Errorf("coverage folded %d time(s) for a library with no variants — the whole "+
+			"answer would have been discarded", n)
+	}
+	for _, a := range albums {
+		if _, ok := a["variants"]; ok {
+			t.Errorf("album %v carries a variants block with no variants in the library", a["title"])
+		}
+	}
+}
+
+// TestANeedsFilterStillBuildsCoverageWithoutVariants is the other half,
+// and it guards a trap rather than a cost. The `needs=` filter reads the
+// DENOMINATOR, which exists with or without a single sidecar — "which
+// albums still need CarPlay copies" is a real question on a library that
+// has never made one, and the answer is "all the eligible ones".
+//
+// Skipping the build here would not merely lose the filter: `filterAlbums`
+// treats a nil snapshot as "drop the filter", so the response would be the
+// whole UNFILTERED library, presented with a total, as though it were the
+// filtered set.
+func TestANeedsFilterStillBuildsCoverageWithoutVariants(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedVariantFreeLibrary(t, srv.deps.Manifest)
+	builds := countCoverageBuilds(t)
+
+	// `needs=optimize`, not `needs=upscale`: both seeded albums are
+	// upscale-eligible against the default target, so that filter cannot
+	// tell "applied" from "dropped" — the answer is the whole library
+	// either way. Optimize narrows genuinely, because the CD album is
+	// already at the CarPlay target and can never want a copy.
+	total, albums := albumsPage(t, srv, "needs=optimize")
+	if n := builds(); n == 0 {
+		t.Fatal("needs=optimize answered without folding coverage — the filter reads the " +
+			"denominator, and a nil snapshot silently drops it")
+	}
+	got := titlesOf(albums)
+	if total != 1 || !got["Bare"] {
+		t.Errorf("needs=optimize → total %d %v, want just Bare", total, got)
+	}
+	if got["Redbook"] {
+		t.Error("an album already at the CarPlay target was listed as needing a copy — the " +
+			"filter was dropped and the unfiltered library came back")
+	}
+}
+
+// TestOneVariantIsEnoughToBuildCoverage pins the gate's edge: the skip is
+// keyed on the library holding NO sidecar, not on the album in front of
+// you having none, so a single row anywhere restores the old behaviour for
+// every tile.
+func TestOneVariantIsEnoughToBuildCoverage(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedVariantFreeLibrary(t, srv.deps.Manifest)
+	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: "Cd/Redbook/01.flac", VariantID: "upscaled-v2-96000-24",
+		SidecarPath: "Cd/Redbook/01.flac.x", Format: "FLAC",
+		SampleRate: 96000, BitsPerSample: 24, SizeBytes: 100,
+		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	builds := countCoverageBuilds(t)
+
+	_, albums := albumsPage(t, srv, "")
+	if n := builds(); n != 1 {
+		t.Errorf("coverage folded %d time(s), want 1 — one sidecar anywhere is enough", n)
+	}
+	var seen bool
+	for _, a := range albums {
+		if _, ok := a["variants"]; ok {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Error("no album carried a variants block although the library holds a sidecar")
+	}
+}

@@ -313,11 +313,16 @@ func (s *Server) apiPlayerAlbums(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 
-	// One whole-library read, shared by the filter and the badges. It is
-	// fetched even when nothing filters on it, because every tile wants
-	// its own numbers — and the snapshot is precomputed precisely so
-	// that costs a map lookup per tile rather than a query.
-	cov := s.albumCoverageFor(r, cat)
+	// One whole-library read, shared by the filter and the badges, so a
+	// tile's numbers cost a map lookup rather than a query.
+	//
+	// The `needs=` filter is passed in because it changes what the
+	// snapshot is FOR: the badge reads presence, the filter reads the
+	// denominator, and with no variants anywhere only the filter has
+	// anything to read. albumCoverageFor skips the build entirely in that
+	// case — see the gate there, including why it cannot be inferred from
+	// a nil snapshot after the fact.
+	cov := s.albumCoverageFor(r, cat, q.Get("needs") != "")
 
 	idx, err := s.filterAlbums(cat, cov, q)
 	if err != nil {
