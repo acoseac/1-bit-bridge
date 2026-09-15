@@ -1349,6 +1349,12 @@ type Server struct {
 	coverage   atomic.Pointer[coverageSnapshot]
 	coverageSF singleflight.Group
 
+	// coverageRefreshing admits one background coverage refresher at a
+	// time; see refreshCoverageAsync for why the singleflight alone is
+	// not enough. The refresher joins catalogState.bgRefresh, so
+	// shutdown drains it with the catalog's.
+	coverageRefreshing atomic.Bool
+
 	// dbStats caches the database-accounting + retention row counts on
 	// GET /api/diagnostics for databaseStatsTTL. That block is the only
 	// database work on an endpoint the page polls every 5 s, and the

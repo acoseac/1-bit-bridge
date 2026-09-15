@@ -205,3 +205,107 @@ func TestAlbumCoverageSnapshotKeysOnTheUpscaleTarget(t *testing.T) {
 		t.Fatalf("at 48/16 → total %d %v, want just Redbook", total, titlesOf(albums))
 	}
 }
+
+// coverageOf reads one album's optimize coverage off the grid response.
+func coverageOf(t *testing.T, srv *Server, title string) playerVariantCoverageDTO {
+	t.Helper()
+	_, albums := albumsPage(t, srv, "")
+	for _, a := range albums {
+		if a["title"] != title {
+			continue
+		}
+		var cov albumCoverage
+		blob, _ := json.Marshal(a["variants"])
+		_ = json.Unmarshal(blob, &cov)
+		return cov.Optimize
+	}
+	t.Fatalf("album %q not on the grid", title)
+	return playerVariantCoverageDTO{}
+}
+
+// expireCoverage ages the snapshot past coverageTTL without touching the
+// epoch or the target, which is precisely the "stale by the clock only"
+// case. Rewriting builtAt rather than sleeping keeps the test off the
+// wall clock — the Windows leg's ~15.6 ms granularity makes any timing
+// assertion here unreliable, and this needs none.
+func expireCoverage(t *testing.T, srv *Server) {
+	t.Helper()
+	c := srv.coverage.Load()
+	if c == nil {
+		t.Fatal("no coverage snapshot to expire")
+	}
+	aged := *c
+	aged.builtAt = time.Now().Add(-2 * coverageTTL)
+	srv.coverage.Store(&aged)
+}
+
+// TestClockStaleCoverageIsServedNotAwaited is the album grid's
+// load-time contract, and it is asserted on CONTENT rather than on a
+// duration: a request landing on a clock-stale snapshot must answer from
+// the copy it has — the OLD number — and refresh behind itself, so the
+// person opening the Albums page never waits on two whole-library scans.
+//
+// A blocking rebuild is exactly what the middle assertion catches: it
+// would report the new coverage immediately, because it went and looked.
+func TestClockStaleCoverageIsServedNotAwaited(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedCoverageLibrary(t, srv.deps.Manifest)
+
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 0 || got.Eligible != 1 {
+		t.Fatalf("seeded Bare optimize = %+v, want 0/1", got)
+	}
+
+	// Plant a change the snapshot cannot know about. UpsertVariant is
+	// what the auto-optimize sweeper does, and it deliberately does NOT
+	// bump the catalog epoch — which is the entire reason coverage
+	// carries a TTL at all.
+	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: "Hi/Bare/01.flac", VariantID: "optimized-v2-48000-16",
+		SidecarPath: "Hi/Bare/01.flac.x", Format: "FLAC",
+		SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
+		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expireCoverage(t, srv)
+
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 0 {
+		t.Errorf("a clock-stale read reported covered=%d: the request blocked on a "+
+			"rebuild instead of serving the snapshot it already had", got.Covered)
+	}
+
+	// ...and the refresh it kicked off lands, so the next reader is current.
+	srv.WaitForCatalogRefresh()
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 1 {
+		t.Errorf("after the background refresh Bare optimize = %+v, want covered 1", got)
+	}
+}
+
+// TestAKnownWrongCoverageSnapshotIsRebuiltSynchronously is the other
+// half, and it is what stops the fix above being "simplified" into
+// always serving stale. An epoch bump means a scan happened and the
+// ALBUM SET itself may have moved, so there is nothing worth serving —
+// the answer has to be current before it is sent.
+func TestAKnownWrongCoverageSnapshotIsRebuiltSynchronously(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedCoverageLibrary(t, srv.deps.Manifest)
+
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 0 {
+		t.Fatalf("seeded Bare optimize covered = %d, want 0", got.Covered)
+	}
+
+	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: "Hi/Bare/01.flac", VariantID: "optimized-v2-48000-16",
+		SidecarPath: "Hi/Bare/01.flac.x", Format: "FLAC",
+		SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
+		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.InvalidateLibraryCatalog() // a scan landed
+
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 1 {
+		t.Errorf("after an epoch bump Bare optimize = %+v, want covered 1 without "+
+			"waiting for a background refresh", got)
+	}
+}
