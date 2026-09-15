@@ -3,6 +3,8 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -307,5 +309,78 @@ func TestAKnownWrongCoverageSnapshotIsRebuiltSynchronously(t *testing.T) {
 	if got := coverageOf(t, srv, "Bare"); got.Covered != 1 {
 		t.Errorf("after an epoch bump Bare optimize = %+v, want covered 1 without "+
 			"waiting for a background refresh", got)
+	}
+}
+
+// TestAConcurrentRebuildForAnotherTargetDoesNotJoinTheFlight pins the
+// singleflight key to the snapshot identity.
+//
+// Keyed on a constant, a caller whose (epoch, rate, bits) differs from
+// the one in flight JOINS it and is handed a map built for somebody
+// else's upscale target — numbers the grid then renders as this target's
+// bars and `filterAlbums` answers `needs=` from. The flight's internal
+// re-check cannot catch it: it compares the LEADER's captured identity,
+// which is by definition satisfied.
+//
+// The two targets are chosen so the answers cannot be confused: at
+// 192000/24 every album has upscale-eligible tracks (4 in total), at
+// 44100/16 none does. Joining is therefore visible as a non-zero count
+// on the request that asked for the lower target.
+func TestAConcurrentRebuildForAnotherTargetDoesNotJoinTheFlight(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedCoverageLibrary(t, srv.deps.Manifest)
+	cat, err := srv.libraryCatalog(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := srv.catalogEpoch.Load()
+
+	// Park the FIRST fold inside the flight, so the second caller
+	// arrives while it is genuinely in progress rather than racing it.
+	release := make(chan struct{})
+	var builds atomic.Int32
+	entered := make(chan struct{})
+	coverageBuiltHookForTests = func() {
+		if builds.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	t.Cleanup(func() { coverageBuiltHookForTests = nil })
+
+	var wg sync.WaitGroup
+	var hi, lo map[string]albumCoverage
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hi = srv.rebuildCoverage(t.Context(), cat, epoch, 192000, 24)
+	}()
+	<-entered // the 192k fold now owns the flight
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		lo = srv.rebuildCoverage(t.Context(), cat, epoch, 44100, 16)
+	}()
+	close(release)
+	wg.Wait()
+
+	totalEligible := func(m map[string]albumCoverage) int {
+		n := 0
+		for _, a := range cat.Albums {
+			n += m[a.ID].Upscale.Eligible
+		}
+		return n
+	}
+	if got := totalEligible(hi); got != 4 {
+		t.Errorf("192000/24 upscale-eligible total = %d, want 4", got)
+	}
+	if got := totalEligible(lo); got != 0 {
+		t.Errorf("44100/16 upscale-eligible total = %d, want 0 — this request was handed "+
+			"the coverage built for 192000/24, i.e. it joined a flight for a different target", got)
+	}
+	if builds.Load() != 2 {
+		t.Errorf("folds = %d, want 2 — the two targets must each build their own", builds.Load())
 	}
 }

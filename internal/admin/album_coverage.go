@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
@@ -42,6 +43,15 @@ type coverageSnapshot struct {
 	rate, bits int
 	builtAt    time.Time
 	byAlbum    map[string]albumCoverage
+}
+
+// coverageKey names the snapshot identity for the singleflight. Every
+// field of coverageSnapshot that the cache-hit check compares appears
+// here, and that correspondence is the point: two callers may share a
+// build exactly when they would accept each other's stored result.
+func coverageKey(epoch uint64, rate, bits int) string {
+	return strconv.FormatUint(epoch, 10) + ":" +
+		strconv.Itoa(rate) + ":" + strconv.Itoa(bits)
 }
 
 // coverageTTL is short because the underlying facts move on their own —
@@ -125,10 +135,29 @@ func (s *Server) albumCoverageFor(r *http.Request, cat *librarycat.Catalog) map[
 // albumCoverageFor is what stops the refresher taking that function's own
 // serve-the-stale-copy shortcut and rebuilding nothing at all.
 //
+// The key is the SNAPSHOT IDENTITY, not a constant — and this is the one
+// place where coverage must not copy the catalog, whose flight is keyed
+// on `"catalog"` on purpose. A joiner there receives a catalog built for
+// a different epoch, and its own docblock accepts that: it is "a
+// consistent snapshot, merely not the newest", which is a true statement
+// about a library view. Coverage is parameterised by the upscale TARGET
+// as well, and a snapshot built for a different (rate, bits) is not an
+// older answer to the same question — it is an answer to a different
+// one. A joiner would render bars computed against a target nobody asked
+// for, and `filterAlbums` would answer `needs=` from them. Identity in
+// the key is what makes joining safe.
+//
+// Two identities can now build concurrently where they would once have
+// serialised. That is the trade and it is the right way round: it costs a
+// second whole-library pass in the rare window where the target changed
+// mid-flight, and it buys never showing a number computed for something
+// else.
+//
 // Returns nil on failure — the caller's "lose a badge, not the page"
 // contract.
 func (s *Server) rebuildCoverage(ctx context.Context, cat *librarycat.Catalog, epoch uint64, rate, bits int) map[string]albumCoverage {
-	v, err, _ := s.coverageSF.Do("coverage", func() (any, error) {
+	key := coverageKey(epoch, rate, bits)
+	v, err, _ := s.coverageSF.Do(key, func() (any, error) {
 		// Re-check inside the flight: a queued caller must not rebuild
 		// what the leader just built.
 		if c := s.coverage.Load(); c != nil && c.epoch == epoch &&
@@ -175,6 +204,16 @@ func (s *Server) rebuildCoverage(ctx context.Context, cat *librarycat.Catalog, e
 // running flight. It is deliberately NOT a claim that the flag prevents
 // duplicate rebuilds — refreshCatalogAsync's docblock makes the same
 // distinction for the same reason.
+//
+// ONE flag rather than one per target, and that is not the oversight it
+// looks like. This function is reachable ONLY from the branch in
+// albumCoverageFor where the cached snapshot's epoch, rate and bits all
+// EQUAL the request's — a read whose identity differs is a cache miss,
+// which takes the synchronous path and never consults this flag. Since
+// `s.coverage` holds one snapshot, at most one identity can be
+// clock-stale at any moment, so a per-target set would have at most one
+// member. A second target cannot be starved here because it was never
+// eligible to be refreshed in the background in the first place.
 //
 // Joined to the same bgRefresh WaitGroup as the catalog refresher, so
 // shutdown waits for it and a rebuild cannot still be reading the store
