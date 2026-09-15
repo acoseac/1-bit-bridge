@@ -420,11 +420,18 @@ func seedVariantFreeLibrary(t *testing.T, st *manifest.Store) {
 }
 
 // countCoverageBuilds installs the test hook and returns a reader for it.
-func countCoverageBuilds(t *testing.T) func() int {
+//
+// Drains before restoring, for the reason the concurrency test's cleanup
+// records: a background refresher can still be inside the hook when a
+// test ends, and the cleanup's write would race its read.
+func countCoverageBuilds(t *testing.T, srv *Server) func() int {
 	t.Helper()
 	var n atomic.Int32
 	coverageBuiltHookForTests = func() { n.Add(1) }
-	t.Cleanup(func() { coverageBuiltHookForTests = nil })
+	t.Cleanup(func() {
+		srv.WaitForCatalogRefresh()
+		coverageBuiltHookForTests = nil
+	})
 	return func() int { return int(n.Load()) }
 }
 
@@ -437,7 +444,7 @@ func countCoverageBuilds(t *testing.T) func() int {
 func TestAVariantFreeLibraryDoesNotBuildCoverage(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	seedVariantFreeLibrary(t, srv.deps.Manifest)
-	builds := countCoverageBuilds(t)
+	builds := countCoverageBuilds(t, srv)
 
 	_, albums := albumsPage(t, srv, "")
 	if len(albums) != 2 {
@@ -467,7 +474,7 @@ func TestAVariantFreeLibraryDoesNotBuildCoverage(t *testing.T) {
 func TestANeedsFilterStillBuildsCoverageWithoutVariants(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	seedVariantFreeLibrary(t, srv.deps.Manifest)
-	builds := countCoverageBuilds(t)
+	builds := countCoverageBuilds(t, srv)
 
 	// `needs=optimize`, not `needs=upscale`: both seeded albums are
 	// upscale-eligible against the default target, so that filter cannot
@@ -504,7 +511,7 @@ func TestOneVariantIsEnoughToBuildCoverage(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	builds := countCoverageBuilds(t)
+	builds := countCoverageBuilds(t, srv)
 
 	_, albums := albumsPage(t, srv, "")
 	if n := builds(); n != 1 {
