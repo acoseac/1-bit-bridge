@@ -3,6 +3,8 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,5 +205,192 @@ func TestAlbumCoverageSnapshotKeysOnTheUpscaleTarget(t *testing.T) {
 	total, albums := albumsPage(t, srv, "needs=upscale")
 	if total != 1 || !titlesOf(albums)["Redbook"] {
 		t.Fatalf("at 48/16 → total %d %v, want just Redbook", total, titlesOf(albums))
+	}
+}
+
+// coverageOf reads one album's optimize coverage off the grid response.
+func coverageOf(t *testing.T, srv *Server, title string) playerVariantCoverageDTO {
+	t.Helper()
+	_, albums := albumsPage(t, srv, "")
+	for _, a := range albums {
+		if a["title"] != title {
+			continue
+		}
+		var cov albumCoverage
+		blob, _ := json.Marshal(a["variants"])
+		_ = json.Unmarshal(blob, &cov)
+		return cov.Optimize
+	}
+	t.Fatalf("album %q not on the grid", title)
+	return playerVariantCoverageDTO{}
+}
+
+// expireCoverage ages the snapshot past coverageTTL without touching the
+// epoch or the target, which is precisely the "stale by the clock only"
+// case. Rewriting builtAt rather than sleeping keeps the test off the
+// wall clock — the Windows leg's ~15.6 ms granularity makes any timing
+// assertion here unreliable, and this needs none.
+func expireCoverage(t *testing.T, srv *Server) {
+	t.Helper()
+	c := srv.coverage.Load()
+	if c == nil {
+		t.Fatal("no coverage snapshot to expire")
+	}
+	aged := *c
+	aged.builtAt = time.Now().Add(-2 * coverageTTL)
+	srv.coverage.Store(&aged)
+}
+
+// TestClockStaleCoverageIsServedNotAwaited is the album grid's
+// load-time contract, and it is asserted on CONTENT rather than on a
+// duration: a request landing on a clock-stale snapshot must answer from
+// the copy it has — the OLD number — and refresh behind itself, so the
+// person opening the Albums page never waits on two whole-library scans.
+//
+// A blocking rebuild is exactly what the middle assertion catches: it
+// would report the new coverage immediately, because it went and looked.
+func TestClockStaleCoverageIsServedNotAwaited(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedCoverageLibrary(t, srv.deps.Manifest)
+
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 0 || got.Eligible != 1 {
+		t.Fatalf("seeded Bare optimize = %+v, want 0/1", got)
+	}
+
+	// Plant a change the snapshot cannot know about. UpsertVariant is
+	// what the auto-optimize sweeper does, and it deliberately does NOT
+	// bump the catalog epoch — which is the entire reason coverage
+	// carries a TTL at all.
+	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: "Hi/Bare/01.flac", VariantID: "optimized-v2-48000-16",
+		SidecarPath: "Hi/Bare/01.flac.x", Format: "FLAC",
+		SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
+		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expireCoverage(t, srv)
+
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 0 {
+		t.Errorf("a clock-stale read reported covered=%d: the request blocked on a "+
+			"rebuild instead of serving the snapshot it already had", got.Covered)
+	}
+
+	// ...and the refresh it kicked off lands, so the next reader is current.
+	srv.WaitForCatalogRefresh()
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 1 {
+		t.Errorf("after the background refresh Bare optimize = %+v, want covered 1", got)
+	}
+}
+
+// TestAKnownWrongCoverageSnapshotIsRebuiltSynchronously is the other
+// half, and it is what stops the fix above being "simplified" into
+// always serving stale. An epoch bump means a scan happened and the
+// ALBUM SET itself may have moved, so there is nothing worth serving —
+// the answer has to be current before it is sent.
+func TestAKnownWrongCoverageSnapshotIsRebuiltSynchronously(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedCoverageLibrary(t, srv.deps.Manifest)
+
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 0 {
+		t.Fatalf("seeded Bare optimize covered = %d, want 0", got.Covered)
+	}
+
+	if err := srv.deps.Manifest.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: "Hi/Bare/01.flac", VariantID: "optimized-v2-48000-16",
+		SidecarPath: "Hi/Bare/01.flac.x", Format: "FLAC",
+		SampleRate: 48000, BitsPerSample: 16, SizeBytes: 100,
+		SourceMTimeNS: time.Unix(7, 0).UnixNano(), SourceSize: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.InvalidateLibraryCatalog() // a scan landed
+
+	if got := coverageOf(t, srv, "Bare"); got.Covered != 1 {
+		t.Errorf("after an epoch bump Bare optimize = %+v, want covered 1 without "+
+			"waiting for a background refresh", got)
+	}
+}
+
+// TestAConcurrentRebuildForAnotherTargetDoesNotJoinTheFlight pins the
+// singleflight key to the snapshot identity.
+//
+// Keyed on a constant, a caller whose (epoch, rate, bits) differs from
+// the one in flight JOINS it and is handed a map built for somebody
+// else's upscale target — numbers the grid then renders as this target's
+// bars and `filterAlbums` answers `needs=` from. The flight's internal
+// re-check cannot catch it: it compares the LEADER's captured identity,
+// which is by definition satisfied.
+//
+// The two targets are chosen so the answers cannot be confused: at
+// 192000/24 every album has upscale-eligible tracks (4 in total), at
+// 44100/16 none does. Joining is therefore visible as a non-zero count
+// on the request that asked for the lower target.
+func TestAConcurrentRebuildForAnotherTargetDoesNotJoinTheFlight(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedCoverageLibrary(t, srv.deps.Manifest)
+	cat, err := srv.libraryCatalog(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := srv.catalogEpoch.Load()
+
+	// Park the FIRST fold inside the flight, so the second caller
+	// arrives while it is genuinely in progress rather than racing it.
+	release := make(chan struct{})
+	var builds atomic.Int32
+	entered := make(chan struct{})
+	coverageBuiltHookForTests = func() {
+		if builds.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	// Drain before restoring, not after. A background refresher joined to
+	// bgRefresh can still be inside the hook when a test ends, and the
+	// cleanup's write would then race its read — the class this file's
+	// sibling rule records as "a field deliberately left unsynchronised
+	// binds TESTS too", which showed on CI and not in 26 local runs.
+	// Nothing here spawns one today; the ordering is free and stops the
+	// next test that does from having to know.
+	t.Cleanup(func() {
+		srv.WaitForCatalogRefresh()
+		coverageBuiltHookForTests = nil
+	})
+
+	var wg sync.WaitGroup
+	var hi, lo map[string]albumCoverage
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hi = srv.rebuildCoverage(t.Context(), cat, epoch, 192000, 24)
+	}()
+	<-entered // the 192k fold now owns the flight
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		lo = srv.rebuildCoverage(t.Context(), cat, epoch, 44100, 16)
+	}()
+	close(release)
+	wg.Wait()
+
+	totalEligible := func(m map[string]albumCoverage) int {
+		n := 0
+		for _, a := range cat.Albums {
+			n += m[a.ID].Upscale.Eligible
+		}
+		return n
+	}
+	if got := totalEligible(hi); got != 4 {
+		t.Errorf("192000/24 upscale-eligible total = %d, want 4", got)
+	}
+	if got := totalEligible(lo); got != 0 {
+		t.Errorf("44100/16 upscale-eligible total = %d, want 0 — this request was handed "+
+			"the coverage built for 192000/24, i.e. it joined a flight for a different target", got)
+	}
+	if builds.Load() != 2 {
+		t.Errorf("folds = %d, want 2 — the two targets must each build their own", builds.Load())
 	}
 }
