@@ -346,7 +346,17 @@ func TestAConcurrentRebuildForAnotherTargetDoesNotJoinTheFlight(t *testing.T) {
 			<-release
 		}
 	}
-	t.Cleanup(func() { coverageBuiltHookForTests = nil })
+	// Drain before restoring, not after. A background refresher joined to
+	// bgRefresh can still be inside the hook when a test ends, and the
+	// cleanup's write would then race its read — the class this file's
+	// sibling rule records as "a field deliberately left unsynchronised
+	// binds TESTS too", which showed on CI and not in 26 local runs.
+	// Nothing here spawns one today; the ordering is free and stops the
+	// next test that does from having to know.
+	t.Cleanup(func() {
+		srv.WaitForCatalogRefresh()
+		coverageBuiltHookForTests = nil
+	})
 
 	var wg sync.WaitGroup
 	var hi, lo map[string]albumCoverage
