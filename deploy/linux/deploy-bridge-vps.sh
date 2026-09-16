@@ -14,7 +14,7 @@
 #
 # Usage:  ./deploy/linux/deploy-bridge-vps.sh
 #   First run: cp deploy/linux/.env.example deploy/linux/.env  (then fill it in)
-# Env vars: HOST, SSH_KEY (required); SSH_OPTS, HEALTH_URL, REMOTE_BIN,
+# Env vars: HOST, SSH_KEY (required); SSH_OPTS, HEALTH_URL, REMOTE_BIN, SVC,
 #           KEEP_BACKUPS, ENV_FILE (optional; see .env.example).
 #
 # If SSH to the host is filtered from this workstation while its :443 answers,
@@ -39,12 +39,19 @@ set -euo pipefail
 ENV_FILE="${ENV_FILE:-$(cd "$(dirname "$0")" && pwd)/.env}"
 _cli_host="${HOST:-}"; _cli_key="${SSH_KEY:-}"
 _cli_health="${HEALTH_URL:-}"; _cli_opts="${SSH_OPTS:-}"
+# The three that pick a TARGET on the host get the same treatment — until
+# 2026-09-16 they did not, so `SVC=x ./deploy…` lost to the env file's SVC
+# (Gemini on #914). On a host running two bridges that is the wrong unit.
+_cli_bin="${REMOTE_BIN:-}"; _cli_svc="${SVC:-}"; _cli_keep="${KEEP_BACKUPS:-}"
 # shellcheck source=/dev/null
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 HOST="${_cli_host:-${HOST:-}}"
 SSH_KEY="${_cli_key:-${SSH_KEY:-}}"
 HEALTH_URL="${_cli_health:-${HEALTH_URL:-}}"
 SSH_OPTS="${_cli_opts:-${SSH_OPTS:-}}"
+REMOTE_BIN="${_cli_bin:-${REMOTE_BIN:-}}"
+SVC="${_cli_svc:-${SVC:-}}"
+KEEP_BACKUPS="${_cli_keep:-${KEEP_BACKUPS:-}}"
 
 if [ -z "$HOST" ] || [ -z "$SSH_KEY" ]; then
   {
@@ -73,7 +80,12 @@ read -ra SSH_OPT_ARR <<< "$SSH_OPTS"
 # rollback plus one behind it; the runbook's ~24h retention guidance is about
 # how long to wait before trusting a deploy, not about hoarding every build.
 KEEP_BACKUPS="${KEEP_BACKUPS:-2}"
-SVC="1-bit-bridge"
+# The systemd unit to restart. Overridable because the public demo bridge
+# shares bridge.ars.md since 2026-09-16 (runbook § "Demo bridge") as its own
+# unit + binary: `.env.demo` sets SVC=1-bit-bridge-demo and
+# REMOTE_BIN=/usr/local/bin/bridge-demo, so a demo deploy can never restart
+# the operator's own bridge, and vice versa.
+SVC="${SVC:-1-bit-bridge}"
 LOCAL_BIN="dist/bridge-linux-amd64"
 
 ssh_vps() { ssh -i "$SSH_KEY" -o ConnectTimeout=15 "${SSH_OPT_ARR[@]+"${SSH_OPT_ARR[@]}"}" "$HOST" "$@"; }

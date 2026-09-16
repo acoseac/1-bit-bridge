@@ -309,59 +309,86 @@ one happened to be clean; the check hadn't shown it.)
 **Measuring the effect (data-driven tuning gate).** Since the download-telemetry change (PR #363), every large transfer (≥ 2 MiB — the `downloadThroughputMinBytes` floor) on `/v1/download` and `/v1/read` emits a `download_complete` structured log line carrying `proto`, `bytes_sent`, `duration_ms`, and `throughput_mbps`, and feeds the `bridge_http_download_throughput_mbps{proto}` Prometheus histogram (loopback `/metrics`). To compare before/after a tuning change: `journalctl -u 1-bit-bridge | grep download_complete` and bucket by `proto=h2` vs `proto=h3`. Apply one tuning change at a time, let real traffic flow, compare the distribution, keep or revert. Note the value is *effective delivery speed* (network ⊕ the iOS client's read pacing / disk I/O), so the h2-vs-h3 comparison is the trustworthy signal — not the absolute number.
 
 
-### Demo bridge (`bridge.1-bit.app` — Linux VM, public read-only demo, SSH `<DEMO-SSH>`)
+### Demo bridge (`bridge.1-bit.app` — public read-only demo; ON bridge.ars.md since 2026-09-16)
 
-Public read-only demo bridge behind the iOS app's **"Add demo bridge"** one-tap source (Sources → add menu). Exists for App Review and for users who want to see bridge features without running their own server. Stood up 2026-08-18. Two properties define it and both are load-bearing:
+Public read-only demo bridge behind the iOS app's **"Add demo bridge"** one-tap source (Sources → add menu). Exists for App Review and for users who want to see bridge features without running their own server. Stood up 2026-08-18 on its own Azure VM (UK South); **moved onto the bridge.ars.md host on 2026-09-16** as its own systemd unit + binary + user behind that host's HAProxy front door (the move is logged in the conductor repo's `ops/azure-migration.md`; the old VM is retired). Two properties define it and both are load-bearing:
 
 - **`demo.enabled: true`** — playlist backup, favorites and playback-history uploads are structurally disabled (typed 404s; `/v1/health` drops their five feature flags and advertises `demoMode`), and demo clients leave no device rows. The bridge collects NOTHING from demo users; the iOS app locks its sync toggles off when it sees `demoMode`. **Never disable this in prod** — it is what makes the app's "collects nothing" claim true.
 - **`demo.tokenSHA256`** — the static bearer token every installed iOS app carries (`DemoBridgeConfiguration` in the iOS repo). The hash lives in bridge.yaml; the raw token lives only in the app + the iOS repo. **Never change or remove it** — a changed hash 401s every shipped app until its next App Store release. It survives a `tokens.json` / dataDir wipe by construction (config-seeded, in-memory).
 
-**Coordinates:**
+**Coordinates** (everything else about the host — NSG, ufw, HAProxy, ZFS — is the bridge.ars.md section above and the conductor repo's `ops/hosts.md`):
 
 | Item | Value |
 |---|---|
-| SSH | `ssh -i <DEMO-SSH-KEY> <DEMO-SSH>` (Azure VM; key kept in the operator's `~/dev/`, perms 0600) |
-| Service manager | systemd (system unit, `User=azureuser`) |
-| Binary | `/usr/local/bin/bridge` (setcap `cap_net_bind_service=+ep`) |
-| Config | `/srv/onebit-demo/bridge.yaml` |
-| Data dir | `/srv/onebit-demo/data/` (adminauth.json, server.crt/.key, acme/, backups/, bridge.db) |
-| Library | `/srv/onebit-demo/library/` — local disk, GENERATED demo content only (see `tools/demo-library/`); never put real/licensed music here |
-| Log | `journalctl -u 1-bit-bridge` |
-| Public endpoint | `https://bridge.1-bit.app/` (autocert direct-TLS on :443, TLS-ALPN-01) |
-| Admin console | `https://127.0.0.1:7789/` — **loopback-bound, reach via SSH tunnel only** (`ssh -L 7789:127.0.0.1:7789 …`); credentials in `/srv/onebit-demo/ADMIN_CREDENTIALS.txt` on the host |
+| Host / SSH | the bridge.ars.md VM: `ssh -i <VPS-SSH-KEY> arsenie@bridge.ars.md` (Azure NSG source-allowlists :22 — see the SSH-flap note above; multiplex over one connection) |
+| Service manager | systemd `1-bit-bridge-demo.service` — `User=onebit-demo` (nologin system user), the tenant template's hardening (`ProtectSystem=strict`, `ProtectHome=yes`, empty capability set, `MemoryMax=2G`) |
+| Binary | `/usr/local/bin/bridge-demo` — the RELEASE ARTIFACT (see below), **separate from** `/usr/local/bin/bridge`, which is the operator's own bridge on the same host; a deploy of one never restarts the other |
+| Config | `/srv/onebit-demo/bridge.yaml` (owner `onebit-demo`, 0600 — `sudo cat` to read) |
+| Data dir | `/srv/onebit-demo/data/` (adminauth.json, server.crt/.key, acme/, backups/, transcoded/, waveforms/, bridge.db, atlas-harvest.json) |
+| Library | `/srv/onebit-demo/library/` — GENERATED demo content only (see `tools/demo-library/`); never put real/licensed music here |
+| Storage | ZFS dataset `tank/public-demo` (quota 24 G, lz4) mounted at `/srv/onebit-demo` — the SAME path the old VM used, so nothing below this table changed |
+| Log | `journalctl -u 1-bit-bridge-demo` |
+| Public endpoint | `https://bridge.1-bit.app/` → HAProxy `:443` SNI passthrough (`use_backend demo_bridge if { req.ssl_sni -i bridge.1-bit.app }` in `1-bit-conductor/host/haproxy/haproxy.cfg`, pinned by `TestTenantsStayPassthroughOn443`) → the bridge on loopback `127.0.0.1:8446`. The bridge terminates its OWN TLS (autocert, TLS-ALPN-01 rides the passthrough), so the certificate the shipped apps see is the bridge's, never the proxy's |
+| Admin console | `https://127.0.0.1:7791/` — **loopback-bound, reach via SSH tunnel only** (`ssh -L 7791:127.0.0.1:7791 -i <VPS-SSH-KEY> arsenie@bridge.ars.md`, then open `https://127.0.0.1:7791/`); credentials in `/srv/onebit-demo/ADMIN_CREDENTIALS.txt` (`sudo cat`) |
+| Bridge CLIs | **always as the service user**: `sudo -u onebit-demo /usr/local/bin/bridge-demo <cmd> -config /srv/onebit-demo/bridge.yaml …` — a root- or `arsenie`-run CLI leaves root-owned files under `data/` and the service's sweepers then fail every job (observed 2026-08-18 on the old VM); heal with `sudo chown -R onebit-demo:onebit-demo /srv/onebit-demo && sudo systemctl restart 1-bit-bridge-demo` |
 
-**Azure NSG posture** (portal-managed, not ufw): `443/tcp` + `443/udp` open to the internet (API + ACME TLS-ALPN-01; UDP carries HTTP/3). `22/tcp` appears to be source-restricted already — 2026-08-18 evidence: an unrelated internet host cannot even TCP-connect to 22 while 443 serves it fine, and 3 h of sshd journal shows zero scanner traffic (implausible for an internet-open Azure port 22) — but this is inferred from behaviour, not read from the portal; confirm the rule there and keep it restricted to the operator IP. Port 80 needs NOT be open — the bridge's ACME is TLS-ALPN-01 only. 7789 is never exposed (loopback bind is the second layer).
+**Network posture** is the host's, not the demo's: the VM's NSG (`1bitbridge-nsg`) opens 443/tcp to the internet and source-allowlists 22; ufw mirrors it. Nothing listens off-loopback for the demo itself. HTTP/3 does NOT reach it (HAProxy is a TCP passthrough; the old VM's 443/udp is gone) — same as bridge.ars.md, and the iOS client falls back to h2 by itself.
 
-**SSH: multiplex, don't burst.** Rapid repeated SSH connections time out for a few minutes — diagnosed 2026-08-18 as flood protection on the OPERATOR'S OWN path (home router / ISP), NOT the VM: the identical ok×~3-then-TCP-timeout pattern reproduces from the same machine against unrelated servers on other networks, the VM's sshd journal records zero drops during a block (the failed connections never reach the host), no host-side limiter exists (no fail2ban/ufw, empty nftables, sshd MaxStartups untripped), and already-established flows survive. Nothing on the VM can fix it — don't tune sshd chasing this. `deploy/linux/.env.demo` carries `SSH_OPTS="-o ControlMaster=auto -o ControlPath=/tmp/ssh-demo-cm -o ControlPersist=900"` so every script step rides ONE TCP connection; for ad-hoc commands reuse the socket (`ssh -S /tmp/ssh-demo-cm <DEMO-SSH> …`) — but verify it is ALIVE first (`ssh -S /tmp/ssh-demo-cm -O check <DEMO-SSH>`): with a dead/missing socket, `ssh -S` silently falls back to opening a fresh TCP connection per command, and a burst of those is exactly what trips the block. If the check fails, re-establish ONE master, don't loop ad-hoc commands. If blocked: wait a few minutes with SPACED probes (45 s+), never hammer.
-
-**VM self-maintenance (configured 2026-08-18)** — the box patches itself; don't re-add what's already there: `unattended-upgrades` with `Unattended-Upgrade::Automatic-Reboot "true"` + `Unattended-Upgrade::Automatic-Reboot-Time "04:30"` (UTC) + `Unattended-Upgrade::Remove-Unused-Dependencies "true"` (`/etc/apt/apt.conf.d/52demo-unattended`; the bridge unit is `enabled`, so it survives unattended reboots — verified by the 2026-08-18 10:02 UTC Azure platform reboot); persistent journald capped via `SystemMaxUse=200M` (`/etc/systemd/journald.conf.d/50-demo.conf` — before this the journal was volatile, which is why that platform reboot was undiagnosable); 2 G swapfile + `vm.swappiness=10` (OOM insurance for sox/ffmpeg transcode spikes, not working memory); sshd pre-auth hardening in `/etc/ssh/sshd_config.d/70-demo-hardening.conf` (`LoginGraceTime 30`, `MaxStartups 30:50:200`, `PerSourceMaxStartups 5`, `PermitRootLogin no`, `X11Forwarding no` — scanner-slot hygiene, NOT a fix for the operator-side block above). No fail2ban/ufw by design — network ACLs are Azure-NSG-side.
-
-**systemd unit** (`/etc/systemd/system/1-bit-bridge.service`; same `Restart=always` rationale as bridge.ars.md — the console Restart button exits 0):
+**systemd unit** (`/etc/systemd/system/1-bit-bridge-demo.service`; `Restart=always` because the console's Restart button exits 0):
 
 ```ini
 [Unit]
-Description=1-bit-bridge demo (bridge.1-bit.app)
-After=network-online.target
+Description=1-bit-bridge PUBLIC DEMO (bridge.1-bit.app)
+After=network-online.target zfs-mount.service zfs.target haproxy.service
 Wants=network-online.target
+ConditionPathIsMountPoint=/srv/onebit-demo
+ConditionPathExists=/srv/onebit-demo/bridge.yaml
 
 [Service]
 Type=simple
-User=azureuser
-ExecStart=/usr/local/bin/bridge serve --config /srv/onebit-demo/bridge.yaml
+User=onebit-demo
+Group=onebit-demo
 WorkingDirectory=/srv/onebit-demo
+ExecStart=/usr/local/bin/bridge-demo serve --config /srv/onebit-demo/bridge.yaml
 Restart=always
-RestartSec=2
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-ProtectSystem=full
+RestartSec=3
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
+CPUWeight=100
+MemoryHigh=1024M
+MemoryMax=2G
+TasksMax=1024
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
 ReadWritePaths=/srv/onebit-demo
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+UMask=0027
+ProtectProc=invisible
+ProtectHostname=yes
+ProtectClock=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-**Config shape** (`/srv/onebit-demo/bridge.yaml`): public mode + autocert for `bridge.1-bit.app` (email `ars@ars.md`), `adminAddress: 127.0.0.1:7789`, `libraryName: "1-bit Demo Library"`, `analysis.enabled: true` (waveforms / loudness / DR / spectrum / key+tempo are half the demo), and the `demo:` block with `enabled: true` + the pinned `tokenSHA256` (`798007f038402931d0d34cd15284d864fb6fdb728a23740af61674d369b66506`). Host audio toolchain (`sox libsox-fmt-all ffmpeg`) is installed like on bridge.ars.md.
+No `CAP_NET_BIND_SERVICE`: both listeners are loopback high ports; HAProxy owns :443.
 
-**Update per release** (this host is on the SAME cadence as the other production bridges — the iOS repo's release checklist points here):
+**Config shape** (`/srv/onebit-demo/bridge.yaml`): public mode + autocert for `bridge.1-bit.app` (email `ars@ars.md`) with **`autocert.external443Mapping: true`** (the listener is `127.0.0.1:8446`, the world reaches it on :443 through the passthrough — without the flag public-mode validation refuses autocert off :443), `adminAddress: 127.0.0.1:7791`, `libraryName: "1-bit Demo Library"`, `analysis.enabled: true` (waveforms / loudness / DR / spectrum / key+tempo are half the demo), and the `demo:` block with `enabled: true` + the pinned `tokenSHA256` (`798007f038402931d0d34cd15284d864fb6fdb728a23740af61674d369b66506`). Host audio toolchain (`sox libsox-fmt-all ffmpeg`) is the host's. The pre-move config is kept beside it as `bridge.yaml.uksouth-20260916`.
+
+**Known interim on the v0.1.9 artifact — one unreachable alternate endpoint.** `/v1/health.endpoints` reads `["https://bridge.1-bit.app", "https://bridge.1-bit.app:8446"]`: the tag's `publicModeEndpoints` appends `https://<autocert.domain>:<listen port>` whenever the listen port is not 443, and `:8446` is loopback-only here. PR #871 (`fix(api): don't advertise a listen port a proxy has remapped`, 2026-09-08) fixed exactly this on `main`, after the tag. Cost until the next release artifact: iOS puts the alternate into its failover rotation, which it consults only after the primary FAILS — so normal operation is unaffected and a demo outage merely reads as offline more slowly. A loopback `:443` listener would collapse the pair on the tag, and it is not available: HAProxy's wildcard `:::443` conflicts with any loopback `:443` bind on Linux (measured `EADDRINUSE`, 2026-09-16). **After the first release-artifact deploy that includes #871, verify `endpoints` reads exactly `["https://bridge.1-bit.app"]`** and delete this paragraph.
+
+**Update per release** (this host is on the SAME cadence as the other production bridges — the iOS repo's release checklist points here). `.env.demo` (untracked) carries `HOST=arsenie@bridge.ars.md`, the VPS key, `REMOTE_BIN=/usr/local/bin/bridge-demo`, `SVC=1-bit-bridge-demo` and `HEALTH_URL=https://bridge.1-bit.app/v1/health`; the deploy script honours all of them:
 
 ```sh
 ENV_FILE=deploy/linux/.env.demo ./deploy/linux/deploy-bridge-vps.sh
@@ -397,9 +424,9 @@ gh release download v0.1.9 -R acoseac/1-bit-bridge \
 #    bridge.ars.md upload step above hardcodes the locally-built path, so
 #    "then follow the flow above" would ship a main build and reintroduce the
 #    exact version string this whole note exists to avoid.
-scp -i <DEMO-SSH-KEY> /tmp/rel/bridge <DEMO-SSH>:/tmp/bridge.new
+scp -i <VPS-SSH-KEY> /tmp/rel/bridge arsenie@bridge.ars.md:/tmp/bridge.new
 shasum -a 256 /tmp/rel/bridge                                          # local
-ssh -i <DEMO-SSH-KEY> <DEMO-SSH> 'chmod +x /tmp/bridge.new
+ssh -i <VPS-SSH-KEY> arsenie@bridge.ars.md 'chmod +x /tmp/bridge.new
                                   sha256sum /tmp/bridge.new
                                   /tmp/bridge.new version'             # remote
 
@@ -408,32 +435,41 @@ ssh -i <DEMO-SSH-KEY> <DEMO-SSH> 'chmod +x /tmp/bridge.new
 # wrong file, which a digest comparison against that same wrong file cannot.
 
 # 3. Then the DETACHED swap -> setcap -> restart from the bridge.ars.md section,
-#    unchanged -- it operates on /tmp/bridge.new and never names the local path.
+#    with REMOTE_BIN=/usr/local/bin/bridge-demo and SVC=1-bit-bridge-demo -- it
+#    operates on /tmp/bridge.new and never names the local path. `.env.demo`
+#    carries both; NEVER let a demo swap touch /usr/local/bin/bridge, which is
+#    the operator's own bridge on the same host.
 ```
 
 Keep the detached dispatch: the window between the two `mv`s is the one state with no
-binary at `/usr/local/bin/bridge`. Confirm with `updateAvailable` reading **false**
+binary at `/usr/local/bin/bridge-demo`. Confirm with `updateAvailable` reading **false**
 afterwards — that is the signal the version string is clean, and no other check shows it.
 
 The other two bridges track `main` deliberately and will keep reporting
 `updateAvailable: true` between releases. That is correct there ("you are ahead of the
 last tag") and needs no fix.
 
-`.env.demo` (untracked, covered by `.gitignore`'s `.env.*`) carries `HOST` / `SSH_KEY` / `HEALTH_URL=https://bridge.1-bit.app/v1/health`. The script's SHA-gate + two-step swap + setcap + restart + health-verify all apply unchanged, and remain the right path for a hotfix that has no release tag. Verify afterwards:
+The script path (a `main` build) stays the right one for a hotfix that has no release tag. Verify afterwards:
 
 ```sh
-curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, .leCertNotAfter, (.features | index("demoMode") != null)'
+curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailable, .leCertNotAfter, .endpoints, (.features | index("demoMode") != null)'
 # Expect: the new version, `false` (see the release-artifact note above), an LE expiry
-# ~90d out, and `true` (demoMode advertised).
+# ~90d out, the single endpoint once #871 has shipped, and `true` (demoMode advertised).
 ```
 
-**Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then `rsync -av --delete <out>/library/ <DEMO-SSH>:/srv/onebit-demo/library/` and trigger a **Full rescan** (admin console via tunnel, or `systemctl restart 1-bit-bridge` — startup scans). Remember the standing doctrine: delta scans never delete, so removals need the full rescan.
+**Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then
 
-**Upscaling + CarPlay-optimized variants on the demo bridge** are deliberately allowed (they showcase the features against the hosted lossless content): `upscale.enabled: true` + `optimizeEnabled` / `autoOptimize` in the demo config. This is safe ONLY because demo mode 403s the four upscale MUTATION endpoints (`demo_read_only` — `POST /v1/upscale`, `POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`, `DELETE /v1/upscale/variants`): every bearer on this host is effectively public, and an open batch endpoint would let anyone burn its CPU. The operator generates variants via the loopback admin console's Browse views (SSH tunnel), which don't route through those handlers. The `bridge upscale` / `bridge optimize` CLIs work too — but **run them as `azureuser` (the systemd `User=`), NEVER `sudo`**: the SSH login already IS `azureuser`, so the plain `bridge upscale -config /srv/onebit-demo/bridge.yaml …` form is correct as-is (from a root shell, `sudo -u azureuser bridge …`). a root-run CLI creates `data/transcoded/` subdirs and DB/WAL siblings owned by root, and the service's auto-optimize sweeper then fails every job with `mkdir … permission denied` (observed 2026-08-18 — the sweep burned a whole pass silently). If it happens, heal with `sudo chown -R azureuser:azureuser /srv/onebit-demo/data` + `sudo systemctl restart 1-bit-bridge` (the startup scan's post-scan nudge re-runs the sweep).
+```sh
+rsync -av --delete --rsync-path="sudo -u onebit-demo rsync" <out>/library/ arsenie@bridge.ars.md:/srv/onebit-demo/library/
+```
 
-**Atlas enrichment on the demo bridge:** `enrich.musicbrainzBaseURL` / `coverArtBaseURL` point at `https://atlas.ars.md` (keyless server-to-server, mirrors bridge.ars.md — kills public-MusicBrainz 503s). Rich-tier bios (`atlas.enabled: true` + `harvestEnabled: true`) are safe here ONLY because demo mode 403s `POST /v1/atlas-ingest` (`demo_read_only`) — the client-content push a public bearer could poison; the bridge instead pulls bios itself via the harvest client, bootstrapped ONCE by the operator's attested 1-bit app (on the demo share in the app: set Atlas base URL `https://atlas.ars.md` + enable the harvest toggle; App Attest needs a real device, not the Simulator). Harvest state persists in `data/atlas-harvest.json`; re-provision only when new content needs harvesting after the token TTL.
+(the tree is owned by the service user, so a plain rsync as `arsenie` cannot write it — the remote side runs AS `onebit-demo`, which lands every file with the right owner and needs no chown pass) and trigger a **Full rescan** (admin console via tunnel, or `sudo systemctl restart 1-bit-bridge-demo` — startup scans). Remember the standing doctrine: delta scans never delete, so removals need the full rescan.
 
-**Do-nots:** never wipe `/srv/onebit-demo/data/acme/` (LE duplicate-cert rate limit); never rotate `demo.tokenSHA256` outside an iOS release cycle; never flip `demo.enabled` off; never bind the admin console off-loopback here (nobody but the operator ever needs it).
+**Upscaling + CarPlay-optimized variants on the demo bridge** are deliberately allowed (they showcase the features against the hosted lossless content): `upscale.enabled: true` + `autoOptimize` in the demo config. This is safe ONLY because demo mode 403s the four upscale MUTATION endpoints (`demo_read_only` — `POST /v1/upscale`, `POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`, `DELETE /v1/upscale/variants`): every bearer on this host is effectively public, and an open batch endpoint would let anyone burn its CPU. The operator generates variants via the loopback admin console's Browse views (SSH tunnel), which don't route through those handlers. The `bridge upscale` / `bridge optimize` CLIs work too — **as the service user** (the coordinates table's CLI row); a root-run CLI creates `data/transcoded/` subdirs and DB/WAL siblings owned by root, and the service's auto-optimize sweeper then fails every job with `mkdir … permission denied` (observed 2026-08-18 — the sweep burned a whole pass silently).
+
+**Atlas enrichment on the demo bridge:** `enrich.musicbrainzBaseURL` / `coverArtBaseURL` point at `https://atlas.ars.md` (keyless server-to-server, mirrors bridge.ars.md — kills public-MusicBrainz 503s); since the move Atlas is on the same host, so that name resolves to loopback via `/etc/hosts` and the requests never leave the box. Rich-tier bios (`atlas.enabled: true` + `harvestEnabled: true`) are safe here ONLY because demo mode 403s `POST /v1/atlas-ingest` (`demo_read_only`) — the client-content push a public bearer could poison; the bridge instead pulls bios itself via the harvest client, bootstrapped ONCE by the operator's attested 1-bit app (on the demo share in the app: set Atlas base URL `https://atlas.ars.md` + enable the harvest toggle; App Attest needs a real device, not the Simulator). Harvest state persists in `data/atlas-harvest.json` (carried over in the move); re-provision only when new content needs harvesting after the token TTL.
+
+**Do-nots:** never wipe `/srv/onebit-demo/data/acme/` (LE duplicate-cert rate limit — the cache moved with the data, so the move cost no issuance); never rotate `demo.tokenSHA256` outside an iOS release cycle; never flip `demo.enabled` off; never bind the admin console off-loopback here (nobody but the operator ever needs it); never point a demo deploy at `/usr/local/bin/bridge` or `1-bit-bridge` (those are the operator's bridge on the same host).
 
 ## Post-merge deployment
 
