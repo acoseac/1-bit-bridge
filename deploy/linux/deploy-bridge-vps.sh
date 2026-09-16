@@ -39,12 +39,19 @@ set -euo pipefail
 ENV_FILE="${ENV_FILE:-$(cd "$(dirname "$0")" && pwd)/.env}"
 _cli_host="${HOST:-}"; _cli_key="${SSH_KEY:-}"
 _cli_health="${HEALTH_URL:-}"; _cli_opts="${SSH_OPTS:-}"
+# The three that pick a TARGET on the host get the same treatment — until
+# 2026-09-16 they did not, so `SVC=x ./deploy…` lost to the env file's SVC
+# (Gemini on #914). On a host running two bridges that is the wrong unit.
+_cli_bin="${REMOTE_BIN:-}"; _cli_svc="${SVC:-}"; _cli_keep="${KEEP_BACKUPS:-}"
 # shellcheck source=/dev/null
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 HOST="${_cli_host:-${HOST:-}}"
 SSH_KEY="${_cli_key:-${SSH_KEY:-}}"
 HEALTH_URL="${_cli_health:-${HEALTH_URL:-}}"
 SSH_OPTS="${_cli_opts:-${SSH_OPTS:-}}"
+REMOTE_BIN="${_cli_bin:-${REMOTE_BIN:-}}"
+SVC="${_cli_svc:-${SVC:-}}"
+KEEP_BACKUPS="${_cli_keep:-${KEEP_BACKUPS:-}}"
 
 if [ -z "$HOST" ] || [ -z "$SSH_KEY" ]; then
   {

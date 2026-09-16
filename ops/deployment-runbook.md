@@ -460,11 +460,10 @@ curl -s https://bridge.1-bit.app/v1/health | jq '.serverVersion, .updateAvailabl
 **Demo content** is generated (Lyria 3 music + Gemini cover art, invented artists/albums — no licensing exposure) by `tools/demo-library/`; the catalog lives in `tools/demo-library/catalog.json`. To regenerate or extend: run the generator on the workstation, then
 
 ```sh
-rsync -av --delete --rsync-path="sudo rsync" <out>/library/ arsenie@bridge.ars.md:/srv/onebit-demo/library/
-ssh arsenie@bridge.ars.md 'sudo chown -R onebit-demo:onebit-demo /srv/onebit-demo/library'
+rsync -av --delete --rsync-path="sudo -u onebit-demo rsync" <out>/library/ arsenie@bridge.ars.md:/srv/onebit-demo/library/
 ```
 
-(the tree is owned by the service user, so a plain rsync as `arsenie` cannot write it — hence the `sudo rsync` remote and the chown) and trigger a **Full rescan** (admin console via tunnel, or `sudo systemctl restart 1-bit-bridge-demo` — startup scans). Remember the standing doctrine: delta scans never delete, so removals need the full rescan.
+(the tree is owned by the service user, so a plain rsync as `arsenie` cannot write it — the remote side runs AS `onebit-demo`, which lands every file with the right owner and needs no chown pass) and trigger a **Full rescan** (admin console via tunnel, or `sudo systemctl restart 1-bit-bridge-demo` — startup scans). Remember the standing doctrine: delta scans never delete, so removals need the full rescan.
 
 **Upscaling + CarPlay-optimized variants on the demo bridge** are deliberately allowed (they showcase the features against the hosted lossless content): `upscale.enabled: true` + `autoOptimize` in the demo config. This is safe ONLY because demo mode 403s the four upscale MUTATION endpoints (`demo_read_only` — `POST /v1/upscale`, `POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`, `DELETE /v1/upscale/variants`): every bearer on this host is effectively public, and an open batch endpoint would let anyone burn its CPU. The operator generates variants via the loopback admin console's Browse views (SSH tunnel), which don't route through those handlers. The `bridge upscale` / `bridge optimize` CLIs work too — **as the service user** (the coordinates table's CLI row); a root-run CLI creates `data/transcoded/` subdirs and DB/WAL siblings owned by root, and the service's auto-optimize sweeper then fails every job with `mkdir … permission denied` (observed 2026-08-18 — the sweep burned a whole pass silently).
 

@@ -474,7 +474,7 @@ deployment**. Put a single consolidated verification checklist in
   `TelemetryMiddleware`), so their absence is not evidence.
 - **Deploy targets, in increasing blast radius**: the local test fixture
   (`/tmp/bridge-live`, see CLAUDE.md `## Local test fixture`), the Windows
-  home-pc install, `bridge.ars.md`, and the public demo `bridge.1-bit.app` (its own unit on the same host since 2026-09-16).
+  home-pc install, `bridge.ars.md`, and the public demo `bridge.1-bit.app`.
   The runbook owns the procedures; LOUPE only says *which* to use and that a
   fix touching the scan or deletion passes needs a REAL library behind it.
 - **A deploy kicks a ~10 minute startup scan**, which silently defers client
