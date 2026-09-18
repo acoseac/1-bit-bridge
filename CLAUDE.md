@@ -390,6 +390,13 @@ lost my library."
   never a build-tagged file — untagged siblings referencing them broke the
   Windows compile of the whole `manifest` test binary, invisibly.
 
+- **Every byte-range prefix consumer trims the trailing slash, including
+  the per-FOLDER twin.** `EligibleRollupByPrefix` did; `EligibleCountsForFolders`
+  beside it did not — latent only because the browse handler passes bare
+  paths, which is the exact state the rollup bug was in before a second
+  caller forwarded a raw one (#536). The result stays keyed by the caller's
+  spelling so a lookup by what was passed still hits. (#919)
+
 ### The wire contract
 
 - **`/v1` describes the SERVED set.** The manifest stream/page/total,
@@ -707,6 +714,16 @@ no failing test — which is the shape to expect in this area.
   25.8 ms at 21,000 tracks — the JSON predicate cannot use the functional
   index on `$.musicBrainzAlbumID` because it is wrapped in COALESCE.
 
+- **Every pass that WRITES checks the scan latch, not just the first.**
+  `tickLyrics` re-checked `ScanInProgress` per candidate in pass one and
+  broke — leaving everything it had already warmed in `pending`, which
+  pass two then drained into `track_lyrics` with the scan under way: the
+  double `indexed_at` bump the guard exists to prevent, one loop later.
+  The stand-down test seeded only `available` recordings, so its pass two
+  was always empty and could not see it. Nothing is stamped for what a
+  stood-down pass leaves behind; the candidate query offers it again next
+  tick, warm. (#916)
+
 ### Enrichment — MusicBrainz, Atlas, artwork, fingerprinting
 
 - **Relaxations belong in the QUERY; strictness belongs in the ACCEPTANCE.**
@@ -1001,6 +1018,20 @@ no failing test — which is the shape to expect in this area.
   are conversion in exactly that sense — a sidecar the job pool built earlier,
   served as a file — never a decode in the request path.
 
+- **Every consumer of `variantsDir` resolves it LIVE — the integrity
+  watchers included.** `POST /api/upscale/variants-dir` is hot, and the
+  enqueuer, coordinator and auto-optimize sweeper read `liveVariantsDir`;
+  `VariantWatcher` and `OrphanSidecarSweeper` took the path at
+  construction, so after a move the orphan GC walked the tree the operator
+  had left while new sidecars landed where it never looked, and the
+  mount-loss guard probed the wrong volume. Both constructors take a
+  `func() string`. A root change drops the sweeper's chunk-resume cursor —
+  a position in ONE tree; against another root `dirEntirelyBehindCursor`
+  can prune that whole tree as "already swept" — and an empty answer is a
+  refusal, never `WalkDir("")`. The Jobs chips gate on the INTERVAL, as the
+  wiring does, not on `UpscaleStats()`, which is nil with upscale off while
+  the watchers tick regardless. (#917)
+
 ### DLNA, UPnP and discovery
 
 - **The three spec-mandatory ContentDirectory introspection actions
@@ -1134,6 +1165,13 @@ no failing test — which is the shape to expect in this area.
   (`hasPrivate || (hasLinkLocal && !hasPublic)`). The obvious simplification
   regresses the no-usable-address cases, and disqualifying on any public IPv4
   breaks dual-stack home LANs where SLAAC hands out a public IPv6.
+
+- **A folder's children sort by `RelativePath`, with `AbsolutePath` only
+  as the tie-break.** Every UPnP-routed track has an EMPTY `AbsolutePath`
+  (`dlna_wiring.go` leaves it so the proxy fast-path takes over), so a sort
+  keyed on it alone left a routed folder's children — and the "first keyed
+  direct child" its `albumArtURI` comes from — in arrival order, under a
+  comment that said "sorted by path". (#919)
 
 ### Config, settings and process lifecycle
 
@@ -1616,9 +1654,27 @@ its twin.** The top list is older, shorter, and read first.
   a browser would derive from the served policy, never omit it.** Negative
   control: `no-referrer` on both header and meta turns exactly the two policy
   tests red.
-- **No per-IP rate cap on pairing requests** — double-NAT puts every LAN device
-  behind one address. The bridge-wide pending cap plus the visible admin queue
-  is the bound. The 6-digit code is drawn from `crypto/rand`.
+- **`POST /v1/pairing/requests` HAS a per-IP token bucket (burst 5, one per
+  5 s, since #133) beside the bridge-wide pending cap.** This bullet said
+  the opposite for over a year — "no per-IP rate cap, double-NAT puts every
+  LAN device behind one address" — while PROTOCOL.md documented the 429 and
+  `pairing.go` enforced it, and `TestPairingCreateQueueFull`'s docblock
+  carried the same false claim. The BURST is what makes double-NAT
+  survivable: a fumbling re-tap never reaches it, and a script is bounded
+  below the 16-pending queue it would otherwise fill alone. Don't remove
+  the limiter to match the old prose. The 6-digit code is drawn from
+  `crypto/rand`.
+- **The login ticket is refused by SHAPE before anything else looks at it**
+  (base64url, at most 64 bytes; a minted one is 43) — on the GET so an
+  unbounded query is never echoed into the page, on the POST so it never
+  reaches the hash or the file read under the console's mutex. The refusal
+  is the same 302 every unusable ticket gets. The interstitial's referrer
+  META is injected from `loginTicketReferrerPolicy`, never typed — a
+  literal is how header and meta both came to say `no-referrer`. A failed
+  session mint after a successful redeem is a STALE link: the ticket is
+  spent by then. **`url.QueryEscape` before templating was proposed and is
+  wrong**: html/template already URL-escapes that attribute context, so it
+  would double-encode; bound the SHAPE instead. (#918)
 - **`AllowAndReserve` callers must NOT also call `RecordFailure`** — the
   reservation IS the failure count. Check-then-act across two lock acquisitions
   let concurrent logins all pass the ceiling.
@@ -1776,6 +1832,24 @@ its twin.** The top list is older, shorter, and read first.
 - **Deleting takes an explicit path list, never a prefix** — that sidesteps the
   case-fold class entirely rather than getting it right.
 
+- **A gate on a query parameter reads the PARSED predicate, never the
+  parameter's presence.** The player sends `needs=all` on every default
+  grid load (its default is the literal `all`, and `qs()` drops only the
+  empty string), and `parseVariantFilter` maps `all` to no filter — so
+  #913's variant-free coverage skip, gated on `q.Get("needs") != ""`,
+  never ran for the live grid on exactly the libraries it was built for,
+  and its test passed because it sent no query at all. Parse first, gate on
+  `pred != nil`, and **test with the query the client actually sends**. An
+  active filter with no snapshot is REFUSED (503 `coverage_unavailable`),
+  never dropped: `filterAlbums` served the unfiltered library under a
+  plausible total beneath a comment calling that the safe direction. (#915)
+- **An `<a class="btn">` inside running text needs `display: inline-block`.**
+  An inline box's vertical padding does not grow its line box, so the
+  pill's padding spills over the line above — the post-upload "Browse your
+  library" link overlapped its sentence by 4.4 px with the UA underline
+  showing through. Every other `.btn` is a `<button>` or sits in a flex
+  row, which is why only this one did it. Measured in a browser. (#920)
+
 ### Build, CI, and test discipline
 
 - **A test that never touches the wiring proves nothing.** Three shapes, all of
@@ -1905,6 +1979,52 @@ its twin.** The top list is older, shorter, and read first.
   after `url.Parse` for a backslash host (Go refuses it outright), and claims
   that `omitempty` keeps a non-nil empty map. Reply on the thread with the
   evidence when declining.
+
+- **`TestEveryCitedTestNameExists` scans `_test.go` COMMENTS too.** It read
+  only non-test source, so a docblock in a test file naming a renamed
+  sibling was invisible — fifteen were, including a first sentence on the
+  fsync contract claiming a property the test beneath it does not pin.
+  Test files are parsed with go/parser and only their comment groups are
+  scanned (a string literal can spell a test name and is not a citation).
+  A historical note naming a removed test is REWORDED rather than exempted,
+  and the guard scans its own file, so its examples cannot name one either.
+  (#921)
+
+### <a name="review-2026-09-18"></a>2026-09-18 — findings review on the post-#899 window
+
+An external full-tree pass (the 2026-09-10 invariants re-checked
+mechanically, plus targeted reads of everything after #899) came back with
+four bugs and eight quick wins; every one was verified against the code
+before acting, and one proposed fix was declined on evidence. Shipped as
+#915–#921 plus a field report folded in (#920). The named classes from the
+2026-09-10 sweep — `indexed_at`, `enriched_at`, `LIKE` on path predicates,
+`WipeFilesystemTracks`, empty-set GC, `loadCLIConfig`, feature gates,
+`SetPostScanHook` — are still closed. The record is in
+`ops/engineering-log.md`.
+
+- **A same-week fix that does not match the wire the UI actually sends.**
+  #913's gate read the parameter, the player always sends it, and the test
+  used an empty query. Gate on the PARSED value, and test with the client's
+  real request — a fixture must be the value the transformation would
+  actually change, and here that value was the default one.
+- **A sibling loop that missed the guard.** The lyrics sweep's pass two had
+  no scan latch, and the test that pinned pass one could not reach it. The
+  same enumeration failure the 2026-09-09 batch names, one function wide.
+- **One consumer that never went live when its writers did.** The integrity
+  watchers kept a boot-time `variantsDir` while every other consumer had
+  been made live, and the Jobs chips then reported them off while they
+  ticked. "Never split a field's halves", with the display half following.
+- **Verify a proposed fix's MECHANISM before taking it.** `QueryEscape`
+  before an html/template URL attribute double-encodes; bounding the
+  ticket's shape was the right thing. Same rule as the 2026-09-10 note on
+  the lyrics-cooldown patch.
+- **Stale claims corrected:** AGENTS.md still said `WipeAllTracks` on a
+  root flip — a THIRD copy of the claim CLAUDE.md's top list corrected on
+  2026-09-06; the pairing bullet denied a limiter PROTOCOL.md documents;
+  the `csrfGuard` docblock said `Origin: null` is allowed while
+  `originMatchesAdmin` refuses it; two artwork comments described a test
+  that ACCEPTS PNG as one that rejects it. When you correct a claim, grep
+  for its twins in every file that restates the rule — AGENTS.md is one.
 
 ### <a name="review-2026-09-10"></a>2026-09-10 — full-codebase review
 

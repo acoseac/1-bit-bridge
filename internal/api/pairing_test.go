@@ -327,10 +327,14 @@ func TestPairingCreateMissingDeviceName(t *testing.T) {
 // TestPairingCreateQueueFull pins the bridge-wide pending cap: with
 // MaxPending requests outstanding, the next create is refused.
 //
-// The cap is the ONLY bound on this endpoint — there is deliberately no
-// per-IP rate limit, because under double-NAT and mesh routers every LAN
-// device presents the same address and per-IP throttling would block
-// legitimate joins. So this test guards the whole spam surface.
+// The cap is one of TWO bounds on this endpoint. The other is the per-IP
+// token bucket forty lines up the handler (pairingRateLimiter: burst 5,
+// one per 5 s, since #133), whose BURST is what keeps double-NAT — every
+// LAN device behind one address — from being throttled by a fumbling
+// re-tap. This test exercises the queue cap alone; a create refused by
+// the limiter answers 429, which the assertions below would report.
+// (This docblock claimed "deliberately no per-IP rate limit" for a year
+// while the limiter was live; PROTOCOL.md documented it all along.)
 //
 // It used to share the fixture's 100 ms TTL and was therefore a race
 // against the store's own sweeper: each create is a full HTTP round trip

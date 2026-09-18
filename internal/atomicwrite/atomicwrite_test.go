@@ -61,7 +61,7 @@ func TestWriteBytes_createsParentDir(t *testing.T) {
 	}
 }
 
-// TestRenameWithRetry_byteEqualFallback pins the load-bearing
+// TestWriteBytes_acceptsRaceWinnerWithEqualBytes pins the load-bearing
 // race-loser-accepts-byte-equivalent contract. We inject a
 // rename failure via the test seam; the function reads the
 // (pre-staged) destination, compares bytes, and accepts the

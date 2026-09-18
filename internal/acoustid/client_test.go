@@ -408,7 +408,7 @@ func TestIsTransientSurvivesATypedNilEnvelope(t *testing.T) {
 	}
 }
 
-// TestStatusFromMessageIsAnchored — the fallback path parses the status out of
+// TestStatusFromMessageRecognisesWrappedErrors — the fallback path parses the status out of
 // httpError's own stable prefix. It must never read a number that merely
 // appears inside an upstream body.
 // The name matters here: this pins PREFIX QUALIFICATION, not positional

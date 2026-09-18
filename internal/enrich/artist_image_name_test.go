@@ -153,7 +153,7 @@ func TestResolveArtistFetchesPortraitByCanonicalName(t *testing.T) {
 	}
 }
 
-// TestFetchRecoveredArtistImageSkipsWhenTheMBIDIsNotTheFingerprintsIs the
+// TestFetchRecoveredArtistImageSkipsWhenTheMBIDIsNotTheFingerprints is the
 // acoustic-side twin. applyAcousticFallback deliberately does NOT overwrite
 // an artist the text path already resolved, so this function could be
 // reached pairing a TEXT-resolved MBID with the fingerprint's name — the

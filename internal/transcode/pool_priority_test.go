@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// TestRoutesToOptimizeChannel pins the pure routing-decision helper.
+// TestRoutesToForegroundLane pins the pure routing-decision helper.
 // Empty Kind (legacy default) and JobKindUpscale both route to the
 // background channel; JobKindOptimize routes to the foreground channel
 // UNLESS the job is flagged background (the auto-optimize sweeper's

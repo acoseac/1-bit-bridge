@@ -344,7 +344,7 @@ func TestTailscaleAdminSourceDisabled_FallsBackToDefaultConfigName(t *testing.T)
 	}
 }
 
-// TestTailscaleAdminSourceRefreshNowDelegates — RefreshNow on an
+// TestTailscaleAdminSourceRefreshNowOnDisabled — RefreshNow on an
 // all-nil source returns the same sentinel as Status (no panic, no
 // crash).
 func TestTailscaleAdminSourceRefreshNowOnDisabled(t *testing.T) {

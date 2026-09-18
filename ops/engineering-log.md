@@ -5415,3 +5415,153 @@ BOTH albums are upscale-eligible against the default target, so the filtered and
 unfiltered answers are identical. `needs=optimize` narrows genuinely, because a
 CD-quality album is already at the CarPlay target. A fixture must be a value the
 transformation would actually change.
+
+## 2026-09-18 — findings review on the post-#899 window (#915–#921)
+
+An external full-tree pass: the 2026-09-10 invariants re-checked
+mechanically (scanner writes, `indexed_at`, `enriched_at`, path `LIKE` vs
+byte-range, `WipeFilesystemTracks`, empty-set GC, `loadCLIConfig`, feature
+gates, `SetPostScanHook` — all still closed) plus targeted reads of the
+unswept post-#899 window. Four confirmed bugs, eight quick wins, one field
+report, one proposed fix declined. Every finding was verified against the
+code before a line changed; every load-bearing test was committed first and
+then negative-controlled by reverting the production line.
+
+### `needs=all` defeated the #913 coverage skip (#915)
+
+#913 skips `AllVariantPresence` + `AllEligibleKinds` when the library holds
+no variant, unless a real `needs=` filter is active, and decided "active"
+with `q.Get("needs") != ""`. The player's `renderAlbums` defaults `needs`
+to the literal `"all"`, `qs()` drops only `""`, and `parseVariantFilter`
+maps `"all"` to no filter — so the live default grid load was `needs=all`,
+read as filtered, and the skip never ran on exactly the hosted / fresh
+libraries it was written for. `TestAVariantFreeLibraryDoesNotBuildCoverage`
+called `albumsPage(..., "")`, never the production query, and was green.
+
+Fix: parse first, gate on `pred != nil`; an invalid token now 400s before
+any fold. An active filter with no snapshot (build failed / target
+unresolved) is refused with `503 coverage_unavailable` — `filterAlbums`
+used to drop the filter and serve the whole unfiltered library under a
+plausible total, beneath a comment calling that the safe direction. The
+badge-only grid still degrades to no badges. The client omits `needs` when
+it is `all` (belt and braces; the server treats `all` as inactive either
+way).
+
+The forced-failure branch needed a seam. Per-server field
+(`failCoverageBuildForTests`), not a package var, for the reason the
+export-cap seam is: a package var is a write the race detector can pair
+with a live handler's read in another test.
+
+Negative controls: restoring the pre-fix ordering + gate turned
+`TestTheDefaultGridQueryDoesNotBuildCoverage` and
+`TestAnInvalidNeedsTokenIsRefusedBeforeAnyFold` red while the refusal test
+stayed green; restoring `if cov == nil { wantVariants = nil }` turned
+exactly `TestANeedsFilterWithNoSnapshotIsRefusedNotWidened` red.
+
+### Lyrics pass two ignored the scan stand-down (#916)
+
+Pass one re-checks `ScanInProgress()` per candidate and breaks — with
+everything it had already warmed still in `pending`. Pass two had no
+check and drained it into `track_lyrics` with the scan under way: the
+double `indexed_at` bump the guard exists to prevent, one loop later.
+`TestTheSweepStandsDownWhenAScanSTARTS` seeds only `available` recordings,
+so its pass two was always empty. The new test puts the `pending` recording
+FIRST so pass one has collected it before the latch flips on the second
+candidate's write; removing the guard turns exactly that test red while
+both older stand-down tests stay green — which is the gap, demonstrated.
+
+### The integrity watchers kept a boot `variantsDir` (#917)
+
+`POST /api/upscale/variants-dir` is hot; the enqueuer, coordinator and
+auto-optimize sweeper read `liveVariantsDir`; `VariantWatcher` and
+`OrphanSidecarSweeper` took `cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)`
+at construction. Both constructors now take a `func() string`, asked per
+tick. Two consequences that were not in the finding:
+
+- **A root change must drop the chunk-resume cursor.** `dirEntirelyBehindCursor`
+  prunes any directory that is not an ancestor of the cursor and sorts
+  before it in walk order — so a cursor left under the OLD root can prune
+  the whole NEW root as "already swept" whenever the new root sorts first.
+  The test creates `b := t.TempDir()` BEFORE `a` (sequential names, so `b`
+  sorts first), sweeps under `a`, plants a cursor under `a`, switches to
+  `b`, and asserts `b`'s orphan is reaped. Removing the reset turns it red
+  independently of memoising the root.
+- **An empty answer is a refusal.** The old string argument could not be
+  empty; the provider returns `""` on a nil config snapshot, and
+  `WalkDir("")` walks the process working directory. Same rule as
+  `ReapOrphans`.
+
+The Jobs chips gated on `UpscaleStats() != nil`, which is nil while
+`upscale.enabled` is false; both sweepers are constructed whenever their
+interval is positive (#781 made the block unconditional) and reconcile
+EXISTING sidecars, so a bridge whose watchers ticked hourly reported them
+"off (upscale off or disabled)". Interval-only now, as in the wiring.
+
+### Login-ticket hygiene (#918)
+
+A minted ticket is `base64.RawURLEncoding` of 32 bytes: 43 characters of
+`[A-Za-z0-9_-]`. Both halves refuse anything longer than 64 or outside
+that alphabet by shape; the refusal is the same `302 /login?link=stale`
+every unusable ticket gets, so `TestBadLoginTicketGrantsNothing`'s
+"indistinguishable" property holds. The POST half has no response-visible
+negative control (the store answers the same 302 for an invalid ticket),
+stated rather than pretended; the GET half turns red when `ticket == ""`
+is restored.
+
+**Declined:** `url.QueryEscape` before templating. `loginTmpl` is
+`html/template`, and `{{.Ticket}}` sits in `action="/login/ticket?t=…"` —
+URL query context, already percent-escaped; a pre-escaped value renders
+`%2B` as `%252B`. The shape check makes it moot.
+
+The `<meta name="referrer">` is injected from `loginTicketReferrerPolicy`;
+a source-scan test refuses any policy literal in the template. Typing
+`strict-origin` back in turns it red while the rendered page still agrees
+with the header — which is exactly why the literal was a trap.
+
+### DLNA child order and the per-folder prefix (#919)
+
+`BuildFolderIndex` sorted children by `AbsolutePath`, which
+`dlna_wiring.go` leaves `""` for every routed track; `sort.Slice` over
+all-equal keys leaves insertion order, so the fixture arrives in reverse
+path order with artwork keys on the first and last by path, and both the
+listing and `artworkKeyFor` disagree with path order under the old sort.
+`RelativePath` first, `AbsolutePath` as tie-break: filesystem folders order
+exactly as before (shared root prefix).
+
+`EligibleCountsForFolders` trims like `EligibleRollupByPrefix` beside it;
+the result is re-keyed by the caller's spelling (`byBase` → `out[p]`), and
+two spellings of one folder in one call both resolve.
+
+### The post-upload Browse link (#920, field report)
+
+`showUploadResult` appends `<a class="btn primary">` after a `<br>` inside
+the 12 px `#upload-result` hint. Measured in the console via the real
+function: `display: inline`, text-run bottom **4.4 px below** the link's
+top at an 18.6 px line height, UA underline visible. After
+`#upload-result .btn { display: inline-block; margin-top: 8px;
+text-decoration: none }`: **+10.6 px** gap at desktop and at 375 px
+(`scrollWidth == 375`), no underline. Static files are `//go:embed`ded, so
+the check needed a rebuild + restart, not a reload.
+
+### Docs hygiene and the widened citation guard (#921)
+
+A census of `Test…` names cited in `_test.go` COMMENTS with no definition
+anywhere: **16 hits, 15 real** — the sixteenth was a `"http://server"`
+string literal on a line that also held `"TestUA"`, which the census's
+regex comment-stripper misread and which is why the guard parses with
+go/parser and scans comment groups only. The fifteen: nine docblocks
+naming a renamed sibling under its old name, four historical notes naming
+removed tests (reworded, not exempted), one missing space
+(`…FingerprintsIs the`), and one first sentence claiming a property the
+test does not pin (`fsync_test.go`: "passing a directory is a hard error"
+above a test that deliberately avoids the directory case because it is
+not deterministic on Unix). The guard scans its own file, so its own
+example could not spell a test name either — it did, on the first run.
+
+Also corrected: AGENTS.md's `WipeAllTracks` (a third copy of the claim
+CLAUDE.md's top list fixed on 2026-09-06), the pairing-limiter denial in
+CLAUDE.md and `TestPairingCreateQueueFull`'s docblock (PROTOCOL.md line
+1444 documents the 429; `pairing.go:106` enforces it since #133), the
+`csrfGuard` docblock's `Origin: null` sentence (`originMatchesAdmin`
+refuses it — the 2026-09-12 report was exactly that), and two artwork
+comments describing `…AcceptsPNGCandidates` as `…RejectsPNGCandidates`.
