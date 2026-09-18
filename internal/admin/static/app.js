@@ -5700,8 +5700,9 @@ function formatDuration(seconds) {
 }
 
 // Mobile hamburger nav. Toggles `data-nav-open` on the <header> + the
-// `aria-expanded` attr on the button. The CSS at <=640px reveals the
-// button, hides the nav by default, and renders an absolute-positioned
+// `aria-expanded` attr on the button. The CSS at <=1023px reveals the
+// button, hides the drawer (.sidebar-drawer: the nav, the space meter and
+// the foot block) by default, and renders it as an absolute-positioned
 // dropdown when data-nav-open=true. Closes on outside click, Escape,
 // or any link tap (the page is about to navigate anyway).
 function initMobileNav() {
