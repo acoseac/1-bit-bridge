@@ -242,10 +242,21 @@ func TestCSSRuleListRefusesUnbalancedBraces(t *testing.T) {
 	if len(inner) != 2 || normSelector(inner[0].sel) != "b" || compactCSS(inner[1].body) != "z:3" {
 		t.Fatalf("nested rules = %+v", inner)
 	}
-	for _, bad := range []string{"a { x: 1 } }", "} a { x: 1 }", "a { x: 1", "a { b { y: 2 }"} {
+	for _, bad := range []string{"a { x: 1 } }", "} a { x: 1 }", "a { x: 1", "a { b { y: 2 }", `a { content: "}`} {
 		if got, err := cssRuleList(bad); err == nil {
 			t.Errorf("%q: accepted as %+v; want a refusal", bad, got)
 		}
+	}
+
+	// Braces inside string literals are text: a quoted `}` must not close
+	// the rule, a quoted `{` in an attribute selector must not open one, and
+	// an escaped quote must not end the string early.
+	quoted, err := cssRuleList(`a::after { content: "}" } [data-v='{'] { y: 2 } b { content: "\"{"; z: 3 }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quoted) != 3 || normSelector(quoted[1].sel) != `[data-v='{']` || compactCSS(quoted[2].body) != `content:"\"{";z:3` {
+		t.Fatalf("quoted rules = %+v", quoted)
 	}
 }
 
@@ -339,15 +350,30 @@ type cssRule struct{ sel, body string }
 // (no `.sidebar-foot` override in the phone block) would then pass over a
 // block the scan never saw. Tolerating the brace was proposed on #934; for
 // a guard, refusing is the direction that cannot go quiet.
+//
+// A brace inside a string literal (`content: "}"`, `[data-v="{"]`) is text,
+// not structure, so quoted runs are skipped, backslash escapes included.
 func cssRuleList(css string) ([]cssRule, error) {
 	var out []cssRule
 	depth, start, selStart := 0, 0, 0
-	// A byte loop, not `range`: the scanner only looks for the two ASCII
-	// braces, so there is nothing to decode. (`range` would be correct too —
+	var quote byte
+	// A byte loop, not `range`: the scanner only looks for ASCII braces and
+	// quotes, so there is nothing to decode. (`range` would be correct too —
 	// its index is the byte offset of each rune, and every bound taken here
 	// is the offset of a brace, which is a rune boundary by construction.)
 	for i := 0; i < len(css); i++ {
+		if quote != 0 {
+			switch css[i] {
+			case '\\':
+				i++ // the escaped byte, whatever it is, is not the closing quote
+			case quote:
+				quote = 0
+			}
+			continue
+		}
 		switch css[i] {
+		case '"', '\'':
+			quote = css[i]
 		case '{':
 			if depth == 0 {
 				start = i + 1
@@ -363,6 +389,9 @@ func cssRuleList(css string) ([]cssRule, error) {
 				selStart = i + 1
 			}
 		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated %c string", quote)
 	}
 	if depth != 0 {
 		return nil, fmt.Errorf("%d block(s) still open at the end of the input", depth)
