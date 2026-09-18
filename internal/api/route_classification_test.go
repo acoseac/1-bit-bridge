@@ -138,7 +138,7 @@ func TestRouteRegistry_noUnexpectedStreamingRoutes(t *testing.T) {
 	}
 }
 
-// TestBoundedHandler_setsWriteDeadline pins the headline contract:
+// TestBoundedHandler_invokesInner pins the headline contract:
 // the wrapper actually calls `SetWriteDeadline` on the response
 // controller. We can't directly observe the deadline value
 // (httptest's recorder doesn't expose it), but we CAN verify the

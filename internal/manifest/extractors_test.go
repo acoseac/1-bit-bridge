@@ -171,8 +171,9 @@ func TestExtractLocalArtwork_FolderCaseInsensitive(t *testing.T) {
 	// Linux filesystems are case-sensitive; Windows-tagger output
 	// like `Cover.JPG` / `Folder.JPG` must still be recognised. The
 	// extractor uses strings.EqualFold against folderArtCandidates
-	// for exactly this reason. JPEG-only by design — PNG case-
-	// variants are covered by TestExtractLocalArtwork_RejectsPNGCandidates.
+	// for exactly this reason. PNG is accepted too (transcoded to JPEG
+	// on the way into the cache) — its case-variants are covered by
+	// TestExtractLocalArtwork_AcceptsPNGCandidates.
 	for _, name := range []string{"Cover.JPG", "FOLDER.JPG", "cover.JPG", "Folder.jpg"} {
 		t.Run(name, func(t *testing.T) {
 			libDir := t.TempDir()
@@ -201,7 +202,7 @@ func TestExtractLocalArtwork_FolderCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestExtractLocalArtwork_RejectsPNGCandidates asserts the V1
+// TestExtractLocalArtwork_AcceptsPNGCandidates asserts the V1
 // PNG acceptance (artwork right-sizing batch, reverses the PR #98
 // JPEG-only V1 restriction): cover.png / folder.png ARE matched by the
 // folder-level fallback, and their bytes are TRANSCODED to JPEG by

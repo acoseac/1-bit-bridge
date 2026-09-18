@@ -57,11 +57,11 @@ func TestFsyncFileAndParent_MissingFileSurfacesError(t *testing.T) {
 	}
 }
 
-// TestFsyncFileAndParent_DirectoryAsPathSurfacesError pins that
-// passing a directory (instead of a file) is a hard error.
-// fsync on a directory handle is a separate code path (syncDir) —
-// passing a directory to the top-level helper should fail at the
-// file-fsync stage, not silently succeed.
+// TestFsyncFileAndParent_PathInsideMissingDir pins that a path the
+// helper cannot open for fsync is a hard error, not a silent success.
+// It does NOT pin "passing a directory is an error", which is what an
+// earlier name claimed: fsync on a directory handle is a separate code
+// path (syncDir), and the directory case is not deterministic —
 //
 // On Unix, opening a directory with O_RDONLY succeeds AND Sync() on
 // the resulting *os.File may succeed too (it ends up acting like a

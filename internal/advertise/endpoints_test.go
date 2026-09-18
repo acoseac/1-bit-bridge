@@ -101,11 +101,9 @@ func TestPortDefaultsTo7788(t *testing.T) {
 // through `internal/api`'s `reachableEndpoints` via the
 // `admin.TailscaleProvider` injection.
 //
-// Replaces the prior four tests
-// (TestShouldAdvertiseHostTailscale + TestEndpointsRespectsTailscaleMode +
-// TestEndpointsSkipsTailscaleCLIInTsnetMode +
-// TestEndpointsIncludesTailscaleInCLIMode) which gated on the now-
-// removed `Params.TailscaleMode` field and the now-removed
+// Replaces the prior four tests (the should-advertise-host, respects-mode,
+// skips-CLI-in-tsnet-mode and includes-in-CLI-mode cases) which gated on
+// the now-removed `Params.TailscaleMode` field and the now-removed
 // `shouldAdvertiseHostTailscale` helper.
 func TestEndpointsNeverEmitsTailscaleClassesUnconditionally(t *testing.T) {
 	eps := Endpoints(Params{Port: 7788, HostOverride: "testhost"})

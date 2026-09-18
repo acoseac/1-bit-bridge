@@ -250,7 +250,9 @@ mode). iOS never talks to the admin listener.
   5s window protects active streams.
 - **Single ↔ multi-root storage flip**: adding a second root (or dropping to
   one) changes stored track paths; the admin handler calls
-  `store.WipeAllTracks()` before rescanning. Don't migrate in place.
+  `store.WipeFilesystemTracks()` before rescanning — never `WipeAllTracks`,
+  which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream
+  library on a mere root-count toggle. Don't migrate in place.
 - **Use `safeQuery(r)` for any handler reading a library path from the query
   string** — `r.URL.Query()` form-decodes literal `+` to space.
 - Per-route write-deadline overrides are a deliberate registry

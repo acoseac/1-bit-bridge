@@ -73,7 +73,7 @@ func TestCloseBeforeStartIsNoOp(t *testing.T) {
 	}
 }
 
-// TestStatusBeforeStartReturnsError — same shape: Status / ListenTLS
+// TestStatusAndListenTLSBeforeStartReturnError — same shape: Status / ListenTLS
 // require a started server. Calling either before Start should
 // return a typed error rather than panic.
 func TestStatusAndListenTLSBeforeStartReturnError(t *testing.T) {
@@ -324,7 +324,7 @@ func TestAssertSecureDirAcceptsWellFormedDir(t *testing.T) {
 
 // TestUnstartedServerInitialState — pre-Start, AuthURL is empty
 // and CertDomains is nil. The previous version of this test was
-// named TestStartIsIdempotent but never actually called Start
+// named for Start's idempotency but never actually called Start
 // (CodeRabbit nitpick on PR #138) — the real idempotency contract
 // requires a live control plane and is integration-tested at the
 // cmd/bridge level. Renamed to reflect what it actually exercises.

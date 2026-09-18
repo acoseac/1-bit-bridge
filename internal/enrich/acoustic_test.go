@@ -471,7 +471,7 @@ func TestAcousticFallbackDoesNotOverwriteAResolvedArtist(t *testing.T) {
 // exactly the population this feature targets. A 15-track "CD 01" folder
 // would spend a quarter of a minute asking the same question fifteen times.
 //
-// Renamed from TestAlbumHopSharesTheTextPathCache: the hop shares the CACHE
+// Renamed (it used to say the hop SHARES the text path's cache): the hop shares the CACHE
 // with the text path, but must not share its KEY. The old name and its
 // text-path-keyed fixture described the collision that cost whole albums
 // their release MBID — see acousticCacheKey.

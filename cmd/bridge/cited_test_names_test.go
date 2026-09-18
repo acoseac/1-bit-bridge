@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,10 +61,19 @@ func TestEveryCitedTestNameExists(t *testing.T) {
 // ordinary slice of what a docblock might cite.
 var citedRe = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*`)
 
-var definedRe = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
-
-// scanTestCitations walks the tree once, collecting names cited from non-test
-// source and names defined in _test.go files.
+// scanTestCitations walks the tree once, collecting names defined in _test.go
+// files and names cited from non-test source AND from the COMMENTS of test
+// files.
+//
+// Test files were skipped entirely at first, and fifteen stale citations sat
+// in their docblocks — a renamed sibling named under its old name, a
+// historical note naming a test that no longer exists, and one first
+// sentence claiming a property the test beneath it does not pin. A test file
+// is parsed ONCE and both halves come off the AST: definitions from its
+// top-level `Test…` FuncDecls, citations from its comment groups and nothing
+// else — a test file's CODE names tests legitimately, and its string
+// literals can hold anything (a User-Agent value spelled like a test name,
+// say — one does). Gemini on #921 folded the two passes into one.
 func scanTestCitations(t *testing.T, root string) (cited map[string][]string, defined map[string]bool) {
 	t.Helper()
 	cited, defined = map[string][]string{}, map[string]bool{}
@@ -87,13 +99,27 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 		// CRLF-normalised: nothing pins eol, so a Windows checkout would make
 		// the `(?m)^func` anchor and every literal below find nothing.
 		src := strings.ReplaceAll(string(raw), "\r\n", "\n")
+		rel, _ := filepath.Rel(root, path)
 		if strings.HasSuffix(path, "_test.go") {
-			for _, m := range definedRe.FindAllStringSubmatch(src, -1) {
-				defined[m[1]] = true
+			f, err := parser.ParseFile(token.NewFileSet(), path, src, parser.ParseComments|parser.SkipObjectResolution)
+			if err != nil {
+				return err
+			}
+			for _, decl := range f.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Test") {
+					defined[fn.Name.Name] = true
+				}
+			}
+			var comments strings.Builder
+			for _, g := range f.Comments {
+				comments.WriteString(g.Text())
+				comments.WriteByte('\n')
+			}
+			for _, name := range citedRe.FindAllString(comments.String(), -1) {
+				cited[name] = append(cited[name], rel)
 			}
 			return nil
 		}
-		rel, _ := filepath.Rel(root, path)
 		for _, name := range citedRe.FindAllString(src, -1) {
 			cited[name] = append(cited[name], rel)
 		}

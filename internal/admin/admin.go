@@ -1921,12 +1921,15 @@ func (s *Server) Serve(ctx context.Context) error {
 //
 //  2. **Origin allowlist (reject-if-mismatched, not reject-if-
 //     missing)**. When the Origin header is present, it must match
-//     the configured AdminAddress host:port. When absent, allow —
-//     Firefox/Safari sometimes omit Origin entirely for loopback
-//     navigations or send "null", and failing closed locks
-//     legitimate operators out. Referer is intentionally not
-//     consulted (same flakiness, no marginal benefit beyond a
-//     strict Content-Type).
+//     the configured AdminAddress host:port — and a literal "null"
+//     (what a browser sends from an opaque origin, e.g. a form POST
+//     from a `no-referrer` page) is PRESENT and MISMATCHED, so
+//     originMatchesAdmin refuses it; the 2026-09-12 login-link
+//     report was exactly that. When absent, allow — Firefox/Safari
+//     sometimes omit Origin entirely for loopback navigations, and
+//     failing closed locks legitimate operators out. Referer is
+//     intentionally not consulted (same flakiness, no marginal
+//     benefit beyond a strict Content-Type).
 //
 // GET / HEAD pass through unconditionally — no body to parse, no
 // state mutation. OPTIONS (which we don't handle) returns 405 from
