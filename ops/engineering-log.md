@@ -5565,3 +5565,78 @@ CLAUDE.md and `TestPairingCreateQueueFull`'s docblock (PROTOCOL.md line
 `csrfGuard` docblock's `Origin: null` sentence (`originMatchesAdmin`
 refuses it — the 2026-09-12 report was exactly that), and two artwork
 comments describing `…AcceptsPNGCandidates` as `…RejectsPNGCandidates`.
+
+## 2026-09-18 — the phone top bar on a public bridge (#934, field report)
+
+### The rail child that was in the top bar
+
+Report: the operator bridge (public mode, uploads + deleting on) at 375 and
+430 px CSS width — the brand mark clipped behind the menu button, the
+library name gone; the demo tenant (same binary, public mode) fine at the
+same width.
+
+Reproduced on a throwaway public-mode bridge (`bridge init --public
+--domain localhost --admin-tls-proxy`, `upload.enabled: true`) in the
+browser pane at 375×812. Measured before the fix:
+
+| element | x | width |
+|---|---|---|
+| `.sidebar-head` | 16 | 56.9 |
+| `.brand` | 16 | 4.9 |
+| `.brand .name` | 62 | 0 (scrollWidth 70) |
+| `.nav-toggle` | 28.9 | 44 |
+| `.space-meter` | 84.9 | 77.9 |
+| `.sidebar-foot` | 174.8 | 184.2 (dot 6 + theme 85.6 + Sign out 76.6) |
+
+The toggle at x=28.9 over the mark at x=16 is the "clipped behind the menu
+button". `.sidebar-head` is `flex: 1 1 auto; min-width: 0` and the name
+has `text-overflow: ellipsis`, so the head gave up everything first; the
+meter (`flex: 0 0 auto`) and the foot (`flex-shrink: 0`) gave up nothing.
+
+What gates the meter: `apiLibrarySpace` sets `Configured =
+cfg.Upload.Enabled || cfg.Upload.MinFreeBytes > 0`, and `refreshSpaceMeter`
+reveals the widget only when that is true or free space is within twice
+the floor. Not the mode. The demo tenant has uploads off.
+
+Fix: `.sidebar-drawer` wraps the nav, the meter and the foot; `display:
+contents` on the desktop rail; the phone block hides/reveals the wrapper
+where it used to hide/reveal `#primary-nav`; the foot keeps its desktop
+shape inside the drawer (the row override, the hidden build line and the
+520 px badge-to-dot rule all dropped); `.brand::after` draws the live dot
+in the bar, coloured via `header.sidebar:has(.conn-badge[data-state=…])`.
+
+After, at 375: head 343 wide, brand 131.6, name 69.6 of 70, toggle at
+x=315; drawer open: 375×520 with scrollHeight 744 (693 without the meter),
+meter at y=655, foot at y=706, build line at y=775; the dot reads
+`rgb(52,211,153)` dark / `rgb(6,95,70)` light with the badge `connected`.
+At 430: brand 131.6, toggle at x=370. Uploads off: meter `hidden`, drawer
+scrollHeight 693, bar identical.
+
+Desktop (1280×900) against an unmodified main build on a second port:
+`.sidebar-head` (14,20,220,52), all twelve nav rows, the meter
+(14,566,220,49.3) and the three `.meta` children at identical coordinates;
+the header's children are `div.sidebar-head` + `div#sidebar-drawer` at
+`display: contents` instead of the four direct children. The only delta
+was the foot's y (782.7 → 766.5), which is the build line wrapping to two
+lines because the worktree build's version string is longer — text, not
+layout.
+
+Rejected: letting the header wrap (a two-row sticky bar on every phone
+page, ~115 px of viewport); a second badge element in the bar (duplicate
+ids, two elements for `applyConnState` to keep in step); moving
+`#conn-status` into the head (changes the desktop foot). Kept: the
+drawer's `min(70vh, 520px)` cap — Sign out is a flick away at the bottom
+of a scrolling menu, and the cut-off last row already signals the scroll.
+
+Guards: `TestEverythingBelowTheBrandIsInTheDrawer` (real handler, public
+mode, `x/net/html`; the header has exactly two element children) and
+`TestPhoneShellHidesTheDrawerAndTheDesktopRailDissolvesIt` (comment-free
+rule scan). Negative controls, each after the commit: the meter moved back
+outside the wrapper → red at the closed-set check and the containment
+check; `display: contents` → `block` → red; the phone block hiding
+`#primary-nav` instead of the wrapper → red twice. Static files are
+`//go:embed`ded — every check needed a rebuild and restart, per #920.
+
+Accessibility note: `#conn-status` and its `aria-live` region now sit in
+the drawer, so state changes announce only while it is open. At ≤520 px
+the badge was already `font-size: 0`; the drawer shows the word.
