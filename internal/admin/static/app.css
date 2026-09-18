@@ -895,6 +895,10 @@ header.sidebar {
 .conn-badge[data-state="connecting"] { color: var(--fg-muted); }
 .conn-badge[data-state="reconnecting"] { color: var(--warn); }
 .conn-badge[data-state="disconnected"] { color: var(--danger); }
+/* The bar's copy of the badge (layout.html, inside .brand). Hidden on the
+ * desktop rail, where the foot's copy is on screen; the <1024px block turns
+ * it into the dot alone. */
+.conn-badge-bar { display: none; }
 
 /* Theme toggle + public-mode sign-out. The theme glyph is a text character
  * so it inherits a themed colour and can never render invisible-on-dark. */
@@ -1092,26 +1096,15 @@ main {
    * longer rides the top bar, and the build line comes back because the
    * reason it was dropped ("no room beside a hamburger") no longer holds. */
 
-  /* The live dot stays in the bar even though the badge it mirrors is now
-   * in the drawer: it is the one thing the foot carried that earns a glance
+  /* The live dot stays in the bar even though the foot's badge is now in
+   * the drawer: it is the one thing the foot carried that earns a glance
    * without opening the menu — the old 520px rule dropped the word and kept
-   * exactly this. Drawn as a pseudo-element on the brand and coloured
-   * through :has() from the badge's own data-state, so app.js still updates
-   * ONE element and nothing here can disagree with it; the badge remains
-   * the accessible one. Same 6px + halo as .conn-badge::before. */
-  .brand::after {
-    content: "";
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: currentcolor;
-    color: var(--fg-muted);
-    box-shadow: 0 0 0 3px color-mix(in srgb, currentcolor 18%, transparent);
-    flex-shrink: 0;
-  }
-  header.sidebar:has(.conn-badge[data-state="connected"]) .brand::after { color: var(--ok); }
-  header.sidebar:has(.conn-badge[data-state="reconnecting"]) .brand::after { color: var(--warn); }
-  header.sidebar:has(.conn-badge[data-state="disconnected"]) .brand::after { color: var(--danger); }
+   * exactly this. It is the SECOND .conn-badge, inside .brand: shown here,
+   * hidden on the desktop rail, so each viewport has one visible live
+   * region and applyConnState keeps both in step. font-size: 0 drops the
+   * word and keeps it in the accessibility tree — the foot's copy is inside
+   * a display: none drawer here, so this is the region a phone can hear. */
+  .conn-badge-bar { display: inline-flex; font-size: 0; gap: 0; }
 
   main { padding: 22px 20px 96px; }
 }

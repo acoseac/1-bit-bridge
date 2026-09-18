@@ -5602,8 +5602,9 @@ Fix: `.sidebar-drawer` wraps the nav, the meter and the foot; `display:
 contents` on the desktop rail; the phone block hides/reveals the wrapper
 where it used to hide/reveal `#primary-nav`; the foot keeps its desktop
 shape inside the drawer (the row override, the hidden build line and the
-520 px badge-to-dot rule all dropped); `.brand::after` draws the live dot
-in the bar, coloured via `header.sidebar:has(.conn-badge[data-state=…])`.
+520 px badge-to-dot rule all dropped); a second, dot-only `.conn-badge`
+inside `.brand` draws the live dot in the bar (see the review note below —
+the first form was a `:has()`-coloured `.brand::after`).
 
 After, at 375: head 343 wide, brand 131.6, name 69.6 of 70, toggle at
 x=315; drawer open: 375×520 with scrollHeight 744 (693 without the meter),
@@ -5622,11 +5623,21 @@ lines because the worktree build's version string is longer — text, not
 layout.
 
 Rejected: letting the header wrap (a two-row sticky bar on every phone
-page, ~115 px of viewport); a second badge element in the bar (duplicate
-ids, two elements for `applyConnState` to keep in step); moving
-`#conn-status` into the head (changes the desktop foot). Kept: the
-drawer's `min(70vh, 520px)` cap — Sign out is a flick away at the bottom
-of a scrolling menu, and the cut-off last row already signals the scroll.
+page, ~115 px of viewport); moving `#conn-status` into the head (changes
+the desktop foot). Kept: the drawer's `min(70vh, 520px)` cap — Sign out is
+a flick away at the bottom of a scrolling menu, and the cut-off last row
+already signals the scroll.
+
+Taken on review (CodeRabbit): the first form drew the bar's dot as
+`.brand::after`, coloured through `:has()` from `#conn-status`'s
+`data-state` — one element for app.js to update, but the ONLY `aria-live`
+region then sat inside a `display: none` drawer, so a phone heard no state
+change at all. Now the bar carries a second `.conn-badge` inside `.brand`
+(no id; `applyConnState` updates every `.conn-badge`), hidden on the
+desktop rail and `font-size: 0` below 1024px, so each viewport shows
+exactly one live region. The "duplicate ids / two elements to keep in
+step" objection that rejected this form at first does not hold: the copy
+has no id, and one `querySelectorAll` updates both from one state.
 
 Guards: `TestEverythingBelowTheBrandIsInTheDrawer` (real handler, public
 mode, `x/net/html`; the header has exactly two element children) and
@@ -5637,6 +5648,11 @@ check; `display: contents` → `block` → red; the phone block hiding
 `#primary-nav` instead of the wrapper → red twice. Static files are
 `//go:embed`ded — every check needed a rebuild and restart, per #920.
 
-Accessibility note: `#conn-status` and its `aria-live` region now sit in
-the drawer, so state changes announce only while it is open. At ≤520 px
-the badge was already `font-size: 0`; the drawer shows the word.
+Also from that review: `compactCSS` folded the descendant combinator, so
+`header[data-nav-open="true"] .sidebar-drawer` and the compound
+`header[…].sidebar-drawer` (which matches nothing) keyed the same —
+selectors now go through `normSelector`, which keeps one space; and
+SonarCloud's cognitive-complexity check (23 against 15) split the
+containment test into helpers. Declined: moving the CLAUDE.md rule out of
+the PR — "CLAUDE.md updates direct to main" is the docs-ONLY exception to
+the branch rule, and #915–#921 each carried their rule in-PR.

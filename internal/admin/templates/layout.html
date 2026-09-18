@@ -102,6 +102,15 @@
     <div class="brand">
       <img class="brand-mark" src="/static/bridge-mark.png?v=2" alt="" width="36" height="36">
       <span class="name">{{.LibraryName}}</span>
+      {{- /* The top bar's own live badge. The foot block's #conn-status is
+          inside the drawer, which is display: none until the menu opens, so
+          on a phone its aria-live region would announce nothing. This copy
+          is the bar's: hidden on the desktop rail, where the foot's copy is
+          on screen, and drawn as the dot alone below 1024px. applyConnState
+          updates EVERY .conn-badge, so each viewport shows exactly one live
+          region and the two can never disagree. No id — app.js finds badges
+          by class, and #conn-status stays on the foot's copy. */ -}}
+      <span class="conn-badge conn-badge-bar" data-state="connecting" aria-live="polite">Connecting…</span>
     </div>
     <button id="nav-toggle" class="nav-toggle" type="button"
             aria-controls="sidebar-drawer" aria-expanded="false" aria-label="Menu">

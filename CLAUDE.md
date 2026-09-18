@@ -1863,8 +1863,12 @@ its twin.** The top list is older, shorter, and read first.
   main build), and `TestEverythingBelowTheBrandIsInTheDrawer` pins the
   header to exactly two element children — put a new rail element inside
   the wrapper unless it has a case for the bar. The live dot stays in the
-  bar as `.brand::after`, coloured through `:has()` from the badge's own
-  `data-state`, so app.js still updates one element. Verified in a
+  bar as a SECOND `.conn-badge` inside the brand — dot-only there, hidden
+  on the desktop rail — because the foot's `#conn-status` is inside the
+  hidden drawer and its `aria-live` region would announce nothing on a
+  phone; `applyConnState` updates every `.conn-badge`, so each viewport
+  shows exactly one live region. (The first form was a `:has()`-coloured
+  pseudo-element; CodeRabbit caught the silent live region.) Verified in a
   browser at 375 / 430 / 1280, dark and light, with and without the
   meter; the Go suite sees only the containment. (#934)
 

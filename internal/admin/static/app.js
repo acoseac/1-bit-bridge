@@ -4845,13 +4845,19 @@ function applyConnState(state) {
   // "reconnecting" (amber pill — EventSource is between attempts),
   // "disconnected" (red pill — used only for terminal close, which
   // EventSource doesn't reach on its own; reserved for future use).
-  const el = document.getElementById("conn-status");
-  if (!el) return;
-  el.dataset.state = state;
-  el.textContent =
+  //
+  // Every .conn-badge, not #conn-status alone: the foot's badge sits in the
+  // phone drawer (display: none until the menu opens), so the top bar
+  // carries a second, dot-only copy inside .brand. One state source, both
+  // updated — a viewport shows exactly one of them.
+  const text =
     state === "connected" ? "Live" :
     state === "reconnecting" ? "Reconnecting…" :
     "Disconnected";
+  document.querySelectorAll(".conn-badge").forEach((el) => {
+    el.dataset.state = state;
+    el.textContent = text;
+  });
 }
 
 // Active EventSource. Tracked at module scope so the
