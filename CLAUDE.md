@@ -1996,7 +1996,7 @@ An external full-tree pass (the 2026-09-10 invariants re-checked
 mechanically, plus targeted reads of everything after #899) came back with
 four bugs and eight quick wins; every one was verified against the code
 before acting, and one proposed fix was declined on evidence. Shipped as
-#915–#921 plus a field report folded in (#920). The named classes from the
+PRs #915–#921 plus a field report folded in (#920). The named classes from the
 2026-09-10 sweep — `indexed_at`, `enriched_at`, `LIKE` on path predicates,
 `WipeFilesystemTracks`, empty-set GC, `loadCLIConfig`, feature gates,
 `SetPostScanHook` — are still closed. The record is in

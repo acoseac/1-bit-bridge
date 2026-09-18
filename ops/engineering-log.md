@@ -5429,7 +5429,7 @@ then negative-controlled by reverting the production line.
 
 ### `needs=all` defeated the #913 coverage skip (#915)
 
-#913 skips `AllVariantPresence` + `AllEligibleKinds` when the library holds
+PR #913 skips `AllVariantPresence` + `AllEligibleKinds` when the library holds
 no variant, unless a real `needs=` filter is active, and decided "active"
 with `q.Get("needs") != ""`. The player's `renderAlbums` defaults `needs`
 to the literal `"all"`, `qs()` drops only `""`, and `parseVariantFilter`
