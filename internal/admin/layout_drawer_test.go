@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -106,7 +107,10 @@ func TestEverythingBelowTheBrandIsInTheDrawer(t *testing.T) {
 // TestPhoneShellHidesTheDrawerAndTheDesktopRailDissolvesIt is the CSS half.
 func TestPhoneShellHidesTheDrawerAndTheDesktopRailDissolvesIt(t *testing.T) {
 	css := readCSSNoComments(t, "static/app.css")
-	top := cssRuleList(css)
+	top, err := cssRuleList(css)
+	if err != nil {
+		t.Fatalf("app.css does not brace-match once comments are stripped: %v", err)
+	}
 
 	var desktop []string
 	var phone string
@@ -131,7 +135,11 @@ func TestPhoneShellHidesTheDrawerAndTheDesktopRailDissolvesIt(t *testing.T) {
 	}
 
 	phoneRules := map[string]string{}
-	for _, r := range cssRuleList(phone) {
+	inner, err := cssRuleList(phone)
+	if err != nil {
+		t.Fatalf("the phone block does not brace-match: %v", err)
+	}
+	for _, r := range inner {
 		phoneRules[compactCSS(r.sel)] += r.body
 	}
 	if !strings.Contains(compactCSS(phoneRules[".sidebar-drawer"]), "display:none") {
@@ -200,7 +208,13 @@ type cssRule struct{ sel, body string }
 // so the caller recurses into the block it wants. Brace matching is safe
 // here only because the comments are already gone — a `{` in prose is the
 // trap CLAUDE.md records for the deletion diffs.
-func cssRuleList(css string) []cssRule {
+//
+// Unbalanced input is an ERROR, never a best-effort scan. A stray `}` would
+// leave every later rule unmatched, and the absence checks the callers make
+// (no `.sidebar-foot` override in the phone block) would then pass over a
+// block the scan never saw. Tolerating the brace was proposed on #934; for
+// a guard, refusing is the direction that cannot go quiet.
+func cssRuleList(css string) ([]cssRule, error) {
 	var out []cssRule
 	depth, start, selStart := 0, 0, 0
 	// A byte loop, not `range`: the scanner only looks for the two ASCII
@@ -215,6 +229,9 @@ func cssRuleList(css string) []cssRule {
 			}
 			depth++
 		case '}':
+			if depth == 0 {
+				return nil, fmt.Errorf("stray '}' at byte %d", i)
+			}
 			depth--
 			if depth == 0 {
 				out = append(out, cssRule{sel: strings.TrimSpace(css[selStart : start-1]), body: css[start:i]})
@@ -222,7 +239,36 @@ func cssRuleList(css string) []cssRule {
 			}
 		}
 	}
-	return out
+	if depth != 0 {
+		return nil, fmt.Errorf("%d block(s) still open at the end of the input", depth)
+	}
+	return out, nil
+}
+
+// TestCSSRuleListRefusesUnbalancedBraces pins the scanner's two halves: a
+// balanced input yields the rules with at-rule bodies kept verbatim for the
+// caller to recurse into, and an unbalanced one is refused rather than
+// scanned best-effort.
+func TestCSSRuleListRefusesUnbalancedBraces(t *testing.T) {
+	rules, err := cssRuleList("a { x: 1 } @media (q) { b { y: 2 } c { z: 3 } }")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 || compactCSS(rules[0].sel) != "a" || compactCSS(rules[0].body) != "x:1" || compactCSS(rules[1].sel) != "@media(q)" {
+		t.Fatalf("rules = %+v", rules)
+	}
+	inner, err := cssRuleList(rules[1].body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inner) != 2 || compactCSS(inner[0].sel) != "b" || compactCSS(inner[1].body) != "z:3" {
+		t.Fatalf("nested rules = %+v", inner)
+	}
+	for _, bad := range []string{"a { x: 1 } }", "} a { x: 1 }", "a { x: 1", "a { b { y: 2 }"} {
+		if got, err := cssRuleList(bad); err == nil {
+			t.Errorf("%q: accepted as %+v; want a refusal", bad, got)
+		}
+	}
 }
 
 // compactCSS drops every whitespace character so a selector or declaration
