@@ -57,10 +57,12 @@ var logger = logging.Component("integrity")
 var stopGrace = 5 * time.Second
 
 type VariantWatcher struct {
-	lister      VariantLister
-	deleter     VariantDeleter
-	publish     PublishFunc
-	variantsDir string
+	lister  VariantLister
+	deleter VariantDeleter
+	publish PublishFunc
+	// variantsDir resolves the effective variants directory for the
+	// mount-loss guard, and is asked PER TICK — see NewVariantWatcher.
+	variantsDir func() string
 	interval    time.Duration
 
 	// onTickComplete fires after every full sweep completes;
@@ -133,16 +135,27 @@ type VariantSnapshot struct {
 // the watcher entirely — Start returns a no-op stopFn. Used by
 // operators on minimal deploys who only run `--gc` manually.
 //
-// `variantsDir` is the effective variants output directory
+// `variantsDir` resolves the effective variants output directory
 // (`cfg.Upscale.EffectiveVariantsDir`) the sidecar paths live
 // under. Before every sweep the watcher probes it via
 // VariantsDirSweepBlockReason and skips the whole tick when the
 // directory is missing or empty while rows exist — the signature
 // of a cleanly-unmounted variants volume, where every per-row
 // stat would report ENOENT and an unguarded sweep would
-// mass-delete the catalog (2026-07-21 review H4). An empty
-// variantsDir disables the guard (legacy unconditional sweep).
-func NewVariantWatcher(lister VariantLister, deleter VariantDeleter, publish PublishFunc, variantsDir string, interval time.Duration) *VariantWatcher {
+// mass-delete the catalog (2026-07-21 review H4). A nil provider,
+// or one answering "", disables the guard (legacy unconditional
+// sweep).
+//
+// A PROVIDER rather than a path, asked on every tick: the
+// directory is a hot setting (POST /api/upscale/variants-dir), and
+// a value captured at construction kept probing the volume the
+// operator had moved AWAY from — so the guard that exists to
+// notice an unmounted variants volume was watching the wrong one
+// for the rest of the process. Every consumer of the field reads
+// it live now, which is the rule for hot config: either every
+// consumer reads a field live or every consumer takes it at boot,
+// never a split.
+func NewVariantWatcher(lister VariantLister, deleter VariantDeleter, publish PublishFunc, variantsDir func() string, interval time.Duration) *VariantWatcher {
 	return &VariantWatcher{
 		lister:      lister,
 		deleter:     deleter,
@@ -251,6 +264,15 @@ func (w *VariantWatcher) run(ctx context.Context, done chan struct{}) {
 	}
 }
 
+// currentVariantsDir asks the provider, treating a nil provider as
+// "no guard" — the same answer an empty path gives.
+func (w *VariantWatcher) currentVariantsDir() string {
+	if w.variantsDir == nil {
+		return ""
+	}
+	return w.variantsDir()
+}
+
 // tick performs one full sweep. Returns the count of rows
 // removed (NOT the count of misses observed — a stat-but-
 // delete-failed row counts 0). Logs WARN on per-row stat /
@@ -278,10 +300,12 @@ func (w *VariantWatcher) tick(ctx context.Context) int {
 	// catalog on per-row ENOENTs. Probed per tick so a later
 	// unmount is caught even after healthy ticks. Shares the
 	// helper with `bridge upscale --gc`'s reverse-sweep guard.
-	if w.variantsDir != "" {
-		if reason := VariantsDirSweepBlockReason(w.variantsDir); reason != "" {
+	// The directory is RESOLVED per tick too, so a hot move of
+	// the variants dir moves the probe with it.
+	if dir := w.currentVariantsDir(); dir != "" {
+		if reason := VariantsDirSweepBlockReason(dir); reason != "" {
 			logger.Warn("integrity variant sweep: skipping sweep, variants dir unhealthy with rows in catalog",
-				slog.String("variants_dir", w.variantsDir),
+				slog.String("variants_dir", dir),
 				slog.String("reason", reason),
 				slog.Int("rows", len(rows)),
 			)

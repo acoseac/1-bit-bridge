@@ -113,9 +113,16 @@ const gcGracePeriod = 10 * time.Minute
 // Mirrors `VariantWatcher` exactly so cmd/bridge's wiring +
 // shutdown ordering treats both watchers symmetrically.
 type OrphanSidecarSweeper struct {
-	lister    SidecarLister
-	outputDir string
+	lister SidecarLister
+	// outputDir resolves the variant tree to walk, and is asked PER
+	// TICK — see NewOrphanSidecarSweeper.
+	outputDir func() string
 	interval  time.Duration
+
+	// lastRoot is the tree the cursor below was taken in. A cursor is
+	// a position in ONE tree; when the provider answers a different
+	// root the cursor is dropped with the old tree (see tick).
+	lastRoot string
 
 	// lastProcessedPath is the cursor across chunked ticks. The
 	// next tick starts its walk at the first path > this value.
@@ -202,13 +209,20 @@ type SidecarLister interface {
 // Used by operators on minimal deploys who run `bridge upscale --gc`
 // manually.
 //
-// `outputDir` is the absolute path of the variant tree to walk.
-// Typically `<cfg.DataDir>/transcoded/` resolved via
-// `cfg.Upscale.EffectiveVariantsDir`. The sweeper does NOT
-// re-resolve this per tick — a config edit that moves the variants
-// directory at runtime requires a bridge restart for the change to
-// take effect (same operational shape as VariantWatcher's interval).
-func NewOrphanSidecarSweeper(lister SidecarLister, outputDir string, interval time.Duration) *OrphanSidecarSweeper {
+// `outputDir` resolves the absolute path of the variant tree to
+// walk — typically `<cfg.DataDir>/transcoded/` via
+// `cfg.Upscale.EffectiveVariantsDir`. It is asked on EVERY tick:
+// the directory is a hot setting (POST /api/upscale/variants-dir),
+// and a path captured at construction kept this sweeper walking
+// the tree the operator had moved away from, for the rest of the
+// process, while new sidecars landed somewhere it never looked. (An
+// earlier docblock here recorded that a restart was required, which
+// was true, and was the defect.) A root change also drops the
+// chunk-resume cursor — a cursor is a position in one tree, and
+// compared against another it can prune that whole tree as "already
+// swept". An empty answer is a REFUSAL, not a walk of "": WalkDir("")
+// walks the process working directory.
+func NewOrphanSidecarSweeper(lister SidecarLister, outputDir func() string, interval time.Duration) *OrphanSidecarSweeper {
 	return &OrphanSidecarSweeper{
 		lister:    lister,
 		outputDir: outputDir,
@@ -331,6 +345,25 @@ func (s *OrphanSidecarSweeper) run(ctx context.Context, done chan struct{}) {
 // without hitting the chunk cap — that's the "we've covered the
 // whole tree this tick, next tick should start over" signal.
 func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
+	root := ""
+	if s.outputDir != nil {
+		root = s.outputDir()
+	}
+	if root == "" {
+		// Nothing resolved — never walk "" (the working directory).
+		logger.Warn("orphan sidecar sweep: refusing — no variants directory resolved")
+		return 0
+	}
+	if root != s.lastRoot {
+		if s.lastRoot != "" && s.lastProcessedPath != "" {
+			logger.Info("orphan sidecar sweep: variants directory moved; dropping the resume cursor",
+				slog.String("from", s.lastRoot),
+				slog.String("to", root),
+			)
+		}
+		s.lastRoot = root
+		s.lastProcessedPath = ""
+	}
 	raw, err := s.lister.AllSidecarPaths(ctx)
 	if err != nil {
 		logger.Error("orphan sidecar sweep: AllSidecarPaths failed",
@@ -374,11 +407,11 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	// in the loop to express intent, which is what the two CLI GCs' explicit
 	// --allow-empty is for.
 	if len(known) == 0 {
-		empty, emptyErr := dirIsEmpty(s.outputDir)
+		empty, emptyErr := dirIsEmpty(root)
 		if emptyErr == nil && !empty {
 			logger.Warn("orphan sidecar sweep: refusing — no variant row references any "+
 				"sidecar, but the variants directory holds files",
-				slog.String("variants_dir", s.outputDir),
+				slog.String("variants_dir", root),
 			)
 		}
 		return 0
@@ -395,7 +428,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		newCursor   string
 	)
 
-	err = filepath.WalkDir(s.outputDir, func(path string, d fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		// Honour cancellation between entries — a shutdown
 		// during a long walk on a multi-TB variant tree should
 		// return promptly.
@@ -447,7 +480,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 			// silently end the sweep early. A symlinked .Trashes needs nothing
 			// extra — filepath.WalkDir does not follow symlinks, so it arrives
 			// as a non-directory entry and is never descended.
-			if path != s.outputDir && strings.HasPrefix(d.Name(), ".") {
+			if path != root && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -539,7 +572,7 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		// propagated up). Log at WARN — the sweeper can resume
 		// on the next tick.
 		logger.Warn("orphan sidecar sweep: walk aborted",
-			slog.String("outputDir", s.outputDir),
+			slog.String("outputDir", root),
 			slog.Any("err", err),
 		)
 	}
