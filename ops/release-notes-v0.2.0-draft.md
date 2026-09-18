@@ -3,8 +3,8 @@
 > Working copy for the operator. The release workflow drafts a Release with
 > goreleaser's raw changelog; replace that body with the text below the rule,
 > after checking that `git log --oneline v0.1.9..v0.2.0 | grep -cE '\(#[0-9]+\)$'` on the
-> tagged tip says **161** (the figure README.md:22 carries: 156 merged PRs in the window at
-> the time of writing, plus #904, #905, #906, #907 and the release-prep PR). Everything here
+> tagged tip says **175** (the figure README.md:22 carries: 156 merged PRs in the window on
+> 2026-09-12, plus #904–#908 that day, plus #909–#922 through 2026-09-18). Everything here
 > was derived from `git log v0.1.9..main` and the dated CLAUDE.md /
 > `ops/engineering-log.md` sections; PR numbers are kept so a reader can
 > follow any line back to its diff. Grouped by who notices it.
@@ -45,6 +45,10 @@ Wire protocol stays at v1 — everything here is additive. A paired iOS app on a
 - In-flight streams are drained before an admin-initiated restart (#780).
 - SYLT lyrics written by CR-only taggers (older Mac tools) rendered with their lines merged — a bare `\r` now counts as a line marker, as it has on the phone since app #1564 (#907).
 
+**The album grid opens at once.** The console's Albums page used to block on two whole-library scans whenever a thirty-second cache lapsed — on essentially every visit. Coverage badges are now served from the last snapshot and refreshed behind the request (#911), a library with no variants skips the snapshot on the default view (#913) — an active variant filter still reads it, since that filter is what the snapshot exists for — and the skip is keyed on the parsed filter rather than on the presence of a `needs` parameter the page always sends, so it actually runs there (#915). Measured on a 21,431-track library: 252 ms → 37 ms cold. A filter with no snapshot to read is now refused rather than answered with the unfiltered library.
+
+**Login links that survive a share sheet.** A link mailed or messaged to yourself is opened by a preview before you tap it, and that preview used to spend the one-time ticket; the link now lands on a one-button page and only the button redeems it (#909), served under `Referrer-Policy: strict-origin` — under `no-referrer` a browser submits that button's POST with `Origin: null`, which the console's CSRF guard refuses (#910). A UPnP-routed folder lists its tracks in path order and takes its cover from the first track by path, not by arrival (#919); the post-upload "Browse your library" button no longer overlaps its sentence (#920).
+
 ## For operators
 
 **Console login links.** `bridge admin login-link` mints a one-time, 60-second link that opens the console signed in — and it now survives a phone-to-laptop hand-off and the minting process exiting, because the ticket is persisted rather than held in memory; the endpoint is hardened as the one anonymous caller on the box (#868, #872, #880, #886). The link now lands on a one-button page and is spent by the Continue click, not by opening it, so a link preview — a share sheet, Messages, a mail client — can no longer use it up before you do.
@@ -59,13 +63,15 @@ Wire protocol stays at v1 — everything here is additive. A paired iOS app on a
 
 **Public / hosted deployments.** Per-route rate-limit classes; every mutating route is bounded (#821). Persisted admin sessions, `/healthz` and `/readyz` (#800). Env overrides derived from the config struct; the admin credential can be seeded from the environment (#802). JSON logs off-terminal, HSTS in public mode, scrapeable metrics (#803). A build that is a descendant of a tag is no longer offered its own tag as an update (#797).
 
+**Hot settings, all the way down.** Moving the variants directory from the console now moves the integrity watchers with it — the orphan-sidecar sweep and the mount-loss guard used to keep the boot-time path — and the Jobs page's maintenance chips follow the sweep intervals rather than the upscale switch (#917). The lyrics network tier's collect pass stands down for a scan the way its first pass always did (#916). A login ticket is refused by shape before anything reads it, the interstitial's referrer policy is one constant, and a failed session mint after a redeem is reported as a stale link (#918). Per-folder eligibility counts tolerate a trailing slash (#919).
+
 **CLI.** Seven ways the CLI surprised or lied — including `bridge token revoke` dying on a host without `--config` — fixed; positional arguments that silently widened a scope to the whole library now refuse (#853, #855, #856, #882). The artwork GC and the UPnP live-host lookup fail closed (#854); every reaper fails closed on an empty referenced set (#895); the store is joined at shutdown (#858).
 
 **DLNA / UPnP.** GENA callbacks that differ from the SUBSCRIBE source are observed (#818); `upnpUpstream.servers[].manualDescriptionURL` is implemented rather than refused (#824); an unknown upstream baseline no longer expires into a reap (#898).
 
 ## Under the hood
 
-- Three review sweeps in one release: a LOUPE on `cmd/bridge` (#852–#858), a LOUPE on the 2026-09-04..09 window (#878–#886) and a full-codebase review (#892–#899). Their rules are in `CLAUDE.md`; the measurements behind them in `ops/engineering-log.md`, split out of the always-loaded file (#836, #837).
+- Four review sweeps in one release: a LOUPE on `cmd/bridge` (#852–#858), a LOUPE on the 2026-09-04..09 window (#878–#886), a full-codebase review (#892–#899) and a findings review on the window after it (#915–#922) — which also widened the test-citation guard to test-file comments, correcting fifteen stale citations and five stale claims across the operator docs (#921, #922). The public demo bridge moved onto the operator's host as its own unit (#914). Their rules are in `CLAUDE.md`; the measurements behind them in `ops/engineering-log.md`, split out of the always-loaded file (#836, #837).
 - **39 fuzz targets across ten packages**, fanned out nightly in CI (#823, #805, #851, #904); the SACD reader and the upload path validation joined the covered surfaces.
 - The Windows and macOS test legs are promoted into the merge gate (#817); `internal/adminauth`'s race-mode time cut from ~300 s to 40 s (#869); the gate's real cost measured — SQLite under the race detector (#873).
 - Dependencies: tailscale.com 1.102.3 (#775), golang.org/x/crypto 0.55.0 (#733), golang.org/x/mod 0.40.0 (#732), golang.org/x/image 0.45.0 (#820), golang.org/x/sync 0.23.0 (#903), prometheus/client_model 0.6.3 (#845). GitHub Actions: docker/setup-buildx-action and setup-qemu-action 4.3.0 (#731, #841), codeql-action 4.37.8 → 4.37.9 (#816, #905).
