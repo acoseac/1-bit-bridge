@@ -251,11 +251,11 @@ func TestCSSRuleListRefusesUnbalancedBraces(t *testing.T) {
 	// Braces inside string literals are text: a quoted `}` must not close
 	// the rule, a quoted `{` in an attribute selector must not open one, and
 	// an escaped quote must not end the string early.
-	quoted, err := cssRuleList(`a::after { content: "}" } [data-v='{'] { y: 2 } b { content: "\"{"; z: 3 }`)
+	quoted, err := cssRuleList(`a::after { content: "}" } [data-v='{'] { y: 2 } b { content: "\"{"; z: 3 } .c\{d { w: 4 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(quoted) != 3 || normSelector(quoted[1].sel) != `[data-v='{']` || compactCSS(quoted[2].body) != `content:"\"{";z:3` {
+	if len(quoted) != 4 || normSelector(quoted[1].sel) != `[data-v='{']` || compactCSS(quoted[2].body) != `content:"\"{";z:3` || normSelector(quoted[3].sel) != `.c\{d` {
 		t.Fatalf("quoted rules = %+v", quoted)
 	}
 }
@@ -352,7 +352,9 @@ type cssRule struct{ sel, body string }
 // a guard, refusing is the direction that cannot go quiet.
 //
 // A brace inside a string literal (`content: "}"`, `[data-v="{"]`) is text,
-// not structure, so quoted runs are skipped, backslash escapes included.
+// not structure, so quoted runs are skipped, backslash escapes included —
+// and a backslash outside a string escapes the next byte too (`.a\{b` is
+// one identifier), so that byte is never read as a brace or a quote.
 func cssRuleList(css string) ([]cssRule, error) {
 	var out []cssRule
 	depth, start, selStart := 0, 0, 0
@@ -372,6 +374,8 @@ func cssRuleList(css string) ([]cssRule, error) {
 			continue
 		}
 		switch css[i] {
+		case '\\':
+			i++ // an escaped byte is part of an identifier, never structure
 		case '"', '\'':
 			quote = css[i]
 		case '{':
