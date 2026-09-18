@@ -995,6 +995,60 @@ func TestTheSweepStandsDownWhenAScanSTARTS(t *testing.T) {
 	}
 }
 
+// TestPassTwoStandsDownForAScanThatStartedDuringPassOne — the collect
+// pass writes too, and it had no latch. Pass one breaking out on a scan
+// left everything it had already warmed in `pending`, and pass two then
+// drained it into track_lyrics with the scan under way: the double
+// indexed_at bump the guard exists to prevent, one loop later. The existing
+// stand-down test could not see it because every recording it seeds is
+// `available` on the first ask, so its pass two is always empty.
+//
+// Order is load-bearing: the pending recording comes FIRST so pass one has
+// collected it before the latch flips on the second candidate's write.
+func TestPassTwoStandsDownForAScanThatStartedDuringPassOne(t *testing.T) {
+	sink := newFakeSink(
+		LyricsCandidate{Path: "a/0.flac", AlbumMBID: "alb", TrackMBID: "rec-0"},
+		LyricsCandidate{Path: "a/1.flac", AlbumMBID: "alb", TrackMBID: "rec-1"},
+		LyricsCandidate{Path: "a/2.flac", AlbumMBID: "alb", TrackMBID: "rec-2"},
+	)
+	stub := &atlasStub{
+		recordings: map[string][]recordingResponse{
+			"rec-0": {{Status: "pending"}, {Status: "available", Plain: "zero"}},
+			"rec-1": {{Status: "available", Plain: "one"}},
+			"rec-2": {{Status: "available", Plain: "two"}},
+		},
+		hits: map[string]int{},
+	}
+	c, st := lyricsClient(t, stub, sink)
+
+	scanning := false
+	c.ScanInProgress = func() bool {
+		sink.mu.Lock()
+		started := len(sink.docs) >= 1
+		sink.mu.Unlock()
+		scanning = scanning || started
+		return scanning
+	}
+	if err := c.tickLyrics(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.docs) != 1 {
+		t.Errorf("wrote %d documents, want 1 — pass two collected a warmed recording "+
+			"after the scan started", len(sink.docs))
+	}
+	if _, ok := sink.docs["a/0.flac"]; ok {
+		t.Error("the pending candidate was written during the scan")
+	}
+	if got := stub.hits["rec-0"]; got != 1 {
+		t.Errorf("rec-0 was asked %d times, want 1 — the stood-down pass must not collect", got)
+	}
+	// Nothing stamped for what was left behind: the candidate query gates on
+	// the ABSENCE of a row, so the track comes back next tick, warm.
+	if _, stamped := sink.attempts["a/0.flac"]; stamped {
+		t.Error("a candidate the sweep stood down on was stamped")
+	}
+}
+
 // TestTheGateIsLiveAndFailsClosed — the sink is wired unconditionally now, so
 // the flag IS the gate. Two things follow and both are asserted here.
 //
