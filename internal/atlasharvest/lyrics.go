@@ -224,6 +224,17 @@ func (c *Client) tickLyrics(ctx context.Context, st State) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// The same stand-down as pass one, for the same reason: this pass
+		// WRITES. Pass one breaking out on the latch left everything it had
+		// already collected in `pending`, and this loop then drained it into
+		// track_lyrics with the scan under way — the double indexed_at bump
+		// the guard exists to prevent, one loop later. Nothing is stamped
+		// for what is left behind: with no attempt row the candidate query
+		// offers it again next tick, and the recording is warm by then.
+		if c.scanInProgress() {
+			c.log().DebugContext(ctx, "atlaslyrics.stood_down_for_scan", "pass", 2)
+			break
+		}
 		if written >= lyricsSweepBudget {
 			break
 		}
