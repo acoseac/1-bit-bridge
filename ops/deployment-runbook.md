@@ -543,7 +543,7 @@ bridge that already had the fix.
 | Version | Date | Hosts | Config keys added since the previous row | After the restart |
 |---|---|---|---|---|
 | `v0.1.9-154` | 2026-09-08 | bridge.ars.md | `upscale.dsdRender.*`, `upscale.tempDir` (#863) | `bridge doctor` → `dsd-render-toolchain` ok; `/v1/health` advertises `dsdRender`; `upscale.tempDir` set explicitly (PrivateTmp) |
-| `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Item 2: NO re-extraction — every deployed host was on `-216`, which already carried `ExtractorVersion` 10 (8 → 10 landed with `-207`), and every row on all five live DBs is stamped 10 (measured 12:58Z), so the restart re-read nothing. Items 3–5 OPEN (the steady-state checks, per unit; 4's wall-clock is the #850 detector, 3's grep only counts extraction errors). Item 6 is the next nightly fuzz run; item 8 DONE (the note is marked). |
+| `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Item 2: NO re-extraction — every deployed host was on `-216`, which already carried `ExtractorVersion` 10 (8 → 10 landed with `-207`), and every row on all five live DBs is stamped 10 (measured 12:58Z), so no version-stale re-extraction was required — which is all the histogram proves; see item 2. Items 3–5 OPEN (the steady-state checks, per unit; 4's wall-clock is the #850 detector, 3's grep only counts extraction errors). Item 6 is the next nightly fuzz run; item 8 DONE (the note is marked). |
 
 ### `v0.2.0` post-deploy checklist
 
@@ -565,7 +565,7 @@ item 2's re-extraction expectation is live there.
    `dsdRender` present on a host with the ffmpeg `dsd_*` decoders; `dlnaArtwork`
    ABSENT on bridge.ars.md and the demo (public mode never starts the DLNA
    listener) and present on home-pc if `dlna.enabled` is on there.
-2. **Re-extraction: NONE on this deploy — measured, not inferred.** Every
+2. **Version-stale re-extraction: NONE on this deploy — measured, not inferred.** Every
    deployed host was on `-216` before 0.2.0, and `-216` already carried
    `ExtractorVersion` 10 (7 → 8 went live with `-191` on 2026-09-10, 8 → 10
    with `-207` on 2026-09-15; `-216` and `v0.2.0` are both 10). The persisted
@@ -573,9 +573,12 @@ item 2's re-extraction expectation is live there.
    read-only on each live DB at 12:58Z: bridge.ars.md `10 × 21,460`, tenants
    `10 × 1` / `10 × 4` / `10 × 1`, demo `10 × 183` — no row below 10, so the
    skip gate (`existing.ExtractorVersion >= ExtractorVersion`) had no
-   version-stale leg to take, and the operator bridge's startup scan reached
-   its duplicate-stamping tail eleven minutes after the restart (11:46:18 →
-   11:57:57). This item expected 7 → 10 here because it was written against
+   version-stale leg to take. That is all the histogram proves: the same
+   `reExtractUnchanged` path also serves a current-version row whose sidecar
+   lyrics drifted or whose local artwork needs recovering, so "re-read
+   nothing" is not a claim it can carry. The scan metric beside it: the
+   operator bridge's startup scan reached its duplicate-stamping tail eleven
+   minutes after the restart (11:46:18 → 11:57:57). This item expected 7 → 10 here because it was written against
    `-154`; it applies to a host brought forward from before `-207` (home-pc —
    see the scope note), where the startup scan re-reads every audio file
    once: expect `scanState.isScanning: true` for a long time on a mounted
