@@ -543,7 +543,7 @@ bridge that already had the fix.
 | Version | Date | Hosts | Config keys added since the previous row | After the restart |
 |---|---|---|---|---|
 | `v0.1.9-154` | 2026-09-08 | bridge.ars.md | `upscale.dsdRender.*`, `upscale.tempDir` (#863) | `bridge doctor` → `dsd-render-toolchain` ok; `/v1/health` advertises `dsdRender`; `upscale.tempDir` set explicitly (PrivateTmp) |
-| `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Items 2–5 were already behind us — the extractor bump landed on these hosts with `-191` / `-207` / `-216`, so the v0.2.0 restart re-extracted nothing. Item 6 is the next nightly fuzz run; item 8 folded (the note is marked). |
+| `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Item 2: NO re-extraction — every host was on `-216`, which already carried `ExtractorVersion` 10 (8 → 10 landed with `-207`), so the restart re-read nothing. Items 3–5 OPEN (the steady-state journal checks, per unit). Item 6 is the next nightly fuzz run; item 8 DONE (the note is marked). |
 
 ### `v0.2.0` post-deploy checklist
 
@@ -570,15 +570,17 @@ be watching.
    long time on a mounted library, and `tracksIndexed` back at the pre-deploy
    value when it ends. A count that dropped means suppression or reaping
    changed something and wants the Duplicates page before anything else.
-3. **#850, steady state — OPEN.** `journalctl -u 1-bit-bridge --since '<restart>' --no-pager | grep -c 're-extract'`
-   across one full periodic scan (`scanner.scanIntervalSec`, default 6 h):
-   must be near zero. A count that is a steady fraction of the library is the
+3. **#850, steady state — OPEN.** `journalctl -u <unit> --since '<restart>' --no-pager | grep -c 're-extract'`
+   — `<unit>` is `1-bit-bridge` on bridge.ars.md, `bridge@<tenant>` on a
+   hosted tenant, `1-bit-bridge-demo` on the demo; the wrong unit reads as a
+   clean zero — across one full periodic scan (`scanner.scanIntervalSec`,
+   default 6 h): must be near zero. A count that is a steady fraction of the library is the
    sidecar-skip-gate disagreement #850 fixed still happening on that host —
    every track with an empty / tagless / legacy-encoded `<stem>.lrc|.txt`
    beside it re-opening on every scan.
 4. **Scan wall-clock, cycle over cycle — OPEN.** From the journal's scan
-   start/finish lines on two consecutive periodic scans. Same reason as 3;
-   the number to record is the steady state.
+   start/finish lines on two consecutive periodic scans, same unit rule as
+   3. Same reason as 3; the number to record is the steady state.
 5. **#849, silent by nature — OPEN.** Add a `.lrc` beside a track on the
    library root, trigger a scan (`POST /api/scan` on a loopback console; a
    restart on a public one), and confirm the phone receives the lyrics on a
@@ -591,8 +593,8 @@ be watching.
 7. **Config keys.** `bridge doctor --config <path>` exits 0 BEFORE any edit
    that adds `atlas.lyricsEnabled` or `deployment.managedControls`; the
    rollback note applies from the moment either is written.
-8. **Mark the verify note folded.** `~/Desktop/to-do/2026-09-06-loupe-lyrics-verify.md`
-   is superseded by items 3–6 here; it should say so at the top.
+8. **Mark the verify note folded — DONE 2026-09-18.** `~/Desktop/to-do/2026-09-06-loupe-lyrics-verify.md`
+   is superseded by items 3–6 here and says so at the top.
 
 ## Diagnosing client behavior from the journal
 
