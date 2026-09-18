@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -269,6 +271,103 @@ func TestBadLoginTicketGrantsNothing(t *testing.T) {
 				q, resp.StatusCode, resp.Header.Get("Location"))
 		}
 		resp.Body.Close()
+	}
+}
+
+// TestATicketOutsideTheMintedShapeIsRefusedByBothHalves — a minted ticket
+// is base64url of 32 bytes, 43 characters, so anything longer or outside
+// that alphabet cannot redeem. Both halves refuse it by SHAPE: the GET so
+// an unbounded query is never echoed into the page, the POST so it never
+// reaches the hash or the file read under the console's mutex. The
+// refusal is the same 302 every unusable ticket gets — a shape is public
+// knowledge, so this is not an oracle — and a real ticket minted alongside
+// still redeems afterwards.
+func TestATicketOutsideTheMintedShapeIsRefusedByBothHalves(t *testing.T) {
+	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	real, err := store.MintLoginTicket("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isPlausibleLoginTicket(real) || len(real) != 43 {
+		t.Fatalf("a minted ticket %q (len %d) fails the shape check the handlers apply", real, len(real))
+	}
+
+	for _, tc := range []struct{ name, t string }{
+		{"one past the cap", strings.Repeat("A", loginTicketMaxLen+1)},
+		{"a kilobyte", strings.Repeat("Z", 1024)},
+		{"markup in the alphabet's place", "abc%3Cimg%20src%3Dx%3Eabc"},
+		{"a plus (base64, not base64url)", "abc%2Bdef"},
+		{"a slash", "abc%2Fdef"},
+	} {
+		page := openLink(t, ts.URL, "?t="+tc.t)
+		if page.StatusCode != http.StatusFound || page.Header.Get("Location") != "/login?link=stale" {
+			t.Errorf("GET %s: %d -> %q, want a 302 to /login?link=stale",
+				tc.name, page.StatusCode, page.Header.Get("Location"))
+		}
+		page.Body.Close()
+		resp := redeemTicket(t, ts.URL, "?t="+tc.t)
+		if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/login?link=stale" {
+			t.Errorf("POST %s: %d -> %q, want a 302 to /login?link=stale",
+				tc.name, resp.StatusCode, resp.Header.Get("Location"))
+		}
+		if sessionCookie(resp) != nil {
+			t.Errorf("POST %s handed out a session", tc.name)
+		}
+		resp.Body.Close()
+	}
+	// Exactly at the cap is admitted by shape (and then refused by the store).
+	atCap := redeemTicket(t, ts.URL, "?t="+strings.Repeat("A", loginTicketMaxLen))
+	if atCap.StatusCode != http.StatusFound || atCap.Header.Get("Location") != "/login?link=stale" {
+		t.Errorf("POST at the cap: %d -> %q", atCap.StatusCode, atCap.Header.Get("Location"))
+	}
+	atCap.Body.Close()
+
+	// The store was never touched by any of that: the real ticket still works.
+	resp := redeemTicket(t, ts.URL, "?t="+real)
+	defer resp.Body.Close()
+	if sessionCookie(resp) == nil {
+		t.Fatal("the real ticket no longer redeems after malformed ones were presented")
+	}
+}
+
+// TestTheInterstitialReferrerMetaIsTheConstant — the header and the meta
+// must be ONE value, and the only way to make that true by construction is
+// for the template to carry no literal at all. A typed literal is how the
+// 2026-09-12 report happened: both said `no-referrer`, and the pin on the
+// header could not see the meta.
+func TestTheInterstitialReferrerMetaIsTheConstant(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("templates", "login_ticket.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := string(src)
+	if !strings.Contains(tpl, `<meta name="referrer" content="{{.ReferrerPolicy}}">`) {
+		t.Error("the interstitial's referrer meta is not injected from the handler's constant")
+	}
+	for _, lit := range []string{`content="strict-origin`, `content="no-referrer`, `content="origin`, `content="same-origin`, `content="unsafe-url`} {
+		if strings.Contains(tpl, lit) {
+			t.Errorf("the template carries a referrer-policy literal (%s) that can drift from the header", lit)
+		}
+	}
+
+	srv, store, _ := newPublicTestServer(t, "correct horse battery staple")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	ticket, err := store.MintLoginTicket("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := openLink(t, ts.URL, "?t="+ticket)
+	defer page.Body.Close()
+	b, err := io.ReadAll(page.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := interstitialReferrerPolicy(t, page, string(b)); got != loginTicketReferrerPolicy {
+		t.Errorf("rendered policy = %q, want %q", got, loginTicketReferrerPolicy)
 	}
 }
 

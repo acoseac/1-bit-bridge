@@ -221,8 +221,46 @@ type loginTicketPageData struct {
 	LibraryName   string
 	ServerVersion string
 	// Ticket is the raw credential, carried ONLY as the query of the form's
-	// POST action — never in a link, never in a script, never logged.
+	// POST action — never in a link, never in a script, never logged. It has
+	// passed isPlausibleLoginTicket, so it is base64url and at most
+	// loginTicketMaxLen bytes; html/template's URL-context escaping is what
+	// keeps the attribute well-formed regardless.
 	Ticket string
+	// ReferrerPolicy is loginTicketReferrerPolicy, injected so the page's
+	// `<meta name="referrer">` and the header it is served with are ONE
+	// constant. The meta is parsed after the header and is the policy the
+	// document keeps; a literal in the template could drift from the header
+	// without either pin noticing, which is what the 2026-09-12 field report
+	// was (header and meta both `no-referrer`, and the button posted
+	// `Origin: null`).
+	ReferrerPolicy string
+}
+
+// loginTicketMaxLen bounds what either half of the login-link flow will
+// look at. A minted ticket is base64url of 32 random bytes — 43 characters
+// — so anything longer, or outside that alphabet, was not minted here and
+// cannot redeem; refusing it by SHAPE keeps an unbounded query out of the
+// hash, out of the store's mutex, and out of the page (the GET echoes the
+// ticket into the form action).
+const loginTicketMaxLen = 64
+
+// isPlausibleLoginTicket reports whether t has the shape MintLoginTicket
+// produces: non-empty, at most loginTicketMaxLen bytes, base64url alphabet.
+// A false answer is a fact about the shape, never about the store — it
+// reveals nothing a reader of MintLoginTicket does not already know.
+func isPlausibleLoginTicket(t string) bool {
+	if t == "" || len(t) > loginTicketMaxLen {
+		return false
+	}
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		switch {
+		case 'A' <= c && c <= 'Z', 'a' <= c && c <= 'z', '0' <= c && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // loginTicketReferrerPolicy is the referrer policy both halves of the
@@ -321,9 +359,12 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ticket := r.URL.Query().Get("t")
-	if ticket == "" {
-		// Nothing to continue with. The same page the POST would send a bad
-		// ticket to — a link with no ticket is a stale link's shape.
+	if !isPlausibleLoginTicket(ticket) {
+		// Nothing to continue with: no ticket, or one that was never minted
+		// here (wrong alphabet, or longer than any real one). The same page
+		// the POST would send a bad ticket to — a link that cannot redeem is
+		// a stale link's shape — and it keeps an unbounded query out of the
+		// page, which echoes the ticket into the form action.
 		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
 		return
 	}
@@ -334,9 +375,10 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
 	envelope := loginTicketPageData{
-		LibraryName:   cfg.LibraryName,
-		ServerVersion: version.ServerVersion,
-		Ticket:        ticket,
+		LibraryName:    cfg.LibraryName,
+		ServerVersion:  version.ServerVersion,
+		Ticket:         ticket,
+		ReferrerPolicy: loginTicketReferrerPolicy,
 	}
 	if err := s.loginTmpl.ExecuteTemplate(w, "login_ticket", envelope); err != nil {
 		logger.Error("render login ticket page", "err", err)
@@ -364,7 +406,18 @@ func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
 			"a login link must be opened by navigating to it")
 		return
 	}
-	username, err := s.deps.AdminAuth.RedeemLoginTicket(r.URL.Query().Get("t"))
+	ticket := r.URL.Query().Get("t")
+	if !isPlausibleLoginTicket(ticket) {
+		// Not minted here, so it cannot redeem: the store's own answer for it
+		// would be ErrTicketInvalid, and this is the same redirect that
+		// answer gets below — indistinguishable from unknown, expired and
+		// spent, as it must be. Refused by shape so an unbounded or
+		// malformed query never reaches the hash or the file read under
+		// the mutex every authenticated console request takes.
+		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
+		return
+	}
+	username, err := s.deps.AdminAuth.RedeemLoginTicket(ticket)
 	if err != nil {
 		if !errors.Is(err, adminauth.ErrTicketInvalid) {
 			// The ticket store could not be written — a full or read-only
@@ -394,8 +447,14 @@ func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := s.deps.AdminAuth.CreateSession(username)
 	if err != nil {
+		// The ticket is SPENT by now — RedeemLoginTicket deletes before it
+		// judges — so re-opening this link can never work, and the honest
+		// advice is the stale one: get a fresh link. A bare /login said
+		// nothing, which left the user to try the same link again. (Only a
+		// crypto/rand failure reaches here; a persist failure is logged
+		// inside CreateSession and the session still works.)
 		logger.Error("admin create session from ticket", "err", err)
-		http.Redirect(w, r, "/login", http.StatusFound)
+		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
 		return
 	}
 	s.setSessionCookie(w, raw)
