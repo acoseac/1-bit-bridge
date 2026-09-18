@@ -697,6 +697,14 @@ header.sidebar {
  * of this file flips it to inline-flex. Hidden everywhere else. */
 .nav-toggle { display: none; }
 
+/* The drawer wrapper groups the nav, the space meter and the foot block so
+ * the <1024px block can hide and reveal them as ONE dropdown. On the desktop
+ * rail it must not exist as a box: `display: contents` hands its children
+ * straight to header.sidebar's flex column, so the nav's natural height,
+ * .sidebar-foot's `margin-top: auto` and the rail's own scroll behave
+ * exactly as they did when the three were direct children. */
+.sidebar-drawer { display: contents; }
+
 /* ---- Nav ------------------------------------------------------------ */
 
 #primary-nav {
@@ -887,6 +895,10 @@ header.sidebar {
 .conn-badge[data-state="connecting"] { color: var(--fg-muted); }
 .conn-badge[data-state="reconnecting"] { color: var(--warn); }
 .conn-badge[data-state="disconnected"] { color: var(--danger); }
+/* The bar's copy of the badge (layout.html, inside .brand). Hidden on the
+ * desktop rail, where the foot's copy is on screen; the <1024px block turns
+ * it into the dot alone. */
+.conn-badge-bar { display: none; }
 
 /* Theme toggle + public-mode sign-out. The theme glyph is a text character
  * so it inherits a themed colour and can never render invisible-on-dark. */
@@ -924,8 +936,9 @@ main {
 
 /* ---- Shell collapse -------------------------------------------------
    Below 1024px a 248px rail costs a quarter of the viewport, so the shell
-   folds to one column: the rail becomes a top bar (brand + hamburger) and
-   the nav becomes a drawer under it.
+   folds to one column: the rail becomes a top bar (brand + hamburger, and
+   nothing else) and everything below the brand — the nav, the space meter,
+   the foot block — becomes a drawer under it.
 
    The breakpoint is on the SHELL, not on phone width, because what runs out
    here is horizontal room for a fixed rail beside a content well — an iPad
@@ -1029,10 +1042,22 @@ main {
   .nav-toggle-bars::before { top: -5.5px; }
   .nav-toggle-bars::after { top: 5.5px; }
 
-  /* Drawer. Collapsed by default; data-nav-open reveals it. */
-  #primary-nav { display: none; }
-  header[data-nav-open="true"] #primary-nav {
+  /* Drawer. Collapsed by default; data-nav-open reveals it.
+   *
+   * The drawer is .sidebar-drawer — the nav PLUS the space meter and the
+   * foot block — not #primary-nav alone. Whatever is NOT in the drawer is
+   * in the top bar, because header.sidebar is a flex ROW here. The meter
+   * and the foot used to be outside it, and on a public bridge with uploads
+   * enabled the bar at 375px held "42 GB free" (78px), the live dot, the
+   * theme pill and Sign out (184px together) beside the 44px hamburger,
+   * which left the head 57px: the mark sat under the button and the
+   * library name rendered at 0px of its 70. The demo tenant looked fine
+   * at the same width only because uploads are off there and the meter
+   * never renders (field report, 2026-09-18). */
+  .sidebar-drawer { display: none; }
+  header[data-nav-open="true"] .sidebar-drawer {
     display: flex;
+    flex-direction: column;
     position: absolute;
     top: 100%;
     left: 0;
@@ -1047,6 +1072,7 @@ main {
     padding: 8px 12px 14px;
     gap: 2px;
   }
+  header[data-nav-open="true"] #primary-nav { gap: 2px; }
   header[data-nav-open="true"] #primary-nav a {
     /* Full-width rows at the touch floor. The active stub reads fine here
      * too, so it is left alone rather than special-cased off. */
@@ -1058,37 +1084,35 @@ main {
   /* 44px touch floor for the two foot-block buttons, at the SHELL breakpoint
    * rather than the phone one. They used to get this at 640px, which was
    * correct while the console had a top bar at every width — but the rail now
-   * folds into a top bar at 1023px, so between 641px and 1023px (iPad
-   * portrait, the obvious case) they sat in a touch surface at 27px next to a
-   * correctly-sized 44px hamburger. The bar is 65px tall, so 44px fits with
-   * room to spare. Desktop keeps the compact size: there they are mouse
-   * targets in a sidebar foot, and 44px would bloat it. */
+   * folds at 1023px, so between 641px and 1023px (iPad portrait, the obvious
+   * case) they sat in a touch surface at 27px next to a correctly-sized 44px
+   * hamburger. They live in the drawer now, beside nav rows that are already
+   * 44px. Desktop keeps the compact size: there they are mouse targets in a
+   * sidebar foot, and 44px would bloat it. */
   .theme-toggle, .logout-btn { min-height: 44px; padding-inline: 14px; }
 
-  /* The foot block rides the top bar as a compact status cluster; the build
-   * line is the first thing to go — it is reference detail, not something an
-   * operator scans, and there is no room for it beside a hamburger. */
-  .sidebar-foot {
-    margin-top: 0;
-    padding: 0;
-    border-top: none;
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-  .build-line { display: none; }
-  .meta { flex-wrap: nowrap; }
+  /* The foot block keeps its desktop shape inside the drawer — border-top,
+   * the status row, the build line under it. No row override: the block no
+   * longer rides the top bar, and the build line comes back because the
+   * reason it was dropped ("no room beside a hamburger") no longer holds. */
+
+  /* The live dot stays in the bar even though the foot's badge is now in
+   * the drawer: it is the one thing the foot carried that earns a glance
+   * without opening the menu — the old 520px rule dropped the word and kept
+   * exactly this. It is the SECOND .conn-badge, inside .brand: shown here,
+   * hidden on the desktop rail, so each viewport has one visible live
+   * region and applyConnState keeps both in step. font-size: 0 drops the
+   * word and keeps it in the accessibility tree — the foot's copy is inside
+   * a display: none drawer here, so this is the region a phone can hear. */
+  .conn-badge-bar { display: inline-flex; font-size: 0; gap: 0; }
 
   main { padding: 22px 20px 96px; }
 }
 
-/* Very narrow: the connection word costs more than it earns beside a brand
- * name and two buttons. The dot survives, and it is the part that carries
- * the signal — plus the live region still announces state changes. */
+/* Very narrow: a tighter content gutter. (This block used to shrink the
+ * connection badge to its dot as well; the badge sits in the drawer now,
+ * where the word fits.) */
 @media (max-width: 520px) {
-  .conn-badge { font-size: 0; gap: 0; }
-  .conn-badge::before { margin: 0; }
   main { padding: 18px 16px 96px; }
 }
 

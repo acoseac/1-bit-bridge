@@ -4845,13 +4845,19 @@ function applyConnState(state) {
   // "reconnecting" (amber pill — EventSource is between attempts),
   // "disconnected" (red pill — used only for terminal close, which
   // EventSource doesn't reach on its own; reserved for future use).
-  const el = document.getElementById("conn-status");
-  if (!el) return;
-  el.dataset.state = state;
-  el.textContent =
+  //
+  // Every .conn-badge, not #conn-status alone: the foot's badge sits in the
+  // phone drawer (display: none until the menu opens), so the top bar
+  // carries a second, dot-only copy inside .brand. One state source, both
+  // updated — a viewport shows exactly one of them.
+  const text =
     state === "connected" ? "Live" :
     state === "reconnecting" ? "Reconnecting…" :
     "Disconnected";
+  document.querySelectorAll(".conn-badge").forEach((el) => {
+    el.dataset.state = state;
+    el.textContent = text;
+  });
 }
 
 // Active EventSource. Tracked at module scope so the
@@ -5700,8 +5706,9 @@ function formatDuration(seconds) {
 }
 
 // Mobile hamburger nav. Toggles `data-nav-open` on the <header> + the
-// `aria-expanded` attr on the button. The CSS at <=640px reveals the
-// button, hides the nav by default, and renders an absolute-positioned
+// `aria-expanded` attr on the button. The CSS at <=1023px reveals the
+// button, hides the drawer (.sidebar-drawer: the nav, the space meter and
+// the foot block) by default, and renders it as an absolute-positioned
 // dropdown when data-nav-open=true. Closes on outside click, Escape,
 // or any link tap (the page is about to navigate anyway).
 function initMobileNav() {

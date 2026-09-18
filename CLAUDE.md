@@ -1849,6 +1849,28 @@ its twin.** The top list is older, shorter, and read first.
   library" link overlapped its sentence by 4.4 px with the UA underline
   showing through. Every other `.btn` is a `<button>` or sits in a flex
   row, which is why only this one did it. Measured in a browser. (#920)
+- **Below 1024px, a rail child that is not inside `.sidebar-drawer` is in
+  the TOP BAR.** `header.sidebar` is a flex ROW there, and the space meter
+  was added as a plain rail child: on a public bridge with uploads enabled
+  the bar at 375px held "42 GB free", the live dot, the theme pill and
+  Sign out beside the 44px hamburger, so the head shrank to 57px, the mark
+  sat under the button and the library name rendered at 0px of its 70.
+  The meter's gate is `upload.enabled || upload.minFreeBytes > 0`, NOT the
+  deployment mode — which is why the demo tenant, same binary, looked
+  fine. The nav, the meter and the foot block now share one wrapper that
+  the breakpoint hides and reveals; it is `display: contents` on the
+  desktop rail, so that column is unchanged (measured identical against a
+  main build), and `TestEverythingBelowTheBrandIsInTheDrawer` pins the
+  header to exactly two element children — put a new rail element inside
+  the wrapper unless it has a case for the bar. The live dot stays in the
+  bar as a SECOND `.conn-badge` inside the brand — dot-only there, hidden
+  on the desktop rail — because the foot's `#conn-status` is inside the
+  hidden drawer and its `aria-live` region would announce nothing on a
+  phone; `applyConnState` updates every `.conn-badge`, so each viewport
+  shows exactly one live region. (The first form was a `:has()`-coloured
+  pseudo-element; CodeRabbit caught the silent live region.) Verified in a
+  browser at 375 / 430 / 1280, dark and light, with and without the
+  meter; the Go suite sees only the containment. (#934)
 
 ### Build, CI, and test discipline
 

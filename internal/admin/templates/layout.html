@@ -102,13 +102,38 @@
     <div class="brand">
       <img class="brand-mark" src="/static/bridge-mark.png?v=2" alt="" width="36" height="36">
       <span class="name">{{.LibraryName}}</span>
+      {{- /* The top bar's own live badge. The foot block's #conn-status is
+          inside the drawer, which is display: none until the menu opens, so
+          on a phone its aria-live region would announce nothing. This copy
+          is the bar's: hidden on the desktop rail, where the foot's copy is
+          on screen, and drawn as the dot alone below 1024px. applyConnState
+          updates EVERY .conn-badge, so each viewport shows exactly one live
+          region and the two can never disagree. No id — app.js finds badges
+          by class, and #conn-status stays on the foot's copy. */ -}}
+      <span class="conn-badge conn-badge-bar" data-state="connecting" aria-live="polite">Connecting…</span>
     </div>
     <button id="nav-toggle" class="nav-toggle" type="button"
-            aria-controls="primary-nav" aria-expanded="false" aria-label="Menu">
+            aria-controls="sidebar-drawer" aria-expanded="false" aria-label="Menu">
       <span class="nav-toggle-bars" aria-hidden="true"></span>
     </button>
   </div>
 
+  {{- /* The drawer. Everything the rail carries below the brand — the nav,
+      the space meter and the foot block — sits inside this one wrapper,
+      and the wrapper is what the phone breakpoint hides and reveals. On the
+      desktop rail it is `display: contents`, so the three stay direct flex
+      children of the header and the column lays out exactly as before.
+
+      The wrapper exists because of what happens to a rail child that is
+      NOT in it: below 1024px the header is a flex ROW, and any child outside
+      the drawer is in the top bar. The space meter was added as a plain
+      rail child, and on a public bridge with uploads enabled the bar then
+      held "42 GB free", the live dot, the theme pill and Sign out beside a
+      44px hamburger — at 375px that left the head 57px, with the mark under
+      the button and the library name at 0px (field report, 2026-09-18).
+      Add a new rail element INSIDE this wrapper unless it has a case for
+      the top bar. */ -}}
+  <div class="sidebar-drawer" id="sidebar-drawer">
   <nav id="primary-nav" aria-label="Primary">
     <p class="nav-group">Library</p>
     {{- /* Browse owns every player route EXCEPT the ones with a rail entry
@@ -254,6 +279,7 @@
     </div>
     <p class="build-line">bridge {{.ServerVersion}} · protocol v{{.ProtocolVersion}}</p>
   </div>
+  </div>{{- /* .sidebar-drawer */}}
 </header>
 
 <main id="main">
