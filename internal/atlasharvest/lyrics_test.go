@@ -961,6 +961,21 @@ func TestAnUnrecognisedStatusIsTransientNotDurable(t *testing.T) {
 // second in ran entirely inside the sweep. Both write track_lyrics; a sweep
 // landing seconds before the scanner extracts a local document bumps
 // indexed_at twice for one track.
+// scanStartsAfterFirstWrite is a ScanInProgress predicate that flips — and
+// stays flipped — once the sink holds its first document: a scan that
+// begins mid-sweep, after a write the sweep has already made. Shared by the
+// two stand-down tests, which differ only in WHICH pass the latch must stop.
+func scanStartsAfterFirstWrite(sink *fakeLyricsSink) func() bool {
+	scanning := false
+	return func() bool {
+		sink.mu.Lock()
+		started := len(sink.docs) >= 1
+		sink.mu.Unlock()
+		scanning = scanning || started
+		return scanning
+	}
+}
+
 func TestTheSweepStandsDownWhenAScanSTARTS(t *testing.T) {
 	sink := newFakeSink(
 		LyricsCandidate{Path: "a/1.flac", AlbumMBID: "alb", TrackMBID: "rec-1"},
@@ -979,14 +994,7 @@ func TestTheSweepStandsDownWhenAScanSTARTS(t *testing.T) {
 
 	// A scan that begins after the first candidate is written — the shape a
 	// single sample at the top of the sweep cannot see.
-	scanning := false
-	c.ScanInProgress = func() bool {
-		sink.mu.Lock()
-		started := len(sink.docs) >= 1
-		sink.mu.Unlock()
-		scanning = scanning || started
-		return scanning
-	}
+	c.ScanInProgress = scanStartsAfterFirstWrite(sink)
 	if err := c.tickLyrics(context.Background(), st); err != nil {
 		t.Fatal(err)
 	}
@@ -1020,15 +1028,8 @@ func TestPassTwoStandsDownForAScanThatStartedDuringPassOne(t *testing.T) {
 		hits: map[string]int{},
 	}
 	c, st := lyricsClient(t, stub, sink)
+	c.ScanInProgress = scanStartsAfterFirstWrite(sink)
 
-	scanning := false
-	c.ScanInProgress = func() bool {
-		sink.mu.Lock()
-		started := len(sink.docs) >= 1
-		sink.mu.Unlock()
-		scanning = scanning || started
-		return scanning
-	}
 	if err := c.tickLyrics(context.Background(), st); err != nil {
 		t.Fatal(err)
 	}
