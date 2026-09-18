@@ -2068,7 +2068,7 @@ one still on disk. The unswept window supplied the rest.
 ### <a name="loupe-2026-09-09"></a>2026-09-09 — LOUPE on the 2026-09-04..09 window
 
 The window's own three hardening batches (#849-851 lyrics, #852-858 CLI,
-#859-862 compaction) refuted almost everything, as expected. **Every
+and #859-862 compaction) refuted almost everything, as expected. **Every
 confirmed finding was in the unswept half** — the DSD renditions, the login
 tickets, the export, managed controls — and the two worst were sites where
 a fix that landed IN THIS WINDOW did not reach a sibling.

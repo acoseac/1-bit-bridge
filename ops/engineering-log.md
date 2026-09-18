@@ -4558,7 +4558,7 @@ Both are the same shape: a correct fix that enumerated the sites it covered.
 
 ### `ExtractorVersion` was 7, and the base commit set it
 
-#849/#850/#851 changed what extraction produces three times over (the LRC
+PRs #849/#850/#851 changed what extraction produces three times over (the LRC
 clamp, `mergeDuplicate` keeping the larger priority, `lessCandidate` becoming
 a strict total order). `scanner.go`'s skip gate compares
 `existing.ExtractorVersion >= ExtractorVersion` **and** unchanged size+mtime,
@@ -4861,8 +4861,8 @@ the suggested patch (`if err != errReleaseUnavailable`) could not work — the
 errors are wrapped, so `==` never matches the sentinel, and the condition is
 inverted. Fixed with a second sentinel (`errReleaseCooling`).
 
-**CodeQL `go/log-injection`, re-verified rather than recalled.** Five alerts on
-#892 (105–109). Probe through the real `logging.Init` handler with
+**CodeQL `go/log-injection`, re-verified rather than recalled.** Five alerts on #892
+(105–109). Probe through the real `logging.Init` handler with
 `dir = "ok\n{\"level\":\"ERROR\",\"msg\":\"FORGED ADMIN ACTION\"}\rmore"` emits:
 
 ```
