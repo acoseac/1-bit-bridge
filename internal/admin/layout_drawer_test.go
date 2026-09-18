@@ -255,7 +255,7 @@ func TestCSSRuleListRefusesUnbalancedBraces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(quoted) != 4 || normSelector(quoted[1].sel) != `[data-v='{']` || compactCSS(quoted[2].body) != `content:"\"{";z:3` || normSelector(quoted[3].sel) != `.c\{d` {
+	if len(quoted) != 4 || normSelector(quoted[1].sel) != `[data-v="{"]` || compactCSS(quoted[2].body) != `content:"\"{";z:3` || normSelector(quoted[3].sel) != `.c\{d` {
 		t.Fatalf("quoted rules = %+v", quoted)
 	}
 }
@@ -266,6 +266,7 @@ func TestNormSelectorKeepsTheDescendantCombinator(t *testing.T) {
 	cases := map[string]string{
 		`header[data-nav-open="true"]  .sidebar-drawer`: `header[data-nav-open="true"] .sidebar-drawer`,
 		"header[data-nav-open=\"true\"].sidebar-drawer": `header[data-nav-open="true"].sidebar-drawer`,
+		`header[data-nav-open='true'] .sidebar-drawer`:  `header[data-nav-open="true"] .sidebar-drawer`,
 		"@media ( max-width : 1023px )":                 "@media(max-width:1023px)",
 		"  .a ,\n .b  ":                                 ".a,.b",
 	}
@@ -412,9 +413,11 @@ var cssNoSpaceAroundRe = regexp.MustCompile(`\s*([(),:])\s*`)
 // DESCENDANT combinator — the space in `header[data-nav-open="true"]
 // .sidebar-drawer` — survives. compactCSS would fold that onto the compound
 // `header[…].sidebar-drawer`, which matches nothing in the DOM, and a lookup
-// keyed on it would accept a stylesheet whose drawer never opens.
+// keyed on it would accept a stylesheet whose drawer never opens. Attribute
+// quotes are folded to double, so a cosmetic `'true'` cannot fail a lookup.
 func normSelector(s string) string {
-	return cssNoSpaceAroundRe.ReplaceAllString(strings.Join(strings.Fields(s), " "), "$1")
+	s = cssNoSpaceAroundRe.ReplaceAllString(strings.Join(strings.Fields(s), " "), "$1")
+	return strings.ReplaceAll(s, "'", `"`)
 }
 
 // compactCSS drops every whitespace character, for DECLARATIONS — where no
