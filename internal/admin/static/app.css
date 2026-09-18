@@ -3176,6 +3176,19 @@ label.checkbox.tray-switch {
 }
 .upload-preview li { padding: 0.1rem 0; overflow-wrap: anywhere; }
 #upload-bar { width: 100%; }
+/* The post-commit "Browse your library" link (app.js showUploadResult) is
+ * an <a class="btn"> inside the 12px #upload-result hint, after a <br>. An
+ * <a> is inline, and an inline box's vertical padding does not grow its
+ * line box, so the pill's 8px of padding spilled over the sentence above
+ * it — measured 4.4px of overlap at the hint's 18.6px line height (field
+ * report, 2026-09-18) — and the UA link underline showed through the
+ * button. inline-block gives the pill a line box of its own; the margin
+ * is the breathing room every action row in the console already has. */
+#upload-result .btn {
+  display: inline-block;
+  margin-top: 8px;
+  text-decoration: none;
+}
 
 /* --- Sidebar space meter --------------------------------------------------
    Rendered only when a floor or quota is configured, or free space is already
