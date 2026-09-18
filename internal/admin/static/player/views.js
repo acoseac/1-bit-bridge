@@ -179,7 +179,12 @@ export async function renderAlbums(view, ctx) {
   // the fetch/sentinel/chunk loop, which is why the A–Z rail and the
   // jump-reset appeared on every browse view EXCEPT the biggest one.
   await renderPagedList(view, ctx, {
-    fetchPage: (offset) => api.albums({ sort, quality, needs, ...scope, offset, limit: PAGE }),
+    // `needs` is sent only when it narrows. The server treats `all` as no
+    // filter either way (parseVariantFilter), so this is belt-and-braces —
+    // but the parameter's mere presence once read as "a filter is active"
+    // and defeated the variant-free shortcut on every default load, and a
+    // query that says nothing about a filter cannot be misread that way.
+    fetchPage: (offset) => api.albums({ sort, quality, needs: needs === "all" ? "" : needs, ...scope, offset, limit: PAGE }),
     pick: (r) => r.albums,
     make: albumTile,
     containerClass: "grid",

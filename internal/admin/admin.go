@@ -1355,6 +1355,16 @@ type Server struct {
 	// shutdown drains it with the catalog's.
 	coverageRefreshing atomic.Bool
 
+	// failCoverageBuildForTests, when set, is consulted at the top of
+	// buildAlbumCoverage and a non-nil error fails the build — the only
+	// way a test can reach the "active filter, no snapshot" branch, since
+	// the store is concrete and a real fault cannot be injected through
+	// it. Per-server rather than a package variable, for the reason the
+	// export cap's seam is: a package var is a write the race detector can
+	// pair with a live handler's read in another test. Set before the
+	// first request, never during one.
+	failCoverageBuildForTests func() error
+
 	// dbStats caches the database-accounting + retention row counts on
 	// GET /api/diagnostics for databaseStatsTTL. That block is the only
 	// database work on an endpoint the page polls every 5 s, and the
