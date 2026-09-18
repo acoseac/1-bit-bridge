@@ -1,6 +1,7 @@
 package main
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -60,8 +61,6 @@ func TestEveryCitedTestNameExists(t *testing.T) {
 // ordinary slice of what a docblock might cite.
 var citedRe = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*`)
 
-var definedRe = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
-
 // scanTestCitations walks the tree once, collecting names defined in _test.go
 // files and names cited from non-test source AND from the COMMENTS of test
 // files.
@@ -69,10 +68,12 @@ var definedRe = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
 // Test files were skipped entirely at first, and fifteen stale citations sat
 // in their docblocks — a renamed sibling named under its old name, a
 // historical note naming a test that no longer exists, and one first
-// sentence claiming a property the test beneath it does not pin. Only their
-// comments are scanned: a test file's CODE names tests legitimately, and its
-// string literals can hold anything (a User-Agent value spelled like a test
-// name, say — one does).
+// sentence claiming a property the test beneath it does not pin. A test file
+// is parsed ONCE and both halves come off the AST: definitions from its
+// top-level `Test…` FuncDecls, citations from its comment groups and nothing
+// else — a test file's CODE names tests legitimately, and its string
+// literals can hold anything (a User-Agent value spelled like a test name,
+// say — one does). Gemini on #921 folded the two passes into one.
 func scanTestCitations(t *testing.T, root string) (cited map[string][]string, defined map[string]bool) {
 	t.Helper()
 	cited, defined = map[string][]string{}, map[string]bool{}
@@ -100,10 +101,21 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 		src := strings.ReplaceAll(string(raw), "\r\n", "\n")
 		rel, _ := filepath.Rel(root, path)
 		if strings.HasSuffix(path, "_test.go") {
-			for _, m := range definedRe.FindAllStringSubmatch(src, -1) {
-				defined[m[1]] = true
+			f, err := parser.ParseFile(token.NewFileSet(), path, src, parser.ParseComments|parser.SkipObjectResolution)
+			if err != nil {
+				return err
 			}
-			for _, name := range citedRe.FindAllString(commentText(t, path, src), -1) {
+			for _, decl := range f.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Test") {
+					defined[fn.Name.Name] = true
+				}
+			}
+			var comments strings.Builder
+			for _, g := range f.Comments {
+				comments.WriteString(g.Text())
+				comments.WriteByte('\n')
+			}
+			for _, name := range citedRe.FindAllString(comments.String(), -1) {
 				cited[name] = append(cited[name], rel)
 			}
 			return nil
@@ -117,23 +129,6 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 		t.Fatal(err)
 	}
 	return cited, defined
-}
-
-// commentText returns every comment in a Go source file, and nothing else —
-// parsed rather than regex-stripped, so a `//` inside a string literal
-// ("http://server") cannot open a comment that is not there.
-func commentText(t *testing.T, path, src string) string {
-	t.Helper()
-	f, err := parser.ParseFile(token.NewFileSet(), path, src, parser.ParseComments|parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	var sb strings.Builder
-	for _, g := range f.Comments {
-		sb.WriteString(g.Text())
-		sb.WriteByte('\n')
-	}
-	return sb.String()
 }
 
 // missingCitations returns the cited names nothing defines, formatted with the
