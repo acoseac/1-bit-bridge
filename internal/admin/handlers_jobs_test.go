@@ -10,6 +10,45 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// TestMaintenanceChipsFollowTheIntervalsNotTheUpscaleFlag — both sweepers
+// are constructed whenever their interval is positive (cmd/bridge's
+// upscale block is unconditional since #781) and they reconcile EXISTING
+// sidecars, which is right with the feature off too. The chips gated on
+// UpscaleStats(), which is nil while upscale is disabled, so a bridge whose
+// watchers ticked hourly reported them "off (upscale off or disabled)".
+// The fixture wires no UpscaleStats at all — the case the old gate read
+// as inactive.
+func TestMaintenanceChipsFollowTheIntervalsNotTheUpscaleFlag(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	h := srv.Handler()
+	if srv.deps.UpscaleStats != nil && srv.deps.UpscaleStats() != nil {
+		t.Fatal("fixture: upscale must read as off for this test to mean anything")
+	}
+
+	get := func() jobsMaintenance {
+		t.Helper()
+		var got jobsSnapshotResponse
+		if code := doJSON(t, h, "GET", "/api/jobs", nil, &got); code != 200 {
+			t.Fatalf("jobs: %d", code)
+		}
+		return got.Maintenance
+	}
+
+	// Defaults: the integrity sweep runs hourly, the orphan GC is opt-in.
+	if mt := get(); !mt.VariantIntegrityActive || mt.OrphanSidecarGC {
+		t.Errorf("defaults with upscale off: %+v, want integrity on / GC off", mt)
+	}
+
+	on, off := 3600, 0
+	next := config.Clone(srv.deps.CfgHolder.Load())
+	next.Integrity.OrphanSidecarSweepIntervalSec = &on
+	next.Integrity.VariantSweepIntervalSec = &off
+	srv.deps.CfgHolder.Store(next)
+	if mt := get(); mt.VariantIntegrityActive || !mt.OrphanSidecarGC {
+		t.Errorf("intervals flipped: %+v, want integrity off / GC on", mt)
+	}
+}
+
 // TestApiJobsNilSafeDefaults — a bare test server (no job closures
 // wired) still serves a full 200 snapshot: config-derived sections
 // populate, closure-backed fields are omitted, nothing panics. This is

@@ -5510,7 +5510,9 @@ function renderJobCards(j) {
 
   // Maintenance + UPnP.
   const mt = j.maintenance || {};
-  setText("job-maint-integrity", mt.variantIntegrityActive ? "hourly sweep" : "off (upscale off or disabled)");
+  // Neither chip depends on the upscale flag: the sweepers reconcile
+  // EXISTING sidecars and run whenever their interval is positive.
+  setText("job-maint-integrity", mt.variantIntegrityActive ? "on" : "off (integrity.variantSweepIntervalSec: 0)");
   setText("job-maint-gc", mt.orphanSidecarGC ? "on" : "off (default)");
   setText("job-maint-artwork", mt.artworkCacheLRU ? "capped — LRU eviction every 15 min" : "unlimited");
   const up = j.upnp || {};

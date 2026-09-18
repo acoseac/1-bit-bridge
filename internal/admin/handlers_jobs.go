@@ -289,11 +289,17 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		resp.Updates.CheckIntervalHours = 6
 	}
 
-	// Maintenance (display-only).
-	upscaleActive := s.deps.UpscaleStats != nil && s.deps.UpscaleStats() != nil
+	// Maintenance (display-only). Both sweepers are constructed whenever
+	// their interval is positive — the upscale block in cmd/bridge is
+	// unconditional since #781, and they reconcile EXISTING sidecars,
+	// which is right with the feature off too. These chips used to be
+	// gated on UpscaleStats(), which answers nil while `upscale.enabled`
+	// is false, so a bridge whose watchers ticked every hour reported
+	// them inactive. The interval is the only gate the wiring applies,
+	// so it is the only gate here.
 	resp.Maintenance = jobsMaintenance{
-		VariantIntegrityActive: upscaleActive && cfg.VariantSweepInterval() > 0,
-		OrphanSidecarGC:        upscaleActive && cfg.OrphanSidecarSweepInterval() > 0,
+		VariantIntegrityActive: cfg.VariantSweepInterval() > 0,
+		OrphanSidecarGC:        cfg.OrphanSidecarSweepInterval() > 0,
 		ArtworkCacheLRU:        cfg.Artwork.CacheMaxBytes > 0,
 	}
 

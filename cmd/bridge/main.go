@@ -3627,6 +3627,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// refuse a sweep when the whole directory reads missing /
 		// empty with rows in the catalog (cleanly-unmounted
 		// variants volume) instead of mass-deleting every row.
+		// Passed as liveVariantsDir, resolved per tick: the dir is
+		// hot (POST /api/upscale/variants-dir), and a boot-time
+		// snapshot kept this guard probing the volume the operator
+		// had moved away from.
 		sweepInterval := cfg.VariantSweepInterval()
 		if sweepInterval > 0 {
 			variantWatcher := integrity.NewVariantWatcher(
@@ -3639,7 +3643,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 						DeletedAt:  time.Now(),
 					})
 				},
-				cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+				liveVariantsDir,
 				sweepInterval,
 			)
 			stopVariantWatcher := variantWatcher.Start(scanCtx)
@@ -3656,12 +3660,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// (disabled) — operators on minimal deploys see zero
 		// behavioural change. Skipped silently when the interval is
 		// ≤ 0. See CLAUDE.md "Bridge background GC" for the snapshot
-		// + chunking + cursor invariants.
+		// + chunking + cursor invariants. The tree to walk is
+		// liveVariantsDir, resolved per tick — a boot-time path had
+		// this sweeper walking the directory the operator moved away
+		// from while new sidecars landed where it never looked.
 		gcInterval := cfg.OrphanSidecarSweepInterval()
 		if gcInterval > 0 {
 			orphanSweeper := integrity.NewOrphanSidecarSweeper(
 				&integritySidecarListerAdapter{store: manifestStore},
-				cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
+				liveVariantsDir,
 				gcInterval,
 			)
 			stopOrphanSweeper := orphanSweeper.Start(scanCtx)

@@ -106,6 +106,52 @@ func (f *fakePublisher) lastEvent() (paths, variantIDs []string) {
 	return e.paths, e.variantIDs
 }
 
+// staticDir wraps a fixed path as the live provider the constructors
+// take. Production passes cmd/bridge's liveVariantsDir; a test that
+// needs the directory to MOVE between ticks writes its own closure over
+// a variable instead (TestVariantWatcher_probesTheVariantsDirLivePerTick).
+func staticDir(dir string) func() string {
+	return func() string { return dir }
+}
+
+// TestVariantWatcher_probesTheVariantsDirLivePerTick — the variants dir is
+// a hot setting (POST /api/upscale/variants-dir), and the mount-loss guard
+// used to probe the path captured at construction for the rest of the
+// process: after a move it watched the volume the operator had left, and
+// the tick it guards ran against the wrong tree's health. Two ticks: the
+// first against an empty mountpoint (blocked, rows exist), the second after
+// the provider answers the healthy tree (the missing row is reaped). With a
+// boot-time snapshot the second tick is still blocked.
+func TestVariantWatcher_probesTheVariantsDirLivePerTick(t *testing.T) {
+	unmounted := filepath.Join(t.TempDir(), "unmounted-mountpoint")
+	if err := os.MkdirAll(unmounted, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	healthy := t.TempDir()
+	writeDecoySidecar(t, healthy)
+
+	lister := &fakeLister{snapshots: [][]VariantSnapshot{{
+		{SourcePath: "A/1.flac", VariantID: "v1", SidecarPath: filepath.Join(healthy, "missing.flac")},
+	}}}
+	deleter := &fakeDeleter{}
+	publisher := &fakePublisher{}
+
+	current := unmounted
+	w := NewVariantWatcher(lister, deleter, publisher.publish, func() string { return current }, time.Hour)
+
+	if n := w.tick(context.Background()); n != 0 {
+		t.Fatalf("tick against an empty mountpoint deleted %d rows, want 0 (guard)", n)
+	}
+	current = healthy
+	if n := w.tick(context.Background()); n != 1 {
+		t.Fatalf("tick after the variants dir moved deleted %d rows, want 1 — the guard kept "+
+			"probing the directory captured at construction", n)
+	}
+	if got := deleter.deleted(); len(got) != 1 || got[0] != "A/1.flac|v1" {
+		t.Errorf("deleted rows = %v, want [A/1.flac|v1]", got)
+	}
+}
+
 // writeDecoySidecar drops one unreferenced file into dir so the
 // mount-loss guard sees a non-empty variants dir and lets the
 // sweep run — the guard skips sweeps over an empty dir while rows
@@ -163,7 +209,7 @@ func TestVariantWatcher_missingSidecarTriggersDeleteAndPublish(t *testing.T) {
 	deleter := &fakeDeleter{}
 	publisher := &fakePublisher{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, tmpDir, 1*time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour)
 	awaitBootSweep(t, w, 1) // the missing sidecar's row
 
 	gotDeletes := deleter.deleted()
@@ -201,7 +247,7 @@ func TestVariantWatcher_multipleMissesBatchIntoSingleEvent(t *testing.T) {
 	}}}
 	deleter := &fakeDeleter{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, tmpDir, 1*time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour)
 	awaitBootSweep(t, w, 3)
 
 	if publisher.eventCount() != 1 {
@@ -234,7 +280,7 @@ func TestVariantWatcher_dedupesPathsAcrossMultipleVariants(t *testing.T) {
 	}}}
 	deleter := &fakeDeleter{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, tmpDir, 1*time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour)
 	awaitBootSweep(t, w, 2) // both variants
 
 	if publisher.eventCount() != 1 {
@@ -268,7 +314,7 @@ func TestVariantWatcher_noMissesNoEvent(t *testing.T) {
 	}}}
 	deleter := &fakeDeleter{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, tmpDir, 1*time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour)
 	awaitBootSweep(t, w, 0) // healthy DB — nothing to delete
 	if publisher.eventCount() != 0 {
 		t.Errorf("publisher fired %d events on healthy DB, want 0", publisher.eventCount())
@@ -287,7 +333,7 @@ func TestVariantWatcher_intervalZeroDisables(t *testing.T) {
 	deleter := &fakeDeleter{}
 	publisher := &fakePublisher{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, "", 0)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, nil, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	stop := w.Start(ctx)
@@ -328,7 +374,7 @@ func TestVariantWatcher_listerErrorDoesNotAbortLoop(t *testing.T) {
 	publisher := &fakePublisher{}
 
 	// Use a very short interval so the second tick fires fast.
-	w := NewVariantWatcher(lister, deleter, publisher.publish, tmpDir, 50*time.Millisecond)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 50*time.Millisecond)
 	tickDone := make(chan int, 4)
 	w.SetOnTickComplete(func(n int) { tickDone <- n })
 
@@ -371,7 +417,7 @@ func TestVariantWatcher_ctxCancelStopsLoop(t *testing.T) {
 	deleter := &fakeDeleter{}
 	publisher := &fakePublisher{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, "", 50*time.Millisecond)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, nil, 50*time.Millisecond)
 
 	// Track tick fires via an extra channel.
 	tickFired := make(chan struct{}, 8)
@@ -481,7 +527,7 @@ func TestVariantWatcher_variantsDirGuard(t *testing.T) {
 			deleter := &fakeDeleter{}
 			publisher := &fakePublisher{}
 
-			w := NewVariantWatcher(lister, deleter, publisher.publish, variantsDir, 1*time.Hour)
+			w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(variantsDir), 1*time.Hour)
 			awaitBootSweep(t, w, tc.wantDel)
 
 			if got := len(deleter.deleted()); got != tc.wantDel {
