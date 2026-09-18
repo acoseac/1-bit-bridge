@@ -115,7 +115,10 @@ func TestPhoneShellHidesTheDrawerAndTheDesktopRailDissolvesIt(t *testing.T) {
 		case ".sidebar-drawer":
 			desktop = append(desktop, r.body)
 		case "@media(max-width:1023px)":
-			phone = r.body
+			// Concatenate rather than assign: a second phone block would
+			// otherwise be scanned for nothing, and the absence checks below
+			// (no .sidebar-foot override) would pass vacuously over it.
+			phone += r.body
 		}
 	}
 	if len(desktop) != 1 || !strings.Contains(compactCSS(desktop[0]), "display:contents") {
