@@ -220,6 +220,68 @@ func Test_BuildFolderIndex_StableOrdering(t *testing.T) {
 	}
 }
 
+// Test_BuildFolderIndex_RoutedChildrenOrderByRelativePath — a UPnP-routed
+// track has NO AbsolutePath (dlna_wiring.go leaves it "" so the file
+// handler's proxy fast-path takes over), and the child sort was keyed on
+// it alone, so a routed folder's children — and the "first keyed direct
+// child" its albumArtURI is drawn from — sat in arrival order. The fixture
+// arrives in REVERSE path order, with artwork keys on the first and last
+// tracks by path, so arrival order and path order disagree on both the
+// listing and the cover.
+func Test_BuildFolderIndex_RoutedChildrenOrderByRelativePath(t *testing.T) {
+	routed := func(id, rel, art string) TrackInfo {
+		return TrackInfo{TrackID: id, RelativePath: rel, Title: id, FileExtension: ".flac", ArtworkKey: art}
+	}
+	idx := BuildFolderIndex([]TrackInfo{
+		routed("t3", "Artist/Album/03.flac", "key-3"),
+		routed("t2", "Artist/Album/02.flac", ""),
+		routed("t1", "Artist/Album/01.flac", "key-1"),
+	})
+	node, ok := idx.Folders[FolderObjectID("Artist/Album")]
+	if !ok {
+		t.Fatal("routed tracks were not filed under Artist/Album")
+	}
+	if got := strings.Join(node.ChildTrackIDs, ","); got != "t1,t2,t3" {
+		t.Errorf("ChildTrackIDs = %s, want t1,t2,t3 — routed children must sort by RelativePath", got)
+	}
+	if got := idx.artworkKeyFor(node); got != "key-1" {
+		t.Errorf("artworkKeyFor = %q, want key-1 (the first keyed child by PATH, not by arrival)", got)
+	}
+}
+
+// Test_BuildFolderIndex_FallbackModeOrdersByAbsolutePath — when ANY track
+// lacks a RelativePath the whole index is built from AbsolutePath (the LCP
+// fallback), and the child order must follow the same key, or a track that
+// happens to carry a RelativePath sorts against its siblings on a key the
+// hierarchy was not built from. Two tracks with a relative path and one
+// without, arranged so the relative order and the absolute order disagree.
+//
+// A fourth track in a SECOND folder keeps the derived root at /lib: with
+// every track in one folder the LCP fallback swallows that folder into the
+// root and files the tracks at the top level (the known "fallback strips a
+// top-level folder" shape), which is not the case under test.
+func Test_BuildFolderIndex_FallbackModeOrdersByAbsolutePath(t *testing.T) {
+	idx := BuildFolderIndex([]TrackInfo{
+		{TrackID: "t2", AbsolutePath: "/lib/Artist/Album/02.flac", RelativePath: "Artist/Album/02.flac", Title: "t2", FileExtension: ".flac"},
+		{TrackID: "t3", AbsolutePath: "/lib/Artist/Album/03.flac", Title: "t3", FileExtension: ".flac"}, // no RelativePath: fallback mode
+		{TrackID: "t1", AbsolutePath: "/lib/Artist/Album/01.flac", RelativePath: "Artist/Album/01.flac", Title: "t1", FileExtension: ".flac"},
+		{TrackID: "t0", AbsolutePath: "/lib/Other/00.flac", Title: "t0", FileExtension: ".flac"},
+	})
+	var node FolderNode
+	found := false
+	for _, n := range idx.Folders {
+		if len(n.ChildTrackIDs) == 3 {
+			node, found = n, true
+		}
+	}
+	if !found {
+		t.Fatalf("no folder holds the three album tracks: %+v", idx.Folders)
+	}
+	if got := strings.Join(node.ChildTrackIDs, ","); got != "t1,t2,t3" {
+		t.Errorf("ChildTrackIDs = %s, want t1,t2,t3 — fallback mode must order by AbsolutePath alone", got)
+	}
+}
+
 func Test_BuildFolderIndex_LookupTrackRoundtrip(t *testing.T) {
 	idx := BuildFolderIndex([]TrackInfo{
 		folderTrack("t1", "Artist A/track 01.flac"),

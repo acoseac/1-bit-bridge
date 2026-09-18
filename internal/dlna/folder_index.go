@@ -272,8 +272,28 @@ func BuildFolderIndex(tracks []TrackInfo) *FolderIndex {
 	// which is captured separately as TopLevelTrackIDs).
 	for folderRelPath, trackList := range tracksByFolder {
 		// Stable sort by path so successive Browse calls produce
-		// identical orderings.
+		// identical orderings — and so "the first keyed direct child"
+		// (artworkKeyFor) is a fact about the path order rather than
+		// about arrival. RelativePath first: it is the manifest path,
+		// always populated in production, and unique per track.
+		// AbsolutePath is EMPTY for every UPnP-routed track
+		// (dlna_wiring.go leaves it "" so the file handler's proxy
+		// fast-path takes over), so keyed on it alone a routed folder's
+		// children sat in insertion order and its cover came from
+		// whichever track happened to arrive first. The absolute path
+		// stays as the tie-break for a caller that fills only it — and
+		// it is the ONLY key in the LCP fallback mode, where the
+		// hierarchy itself was derived from AbsolutePath because some
+		// track lacks a RelativePath: a relative-path key there would
+		// order the tracks that have one against the ones that do not,
+		// inconsistently with the folders they were filed under (Gemini
+		// on #919).
 		sort.Slice(trackList, func(i, j int) bool {
+			if useRelPath {
+				if a, b := trackList[i].RelativePath, trackList[j].RelativePath; a != b {
+					return a < b
+				}
+			}
 			return trackList[i].AbsolutePath < trackList[j].AbsolutePath
 		})
 		ids := make([]string, 0, len(trackList))
