@@ -203,8 +203,12 @@ type cssRule struct{ sel, body string }
 func cssRuleList(css string) []cssRule {
 	var out []cssRule
 	depth, start, selStart := 0, 0, 0
-	for i, ch := range css {
-		switch ch {
+	// A byte loop, not `range`: the scanner only looks for the two ASCII
+	// braces, so there is nothing to decode. (`range` would be correct too —
+	// its index is the byte offset of each rune, and every bound taken here
+	// is the offset of a brace, which is a rune boundary by construction.)
+	for i := 0; i < len(css); i++ {
+		switch css[i] {
 		case '{':
 			if depth == 0 {
 				start = i + 1
