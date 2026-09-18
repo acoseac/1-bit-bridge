@@ -281,10 +281,18 @@ func BuildFolderIndex(tracks []TrackInfo) *FolderIndex {
 		// fast-path takes over), so keyed on it alone a routed folder's
 		// children sat in insertion order and its cover came from
 		// whichever track happened to arrive first. The absolute path
-		// stays as the tie-break for a caller that fills only it.
+		// stays as the tie-break for a caller that fills only it — and
+		// it is the ONLY key in the LCP fallback mode, where the
+		// hierarchy itself was derived from AbsolutePath because some
+		// track lacks a RelativePath: a relative-path key there would
+		// order the tracks that have one against the ones that do not,
+		// inconsistently with the folders they were filed under (Gemini
+		// on #919).
 		sort.Slice(trackList, func(i, j int) bool {
-			if a, b := trackList[i].RelativePath, trackList[j].RelativePath; a != b {
-				return a < b
+			if useRelPath {
+				if a, b := trackList[i].RelativePath, trackList[j].RelativePath; a != b {
+					return a < b
+				}
 			}
 			return trackList[i].AbsolutePath < trackList[j].AbsolutePath
 		})
