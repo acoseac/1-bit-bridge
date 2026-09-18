@@ -118,10 +118,15 @@ func (s *Server) albumCoverageFor(r *http.Request, cat *librarycat.Catalog, need
 	// The `needs=` filter is the ONE consumer that reads the denominator
 	// alone ("albums that still need CarPlay copies" is a real question
 	// with zero variants — the answer is "all the eligible ones"), so it
-	// forces the build. That is not an optimisation detail: `filterAlbums`
-	// treats a nil snapshot as "drop the filter", so skipping the build
-	// under a `needs=` query would quietly answer with the UNFILTERED
-	// library rather than with nothing.
+	// forces the build. `needsFilter` is the PARSED predicate's presence,
+	// never the parameter's: the player sends `needs=all` on every default
+	// load, and `all` is no filter. Gated on the parameter, this skip never
+	// ran for the live grid (#913 shipped it that way, and the test beside
+	// it sent no query at all). And the build must not be skipped under a
+	// real filter, because an active predicate with no snapshot is refused
+	// by the handler (503) rather than dropped — the filter would become
+	// unservable, not wrong, but unservable on every variant-free bridge
+	// is still broken.
 	//
 	// This is the cloud tenant's case and every fresh bridge's — the
 	// hosted template ships with upscale and optimize off, so those
@@ -295,6 +300,11 @@ var coverageBuiltHookForTests func()
 // library. Holding the per-path maps would multiply the retained size
 // by an order of magnitude for data no reader wants again.
 func (s *Server) buildAlbumCoverage(ctx context.Context, cat *librarycat.Catalog, rate, bits int) (map[string]albumCoverage, error) {
+	if f := s.failCoverageBuildForTests; f != nil {
+		if err := f(); err != nil {
+			return nil, err
+		}
+	}
 	present, err := s.deps.Manifest.AllVariantPresence(ctx)
 	if err != nil {
 		return nil, err

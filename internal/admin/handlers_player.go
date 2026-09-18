@@ -313,18 +313,44 @@ func (s *Server) apiPlayerAlbums(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 
+	// The `needs` filter is parsed FIRST, and its predicate — not the
+	// parameter — decides whether coverage is required. The player always
+	// sends the parameter (renderAlbums defaults it to the literal `all`,
+	// and its query builder drops only the empty string), and
+	// parseVariantFilter maps `all` to no filter; gating on
+	// `q.Get("needs") != ""` therefore read every default grid load as a
+	// filtered one and skipped the variant-free shortcut on exactly the
+	// libraries it was built for. An invalid token is refused here, before
+	// any fold is paid for it.
+	wantVariants, err := parseVariantFilter(q.Get("needs"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
 	// One whole-library read, shared by the filter and the badges, so a
 	// tile's numbers cost a map lookup rather than a query.
 	//
-	// The `needs=` filter is passed in because it changes what the
+	// Whether a filter is ACTIVE is passed in because it changes what the
 	// snapshot is FOR: the badge reads presence, the filter reads the
 	// denominator, and with no variants anywhere only the filter has
 	// anything to read. albumCoverageFor skips the build entirely in that
 	// case — see the gate there, including why it cannot be inferred from
 	// a nil snapshot after the fact.
-	cov := s.albumCoverageFor(r, cat, q.Get("needs") != "")
+	cov := s.albumCoverageFor(r, cat, wantVariants != nil)
 
-	idx, err := s.filterAlbums(cat, cov, q)
+	idx, err := s.filterAlbums(cat, cov, wantVariants, q)
+	if errors.Is(err, errCoverageUnavailable) {
+		// The filter reads the denominator and there is no snapshot to
+		// read it from — the build failed, or the upscale target could
+		// not be resolved. Dropping the filter would answer with the
+		// UNFILTERED library under a plausible total: a wrong answer
+		// shaped like a right one. Refusing the view is the honest reply,
+		// and the badge-only grid (no `needs`) still serves.
+		writeError(w, http.StatusServiceUnavailable, "coverage_unavailable",
+			"the variant coverage this filter reads could not be built; try again")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -370,10 +396,21 @@ func albumBuckets(cat *librarycat.Catalog, idx []int, mode string) []playerBucke
 	return buildBuckets(len(idx), letterAt)
 }
 
+// errCoverageUnavailable is filterAlbums' answer to an active variant
+// filter with no coverage snapshot to read. The handler maps it to 503;
+// it is deliberately NOT a "drop the filter" — see the comment at the
+// predicate below.
+var errCoverageUnavailable = errors.New("variant coverage unavailable")
+
 // filterAlbums narrows the snapshot to the indices matching the query.
 // Returns a fresh slice every call — the catalog's own ordering must
 // never be mutated, since it is shared by every concurrent reader.
-func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCoverage, q map[string][]string) ([]int, error) {
+//
+// The variant predicate arrives already parsed because the caller needs
+// it BEFORE the coverage snapshot exists: whether one is built at all
+// depends on it (see apiPlayerAlbums).
+func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCoverage,
+	wantVariants func(albumCoverage) bool, q map[string][]string) ([]int, error) {
 	get := func(k string) string {
 		if v, ok := q[k]; ok && len(v) > 0 {
 			return v[0]
@@ -407,17 +444,17 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCover
 	if err != nil {
 		return nil, err
 	}
-	wantVariants, err := parseVariantFilter(get("needs"))
-	if err != nil {
-		return nil, err
-	}
 	// The variant filter needs whole-library coverage, and it is the
 	// reason that snapshot exists: filtering a PAGE would draw page 1 of
 	// the filtered list from page 1 of the unfiltered one and report a
-	// total for the wrong set. A nil snapshot (build failed) drops the
-	// filter rather than silently returning everything OR nothing.
-	if cov == nil {
-		wantVariants = nil
+	// total for the wrong set. With no snapshot there are two wrong
+	// answers and no right one — dropping the filter serves the whole
+	// library as though it were the filtered set (which is what this
+	// function did, under a comment that called it the safe direction),
+	// and applying it to a nil map reads a zero coverage for every album
+	// and serves nothing. Neither is what was asked; refuse instead.
+	if wantVariants != nil && cov == nil {
+		return nil, errCoverageUnavailable
 	}
 
 	idx := make([]int, 0, len(cat.Albums))

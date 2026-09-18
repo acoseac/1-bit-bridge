@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -472,10 +473,12 @@ func TestAVariantFreeLibraryDoesNotBuildCoverage(t *testing.T) {
 // albums still need CarPlay copies" is a real question on a library that
 // has never made one, and the answer is "all the eligible ones".
 //
-// Skipping the build here would not merely lose the filter: `filterAlbums`
-// treats a nil snapshot as "drop the filter", so the response would be the
-// whole UNFILTERED library, presented with a total, as though it were the
-// filtered set.
+// Skipping the build here would make the filter unservable: an active
+// predicate with no snapshot is refused (503) rather than dropped, so a
+// variant-free bridge would answer every `needs=` query with an error.
+// (`filterAlbums` used to drop the filter instead and serve the whole
+// UNFILTERED library under a total — the worse failure, and the one
+// TestANeedsFilterWithNoSnapshotIsRefusedNotWidened now pins shut.)
 func TestANeedsFilterStillBuildsCoverageWithoutVariants(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	seedVariantFreeLibrary(t, srv.deps.Manifest)
@@ -489,7 +492,7 @@ func TestANeedsFilterStillBuildsCoverageWithoutVariants(t *testing.T) {
 	total, albums := albumsPage(t, srv, "needs=optimize")
 	if n := builds(); n == 0 {
 		t.Fatal("needs=optimize answered without folding coverage — the filter reads the " +
-			"denominator, and a nil snapshot silently drops it")
+			"denominator, and there is nothing else to read it from")
 	}
 	got := titlesOf(albums)
 	if total != 1 || !got["Bare"] {
@@ -497,7 +500,106 @@ func TestANeedsFilterStillBuildsCoverageWithoutVariants(t *testing.T) {
 	}
 	if got["Redbook"] {
 		t.Error("an album already at the CarPlay target was listed as needing a copy — the " +
-			"filter was dropped and the unfiltered library came back")
+			"filter was not applied and the unfiltered library came back")
+	}
+}
+
+// TestTheDefaultGridQueryDoesNotBuildCoverage is
+// TestAVariantFreeLibraryDoesNotBuildCoverage asked with the query the
+// player ACTUALLY sends. renderAlbums defaults `needs` to the literal
+// "all" and the query builder drops only the empty string, so a default
+// grid load is `needs=all` — and the handler's gate read the parameter's
+// presence as "a filter is active". Every default load on a variant-free
+// bridge paid both whole-library scans for a badge that could not appear,
+// and the test beside this one passed because it sent no query at all.
+//
+// The test therefore sends the FULL default query, not a minimal one: a
+// fixture must be the value the transformation would actually change.
+func TestTheDefaultGridQueryDoesNotBuildCoverage(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedVariantFreeLibrary(t, srv.deps.Manifest)
+	builds := countCoverageBuilds(t, srv)
+
+	_, albums := albumsPage(t, srv, "sort=recent&quality=all&needs=all")
+	if len(albums) != 2 {
+		t.Fatalf("got %d albums, want 2", len(albums))
+	}
+	if n := builds(); n != 0 {
+		t.Errorf("coverage folded %d time(s) under the player's default query — "+
+			"`needs=all` is no filter, and the gate must read the parsed predicate, "+
+			"not the parameter", n)
+	}
+	for _, a := range albums {
+		if _, ok := a["variants"]; ok {
+			t.Errorf("album %v carries a variants block with no variants in the library", a["title"])
+		}
+	}
+}
+
+// TestAnInvalidNeedsTokenIsRefusedBeforeAnyFold — the filter is parsed
+// before coverage is consulted, so a bad token costs a 400 and nothing
+// else. It used to reach the gate as "a filter is present", build the
+// snapshot in full, and only then be refused by filterAlbums.
+//
+// Seeded WITH variants on purpose: on a variant-free library the gate
+// alone would skip the build and the test would pass for the wrong
+// reason.
+func TestAnInvalidNeedsTokenIsRefusedBeforeAnyFold(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedCoverageLibrary(t, srv.deps.Manifest)
+	builds := countCoverageBuilds(t, srv)
+
+	w, body := playerGet(t, srv, "/api/player/albums?needs=bogus")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("needs=bogus: status %d body %s, want 400", w.Code, w.Body.String())
+	}
+	if body["error"] != "bad_request" {
+		t.Errorf("error = %v, want bad_request", body["error"])
+	}
+	if n := builds(); n != 0 {
+		t.Errorf("coverage folded %d time(s) for a query that was going to be refused", n)
+	}
+}
+
+// TestANeedsFilterWithNoSnapshotIsRefusedNotWidened — when the filter is
+// active and the snapshot cannot be built, the answer is a refusal, not
+// the unfiltered library. filterAlbums used to drop the filter on a nil
+// snapshot under a comment that called that the safe direction, and the
+// response carried a plausible total for a set nobody asked for — a wrong
+// answer shaped like a right one. Losing a BADGE is not losing the page,
+// so the badge-only grid must still serve on the same fault.
+func TestANeedsFilterWithNoSnapshotIsRefusedNotWidened(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedCoverageLibrary(t, srv.deps.Manifest)
+	srv.failCoverageBuildForTests = func() error {
+		return errors.New("injected: the coverage build failed")
+	}
+
+	w, body := playerGet(t, srv, "/api/player/albums?needs=optimize")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("needs=optimize with no snapshot: status %d body %s, want 503 — "+
+			"an active filter must not be dropped into the unfiltered library",
+			w.Code, w.Body.String())
+	}
+	if body["error"] != "coverage_unavailable" {
+		t.Errorf("error = %v, want coverage_unavailable", body["error"])
+	}
+	if _, ok := body["albums"]; ok {
+		t.Error("the refusal carried an album list")
+	}
+
+	// The badge-only grid degrades to no badges rather than to an error.
+	w, body = playerGet(t, srv, "/api/player/albums?limit=50")
+	if w.Code != http.StatusOK {
+		t.Fatalf("badge-only grid on the same fault: status %d, want 200", w.Code)
+	}
+	if raw, _ := body["albums"].([]any); len(raw) != 3 {
+		t.Errorf("badge-only grid served %d albums, want 3", len(raw))
+	}
+	for _, a := range body["albums"].([]any) {
+		if m, _ := a.(map[string]any); m["variants"] != nil {
+			t.Errorf("album %v carries a variants block the build could not have produced", m["title"])
+		}
 	}
 }
 
