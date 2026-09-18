@@ -255,11 +255,17 @@ func Test_BuildFolderIndex_RoutedChildrenOrderByRelativePath(t *testing.T) {
 // happens to carry a RelativePath sorts against its siblings on a key the
 // hierarchy was not built from. Two tracks with a relative path and one
 // without, arranged so the relative order and the absolute order disagree.
+//
+// A fourth track in a SECOND folder keeps the derived root at /lib: with
+// every track in one folder the LCP fallback swallows that folder into the
+// root and files the tracks at the top level (the known "fallback strips a
+// top-level folder" shape), which is not the case under test.
 func Test_BuildFolderIndex_FallbackModeOrdersByAbsolutePath(t *testing.T) {
 	idx := BuildFolderIndex([]TrackInfo{
 		{TrackID: "t2", AbsolutePath: "/lib/Artist/Album/02.flac", RelativePath: "Artist/Album/02.flac", Title: "t2", FileExtension: ".flac"},
 		{TrackID: "t3", AbsolutePath: "/lib/Artist/Album/03.flac", Title: "t3", FileExtension: ".flac"}, // no RelativePath: fallback mode
 		{TrackID: "t1", AbsolutePath: "/lib/Artist/Album/01.flac", RelativePath: "Artist/Album/01.flac", Title: "t1", FileExtension: ".flac"},
+		{TrackID: "t0", AbsolutePath: "/lib/Other/00.flac", Title: "t0", FileExtension: ".flac"},
 	})
 	var node FolderNode
 	found := false
@@ -269,7 +275,7 @@ func Test_BuildFolderIndex_FallbackModeOrdersByAbsolutePath(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("no folder holds all three tracks: %+v", idx.Folders)
+		t.Fatalf("no folder holds the three album tracks: %+v", idx.Folders)
 	}
 	if got := strings.Join(node.ChildTrackIDs, ","); got != "t1,t2,t3" {
 		t.Errorf("ChildTrackIDs = %s, want t1,t2,t3 — fallback mode must order by AbsolutePath alone", got)
