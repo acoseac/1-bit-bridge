@@ -97,14 +97,26 @@ func renderPublicHeader(t *testing.T) *html.Node {
 // children.
 func railChildrenAreHeadAndDrawer(t *testing.T, header *html.Node) {
 	t.Helper()
+	heads, drawers := 0, 0
 	for c := header.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type != html.ElementNode || railHasClass(c, "sidebar-head") || railAttr(c, "id") == "sidebar-drawer" {
-			continue
+		switch {
+		case c.Type != html.ElementNode:
+		case railHasClass(c, "sidebar-head"):
+			heads++
+		case railAttr(c, "id") == "sidebar-drawer":
+			drawers++
+		default:
+			t.Errorf("header.sidebar has a child <%s class=%q id=%q> that is neither .sidebar-head nor #sidebar-drawer: "+
+				"below 1024px it renders in the TOP BAR beside the brand, which is how the space meter ended up there. "+
+				"Put it inside the drawer, or make the case for the bar in a comment and here.",
+				c.Data, railAttr(c, "class"), railAttr(c, "id"))
 		}
-		t.Errorf("header.sidebar has a child <%s class=%q id=%q> that is neither .sidebar-head nor #sidebar-drawer: "+
-			"below 1024px it renders in the TOP BAR beside the brand, which is how the space meter ended up there. "+
-			"Put it inside the drawer, or make the case for the bar in a comment and here.",
-			c.Data, railAttr(c, "class"), railAttr(c, "id"))
+	}
+	// Exactly one of each: a second head is a second bar, a second drawer a
+	// second dropdown, and skipping the permitted names would let either
+	// duplicate through.
+	if heads != 1 || drawers != 1 {
+		t.Errorf("header.sidebar has %d direct .sidebar-head and %d direct #sidebar-drawer children; want one of each", heads, drawers)
 	}
 }
 
