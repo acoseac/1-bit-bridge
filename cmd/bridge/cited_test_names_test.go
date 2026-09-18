@@ -74,6 +74,11 @@ func TestScanTestCitationsReadsTestFileCommentsOnly(t *testing.T) {
 	if !defined["TestReal"] {
 		t.Errorf("the fixture's real test was not collected as defined: %v", defined)
 	}
+	if defined["TestGhostInLiteral"] {
+		// Definitions come from FuncDecls only; a literal that spells a test
+		// name must not satisfy a citation of it (CodeRabbit on #922).
+		t.Errorf("a test-shaped string literal was collected as a definition: %v", defined)
+	}
 	if _, ok := cited["TestGhostFromComment"]; !ok {
 		t.Error("a citation in a _test.go COMMENT was not collected — the test-file branch is not reading comments")
 	}
@@ -87,13 +92,19 @@ func TestScanTestCitationsReadsTestFileCommentsOnly(t *testing.T) {
 		// The definition's own name appears only in CODE here, never in a comment.
 		t.Errorf("the defined test's name was collected from test CODE: %v", files)
 	}
-	missing := missingCitations(cited, defined)
-	if len(missing) != 2 {
-		t.Fatalf("missingCitations = %v, want exactly the two ghosts", missing)
+	// Exact strings, file names included: a citation attributed to the wrong
+	// file would pass a prefix check (Gemini on #922).
+	want := []string{
+		"TestGhostFromComment  (cited by x_test.go)",
+		"TestGhostFromProd  (cited by prod.go)",
 	}
-	for _, m := range missing {
-		if !strings.HasPrefix(m, "TestGhostFromComment") && !strings.HasPrefix(m, "TestGhostFromProd") {
-			t.Errorf("unexpected missing citation %q", m)
+	missing := missingCitations(cited, defined)
+	if len(missing) != len(want) {
+		t.Fatalf("missingCitations = %v, want %v", missing, want)
+	}
+	for i, m := range missing {
+		if m != want[i] {
+			t.Errorf("missingCitations[%d] = %q, want %q", i, m, want[i])
 		}
 	}
 }
