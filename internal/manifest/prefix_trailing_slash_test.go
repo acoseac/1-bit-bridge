@@ -75,6 +75,48 @@ func TestEligibleRollupByPrefixToleratesTrailingSlash(t *testing.T) {
 	}
 }
 
+// TestEligibleCountsForFoldersToleratesTrailingSlash is the per-folder
+// twin of the rollup test above. EligibleRollupByPrefix trimmed; this one
+// did not, and only the browse handler's habit of passing bare folder
+// paths kept it latent — the state the rollup bug was in before a second
+// caller forwarded a raw path. The result stays keyed by the CALLER's
+// spelling: a lookup by what was passed must still hit, and two spellings
+// of one folder in the same call must both resolve.
+func TestEligibleCountsForFoldersToleratesTrailingSlash(t *testing.T) {
+	s := seedPrefixFixture(t)
+	ctx := context.Background()
+
+	bare, err := s.EligibleCountsForFolders(ctx, []string{"Album"}, 96000, 24, EligibilityOpts{})
+	if err != nil {
+		t.Fatalf("bare path: %v", err)
+	}
+	want := bare["Album"]
+	if want.Upscale == 0 && want.Optimize == 0 {
+		t.Fatal("fixture seeded nothing eligible — test can't detect the bug")
+	}
+	for _, p := range []string{"Album/", "Album//", "Album///"} {
+		got, err := s.EligibleCountsForFolders(ctx, []string{p}, 96000, 24, EligibilityOpts{})
+		if err != nil {
+			t.Fatalf("path %q: %v", p, err)
+		}
+		ec, ok := got[p]
+		if !ok {
+			t.Errorf("path %q: result is not keyed by the caller's spelling: %v", p, got)
+			continue
+		}
+		if ec != want {
+			t.Errorf("path %q changed the result: bare=%+v slashed=%+v", p, want, ec)
+		}
+	}
+	mixed, err := s.EligibleCountsForFolders(ctx, []string{"Album", "Album/"}, 96000, 24, EligibilityOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mixed["Album"] != want || mixed["Album/"] != want {
+		t.Errorf("two spellings in one call: %v, want both = %+v", mixed, want)
+	}
+}
+
 func TestListTrackProjectionsUnderPrefixToleratesTrailingSlash(t *testing.T) {
 	s := seedPrefixFixture(t)
 	ctx := context.Background()

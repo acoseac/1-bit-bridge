@@ -220,6 +220,35 @@ func Test_BuildFolderIndex_StableOrdering(t *testing.T) {
 	}
 }
 
+// Test_BuildFolderIndex_RoutedChildrenOrderByRelativePath — a UPnP-routed
+// track has NO AbsolutePath (dlna_wiring.go leaves it "" so the file
+// handler's proxy fast-path takes over), and the child sort was keyed on
+// it alone, so a routed folder's children — and the "first keyed direct
+// child" its albumArtURI is drawn from — sat in arrival order. The fixture
+// arrives in REVERSE path order, with artwork keys on the first and last
+// tracks by path, so arrival order and path order disagree on both the
+// listing and the cover.
+func Test_BuildFolderIndex_RoutedChildrenOrderByRelativePath(t *testing.T) {
+	routed := func(id, rel, art string) TrackInfo {
+		return TrackInfo{TrackID: id, RelativePath: rel, Title: id, FileExtension: ".flac", ArtworkKey: art}
+	}
+	idx := BuildFolderIndex([]TrackInfo{
+		routed("t3", "Artist/Album/03.flac", "key-3"),
+		routed("t2", "Artist/Album/02.flac", ""),
+		routed("t1", "Artist/Album/01.flac", "key-1"),
+	})
+	node, ok := idx.Folders[FolderObjectID("Artist/Album")]
+	if !ok {
+		t.Fatal("routed tracks were not filed under Artist/Album")
+	}
+	if got := strings.Join(node.ChildTrackIDs, ","); got != "t1,t2,t3" {
+		t.Errorf("ChildTrackIDs = %s, want t1,t2,t3 — routed children must sort by RelativePath", got)
+	}
+	if got := idx.artworkKeyFor(node); got != "key-1" {
+		t.Errorf("artworkKeyFor = %q, want key-1 (the first keyed child by PATH, not by arrival)", got)
+	}
+}
+
 func Test_BuildFolderIndex_LookupTrackRoundtrip(t *testing.T) {
 	idx := BuildFolderIndex([]TrackInfo{
 		folderTrack("t1", "Artist A/track 01.flac"),

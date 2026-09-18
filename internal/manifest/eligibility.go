@@ -239,7 +239,19 @@ func (s *Store) EligibleCountsForFolders(ctx context.Context, paths []string, ta
 	if len(paths) == 0 {
 		return map[string]EligibleCounts{}, nil
 	}
-	blob, err := json.Marshal(paths)
+	// Trim trailing separators BEFORE the range is built, as
+	// EligibleRollupByPrefix does: the query appends its own '/', so
+	// "Album/" would build `path >= 'Album//'` and — since the byte after
+	// "Album/" in a real row sorts above the '0' upper bound — match
+	// nothing, a silently-empty tile. The browse handler happens to pass
+	// bare folder paths today, which is exactly the state the rollup bug
+	// was in before a second caller forwarded a raw one. The result is
+	// keyed by the CALLER's spelling so a lookup by what was passed hits.
+	trimmed := make([]string, len(paths))
+	for i, p := range paths {
+		trimmed[i] = strings.TrimRight(p, "/")
+	}
+	blob, err := json.Marshal(trimmed)
 	if err != nil {
 		return nil, err
 	}
@@ -260,17 +272,21 @@ func (s *Store) EligibleCountsForFolders(ctx context.Context, paths []string, ta
 		return nil, fmt.Errorf("eligible counts: %w", err)
 	}
 	defer rows.Close()
-	out := make(map[string]EligibleCounts, len(paths))
+	byBase := make(map[string]EligibleCounts, len(paths))
 	for rows.Next() {
 		var p string
 		var ec EligibleCounts
 		if err := rows.Scan(&p, &ec.Upscale, &ec.Optimize, &ec.PCM); err != nil {
 			return nil, err
 		}
-		out[p] = ec
+		byBase[p] = ec
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	out := make(map[string]EligibleCounts, len(paths))
+	for i, p := range paths {
+		out[p] = byBase[trimmed[i]]
 	}
 	return out, nil
 }
