@@ -135,7 +135,7 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 | Library mount | `/mnt/music` (rclone B2 FUSE, `--read-only --vfs-cache-mode full --vfs-cache-max-size 5G`) |
 | Log | `journalctl -u 1-bit-bridge` (systemd journal — no separate file) |
 | Public endpoint | `https://bridge.ars.md/` (autocert direct-TLS on :443) |
-| Admin endpoint | `https://bridge.ars.md:7789/` (autocert + adminauth session cookie) |
+| Admin endpoint | **`https://bridge.ars.md:7790/`** (autocert + adminauth session cookie). Since 2026-09-16 **`:7789` on this host is HAProxy's tenant-console frontend** (`<id>.cloud.1-bit.app`, by Host, under the `*.cloud.1-bit.app` wildcard) — opening `bridge.ars.md:7789` gets that certificate and a `421`, which reads as "wrong certificate" in a browser. This row said `:7789` until 2026-09-18. |
 
 **systemd units:**
 
@@ -155,7 +155,7 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 
 **Firewall posture (ufw):**
 - `22/tcp` (SSH) — **whitelisted to operator's public IP only**.
-- `7789/tcp` (admin console) — **whitelisted to operator's public IP only**.
+- `7790/tcp` (the operator's admin console) — **NSG-allowlisted to the operator's ranges** (ufw allows it from anywhere; the NSG is the real allowlist). `7789/tcp` is HAProxy's tenant-console frontend, open to Any.
 - `443/tcp` + `443/udp` (HTTPS + HTTP/3) — open to the internet (the public API + autocert TLS-ALPN-01 challenge land here).
 
 **Connection-issues debugging hint**: if SSH or admin-console access starts failing intermittently, **check whether the operator's public IP has changed** (residential CGNAT rotation, switching networks, VPN flip). The 22/7789 whitelist is keyed on the IP at standup-time (2026-05-24). The fix is to update the ufw rules; the bridge itself doesn't care. Public-internet :443 access is unaffected by IP changes — if iOS clients can still reach `/v1/health` but you can't SSH, that's the whitelist class of issue.
@@ -513,7 +513,7 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 # (self-signed pinned cert), leCertNotAfter ~90d out (Let's Encrypt).
 ```
 
-**Connection-issues hint** (re-stated for the post-merge loop): SSH and admin-port 7789 are whitelisted to the operator's public IP in ufw. A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Update ufw rules from the new IP.
+**Connection-issues hint** (re-stated for the post-merge loop): SSH and the admin port `7790` are allowlisted to the operator's ranges (the Azure NSG since 2026-09-16; ufw before). A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Update ufw rules from the new IP.
 
 ### Step 4 — demo bridge (`bridge.1-bit.app`)
 
