@@ -79,7 +79,7 @@ func renderPublicHeader(t *testing.T) *html.Node {
 	if rw.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200", rw.Code)
 	}
-	doc, err := html.Parse(strings.NewReader(rw.Body.String()))
+	doc, err := html.Parse(rw.Body)
 	if err != nil {
 		t.Fatalf("page does not parse as HTML: %v", err)
 	}
