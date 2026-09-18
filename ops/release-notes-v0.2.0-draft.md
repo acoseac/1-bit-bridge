@@ -3,8 +3,9 @@
 > Working copy for the operator. The release workflow drafts a Release with
 > goreleaser's raw changelog; replace that body with the text below the rule,
 > after checking that `git log --oneline v0.1.9..v0.2.0 | grep -cE '\(#[0-9]+\)$'` on the
-> tagged tip says **175** (the figure README.md:22 carries: 156 merged PRs in the window on
-> 2026-09-12, plus #904–#908 that day, plus #909–#922 through 2026-09-18). Everything here
+> tagged tip says **177** (the figure README.md:22 carries: 156 merged PRs in the window on
+> 2026-09-12, plus #904–#908 that day, plus #909–#922 through 2026-09-18, plus the two
+> release-prep PRs #923 and #924 — a count that includes the PR carrying it, as #908's did). Everything here
 > was derived from `git log v0.1.9..main` and the dated CLAUDE.md /
 > `ops/engineering-log.md` sections; PR numbers are kept so a reader can
 > follow any line back to its diff. Grouped by who notices it.
