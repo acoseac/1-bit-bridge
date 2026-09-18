@@ -543,7 +543,7 @@ bridge that already had the fix.
 | Version | Date | Hosts | Config keys added since the previous row | After the restart |
 |---|---|---|---|---|
 | `v0.1.9-154` | 2026-09-08 | bridge.ars.md | `upscale.dsdRender.*`, `upscale.tempDir` (#863) | `bridge doctor` → `dsd-render-toolchain` ok; `/v1/health` advertises `dsdRender`; `upscale.tempDir` set explicitly (PrivateTmp) |
-| `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Item 2: NO re-extraction — every host was on `-216`, which already carried `ExtractorVersion` 10 (8 → 10 landed with `-207`), so the restart re-read nothing. Items 3–5 OPEN (the steady-state journal checks, per unit). Item 6 is the next nightly fuzz run; item 8 DONE (the note is marked). |
+| `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Item 2: NO re-extraction — every deployed host was on `-216`, which already carried `ExtractorVersion` 10 (8 → 10 landed with `-207`), and every row on all five live DBs is stamped 10 (measured 12:58Z), so the restart re-read nothing. Items 3–5 OPEN (the steady-state checks, per unit; 4's wall-clock is the #850 detector, 3's grep only counts extraction errors). Item 6 is the next nightly fuzz run; item 8 DONE (the note is marked). |
 
 ### `v0.2.0` post-deploy checklist
 
@@ -553,34 +553,51 @@ been live on bridge.ars.md since the `-154` deploy, so the numbers are
 measurable today, and the v0.2.0 restart is the first scan cycle anyone will
 be watching.
 
+**Scope: the five DEPLOYED endpoints** — bridge.ars.md (`1-bit-bridge`), the
+three hosted tenants (`bridge@demo`, `bridge@t26f0939137`, `bridge@t0ae4e78fa1`)
+and the public demo (`1-bit-bridge-demo`). **home-pc is NOT on v0.2.0** — the
+standing default is never to deploy it without an explicit ask — and is outside
+this checklist; when it is brought forward, items 1–2 apply to it afresh and
+item 2's re-extraction expectation is live there.
+
 1. **Version and flags.** `curl -s https://<host>/v1/health | jq '.serverVersion, .features'` —
    expect `0.2.0` (bare, on the release artifact) and `lyrics` present;
    `dsdRender` present on a host with the ffmpeg `dsd_*` decoders; `dlnaArtwork`
    ABSENT on bridge.ars.md and the demo (public mode never starts the DLNA
    listener) and present on home-pc if `dlna.enabled` is on there.
-2. **Re-extraction: NONE on this deploy — a result, not an expectation.**
-   Every host was on `-216` before 0.2.0, and `-216` already carried
+2. **Re-extraction: NONE on this deploy — measured, not inferred.** Every
+   deployed host was on `-216` before 0.2.0, and `-216` already carried
    `ExtractorVersion` 10 (7 → 8 went live with `-191` on 2026-09-10, 8 → 10
-   with `-207` on 2026-09-15; `-216` and `v0.2.0` are both 10), so the 0.2.0
-   restart's startup scan had nothing to re-read. This item expected 7 → 10
-   here because it was written against `-154`. It still applies to any host
-   brought forward from a build before `-207` straight to a release —
-   home-pc, if it is still on an older build — where the startup scan
-   re-reads every audio file once: expect `scanState.isScanning: true` for a
-   long time on a mounted library, and `tracksIndexed` back at the pre-deploy
-   value when it ends. A count that dropped means suppression or reaping
-   changed something and wants the Duplicates page before anything else.
-3. **#850, steady state — OPEN.** `journalctl -u <unit> --since '<restart>' --no-pager | grep -c 're-extract'`
+   with `-207` on 2026-09-15; `-216` and `v0.2.0` are both 10). The persisted
+   stamps agree — `SELECT extractor_version, COUNT(*) FROM tracks GROUP BY 1`,
+   read-only on each live DB at 12:58Z: bridge.ars.md `10 × 21,460`, tenants
+   `10 × 1` / `10 × 4` / `10 × 1`, demo `10 × 183` — no row below 10, so the
+   skip gate (`existing.ExtractorVersion >= ExtractorVersion`) had no
+   version-stale leg to take, and the operator bridge's startup scan reached
+   its duplicate-stamping tail eleven minutes after the restart (11:46:18 →
+   11:57:57). This item expected 7 → 10 here because it was written against
+   `-154`; it applies to a host brought forward from before `-207` (home-pc —
+   see the scope note), where the startup scan re-reads every audio file
+   once: expect `scanState.isScanning: true` for a long time on a mounted
+   library, and `tracksIndexed` back at the pre-deploy value when it ends. A
+   count that dropped means suppression or reaping changed something and
+   wants the Duplicates page before anything else.
+3. **#850, steady state — OPEN, and the journal grep is NOT the detector.**
+   The scanner logs nothing per re-read: `re-extract (version-stale)` is an
+   ERROR line (an extraction that FAILED on the version-stale leg), so
+   `journalctl -u <unit> --since '<restart>' --no-pager | grep -c 're-extract'`
    — `<unit>` is `1-bit-bridge` on bridge.ars.md, `bridge@<tenant>` on a
    hosted tenant, `1-bit-bridge-demo` on the demo; the wrong unit reads as a
-   clean zero — across one full periodic scan (`scanner.scanIntervalSec`,
-   default 6 h): must be near zero. A count that is a steady fraction of the library is the
-   sidecar-skip-gate disagreement #850 fixed still happening on that host —
-   every track with an empty / tagless / legacy-encoded `<stem>.lrc|.txt`
-   beside it re-opening on every scan.
+   clean zero — counts failures, and its zero on all five units (2026-09-18)
+   says only that nothing failed. The #850 class (`reExtractUnchanged` →
+   `versionStampOnly`) leaves no log line and no `indexed_at` churn; what
+   shows it is item 4's wall-clock, and after a version bump the stamp
+   histogram in item 2 (every row at the current version = the version-stale
+   leg is spent). Run the grep anyway — a non-zero is a real extraction error
+   on a file the phone will now miss.
 4. **Scan wall-clock, cycle over cycle — OPEN.** From the journal's scan
    start/finish lines on two consecutive periodic scans, same unit rule as
-   3. Same reason as 3; the number to record is the steady state.
+   3. This is the #850 detector; the number to record is the steady state.
 5. **#849, silent by nature — OPEN.** Add a `.lrc` beside a track on the
    library root, trigger a scan (`POST /api/scan` on a loopback console; a
    restart on a public one), and confirm the phone receives the lyrics on a
