@@ -1961,10 +1961,17 @@ its twin.** The top list is older, shorter, and read first.
   CodeRabbit EDITS the marker out of the walkthrough when the review finally
   runs, so a later 0 is not evidence a review happened. Auditing after the fact
   asks a different question — whether the bot left any review or inline comment
-  at all. Ask for the pass rather than waiting it out: `@coderabbitai review`
-  picks up the incremental commits and `/gemini review` does the same, both
-  inside a minute. CodeRabbit's real pass says "Review finished"; Gemini's says
-  it has no comments to address. Anything less than one of those is not a round.
+  at all. Ask for the pass rather than waiting it out — but **`@coderabbitai
+  review` does NOT clear a plan-limit pause**: on 2026-09-18 it answered
+  "Review rate limited" on all five paused PRs, and the notice's own small
+  print says the command applies only when AUTOMATIC reviews are paused. What
+  works is the **"Run this review for free" checkbox inside the walkthrough
+  comment** — tick it by PATCHing the comment body (`- [ ]` → `- [x]` on the
+  `checkboxId` line; the repo owner may edit the bot's comment), and the
+  review runs within minutes. `/gemini review` still works as written.
+  CodeRabbit's real pass says "No actionable comments were generated" or
+  "Actionable comments posted: N"; Gemini's says it has no comments to
+  address. Anything less than one of those is not a round.
   **#900 is the live instance**: merged nineteen minutes after opening with the
   notice standing, and it carries zero CodeRabbit reviews and zero inline
   comments to this day. #901 was limited from its FIRST review too, which left
