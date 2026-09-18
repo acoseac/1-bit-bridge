@@ -135,7 +135,7 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 | Library mount | `/mnt/music` (rclone B2 FUSE, `--read-only --vfs-cache-mode full --vfs-cache-max-size 5G`) |
 | Log | `journalctl -u 1-bit-bridge` (systemd journal — no separate file) |
 | Public endpoint | `https://bridge.ars.md/` (autocert direct-TLS on :443) |
-| Admin endpoint | `https://bridge.ars.md:7789/` (autocert + adminauth session cookie) |
+| Admin endpoint | **`https://bridge.ars.md:7790/`** (autocert + adminauth session cookie). Since 2026-09-16 **`:7789` on this host is HAProxy's tenant-console frontend** (`<id>.cloud.1-bit.app`, by Host, under the `*.cloud.1-bit.app` wildcard) — opening `bridge.ars.md:7789` gets that certificate and a `421`, which reads as "wrong certificate" in a browser. This row said `:7789` until 2026-09-18. |
 
 **systemd units:**
 
@@ -153,12 +153,12 @@ Public-internet-reachable bridge running in `deployment.mode: public` against a 
 - **Current shape** (in `/etc/systemd/system/1-bit-bridge.service.d/variants.conf`): `ProtectSystem=full` (only `/usr` `/boot` `/efi` `/etc` read-only — no `/mnt` binds needed) + `ReadOnlyPaths=` (clears the music bind). Library protection does NOT regress: `/mnt/music` is mounted read-only by `rclone-music.service` itself (`ro` mount option) — the mount is the enforcement, not the sandbox. `/mnt/bridge-variants` writes are governed by FUSE perms (`user_id=1000` = the service user). Verified post-change from inside the service's own namespace: variants writable, music still EROFS.
 - Don't reintroduce `ProtectSystem=strict` or any `/mnt` path in `ReadOnlyPaths`/`ReadWritePaths` without re-testing a service restart — the failure mode is a crash-loop (status=226/NAMESPACE), i.e. a full outage, not a degraded feature. The alternative path (enabling `allow_other` on the rclone mounts + `user_allow_other` in `/etc/fuse.conf`) would let real binds work but touches the mount units; deliberately not taken.
 
-**Firewall posture (ufw):**
-- `22/tcp` (SSH) — **whitelisted to operator's public IP only**.
-- `7789/tcp` (admin console) — **whitelisted to operator's public IP only**.
+**Firewall posture — the Azure NSG (`1bitbridge-nsg`) is the allowlist; ufw is not a gate.** `sudo ufw status numbered` on 2026-09-18: `ALLOW IN Anywhere` for OpenSSH, 80/tcp, 443/tcp+udp, 7789/tcp, 7790/tcp and 8443/tcp, v4 and v6 — nothing is source-restricted there any more (it was, until the NSG took that over on 2026-09-16). Editing ufw from a new IP therefore changes nothing.
+- `22/tcp` (SSH) — **NSG source-allowlisted to the operator's ranges**.
+- `7790/tcp` (the operator's admin console) — **NSG source-allowlisted to the operator's ranges**. `7789/tcp` (HAProxy's tenant-console frontend) and `8443/tcp` (the tenant API passthrough) are open to Any.
 - `443/tcp` + `443/udp` (HTTPS + HTTP/3) — open to the internet (the public API + autocert TLS-ALPN-01 challenge land here).
 
-**Connection-issues debugging hint**: if SSH or admin-console access starts failing intermittently, **check whether the operator's public IP has changed** (residential CGNAT rotation, switching networks, VPN flip). The 22/7789 whitelist is keyed on the IP at standup-time (2026-05-24). The fix is to update the ufw rules; the bridge itself doesn't care. Public-internet :443 access is unaffected by IP changes — if iOS clients can still reach `/v1/health` but you can't SSH, that's the whitelist class of issue.
+**Connection-issues debugging hint**: if SSH or admin-console access starts failing intermittently, **check whether the operator's public IP has changed** (residential CGNAT rotation, switching networks, VPN flip). The `:22` and `:7790` allowlists live in the Azure NSG and are keyed on the operator's ranges; ufw allows both ports from anywhere (verified 2026-09-18), so editing ufw changes nothing. The fix is to add the new source range to the NSG rules; the bridge itself doesn't care. Public-internet :443 access is unaffected by IP changes — if iOS clients can still reach `/v1/health` but you can't SSH, that's the whitelist class of issue.
 
 **Host audio toolchain (upscale + analysis):** because this host runs the audio-analysis feature (and can run upscale/optimize), it needs the audio toolchain installed via apt: `sudo apt install sox libsox-fmt-all ffmpeg`. `sox` drives the offline upscale/optimize pipeline and is the primary analysis decoder; **`libsox-fmt-all` supplies FLAC** — Debian/Ubuntu split it into a separate plugin package and the bridge forces `-t flac`, so plain `sox` alone fails the `internal/doctor` FLAC check; `ffmpeg`/`ffprobe` are the analysis fallback decoder for AAC/m4a that sox can't open, and — since PR #863 — the decoder for the DSD → PCM renditions (`upscale.dsdRender.enabled`): the apt build carries the `dsd_*` + `dst` decoders (verify with `ffmpeg -hide_banner -decoders | grep -E ' dsd_| dst '`; `bridge doctor`'s `dsd-render-toolchain` check says the same). Rendering scratch goes to `upscale.tempDir` (default under the system temp dir) — keep it on LOCAL disk, never on the B2 FUSE mount, and mind that a faithful 176.4 kHz render of an hour-long track stages ~5 GB there. The three prerequisites degrade INDEPENDENTLY, so read `bridge doctor` rather than assuming one verdict covers them: no `sox` (or no FLAC handler) turns `upscale.enabled` off at `bridge serve` startup and takes `analysis.enabled`'s primary decoder with it (the LookPath probe logs a `disabling` line); an `ffmpeg` missing any of the four `dsd_*` decoders leaves `upscale.dsdRender.enabled` written but INERT — `/v1/health` stops advertising `dsdRender` and every DSD job is refused with a typed error — while PCM upscaling carries on unaffected; and an `ffmpeg` that has the `dsd_*` decoders but not `dst` renders plain DSF/DFF normally and skips only DST-compressed DSDIFF. This is a systemd/apt-host prerequisite only — the Docker image bundles the same toolchain by default (see [`docs/docker.md`](docker.md)).
 
@@ -332,7 +332,7 @@ Public read-only demo bridge behind the iOS app's **"Add demo bridge"** one-tap 
 | Admin console | `https://127.0.0.1:7791/` — **loopback-bound, reach via SSH tunnel only** (`ssh -L 7791:127.0.0.1:7791 -i <VPS-SSH-KEY> arsenie@bridge.ars.md`, then open `https://127.0.0.1:7791/`); credentials in `/srv/onebit-demo/ADMIN_CREDENTIALS.txt` (`sudo cat`) |
 | Bridge CLIs | **always as the service user**: `sudo -u onebit-demo /usr/local/bin/bridge-demo <cmd> -config /srv/onebit-demo/bridge.yaml …` — a root- or `arsenie`-run CLI leaves root-owned files under `data/` and the service's sweepers then fail every job (observed 2026-08-18 on the old VM); heal with `sudo chown -R onebit-demo:onebit-demo /srv/onebit-demo && sudo systemctl restart 1-bit-bridge-demo` |
 
-**Network posture** is the host's, not the demo's: the VM's NSG (`1bitbridge-nsg`) opens 443/tcp to the internet and source-allowlists 22; ufw mirrors it. Nothing listens off-loopback for the demo itself. HTTP/3 does NOT reach it (HAProxy is a TCP passthrough; the old VM's 443/udp is gone) — same as bridge.ars.md, and the iOS client falls back to h2 by itself.
+**Network posture** is the host's, not the demo's: the VM's NSG (`1bitbridge-nsg`) opens 443/tcp to the internet and source-allowlists 22 and 7790; ufw allows everything it lists from anywhere and is not the gate (verified 2026-09-18). Nothing listens off-loopback for the demo itself. HTTP/3 does NOT reach it (HAProxy is a TCP passthrough; the old VM's 443/udp is gone) — same as bridge.ars.md, and the iOS client falls back to h2 by itself.
 
 **systemd unit** (`/etc/systemd/system/1-bit-bridge-demo.service`; `Restart=always` because the console's Restart button exits 0):
 
@@ -513,7 +513,7 @@ curl -s https://bridge.ars.md/v1/health | jq '.serverVersion, .certNotAfter, .le
 # (self-signed pinned cert), leCertNotAfter ~90d out (Let's Encrypt).
 ```
 
-**Connection-issues hint** (re-stated for the post-merge loop): SSH and admin-port 7789 are whitelisted to the operator's public IP in ufw. A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Update ufw rules from the new IP.
+**Connection-issues hint** (re-stated for the post-merge loop): SSH and the admin port `7790` are allowlisted to the operator's ranges (the Azure NSG since 2026-09-16; ufw before). A residential CGNAT rotation or VPN flip can make those fail while `/v1/health` over :443 still works — that's a whitelist class of issue, NOT a bridge bug. Add the new source range to the NSG rules — ufw allows those ports from anywhere and is not the gate.
 
 ### Step 4 — demo bridge (`bridge.1-bit.app`)
 
@@ -543,7 +543,7 @@ bridge that already had the fix.
 | Version | Date | Hosts | Config keys added since the previous row | After the restart |
 |---|---|---|---|---|
 | `v0.1.9-154` | 2026-09-08 | bridge.ars.md | `upscale.dsdRender.*`, `upscale.tempDir` (#863) | `bridge doctor` → `dsd-render-toolchain` ok; `/v1/health` advertises `dsdRender`; `upscale.tempDir` set explicitly (PrivateTmp) |
-| **`v0.2.0`** | pending | bridge.ars.md → home-pc → demo | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; a config that does not name them needs nothing. | see the checklist below |
+| `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Item 2: NO re-extraction — every deployed host was on `-216`, which already carried `ExtractorVersion` 10 (8 → 10 landed with `-207`), and every row on all five live DBs is stamped 10 (measured 12:58Z), so no version-stale re-extraction was required — which is all the histogram proves; see item 2. Items 3–5 OPEN (the steady-state checks, per unit; 4's wall-clock is the #850 detector, 3's grep only counts extraction errors). Item 6 is the next nightly fuzz run; item 8 DONE (the note is marked). |
 
 ### `v0.2.0` post-deploy checklist
 
@@ -553,43 +553,68 @@ been live on bridge.ars.md since the `-154` deploy, so the numbers are
 measurable today, and the v0.2.0 restart is the first scan cycle anyone will
 be watching.
 
+**Scope: the five DEPLOYED endpoints** — bridge.ars.md (`1-bit-bridge`), the
+three hosted tenants (`bridge@demo`, `bridge@t26f0939137`, `bridge@t0ae4e78fa1`)
+and the public demo (`1-bit-bridge-demo`). **home-pc is NOT on v0.2.0** — the
+standing default is never to deploy it without an explicit ask — and is outside
+this checklist; when it is brought forward, items 1–2 apply to it afresh and
+item 2's re-extraction expectation is live there.
+
 1. **Version and flags.** `curl -s https://<host>/v1/health | jq '.serverVersion, .features'` —
    expect `0.2.0` (bare, on the release artifact) and `lyrics` present;
    `dsdRender` present on a host with the ffmpeg `dsd_*` decoders; `dlnaArtwork`
    ABSENT on bridge.ars.md and the demo (public mode never starts the DLNA
    listener) and present on home-pc if `dlna.enabled` is on there.
-2. **The one-time re-extraction.** `ExtractorVersion` goes 7 → 10 on both
-   production bridges (they run `-154`, before v8 at `-175`), so the startup
-   scan re-reads every audio file's tags once. On bridge.ars.md that is a full
-   pass over the B2 mount — expect `scanState.isScanning: true` for a long time
-   and iOS incremental rescans to defer (see "After a deploy" below). Confirm
-   it ENDS: `isScanning: false` and `tracksIndexed` back at the pre-deploy
-   value. A count that dropped means suppression or reaping changed something
-   and wants the Duplicates page before anything else.
-3. **#850, the loud one.** `journalctl -u 1-bit-bridge --since '<restart>' --no-pager | grep -c 're-extract'`
-   after the first full scan, then again after the NEXT periodic scan
-   (`scanner.scanIntervalSec`, default 6 h). The first count is the whole
-   library (the version bump); the second must be near zero. A second count
-   that is a steady fraction of the library is the sidecar-skip-gate
-   disagreement #850 fixed still happening on that host — every track with an
-   empty / tagless / legacy-encoded `<stem>.lrc|.txt` beside it re-opening on
-   every scan.
-4. **Scan wall-clock, cycle over cycle.** From the journal's scan start/finish
-   lines on the second and third periodic scans. Same reason as 3; the number
-   to record is the steady-state, not the re-extraction pass.
-5. **#849, silent by nature.** Add a `.lrc` beside a track on the library
-   root, trigger a scan (`POST /api/scan` on a loopback console; a restart on
-   a public one), and confirm the phone receives the lyrics on a DELTA sync —
-   `/v1/manifest?since=` carries the track with a new `lyricsTag` — not only
-   on a full sync. Remove the file afterwards and confirm the row goes.
+2. **Version-stale re-extraction: NONE on this deploy — measured, not inferred.** Every
+   deployed host was on `-216` before 0.2.0, and `-216` already carried
+   `ExtractorVersion` 10 (7 → 8 went live with `-191` on 2026-09-10, 8 → 10
+   with `-207` on 2026-09-15; `-216` and `v0.2.0` are both 10). The persisted
+   stamps agree — `SELECT extractor_version, COUNT(*) FROM tracks GROUP BY 1`,
+   read-only on each live DB at 12:58Z: bridge.ars.md `10 × 21,460`, tenants
+   `10 × 1` / `10 × 4` / `10 × 1`, demo `10 × 183` — no row below 10, so the
+   skip gate (`existing.ExtractorVersion >= ExtractorVersion`) had no
+   version-stale leg to take. That is all the histogram proves: the same
+   `reExtractUnchanged` path also serves a current-version row whose sidecar
+   lyrics drifted or whose local artwork needs recovering, so "re-read
+   nothing" is not a claim it can carry. The scan metric beside it: the
+   operator bridge's startup scan reached its duplicate-stamping tail eleven
+   minutes after the restart (11:46:18 → 11:57:57). This item expected 7 → 10 here because it was written against
+   `-154`; it applies to a host brought forward from before `-207` (home-pc —
+   see the scope note), where the startup scan re-reads every audio file
+   once: expect `scanState.isScanning: true` for a long time on a mounted
+   library, and `tracksIndexed` back at the pre-deploy value when it ends. A
+   count that dropped means suppression or reaping changed something and
+   wants the Duplicates page before anything else.
+3. **#850, steady state — OPEN, and the journal grep is NOT the detector.**
+   The scanner logs nothing per re-read: `re-extract (version-stale)` is an
+   ERROR line (an extraction that FAILED on the version-stale leg), so
+   `journalctl -u <unit> --since '<restart>' --no-pager | grep -c 're-extract'`
+   — `<unit>` is `1-bit-bridge` on bridge.ars.md, `bridge@<tenant>` on a
+   hosted tenant, `1-bit-bridge-demo` on the demo; the wrong unit reads as a
+   clean zero — counts failures, and its zero on all five units (2026-09-18)
+   says only that nothing failed. The #850 class (`reExtractUnchanged` →
+   `versionStampOnly`) leaves no log line and no `indexed_at` churn; what
+   shows it is item 4's wall-clock, and after a version bump the stamp
+   histogram in item 2 (every row at the current version = the version-stale
+   leg is spent). Run the grep anyway — a non-zero is a real extraction error
+   on a file the phone will now miss.
+4. **Scan wall-clock, cycle over cycle — OPEN.** From the journal's scan
+   start/finish lines on two consecutive periodic scans, same unit rule as
+   3. This is the #850 detector; the number to record is the steady state.
+5. **#849, silent by nature — OPEN.** Add a `.lrc` beside a track on the
+   library root, trigger a scan (`POST /api/scan` on a loopback console; a
+   restart on a public one), and confirm the phone receives the lyrics on a
+   DELTA sync — `/v1/manifest?since=` carries the track with a new
+   `lyricsTag` — not only on a full sync. Remove the file afterwards and
+   confirm the row goes.
 6. **Nightly fuzz.** The next `fuzz.yml` run is green and the matrix shows
    **39** targets — the list is discovered from the tree, so the count is the
    check that the new `internal/lyrics` target was picked up.
 7. **Config keys.** `bridge doctor --config <path>` exits 0 BEFORE any edit
    that adds `atlas.lyricsEnabled` or `deployment.managedControls`; the
    rollback note applies from the moment either is written.
-8. **Mark the verify note folded.** `~/Desktop/to-do/2026-09-06-loupe-lyrics-verify.md`
-   is superseded by items 3–6 here; it should say so at the top.
+8. **Mark the verify note folded — DONE 2026-09-18.** `~/Desktop/to-do/2026-09-06-loupe-lyrics-verify.md`
+   is superseded by items 3–6 here and says so at the top.
 
 ## Diagnosing client behavior from the journal
 
