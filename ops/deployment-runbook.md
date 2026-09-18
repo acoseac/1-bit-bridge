@@ -543,7 +543,7 @@ bridge that already had the fix.
 | Version | Date | Hosts | Config keys added since the previous row | After the restart |
 |---|---|---|---|---|
 | `v0.1.9-154` | 2026-09-08 | bridge.ars.md | `upscale.dsdRender.*`, `upscale.tempDir` (#863) | `bridge doctor` → `dsd-render-toolchain` ok; `/v1/health` advertises `dsdRender`; `upscale.tempDir` set explicitly (PrivateTmp) |
-| **`v0.2.0`** | pending | bridge.ars.md → home-pc → demo | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; a config that does not name them needs nothing. | see the checklist below |
+| `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Items 2–5 were already behind us — the extractor bump landed on these hosts with `-191` / `-207` / `-216`, so the v0.2.0 restart re-extracted nothing. Item 6 is the next nightly fuzz run; item 8 folded (the note is marked). |
 
 ### `v0.2.0` post-deploy checklist
 
