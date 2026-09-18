@@ -48,6 +48,56 @@ func TestEveryCitedTestNameExists(t *testing.T) {
 	}
 }
 
+// TestScanTestCitationsReadsTestFileCommentsOnly pins the test-file branch
+// on a fixture of its own rather than on whatever the tree happens to
+// contain: the whole-tree run passed vacuously against a branch that skipped
+// test files (the non-test citations alone clear the floor), and it caught a
+// raw-source scan only because some string literal in the tree happens to
+// spell a test name. One temporary tree with one non-test citation, one
+// test-file COMMENT citation, one test-shaped string LITERAL and one real
+// definition — the comment must be collected, the literal must not, and the
+// two ghosts must be what missingCitations reports. (CodeRabbit on #921.)
+func TestScanTestCitationsReadsTestFileCommentsOnly(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("prod.go", "package x\n\n// Guarded by TestGhostFromProd.\nfunc f() {}\n")
+	write("x_test.go", "package x\n\nimport \"testing\"\n\n"+
+		"// Pinned by TestGhostFromComment, which nothing defines.\n"+
+		"func TestReal(t *testing.T) {\n\tua := \"TestGhostInLiteral/1.0\"\n\t_ = ua\n}\n")
+
+	cited, defined := scanTestCitations(t, root)
+	if !defined["TestReal"] {
+		t.Errorf("the fixture's real test was not collected as defined: %v", defined)
+	}
+	if _, ok := cited["TestGhostFromComment"]; !ok {
+		t.Error("a citation in a _test.go COMMENT was not collected — the test-file branch is not reading comments")
+	}
+	if _, ok := cited["TestGhostFromProd"]; !ok {
+		t.Error("a citation in non-test source was not collected")
+	}
+	if files, ok := cited["TestGhostInLiteral"]; ok {
+		t.Errorf("a test-shaped STRING LITERAL in a _test.go file was collected as a citation (%v) — the branch is scanning source, not comments", files)
+	}
+	if files, ok := cited["TestReal"]; ok {
+		// The definition's own name appears only in CODE here, never in a comment.
+		t.Errorf("the defined test's name was collected from test CODE: %v", files)
+	}
+	missing := missingCitations(cited, defined)
+	if len(missing) != 2 {
+		t.Fatalf("missingCitations = %v, want exactly the two ghosts", missing)
+	}
+	for _, m := range missing {
+		if !strings.HasPrefix(m, "TestGhostFromComment") && !strings.HasPrefix(m, "TestGhostFromProd") {
+			t.Errorf("unexpected missing citation %q", m)
+		}
+	}
+}
+
 // citedRe matches a citation: `Test` + an uppercase letter + the rest.
 //
 // The `\b` is what keeps it off `Test`-shaped substrings of larger identifiers
