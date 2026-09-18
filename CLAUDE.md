@@ -126,6 +126,19 @@ make build >/dev/null
 
 The old hand-authored `bridge.yaml` recipe still works; keeping the init form because it also mints the TLS cert up-front and catches config typos before `serve` is up.
 
+**Public-mode variant** — renders Sign out, the session gate and every public-only piece of chrome (used for the 2026-09-18 phone top-bar report, #934):
+
+```sh
+./bin/bridge init --yes --no-service --dir /tmp/bridge-pub --library ~/Music/test-library --name "Test Library" \
+  --public --domain localhost --admin-tls-proxy --admin-address 127.0.0.1:7791 --listen-address 127.0.0.1:7790
+printf 'upload:\n    enabled: true\ndisableHttp3: true\n' >> /tmp/bridge-pub/bridge.yaml   # uploads on = the space meter renders
+echo "throwaway" | ./bin/bridge admin reset-password --config /tmp/bridge-pub/bridge.yaml --from-stdin
+./bin/bridge serve --config /tmp/bridge-pub/bridge.yaml &
+./bin/bridge admin login-link --config /tmp/bridge-pub/bridge.yaml --ttl 5m   # open http://localhost:7791<path>, press Continue — no password typed
+```
+
+Four things that each cost a round: `--admin-tls-proxy` is what lets the console serve plain HTTP (public mode otherwise demands `autocert.enabled`); the browser must use the HOST that `autocert.domain` names — `originMatchesPublicMode` compares every POST's Origin host to it, so `127.0.0.1` against `domain: localhost` fails the ticket redeem with a cross-origin refusal (loopback is a secure context, so the `Secure` session cookie itself works over plain http on either name); `mdns.enabled` must stay `false` — a blanket `sed` on `enabled:` flips it and public mode refuses to start; and the static files are `//go:embed`ded, so every CSS / JS / template change is a `make build` + restart, never a reload. A second bridge on other ports for a before/after comparison needs a different host (`127.0.0.1`, with `autocert.domain: 127.0.0.1`): cookies ignore ports, so two bridges on `localhost` overwrite each other's session.
+
 Force re-enrichment if the DB is already populated from a prior run:
 
 ```sh
