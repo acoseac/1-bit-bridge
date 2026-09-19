@@ -611,8 +611,16 @@ func buildMP4WithALACConfig(bitDepth byte) []byte {
 // the bit-depth walker, which needs to read into the sample-entry
 // payload itself.
 func buildMP4WithSampleEntryPayload(codec string, payload []byte) []byte {
+	return buildMP4WithMoovChildren(codec, payload, nil)
+}
+
+// buildMP4WithMoovChildren is buildMP4WithSampleEntryPayload with extra
+// atoms written into `moov` AHEAD of the `trak` — the slot a real
+// encoder's `mvhd` (movie header) occupies, which the duration walker
+// reads and the stsd descent must skip past.
+func buildMP4WithMoovChildren(codec string, payload []byte, leadingMoovChildren [][]byte) []byte {
 	if len(codec) != 4 {
-		panic("buildMP4WithSampleEntryPayload: codec must be 4 chars")
+		panic("buildMP4WithMoovChildren: codec must be 4 chars")
 	}
 
 	entry := &bytes.Buffer{}
@@ -638,6 +646,9 @@ func buildMP4WithSampleEntryPayload(codec string, payload []byte) []byte {
 	writeAtom(trak, "mdia", mdia.Bytes())
 
 	moov := &bytes.Buffer{}
+	for _, child := range leadingMoovChildren {
+		moov.Write(child)
+	}
 	writeAtom(moov, "trak", trak.Bytes())
 
 	out := &bytes.Buffer{}

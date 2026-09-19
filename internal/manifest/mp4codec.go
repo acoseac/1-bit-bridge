@@ -136,16 +136,9 @@ func extractMP4Codec(r io.ReadSeeker) (string, error) {
 // with no audio track" and either way the right behaviour is "leave
 // bits nil".
 func findSTSD(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
-	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return 0, 0, 0, err
-	}
-
-	moovStart, moovHdr, moovSize, err := findAtom(r, "moov", 0, mp4MaxHeaderReadBudget)
+	moovStart, moovHdr, moovSize, err := findMoov(r)
 	if err != nil {
 		return 0, 0, 0, err
-	}
-	if moovSize <= 0 {
-		return 0, 0, 0, fmt.Errorf("%w: moov", errMP4StructureNotFound)
 	}
 	trakStart, trakHdr, trakSize, err := findAtom(r, "trak", moovStart+moovHdr, moovStart+moovSize)
 	if err != nil {
@@ -183,6 +176,135 @@ func findSTSD(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
 		return 0, 0, 0, fmt.Errorf("%w: stsd", errMP4StructureNotFound)
 	}
 	return stsdStart, stsdHdr, stsdSize, nil
+}
+
+// findMoov rewinds the reader and locates the top-level `moov`
+// container within the initial-read budget (mp4MaxHeaderReadBudget —
+// the fast-start layout; see the header comment for the
+// mdat-before-moov limitation). The ONE moov-search policy, shared by
+// the stsd descent (codec / bits / rate) and the `mvhd` duration read,
+// so the two can never disagree about which file layouts they accept.
+// A missing moov is errMP4StructureNotFound, like every other box.
+func findMoov(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return 0, 0, 0, err
+	}
+	moovStart, moovHdr, moovSize, err := findAtom(r, "moov", 0, mp4MaxHeaderReadBudget)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if moovSize <= 0 {
+		return 0, 0, 0, fmt.Errorf("%w: moov", errMP4StructureNotFound)
+	}
+	return moovStart, moovHdr, moovSize, nil
+}
+
+// mvhdUnknownDuration32 / mvhdUnknownDuration64 are the ISO 14496-12
+// "duration unknown" sentinels (all ones) an encoder writes when it
+// cannot know the length up front — a still-recording capture, a
+// fragmented movie. Treated as absent, never as a duration.
+const (
+	mvhdUnknownDuration32 = ^uint32(0)
+	mvhdUnknownDuration64 = ^uint64(0)
+)
+
+// extractMP4Duration reads the presentation duration (seconds) from the
+// `mvhd` movie-header box directly under `moov`: `duration / timescale`
+// in the movie timescale. Returns 0 (no error) when it cannot be
+// determined — a non-MP4 / structurally-incomplete file, a version the
+// box's FullBox header doesn't declare, a zero timescale, a zero or
+// all-ones ("unknown") duration — so the caller leaves t.Duration nil.
+// Genuine I/O / atom-walk failures propagate, exactly like
+// extractMP4SampleRate.
+//
+// Why `mvhd` rather than the audio track's `mdhd`: it needs no per-trak
+// descent, so a video-first container (a video trak ahead of the audio
+// trak) can't hand back the wrong track's clock; it is the duration
+// AVFoundation reports for the asset (so the phone's own enrich of the
+// same file lands the same number); and it already accounts for an
+// `elst` edit list (an iTunes AAC file trims its encoder priming
+// there). Precision is the movie timescale — 600 or 1000 for most
+// encoders, the sample rate for some — all far finer than the m:ss the
+// row renders. A FRAGMENTED movie (`moof` boxes) writes a zero or
+// all-ones `mvhd` duration and carries the real one in `mehd`; that
+// layout is honestly absent here (0 → nil), the same way the
+// mdat-before-moov layout is absent from every MP4 walk.
+//
+// FullBox layout after the 8/16-byte atom header: version (1 byte) +
+// flags (3). Version 0: creation u32, modification u32, timescale u32,
+// duration u32 — timescale at payload offset 12, duration at 16.
+// Version 1: creation u64, modification u64, timescale u32, duration
+// u64 — timescale at 20, duration at 24.
+func extractMP4Duration(r io.ReadSeeker) (float64, error) {
+	moovStart, moovHdr, moovSize, err := findMoov(r)
+	if err != nil {
+		if errors.Is(err, errMP4StructureNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	mvhdStart, mvhdHdr, mvhdSize, err := findAtom(r, "mvhd", moovStart+moovHdr, moovStart+moovSize)
+	if err != nil {
+		if errors.Is(err, errMP4StructureNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if mvhdSize <= mvhdHdr {
+		return 0, nil
+	}
+	payloadStart := mvhdStart + mvhdHdr
+	payloadLen := mvhdSize - mvhdHdr
+	// The largest layout (version 1) needs 32 payload bytes; read at
+	// most that many, bounded by what the box declares.
+	const v0Need, v1Need = 20, 32
+	if payloadLen < 4 {
+		return 0, nil
+	}
+	if _, err := r.Seek(int64(payloadStart), io.SeekStart); err != nil {
+		return 0, err
+	}
+	var head [v1Need]byte
+	want := int(payloadLen)
+	if want > v1Need {
+		want = v1Need
+	}
+	n, err := io.ReadFull(r, head[:want])
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		if errors.Is(err, io.EOF) {
+			return 0, nil // truncated box — absent, like a truncated atom header
+		}
+		return 0, err
+	}
+	var timescale uint32
+	var duration uint64
+	switch head[0] {
+	case 0:
+		if n < v0Need {
+			return 0, nil
+		}
+		timescale = binary.BigEndian.Uint32(head[12:16])
+		d32 := binary.BigEndian.Uint32(head[16:20])
+		if d32 == mvhdUnknownDuration32 {
+			return 0, nil
+		}
+		duration = uint64(d32)
+	case 1:
+		if n < v1Need {
+			return 0, nil
+		}
+		timescale = binary.BigEndian.Uint32(head[20:24])
+		duration = binary.BigEndian.Uint64(head[24:32])
+		if duration == mvhdUnknownDuration64 {
+			return 0, nil
+		}
+	default:
+		return 0, nil
+	}
+	if timescale == 0 || duration == 0 {
+		return 0, nil
+	}
+	return float64(duration) / float64(timescale), nil
 }
 
 // extractALACBitDepth walks the same atom chain as extractMP4Codec

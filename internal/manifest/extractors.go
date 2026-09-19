@@ -283,7 +283,21 @@ var Ext = map[string]bool{
 // produces for such a file changes, so its lyricsTag changes, and only a
 // bump reaches an already-scanned row. Both production bridges still sit
 // at v7, so this is the same single re-extraction as v8 and v9.
-const ExtractorVersion = 10
+// v11 (duration for every PCM container, mirror of iOS #1855's field
+// report): MP4 (ALAC / AAC — the `mvhd` presentation duration), MP3
+// (Xing / Info / VBRI frame counts, else a first-frame CBR estimate),
+// AIFF (COMM `numSampleFrames` / rate, gated on the `SSND` payload
+// fitting the file) and WAV (`data` bytes / `nAvgBytesPerSec`, gated
+// the same way) now stamp `Track.Duration`, which only FLAC / DSF / DFF /
+// SACD ever carried. On the phone a row without a duration falls back to
+// its FILE SIZE in the track list — the deliberate pre-enrich placeholder
+// that became permanent for every ALAC and MP3 track a bridge served
+// (183-track demo library: all 65 ALAC + all 22 MP3 rows, 0 of 96 FLAC).
+// `duration` is an existing additive wire field, so ProtocolVersion
+// stays 1 and a pre-v11 phone simply keeps its fallback. Rows that
+// already carried a duration re-extract byte-identical and ride the
+// version-stamp leg; the rows that GAIN one are exactly the iOS delta.
+const ExtractorVersion = 11
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -426,8 +440,22 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	} else if rate > 0 {
 		t.SampleRate = &rate
 	}
+	// Duration: the `mvhd` presentation duration (movie timescale),
+	// which is what AVFoundation reports as the asset duration and what
+	// the FLAC / DSF / DFF paths' sample-count arithmetic lands for
+	// those containers. findMoov rewinds the reader itself. A missing
+	// or malformed box is honest suppression (nil duration, no Warn —
+	// the same errMP4StructureNotFound contract the rate walk uses);
+	// only a genuine I/O failure is worth an operator's attention.
+	if d, err := extractMP4Duration(f); err != nil {
+		scanLogger.Warn("mp4 duration walk failed; manifest will carry nil duration",
+			"path", absPath, "err", err)
+	} else if plausibleDuration(d) {
+		t.Duration = &d
+	}
 	// Seek to head before handing the reader to dhowden/tag —
-	// the codec / bit-depth / sample-rate walks all consumed bytes.
+	// the codec / bit-depth / sample-rate / duration walks all
+	// consumed bytes.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
@@ -479,21 +507,32 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// (returns `tag.MP3`), but we set it directly here to avoid
 		// an extra step.
 		t.Codec = "MP3"
-		// Open once: read the sample rate from the first MPEG frame
-		// header (dhowden surfaces tags but not frame geometry), then
-		// rewind and hand the same handle to the tag reader — the
+		// Open once: read the sample rate + duration from the first
+		// MPEG frame (dhowden surfaces tags but not frame geometry),
+		// then rewind and hand the same handle to the tag reader — the
 		// single-open-then-rewind pattern the FLAC branch uses. Bit
-		// depth stays nil (not meaningful for a lossy codec).
+		// depth stays nil (not meaningful for a lossy codec). Duration
+		// comes from a Xing / Info / VBRI frame count when the encoder
+		// wrote one, else the first frame's bitrate against the audio
+		// byte span (exact for CBR, the classic estimate for a
+		// header-less VBR file) — see extractMP3Format.
 		f, err := os.Open(absPath)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
-		if rate, err := extractMP3SampleRate(f); err != nil {
-			scanLogger.Warn("mp3 sample-rate parse failed; manifest will carry nil sampleRate",
+		if fmtInfo, err := extractMP3Format(f); err != nil {
+			scanLogger.Warn("mp3 frame parse failed; manifest will carry nil sampleRate + duration",
 				"path", absPath, "err", err)
-		} else if rate > 0 {
-			t.SampleRate = &rate
+		} else {
+			if fmtInfo.sampleRate > 0 {
+				rate := fmtInfo.sampleRate
+				t.SampleRate = &rate
+			}
+			if plausibleDuration(fmtInfo.duration) {
+				d := fmtInfo.duration
+				t.Duration = &d
+			}
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return err
@@ -2438,8 +2477,22 @@ func (s dffSoundInfo) payloadFits() bool {
 // `DSD ` chunk size or FRTE frame count must not stamp an absurd value.
 // A week (no real DSD track approaches it); at or past the ceiling the
 // Duration stays nil (honest absence beats garbage). Mirrors the iOS
-// `DFFHeadScan.maxPlausibleDurationSeconds` constant.
+// `DFFHeadScan.maxPlausibleDurationSeconds` constant. Named for the DFF
+// path that introduced it; every derived duration (MP4 / MP3 / AIFF /
+// WAV, v11) applies the SAME ceiling through plausibleDuration.
 const dffMaxPlausibleDurationSeconds = 604_800.0
+
+// plausibleDuration reports whether a derived duration may be stamped:
+// finite, strictly positive, and under the week-long ceiling. NaN fails
+// `d > 0` and +Inf fails `d < ceiling`, so no separate checks are needed.
+// The ONE gate every Duration write site consults — a forged header
+// (an `mvhd` timescale of 1, a Xing frame count of 2^32−1, a WAV
+// `nAvgBytesPerSec` of 1) must not persist a multi-year duration, and
+// a non-finite value would fail json.Marshal for the whole tags_json
+// batch (the parseAIFFExtended precedent).
+func plausibleDuration(d float64) bool {
+	return d > 0 && d < dffMaxPlausibleDurationSeconds
+}
 
 // applyDFFStamps is the single commit policy over everything the DFF
 // walk gathered — called once, at the EOF terminator. Truth table
@@ -2487,7 +2540,7 @@ func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
 		}
 	}
 	setDuration := func(d float64) {
-		if d > 0 && d < dffMaxPlausibleDurationSeconds && !math.IsInf(d, 0) && !math.IsNaN(d) {
+		if plausibleDuration(d) {
 			t.Duration = &d
 		}
 	}
