@@ -330,6 +330,21 @@ lost my library."
   merge set by grepping the actual `tags_json` writers, not from what a field
   "looks like"** — `MusicBrainzTrackID` was omitted on the belief it was
   extractor-owned when the acoustic fallback writes it.
+- **Every derived `Track.Duration` passes ONE gate, `plausibleDuration`, and
+  the AIFF / WAV walkers add the DFF `payloadFits` rule through one
+  `iffPayloadFits`** (ExtractorVersion 11, #935 — MP4 `mvhd`, MP3 Xing / Info /
+  VBRI or the first-frame CBR estimate, AIFF COMM frames, WAV `data` bytes over
+  `nAvgBytesPerSec`; the v11 docblock in `extractors.go` carries the per-format
+  reasoning). Don't stamp a duration at a new site without both. **The fuzzer
+  found the first draft's bug within 16 s: a `largesize` mvhd declaring ~2^63
+  bytes converted its payload length to a NEGATIVE `int` and sliced a buffer by
+  it** — compare a declared length in `uint64` BEFORE any `int` conversion, and
+  treat a box declaring past its PARENT as absent (`findAtom` only checks that
+  the header sits inside the bound). The crash input is committed as the
+  regression seed; run the whole-file fuzz targets for a minute after any
+  parser change, before the PR, not after. (And this PR re-learned the rule two
+  entries below: a control's `git checkout --` took an uncommitted refactor
+  with it. Commit before EVERY control, including the small confirmatory one.)
 - **`enriched_at`'s sanctioned writers are a closed set**: the enricher, the
   operator "Retry missing" resets (`ResetEnrichedMisses`,
   `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix`), and
