@@ -131,50 +131,48 @@ func (f mpegFrame) sideInfoSize() int {
 // not subtracted: the row renders m:ss, and the FLAC / DSF paths' sample
 // counts don't subtract their containers' priming either.
 func extractMP3Format(r io.ReadSeeker) (mp3Format, error) {
-	// An ID3v2 tag, when present, prefixes the audio. Skip it so the
-	// scan starts at (or near) the first real frame rather than inside
-	// embedded APIC bytes that could carry a spurious 0xFF 0xFB pattern.
-	var idHeader [10]byte
-	n, err := io.ReadFull(r, idHeader[:])
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+	// An ID3v2 tag, when present, prefixes the audio. Skip it (the FLAC
+	// walkers' skipID3v2 — same synchsafe size, same version-gated
+	// footer) so the scan starts at (or near) the first real frame
+	// rather than inside embedded APIC bytes that could carry a
+	// spurious 0xFF 0xFB pattern.
+	if err := skipID3v2(r); err != nil {
 		return mp3Format{}, err
 	}
-	var frameSearchStart int64
-	if n >= 10 && string(idHeader[0:3]) == "ID3" {
-		tagLen := int64(10) + int64(unsyncsafe(idHeader[6:10]))
-		if idHeader[5]&0x10 != 0 {
-			// Footer-present flag (ID3v2.4) — the footer is another 10 bytes.
-			tagLen += 10
-		}
-		frameSearchStart = tagLen
-	}
-	if _, err := r.Seek(frameSearchStart, io.SeekStart); err != nil {
+	frameSearchStart, err := r.Seek(0, io.SeekCurrent)
+	if err != nil {
 		return mp3Format{}, err
 	}
-
 	buf := make([]byte, mp3FrameScanWindow)
 	nn, err := io.ReadFull(r, buf)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return mp3Format{}, err
 	}
-	buf = buf[:nn]
+	frame, at, ok := locateFirstMPEGFrame(buf[:nn])
+	if !ok {
+		return mp3Format{}, nil
+	}
+	duration, err := mp3Duration(r, frame, frameSearchStart+int64(at))
+	if err != nil {
+		return mp3Format{}, err
+	}
+	return mp3Format{sampleRate: float64(frame.sampleRate), duration: duration}, nil
+}
+
+// locateFirstMPEGFrame scans buf for the first byte pair that reads as
+// an MPEG frame sync (11 set bits: 0xFF followed by 0b111xxxxx) AND
+// validates as a full header, returning the decoded frame and its index
+// in buf.
+func locateFirstMPEGFrame(buf []byte) (mpegFrame, int, bool) {
 	for i := 0; i+4 <= len(buf); i++ {
-		// A frame sync is 11 set bits: 0xFF followed by 0b111xxxxx.
 		if buf[i] != 0xFF || buf[i+1]&0xE0 != 0xE0 {
 			continue
 		}
-		frame, ok := parseMPEGFrameHeader(buf[i : i+4])
-		if !ok {
-			continue
+		if frame, ok := parseMPEGFrameHeader(buf[i : i+4]); ok {
+			return frame, i, true
 		}
-		frameOffset := frameSearchStart + int64(i)
-		duration, err := mp3Duration(r, frame, frameOffset)
-		if err != nil {
-			return mp3Format{}, err
-		}
-		return mp3Format{sampleRate: float64(frame.sampleRate), duration: duration}, nil
 	}
-	return mp3Format{}, nil
+	return mpegFrame{}, 0, false
 }
 
 // mp3Duration derives the duration for a stream whose first valid frame
@@ -351,6 +349,7 @@ func mpegFrameSampleRate(hdr []byte) (int, bool) {
 
 // unsyncsafe decodes a 4-byte ID3v2 synchsafe integer (7 bits per byte,
 // MSB always 0) into a uint32 — the encoding ID3v2 uses for its tag size.
+// The one decoder: skipID3v2 (the FLAC + MP3 tag skip) reads through it.
 func unsyncsafe(b []byte) uint32 {
 	return uint32(b[0]&0x7F)<<21 | uint32(b[1]&0x7F)<<14 | uint32(b[2]&0x7F)<<7 | uint32(b[3]&0x7F)
 }

@@ -199,15 +199,6 @@ func findMoov(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
 	return moovStart, moovHdr, moovSize, nil
 }
 
-// mvhdUnknownDuration32 / mvhdUnknownDuration64 are the ISO 14496-12
-// "duration unknown" sentinels (all ones) an encoder writes when it
-// cannot know the length up front — a still-recording capture, a
-// fragmented movie. Treated as absent, never as a duration.
-const (
-	mvhdUnknownDuration32 = ^uint32(0)
-	mvhdUnknownDuration64 = ^uint64(0)
-)
-
 // extractMP4Duration reads the presentation duration (seconds) from the
 // `mvhd` movie-header box directly under `moov`: `duration / timescale`
 // in the movie timescale. Returns 0 (no error) when it cannot be
@@ -230,81 +221,142 @@ const (
 // layout is honestly absent here (0 → nil), the same way the
 // mdat-before-moov layout is absent from every MP4 walk.
 //
-// FullBox layout after the 8/16-byte atom header: version (1 byte) +
-// flags (3). Version 0: creation u32, modification u32, timescale u32,
-// duration u32 — timescale at payload offset 12, duration at 16.
-// Version 1: creation u64, modification u64, timescale u32, duration
-// u64 — timescale at 20, duration at 24.
+// Three steps, each its own function (SonarCloud go:S3776 — the
+// dispatcher precedent): locate the box, read its bounded head, decode
+// the two fields.
 func extractMP4Duration(r io.ReadSeeker) (float64, error) {
+	payloadStart, payloadLen, found, err := findMVHDPayload(r)
+	if err != nil || !found {
+		return 0, err
+	}
+	head, err := readMVHDHead(r, payloadStart, payloadLen)
+	if err != nil || len(head) == 0 {
+		return 0, err
+	}
+	timescale, duration, ok := parseMVHDHead(head)
+	if !ok {
+		return 0, nil
+	}
+	return float64(duration) / float64(timescale), nil
+}
+
+// findMVHDPayload locates the mvhd payload (its absolute start + declared
+// length) inside the top-level moov. `found` is false — no error — for a
+// missing moov / mvhd, a header-only box, and a box declaring PAST its
+// parent: findAtom only checks that a box's HEADER sits inside the
+// bound, so a forged `largesize` mvhd can claim 2^63 bytes (the fuzzer
+// built one); such a box is malformed and treated as absent, while a
+// size-0 "to the end of the parent" box is by construction exactly the
+// remainder and passes. The parent end saturates so a forged moov size
+// cannot wrap the bound.
+func findMVHDPayload(r io.ReadSeeker) (payloadStart, payloadLen uint64, found bool, err error) {
 	moovStart, moovHdr, moovSize, err := findMoov(r)
 	if err != nil {
 		if errors.Is(err, errMP4StructureNotFound) {
-			return 0, nil
+			return 0, 0, false, nil
 		}
-		return 0, err
+		return 0, 0, false, err
 	}
-	mvhdStart, mvhdHdr, mvhdSize, err := findAtom(r, "mvhd", moovStart+moovHdr, moovStart+moovSize)
+	moovEnd := moovStart + moovSize
+	if moovEnd < moovStart {
+		moovEnd = ^uint64(0)
+	}
+	mvhdStart, mvhdHdr, mvhdSize, err := findAtom(r, "mvhd", moovStart+moovHdr, moovEnd)
 	if err != nil {
 		if errors.Is(err, errMP4StructureNotFound) {
-			return 0, nil
+			return 0, 0, false, nil
 		}
-		return 0, err
+		return 0, 0, false, err
 	}
-	if mvhdSize <= mvhdHdr {
-		return 0, nil
+	if mvhdSize <= mvhdHdr || mvhdSize > moovEnd-mvhdStart {
+		return 0, 0, false, nil
 	}
-	payloadStart := mvhdStart + mvhdHdr
-	payloadLen := mvhdSize - mvhdHdr
-	// The largest layout (version 1) needs 32 payload bytes; read at
-	// most that many, bounded by what the box declares.
-	const v0Need, v1Need = 20, 32
-	if payloadLen < 4 {
-		return 0, nil
+	return mvhdStart + mvhdHdr, mvhdSize - mvhdHdr, true, nil
+}
+
+// mvhdHeadBytes is the most of an mvhd payload the walker ever reads:
+// the version-1 layout's timescale + duration end at byte 32.
+const mvhdHeadBytes = 32
+
+// readMVHDHead reads the first min(payloadLen, mvhdHeadBytes) bytes of
+// the mvhd payload. An empty result (no error) means the box was
+// truncated at EOF — absent, like a truncated atom header.
+//
+// The byte count is compared in uint64 and never converted first: a
+// declared length past 2^63 converts to a NEGATIVE int, and slicing the
+// buffer by it panics — the exact shape the fuzzer found on this walk's
+// first draft (testdata/fuzz/FuzzExtractM4A/bd63bb3c1e1eae42).
+func readMVHDHead(r io.ReadSeeker, payloadStart, payloadLen uint64) ([]byte, error) {
+	if payloadLen == 0 {
+		return nil, nil
 	}
 	if _, err := r.Seek(int64(payloadStart), io.SeekStart); err != nil {
-		return 0, err
+		return nil, err
 	}
-	var head [v1Need]byte
-	want := int(payloadLen)
-	if want > v1Need {
-		want = v1Need
+	want := mvhdHeadBytes
+	if payloadLen < uint64(mvhdHeadBytes) {
+		want = int(payloadLen)
 	}
-	n, err := io.ReadFull(r, head[:want])
+	head := make([]byte, want)
+	n, err := io.ReadFull(r, head)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		if errors.Is(err, io.EOF) {
-			return 0, nil // truncated box — absent, like a truncated atom header
+			return nil, nil
 		}
-		return 0, err
+		return nil, err
 	}
-	var timescale uint32
-	var duration uint64
+	return head[:n], nil
+}
+
+// mvhdUnknownDuration32 / mvhdUnknownDuration64 are the ISO 14496-12
+// "duration unknown" sentinels (all ones) an encoder writes when it
+// cannot know the length up front — a still-recording capture, a
+// fragmented movie. Treated as absent, never as a duration.
+const (
+	mvhdUnknownDuration32 = ^uint32(0)
+	mvhdUnknownDuration64 = ^uint64(0)
+)
+
+// parseMVHDHead decodes timescale + duration from the head of an mvhd
+// payload. FullBox layout: version (1 byte) + flags (3). Version 0:
+// creation u32, modification u32, timescale u32, duration u32 —
+// timescale at payload offset 12, duration at 16. Version 1: creation
+// u64, modification u64, timescale u32, duration u64 — timescale at 20,
+// duration at 24. `ok` is false for a head too short for its declared
+// version, an undeclared version, a zero timescale, and a zero or
+// all-ones duration.
+func parseMVHDHead(head []byte) (timescale uint32, duration uint64, ok bool) {
+	const v0Need, v1Need = 20, 32
+	if len(head) < 1 {
+		return 0, 0, false
+	}
 	switch head[0] {
 	case 0:
-		if n < v0Need {
-			return 0, nil
+		if len(head) < v0Need {
+			return 0, 0, false
 		}
 		timescale = binary.BigEndian.Uint32(head[12:16])
 		d32 := binary.BigEndian.Uint32(head[16:20])
 		if d32 == mvhdUnknownDuration32 {
-			return 0, nil
+			return 0, 0, false
 		}
 		duration = uint64(d32)
 	case 1:
-		if n < v1Need {
-			return 0, nil
+		if len(head) < v1Need {
+			return 0, 0, false
 		}
 		timescale = binary.BigEndian.Uint32(head[20:24])
 		duration = binary.BigEndian.Uint64(head[24:32])
 		if duration == mvhdUnknownDuration64 {
-			return 0, nil
+			return 0, 0, false
 		}
 	default:
-		return 0, nil
+		return 0, 0, false
 	}
 	if timescale == 0 || duration == 0 {
-		return 0, nil
+		return 0, 0, false
 	}
-	return float64(duration) / float64(timescale), nil
+	return timescale, duration, true
 }
 
 // extractALACBitDepth walks the same atom chain as extractMP4Codec

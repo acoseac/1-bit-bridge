@@ -190,6 +190,70 @@ func TestExtractMP4Duration_DegenerateBoxesReturnZero(t *testing.T) {
 	}
 }
 
+func TestExtractMP4Duration_ForgedLargesizeMVHDDoesNotPanic(t *testing.T) {
+	// The fuzzer's first find on this walk (testdata/fuzz/FuzzExtractM4A/
+	// bd63bb3c1e1eae42): an mvhd in the 64-bit `largesize` form declaring
+	// ~2^63 bytes. Its payload length converted to a NEGATIVE int and the
+	// bounded read sliced `head[:n]` on it. A forged size is an absent
+	// box — zero, no error, no panic.
+	mvhd := &bytes.Buffer{}
+	binary.Write(mvhd, binary.BigEndian, uint32(1)) // largesize sentinel
+	mvhd.WriteString("mvhd")
+	binary.Write(mvhd, binary.BigEndian, uint64(0xC530303030303030))
+	mvhd.Write(make([]byte, 8))
+	fixture := buildMP4WithMoovChildren("mp4a", buildAACSampleEntryPayload(44100), [][]byte{mvhd.Bytes()})
+	got, err := extractMP4Duration(bytes.NewReader(fixture))
+	if err != nil {
+		t.Fatalf("extractMP4Duration: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("got %v, want 0 for a forged largesize mvhd", got)
+	}
+	// Size 0 ("to end of enclosing box") on a box declaring more than the
+	// walker reads is the other way a payload length exceeds 32 bytes.
+	zeroSize := &bytes.Buffer{}
+	binary.Write(zeroSize, binary.BigEndian, uint32(0))
+	zeroSize.WriteString("mvhd")
+	zeroSize.Write(buildMVHDPayload(0, 600, 144300))
+	fixture = buildMP4WithMoovChildren("mp4a", buildAACSampleEntryPayload(44100), [][]byte{zeroSize.Bytes()})
+	got, err = extractMP4Duration(bytes.NewReader(fixture))
+	if err != nil {
+		t.Fatalf("extractMP4Duration (size 0): %v", err)
+	}
+	assertDuration(t, &got, 240.5)
+}
+
+func TestParseMVHDHead_TruthTable(t *testing.T) {
+	v0 := buildMVHDPayload(0, 600, 144300)
+	v1 := buildMVHDPayload(1, 44100, 10_584_000)
+	cases := []struct {
+		name         string
+		head         []byte
+		wantTS       uint32
+		wantDuration uint64
+		wantOK       bool
+	}{
+		{"v0 full payload", v0, 600, 144300, true},
+		{"v0 exactly 20 bytes", v0[:20], 600, 144300, true},
+		{"v0 19 bytes", v0[:19], 0, 0, false},
+		{"v1 full payload", v1, 44100, 10_584_000, true},
+		{"v1 exactly 32 bytes", v1[:32], 44100, 10_584_000, true},
+		{"v1 31 bytes", v1[:31], 0, 0, false},
+		{"empty", nil, 0, 0, false},
+		{"version 2", buildMVHDPayload(2, 600, 144300), 0, 0, false},
+		{"v0 zero timescale", buildMVHDPayload(0, 0, 144300), 0, 0, false},
+		{"v0 zero duration", buildMVHDPayload(0, 600, 0), 0, 0, false},
+		{"v0 unknown sentinel", buildMVHDPayload(0, 600, uint64(mvhdUnknownDuration32)), 0, 0, false},
+		{"v1 unknown sentinel", buildMVHDPayload(1, 600, mvhdUnknownDuration64), 0, 0, false},
+	}
+	for _, tc := range cases {
+		ts, d, ok := parseMVHDHead(tc.head)
+		if ok != tc.wantOK || ts != tc.wantTS || d != tc.wantDuration {
+			t.Errorf("%s: got (%d, %d, %v), want (%d, %d, %v)", tc.name, ts, d, ok, tc.wantTS, tc.wantDuration, tc.wantOK)
+		}
+	}
+}
+
 func TestExtractMP4Duration_SuppressesStructuralNotFound(t *testing.T) {
 	// ftyp only, no moov: the same honest-suppression contract the codec /
 	// bits / rate walkers share.
