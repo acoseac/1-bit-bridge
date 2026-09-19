@@ -60,6 +60,9 @@ func FuzzExtractAIFF(f *testing.F) {
 	fuzzExtract(f, ".aiff", [][]byte{
 		// FORM/AIFF carrying a well-formed 18-byte COMM (2ch, 16-bit, 44.1k).
 		[]byte("FORM\x00\x00\x00\x12AIFFCOMM\x00\x00\x00\x12\x00\x02\x00\x00\x10\x00\x00\x18\x40\x0E\xAC\x44\x00\x00\x00\x00\x00\x00"),
+		// The same COMM followed by a 12-byte SSND (8-byte header + 4 audio
+		// bytes) — the duration walk's fit check (v11) has a payload to check.
+		[]byte("FORM\x00\x00\x00\x26AIFFCOMM\x00\x00\x00\x12\x00\x02\x00\x00\x10\x00\x00\x18\x40\x0E\xAC\x44\x00\x00\x00\x00\x00\x00SSND\x00\x00\x00\x0c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
 		[]byte("FORM\x00\x00\x00\x04AIFC"),
 	})
 }
@@ -67,6 +70,8 @@ func FuzzExtractAIFF(f *testing.F) {
 func FuzzExtractWAV(f *testing.F) {
 	fuzzExtract(f, ".wav", [][]byte{
 		[]byte("RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00\x44\xAC\x00\x00\x10\xB1\x02\x00\x04\x00\x10\x00data\x00\x00\x00\x00"),
+		// Four bytes of audio in the data chunk — a non-zero duration path.
+		[]byte("RIFF\x28\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00\x44\xAC\x00\x00\x10\xB1\x02\x00\x04\x00\x10\x00data\x04\x00\x00\x00\x00\x00\x00\x00"),
 		[]byte("RIFF\x04\x00\x00\x00WAVE"),
 	})
 }
@@ -94,11 +99,19 @@ func FuzzExtractFLAC(f *testing.F) {
 func FuzzExtractM4A(f *testing.F) {
 	fuzzExtract(f, ".m4a", [][]byte{
 		[]byte("\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A mp42isom"),
+		// ftyp + a moov holding only a version-0 mvhd (timescale 600,
+		// duration 144300) — the duration walk (v11) parses it.
+		append([]byte("\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A mp42isom\x00\x00\x00\x74moov\x00\x00\x00\x6cmvhd\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x58\x00\x02\x33\xAC"),
+			make([]byte, 80)...),
 	})
 }
 
 func FuzzExtractMP3(f *testing.F) {
 	fuzzExtract(f, ".mp3", [][]byte{
 		[]byte("ID3\x03\x00\x00\x00\x00\x00\x0aTIT2\x00\x00\x00\x02\x00\x00\x00a"),
+		// One MPEG 1 Layer III 128 kbit/s 44.1 kHz frame carrying a Xing
+		// header (32 bytes of side info, flags=frames, 100 frames) — the
+		// duration ladder's first rung (v11).
+		append(append([]byte("\xFF\xFB\x90\x00"), make([]byte, 32)...), []byte("Xing\x00\x00\x00\x01\x00\x00\x00\x64")...),
 	})
 }

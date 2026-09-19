@@ -82,6 +82,17 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 		return fmt.Errorf("aiff: not an AIFF/AIFC form (got %q)", formType)
 	}
 
+	// Duration inputs, resolved once the walk is over (the spec fixes no
+	// chunk order, so COMM may follow SSND): the COMM frame count, and
+	// the SSND payload's position so a truncated file — declared audio
+	// past the physical end — reports no duration for bytes it does not
+	// hold (the DFF `payloadFits` rule; see iffPayloadFits).
+	var (
+		numSampleFrames uint32
+		ssnd            iffPayloadSpan
+	)
+	physicalSize := physicalFileSize(f)
+
 	// Walk sub-chunks looking for "ID3 ". Each sub-chunk: 4 bytes
 	// FOURCC + 4 bytes BE size + payload + pad byte if size is odd
 	// (IFF chunk-pad rule).
@@ -157,13 +168,27 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 					return fmt.Errorf("aiff: COMM pad seek: %w", err)
 				}
 			}
-			parseAIFFCOMMChunk(body, t, formType)
+			numSampleFrames = parseAIFFCOMMChunk(body, t, formType)
+			continue
+		}
+		if fourcc == "SSND" {
+			// The audio payload itself is never read — only WHERE it
+			// sits, for the fit check. First SSND wins (a second one
+			// is malformed; the spec allows exactly one).
+			if !ssnd.seen {
+				ssnd = iffPayloadSpanAt(f, size)
+			}
+			if err := seekPastChunk(f, int64(size)); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := seekPastChunk(f, int64(size)); err != nil {
 			return err
 		}
 	}
+
+	stampIFFDuration(t, aiffDurationSeconds(numSampleFrames, t.SampleRate), ssnd, physicalSize)
 
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		// Pass the dhowden Metadata (or nil if no ID3 chunk surfaced)
@@ -172,6 +197,16 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 		extractLocalArtwork(absPath, t, idTagMetadata, ec)
 	}
 	return nil
+}
+
+// aiffDurationSeconds is COMM numSampleFrames / sampleRate: frames are
+// per-channel sample frames, so channel count does not enter. 0 when
+// either input is absent; the plausibility gate is the caller's.
+func aiffDurationSeconds(numSampleFrames uint32, sampleRate *float64) float64 {
+	if numSampleFrames == 0 || sampleRate == nil || *sampleRate <= 0 {
+		return 0
+	}
+	return float64(numSampleFrames) / *sampleRate
 }
 
 // parseAIFFCOMMChunk reads the PCM geometry from an AIFF/AIFC COMM
@@ -183,6 +218,11 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 //	[6:8]  sampleSize    int16   — bits per sample of the (decompressed) signal
 //	[8:18] sampleRate    80-bit IEEE-754 extended
 //
+// Returns numSampleFrames — the per-channel sample-frame count the
+// duration is derived from (0 for a body too short to carry one). It is
+// RETURNED rather than stamped because the duration also needs the
+// SSND payload to fit the file, which only the walk knows.
+//
 // SampleRate is always stamped. BitsPerSample is gated TWICE: by
 // canSetBitsPerSample (allowlists "AIFF") AND by aiffCOMMHasPCMDepth —
 // because `.aifc` is stamped Codec="AIFF" before the COMM is parsed, a
@@ -192,10 +232,11 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 // AIFC we therefore only set bits when the compressionType is a known
 // PCM-like FOURCC. Plain AIFF is uncompressed by definition, so it's
 // always eligible.
-func parseAIFFCOMMChunk(body []byte, t *Track, formType string) {
+func parseAIFFCOMMChunk(body []byte, t *Track, formType string) (numSampleFrames uint32) {
 	if len(body) < 18 {
-		return
+		return 0
 	}
+	numSampleFrames = binary.BigEndian.Uint32(body[2:6])
 	sampleSize := int16(binary.BigEndian.Uint16(body[6:8]))
 	sampleRate := parseAIFFExtended(body[8:18])
 	if sampleRate > 0 {
@@ -205,6 +246,7 @@ func parseAIFFCOMMChunk(body []byte, t *Track, formType string) {
 		bps := int(sampleSize)
 		t.BitsPerSample = &bps
 	}
+	return numSampleFrames
 }
 
 // aiffCOMMHasPCMDepth reports whether the COMM chunk's sampleSize is a
@@ -301,6 +343,17 @@ func extractWAVWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	if string(header[8:12]) != "WAVE" {
 		return fmt.Errorf("wav: not a WAVE form (got %q)", header[8:12])
 	}
+
+	// Duration inputs, resolved once the walk is over (`fmt ` precedes
+	// `data` per spec, but the walk does not depend on it): the fmt
+	// chunk's bytes-per-second, and the data payload's position + size
+	// so a truncated file — or a streaming writer's never-fixed-up
+	// 0 / 0xFFFFFFFF size — reports no duration (see iffPayloadFits).
+	var (
+		bytesPerSecond uint64
+		data           iffPayloadSpan
+	)
+	physicalSize := physicalFileSize(f)
 
 	var idTagMetadata tag.Metadata
 	// Labeled so a truncated chunk BODY inside the switch below can break
@@ -412,7 +465,17 @@ chunkLoop:
 					return fmt.Errorf("wav: fmt pad seek: %w", err)
 				}
 			}
-			parseWAVFmtChunk(body, t)
+			bytesPerSecond = parseWAVFmtChunk(body, t)
+		case fourcc == "data":
+			// The audio payload itself is never read — only WHERE it
+			// sits and how much it declares, for the duration + the
+			// fit check. First data chunk wins.
+			if !data.seen {
+				data = iffPayloadSpanAt(f, size)
+			}
+			if err := seekPastChunk(f, int64(size)); err != nil {
+				return err
+			}
 		default:
 			if err := seekPastChunk(f, int64(size)); err != nil {
 				return err
@@ -420,10 +483,84 @@ chunkLoop:
 		}
 	}
 
+	stampIFFDuration(t, wavDurationSeconds(data, bytesPerSecond), data, physicalSize)
+
 	if ec != nil && ec.ArtworkCacheDir != "" {
 		extractLocalArtwork(absPath, t, idTagMetadata, ec)
 	}
 	return nil
+}
+
+// wavDurationSeconds is the data payload's declared byte count over the
+// fmt chunk's bytes-per-second. 0 when either is absent; the fit check
+// and the plausibility gate are the caller's.
+func wavDurationSeconds(data iffPayloadSpan, bytesPerSecond uint64) float64 {
+	if !data.seen || data.size == 0 || bytesPerSecond == 0 {
+		return 0
+	}
+	return float64(data.size) / float64(bytesPerSecond)
+}
+
+// iffPayloadSpan records where a chunk's payload sits in the file and
+// how many bytes it declares, for the truncation check — the audio
+// bytes themselves are never read by either walker.
+type iffPayloadSpan struct {
+	seen   bool
+	offset uint64 // absolute offset of the payload's first byte
+	size   uint64 // the chunk header's declared payload size
+}
+
+// iffPayloadSpanAt records the payload that begins at the file's
+// CURRENT position (the walker has just consumed the 8-byte chunk
+// header). A failed position read leaves the span unseen — no duration
+// rather than one the fit check could not verify.
+func iffPayloadSpanAt(f *os.File, size uint32) iffPayloadSpan {
+	pos, err := f.Seek(0, io.SeekCurrent)
+	if err != nil || pos < 0 {
+		return iffPayloadSpan{}
+	}
+	return iffPayloadSpan{seen: true, offset: uint64(pos), size: uint64(size)}
+}
+
+// physicalFileSize is the on-disk byte count, 0 when Stat fails — an
+// unknown bound fails OPEN in iffPayloadFits (typing and duration land),
+// parity with the DFF walker and the iOS `fileSizeBound: nil` rule. In
+// practice Stat on an open handle does not fail.
+func physicalFileSize(f *os.File) uint64 {
+	if fi, err := f.Stat(); err == nil && fi.Size() > 0 {
+		return uint64(fi.Size())
+	}
+	return 0
+}
+
+// iffPayloadFits reports whether the declared payload physically fits
+// inside the file: offset + size <= physicalSize, overflow-safe. An
+// unknown bound (0) fails OPEN; an unseen payload fails CLOSED — a
+// duration nothing can verify must not be stamped. The AIFF / WAV twin
+// of the DFF walker's `payloadFits`, kept as its own function because
+// that one is a method over the DFF walk's own state.
+func iffPayloadFits(span iffPayloadSpan, physicalSize uint64) bool {
+	if !span.seen {
+		return false
+	}
+	if physicalSize == 0 {
+		return true
+	}
+	if span.offset > physicalSize {
+		return false
+	}
+	return span.size <= physicalSize-span.offset
+}
+
+// stampIFFDuration is the single Duration write for the AIFF and WAV
+// walkers: the derived seconds land only when the audio payload fits
+// the file AND the value passes the shared plausibility gate.
+func stampIFFDuration(t *Track, seconds float64, payload iffPayloadSpan, physicalSize uint64) {
+	if !iffPayloadFits(payload, physicalSize) || !plausibleDuration(seconds) {
+		return
+	}
+	d := seconds
+	t.Duration = &d
 }
 
 // parseWAVINFOBlock walks the body of a RIFF LIST/INFO chunk and
@@ -524,12 +661,22 @@ const (
 // bar want), with the valid-bits count at [18:20]. BitsPerSample is set
 // only for PCM / IEEE-float and gated by canSetBitsPerSample (allowlists
 // "WAV") as defense-in-depth, matching every other bits-write site.
-func parseWAVFmtChunk(body []byte, t *Track) {
+//
+// Returns the stream's bytes-per-second for the duration derivation —
+// `nAvgBytesPerSec` as written, which is defined for compressed WAV
+// formats too (ADPCM, MP3-in-WAV), where `nSamplesPerSec × nBlockAlign`
+// would be a compressed block size and wrong; that product is used only
+// as a fallback for a PCM-like file whose writer left the field 0
+// (widened to 64 bits so a forged rate × block-align cannot wrap into a
+// small, plausible-looking number). 0 means "cannot derive".
+func parseWAVFmtChunk(body []byte, t *Track) (bytesPerSecond uint64) {
 	if len(body) < 16 {
-		return
+		return 0
 	}
 	formatTag := binary.LittleEndian.Uint16(body[0:2])
 	sampleRate := binary.LittleEndian.Uint32(body[4:8])
+	avgBytesPerSec := binary.LittleEndian.Uint32(body[8:12])
+	blockAlign := binary.LittleEndian.Uint16(body[12:14])
 	bitsPerSample := binary.LittleEndian.Uint16(body[14:16])
 
 	effectiveFormat := formatTag
@@ -546,6 +693,13 @@ func parseWAVFmtChunk(body []byte, t *Track) {
 		bps := int(bitsPerSample)
 		t.BitsPerSample = &bps
 	}
+	if avgBytesPerSec > 0 {
+		return uint64(avgBytesPerSec)
+	}
+	if isPCMLike {
+		return uint64(sampleRate) * uint64(blockAlign)
+	}
+	return 0
 }
 
 // applyEmbeddedID3 parses an embedded ID3v2 chunk body, merges its tags
