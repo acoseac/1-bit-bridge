@@ -379,6 +379,24 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 - `isDSD: true` tracks MUST set `sampleRate` to the DSD rate in Hz (e.g. `2822400` for DSD64, `5644800` for DSD128) and `bitsPerSample: 1`.
 - `duration` is in seconds, regardless of format.
 
+#### Duration coverage (no new field; every PCM container since ExtractorVersion 11)
+
+`duration` (seconds, omitted when unknown) was stamped for FLAC, DSF and
+DFF from their sample counts, and for SACD virtual rows from the TOC; an
+MP4 (ALAC / AAC), MP3, AIFF or WAV row carried none, and a client that
+renders a duration-less row falls back to its file size. Since
+ExtractorVersion 11 (the bridge release after v0.2.0) those four derive
+it too — MP4 from the `mvhd` presentation duration, MP3 from a Xing /
+Info / VBRI frame
+count or, failing one, the first frame's bitrate over the audio byte span
+(exact for CBR, the classic estimate for a header-less VBR file), AIFF
+from COMM `numSampleFrames` over its rate, WAV from the `data` payload
+over the fmt chunk's `nAvgBytesPerSec`. The AIFF and WAV values are
+omitted when the audio payload does not fit the physical file (the DFF
+rule below); every value is omitted at or past a week. The wire shape is
+unchanged and `ProtocolVersion` stays 1: a pre-v11 bridge simply omits
+the field for those rows, and a client keeps whatever fallback it had.
+
 #### DST-compressed DSDIFF (additive, since v1.10)
 
 DST (Direct Stream Transfer, ISO/IEC 14496-3 Subpart 10) is the lossless
