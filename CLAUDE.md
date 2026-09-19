@@ -342,9 +342,10 @@ lost my library."
   treat a box declaring past its PARENT as absent (`findAtom` only checks that
   the header sits inside the bound). The crash input is committed as the
   regression seed; run the whole-file fuzz targets for a minute after any
-  parser change, before the PR, not after. (And this PR re-learned the rule two
-  entries below: a control's `git checkout --` took an uncommitted refactor
-  with it. Commit before EVERY control, including the small confirmatory one.)
+  parser change, before the PR, not after. (And this PR re-learned the "Commit BEFORE the negative control" rule
+  recorded further down: a control's `git checkout --` took an uncommitted
+  refactor with it. Commit before EVERY control, including the small
+  confirmatory one.)
 - **`enriched_at`'s sanctioned writers are a closed set**: the enricher, the
   operator "Retry missing" resets (`ResetEnrichedMisses`,
   `ResetEnrichedByArtistMBIDs`, `ResetEnrichedMissesUnderPrefix`), and
