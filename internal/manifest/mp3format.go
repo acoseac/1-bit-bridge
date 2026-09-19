@@ -200,35 +200,50 @@ func mp3Duration(r io.ReadSeeker, frame mpegFrame, frameOffset int64) (float64, 
 // mp3VBRFrameCount reads an encoder-declared total frame count out of
 // the first frame's bytes (header included, starting at index 0):
 // a Xing / Info header after the Layer III side info, else a VBRI
-// header at its fixed 32-byte offset. Layers I / II carry neither.
+// header at its fixed 32-byte offset. Layers I / II carry neither. A
+// Xing header WITHOUT the frames flag ends the search (no encoder
+// writes both), so the CBR estimate follows — VBRI is consulted only
+// when no Xing / Info tag is present at all.
 func mp3VBRFrameCount(first []byte, frame mpegFrame) (uint32, bool) {
 	if frame.layer != mpegLayerIII {
 		return 0, false
 	}
-	// Xing (VBR) / Info (CBR, LAME's spelling): tag, then a flags word
-	// whose bit 0 says a frame count follows.
-	xingAt := 4 + frame.sideInfoSize()
-	if len(first) >= xingAt+12 {
-		tagName := string(first[xingAt : xingAt+4])
-		if tagName == "Xing" || tagName == "Info" {
-			flags := binary.BigEndian.Uint32(first[xingAt+4 : xingAt+8])
-			if flags&0x1 != 0 {
-				if frames := binary.BigEndian.Uint32(first[xingAt+8 : xingAt+12]); frames > 0 {
-					return frames, true
-				}
-			}
-			return 0, false
-		}
+	if frames, ok, present := xingFrameCount(first, 4+frame.sideInfoSize()); present {
+		return frames, ok
 	}
-	// VBRI (Fraunhofer): always 32 bytes after the 4-byte header, then
-	// version u16, delay u16, quality u16, bytes u32, frames u32.
+	return vbriFrameCount(first)
+}
+
+// xingFrameCount reads a Xing (VBR) / Info (CBR, LAME's spelling) header
+// at `at`: the tag, then a flags word whose bit 0 says a frame count
+// follows. `present` reports that a tag was there at all; `ok` that it
+// carried a positive frame count.
+func xingFrameCount(first []byte, at int) (frames uint32, ok bool, present bool) {
+	if len(first) < at+12 {
+		return 0, false, false
+	}
+	tagName := string(first[at : at+4])
+	if tagName != "Xing" && tagName != "Info" {
+		return 0, false, false
+	}
+	flags := binary.BigEndian.Uint32(first[at+4 : at+8])
+	if flags&0x1 == 0 {
+		return 0, false, true
+	}
+	frames = binary.BigEndian.Uint32(first[at+8 : at+12])
+	return frames, frames > 0, true
+}
+
+// vbriFrameCount reads a Fraunhofer VBRI header: always 32 bytes after
+// the 4-byte frame header, then version u16, delay u16, quality u16,
+// bytes u32, frames u32.
+func vbriFrameCount(first []byte) (uint32, bool) {
 	const vbriAt = 4 + 32
-	if len(first) >= vbriAt+18 && string(first[vbriAt:vbriAt+4]) == "VBRI" {
-		if frames := binary.BigEndian.Uint32(first[vbriAt+14 : vbriAt+18]); frames > 0 {
-			return frames, true
-		}
+	if len(first) < vbriAt+18 || string(first[vbriAt:vbriAt+4]) != "VBRI" {
+		return 0, false
 	}
-	return 0, false
+	frames := binary.BigEndian.Uint32(first[vbriAt+14 : vbriAt+18])
+	return frames, frames > 0
 }
 
 // mp3CBRDurationEstimate is the ladder's last rung: the audio byte span
