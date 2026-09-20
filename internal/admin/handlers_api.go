@@ -1510,7 +1510,7 @@ func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
 	if port == 0 {
 		return []adminEndpointEntry{}, nil
 	}
-	eps := advertisedEndpoints(port, cfg, s.deps.Endpoints)
+	eps := advertisedEndpoints(s.deps.Endpoints)
 	out := make([]adminEndpointEntry, 0, len(eps))
 	for _, e := range eps {
 		out = append(out, adminEndpointEntry{

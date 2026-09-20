@@ -182,13 +182,14 @@ type Deps struct {
 	// in, though the pairing docblock promised it, and the panel could
 	// never show the entry its own prose said to look for.
 	//
-	// Nil-safe: absent (test fixtures, an admin wired without an api
-	// server) → both consumers fall back to the host-network walk
-	// `advertise.Endpoints`, which is what they did before and is exactly
-	// the degraded shape this field exists to replace — no Tailscale
-	// entries, no public-mode filter. Production wiring is pinned by a
-	// boot test in cmd/bridge (TestServeBakesHealthEndpointsIntoThePairingQR),
-	// because nothing here can tell a fixture from a forgotten line.
+	// Nil-safe: absent (test fixtures) → no list at all. The QR carries
+	// the operator's primary alone, which always pairs, and the panel
+	// shows its empty state. Deliberately NOT a fallback to the old
+	// `advertise.Endpoints` walk — see advertisedEndpoints in pairing.go
+	// for why a substitute list is worse than none. Production wiring is
+	// pinned by a boot test in cmd/bridge
+	// (TestServeBakesHealthEndpointsIntoThePairingQR), because nothing
+	// here can tell a fixture from a forgotten line.
 	Endpoints func() []advertise.Endpoint
 
 	// Pairing backs the admin-approval pairing flow. Optional — when

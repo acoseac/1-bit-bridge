@@ -66,18 +66,19 @@ func TestPairAlternatesLoopbackBakesTheAdvertisedTailscaleEndpoints(t *testing.T
 	}
 }
 
-// The nil-provider fallback is the pre-fix host walk PLUS customEndpoints
-// — the second half of the defect was that loopback pairing dropped them
-// even though health advertised them. The LAN/mDNS rows depend on the
-// runner's interfaces, so only the deterministic entry is asserted.
-func TestPairAlternatesLoopbackUnwiredStillCarriesCustomEndpoints(t *testing.T) {
+// No provider, no list: the QR carries the operator's primary alone.
+// NOT the old advertise.Endpoints walk — that is the degraded shape the
+// provider replaces, and on a host without Tailscale it is byte-identical
+// to what health serves, so a wiring regression could never be told
+// apart from it (the first draft's boot control stayed green that way).
+func TestPairAlternatesUnwiredYieldsThePrimaryAlone(t *testing.T) {
 	cfg := &config.Config{
 		ListenAddress:   "0.0.0.0:7788",
 		CustomEndpoints: []string{"https://custom.example.test:7788"},
 	}
 	got := pairAlternates("https://primary.example.test:7788", cfg, nil)
-	if !containsURL(got, "https://custom.example.test:7788") {
-		t.Errorf("unwired loopback alternates dropped cfg.CustomEndpoints: %v", got)
+	if len(got) != 1 || got[0] != "https://primary.example.test:7788" {
+		t.Errorf("unwired loopback alternates = %v, want the primary alone", got)
 	}
 }
 
