@@ -261,15 +261,20 @@ func TestMassDeleteRefusal(t *testing.T) {
 // can unlink a moved catalog; a row with no source identity
 // contributes only its recorded path; the keys are case-folded.
 func TestKnownSidecarSetCarriesBothSpellings(t *testing.T) {
+	// filepath.Join throughout, so the expectations carry the platform's
+	// separator — a Windows checkout cleans `/mnt/Old/…` to backslashes
+	// before the fold, and a forward-slash literal would never match.
+	oldDir, newDir := filepath.Join("/mnt", "Old"), filepath.Join("/srv", "new")
 	rows := []VariantSnapshot{
-		{SourcePath: "Artist/Album/01.flac", VariantID: "upscaled-v2-176400-24", SidecarPath: "/mnt/Old/Artist/Album/01.flac.upscaled-v2-176400-24.flac"},
-		{SidecarPath: "/mnt/old/legacy-abc.flac"},
+		{SourcePath: "Artist/Album/01.flac", VariantID: "upscaled-v2-176400-24",
+			SidecarPath: filepath.Join(oldDir, "Artist", "Album", "01.flac.upscaled-v2-176400-24.flac")},
+		{SidecarPath: filepath.Join(oldDir, "legacy-abc.flac")},
 	}
-	known := KnownSidecarSet("/srv/new", rows)
+	known := KnownSidecarSet(newDir, rows)
 	for _, want := range []string{
-		"/mnt/old/artist/album/01.flac.upscaled-v2-176400-24.flac",
-		strings.ToLower(transcode.VariantSidecarPath("/srv/new", "Artist/Album/01.flac", "upscaled-v2-176400-24")),
-		"/mnt/old/legacy-abc.flac",
+		strings.ToLower(filepath.Join(oldDir, "Artist", "Album", "01.flac.upscaled-v2-176400-24.flac")),
+		strings.ToLower(transcode.VariantSidecarPath(newDir, "Artist/Album/01.flac", "upscaled-v2-176400-24")),
+		strings.ToLower(filepath.Join(oldDir, "legacy-abc.flac")),
 	} {
 		if _, ok := known[want]; !ok {
 			t.Errorf("known set lacks %q; have %v", want, known)
