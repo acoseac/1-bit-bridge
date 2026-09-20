@@ -5656,3 +5656,83 @@ SonarCloud's cognitive-complexity check (23 against 15) split the
 containment test into helpers. Declined: moving the CLAUDE.md rule out of
 the PR — "CLAUDE.md updates direct to main" is the docs-ONLY exception to
 the branch rule, and #915–#921 each carried their rule in-PR.
+
+## 2026-09-20 — the pairing QR had no Tailscale fallback (#936, field report)
+
+### Two admin consumers PR #269 left on the old walk
+
+Report: a loopback bridge (0.2.0, `tailscale.mode: cli`) whose
+`GET /v1/health` advertised `endpoints: [192.168.0.24, nuc.local,
+nuc.sable-eagle.ts.net, 100.102.105.89, [fd7a:…]]` answered
+`POST /api/tokens {"name":"iPhone 13"}` with `alternates: [nuc.local,
+192.168.0.24]` — the QR's `bridge://pair?urls=` carried no Tailscale entry,
+so a phone paired on Wi-Fi could not roam without a re-pair, which is the
+exact promise in `buildPairURL`'s docblock.
+
+Cause: `baf65f7` (PR #269, 2026-05-18) stripped the Tailscale append out of
+`advertise.Endpoints()` — the CLI shell-out and the `net.Interfaces()`
+CGNAT/ULA classification both — and moved it to `internal/api`'s
+`reachableEndpoints`, unifying `cli` and `tsnet` onto the
+`admin.TailscaleProvider`. Its diff touched no file under `internal/admin`.
+Both admin consumers of the walk stayed on it: `pairAlternates` (the QR,
+loopback branch — `advertise.URLs(Params{Port})`, which also never passed
+`cfg.CustomEndpoints`) and `getEndpointsSnapshot` (the Settings "Reachable
+endpoints" panel + its SSE twin, whose template says "bring a Tailscale
+tunnel up and refresh to see the new entry", and whose docblock said it
+"mirrors the per-call enumeration in `s.reachableEndpoints()`"). The
+enumeration-of-sites failure this file records repeatedly, one layer up:
+the refactor listed the two Tailscale MODES it unified and not the
+CONSUMERS of what it removed.
+
+Fix: `api.(*Server).ReachableEndpoints() []advertise.Endpoint` is the
+classed form of what health flattens (`reachableEndpoints` is now a
+projection of it, behind the same `endpointsCache`); admin takes it as
+`Deps.Endpoints`, wired in `runServe`, and both consumers go through
+`advertisedEndpoints`. Admin never imports api (the dependency runs the
+other way), so it is a closure like every other Deps field. The
+public-mode branch of `pairAlternates` is untouched and never consults the
+provider — its explicit-`:443` autocert URL differs from health's port-less
+form on purpose (the iOS 7788-default bug, #339). `TailscaleStatus.
+TailscaleIPs`'s docblock ("empty in cli-mode") was also stale since #269
+and is corrected.
+
+### The fallback that hid its own wiring
+
+The first draft fell back to `advertise.Endpoints(Params{Port,
+CustomEndpoints})` when `Deps.Endpoints` was nil — "what it did before, plus
+the customEndpoints half of the fix". The boot control (the wiring line
+deleted from `main.go`) stayed GREEN: on a host with no Tailscale
+entries to append, that walk is byte-identical to what health serves, so
+the discriminator the test relied on (a customEndpoint) was supplied by the
+fallback itself. A substitute list is worse than none here — it is a
+second enumeration to keep in step AND one a forgotten wiring line can
+never be told apart from. Nil now means no list (the QR carries the
+primary alone, which always pairs; the panel renders "No external
+addresses detected", which in that wiring is true), matching the "absent
+→ nothing, never a guess" convention every other Deps closure follows.
+Second control run: red at both mint and rotate.
+
+Guards: `TestServeBakesHealthEndpointsIntoThePairingQR` (cmd/bridge; boots
+the real `serve` on two reserved loopback ports, requires
+`POST /api/tokens` and the rotate to bake exactly `[primary] +
+/v1/health.endpoints` and the QR's `urls=` to match — a Tailscale identity
+cannot be injected into a real serve, so a customEndpoint is the
+discriminator and the fixture asserts health carries it);
+`TestMintAndRotateBakeTailscaleIntoAlternatesAndURLs` and
+`TestEndpointsPanelRendersTheSharedEnumerationWithClasses` (real admin
+handlers, canned provider in the shape of the report);
+`TestPairAlternatesPublicModeNeverConsultsTheProvider` (call counter);
+`TestReachableEndpoints_ExportedFormKeepsTheClasses` (api). Four negative
+controls, each after a commit: the wiring line deleted → red (mint +
+rotate); the loopback branch reverted to `advertise.URLs` → red on the four
+pairing tests only; the panel reverted to its own walk → red on the panel
+test only; the MagicDNS entry mis-classed → red on the class pin.
+
+Live, on this Mac (tailnet-joined, `tailscale` CLI present, cert minted at
+boot), a throwaway loopback fixture with one customEndpoint: health, the
+mint's `alternates`, the QR's `urls=` and `GET /api/endpoints` all read
+`[192.168.0.85, Macbook.local, macbook.sable-eagle.ts.net, 100.79.163.73,
+[fd7a:115c:a1e0::3139:a34a], custom.example.test]` with the operator's
+primary lifted to the head; the rotate with a different primary the same.
+No wire change: `/v1/health` is untouched and `urls=` was already one URL
+per line on the iOS parser. No ProtocolVersion bump.

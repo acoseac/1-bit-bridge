@@ -1492,9 +1492,9 @@ func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
 	if err != nil {
 		return nil, &endpointsErr{code: "bad_port", msg: "invalid listen port"}
 	}
-	// Reject out-of-range ports up-front rather than letting them
-	// reach `advertise.Endpoints` and produce overflowed values in
-	// the URL strings. Ports must be 1..65535 by RFC 6335.
+	// Reject out-of-range ports up-front with a typed error rather
+	// than letting the enumeration synthesize URLs around them. Ports
+	// must be 1..65535 by RFC 6335.
 	if port < 0 || port > 65535 {
 		return nil, &endpointsErr{code: "bad_port", msg: "listen port out of range (must be 1..65535)"}
 	}
