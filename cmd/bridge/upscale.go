@@ -864,7 +864,8 @@ func gcRefuseMassOrphans(stderr io.Writer, outputDir string, inv integrity.Sidec
 	fmt.Fprintf(stderr, "GC: refusing to run — %s.\n", reason)
 	fmt.Fprintln(stderr, "  A catalog this much smaller than the tree it describes usually means the INDEX was lost,")
 	fmt.Fprintln(stderr, "  not that the files are junk: a bridge.db restored from an older snapshot, a --config naming")
-	fmt.Fprintf(stderr, "  another install, or a sweep that reaped %s's rows after a host move.\n", outputDir)
+	fmt.Fprintln(stderr, "  another install, or a sweep that reaped the rows for this tree after a host move.")
+	fmt.Fprintf(stderr, "  The tree is %s.\n", outputDir)
 	fmt.Fprintln(stderr, "  Nothing was unlinked and no row was removed. Check `bridge doctor` (variants-index), and if the")
 	fmt.Fprintln(stderr, "  rows are recoverable restore them before sweeping — the files here cannot be re-derived from disk.")
 	for i, p := range inv.OrphanPaths {

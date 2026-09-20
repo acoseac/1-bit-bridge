@@ -5949,3 +5949,165 @@ Until then, waveform adoption on serve (`analysisStoreAdapter.LookupAnalysis`
 probing `analyze.AnalyzeSpec{…}.SidecarPath()` and a new
 `UpdateAnalysisWaveformPath`) is the cheap half worth doing first; the
 doctor check names the gap.
+
+## 2026-09-20 — the forward sweeps had no denominator (#940, the other half of #937)
+
+### The hole #937 left
+
+#937 closed the relocation case on both sides: a row whose file moved is
+adopted, and a forward sweep's known set carries the canonical spelling so a
+moved tree is not 10,248 orphans. Both fixes need the ROWS. The field report's
+own aftermath had no rows: the pre-#937 boot sweep had already dropped all
+10,248, and three minutes later the auto-optimize sweeper — candidate query
+"no fresh variant row exists" — had written 200 fresh ones over the stranded
+tree. That is an ordinary state for an operator to be in today.
+
+Run `bridge upscale --gc` there and every guard passes:
+
+| guard | question | answer on the aftermath |
+|---|---|---|
+| `gcRefuseEmptyKnownSetOverPopulatedDir` (#895) | is the catalog EMPTY? | no — 200 rows |
+| `gcRefuseRelocationInProgress` (#937) | how many ROWS lost their file? | none — all 200 point where their file is |
+| `VariantsDirSweepBlockReason` | is the directory missing or empty? | no — healthy and full |
+
+…and the forward sweep unlinks 10,048 files, 254 GiB, exit 0. Reproduced
+against the real `runGC` before writing anything: `rc=0`, `removed 40 orphan
+file(s), kept 2 known sidecar(s)` on the scaled-down fixture, and at full scale
+on a live install (200 rows / 10,248 files) it removed 10,048.
+
+The row guard's question is simply the wrong one here, and no tuning of it
+helps: a catalog that lost its index is SMALL, and the deletion does not touch
+it at all. `MassDeleteRefusal` is asked about zero missing rows and correctly
+says nothing.
+
+### `integrity.MassOrphanRefusal` — three terms, and the middle one is the finding
+
+Refuse when all hold:
+
+- `orphans >= massOrphanFloor` (10, the same const as `massDeleteFloor`, pinned
+  equal by a test so the two guards cannot drift on what a "mass" is).
+- **`orphans > rows`** — more unreferenced files than the catalog has rows IN
+  TOTAL. This is the term that knows a lost index from an ordinary crop. A
+  healthy catalog references about one file per row, so a tree holding more
+  junk than the catalog has entries is a tree the catalog has stopped
+  describing. The ordinary reasons for a big `--gc` do not have this shape: the
+  v1→v2 naming-scheme change (the documented reason `--gc` exists) leaves one
+  old file per current row, and an interrupted bulk delete leaves one per
+  DELETED row against the rows that remain.
+- `orphans*100 > maxOrphanPercent*files`, reusing
+  `integrity.variantSweepMaxDeletePercent` (default 20) with the same meaning
+  at both ends — 100 disables, 0 refuses any mass orphan removal. One knob: an
+  operator who raised it to allow a big row reap was saying something about
+  mass deletion, and leaving the file half (the half that cannot be re-adopted)
+  on a separate number would be a trap.
+
+Deliberately NOT gated on `TreeHoldsVariantSidecars`, unlike the reverse twin.
+That probe exists to tell a relocation from a real deletion; here the files
+are the evidence — counted, in hand, about to be unlinked.
+
+**The `orphans > rows` term turned out to be load-bearing for the EXISTING
+`--allow-mass-delete` path too**, which the negative control found rather than
+the design: in `TestRunGCRefusesAMassDeleteUntilAllowed`'s second half the tree
+holds 12 files under a layout the probe does not know, against 12 rows, so
+`orphans == rows` and the sweep proceeds once the operator has authorised it.
+Drop the term and that test goes red. The two overrides stay separate on
+purpose (different questions; the file half is unrecoverable), so a shape that
+trips both needs both flags — and the refusal names the one it is asking for.
+
+### The walk had to be split, for #937's own reason one layer over
+
+`runGCForwardSweep` deleted as it walked, so a guard inside it could only ever
+measure a ratio from the part of the tree it had already destroyed — exactly
+why #937 made the relocation guard a pre-flight rather than a step inside the
+reverse sweep. `integrity.TakeSidecarInventory` now walks once and classifies;
+`gcRefuseMassOrphans` decides; `runGCForwardSweep` unlinks the list it is
+handed. The negative control (guard moved after the sweep) turns the test red
+on the FILES, which is the assertion that matters — the same trap #937 records.
+
+`analyze --gc` shares both halves. Waveforms are cheaper to rebuild, which is
+why that is the milder case and not a different rule, and the shared walker
+brings it two things it never had: the dot-directory prune, and a fail-closed
+reading of a walk error in place of "skip the unreadable entry and keep
+deleting". Its `.waveform.bin.tmp` scratch is collected separately, removed
+unconditionally and kept out of the ratio — a crashed run must not be able to
+trip the guard on the next one. `--allow-mass-orphans` on upscale / optimize /
+render / analyze, swept by a test; `artwork --gc` is exempt BY NAME in that
+sweep, because its cache is keyed by content and MBID rather than by an
+absolute path a relocation can strand, and an omission that reads as a decision
+is what the `--allow-empty` precedent asks for.
+
+### `bridge doctor` → `variants-index`
+
+Rows against files: `ok` when they agree (both counts still in the summary),
+`warn` with both counts and a few orphan names when they do not. The names are
+RELATIVE to the directory the summary already names — a doctor report gets
+pasted into issues. The "this is a lost index, do NOT pass
+`--allow-mass-orphans`" wording is gated on `MassOrphanRefusal`'s own verdict
+rather than on a second copy of the rule, so the doctor and the sweep cannot
+disagree about the threshold.
+
+It reuses `KnownSidecarSet` and `TakeSidecarInventory` rather than a third
+walker, which is what makes it quiet on a merely RELOCATED catalog — the one
+moment its warning must not be noise. Control: recorded paths only, and the
+relocated-catalog test reports 12 of 12 files unreferenced.
+
+**The walk is bounded at 20,000 entries**, because `/api/doctor` is fetched on
+every settings-page render (the prereq chips), not only from the "Run checks"
+button. Measured over a synthetic source-mirrored tree of 100,001 files on an
+APFS SSD: **113 ms unbounded, 57 ms at 50,000, 23 ms at 20,000** (~1.1 µs per
+entry warm). The number that sets the budget is the other end —
+`internal/integrity`'s sweeper records ~50 µs per entry on the pathological
+tier (USB-attached spinning rust, NTFS / exFAT), where the whole tree would be
+~5 s and 20,000 entries is ~1 s. On the live 10,248-file fixture the WHOLE
+`bridge doctor` run, walk included, is **78 ms**.
+
+Truncating costs almost nothing the check is for: a catalog that lost its index
+has unreferenced files throughout the tree, so they turn up far inside the
+budget. It is the ALL-CLEAR that gets scoped ("the first N file(s) — the tree
+is larger"), never the alarm.
+
+**`VariantsIndex.Budget` is reported, not inferred**, and that is a testability
+decision worth naming: a probe wired with a budget of 0 walks a 200k-file tree
+on a page render and every count it returns still looks exactly right. It is
+the one mistake no number reveals, so the probe says what cap it ran under and
+the wiring test reads it off a 12-file fixture. The first draft proved it by
+writing 20,001 files — 2.7 s per run and ~80 MB of blocks, against 0.8 s now.
+
+### Negative controls
+
+Each a single production line reverted after the commit that carried it.
+
+| control | red |
+|---|---|
+| `gcRefuseMassOrphans` always proceeds | `TestRunGCRefusesAMassOrphanSweepUntilAllowed` |
+| guard moved AFTER the forward sweep | the same test, on the files |
+| `orphans > rows` term dropped | the truth table, `TestRunGCStillReclaimsAnOrdinaryOrphanCrop`, and #937's `TestRunGCRefusesAMassDeleteUntilAllowed` |
+| `analyze --gc` guard disabled | `TestRunAnalyzeGCRefusesAMassOrphanSweepUntilAllowed` |
+| scratch collection removed | `TestTakeSidecarInventoryKeepsScratchOutOfTheRatio` + the analyze test |
+| doctor probe: recorded paths only | `TestDoctorVariantsIndexAcceptsARelocatedCatalog` |
+| doctor probe: budget 0 | `TestDoctorVariantsIndexWalkIsBounded` |
+
+**The scratch control passed on the first attempt and proved nothing** — the
+usual shape, caught only because it was run. The test passed `analyze --gc`'s
+own `Consider` (which already excludes `.waveform.bin.tmp`) beside `Scratch`,
+so deleting the Scratch branch changed no count. It now passes `Consider: nil`
+— the `upscale --gc` shape — where Scratch is the only thing holding the
+scratch files out of `Files`.
+
+### Not in scope, and why
+
+- **`OrphanSidecarSweeper`** (the BACKGROUND file walk, opt-in and off by
+  default: `OrphanSidecarSweepInterval()` returns 0 unless configured) gets no
+  guard here. It is chunked at 5,000 entries per tick, so it cannot compute a
+  whole-tree ratio in one pass, and a per-chunk ratio is a different statistic
+  that needs its own justification. A background sweeper also gets no override
+  by the rule this file already records — nobody is in the loop to express
+  intent — so the guard there would have to be right first time. Worth doing;
+  worth doing on its own.
+- **`artwork --gc`**: keyed by content hash and MBID, not by an absolute path a
+  relocation can strand. Exempted by name in the sweep test.
+- `TestServeWiresResolvedConfigPathIntoAdminAndBackups` flakes at **1/10 on
+  this branch and 1/10 on main**, identically (`TempDir RemoveAll cleanup:
+  unlinkat …/data/tls: directory not empty`) — the latent boot-test cleanup
+  race, unrelated. A first 3-run sample read as "green on main, red on the
+  branch"; three runs is not a flake measurement.

@@ -1105,6 +1105,56 @@ no failing test — which is the shape to expect in this area.
   file, so a moved dataDir strands the whole waveform cache as 410s that
   never regenerate) — `bridge doctor`'s `sidecar-paths` check reports
   both tables; the schema-relative follow-up is #938. (#937)
+- **A forward sweep's denominator is the TREE, never the catalog, and the
+  term that knows a lost index is `orphans > rows`.** Adoption and the
+  canonical known set both need the ROWS; the 2026-09-20 aftermath had
+  none — the boot sweep had dropped all 10,248 and the auto-optimize
+  sweeper had written 200 fresh ones over the stranded tree, so
+  `gcRefuseEmptyKnownSetOverPopulatedDir` ("is the catalog EMPTY?") said
+  no, `gcRefuseRelocationInProgress` ("how many ROWS lost their file?")
+  said none, and `--gc` unlinked 10,048 files at exit 0.
+  `integrity.MassOrphanRefusal` is the one decision both file-deleting
+  sweeps make: the same floor of ten, more than
+  `variantSweepMaxDeletePercent` of the FILES (one knob, same meaning at
+  both ends — leaving the unrecoverable half on a second number is a
+  trap), AND more unreferenced files than the catalog has rows in total.
+  That last term is what passes an ordinary crop — a naming-scheme change
+  leaves one old file per CURRENT row, an interrupted bulk delete one per
+  DELETED row — and it is load-bearing for `--allow-mass-delete` too,
+  where `orphans == rows` must proceed. Unlike the reverse twin it is NOT
+  gated on `TreeHoldsVariantSidecars`: there the probe tells a relocation
+  from a deletion, here the files are the evidence. **The walk is split
+  from the unlink** (`integrity.TakeSidecarInventory` classifies, the
+  sweep removes the list it is handed) for #937's own reason one layer
+  up — a guard inside the walk measures a ratio from the tree it has
+  already destroyed, so the test asserts on the FILES.
+  `--allow-mass-orphans` is the CLI's way past it on upscale / optimize /
+  render / analyze; `artwork --gc` is exempt BY NAME in the sweep test
+  (content/MBID-keyed, no absolute path a relocation can strand), and the
+  background `OrphanSidecarSweeper` is deliberately left for its own
+  change — chunked at 5,000 entries it cannot see a whole-tree ratio, a
+  per-chunk one is a different statistic, and a background sweeper gets no
+  override, so it has to be right first time. `analyze --gc` shares both
+  halves and gained the dot-directory prune and a fail-closed walk error
+  with them; its `.tmp` scratch is removed unconditionally and kept OUT of
+  the ratio, or a crashed run trips the guard on the next one. (#940)
+- **`bridge doctor`'s `variants-index` is the other side of
+  `sidecar-paths`, and its walk is BOUNDED.** `sidecar-paths` counts rows
+  recorded outside the current directory (a relocation the sweeps heal);
+  this one counts FILES no row mentions (a relocation nothing can heal —
+  the evidence that would connect them is what went missing). It reuses
+  `KnownSidecarSet` + `TakeSidecarInventory`, which is what keeps it quiet
+  on a merely relocated catalog, and takes its "the sweep would refuse
+  this" wording from `MassOrphanRefusal` rather than restating the rule.
+  `/api/doctor` is fetched on every settings-page render, so the walk caps
+  at 20,000 entries (measured: 113 ms unbounded over 100,001 files, 23 ms
+  at the cap; ~1 s at the cap on the sweeper's recorded 50 µs/entry
+  pathological tier) and SCOPES its claim when it truncates — the
+  all-clear is what gets scoped, never the alarm, because a lost index has
+  orphans throughout. **The probe reports the budget it ran under**: a
+  closure wired with 0 walks the whole tree on a page render and every
+  count still looks right, which is the one mistake no number reveals.
+  (#940)
 
 ### DLNA, UPnP and discovery
 
