@@ -992,7 +992,7 @@ func gcRefuseRelocationInProgress(stderr io.Writer, outputDir string, verdicts g
 	fmt.Fprintln(stderr, "  This looks like a relocation in progress, not a library whose sidecars were deleted:")
 	fmt.Fprintln(stderr, "  rows still name a directory that is not this one, and the files are here but not at their")
 	fmt.Fprintln(stderr, "  source-mirrored paths (or the copy has not finished). Nothing was unlinked and no row was")
-	fmt.Fprintln(stderr, "  removed. Put the files at their paths, or `bridge variants move --to <dir>`, and re-run.")
+	fmt.Fprintln(stderr, "  removed. Put the files at their paths, or `bridge variants move --to <dir> --confirm MOVE`, and re-run.")
 	fmt.Fprintln(stderr, "  If the sidecars really are gone, re-run with --allow-mass-delete.")
 	if n := len(verdicts.relocated); n > 0 {
 		fmt.Fprintf(stderr, "  (%d row(s) DO have their file at the canonical path and would be adopted by that run.)\n", n)
@@ -1031,7 +1031,7 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 	// that case identically to a directly-missing file. Per Gemini on
 	// PR #207.
 	rowsKept := verdicts.present
-	var rowsRemoved, rowsAdopted, rowsFailed int
+	var rowsRemoved, rowsAdopted, rowsMismatched, rowsFailed int
 	interrupted := func() (int, int, int, int) {
 		fmt.Fprintln(stderr, gcInterruptedMessage)
 		return rowsRemoved, rowsKept, rowsFailed, 1
@@ -1045,10 +1045,15 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 	}
 	for _, m := range verdicts.mismatched {
 		// A file is there but not the one the row describes — a copy
-		// still in flight, most likely. Keep the row; say so.
+		// still in flight, most likely. Keep the row; say so. Its own
+		// counter, NOT a failure: runGC exits 1 on rowsFailed, and a
+		// `--gc` run from cron while a copy lands is a healthy state, not
+		// a job the scheduler should report as failed. The watcher keeps
+		// Mismatched apart from Failed for the same reason (CodeRabbit on
+		// #937).
 		fmt.Fprintf(stderr, "keep %s / %s: a sidecar at %s has a different size than the row records; not adopted, not deleted\n",
 			m.row.SourcePath, m.row.VariantID, m.canonical)
-		rowsFailed++
+		rowsMismatched++
 	}
 	for _, rel := range verdicts.relocated {
 		// Stop promptly on SIGINT — same rationale as the forward-walk
@@ -1098,8 +1103,8 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 		}
 		rowsRemoved++
 	}
-	fmt.Fprintf(stdout, "GC reverse sweep: removed %d orphan row(s), adopted %d relocated row(s), kept %d row(s) with live sidecar, %d failure(s).\n",
-		rowsRemoved, rowsAdopted, rowsKept, rowsFailed)
+	fmt.Fprintf(stdout, "GC reverse sweep: removed %d orphan row(s), adopted %d relocated row(s), kept %d row(s) with live sidecar, %d row(s) with a mismatched sidecar, %d failure(s).\n",
+		rowsRemoved, rowsAdopted, rowsKept, rowsMismatched, rowsFailed)
 	return rowsRemoved, rowsKept, rowsFailed, 0
 }
 
