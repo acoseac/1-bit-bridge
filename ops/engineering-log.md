@@ -6504,3 +6504,159 @@ Two process notes:
 No `/v1` handler, no `PROTOCOL.md`, no `ProtocolVersion` bump.
 `ops/prompt-gc-empty-dir-wedge.md`, the one-shot work order for this fix, is
 deleted with it.
+
+## 2026-09-20 — a deleted playlist had no way back (field report; console restore + mass-delete warning)
+
+### The incident
+
+15:06 CEST. A freshly paired phone issued 17 `DELETE /v1/playlists/{id}` in 26
+seconds, immediately after its first `GET /v1/playlists`.
+
+The cause was app-side and is worth stating precisely, because it is not a bug
+in either half: the operator removed the old bridge in the app, deleted the
+now-empty local playlists, then paired the new bridge — which listed the SAME
+ids, because playlist ids are client UUIDs and both bridges held backups of the
+same playlists. The app's `PendingPlaylistDeleteStore` still held those ids and
+replayed them against the newly-eligible bridge.
+
+The bridge behaved exactly per contract. `TombstonePlaylist` sets
+`deleted = 1`; `playlist_items` is untouched; the ids join `deletedIds` so the
+delete propagates. Seventeen 200s, nothing else in the journal.
+
+Two things were missing, and they are different problems:
+
+1. **No undo.** `internal/admin` routed `GET /api/playlists`, `/detail` and
+   `/export` — all three live-only. The console had no view of tombstones and
+   no way to lift one. Recovery was `UPDATE playlists SET deleted = 0` by hand
+   against a live WAL database.
+2. **Nothing said it had happened.** A delete run is indistinguishable from a
+   person tidying up, one request at a time, at the granularity the journal
+   records.
+
+### `deleted_by`, and the decision NOT to add `deleted_at`
+
+The obvious column to add was `deleted_at`. It is not needed, and the reason is
+worth keeping: on a `deleted = 1` row `updated_at` ALREADY IS the delete time.
+`TombstonePlaylist` is the only writer of `deleted = 1` in the tree and it
+stamps both fields in one statement; the only two ways back out — an
+`UpsertPlaylist` revive and the new `RestorePlaylist` — clear the flag in the
+same statement that moves `updated_at` again. A second column carrying the same
+instant is a second thing to keep in step, and the pair can only ever disagree
+by being wrong. `TestUpdatedAtOnATombstonedRowIsTheDeleteTime` pins the
+equality so a future writer cannot quietly separate them (negative control: a
+tombstone that leaves `updated_at` alone reports the WRITE time as the delete
+time and the test says so by name).
+
+What genuinely was not recorded is **who deleted it**. `playlists.device_token`
+is the LAST WRITER, and in this incident that was a different device for all 17
+rows — every tombstone went on naming the Mac that had made the playlists, not
+the phone that deleted them. Migration v45 adds `playlists.deleted_by` (the
+deleting device's token, `''` when the caller sent none), via `post()` +
+`addColumnsIfMissing` per the ladder's idempotency contract.
+
+`RestorePlaylist` clears `deleted_by` with the flag: it is provenance for THAT
+tombstone, and leaving it would attribute the next delete to whoever made the
+last one.
+
+### `last_modified_at` does not move on a restore
+
+The tempting alternative is to stamp it to now, so the bridge's copy outranks
+every device's and the restore "wins". Declined. `last_modified_at` is the
+CLIENT's wall clock and the LWW guard key; an operator undoing a delete has not
+authored a new version. Leaving it alone makes LWW resolve exactly as it would
+have had the delete never happened — a device holding a genuinely newer copy
+still wins on its next flush. Negative control: stamping it to `now()` turns
+`TestRestorePlaylistBringsBackTheRowAndItsItems` red on that field alone.
+
+### The mass-delete warning counts from the TABLE, not from a ring
+
+The obvious shape is an in-process sliding window keyed by device. Rejected for
+three reasons, all of which the table form gets for free: the rows the warning
+counts are the SAME rows the console's restore panel lists, so the two cannot
+tell different stories; a burst spanning a restart is still one burst; and
+there is no map to bound, lock or expire. `playlists` holds one row per playlist
+— tens to hundreds on a real bridge — and a DELETE is a human-paced request, so
+the `COUNT(*)` needs no index.
+
+It is **not a gate**: the tombstone has already committed when the count runs,
+and a failed count logs and lets the delete stand.
+
+**One WARN per tombstone past the threshold, deliberately.** This is the one
+place in the tree where a repeated line is right, and it is worth contrasting
+with the M-SEARCH streak suppression recorded earlier in this log (199,078 of
+200,000 lines). That ticker's failure mode is PERSISTENT and every line says
+the same thing. A delete burst is bounded by how many playlists exist, each
+line carries a different count, and the last one is where the run stopped. The
+incident would have produced 13 lines. Verified on a live fixture: 6 deletes
+produced exactly 2 lines, `deleted=5` and `deleted=6`.
+
+Threshold 5 within 60 s. Well clear of a person deleting a couple by hand, well
+under a client draining a queue — the incident clears it four times over. The
+window is short on purpose: the question is "is a client looping", not "has a
+lot been deleted today". Both numbers are `manifest.PlaylistDeleteBurst*` and
+are SERVED to the console on `/api/playlists/deleted`, so the panel's sentence
+and the journal line describe one event.
+
+### The dashboard has no recent-events area
+
+The work order asked for the burst to be surfaced there "if one exists". It does
+not — `dashboard.html` has no such section, and the SSE stream carries
+stats/pairing/endpoints/updates/tailscale snapshots, not an event feed. Adding
+one is a larger design question than this fix. The burst is surfaced where the
+operator can act on it instead: the panel's first line names the device and the
+span, above the "Restore all" button.
+
+### The panel goes in `renderPagedList`'s banner slot
+
+Not appended after the grid. The banner is painted on the EMPTY view too, and
+"every playlist was just deleted" is precisely the state a mass delete produces
+— the grid says "No playlists backed up" and the restore panel is the only
+useful thing on the page. Verified in a browser with all 6 fixture playlists
+deleted.
+
+### A grid's auto track sizes to max-content — measured, not reasoned about
+
+`.deleted-list` was `display: grid; gap: 2px` with no explicit
+`grid-template-columns`, matching `.unresolved-list` beside it. One long
+playlist name resolved the implicit `auto` column to **925 px inside a 317 px
+panel** at 375 px wide: the rows overflowed, every Restore button left the
+viewport, and the list grew a horizontal scrollbar. `min-width: 0` on
+`.deleted-item-text` did not help — the TRACK is what grew.
+`grid-template-columns: minmax(0, 1fr)` plus `min-width: 0` on the grid ITEM is
+what lets the name's ellipsis apply. Measured after the fix: `scrollWidth ==
+clientWidth == 317`, every button inside the viewport.
+
+**No Go guard could see any of this.** `TestPlayerEmittedClassesAreStyled`
+was green throughout — the class HAD a rule. The markup was correct; the page
+just rendered wrong, which is the failure mode that whole test exists to
+describe and cannot detect. Found only by driving the real console at 375 px
+with a deliberately long fixture name.
+
+### iOS: a revived id is re-imported, and a pending delete will re-tombstone it
+
+Confirmed against `PlaylistSyncCoordinator.sweepIfOnline`. Phase 3's `hasNew`
+is `!localIDs.contains(uuid) && !pendingDeletes.contains(uuid)`, so a restored
+id absent locally imports through the existing `restore(from:)` machinery — no
+iOS change needed.
+
+The one interaction to know about: `retryPendingDeletes` runs at the head of
+every sweep and re-sends the DELETE for any id still in
+`PendingPlaylistDeleteStore`, which would re-tombstone a just-restored
+playlist. In THIS incident that store is already drained —
+`markLanded` removes the record once the delete has landed on every eligible
+bridge, and all 17 DELETEs returned 200 — so the restore sticks. It is written
+up in `PROTOCOL.md` (and the iOS mirror) as a note for client implementors
+rather than fixed here, because the correct fix is on the client side.
+
+`PROTOCOL.md` also records that the operator restore leaves `lastModifiedAt`
+unchanged, and that an operator-uploaded cover does NOT come back: the `/v1`
+DELETE calls `api.pruneCover`, which unlinks the JPEG. Nothing keeps a copy.
+The console says so beside the button rather than leaving the operator to
+notice.
+
+### Not a managed control
+
+`POST /api/playlists/{id}/restore` is deliberately NOT wrapped in
+`s.managed(...)`. The managed-controls set covers actions a control plane owns
+on a bridge somebody else runs — restart, updates, roots, variantsDir, backups.
+Restoring the operator's own playlist data is not one of them.

@@ -462,6 +462,36 @@ lost my library."
   the same transaction as the stamp**, and the since-leg emits it as
   `deleted: [paths]`. `indexed_at` is still never bumped on suppression; the
   tombstone is the delta signal.
+- **A playlist tombstone is DATA, and `updated_at` on a `deleted = 1` row IS
+  the delete time.** `DELETE /v1/playlists/{id}` sets a flag and keeps every
+  `playlist_items` row, so the console can lift it (`RestorePlaylist`, behind
+  `GET /api/playlists/deleted` + `POST /api/playlists/{id}/restore`) — which is
+  what the 2026-09-20 incident needed and did not have: a freshly-paired phone
+  replayed a queued delete, 17 DELETEs in 26 s, and recovery was an `UPDATE`
+  by hand against a live database. A restore **must not move
+  `last_modified_at`** — that is the client's wall clock and the LWW guard key,
+  and an operator undoing a delete has not authored a new version; leaving it
+  makes LWW resolve exactly as if the delete had never happened. There is
+  deliberately **no `deleted_at` column**: `TombstonePlaylist` is the only
+  writer of `deleted = 1` and stamps `updated_at` in the same statement, so a
+  second column carrying the same instant could only disagree by being wrong
+  (`TestUpdatedAtOnATombstonedRowIsTheDeleteTime`). What WAS missing is the
+  DELETER — `device_token` is the last WRITER, a different device for all 17
+  rows — hence `playlists.deleted_by` (v45), cleared on restore so a stale
+  value cannot attribute the next delete. The custom cover does NOT come back:
+  the DELETE unlinks the JPEG (`api.pruneCover`) and nothing keeps a copy.
+- **The playlist mass-delete WARN counts from the TABLE, never an in-process
+  ring**, and fires ONE LINE PER TOMBSTONE past the threshold
+  (`manifest.PlaylistDeleteBurstThreshold` = 5 within
+  `PlaylistDeleteBurstWindow` = 60 s, both SERVED to the console so the panel's
+  sentence and the journal line describe one event). Counting from the rows is
+  what makes the warning and the restore panel unable to tell different
+  stories, and what makes a burst spanning a restart still one burst. The
+  repetition is deliberate and is **not** the M-SEARCH case: that ticker's
+  failure is persistent and every line identical, while a delete run is bounded
+  by how many playlists exist, each line carries a different count, and the last
+  one is where the run stopped. Never a gate — the tombstone has committed by
+  then, so a failed count logs and the delete stands.
 - **Verify a wire field name against the Go tag before "fixing" code to match a
   doc.** `deletedIds` was written up as `deletedPlaylistIDs` here for months
   while the tag, both PROTOCOL.mds and the iOS DTO always agreed on `deletedIds`.
@@ -2003,6 +2033,20 @@ its twin.** The top list is older, shorter, and read first.
   an mtime-driven sweeper purges oldest-content-first the instant it lands.
 - **Deleting takes an explicit path list, never a prefix** — that sidesteps the
   case-fold class entirely rather than getting it right.
+
+- **A CSS grid with no `grid-template-columns` sizes its track to the WIDEST
+  item's max-content, and no Go guard can see the result.** `.deleted-list`
+  copied `.unresolved-list`'s `display: grid; gap: 2px` and one long playlist
+  name resolved the implicit `auto` column to **925 px inside a 317 px panel**
+  at 375 px: rows overflowed, every action button left the viewport, and the
+  list grew a horizontal scrollbar. `min-width: 0` on the child does NOT fix
+  it — the TRACK is what grew; `minmax(0, 1fr)` on the list plus `min-width: 0`
+  on the grid ITEM is what lets an ellipsis apply.
+  `TestPlayerEmittedClassesAreStyled` was green throughout, because the class
+  HAD a rule: the markup was correct and the page rendered wrong, which is the
+  exact failure that test describes and cannot detect. **Drive the real console
+  at 375 px with a deliberately long fixture string**, and check
+  `scrollWidth == clientWidth` rather than eyeballing it. (2026-09-20)
 
 - **A gate on a query parameter reads the PARSED predicate, never the
   parameter's presence.** The player sends `needs=all` on every default
