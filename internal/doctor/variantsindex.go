@@ -39,10 +39,8 @@ type VariantsIndex struct {
 	// monotone in the walk, so a verdict derived from a budgeted prefix
 	// could tell an operator that `--gc` refuses when it would proceed —
 	// the confident-wrong-answer shape this whole check exists to catch,
-	// one level up. Measured latent at the default threshold and
-	// reachable from 34 (integrity.MassOrphanLowerBound has the
-	// arithmetic); kept because the knob takes 0..100 (CodeRabbit on
-	// #940).
+	// one level up, and reachable at the default threshold
+	// (CodeRabbit on #940).
 	WouldRefuseGC bool
 	// OrphansExceedRows is integrity.MassOrphanLowerBound: more
 	// unreferenced files than the catalog has rows in total, which is the

@@ -215,17 +215,18 @@ var errInventoryBudget = errors.New("integrity: inventory budget reached")
 // not state what MassOrphanRefusal as a whole will decide (CodeRabbit on
 // #940).
 //
-// The two are not independent, and the arithmetic is worth writing down
-// because it decides how much the distinction matters: `orphans > rows`
-// bounds the referenced files at `known <= 2*rows < 2*orphans` (a row
-// contributes at most two spellings, and both are on disk only mid-copy),
-// so a prefix satisfying this is already more than a third orphans.
-// Swept over every (rows, orphans, known, prefix) shape, a prefix verdict
-// can therefore differ from the completed one only once
-// maxOrphanPercent reaches 34 — never at the default 20. The separation
-// is kept anyway: the knob takes 0..100, and a guard that is correct
-// only because two of its terms happen to overlap at today's default is
-// one configuration change from being wrong.
+// The referenced files are NOT bounded by the row count, which is what
+// makes the divergence reachable at the DEFAULT threshold rather than an
+// exotic one. KnownSidecarSet folds its keys to lower case while this
+// walk counts FILES, so on a case-sensitive filesystem any number of
+// case-variant sidecars collapse onto one row's key and are all counted
+// Known — the deliberate false-keep that fold is documented as costing.
+// An earlier draft of this docblock reasoned from `known <= 2*rows` and
+// concluded the two terms could only disagree above 34%; swept without
+// that assumption they disagree from 3% up (CodeRabbit on #940). The
+// measurement was of a constrained space and was written down as a
+// general bound, which is the trap this repo records as "a negative
+// result is about the thing you measured".
 //
 // Exported so `bridge doctor`'s bounded probe has one place to ask the
 // question rather than a second copy of the floor.

@@ -6167,23 +6167,39 @@ cannot be told from here and points at the command that measures the whole
 tree, noting that it unlinks nothing when it refuses — an instruction that is
 safe to follow either way.
 
-**How reachable, measured rather than asserted.** The first draft of this
-entry said "a prefix that is 90% orphans followed by 180,000 referenced
-files", and that cannot happen: the two terms are not independent.
-`orphans > rows` bounds the referenced files at `known <= 2*rows < 2*orphans`
-(a row contributes at most two spellings, and both sit on disk only mid-copy),
-so any qualifying prefix is already more than a third orphans. Swept over
-every (rows, orphans, known, prefix) shape, a prefix verdict first differs
-from the completed one at **maxOrphanPercent 34 — never at the default 20**.
-So the bug is latent today and reachable on a bridge whose operator raised the
-knob, which takes 0..100.
+**How reachable — and the measurement that was wrong twice.** The first draft
+of this entry said "a prefix that is 90% orphans followed by 180,000
+referenced files", which cannot happen while `orphans > rows` holds. The
+second draft fixed that by bounding the referenced files at `known <= 2*rows`
+(a row contributes at most two spellings) and swept every (rows, orphans,
+known, prefix) shape under it, concluding the two terms could disagree only
+from **maxOrphanPercent 34** and never at the default 20 — latent today,
+reachable on a reconfigured bridge.
 
-Kept anyway, and that is the judgement rather than the arithmetic: a guard
-that is correct only because two of its terms happen to overlap at today's
-default is one configuration change from being wrong, and nothing in the code
-said so. `TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot` pins the
-monotonicity, the non-monotonicity and the 34, so a future change to either
-term fails rather than silently moving the boundary.
+**That bound is also wrong** (CodeRabbit, round 3). `KnownSidecarSet` folds
+its keys to lower case while `TakeSidecarInventory` counts FILES, so on a
+case-sensitive filesystem any number of case-variant sidecars collapse onto
+one row's key and are all counted Known — the deliberate false-keep that the
+fold is already documented as costing, in this very package. The referenced
+files are therefore not bounded by the row count at all. Swept without the
+assumption, the terms disagree **from 3% up**, and the disagreement is
+constructible at the default: `rows=0, orphans=10, known=40` — a prefix of
+the ten orphans refuses, the completed walk over all fifty proceeds.
+
+So the fix is not a hedge against a reconfigured bridge; it is load-bearing on
+a default one. `TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot` now
+CONSTRUCTS that disagreement at the default threshold rather than asserting a
+boundary number, and fails loudly if it ever becomes unconstructible — because
+that would be the condition under which the doctor could claim a verdict from
+a truncated walk again, and it should have to be proved rather than noticed.
+
+**The lesson is the one this file already records, arrived at from the other
+side:** *a negative result is about the thing you measured*. Both wrong
+drafts were real sweeps over real state spaces, run and reported honestly —
+and both spaces were narrowed by an assumption about the subject that was
+never itself checked. A brute-force sweep reads as evidence in a way prose
+does not, which is exactly why the constraint on its domain needs stating and
+justifying beside the number. It took an outside reviewer to see it twice.
 
 ### Not in scope, and why
 

@@ -413,11 +413,16 @@ func mustRel(t *testing.T, base, p string) string {
 // The lower bound is monotone — orphans only grow as the walk sees more,
 // and rows is the whole catalog either way — so a prefix that satisfies
 // it proves the completed walk does. The full verdict is not, and the
-// sweep over every shape below is what says HOW MUCH that matters: the
-// two terms overlap (orphans > rows bounds known at 2*rows < 2*orphans,
-// so any qualifying prefix is already over a third orphans), and a
-// prefix verdict can differ from the completed one only from
-// maxOrphanPercent 34 up — never at the default 20.
+// second half constructs the disagreement AT THE DEFAULT THRESHOLD,
+// which is what says the separation is load-bearing rather than tidy.
+//
+// The referenced-file count is deliberately unbounded here. An earlier
+// draft restricted it to 2*rows, reasoning that a row contributes at
+// most two spellings — and concluded the two terms could only disagree
+// above 34%. KnownSidecarSet folds its keys while the walk counts files,
+// so a case-sensitive tree can collapse any number of case-variant
+// sidecars onto one row's key; the restriction was an assumption about
+// the subject, written down as a measurement of it. (CodeRabbit on #940.)
 func TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot(t *testing.T) {
 	// Monotone: growing the orphan count can only turn the bound ON.
 	for rows := 0; rows < 40; rows++ {
@@ -431,29 +436,34 @@ func TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot(t *testing.T) {
 		}
 	}
 
-	// And the whole verdict is not, from 34 up. `known <= 2*rows`: a row
-	// contributes at most two spellings, and both sit on disk only while
-	// a copy is in flight.
-	firstDivergent := -1
-	for pct := 0; pct <= 100 && firstDivergent < 0; pct++ {
-		for rows := 0; rows < 40 && firstDivergent < 0; rows++ {
-			for orphans := massOrphanFloor; orphans < 80 && firstDivergent < 0; orphans++ {
-				for knownTotal := 0; knownTotal <= 2*rows && firstDivergent < 0; knownTotal++ {
-					if MassOrphanRefusal(orphans, orphans+knownTotal, rows, pct) != "" {
-						continue // the completed walk refuses too: no divergence
-					}
-					for knownPrefix := 0; knownPrefix <= knownTotal; knownPrefix++ {
-						if MassOrphanRefusal(orphans, orphans+knownPrefix, rows, pct) != "" {
-							firstDivergent = pct
-							break
-						}
+	// And the whole verdict is not, at the threshold bridges actually run.
+	const defaultPct = 20
+	type shape struct{ rows, orphans, knownTotal, knownPrefix int }
+	var found *shape
+	for rows := 0; rows < 20 && found == nil; rows++ {
+		for orphans := massOrphanFloor; orphans < 60 && found == nil; orphans++ {
+			for knownTotal := 0; knownTotal < 400 && found == nil; knownTotal++ {
+				if MassOrphanRefusal(orphans, orphans+knownTotal, rows, defaultPct) != "" {
+					continue // the completed walk refuses too: no divergence
+				}
+				for knownPrefix := 0; knownPrefix <= knownTotal; knownPrefix++ {
+					if MassOrphanRefusal(orphans, orphans+knownPrefix, rows, defaultPct) != "" {
+						found = &shape{rows, orphans, knownTotal, knownPrefix}
+						break
 					}
 				}
 			}
 		}
 	}
-	if firstDivergent != 34 {
-		t.Errorf("a prefix verdict first diverges from the completed one at maxOrphanPercent=%d, want 34 — "+
-			"the arithmetic in MassOrphanLowerBound's docblock has moved", firstDivergent)
+	if found == nil {
+		t.Fatal("no prefix/completed disagreement at the default threshold — if that is now a THEOREM " +
+			"rather than an accident, the doctor could claim a verdict from a truncated walk again; " +
+			"prove it before relaxing anything")
 	}
+	// The lower bound holds on that same shape, which is why the check can
+	// keep warning about a lost index while withholding the verdict.
+	if !MassOrphanLowerBound(found.orphans, found.rows) {
+		t.Errorf("the divergent shape %+v does not satisfy the monotone half", *found)
+	}
+	t.Logf("prefix says refuse, completed says proceed, at pct=%d: %+v", defaultPct, *found)
 }
