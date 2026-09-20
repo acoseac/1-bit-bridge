@@ -6096,6 +6096,48 @@ so deleting the Scratch branch changed no count. It now passes `Consider: nil`
 — the `upscale --gc` shape — where Scratch is the only thing holding the
 scratch files out of `Files`.
 
+### Round 1 (CodeRabbit, 2 actionable, both real)
+
+Gemini reviewed with no comments; SonarCloud's gate passed; all twelve CI
+checks green including the Windows leg and `test -race`. CodeRabbit posted a
+genuine review — "Actionable comments posted: 2", no rate-limit marker — and
+both findings were verified against the code before acting.
+
+1. **ENOENT during the forward sweep was counted as a failure**, and `runGC`
+   exits 1 on failures. A window THIS PR opened: splitting the walk from the
+   unlink means a file another process removes in between reaches `os.Remove`
+   as ENOENT — which is the outcome the sweep asked for, reported as a failed
+   cron job. `analyze --gc` has always read it as success, so the two halves
+   also disagreed. `TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved` pins
+   it, with a directory in the orphan list beside it so a fix that swallowed
+   EVERY remove error would still be caught (ENOTEMPTY is not ENOENT).
+
+2. **`MaxEntries` bounded only what `Consider` ACCEPTED**, and directories
+   returned before the check ran at all. So a tree of directories, of ignored
+   files, or of scratch files walked without limit under a probe whose entire
+   contract is that it is bounded — on a settings-page render. Not live, because
+   both budget-using callers pass a nil `Consider` and every count therefore
+   looked right; the guarantee was holding by luck, which is the shape this file
+   records as "the zero value grants nothing". The budget is spent on every
+   traversed entry now, before any classification, and `inv.Files` stays the
+   CLASSIFIED count so Known / Orphans / the ratio are untouched.
+   `TestTakeSidecarInventoryBudgetCountsWhatItDidNotClassify` covers all three
+   shapes; the control (budget back on `inv.Files`) turns it red in all three
+   plus the original budget test.
+
+Re-measured after the semantic change, because the recorded number was about
+files and is now about entries: 100,001 files in 111 directories, **110 ms
+unbounded against 21 ms at the budget**, classifying 19,889 — the remainder of
+the budget goes on directories. The doctor test's expectation moves with it
+(root + `d` + three files at a budget of five), and the sample-cap assertion
+moves to the fixture that actually exceeds it, since three orphans cannot
+demonstrate a cap of five.
+
+**Process note:** the first ENOENT control did not BUILD — reverting the
+compare left `io/fs` imported and unused — which reads as "control invalid",
+never as a pass. This file already records that rule; reverting the import
+alongside the production line is what makes the control mean anything.
+
 ### Not in scope, and why
 
 - **`OrphanSidecarSweeper`** (the BACKGROUND file walk, opt-in and off by
