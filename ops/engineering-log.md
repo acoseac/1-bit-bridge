@@ -6229,6 +6229,40 @@ change to the shipped default re-asks the property at the new value instead
 of quietly continuing to answer about a number no bridge runs. Checked for a
 cycle first — `config` does not depend on `integrity`.
 
+### Round 5 (CodeRabbit, 1 Major — observation taken, remedy declined)
+
+**"Do not return `OK` for a partial inventory."** Right about the phrasing:
+`Orphans == 0` over a walk that saw part of the tree was rendered "N sidecar
+file(s), all referenced", a global claim from a prefix, with the scope suffix
+contradicting it in the same sentence. Fixed.
+
+**The stated mechanism does not hold, and checking it changed the fix.** The
+finding's consequence was "the complete doctor report can therefore print
+`all clear.` for an incomplete check" — but `all clear.` is gated on
+`HasFail()` alone, so it prints with warnings present. The live fixture in
+this PR printed `12 ok, 3 warn, 0 fail` followed by `all clear.` Converting
+this `ok` to a `warn` would not have changed the thing it was aimed at.
+
+So the two partial cases are split on whether they are the OPERATOR'S to act
+on, rather than both becoming warnings:
+
+- **unreadable directory → warn.** A fault on the host: actionable, reported
+  nowhere else, and it means `--gc` and the serving path may not see those
+  sidecars either. The hint names ownership and mode.
+- **truncated budget → ok, rephrased.** A property of this check (we chose the
+  budget) and of a large library. Every bridge over
+  `doctorVariantsIndexBudget` sidecars truncates on EVERY run, so warning
+  there is a permanent unactionable line in every large healthy operator's
+  report — the shape this file already records from the `Managed` checks,
+  where two unactionable warnings made a healthy appliance read as two
+  problems.
+
+Taken whole, the proposed patch would have bought nothing against its stated
+goal and cost that. **Take the accurate half of a finding, verify the
+mechanism, write your own fix** — the rule this file records from #892-#899,
+and the fourth time on this PR that verifying before applying changed the
+outcome. Declined on the thread with the evidence.
+
 ### Not in scope, and why
 
 - **`OrphanSidecarSweeper`** (the BACKGROUND file walk, opt-in and off by
