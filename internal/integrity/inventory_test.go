@@ -80,9 +80,13 @@ func TestTakeSidecarInventoryPartitionsTheTree(t *testing.T) {
 func TestTakeSidecarInventoryKeepsScratchOutOfTheRatio(t *testing.T) {
 	root := t.TempDir()
 	seedTree(t, root, "a.waveform.bin", "b.waveform.bin.tmp", "c.waveform.bin.tmp")
+	// Consider is nil — accept every file, the shape `upscale --gc` uses
+	// — so Scratch is the ONLY thing keeping the two .tmp files out of
+	// the ratio. With a Consider that excludes them anyway (what
+	// `analyze --gc` passes) this assertion would hold with Scratch
+	// deleted, and prove nothing.
 	inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{
-		Consider: func(n string) bool { return strings.HasSuffix(n, ".waveform.bin") },
-		Scratch:  func(n string) bool { return strings.HasSuffix(n, ".waveform.bin.tmp") },
+		Scratch: func(n string) bool { return strings.HasSuffix(n, ".waveform.bin.tmp") },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +96,11 @@ func TestTakeSidecarInventoryKeepsScratchOutOfTheRatio(t *testing.T) {
 	}
 	if len(inv.ScratchPaths) != 2 {
 		t.Errorf("ScratchPaths=%v, want both .tmp files (their caller removes them unconditionally)", inv.ScratchPaths)
+	}
+	for _, p := range inv.OrphanPaths {
+		if strings.HasSuffix(p, ".tmp") {
+			t.Errorf("a scratch file is in the deletion RATIO as an orphan: %s", p)
+		}
 	}
 }
 
