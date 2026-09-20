@@ -3,6 +3,7 @@ package integrity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -108,10 +109,14 @@ func TestTakeSidecarInventoryKeepsScratchOutOfTheRatio(t *testing.T) {
 // cap the walk; the cap must be visible in the result, because an answer
 // from part of a tree presented as an answer about the tree is the
 // confident-wrong-answer shape.
+//
+// The budget counts TRAVERSED entries, so Files lands BELOW it by however
+// many directories the walk crossed. That is the point: the cap is a
+// wall-clock bound and a directory costs the same as a file.
 func TestTakeSidecarInventoryBudgetScopesTheAnswer(t *testing.T) {
 	root := t.TempDir()
 	for i := 0; i < 30; i++ {
-		seedTree(t, root, filepath.ToSlash(filepath.Join("d", string(rune('a'+i%26))+string(rune('a'+i/26))+".flac")))
+		seedTree(t, root, fmt.Sprintf("d/%02d.flac", i))
 	}
 	inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{
 		MaxEntries: 10, MaxOrphanPaths: 3,
@@ -122,14 +127,88 @@ func TestTakeSidecarInventoryBudgetScopesTheAnswer(t *testing.T) {
 	if !inv.Truncated {
 		t.Error("a walk stopped at its budget must say so")
 	}
-	if inv.Files != 10 {
-		t.Errorf("files=%d, want exactly the budget", inv.Files)
+	// Ten entries: the root, the `d` directory, and eight files.
+	if inv.Files != 8 {
+		t.Errorf("files=%d, want 8 — the budget of 10 also paid for the root and `d`", inv.Files)
 	}
 	if len(inv.OrphanPaths) != 3 {
 		t.Errorf("OrphanPaths=%d, want the MaxOrphanPaths cap of 3 while Orphans counts %d", len(inv.OrphanPaths), inv.Orphans)
 	}
-	if inv.Orphans != 10 {
-		t.Errorf("orphans=%d, want every classified file counted even though only 3 paths are kept", inv.Orphans)
+	if inv.Orphans != inv.Files {
+		t.Errorf("orphans=%d files=%d: every classified file here is unreferenced", inv.Orphans, inv.Files)
+	}
+}
+
+// TestTakeSidecarInventoryBudgetCountsWhatItDidNotClassify is the finding
+// itself. Gated on inv.Files, the cap bounded only the files Consider
+// accepted — so a tree of directories, of ignored files, or of scratch
+// files walked without limit under a probe documented as bounded, and the
+// guarantee held only because both of today's callers happen to pass a nil
+// Consider. `/api/doctor` runs on a settings-page render; an unbounded
+// walk there is the cost the budget exists to cap. (CodeRabbit on #940.)
+func TestTakeSidecarInventoryBudgetCountsWhatItDidNotClassify(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		seed func(root string)
+		opts SidecarInventoryOptions
+	}{
+		{
+			name: "files Consider rejects",
+			seed: func(root string) {
+				for i := 0; i < 200; i++ {
+					seedTree(t, root, fmt.Sprintf("notes/%03d.txt", i))
+				}
+			},
+			opts: SidecarInventoryOptions{
+				Consider:   func(n string) bool { return strings.HasSuffix(n, ".flac") },
+				MaxEntries: 20,
+			},
+		},
+		{
+			name: "scratch files",
+			seed: func(root string) {
+				for i := 0; i < 200; i++ {
+					seedTree(t, root, fmt.Sprintf("tmp/%03d.waveform.bin.tmp", i))
+				}
+			},
+			opts: SidecarInventoryOptions{
+				Consider:   func(n string) bool { return strings.HasSuffix(n, ".waveform.bin") },
+				Scratch:    func(n string) bool { return strings.HasSuffix(n, ".tmp") },
+				MaxEntries: 20,
+			},
+		},
+		{
+			name: "directories",
+			seed: func(root string) {
+				for i := 0; i < 200; i++ {
+					if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("a%03d", i)), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			opts: SidecarInventoryOptions{MaxEntries: 20},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			c.seed(root)
+			inv, err := TakeSidecarInventory(context.Background(), root, nil, c.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !inv.Truncated {
+				t.Fatalf("the walk crossed 200 entries under a budget of %d without truncating: %+v",
+					c.opts.MaxEntries, inv)
+			}
+			// ...and the budget must not have been spent on classification
+			// it never did: Files stays the count of classified files.
+			if inv.Files > c.opts.MaxEntries {
+				t.Errorf("files=%d exceeds the budget", inv.Files)
+			}
+			if len(inv.ScratchPaths) > c.opts.MaxEntries {
+				t.Errorf("scratch=%d exceeds the budget", len(inv.ScratchPaths))
+			}
+		})
 	}
 }
 

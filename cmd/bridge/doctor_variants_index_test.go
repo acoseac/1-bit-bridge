@@ -108,6 +108,13 @@ func TestDoctorReportsAVariantCatalogThatLostItsIndex(t *testing.T) {
 	if !strings.Contains(c.Hint, "Artist"+string(filepath.Separator)+"Stranded") {
 		t.Errorf("hint names no example: %q", c.Hint)
 	}
+	// The sample is capped and the rest are accounted for — 40 orphans,
+	// doctorVariantsIndexSamples named, the remainder counted. A hint that
+	// listed all forty would scroll the summary off the screen.
+	if want := fmt.Sprintf("+%d more", 40-doctorVariantsIndexSamples); !strings.Contains(c.Hint, want) {
+		t.Errorf("hint does not cap its sample at %d and account for the rest (%q): %q",
+			doctorVariantsIndexSamples, want, c.Hint)
+	}
 	// The verdict has to come from the SWEEP's own threshold, not a
 	// second copy of the rule: what the doctor warns about is exactly
 	// what `bridge upscale --gc` refuses.
@@ -228,18 +235,18 @@ func TestDoctorVariantsIndexWalkIsBounded(t *testing.T) {
 	}
 	dbPath := manifest.DefaultDBPath(filepath.Join(dir, "data"))
 
+	// The budget counts TRAVERSED entries, so five of them here are the
+	// root, `d`, and three files — Files lands below the cap by however
+	// many directories the walk crossed, which is exactly what makes the
+	// cap a wall-clock bound rather than a bound on candidates.
 	idx, err := variantsIndexCounts(context.Background(), dbPath, variantsDir, 20, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !idx.Truncated || idx.Files != 5 {
-		t.Fatalf("truncated=%v files=%d, want a walk that stopped at the budget of 5", idx.Truncated, idx.Files)
+	if !idx.Truncated || idx.Files != 3 {
+		t.Fatalf("truncated=%v files=%d, want a walk that stopped at the budget of 5 entries (root + d + 3 files)",
+			idx.Truncated, idx.Files)
 	}
-	if len(idx.OrphanSample) != doctorVariantsIndexSamples {
-		t.Errorf("OrphanSample=%d, want the sample cap %d while Orphans counts %d",
-			len(idx.OrphanSample), doctorVariantsIndexSamples, idx.Orphans)
-	}
-
 	// The wiring: whatever buildDoctorDeps builds must carry a real cap.
 	d := buildDoctorDeps(cfgPath)
 	if d.VariantsIndex == nil {

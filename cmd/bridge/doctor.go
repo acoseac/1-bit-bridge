@@ -341,16 +341,19 @@ func relocatedSidecarCounts(ctx context.Context, dbPath, variantsDir, waveformDi
 	return out, nil
 }
 
-// doctorVariantsIndexBudget caps how many sidecar files the variants-index
-// probe classifies before it stops and scopes its answer.
+// doctorVariantsIndexBudget caps how many ENTRIES the variants-index probe
+// traverses — directories and ignored files included, not just the sidecar
+// files it classifies — before it stops and scopes its answer.
 //
 // `/api/doctor` is fetched on every settings-page render (the prereq
 // chips), not only from the "Run checks" button, so this walk is on a page
 // load. Measured on an APFS SSD over a synthetic source-mirrored tree of
-// 100,001 files: 113 ms unbounded, 23 ms at this budget. The number that
-// sets it is the other end — internal/integrity's sweeper records ~50 µs
-// per entry on the pathological tier (USB-attached spinning rust, NTFS /
-// exFAT), where 20,000 entries is ~1 s and the whole tree would be ~5 s.
+// 100,001 files in 111 directories: 110 ms unbounded, 21 ms at this budget
+// (19,889 files classified, the rest of the budget spent on directories).
+// The number that sets it is the other end — internal/integrity's sweeper
+// records ~50 µs per entry on the pathological tier (USB-attached spinning
+// rust, NTFS / exFAT), where 20,000 entries is ~1 s and the whole tree
+// would be ~5 s.
 //
 // Truncating loses very little of what the check is for: a catalog that
 // lost its index has unreferenced files throughout the tree, so they turn

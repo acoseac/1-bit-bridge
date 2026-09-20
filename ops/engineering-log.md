@@ -6051,11 +6051,13 @@ walker, which is what makes it quiet on a merely RELOCATED catalog — the one
 moment its warning must not be noise. Control: recorded paths only, and the
 relocated-catalog test reports 12 of 12 files unreferenced.
 
-**The walk is bounded at 20,000 entries**, because `/api/doctor` is fetched on
-every settings-page render (the prereq chips), not only from the "Run checks"
-button. Measured over a synthetic source-mirrored tree of 100,001 files on an
-APFS SSD: **113 ms unbounded, 57 ms at 50,000, 23 ms at 20,000** (~1.1 µs per
-entry warm). The number that sets the budget is the other end —
+**The walk is bounded at 20,000 traversed entries**, because `/api/doctor` is
+fetched on every settings-page render (the prereq chips), not only from the
+"Run checks" button. Measured over a synthetic source-mirrored tree of 100,001
+files in 111 directories on an APFS SSD: **110 ms unbounded, 21 ms at the
+budget** (19,889 files classified — the rest of the budget went on
+directories); at an earlier draft's 50,000 it was 57 ms. That is ~1.1 µs per
+entry warm. The number that sets the budget is the other end —
 `internal/integrity`'s sweeper records ~50 µs per entry on the pathological
 tier (USB-attached spinning rust, NTFS / exFAT), where the whole tree would be
 ~5 s and 20,000 entries is ~1 s. On the live 10,248-file fixture the WHOLE

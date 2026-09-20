@@ -1147,9 +1147,13 @@ no failing test — which is the shape to expect in this area.
   on a merely relocated catalog, and takes its "the sweep would refuse
   this" wording from `MassOrphanRefusal` rather than restating the rule.
   `/api/doctor` is fetched on every settings-page render, so the walk caps
-  at 20,000 entries (measured: 113 ms unbounded over 100,001 files, 23 ms
-  at the cap; ~1 s at the cap on the sweeper's recorded 50 µs/entry
-  pathological tier) and SCOPES its claim when it truncates — the
+  at 20,000 TRAVERSED entries — directories and ignored files included,
+  never just the candidates, or the cap bounds nothing on a tree of
+  either and the guarantee holds only for callers that happen to pass a
+  nil `Consider` (measured: 110 ms unbounded over 100,001 files in 111
+  directories, 21 ms at the cap; ~1 s at the cap on the sweeper's
+  recorded 50 µs/entry pathological tier) — and SCOPES its claim when it
+  truncates: the
   all-clear is what gets scoped, never the alarm, because a lost index has
   orphans throughout. **The probe reports the budget it ran under**: a
   closure wired with 0 walks the whole tree on a page render and every

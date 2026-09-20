@@ -81,8 +81,17 @@ type SidecarInventoryOptions struct {
 	// Scratch reports whether a basename is the sweep's own half-written
 	// temporary. nil means the family has none.
 	Scratch func(name string) bool
-	// MaxEntries caps how many files the walk classifies; 0 is
-	// unbounded. A walk that hits the cap sets Truncated.
+	// MaxEntries caps how many entries the walk TRAVERSES — every
+	// directory and every file it is handed, whether or not Consider
+	// accepts it; 0 is unbounded. A walk that hits the cap sets
+	// Truncated.
+	//
+	// Traversed, not classified, because the cap is a wall-clock bound
+	// and a directory costs the same to walk as a file. Gated on
+	// inv.Files it would bound nothing on a tree of directories or of
+	// files Consider rejects — the guarantee would hold only for
+	// today's callers, both of which happen to pass a nil Consider
+	// (CodeRabbit on #940).
 	//
 	// Only a REPORTING caller may set it. A sweep that deletes on a
 	// truncated inventory would be deleting on a ratio measured from part
@@ -113,7 +122,12 @@ type SidecarInventoryOptions struct {
 // A directory that cannot be DESCENDED into is the softer case — see
 // SidecarInventory.Unreadable.
 func TakeSidecarInventory(ctx context.Context, root string, known map[string]struct{}, opts SidecarInventoryOptions) (SidecarInventory, error) {
-	var inv SidecarInventory
+	var (
+		inv SidecarInventory
+		// traversed counts every entry the walk is handed, which is what
+		// MaxEntries bounds — see SidecarInventoryOptions.MaxEntries.
+		traversed int
+	)
 	if root == "" {
 		// WalkDir("") walks the process working directory — the
 		// ReapOrphans rule. Nothing to inventory is not "inventory
@@ -141,6 +155,17 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 			}
 			return walkErr
 		}
+		// The budget is spent BEFORE any classification, so a tree of
+		// directories or of files Consider rejects costs the same as one
+		// of candidates. inv.Files stays the count of CLASSIFIED files, so
+		// Known, Orphans and the mass-orphan ratio are unchanged.
+		if opts.MaxEntries > 0 {
+			if traversed >= opts.MaxEntries {
+				inv.Truncated = true
+				return errInventoryBudget
+			}
+			traversed++
+		}
 		if d.IsDir() {
 			if path != root && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
@@ -154,10 +179,6 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 		}
 		if opts.Consider != nil && !opts.Consider(name) {
 			return nil
-		}
-		if opts.MaxEntries > 0 && inv.Files >= opts.MaxEntries {
-			inv.Truncated = true
-			return errInventoryBudget
 		}
 		inv.Files++
 		if _, ok := known[strings.ToLower(filepath.Clean(path))]; ok {

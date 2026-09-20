@@ -39,6 +39,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"runtime"
 	"strings"
@@ -797,7 +798,12 @@ func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integr
 			fmt.Fprintln(stderr, gcInterruptedMessage)
 			return removed, inv.Known, failed, 1
 		}
-		if err := os.Remove(path); err != nil {
+		// ENOENT is a success: the inventory and the unlink are separate
+		// steps now, so a file another process removed in between is gone,
+		// which is the outcome asked for. Counting it as a failure would
+		// exit 1 and report a cron'd --gc as failed for doing its job.
+		// `analyze --gc` has always read it this way.
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			fmt.Fprintf(stderr, "remove %s: %v\n", path, err)
 			failed++
 			continue
