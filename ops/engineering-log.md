@@ -6106,6 +6106,35 @@ scratch files out of `Files`.
   worth doing on its own.
 - **`artwork --gc`**: keyed by content hash and MBID, not by an absolute path a
   relocation can strand. Exempted by name in the sweep test.
+- **The refusal deliberately does NOT name `bridge variants move`**, though the
+  obvious hint would. That command needs the ROWS — this file's own #937 entry
+  records it — and so does adoption; in the lost-index shape there are no rows
+  to move. Naming it would send the operator to a command that cannot work,
+  which is the class of error the same PR removed from `analyze --gc`'s
+  refusal (it claimed `bridge doctor` reports waveform orphans under
+  `sidecar-paths`; it does not, and `variants-index` is variants only). The
+  hint points at `bridge doctor` and at restoring the rows, which are the two
+  things that can actually help.
+
+### The cost the doctor check adds, stated rather than assumed
+
+The probe needs `(source_path, variant_id, sidecar_path)` per row to build the
+known set, so it calls `AllVariants` — a full read of `track_variants`, not the
+narrow `CountVariantsNotUnderPrefix` the sidecar-paths probe uses. On a
+100k-variant bridge that is the same read the hourly watcher and every `--gc`
+already do, but it is now on a settings-page render, beside the capped walk.
+Against what `/api/doctor` already costs — `lsof`, and up to three toolchain
+execs each under a 2 s cap — it is in family rather than free. Measured whole:
+78 ms on the 10,248-file live fixture. If it ever needs to come down, the shape
+is a narrower projection for the known set, not a smaller budget: the budget is
+already where the measurement puts it.
+
+### No wire change
+
+`PROTOCOL.md` untouched, no `/v1` handler touched, no `ProtocolVersion` bump.
+`bridge doctor --json` gains a check in its `checks` list, which is a list and
+not a schema change, so `doctorJSONSchemaVersion` stays at 1 by its own rule
+(bump on rename / removal / changed meaning).
 - `TestServeWiresResolvedConfigPathIntoAdminAndBackups` flakes at **1/10 on
   this branch and 1/10 on main**, identically (`TempDir RemoveAll cleanup:
   unlinkat …/data/tls: directory not empty`) — the latent boot-test cleanup
