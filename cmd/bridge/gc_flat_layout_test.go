@@ -116,9 +116,19 @@ func TestRunGCStillRefusesAVariantsDirThatWasAlreadyEmpty(t *testing.T) {
 		t.Errorf("%d row(s) survived a refused --gc, want 5", len(rows))
 	}
 	out := stderr.String()
-	for _, want := range []string{"variants directory is empty", dir, "refusing to delete rows"} {
+	for _, want := range []string{"variants directory is empty", "refusing to delete rows"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("refusal does not say %q:\n%s", want, out)
 		}
+	}
+	// The refusal must NAME the mount — that is the half a fix which simply
+	// deleted the guard would lose. Either rendering counts: the message
+	// formats the path with %q, and on Windows that comes back with its
+	// backslashes ESCAPED (`C:\\Users\\...`), so a bare substring check
+	// against the raw path fails on that platform alone (caught by the
+	// Windows CI leg). Accepting both keeps the assertion about the mount
+	// being named rather than about the verb it is named with.
+	if !strings.Contains(out, dir) && !strings.Contains(out, fmt.Sprintf("%q", dir)) {
+		t.Errorf("refusal does not name the mount %s:\n%s", dir, out)
 	}
 }
