@@ -101,6 +101,23 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 	if idx.Unreadable > 0 {
 		scope += fmt.Sprintf("; %d director(y/ies) could not be read", idx.Unreadable)
 	}
+	if idx.Files == 0 && idx.Rows > 0 {
+		// The other way round, and "all referenced" would be a strange
+		// thing to say about no files at all. Nothing else reports this:
+		// checkSidecarPaths sees only rows recorded OUTSIDE the current
+		// directory, and these point inside one that is empty or gone.
+		//
+		// Both sweeps already refuse to act on it — VariantsDirSweepBlockReason
+		// reads a missing-or-empty directory as an unmounted volume rather
+		// than as a library whose every sidecar was deleted — so this is a
+		// warning, not an emergency, and it says so.
+		return warn(checkNameVariantsIndex,
+			fmt.Sprintf("the catalog holds %d variant row(s) and %s holds no sidecar files%s", idx.Rows, idx.VariantsDir, scope),
+			"A variants volume that is unmounted looks exactly like this, and the integrity sweep and `bridge upscale --gc` "+
+				"both refuse to reap rows while the directory reads missing or empty, so nothing is being deleted. "+
+				"If the volume should be mounted, mount it. If the renditions really are gone, `bridge upscale --gc` "+
+				"clears the rows once the directory is back, and the job pool re-renders from source.")
+	}
 	if idx.Orphans == 0 {
 		return ok(checkNameVariantsIndex, fmt.Sprintf("%d variant row(s), %d sidecar file(s), all referenced%s",
 			idx.Rows, idx.Files, scope))

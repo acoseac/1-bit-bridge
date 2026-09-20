@@ -144,3 +144,36 @@ func TestVariantsIndexSkipsWithoutAProbeOrOnAManagedBridge(t *testing.T) {
 		t.Error("a managed bridge still paid for the walk")
 	}
 }
+
+// TestVariantsIndexWarnsWhenTheTreeIsEmptyButTheCatalogIsNot — the other
+// direction, which nothing else reports: checkSidecarPaths sees only rows
+// recorded OUTSIDE the current directory, and these point inside one that
+// is empty or gone. "all referenced" would be a strange thing to say
+// about no files at all.
+func TestVariantsIndexWarnsWhenTheTreeIsEmptyButTheCatalogIsNot(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{Rows: 4096, Files: 0, VariantsDir: "/mnt/bridge-variants"}, nil
+	}})
+	if c.Status != Warn {
+		t.Fatalf("status=%v, want warn: %q", c.Status, c.Summary)
+	}
+	if !strings.Contains(c.Summary, "4096 variant row(s)") || !strings.Contains(c.Summary, "no sidecar files") {
+		t.Errorf("summary: %q", c.Summary)
+	}
+	if strings.Contains(c.Summary, "all referenced") {
+		t.Errorf("an empty tree was reported as fully referenced: %q", c.Summary)
+	}
+	// It must not read as an emergency: both sweeps refuse to reap while
+	// the directory looks unmounted, so nothing is being deleted.
+	if !strings.Contains(c.Hint, "unmounted") || !strings.Contains(c.Hint, "nothing is being deleted") {
+		t.Errorf("hint does not say the sweeps are already standing down: %q", c.Hint)
+	}
+	// An empty catalog over an empty tree is a bridge that never
+	// transcoded anything — the one state this must stay quiet about.
+	c = variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{}, nil
+	}})
+	if c.Status != OK {
+		t.Errorf("a bridge that never transcoded anything warns: %q", c.Summary)
+	}
+}
