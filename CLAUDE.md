@@ -1159,6 +1159,31 @@ no failing test — which is the shape to expect in this area.
   closure wired with 0 walks the whole tree on a page render and every
   count still looks right, which is the one mistake no number reveals.
   (#940)
+- **A guard that reads the world AFTER a sweep has to be told what the sweep
+  did.** `gcCheckOutputDirBeforeReverseSweep` reads a missing-or-empty variants
+  directory as a lost mount — right, except that on the legacy hash-flat layout
+  (`<dir>/<hash>-<variantID>.flac`, no subdirectories) the FORWARD sweep runs
+  first and can remove the last file, so it refused on a state that run had
+  just created. No re-run cleared it — the directory was still empty, so it
+  refused again having removed nothing — and **no flag reached it either**
+  (measured: `--allow-mass-delete`, `--allow-mass-orphans` and `--allow-empty`
+  all still wedged; only `mkdir "$dir/.keep"` got past, because a plain file is
+  unlinked as an orphan before the reverse guard probes). Those rows could not
+  be reaped by `--gc` at all, and `manifest clear-missing` is not a route —
+  `ClearMissingCounts` deletes from `tracks` + `folders` and never touches
+  `track_variants`. The source-mirrored layout hid it for years: `WalkDir`
+  removes no directories, so an emptied subtree still leaves dirents behind.
+  It now takes the forward sweep's `removed` count and skips the refusal for
+  **EMPTY alone**; missing, unreadable and not-a-directory still refuse however
+  much was removed, because the forward sweep unlinks files and never
+  directories (`TakeSidecarInventory` hands it none), so it cannot be what took
+  the root — something else did, mid-run, which is the hazard.
+  `integrity.VariantsDirSweepBlock` is the typed answer and
+  `VariantsDirSweepBlockReason` delegates to it, so the two cannot drift. The
+  serve-time `VariantWatcher` has the same shape one layer over —
+  `OrphanSidecarSweeper` can empty a flat directory under it — and is
+  deliberately left: it removes nothing itself, so it has no count to be told,
+  and the CLI is the repair tool. (#941)
 
 ### DLNA, UPnP and discovery
 
