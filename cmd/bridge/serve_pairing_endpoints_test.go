@@ -19,10 +19,13 @@ import (
 
 // TestServeBakesHealthEndpointsIntoThePairingQR pins the one line no
 // package test can see: `admin.Deps.Endpoints: apiSrv.ReachableEndpoints`
-// in runServe. Without it the admin falls back to its own host-network
-// walk and every test in internal/admin stays green — that fallback is
-// the exact shape the pairing QR shipped in from PR #269 until
-// 2026-09-20, with no Tailscale entry and no customEndpoints.
+// in runServe. Without it the admin has no endpoint list at all — the QR
+// carries the primary alone, the panel renders empty — and every test in
+// internal/admin stays green. (The first draft fell back to the admin's
+// old host-network walk there, which on a host without Tailscale is
+// byte-identical to health: this test could not see the line missing.
+// That walk is the shape the QR shipped in from PR #269 until
+// 2026-09-20, with no Tailscale entry and no customEndpoints.)
 //
 // Booting the real server, the test asks the two surfaces the same
 // question and requires the same answer: `POST /api/tokens` must bake
@@ -152,8 +155,8 @@ func assertQRMatchesHealth(t *testing.T, op string, res pairResponse, primary st
 	want := append([]string{primary}, health...)
 	if strings.Join(res.Alternates, "\n") != strings.Join(want, "\n") {
 		t.Errorf("%s: alternates are not [primary] + /v1/health.endpoints —\n  got  %v\n  want %v\n"+
-			"admin.Deps.Endpoints is not wired to apiSrv.ReachableEndpoints, so the QR bakes the "+
-			"admin's own host walk (no Tailscale entry, no customEndpoints) instead of what the phone sees.",
+			"admin.Deps.Endpoints is not wired to apiSrv.ReachableEndpoints, so the QR has no "+
+			"endpoint list to bake (primary alone) instead of what the phone sees.",
 			op, res.Alternates, want)
 	}
 	// And the QR itself, not just the JSON beside it.

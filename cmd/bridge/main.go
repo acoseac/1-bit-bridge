@@ -4149,9 +4149,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// The pairing QR's `urls=` list and the Settings "Reachable
 		// endpoints" panel read the SAME enumeration /v1/health serves —
 		// including the Tailscale MagicDNS + tailnet IPs that only the api
-		// layer appends (from tailscaleAdminSrc, above). Unwired, both fall
-		// back to the host-network walk and silently lose every Tailscale
-		// entry, which is how they shipped from PR #269 until 2026-09-20.
+		// layer appends (from tailscaleAdminSrc, above). Unwired, there is
+		// no list at all: the QR carries the operator's primary alone and
+		// the panel renders empty — deliberately not the admin's old
+		// host-network walk, which is the no-Tailscale shape both shipped
+		// in from PR #269 until 2026-09-20 (see advertisedEndpoints).
 		Endpoints:       apiSrv.ReachableEndpoints,
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
