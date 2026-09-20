@@ -918,37 +918,104 @@ func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowC
 	return 0
 }
 
-// runGCReverseSweep is the per-row sweep: every track_variants row
-// whose sidecar is missing on disk is deleted via the store's
-// DeleteVariant (which bumps indexed_at). Returns
-// `(rowsRemoved, rowsKept, rowsFailed, exitCode)`. exitCode is 1 on
-// SIGINT-during-sweep or a relocation refusal, 0 otherwise —
-// bot-reviewed cancellation shape from PR #217 (ctx cancel during the
-// inner DeleteVariant surfaces as interrupted, real DB fault is logged
-// and counted).
+// gcRowVerdicts is one classification pass over every track_variants
+// row against the variants directory — integrity.LocateSidecar's verdict
+// per row, bucketed. Read-only: it stats, it never writes.
 //
-// "Missing on disk" is integrity.LocateSidecar's verdict, the same one
-// the serve-time VariantWatcher acts on: a row whose recorded path is
-// gone but whose file sits at its canonical place under outputDir with
-// the recorded size is RELOCATED and adopted (its sidecar_path rewritten,
-// no indexed_at bump), not reaped. Then integrity.MassDeleteRefusal asks
-// the same question the watcher asks before it deletes — would this
-// reap more than the configured share of the catalog while the tree
-// still holds sidecars — and refuses unless --allow-mass-delete says
-// the operator has looked. The two reapers share both decisions so
-// they cannot disagree about what a relocation looks like.
-func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string, allRows []manifest.VariantRow, opts gcOptions) (int, int, int, int) {
-	// Reverse sweep: each row in `track_variants` whose `sidecar_path`
-	// is missing on disk is a phantom variant. `DeleteVariant` is the
-	// store API designed for this exact case — it bumps the parent
-	// track's `indexed_at` so the next iOS delta sync sees the row
-	// disappear, closing the loop. Use `os.Stat` (NOT `os.Lstat`) so
-	// a symlink pointing at a missing target is correctly treated as
-	// a phantom: the bridge's `/v1/download` path opens the file
-	// through the symlink and would 410 on a broken target, so the
-	// gc should treat that case identically to a directly-missing
-	// file. Per Gemini on PR #207. (LocateSidecar stats the same way.)
-	//
+// Taken ONCE, before the forward sweep, because the relocation guard has
+// to be asked before anything is unlinked: a tree copied to a layout the
+// probe does not recognise (a flat dump, a `variants/old/...` subtree) is
+// all orphans to the forward sweep, which would remove the very files
+// that are the guard's evidence and then hand the reverse sweep a tree
+// that "holds no sidecars". The forward sweep cannot change a verdict —
+// every recorded and canonical path is in its known set — so the reverse
+// sweep acts on this same pass rather than stat'ing everything again.
+type gcRowVerdicts struct {
+	present    int
+	relocated  []gcRelocated
+	mismatched []gcMismatched
+	unknown    []gcUnknown
+	missing    []manifest.VariantRow
+}
+
+type gcRelocated struct {
+	row       manifest.VariantRow
+	canonical string
+}
+
+type gcMismatched struct {
+	row       manifest.VariantRow
+	canonical string
+}
+
+type gcUnknown struct {
+	row manifest.VariantRow
+	err error
+}
+
+func classifyGCRows(outputDir string, rows []manifest.VariantRow) gcRowVerdicts {
+	var v gcRowVerdicts
+	for _, r := range rows {
+		loc := integrity.LocateSidecar(outputDir, integrity.VariantSnapshot{
+			SourcePath: r.SourcePath, VariantID: r.VariantID, SidecarPath: r.SidecarPath, SizeBytes: r.SizeBytes,
+		})
+		switch loc.Verdict {
+		case integrity.SidecarPresent:
+			v.present++
+		case integrity.SidecarRelocated:
+			v.relocated = append(v.relocated, gcRelocated{row: r, canonical: loc.Canonical})
+		case integrity.SidecarMismatched:
+			v.mismatched = append(v.mismatched, gcMismatched{row: r, canonical: loc.Canonical})
+		case integrity.SidecarUnknown:
+			v.unknown = append(v.unknown, gcUnknown{row: r, err: loc.Err})
+		case integrity.SidecarMissing:
+			v.missing = append(v.missing, r)
+		}
+	}
+	return v
+}
+
+// gcRefuseRelocationInProgress is the relocation guard as a pre-flight
+// over the WHOLE gc — integrity.MassDeleteRefusal, the same decision the
+// serve-time watcher makes before it deletes, asked here before either
+// sweep has touched anything. Returns 0 to proceed, 1 after printing the
+// refusal. --allow-mass-delete skips it.
+func gcRefuseRelocationInProgress(stderr io.Writer, outputDir string, verdicts gcRowVerdicts, rowCount int, opts gcOptions) int {
+	if opts.allowMassDelete {
+		return 0
+	}
+	reason := integrity.MassDeleteRefusal(outputDir, len(verdicts.missing), rowCount, opts.maxDeletePercent)
+	if reason == "" {
+		return 0
+	}
+	fmt.Fprintf(stderr, "GC: refusing to run — %s.\n", reason)
+	fmt.Fprintln(stderr, "  This looks like a relocation in progress, not a library whose sidecars were deleted:")
+	fmt.Fprintln(stderr, "  rows still name a directory that is not this one, and the files are here but not at their")
+	fmt.Fprintln(stderr, "  source-mirrored paths (or the copy has not finished). Nothing was unlinked and no row was")
+	fmt.Fprintln(stderr, "  removed. Put the files at their paths, or `bridge variants move --to <dir>`, and re-run.")
+	fmt.Fprintln(stderr, "  If the sidecars really are gone, re-run with --allow-mass-delete.")
+	if n := len(verdicts.relocated); n > 0 {
+		fmt.Fprintf(stderr, "  (%d row(s) DO have their file at the canonical path and would be adopted by that run.)\n", n)
+	}
+	return 1
+}
+
+// runGCReverseSweep applies the classification: every row whose sidecar
+// is RELOCATED (gone from the recorded path, present at its canonical
+// place under outputDir with the recorded size) is adopted — its
+// sidecar_path rewritten by the store's UpdateVariantSidecarPath, which
+// deliberately bumps no indexed_at — and every row MISSING at both
+// locations is deleted via DeleteVariant (which bumps indexed_at).
+// Returns `(rowsRemoved, rowsKept, rowsFailed, exitCode)`; exitCode is 1
+// on SIGINT-during-sweep, 0 otherwise — bot-reviewed cancellation shape
+// from PR #217 (ctx cancel during the inner DeleteVariant surfaces as
+// interrupted, real DB fault is logged and counted).
+//
+// The verdicts come from classifyGCRows, the same integrity.LocateSidecar
+// the serve-time VariantWatcher acts on, so the two reapers cannot
+// disagree about what a relocated row is; the relocation guard has
+// already run over them (gcRefuseRelocationInProgress).
+func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, verdicts gcRowVerdicts) (int, int, int, int) {
 	// Per-row `DeleteVariant` (one transaction per orphan) over a
 	// bulk-delete API: `--gc` is operator-initiated and infrequent,
 	// orphan counts are typically <100 in practice, and a new bulk
@@ -956,67 +1023,53 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 	// machinery `DeleteVariant` already provides. CLAUDE.md "no
 	// premature abstractions" — revisit if a future call site
 	// proves the volume out.
-	var rowsRemoved, rowsKept, rowsAdopted, rowsFailed int
-	var missing []manifest.VariantRow
-	for _, r := range allRows {
-		// Stop the reverse sweep promptly on SIGINT — same
-		// rationale as the forward-walk gate. CodeRabbit Major
-		// + Gemini Medium on PR #217.
-		if err := ctx.Err(); err != nil {
-			fmt.Fprintln(stderr, gcInterruptedMessage)
-			return rowsRemoved, rowsKept, rowsFailed, 1
+	//
+	// `os.Stat` (NOT `os.Lstat`) inside LocateSidecar, so a symlink
+	// pointing at a missing target is correctly treated as a phantom:
+	// the bridge's `/v1/download` path opens the file through the
+	// symlink and would 410 on a broken target, so the gc should treat
+	// that case identically to a directly-missing file. Per Gemini on
+	// PR #207.
+	rowsKept := verdicts.present
+	var rowsRemoved, rowsAdopted, rowsFailed int
+	interrupted := func() (int, int, int, int) {
+		fmt.Fprintln(stderr, gcInterruptedMessage)
+		return rowsRemoved, rowsKept, rowsFailed, 1
+	}
+	for _, u := range verdicts.unknown {
+		// Permission denied, I/O error, etc. — log and keep the row
+		// rather than risk a destructive delete on a transient failure.
+		// Operator re-runs `--gc` after fixing the environment.
+		fmt.Fprintf(stderr, "stat %s: %v\n", u.row.SidecarPath, u.err)
+		rowsFailed++
+	}
+	for _, m := range verdicts.mismatched {
+		// A file is there but not the one the row describes — a copy
+		// still in flight, most likely. Keep the row; say so.
+		fmt.Fprintf(stderr, "keep %s / %s: a sidecar at %s has a different size than the row records; not adopted, not deleted\n",
+			m.row.SourcePath, m.row.VariantID, m.canonical)
+		rowsFailed++
+	}
+	for _, rel := range verdicts.relocated {
+		// Stop promptly on SIGINT — same rationale as the forward-walk
+		// gate. CodeRabbit Major + Gemini Medium on PR #217.
+		if ctx.Err() != nil {
+			return interrupted()
 		}
-		loc := integrity.LocateSidecar(outputDir, integrity.VariantSnapshot{
-			SourcePath: r.SourcePath, VariantID: r.VariantID, SidecarPath: r.SidecarPath, SizeBytes: r.SizeBytes,
-		})
-		switch loc.Verdict {
-		case integrity.SidecarPresent:
-			rowsKept++
-		case integrity.SidecarRelocated:
-			if err := store.UpdateVariantSidecarPath(ctx, r.SourcePath, r.VariantID, loc.Canonical); err != nil {
-				if ctx.Err() != nil {
-					fmt.Fprintln(stderr, gcInterruptedMessage)
-					return rowsRemoved, rowsKept, rowsFailed, 1
-				}
-				fmt.Fprintf(stderr, "adopt relocated row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
-				rowsFailed++
-				continue
+		if err := store.UpdateVariantSidecarPath(ctx, rel.row.SourcePath, rel.row.VariantID, rel.canonical); err != nil {
+			if ctx.Err() != nil {
+				return interrupted()
 			}
-			fmt.Fprintf(stdout, "adopted %s → %s\n", r.SidecarPath, loc.Canonical)
-			rowsAdopted++
-		case integrity.SidecarMismatched:
-			// A file is there but not the one the row describes — a copy
-			// still in flight, most likely. Keep the row; say so.
-			fmt.Fprintf(stderr, "keep %s / %s: a sidecar at %s has a different size than the row records; not adopted, not deleted\n",
-				r.SourcePath, r.VariantID, loc.Canonical)
+			fmt.Fprintf(stderr, "adopt relocated row %s / %s: %v\n", rel.row.SourcePath, rel.row.VariantID, err)
 			rowsFailed++
-		case integrity.SidecarUnknown:
-			// Permission denied, I/O error, etc. — log and keep
-			// the row rather than risk a destructive delete on a
-			// transient failure. Operator re-runs `--gc` after
-			// fixing the environment.
-			fmt.Fprintf(stderr, "stat %s: %v\n", r.SidecarPath, loc.Err)
-			rowsFailed++
-		case integrity.SidecarMissing:
-			missing = append(missing, r)
+			continue
 		}
+		fmt.Fprintf(stdout, "adopted %s → %s\n", rel.row.SidecarPath, rel.canonical)
+		rowsAdopted++
 	}
-	if !opts.allowMassDelete {
-		if reason := integrity.MassDeleteRefusal(outputDir, len(missing), len(allRows), opts.maxDeletePercent); reason != "" {
-			fmt.Fprintf(stderr, "GC reverse sweep: refusing to delete rows — %s.\n", reason)
-			fmt.Fprintln(stderr, "  This looks like a relocation in progress, not a library whose sidecars were deleted:")
-			fmt.Fprintln(stderr, "  rows still name a directory that is not this one, and the files are here but not at their")
-			fmt.Fprintln(stderr, "  source-mirrored paths (or the copy has not finished). Put them there, or `bridge variants")
-			fmt.Fprintln(stderr, "  move --to <dir>`, and re-run. If the sidecars really are gone, re-run with --allow-mass-delete.")
-			fmt.Fprintf(stdout, "GC reverse sweep: adopted %d relocated row(s), kept %d row(s) with live sidecar, refused to remove %d, %d failure(s).\n",
-				rowsAdopted, rowsKept, len(missing), rowsFailed)
-			return rowsRemoved, rowsKept, rowsFailed, 1
-		}
-	}
-	for _, r := range missing {
-		if err := ctx.Err(); err != nil {
-			fmt.Fprintln(stderr, gcInterruptedMessage)
-			return rowsRemoved, rowsKept, rowsFailed, 1
+	for _, r := range verdicts.missing {
+		if ctx.Err() != nil {
+			return interrupted()
 		}
 		if err := store.DeleteVariant(ctx, r.SourcePath, r.VariantID); err != nil {
 			// Two cancellation shapes get different
@@ -1037,8 +1090,7 @@ func runGCReverseSweep(ctx context.Context, stdout, stderr io.Writer, store *man
 			//   - Real DB fault: log + count + continue
 			//     (same legacy degrade policy).
 			if ctx.Err() != nil {
-				fmt.Fprintln(stderr, gcInterruptedMessage)
-				return rowsRemoved, rowsKept, rowsFailed, 1
+				return interrupted()
 			}
 			fmt.Fprintf(stderr, "delete orphan row %s / %s: %v\n", r.SourcePath, r.VariantID, err)
 			rowsFailed++
@@ -1108,6 +1160,14 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		return code
 	}
 
+	// Classify every row and ask the relocation guard BEFORE the forward
+	// sweep unlinks anything — see gcRowVerdicts for why the order is
+	// load-bearing.
+	verdicts := classifyGCRows(outputDir, allRows)
+	if code := gcRefuseRelocationInProgress(stderr, outputDir, verdicts, len(allRows), opts); code != 0 {
+		return code
+	}
+
 	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, outputDir, known)
 	if exitCode != 0 {
 		return exitCode
@@ -1117,7 +1177,7 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		return exitCode
 	}
 
-	_, _, rowsFailed, exitCode := runGCReverseSweep(ctx, stdout, stderr, store, outputDir, allRows, opts)
+	_, _, rowsFailed, exitCode := runGCReverseSweep(ctx, stdout, stderr, store, verdicts)
 	if exitCode != 0 {
 		return exitCode
 	}

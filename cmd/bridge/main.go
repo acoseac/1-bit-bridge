@@ -166,7 +166,22 @@ func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, var
 	loc := integrity.LocateSidecar(a.variantsDir(), integrity.VariantSnapshot{
 		SourcePath: v.SourcePath, VariantID: v.VariantID, SidecarPath: v.SidecarPath, SizeBytes: v.SizeBytes,
 	})
-	if loc.Verdict != integrity.SidecarRelocated {
+	switch loc.Verdict {
+	case integrity.SidecarRelocated:
+		// adopted below
+	case integrity.SidecarMismatched:
+		// A file is at the canonical place but not the one the row
+		// records — a copy in flight. Handing serveVariant the recorded
+		// (missing) path would have its reaper delete the row; handing
+		// it the canonical path would stream a partial file. Neither:
+		// the client gets the 410 it already handles and the row waits
+		// for the watcher, which keeps it for the same reason.
+		return nil, fmt.Errorf("variant %s/%s: sidecar at %s does not match the row: %w",
+			v.SourcePath, v.VariantID, loc.Canonical, api.ErrVariantSidecarUnavailable)
+	default:
+		// Present (serve it), Missing at both (serveVariant's ENOENT
+		// branch reaps — the case it was written for), Unknown (the
+		// open surfaces the real error as a 5xx).
 		return rec, nil
 	}
 	// Serve from the canonical path whether or not the UPDATE lands: the

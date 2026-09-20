@@ -350,6 +350,13 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 		return
 	}
 	rec, err := s.variantStore.LookupVariant(r.Context(), sourcePath, variantID)
+	if errors.Is(err, ErrVariantSidecarUnavailable) {
+		// The row stays: the store has seen a file for it that is not
+		// yet the one the row describes. Same wire answer as a sidecar
+		// deleted under our feet, minus the reap — see the sentinel.
+		writeError(w, http.StatusGone, "variant_missing_on_disk", "sidecar file missing")
+		return
+	}
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge couldn't look up this variant", err)
