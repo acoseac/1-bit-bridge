@@ -5876,6 +5876,25 @@ Sonar's six new issues are `S3776` on the new test TABLES plus one
 pre-existing hit in `store.go` from August; the quality gate passed and
 production code is clean, so they stand.
 
+**Round 2 (CodeRabbit, posted 31 seconds AFTER the squash-merge — the
+process failure this file names on #562–#564 and #900, reached from the
+other side: the review was asked for and the merge did not wait for it).**
+Three of four real, shipped as a follow-up PR. (1) The doctor's
+sidecar-paths probe was wired only when `os.Stat(bridge.db)` succeeded, so
+a database that existed but could not be read left the probe nil and the
+check answered ok / "no manifest" about a permission problem — unwired
+only on `IsNotExist` now, and the error reaches the check. (2) The CLI
+reverse sweep counted a mismatched sidecar as a failure and `runGC` exits
+1 on failures, so a cron'd `--gc` during a copy in flight reported a failed
+job for a healthy state — its own counter, in the summary line, as the
+watcher already had. (3) `bridge variants move` refuses without
+`--confirm MOVE`, and all three hints that named it (the doctor, the
+watcher's WARN, the `--gc` refusal) named a command that could not run.
+(4) Unique subtest names in the config test, split under S3776. Both
+functional fixes are negative-controlled
+(`TestRunGCKeepsAMismatchedSidecarWithoutFailing`,
+`TestDoctorSidecarProbeReportsAnUnreadableManifest`).
+
 Negative controls, each a single production line reverted after the commit
 that carried it, each turning exactly the named test red: no adoption
 (`TestVariantWatcher_adoptsARelocatedCatalog`), no guard
