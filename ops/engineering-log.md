@@ -6129,6 +6129,33 @@ execs each under a 2 s cap — it is in family rather than free. Measured whole:
 is a narrower projection for the known set, not a smaller budget: the budget is
 already where the measurement puts it.
 
+### Found while restructuring, NOT fixed here: `--gc` can wedge itself on a flat layout
+
+`gcCheckOutputDirBeforeReverseSweep` runs AFTER the forward sweep and reads a
+missing-or-empty directory as an unmounted volume. On the legacy hash-flat
+layout (`<dir>/<hash>-<variantID>.flac`, no subdirectories) a run with
+`--allow-mass-delete --allow-mass-orphans` has the forward sweep remove every
+file, which leaves the directory genuinely empty — and the reverse guard then
+refuses with "likely a disconnected mount", leaving the rows. Re-running does
+not help: the directory is still empty, so it refuses again. Those rows cannot
+be reaped by `--gc` at all.
+
+Reproduced on this branch AND on main with a throwaway fixture (12 flat
+sidecars, 12 rows recorded under a path that does not exist, both overrides):
+`rc=1`, `removed 12 orphan file(s)`, `12 variant row(s) exist; refusing`, 12
+rows left. Pre-existing and untouched by #940 — the new guard only ever
+refuses MORE, never allows more, so it adds no reachability. The
+source-mirrored layout hides it because `WalkDir` does not remove directories,
+so an emptied subtree still leaves dirents behind and `dirIsEmpty` reads
+false.
+
+The fix is small and belongs in its own change: the reverse guard should be
+told how many files the forward sweep removed, because a directory that is
+empty BECAUSE WE JUST EMPTIED IT is explained, and is not evidence of an
+unmounted volume. Left out of #940 deliberately — it is the reverse guard's
+bug, it predates this work, and bundling it would have put an unrelated
+behaviour change under a PR about the forward denominator.
+
 ### No wire change
 
 `PROTOCOL.md` untouched, no `/v1` handler touched, no `ProtocolVersion` bump.
