@@ -6201,6 +6201,34 @@ never itself checked. A brute-force sweep reads as evidence in a way prose
 does not, which is exactly why the constraint on its domain needs stating and
 justifying beside the number. It took an outside reviewer to see it twice.
 
+### Round 4 (CodeRabbit, 2, both taken)
+
+**An unreadable directory is a partial walk too.** `TakeSidecarInventory`
+steps over a directory it cannot descend into and counts it, so its contents
+are missing from `Files` and `Orphans` — which makes the RATIO a statement
+about part of the tree, exactly as a truncated budget does. The doctor
+withheld its verdict for one and not the other. Both now, on the same terms;
+the lower bound survives both, because hiding entries can only lower
+`orphans` while `rows` is the whole catalog either way. The control is worth
+reading: with the guard reverted the hint says "this is a LOST INDEX, do not
+pass --allow-mass-orphans" and "`bridge upscale --gc` reclaims them" in the
+same paragraph.
+
+**The sweep is deliberately NOT changed to match**, and the asymmetry has a
+reason rather than an oversight. Its exposure is bounded from the other side:
+it deletes only the orphans it could SEE, and to make the guard under-fire
+most of the orphans would have to be hidden — which caps what it can unlink
+below the floor the guard would otherwise have applied. It already prints a
+line naming how many directories it skipped. The doctor's problem is
+different in kind: it is not deleting, it is making a CLAIM about what a
+later run will do.
+
+**The property test takes the default from
+`config.DefaultVariantSweepMaxDeletePercent`** rather than a retyped 20, so a
+change to the shipped default re-asks the property at the new value instead
+of quietly continuing to answer about a number no bridge runs. Checked for a
+cycle first — `config` does not depend on `integrity`.
+
 ### Not in scope, and why
 
 - **`OrphanSidecarSweeper`** (the BACKGROUND file walk, opt-in and off by
