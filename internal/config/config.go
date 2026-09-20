@@ -671,6 +671,34 @@ type IntegrityConfig struct {
 	//
 	// Always read via Config.OrphanSidecarSweepInterval() below.
 	OrphanSidecarSweepIntervalSec *int `yaml:"orphanSidecarSweepIntervalSec,omitempty"`
+
+	// VariantSweepMaxDeletePercent caps how much of `track_variants`
+	// one integrity sweep may delete while the variants directory
+	// still holds sidecar files. Default 20. A sweep that would reap
+	// more than this share of the catalog — after first adopting every
+	// row whose file sits at its canonical place under the CURRENT
+	// directory — is refused with a WARN instead of applied, because
+	// that shape is a relocation in progress (a copy still running, a
+	// tree in a layout the probe does not recognise), not a library
+	// whose sidecars were individually deleted. `bridge upscale --gc
+	// --allow-mass-delete` is the way past it once the operator has
+	// looked.
+	//
+	// Field report 2026-09-20: a `bridge.db` copied between hosts with
+	// the variants dir at a new path made every row's recorded path
+	// ENOENT at first boot; the sweep deleted all 10,248 rows without
+	// a log line, and the auto-optimize sweeper then re-rendered 200
+	// byte-identical sidecars before it was caught.
+	//
+	// 100 disables the guard (every sweep deletes what it finds
+	// missing); 0 refuses any mass deletion while sidecars remain. A
+	// sweep that would delete fewer than ten rows is never refused —
+	// the guard is for the whole-tree move, not the odd deleted file.
+	// Pointer-typed like its siblings; read via
+	// Config.VariantSweepMaxDeletePercent(). Config-file / env only, as
+	// the two intervals above are: none of the integrity knobs are on
+	// the settings page.
+	VariantSweepMaxDeletePercent *int `yaml:"variantSweepMaxDeletePercent,omitempty"`
 }
 
 // ScannerConfig controls the library scanner's resilience knobs.
@@ -3100,6 +3128,13 @@ func (c *Config) Validate() error {
 	if c.Integrity.OrphanSidecarSweepIntervalSec != nil && (*c.Integrity.OrphanSidecarSweepIntervalSec < 0 || *c.Integrity.OrphanSidecarSweepIntervalSec > maxIntervalSeconds) {
 		return fmt.Errorf("integrity.orphanSidecarSweepIntervalSec: must be between 0 and %d (0 disables, omit for default), got %d", maxIntervalSeconds, *c.Integrity.OrphanSidecarSweepIntervalSec)
 	}
+	// A percentage: refuse (never clamp) anything outside 0..100, like
+	// every other bounded knob here — a typo'd 200 would silently mean
+	// "disabled", which is the setting an operator least expects to reach
+	// by accident.
+	if c.Integrity.VariantSweepMaxDeletePercent != nil && (*c.Integrity.VariantSweepMaxDeletePercent < 0 || *c.Integrity.VariantSweepMaxDeletePercent > 100) {
+		return fmt.Errorf("integrity.variantSweepMaxDeletePercent: must be between 0 and 100 (100 disables the guard, omit for default %d), got %d", DefaultVariantSweepMaxDeletePercent, *c.Integrity.VariantSweepMaxDeletePercent)
+	}
 	// backup.Keep: any non-positive value disables pruning. No
 	// upper-bound check — an operator who wants 1000 retained
 	// snapshots is making a disk-space choice we don't second-
@@ -3579,6 +3614,22 @@ func (c *Config) OrphanSidecarSweepInterval() time.Duration {
 		secs = 0
 	}
 	return time.Duration(secs) * time.Second
+}
+
+// DefaultVariantSweepMaxDeletePercent is the share of `track_variants`
+// one integrity sweep may delete while the variants directory still
+// holds sidecar files — see IntegrityConfig.VariantSweepMaxDeletePercent.
+const DefaultVariantSweepMaxDeletePercent = 20
+
+// VariantSweepMaxDeletePercent returns the relocation guard's threshold.
+// Missing field returns the default (20); an explicit value is returned
+// verbatim (Validate has already bounded it to 0..100, so the integrity
+// package can rely on the range).
+func (c *Config) VariantSweepMaxDeletePercent() int {
+	if c.Integrity.VariantSweepMaxDeletePercent == nil {
+		return DefaultVariantSweepMaxDeletePercent
+	}
+	return *c.Integrity.VariantSweepMaxDeletePercent
 }
 
 // Save atomically writes c as YAML to path (temp file + rename). Parent

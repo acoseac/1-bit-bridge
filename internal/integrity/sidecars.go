@@ -23,7 +23,7 @@ import (
 // (~5-10 µs per entry once the OS dirent cache is hot), AND a
 // 100k-variant library completes one full sweep in ~20 ticks
 // rather than the ~1000 ticks the original 100-floor required.
-// Pre-fix the chunk-size-100 + per-tick AllSidecarPaths SELECT
+// Pre-fix the chunk-size-100 + per-tick AllVariants SELECT
 // produced O(N × N/chunk) total DB read on every full sweep — for
 // a 100k-variant library, ~100M rows per cycle. Gemini medium on
 // PR #282 caught the quadratic blow-up.
@@ -73,7 +73,9 @@ const gcGracePeriod = 10 * time.Minute
 // OrphanSidecarSweeper walks `outputDir/transcoded/` on a cadence
 // (configured via `cfg.Integrity.OrphanSidecarSweepIntervalSec`)
 // and unlinks `.flac` files whose absolute path is NOT present in
-// the current `track_variants.sidecar_path` snapshot. The forward
+// the current `track_variants` snapshot — neither as a row's
+// recorded `sidecar_path` nor as its canonical path under the tree
+// being walked (KnownSidecarSet). The forward
 // half of the operator-triggered `bridge upscale --gc` sweep,
 // which `VariantWatcher` (in variants.go) does NOT cover — that
 // type handles the REVERSE direction (rows whose sidecar file
@@ -91,7 +93,7 @@ const gcGracePeriod = 10 * time.Minute
 // new sidecar lands on disk BEFORE the new row is in the snapshot
 // — and the sweeper would unlink the file behind a row that
 // hasn't yet rolled into its view). SQLite WAL mode gives every
-// SELECT a consistent snapshot natively, so `AllSidecarPaths` is
+// SELECT a consistent snapshot natively, so `AllVariants` is
 // safe to call without an explicit transaction wrapper.
 //
 // **Chunked walking**: at most `gcChunkSize` files are stat'd /
@@ -192,16 +194,24 @@ func (s *OrphanSidecarSweeper) effectiveChunkSize() int {
 }
 
 // SidecarLister is the integrity-package-local read surface for
-// `track_variants.sidecar_path` projection. `manifest.Store` will
-// be wired via a thin adapter in cmd/bridge; the explicit interface
-// lets tests inject fakes without spinning a real SQLite store.
+// the `track_variants` rows the forward sweep builds its known set
+// from. `manifest.Store` is wired via a thin adapter in cmd/bridge;
+// the explicit interface lets tests inject fakes without spinning a
+// real SQLite store.
 //
-// Returns a SET of sidecar paths (`map[string]struct{}` for O(1)
-// lookup against thousands of filesystem entries during a walk).
-// Bare `[]string` was rejected: per-file lookup against a slice is
-// O(n) and a 50k-variant library would O(n²)-walk on every tick.
+// Rows, not a bare set of paths (which is what this returned until
+// the 2026-09-20 report): the known set must hold each row's
+// CANONICAL path under the tree being walked beside its recorded
+// one, and the canonical path is computed from (source_path,
+// variant_id). With the recorded paths alone, a database copied to
+// a host where the variants dir has a new path knows NOTHING under
+// that dir — every file of a byte-identical 259.7 GiB tree reads as
+// an orphan and the walk unlinks it, chunk by chunk, older-than-
+// grace first. The sweep projects the rows into a
+// `map[string]struct{}` itself (O(1) lookup against thousands of
+// filesystem entries; a slice would O(n²)-walk on every tick).
 type SidecarLister interface {
-	AllSidecarPaths(ctx context.Context) (map[string]struct{}, error)
+	AllVariants(ctx context.Context) ([]VariantSnapshot, error)
 }
 
 // NewOrphanSidecarSweeper constructs a sweeper. interval ≤ 0
@@ -364,9 +374,9 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		s.lastRoot = root
 		s.lastProcessedPath = ""
 	}
-	raw, err := s.lister.AllSidecarPaths(ctx)
+	rows, err := s.lister.AllVariants(ctx)
 	if err != nil {
-		logger.Error("orphan sidecar sweep: AllSidecarPaths failed",
+		logger.Error("orphan sidecar sweep: AllVariants failed",
 			slog.Any("err", err),
 		)
 		return 0
@@ -377,10 +387,15 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	// hazard fixed in `bridge upscale --gc` (CodeRabbit on PR #477). The
 	// cursor-resume comparisons (pathWalkCompare / dirEntirelyBehindCursor)
 	// below stay on RAW paths; they must track WalkDir's byte-order traversal.
-	known := make(map[string]struct{}, len(raw))
-	for k := range raw {
-		known[strings.ToLower(filepath.Clean(k))] = struct{}{}
-	}
+	//
+	// Both spellings of every row go in: the recorded path AND the canonical
+	// one under the tree being walked (KnownSidecarSet). A relocated catalog
+	// — rows still naming the old host's directory, files at their
+	// source-mirrored places under this one — is then fully known, and the
+	// reverse sweep (VariantWatcher) adopts the rows at its own pace while
+	// this walk leaves the files alone. `bridge upscale --gc`'s forward
+	// sweep builds its set the same way.
+	known := KnownSidecarSet(root, rows)
 
 	// FAIL CLOSED on an empty known-set. Every file under the variants dir
 	// misses an empty `known`, so the walk below would classify the whole
@@ -594,6 +609,26 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 		slog.String("next_cursor", s.lastProcessedPath),
 	)
 	return unlinked
+}
+
+// KnownSidecarSet is the forward sweeps' "this file has a row" set:
+// every row's recorded `sidecar_path` AND its canonical path under
+// `variantsDir` (CanonicalSidecarPath — empty, and skipped, for a row
+// with no source identity), each case-folded and cleaned to match the
+// walk's on-disk spelling on a case-insensitive filesystem. Shared by
+// OrphanSidecarSweeper and `bridge upscale --gc` so the two forward
+// sweeps cannot disagree about which files a relocated catalog owns.
+func KnownSidecarSet(variantsDir string, rows []VariantSnapshot) map[string]struct{} {
+	known := make(map[string]struct{}, 2*len(rows))
+	for _, r := range rows {
+		if r.SidecarPath != "" {
+			known[strings.ToLower(filepath.Clean(r.SidecarPath))] = struct{}{}
+		}
+		if c := CanonicalSidecarPath(variantsDir, r); c != "" {
+			known[strings.ToLower(filepath.Clean(c))] = struct{}{}
+		}
+	}
+	return known
 }
 
 // shouldConsiderSidecarFile is the pure-helper predicate that

@@ -103,7 +103,8 @@ func TestIntegrityAdaptersCarryACancellableContext(t *testing.T) {
 	body := readGoSourceLF(t, "main.go")
 	for _, decl := range []string{
 		"func (a *integrityVariantListerAdapter) AllVariants()",
-		"func (a *integrityVariantDeleterAdapter) DeleteVariant(",
+		"func (a *integrityVariantReconcilerAdapter) DeleteVariant(",
+		"func (a *integrityVariantReconcilerAdapter) AdoptVariantSidecar(",
 	} {
 		i := strings.Index(body, decl)
 		if i < 0 {

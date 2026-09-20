@@ -15,10 +15,7 @@ package integrity
 
 import (
 	"context"
-	"errors"
-	"io/fs"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 
@@ -35,11 +32,34 @@ var logger = logging.Component("integrity")
 // software with eager retention, disk-image rebuild that
 // preserved the SQLite DB but not the sidecar tree.
 //
-// On every miss, the row is removed via the supplied Deleter
-// (bumps `tracks.indexed_at` so iOS delta-sync sees the
-// disappearance) AND a single batched `upscale.deleted` SSE
+// A miss at the RECORDED path is not yet a disappearance. The
+// sweep first asks LocateSidecar (locate.go) whether the file
+// sits at its canonical place under the CURRENT variants dir
+// with the recorded size — the state every row is in after the
+// database and the tree move hosts together — and if so ADOPTS
+// the row (rewrites `sidecar_path`; no `indexed_at` bump, nothing
+// on the wire, because nothing changed for a client). Only a row
+// whose file is at neither location is removed via the supplied
+// reconciler (bumps `tracks.indexed_at` so iOS delta-sync sees
+// the disappearance), and a single batched `upscale.deleted` SSE
 // event is published per tick — iOS reconciles immediately
 // without waiting for a manifest re-sync.
+//
+// Two guards sit between "missing" and "deleted". The mount-loss
+// guard (VariantsDirSweepBlockReason) skips the whole tick when
+// the directory is gone or empty. The relocation guard
+// (MassDeleteRefusal) skips the DELETIONS of a tick that would
+// reap more than cfg.Integrity.VariantSweepMaxDeletePercent of
+// the catalog while the directory still holds sidecar files —
+// the 2026-09-20 shape, where the directory was healthy and full
+// and every row still pointed at the old host's path. Adoptions
+// are applied either way; they are never the dangerous half.
+//
+// Every tick that saw rows logs ONE summary line (rows / present
+// / adopted / deleted / mismatched / stat-failed / refused) at
+// Info, at Warn when it deleted or refused anything — the field
+// report's first finding was that 10,248 deletions produced no
+// line at all.
 //
 // Threading: one long-lived goroutine spun up by Start; stops
 // on the supplied ctx's cancellation. Time.NewTicker is reset
@@ -57,19 +77,23 @@ var logger = logging.Component("integrity")
 var stopGrace = 5 * time.Second
 
 type VariantWatcher struct {
-	lister  VariantLister
-	deleter VariantDeleter
-	publish PublishFunc
+	lister     VariantLister
+	reconciler VariantReconciler
+	publish    PublishFunc
 	// variantsDir resolves the effective variants directory for the
-	// mount-loss guard, and is asked PER TICK — see NewVariantWatcher.
+	// mount-loss guard AND the relocation probe, and is asked PER
+	// TICK — see NewVariantWatcher.
 	variantsDir func() string
 	interval    time.Duration
+	// maxDeletePercent is the relocation guard's threshold
+	// (cfg.Integrity.VariantSweepMaxDeletePercent); see MassDeleteRefusal.
+	maxDeletePercent int
 
 	// onTickComplete fires after every full sweep completes;
 	// the test harness wires this to drive deterministic sync
 	// without polling the watcher's internal state. nil in
 	// production — Go's linker drops the call when unused.
-	onTickComplete func(deletedCount int)
+	onTickComplete func(SweepReport)
 
 	// startOnce + stopOnce + done live on the struct (NOT as
 	// locals inside Start) so a hypothetical second Start
@@ -94,14 +118,29 @@ type VariantLister interface {
 	AllVariants() ([]VariantSnapshot, error)
 }
 
-// VariantDeleter removes one variant row by (source_path,
-// variant_id). The Store's DeleteVariant transactionally
-// bumps `tracks.indexed_at` so iOS delta-sync observes the
-// removal on the next manifest fetch. Per-row error tolerance:
-// a Watcher tick logs and continues on per-row failure, but
+// VariantReconciler is the write half the sweep needs, both arms
+// keyed by (source_path, variant_id).
+//
+// DeleteVariant removes one row. The Store's DeleteVariant
+// transactionally bumps `tracks.indexed_at` so iOS delta-sync
+// observes the removal on the next manifest fetch. Per-row error
+// tolerance: a tick logs and continues on per-row failure, but
 // still publishes the events for the rows that DID delete.
-type VariantDeleter interface {
+//
+// AdoptVariantSidecar rewrites one row's `sidecar_path` to the
+// canonical location LocateSidecar found the file at. The Store's
+// UpdateVariantSidecarPath deliberately does NOT bump `indexed_at`
+// — a path-only change is invisible to a client — which is what
+// makes adopting a whole relocated catalog free on the wire.
+//
+// One interface rather than an optional upgrade on the deleter: a
+// `.(VariantAdopter)` type assertion that the production adapter
+// forgot to satisfy would silently turn every relocation back into
+// a deletion while a test fake that did satisfy it stayed green.
+// The compiler enforces the wiring instead.
+type VariantReconciler interface {
 	DeleteVariant(sourcePath, variantID string) error
+	AdoptVariantSidecar(sourcePath, variantID, newSidecarPath string) error
 }
 
 // PublishFunc is the domain-specific publish callback fired
@@ -129,6 +168,27 @@ type VariantSnapshot struct {
 	SourcePath  string
 	VariantID   string
 	SidecarPath string
+	// SizeBytes is the row's recorded sidecar size, which the
+	// relocation probe compares against a file found at the canonical
+	// location so a partial copy is never adopted (LocateSidecar).
+	SizeBytes int64
+}
+
+// SweepReport is what one tick did, in rows. Rows is the catalog
+// size the tick saw; the rest partition it (Refused counts the
+// missing rows the relocation guard declined to delete). Handed to
+// the test seam and folded into the per-tick summary log line.
+type SweepReport struct {
+	Rows       int
+	Present    int
+	Adopted    int
+	Deleted    int
+	Mismatched int
+	StatFailed int
+	Refused    int
+	// Skipped is true when the tick did not sweep at all — the
+	// mount-loss guard fired, or the catalog query failed.
+	Skipped bool
 }
 
 // NewVariantWatcher constructs a watcher. interval ≤ 0 disables
@@ -154,14 +214,21 @@ type VariantSnapshot struct {
 // for the rest of the process. Every consumer of the field reads
 // it live now, which is the rule for hot config: either every
 // consumer reads a field live or every consumer takes it at boot,
-// never a split.
-func NewVariantWatcher(lister VariantLister, deleter VariantDeleter, publish PublishFunc, variantsDir func() string, interval time.Duration) *VariantWatcher {
+// never a split. The same provider answers the relocation probe:
+// "where should this row's file be NOW" has to be asked of the
+// directory that is current on this tick.
+//
+// `maxDeletePercent` is the relocation guard's threshold
+// (cfg.Integrity.VariantSweepMaxDeletePercent, already bounded to
+// 0..100 by config validation); see MassDeleteRefusal.
+func NewVariantWatcher(lister VariantLister, reconciler VariantReconciler, publish PublishFunc, variantsDir func() string, interval time.Duration, maxDeletePercent int) *VariantWatcher {
 	return &VariantWatcher{
-		lister:      lister,
-		deleter:     deleter,
-		publish:     publish,
-		variantsDir: variantsDir,
-		interval:    interval,
+		lister:           lister,
+		reconciler:       reconciler,
+		publish:          publish,
+		variantsDir:      variantsDir,
+		interval:         interval,
+		maxDeletePercent: maxDeletePercent,
 	}
 }
 
@@ -169,7 +236,7 @@ func NewVariantWatcher(lister VariantLister, deleter VariantDeleter, publish Pub
 // Same convention as transcode.Pool's SetOnStateChange — the
 // test harness can register a callback once at construction
 // without exposing internal channels.
-func (w *VariantWatcher) SetOnTickComplete(fn func(deletedCount int)) {
+func (w *VariantWatcher) SetOnTickComplete(fn func(SweepReport)) {
 	w.onTickComplete = fn
 }
 
@@ -242,10 +309,13 @@ func (w *VariantWatcher) Start(ctx context.Context) (stopFn func()) {
 func (w *VariantWatcher) run(ctx context.Context, done chan struct{}) {
 	// Immediate sweep at boot covers the "operator deleted
 	// variants while the bridge was down" case without
-	// waiting `interval` for the first sweep.
-	deleted := w.tick(ctx)
+	// waiting `interval` for the first sweep — and, since the
+	// 2026-09-20 report, the "database and tree moved hosts
+	// together" case, which the same boot sweep used to turn
+	// into a whole-catalog deletion.
+	report := w.tick(ctx)
 	if w.onTickComplete != nil {
-		w.onTickComplete(deleted)
+		w.onTickComplete(report)
 	}
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
@@ -256,9 +326,9 @@ func (w *VariantWatcher) run(ctx context.Context, done chan struct{}) {
 		case <-done:
 			return
 		case <-ticker.C:
-			deleted := w.tick(ctx)
+			report := w.tick(ctx)
 			if w.onTickComplete != nil {
-				w.onTickComplete(deleted)
+				w.onTickComplete(report)
 			}
 		}
 	}
@@ -273,25 +343,35 @@ func (w *VariantWatcher) currentVariantsDir() string {
 	return w.variantsDir()
 }
 
-// tick performs one full sweep. Returns the count of rows
-// removed (NOT the count of misses observed — a stat-but-
-// delete-failed row counts 0). Logs WARN on per-row stat /
-// delete failures; logs ERROR only on the outer AllVariants
-// query failure (the only path where we can't even start).
-// Skips wholesale (WARN, 0 deletions) when the variants dir
-// probe reports missing/empty with rows in the catalog — see
-// NewVariantWatcher and VariantsDirSweepBlockReason.
-func (w *VariantWatcher) tick(ctx context.Context) int {
+// tick performs one full sweep and reports what it did. Logs ERROR
+// only on the outer AllVariants query failure (the only path where
+// we can't even start); WARN (sampled per tick, see logSample) on
+// per-row stat / adopt / delete failures; and ONE summary line per
+// tick that saw rows. Skips wholesale (WARN, nothing touched) when
+// the variants dir probe reports missing/empty with rows in the
+// catalog — see NewVariantWatcher and VariantsDirSweepBlockReason.
+//
+// Two passes over the snapshot. The first classifies every row with
+// LocateSidecar and applies the ADOPTIONS as it goes (a relocated
+// row's file is right there; nothing about adopting it depends on
+// the rest of the catalog). The second applies the DELETIONS — but
+// only after MassDeleteRefusal has looked at how many there are
+// against how many rows the tick saw, which is a question that can
+// only be asked once the whole snapshot is classified. That ordering
+// is the point: the guard needs the count, and the count is not known
+// until every row has been asked.
+func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	rows, err := w.lister.AllVariants()
 	if err != nil {
 		logger.Error("integrity variant sweep: AllVariants failed",
 			slog.Any("err", err),
 		)
-		return 0
+		return SweepReport{Skipped: true}
 	}
 	if len(rows) == 0 {
-		return 0
+		return SweepReport{}
 	}
+	dir := w.currentVariantsDir()
 	// Mount-loss guard: rows exist but the whole variants dir is
 	// missing or empty → the volume is almost certainly unmounted
 	// (a clean unmount reverts the mountpoint to an empty local
@@ -302,76 +382,193 @@ func (w *VariantWatcher) tick(ctx context.Context) int {
 	// helper with `bridge upscale --gc`'s reverse-sweep guard.
 	// The directory is RESOLVED per tick too, so a hot move of
 	// the variants dir moves the probe with it.
-	if dir := w.currentVariantsDir(); dir != "" {
+	if dir != "" {
 		if reason := VariantsDirSweepBlockReason(dir); reason != "" {
 			logger.Warn("integrity variant sweep: skipping sweep, variants dir unhealthy with rows in catalog",
 				slog.String("variants_dir", dir),
 				slog.String("reason", reason),
 				slog.Int("rows", len(rows)),
 			)
-			return 0
+			return SweepReport{Rows: len(rows), Skipped: true}
 		}
 	}
-	// `paths` is the deduplicated set of affected source paths;
-	// `variantIDs` is the (potentially repeating) set of deleted
-	// variantIDs. Per the upscale.deleted contract documented in
-	// internal/api/upscale_deleted_event.go: `Paths` and
-	// `VariantIDs` are NOT zipped 1:1, just the union of what
-	// disappeared. Dedup paths so a track with multiple missing
-	// variants (rare but legitimate — e.g. 96k + 192k variants
-	// for the same source both wiped by an external rm) doesn't
-	// emit the same path twice in the SSE payload. CodeRabbit
-	// Minor on PR #209.
+
+	report := SweepReport{Rows: len(rows)}
 	var (
-		paths       []string
-		variantIDs  []string
-		pathsSeen   = make(map[string]struct{})
-		deletedRows int
+		missing []VariantSnapshot
+		sample  logSampler
 	)
+	// Pass one: classify, adopting as we go.
 	for _, r := range rows {
 		// Honour cancellation between rows so a shutdown
 		// during a long sweep on a large library doesn't
 		// hold the process up for minutes.
 		select {
 		case <-ctx.Done():
-			return deletedRows
+			return report
 		default:
 		}
-		_, statErr := os.Stat(r.SidecarPath)
-		if statErr == nil {
-			continue
-		}
-		if !errors.Is(statErr, fs.ErrNotExist) {
-			// Permission errors, I/O faults, etc. — log
-			// and skip rather than treating as "missing".
-			// `--gc` reverse-pass behaves the same way.
-			logger.Warn("integrity variant sweep: stat failed",
+		loc := LocateSidecar(dir, r)
+		switch loc.Verdict {
+		case SidecarPresent:
+			report.Present++
+		case SidecarRelocated:
+			if err := w.reconciler.AdoptVariantSidecar(r.SourcePath, r.VariantID, loc.Canonical); err != nil {
+				// The file is there and the row still points at the old
+				// path; nothing is lost and the next tick asks again. Not
+				// a deletion candidate under any reading.
+				report.StatFailed++
+				sample.log(slog.LevelWarn, "integrity variant sweep: adopt failed",
+					slog.String("source_path", r.SourcePath),
+					slog.String("variant_id", r.VariantID),
+					slog.String("canonical", loc.Canonical),
+					slog.Any("err", err),
+				)
+				continue
+			}
+			report.Adopted++
+			sample.log(slog.LevelInfo, "integrity variant sweep: adopted relocated sidecar",
+				slog.String("source_path", r.SourcePath),
+				slog.String("variant_id", r.VariantID),
+				slog.String("from", r.SidecarPath),
+				slog.String("to", loc.Canonical),
+			)
+		case SidecarMismatched:
+			report.Mismatched++
+			sample.log(slog.LevelWarn, "integrity variant sweep: sidecar at canonical path has a different size; keeping the row",
+				slog.String("source_path", r.SourcePath),
+				slog.String("variant_id", r.VariantID),
+				slog.String("canonical", loc.Canonical),
+				slog.Int64("recorded_size", r.SizeBytes),
+			)
+		case SidecarUnknown:
+			// Permission errors, I/O faults, etc. — log and skip
+			// rather than treating as "missing". `--gc`'s reverse
+			// pass behaves the same way.
+			report.StatFailed++
+			sample.log(slog.LevelWarn, "integrity variant sweep: stat failed",
 				slog.String("sidecar", r.SidecarPath),
 				slog.String("variant_id", r.VariantID),
-				slog.Any("err", statErr),
+				slog.Any("err", loc.Err),
 			)
-			continue
+		case SidecarMissing:
+			missing = append(missing, r)
 		}
-		if delErr := w.deleter.DeleteVariant(r.SourcePath, r.VariantID); delErr != nil {
-			logger.Warn("integrity variant sweep: DB delete failed",
+	}
+
+	// Relocation guard, asked of the whole tick. A refusal leaves the
+	// rows in place for the operator to look at; the summary line and
+	// the reason say exactly what was seen.
+	if reason := MassDeleteRefusal(dir, len(missing), len(rows), w.maxDeletePercent); reason != "" {
+		report.Refused = len(missing)
+		logger.Warn("integrity variant sweep: refusing to delete rows — this looks like a relocation, not a deletion",
+			slog.String("reason", reason),
+			slog.String("variants_dir", dir),
+			slog.String("hint", "if the sidecars really are gone: `bridge upscale --gc --allow-mass-delete`; if they were moved: put them at their source-mirrored paths under the variants directory, or `bridge variants move --to <dir>`"),
+		)
+		w.logSummary(dir, report)
+		return report
+	}
+
+	// Pass two: delete. `paths` is the deduplicated set of affected
+	// source paths; `variantIDs` is the (potentially repeating) set
+	// of deleted variantIDs. Per the upscale.deleted contract
+	// documented in internal/api/upscale_deleted_event.go: `Paths`
+	// and `VariantIDs` are NOT zipped 1:1, just the union of what
+	// disappeared. Dedup paths so a track with multiple missing
+	// variants (rare but legitimate — e.g. 96k + 192k variants for
+	// the same source both wiped by an external rm) doesn't emit the
+	// same path twice in the SSE payload. CodeRabbit Minor on PR #209.
+	var (
+		paths      []string
+		variantIDs []string
+		pathsSeen  = make(map[string]struct{})
+	)
+	for _, r := range missing {
+		select {
+		case <-ctx.Done():
+			w.publishDeleted(paths, variantIDs)
+			return report
+		default:
+		}
+		if delErr := w.reconciler.DeleteVariant(r.SourcePath, r.VariantID); delErr != nil {
+			report.StatFailed++
+			sample.log(slog.LevelWarn, "integrity variant sweep: DB delete failed",
 				slog.String("source_path", r.SourcePath),
 				slog.String("variant_id", r.VariantID),
 				slog.Any("err", delErr),
 			)
 			continue
 		}
-		deletedRows++
+		report.Deleted++
+		sample.log(slog.LevelInfo, "integrity variant sweep: deleted row whose sidecar is missing at both locations",
+			slog.String("source_path", r.SourcePath),
+			slog.String("variant_id", r.VariantID),
+			slog.String("recorded", r.SidecarPath),
+		)
 		variantIDs = append(variantIDs, r.VariantID)
 		if _, seen := pathsSeen[r.SourcePath]; !seen {
 			pathsSeen[r.SourcePath] = struct{}{}
 			paths = append(paths, r.SourcePath)
 		}
 	}
+	w.publishDeleted(paths, variantIDs)
+	w.logSummary(dir, report)
+	return report
+}
+
+// publishDeleted fires the single batched callback per sweep that
+// observed at least one deletion — iOS reconciles all affected
+// tracks in one pass rather than fielding N separate event hops.
+func (w *VariantWatcher) publishDeleted(paths, variantIDs []string) {
 	if len(paths) > 0 && w.publish != nil {
-		// Single batched callback per sweep — iOS
-		// reconciles all affected tracks in one pass
-		// rather than fielding N separate event hops.
 		w.publish(paths, variantIDs)
 	}
-	return deletedRows
+}
+
+// logSummary writes the one line per tick that the 2026-09-20 sweep
+// never wrote. Warn when the tick deleted or refused anything —
+// those are the ticks an operator scrolling a journal is looking
+// for — Info otherwise, so a healthy hourly tick is one findable
+// line rather than silence.
+func (w *VariantWatcher) logSummary(dir string, r SweepReport) {
+	level := slog.LevelInfo
+	if r.Deleted > 0 || r.Refused > 0 {
+		level = slog.LevelWarn
+	}
+	logger.Log(context.Background(), level, "integrity variant sweep: summary",
+		slog.Int("rows", r.Rows),
+		slog.Int("present", r.Present),
+		slog.Int("adopted", r.Adopted),
+		slog.Int("deleted", r.Deleted),
+		slog.Int("mismatched", r.Mismatched),
+		slog.Int("stat_failed", r.StatFailed),
+		slog.Int("refused", r.Refused),
+		slog.String("variants_dir", dir),
+	)
+}
+
+// logSampleCap is how many per-row lines of each message a tick emits
+// at the message's own level before the rest drop to Debug. A relocated
+// catalog adopts thousands of rows in one tick and a copy in flight
+// mismatches thousands more every hour until it lands; the summary line
+// carries the totals, and the M-SEARCH lesson (199,078 of 200,000 log
+// lines) is that an unbounded per-row log makes every other line
+// unfindable.
+const logSampleCap = 10
+
+// logSampler counts per-message emissions within one tick.
+type logSampler struct {
+	seen map[string]int
+}
+
+func (s *logSampler) log(level slog.Level, msg string, attrs ...slog.Attr) {
+	if s.seen == nil {
+		s.seen = make(map[string]int)
+	}
+	s.seen[msg]++
+	if s.seen[msg] > logSampleCap {
+		level = slog.LevelDebug
+	}
+	logger.LogAttrs(context.Background(), level, msg, attrs...)
 }

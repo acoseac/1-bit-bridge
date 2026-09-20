@@ -505,13 +505,40 @@ func initOptimizeIDCache() {
 // Dirname segments are NOT sanitised — they came from the source
 // filesystem which already accepts them.
 func (j JobSpec) SidecarPath() string {
-	dir := filepath.Dir(j.SourceLibraryRel)
-	base := filepath.Base(j.SourceLibraryRel)
-	filename := safeVariantFilename(base, j.VariantID())
+	return VariantSidecarPath(j.OutputDir, j.SourceLibraryRel, j.VariantID())
+}
+
+// VariantSidecarPath is THE source-path-mirrored layout — the one
+// answer to "where does the sidecar for (source, variant) live under
+// this variants directory". Three consumers, one definition:
+//
+//   - the writers: JobSpec.SidecarPath above (the pool and the CLI
+//     conversions land files here);
+//   - `bridge variants move` (cmd/bridge computeNewSidecarPath), which
+//     relocates every row's file to this path under the new directory;
+//   - the integrity probes (internal/integrity.LocateSidecar and the
+//     forward sweeps' known sets), which ask where a row's file SHOULD
+//     be under the CURRENT directory when its recorded path is gone.
+//
+// The third is what makes a moved variants tree survive: after a host
+// move the recorded `track_variants.sidecar_path` carries the old
+// prefix, and every file is exactly here under the new one — so this
+// function is how a reaper tells "relocated" from "deleted". It was
+// three hand-copied `filepath.Join(dir, Dir(rel), basename)` bodies
+// before, which agreed by luck; a layout change now cannot leave one
+// probe looking in the wrong place. Pure path arithmetic — no I/O.
+//
+// sourceLibraryRel is the manifest path (`tracks.path`, root-basename
+// prefix included in multi-root mode), exactly as `track_variants.
+// source_path` stores it; variantID is the persisted id.
+func VariantSidecarPath(outputDir, sourceLibraryRel, variantID string) string {
+	dir := filepath.Dir(sourceLibraryRel)
+	base := filepath.Base(sourceLibraryRel)
+	filename := safeVariantFilename(base, variantID)
 	if dir == "" || dir == "." {
-		return filepath.Join(j.OutputDir, filename)
+		return filepath.Join(outputDir, filename)
 	}
-	return filepath.Join(j.OutputDir, dir, filename)
+	return filepath.Join(outputDir, dir, filename)
 }
 
 // VariantSidecarBasename builds the variant FLAC's basename for the

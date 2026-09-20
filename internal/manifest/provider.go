@@ -33,9 +33,15 @@ type VariantLookup struct {
 	// emission so the wire path matches `Track.path` byte-
 	// identical for iOS reverse-index resolution. CodeRabbit
 	// Major on PR #209.
-	SourcePath    string
-	VariantID     string
-	SidecarPath   string
+	SourcePath  string
+	VariantID   string
+	SidecarPath string
+	// SizeBytes is the sidecar's recorded size — what the serve-side
+	// relocation probe (cmd/bridge variantStoreAdapter) compares against
+	// a file found at the canonical location under the CURRENT variants
+	// dir when the recorded path is gone, so it adopts the operator's
+	// byte-identical copy and never a partial one.
+	SizeBytes     int64
 	SourceMTimeNS int64
 	SourceSize    int64
 }
@@ -266,6 +272,7 @@ func (p *Provider) LookupVariant(ctx context.Context, sourcePath, variantID stri
 		SourcePath:    v.SourcePath,
 		VariantID:     v.VariantID,
 		SidecarPath:   v.SidecarPath,
+		SizeBytes:     v.SizeBytes,
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,
 	}, nil

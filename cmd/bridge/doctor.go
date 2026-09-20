@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -270,6 +271,37 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 				}
 				defer func() { _ = st.Close() }()
 				return st.HasTracksWithCodec(ctx, codec)
+			}
+			// The sidecar-paths probe: the same lazy open + immediate close,
+			// for the same reasons, answering from the two directories the
+			// sidecars are written to TODAY (the variants dir is a hot
+			// setting; the doctor runs against the persisted config, which
+			// is what the next boot will use).
+			variantsDir := cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
+			waveformDir := analyze.WaveformDirFor(cfg.DataDir)
+			d.RelocatedSidecars = func(ctx context.Context) (doctor.RelocatedSidecars, error) {
+				if _, err := os.Stat(dbPath); err != nil {
+					return doctor.RelocatedSidecars{}, err
+				}
+				st, err := manifest.OpenStore(dbPath)
+				if err != nil {
+					return doctor.RelocatedSidecars{}, err
+				}
+				defer func() { _ = st.Close() }()
+				out := doctor.RelocatedSidecars{VariantsDir: variantsDir, WaveformDir: waveformDir}
+				// Both counters want a trailing separator so `/srv/variants`
+				// does not claim `/srv/variants2/...` — the contract their
+				// admin caller (countLegacyVariants) already honours.
+				sep := string(filepath.Separator)
+				out.Variants, out.VariantBytes, err = st.CountVariantsNotUnderPrefix(ctx, filepath.Clean(variantsDir)+sep)
+				if err != nil {
+					return doctor.RelocatedSidecars{}, err
+				}
+				out.Waveforms, err = st.CountWaveformsNotUnderPrefix(ctx, filepath.Clean(waveformDir)+sep)
+				if err != nil {
+					return doctor.RelocatedSidecars{}, err
+				}
+				return out, nil
 			}
 		}
 	}

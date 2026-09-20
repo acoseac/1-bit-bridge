@@ -2467,9 +2467,18 @@ func shouldSkipDir(name string) bool {
 // avoid the `transcode` import cycle). A DSD rendition's source is a `.dsf` / `.dff`, so a
 // sidecar reads `01.dsf.pcm-v1-176400-24.flac` — without the two DSD families here every
 // rendition would index as a phantom track under the variants dir.
-var variantIDInfixRe = regexp.MustCompile(
-	`^(?:` + VariantKindPrefixUpscaled + `|` + VariantKindPrefixOptimized + `|` +
-		VariantKindPrefixOptimizedDSD + `|` + VariantKindPrefixPCM + `)-v[0-9]+-[0-9]+-[0-9]+$`)
+var variantIDInfixRe = regexp.MustCompile(`^` + VariantIDPattern + `$`)
+
+// VariantIDPattern is the regexp source for ONE well-formed bridge variant id
+// — `<kind>-v<schema>-<rate>-<bits>` over every VariantKindPrefix* — with no
+// anchors, so each consumer adds its own. The scanner anchors it to a whole
+// dot-segment (variantIDInfixRe above: a real track must never be mistaken
+// for a sidecar); internal/integrity's relocation guard matches it LOOSELY
+// inside a basename (a real sidecar in either the source-mirrored or the
+// legacy hash-flat layout must never be mistaken for junk). One list of
+// kinds, so a fifth family added here reaches both without a second edit.
+const VariantIDPattern = `(?:` + VariantKindPrefixUpscaled + `|` + VariantKindPrefixOptimized + `|` +
+	VariantKindPrefixOptimizedDSD + `|` + VariantKindPrefixPCM + `)-v[0-9]+-[0-9]+-[0-9]+`
 
 // isVariantSidecarName reports whether a file basename is one of the bridge's own
 // optimize/upscale transcode artifacts and therefore must NOT be indexed as a library

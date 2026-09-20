@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -108,8 +109,34 @@ type tsnetH3State struct {
 	listeners []tsnetH3Listener
 }
 
+// variantStoreAdapter implements api.VariantStore on top of the
+// manifest provider — and is the serve-side half of the relocation
+// story. `serveVariant` opens the record's SidecarPath and, on ENOENT,
+// REAPS the row (the reactive cleanup for "operator deleted this file
+// while it was playing"). After a host move every row's recorded path
+// is ENOENT while every file sits at its canonical place under the
+// current variants dir, so a plain lookup would hand that path over and
+// the first play of each track would delete its row — one at a time,
+// until the integrity watcher's boot sweep had adopted them, or forever
+// on a bridge that runs the watcher off. So the lookup asks
+// integrity.LocateSidecar first: a relocated row is adopted here, in
+// the same call, and the record already carries the path the file is
+// at. Only a row missing at BOTH locations reaches serveVariant's
+// reaper, which is the case it was written for.
+//
+// The stat this adds to the download path is one syscall against a
+// stream of thousands, and the TOCTOU window it reopens (present at
+// stat, gone at open) lands in serveVariant's existing ENOENT branch,
+// where reaping is the right answer.
 type variantStoreAdapter struct {
 	provider *manifest.Provider
+	// store performs the adoption UPDATE; nil in fixtures that only
+	// project, which turns a relocated row into a plain miss (the
+	// pre-relocation behaviour) rather than a nil deref.
+	store *manifest.Store
+	// variantsDir is liveVariantsDir — the CURRENT directory, asked per
+	// lookup, because the probe has to look where a sidecar belongs NOW.
+	variantsDir func() string
 }
 
 func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, variantID string) (*api.VariantRecord, error) {
@@ -120,7 +147,7 @@ func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, var
 	if v == nil {
 		return nil, nil
 	}
-	return &api.VariantRecord{
+	rec := &api.VariantRecord{
 		// Canonical values from the row — NOT the request input.
 		// Case-insensitive lookup may have resolved a folded
 		// request against the canonical-case row; the api
@@ -132,7 +159,37 @@ func (a *variantStoreAdapter) LookupVariant(ctx context.Context, sourcePath, var
 		SidecarPath:   v.SidecarPath,
 		SourceMTimeNS: v.SourceMTimeNS,
 		SourceSize:    v.SourceSize,
-	}, nil
+	}
+	if a.store == nil || a.variantsDir == nil {
+		return rec, nil
+	}
+	loc := integrity.LocateSidecar(a.variantsDir(), integrity.VariantSnapshot{
+		SourcePath: v.SourcePath, VariantID: v.VariantID, SidecarPath: v.SidecarPath, SizeBytes: v.SizeBytes,
+	})
+	if loc.Verdict != integrity.SidecarRelocated {
+		return rec, nil
+	}
+	// Serve from the canonical path whether or not the UPDATE lands: the
+	// bytes are there. A failed adoption is logged and the watcher's next
+	// tick tries again; it is never a reason to hand serveVariant the
+	// stale path and have it reap a row whose file exists.
+	if err := a.store.UpdateVariantSidecarPath(ctx, v.SourcePath, v.VariantID, loc.Canonical); err != nil {
+		logger.Warn("variant lookup: adopting relocated sidecar failed; serving it anyway",
+			slog.String("source_path", v.SourcePath),
+			slog.String("variant_id", v.VariantID),
+			slog.String("canonical", loc.Canonical),
+			slog.Any("err", err),
+		)
+	} else {
+		logger.Info("variant lookup: adopted relocated sidecar",
+			slog.String("source_path", v.SourcePath),
+			slog.String("variant_id", v.VariantID),
+			slog.String("from", v.SidecarPath),
+			slog.String("to", loc.Canonical),
+		)
+	}
+	rec.SidecarPath = loc.Canonical
+	return rec, nil
 }
 
 // atlasHarvestSink adapts the manifest store to the Phase-H harvest client's
@@ -517,23 +574,34 @@ func (a *integrityVariantListerAdapter) AllVariants() ([]integrity.VariantSnapsh
 	if err != nil {
 		return nil, err
 	}
+	return integritySnapshotsFromRows(rows), nil
+}
+
+// integritySnapshotsFromRows is the ONE projection from a store row to
+// the integrity package's snapshot, shared by both listers so the
+// reverse and forward sweeps see the same fields — SizeBytes included,
+// which the relocation probe compares against a file found at the
+// canonical location.
+func integritySnapshotsFromRows(rows []manifest.VariantRow) []integrity.VariantSnapshot {
 	out := make([]integrity.VariantSnapshot, len(rows))
 	for i, r := range rows {
 		out[i] = integrity.VariantSnapshot{
 			SourcePath:  r.SourcePath,
 			VariantID:   r.VariantID,
 			SidecarPath: r.SidecarPath,
+			SizeBytes:   r.SizeBytes,
 		}
 	}
-	return out, nil
+	return out
 }
 
-// integrityVariantDeleterAdapter implements integrity.VariantDeleter
-// on top of a manifest.Store. Same one-line passthrough as
-// variantDeleterAdapter's DeleteVariant; lives separately so the
-// integrity package stays decoupled from internal/api's
-// VariantSummary type.
-type integrityVariantDeleterAdapter struct {
+// integrityVariantReconcilerAdapter implements integrity.VariantReconciler
+// on top of a manifest.Store: DeleteVariant is the same one-line
+// passthrough as variantDeleterAdapter's, AdoptVariantSidecar is the
+// path-only UPDATE `bridge variants move` uses (no `indexed_at` bump —
+// nothing changed for a client). Lives separately so the integrity
+// package stays decoupled from internal/api's VariantSummary type.
+type integrityVariantReconcilerAdapter struct {
 	store *manifest.Store
 	// baseCtx is runServe's scanCtx. The integrity interfaces take no
 	// ctx, so without it these adapters used context.Background() and a
@@ -544,28 +612,37 @@ type integrityVariantDeleterAdapter struct {
 }
 
 // ctx resolves baseCtx, tolerating a zero-value adapter in tests.
-func (a *integrityVariantDeleterAdapter) ctx() context.Context {
+func (a *integrityVariantReconcilerAdapter) ctx() context.Context {
 	if a.baseCtx != nil {
 		return a.baseCtx
 	}
 	return context.Background()
 }
 
-func (a *integrityVariantDeleterAdapter) DeleteVariant(sourcePath, variantID string) error {
+func (a *integrityVariantReconcilerAdapter) DeleteVariant(sourcePath, variantID string) error {
 	return a.store.DeleteVariant(a.ctx(), sourcePath, variantID)
 }
 
+func (a *integrityVariantReconcilerAdapter) AdoptVariantSidecar(sourcePath, variantID, newSidecarPath string) error {
+	return a.store.UpdateVariantSidecarPath(a.ctx(), sourcePath, variantID, newSidecarPath)
+}
+
 // integritySidecarListerAdapter implements integrity.SidecarLister on
-// top of a manifest.Store. Mirrors integrityVariantListerAdapter but
-// projects only `track_variants.sidecar_path` (no per-row metadata
-// reads — the forward-sweep sweeper only needs to know "what paths
-// exist in the DB" to diff against the filesystem walk).
+// top of a manifest.Store for the forward-sweep sweeper. It projects
+// the same snapshot the reverse sweep reads (integritySnapshotsFromRows)
+// rather than bare paths: the sweeper's known set carries each row's
+// CANONICAL path beside its recorded one, and the canonical path is
+// computed from (source_path, variant_id).
 type integritySidecarListerAdapter struct {
 	store *manifest.Store
 }
 
-func (a *integritySidecarListerAdapter) AllSidecarPaths(ctx context.Context) (map[string]struct{}, error) {
-	return a.store.AllSidecarPaths(ctx)
+func (a *integritySidecarListerAdapter) AllVariants(ctx context.Context) ([]integrity.VariantSnapshot, error) {
+	rows, err := a.store.AllVariants(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return integritySnapshotsFromRows(rows), nil
 }
 
 // upscaleEnqueuerAdapter implements api.UpscaleEnqueuer on top
@@ -2395,6 +2472,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	liveInterval := func(pick func(*config.Config) time.Duration) func() time.Duration {
 		return func() time.Duration { return pick(liveCfg()) }
 	}
+	// liveVariantsDir resolves the effective variants dir from the LIVE
+	// config so hot changes via POST /api/upscale/variants-dir take effect
+	// without a restart — for where new sidecars land, for the pre-flight
+	// disk checks that grade that volume, for the integrity watchers'
+	// probes, and for the serve-side relocation lookup below, which is
+	// why it is defined up here beside liveCfg rather than in the pool
+	// block: every consumer reads the ONE closure, live.
+	liveVariantsDir := func() string {
+		live := liveCfg()
+		return live.Upscale.EffectiveVariantsDir(live.DataDir)
+	}
 	// cadenceRearms collects every buffered-1 channel that wants a poke
 	// when a CADENCE setting changes, so the loop re-reads its interval
 	// and re-arms instead of waiting out the old one. Fanned out by
@@ -2967,7 +3055,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		WithPairing(pairingStore).
 		WithCertExpiry(certNotAfter).
 		WithLECertExpiry(leCertExpiry).
-		WithUpscale(upscaleActiveFn, &variantStoreAdapter{provider: provider}).
+		WithUpscale(upscaleActiveFn, &variantStoreAdapter{provider: provider, store: manifestStore, variantsDir: liveVariantsDir}).
 		WithCarPlayOptimize(func() bool {
 			// The live upscale gate AND-ed with the live optimize toggle
 			// — the same pairing autoOptimizeEnabledFn uses, so the
@@ -3490,21 +3578,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 			}
 		}
-		// liveVariantsDir resolves the effective variants dir from the
-		// LIVE config holder so hot changes via POST
-		// /api/upscale/variants-dir take effect without a restart —
-		// both for where new sidecars land and for the pre-flight
-		// disk checks that grade that volume.
-		liveVariantsDir := func() string {
-			live := cfgHolder.Load()
-			if live == nil {
-				// Defensive: the holder is seeded before serving, but a
-				// nil snapshot must not panic a Submit — "" makes the
-				// coordinator's disk check fall back to its dataDir.
-				return ""
-			}
-			return live.Upscale.EffectiveVariantsDir(live.DataDir)
-		}
 		apiSrv.WithUpscaleEnqueuer(&upscaleEnqueuerAdapter{
 			pool:      upscalePool,
 			store:     manifestStore,
@@ -3631,11 +3704,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// hot (POST /api/upscale/variants-dir), and a boot-time
 		// snapshot kept this guard probing the volume the operator
 		// had moved away from.
+		// The relocation threshold is a boot value like the interval
+		// beside it: none of the integrity knobs are on the settings
+		// page, so there is no live half to split from.
 		sweepInterval := cfg.VariantSweepInterval()
 		if sweepInterval > 0 {
 			variantWatcher := integrity.NewVariantWatcher(
 				&integrityVariantListerAdapter{store: manifestStore, baseCtx: scanCtx},
-				&integrityVariantDeleterAdapter{store: manifestStore, baseCtx: scanCtx},
+				&integrityVariantReconcilerAdapter{store: manifestStore, baseCtx: scanCtx},
 				func(paths, variantIDs []string) {
 					apiSrv.EventPublisher().Publish("upscale.deleted", api.UpscaleDeletedEvent{
 						Paths:      paths,
@@ -3645,6 +3721,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				},
 				liveVariantsDir,
 				sweepInterval,
+				cfg.VariantSweepMaxDeletePercent(),
 			)
 			stopVariantWatcher := variantWatcher.Start(scanCtx)
 			defer stopVariantWatcher()
