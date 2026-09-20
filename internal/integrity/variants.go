@@ -466,7 +466,7 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		logger.Warn("integrity variant sweep: refusing to delete rows — this looks like a relocation, not a deletion",
 			slog.String("reason", reason),
 			slog.String("variants_dir", dir),
-			slog.String("hint", "if the sidecars really are gone: `bridge upscale --gc --allow-mass-delete`; if they were moved: put them at their source-mirrored paths under the variants directory, or `bridge variants move --to <dir>`"),
+			slog.String("hint", "if the sidecars really are gone: `bridge upscale --gc --allow-mass-delete`; if they were moved: put them at their source-mirrored paths under the variants directory, or `bridge variants move --to <dir> --confirm MOVE`"),
 		)
 		w.logSummary(dir, report)
 		return report

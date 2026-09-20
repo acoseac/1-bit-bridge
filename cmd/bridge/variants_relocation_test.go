@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -343,5 +344,98 @@ func TestRunAnalyzeGCKeepsARelocatedWaveform(t *testing.T) {
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Errorf("control: the true orphan survived (%v)", err)
+	}
+}
+
+// TestRunGCKeepsAMismatchedSidecarWithoutFailing — a copy in flight
+// (the canonical file is there, shorter than the row records) is a KEEP,
+// not a fault: the row stays as recorded, the summary names it, and the
+// exit code is 0 — a `--gc` run from cron while a copy lands must not
+// report a failed job for a healthy state. The watcher keeps Mismatched
+// apart from Failed for the same reason (CodeRabbit on #937).
+func TestRunGCKeepsAMismatchedSidecarWithoutFailing(t *testing.T) {
+	oldDir := filepath.Join(t.TempDir(), "mnt", "bridge-variants")
+	newDir := t.TempDir()
+	store, canonical := relocatedStore(t, oldDir, newDir, 3)
+	ctx := context.Background()
+	if err := os.Truncate(canonical[1], 10); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rc := runGC(ctx, &stdout, &stderr, store, newDir, t.TempDir(), gcOptions{maxDeletePercent: 20})
+	if rc != 0 {
+		t.Fatalf("runGC rc=%d for a copy in flight, want 0\nstderr: %s", rc, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "1 row(s) with a mismatched sidecar") || !strings.Contains(stdout.String(), "0 failure(s)") {
+		t.Errorf("summary should count the mismatch on its own, not as a failure:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not adopted, not deleted") {
+		t.Errorf("the keep should be said on stderr:\n%s", stderr.String())
+	}
+	rows, err := store.AllVariants(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept, adopted int
+	for _, r := range rows {
+		switch {
+		case strings.HasPrefix(r.SidecarPath, oldDir):
+			kept++
+		case strings.HasPrefix(r.SidecarPath, newDir):
+			adopted++
+		}
+	}
+	if kept != 1 || adopted != 2 {
+		t.Errorf("rows: %d kept as recorded, %d adopted; want 1 and 2", kept, adopted)
+	}
+}
+
+// TestDoctorSidecarProbeReportsAnUnreadableManifest — the probe is left
+// unwired only when bridge.db is genuinely absent (a fresh install). A
+// database that is there but cannot be read must reach the check as an
+// error, never as ok/"no manifest" (CodeRabbit on #937).
+func TestDoctorSidecarProbeReportsAnUnreadableManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory modes do not deny stat on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	dir := t.TempDir()
+	cfgPath := writeInstallAt(t, dir, "Artist/Album/01.flac")
+	dataDir := filepath.Join(dir, "data")
+
+	// Present and readable: wired, and it answers.
+	d := buildDoctorDeps(cfgPath)
+	if d.RelocatedSidecars == nil {
+		t.Fatal("probe not wired for a present manifest")
+	}
+	if _, err := d.RelocatedSidecars(context.Background()); err != nil {
+		t.Fatalf("probe over a readable manifest: %v", err)
+	}
+
+	// Present but unreadable: still wired, and the error reaches the check.
+	if err := os.Chmod(dataDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o755) })
+	d = buildDoctorDeps(cfgPath)
+	if d.RelocatedSidecars == nil {
+		t.Fatal("probe left unwired for an unreadable manifest — the check would answer ok about a database it cannot read")
+	}
+	if _, err := d.RelocatedSidecars(context.Background()); err == nil {
+		t.Fatal("probe over an unreadable manifest returned no error")
+	}
+
+	// Absent: not wired, so the check says "run after the first scan".
+	if err := os.Chmod(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if d = buildDoctorDeps(cfgPath); d.RelocatedSidecars != nil {
+		t.Fatal("probe wired for a manifest that does not exist")
 	}
 }

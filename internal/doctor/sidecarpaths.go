@@ -68,8 +68,8 @@ func checkSidecarPaths(ctx context.Context, d Deps) Check {
 	if rel.Variants > 0 {
 		hint += fmt.Sprintf("%d variant row(s) (%s) point outside %s. Rows whose file sits at its source-mirrored "+
 			"path under that directory are adopted by the hourly integrity sweep and on first play; rows still listed "+
-			"after a sweep point at files that are not there — `bridge variants move --to %s` relocates any still at "+
-			"the old path, `bridge upscale --gc` reaps the rest. ",
+			"after a sweep point at files that are not there — `bridge variants move --to %s --confirm MOVE` relocates "+
+			"any still at the old path, `bridge upscale --gc` reaps the rest. ",
 			rel.Variants, humanBytes(rel.VariantBytes), rel.VariantsDir, rel.VariantsDir)
 	}
 	if rel.Waveforms > 0 {

@@ -276,16 +276,19 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			// for the same reasons, answering from the two directories the
 			// sidecars are written to TODAY (the variants dir is a hot
 			// setting; the doctor runs against the persisted config, which
-			// is what the next boot will use). Wired only when a manifest
-			// EXISTS: a fresh install has no bridge.db until its first
-			// scan, and "could not read the sidecar tables" on a bridge
-			// that has never scanned would be a warning about nothing —
-			// the check's nil branch says "run after the first scan"
-			// instead. (Verified against a just-initialised fixture, where
-			// the first draft warned.)
+			// is what the next boot will use). Left unwired only when the
+			// manifest is genuinely ABSENT: a fresh install has no bridge.db
+			// until its first scan, and "could not read the sidecar tables"
+			// on a bridge that has never scanned would be a warning about
+			// nothing — the check's nil branch says "run after the first
+			// scan" instead (verified against a just-initialised fixture,
+			// where the first draft warned). Any other stat failure — a
+			// permission or I/O error on a database that IS there — wires
+			// the probe so the check reports it, rather than answering ok
+			// about a manifest it could not read (CodeRabbit on #937).
 			variantsDir := cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
 			waveformDir := analyze.WaveformDirFor(cfg.DataDir)
-			if _, err := os.Stat(dbPath); err == nil {
+			if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 				d.RelocatedSidecars = func(ctx context.Context) (doctor.RelocatedSidecars, error) {
 					return relocatedSidecarCounts(ctx, dbPath, variantsDir, waveformDir)
 				}
