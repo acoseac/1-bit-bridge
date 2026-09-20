@@ -6381,12 +6381,16 @@ Measured on `main`, same fixture:
 |---|---|
 | plain `--gc` | `rc=1`, 5 rows left |
 | `--allow-mass-delete --allow-mass-orphans --allow-empty` | `rc=1`, 5 rows left |
+| `touch "$variantsDir/.keep"`, then `--gc` | `rc=1`, 5 rows left (the file is unlinked first) |
 | `mkdir "$variantsDir/.keep"`, then `--gc` | `rc=0`, 0 rows left |
 
 No flag reaches this guard — it has no override, by design. What works is
 making the probe read non-empty with something the forward sweep cannot remove,
-i.e. a SUBDIRECTORY; a plain file would be unlinked as an orphan before the
-reverse guard probes. `bridge manifest clear-missing` is not a route either —
+i.e. a SUBDIRECTORY. A plain file does NOT work, and that was measured rather
+than reasoned: the `--gc` inventory passes a nil `Consider`, so every file under
+the root is a candidate and a dot-FILE is unlinked as an orphan (only dot-
+DIRECTORIES are pruned at the walk), leaving the directory empty again by the
+time the reverse guard probes. `bridge manifest clear-missing` is not a route either —
 `ClearMissingCounts` deletes from `tracks` + `folders` under a
 `upnp_track_routing` anti-join and never touches `track_variants` — and nor is
 `bridge restore`. So the operator had to know the trick, which is what made it
@@ -6455,6 +6459,20 @@ works. Left for its own change.
 
 The two-run test shape is the point: a single run that merely exits 0 does not
 prove the wedge is gone, because the wedge is about what the SECOND run can do.
+
+**`git stash` on a CLEAN tree is a silent no-op, and that is a new way to lose a
+control.** The escape-hatch table above was first measured with
+`git stash && go test && git stash pop` while the fix was uncommitted, which is
+sound. Re-running the same shape AFTER committing stashed nothing, ran against
+the FIXED build, and reported that a plain `.keep` file works — the opposite of
+the truth, and passing for the wrong reason. `git stash pop`'s "No stash entries
+found" was the only tell, and it comes at the END. This repo's standing rule is
+"commit before the control" because `git checkout --` takes uncommitted work
+with it; the inverse holds too — **once you have committed, a control has to
+check out the pre-fix commit** (a throwaway `git worktree add <dir> <sha>`), and
+it must ASSERT it is on the old code (`grep -c forwardRemoved` → 0) rather than
+assume the stash took. Redone that way, the table above is what the unfixed
+build actually does.
 
 ### No wire change
 

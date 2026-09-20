@@ -1167,8 +1167,9 @@ no failing test — which is the shape to expect in this area.
   just created. No re-run cleared it — the directory was still empty, so it
   refused again having removed nothing — and **no flag reached it either**
   (measured: `--allow-mass-delete`, `--allow-mass-orphans` and `--allow-empty`
-  all still wedged; only `mkdir "$dir/.keep"` got past, because a plain file is
-  unlinked as an orphan before the reverse guard probes). Those rows could not
+  all still wedged; only `mkdir "$dir/.keep"` got past — a plain `touch` does
+  NOT, because the `--gc` inventory passes a nil `Consider`, so a dot-FILE is
+  unlinked as an orphan while only dot-DIRECTORIES are pruned at the walk). Those rows could not
   be reaped by `--gc` at all, and `manifest clear-missing` is not a route —
   `ClearMissingCounts` deletes from `tracks` + `folders` and never touches
   `track_variants`. The source-mirrored layout hid it for years: `WalkDir`
@@ -2077,6 +2078,17 @@ its twin.** The top list is older, shorter, and read first.
   the lesson; I hit it twice in one session anyway. And a control that fails to
   BUILD reads as "control invalid", never as a pass — revert the test fixture
   alongside the production line so the control compiles.
+- **...and once you HAVE committed, `git stash` is a no-op, which is the same
+  trap inverted.** `git stash && go test && git stash pop` against a clean tree
+  stashes nothing and runs the test against the FIXED build, so the control
+  passes for the wrong reason and reports the opposite of the truth — the only
+  tell is `pop`'s "No stash entries found", and it comes at the END. Check out
+  the pre-fix commit instead (a throwaway `git worktree add <dir> <sha>`, removed
+  after), and **assert you are on the old code** — grep the tree for the
+  identifier the fix introduced and require zero — rather than assuming the
+  stash took. Found on #941, where a "plain file works too" measurement was
+  entirely an artifact of this. (Also: `grep -c … && next` exits 1 on zero
+  matches and silently ends the chain.)
 - **Negative-control every load-bearing assertion**, and check what the mutation
   actually did. A control that fails to BUILD reads as "control invalid", never
   as a pass — and most "just disable this branch" edits delete a variable's only
