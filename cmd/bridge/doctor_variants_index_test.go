@@ -280,3 +280,47 @@ func findCheck(t *testing.T, rep doctor.Report, name string) doctor.Check {
 	t.Fatalf("no %q check in the report — it is declared but never dispatched to", name)
 	return doctor.Check{}
 }
+
+// TestDoctorVariantsIndexClaimsNoVerdictFromATruncatedWalk drives the
+// real probe: whatever the counts say, a walk that stopped at its budget
+// must not hand the check a definite answer about what the sweep will do.
+// The sweep's ratio is over the whole tree and this one saw a prefix.
+//
+// Pinned at the probe, not only at the check's wording, because the check
+// cannot tell a verdict that was withheld from one that came back false —
+// they are the same bool.
+func TestDoctorVariantsIndexClaimsNoVerdictFromATruncatedWalk(t *testing.T) {
+	dir := t.TempDir()
+	_, variantsDir := variantsIndexInstall(t, dir, 0, 0)
+	for i := 0; i < 40; i++ {
+		writeFixtureFile(t, filepath.Join(variantsDir, "aaa", fmt.Sprintf("%03d.flac", i)), 1)
+	}
+	dbPath := manifest.DefaultDBPath(filepath.Join(dir, "data"))
+
+	idx, err := variantsIndexCounts(context.Background(), dbPath, variantsDir, 20, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !idx.Truncated {
+		t.Fatalf("the fixture does not truncate, so it pins nothing: %+v", idx)
+	}
+	if idx.WouldRefuseGC {
+		t.Errorf("a definite refusal was derived from a prefix of %d file(s) (orphans=%d rows=%d)",
+			idx.Files, idx.Orphans, idx.Rows)
+	}
+	// ...while the monotone half survives: more unreferenced files than
+	// the catalog has rows is true of the whole tree once it is true here.
+	if !idx.OrphansExceedRows {
+		t.Errorf("the lower bound was withheld too (orphans=%d rows=%d) — the lost-index warning "+
+			"would vanish on exactly the large trees that always truncate", idx.Orphans, idx.Rows)
+	}
+
+	// A complete walk of the same tree does answer.
+	idx, err = variantsIndexCounts(context.Background(), dbPath, variantsDir, 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Truncated || !idx.WouldRefuseGC {
+		t.Errorf("an unbounded walk withheld the verdict (truncated=%v wouldRefuse=%v)", idx.Truncated, idx.WouldRefuseGC)
+	}
+}

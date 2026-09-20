@@ -68,9 +68,10 @@ func TestVariantsIndexSaysWhenTheSweepWouldRefuse(t *testing.T) {
 	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
 		return VariantsIndex{
 			Rows: 200, Files: 10248, Known: 200, Orphans: 10048,
-			OrphanSample:  []string{"A/Al/01.flac.upscaled-v2-176400-24.flac"},
-			WouldRefuseGC: true,
-			VariantsDir:   "/srv/bridge-variants",
+			OrphanSample:      []string{"A/Al/01.flac.upscaled-v2-176400-24.flac"},
+			WouldRefuseGC:     true,
+			OrphansExceedRows: true,
+			VariantsDir:       "/srv/bridge-variants",
 		}, nil
 	}})
 	if c.Status != Warn {
@@ -175,5 +176,52 @@ func TestVariantsIndexWarnsWhenTheTreeIsEmptyButTheCatalogIsNot(t *testing.T) {
 	}})
 	if c.Status != OK {
 		t.Errorf("a bridge that never transcoded anything warns: %q", c.Summary)
+	}
+}
+
+// TestVariantsIndexWillNotGuessTheSweepsVerdictFromAPartialWalk — the
+// sweep's ratio is over the WHOLE tree, and this probe walks under a
+// budget. A truncated prefix that is 90% orphans can be followed by a
+// tree of referenced files, so a verdict derived from it could tell an
+// operator that `--gc` refuses when it would proceed — the
+// confident-wrong-answer shape the check itself exists to catch, one
+// level up. (CodeRabbit on #940.)
+//
+// What must SURVIVE the hedge is the lost-index warning: the terms behind
+// it are monotone in the walk, and truncation is certain on exactly the
+// large trees where the warning matters most. Downgrading those to
+// "`--gc` reclaims them" would be the opposite advice about the one shape
+// where the files are the only copy.
+func TestVariantsIndexWillNotGuessTheSweepsVerdictFromAPartialWalk(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{
+			Rows: 200, Files: 20000, Known: 200, Orphans: 19800,
+			Truncated: true, Budget: 20000,
+			// The probe leaves WouldRefuseGC false on a truncated walk;
+			// the monotone lower bound it may still assert.
+			OrphansExceedRows: true,
+			OrphanSample:      []string{"A/Al/01.flac.upscaled-v2-176400-24.flac"},
+			VariantsDir:       "/srv/bridge-variants",
+		}, nil
+	}})
+	if c.Status != Warn {
+		t.Fatalf("status=%v, want warn", c.Status)
+	}
+	if !strings.Contains(c.Hint, "LOST INDEX") {
+		t.Errorf("the monotone warning was lost with the verdict: %q", c.Hint)
+	}
+	if strings.Contains(c.Hint, "REFUSES") {
+		t.Errorf("a definite refusal was claimed from a partial walk: %q", c.Hint)
+	}
+	if strings.Contains(c.Hint, "reclaims them") {
+		t.Errorf("a partial walk was reported as an ordinary orphan crop: %q", c.Hint)
+	}
+	if !strings.Contains(c.Hint, "cannot be told from a partial walk") {
+		t.Errorf("hint does not say the verdict is out of reach: %q", c.Hint)
+	}
+	// The instruction it gives must be safe to follow: --gc refuses by
+	// default, so "run it" cannot destroy anything.
+	if !strings.Contains(c.Hint, "unlinks nothing when it refuses") {
+		t.Errorf("hint does not say the suggested command is safe to run: %q", c.Hint)
 	}
 }

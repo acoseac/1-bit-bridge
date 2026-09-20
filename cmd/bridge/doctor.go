@@ -397,7 +397,17 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 	}
 	out.Files, out.Known, out.Orphans = inv.Files, inv.Known, inv.Orphans
 	out.Truncated, out.Unreadable = inv.Truncated, inv.Unreadable
-	out.WouldRefuseGC = integrity.MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), maxOrphanPercent) != ""
+	// The lower bound is monotone in the walk, so it is sound either way;
+	// the full verdict is not, so it is claimed only on a complete walk.
+	// Latent at the default threshold and reachable above 33 — see
+	// integrity.MassOrphanLowerBound for why the two terms overlap — but
+	// the doctor telling an operator that `--gc` REFUSES when it would
+	// proceed is the confident-wrong-answer shape this check exists to
+	// catch, and it should not be safe by coincidence.
+	out.OrphansExceedRows = integrity.MassOrphanLowerBound(inv.Orphans, len(rows))
+	if !inv.Truncated {
+		out.WouldRefuseGC = integrity.MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), maxOrphanPercent) != ""
+	}
 	for _, p := range inv.OrphanPaths {
 		// Relative to the directory the summary already names: shorter to
 		// read, and a doctor report gets pasted into issues.

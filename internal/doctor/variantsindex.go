@@ -34,7 +34,23 @@ type VariantsIndex struct {
 	// numbers: true when `bridge upscale --gc` would refuse to unlink
 	// them. Computed by the probe rather than restated here, so the
 	// doctor and the sweep cannot disagree about the threshold.
+	//
+	// Only ever set on a COMPLETE walk. The sweep's ratio term is not
+	// monotone in the walk, so a verdict derived from a budgeted prefix
+	// could tell an operator that `--gc` refuses when it would proceed —
+	// the confident-wrong-answer shape this whole check exists to catch,
+	// one level up. Measured latent at the default threshold and
+	// reachable from 34 (integrity.MassOrphanLowerBound has the
+	// arithmetic); kept because the knob takes 0..100 (CodeRabbit on
+	// #940).
 	WouldRefuseGC bool
+	// OrphansExceedRows is integrity.MassOrphanLowerBound: more
+	// unreferenced files than the catalog has rows in total, which is the
+	// lost-index signal itself. Both its terms ARE monotone in the walk,
+	// so unlike WouldRefuseGC it is sound on a truncated prefix — which is
+	// what lets the check keep warning about the shape on the very trees
+	// (large ones) where truncation is certain.
+	OrphansExceedRows bool
 	// Truncated is set when the walk stopped at its entry budget. The
 	// check then scopes its claim to what it looked at instead of
 	// answering for the whole tree.
@@ -125,13 +141,25 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 	summary := fmt.Sprintf("%d of %d sidecar file(s) under %s are referenced by no row, against %d row(s) in the catalog%s",
 		idx.Orphans, idx.Files, idx.VariantsDir, idx.Rows, scope)
 	var hint strings.Builder
-	if idx.WouldRefuseGC {
+	if idx.OrphansExceedRows {
 		hint.WriteString("There are more unreferenced files than the catalog has rows in total, which is what a LOST INDEX " +
 			"looks like rather than a tree of junk — a bridge.db restored from an older snapshot, or a host move whose " +
-			"sweep reaped the rows before they could be adopted. `bridge upscale --gc` REFUSES this shape; do not pass " +
-			"--allow-mass-orphans until you are sure, because an unlinked rendition has to be transcoded again from source. " +
-			"If the rows are recoverable, restore them first. ")
-	} else {
+			"sweep reaped the rows before they could be adopted. Do not pass --allow-mass-orphans until you are sure, " +
+			"because an unlinked rendition has to be transcoded again from source. If the rows are recoverable, restore " +
+			"them first. ")
+	}
+	switch {
+	case idx.WouldRefuseGC:
+		hint.WriteString("`bridge upscale --gc` REFUSES this shape, so it will not unlink anything. ")
+	case idx.Truncated:
+		// The sweep's own ratio is over the WHOLE tree and this walk saw a
+		// prefix, so what it will decide cannot be told from here — and
+		// saying either "refuses" or "reclaims them" would be a guess
+		// dressed as a fact. Point at the thing that measures the whole
+		// tree; it is safe to run, because refusing is its default.
+		hint.WriteString("Whether `bridge upscale --gc` reclaims these or refuses them cannot be told from a partial walk — " +
+			"run it and read what it says; it measures the whole tree and unlinks nothing when it refuses. ")
+	default:
 		hint.WriteString("`bridge upscale --gc` reclaims them. ")
 	}
 	hint.WriteString("Unreferenced so far: ")

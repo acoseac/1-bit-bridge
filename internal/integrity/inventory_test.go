@@ -405,3 +405,55 @@ func mustRel(t *testing.T, base, p string) string {
 	}
 	return filepath.ToSlash(rel)
 }
+
+// TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot is the property
+// behind the doctor's bounded probe: which parts of MassOrphanRefusal a
+// caller may assert from a PREFIX of the tree.
+//
+// The lower bound is monotone — orphans only grow as the walk sees more,
+// and rows is the whole catalog either way — so a prefix that satisfies
+// it proves the completed walk does. The full verdict is not, and the
+// sweep over every shape below is what says HOW MUCH that matters: the
+// two terms overlap (orphans > rows bounds known at 2*rows < 2*orphans,
+// so any qualifying prefix is already over a third orphans), and a
+// prefix verdict can differ from the completed one only from
+// maxOrphanPercent 34 up — never at the default 20.
+func TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot(t *testing.T) {
+	// Monotone: growing the orphan count can only turn the bound ON.
+	for rows := 0; rows < 40; rows++ {
+		on := false
+		for orphans := 0; orphans < 120; orphans++ {
+			got := MassOrphanLowerBound(orphans, rows)
+			if on && !got {
+				t.Fatalf("MassOrphanLowerBound(%d,%d) went false after being true — not monotone", orphans, rows)
+			}
+			on = on || got
+		}
+	}
+
+	// And the whole verdict is not, from 34 up. `known <= 2*rows`: a row
+	// contributes at most two spellings, and both sit on disk only while
+	// a copy is in flight.
+	firstDivergent := -1
+	for pct := 0; pct <= 100 && firstDivergent < 0; pct++ {
+		for rows := 0; rows < 40 && firstDivergent < 0; rows++ {
+			for orphans := massOrphanFloor; orphans < 80 && firstDivergent < 0; orphans++ {
+				for knownTotal := 0; knownTotal <= 2*rows && firstDivergent < 0; knownTotal++ {
+					if MassOrphanRefusal(orphans, orphans+knownTotal, rows, pct) != "" {
+						continue // the completed walk refuses too: no divergence
+					}
+					for knownPrefix := 0; knownPrefix <= knownTotal; knownPrefix++ {
+						if MassOrphanRefusal(orphans, orphans+knownPrefix, rows, pct) != "" {
+							firstDivergent = pct
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	if firstDivergent != 34 {
+		t.Errorf("a prefix verdict first diverges from the completed one at maxOrphanPercent=%d, want 34 — "+
+			"the arithmetic in MassOrphanLowerBound's docblock has moved", firstDivergent)
+	}
+}

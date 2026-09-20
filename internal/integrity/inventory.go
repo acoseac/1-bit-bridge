@@ -204,6 +204,35 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 // TakeSidecarInventory.
 var errInventoryBudget = errors.New("integrity: inventory budget reached")
 
+// MassOrphanLowerBound reports whether the two terms of MassOrphanRefusal
+// that SURVIVE A PARTIAL WALK hold: the deletion clears the floor, and
+// there are more unreferenced files than the catalog has rows in total.
+//
+// Both are monotone in the walk. `orphans` can only grow as more of the
+// tree is seen, and `rows` is the whole catalog either way, so a prefix
+// that satisfies them proves the completed walk does too. The RATIO term
+// is not, so a caller that walked under a budget may state THIS and may
+// not state what MassOrphanRefusal as a whole will decide (CodeRabbit on
+// #940).
+//
+// The two are not independent, and the arithmetic is worth writing down
+// because it decides how much the distinction matters: `orphans > rows`
+// bounds the referenced files at `known <= 2*rows < 2*orphans` (a row
+// contributes at most two spellings, and both are on disk only mid-copy),
+// so a prefix satisfying this is already more than a third orphans.
+// Swept over every (rows, orphans, known, prefix) shape, a prefix verdict
+// can therefore differ from the completed one only once
+// maxOrphanPercent reaches 34 — never at the default 20. The separation
+// is kept anyway: the knob takes 0..100, and a guard that is correct
+// only because two of its terms happen to overlap at today's default is
+// one configuration change from being wrong.
+//
+// Exported so `bridge doctor`'s bounded probe has one place to ask the
+// question rather than a second copy of the floor.
+func MassOrphanLowerBound(orphans, rows int) bool {
+	return orphans >= massOrphanFloor && orphans > rows
+}
+
 // massOrphanFloor is the smallest number of unreferenced files the
 // forward guard will ever refuse, the twin of massDeleteFloor and set to
 // the same ten for the same reason: below it the ratio says nothing, and
@@ -243,10 +272,7 @@ const massOrphanFloor = 10
 // The reason names the numbers so the caller's refusal tells the operator
 // what was seen rather than that something was refused.
 func MassOrphanRefusal(orphans, files, rows, maxOrphanPercent int) string {
-	if orphans < massOrphanFloor || files <= 0 {
-		return ""
-	}
-	if orphans <= rows {
+	if files <= 0 || !MassOrphanLowerBound(orphans, rows) {
 		return ""
 	}
 	if orphans*100 <= maxOrphanPercent*files {
