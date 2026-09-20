@@ -1355,7 +1355,174 @@ export async function renderPlaylists(view, ctx) {
     countNoun: "playlist",
     emptyTitle: "No playlists backed up",
     emptyDetail: "Playlists appear here when a paired device has playlist backup switched on.",
+    // The banner slot, not a section appended after the grid — and that
+    // is the whole point. renderPagedList paints the banner on the EMPTY
+    // view too, and "every playlist was just deleted" is exactly the
+    // state where the grid is empty and the restore panel is the only
+    // thing on the page worth reading.
+    banner: deletedPlaylistsPanel(),
   });
+}
+
+/**
+ * "Recently deleted", with an undo.
+ *
+ * DELETE /v1/playlists/{id} writes a tombstone and keeps every item row,
+ * so nothing is actually gone — but until this panel the only way back
+ * was an UPDATE against the live database. On 2026-09-20 a freshly
+ * paired phone replayed a queued delete and sent 17 DELETEs in 26
+ * seconds; the bridge did exactly what the contract says and the
+ * operator had no button.
+ *
+ * Returned SYNCHRONOUSLY and filled later, the sourceScopeBanner idiom:
+ * the grid must never wait on this read to paint. It starts `hidden`, so
+ * the common case — nothing deleted — costs no layout at all and the
+ * panel appears only when it has something to say.
+ *
+ * No generation guard. A reader who navigates away leaves this node
+ * detached, and filling a detached node paints nothing; an aborted read
+ * is a cancellation, not a failure, and is swallowed with everything
+ * else — a panel that cannot load must not put an error where a library
+ * should be.
+ */
+function deletedPlaylistsPanel() {
+  const box = el("div", { class: "deleted-panel", attrs: { hidden: true } });
+  api.deletedPlaylists()
+    .then((r) => fillDeletedPlaylists(box, r))
+    .catch(() => {
+      /* the grid is the page; a missing undo panel is not worth an error state */
+    });
+  return box;
+}
+
+function fillDeletedPlaylists(box, r) {
+  const rows = r?.deleted || [];
+  if (!rows.length) return;
+
+  const head = el("div", { class: "deleted-head" },
+    el("h2", { class: "deleted-title", text: "Recently deleted" }));
+  const status = el("span", { class: "muted small", attrs: { role: "status" } });
+  if (rows.length > 1) {
+    head.appendChild(restoreButton(rows.map((p) => p.id),
+      `Restore all ${rows.length}`, status));
+  }
+  head.appendChild(status);
+
+  const note = el("p", { class: "muted small deleted-note" },
+    burstSentence(rows, r) +
+    " Deleting only hid these — the tracks are still stored. A cover you " +
+    "uploaded is not restored.");
+
+  const list = el("ul", { class: "deleted-list" });
+  for (const p of rows) list.appendChild(deletedRow(p, status));
+
+  box.append(head, note, list);
+  box.removeAttribute("hidden");
+}
+
+/**
+ * The first line of the panel: a plain count, or the mass-delete sentence
+ * when the newest run looks like one.
+ *
+ * `burstThreshold` / `burstWindowSec` come from the RESPONSE, not from a
+ * constant here — they are the same two numbers the bridge's own
+ * "playlist mass delete" WARN fires on (manifest.PlaylistDeleteBurst*),
+ * so the journal line and this sentence cannot describe different events.
+ * The predicate is evaluated twice (a COUNT there, a scan over the run
+ * here) because the two have different inputs; the NUMBERS have one home.
+ */
+function burstSentence(rows, r) {
+  const run = newestDeleteRun(rows, (r?.burstWindowSec ?? 60) * 1000);
+  const threshold = r?.burstThreshold ?? 5;
+  if (run.length < threshold) {
+    return `${plural(rows.length, "playlist")} deleted and not yet restored.`;
+  }
+  const who = run[0].deletedByName || "one device";
+  const spanSec = Math.max(1, Math.round(
+    (Date.parse(run[0].deletedAt) - Date.parse(run[run.length - 1].deletedAt)) / 1000));
+  return `${plural(run.length, "playlist")} deleted by ${who} within ` +
+    `${plural(spanSec, "second")} — usually a client replaying a queued delete.`;
+}
+
+/**
+ * The newest run of deletes: consecutive rows from the same device, each
+ * within `windowMs` of the one before it.
+ *
+ * Rows arrive newest-first (the handler's ORDER BY), so this walks
+ * forward from the head and stops at the first gap. Consecutive PAIRS
+ * rather than a first-to-last span, because a device deleting steadily
+ * for five minutes is still one run and a fixed window from the newest
+ * row would cut it arbitrarily.
+ *
+ * A row with no recorded deleter (a tombstone from before the column
+ * existed, or a DELETE that carried no device token) ends the run rather
+ * than joining it — attributing a burst to "unknown" is worse than not
+ * claiming one.
+ */
+function newestDeleteRun(rows, windowMs) {
+  if (!rows.length || !rows[0].deletedByPrefix) return [];
+  const who = rows[0].deletedByPrefix;
+  const run = [rows[0]];
+  for (let i = 1; i < rows.length; i++) {
+    const prev = Date.parse(run[run.length - 1].deletedAt);
+    const here = Date.parse(rows[i].deletedAt);
+    if (rows[i].deletedByPrefix !== who) break;
+    if (!Number.isFinite(prev) || !Number.isFinite(here)) break;
+    if (prev - here > windowMs) break;
+    run.push(rows[i]);
+  }
+  return run;
+}
+
+function deletedRow(p, status) {
+  const by = p.deletedByName || (p.deletedByPrefix ? `device ${p.deletedByPrefix}` : "");
+  const meta = [plural(p.trackCount ?? 0, "track"),
+    timeAgo(p.deletedAt), by ? `by ${by}` : ""].filter(Boolean).join(" · ");
+  return el("li", { class: "deleted-item" },
+    el("div", { class: "deleted-item-text" },
+      el("span", { class: "deleted-item-name", text: p.name || p.id }),
+      el("span", { class: "muted small", text: meta })),
+    restoreButton([p.id], "Restore", status));
+}
+
+/**
+ * One Restore control, for a single row or for the whole panel.
+ *
+ * Sequential, not Promise.all: the console is one operator's loopback
+ * session and seventeen concurrent writes against a store that
+ * serialises every writer on one mutex buys nothing but a less legible
+ * failure. A partial result is REPORTED rather than swallowed — "restored
+ * 15 of 17" is the true thing, and the rows that failed are still listed
+ * after the re-render.
+ *
+ * Then route(), the regenerateAllButton idiom: a restored playlist has to
+ * appear in the grid above and leave this panel, and re-running the route
+ * is one honest refetch rather than two in-place mutations that can
+ * disagree with the server.
+ */
+function restoreButton(ids, label, status) {
+  const btn = el("button", { class: "btn btn-quiet", text: label });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    status.textContent = "Restoring…";
+    let ok = 0;
+    for (const id of ids) {
+      try {
+        await api.restorePlaylist(id);
+        ok++;
+      } catch {
+        /* counted by omission; the message below reports the shortfall */
+      }
+    }
+    if (ok === ids.length) {
+      announce(`Restored ${plural(ok, "playlist")}.`);
+    } else {
+      status.textContent = `Restored ${ok} of ${ids.length}.`;
+      btn.disabled = false;
+    }
+    await window.__player?.route?.();
+  });
+  return btn;
 }
 
 export async function renderMixes(view, ctx) {

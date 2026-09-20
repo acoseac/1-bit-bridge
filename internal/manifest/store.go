@@ -1992,6 +1992,37 @@ var migrations = []migration{
 		CREATE INDEX IF NOT EXISTS idx_atlas_lyrics_attempt_due
 			ON atlas_lyrics_attempt(next_attempt_at);`,
 	},
+	{
+		version: 45,
+		name:    "playlists.deleted_by (which device asked for the tombstone)",
+		// A tombstoned playlist recorded WHO WROTE IT LAST and never who
+		// DELETED IT, and the two are routinely different devices — the
+		// 2026-09-20 incident was a freshly-paired phone deleting 17
+		// playlists it had never written, so every row it tombstoned went
+		// on naming the device that made them. Restoring, and warning about
+		// a mass delete, both need the deleter.
+		//
+		// There is deliberately NO `deleted_at` column beside it. On a
+		// `deleted = 1` row `updated_at` ALREADY IS the tombstone time:
+		// TombstonePlaylist is the only writer of `deleted = 1` in the tree
+		// and it stamps updated_at in the same statement, and the only way
+		// back out (an UpsertPlaylist revive, or RestorePlaylist) clears
+		// the flag in the same statement that moves updated_at again. A
+		// second column carrying the same instant is a second thing to keep
+		// in step, and the pair can only ever disagree by being wrong.
+		// TestUpdatedAtOnATombstonedRowIsTheDeleteTime pins the equality so
+		// a future writer cannot quietly separate them.
+		//
+		// Append-only / idempotent per the ladder contract: the ALTER rides
+		// post(), not `sql`, because a failure after a non-idempotent ALTER
+		// leaves the next boot unable to re-run it (see the v9 docblock).
+		sql: `-- column added in post() for idempotency; see migration v9 docblock`,
+		post: func(db *sql.DB) error {
+			return addColumnsIfMissing(db, "playlists",
+				tableColumn{"deleted_by", "ALTER TABLE playlists ADD COLUMN deleted_by TEXT NOT NULL DEFAULT ''"},
+			)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
