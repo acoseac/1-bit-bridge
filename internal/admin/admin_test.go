@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -165,30 +166,42 @@ func TestStatsEndpoint(t *testing.T) {
 // matching `https://...`, and every entry has one of the documented
 // class strings.
 //
+// The list comes from Deps.Endpoints (nil → empty, so the fixture
+// wires the real host walk here to have classes to check); the
+// canned-provider mapping is pinned in
+// TestEndpointsPanelRendersTheSharedEnumerationWithClasses.
+//
 // PR #69 — admin-side companion to iOS PR #150's per-endpoint
 // visibility work.
 func TestEndpointsHandler(t *testing.T) {
 	srv, _, _ := newTestServer(t)
+	srv.deps.Endpoints = func() []advertise.Endpoint {
+		return advertise.Endpoints(advertise.Params{Port: 7788, CustomEndpoints: []string{"https://custom.example.test:7788"}})
+	}
 	var entries []map[string]string
 	code := doJSON(t, srv.Handler(), "GET", "/api/endpoints", nil, &entries)
 	if code != 200 {
 		t.Fatalf("endpoints: %d", code)
 	}
-	// Empty is acceptable on a runner with no advertisable
-	// interfaces (rare CI sandboxes); we don't gate on length.
+	// The custom entry is always there; the interface rows depend on
+	// the runner, so length is not gated beyond that.
+	if len(entries) == 0 {
+		t.Fatal("endpoints: empty; the customEndpoint alone should render")
+	}
 	validClasses := map[string]bool{
 		"LAN":           true,
 		"mDNS":          true,
 		"Tailscale DNS": true, // ClassTailscaleDNS — magic-DNS, ATS-compatible
 		"Tailscale":     true, // CGNAT IP-based
 		"Public":        true,
+		"Custom":        true, // cfg.CustomEndpoints
 	}
 	for i, e := range entries {
 		if !strings.HasPrefix(e["url"], "https://") {
 			t.Errorf("entry[%d].url = %q, want https:// prefix", i, e["url"])
 		}
 		if !validClasses[e["class"]] {
-			t.Errorf("entry[%d].class = %q, want one of LAN/mDNS/Tailscale DNS/Tailscale/Public", i, e["class"])
+			t.Errorf("entry[%d].class = %q, want one of LAN/mDNS/Tailscale DNS/Tailscale/Public/Custom", i, e["class"])
 		}
 	}
 }

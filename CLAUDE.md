@@ -1714,6 +1714,24 @@ its twin.** The top list is older, shorter, and read first.
   `FingerprintForServerName` mirrors `Get`'s routing rather than delegating, so
   **every freshness and validity gate in `Get` must be restated there**; losing
   one made the QR advertise a fingerprint the listener never presents.
+- **The pairing QR's `urls=` and the console's "Reachable endpoints" panel
+  read `admin.Deps.Endpoints` — `api.(*Server).ReachableEndpoints`, the ONE
+  enumeration `/v1/health` serves — never a second `advertise.Endpoints`
+  walk.** PR #269 moved the Tailscale append out of the advertise package
+  into the api layer and left both admin consumers on the old walk, so from
+  May to September the QR baked no Tailscale fallback (while `buildPairURL`'s
+  docblock promised one) and dropped `customEndpoints`, and the panel could
+  never show the row its own prose said to look for — a loopback cli-mode
+  bridge whose health advertised `.ts.net` + `100.x` + `fd7a:…` paired the
+  phone with `.local` and the LAN IP alone. **Nil is NO list, not the old
+  walk**: on a host without Tailscale that walk is byte-identical to health,
+  which is how the first boot control stayed green with the wiring line
+  deleted; the QR falls back to the primary (which always pairs) and the
+  panel to its empty state. `TestServeBakesHealthEndpointsIntoThePairingQR`
+  boots the real `serve` and requires `POST /api/tokens` to bake exactly
+  `[primary] + /v1/health.endpoints`. Public mode keeps its own explicit-
+  `:443` synthesis in `pairAlternates` on purpose (the iOS 7788-default bug)
+  and never consults the provider. (#936)
 - **`atlas.harvestBaseUrl` pins the host a credential POST may set** — the body
   carries the base URL, so whoever sets it chooses where bios come from, and
   those render as an attacker-chosen "Read more on …" link. A pin binds in every

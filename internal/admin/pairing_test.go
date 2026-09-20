@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
@@ -63,13 +64,19 @@ func TestBuildPairURLPrimaryStaysFirst(t *testing.T) {
 }
 
 func TestPairAlternatesPrependsPrimary(t *testing.T) {
-	// advertise.URLs doesn't know about the operator's override URL —
-	// our pairAlternates helper is what ensures it lands first. Test
-	// with a non-default listen address just to exercise the port
+	// The advertised list doesn't know about the operator's override
+	// URL — our pairAlternates helper is what ensures it lands first.
+	// Test with a non-default listen address just to exercise the port
 	// parse.
-	got := pairAlternates("https://user-chose-this:9999", &config.Config{ListenAddress: "127.0.0.1:7788"})
-	if len(got) == 0 {
-		t.Fatal("expected non-empty alternates")
+	advertised := func() []advertise.Endpoint {
+		return []advertise.Endpoint{
+			{URL: "https://192.168.1.10:7788", Class: advertise.ClassLANv4},
+			{URL: "https://homepc.local:7788", Class: advertise.ClassMDNSHost},
+		}
+	}
+	got := pairAlternates("https://user-chose-this:9999", &config.Config{ListenAddress: "127.0.0.1:7788"}, advertised)
+	if len(got) != 3 {
+		t.Fatalf("alternates = %v, want the primary plus both advertised URLs", got)
 	}
 	if got[0] != "https://user-chose-this:9999" {
 		t.Errorf("first alternate = %q, want the operator primary", got[0])
@@ -102,7 +109,7 @@ func TestPairAlternatesPublicModeFiltersLANAndTailscale(t *testing.T) {
 		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
 		CustomEndpoints: []string{"https://alt.example.com:443"},
 	}
-	got := pairAlternates("https://bridge.example.com:443", cfg)
+	got := pairAlternates("https://bridge.example.com:443", cfg, nil)
 	if len(got) == 0 {
 		t.Fatal("expected non-empty alternates")
 	}
@@ -133,7 +140,7 @@ func TestPairAlternatesPublicModeIncludesExplicitPort(t *testing.T) {
 		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
 		CustomEndpoints: []string{"https://bridge.example.com"},
 	}
-	got := pairAlternates("https://bridge.example.com:443", cfg)
+	got := pairAlternates("https://bridge.example.com:443", cfg, nil)
 	foundExplicit := false
 	for _, u := range got {
 		if u == "https://bridge.example.com:443" {

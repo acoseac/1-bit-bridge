@@ -38,6 +38,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -166,6 +167,30 @@ type Deps struct {
 	// cmd/bridge/main.go so this package doesn't import
 	// internal/tailscale or the cmd/bridge auto-pilot type.
 	Tailscale TailscaleProvider
+
+	// Endpoints is the list of URLs this bridge advertises to paired
+	// devices — `/v1/health.endpoints` with each entry's class kept.
+	// Wired to `api.(*Server).ReachableEndpoints` in cmd/bridge/main.go
+	// (admin never imports internal/api; the dependency runs the other
+	// way), so the pairing QR's `urls=` list and the Settings "Reachable
+	// endpoints" panel come from the ONE enumeration the phone sees, with
+	// the Tailscale MagicDNS + tailnet-IP entries the api layer appends
+	// from the TailscaleProvider in `cli` and `tsnet` modes. Both
+	// consumers used to call advertise.Endpoints directly, and lost every
+	// Tailscale entry when PR #269 moved that append out of the advertise
+	// package — a phone paired on Wi-Fi had no Tailscale fallback baked
+	// in, though the pairing docblock promised it, and the panel could
+	// never show the entry its own prose said to look for.
+	//
+	// Nil-safe: absent (test fixtures) → no list at all. The QR carries
+	// the operator's primary alone, which always pairs, and the panel
+	// shows its empty state. Deliberately NOT a fallback to the old
+	// `advertise.Endpoints` walk — see advertisedEndpoints in pairing.go
+	// for why a substitute list is worse than none. Production wiring is
+	// pinned by a boot test in cmd/bridge
+	// (TestServeBakesHealthEndpointsIntoThePairingQR), because nothing
+	// here can tell a fixture from a forgotten line.
+	Endpoints func() []advertise.Endpoint
 
 	// Pairing backs the admin-approval pairing flow. Optional — when
 	// nil, /api/pairing returns an empty list and the approve / decline
@@ -1096,13 +1121,17 @@ type TailscaleStatus struct {
 	// existing consumers; new consumers consult this explicit field.
 	BackendState string `json:"backendState,omitempty"`
 
-	// TailscaleIPs are the tsnet node's tailnet-assigned addresses
+	// TailscaleIPs are the local node's tailnet-assigned addresses
 	// (CGNAT 100.x IPv4 + ULA fd7a:115c:a1e0::/48 IPv6) as strings,
 	// surfaced so the api layer can advertise them in
 	// `/v1/health.endpoints` for iOS clients that need an IP fallback
-	// when MagicDNS resolution misses. Empty in cli-mode; populated
-	// only by the embedded-tsnet path. `omitempty` keeps the existing
-	// admin-tile JSON shape unchanged when the source doesn't populate.
+	// when MagicDNS resolution misses. Populated by BOTH sources since
+	// PR #269: the tsnet path from `ipnstate.Status.Self.TailscaleIPs`,
+	// the cli path from `tailscale status --json`'s `Self.TailscaleIPs`
+	// (cmd/bridge/tailscale.go, toAdminStatus). This comment said
+	// "empty in cli-mode" for four months after that stopped being
+	// true. `omitempty` keeps the existing admin-tile JSON shape
+	// unchanged when a source has none to report.
 	TailscaleIPs []string `json:"tailscaleIPs,omitempty"`
 }
 

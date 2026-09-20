@@ -1934,12 +1934,33 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// reachableEndpoints enumerates LAN + mDNS + Tailscale URLs for the
-// bridge on every /v1/health call. Fresh on each call so adding /
-// removing a network interface (Tailscale up, Wi-Fi down) takes effect
-// on the next heartbeat without requiring a restart. Cost is a
-// `net.Interfaces()` + `.Addrs()` walk — cheap enough to not warrant
-// caching for the host-network part.
+// reachableEndpoints is the flat, URL-only form of ReachableEndpoints —
+// what `/v1/health.endpoints` carries (behind endpointsCache; see there
+// for why the unauthenticated route is TTL-capped).
+func (s *Server) reachableEndpoints() []string {
+	return endpointURLs(s.ReachableEndpoints())
+}
+
+// ReachableEndpoints enumerates LAN + mDNS + Tailscale URLs for the
+// bridge — THE list `/v1/health` advertises, with each entry's class
+// kept. Fresh on each call so adding / removing a network interface
+// (Tailscale up, Wi-Fi down) takes effect on the next heartbeat without
+// requiring a restart. Cost is a `net.Interfaces()` + `.Addrs()` walk —
+// cheap enough to not warrant caching for the host-network part.
+//
+// Exported because the admin console consumes the same list: the
+// pairing QR bakes it into `bridge://pair?urls=` (so a phone paired on
+// Wi-Fi has the Tailscale fallback recorded and can roam without a
+// re-pair) and the Settings "Reachable endpoints" panel renders it with
+// the class tags. Both used to call `advertise.Endpoints` directly and
+// silently lost every Tailscale entry when PR #269 moved that append
+// here — a refactor that unified the two Tailscale modes onto this one
+// path and left the two admin-side consumers on the old one. Wired
+// into `admin.Deps.Endpoints` in cmd/bridge/main.go; there is no second
+// enumeration to keep in step. Admin calls are operator-driven and
+// loopback / session-authed, so they take the fresh walk rather than
+// the health route's cache; the Tailscale snapshot underneath still
+// rides its own 5s TTL.
 //
 // In `tsnet` mode the embedded tsnet node's MagicDNSName + tailnet IPs
 // are appended from `s.cachedTailscaleStatus()` (5s TTL — see
@@ -1949,7 +1970,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 // workaround) ends up classified as `ClassTailscaleDNS` rather than
 // `ClassCustom`, keeping the URL ranked correctly in the iOS endpoint
 // selector's hint order.
-func (s *Server) reachableEndpoints() []string {
+//
+// Returns nil when the listen address cannot name a port (`:0` and
+// parse failures) — the same "no advertisable address" answer the
+// health route has always given.
+func (s *Server) ReachableEndpoints() []advertise.Endpoint {
 	cfg := s.cfgHolder.Load()
 	_, portStr, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil {
@@ -1971,7 +1996,7 @@ func (s *Server) reachableEndpoints() []string {
 	// interface walk + the Tailscale append entirely.
 	if cfg.IsPublic() {
 		eps := publicModeEndpoints(cfg, portStr)
-		return classStableUniqueURLs(eps)
+		return classStableUnique(eps)
 	}
 	eps := advertise.Endpoints(advertise.Params{
 		Port:            port,
@@ -1995,7 +2020,7 @@ func (s *Server) reachableEndpoints() []string {
 	if mode == "cli" || mode == "tsnet" {
 		eps = s.appendTailscaleEndpoints(eps, portStr, mode)
 	}
-	return classStableUniqueURLs(eps)
+	return classStableUnique(eps)
 }
 
 // appendTailscaleEndpoints adds the local Tailscale node's
@@ -2081,7 +2106,7 @@ func (s *Server) appendTailscaleEndpoints(eps []advertise.Endpoint, portStr stri
 // dedupe downstream collapses the pair instead of admitting two
 // URLs that differ only by the implicit https default
 // (`https://h` vs `https://h:443` would otherwise be distinct
-// strings to classStableUniqueURLs — Gemini medium on PR #295).
+// strings to classStableUnique — Gemini medium on PR #295).
 //
 // **It is skipped entirely when customEndpoints already names that
 // HOST**, because `portStr` is the port this process listens on,
@@ -2126,8 +2151,8 @@ func endpointHost(raw string) string {
 	return strings.ToLower(u.Hostname())
 }
 
-// classStableUniqueURLs applies the class-stable sort + dedupe + URL
-// flatten that `reachableEndpoints` returns. Sort happens BEFORE
+// classStableUnique applies the class-stable sort + dedupe that
+// `ReachableEndpoints` returns. Sort happens BEFORE
 // dedupe so that a duplicate URL across classes (the canonical
 // case: an operator hardcoded the magic-DNS URL into
 // `customEndpoints` as a pre-tsnet-auto-advertising workaround,
@@ -2137,7 +2162,7 @@ func endpointHost(raw string) string {
 // `ClassCustom` (7). A dedupe-first pass would keep insertion-order
 // (`ClassCustom` first) and demote the URL to the bottom of the
 // ranking.
-func classStableUniqueURLs(eps []advertise.Endpoint) []string {
+func classStableUnique(eps []advertise.Endpoint) []advertise.Endpoint {
 	sort.SliceStable(eps, func(i, j int) bool {
 		return eps[i].Class < eps[j].Class
 	})
@@ -2150,8 +2175,21 @@ func classStableUniqueURLs(eps []advertise.Endpoint) []string {
 		seen[e.URL] = true
 		unique = append(unique, e)
 	}
-	out := make([]string, len(unique))
-	for i, e := range unique {
+	return unique
+}
+
+// endpointURLs flattens a classed endpoint list to its URLs, in order.
+// A fresh slice, never a view: the health route parks the result in
+// endpointsCache and shares it read-only across a TTL window. nil stays
+// nil so reachableEndpoints keeps its pre-split shape on the no-port
+// path — not that the wire can tell: HealthResponse.Endpoints is
+// `omitempty`, which drops nil and empty alike.
+func endpointURLs(eps []advertise.Endpoint) []string {
+	if eps == nil {
+		return nil
+	}
+	out := make([]string, len(eps))
+	for i, e := range eps {
 		out[i] = e.URL
 	}
 	return out

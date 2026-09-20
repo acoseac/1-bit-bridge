@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
@@ -456,7 +457,7 @@ func TestReachableEndpoints_PublicModeNon443IncludesPort(t *testing.T) {
 // pins the operator-workaround case: the operator declared the
 // autocert domain in BOTH customEndpoints (as `https://host`)
 // AND autocert.domain (= "host"). After the :443 normalization
-// the two URLs are byte-identical and classStableUniqueURLs
+// the two URLs are byte-identical and classStableUnique
 // collapses them to a single entry.
 func TestReachableEndpoints_PublicModeDedupesAutocertAgainstCustom(t *testing.T) {
 	cfg := &config.Config{
@@ -542,5 +543,53 @@ func TestReachableEndpoints_PublicModeAutocertHostMatchIsCaseInsensitive(t *test
 	eps := s.reachableEndpoints()
 	if contains(eps, "https://Demo.Cloud.Example:20001") {
 		t.Errorf("case difference defeated the host match; got %v", eps)
+	}
+}
+
+// TestReachableEndpoints_ExportedFormKeepsTheClasses pins the shape the
+// admin console consumes through `admin.Deps.Endpoints`: the classed
+// list is the SAME list `/v1/health` flattens, in the same order, and
+// the Tailscale entries carry the classes the Settings panel renders
+// as its "Tailscale DNS" / "Tailscale" tags. The panel and the pairing
+// QR used to run their own advertise.Endpoints walk, which has emitted
+// nothing Tailscale-classed since PR #269 moved the append here.
+func TestReachableEndpoints_ExportedFormKeepsTheClasses(t *testing.T) {
+	s := makeServerForEndpoints(t, "cli", []string{"https://custom.example.test:7788"})
+	s.tailscaleStatus = &fakeTailscaleProvider{
+		snap: admin.TailscaleStatus{
+			CertPresent:  true,
+			MagicDNSName: "host.tailnet.ts.net",
+			TailscaleIPs: []string{"100.64.0.5", "fd7a:115c::1"},
+		},
+	}
+	classed := s.ReachableEndpoints()
+	wantClass := map[string]advertise.Class{
+		"https://host.tailnet.ts.net:7788": advertise.ClassTailscaleDNS,
+		"https://100.64.0.5:7788":          advertise.ClassTailscaleV4,
+		"https://[fd7a:115c::1]:7788":      advertise.ClassTailscaleV6,
+		"https://custom.example.test:7788": advertise.ClassCustom,
+	}
+	for _, e := range classed {
+		if want, ok := wantClass[e.URL]; ok {
+			if e.Class != want {
+				t.Errorf("%s classed %v, want %v", e.URL, e.Class, want)
+			}
+			delete(wantClass, e.URL)
+		}
+	}
+	for u := range wantClass {
+		t.Errorf("exported enumeration lacks %s (got %v)", u, classed)
+	}
+	// The flat form is a projection of the classed one — nothing is
+	// added, dropped or reordered between what the panel shows and
+	// what the phone receives.
+	flat := s.reachableEndpoints()
+	if len(flat) != len(classed) {
+		t.Fatalf("flat len %d != classed len %d", len(flat), len(classed))
+	}
+	for i := range flat {
+		if flat[i] != classed[i].URL {
+			t.Errorf("flat[%d] = %q, classed[%d].URL = %q", i, flat[i], i, classed[i].URL)
+		}
 	}
 }

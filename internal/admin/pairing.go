@@ -60,6 +60,20 @@ func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string, alternat
 // iOS builds (which only read `url`) pick the same default the
 // operator saw in the admin modal.
 //
+// `endpoints` IS that list — `Deps.Endpoints`, the api layer's
+// `ReachableEndpoints`, the one place the Tailscale MagicDNS + tailnet
+// IPs are appended (from the TailscaleProvider, in `cli` and `tsnet`
+// modes) and the one place customEndpoints join the loopback set.
+// Before it was threaded through, this function called
+// `advertise.Endpoints` directly — which stopped emitting anything
+// Tailscale-classed in PR #269 — so a loopback bridge whose health
+// advertised `nuc.sable-eagle.ts.net` + `100.x` + `fd7a:…` handed the
+// phone a QR carrying only the `.local` name and the LAN IP: no
+// Tailscale fallback recorded, roaming needed a re-pair, and the
+// promise in buildPairURL's docblock was false for four months. It
+// also dropped cfg.CustomEndpoints in loopback mode. Nil → the primary
+// alone (see advertisedEndpoints for why not the old walk).
+//
 // **Public-mode short-circuit (PR 5)**: when cfg.IsPublic(), skip
 // the LAN / mDNS / Tailscale enumeration and use only the
 // operator-declared customEndpoints plus the autocert public
@@ -67,9 +81,13 @@ func buildPairURL(bridgeURL, rawToken, fingerprint, libraryName string, alternat
 // pair QR (an iOS device that connects to the public bridge
 // from outside the VPS network would then keep retrying the
 // useless LAN URL on every fail-over attempt). Matches the
-// `reachableEndpoints` filter on the iOS-facing /v1/health
-// side, so both surfaces agree.
-func pairAlternates(primary string, cfg *config.Config) []string {
+// `ReachableEndpoints` filter on the iOS-facing /v1/health
+// side, so both surfaces agree — but is NOT delegated to it: the
+// QR's autocert URL names its port explicitly (`:443` included)
+// where health omits the https default, because a port-less dial
+// URL trips the iOS 7788-default bug on shipped builds (see
+// defaultBridgeURL). The two shapes differ on purpose.
+func pairAlternates(primary string, cfg *config.Config, endpoints func() []advertise.Endpoint) []string {
 	listenAddress := cfg.ListenAddress
 	_, portStr, err := net.SplitHostPort(listenAddress)
 	if err != nil {
@@ -102,12 +120,12 @@ func pairAlternates(primary string, cfg *config.Config) []string {
 			urls = append(urls, httpsScheme+d+":"+portStr)
 		}
 	} else {
-		// Loopback mode (historical behaviour): the
-		// auto-discovered LAN / mDNS / Tailscale enumeration.
-		// CustomEndpoints aren't seeded here because the
-		// deep-link/QR baker traditionally relied on the
-		// caller passing one via `primary`.
-		urls = advertise.URLs(advertise.Params{Port: port})
+		// Loopback mode: the auto-discovered LAN / mDNS / Tailscale /
+		// custom enumeration, class-ordered the way the phone's
+		// selector ranks it. Exactly what `/v1/health` says.
+		for _, e := range advertisedEndpoints(endpoints) {
+			urls = append(urls, e.URL)
+		}
 	}
 	if len(urls) == 0 {
 		return []string{primary}
@@ -124,6 +142,31 @@ func pairAlternates(primary string, cfg *config.Config) []string {
 		}
 	}
 	return out
+}
+
+// advertisedEndpoints is the classed list this bridge advertises to
+// paired devices — `Deps.Endpoints`, the api layer's `/v1/health`
+// enumeration — or nothing when no provider is wired. Shared by the
+// pairing QR and the Settings "Reachable endpoints" panel so the two
+// cannot disagree about what the phone will see.
+//
+// Nil is NOT a fallback to the host-network walk. That walk is what
+// both consumers ran before, and it is exactly the degraded shape the
+// provider replaces (no Tailscale entry since PR #269, no
+// customEndpoints in the QR); reproducing it here would be a second
+// enumeration to keep in step, and one that a forgotten wiring line
+// could never be told apart from — on a host without Tailscale the two
+// lists are byte-identical, which is how the first draft's boot control
+// stayed green with the line deleted. An absent dependency answers the
+// way every other Deps closure does: with nothing, never a guess. The
+// QR then carries only the operator's primary, which always pairs, and
+// the panel renders its "No external addresses detected" state, which
+// in that wiring is the truth.
+func advertisedEndpoints(provider func() []advertise.Endpoint) []advertise.Endpoint {
+	if provider == nil {
+		return nil
+	}
+	return provider()
 }
 
 // ensurePrimaryFirst is the response-boundary defence-in-depth that
