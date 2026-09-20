@@ -6268,21 +6268,24 @@ already where the measurement puts it.
 
 `gcCheckOutputDirBeforeReverseSweep` runs AFTER the forward sweep and reads a
 missing-or-empty directory as an unmounted volume. On the legacy hash-flat
-layout (`<dir>/<hash>-<variantID>.flac`, no subdirectories) a run with
-`--allow-mass-delete --allow-mass-orphans` has the forward sweep remove every
-file, which leaves the directory genuinely empty — and the reverse guard then
-refuses with "likely a disconnected mount", leaving the rows. Re-running does
-not help: the directory is still empty, so it refuses again. Those rows cannot
-be reaped by `--gc` at all.
+layout (`<dir>/<hash>-<variantID>.flac`, no subdirectories) the forward sweep
+removes every file, which leaves the directory genuinely empty — and the
+reverse guard then refuses with "likely a disconnected mount", leaving the
+rows. Re-running does not help: the directory is still empty, so it refuses
+again, having removed nothing. Those rows cannot be reaped by `--gc` at all.
 
-Reproduced on this branch AND on main with a throwaway fixture (12 flat
-sidecars, 12 rows recorded under a path that does not exist, both overrides):
-`rc=1`, `removed 12 orphan file(s)`, `12 variant row(s) exist; refusing`, 12
-rows left. Pre-existing and untouched by #940 — the new guard only ever
-refuses MORE, never allows more, so it adds no reachability. The
-source-mirrored layout hides it because `WalkDir` does not remove directories,
-so an emptied subtree still leaves dirents behind and `dirIsEmpty` reads
-false.
+**It needs no override flags.** A first draft of this entry said it took
+`--allow-mass-delete --allow-mass-orphans`, which is how it was first
+reproduced and is not what it requires: at five rows and five flat sidecars
+BOTH new guards are under their floor of ten and never fire, so a plain
+`bridge upscale --gc` walks straight into it. Reproduced at that size on this
+branch and on main, twice in a row each: `rc=1`, `5 variant row(s) exist;
+refusing`, five rows left, second run removing nothing and refusing
+identically. Pre-existing and untouched by #940 — the new guard only ever
+refuses MORE, so it adds no reachability, but it does not reduce it either.
+The source-mirrored layout hides the whole thing because `WalkDir` does not
+remove directories, so an emptied subtree still leaves dirents behind and
+`dirIsEmpty` reads false.
 
 The fix is small and belongs in its own change: the reverse guard should be
 told how many files the forward sweep removed, because a directory that is
