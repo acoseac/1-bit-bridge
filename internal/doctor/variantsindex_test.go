@@ -1,0 +1,146 @@
+package doctor
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+)
+
+func variantsIndexCheck(t *testing.T, d Deps) Check {
+	t.Helper()
+	c := checkVariantsIndex(t.Context(), d)
+	if c.Name != checkNameVariantsIndex {
+		t.Fatalf("check name = %q, want %q", c.Name, checkNameVariantsIndex)
+	}
+	return c
+}
+
+// TestVariantsIndexAgreeingCountsAreOK — the ordinary bridge. The summary
+// still carries both numbers, because "they agree" is only meaningful
+// beside what they are.
+func TestVariantsIndexAgreeingCountsAreOK(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{Rows: 1024, Files: 1024, Known: 1024}, nil
+	}})
+	if c.Status != OK {
+		t.Fatalf("status=%v summary=%q", c.Status, c.Summary)
+	}
+	for _, want := range []string{"1024 variant row(s)", "1024 sidecar file(s)"} {
+		if !strings.Contains(c.Summary, want) {
+			t.Errorf("summary %q does not carry %q", c.Summary, want)
+		}
+	}
+}
+
+// TestVariantsIndexWarnsOnOrphansAndNamesExamples — an ordinary orphan
+// crop. `--gc` would reclaim them, and the hint says so rather than
+// alarming about a state the sweep handles.
+func TestVariantsIndexWarnsOnOrphansAndNamesExamples(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{
+			Rows: 900, Files: 1000, Known: 900, Orphans: 100,
+			OrphanSample: []string{"A/Al/01.flac.upscaled-v1-192000-24.flac", "A/Al/02.flac.upscaled-v1-192000-24.flac"},
+			VariantsDir:  "/srv/bridge-variants",
+		}, nil
+	}})
+	if c.Status != Warn {
+		t.Fatalf("status=%v, want warn: %q", c.Status, c.Summary)
+	}
+	if !strings.Contains(c.Summary, "100 of 1000 sidecar file(s)") || !strings.Contains(c.Summary, "900 row(s)") {
+		t.Errorf("summary does not carry both counts: %q", c.Summary)
+	}
+	if !strings.Contains(c.Hint, "bridge upscale --gc` reclaims them") {
+		t.Errorf("an ordinary crop should point at the sweep: %q", c.Hint)
+	}
+	if !strings.Contains(c.Hint, "A/Al/01.flac") {
+		t.Errorf("hint names no example: %q", c.Hint)
+	}
+	if !strings.Contains(c.Hint, "+98 more") {
+		t.Errorf("hint does not account for the orphans it did not name: %q", c.Hint)
+	}
+}
+
+// TestVariantsIndexSaysWhenTheSweepWouldRefuse — the 2026-09-20 shape.
+// The operator must not be sent to `--gc` here, and specifically must not
+// be sent to --allow-mass-orphans, because the files are the only copy.
+func TestVariantsIndexSaysWhenTheSweepWouldRefuse(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{
+			Rows: 200, Files: 10248, Known: 200, Orphans: 10048,
+			OrphanSample:  []string{"A/Al/01.flac.upscaled-v2-176400-24.flac"},
+			WouldRefuseGC: true,
+			VariantsDir:   "/srv/bridge-variants",
+		}, nil
+	}})
+	if c.Status != Warn {
+		t.Fatalf("status=%v, want warn", c.Status)
+	}
+	if !strings.Contains(c.Hint, "LOST INDEX") || !strings.Contains(c.Hint, "REFUSES") {
+		t.Errorf("hint does not say what this shape is: %q", c.Hint)
+	}
+	if strings.Contains(c.Hint, "reclaims them") {
+		t.Errorf("the hint sends the operator to a sweep that would destroy the only copy: %q", c.Hint)
+	}
+}
+
+// TestVariantsIndexScopesATruncatedWalk — a report built from part of a
+// tree must say so. An all-clear that silently covered 20,000 of 200,000
+// files is the confident-wrong-answer shape.
+func TestVariantsIndexScopesATruncatedWalk(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{Rows: 90000, Files: 20000, Known: 20000, Truncated: true}, nil
+	}})
+	if c.Status != OK {
+		t.Fatalf("status=%v", c.Status)
+	}
+	if !strings.Contains(c.Summary, "the first 20000 file(s)") || !strings.Contains(c.Summary, "the tree is larger") {
+		t.Errorf("a truncated walk answered for the whole tree: %q", c.Summary)
+	}
+}
+
+// TestVariantsIndexReportsAnUnreadableDirectory — its contents are absent
+// from every count, so the counts are about part of the tree.
+func TestVariantsIndexReportsAnUnreadableDirectory(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{Rows: 10, Files: 10, Known: 10, Unreadable: 3}, nil
+	}})
+	if !strings.Contains(c.Summary, "3 director(y/ies) could not be read") {
+		t.Errorf("summary hides that the walk could not see part of the tree: %q", c.Summary)
+	}
+}
+
+// TestVariantsIndexProbeFailureIsNotAnAllClear — "don't know" is not
+// "fine", the same reading checkSidecarPaths takes.
+func TestVariantsIndexProbeFailureIsNotAnAllClear(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{}, errors.New("permission denied")
+	}})
+	if c.Status != Warn {
+		t.Fatalf("status=%v, want warn — a failed probe answered as ok", c.Status)
+	}
+	if !strings.Contains(c.Hint, "permission denied") {
+		t.Errorf("hint drops the cause: %q", c.Hint)
+	}
+}
+
+// TestVariantsIndexSkipsWithoutAProbeOrOnAManagedBridge — a fresh install
+// has no manifest to compare, and a tenant has no shell for the commands
+// the hint names (the log-file-size reason).
+func TestVariantsIndexSkipsWithoutAProbeOrOnAManagedBridge(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{})
+	if c.Status != OK || !strings.Contains(c.Summary, "run after the first scan") {
+		t.Errorf("no probe: status=%v summary=%q", c.Status, c.Summary)
+	}
+	called := false
+	c = variantsIndexCheck(t, Deps{Managed: true, VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		called = true
+		return VariantsIndex{Rows: 1, Files: 9999, Orphans: 9998, WouldRefuseGC: true}, nil
+	}})
+	if c.Status != OK {
+		t.Errorf("a managed bridge got a warning it cannot act on: %q", c.Summary)
+	}
+	if called {
+		t.Error("a managed bridge still paid for the walk")
+	}
+}

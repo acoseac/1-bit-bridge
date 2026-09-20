@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
@@ -288,9 +289,19 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			// about a manifest it could not read (CodeRabbit on #937).
 			variantsDir := cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
 			waveformDir := analyze.WaveformDirFor(cfg.DataDir)
+			// The SAME threshold `bridge upscale --gc` applies, so the
+			// check's "the sweep would refuse this" is the sweep's own
+			// answer rather than a second copy of the rule.
+			maxDeletePercent := cfg.VariantSweepMaxDeletePercent()
 			if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 				d.RelocatedSidecars = func(ctx context.Context) (doctor.RelocatedSidecars, error) {
 					return relocatedSidecarCounts(ctx, dbPath, variantsDir, waveformDir)
+				}
+				// The other direction: files the catalog no longer
+				// describes. Same lazy open, same reasons; the walk it
+				// adds is bounded — see doctorVariantsIndexBudget.
+				d.VariantsIndex = func(ctx context.Context) (doctor.VariantsIndex, error) {
+					return variantsIndexCounts(ctx, dbPath, variantsDir, maxDeletePercent, doctorVariantsIndexBudget)
 				}
 			}
 		}
@@ -326,6 +337,71 @@ func relocatedSidecarCounts(ctx context.Context, dbPath, variantsDir, waveformDi
 	out.Waveforms, err = st.CountWaveformsNotUnderPrefix(ctx, filepath.Clean(waveformDir)+sep)
 	if err != nil {
 		return doctor.RelocatedSidecars{}, err
+	}
+	return out, nil
+}
+
+// doctorVariantsIndexBudget caps how many sidecar files the variants-index
+// probe classifies before it stops and scopes its answer.
+//
+// `/api/doctor` is fetched on every settings-page render (the prereq
+// chips), not only from the "Run checks" button, so this walk is on a page
+// load. Measured on an APFS SSD over a synthetic source-mirrored tree of
+// 100,001 files: 113 ms unbounded, 23 ms at this budget. The number that
+// sets it is the other end — internal/integrity's sweeper records ~50 µs
+// per entry on the pathological tier (USB-attached spinning rust, NTFS /
+// exFAT), where 20,000 entries is ~1 s and the whole tree would be ~5 s.
+//
+// Truncating loses very little of what the check is for: a catalog that
+// lost its index has unreferenced files throughout the tree, so they turn
+// up far inside the budget. It is the ALL-CLEAR that gets scoped, and the
+// check says so rather than answering for a tree it stopped short of.
+const doctorVariantsIndexBudget = 20000
+
+// doctorVariantsIndexSamples is how many orphan names the hint carries.
+const doctorVariantsIndexSamples = 5
+
+// variantsIndexCounts compares `track_variants` with the files under the
+// variants directory, for the doctor's variants-index check. Opened per
+// call and closed immediately, like the codec and sidecar-paths probes:
+// `bridge doctor` may run beside a live `bridge serve`.
+//
+// It reuses integrity.KnownSidecarSet and integrity.TakeSidecarInventory
+// — the enumeration `bridge upscale --gc` and the background orphan
+// sweeper already walk with — rather than a third walker, so the number
+// the doctor reports is the number the sweep would act on.
+func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrphanPercent, budget int) (doctor.VariantsIndex, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return doctor.VariantsIndex{}, err
+	}
+	st, err := manifest.OpenStore(dbPath)
+	if err != nil {
+		return doctor.VariantsIndex{}, err
+	}
+	defer func() { _ = st.Close() }()
+	rows, err := st.AllVariants(ctx)
+	if err != nil {
+		return doctor.VariantsIndex{}, err
+	}
+	out := doctor.VariantsIndex{Rows: len(rows), VariantsDir: variantsDir, Budget: budget}
+	known := integrity.KnownSidecarSet(variantsDir, integritySnapshotsFromRows(rows))
+	inv, err := integrity.TakeSidecarInventory(ctx, variantsDir, known, integrity.SidecarInventoryOptions{
+		MaxEntries:     budget,
+		MaxOrphanPaths: doctorVariantsIndexSamples,
+	})
+	if err != nil {
+		return doctor.VariantsIndex{}, err
+	}
+	out.Files, out.Known, out.Orphans = inv.Files, inv.Known, inv.Orphans
+	out.Truncated, out.Unreadable = inv.Truncated, inv.Unreadable
+	out.WouldRefuseGC = integrity.MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), maxOrphanPercent) != ""
+	for _, p := range inv.OrphanPaths {
+		// Relative to the directory the summary already names: shorter to
+		// read, and a doctor report gets pasted into issues.
+		if rel, relErr := filepath.Rel(variantsDir, p); relErr == nil {
+			p = rel
+		}
+		out.OrphanSample = append(out.OrphanSample, p)
 	}
 	return out, nil
 }

@@ -40,7 +40,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -222,6 +221,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	gc := fs.Bool("gc", false, "remove orphan sidecars (files with no DB row) AND orphan DB rows (rows with no on-disk sidecar); skips conversion")
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no variant row references any sidecar (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
 	allowMassDelete := fs.Bool("allow-mass-delete", false, "with --gc: delete rows whose sidecar is missing even when that is more than integrity.variantSweepMaxDeletePercent of the catalog while the variants directory still holds sidecar files (the sidecars really are gone); refused by default, because that shape is a relocation in progress")
+	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink sidecar files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index, and an unlinked rendition cannot be re-derived from disk")
 	if !parseTranscodeArgs(fs, "upscale", args, stderr) {
 		return 2
 	}
@@ -240,6 +240,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runGC(ctx, stdout, stderr, r.store, r.outputDir, r.tempDir, gcOptions{
 			allowEmpty:       *allowEmpty,
 			allowMassDelete:  *allowMassDelete,
+			allowMassOrphans: *allowMassOrphans,
 			maxDeletePercent: r.cfg.VariantSweepMaxDeletePercent(),
 		})
 	}
@@ -776,72 +777,110 @@ producerLoop:
 //     PR #351) — the next manifest rescan re-pulls the same dead ID
 //     and the loop restarts.
 //
-// runGCForwardSweep walks `outputDir` and removes every file whose
-// path is not in the `known` set built from `track_variants` rows. Returns
-// `(removed, kept, failed, exitCode)` — `exitCode != 0` signals a
-// fatal sweep error (or a SIGINT) and runGC bails immediately. The
-// pre-refactor inline closure inflated cognitive complexity to 36; the
-// extraction makes runGC a flat sequence of three named steps.
-func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, outputDir string, known map[string]struct{}) (int, int, int, int) {
-	var removed, kept, failed int
-	// Forward sweep: WalkDir over Walk avoids the per-file os.Lstat —
-	// DirEntry already carries IsDir(), so a flat directory of N
-	// sidecars pays N fewer syscalls (Gemini bot review on PR #108).
-	walkErr := filepath.WalkDir(outputDir, func(path string, d os.DirEntry, walkErr error) error {
-		// Stop the forward sweep promptly on SIGINT. Without
-		// the check, a Ctrl-C mid-walk would let the GC keep
-		// deleting files until it finished iterating the
-		// directory. CodeRabbit Major on PR #217.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if walkErr != nil {
-			// Output dir may not exist yet (no upscales ever
-			// run on this bridge). Treat as empty rather than
-			// erroring out.
-			if os.IsNotExist(walkErr) {
-				return filepath.SkipDir
-			}
-			return walkErr
-		}
-		if d.IsDir() {
-			// Dot-directories are never ours to reap: the variants dir
-			// holds only `<path>.<variantID>.flac` sidecars, so a hidden
-			// subtree is a foreign tenant's (a `.Trash`, an `.rclone`
-			// cache, an operator's `.scratch`) — and DSD-render scratch,
-			// which lives OUTSIDE the variants dir by design, must never
-			// be confused with an orphan sidecar if someone points
-			// `upscale.tempDir` beneath it anyway.
-			if path != outputDir && strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if _, ok := known[strings.ToLower(filepath.Clean(path))]; ok {
-			kept++
-			return nil
+// runGCForwardSweep unlinks every file the inventory classified as an
+// orphan. Returns `(removed, kept, failed, exitCode)` — `exitCode != 0`
+// signals a SIGINT and runGC bails immediately.
+//
+// It does NOT walk. The walk happens once, earlier, in
+// gcTakeInventory, because the mass-orphan guard has to see the whole
+// count before anything is unlinked — the same reason the relocation
+// guard is a pre-flight rather than a step inside the reverse sweep. A
+// sweep that deleted as it walked could only be guarded by a ratio
+// measured from the part of the tree it had already destroyed.
+func runGCForwardSweep(ctx context.Context, stdout, stderr io.Writer, inv integrity.SidecarInventory) (int, int, int, int) {
+	var removed, failed int
+	for _, path := range inv.OrphanPaths {
+		// Stop the forward sweep promptly on SIGINT. Without the check,
+		// a Ctrl-C mid-sweep would let the GC keep deleting files until
+		// it finished the list. CodeRabbit Major on PR #217.
+		if ctx.Err() != nil {
+			fmt.Fprintln(stderr, gcInterruptedMessage)
+			return removed, inv.Known, failed, 1
 		}
 		if err := os.Remove(path); err != nil {
 			fmt.Fprintf(stderr, "remove %s: %v\n", path, err)
 			failed++
-			return nil
+			continue
 		}
 		removed++
-		return nil
-	})
-	if walkErr != nil {
+	}
+	fmt.Fprintf(stdout, "GC forward sweep: removed %d orphan file(s), kept %d known sidecar(s), %d failure(s).\n", removed, inv.Known, failed)
+	return removed, inv.Known, failed, 0
+}
+
+// gcTakeInventory is the forward sweep's read-only half: one walk of
+// `outputDir` classifying every file against the known set, taken before
+// anything is deleted.
+//
+// The walk is deliberately unbounded (no MaxEntries): the caller is about
+// to act on this list, and a truncated inventory would both miss orphans
+// and measure the guard's ratio from a slice of the tree.
+func gcTakeInventory(ctx context.Context, stderr io.Writer, outputDir string, known map[string]struct{}) (integrity.SidecarInventory, int) {
+	inv, err := integrity.TakeSidecarInventory(ctx, outputDir, known, integrity.SidecarInventoryOptions{})
+	if err != nil {
 		// Operator-interrupt path: distinguish from a real
 		// walk error so the SIGINT case reads cleanly.
-		if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			fmt.Fprintln(stderr, gcInterruptedMessage)
-			return removed, kept, failed, 1
+			return integrity.SidecarInventory{}, 1
 		}
-		fmt.Fprintf(stderr, "walk transcoded dir: %v\n", walkErr)
-		return removed, kept, failed, 1
+		fmt.Fprintf(stderr, "walk transcoded dir: %v\n", err)
+		return integrity.SidecarInventory{}, 1
 	}
-	fmt.Fprintf(stdout, "GC forward sweep: removed %d orphan file(s), kept %d known sidecar(s), %d failure(s).\n", removed, kept, failed)
-	return removed, kept, failed, 0
+	if inv.Unreadable > 0 {
+		// Not a refusal: a directory the walk could not descend into is
+		// simply absent from the counts, and its files are absent from
+		// the deletion list. Say so, because the summary that follows is
+		// then about part of the tree.
+		fmt.Fprintf(stderr, "GC forward sweep: %d director(y/ies) under %s could not be read; their contents were neither counted nor removed.\n",
+			inv.Unreadable, outputDir)
+	}
+	return inv, 0
 }
+
+// gcRefuseMassOrphans is the FORWARD sweep's mass-deletion guard, the
+// twin of gcRefuseRelocationInProgress on the file side —
+// integrity.MassOrphanRefusal, shared with `analyze --gc`.
+//
+// gcRefuseEmptyKnownSetOverPopulatedDir covers only a catalog that is
+// ENTIRELY empty, and the 2026-09-20 aftermath was not: the auto-optimize
+// sweeper had written 200 fresh rows over a tree of 10,248 stranded
+// files, so the known set was populated, every one of those rows was
+// PRESENT, and both existing guards passed while the sweep unlinked
+// 254 GiB. A catalog far smaller than the tree it is supposed to describe
+// is the signal neither of them can see.
+//
+// Override, not refusal-forever: there is an operator at the terminal,
+// which is the same reason --allow-empty exists and the background
+// sweeper gets nothing.
+func gcRefuseMassOrphans(stderr io.Writer, outputDir string, inv integrity.SidecarInventory, rowCount int, opts gcOptions) int {
+	if opts.allowMassOrphans {
+		return 0
+	}
+	reason := integrity.MassOrphanRefusal(inv.Orphans, inv.Files, rowCount, opts.maxDeletePercent)
+	if reason == "" {
+		return 0
+	}
+	fmt.Fprintf(stderr, "GC: refusing to run — %s.\n", reason)
+	fmt.Fprintln(stderr, "  A catalog this much smaller than the tree it describes usually means the INDEX was lost,")
+	fmt.Fprintln(stderr, "  not that the files are junk: a bridge.db restored from an older snapshot, a --config naming")
+	fmt.Fprintf(stderr, "  another install, or a sweep that reaped %s's rows after a host move.\n", outputDir)
+	fmt.Fprintln(stderr, "  Nothing was unlinked and no row was removed. Check `bridge doctor` (variants-index), and if the")
+	fmt.Fprintln(stderr, "  rows are recoverable restore them before sweeping — the files here cannot be re-derived from disk.")
+	for i, p := range inv.OrphanPaths {
+		if i >= gcOrphanExamples {
+			break
+		}
+		fmt.Fprintf(stderr, "    e.g. %s\n", p)
+	}
+	fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-mass-orphans.")
+	return 1
+}
+
+// gcOrphanExamples bounds how many orphan paths a refusal prints. Enough
+// for an operator to recognise whether these are their renditions; not so
+// many that a 10,000-file refusal scrolls the reason off the screen.
+const gcOrphanExamples = 5
 
 // gcRefuseEmptyKnownSetOverPopulatedDir is the FORWARD sweep's twin of
 // gcCheckOutputDirBeforeReverseSweep, and the direction that was missing.
@@ -905,10 +944,10 @@ func gcRefuseEmptyKnownSetOverPopulatedDir(stderr io.Writer, outputDir, rowNoun,
 func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount int) int {
 	if rowCount == 0 {
 		// LEGITIMATELY-empty case (no upscales ever generated on
-		// this bridge); the forward sweep's WalkDir handles a
-		// missing outputDir via filepath.SkipDir, so the guard
-		// only protects against mass-delete when there's
-		// something to lose.
+		// this bridge); the forward sweep's walk treats a missing
+		// outputDir as an empty inventory, so the guard only
+		// protects against mass-delete when there's something to
+		// lose.
 		return 0
 	}
 	if reason := integrity.VariantsDirSweepBlockReason(outputDir); reason != "" {
@@ -1128,8 +1167,17 @@ type gcOptions struct {
 	// allowMassDelete lets the reverse sweep delete past the relocation
 	// guard (--allow-mass-delete).
 	allowMassDelete bool
-	// maxDeletePercent is cfg.VariantSweepMaxDeletePercent(), the same
-	// threshold the serve-time watcher applies.
+	// allowMassOrphans lets the FORWARD sweep unlink past the mass-orphan
+	// guard (--allow-mass-orphans). A separate flag from allowMassDelete
+	// because the two guards answer different questions about different
+	// things — rows the catalog can no longer find, versus files the
+	// catalog never knew about — and the file half is the one that cannot
+	// be undone.
+	allowMassOrphans bool
+	// maxDeletePercent is cfg.VariantSweepMaxDeletePercent(), the
+	// threshold the serve-time watcher applies and the one BOTH guards
+	// read: an operator who raised it to allow a big row reap is saying
+	// something about mass deletion, not about one direction of it.
 	maxDeletePercent int
 }
 
@@ -1173,7 +1221,18 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		return code
 	}
 
-	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, outputDir, known)
+	// One walk, before anything is unlinked, so the mass-orphan guard can
+	// see the whole count — the same ordering, and the same reason, as the
+	// relocation pre-flight above.
+	inv, exitCode := gcTakeInventory(ctx, stderr, outputDir, known)
+	if exitCode != 0 {
+		return exitCode
+	}
+	if code := gcRefuseMassOrphans(stderr, outputDir, inv, len(allRows), opts); code != 0 {
+		return code
+	}
+
+	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, inv)
 	if exitCode != 0 {
 		return exitCode
 	}

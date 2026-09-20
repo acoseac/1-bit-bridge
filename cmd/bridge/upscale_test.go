@@ -164,7 +164,11 @@ func TestRunGCForwardSweepCaseInsensitive(t *testing.T) {
 	// delta the fix bridges.
 	known := map[string]struct{}{strings.ToLower(filepath.Clean(sidecar)): {}}
 
-	removed, kept, failed, exitCode := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, outputDir, known)
+	inv, exitCode := gcTakeInventory(context.Background(), &bytes.Buffer{}, outputDir, known)
+	if exitCode != 0 {
+		t.Fatalf("inventory unexpected: exit=%d", exitCode)
+	}
+	removed, kept, failed, exitCode := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, inv)
 	if exitCode != 0 || failed != 0 {
 		t.Fatalf("sweep unexpected: exit=%d failed=%d", exitCode, failed)
 	}

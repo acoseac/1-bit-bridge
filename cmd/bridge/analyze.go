@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -37,6 +38,7 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	force := fs.Bool("force", false, "re-analyze even if a fresh sidecar already exists")
 	gc := fs.Bool("gc", false, "remove orphan waveform sidecars (files with no DB row); skips analysis")
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no analysis row references any waveform (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
+	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink waveform files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index")
 	if !parseTranscodeArgs(fs, "analyze", args, stderr) {
 		return 2
 	}
@@ -65,7 +67,7 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 	outputDir := analyze.WaveformDirFor(cfg.DataDir)
 	if *gc {
-		return runAnalyzeGC(ctx, stdout, stderr, store, outputDir, *allowEmpty)
+		return runAnalyzeGC(ctx, stdout, stderr, store, outputDir, *allowEmpty, *allowMassOrphans)
 	}
 
 	resolver := bridgefs.New(cfg.LibraryRoots)
@@ -173,7 +175,7 @@ producer:
 // waveform output dir that no `track_analysis` row points at (plus
 // stale `.tmp` debris from interrupted runs). Mirrors the forward sweep
 // of `bridge upscale --gc`.
-func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string, allowEmpty bool) int {
+func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir string, allowEmpty, allowMassOrphans bool) int {
 	rows, err := store.AllAnalysisRows(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "list analysis rows: %v\n", err)
@@ -195,14 +197,14 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// cheaper-to-rebuild half; the serve path has no adoption for waveforms
 	// yet (see the doctor's sidecar-paths check), so at least the files
 	// survive for the day it does.
-	known := make(map[string]bool, 2*len(rows))
+	known := make(map[string]struct{}, 2*len(rows))
 	for _, r := range rows {
 		if r.WaveformPath != "" {
-			known[strings.ToLower(filepath.Clean(r.WaveformPath))] = true
+			known[strings.ToLower(filepath.Clean(r.WaveformPath))] = struct{}{}
 		}
 		if r.SourcePath != "" {
 			canonical := analyze.AnalyzeSpec{OutputDir: outputDir, SourceLibraryRel: r.SourcePath}.SidecarPath()
-			known[strings.ToLower(filepath.Clean(canonical))] = true
+			known[strings.ToLower(filepath.Clean(canonical))] = struct{}{}
 		}
 	}
 
@@ -219,43 +221,74 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		return code
 	}
 
-	var removed, kept int
-	walkErr := filepath.WalkDir(outputDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // best-effort: skip unreadable entries
+	// One classification pass, shared with `upscale --gc` and the doctor's
+	// variants-index check, so the three cannot disagree about what a tree
+	// that lost its index looks like. It also brings the dot-directory
+	// prune this walk never had: `<dataDir>/waveforms` is bridge-owned, but
+	// the rule ("a sidecar walk prunes dot-directories AT THE WALK") is not
+	// one to hold in one of two places.
+	inv, invErr := integrity.TakeSidecarInventory(ctx, outputDir, known, integrity.SidecarInventoryOptions{
+		Consider: func(name string) bool { return strings.HasSuffix(name, waveformSuffix) },
+		Scratch:  func(name string) bool { return strings.HasSuffix(name, waveformSuffix+".tmp") },
+	})
+	if invErr != nil {
+		if errors.Is(invErr, context.Canceled) || errors.Is(invErr, context.DeadlineExceeded) {
+			fmt.Fprintln(stderr, "analyze --gc: interrupted")
+			return 130
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		// Fail closed rather than the pre-#940 "skip the unreadable entry
+		// and keep deleting": a tree the walk could not read is not
+		// evidence its files are junk.
+		fmt.Fprintf(stderr, "analyze --gc: walk %s: %v\n", outputDir, invErr)
+		return 1
+	}
+	if inv.Unreadable > 0 {
+		fmt.Fprintf(stderr, "analyze --gc: %d director(y/ies) under %s could not be read; their contents were neither counted nor removed.\n",
+			inv.Unreadable, outputDir)
+	}
+	if !allowMassOrphans {
+		if reason := integrity.MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), analysisGCMaxOrphanPercent); reason != "" {
+			fmt.Fprintf(stderr, "analyze --gc: refusing to run — %s.\n", reason)
+			fmt.Fprintln(stderr, "  A catalog this much smaller than the tree it describes usually means the INDEX was lost —")
+			fmt.Fprintln(stderr, "  a bridge.db restored from an older snapshot, or a --config naming another install.")
+			fmt.Fprintln(stderr, "  Nothing was unlinked. `bridge doctor` reports the same mismatch under sidecar-paths.")
+			fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-mass-orphans (or `bridge analyze --force` rebuilds them).")
+			return 1
 		}
-		if d.IsDir() {
-			return nil
-		}
-		name := d.Name()
-		isWaveform := strings.HasSuffix(name, ".waveform.bin")
-		isTmp := strings.HasSuffix(name, ".waveform.bin.tmp")
-		if !isWaveform && !isTmp {
-			return nil
-		}
-		if isWaveform && known[strings.ToLower(filepath.Clean(path))] {
-			kept++
-			return nil
+	}
+
+	var removed, kept, failed int
+	// The scratch half is unconditional and outside the ratio: a
+	// `.waveform.bin.tmp` is this sweep's own half-written litter, never
+	// the operator's data, so a crashed run must not be able to trip the
+	// guard on the next one.
+	for _, path := range append(inv.ScratchPaths, inv.OrphanPaths...) {
+		if ctx.Err() != nil {
+			fmt.Fprintln(stderr, "analyze --gc: interrupted")
+			return 130
 		}
 		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			fmt.Fprintf(stderr, "analyze --gc: remove %s: %v\n", name, rmErr)
-			return nil
+			fmt.Fprintf(stderr, "analyze --gc: remove %s: %v\n", filepath.Base(path), rmErr)
+			failed++
+			continue
 		}
 		removed++
-		return nil
-	})
-	if walkErr != nil && (errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded)) {
-		fmt.Fprintln(stderr, "analyze --gc: interrupted")
-		return 130
 	}
-	fmt.Fprintf(stdout, "analyze --gc: removed %d orphan sidecar(s), kept %d\n", removed, kept)
+	kept = inv.Known
+	fmt.Fprintf(stdout, "analyze --gc: removed %d orphan sidecar(s), kept %d, %d failure(s)\n", removed, kept, failed)
 	return 0
 }
+
+// waveformSuffix is the extension analyze.AnalyzeSpec.SidecarPath writes.
+const waveformSuffix = ".waveform.bin"
+
+// analysisGCMaxOrphanPercent is the mass-orphan threshold for waveforms.
+// The same 20 as integrity.variantSweepMaxDeletePercent's default, but a
+// constant rather than a config read: the `integrity.*` knob is about the
+// variants catalog the watcher sweeps, and waveforms have no watcher —
+// borrowing the number keeps one answer to "how much of a tree is too
+// much" without pretending the setting covers a table it never named.
+const analysisGCMaxOrphanPercent = 20
 
 // analysisScanResult bundles the enumeration outcome shared by the CLI
 // batch path and the serve-side auto-analysis sweeper.

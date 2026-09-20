@@ -163,6 +163,18 @@ type Deps struct {
 	// as "fine".
 	RelocatedSidecars func(ctx context.Context) (RelocatedSidecars, error)
 
+	// VariantsIndex compares the variant catalog with the sidecar files on
+	// disk — see checkVariantsIndex. The other direction from
+	// RelocatedSidecars, and the one nothing else reports: rows that went
+	// missing while their files stayed. Optional on the same terms: nil
+	// skips the check, an error is reported rather than answered as fine.
+	//
+	// It WALKS the variants directory, so the probe bounds itself (see
+	// cmd/bridge's wiring) — `/api/doctor` is fetched on a settings-page
+	// render, and an unbounded walk of a 100k-sidecar tree there would
+	// turn a diagnostic into a load source.
+	VariantsIndex func(ctx context.Context) (VariantsIndex, error)
+
 	// LogPath is the file the service unit redirects this bridge's stderr
 	// to — packaging.DefaultLogPath(). Empty (a foreground `bridge serve`,
 	// which logs to its terminal) makes checkLogSize a no-op rather than a
@@ -236,6 +248,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkFingerprintToolchain,
 		checkLogSize,
 		checkSidecarPaths,
+		checkVariantsIndex,
 	}
 	out := make([]Check, 0, len(checks))
 	for _, fn := range checks {
