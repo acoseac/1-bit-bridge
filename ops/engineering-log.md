@@ -5862,6 +5862,20 @@ so a moved dataDir strands the entire waveform cache, silently, until
   console). Warn, never fail (`bridge init` refuses on fail); skipped on
   `Managed` for the log-file-size reason.
 
+**Round 1 (Gemini, High):** `TreeHoldsVariantSidecars` accepted only
+`d.Type().IsRegular()`, so a tree of symlinked sidecars read as holding
+none. Taken, and it uncovered the larger version: `filepath.WalkDir`
+follows neither an entry nor the ROOT, so a variants dir that is itself a
+symlink — the ordinary mountpoint alias — walked as one non-directory entry
+and bypassed the guard on exactly the deployment it exists for. The root
+is `EvalSymlinks`'d before the walk; a symlinked entry counts when
+`os.Stat` says it resolves to a regular file (the #207 rule: the serving
+path opens through the link) and a dangling one does not. Two controls
+(root unresolved, symlink entries ignored) each turn their subtest red.
+Sonar's six new issues are `S3776` on the new test TABLES plus one
+pre-existing hit in `store.go` from August; the quality gate passed and
+production code is clean, so they stand.
+
 Negative controls, each a single production line reverted after the commit
 that carried it, each turning exactly the named test red: no adoption
 (`TestVariantWatcher_adoptsARelocatedCatalog`), no guard
