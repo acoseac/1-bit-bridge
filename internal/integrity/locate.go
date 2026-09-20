@@ -159,14 +159,23 @@ func looksLikeVariantSidecar(name string) bool {
 // first hit; it never escapes the function.
 var errFoundSidecar = errors.New("integrity: sidecar found")
 
-// TreeHoldsVariantSidecars reports whether at least one regular file
-// under dir is a bridge sidecar (looksLikeVariantSidecar), pruning
-// dot-directories the way the orphan sweep does — a `.Trashes/` full of
-// sidecars an operator threw away is not a tree that still holds them.
-// Stops at the first hit, so on the tree it exists for (a relocated
-// library, every file a sidecar) it reads one directory entry; only a
-// tree with NO sidecars is walked whole, and that walk is what proves
-// the negative.
+// TreeHoldsVariantSidecars reports whether at least one file under dir
+// is a bridge sidecar (looksLikeVariantSidecar), pruning dot-directories
+// the way the orphan sweep does — a `.Trashes/` full of sidecars an
+// operator threw away is not a tree that still holds them. Stops at the
+// first hit, so on the tree it exists for (a relocated library, every
+// file a sidecar) it reads one directory entry; only a tree with NO
+// sidecars is walked whole, and that walk is what proves the negative.
+//
+// Symlinks count when they resolve to a regular file, and the ROOT is
+// resolved before the walk. filepath.WalkDir follows neither: a variants
+// directory that is itself a symlink (`/srv/variants -> /mnt/vol/…`, the
+// ordinary mountpoint alias) would otherwise walk as one non-directory
+// entry and "hold nothing", and a tree of symlinked sidecars the same —
+// both bypassing the guard on exactly the deployments an operator has
+// arranged by hand (Gemini on #937). A live link IS a sidecar here
+// because the serving path opens through it (the #207 broken-link rule);
+// a dangling one is not.
 //
 // Any walk error other than the sentinel counts as "unknown" and is
 // returned so the caller can fail closed: a directory it cannot read is
@@ -175,18 +184,30 @@ func TreeHoldsVariantSidecars(dir string) (bool, error) {
 	if dir == "" {
 		return false, errors.New("integrity: no variants directory")
 	}
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false, err
+	}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if d.IsDir() {
-			if path != dir && strings.HasPrefix(d.Name(), ".") {
+			if path != root && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if d.Type().IsRegular() && looksLikeVariantSidecar(d.Name()) {
+		if !looksLikeVariantSidecar(d.Name()) {
+			return nil
+		}
+		if d.Type().IsRegular() {
 			return errFoundSidecar
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() {
+				return errFoundSidecar
+			}
 		}
 		return nil
 	})

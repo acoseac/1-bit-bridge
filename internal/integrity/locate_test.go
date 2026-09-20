@@ -205,6 +205,45 @@ func TestTreeHoldsVariantSidecars(t *testing.T) {
 			t.Fatal("want an error for a directory that cannot be read")
 		}
 	})
+	// Symlinks: filepath.WalkDir follows neither the root nor an entry,
+	// and the first draft used it bare — a symlinked variants dir (the
+	// ordinary mountpoint alias) walked as one non-directory entry and
+	// "held nothing", which is the guard bypassed on exactly the
+	// deployment it exists for (Gemini on #937).
+	t.Run("a variants dir that is itself a symlink is walked through", func(t *testing.T) {
+		real := t.TempDir()
+		write(t, real, "Artist/Album/01.flac.upscaled-v2-176400-24.flac")
+		link := filepath.Join(t.TempDir(), "variants")
+		if err := os.Symlink(real, link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		got, err := TreeHoldsVariantSidecars(link)
+		if err != nil || !got {
+			t.Fatalf("got %v, %v — want true through the root symlink", got, err)
+		}
+	})
+	t.Run("a symlinked sidecar counts when it resolves to a file", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(t.TempDir(), "real.flac")
+		if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dir, "01.flac.upscaled-v2-176400-24.flac")); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if got, err := TreeHoldsVariantSidecars(dir); err != nil || !got {
+			t.Fatalf("got %v, %v — want true for a live symlinked sidecar", got, err)
+		}
+	})
+	t.Run("a dangling symlink named like a sidecar does not count", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Symlink(filepath.Join(dir, "never-existed.flac"), filepath.Join(dir, "01.flac.upscaled-v2-176400-24.flac")); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if got, err := TreeHoldsVariantSidecars(dir); err != nil || got {
+			t.Fatalf("got %v, %v — want false for a dangling link", got, err)
+		}
+	})
 	t.Run("empty path is refused", func(t *testing.T) {
 		if _, err := TreeHoldsVariantSidecars(""); err == nil {
 			t.Fatal("want an error for an empty directory path — never walk the working directory")
