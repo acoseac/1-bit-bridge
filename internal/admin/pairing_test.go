@@ -67,7 +67,7 @@ func TestPairAlternatesPrependsPrimary(t *testing.T) {
 	// our pairAlternates helper is what ensures it lands first. Test
 	// with a non-default listen address just to exercise the port
 	// parse.
-	got := pairAlternates("https://user-chose-this:9999", &config.Config{ListenAddress: "127.0.0.1:7788"})
+	got := pairAlternates("https://user-chose-this:9999", &config.Config{ListenAddress: "127.0.0.1:7788"}, nil)
 	if len(got) == 0 {
 		t.Fatal("expected non-empty alternates")
 	}
@@ -102,7 +102,7 @@ func TestPairAlternatesPublicModeFiltersLANAndTailscale(t *testing.T) {
 		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
 		CustomEndpoints: []string{"https://alt.example.com:443"},
 	}
-	got := pairAlternates("https://bridge.example.com:443", cfg)
+	got := pairAlternates("https://bridge.example.com:443", cfg, nil)
 	if len(got) == 0 {
 		t.Fatal("expected non-empty alternates")
 	}
@@ -133,7 +133,7 @@ func TestPairAlternatesPublicModeIncludesExplicitPort(t *testing.T) {
 		Autocert:        config.AutocertConfig{Domain: "bridge.example.com"},
 		CustomEndpoints: []string{"https://bridge.example.com"},
 	}
-	got := pairAlternates("https://bridge.example.com:443", cfg)
+	got := pairAlternates("https://bridge.example.com:443", cfg, nil)
 	foundExplicit := false
 	for _, u := range got {
 		if u == "https://bridge.example.com:443" {

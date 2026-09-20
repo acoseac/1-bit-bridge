@@ -4141,11 +4141,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// rescans inherit the bridge's run-scope (a request-context
 		// would cancel the walk when the operator's browser
 		// disconnects).
-		UPnPUpstream:    upnpLC.installAdminAdapter(ctx, cfgHolder, absCfgPath, manifestStore, upnpLC.ingester),
-		Updater:         updAdapter,
-		BackupSources:   backupSources,
-		LogPath:         adminLogPath(),
-		Tailscale:       tailscaleAdminSrc,
+		UPnPUpstream:  upnpLC.installAdminAdapter(ctx, cfgHolder, absCfgPath, manifestStore, upnpLC.ingester),
+		Updater:       updAdapter,
+		BackupSources: backupSources,
+		LogPath:       adminLogPath(),
+		Tailscale:     tailscaleAdminSrc,
+		// The pairing QR's `urls=` list and the Settings "Reachable
+		// endpoints" panel read the SAME enumeration /v1/health serves —
+		// including the Tailscale MagicDNS + tailnet IPs that only the api
+		// layer appends (from tailscaleAdminSrc, above). Unwired, both fall
+		// back to the host-network walk and silently lose every Tailscale
+		// entry, which is how they shipped from PR #269 until 2026-09-20.
+		Endpoints:       apiSrv.ReachableEndpoints,
 		Pairing:         pairingStore,
 		IsSupervised:    supervision.IsSupervised(),
 		UpscalePrecheck: soxCache.precheck,

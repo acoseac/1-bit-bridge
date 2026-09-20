@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -1439,11 +1438,15 @@ type adminEndpointEntry struct {
 }
 
 // apiEndpoints returns the live set of advertised endpoints —
-// computed fresh on each call from `net.Interfaces()` so a
-// just-connected Tailscale interface (or a just-dropped LAN one)
-// is reflected immediately. Mirrors the per-call enumeration in
-// `s.reachableEndpoints()` over in `internal/api`, but admin-
-// scoped so the iOS-facing handler stays untouched.
+// computed fresh on each call so a just-connected Tailscale
+// interface (or a just-dropped LAN one) is reflected immediately.
+// The list IS `internal/api`'s `ReachableEndpoints` — the one
+// `/v1/health` serves — reached through `Deps.Endpoints`; the
+// panel used to run its own `advertise.Endpoints` walk "mirroring"
+// it, and the mirror silently lost every Tailscale entry when
+// PR #269 moved that append to the api layer. The panel's own
+// prose ("bring a Tailscale tunnel up … to see the new entry")
+// described a row it could no longer render.
 //
 // No reachability indicator from the bridge side — only the iOS
 // client knows reachability from its network position. Operators
@@ -1470,8 +1473,8 @@ type endpointsErr struct {
 func (e *endpointsErr) Error() string { return e.code + ": " + e.msg }
 
 // getEndpointsSnapshot enumerates the live set of advertised endpoints —
-// computed fresh on each call from `net.Interfaces()` so a just-
-// connected Tailscale interface (or a just-dropped LAN one) is
+// computed fresh on each call (see apiEndpoints for the source) so a
+// just-connected Tailscale interface (or a just-dropped LAN one) is
 // reflected immediately. Shared by apiEndpoints (REST) and
 // apiEvents (SSE).
 //
@@ -1507,10 +1510,7 @@ func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
 	if port == 0 {
 		return []adminEndpointEntry{}, nil
 	}
-	eps := advertise.Endpoints(advertise.Params{
-		Port:            port,
-		CustomEndpoints: cfg.CustomEndpoints,
-	})
+	eps := advertisedEndpoints(port, cfg, s.deps.Endpoints)
 	out := make([]adminEndpointEntry, 0, len(eps))
 	for _, e := range eps {
 		out = append(out, adminEndpointEntry{
@@ -1856,7 +1856,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 	// moment of pairing. Empty slice if enumeration fails — the
 	// operator-supplied primary URL is always the first entry, so the
 	// QR always pairs even on an interface-less environment.
-	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg))
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, s.deps.Endpoints))
 	pairURL := buildPairURL(req.URL, rawToken, fp, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
