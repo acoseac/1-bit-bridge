@@ -6138,6 +6138,53 @@ compare left `io/fs` imported and unused — which reads as "control invalid",
 never as a pass. This file already records that rule; reverting the import
 alongside the production line is what makes the control mean anything.
 
+### Round 2 (CodeRabbit, 1 outside-diff finding, real — and its patch was the wrong fix)
+
+**The doctor derived `WouldRefuseGC` from a walk it had truncated.** The
+sweep's ratio term is over the whole tree and the probe walks under a budget,
+so the check could tell an operator that `bridge upscale --gc` REFUSES — and
+not to pass `--allow-mass-orphans` — about a tree the sweep would reclaim. It
+is this feature's own failure mode one level up, which is the part worth
+keeping: the check exists to catch confident answers built from partial
+measurements, and it was one.
+
+**The suggested patch — "set `WouldRefuseGC` only when `inv.Truncated` is
+false" — would have been worse than the bug.** With the bool false the hint
+falls through to "`bridge upscale --gc` reclaims them", and truncation is
+CERTAIN on a large tree, which is exactly where a lost index means the files
+are the only copy. That is the opposite advice on the worst shape. Take the
+observation, verify the mechanism, write your own fix — the rule this file
+already records from #892-#899.
+
+The terms are split instead by whether they survive a partial walk.
+`integrity.MassOrphanLowerBound` (clears the floor AND more orphans than the
+catalog has rows) is **monotone**: `orphans` only grows as the walk sees more
+and `rows` is the whole catalog either way, so a prefix that satisfies it
+proves the completed walk does. That is the lost-index signal itself, and the
+check still states it on a truncated walk. The RATIO is not monotone, so the
+verdict is claimed only on a complete walk; a truncated one says the decision
+cannot be told from here and points at the command that measures the whole
+tree, noting that it unlinks nothing when it refuses — an instruction that is
+safe to follow either way.
+
+**How reachable, measured rather than asserted.** The first draft of this
+entry said "a prefix that is 90% orphans followed by 180,000 referenced
+files", and that cannot happen: the two terms are not independent.
+`orphans > rows` bounds the referenced files at `known <= 2*rows < 2*orphans`
+(a row contributes at most two spellings, and both sit on disk only mid-copy),
+so any qualifying prefix is already more than a third orphans. Swept over
+every (rows, orphans, known, prefix) shape, a prefix verdict first differs
+from the completed one at **maxOrphanPercent 34 — never at the default 20**.
+So the bug is latent today and reachable on a bridge whose operator raised the
+knob, which takes 0..100.
+
+Kept anyway, and that is the judgement rather than the arithmetic: a guard
+that is correct only because two of its terms happen to overlap at today's
+default is one configuration change from being wrong, and nothing in the code
+said so. `TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot` pins the
+monotonicity, the non-monotonicity and the 34, so a future change to either
+term fails rather than silently moving the boundary.
+
 ### Not in scope, and why
 
 - **`OrphanSidecarSweeper`** (the BACKGROUND file walk, opt-in and off by
