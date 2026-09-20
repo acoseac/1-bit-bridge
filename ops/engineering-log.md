@@ -5737,7 +5737,7 @@ primary lifted to the head; the rotate with a different primary the same.
 No wire change: `/v1/health` is untouched and `urls=` was already one URL
 per line on the iOS parser. No ProtocolVersion bump.
 
-## 2026-09-20 — the variants index did not survive a relocation (field report)
+## 2026-09-20 — the variants index did not survive a relocation (#937, field report; schema follow-up #938)
 
 ### The incident, and why no guard fired
 
@@ -5909,6 +5909,8 @@ touch list is too wide for this PR, and it is the follow-up's spec:
   one probe), the legacy hash-flat rows (`<dataDir>/transcoded/<hash>.flac`)
   that live under NO current directory, and PROTOCOL.md is untouched either
   way — nothing on `/v1` carries a sidecar path.
+
+Filed as #938 with this list as its checklist.
 
 Until then, waveform adoption on serve (`analysisStoreAdapter.LookupAnalysis`
 probing `analyze.AnalyzeSpec{…}.SidecarPath()` and a new

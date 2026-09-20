@@ -1104,7 +1104,7 @@ no failing test — which is the shape to expect in this area.
   shape and NO adoption yet (the analysis skip gate reads the row, not the
   file, so a moved dataDir strands the whole waveform cache as 410s that
   never regenerate) — `bridge doctor`'s `sidecar-paths` check reports
-  both tables; the schema-relative follow-up is filed.
+  both tables; the schema-relative follow-up is #938. (#937)
 
 ### DLNA, UPnP and discovery
 
