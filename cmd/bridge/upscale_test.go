@@ -467,12 +467,20 @@ func TestRunGCRefusesWhenOutputDirUnhealthyButRowsExist(t *testing.T) {
 // missing OR exists-but-empty outputDir refuses (exit 1) — the
 // cleanly-unmounted-mountpoint signature — while a non-empty dir
 // proceeds, and zero rows proceed regardless of dir state.
+//
+// Plus the one exception, the flat-layout wedge: an EMPTY directory
+// that THIS RUN's forward sweep emptied is explained and proceeds,
+// while a MISSING one still refuses however much was removed — the
+// forward sweep unlinks files and never directories, so it cannot be
+// what took the root.
 func TestGCCheckOutputDirBeforeReverseSweep(t *testing.T) {
 	cases := []struct {
 		name string
 		// setup returns the outputDir to probe.
-		setup   func(t *testing.T) string
-		rows    int
+		setup func(t *testing.T) string
+		rows  int
+		// removed is what the forward sweep unlinked on this run.
+		removed int
 		wantRC  int
 		wantMsg string // stderr substring expected when refusing; "" otherwise
 	}{
@@ -516,11 +524,36 @@ func TestGCCheckOutputDirBeforeReverseSweep(t *testing.T) {
 			wantRC:  0,
 			wantMsg: "",
 		},
+		{
+			// The flat-layout wedge: the forward sweep removed the last
+			// file, so "empty" is this run's own doing.
+			name: "empty dir with rows proceeds when this run emptied it",
+			setup: func(t *testing.T) string {
+				return t.TempDir()
+			},
+			rows:    2,
+			removed: 5,
+			wantRC:  0,
+			wantMsg: "",
+		},
+		{
+			// ...and the line the exception does not cross. The forward
+			// sweep unlinks no directories, so a root that is GONE went
+			// some other way — the mount, mid-run.
+			name: "missing dir with rows refuses even when this run removed files",
+			setup: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "unmounted-mountpoint")
+			},
+			rows:    2,
+			removed: 5,
+			wantRC:  1,
+			wantMsg: "variants directory is missing",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			rc := gcCheckOutputDirBeforeReverseSweep(&stderr, tc.setup(t), tc.rows)
+			rc := gcCheckOutputDirBeforeReverseSweep(&stderr, tc.setup(t), tc.rows, tc.removed)
 			if rc != tc.wantRC {
 				t.Fatalf("gcCheckOutputDirBeforeReverseSweep rc = %d, want %d (stderr=%s)", rc, tc.wantRC, stderr.String())
 			}
