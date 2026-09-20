@@ -1286,6 +1286,13 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .deleted-list {
   list-style: none; margin: 0; padding: 0;
   display: grid; gap: 2px;
+  /* minmax(0, 1fr), not the implicit `auto` track. An auto track sizes to
+   * its widest item's max-content, so ONE long playlist name made the
+   * column 925px inside a 317px panel: the rows overflowed, the Restore
+   * buttons left the screen entirely and the list grew a horizontal
+   * scrollbar. Measured at 375px, not reasoned about — every Go guard
+   * here was green through all of it. */
+  grid-template-columns: minmax(0, 1fr);
   /* Bounded for the same reason .unresolved-list is: a client replaying a
    * queued delete can tombstone a whole library's worth of playlists, and
    * an unbounded block would push the grid off the screen. */
@@ -1296,6 +1303,9 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   display: flex; align-items: center; gap: var(--space-2);
   padding: var(--space-1) 0;
   border-top: 1px solid var(--border);
+  /* The track can shrink; this is what lets the ITEM inside it shrink
+   * with it, so the ellipsis below actually gets a chance to apply. */
+  min-width: 0;
 }
 .deleted-item:first-child { border-top: 0; }
 .deleted-item-text {
