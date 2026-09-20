@@ -6,14 +6,14 @@ import (
 )
 
 func TestSafeAnalysisFilenameClean(t *testing.T) {
-	if got := safeAnalysisFilename("01 Track.flac"); got != "01 Track.flac"+waveformExt {
+	if got := safeAnalysisFilename("01 Track.flac"); got != "01 Track.flac"+WaveformExt {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestSafeAnalysisFilenameFATCharsSanitizedAndDisambiguated(t *testing.T) {
 	got := safeAnalysisFilename(`Track: A? B.flac`)
-	if !strings.HasSuffix(got, waveformExt) {
+	if !strings.HasSuffix(got, WaveformExt) {
 		t.Fatalf("missing suffix: %q", got)
 	}
 	if strings.ContainsAny(got, `:*?"<>|\`) {
@@ -30,10 +30,10 @@ func TestSafeAnalysisFilenameFATCharsSanitizedAndDisambiguated(t *testing.T) {
 func TestSafeAnalysisFilenameLongFitsCap(t *testing.T) {
 	long := strings.Repeat("x", 300) + ".flac"
 	got := safeAnalysisFilename(long)
-	if len(got)+len(analysisTmpSuffix) > 255 {
+	if len(got)+len(AnalysisTmpSuffix) > 255 {
 		t.Fatalf("basename + tmp suffix overflows 255: len(got)=%d", len(got))
 	}
-	if !strings.HasSuffix(got, waveformExt) {
+	if !strings.HasSuffix(got, WaveformExt) {
 		t.Fatalf("missing suffix: %q", got)
 	}
 }
@@ -43,10 +43,10 @@ func TestSafeAnalysisFilenameUTF8MiddleTruncateSafe(t *testing.T) {
 	// (no corrupted UTF-8) and still fit the cap.
 	long := strings.Repeat("Dvořák ", 60) + ".flac"
 	got := safeAnalysisFilename(long)
-	if len(got)+len(analysisTmpSuffix) > 255 {
+	if len(got)+len(AnalysisTmpSuffix) > 255 {
 		t.Fatalf("overflow: len(got)=%d", len(got))
 	}
-	if !strings.HasSuffix(got, waveformExt) {
+	if !strings.HasSuffix(got, WaveformExt) {
 		t.Fatalf("missing suffix: %q", got)
 	}
 	if !utf8ValidStr(got) {

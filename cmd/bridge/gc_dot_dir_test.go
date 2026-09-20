@@ -30,7 +30,14 @@ func TestRunGCForwardSweepSkipsDotDirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	removed, kept, failed, exitCode := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, outputDir, map[string]struct{}{})
+	// The walk and the deletion are two steps now — the mass-orphan guard
+	// sits between them — so the test drives both, which is also what
+	// keeps the dot-directory rule pinned wherever it moved to.
+	inv, exitCode := gcTakeInventory(context.Background(), &bytes.Buffer{}, outputDir, map[string]struct{}{})
+	if exitCode != 0 {
+		t.Fatalf("inventory unexpected: exit=%d", exitCode)
+	}
+	removed, kept, failed, exitCode := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, inv)
 	if exitCode != 0 || failed != 0 {
 		t.Fatalf("sweep unexpected: exit=%d failed=%d", exitCode, failed)
 	}
