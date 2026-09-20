@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -311,5 +312,52 @@ func TestEveryForwardSweepingGCCommandOffersTheMassOrphanOverride(t *testing.T) 
 	}
 	if covered < 4 {
 		t.Fatalf("only %d command(s) carry the override; upscale / optimize / render / analyze all should", covered)
+	}
+}
+
+// TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved pins a window this
+// PR opened: the inventory and the unlink are separate steps now, so a
+// file another process removes in between reaches os.Remove as ENOENT.
+// That is the outcome the sweep asked for, and counting it as a failure
+// exits 1 — a cron'd `--gc` reporting a failed job for doing its job.
+// `analyze --gc` has always read ENOENT this way. (CodeRabbit on #940.)
+func TestRunGCForwardSweepTreatsAVanishedOrphanAsRemoved(t *testing.T) {
+	dir := t.TempDir()
+	vanishes := filepath.Join(dir, "gone.flac.upscaled-v2-176400-24.flac")
+	stays := filepath.Join(dir, "here.flac.upscaled-v2-176400-24.flac")
+	writeFixtureFile(t, vanishes, 8)
+	writeFixtureFile(t, stays, 8)
+
+	inv, code := gcTakeInventory(context.Background(), &bytes.Buffer{}, dir, map[string]struct{}{})
+	if code != 0 || inv.Orphans != 2 {
+		t.Fatalf("inventory: code=%d orphans=%d", code, inv.Orphans)
+	}
+	// Another process gets to one of them first.
+	if err := os.Remove(vanishes); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	removed, _, failed, exitCode := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr, inv)
+	if failed != 0 || exitCode != 0 {
+		t.Fatalf("a file that vanished before the unlink counted as a failure (failed=%d exit=%d): %s",
+			failed, exitCode, stderr.String())
+	}
+	if removed != 2 {
+		t.Errorf("removed=%d, want both counted gone", removed)
+	}
+	if _, err := os.Stat(stays); !os.IsNotExist(err) {
+		t.Errorf("control: the orphan that was still there survived (%v)", err)
+	}
+	// A real failure must still be one. A directory in the orphan list
+	// (which the walk never produces, but the loop cannot know that) fails
+	// with ENOTEMPTY, not ENOENT.
+	sub := filepath.Join(dir, "sub")
+	writeFixtureFile(t, filepath.Join(sub, "child.flac"), 1)
+	stderr.Reset()
+	_, _, failed, _ = runGCForwardSweep(context.Background(), &bytes.Buffer{}, &stderr,
+		integrity.SidecarInventory{OrphanPaths: []string{sub}})
+	if failed != 1 {
+		t.Errorf("a genuine remove failure was swallowed (failed=%d): %s", failed, stderr.String())
 	}
 }
