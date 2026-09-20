@@ -2180,8 +2180,14 @@ func classStableUnique(eps []advertise.Endpoint) []advertise.Endpoint {
 
 // endpointURLs flattens a classed endpoint list to its URLs, in order.
 // A fresh slice, never a view: the health route parks the result in
-// endpointsCache and shares it read-only across a TTL window.
+// endpointsCache and shares it read-only across a TTL window. nil stays
+// nil so reachableEndpoints keeps its pre-split shape on the no-port
+// path — not that the wire can tell: HealthResponse.Endpoints is
+// `omitempty`, which drops nil and empty alike.
 func endpointURLs(eps []advertise.Endpoint) []string {
+	if eps == nil {
+		return nil
+	}
 	out := make([]string, len(eps))
 	for i, e := range eps {
 		out[i] = e.URL
