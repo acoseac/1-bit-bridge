@@ -225,3 +225,39 @@ func TestVariantsIndexWillNotGuessTheSweepsVerdictFromAPartialWalk(t *testing.T)
 		t.Errorf("hint does not say the suggested command is safe to run: %q", c.Hint)
 	}
 }
+
+// TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory
+// — a directory the walk could not descend into is the same fact as a
+// truncated budget arriving by a different route: the ratio was taken
+// over part of the tree. The lower bound survives it (hiding entries can
+// only lower `orphans`, and `rows` is the whole catalog either way); the
+// verdict does not. (CodeRabbit on #940.)
+func TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{
+			Rows: 200, Files: 9000, Known: 200, Orphans: 8800,
+			Unreadable: 2, // the probe withholds WouldRefuseGC for this
+			// ...while the monotone half stays assertable.
+			OrphansExceedRows: true,
+			OrphanSample:      []string{"A/Al/01.flac.upscaled-v2-176400-24.flac"},
+			VariantsDir:       "/srv/bridge-variants",
+		}, nil
+	}})
+	if c.Status != Warn {
+		t.Fatalf("status=%v, want warn", c.Status)
+	}
+	if !strings.Contains(c.Summary, "2 director(y/ies) could not be read") {
+		t.Errorf("summary hides that the counts are partial: %q", c.Summary)
+	}
+	if !strings.Contains(c.Hint, "LOST INDEX") {
+		t.Errorf("the monotone warning was dropped with the verdict: %q", c.Hint)
+	}
+	for _, forbidden := range []string{"REFUSES", "reclaims them"} {
+		if strings.Contains(c.Hint, forbidden) {
+			t.Errorf("a definite %q was claimed over a tree the walk could not fully read: %q", forbidden, c.Hint)
+		}
+	}
+	if !strings.Contains(c.Hint, "cannot be told from a partial walk") {
+		t.Errorf("hint does not say the verdict is out of reach: %q", c.Hint)
+	}
+}

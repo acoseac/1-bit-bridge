@@ -51,7 +51,8 @@ type VariantsIndex struct {
 	OrphansExceedRows bool
 	// Truncated is set when the walk stopped at its entry budget. The
 	// check then scopes its claim to what it looked at instead of
-	// answering for the whole tree.
+	// answering for the whole tree — as it does for Unreadable, which is
+	// the same fact arriving by a different route.
 	Truncated bool
 	// Budget is the entry cap the probe walked under, 0 for an unbounded
 	// walk. Reported rather than inferred from Files: it is the number
@@ -61,6 +62,10 @@ type VariantsIndex struct {
 	// settings-page render and every count would still look right.
 	Budget int
 	// Unreadable counts directories the walk could not descend into.
+	// Their contents are missing from Files and Orphans, so like
+	// Truncated it makes the RATIO a statement about part of the tree —
+	// and WouldRefuseGC is withheld for it on the same terms
+	// (CodeRabbit on #940).
 	Unreadable int
 	// VariantsDir is the directory the counts were taken against.
 	VariantsDir string
@@ -149,12 +154,14 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 	switch {
 	case idx.WouldRefuseGC:
 		hint.WriteString("`bridge upscale --gc` REFUSES this shape, so it will not unlink anything. ")
-	case idx.Truncated:
-		// The sweep's own ratio is over the WHOLE tree and this walk saw a
-		// prefix, so what it will decide cannot be told from here — and
-		// saying either "refuses" or "reclaims them" would be a guess
-		// dressed as a fact. Point at the thing that measures the whole
-		// tree; it is safe to run, because refusing is its default.
+	case idx.Truncated || idx.Unreadable > 0:
+		// The sweep's own ratio is over the WHOLE tree and this walk saw
+		// part of one — stopped at its budget, or stepped over a directory
+		// it could not read. What the sweep will decide cannot be told
+		// from here, and saying either "refuses" or "reclaims them" would
+		// be a guess dressed as a fact. Point at the thing that measures
+		// the whole tree; it is safe to run, because refusing is its
+		// default.
 		hint.WriteString("Whether `bridge upscale --gc` reclaims these or refuses them cannot be told from a partial walk — " +
 			"run it and read what it says; it measures the whole tree and unlinks nothing when it refuses. ")
 	default:

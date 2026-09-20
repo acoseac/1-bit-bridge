@@ -404,7 +404,11 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 	// catch — and it is reachable at the default threshold, not an exotic
 	// one (integrity.MassOrphanLowerBound has why).
 	out.OrphansExceedRows = integrity.MassOrphanLowerBound(inv.Orphans, len(rows))
-	if !inv.Truncated {
+	// A truncated walk and an unreadable directory are the same fact: the
+	// ratio was taken over part of the tree. The lower bound survives both
+	// (hiding entries can only lower `orphans`, and `rows` is the whole
+	// catalog either way); the ratio survives neither.
+	if !inv.Truncated && inv.Unreadable == 0 {
 		out.WouldRefuseGC = integrity.MassOrphanRefusal(inv.Orphans, inv.Files, len(rows), maxOrphanPercent) != ""
 	}
 	for _, p := range inv.OrphanPaths {

@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // seedTree writes each relative path under root with one byte of content.
@@ -436,8 +438,11 @@ func TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot(t *testing.T) {
 		}
 	}
 
-	// And the whole verdict is not, at the threshold bridges actually run.
-	const defaultPct = 20
+	// And the whole verdict is not, at the threshold bridges actually run —
+	// taken from config rather than retyped, so that if the shipped default
+	// ever moves this property is re-asked at the new one rather than
+	// quietly continuing to answer about 20 (CodeRabbit on #940).
+	const defaultPct = config.DefaultVariantSweepMaxDeletePercent
 	type shape struct{ rows, orphans, knownTotal, knownPrefix int }
 	var found *shape
 	for rows := 0; rows < 20 && found == nil; rows++ {
