@@ -1159,6 +1159,32 @@ no failing test — which is the shape to expect in this area.
   closure wired with 0 walks the whole tree on a page render and every
   count still looks right, which is the one mistake no number reveals.
   (#940)
+- **A guard that reads the world AFTER a sweep has to be told what the sweep
+  did.** `gcCheckOutputDirBeforeReverseSweep` reads a missing-or-empty variants
+  directory as a lost mount — right, except that on the legacy hash-flat layout
+  (`<dir>/<hash>-<variantID>.flac`, no subdirectories) the FORWARD sweep runs
+  first and can remove the last file, so it refused on a state that run had
+  just created. No re-run cleared it — the directory was still empty, so it
+  refused again having removed nothing — and **no flag reached it either**
+  (measured: `--allow-mass-delete`, `--allow-mass-orphans` and `--allow-empty`
+  all still wedged; only `mkdir "$dir/.keep"` got past — a plain `touch` does
+  NOT, because the `--gc` inventory passes a nil `Consider`, so a dot-FILE is
+  unlinked as an orphan while only dot-DIRECTORIES are pruned at the walk). Those rows could not
+  be reaped by `--gc` at all, and `manifest clear-missing` is not a route —
+  `ClearMissingCounts` deletes from `tracks` + `folders` and never touches
+  `track_variants`. The source-mirrored layout hid it for years: `WalkDir`
+  removes no directories, so an emptied subtree still leaves dirents behind.
+  It now takes the forward sweep's `removed` count and skips the refusal for
+  **EMPTY alone**; missing, unreadable and not-a-directory still refuse however
+  much was removed, because the forward sweep unlinks files and never
+  directories (`TakeSidecarInventory` hands it none), so it cannot be what took
+  the root — something else did, mid-run, which is the hazard.
+  `integrity.VariantsDirSweepBlock` is the typed answer and
+  `VariantsDirSweepBlockReason` delegates to it, so the two cannot drift. The
+  serve-time `VariantWatcher` has the same shape one layer over —
+  `OrphanSidecarSweeper` can empty a flat directory under it — and is
+  deliberately left: it removes nothing itself, so it has no count to be told,
+  and the CLI is the repair tool. (#941)
 
 ### DLNA, UPnP and discovery
 
@@ -2052,6 +2078,17 @@ its twin.** The top list is older, shorter, and read first.
   the lesson; I hit it twice in one session anyway. And a control that fails to
   BUILD reads as "control invalid", never as a pass — revert the test fixture
   alongside the production line so the control compiles.
+- **...and once you HAVE committed, `git stash` is a no-op, which is the same
+  trap inverted.** `git stash && go test && git stash pop` against a clean tree
+  stashes nothing and runs the test against the FIXED build, so the control
+  passes for the wrong reason and reports the opposite of the truth — the only
+  tell is `pop`'s "No stash entries found", and it comes at the END. Check out
+  the pre-fix commit instead (a throwaway `git worktree add <dir> <sha>`, removed
+  after), and **assert you are on the old code** — grep the tree for the
+  identifier the fix introduced and require zero — rather than assuming the
+  stash took. Found on #941, where a "plain file works too" measurement was
+  entirely an artifact of this. (Also: `grep -c … && next` exits 1 on zero
+  matches and silently ends the chain.)
 - **Negative-control every load-bearing assertion**, and check what the mutation
   actually did. A control that fails to BUILD reads as "control invalid", never
   as a pass — and most "just disable this branch" edits delete a variable's only
@@ -2085,6 +2122,15 @@ its twin.** The top list is older, shorter, and read first.
   a static file — there is no `.gitattributes` pinning `eol`.
 - **`filepath.ToSlash` is a no-op on POSIX**, so a Windows-shaped path handed to
   it on a Mac keeps its backslashes.
+- **A test asserting that a message NAMES A PATH must not substring-match the
+  raw path.** `%q` escapes backslashes, so a Windows `C:\Users\…` renders as
+  `C:\\Users\\…` and `strings.Contains(out, dir)` fails on that platform
+  alone. Accept either rendering — the property is that the path is named, not
+  the verb it is named with; pinning `%q` instead would go red on a benign
+  change to `%s`. **And a quick follow-up push CANCELS the in-flight platform
+  legs**, so a green tick on an older SHA is not evidence Windows ran: #941's
+  code commit had its Windows and race legs cancelled by a docs-only push
+  twenty minutes later, and the defect surfaced on the leg's first real run. (#941)
 - **CI's cost is SQLite under the race detector, not the tests' shape.**
   `modernc.org/sqlite` is pure Go, so every page operation is Go code `-race`
   instruments, and the multiplier is ~48x, not the usual eight: deleting 2,000

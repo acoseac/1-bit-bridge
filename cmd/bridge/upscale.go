@@ -948,7 +948,32 @@ func gcRefuseEmptyKnownSetOverPopulatedDir(stderr io.Writer, outputDir, rowNoun,
 // mountpoint reverts to an EMPTY local dir, so an outputDir that
 // stats fine but holds zero entries is the same mass-delete hazard
 // as a missing one — every per-row sidecar stat would ENOENT.
-func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount int) int {
+//
+// `forwardRemoved` is what the forward sweep unlinked a moment ago,
+// and it is what tells the two apart. On the legacy hash-flat layout
+// (`<outputDir>/<hash>-<variantID>.flac`, every sidecar directly
+// under the root) the forward sweep can remove the last file, and
+// then the directory is empty BECAUSE THIS RUN EMPTIED IT — which is
+// explained, and is not evidence of an unmounted volume. Unguarded,
+// the refusal fires on a state the run itself created and no re-run
+// can clear it: the directory is still empty, so it refuses again
+// having removed nothing, and those rows can never be reaped by
+// `--gc` at all. The source-mirrored layout hid it for years —
+// WalkDir removes no directories, so an emptied subtree still leaves
+// dirents behind and the probe reads non-empty.
+//
+// ONLY the empty case is explained away, deliberately. The forward
+// sweep unlinks files and never directories (TakeSidecarInventory
+// hands it no directory to remove), so it cannot make outputDir
+// itself disappear: a MISSING, unreadable or not-a-directory root
+// after a sweep that removed files means something ELSE took it
+// mid-run — the mount going away under us, which is exactly the
+// hazard. Those still refuse however much this run removed.
+//
+// `forwardRemoved == 0` keeps the guard whole for the case it was
+// written for: the directory read empty and this run did nothing to
+// make it so.
+func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowCount, forwardRemoved int) int {
 	if rowCount == 0 {
 		// LEGITIMATELY-empty case (no upscales ever generated on
 		// this bridge); the forward sweep's walk treats a missing
@@ -957,11 +982,15 @@ func gcCheckOutputDirBeforeReverseSweep(stderr io.Writer, outputDir string, rowC
 		// lose.
 		return 0
 	}
-	if reason := integrity.VariantsDirSweepBlockReason(outputDir); reason != "" {
-		fmt.Fprintf(stderr, "GC reverse sweep: %s (%q) but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", reason, outputDir, rowCount)
-		return 1
+	block := integrity.VariantsDirSweepBlock(outputDir)
+	if block.Reason == "" {
+		return 0
 	}
-	return 0
+	if block.Empty && forwardRemoved > 0 {
+		return 0
+	}
+	fmt.Fprintf(stderr, "GC reverse sweep: %s (%q) but %d variant row(s) exist; refusing to delete rows en masse (likely a disconnected mount or filesystem issue — restore access and re-run).\n", block.Reason, outputDir, rowCount)
+	return 1
 }
 
 // gcRowVerdicts is one classification pass over every track_variants
@@ -1239,12 +1268,15 @@ func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store,
 		return code
 	}
 
-	_, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, inv)
+	forwardRemoved, _, failed, exitCode := runGCForwardSweep(ctx, stdout, stderr, inv)
 	if exitCode != 0 {
 		return exitCode
 	}
 
-	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows)); exitCode != 0 {
+	// The reverse guard is told what the forward sweep just unlinked: a
+	// variants directory this run emptied is explained, an unmounted one
+	// is not. See gcCheckOutputDirBeforeReverseSweep.
+	if exitCode := gcCheckOutputDirBeforeReverseSweep(stderr, outputDir, len(allRows), forwardRemoved); exitCode != 0 {
 		return exitCode
 	}
 

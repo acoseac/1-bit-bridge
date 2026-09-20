@@ -12,6 +12,12 @@ import (
 // variants dirs all block a deletion sweep with an actionable
 // reason; a dir holding at least one entry (file or subdir) is
 // healthy and returns "".
+//
+// It pins the Empty half of the typed answer in the same table,
+// because that flag is what `upscale --gc`'s reverse guard acts on
+// and "missing" must never set it: the two are different facts, and
+// a sweep that emptied the directory itself may proceed past one and
+// not the other.
 func TestVariantsDirSweepBlockReason(t *testing.T) {
 	cases := []struct {
 		name string
@@ -20,6 +26,9 @@ func TestVariantsDirSweepBlockReason(t *testing.T) {
 		// wantReason is the substring the block reason must
 		// contain; "" means healthy (no block).
 		wantReason string
+		// wantEmpty is the typed answer's Empty flag: true for the
+		// exists-but-holds-nothing case alone.
+		wantEmpty bool
 	}{
 		{
 			name: "missing dir blocks",
@@ -34,6 +43,7 @@ func TestVariantsDirSweepBlockReason(t *testing.T) {
 				return t.TempDir()
 			},
 			wantReason: "empty",
+			wantEmpty:  true,
 		},
 		{
 			name: "regular file blocks",
@@ -71,7 +81,18 @@ func TestVariantsDirSweepBlockReason(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reason := VariantsDirSweepBlockReason(tc.setup(t))
+			dir := tc.setup(t)
+			block := VariantsDirSweepBlock(dir)
+			if block.Empty != tc.wantEmpty {
+				t.Errorf("Empty = %v, want %v (reason %q)", block.Empty, tc.wantEmpty, block.Reason)
+			}
+			// The one-line form is a wrapper, and must stay one:
+			// two probes that can answer differently is the drift
+			// the delegation exists to prevent.
+			reason := VariantsDirSweepBlockReason(dir)
+			if reason != block.Reason {
+				t.Errorf("VariantsDirSweepBlockReason = %q, VariantsDirSweepBlock().Reason = %q", reason, block.Reason)
+			}
 			if tc.wantReason == "" {
 				if reason != "" {
 					t.Errorf("healthy dir blocked: %q", reason)

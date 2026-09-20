@@ -6339,3 +6339,168 @@ not a schema change, so `doctorJSONSchemaVersion` stays at 1 by its own rule
   unlinkat …/data/tls: directory not empty`) — the latent boot-test cleanup
   race, unrelated. A first 3-run sample read as "green on main, red on the
   branch"; three runs is not a flake measurement.
+
+## 2026-09-20 — `--gc` wedged itself once its own forward sweep emptied the dir (#941)
+
+Filed out of #940's restructuring as "found while restructuring, NOT fixed
+here" (the entry above), and fixed here on its own. The bug predates both.
+
+`runGC` runs the forward sweep first, then `gcCheckOutputDirBeforeReverseSweep`,
+then the reverse sweep. The guard reads a missing-or-empty variants directory
+as a cleanly unmounted volume and refuses to reap rows — correct, and on the
+legacy hash-flat layout (`<dir>/<hash>-<variantID>.flac`, every sidecar
+directly under the root) the forward sweep can remove the last file, so the
+guard fired on a state THIS RUN had just created. Re-running did not help: the
+directory was still empty, so it refused again having removed nothing.
+
+### Reproduced before the fix, twice in a row, no override flags
+
+Five rows whose flat sidecar is not on disk plus five flat files from a
+superseded variant generation — both of #940's guards are under their floor of
+ten at that size and never fire, so a plain `bridge upscale --gc` reaches it:
+
+```
+run 1: rc=1 rows_left=5
+  GC forward sweep: removed 5 orphan file(s), kept 0 known sidecar(s), 0 failure(s).
+  GC reverse sweep: variants directory is empty ("…") but 5 variant row(s) exist;
+  refusing to delete rows en masse (likely a disconnected mount or filesystem issue…).
+run 2: rc=1 rows_left=5
+  GC forward sweep: removed 0 orphan file(s), kept 0 known sidecar(s), 0 failure(s).
+  (identical refusal)
+```
+
+The source-mirrored layout hid it for years: `filepath.WalkDir` removes no
+directories, so an emptied subtree still leaves dirents behind and `dirIsEmpty`
+reads false.
+
+### There WAS a way out, and it was undocumented
+
+Measured on `main`, same fixture:
+
+| attempt | result |
+|---|---|
+| plain `--gc` | `rc=1`, 5 rows left |
+| `--allow-mass-delete --allow-mass-orphans --allow-empty` | `rc=1`, 5 rows left |
+| `touch "$variantsDir/.keep"`, then `--gc` | `rc=1`, 5 rows left (the file is unlinked first) |
+| `mkdir "$variantsDir/.keep"`, then `--gc` | `rc=0`, 0 rows left |
+
+No flag reaches this guard — it has no override, by design. What works is
+making the probe read non-empty with something the forward sweep cannot remove,
+i.e. a SUBDIRECTORY. A plain file does NOT work, and that was measured rather
+than reasoned: the `--gc` inventory passes a nil `Consider`, so every file under
+the root is a candidate and a dot-FILE is unlinked as an orphan (only dot-
+DIRECTORIES are pruned at the walk), leaving the directory empty again by the
+time the reverse guard probes. `bridge manifest clear-missing` is not a route either —
+`ClearMissingCounts` deletes from `tracks` + `folders` under a
+`upnp_track_routing` anti-join and never touches `track_variants` — and nor is
+`bridge restore`. So the operator had to know the trick, which is what made it
+worth fixing rather than documenting.
+
+### Only EMPTY is explained away, and that is the decision
+
+The guard now takes the forward sweep's `removed` count (`runGCForwardSweep`
+already returned it; `runGC` discarded it) and skips the refusal when the block
+is EMPTY and `removed > 0`.
+
+Missing, unreadable and not-a-directory still refuse however much was removed.
+The reason is checkable rather than stylistic: `TakeSidecarInventory` returns
+on `d.IsDir()` before anything reaches `OrphanPaths`, so the forward sweep is
+handed no directory to remove and cannot be what made `outputDir` itself
+disappear. A root that is GONE after a sweep that removed files means something
+ELSE took it mid-run — the mount going away under us, which is the hazard the
+guard exists for. `removed == 0` keeps the guard whole for the case it was
+written for.
+
+A second consideration was weighed and dropped: refusing when `removed > 0` AND
+`inv.Known > 0` (we kept files, yet the directory reads empty — a mount lost
+mid-run). It buys nothing, because `classifyGCRows` runs BEFORE the forward
+sweep and the reverse sweep acts on that pass: a mount lost mid-run cannot
+enlarge the deletion set, since every row was classified while the mount was
+live. A branch with no consequence is a branch to leave out.
+
+### The probe's typed answer, rather than matching its string
+
+`integrity.VariantsDirSweepBlock` returns `{Reason, Empty}`, with `Empty` true
+only for the exists-is-a-directory-holds-nothing case;
+`VariantsDirSweepBlockReason` stays the one-line form and DELEGATES to it, so
+the two cannot answer differently and no caller's signature changed. A test
+pins the delegation as well as `Empty` per case.
+
+### The sibling callers, verified rather than assumed
+
+- `integrity.VariantWatcher.tick` probes BEFORE its sweep and deletes no files:
+  the only `os.Remove` in the package belongs to `OrphanSidecarSweeper`, a
+  different type that does not call this probe.
+- `gcRefuseEmptyKnownSetOverPopulatedDir` is the first guard in `runGC`, ahead
+  of every deletion.
+
+Neither can empty the directory under its own guard, so neither needs the count.
+
+### The serve-time sibling, left deliberately
+
+`OrphanSidecarSweeper` unlinks orphan sidecars on its own ticker, so on a flat
+layout it CAN empty the directory under `VariantWatcher`, which then skips
+every tick with rows still in the catalog —
+`TestVariantWatcher_variantsDirGuard`'s "empty dir with rows skips sweep" is
+exactly that state. The fix shape does not transfer: the watcher removes
+nothing, so it has no count to be told, and it would need cross-loop knowledge.
+The consequence is also much milder — stale rows answer 410 rather than
+accumulating unbounded, and `--gc` is the repair tool, which after this change
+works. Left for its own change.
+
+### Negative controls, each with the round committed first
+
+| mutation | goes red |
+|---|---|
+| `if false && block.Empty && forwardRemoved > 0` | the wedge test + `empty_dir_with_rows_proceeds_when_this_run_emptied_it` |
+| guard deleted outright | the already-empty positive control + 3 matrix rows |
+| `block.Empty` term dropped (`forwardRemoved > 0` alone) | `missing_dir_with_rows_refuses_even_when_this_run_removed_files`, alone |
+| `Empty: true` on the MISSING branch | `TestVariantsDirSweepBlockReason/missing_dir_blocks`, alone |
+
+The two-run test shape is the point: a single run that merely exits 0 does not
+prove the wedge is gone, because the wedge is about what the SECOND run can do.
+
+**`git stash` on a CLEAN tree is a silent no-op, and that is a new way to lose a
+control.** The escape-hatch table above was first measured with
+`git stash && go test && git stash pop` while the fix was uncommitted, which is
+sound. Re-running the same shape AFTER committing stashed nothing, ran against
+the FIXED build, and reported that a plain `.keep` file works — the opposite of
+the truth, and passing for the wrong reason. `git stash pop`'s "No stash entries
+found" was the only tell, and it comes at the END. This repo's standing rule is
+"commit before the control" because `git checkout --` takes uncommitted work
+with it; the inverse holds too — **once you have committed, a control has to
+check out the pre-fix commit** (a throwaway `git worktree add <dir> <sha>`), and
+it must ASSERT it is on the old code (`grep -c forwardRemoved` → 0) rather than
+assume the stash took. Redone that way, the table above is what the unfixed
+build actually does.
+
+### The Windows leg caught a test defect on its first real run
+
+`TestRunGCStillRefusesAVariantsDirThatWasAlreadyEmpty` asserted
+`strings.Contains(stderr, dir)` to pin that the refusal NAMES the mount. The
+message formats the path with `%q`, so on Windows the backslashes come back
+escaped (`C:\\Users\\RUNNER~1\\…`) and the raw path is not a substring —
+red on that platform and green everywhere else. Verified against the exact path
+from the CI log: the old check is false there and true on POSIX, the new one
+true on both.
+
+Fixed by accepting EITHER rendering rather than rebuilding the expectation with
+`%q`. The property under test is that the mount is named — which is the half a
+fix that merely deleted the guard would lose — not the verb it is named with,
+and pinning `%q` would have gone red on a benign change to `%s`.
+
+Two process notes:
+
+- **A quick follow-up push cancels the in-flight platform legs.** The code
+  commit's Windows and race legs were cancelled by a docs-only push twenty
+  minutes later, so this was the leg's FIRST real run on the change. A green
+  check list on an older SHA is not evidence the slow legs ran — read the
+  conclusion, where `cancelled` and `success` are different words.
+- The leg has been blocking since 2026-09-01 for exactly this reason, and it
+  earned that here: nothing else in the tree, local or CI, could see this.
+
+### No wire change
+
+No `/v1` handler, no `PROTOCOL.md`, no `ProtocolVersion` bump.
+`ops/prompt-gc-empty-dir-wedge.md`, the one-shot work order for this fix, is
+deleted with it.
