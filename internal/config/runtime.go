@@ -144,6 +144,10 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.Integrity.OrphanSidecarSweepIntervalSec
 		out.Integrity.OrphanSidecarSweepIntervalSec = &v
 	}
+	if cfg.Integrity.VariantSweepMaxDeletePercent != nil {
+		v := *cfg.Integrity.VariantSweepMaxDeletePercent
+		out.Integrity.VariantSweepMaxDeletePercent = &v
+	}
 	if cfg.Upscale.OptimizeEnabled != nil {
 		v := *cfg.Upscale.OptimizeEnabled
 		out.Upscale.OptimizeEnabled = &v

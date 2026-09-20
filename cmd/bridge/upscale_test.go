@@ -162,7 +162,7 @@ func TestRunGCForwardSweepCaseInsensitive(t *testing.T) {
 	// Known-set keyed exactly as runGC keys it: case-folded + cleaned.
 	// The lowercase key vs the mixed-case on-disk walk path is the casing
 	// delta the fix bridges.
-	known := map[string]bool{strings.ToLower(filepath.Clean(sidecar)): true}
+	known := map[string]struct{}{strings.ToLower(filepath.Clean(sidecar)): {}}
 
 	removed, kept, failed, exitCode := runGCForwardSweep(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, outputDir, known)
 	if exitCode != 0 || failed != 0 {
@@ -272,7 +272,7 @@ func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 
 	var stdout, stderr bytes.Buffer
-	rc := runGC(context.Background(), &stdout, &stderr, store, transcodedDir, t.TempDir(), false)
+	rc := runGC(context.Background(), &stdout, &stderr, store, transcodedDir, t.TempDir(), gcOptions{maxDeletePercent: 20})
 	if rc != 0 {
 		t.Fatalf("runGC rc=%d, stderr=%s", rc, stderr.String())
 	}
@@ -431,7 +431,7 @@ func TestRunGCRefusesWhenOutputDirUnhealthyButRowsExist(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			rc := runGC(context.Background(), &stdout, &stderr, store, outputDir, t.TempDir(), false)
+			rc := runGC(context.Background(), &stdout, &stderr, store, outputDir, t.TempDir(), gcOptions{maxDeletePercent: 20})
 			if rc == 0 {
 				t.Fatalf("expected runGC to fail when outputDir is %s but rows exist; stdout=%s stderr=%s", tc.name, stdout.String(), stderr.String())
 			}

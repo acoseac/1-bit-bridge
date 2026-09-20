@@ -5736,3 +5736,197 @@ mint's `alternates`, the QR's `urls=` and `GET /api/endpoints` all read
 primary lifted to the head; the rotate with a different primary the same.
 No wire change: `/v1/health` is untouched and `urls=` was already one URL
 per line on the iOS parser. No ProtocolVersion bump.
+
+## 2026-09-20 — the variants index did not survive a relocation (#937, field report; schema follow-up #938)
+
+### The incident, and why no guard fired
+
+The operator's bridge moved hosts. `bridge.db` was copied from Azure
+(`upscale.variantsDir: /mnt/bridge-variants`) to a NUC
+(`/srv/bridge-variants`), and every sidecar — 10,248 files, 259.7 GiB —
+was copied byte-identical to the new directory in the same source-mirrored
+layout. At first boot `VariantWatcher`'s immediate sweep stat'd each row's
+ABSOLUTE `track_variants.sidecar_path`, got ENOENT for all 10,248 (the
+recorded prefix was the old host's), and deleted every row.
+`VariantsDirSweepBlockReason` did not block: it exists for the cleanly
+unmounted volume, so it asks only "missing or empty?", and the configured
+directory was healthy and full. Not one log line was written — the tick
+logged stat and DB errors and had no summary. Three minutes later the
+auto-optimize sweeper, whose candidate query is "no fresh variant row
+exists", began re-rendering and wrote 200 sidecars (5.2 GB) OVER good files
+before it was caught. Recovery was hand SQL, re-inserting the old rows with
+the prefix rewritten — possible only because every file existed at
+`variantsDir + <source-mirrored path>` with the recorded `size_bytes`.
+`bridge variants move --to` could not help: it needs the rows.
+
+### Five consumers, not one — and the worst was not the one reported
+
+Grepping for the pattern rather than the symptom (the rule this file
+records for #852/#856/#882) found every consumer that treats "not at the
+recorded path" as "gone":
+
+| consumer | direction | after a move, before this PR |
+|---|---|---|
+| `VariantWatcher.tick` | rows, background, boot + hourly | reaps the whole catalog (the report) |
+| `runGCReverseSweep` (`upscale`/`optimize`/`render --gc`) | rows, operator | reaps the whole catalog |
+| `serveVariant`'s reactive reap (`internal/api/files.go`) | rows, per request | reaps one row per first play, forever on a bridge with the watcher off |
+| `OrphanSidecarSweeper.tick` (opt-in, off by default) | FILES, background | known set = recorded paths only → every file under the new dir is an orphan → **unlinks the 259.7 GiB tree**, chunk by chunk, older-than-grace first |
+| `runGCForwardSweep` | FILES, operator | the same, unbounded, and it runs BEFORE the reverse sweep — so `bridge upscale --gc` after a move destroys the cache outright |
+
+The two file walks were the more dangerous class: the watcher lost the
+index and the files could be re-adopted; the forward sweeps lose the files.
+`gcRefuseEmptyKnownSetOverPopulatedDir` (#895) guarded only an EMPTY known
+set; a known set of 10,248 paths none of which exist under the tree looked
+exactly like a healthy catalog with a lot of orphans.
+`track_analysis.waveform_path` is the same shape under `<dataDir>/waveforms`,
+with the OPPOSITE failure: nothing reaps analysis rows, `/v1/waveform` 410s
+per row, and `collectAnalysisCandidates`' skip gate compares
+`SourceMTimeNS`/`SourceSize`/`SchemaVersion` from the row — never the file —
+so a moved dataDir strands the entire waveform cache, silently, until
+`bridge analyze --force`.
+
+### What shipped
+
+- **One layout definition.** `transcode.VariantSidecarPath(outputDir, rel,
+  variantID)`; `JobSpec.SidecarPath` and cmd/bridge's
+  `computeNewSidecarPath` delegate to it. They were three hand-copied
+  bodies that agreed by luck. `TestCanonicalSidecarPathIsTheWriterLayout`
+  pins the probe against real `JobSpec`s of every kind, FAT-illegal and
+  over-long names included.
+- **`integrity.LocateSidecar`** — the one classification (present /
+  relocated / missing / mismatched / unknown), pure, shared by all three
+  reapers. Relocated = recorded ENOENT AND canonical is a regular file of
+  exactly `size_bytes`. `size_bytes` is what the writer stat'd after the
+  atomic rename and a sidecar is never modified in place, so the compare is
+  exact and a partial copy can never be adopted. A size mismatch is a copy
+  in flight: keep the row, adopt nothing, delete nothing, ask again next
+  tick. `os.Stat` on both probes (the #207 broken-symlink rule).
+- **Adoption** = `UpdateVariantSidecarPath`, which `variants move` already
+  used and which deliberately bumps no `indexed_at` — a path-only change is
+  invisible to a client, so adopting a whole relocated catalog is free on
+  the wire. Watcher and CLI adopt in place; the serve lookup
+  (`variantStoreAdapter.LookupVariant`) adopts and hands `serveVariant` the
+  canonical path in the same call. A mismatched row there answers the new
+  `api.ErrVariantSidecarUnavailable`, which `serveVariant` maps to the
+  existing `410 variant_missing_on_disk` WITHOUT the reap — the wire is
+  unchanged (`PROTOCOL.md` untouched, no ProtocolVersion bump) and the three
+  reapers act on the same verdicts. The first api-level test of the reactive
+  reap wires the deleter into the download fixture (none of the earlier
+  variant download tests could say whether a 410 reaped).
+- **`integrity.KnownSidecarSet`** — recorded ∪ canonical, case-folded,
+  shared by the orphan sweeper and `--gc`'s file walk. `SidecarLister`
+  returns rows now instead of a bare path set (`Store.AllSidecarPaths`
+  deleted; it could not carry the source identity the canonical path
+  needs). `analyze --gc` gets the same widening for waveforms.
+- **`integrity.MassDeleteRefusal`** — refuse when `missing ≥ 10`, `missing
+  > percent × total` (`integrity.variantSweepMaxDeletePercent`, default 20;
+  100 disables, 0 refuses any mass deletion; config-file / env only like
+  its two `integrity` siblings — none are on the settings page, so there is
+  no `settingsPatch` half to keep in step), AND `TreeHoldsVariantSidecars`.
+  That last probe matches a variant id LOOSELY in a basename (`(?:^|[.-])`
+  + `manifest.VariantIDPattern` + `\.flac$`, both the source-mirrored and
+  the legacy hash-flat layouts) and prunes dot-directories, stopping at the
+  first hit; a tree it cannot read fails closed. It is deliberately looser
+  than the scanner's anchored matcher — that one must never mistake a
+  track for a sidecar, this one must never mistake a sidecar for junk, and
+  the errors point opposite ways. `VariantIDPattern` is exported from the
+  scanner's own regexp source so the two see one family list.
+- **The floor.** 1 of 4 rows is 25%; without a floor the odd deleted
+  sidecar in a small catalog would be refused every hour until the operator
+  ran `--gc`. Ten is the smallest "mass".
+- **In `runGC` the guard is a pre-flight.** The first draft put it inside
+  the reverse sweep and the test asserted on rows — green, while the
+  forward sweep had already unlinked every file: a tree copied to
+  `<dir>/old/…` is all orphans to the file walk, which then hands the
+  reverse sweep a tree that holds no sidecars. `classifyGCRows` runs once
+  before either sweep, feeds both the guard and the reverse sweep (the
+  forward sweep cannot change a verdict — every recorded and canonical path
+  is in its known set), and a refusal touches nothing.
+  `TestRunGCRefusesAMassDeleteUntilAllowed` asserts on the files.
+  `--allow-mass-delete` on all three transcode GC commands, swept by
+  `TestEveryTranscodeGCCommandOffersTheMassDeleteOverride` (the
+  `--allow-empty` precedent: `artwork --gc` carried an un-escapable refusal
+  for months).
+- **Logging.** One summary line per tick that saw rows (`rows present
+  adopted deleted mismatched failed refused variants_dir`), Warn when
+  it deleted or refused, Info otherwise, nothing for an empty catalog.
+  Per-row lines are sampled: the first 10 per message per tick at the
+  message's level, the rest at Debug — a 10k-row adoption would otherwise
+  be 10k Info lines at boot and a copy in flight 10k Warns an hour.
+- **`bridge doctor` → `sidecar-paths`**: counts of `track_variants` rows
+  outside the current variants dir (the console's "N legacy variants"
+  number, via `CountVariantsNotUnderPrefix`) and of `track_analysis` rows
+  outside `<dataDir>/waveforms` (new `CountWaveformsNotUnderPrefix`, same
+  `NOT LIKE` shape on purpose — a read-only diagnostic count, not a
+  predicate that writes or bounds a scope, and it should agree with the
+  console). Warn, never fail (`bridge init` refuses on fail); skipped on
+  `Managed` for the log-file-size reason.
+
+**Round 1 (Gemini, High):** `TreeHoldsVariantSidecars` accepted only
+`d.Type().IsRegular()`, so a tree of symlinked sidecars read as holding
+none. Taken, and it uncovered the larger version: `filepath.WalkDir`
+follows neither an entry nor the ROOT, so a variants dir that is itself a
+symlink — the ordinary mountpoint alias — walked as one non-directory entry
+and bypassed the guard on exactly the deployment it exists for. The root
+is `EvalSymlinks`'d before the walk; a symlinked entry counts when
+`os.Stat` says it resolves to a regular file (the #207 rule: the serving
+path opens through the link) and a dangling one does not. Two controls
+(root unresolved, symlink entries ignored) each turn their subtest red.
+Sonar's six new issues are `S3776` on the new test TABLES plus one
+pre-existing hit in `store.go` from August; the quality gate passed and
+production code is clean, so they stand.
+
+Negative controls, each a single production line reverted after the commit
+that carried it, each turning exactly the named test red: no adoption
+(`TestVariantWatcher_adoptsARelocatedCatalog`), no guard
+(`…_refusesAMassDeleteWhileTheTreeHoldsSidecars`), no summary line
+(`…_healthyTickLogsOneInfoLine`), sweeper known set recorded-only
+(`TestOrphanSweeperKnowsARelocatedCatalogsCanonicalPaths`), `--gc` known
+set recorded-only (`TestRunGCAdoptsARelocatedCatalogAndKeepsItsFiles`),
+guard after the forward sweep (`TestRunGCRefusesAMassDeleteUntilAllowed`),
+no sentinel branch in `serveVariant`
+(`TestServeVariantKeepsTheRowWhenTheStoreSaysUnavailable`), `analyze --gc`
+recorded-only (`TestRunAnalyzeGCKeepsARelocatedWaveform`), lookup without
+adoption (`TestVariantStoreAdapterAdoptsARelocatedSidecarOnLookup`).
+
+### Evaluated and deferred: storing the paths RELATIVE to their directory
+
+The right long-term shape is `sidecar_path` relative to `variantsDir` and
+`waveform_path` relative to `<dataDir>/waveforms`, resolved at read time —
+then a relocation is a config change and nothing has to be adopted. The
+touch list is too wide for this PR, and it is the follow-up's spec:
+
+- `internal/manifest/store.go`: the v-next migration (append-only; the
+  rewrite needs the variants dir, which the ladder does not have — a
+  post-open relativize pass driven by cmd/bridge, and a MIXED state during
+  rollout since both live bridges already ran every migration);
+  `UpsertVariant` / `scanVariantRow` / `variantRowSelect` and the 22
+  `sidecar_path` mentions; the store's OWN `os.Remove(sidecar_path)` sites
+  (`DeleteTrack`, `DeleteTracksByPrefix`, the threshold reap's
+  `reapVariantSidecars*SQL`, `WipeFilesystemTracks` / `WipeAllTracks`,
+  `listSidecarsByPathPrefix`, `listAllSidecars`), which would need the
+  directory the store does not know; `CountVariantsNotUnderPrefix` and the
+  console's "Migrate legacy variants" affordance, which become meaningless
+  or need redesign; `catalog_refs.go`'s `variantChunkForPaths`;
+  `UpsertAnalysis` / the `track_analysis` readers and `listWaveformSidecars`.
+- `internal/transcode/pool.go` and `cmd/bridge/upscale.go` (the two
+  `UpsertVariant` writers), `internal/analyze/pool.go`.
+- `internal/api/files.go` (`serveVariant` opens the path), `waveform.go`,
+  `upscale_delete.go` (unlinks by path); the cmd/bridge adapters
+  (`variantStoreAdapter`, `analysisStoreAdapter`, `variantDeleterAdapter`);
+  `internal/admin/player_audio.go` (serves the sidecar) and
+  `handlers_variants_dir.go`.
+- `cmd/bridge/variants.go` (`variants move` becomes a config change plus a
+  file move), `upscale.go` `--gc` and `analyze.go` `--gc` (known sets),
+  `dlna_wiring.go` (`loadVariantsBySource`).
+- `internal/integrity` (the known sets and `LocateSidecar` collapse to
+  one probe), the legacy hash-flat rows (`<dataDir>/transcoded/<hash>.flac`)
+  that live under NO current directory, and PROTOCOL.md is untouched either
+  way — nothing on `/v1` carries a sidecar path.
+
+Filed as #938 with this list as its checklist.
+
+Until then, waveform adoption on serve (`analysisStoreAdapter.LookupAnalysis`
+probing `analyze.AnalyzeSpec{…}.SidecarPath()` and a new
+`UpdateAnalysisWaveformPath`) is the cheap half worth doing first; the
+doctor check names the gap.

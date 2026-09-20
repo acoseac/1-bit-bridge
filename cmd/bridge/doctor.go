@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -271,9 +272,59 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 				defer func() { _ = st.Close() }()
 				return st.HasTracksWithCodec(ctx, codec)
 			}
+			// The sidecar-paths probe: the same lazy open + immediate close,
+			// for the same reasons, answering from the two directories the
+			// sidecars are written to TODAY (the variants dir is a hot
+			// setting; the doctor runs against the persisted config, which
+			// is what the next boot will use). Wired only when a manifest
+			// EXISTS: a fresh install has no bridge.db until its first
+			// scan, and "could not read the sidecar tables" on a bridge
+			// that has never scanned would be a warning about nothing —
+			// the check's nil branch says "run after the first scan"
+			// instead. (Verified against a just-initialised fixture, where
+			// the first draft warned.)
+			variantsDir := cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
+			waveformDir := analyze.WaveformDirFor(cfg.DataDir)
+			if _, err := os.Stat(dbPath); err == nil {
+				d.RelocatedSidecars = func(ctx context.Context) (doctor.RelocatedSidecars, error) {
+					return relocatedSidecarCounts(ctx, dbPath, variantsDir, waveformDir)
+				}
+			}
 		}
 	}
 	return d
+}
+
+// relocatedSidecarCounts opens the manifest for one doctor probe and
+// counts the rows of each sidecar table recorded outside its current
+// directory. Opened per call and closed immediately, like the codec
+// probe: `bridge doctor` may run beside a live `bridge serve`.
+func relocatedSidecarCounts(ctx context.Context, dbPath, variantsDir, waveformDir string) (doctor.RelocatedSidecars, error) {
+	// Still guarded: OpenStore on a missing path CREATES the database,
+	// and a read-only diagnostic must not leave one behind if the file
+	// vanished between the Deps build and this call.
+	if _, err := os.Stat(dbPath); err != nil {
+		return doctor.RelocatedSidecars{}, err
+	}
+	st, err := manifest.OpenStore(dbPath)
+	if err != nil {
+		return doctor.RelocatedSidecars{}, err
+	}
+	defer func() { _ = st.Close() }()
+	out := doctor.RelocatedSidecars{VariantsDir: variantsDir, WaveformDir: waveformDir}
+	// Both counters want a trailing separator so `/srv/variants` does not
+	// claim `/srv/variants2/...` — the contract their admin caller
+	// (countLegacyVariants) already honours.
+	sep := string(filepath.Separator)
+	out.Variants, out.VariantBytes, err = st.CountVariantsNotUnderPrefix(ctx, filepath.Clean(variantsDir)+sep)
+	if err != nil {
+		return doctor.RelocatedSidecars{}, err
+	}
+	out.Waveforms, err = st.CountWaveformsNotUnderPrefix(ctx, filepath.Clean(waveformDir)+sep)
+	if err != nil {
+		return doctor.RelocatedSidecars{}, err
+	}
+	return out, nil
 }
 
 // splitHostPort is a tiny wrapper around net.SplitHostPort that returns

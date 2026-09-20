@@ -19,6 +19,7 @@ import (
 type fakeSidecarLister struct {
 	mu    sync.Mutex
 	known map[string]struct{}
+	rows  []VariantSnapshot
 }
 
 // withLiveRow returns a known-set carrying one real sidecar path.
@@ -37,13 +38,19 @@ func withLiveRow(outputDir string) map[string]struct{} {
 	}
 }
 
-func (f *fakeSidecarLister) AllSidecarPaths(ctx context.Context) (map[string]struct{}, error) {
+// AllVariants projects the fixture's path set as rows with no source
+// identity, so the sweep's known set is exactly these paths — the
+// pre-relocation contract every test here was written against. A test
+// that needs the CANONICAL spelling in the known set seeds `rows`
+// instead (TestOrphanSweeperKnowsARelocatedCatalogsCanonicalPaths).
+func (f *fakeSidecarLister) AllVariants(ctx context.Context) ([]VariantSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make(map[string]struct{}, len(f.known))
+	out := make([]VariantSnapshot, 0, len(f.known)+len(f.rows))
 	for k := range f.known {
-		out[k] = struct{}{}
+		out = append(out, VariantSnapshot{SidecarPath: k})
 	}
+	out = append(out, f.rows...)
 	return out, nil
 }
 
@@ -767,7 +774,7 @@ func TestPathWalkCompare_ZeroAlloc(t *testing.T) {
 // TestOrphanSidecarSweepRefusesAnEmptyKnownSet is the guard the FORWARD sweep
 // did not have while its reverse twin had two.
 //
-// `AllSidecarPaths` returning zero rows with a nil error is an ordinary state,
+// `AllVariants` returning zero rows with a nil error is an ordinary state,
 // not a fault: `rm -f bridge.db*` + restart is the reset procedure this repo's
 // own CLAUDE.md documents, and `run` takes a tick at boot; a single<->multi
 // root flip runs WipeFilesystemTracks and `track_variants` CASCADEs on

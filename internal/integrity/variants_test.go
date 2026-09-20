@@ -42,12 +42,15 @@ func (f *fakeLister) callCount() int {
 	return f.calls
 }
 
-// fakeDeleter is a test stub for VariantDeleter. Records every
-// delete call; optionally returns a configured error.
+// fakeDeleter is a test stub for VariantReconciler. Records every
+// delete and every adoption; optionally returns a configured error
+// from either arm.
 type fakeDeleter struct {
-	mu      sync.Mutex
-	deletes []string // "sourcePath|variantID"
-	err     error
+	mu        sync.Mutex
+	deletes   []string // "sourcePath|variantID"
+	adoptions []string // "sourcePath|variantID|newSidecarPath"
+	err       error
+	adoptErr  error
 }
 
 func (f *fakeDeleter) DeleteVariant(sourcePath, variantID string) error {
@@ -60,11 +63,29 @@ func (f *fakeDeleter) DeleteVariant(sourcePath, variantID string) error {
 	return nil
 }
 
+func (f *fakeDeleter) AdoptVariantSidecar(sourcePath, variantID, newSidecarPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.adoptErr != nil {
+		return f.adoptErr
+	}
+	f.adoptions = append(f.adoptions, sourcePath+"|"+variantID+"|"+newSidecarPath)
+	return nil
+}
+
 func (f *fakeDeleter) deleted() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]string, len(f.deletes))
 	copy(out, f.deletes)
+	return out
+}
+
+func (f *fakeDeleter) adopted() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.adoptions))
+	copy(out, f.adoptions)
 	return out
 }
 
@@ -137,15 +158,15 @@ func TestVariantWatcher_probesTheVariantsDirLivePerTick(t *testing.T) {
 	publisher := &fakePublisher{}
 
 	current := unmounted
-	w := NewVariantWatcher(lister, deleter, publisher.publish, func() string { return current }, time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, func() string { return current }, time.Hour, 20)
 
-	if n := w.tick(context.Background()); n != 0 {
-		t.Fatalf("tick against an empty mountpoint deleted %d rows, want 0 (guard)", n)
+	if r := w.tick(context.Background()); r.Deleted != 0 {
+		t.Fatalf("tick against an empty mountpoint deleted %d rows, want 0 (guard)", r.Deleted)
 	}
 	current = healthy
-	if n := w.tick(context.Background()); n != 1 {
+	if r := w.tick(context.Background()); r.Deleted != 1 {
 		t.Fatalf("tick after the variants dir moved deleted %d rows, want 1 — the guard kept "+
-			"probing the directory captured at construction", n)
+			"probing the directory captured at construction", r.Deleted)
 	}
 	if got := deleter.deleted(); len(got) != 1 || got[0] != "A/1.flac|v1" {
 		t.Errorf("deleted rows = %v, want [A/1.flac|v1]", got)
@@ -168,10 +189,10 @@ func writeDecoySidecar(t *testing.T, dir string) {
 // rows. Registers ctx-cancel + stop cleanups. Shared by the
 // single-sweep watcher tests so each keeps only its scenario
 // setup and post-sweep assertions.
-func awaitBootSweep(t *testing.T, w *VariantWatcher, wantDeleted int) {
+func awaitBootSweep(t *testing.T, w *VariantWatcher, wantDeleted int) SweepReport {
 	t.Helper()
-	tickDone := make(chan int, 1)
-	w.SetOnTickComplete(func(n int) { tickDone <- n })
+	tickDone := make(chan SweepReport, 1)
+	w.SetOnTickComplete(func(r SweepReport) { tickDone <- r })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -179,13 +200,15 @@ func awaitBootSweep(t *testing.T, w *VariantWatcher, wantDeleted int) {
 	t.Cleanup(stop)
 
 	select {
-	case n := <-tickDone:
-		if n != wantDeleted {
-			t.Fatalf("boot sweep deleted %d, want %d", n, wantDeleted)
+	case r := <-tickDone:
+		if r.Deleted != wantDeleted {
+			t.Fatalf("boot sweep deleted %d, want %d (report %+v)", r.Deleted, wantDeleted, r)
 		}
+		return r
 	case <-time.After(2 * time.Second):
 		t.Fatal("sweep never completed")
 	}
+	return SweepReport{}
 }
 
 // TestVariantWatcher_missingSidecarTriggersDeleteAndPublish is the
@@ -209,7 +232,7 @@ func TestVariantWatcher_missingSidecarTriggersDeleteAndPublish(t *testing.T) {
 	deleter := &fakeDeleter{}
 	publisher := &fakePublisher{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour, 20)
 	awaitBootSweep(t, w, 1) // the missing sidecar's row
 
 	gotDeletes := deleter.deleted()
@@ -247,7 +270,7 @@ func TestVariantWatcher_multipleMissesBatchIntoSingleEvent(t *testing.T) {
 	}}}
 	deleter := &fakeDeleter{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour, 20)
 	awaitBootSweep(t, w, 3)
 
 	if publisher.eventCount() != 1 {
@@ -280,7 +303,7 @@ func TestVariantWatcher_dedupesPathsAcrossMultipleVariants(t *testing.T) {
 	}}}
 	deleter := &fakeDeleter{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour, 20)
 	awaitBootSweep(t, w, 2) // both variants
 
 	if publisher.eventCount() != 1 {
@@ -314,7 +337,7 @@ func TestVariantWatcher_noMissesNoEvent(t *testing.T) {
 	}}}
 	deleter := &fakeDeleter{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 1*time.Hour, 20)
 	awaitBootSweep(t, w, 0) // healthy DB — nothing to delete
 	if publisher.eventCount() != 0 {
 		t.Errorf("publisher fired %d events on healthy DB, want 0", publisher.eventCount())
@@ -333,7 +356,7 @@ func TestVariantWatcher_intervalZeroDisables(t *testing.T) {
 	deleter := &fakeDeleter{}
 	publisher := &fakePublisher{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, nil, 0)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, nil, 0, 20)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	stop := w.Start(ctx)
@@ -374,9 +397,9 @@ func TestVariantWatcher_listerErrorDoesNotAbortLoop(t *testing.T) {
 	publisher := &fakePublisher{}
 
 	// Use a very short interval so the second tick fires fast.
-	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 50*time.Millisecond)
-	tickDone := make(chan int, 4)
-	w.SetOnTickComplete(func(n int) { tickDone <- n })
+	w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(tmpDir), 50*time.Millisecond, 20)
+	tickDone := make(chan SweepReport, 4)
+	w.SetOnTickComplete(func(r SweepReport) { tickDone <- r })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -385,9 +408,9 @@ func TestVariantWatcher_listerErrorDoesNotAbortLoop(t *testing.T) {
 
 	// First tick: error, returns 0.
 	select {
-	case n := <-tickDone:
-		if n != 0 {
-			t.Fatalf("first sweep returned %d, want 0 (error path)", n)
+	case r := <-tickDone:
+		if r.Deleted != 0 || !r.Skipped {
+			t.Fatalf("first sweep returned %+v, want 0 deleted and skipped (error path)", r)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("first sweep never completed")
@@ -400,9 +423,9 @@ func TestVariantWatcher_listerErrorDoesNotAbortLoop(t *testing.T) {
 
 	// Wait for the next tick (loop continued past the error).
 	select {
-	case n := <-tickDone:
-		if n != 1 {
-			t.Fatalf("subsequent sweep returned %d, want 1 (recovered)", n)
+	case r := <-tickDone:
+		if r.Deleted != 1 {
+			t.Fatalf("subsequent sweep returned %+v, want 1 deleted (recovered)", r)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("loop aborted after error; second sweep never fired")
@@ -417,11 +440,11 @@ func TestVariantWatcher_ctxCancelStopsLoop(t *testing.T) {
 	deleter := &fakeDeleter{}
 	publisher := &fakePublisher{}
 
-	w := NewVariantWatcher(lister, deleter, publisher.publish, nil, 50*time.Millisecond)
+	w := NewVariantWatcher(lister, deleter, publisher.publish, nil, 50*time.Millisecond, 20)
 
 	// Track tick fires via an extra channel.
 	tickFired := make(chan struct{}, 8)
-	w.SetOnTickComplete(func(int) { tickFired <- struct{}{} })
+	w.SetOnTickComplete(func(SweepReport) { tickFired <- struct{}{} })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	stop := w.Start(ctx)
@@ -527,7 +550,7 @@ func TestVariantWatcher_variantsDirGuard(t *testing.T) {
 			deleter := &fakeDeleter{}
 			publisher := &fakePublisher{}
 
-			w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(variantsDir), 1*time.Hour)
+			w := NewVariantWatcher(lister, deleter, publisher.publish, staticDir(variantsDir), 1*time.Hour, 20)
 			awaitBootSweep(t, w, tc.wantDel)
 
 			if got := len(deleter.deleted()); got != tc.wantDel {

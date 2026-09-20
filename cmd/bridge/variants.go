@@ -181,29 +181,19 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 
 // computeNewSidecarPath builds the destination sidecar path under
 // <to> matching the v1.4 source-mirrored layout from
-// `transcode.JobSpec.SidecarPath`. Mirrors the same shape that the
-// runtime pool produces for new conversions.
+// `transcode.JobSpec.SidecarPath`.
 //
 // We don't have the full JobSpec here (only the persisted VariantRow),
-// so we can't call JobSpec.SidecarPath directly — but we DO share its
-// basename builder (transcode.VariantSidecarBasename) so the two can't
-// drift. The dir prefix mirrors SidecarPath's (dir segments are not
-// sanitized: they came from the source filesystem, which already
-// accepts them).
+// so we can't call JobSpec.SidecarPath directly — but the layout is ONE
+// function, transcode.VariantSidecarPath, shared with the pool writer
+// and the integrity probes, so the recomputed path cannot drift from
+// the persisted sidecar_path (and from where the reapers look for a
+// relocated file). A raw fmt.Sprintf here once skipped the FAT
+// sanitization + 255-byte truncation, so a move to a FAT/exFAT target
+// (the documented use case) failed on every colon/`?`-bearing classical
+// filename, and over-long names hit ENAMETOOLONG even on ext4.
 func computeNewSidecarPath(toDir string, v manifest.VariantRow) string {
-	dir := filepath.Dir(v.SourcePath)
-	base := filepath.Base(v.SourcePath)
-	// Use the SAME builder the pool writer uses (transcode.VariantSidecarBasename
-	// -> safeVariantFilename) so the recomputed path can't drift from the
-	// persisted sidecar_path. A raw fmt.Sprintf here skipped the FAT
-	// sanitization + 255-byte truncation, so a move to a FAT/exFAT target
-	// (the documented use case) failed on every colon/`?`-bearing classical
-	// filename, and over-long names hit ENAMETOOLONG even on ext4.
-	filename := transcode.VariantSidecarBasename(base, v.VariantID)
-	if dir == "" || dir == "." {
-		return filepath.Join(toDir, filename)
-	}
-	return filepath.Join(toDir, dir, filename)
+	return transcode.VariantSidecarPath(toDir, v.SourcePath, v.VariantID)
 }
 
 // moveOneVariant runs the per-row move pipeline:

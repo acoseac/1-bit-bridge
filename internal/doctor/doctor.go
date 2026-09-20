@@ -156,6 +156,13 @@ type Deps struct {
 	// as "don't know", never as "no".
 	LibraryHasCodec func(ctx context.Context, codec string) (bool, error)
 
+	// RelocatedSidecars counts the sidecar rows whose recorded path lies
+	// outside the directory that kind of sidecar is currently written
+	// to — see checkSidecarPaths. Optional, like LibraryHasCodec: nil
+	// skips the check; an error is reported as "could not read", never
+	// as "fine".
+	RelocatedSidecars func(ctx context.Context) (RelocatedSidecars, error)
+
 	// LogPath is the file the service unit redirects this bridge's stderr
 	// to — packaging.DefaultLogPath(). Empty (a foreground `bridge serve`,
 	// which logs to its terminal) makes checkLogSize a no-op rather than a
@@ -228,6 +235,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkDSDRenderToolchain,
 		checkFingerprintToolchain,
 		checkLogSize,
+		checkSidecarPaths,
 	}
 	out := make([]Check, 0, len(checks))
 	for _, fn := range checks {

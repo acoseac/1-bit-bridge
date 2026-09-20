@@ -184,10 +184,25 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// Windows filesystems) can't make `--gc` delete a live waveform.
 	// On case-sensitive Linux the worst case is a false-keep of a rare
 	// same-name-different-case orphan — safe (no data loss). Gemini on #395.
-	known := make(map[string]bool, len(rows))
+	//
+	// BOTH spellings of every row go in: the recorded `waveform_path` and
+	// the canonical path under outputDir (analyze.AnalyzeSpec.SidecarPath,
+	// the layout the pool writes). `waveform_path` is absolute under the
+	// dataDir that wrote it, so a dataDir moved to a new host leaves every
+	// row naming the old one — and a known set of recorded paths alone
+	// then reads the whole moved waveform tree as orphans and unlinks it.
+	// Same class as `upscale --gc`'s 2026-09-20 relocation hazard, the
+	// cheaper-to-rebuild half; the serve path has no adoption for waveforms
+	// yet (see the doctor's sidecar-paths check), so at least the files
+	// survive for the day it does.
+	known := make(map[string]bool, 2*len(rows))
 	for _, r := range rows {
 		if r.WaveformPath != "" {
 			known[strings.ToLower(filepath.Clean(r.WaveformPath))] = true
+		}
+		if r.SourcePath != "" {
+			canonical := analyze.AnalyzeSpec{OutputDir: outputDir, SourceLibraryRel: r.SourcePath}.SidecarPath()
+			known[strings.ToLower(filepath.Clean(canonical))] = true
 		}
 	}
 

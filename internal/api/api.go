@@ -249,6 +249,20 @@ func (s *Server) ConfigHolder() *config.RuntimeConfig { return s.cfgHolder }
 // cmd/bridge wiring).
 var ErrUpscaleQueueFull = errors.New("upscale queue is full")
 
+// ErrVariantSidecarUnavailable is the answer a VariantStore gives when
+// the row EXISTS and must be KEPT but its sidecar cannot be served right
+// now — the recorded path is gone and a file at the canonical location
+// has a different size than the row records, i.e. a copy in flight
+// (integrity.SidecarMismatched). serveVariant maps it to the same
+// `410 variant_missing_on_disk` the client already handles, and does NOT
+// run the reactive reap: that branch exists for a file deleted under the
+// bridge's feet, and reaping a row whose file is still arriving would
+// have the auto-optimize sweeper render over it. Without this the
+// serve-side lookup had no way to say "missing, but not yours to
+// delete", so the three reapers could not agree on the verdict the
+// integrity package hands them.
+var ErrVariantSidecarUnavailable = errors.New("variant sidecar unavailable")
+
 // VariantStore is the optional interface the `?variant=<id>` branch
 // of /v1/download uses to look up a variant's cached metadata.
 // Nil-safe — when `s.variantStore` is nil the download handler
@@ -270,7 +284,12 @@ var ErrUpscaleQueueFull = errors.New("upscale queue is full")
 // this row, and what's its recorded provenance".
 //
 // `internal/manifest.Provider` satisfies this in production via
-// a thin LookupVariant wrapper around the SQLite row read.
+// a thin LookupVariant wrapper around the SQLite row read — wrapped
+// again by cmd/bridge's variantStoreAdapter, which is where a row whose
+// file moved with the variants dir is adopted before the record is
+// handed back (see that type), and which returns
+// ErrVariantSidecarUnavailable for a row whose file is present but not
+// yet whole.
 type VariantStore interface {
 	LookupVariant(ctx context.Context, sourcePath, variantID string) (*VariantRecord, error)
 }

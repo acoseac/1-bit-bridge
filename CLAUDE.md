@@ -88,6 +88,7 @@ The iOS app **1-bit** lives at `github.com/acoseac/1-bit` with a local clone at 
 - **Admin console is loopback-only, no auth — IN LOOPBACK MODE.** `config.validateLoopbackAddress` + `admin.loopbackOnly` middleware both enforce this. **Public mode is the separate, credentialed posture** (`internal/admin/middleware_auth.go`: session auth, persisted since PR #800), which is what `bridge.ars.md` actually runs; this bullet omitted that until 2026-09-06. Don't add an auth layer that bypasses the loopback constraint; don't expose admin behind Tailscale / reverse-proxy. Anyone on the host already owns the token store and the SQLite DB — auth on top would be theatre. For remote admin, SSH-tunnel the port.
 - **Graceful shutdown triggers full cleanup.** The `POST /api/restart` admin handler MUST NOT call `os.Exit(0)` directly. It must invoke the same cancellation closure that handles `SIGINT/SIGTERM`. This ensures the `bgScans` WaitGroup is honored (preventing SQLite corruption), in-flight transcode jobs are cleaned up, and the `auth.Store` flushes its last-used-at debounce buffer. Wired in `cmd/bridge/main.go` via `admin.Deps.Restart`.
 - **Dual-stack HTTP/2 and HTTP/3 API.** The bridge serves the v1 API over both TCP (HTTP/2) and UDP (HTTP/3). QUIC is enabled by default but can be disabled via `disableHttp3: true` or `BRIDGE_DISABLE_HTTP3=true`. LAN HTTP/3 uses on-disk certs with forced "h3" ALPN; Tailscale HTTP/3 uses `tsnet.LocalClient` to fetch Let's Encrypt certs dynamically. Graceful shutdown uses `.Shutdown(ctx)` with a 5s window to protect active media streams.
+- **A recorded sidecar path is a claim, never proof the file is gone.** `sidecar_path` / `waveform_path` are absolute; after a host move every row reads ENOENT while the files sit at their canonical places. The three reapers ask `integrity.LocateSidecar` and ADOPT a relocated row; the forward sweeps' known sets carry the canonical spelling; a mass deletion while the tree still holds sidecars is refused. Full rule under **Job pools** below (2026-09-20).
 - **Single ↔ multi-root storage form flips.** When the admin adds a second root or removes back down to one, track paths change from `Artist/Album/…` to `<basename>/Artist/Album/…`. The admin handler calls **`store.WipeFilesystemTracks()`** before the new scan so no stale rows survive — **never `WipeAllTracks`**, which CASCADE-deletes `upnp_track_routing` and destroys an entire upstream library on a mere root-count toggle. (This bullet said `WipeAllTracks` until 2026-09-06, contradicting the rule under **Scanner** below; no production path has ever called it.) Don't try to migrate in place — the rescan is cheap, enrichment is cached by MBID.
 
 **Working the bridge**: `feat/<topic>` branches, PR to `main`, pre-push `make fmt vet test build-all`. **Working the iOS side**: same convention at `~/dev/com.acoseac.dsdplayer/`. Never push direct to `main` on either repo.
@@ -1060,6 +1061,50 @@ no failing test — which is the shape to expect in this area.
   refusal, never `WalkDir("")`. The Jobs chips gate on the INTERVAL, as the
   wiring does, not on `UpscaleStats()`, which is nil with upscale off while
   the watchers tick regardless. (#917)
+
+- **A recorded sidecar path is a CLAIM about where the file was, never
+  proof that it is gone.** `track_variants.sidecar_path` and
+  `track_analysis.waveform_path` are ABSOLUTE, so a `bridge.db` copied to
+  a host where the variants dir (or dataDir) has a different path reads
+  ENOENT on every row while every file sits, byte-identical, at its
+  source-mirrored place under the current directory. Field report
+  2026-09-20: the boot sweep reaped all 10,248 rows (259.7 GiB of
+  renditions) with NO log line — the mount-loss guard saw a healthy,
+  full directory — and the auto-optimize sweeper re-rendered over 200
+  good files before it was caught. **Every consumer that turns a missing
+  recorded path into a deletion asks `integrity.LocateSidecar` first**
+  (there are THREE reapers: `VariantWatcher.tick`, `upscale --gc`'s
+  reverse sweep, and the reactive reap in `serveVariant` via the
+  cmd/bridge `variantStoreAdapter`), and **every forward sweep's known
+  set carries the CANONICAL path beside the recorded one**
+  (`integrity.KnownSidecarSet` — the orphan sweeper and `--gc`'s file
+  walk; `analyze --gc` for waveforms), or a moved tree is 10k orphans to
+  the file walk and gets UNLINKED, which is worse. `transcode.
+  VariantSidecarPath` is the ONE layout (the pool, `variants move`, the
+  probe); don't hand-copy the `Join(dir, Dir(rel), basename)` body.
+  Relocated = canonical exists with the recorded `size_bytes` → adopt
+  (`UpdateVariantSidecarPath`, no `indexed_at` bump, nothing on the wire);
+  a size MISMATCH is a copy in flight → keep the row, adopt nothing,
+  delete nothing (the serve lookup answers `api.ErrVariantSidecarUnavailable`
+  → 410 without the reap); delete only when NEITHER location has the file.
+- **A sweep that would reap more than `integrity.variantSweepMaxDeletePercent`
+  (default 20, floor 10 rows) of the catalog while the tree still holds
+  sidecar-shaped files is REFUSED, and every tick that saw rows logs one
+  summary line** — `integrity.MassDeleteRefusal`, the one decision both
+  reapers make; `--allow-mass-delete` is the CLI's way past it. **In `runGC`
+  the guard is a PRE-FLIGHT over the whole gc, never inside the reverse
+  half**: the forward sweep runs first, and for a tree copied into a
+  layout the probe doesn't know it unlinks the very files that are the
+  guard's evidence, then hands the reverse sweep a tree that "holds no
+  sidecars" — the first draft's test went green while the files were
+  already gone (`TestRunGCRefusesAMassDeleteUntilAllowed` now asserts on
+  the FILES). The summary is Warn when it deleted or refused, Info
+  otherwise; per-row lines are sampled at 10 per message per tick, the
+  M-SEARCH lesson applied before the flood. `waveform_path` has the same
+  shape and NO adoption yet (the analysis skip gate reads the row, not the
+  file, so a moved dataDir strands the whole waveform cache as 410s that
+  never regenerate) — `bridge doctor`'s `sidecar-paths` check reports
+  both tables; the schema-relative follow-up is #938. (#937)
 
 ### DLNA, UPnP and discovery
 

@@ -7870,50 +7870,20 @@ func (s *Store) lookupVariantByLowerCase(ctx context.Context, cleanedSourcePath,
 
 // AllVariants returns every row in track_variants. Used by `bridge
 // upscale --gc` to drive the mark-and-sweep against the on-disk
-// `<dataDir>/transcoded/` directory.
-// AllSidecarPaths returns the set of `sidecar_path` strings currently
-// recorded in `track_variants`, projected as a map for O(1) lookup
-// by the integrity package's forward-sweep (orphan sidecar) watcher.
+// variants directory, by the integrity watchers (both sweeps read the
+// full row now — the forward one used to take a bare `sidecar_path`
+// projection, AllSidecarPaths, which could not carry the source identity
+// its known set needs to name each row's canonical path), and by the
+// DLNA adapter.
 //
 // **Why a single SELECT, no explicit transaction**: SQLite in WAL
 // mode (the project default — see `internal/manifest/migrations`) gives
 // every SELECT a consistent snapshot via its built-in MVCC; the bare
 // query produces a point-in-time view without blocking writers, which
-// is exactly the guarantee the sweeper needs to safely diff against
+// is exactly the guarantee the sweepers need to safely diff against
 // the filesystem. An explicit `BEGIN DEFERRED` would only matter for
 // multi-statement consistency, which this single projection doesn't
-// need. CLAUDE.md "Bridge background GC" docs the snapshot semantics
-// in more detail.
-//
-// **Memory shape**: returns a `map[string]struct{}` keyed on the
-// absolute sidecar path. A 50k-variant library projects to ~5 MB of
-// strings (avg sidecar path ~100 bytes); a 500k-variant library
-// projects to ~50 MB. The sweeper holds the map for the duration of
-// one tick (typically seconds), then drops it. If a future library
-// scale pushes this past comfortable RAM, the next migration is a
-// streaming variant `EachSidecarPath(ctx, func(path string) bool)` —
-// but the projection-map shape is simpler to reason about and matches
-// the existing `AllVariants` API surface.
-func (s *Store) AllSidecarPaths(ctx context.Context) (map[string]struct{}, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT sidecar_path
-		FROM track_variants
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make(map[string]struct{})
-	for rows.Next() {
-		var sidecar string
-		if err := rows.Scan(&sidecar); err != nil {
-			return nil, err
-		}
-		out[sidecar] = struct{}{}
-	}
-	return out, rows.Err()
-}
-
+// need.
 func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
 	rows, err := s.db.QueryContext(ctx, allVariantsSQL)
 	if err != nil {
@@ -8684,6 +8654,44 @@ func (s *Store) LookupAnalysis(ctx context.Context, sourcePath string) (*Analysi
 		return nil, err
 	}
 	return &a, nil
+}
+
+// CountWaveformsNotUnderPrefix returns how many `track_analysis` rows
+// record a waveform sidecar whose path is NOT a descendant of `prefix`
+// — the waveform twin of CountVariantsNotUnderPrefix, for `bridge
+// doctor`'s sidecar-paths check. `waveform_path` is absolute under the
+// dataDir that wrote it, so after a dataDir move every row names the old
+// host's directory: the API answers 410 for each and the analysis skip
+// gate (which reads the row, not the file) never regenerates them.
+//
+// Rows with an empty waveform_path are not counted: they
+// record a failed or pending analysis, not a file somewhere else.
+// `prefix` MUST end with the platform path separator, as its sibling
+// requires; an empty prefix counts every row that has a waveform.
+//
+// Same `NOT LIKE` shape as the sibling, deliberately: this is a
+// read-only diagnostic count, not a predicate that writes, deletes or
+// bounds a scope (the rule that sends those to a byte range), and the
+// two checks should agree with the console's "N legacy variants" number
+// rather than fold differently from it.
+func (s *Store) CountWaveformsNotUnderPrefix(ctx context.Context, prefix string) (int, error) {
+	var count int
+	if prefix == "" {
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM track_analysis WHERE waveform_path != ''`).Scan(&count); err != nil {
+			return 0, fmt.Errorf("count waveforms (empty prefix): %w", err)
+		}
+		return count, nil
+	}
+	pattern := likeEscape(prefix) + `%`
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		  FROM track_analysis
+		 WHERE waveform_path != '' AND waveform_path NOT LIKE ? ESCAPE '\'
+	`, pattern).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count waveforms not under prefix: %w", err)
+	}
+	return count, nil
 }
 
 // AllAnalysisRows returns every analysis row. Used by `bridge analyze
