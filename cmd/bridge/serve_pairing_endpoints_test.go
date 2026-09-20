@@ -130,7 +130,10 @@ func pairViaAdmin(t *testing.T, ctx context.Context, client *http.Client, endpoi
 		t.Fatalf("POST %s: %v; stderr=%s", endpoint, err, stderr.String())
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("POST %s: read body: %v", endpoint, err)
+	}
 	if resp.StatusCode != wantCode {
 		t.Fatalf("POST %s = %d, want %d: %s", endpoint, resp.StatusCode, wantCode, raw)
 	}
@@ -143,6 +146,9 @@ func pairViaAdmin(t *testing.T, ctx context.Context, client *http.Client, endpoi
 
 func assertQRMatchesHealth(t *testing.T, op string, res pairResponse, primary string, health []string) {
 	t.Helper()
+	if res.URL != primary {
+		t.Errorf("%s: url = %q, want the operator's primary %q", op, res.URL, primary)
+	}
 	want := append([]string{primary}, health...)
 	if strings.Join(res.Alternates, "\n") != strings.Join(want, "\n") {
 		t.Errorf("%s: alternates are not [primary] + /v1/health.endpoints —\n  got  %v\n  want %v\n"+
