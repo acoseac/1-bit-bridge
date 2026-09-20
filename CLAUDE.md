@@ -2122,6 +2122,15 @@ its twin.** The top list is older, shorter, and read first.
   a static file — there is no `.gitattributes` pinning `eol`.
 - **`filepath.ToSlash` is a no-op on POSIX**, so a Windows-shaped path handed to
   it on a Mac keeps its backslashes.
+- **A test asserting that a message NAMES A PATH must not substring-match the
+  raw path.** `%q` escapes backslashes, so a Windows `C:\Users\…` renders as
+  `C:\\Users\\…` and `strings.Contains(out, dir)` fails on that platform
+  alone. Accept either rendering — the property is that the path is named, not
+  the verb it is named with; pinning `%q` instead would go red on a benign
+  change to `%s`. **And a quick follow-up push CANCELS the in-flight platform
+  legs**, so a green tick on an older SHA is not evidence Windows ran: #941's
+  code commit had its Windows and race legs cancelled by a docs-only push
+  twenty minutes later, and the defect surfaced on the leg's first real run. (#941)
 - **CI's cost is SQLite under the race detector, not the tests' shape.**
   `modernc.org/sqlite` is pure Go, so every page operation is Go code `-race`
   instruments, and the multiplier is ~48x, not the usual eight: deleting 2,000

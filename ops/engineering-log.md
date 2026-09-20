@@ -6474,6 +6474,31 @@ it must ASSERT it is on the old code (`grep -c forwardRemoved` → 0) rather tha
 assume the stash took. Redone that way, the table above is what the unfixed
 build actually does.
 
+### The Windows leg caught a test defect on its first real run
+
+`TestRunGCStillRefusesAVariantsDirThatWasAlreadyEmpty` asserted
+`strings.Contains(stderr, dir)` to pin that the refusal NAMES the mount. The
+message formats the path with `%q`, so on Windows the backslashes come back
+escaped (`C:\\Users\\RUNNER~1\\…`) and the raw path is not a substring —
+red on that platform and green everywhere else. Verified against the exact path
+from the CI log: the old check is false there and true on POSIX, the new one
+true on both.
+
+Fixed by accepting EITHER rendering rather than rebuilding the expectation with
+`%q`. The property under test is that the mount is named — which is the half a
+fix that merely deleted the guard would lose — not the verb it is named with,
+and pinning `%q` would have gone red on a benign change to `%s`.
+
+Two process notes:
+
+- **A quick follow-up push cancels the in-flight platform legs.** The code
+  commit's Windows and race legs were cancelled by a docs-only push twenty
+  minutes later, so this was the leg's FIRST real run on the change. A green
+  check list on an older SHA is not evidence the slow legs ran — read the
+  conclusion, where `cancelled` and `success` are different words.
+- The leg has been blocking since 2026-09-01 for exactly this reason, and it
+  earned that here: nothing else in the tree, local or CI, could see this.
+
 ### No wire change
 
 No `/v1` handler, no `PROTOCOL.md`, no `ProtocolVersion` bump.
