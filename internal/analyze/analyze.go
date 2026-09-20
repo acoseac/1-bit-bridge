@@ -267,7 +267,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
 		return Result{}, fmt.Errorf("mkdir waveform dir: %w", err)
 	}
-	tmpPath := finalPath + analysisTmpSuffix
+	tmpPath := finalPath + AnalysisTmpSuffix
 	// Clear any stale tmp from a prior interrupted run.
 	_ = os.Remove(tmpPath)
 	cleanup := true

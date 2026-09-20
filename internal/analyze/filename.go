@@ -8,9 +8,16 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
+// WaveformExt is the extension RunAnalysis writes every waveform sidecar
+// with, and AnalysisTmpSuffix the one its atomic rename stages under.
+//
+// Exported because the `analyze --gc` sweep in cmd/bridge has to recognise
+// both to know which files it manages, and a hand-copied literal there is
+// the shape #937 removed from the variant layout: a sweep whose idea of
+// the extension drifts from the writer's quietly manages nothing.
 const (
-	waveformExt       = ".waveform.bin"
-	analysisTmpSuffix = ".tmp"
+	WaveformExt       = ".waveform.bin"
+	AnalysisTmpSuffix = ".tmp"
 )
 
 // safeAnalysisFilename builds the waveform sidecar basename for the
@@ -28,7 +35,7 @@ func safeAnalysisFilename(srcBase string) string {
 	// 255 minus the atomic-rename temp suffix RunAnalysis appends, so a
 	// basename at the cap doesn't make the `<sidecar>.tmp` write target
 	// overflow ENAMETOOLONG.
-	const fsBasenameCap = 255 - len(analysisTmpSuffix)
+	const fsBasenameCap = 255 - len(AnalysisTmpSuffix)
 	raw := srcBase
 	sanitized := fsutil.SanitiseForFAT(srcBase)
 
@@ -37,7 +44,7 @@ func safeAnalysisFilename(srcBase string) string {
 	// rewritten falls through to the SHA8 path, so two raw inputs that
 	// sanitize identically (`Track:A` + `Track*A`) stay distinct.
 	if sanitized == raw {
-		candidate := sanitized + waveformExt
+		candidate := sanitized + WaveformExt
 		if len(candidate) <= fsBasenameCap {
 			return candidate
 		}
@@ -45,14 +52,14 @@ func safeAnalysisFilename(srcBase string) string {
 	// Disambiguation path — hash the RAW (pre-sanitization) bytes.
 	sum := sha256.Sum256([]byte(raw))
 	sha8 := hex.EncodeToString(sum[:])[:8]
-	suffix := fmt.Sprintf("~%s%s", sha8, waveformExt)
+	suffix := fmt.Sprintf("~%s%s", sha8, WaveformExt)
 	budget := fsBasenameCap - len(suffix)
 	if budget < 8 {
 		// Pathological: the suffix alone consumes the budget. Emit a
 		// fully-hashed name — `suffix` already carries the extension, so
-		// use waveformExt (not `suffix`) to avoid a doubled `~<sha8>`.
+		// use WaveformExt (not `suffix`) to avoid a doubled `~<sha8>`.
 		// Matches the transcode safeVariantFilename twin.
-		return fmt.Sprintf("v.%s%s", sha8, waveformExt)
+		return fmt.Sprintf("v.%s%s", sha8, WaveformExt)
 	}
 	if len(sanitized) <= budget {
 		return sanitized + suffix

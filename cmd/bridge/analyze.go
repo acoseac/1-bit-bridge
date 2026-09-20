@@ -228,8 +228,13 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// the rule ("a sidecar walk prunes dot-directories AT THE WALK") is not
 	// one to hold in one of two places.
 	inv, invErr := integrity.TakeSidecarInventory(ctx, outputDir, known, integrity.SidecarInventoryOptions{
-		Consider: func(name string) bool { return strings.HasSuffix(name, waveformSuffix) },
-		Scratch:  func(name string) bool { return strings.HasSuffix(name, waveformSuffix+".tmp") },
+		// analyze's own constants, not a literal: a sweep whose idea of
+		// the extension drifts from the writer's manages nothing, and
+		// says so by reporting zero of everything.
+		Consider: func(name string) bool { return strings.HasSuffix(name, analyze.WaveformExt) },
+		Scratch: func(name string) bool {
+			return strings.HasSuffix(name, analyze.WaveformExt+analyze.AnalysisTmpSuffix)
+		},
 	})
 	if invErr != nil {
 		if errors.Is(invErr, context.Canceled) || errors.Is(invErr, context.DeadlineExceeded) {
@@ -251,8 +256,9 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 			fmt.Fprintf(stderr, "analyze --gc: refusing to run — %s.\n", reason)
 			fmt.Fprintln(stderr, "  A catalog this much smaller than the tree it describes usually means the INDEX was lost —")
 			fmt.Fprintln(stderr, "  a bridge.db restored from an older snapshot, or a --config naming another install.")
-			fmt.Fprintln(stderr, "  Nothing was unlinked. `bridge doctor` reports the same mismatch under sidecar-paths.")
-			fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-mass-orphans (or `bridge analyze --force` rebuilds them).")
+			fmt.Fprintf(stderr, "  The tree is %s. Nothing was unlinked.\n", outputDir)
+			fmt.Fprintln(stderr, "  If the files really are junk, re-run with --allow-mass-orphans; `bridge analyze --force` rebuilds")
+			fmt.Fprintln(stderr, "  waveforms from source, so this side is recoverable in a way the variant tree is not.")
 			return 1
 		}
 	}
@@ -262,25 +268,29 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// `.waveform.bin.tmp` is this sweep's own half-written litter, never
 	// the operator's data, so a crashed run must not be able to trip the
 	// guard on the next one.
-	for _, path := range append(inv.ScratchPaths, inv.OrphanPaths...) {
-		if ctx.Err() != nil {
-			fmt.Fprintln(stderr, "analyze --gc: interrupted")
-			return 130
+	for _, set := range [][]string{inv.ScratchPaths, inv.OrphanPaths} {
+		for _, path := range set {
+			if ctx.Err() != nil {
+				fmt.Fprintln(stderr, "analyze --gc: interrupted")
+				return 130
+			}
+			if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+				fmt.Fprintf(stderr, "analyze --gc: remove %s: %v\n", filepath.Base(path), rmErr)
+				failed++
+				continue
+			}
+			removed++
 		}
-		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			fmt.Fprintf(stderr, "analyze --gc: remove %s: %v\n", filepath.Base(path), rmErr)
-			failed++
-			continue
-		}
-		removed++
 	}
 	kept = inv.Known
 	fmt.Fprintf(stdout, "analyze --gc: removed %d orphan sidecar(s), kept %d, %d failure(s)\n", removed, kept, failed)
+	// Exit 0 even with per-file failures, as this command always has —
+	// unlike `upscale --gc`, which exits 1. Reported rather than silent
+	// (it was neither counted nor printed before), but promoting it to a
+	// non-zero exit would change what a cron'd analyze --gc reports, which
+	// is a decision for whoever wants it, not a side effect of this guard.
 	return 0
 }
-
-// waveformSuffix is the extension analyze.AnalyzeSpec.SidecarPath writes.
-const waveformSuffix = ".waveform.bin"
 
 // analysisGCMaxOrphanPercent is the mass-orphan threshold for waveforms.
 // The same 20 as integrity.variantSweepMaxDeletePercent's default, but a

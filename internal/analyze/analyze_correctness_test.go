@@ -55,10 +55,10 @@ func TestLoudnessMeterRecoversFromNonFiniteSample(t *testing.T) {
 // 229 (odd): 251 cap − 22 (`~<sha8>.waveform.bin`). Pre-fix the result was
 // one byte short of the cap.
 func TestSafeAnalysisFilenameOddBudgetUsesFullWidth(t *testing.T) {
-	const fsBasenameCap = 255 - len(analysisTmpSuffix)
+	const fsBasenameCap = 255 - len(AnalysisTmpSuffix)
 	long := strings.Repeat("a", 300) + ".flac" // pure ASCII → sanitized == raw, forces the hash+truncate path
 	got := safeAnalysisFilename(long)
-	if !strings.HasSuffix(got, waveformExt) {
+	if !strings.HasSuffix(got, WaveformExt) {
 		t.Fatalf("missing suffix: %q", got)
 	}
 	if len(got) != fsBasenameCap {
