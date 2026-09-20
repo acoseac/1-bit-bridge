@@ -138,8 +138,39 @@ func checkVariantsIndex(ctx context.Context, d Deps) Check {
 				"clears the rows once the directory is back, and the job pool re-renders from source.")
 	}
 	if idx.Orphans == 0 {
-		return ok(checkNameVariantsIndex, fmt.Sprintf("%d variant row(s), %d sidecar file(s), all referenced%s",
-			idx.Rows, idx.Files, scope))
+		// A clean result over a walk that saw part of the tree may not be
+		// phrased as a clean result over the tree. The two partial cases
+		// are NOT the same kind of thing, though, and are split on that:
+		//
+		// A directory the walk could not read is a fault on the host —
+		// actionable, not reported anywhere else, and it means the sweeps
+		// and the serving path may not be able to see those sidecars
+		// either. That is a warning.
+		//
+		// A budget that ran out is a property of THIS check (we chose the
+		// budget) and of a large library, which is not a problem. Any
+		// bridge over doctorVariantsIndexBudget sidecars truncates on
+		// every single run, so warning would put a permanent,
+		// unactionable line in every large healthy operator's report —
+		// the shape this tree already records from the Managed checks,
+		// where two unactionable warnings made a healthy appliance read
+		// as two problems. It stays ok, and says what it looked at
+		// instead of claiming the whole tree.
+		if idx.Unreadable > 0 {
+			return warn(checkNameVariantsIndex,
+				fmt.Sprintf("%d variant row(s); every one of the %d sidecar file(s) the walk could reach is referenced%s",
+					idx.Rows, idx.Files, scope),
+				"A directory under the variants directory could not be read, so its sidecars were neither counted "+
+					"here nor seen by `bridge upscale --gc` — and the serving path may not be able to open them "+
+					"either. Check the ownership and mode of that tree against the user this bridge runs as.")
+		}
+		if idx.Truncated {
+			return ok(checkNameVariantsIndex,
+				fmt.Sprintf("%d variant row(s); the first %d sidecar file(s) are all referenced (the tree is larger)",
+					idx.Rows, idx.Files))
+		}
+		return ok(checkNameVariantsIndex, fmt.Sprintf("%d variant row(s), %d sidecar file(s), all referenced",
+			idx.Rows, idx.Files))
 	}
 	summary := fmt.Sprintf("%d of %d sidecar file(s) under %s are referenced by no row, against %d row(s) in the catalog%s",
 		idx.Orphans, idx.Files, idx.VariantsDir, idx.Rows, scope)

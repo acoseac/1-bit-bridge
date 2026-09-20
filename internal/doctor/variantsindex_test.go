@@ -95,8 +95,19 @@ func TestVariantsIndexScopesATruncatedWalk(t *testing.T) {
 	if c.Status != OK {
 		t.Fatalf("status=%v", c.Status)
 	}
-	if !strings.Contains(c.Summary, "the first 20000 file(s)") || !strings.Contains(c.Summary, "the tree is larger") {
+	if !strings.Contains(c.Summary, "the first 20000 sidecar file(s)") || !strings.Contains(c.Summary, "the tree is larger") {
 		t.Errorf("a truncated walk answered for the whole tree: %q", c.Summary)
+	}
+	// ...and specifically must NOT claim, flatly, that everything is
+	// referenced — the phrasing CodeRabbit read as a global all-clear.
+	if strings.Contains(c.Summary, "sidecar file(s), all referenced") {
+		t.Errorf("a partial walk used the complete-walk phrasing: %q", c.Summary)
+	}
+	// It stays OK, though: any bridge over the budget truncates on every
+	// run, so warning here is a permanent unactionable line in every large
+	// healthy report — the Managed-checks shape this tree already records.
+	if c.Status != OK {
+		t.Errorf("a large healthy library was warned about: %v / %q", c.Status, c.Summary)
 	}
 }
 
@@ -259,5 +270,32 @@ func TestVariantsIndexWillNotGuessTheSweepsVerdictPastAnUnreadableDirectory(t *t
 	}
 	if !strings.Contains(c.Hint, "cannot be told from a partial walk") {
 		t.Errorf("hint does not say the verdict is out of reach: %q", c.Hint)
+	}
+}
+
+// TestVariantsIndexWarnsWhenItCouldNotReadPartOfTheTree — the other
+// partial-clean case, split from truncation because it is a different
+// kind of thing. A directory the walk could not read is a fault on the
+// HOST: actionable, reported nowhere else, and it means `--gc` and the
+// serving path may not see those sidecars either. Truncation is a
+// property of this check and of a large library, and is not a problem.
+// (CodeRabbit on #940 proposed warning for both; the mechanism it gave —
+// that a warn would stop `bridge doctor` printing "all clear." — does not
+// hold, since only a FAIL does that.)
+func TestVariantsIndexWarnsWhenItCouldNotReadPartOfTheTree(t *testing.T) {
+	c := variantsIndexCheck(t, Deps{VariantsIndex: func(context.Context) (VariantsIndex, error) {
+		return VariantsIndex{Rows: 500, Files: 500, Known: 500, Unreadable: 1, VariantsDir: "/srv/bridge-variants"}, nil
+	}})
+	if c.Status != Warn {
+		t.Fatalf("status=%v, want warn — a clean result was claimed over a tree part of which could not be read", c.Status)
+	}
+	if strings.Contains(c.Summary, "sidecar file(s), all referenced") {
+		t.Errorf("the complete-walk phrasing was used over an unreadable tree: %q", c.Summary)
+	}
+	if !strings.Contains(c.Summary, "could not be read") {
+		t.Errorf("summary does not say part of the tree was unreachable: %q", c.Summary)
+	}
+	if !strings.Contains(c.Hint, "ownership and mode") {
+		t.Errorf("hint gives the operator nothing to do: %q", c.Hint)
 	}
 }
