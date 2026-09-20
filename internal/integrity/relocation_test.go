@@ -323,7 +323,7 @@ func TestVariantWatcher_adoptFailureKeepsTheRow(t *testing.T) {
 	store := &fakeDeleter{adoptErr: fmt.Errorf("database is locked")}
 	w := NewVariantWatcher(lister, store, nil, staticDir(newDir), time.Hour, 20)
 	report := awaitBootSweep(t, w, 0)
-	if report.StatFailed != 3 || report.Adopted != 0 {
+	if report.Failed != 3 || report.Adopted != 0 {
 		t.Fatalf("report = %+v, want 3 failed adoptions and nothing deleted", report)
 	}
 	if got := store.deleted(); len(got) != 0 {

@@ -56,7 +56,7 @@ var logger = logging.Component("integrity")
 // are applied either way; they are never the dangerous half.
 //
 // Every tick that saw rows logs ONE summary line (rows / present
-// / adopted / deleted / mismatched / stat-failed / refused) at
+// / adopted / deleted / mismatched / failed / refused) at
 // Info, at Warn when it deleted or refused anything — the field
 // report's first finding was that 10,248 deletions produced no
 // line at all.
@@ -184,8 +184,10 @@ type SweepReport struct {
 	Adopted    int
 	Deleted    int
 	Mismatched int
-	StatFailed int
-	Refused    int
+	// Failed counts rows a stat, an adoption UPDATE or a DELETE failed
+	// on — each kept as it was, each logged, none a deletion.
+	Failed  int
+	Refused int
 	// Skipped is true when the tick did not sweep at all — the
 	// mount-loss guard fired, or the catalog query failed.
 	Skipped bool
@@ -417,7 +419,7 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 				// The file is there and the row still points at the old
 				// path; nothing is lost and the next tick asks again. Not
 				// a deletion candidate under any reading.
-				report.StatFailed++
+				report.Failed++
 				sample.log(slog.LevelWarn, "integrity variant sweep: adopt failed",
 					slog.String("source_path", r.SourcePath),
 					slog.String("variant_id", r.VariantID),
@@ -445,7 +447,7 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 			// Permission errors, I/O faults, etc. — log and skip
 			// rather than treating as "missing". `--gc`'s reverse
 			// pass behaves the same way.
-			report.StatFailed++
+			report.Failed++
 			sample.log(slog.LevelWarn, "integrity variant sweep: stat failed",
 				slog.String("sidecar", r.SidecarPath),
 				slog.String("variant_id", r.VariantID),
@@ -492,7 +494,7 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		default:
 		}
 		if delErr := w.reconciler.DeleteVariant(r.SourcePath, r.VariantID); delErr != nil {
-			report.StatFailed++
+			report.Failed++
 			sample.log(slog.LevelWarn, "integrity variant sweep: DB delete failed",
 				slog.String("source_path", r.SourcePath),
 				slog.String("variant_id", r.VariantID),
@@ -542,7 +544,7 @@ func (w *VariantWatcher) logSummary(dir string, r SweepReport) {
 		slog.Int("adopted", r.Adopted),
 		slog.Int("deleted", r.Deleted),
 		slog.Int("mismatched", r.Mismatched),
-		slog.Int("stat_failed", r.StatFailed),
+		slog.Int("failed", r.Failed),
 		slog.Int("refused", r.Refused),
 		slog.String("variants_dir", dir),
 	)

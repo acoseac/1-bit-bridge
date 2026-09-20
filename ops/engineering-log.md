@@ -5848,7 +5848,7 @@ so a moved dataDir strands the entire waveform cache, silently, until
   `--allow-empty` precedent: `artwork --gc` carried an un-escapable refusal
   for months).
 - **Logging.** One summary line per tick that saw rows (`rows present
-  adopted deleted mismatched stat_failed refused variants_dir`), Warn when
+  adopted deleted mismatched failed refused variants_dir`), Warn when
   it deleted or refused, Info otherwise, nothing for an empty catalog.
   Per-row lines are sampled: the first 10 per message per tick at the
   message's level, the rest at Debug — a 10k-row adoption would otherwise
