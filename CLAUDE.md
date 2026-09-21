@@ -2214,10 +2214,11 @@ its twin.** The top list is older, shorter, and read first.
   `^(A|B)$`, because it matches each `/`-part UNANCHORED and `internal/manifest`
   really has **23 name pairs where one is a prefix of the other** (unanchored
   `TestAnalysisCoverage` selects 2, anchored selects 1); discovery runs under
-  **the same `-race`**, because `-race` defines the `race` build tag and this
-  repo already carries `racefixture_race_test.go`, so a `//go:build race` test
-  would be listed by neither the discovery nor any shard (it is also strictly
-  less work — the non-race listing builds a second binary nothing uses); and the
+  **the same `-race`**, because `-race` defines the `race` build tag, so a
+  listing taken WITHOUT it describes a different build — and a `//go:build race`
+  test would then be in neither the listing nor any shard. Not hypothetical:
+  this repo already carries `racefixture_race_test.go`. (It is also strictly
+  less work — the non-race listing builds a second binary nothing uses.) And the
   `rest` leg asserts the WORKFLOW MATRIX schedules the exact index set
   `0..n-1` of every group it skips, because checking that the group is merely
   MENTIONED passes when one leg is deleted and 208 tests then run nowhere.

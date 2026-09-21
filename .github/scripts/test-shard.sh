@@ -81,7 +81,14 @@ RACE_FLAGS=(-race -timeout 30m)
 # assert_matrix_is_complete requires the matrix to match.
 SHARDED=(manifest:4 admin:4)
 
-cores() { command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu; }
+# cores — `-p` for the `rest` leg. The `4` is not arbitrary: it is the
+# Makefile's own default `P`, which exists for exactly this "the machine is
+# unknown" case. Without a fallback both probes failing makes the function
+# return non-zero, and under `set -e` that ends the script with bash's
+# `sysctl: command not found` and nothing naming this file — measured, exit
+# 127 (Gemini on #943). It cannot happen on the two platforms this runs on;
+# it costs one line not to have to know that.
+cores() { command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu 2>/dev/null || echo 4; }
 
 # sharded_count <group> — how many ways that group splits; non-zero exit
 # when the group is not sharded at all.
