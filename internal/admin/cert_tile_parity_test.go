@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
@@ -12,6 +13,45 @@ import (
 // certFieldRe finds `info.<field>` reads — the name refreshCertInfo binds
 // the decoded /api/cert body to.
 var certFieldRe = regexp.MustCompile(`\binfo\??\.([A-Za-z_][A-Za-z0-9_]*)`)
+
+// jsBracketReadRe finds `root["field"]` / `root?.["field"]`, the form the
+// dot-property scans above cannot see.
+//
+// It is matched against COMMENT-STRIPPED source rather than stripJSNoise'd
+// source, and that is the whole difficulty: stripJSNoise blanks string
+// literals, so `info["notYetValid"]` arrives as `info[""]` with the field
+// name already destroyed. Same reason statsKeysReadBy walks the Go AST
+// instead of scanning — when the subject IS a string literal, the tool that
+// protects scans from their own commentary is the tool that erases it.
+//
+// Comments still have to go, for the reason this package's other guards
+// record: the prose beside a rule quotes the rule.
+var jsBracketReadRe = regexp.MustCompile(`\b%s\s*\??\.?\[\s*["']([A-Za-z_$][A-Za-z0-9_$]*)["']\s*\]`)
+
+// jsBracketFieldReads returns the field names read off `root` in bracket
+// form. CodeRabbit raised the gap on PR #951 against the cert guard below;
+// the jobs guard beside it had the same blind spot, so the helper is shared
+// rather than the one flagged site being patched.
+//
+// NOT covered, deliberately and stated rather than implied: the alias-
+// resolving machinery in console_source_parity_test.go (jsMemberReadRe and
+// the jobsScopes/snapshotScopes walk it feeds) is dot-only too. Extending it
+// means teaching path resolution about bracket segments, which is a real
+// change to a different mechanism — claiming it here without doing it would
+// be the false-safety-claim shape TestEveryCitedTestNameExists exists for.
+func jsBracketFieldReads(t *testing.T, src, root string) map[string]bool {
+	t.Helper()
+	re, err := regexp.Compile(fmt.Sprintf(jsBracketReadRe.String(), regexp.QuoteMeta(root)))
+	if err != nil {
+		t.Fatalf("compile bracket-read scan for %q: %v", root, err)
+	}
+	stripped := jsLineCommentRe.ReplaceAllString(jsBlockCommentRe.ReplaceAllString(src, " "), " ")
+	out := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(stripped, -1) {
+		out[m[1]] = true
+	}
+	return out
+}
 
 // TestCertTileOnlyReadsRealCertFields is the /api/cert twin of
 // TestSettingsPrereqsOnlyReadRealJobsFields, and it exists because the
@@ -52,10 +92,15 @@ func TestCertTileOnlyReadsRealCertFields(t *testing.T) {
 	// Scoped to refreshCertInfo: `info` is a common local name, and an
 	// unscoped scan would grade every other function's variable against
 	// this struct.
-	body := stripJSNoise(certTileSource(t))
+	src := certTileSource(t)
 	seen := map[string]bool{}
-	for _, m := range certFieldRe.FindAllStringSubmatch(body, -1) {
+	for _, m := range certFieldRe.FindAllStringSubmatch(stripJSNoise(src), -1) {
 		seen[m[1]] = true
+	}
+	// Bracket form too, off the comment-stripped source — see
+	// jsBracketFieldReads for why it cannot share the stripJSNoise pass.
+	for f := range jsBracketFieldReads(t, src, "info") {
+		seen[f] = true
 	}
 	if len(seen) == 0 {
 		t.Fatal("no info.<field> reads found in refreshCertInfo — the scan is broken")
