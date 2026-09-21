@@ -269,3 +269,64 @@ func TestCertRotateSaysNothingAboutTheClockOnAHealthyCert(t *testing.T) {
 		t.Errorf("an expiring cert is reported as not yet valid:\n%s", out)
 	}
 }
+
+// TestCertInfoVerdictsAreMutuallyExclusiveOnAnInvertedWindow pins the
+// property that makes `--json`'s three booleans readable: at most one
+// is true, and it is the one the human switch would print.
+//
+// The case that can break it is a certificate whose NotAfter precedes
+// its NotBefore. Gemini read the `!notYetValid` guard on `expired` as
+// dead code on PR #951, on the premise that NotAfter is always after
+// NotBefore for a valid certificate. Nothing in this path enforces
+// that: `x509.CreateCertificate` and `x509.ParseCertificate` both
+// accept an inverted window, `LoadX509KeyPair` ignores dates, and
+// `tlsCertPath` takes any operator-supplied pair — so a hand-assembled
+// or restored data directory reaches `Inspect` with whatever it holds.
+//
+// The fixture asserts the inversion it depends on, so it cannot quietly
+// stop reproducing the case it exists for.
+func TestCertInfoVerdictsAreMutuallyExclusiveOnAnInvertedWindow(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := certFixtureConfig(t, dir)
+	certPath, keyPath := servertls.DefaultPaths(filepath.Join(dir, "data"))
+	notBefore := time.Now().Add(30 * 24 * time.Hour)
+	notAfter := time.Now().Add(-10 * 24 * time.Hour)
+	if !notAfter.Before(notBefore) {
+		t.Fatalf("fixture is not inverted: NotBefore=%s NotAfter=%s", notBefore, notAfter)
+	}
+	certFixtureWindow(t, certPath, keyPath, notBefore, notAfter)
+
+	var stdout, stderr bytes.Buffer
+	if code := certInfoCmd([]string{"--config", cfgPath, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cert info --json: code=%d stderr=%s", code, stderr.String())
+	}
+	var env struct {
+		NotYetValid  bool `json:"notYetValid"`
+		Expired      bool `json:"expired"`
+		ExpiringSoon bool `json:"expiringSoon"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout.String())
+	}
+	set := 0
+	for _, v := range []bool{env.NotYetValid, env.Expired, env.ExpiringSoon} {
+		if v {
+			set++
+		}
+	}
+	if set != 1 {
+		t.Errorf("%d verdicts set, want exactly 1: %+v", set, env)
+	}
+	// And it must be the one the human switch prints, or the two halves
+	// of this command describe the same file differently.
+	if !env.NotYetValid {
+		t.Errorf("notYetValid is not the winning verdict: %+v", env)
+	}
+	var human, humanErr bytes.Buffer
+	if code := certInfoCmd([]string{"--config", cfgPath}, &human, &humanErr); code != 0 {
+		t.Fatalf("cert info: code=%d stderr=%s", code, humanErr.String())
+	}
+	if !strings.Contains(human.String(), "NOT YET VALID") {
+		t.Errorf("the human output takes a different band than the envelope:\n%s", human.String())
+	}
+}

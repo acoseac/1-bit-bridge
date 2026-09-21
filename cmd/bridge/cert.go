@@ -91,6 +91,18 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	// near-expiry band) and "expired 23h ago" (already past it, the
 	// hard one). Integer truncation makes the two indistinguishable on
 	// that field alone (Gemini flagged on PR #46).
+	//
+	// The `!notYetValid` prefix here and on expiringSoon below is
+	// PRECEDENCE, not redundancy, and it is what makes the three
+	// booleans mutually exclusive — the envelope says exactly what the
+	// switch below prints. Gemini read it as dead on PR #951, on the
+	// premise that NotAfter is always after NotBefore. Nothing in this
+	// path enforces that: `x509.CreateCertificate` and
+	// `x509.ParseCertificate` both accept an inverted window (measured),
+	// `LoadX509KeyPair` ignores dates entirely, and `tlsCertPath` takes
+	// any operator-supplied pair — a hand-assembled or restored data dir
+	// is a documented operator state. Dropped, an inverted window
+	// serialises `notYetValid: true` AND `expired: true`.
 	expired := !notYetValid && now.After(info.NotAfter)
 	// Against the exact remaining duration and servertls's own
 	// threshold, NOT `DaysUntilExpiry <= 30`: the day count truncates
