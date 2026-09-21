@@ -867,10 +867,32 @@ async function refreshBackups() {
 
 // refreshCertInfo populates the "Expires" line under the TLS
 // fingerprint panel (Settings → Networking) with the live cert's
-// expiry. ≤7 days is rendered red, ≤30 days yellow, otherwise the
-// plain count. Errors degrade silently — the panel just shows the
+// validity. Errors degrade silently — the panel just shows the
 // placeholder dashes. Self-guards via `if (!cell) return` so calling
 // it from a page that doesn't render the panel is a no-op.
+//
+// The ladder grades BOTH ends of the window, in order:
+//
+//   not yet valid → red, and the START date rather than the end
+//   expired       → red
+//   ≤7 days       → red
+//   ≤30 days      → yellow
+//   otherwise     → the plain count, no badge
+//
+// The near end comes first because it is the one `daysUntilExpiry`
+// cannot express: a certificate starting in 30 days still has ~426 days
+// of NotAfter ahead of it, so grading the day count alone rendered a
+// comfortable `(426 days)` with no badge about a certificate every
+// paired device refuses — the same blind spot `bridge doctor` and the
+// serve-time warning had before PR #950. `notBefore` has always been on
+// this payload (`/api/cert` marshals servertls.CertInfo), so this is a
+// client-side fix with no wire change.
+//
+// The expired band is split out of `days <= 7` for the same reason
+// `bridge cert info` splits it: Inspect forces a -1 sentinel past
+// NotAfter, so an expired certificate reached that arm and was
+// announced as "expiring soon" — future tense about something that has
+// already happened.
 async function refreshCertInfo() {
   const cell = document.getElementById("cert-expiry");
   if (!cell) return;
@@ -882,9 +904,27 @@ async function refreshCertInfo() {
     }
     const when = new Date(info.notAfter);
     const days = info.daysUntilExpiry;
+    const starts = info.notBefore ? new Date(info.notBefore) : null;
+    if (starts && starts.getTime() > Date.now()) {
+      // Named for the CAUSE, not the symptom: the operator's next
+      // question is "why", and on this hardware the answer is almost
+      // always a host clock that was ahead when the cert was minted.
+      // The CLI carries the full remedy (`bridge cert info`), which is
+      // where it can be acted on — rotating from here would mint the
+      // same wrong dates again.
+      cell.innerHTML =
+        '<span class="badge danger">not valid yet</span> ' +
+        `starts ${starts.toLocaleDateString()} — check the host clock`;
+      return;
+    }
     let badge = "";
-    if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
-    else if (days <= 30) badge = '<span class="badge running">expiring</span> ';
+    if (days < 0) badge = '<span class="badge danger">expired</span> ';
+    else if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
+    // Yellow, as this function's contract has always said. `.badge.warn`
+    // is the yellow one; `.badge.running` is green (--ok) and was what
+    // this arm emitted from the day the tile was written, so "expiring
+    // within a month" rendered in the same colour as healthy.
+    else if (days <= 30) badge = '<span class="badge warn">expiring</span> ';
     cell.innerHTML = `${badge}${when.toLocaleDateString()} (${days} days)`;
   } catch {
     cell.textContent = "—";

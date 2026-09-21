@@ -501,14 +501,27 @@ func badgeForStatus(s doctor.Status) string {
 	}
 }
 
-// ensureNotInitialized is a helper consumed by `bridge init` before it
-// starts touching the filesystem. Returns 0 when doctor is clean, 1
-// otherwise; printing the report to the passed writer. Separate from
-// doctorCmd so the init path can pre-seed Deps with the values its
-// prompts produced, rather than re-reading a config that might not
-// exist yet.
+// ensureDoctorClean is a helper consumed by `bridge init` before it
+// starts touching the filesystem. Returns 0 when doctor has no fails, 1
+// otherwise; printing to the passed writer. Separate from doctorCmd so
+// the init path can pre-seed Deps with the values its prompts produced,
+// rather than re-reading a config that might not exist yet.
 //
 // Caller decides the exit action — we just return the code.
+//
+// Warn does not block — that split is doctor's, not this function's,
+// and refusing to initialise a bridge over a lapsed cert would block
+// the very run that mints a new one. It is still PRINTED. It was not,
+// and the consequence was structural rather than cosmetic: the checks
+// whose most important verdicts are warn-only by design — tls-cert's
+// not-yet-valid band, tls-cert-sans in full — could be wired into this
+// preflight and reach nobody, which is this repo's recorded shape for
+// shipping a dead feature with a green suite. A preflight that computes
+// a finding and discards it is worse than one that never ran.
+//
+// Only the warn lines, not the whole table: on a clean host this prints
+// nothing at all, so `bridge init`'s first-run output is unchanged
+// except on the hosts that have something to say.
 func ensureDoctorClean(w io.Writer, d doctor.Deps) int {
 	// Background for the same reason as doctorCmd: `bridge init` is a
 	// short-lived foreground process, and the per-subprocess deadline
@@ -518,7 +531,32 @@ func ensureDoctorClean(w io.Writer, d doctor.Deps) int {
 		printReport(w, report)
 		return 1
 	}
+	printWarnings(w, report)
 	return 0
+}
+
+// printWarnings emits the warn-level checks in printReport's layout,
+// and nothing at all when there are none.
+//
+// Same badge and hint rendering as the full report on purpose: an
+// operator who has seen `bridge doctor` output should not have to learn
+// a second format to read the same three checks, and the hint is the
+// half that says what to do.
+func printWarnings(w io.Writer, r doctor.Report) {
+	if r.WarnCount() == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "preflight warnings (not blocking — run `bridge doctor` for the full report):")
+	for _, c := range r.Checks {
+		if c.Status != doctor.Warn {
+			continue
+		}
+		fmt.Fprintf(w, "  %s %-18s  %s\n", badgeForStatus(c.Status), c.Name, c.Summary)
+		if c.Hint != "" {
+			fmt.Fprintf(w, "    ↳ %s\n", c.Hint)
+		}
+	}
 }
 
 // adminDoctorRunner returns the closure admin.Deps.DoctorRun is wired

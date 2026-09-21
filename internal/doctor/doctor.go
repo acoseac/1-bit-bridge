@@ -443,10 +443,7 @@ func tlsCertPairCheck(certPath, keyPath string) Check {
 	if info.NotBefore.After(now) {
 		return warn(checkNameTLSCert,
 			fmt.Sprintf("present, NOT YET VALID (starts %s)", info.NotBefore.UTC().Format(time.RFC3339)),
-			"clients reject a certificate before its NotBefore exactly as they reject an expired one, so every "+
-				"paired device fails to connect until then. This usually means the host clock was ahead when the "+
-				"certificate was minted — CHECK THE CLOCK FIRST (`timedatectl` / `sntp -sS`), because rotating "+
-				"against a wrong clock mints another one. Once the clock is right: "+servertls.RotationRemediation)
+			servertls.NotYetValidRemediation)
 	}
 	// Remaining validity comes from NotAfter directly, NOT from
 	// DaysUntilExpiry: that count truncates toward zero, so a cert with

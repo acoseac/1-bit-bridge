@@ -32,6 +32,26 @@ import (
 const RotationRemediation = "Run `bridge cert rotate` (or click Rotate in the admin console's Cert tile) and restart the bridge, " +
 	"then re-pair every paired device — a rotation changes the SHA-256 fingerprint iOS pinned at pairing."
 
+// NotYetValidRemediation is what every surface says about a certificate
+// whose validity window has not OPENED yet.
+//
+// It is deliberately not RotationRemediation with a different lead-in,
+// and that asymmetry is the whole reason it exists: everywhere else in
+// this package the answer is "rotate", and here rotating FIRST mints a
+// second certificate with the same wrong dates, because the mint reads
+// the same clock (`NotBefore: now-1h`). So the sentence leads with the
+// clock and only then reaches the rotation.
+//
+// A const beside RotationRemediation for the reason that one is:
+// `bridge doctor`'s tls-cert line, `bridge cert info` and `bridge cert
+// rotate`'s preamble all describe this state, and three copies of a
+// four-clause remedy drift into three different pieces of advice — the
+// dropped clause being, as ever, the one that makes the rest work.
+const NotYetValidRemediation = "clients reject a certificate before its NotBefore exactly as they reject an expired one, " +
+	"so every paired device fails to connect until then. This usually means the host clock was ahead when the " +
+	"certificate was minted — CHECK THE CLOCK FIRST (`timedatectl` / `sntp -sS`), because rotating against a " +
+	"wrong clock mints another one. Once the clock is right: " + RotationRemediation
+
 // SANCoverage compares the SAN set a cert minted right now would carry
 // against the set the on-disk cert actually carries.
 //
