@@ -75,13 +75,31 @@ cores() { command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu; }
 
 # names <pkg> — every name `-run` can actually select, one per line.
 #
+# DISCOVERY RUNS UNDER RACE_FLAGS, and that is load-bearing rather than
+# tidy. `-race` defines the `race` build tag, so a listing taken without it
+# describes a DIFFERENT build than the one the shard executes: a
+# `//go:build race` test would be absent from the list, land in no
+# partition, and silently never run — behind nine green checks, which is
+# the one failure this whole script is written to prevent. This repo
+# already carries both tags (internal/manifest's racefixture_*_test.go
+# size the compaction fixtures by build), so it is a single new function
+# away rather than hypothetical. The mirror case is harmless by
+# construction: a `//go:build !race` name simply is not in the race
+# listing, and the shard that would have owned it never asks for it.
+#
+# It is also strictly less work. The shard has to build the race binary
+# regardless; listing without `-race` builds a SECOND, non-race binary
+# that nothing then uses (measured cold here: 17.0s for the race build the
+# shard needs anyway, on top of which the non-race listing was pure
+# waste).
+#
 # The listing is captured BEFORE the filter so a package that fails to
 # compile fails here, loudly, with go's own message — rather than reaching
 # the empty-set floor below and being reported as "no test names", which
-# names the symptom and hides the cause.
+# names the symptom and hides the cause. (CodeRabbit on #943.)
 names() {
   local out
-  if ! out="$(go test "$1" -list '.*')"; then
+  if ! out="$(go test "${RACE_FLAGS[@]}" "$1" -list '.*')"; then
     echo "test-shard: could not list tests in $1" >&2
     return 1
   fi
@@ -94,12 +112,17 @@ partition() {
 }
 
 # is_sharded <import path> — true when this package has its own matrix legs.
-# Exact tail match, never a substring: ./internal/adminauth must not be
-# swallowed by the entry meant for ./internal/admin.
+#
+# A glob with NO trailing wildcard, which is what makes it an exact tail
+# match: ./internal/adminauth does not match */internal/admin, so it stays
+# in the `rest` leg where it belongs. (Gemini on #943 — the previous pair
+# of parameter expansions was equivalent and much harder to read.)
 is_sharded() {
   local pkg="$1" g
   for g in "${SHARDED[@]}"; do
-    [ "${pkg##*/internal/}" = "$g" ] && [ "$pkg" != "${pkg%/internal/$g}" ] && return 0
+    if [[ "$pkg" == */internal/"$g" ]]; then
+      return 0
+    fi
   done
   return 1
 }
@@ -119,7 +142,15 @@ assert_matrix_runs_the_sharded_packages() {
   local wf=".github/workflows/gate.yml" g
   [ -f "$wf" ] || return 0
   for g in "${SHARDED[@]}"; do
-    if ! grep -qE "group:[[:space:]]*${g}[[:space:]]*," "$wf"; then
+    # `group: <name>` followed by anything that is not a name character, or
+    # by end of line. NOT a trailing comma, which is only there because
+    # `index` happens to follow `group` in the matrix today — reorder the
+    # flow mapping so `group` is last and a comma-dependent check would
+    # report that the package runs nowhere while it runs perfectly well.
+    # Fails closed, but a false alarm on a green tree is still a bad
+    # guard. POSIX ERE rather than `\b`, which is a GNU extension this
+    # script cannot assume on every host it is run from. (Gemini on #943.)
+    if ! grep -qE "group:[[:space:]]*${g}([^[:alnum:]_]|\$)" "$wf"; then
       echo "test-shard: internal/${g} is excluded from the 'rest' shard, but no" >&2
       echo "            matrix leg in ${wf} runs it — its tests would run nowhere." >&2
       exit 1
