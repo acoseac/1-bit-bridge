@@ -400,6 +400,11 @@ func (s *Server) invalidateAnalysisCoverage() {
 	s.analysisCoverageMu.Lock()
 	s.analysisCoverage = nil
 	s.analysisCoverageAt = time.Time{}
+	// Bumping the generation is what makes this stick against a query that
+	// is ALREADY RUNNING. Clearing the two fields alone is not enough: the
+	// in-flight reader holds pre-clear numbers and would publish them a
+	// moment later with a fresh timestamp.
+	s.analysisCoverageGen++
 	s.analysisCoverageMu.Unlock()
 }
 
@@ -431,6 +436,12 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 			s.analysisCoverageMu.Unlock()
 			return snap, nil
 		}
+		// Captured BEFORE the query, compared after. The query runs outside
+		// the mutex, so a clear landing while it is in flight would otherwise
+		// see its own invalidation overwritten by the pre-clear numbers this
+		// call is already holding — with a fresh timestamp, so the stale
+		// answer would then be served for a full TTL.
+		gen := s.analysisCoverageGen
 		s.analysisCoverageMu.Unlock()
 		// Detached from the request ctx: the result is shared by every
 		// queued caller, so one client's hang-up must not synthesize a
@@ -461,6 +472,15 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 			UnreadableExcluded: cov.UnreadableExcluded,
 		}
 		s.analysisCoverageMu.Lock()
+		if s.analysisCoverageGen != gen {
+			// Invalidated while this query was in flight: the numbers
+			// describe a library that no longer exists. Return them to THIS
+			// caller — they were true when read, and a nil would blank the
+			// tile — but do not publish them, so the next poll recomputes
+			// rather than serving them for a TTL.
+			s.analysisCoverageMu.Unlock()
+			return snap, nil
+		}
 		s.analysisCoverage = snap
 		s.analysisCoverageAt = time.Now()
 		s.analysisCoverageMu.Unlock()

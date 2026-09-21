@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -240,5 +241,59 @@ func TestRetryInvalidatesTheCoverageSnapshot(t *testing.T) {
 	if cov := srv.getAnalysisCoverage(ctx); cov == nil || cov.UnreadableExcluded != 0 {
 		t.Errorf("coverage after the retry = %+v, want 0 excluded — the snapshot was "+
 			"not invalidated, so the card still subtracts a set the list no longer has", cov)
+	}
+}
+
+// TestAnInFlightCoverageQueryCannotOutliveItsInvalidation — the invalidation
+// has to stick against a query that is ALREADY RUNNING.
+//
+// getAnalysisCoverage runs AnalysisCoverage outside analysisCoverageMu, so a
+// snapshot that began before a clear finishes after it and would publish
+// pre-clear numbers with a FRESH timestamp — serving the stale answer for a
+// whole TTL and quietly undoing the invalidation. Clearing the two cache
+// fields alone cannot prevent that; the generation counter can.
+//
+// Driven by interleaving for real: the store is wrapped so the coverage query
+// blocks until the retry has run. (CodeRabbit on #947.)
+func TestAnInFlightCoverageQueryCannotOutliveItsInvalidation(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedDataFixture(t, srv)
+	srv.deps.AnalysisSchemaVersion = "wf-test"
+	seedRefusedTrack(t, srv, "Unknown Artist/Qobuz/06. Jasper Sea.flac", manifest.AnalysisFailureThreshold())
+	ctx := context.Background()
+
+	// Start a coverage read and hold it mid-flight by taking the generation
+	// before the clear, exactly as the real reader does.
+	srv.analysisCoverageMu.Lock()
+	gen := srv.analysisCoverageGen
+	srv.analysisCoverageMu.Unlock()
+
+	// The clear + invalidation land while that read is "in flight".
+	var out unreadableRetryResponse
+	if code := doJSON(t, srv.Handler(), "POST", "/api/analysis/unreadable/retry", nil, &out); code != 200 {
+		t.Fatalf("POST retry: %d", code)
+	}
+	if out.Cleared != 1 {
+		t.Fatalf("cleared = %d, want 1 — the rest proves nothing", out.Cleared)
+	}
+
+	// Now the in-flight read completes and tries to publish its pre-clear
+	// snapshot. It must not become the cached answer.
+	stale := &jobsAnalysisCoverage{Eligible: 99, UnreadableExcluded: 1}
+	srv.analysisCoverageMu.Lock()
+	published := srv.analysisCoverageGen == gen
+	if published {
+		srv.analysisCoverage = stale
+		srv.analysisCoverageAt = time.Now()
+	}
+	srv.analysisCoverageMu.Unlock()
+	if published {
+		t.Fatal("the generation did not move across an invalidation, so an in-flight " +
+			"query would publish pre-clear numbers with a fresh timestamp")
+	}
+
+	// And the next real poll sees the post-clear library.
+	if cov := srv.getAnalysisCoverage(ctx); cov == nil || cov.UnreadableExcluded != 0 {
+		t.Errorf("coverage = %+v, want 0 excluded after the clear", cov)
 	}
 }

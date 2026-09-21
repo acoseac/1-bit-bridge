@@ -7349,12 +7349,17 @@ go vet ./... && go test ./... 2>&1 | grep -vE "^ok|no test files" | head -10; gi
 ```
 
 Three things went wrong in one line, and the third is the one that matters.
-`| grep` makes the pipeline's exit status GREP's, so `go test`'s result is
-gone. `| head -10` then truncated the output to the first ten non-`ok` lines,
-which were INFO logs from an unrelated sweeper — the `FAIL` lines came after
-and were cut off. And `;` rather than `&&` before the commit meant it ran
-anyway. Checking the saved output afterwards with `grep -cE "^FAIL"` returned
-0, because the file only ever held the truncated ten lines.
+Without `pipefail`, a pipeline's exit status is its LAST command's — here
+`head`, which always exits 0 — so `go test`'s result was discarded. (An
+earlier draft of this entry blamed `grep`, which is wrong and was corrected by
+CodeRabbit on #947: grep is in the middle and owns nothing. Verified:
+`false | grep -v x | head -10` exits 0. With `pipefail` set, the rightmost
+NONZERO status wins and the failure would have survived.) `| head -10` then
+truncated the output to the first ten non-`ok` lines, which were INFO logs
+from an unrelated sweeper — the `FAIL` lines came after and were cut off. And
+`;` rather than `&&` before the commit meant it ran anyway. Checking the saved
+output afterwards with `grep -cE "^FAIL"` returned 0, because the file only
+ever held the truncated ten lines.
 
 So every check I made agreed, and all of them were measuring the same
 truncated fragment. This is the grep-masked-exit-status trap this file already

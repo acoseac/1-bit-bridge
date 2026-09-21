@@ -5692,7 +5692,15 @@ async function unreadableRefresh() {
     if (panel) panel.hidden = false;
     if (err) {
       err.hidden = false;
-      err.textContent = `Couldn’t load the unreadable list: ${e.message}`;
+      // Generic on the PAGE, detail in the browser console. The handler
+      // passes err.Error() through as the JSON `message`, and a store
+      // failure can name the database file — a host path, on a surface
+      // this console promises library-relative ones on. The operator
+      // debugging still has it one keystroke away. (CodeRabbit on #947;
+      // the sibling panels render e.message directly and are left alone,
+      // since changing one site does not close a codebase-wide pattern.)
+      err.textContent = "Couldn’t load the unreadable list. Try again.";
+      console.warn("unreadable list:", e);
     }
   }
 }

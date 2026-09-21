@@ -1306,6 +1306,13 @@ type Server struct {
 	analysisCoverage   *jobsAnalysisCoverage
 	analysisCoverageAt time.Time
 	analysisCoverageSF singleflight.Group
+	// analysisCoverageGen rises on every invalidation. The query runs
+	// OUTSIDE analysisCoverageMu (it is slow and detached), so a snapshot
+	// that began before a clear can finish after it and publish pre-clear
+	// numbers with a fresh timestamp — defeating the invalidation for a
+	// whole TTL. The reader captures the generation before querying and
+	// publishes only if it still matches. (CodeRabbit on #947.)
+	analysisCoverageGen uint64
 
 	// lastBackupAt caches the newest snapshot's timestamp for the jobs
 	// card. Same TTL + singleflight shape as analysisCoverage above,
