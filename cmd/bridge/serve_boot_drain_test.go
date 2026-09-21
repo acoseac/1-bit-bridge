@@ -105,32 +105,43 @@ func TestEveryBackgroundServeDrainsOnCleanup(t *testing.T) {
 	fset := token.NewFileSet()
 	checked := 0
 	for _, path := range files {
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "Test") {
-				continue
-			}
-			if !launchesServeOnAGoroutine(fn.Body) {
-				continue
-			}
-			checked++
-			if !callsFunc(fn.Body, "drainServeOnCleanup") {
-				t.Errorf("%s: %s boots serve on a goroutine without drainServeOnCleanup. "+
-					"A t.Fatalf in its body returns while serve still holds the store, and "+
-					"t.TempDir's cleanup then removes the data dir under it — the removal is "+
-					"what gets reported, not the assertion that failed.",
-					fset.Position(fn.Pos()), fn.Name.Name)
-			}
-		}
+		checked += auditBootTestsIn(t, fset, path)
 	}
 	if checked < 3 {
 		t.Fatalf("matched %d test(s) booting serve on a goroutine, want at least 3 — "+
 			"the scan has stopped matching what it is meant to match", checked)
 	}
+}
+
+// auditBootTestsIn reports how many tests in one file boot serve on a
+// goroutine, and errors for each that does so without the drain. Split
+// out from the test body to keep the nesting shallow (SonarCloud
+// go:S3776 on PR #944); the count it returns is what feeds the floor.
+func auditBootTestsIn(t *testing.T, fset *token.FileSet, path string) int {
+	t.Helper()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	matched := 0
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+			continue
+		}
+		if !launchesServeOnAGoroutine(fn.Body) {
+			continue
+		}
+		matched++
+		if !callsFunc(fn.Body, "drainServeOnCleanup") {
+			t.Errorf("%s: %s boots serve on a goroutine without drainServeOnCleanup. "+
+				"A t.Fatalf in its body returns while serve still holds the store, and "+
+				"t.TempDir's cleanup then removes the data dir under it — the removal is "+
+				"what gets reported, not the assertion that failed.",
+				fset.Position(fn.Pos()), fn.Name.Name)
+		}
+	}
+	return matched
 }
 
 // launchesServeOnAGoroutine reports whether body starts the CLI's entry
