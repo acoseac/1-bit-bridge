@@ -7823,3 +7823,71 @@ The loop was then verified end to end: doctor warns → `bridge cert rotate` →
 `[ok] tls-cert-sans covers all 4 name(s) and 6 address(es)`.
 
 Ships as #950 on `feat/doctor-cert-sans`.
+
+### Review round 1 on #950 — three real, one declined
+
+Both bots reviewed for real (no CodeRabbit rate-limit marker; "Actionable
+comments posted: 3"). Every finding was verified against the code with a
+throwaway probe before being acted on.
+
+**Gemini, `pem.Decode` reads only the first block — REAL, and widened.**
+`crypto/tls.LoadX509KeyPair`, the load `bridge serve` performs, walks every
+block and collects the CERTIFICATE ones, so a key-first or `Bag Attributes`
+PEM loads fine. Measured on one such file: `LoadX509KeyPair` nil, `Inspect`
+and `InspectSANCoverage` both "no CERTIFICATE block in PEM". Pre-existing in
+`Inspect` and `fingerprintFromPEM`, so fixing only the new function would have
+left doctor's two cert lines able to disagree about one file. One shared
+`decodeCertificatePEM`; the negative control is that a file with NO certificate
+still errors.
+
+**CodeRabbit, validate the pair — REAL, and it is a documented state.**
+`GenerateWithOptions` commits cert and key in two renames and its own docblock
+records the residual: a crash between them leaves a new cert with the old key.
+Measured on exactly that: `LoadX509KeyPair` → "tls: private key does not match
+public key" while `Inspect` returns err=nil, days=396 — doctor said `present,
+expires in 396 days` about a bridge that exits on startup. `servertls.
+VerifyKeyPair` is that same call, so doctor gets serve's answer rather than a
+second opinion.
+
+Two things the finding did not say, both decided here:
+
+- It is a **fail**, not a warn, and that settles the whole grading: the split
+  is "can `bridge serve` start". Partial, unparseable and mismatched all stop
+  it, so all three fail (the partial-state branch already did). Expiring and
+  expired load fine — serve starts, clients suffer — so they warn. The
+  "present but unreadable" case moved from warn to fail with it.
+- **A permission failure on the key is deliberately not a finding.** The key is
+  0600 and owned by the service user; on the public-mode VPS layout the person
+  running `bridge doctor` is somebody else, and adding a key READ where the
+  checks previously only stat'd would have failed the preflight on every such
+  host — with `bridge init` bailing on a fail. Same precedent as
+  `config.Validate()` not stat'ing the library roots. Expiry still grades,
+  because it comes from the 0644 cert.
+
+**CodeRabbit, the boundary truncates — REAL.** `DaysUntilExpiry` truncates
+toward zero, so 30d23h reads as 30 and `days*24h <= ExpiryWarningWindow`
+warned while `logIfExpiringSoon`, comparing `time.Until(NotAfter)`, stayed
+quiet. A 23-hour window in which doctor and the next `bridge serve` disagree —
+directly contradicting the docblock claiming they cannot. The day count is
+display-only now, and the test asserts the fixture reproduces the disagreement
+before asserting the verdict.
+
+**CodeRabbit, README `3 of 6 name(s)` — REAL.** Hand-counted; the merged want
+set is 4 (`localhost` is in the total even though the cert carries it). The
+corrected numbers were taken by running the code, and the counts are now
+pinned in `TestCheckTLSCertSANs_StaleCertWarnsWithTheExactMissingSet` so the
+next hand-written number cannot drift.
+
+**Gemini, nil guards in `ipDiff` — DECLINED.** `want` is always
+`mergeIPs(...)`, which already skips any entry whose `To16()` is nil, with a
+comment naming the exact aliasing hazard the finding describes; `got` comes
+from x509, which parses IP SANs as 4- or 16-byte values or errors. Probed:
+`ExtraIPs{nil, 3-byte, valid}` yields `WantIPs [127.0.0.1 ::1 0.0.0.0
+10.0.0.1]` and `MissingIPs [10.0.0.1]` — no `<nil>` reachable.
+
+**And the pair check caught the test helper that introduced it.**
+`writeCertWithNotAfter` rewrote the cert with a freshly generated key and left
+the fixture's original key in place, so every expiry fixture was a mismatched
+pair — which the new check immediately failed. The helper writes both halves
+now. A fixture that only rewrites one half of a pair silently tests a
+different state than the one its caller named.

@@ -13,8 +13,6 @@ package tls
 
 import (
 	"crypto/x509"
-	"encoding/pem"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -74,9 +72,9 @@ func InspectSANCoverage(certPath string, opts GenerateOptions) (SANCoverage, err
 	if err != nil {
 		return SANCoverage{}, err
 	}
-	block, _ := pem.Decode(raw)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return SANCoverage{}, errors.New("no CERTIFICATE block in PEM")
+	block, err := decodeCertificatePEM(raw)
+	if err != nil {
+		return SANCoverage{}, err
 	}
 	parsed, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {

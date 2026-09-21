@@ -1940,9 +1940,21 @@ its twin.** The top list is older, shorter, and read first.
   doctor's cert checks read `cfg.TLSCertPath` too, via `doctor.certPaths` —
   resolved from `DataDir` alone they graded a cert nobody serves. Expiry is on
   the `tls-cert` line against the exported `servertls.ExpiryWarningWindow`, the
-  startup warning's own threshold. Both are WARN, never fail: `bridge init`
-  bails on a fail, and refusing to initialise because the old cert lapsed would
-  block the run that mints the new one. `tls-cert-sans` skips on a managed
+  startup warning's own threshold — **compared as an exact duration, never
+  `DaysUntilExpiry`**, which truncates toward zero, so a day count would warn at
+  30d23h while `logIfExpiringSoon` stays quiet. The fail/warn split is **"can
+  `bridge serve` start"**: a pair it cannot LOAD fails (partial, unparseable, or
+  mismatched — `VerifyKeyPair` is `LoadX509KeyPair`, serve's own call, and an
+  interrupted two-rename rotate leaves a new cert with the old key, which
+  `Inspect` grades as a clean 396 days); an expiring or expired cert loads, so
+  it warns about the clients. **A permission failure reading the 0600 key is NOT
+  a finding** — on the public-mode layout the operator is not the service user,
+  and that is a fact about the doctor run, the same reason `Validate()` does not
+  stat the roots. **Every cert READER skips to the first CERTIFICATE block**
+  (`decodeCertificatePEM`, shared by `Inspect`, `fingerprintFromPEM` and
+  `InspectSANCoverage`) because `LoadX509KeyPair` does: a key-first or
+  `Bag Attributes` PEM loads at serve time and read as "unreadable" on both
+  doctor lines. `tls-cert-sans` skips on a managed
   bridge (the control plane owns rotation and the tenant reaches it over the
   autocert domain); **expiry does not** — `TestManagedReportsExpiryButNotStaleSANs`
   pins the split, which was prose in a docblock and nothing else. `--fix` does

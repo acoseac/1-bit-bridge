@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -375,7 +376,7 @@ func checkTLSCert(_ context.Context, d Deps) Check {
 	keyExists := fileExists(keyPath)
 	switch {
 	case certExists && keyExists:
-		return tlsCertExpiryCheck(certPath)
+		return tlsCertPairCheck(certPath, keyPath)
 	case !certExists && !keyExists:
 		// Fresh install — init() will mint on first serve.
 		return ok(checkNameTLSCert, "absent (init will mint)")
@@ -389,37 +390,71 @@ func checkTLSCert(_ context.Context, d Deps) Check {
 	}
 }
 
-// tlsCertExpiryCheck grades a present cert pair on remaining validity.
-func tlsCertExpiryCheck(certPath string) Check {
+// tlsCertPairCheck grades a present cert pair: does it LOAD, and how
+// long is it good for.
+//
+// The split between fail and warn here is "can `bridge serve` start":
+// a pair it cannot load is a fail, like the partial-state branch above
+// and for the same reason; an expired or expiring certificate loads
+// fine and serve starts, so it is a warn about the clients.
+func tlsCertPairCheck(certPath, keyPath string) Check {
 	info, err := servertls.Inspect(certPath)
 	if err != nil {
-		// The pair is there and one half will not parse. "present" was
-		// the old answer and it is a confident wrong one: `bridge serve`
-		// fails to load this cert.
-		return warn(checkNameTLSCert, "present but unreadable",
+		// The pair is there and the cert half will not parse. "present"
+		// was the old answer and it is a confident wrong one.
+		return fail(checkNameTLSCert, "present but unreadable",
 			fmt.Sprintf("%s did not parse as a certificate (%v) — `bridge serve` will fail to load it. "+
 				"Remove the cert and key and re-run `bridge init`, or restore them from a backup.", certPath, err))
 	}
-	days := info.DaysUntilExpiry
+	// A certificate that parses says nothing about the key beside it,
+	// and a mismatched pair is reachable: GenerateWithOptions commits
+	// the two files in two renames, and a crash between them leaves a
+	// new cert with the old key — a residual its own docblock records.
+	// Measured on that state, Inspect returns a clean 396-day verdict
+	// while `bridge serve` exits on "private key does not match public
+	// key".
+	if err := servertls.VerifyKeyPair(certPath, keyPath); err != nil && !errors.Is(err, fs.ErrPermission) {
+		return fail(checkNameTLSCert, "present, but the cert and key are not a pair",
+			fmt.Sprintf("`bridge serve` loads both files together and will not start: %v. "+
+				"This is what an interrupted `bridge cert rotate` leaves behind. Re-run `bridge cert rotate` "+
+				"— it re-mints BOTH files — then re-pair every paired device.", err))
+	}
+	// A permission failure on the key is deliberately NOT a finding.
+	// The key is 0600 and owned by the service user; on the public-mode
+	// layout the operator running `bridge doctor` is somebody else, and
+	// the bridge reads it perfectly well. That is a fact about this
+	// doctor run, not about the bridge — the same reason config
+	// `Validate()` does not stat the library roots. Expiry still grades,
+	// because it was read from the cert, which is 0644.
+	//
+	// Remaining validity comes from NotAfter directly, NOT from
+	// DaysUntilExpiry: that count truncates toward zero, so a cert with
+	// 30 days 23 hours left reads as 30 and would trip a
+	// `days*24h <= ExpiryWarningWindow` test while `logIfExpiringSoon`,
+	// which compares `time.Until(NotAfter)`, stays quiet — a 23-hour
+	// window in which doctor and the next `bridge serve` disagree, which
+	// is the one thing this grading exists not to do. The day count is
+	// for the sentence only.
+	remaining := time.Until(info.NotAfter)
 	switch {
-	case days < 0:
-		return warn(checkNameTLSCert, fmt.Sprintf("present, EXPIRED %s", expiryPhrase(days)),
+	case remaining <= 0:
+		return warn(checkNameTLSCert, fmt.Sprintf("present, EXPIRED %s", expiryPhrase(info.DaysUntilExpiry)),
 			"an expired certificate is rejected at the TLS handshake layer before pinning is consulted, so every "+
 				"paired device fails to connect. "+servertls.RotationRemediation)
-	case time.Duration(days)*24*time.Hour <= servertls.ExpiryWarningWindow:
-		return warn(checkNameTLSCert, fmt.Sprintf("present, expires %s", expiryPhrase(days)),
+	case remaining <= servertls.ExpiryWarningWindow:
+		return warn(checkNameTLSCert, fmt.Sprintf("present, expires %s", expiryPhrase(info.DaysUntilExpiry)),
 			"renew before it lapses — an expired certificate is rejected at the TLS handshake layer, so every "+
 				"paired device fails to connect. "+servertls.RotationRemediation)
 	default:
-		return ok(checkNameTLSCert, fmt.Sprintf("present, expires %s", expiryPhrase(days)))
+		return ok(checkNameTLSCert, fmt.Sprintf("present, expires %s", expiryPhrase(info.DaysUntilExpiry)))
 	}
 }
 
 // expiryPhrase renders CertInfo.DaysUntilExpiry as the tail of a
-// sentence. Inspect uses a -1 sentinel for "already past NotAfter" (its
-// day count truncates toward zero, so 23 hours either side of the
-// boundary both land on 0), which is why this reads the sign rather
-// than the magnitude on the expired side.
+// sentence. DISPLAY ONLY — the day count truncates toward zero, so no
+// branch is taken on it; its caller decides from the exact remaining
+// duration. Inspect's -1 sentinel for "already past NotAfter" is why
+// this reads the sign rather than the magnitude on the expired side.
 func expiryPhrase(days int) string {
 	switch {
 	case days < 0:

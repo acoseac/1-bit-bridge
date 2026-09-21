@@ -1,6 +1,7 @@
 package tls
 
 import (
+	cryptotls "crypto/tls"
 	"net"
 	"os"
 	"path/filepath"
@@ -156,4 +157,102 @@ func containsString(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestEveryCertReaderAgreesWithWhatServeLoads — `crypto/tls.
+// LoadX509KeyPair`, the load `bridge serve` performs, walks EVERY PEM
+// block and collects the CERTIFICATE ones, so a file whose first block
+// is a key or an openssl `Bag Attributes` preamble loads fine. The
+// read-side surfaces here decoded only the first block and answered "no
+// CERTIFICATE block in PEM" for the same file — so `bridge doctor`
+// called a certificate the bridge is happily serving unreadable, on
+// both of its cert lines.
+//
+// The property is agreement, not any one function's behaviour: doctor
+// prints an expiry line and a SAN line about ONE certificate, and one
+// of them grading it while the other calls it unreadable would be worse
+// than either answer alone.
+func TestEveryCertReaderAgreesWithWhatServeLoads(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := DefaultPaths(dir)
+	opts := GenerateOptions{Hostname: "nuc", ExtraDNSNames: []string{"nuc.example.test"}}
+	if err := GenerateWithOptions(certPath, keyPath, opts); err != nil {
+		t.Fatal(err)
+	}
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A cert file carrying the key first, then a metadata preamble —
+	// both shapes real PKI tooling emits.
+	mixed := filepath.Join(dir, "keyfirst.crt")
+	body := append([]byte("Bag Attributes\n    friendlyName: bridge\n"), keyPEM...)
+	if err := os.WriteFile(mixed, append(body, certPEM...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The reference: what serve does with it.
+	if _, err := cryptotls.LoadX509KeyPair(mixed, keyPath); err != nil {
+		t.Skipf("crypto/tls itself rejects this shape (%v) — the premise is gone, not the code", err)
+	}
+
+	if _, err := Inspect(mixed); err != nil {
+		t.Errorf("Inspect: %v — serve loads this file", err)
+	}
+	cov, err := InspectSANCoverage(mixed, opts)
+	if err != nil {
+		t.Fatalf("InspectSANCoverage: %v — serve loads this file", err)
+	}
+	if !cov.Covered() {
+		t.Errorf("read the wrong block: missing %v / %v", cov.MissingDNS, cov.MissingIPStrings())
+	}
+	if _, err := fingerprintFromPEM(mixed); err != nil {
+		t.Errorf("fingerprintFromPEM: %v — serve loads this file", err)
+	}
+
+	// NEGATIVE CONTROL: a file with no CERTIFICATE block at all is still
+	// an error. Skipping past non-cert blocks must not become skipping
+	// past the absence of one.
+	keyOnly := filepath.Join(dir, "keyonly.crt")
+	if err := os.WriteFile(keyOnly, keyPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Inspect(keyOnly); err == nil {
+		t.Error("Inspect accepted a file holding no certificate")
+	}
+	if _, err := InspectSANCoverage(keyOnly, opts); err == nil {
+		t.Error("InspectSANCoverage accepted a file holding no certificate")
+	}
+}
+
+// TestVerifyKeyPairIsServesOwnAnswer — the doctor's pair check has to be
+// the load `bridge serve` performs, not a second opinion about it. The
+// mismatched arm is the residual GenerateWithOptions documents: it
+// commits cert and key in two renames, and a crash between them leaves
+// a new cert with the old key.
+func TestVerifyKeyPairIsServesOwnAnswer(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	aCert, aKey := DefaultPaths(a)
+	bCert, bKey := DefaultPaths(b)
+	for _, d := range []struct{ c, k string }{{aCert, aKey}, {bCert, bKey}} {
+		if err := GenerateWithOptions(d.c, d.k, GenerateOptions{Hostname: "h"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := VerifyKeyPair(aCert, aKey); err != nil {
+		t.Errorf("a real pair: %v", err)
+	}
+	if err := VerifyKeyPair(aCert, bKey); err == nil {
+		t.Error("a cert and another install's key verified as a pair")
+	}
+	// And the cert half alone still parses clean, which is exactly why
+	// reading it was not enough.
+	if _, err := Inspect(aCert); err != nil {
+		t.Errorf("Inspect on the mismatched pair's cert: %v", err)
+	}
 }

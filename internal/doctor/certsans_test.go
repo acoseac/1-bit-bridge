@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -84,8 +85,14 @@ func TestCheckTLSCertSANs_StaleCertWarnsWithTheExactMissingSet(t *testing.T) {
 		t.Errorf("hint does not carry the shared remediation: %q", c.Hint)
 	}
 	// The summary counts rather than lists, and says which way it went.
-	if !strings.Contains(c.Summary, "stale") {
-		t.Errorf("summary = %q, want it to say the cert is stale", c.Summary)
+	// The COUNTS are pinned because the README's worked example got them
+	// by hand and got the denominator wrong: the wanted name set is the
+	// MERGED one, so `localhost` is in the total even though the cert
+	// carries it. Three of four names, three of six addresses.
+	for _, want := range []string{"stale", "3 of 4 name(s)", "3 of 6 address(es)"} {
+		if !strings.Contains(c.Summary, want) {
+			t.Errorf("summary = %q, want it to contain %q", c.Summary, want)
+		}
 	}
 }
 
@@ -243,7 +250,7 @@ func TestCheckTLSCert_ExpiryGrading(t *testing.T) {
 
 // TestCheckTLSCert_UnreadableCertIsNotPresent — "present" was the old
 // answer for any pair of files that existed. `bridge serve` fails to
-// load this one.
+// load this one, which is the fail side of the split.
 func TestCheckTLSCert_UnreadableCertIsNotPresent(t *testing.T) {
 	d := certFixture(t, newHostEndpoints, newHostEndpoints)
 	certPath, _ := servertls.DefaultPaths(d.DataDir)
@@ -251,19 +258,127 @@ func TestCheckTLSCert_UnreadableCertIsNotPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := checkTLSCert(t.Context(), d)
-	if c.Status != Warn || !strings.Contains(c.Summary, "unreadable") {
-		t.Errorf("status = %q, summary = %q; want warn about an unreadable cert", c.Status, c.Summary)
+	if c.Status != Fail || !strings.Contains(c.Summary, "unreadable") {
+		t.Errorf("status = %q, summary = %q; want fail about an unreadable cert", c.Status, c.Summary)
 	}
 }
 
-// writeCertWithNotAfter replaces the cert at path with a self-signed
-// one expiring at `notAfter`.
+// TestCheckTLSCert_MismatchedPairFails — a certificate that parses says
+// nothing about the key beside it. This is the residual state
+// GenerateWithOptions' own docblock records: it commits the two files
+// in two renames, and a crash between them leaves a new cert with the
+// old key. Before this, doctor read the cert alone and answered
+// `present, expires in 396 days` about a bridge that exits on startup.
+func TestCheckTLSCert_MismatchedPairFails(t *testing.T) {
+	d := certFixture(t, newHostEndpoints, newHostEndpoints)
+	_, keyPath := servertls.DefaultPaths(d.DataDir)
+	// Another install's key — same shape, wrong key.
+	other := certFixture(t, newHostEndpoints, newHostEndpoints)
+	_, otherKey := servertls.DefaultPaths(other.DataDir)
+	raw, err := os.ReadFile(otherKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := checkTLSCert(t.Context(), d)
+	if c.Status != Fail {
+		t.Fatalf("status = %q, want fail (%q)", c.Status, c.Summary)
+	}
+	if !strings.Contains(c.Summary, "not a pair") {
+		t.Errorf("summary = %q, want it to name the mismatch", c.Summary)
+	}
+	// The recovery has to be the command that re-mints BOTH files;
+	// `bridge cert rotate` reads the old cert only best-effort, so it
+	// still works on a pair that will not load.
+	if !strings.Contains(c.Hint, "bridge cert rotate") {
+		t.Errorf("hint does not name the recovery: %q", c.Hint)
+	}
+
+	// NEGATIVE CONTROL: the untouched fixture is a real pair and passes.
+	if c := checkTLSCert(t.Context(), other); c.Status != OK {
+		t.Errorf("a matched pair = %q, want ok (%q)", c.Status, c.Summary)
+	}
+}
+
+// TestCheckTLSCert_AnUnreadableKeyIsNotAFinding — the key is 0600 and
+// owned by the service user. On the public-mode layout the operator
+// running `bridge doctor` is somebody else, and the bridge reads it
+// perfectly well; failing there would be a preflight that fails on
+// every such host, and `bridge init` bails on a fail. Expiry still
+// grades, because it comes from the 0644 cert.
+func TestCheckTLSCert_AnUnreadableKeyIsNotAFinding(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not deny reads on Windows")
+	}
+	d := certFixture(t, newHostEndpoints, newHostEndpoints)
+	_, keyPath := servertls.DefaultPaths(d.DataDir)
+	if err := os.Chmod(keyPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(keyPath, 0o600) })
+	// Root ignores the mode, so the fixture would not reproduce the
+	// state and the assertion would pass for the wrong reason.
+	if _, err := os.ReadFile(keyPath); err == nil {
+		t.Skip("this user can read a 0000 file (root?) — the fixture cannot reproduce the state")
+	}
+
+	c := checkTLSCert(t.Context(), d)
+	if c.Status != OK {
+		t.Errorf("status = %q, want ok — an unreadable key is a fact about this run, not the bridge (%q / %q)",
+			c.Status, c.Summary, c.Hint)
+	}
+	if !strings.Contains(c.Summary, "expires in") {
+		t.Errorf("summary = %q, want expiry still graded from the cert", c.Summary)
+	}
+}
+
+// TestCheckTLSCert_WarningBoundaryIsTheExactRemainingDuration —
+// DaysUntilExpiry truncates toward zero, so a certificate with 30 days
+// and 23 hours left reads as 30. Grading on `days*24h <=
+// ExpiryWarningWindow` would warn here while `logIfExpiringSoon`, which
+// compares time.Until(NotAfter), stays quiet: a 23-hour window in which
+// the doctor and the next `bridge serve` disagree, which is the one
+// thing this grading exists not to do.
+func TestCheckTLSCert_WarningBoundaryIsTheExactRemainingDuration(t *testing.T) {
+	d := certFixture(t, newHostEndpoints, newHostEndpoints)
+	certPath, _ := servertls.DefaultPaths(d.DataDir)
+	notAfter := time.Now().Add(servertls.ExpiryWarningWindow + 23*time.Hour)
+	writeCertWithNotAfter(t, certPath, notAfter)
+
+	// The fixture has to be a value the two forms disagree about, or the
+	// test pins nothing.
+	info, err := servertls.Inspect(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := time.Duration(info.DaysUntilExpiry) * 24 * time.Hour; got > servertls.ExpiryWarningWindow {
+		t.Fatalf("fixture does not reproduce the disagreement: truncated to %v, window %v",
+			got, servertls.ExpiryWarningWindow)
+	}
+
+	if c := checkTLSCert(t.Context(), d); c.Status != OK {
+		t.Errorf("status = %q, want ok — %v remains, past the %v window (%q)",
+			c.Status, time.Until(notAfter).Round(time.Hour), servertls.ExpiryWarningWindow, c.Summary)
+	}
+}
+
+// writeCertWithNotAfter replaces the cert at path — AND the key beside
+// it — with a self-signed pair expiring at `notAfter`.
 //
 // Minted here rather than through servertls.GenerateWithOptions because
 // that path hard-codes 397 days (Apple ATS's ceiling), which is exactly
 // the constant that makes the near-expiry and expired bands
-// unreachable through the production minter. The key on disk is left
-// alone: nothing in these checks loads the pair, only parses the cert.
+// unreachable through the production minter.
+//
+// It writes the KEY too, and that is not incidental: an earlier version
+// left the fixture's original key in place, which made every expiry
+// fixture a MISMATCHED pair. The pair check caught it the moment it
+// landed — which is the check working, but it also means a helper that
+// only rewrites the cert silently tests a different state than the one
+// its caller named.
 func writeCertWithNotAfter(t *testing.T, path string, notAfter time.Time) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -283,6 +398,15 @@ func writeCertWithNotAfter(t *testing.T, path string, notAfter time.Time) {
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	if err := os.WriteFile(path, pemBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".key"
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(
+		&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

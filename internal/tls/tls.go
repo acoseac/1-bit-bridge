@@ -332,9 +332,9 @@ func Inspect(certPath string) (CertInfo, error) {
 	if err != nil {
 		return CertInfo{}, err
 	}
-	block, _ := pem.Decode(raw)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return CertInfo{}, errors.New("no CERTIFICATE block in PEM")
+	block, err := decodeCertificatePEM(raw)
+	if err != nil {
+		return CertInfo{}, err
 	}
 	parsed, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
@@ -521,6 +521,58 @@ func stagePEM(path, blockType string, der []byte, mode os.FileMode) (tmpName str
 	return name, nil
 }
 
+// decodeCertificatePEM returns the first CERTIFICATE block in a PEM
+// file, SKIPPING any other block type ahead of it.
+//
+// It has to skip, because `crypto/tls.LoadX509KeyPair` — the load
+// `bridge serve` actually performs — does: its X509KeyPair loop walks
+// every block and collects only the CERTIFICATE ones. A file whose
+// first block is a key, or an openssl `Bag Attributes` preamble,
+// therefore loads FINE at serve time, while a bare `pem.Decode` of the
+// first block answers "no CERTIFICATE block" — so every read-side
+// surface here called a certificate the bridge is happily serving
+// unreadable. Measured on one key-first file: LoadX509KeyPair nil,
+// Inspect and InspectSANCoverage both erroring.
+//
+// All three readers share it so they cannot disagree about the same
+// file: `bridge doctor` prints an expiry line and a SAN line for one
+// certificate, and one of them calling it unreadable while the other
+// grades it would be worse than either answer alone.
+func decodeCertificatePEM(raw []byte) (*pem.Block, error) {
+	for {
+		var block *pem.Block
+		block, raw = pem.Decode(raw)
+		if block == nil {
+			return nil, errors.New("no CERTIFICATE block in PEM")
+		}
+		if block.Type == "CERTIFICATE" {
+			return block, nil
+		}
+	}
+}
+
+// VerifyKeyPair reports whether the cert and key at these paths load as
+// a pair — the SAME `crypto/tls.LoadX509KeyPair` call `bridge serve`
+// makes, so a caller gets serve's own answer rather than a second
+// opinion about it.
+//
+// It exists for `bridge doctor`: a certificate that parses on its own
+// says nothing about the key beside it, and a MISMATCHED pair is a
+// state this package documents as reachable — GenerateWithOptions
+// commits cert and key in two renames, and a crash between them leaves
+// a new cert with the old key (see the two-rename residual in
+// GenerateWithOptions). Measured on exactly that state: Inspect returns
+// a clean 396-day verdict while LoadX509KeyPair returns "tls: private
+// key does not match public key" and the bridge does not start.
+//
+// Read-only. The returned error is LoadX509KeyPair's, unwrapped, so a
+// caller can tell a permission failure (`fs.ErrPermission` — a reader
+// who is not the service user) from a real mismatch.
+func VerifyKeyPair(certPath, keyPath string) error {
+	_, err := cryptotls.LoadX509KeyPair(certPath, keyPath)
+	return err
+}
+
 // fingerprintFromPEM reads the PEM-encoded cert file and returns its SHA-256
 // fingerprint. Helper for the LoadOrGenerate path that already has a file
 // handy; callers with a parsed cert should use FingerprintFromDER.
@@ -529,9 +581,9 @@ func fingerprintFromPEM(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	block, _ := pem.Decode(raw)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return "", errors.New("no CERTIFICATE block in PEM")
+	block, err := decodeCertificatePEM(raw)
+	if err != nil {
+		return "", err
 	}
 	return FingerprintFromDER(block.Bytes), nil
 }
