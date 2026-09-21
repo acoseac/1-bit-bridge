@@ -151,13 +151,18 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	stdout, stderr := &safeBuffer{}, &safeBuffer{}
 	done := make(chan int, 1)
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		// No --config: the whole point.
 		done <- run(ctx, []string{"serve", "--addr", "127.0.0.1:0"}, stdout, stderr)
 	}()
+	// Before the first t.Fatalf below, and after isolateConfigEnv's
+	// t.TempDir: this test has several failure paths of its own, and
+	// waitForAdminReady can consume `done` on one of them.
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	// The startup banner means the API listener is up. It says NOTHING
 	// about the admin console, and the two are independent: runServe
 	// spawns `adminSrv.Serve(adminCtx)` on its OWN goroutine and then
@@ -245,16 +250,6 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 			"an absolute, resolved path. backup.Snapshot skips a source that is empty "+
 			"OR that os.Stat cannot find, both silently, so the config goes missing "+
 			"from every snapshot with no error anywhere.\nresponse: %s", backupBody)
-	}
-
-	cancel()
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Errorf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
-		}
-	case <-time.After(shutdownGrace + 5*time.Second):
-		t.Fatalf("serve did not shut down within grace window; stderr=%s", stderr.String())
 	}
 }
 
