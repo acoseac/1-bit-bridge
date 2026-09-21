@@ -7891,3 +7891,55 @@ the fixture's original key in place, so every expiry fixture was a mismatched
 pair — which the new check immediately failed. The helper writes both halves
 now. A fixture that only rewrites one half of a pair silently tests a
 different state than the one its caller named.
+
+### Review round 2 on #950 — the near end of the validity window
+
+One finding, real, and its second half was the sharper one.
+
+**`tlsCertPairCheck` graded only `NotAfter`.** `LoadX509KeyPair` does not look
+at dates, so the pair check passes and the expiry arm reports a comfortable
+year of life left while no client will accept the certificate for another
+month — clients reject a not-yet-valid cert exactly as they reject an expired
+one. Reachable on this product's hardware rather than theoretical: the mint
+sets `NotBefore: time.Now().Add(-time.Hour)`, one hour of skew allowance, so a
+host whose clock was further ahead than that when the cert was minted — a NUC
+or Pi with no RTC, before NTP lands — leaves a future `NotBefore` once the
+clock is corrected. Moving the data directory off such a host is this check's
+own subject.
+
+Warn, not fail, per the split settled in round 1: serve loads it and starts.
+Both ends now read one captured `now`, so the two comparisons cannot straddle
+a tick. `logIfExpiringSoon` graded the same window and checked the same half,
+so it gets the arm too — leaving serve silent about a cert every client
+rejects would be a gap to write up rather than a decision.
+
+**The hint is not the usual one, deliberately.** Every other band here ends in
+`RotationRemediation`; this one leads with CHECK THE CLOCK FIRST
+(`timedatectl` / `sntp -sS`), because a rotation against a wrong clock mints
+another bad certificate. `TestCheckTLSCert_NotYetValidWarns` asserts that
+wording, not just the status.
+
+**And the fixtures were already in that state.** `writeCertWithNotAfter`
+derived `NotBefore: notAfter.Add(-24h)`, so measured against `time.Now()`:
+
+```
+expiring soon    NotBefore = now+648.0h  → valid yet? false
+boundary 30d23h  NotBefore = now+719.0h  → valid yet? false
+expired          NotBefore = now-72.0h   → valid yet? true
+```
+
+Two of the three expiry fixtures described certificates that would not be
+valid for another 27–30 days, and
+`TestCheckTLSCert_WarningBoundaryIsTheExactRemainingDuration` asserted `ok`
+about one of them. The helper pins `NotBefore` to the past now; callers that
+want a future one say so through `writeCertWithWindow`; and
+`TestExpiryFixturesAreInsideTheirValidityWindow` pins the HELPER rather than
+each caller, because the next fixture added will go through it too. The
+negative control reverting the derivation turns three tests red with
+`present, NOT YET VALID (starts 2026-10-18T…)` — the pre-fix state named
+explicitly.
+
+The generalisable rule, which is the second time this PR has paid for it (the
+round-1 mismatched-key helper was the first): **a fixture has to be broken in
+exactly the way its caller names and in no other way**, or a green test is
+about a state nobody chose.

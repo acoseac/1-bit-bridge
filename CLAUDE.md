@@ -1946,8 +1946,14 @@ its twin.** The top list is older, shorter, and read first.
   `bridge serve` start"**: a pair it cannot LOAD fails (partial, unparseable, or
   mismatched — `VerifyKeyPair` is `LoadX509KeyPair`, serve's own call, and an
   interrupted two-rename rotate leaves a new cert with the old key, which
-  `Inspect` grades as a clean 396 days); an expiring or expired cert loads, so
-  it warns about the clients. **A permission failure reading the 0600 key is NOT
+  `Inspect` grades as a clean 396 days); an expiring, expired or NOT-YET-VALID
+  cert loads, so it warns about the clients. **The validity window has a near
+  end** — `LoadX509KeyPair` ignores dates, and the mint allows one hour of skew
+  (`NotBefore: now-1h`), so a host whose clock was further ahead at mint time (a
+  NUC or Pi with no RTC, pre-NTP) leaves a future `NotBefore` that reads as a
+  comfortable year of life left; `logIfExpiringSoon` carries the same arm, and
+  the hint says CHECK THE CLOCK FIRST because rotating against a wrong clock
+  mints another bad cert. **A permission failure reading the 0600 key is NOT
   a finding** — on the public-mode layout the operator is not the service user,
   and that is a fact about the doctor run, the same reason `Validate()` does not
   stat the roots. **Every cert READER skips to the first CERTIFICATE block**
