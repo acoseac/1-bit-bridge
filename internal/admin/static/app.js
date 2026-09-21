@@ -5634,9 +5634,14 @@ function renderUnreadableTracks(data) {
     // Two populations with different meanings, and the sentence says which
     // is which: a file still being retried is not yet a file to go and
     // replace.
-    const stopped = suppressed > 0
-      ? `${suppressed} of them failed ${threshold} times running and are no longer retried.`
-      : `None has yet failed ${threshold} times running, so all are still being retried.`;
+    let stopped;
+    if (suppressed === 0) {
+      stopped = `None has failed ${threshold} times yet, so all are still being retried.`;
+    } else if (suppressed === 1) {
+      stopped = `One failed ${threshold} times running and is no longer retried.`;
+    } else {
+      stopped = `${suppressed} of them failed ${threshold} times running and are no longer retried.`;
+    }
     hint.textContent =
       `${tracks.length} track${tracks.length === 1 ? "" : "s"} the decoder could not read. ` +
       `${stopped} Replacing a file re-opens it automatically — nothing to click. ` +
