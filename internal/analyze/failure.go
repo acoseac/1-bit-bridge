@@ -57,19 +57,25 @@ import (
 //     under load.
 //
 // A non-zero exit can also mean "could not open the input" — a dropped
-// mount, a permission change. Three things keep that from being
-// recorded as permanent, and they are why this sentinel does not have
-// to be narrower than the decoder's own verdict:
+// mount, a permission change — and this sentinel does not try to be
+// narrower than the decoder's own verdict. Three things bound the cost:
 //
-//  1. A file the bridge cannot stat never reaches a decoder at all.
+//  1. A file the bridge cannot STAT never reaches a decoder at all.
 //     `collectAnalysisCandidates` calls `ResolveChecked` first, and an
 //     unresolvable path lands in `res.missing` without being enqueued —
-//     so a vanished mount produces no strikes, not wrong ones.
+//     so a vanished mount produces no strikes, not wrong ones. What is
+//     left is the narrow case of a file that stats and will not open.
 //  2. Suppression takes `manifest.analysisFailureThreshold` CONSECUTIVE
-//     strikes against the same file version, on separate sweeps.
-//  3. A strike is keyed on (size, mtime_ns) and TTL'd, so repairing the
-//     file re-opens it with no operator action and a toolchain upgrade
-//     gets a fresh try on its own.
+//     strikes against the same file version, on separate sweeps, so a
+//     brief fault has to persist across all of them.
+//  3. The operator is TOLD. The console's unreadable list carries the
+//     decoder's own message, so "Permission denied" reads as itself.
+//
+// Be precise about what re-opens a suppressed file, because the two
+// cases differ. A REPAIRED file changes (size, mtime_ns) and the version
+// gate re-offers it with no operator action. A CHMOD changes neither, so
+// that one waits for the TTL or takes the explicit route —
+// `bridge analyze --retry-failed`, or the list's Retry button.
 var ErrSourceUnreadable = errors.New("source unreadable")
 
 // markUnreadable tags err as ErrSourceUnreadable WITHOUT changing what
