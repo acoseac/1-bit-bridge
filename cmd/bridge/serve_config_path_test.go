@@ -151,13 +151,27 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	stdout, stderr := &safeBuffer{}, &safeBuffer{}
 	done := make(chan int, 1)
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		// No --config: the whole point.
 		done <- run(ctx, []string{"serve", "--addr", "127.0.0.1:0"}, stdout, stderr)
 	}()
+	// Created HERE, before the drain is registered, though it is not used
+	// until the chdir further down. Cleanups run LIFO, so a t.TempDir
+	// taken after the drain is registered has its removal run BEFORE the
+	// drain — and this is the directory the process is chdir'd into, which
+	// Windows will not remove while it is a working directory. Taking it
+	// first puts the order back the way this whole change is about: the
+	// working directory is restored, then serve is drained, then every
+	// directory is removed. (CodeRabbit, PR #944.)
+	scratch := t.TempDir()
+	// Before the first t.Fatalf below, and after isolateConfigEnv's
+	// t.TempDir: this test has several failure paths of its own, and
+	// waitForAdminReady can consume `done` on one of them.
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	// The startup banner means the API listener is up. It says NOTHING
 	// about the admin console, and the two are independent: runServe
 	// spawns `adminSrv.Serve(adminCtx)` on its OWN goroutine and then
@@ -189,9 +203,9 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 	// This is not a contrived stress: the installed service units set
 	// WorkingDirectory to the DATA dir, and the backup ticker's first
 	// snapshot can fire 24h after boot.
-	if err := os.Chdir(t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
+	// chdir, not a bare os.Chdir: the helper registers the restore, so the
+	// process leaves `scratch` before anything tries to remove it.
+	chdir(t, scratch)
 
 	adminBase := fmt.Sprintf("http://127.0.0.1:%d", adminPort)
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -245,16 +259,6 @@ func TestServeWiresResolvedConfigPathIntoAdminAndBackups(t *testing.T) {
 			"an absolute, resolved path. backup.Snapshot skips a source that is empty "+
 			"OR that os.Stat cannot find, both silently, so the config goes missing "+
 			"from every snapshot with no error anywhere.\nresponse: %s", backupBody)
-	}
-
-	cancel()
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Errorf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
-		}
-	case <-time.After(shutdownGrace + 5*time.Second):
-		t.Fatalf("serve did not shut down within grace window; stderr=%s", stderr.String())
 	}
 }
 

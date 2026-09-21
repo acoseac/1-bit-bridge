@@ -124,21 +124,24 @@ func TestUnknownSubcommandReturns2(t *testing.T) {
 // TestServeStartsAndServesHealth is the real end-to-end: spin up `serve` on
 // an ephemeral port in a goroutine, poll /v1/health over TLS with a
 // fingerprint-capturing client, then cancel the context and verify clean
-// shutdown with exit code 0.
+// shutdown with exit code 0 — that last half from a t.Cleanup, so it still
+// runs when an assertion above it fails (see drainServeOnCleanup).
 func TestServeStartsAndServesHealth(t *testing.T) {
 	cfgPath := writeValidConfig(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Use concurrency-safe buffers — the test goroutine reads them while
 	// serveCmd runs in its own goroutine writing to the same streams.
 	stdout := &safeBuffer{}
 	stderr := &safeBuffer{}
 	done := make(chan int, 1)
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		done <- run(ctx, []string{"serve", "--config", cfgPath, "--addr", "127.0.0.1:0"}, stdout, stderr)
 	}()
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
 
 	// 30s, not 5s: startup mints a TLS keypair, runs the migration
 	// ladder, and kicks a scan before the banner prints, and on a loaded
@@ -182,17 +185,6 @@ func TestServeStartsAndServesHealth(t *testing.T) {
 	}
 	if peerFP != fingerprint {
 		t.Errorf("peer fingerprint = %q, want %q", peerFP, fingerprint)
-	}
-
-	// Cancel → serve should exit cleanly with code 0.
-	cancel()
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Errorf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
-		}
-	case <-time.After(shutdownGrace + 2*time.Second):
-		t.Fatalf("serve did not shut down within grace window; stderr=%s", stderr.String())
 	}
 }
 

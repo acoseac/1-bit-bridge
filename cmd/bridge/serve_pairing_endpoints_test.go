@@ -64,27 +64,11 @@ func TestServeBakesHealthEndpointsIntoThePairingQR(t *testing.T) {
 		done <- run(ctx, []string{"serve", "--config", cfgPath,
 			"--addr", fmt.Sprintf("127.0.0.1:%d", apiPort)}, stdout, stderr)
 	}()
-	// Shutdown is a cleanup, not a tail: a t.Fatalf anywhere below would
-	// otherwise leave serve running while t.TempDir's own cleanup (registered
-	// earlier, so it runs later) removes the data dir under it. `exited` is a
-	// closed channel so the wait holds on every path, including the one where
-	// waitForAdminReady already consumed the exit code from `done`.
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-exited:
-		case <-time.After(shutdownGrace + 5*time.Second):
-			t.Errorf("serve did not shut down within grace window; stderr=%s", stderr.String())
-			return
-		}
-		select {
-		case code := <-done:
-			if code != 0 {
-				t.Errorf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
-			}
-		default: // already read by a failure path that reported it
-		}
-	})
+	// Shutdown is a cleanup, not a tail — the reasoning, and why `exited`
+	// rather than `done`, is in drainServeOnCleanup. This test is where
+	// that shape was first written; it reads the shared one now so the
+	// three boot tests cannot drift apart again.
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	addr, _ := waitForListening(t, stdout, 30*time.Second)
 	waitForAdminReady(t, fmt.Sprintf("127.0.0.1:%d", adminPort), done, stderr)
 
