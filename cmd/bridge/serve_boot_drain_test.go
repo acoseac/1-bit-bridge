@@ -42,6 +42,21 @@ import (
 // this helper exists to sequence itself against.
 func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan struct{}, done <-chan int, stderr *safeBuffer) {
 	t.Helper()
+	// Refuse at the CALL SITE rather than inside the cleanup. The closure
+	// calls `cancel` and reports with `stderr`, and a nil-dereference
+	// raised from a cleanup surfaces as a stack trace laid over whatever
+	// the test was really failing for — which is the diagnostic problem,
+	// not the nil itself. Tolerating a nil stderr is the other wrong
+	// answer: it is the ONLY diagnostic either branch below has, so an
+	// empty `stderr=` would quietly remove the reason the grace window was
+	// worth reporting. Unreachable from the three current callers, which
+	// all pass the &safeBuffer{} they also hand to run, and the sweep test
+	// means a new boot test arrives through here too. Both are checked, not
+	// just the one that was raised. (Gemini, PR #944.)
+	if cancel == nil || stderr == nil {
+		t.Fatal("drainServeOnCleanup: cancel and a stderr buffer are both required — " +
+			"the cleanup calls the one and reports with the other")
+	}
 	t.Cleanup(func() {
 		cancel()
 		select {
