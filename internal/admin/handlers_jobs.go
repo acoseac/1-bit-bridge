@@ -69,6 +69,12 @@ type jobsAnalysisCoverage struct {
 	Stale            int `json:"stale,omitempty"`
 	DSDExcluded      int `json:"dsdExcluded"`
 	ZeroByteExcluded int `json:"zeroByteExcluded"`
+	// UnreadableExcluded: sources the decoders refused enough consecutive
+	// times to stop being offered. Subtracted from Eligible like the other
+	// two exclusions, so the bar can reach 100% on a library that holds a
+	// few broken files — a remainder that never drains reads as a stuck job
+	// and is what sent an operator to the journal in the first place.
+	UnreadableExcluded int `json:"unreadableExcluded"`
 }
 
 // jobsAnalysis — the audio-analysis card. Sweep/Coverage omitted when
@@ -387,6 +393,21 @@ func (s *Server) getLastBackupAt(ctx context.Context) *time.Time {
 //
 // A snapshot taken by the SCHEDULER is deliberately not hooked: nobody is
 // watching for it, so TTL-bounded staleness is fine.
+// invalidateAnalysisCoverage drops the TTL-cached coverage snapshot so the
+// next /api/jobs poll rebuilds it. Called by anything that changes what the
+// snapshot counts — today, clearing the analysis-failure markers.
+func (s *Server) invalidateAnalysisCoverage() {
+	s.analysisCoverageMu.Lock()
+	s.analysisCoverage = nil
+	s.analysisCoverageAt = time.Time{}
+	// Bumping the generation is what makes this stick against a query that
+	// is ALREADY RUNNING. Clearing the two fields alone is not enough: the
+	// in-flight reader holds pre-clear numbers and would publish them a
+	// moment later with a fresh timestamp.
+	s.analysisCoverageGen++
+	s.analysisCoverageMu.Unlock()
+}
+
 func (s *Server) invalidateLastBackup() {
 	s.lastBackupMu.Lock()
 	s.lastBackupAt = time.Time{}
@@ -415,6 +436,12 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 			s.analysisCoverageMu.Unlock()
 			return snap, nil
 		}
+		// Captured BEFORE the query, compared after. The query runs outside
+		// the mutex, so a clear landing while it is in flight would otherwise
+		// see its own invalidation overwritten by the pre-clear numbers this
+		// call is already holding — with a fresh timestamp, so the stale
+		// answer would then be served for a full TTL.
+		gen := s.analysisCoverageGen
 		s.analysisCoverageMu.Unlock()
 		// Detached from the request ctx: the result is shared by every
 		// queued caller, so one client's hang-up must not synthesize a
@@ -436,13 +463,24 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 			return snap, nil
 		}
 		snap := &jobsAnalysisCoverage{
-			Eligible:         cov.TotalLocal - cov.DSDExcluded - cov.ZeroByteExcluded,
-			Analysed:         cov.AnalysedFresh,
-			Stale:            cov.AnalysedStale,
-			DSDExcluded:      cov.DSDExcluded,
-			ZeroByteExcluded: cov.ZeroByteExcluded,
+			Eligible: cov.TotalLocal - cov.DSDExcluded - cov.ZeroByteExcluded -
+				cov.UnreadableExcluded,
+			Analysed:           cov.AnalysedFresh,
+			Stale:              cov.AnalysedStale,
+			DSDExcluded:        cov.DSDExcluded,
+			ZeroByteExcluded:   cov.ZeroByteExcluded,
+			UnreadableExcluded: cov.UnreadableExcluded,
 		}
 		s.analysisCoverageMu.Lock()
+		if s.analysisCoverageGen != gen {
+			// Invalidated while this query was in flight: the numbers
+			// describe a library that no longer exists. Return them to THIS
+			// caller — they were true when read, and a nil would blank the
+			// tile — but do not publish them, so the next poll recomputes
+			// rather than serving them for a TTL.
+			s.analysisCoverageMu.Unlock()
+			return snap, nil
+		}
 		s.analysisCoverage = snap
 		s.analysisCoverageAt = time.Now()
 		s.analysisCoverageMu.Unlock()

@@ -36,6 +36,7 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	filter := fs.String("filter", "", "case-sensitive substring filter on track path (empty = all)")
 	dryRun := fs.Bool("dry-run", false, "list how many tracks would be analyzed without doing it")
 	force := fs.Bool("force", false, "re-analyze even if a fresh sidecar already exists")
+	retryFailed := fs.Bool("retry-failed", false, "clear recorded decode failures (honours --filter) so sources the decoder refused are offered again, then analyze")
 	gc := fs.Bool("gc", false, "remove orphan waveform sidecars (files with no DB row); skips analysis")
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no analysis row references any waveform (the library really was emptied); refused by default, because an empty catalog makes every file on disk look like an orphan")
 	allowMassOrphans := fs.Bool("allow-mass-orphans", false, "with --gc: unlink waveform files no row references even when there are more of them than the catalog has rows in total (the files really are junk); refused by default, because that shape is a catalog that lost its index")
@@ -75,6 +76,11 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if workerCount <= 0 {
 		workerCount = cfg.Analysis.EffectiveWorkers()
 	}
+	if *retryFailed {
+		if code := runAnalyzeRetryFailed(ctx, stdout, stderr, store, *filter, *dryRun); code != 0 {
+			return code
+		}
+	}
 	return runAnalyzeBatch(ctx, stdout, stderr, store, resolver, analyzeBatchParams{
 		outputDir: outputDir,
 		workers:   workerCount,
@@ -83,6 +89,84 @@ func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		dryRun:    *dryRun,
 		force:     *force,
 	})
+}
+
+// runAnalyzeRetryFailed clears the analysis-failure debounce so refused
+// sources are offered to the walk again. Runs BEFORE the walk in the same
+// invocation, so `bridge analyze --retry-failed` both re-opens and retries.
+//
+// Under --dry-run it COUNTS and clears nothing. A dry run that quietly
+// re-opened 30 suppressed sources would be the one thing a dry run must not
+// do, and refusing the combination outright would make the operator run the
+// destructive form to find out how much it would touch.
+//
+// Honours --filter EXACTLY, which is why it goes through the explicit-path
+// form rather than a prefix range: --filter is a case-sensitive SUBSTRING
+// match, and no byte range expresses that. The paths come from the recorded
+// set, so the substring is applied to the same spelling the walk applies it
+// to.
+//
+// An empty scope is the whole library and says so — that is the operator
+// typing `bridge analyze --retry-failed` with no filter, which is the
+// documented way to re-open everything. A filter matching nothing clears
+// nothing, and the two cases are different functions in the store so they
+// cannot be reached by the same argument.
+func runAnalyzeRetryFailed(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, filter string, dryRun bool) int {
+	scope := "whole library"
+	if filter != "" {
+		scope = fmt.Sprintf("matching %q", filter)
+	}
+	// The listing is needed for the dry run either way, and for the filtered
+	// clear it is what turns a substring into the explicit path set.
+	rows, err := store.ListUnreadableTracksForAdmin(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "list recorded decode failures: %v\n", err)
+		return 1
+	}
+	var paths []string
+	for _, r := range rows {
+		if filter == "" || strings.Contains(r.Path, filter) {
+			paths = append(paths, r.Path)
+		}
+	}
+	if dryRun {
+		fmt.Fprintf(stdout, "analyze: would clear %d recorded decode failure(s) (%s)\n", len(paths), scope)
+		for _, p := range paths {
+			fmt.Fprintf(stdout, "  %s\n", p)
+		}
+		// Say which library the summary below describes. Nothing was cleared,
+		// so the walk still applies these suppressions and its `to analyze`
+		// count excludes the very paths just listed — accurate about the
+		// library as it stands, and easy to read as a prediction of the real
+		// run if nobody says otherwise. Threading a bypass set into
+		// collectAnalysisCandidates would make the number predictive, at the
+		// cost of a new parameter on the function the CLI and the serve-side
+		// sweeper share — and that function's whole job is that the two
+		// cannot drift on what "needs analysis" means. A sentence is the
+		// cheaper honest answer. (CodeRabbit on #947.)
+		if len(paths) > 0 {
+			fmt.Fprintf(stdout, "analyze: the summary below describes the library AS IT STANDS — "+
+				"those %d are still suppressed, so they are counted unreadable rather than "+
+				"to-analyze. Re-run without --dry-run to clear them.\n", len(paths))
+		}
+		return 0
+	}
+	var n int64
+	if filter == "" {
+		// The whole-library form is its own store call, not the by-paths one
+		// with everything listed: "clear the library" and "clear these
+		// paths" must not be spellable the same way, and a list built from a
+		// read that raced a concurrent write would silently miss rows.
+		n, err = store.ClearAllAnalysisFailures(ctx)
+	} else {
+		n, err = store.ClearAnalysisFailuresByPaths(ctx, paths)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "clear analysis failures: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "analyze: cleared %d recorded decode failure(s) (%s)\n", n, scope)
+	return 0
 }
 
 type analyzeBatchParams struct {
@@ -105,8 +189,22 @@ func runAnalyzeBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	}
 	candidates := res.candidates
 
-	fmt.Fprintf(stdout, "analyze: %d tracks, %d to analyze, %d up-to-date, %d skipped (DSD), %d empty, %d unreadable\n",
-		res.total, len(candidates), res.skipped, res.dsdSkipped, res.emptySkipped, res.missing)
+	// `missing` is reported as "unresolvable", not "unreadable". It used to
+	// carry the latter word and now cannot: `unreadable` is a different set
+	// with a different remedy (files to replace, vs paths this bridge cannot
+	// address at all), and two counts sharing one label is how an operator
+	// reads the wrong number.
+	fmt.Fprintf(stdout, "analyze: %d tracks, %d to analyze, %d up-to-date, %d skipped (DSD), %d empty, %d unresolvable, %d unreadable\n",
+		res.total, len(candidates), res.skipped, res.dsdSkipped, res.emptySkipped, res.missing, res.unreadable)
+	if res.unreadable > 0 {
+		subject, verb, object := "sources", "are", "the files"
+		if res.unreadable == 1 {
+			subject, verb, object = "source", "is", "the file"
+		}
+		fmt.Fprintf(stdout, "analyze: %d %s the decoder refused %d times running %s no longer retried; "+
+			"re-run with --retry-failed, or replace %s (see the console's unreadable list)\n",
+			res.unreadable, subject, manifest.AnalysisFailureThreshold(), verb, object)
+	}
 	if p.dryRun {
 		return 0
 	}
@@ -309,14 +407,21 @@ type analysisScanResult struct {
 	dsdSkipped   int // DSD source (sox can't decode)
 	emptySkipped int // zero-byte source (unanalyzable — failed/incomplete upload)
 	missing      int // unresolvable / directory
+	// unreadable is how many sources the decoders have refused enough
+	// consecutive times, against the version currently on disk, to stop
+	// being offered (manifest's analysis-failure debounce). Reported
+	// separately from emptySkipped because the remedy differs: a zero-byte
+	// file is an upload to finish, these are files to replace.
+	unreadable int
 }
 
 // collectAnalysisCandidates enumerates library tracks that need a
 // waveform: filtered by `filter` (substring; "" = all), DSD skipped,
-// unreadable skipped, and — unless `force` — up-to-date sidecars skipped
-// via the scan-skip gate (matching source mtime + size + schema). Shared
-// by `bridge analyze` and the serve-side sweeper so the two can't drift
-// on what "needs analysis" means.
+// unresolvable skipped, zero-byte skipped, sources the decoders have
+// repeatedly refused skipped, and — unless `force` — up-to-date sidecars
+// skipped via the scan-skip gate (matching source mtime + size + schema).
+// Shared by `bridge analyze` and the serve-side sweeper so the two can't
+// drift on what "needs analysis" means.
 //
 // It enumerates LOCAL tracks only. Analysis decodes a file with
 // sox/ffmpeg, so a row routed from a UPnP upstream has nothing to
@@ -332,6 +437,18 @@ type analysisScanResult struct {
 // describe the same set.
 func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resolver *bridgefs.Resolver, outputDir, filter string, force bool) (analysisScanResult, error) {
 	paths, err := store.TrackPathsLocal(ctx)
+	if err != nil {
+		return analysisScanResult{}, err
+	}
+	// One query for the whole suppressed set rather than a question per
+	// path: this walk already runs a GetAnalysis per track, and the set is
+	// bounded by how many files are broken.
+	//
+	// A read failure aborts the walk instead of degrading to "nothing is
+	// suppressed". Degrading would silently restore the unbounded retry loop
+	// this gate exists to close, and on the serve side it would do so on
+	// every tick with no operator in the loop.
+	suppressed, err := store.SuppressedAnalysisPaths(ctx)
 	if err != nil {
 		return analysisScanResult{}, err
 	}
@@ -385,6 +502,37 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 				res.skipped++
 				continue
 			}
+		}
+		// A source the decoders have refused
+		// manifest.AnalysisFailureThreshold() times running, against the
+		// version on disk, stops being offered. The zero-byte skip above
+		// could not cover these — its own comment says so: it "stays
+		// mtime/size-driven so it can't suppress a real file that's only
+		// TRANSIENTLY failing (those keep a non-zero size)", and a truncated
+		// file keeps a non-zero size. What makes THIS skip safe is that the
+		// decoder reached a verdict (analyze.ErrSourceUnreadable) three
+		// separate times.
+		//
+		// AFTER the freshness gate and OUTSIDE the --force guard, which is
+		// two decisions. After, because a track that already has a fresh
+		// waveform is up-to-date, not unreadable, and Store.AnalysisCoverage
+		// makes the same call ("suppressed AND NOT analysed-fresh") — the
+		// state is unreachable today, since a success clears the strikes,
+		// but two surfaces that agree only by unreachability agree by luck.
+		// Outside, because --force bypasses the FRESHNESS gate, not
+		// unanalyzability: the same posture the zero-byte gate takes.
+		// `bridge analyze --retry-failed` is the way past this one, and
+		// repairing the file is the way that needs no flag.
+		//
+		// The live stat has the last word. `sup` is the version the manifest
+		// row described when the verdicts landed; between an operator
+		// replacing the file and the next scan it describes the old one, so
+		// a mismatch means the thing that was refused is not the thing on
+		// disk, and the file is analysed.
+		if sup, ok := suppressed[rel]; ok &&
+			sup.SizeBytes == info.Size() && sup.MTimeNS == info.ModTime().UnixNano() {
+			res.unreadable++
+			continue
 		}
 		res.candidates = append(res.candidates, analyze.AnalyzeSpec{
 			SourceAbsPath:    abs,
@@ -502,6 +650,7 @@ func (s *analysisSweeper) sweep(ctx context.Context) *admin.AnalysisSweepCounts 
 		DSDExcluded:    res.dsdSkipped,
 		ZeroByte:       res.emptySkipped,
 		Missing:        res.missing,
+		Unreadable:     res.unreadable,
 		Enqueued:       enqueued,
 		QueueSaturated: saturated,
 	}

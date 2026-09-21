@@ -354,8 +354,21 @@ func decodeFramesWith(ctx context.Context, tool decoderTool, name string, args [
 		processReleased = true
 		// redactSoxErr strips the absolute path (the privacy-load-bearing part);
 		// its sox-prefix trimming is a harmless no-op on ffmpeg stderr.
-		return totalFrames, fmt.Errorf("%s: %w (stderr: %s)",
+		//
+		// The redaction is also what makes this error SAFE TO PERSIST: the
+		// pool records the message as `tracks.analysis_fail_reason` and the
+		// console renders it, so an un-redacted stderr would put an absolute
+		// library path on a page that promises library-relative ones (the
+		// redactSoxErr rule in CLAUDE.md, one layer over).
+		err := fmt.Errorf("%s: %w (stderr: %s)",
 			tool, werr, redactSoxErr(strings.TrimSpace(stderr.String()), srcAbs))
+		// A decoder that ran and exited non-zero reached a VERDICT on bytes
+		// it opened. One killed by a signal — the per-job timeout, shutdown,
+		// the OOM killer — reached none. See failure.go.
+		if decoderReachedAVerdict(werr) {
+			return totalFrames, markUnreadable(err)
+		}
+		return totalFrames, err
 	}
 	processReleased = true
 	// A clean exit does NOT guarantee a complete decode: ffmpeg conceals a
@@ -367,9 +380,17 @@ func decodeFramesWith(ctx context.Context, tool decoderTool, name string, args [
 	// mid-stream FLAC glitch resyncs to EOF and prints the SAME
 	// `sox FAIL ... LOST_SYNC` as a real truncation, so stderr matching cannot
 	// tell them apart — the decoded-length check can. Unknown duration: no-op.
+	//
+	// This is the ONE signal that separates a short FILE from a short READ,
+	// which is why it carries ErrSourceUnreadable: both decoders exited 0,
+	// so nothing else in the failure is a property of the source. The
+	// message names both durations because it is what the operator sees —
+	// it is persisted as the failure reason and rendered in the console's
+	// unreadable list, not just logged.
 	if decodedShortOfDuration(expectedSec, totalFrames) {
-		return totalFrames, fmt.Errorf("%s: decoded %.1fs of %.1fs probed — source appears truncated",
-			tool, float64(totalFrames)/float64(AnalysisSampleRate), expectedSec)
+		return totalFrames, markUnreadable(fmt.Errorf(
+			"%s: decoded %.1fs of %.1fs probed — source appears truncated",
+			tool, float64(totalFrames)/float64(AnalysisSampleRate), expectedSec))
 	}
 	return totalFrames, nil
 }

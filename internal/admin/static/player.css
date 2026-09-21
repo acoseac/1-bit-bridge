@@ -1055,10 +1055,13 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    heavy: nothing receded.
 
    Bound to --text-sm rather than a local number so it sits on app.css's
-   type ramp with the console's other dense-secondary text. Not scoped
-   under .player-main: boot.js loads on every page and nothing else in
-   the console uses a bare .small, so a global definition can only fix
-   the class, never surprise an operator page. */
+   type ramp with the console's other dense-secondary text. Deliberately
+   NOT scoped under .player-main: this stylesheet is linked from
+   layout.html on every page, so the rule is the console-wide definition
+   of .small and the operator pages use it too — the Jobs page's
+   unreadable-track list puts the decoder's error text under it. It was
+   written when the player was the only user; keep it global, and keep
+   this note honest if a third caller appears. */
 .small { font-size: var(--text-sm); }
 
 /* ---- Detail tabs (album / artist) ----

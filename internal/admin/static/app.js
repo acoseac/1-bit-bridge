@@ -5011,11 +5011,16 @@ function initJobs() {
   // per-job state). Both pause in background tabs.
   const batches = makeVisibilityChain(jobsRefresh, 5000);
   const snapshot = makeVisibilityChain(jobsSnapshotRefresh, 10000);
+  // The unreadable list rides the SLOW chain: it changes only when a decode
+  // fails, which happens at sweep cadence at most.
+  const unreadable = makeVisibilityChain(unreadableRefresh, 10000);
   batches.start();
   snapshot.start();
+  unreadable.start();
   document.addEventListener("visibilitychange", () => {
     batches.resume();
     snapshot.resume();
+    unreadable.resume();
   }, { signal: pageSignal() });
 
   wireJobButton("jobs-scan-now", () => API.post("/api/scan"), "Scan started");
@@ -5023,6 +5028,13 @@ function initJobs() {
   wireJobButton("jobs-fp-now", () => API.post("/api/fingerprint/sweep"), "Sweep queued");
   wireJobButton("jobs-dupes-restamp", () => API.post("/api/duplicates/sweep"), "Re-evaluate queued");
   wireJobButton("jobs-ao-now", () => API.post("/api/upscale/auto-optimize/sweep"), "Sweep queued");
+  // Refresh straight after: the clear empties the list, and leaving the rows
+  // on screen for up to 10 s would read as "the button did nothing".
+  wireJobButton("jobs-unreadable-retry", async () => {
+    const r = await API.post("/api/analysis/unreadable/retry");
+    await unreadableRefresh();
+    return r;
+  }, "Cleared — will retry");
 
   // Fingerprint Enable: a settings PATCH rather than a job trigger, so it
   // gets its own handler instead of wireJobButton — the post-click state
@@ -5403,6 +5415,7 @@ function renderJobCards(j) {
       ? "sweeping now"
       : sweep.lastFinishedAt ? `last swept ${agoOrDash(sweep.lastFinishedAt)}` : "not yet run");
     setText("job-analysis-next", formatInFuture(sweep.nextDueAt));
+    setText("job-analysis-lastrun", describeAnalysisSweep(sweep.last));
   }
 
   // Fingerprint.
@@ -5572,11 +5585,124 @@ function renderAnalysisCoverage(cov) {
   }
   const parts = [];
   if (cov.dsdExcluded > 0) parts.push(`${cov.dsdExcluded} DSD excluded by design (sox can't decode DSD)`);
-  if (cov.zeroByteExcluded > 0) parts.push(`${cov.zeroByteExcluded} unreadable (zero-byte)`);
+  if (cov.zeroByteExcluded > 0) parts.push(`${cov.zeroByteExcluded} zero-byte (upload never finished)`);
+  if (cov.unreadableExcluded > 0) parts.push(`${cov.unreadableExcluded} the decoder refused (see below)`);
   if (cov.stale > 0) parts.push(`${cov.stale} awaiting re-analysis (schema update)`);
   excl.textContent = parts.length
     ? `Not counted as eligible: ${parts.join(" · ")}.`
     : "Every track is eligible.";
+}
+
+// describeAnalysisSweep — the sweeper's OWN last-run breakdown, which is the
+// exact per-run truth the approximate SQL coverage bar above it is not (see
+// AnalysisSweepCounts). Every bucket is named, so the numbers visibly account
+// for `total`: a skip category that renders nowhere is a count that silently
+// stops adding up, which is how a reader concludes the sweeper lost tracks.
+function describeAnalysisSweep(last) {
+  if (!last) return "not yet run";
+  const parts = [`${last.enqueued ?? 0} enqueued`, `${last.upToDate ?? 0} up to date`];
+  if (last.dsdExcluded > 0) parts.push(`${last.dsdExcluded} DSD`);
+  if (last.zeroByte > 0) parts.push(`${last.zeroByte} zero-byte`);
+  if (last.missing > 0) parts.push(`${last.missing} unresolvable`);
+  if (last.unreadable > 0) parts.push(`${last.unreadable} unreadable`);
+  let text = `${last.total ?? 0} tracks — ${parts.join(" · ")}`;
+  if (last.queueSaturated) text += " (queue full — the rest follow next sweep)";
+  return text;
+}
+
+// renderUnreadableTracks — the list of sources the decoders refuse, with the
+// error and when it was first seen, so the operator can replace the files.
+//
+// Hidden when the list is empty, which is every healthy bridge. Rows are
+// built with textContent, never innerHTML: `path` and `reason` are a library
+// path and a decoder's stderr, i.e. content this bridge did not author.
+function renderUnreadableTracks(data) {
+  const panel = document.getElementById("unreadable-panel");
+  const body = document.getElementById("unreadable-body");
+  if (!panel || !body) return;
+  const tracks = data?.tracks || [];
+  if (tracks.length === 0) {
+    panel.hidden = true;
+    body.textContent = "";
+    return;
+  }
+  panel.hidden = false;
+  const suppressed = data.suppressed ?? 0;
+  const threshold = data.threshold ?? 0;
+  const hint = document.getElementById("unreadable-hint");
+  if (hint) {
+    // Two populations with different meanings, and the sentence says which
+    // is which: a file still being retried is not yet a file to go and
+    // replace.
+    let stopped;
+    if (suppressed === 0) {
+      stopped = `None has failed ${threshold} times yet, so all are still being retried.`;
+    } else if (suppressed === 1) {
+      stopped = `One failed ${threshold} times running and is no longer retried.`;
+    } else {
+      stopped = `${suppressed} of them failed ${threshold} times running and are no longer retried.`;
+    }
+    hint.textContent =
+      `${tracks.length} track${tracks.length === 1 ? "" : "s"} the decoder could not read. ` +
+      `${stopped} Replacing a file re-opens it automatically — nothing to click. ` +
+      `“Retry all” only clears the record, so a file that is still broken lands back here.`;
+  }
+  body.textContent = "";
+  for (const t of tracks) {
+    const tr = document.createElement("tr");
+    // data-label is not decoration: below 1024px app.css stacks every
+    // table.rows row into a card and renders `attr(data-label)` as the
+    // cell's only heading, so a cell without one is a value with nothing
+    // saying what it is.
+    const path = document.createElement("td");
+    path.dataset.label = "Track";
+    path.textContent = t.path;
+    const reason = document.createElement("td");
+    reason.className = "small";
+    reason.dataset.label = "Error";
+    reason.textContent = t.reason || "—";
+    const first = document.createElement("td");
+    first.dataset.label = "First seen";
+    first.textContent = agoOrDash(t.firstSeenAt);
+    first.title = t.firstSeenAt || "";
+    const tries = document.createElement("td");
+    tries.className = "num";
+    tries.dataset.label = "Tries";
+    tries.textContent = String(t.strikes ?? 0);
+    // A row still being retried says so, rather than looking identical to
+    // one the bridge has given up on.
+    if (!t.suppressed) tries.title = "still being retried";
+    else tries.title = "no longer retried";
+    tr.append(path, reason, first, tries);
+    body.appendChild(tr);
+  }
+}
+
+async function unreadableRefresh() {
+  const err = document.getElementById("unreadable-error");
+  try {
+    renderUnreadableTracks(await API.get("/api/analysis/unreadable"));
+    if (err) err.hidden = true;
+  } catch (e) {
+    // Reveal the PANEL too. It starts hidden and only renderUnreadableTracks
+    // unhides it, so on a failed first fetch the error sat inside a hidden
+    // parent and the page silently omitted the whole feature — `hidden =
+    // false` says nothing about an ancestor. (CodeRabbit on #947.)
+    const panel = document.getElementById("unreadable-panel");
+    if (panel) panel.hidden = false;
+    if (err) {
+      err.hidden = false;
+      // Generic on the PAGE, detail in the browser console. The handler
+      // passes err.Error() through as the JSON `message`, and a store
+      // failure can name the database file — a host path, on a surface
+      // this console promises library-relative ones on. The operator
+      // debugging still has it one keystroke away. (CodeRabbit on #947;
+      // the sibling panels render e.message directly and are left alone,
+      // since changing one site does not close a codebase-wide pattern.)
+      err.textContent = "Couldn’t load the unreadable list. Try again.";
+      console.warn("unreadable list:", e);
+    }
+  }
 }
 
 function updateStatusLine(r) {

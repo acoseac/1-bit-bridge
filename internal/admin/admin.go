@@ -972,11 +972,17 @@ type AnalysisSweepState struct {
 // collectAnalysisCandidates (the SQL coverage tile is the approximate
 // whole-library view; these are the sweeper's own truth).
 type AnalysisSweepCounts struct {
-	Total          int  `json:"total"`
-	UpToDate       int  `json:"upToDate"`
-	DSDExcluded    int  `json:"dsdExcluded"`
-	ZeroByte       int  `json:"zeroByte"`
-	Missing        int  `json:"missing"`
+	Total       int `json:"total"`
+	UpToDate    int `json:"upToDate"`
+	DSDExcluded int `json:"dsdExcluded"`
+	ZeroByte    int `json:"zeroByte"`
+	Missing     int `json:"missing"`
+	// Unreadable is how many candidates THIS sweep skipped because the
+	// decoders have refused them repeatedly. Reported beside Missing and
+	// never folded into it: one is a path the bridge could not address, the
+	// other a file it addressed and could not read, and they have different
+	// remedies.
+	Unreadable     int  `json:"unreadable"`
 	Enqueued       int  `json:"enqueued"`
 	QueueSaturated bool `json:"queueSaturated,omitempty"`
 }
@@ -1300,6 +1306,13 @@ type Server struct {
 	analysisCoverage   *jobsAnalysisCoverage
 	analysisCoverageAt time.Time
 	analysisCoverageSF singleflight.Group
+	// analysisCoverageGen rises on every invalidation. The query runs
+	// OUTSIDE analysisCoverageMu (it is slow and detached), so a snapshot
+	// that began before a clear can finish after it and publish pre-clear
+	// numbers with a fresh timestamp — defeating the invalidation for a
+	// whole TTL. The reader captures the generation before querying and
+	// publishes only if it still matches. (CodeRabbit on #947.)
+	analysisCoverageGen uint64
 
 	// lastBackupAt caches the newest snapshot's timestamp for the jobs
 	// card. Same TTL + singleflight shape as analysisCoverage above,
@@ -1635,6 +1648,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/upscale/stats", s.apiUpscaleStats)
 	mux.HandleFunc("GET /api/analysis/stats", s.apiAnalysisStats)
 	mux.HandleFunc("POST /api/analysis/sweep", s.apiAnalysisSweep)
+	// Not managed controls: the operator's own library data, like the
+	// playlist restore pair. See handlers_analysis_unreadable.go.
+	mux.HandleFunc("GET /api/analysis/unreadable", s.apiUnreadableTracksList)
+	mux.HandleFunc("POST /api/analysis/unreadable/retry", s.apiUnreadableTracksRetry)
 	mux.HandleFunc("GET /api/jobs", s.apiJobs)
 	mux.HandleFunc("GET /api/diagnostics", s.apiDiagnostics)
 	mux.HandleFunc("POST /api/database/compact", s.apiDatabaseCompact)
