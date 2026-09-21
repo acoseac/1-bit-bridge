@@ -130,6 +130,13 @@ export const api = {
   // design, so they carry no cover refs and nothing playable.
   playlists: () => getJSON("/api/player/playlists", { key: "playlists" }),
   playlist: (id) => getJSON(`/api/player/playlists/${encodeURIComponent(id)}`, { key: "detail" }),
+  // Tombstones + their undo. The OPERATOR endpoints, like the export
+  // below: a deleted playlist has no cover, no playable tracks and no
+  // place in the catalog, so there is nothing for /api/player to add and
+  // a second reader of the same rows would be a second thing to keep
+  // right. Its own request key — the grid's own fetch must not abort it.
+  deletedPlaylists: () => getJSON("/api/playlists/deleted", { key: "playlists-deleted" }),
+  restorePlaylist: (id) => postJSON(`/api/playlists/${encodeURIComponent(id)}/restore`),
   mixes: () => getJSON("/api/player/mixes", { key: "mixes" }),
   mix: (slug) => getJSON(`/api/player/mixes/${encodeURIComponent(slug)}`, { key: "detail" }),
   // The PLAYER's favorites, not /api/favorites: that one is the stored

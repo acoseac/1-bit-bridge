@@ -133,7 +133,7 @@ func TestTombstonePlaylist(t *testing.T) {
 	p, items := samplePlaylist("pl-1", "doomed", 100)
 	_ = s.UpsertPlaylist(ctx, "devA", p, items)
 
-	ok, err := s.TombstonePlaylist(ctx, "pl-1")
+	ok, err := s.TombstonePlaylist(ctx, "pl-1", "devA")
 	if err != nil || !ok {
 		t.Fatalf("tombstone: ok=%v err=%v", ok, err)
 	}
@@ -147,7 +147,7 @@ func TestTombstonePlaylist(t *testing.T) {
 		t.Errorf("tombstoned playlist still listed: %d", len(list))
 	}
 	// Second tombstone is a no-op (no live row).
-	ok2, _ := s.TombstonePlaylist(ctx, "pl-1")
+	ok2, _ := s.TombstonePlaylist(ctx, "pl-1", "devA")
 	if ok2 {
 		t.Error("second tombstone reported a hit")
 	}
@@ -228,7 +228,7 @@ func TestTombstoneCrossDevice(t *testing.T) {
 	_ = s.UpsertPlaylist(ctx, "devA", p, items)
 	// The store API is id-scoped, so "devB deleting" is simply a delete
 	// by id — this pins that there is no hidden device filter left.
-	ok, err := s.TombstonePlaylist(ctx, "pl-1")
+	ok, err := s.TombstonePlaylist(ctx, "pl-1", "devB")
 	if err != nil || !ok {
 		t.Fatalf("cross-device tombstone: ok=%v err=%v", ok, err)
 	}
@@ -262,7 +262,7 @@ func TestListPlaylistTombstoneIDs(t *testing.T) {
 		t.Fatalf("pre-delete tombstones = %v, want none", ids)
 	}
 
-	if ok, err := s.TombstonePlaylist(ctx, "pl-doomed"); err != nil || !ok {
+	if ok, err := s.TombstonePlaylist(ctx, "pl-doomed", "devA"); err != nil || !ok {
 		t.Fatalf("tombstone: ok=%v err=%v", ok, err)
 	}
 
@@ -298,7 +298,7 @@ func TestUpsertPlaylistRevivesTombstone(t *testing.T) {
 	ctx := context.Background()
 	p, items := samplePlaylist("pl-1", "v1", 100)
 	_ = s.UpsertPlaylist(ctx, "devA", p, items)
-	if ok, _ := s.TombstonePlaylist(ctx, "pl-1"); !ok {
+	if ok, _ := s.TombstonePlaylist(ctx, "pl-1", "devA"); !ok {
 		t.Fatal("tombstone failed")
 	}
 	rev, ri := samplePlaylist("pl-1", "revived", 200)

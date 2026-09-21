@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -25,7 +26,11 @@ type PlaylistStore interface {
 	GetPlaylist(ctx context.Context, id string) (*manifest.PlaylistRow, []manifest.PlaylistItemRow, error)
 	ListPlaylists(ctx context.Context) ([]manifest.PlaylistSummary, error)
 	ListPlaylistTombstoneIDs(ctx context.Context) ([]string, error)
-	TombstonePlaylist(ctx context.Context, id string) (bool, error)
+	TombstonePlaylist(ctx context.Context, id, deletedBy string) (bool, error)
+	// CountRecentPlaylistTombstonesBy backs the mass-delete warning on
+	// the DELETE path only. Never a gate: a failure here is logged and
+	// the delete stands.
+	CountRecentPlaylistTombstonesBy(ctx context.Context, deviceToken string, since time.Time) (manifest.PlaylistDeleteBurst, error)
 }
 
 // WithPlaylistStore wires the playlist-backup feature. Advertises the
@@ -396,7 +401,8 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 // any paired device can delete any playlist (the delete then propagates
 // to the user's other devices on their next sweep).
 func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requirePlaylistFeature(w, r); !ok {
+	dt, ok := s.requirePlaylistFeature(w, r)
+	if !ok {
 		return
 	}
 	id := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
@@ -404,7 +410,7 @@ func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "playlist id is required")
 		return
 	}
-	deleted, err := s.playlistStore.TombstonePlaylist(r.Context(), id)
+	deleted, err := s.playlistStore.TombstonePlaylist(r.Context(), id, dt)
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"failed to delete playlist", err)
@@ -416,6 +422,61 @@ func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	// Orphan cleanup: drop any custom cover for this playlist so its JPEG
 	// doesn't linger on disk after the playlist is gone (best-effort).
+	// This is why a restore cannot bring the cover back: the bytes are
+	// gone, and nothing keeps a copy.
 	s.pruneCover(r.Context(), manifest.CoverScopePlaylist, id)
+	s.warnOnPlaylistDeleteBurst(r, dt)
 	writeJSON(w, http.StatusOK, playlistDeletedResponse{ID: id, Deleted: true})
+}
+
+// warnOnPlaylistDeleteBurst logs one WARN per tombstone once a device has
+// deleted manifest.PlaylistDeleteBurstThreshold playlists inside
+// manifest.PlaylistDeleteBurstWindow.
+//
+// Per tombstone, deliberately, and this is the one place in the tree where
+// a repeated line is the right answer: the count is the payload. The
+// M-SEARCH streak suppression exists because that ticker's failure mode is
+// PERSISTENT and every line says the same thing; a delete burst is bounded
+// by how many playlists exist, each line carries a different count, and
+// the operator reading the journal afterwards wants to see where it
+// stopped. The 2026-09-20 incident would have produced 13 lines.
+//
+// Never a gate. The tombstone has already committed and the client has
+// already been told it will succeed; this is a note for whoever reads the
+// journal later, and a failed count must not turn a successful delete into
+// a 500. Runs inline rather than in a goroutine: it is one indexed-free
+// COUNT over a table with one row per playlist, on a request that is
+// human-paced by nature, and a goroutine here would outlive the request
+// context it reads through.
+func (s *Server) warnOnPlaylistDeleteBurst(r *http.Request, deviceToken string) {
+	if deviceToken == "" {
+		return
+	}
+	since := time.Now().Add(-manifest.PlaylistDeleteBurstWindow)
+	burst, err := s.playlistStore.CountRecentPlaylistTombstonesBy(r.Context(), deviceToken, since)
+	if err != nil {
+		logger.Warn("playlist delete burst check failed", "err", err)
+		return
+	}
+	if burst.Count < manifest.PlaylistDeleteBurstThreshold {
+		return
+	}
+	name := burst.DeviceName
+	if name == "" {
+		name = "(unnamed device)"
+	}
+	// tokenId from the CONTEXT, falling back to the registration's: the
+	// context one is the token that authenticated THIS request, which is
+	// what an operator matches against the Devices page, while the
+	// registration's can lag by a rebind.
+	tokenID := tokenIDFromContext(r.Context())
+	if tokenID == "" {
+		tokenID = burst.TokenID
+	}
+	logger.Warn("playlist mass delete",
+		"deviceName", name,
+		"tokenId", tokenID,
+		"deleted", burst.Count,
+		"withinSec", int(manifest.PlaylistDeleteBurstWindow.Seconds()),
+		"hint", "restore from the console: Playlists -> Recently deleted")
 }

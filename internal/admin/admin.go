@@ -1605,6 +1605,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/playlists", s.apiPlaylistsList)
 	mux.HandleFunc("GET /api/playlists/detail", s.apiPlaylistDetail)
 	mux.HandleFunc("GET /api/playlists/export", s.apiPlaylistExport)
+	// The undo for DELETE /v1/playlists/{id}, which only ever writes a
+	// tombstone. NOT a managed control: this is the operator's own
+	// playlist data, not an action a control plane owns.
+	mux.HandleFunc("GET /api/playlists/deleted", s.apiDeletedPlaylistsList)
+	mux.HandleFunc("POST /api/playlists/{id}/restore", s.apiPlaylistRestore)
 	mux.HandleFunc("GET /api/favorites", s.apiFavorites)
 	mux.HandleFunc("GET /api/history", s.apiHistorySummary)
 	mux.HandleFunc("GET /api/history/events", s.apiHistoryEvents)
