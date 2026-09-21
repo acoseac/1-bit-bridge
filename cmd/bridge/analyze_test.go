@@ -213,7 +213,6 @@ func TestRunAnalysisSweeperRespectsDisabledGate(t *testing.T) {
 	store, pool := sweeperFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	status := &sweepStatus[admin.AnalysisSweepCounts]{}
 	nudge := make(chan struct{}, 1)
 
@@ -238,6 +237,7 @@ func TestRunAnalysisSweeperRespectsDisabledGate(t *testing.T) {
 			outputDir: t.TempDir(), pool: pool, enabled: disabled,
 		}, staticInterval(time.Hour), nudge, nil, status)
 	}()
+	drainLoopOnCleanup(t, cancel, done, "the analysis sweeper")
 
 	// Both sweep triggers, each waited for: the post-settle pass, then a nudge.
 	waitGate(t, gateCalls, "the post-settle sweep")
@@ -248,12 +248,6 @@ func TestRunAnalysisSweeperRespectsDisabledGate(t *testing.T) {
 		t.Errorf("a disabled sweeper recorded a sweep: lastStart=%v lastEnd=%v — the analysis.enabled gate is not being consulted", lastStart, lastEnd)
 	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("sweeper did not exit on ctx cancel")
-	}
 }
 
 func waitForSweep(t *testing.T, status *sweepStatus[admin.AnalysisSweepCounts], after time.Time, deadline time.Duration) time.Time {
@@ -279,7 +273,6 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 	store, pool := sweeperFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	nudge := make(chan struct{}, 1)
 	status := &sweepStatus[admin.AnalysisSweepCounts]{}
 
@@ -297,6 +290,7 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 			outputDir: t.TempDir(), pool: pool, enabled: alwaysAnalysisEnabled,
 		}, staticInterval(time.Hour), nudge, nil, status)
 	}()
+	drainLoopOnCleanup(t, cancel, done, "the analysis sweeper")
 
 	firstEnd := waitForSweep(t, status, time.Time{}, 5*time.Second)
 
@@ -320,12 +314,6 @@ func TestRunAnalysisSweeperNudgeTriggersImmediateSweep(t *testing.T) {
 		t.Errorf("sweep counts = %+v, want zeroed for empty library", last)
 	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("sweeper did not exit on ctx cancel")
-	}
 }
 
 // TestRunAnalysisSweeperRecordsNextDue — with a periodic interval the
@@ -335,7 +323,6 @@ func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
 	store, pool := sweeperFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	status := &sweepStatus[admin.AnalysisSweepCounts]{}
 	done := make(chan struct{})
 	go func() {
@@ -345,13 +332,12 @@ func TestRunAnalysisSweeperRecordsNextDue(t *testing.T) {
 			outputDir: t.TempDir(), pool: pool, enabled: alwaysAnalysisEnabled,
 		}, staticInterval(time.Hour), make(chan struct{}, 1), nil, status)
 	}()
+	drainLoopOnCleanup(t, cancel, done, "the analysis sweeper")
 	waitForSweep(t, status, time.Time{}, 5*time.Second)
 	_, _, _, nextDue, _ := status.snapshot()
 	if nextDue.IsZero() || !nextDue.After(time.Now().Add(30*time.Minute)) {
 		t.Errorf("nextDue = %v, want ~1h out", nextDue)
 	}
-	cancel()
-	<-done
 }
 
 // TestCollectAnalysisCandidatesExcludesUPnPRoutedRows is the end-to-end

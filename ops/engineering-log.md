@@ -6846,7 +6846,8 @@ not just a dirty exit.
 
 ### The fix
 
-`drainServeOnCleanup` in `cmd/bridge/serve_boot_drain_test.go`, called by all
+`drainServeOnCleanup` in `cmd/bridge/background_drain_test.go` (named
+`serve_boot_drain_test.go` until #945 renamed it), called by all
 three. #936's test is converted onto it rather than left as a third copy, so
 there is one definition of:
 
@@ -6867,7 +6868,8 @@ this package's history of Windows-runner timing.
 
 ### The guard
 
-`TestEveryBackgroundServeDrainsOnCleanup`: every test holding a `go` statement
+`TestEveryBackgroundGoroutineDrainsOnCleanup` (`…ServeDrains…` until #945
+widened it): every test holding a `go` statement
 that calls `run` must call the helper. The population is the thing to pin — the
 two siblings kept the flake precisely because #936 fixed the site in front of
 it and enumerated nothing.

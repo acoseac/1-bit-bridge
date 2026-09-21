@@ -2179,10 +2179,12 @@ its twin.** The top list is older, shorter, and read first.
   — `waitForAdminReady` does), and report with `t.Errorf`, since `FailNow` from
   a cleanup skips the very removals the drain sequences itself against. Three
   such tests, written months apart, and the surviving shape had reached only
-  the newest — so `TestEveryBackgroundServeDrainsOnCleanup` pins the
-  POPULATION, by AST: a text scan for the marker is satisfied by the two
-  comments that merely NAME the helper, and one for the old shape flags every
-  in-process loop test in the package, where it is the correct shape. (#944)
+  the newest — so `TestEveryBackgroundGoroutineDrainsOnCleanup` pins the
+  POPULATION, by AST: a text scan for the marker is satisfied by the comments
+  that merely NAME a helper, and one for the old `defer cancel()` shape misses
+  the sites that never had one. (#944; extended to the in-process loops, and
+  `drainLoopOnCleanup` added beside it, in #945 — where a hand-written list of
+  five files missed a sixth site that the shape match found.)
 - **Windows CI catches wall-clock assumptions** — ~15.6 ms granularity means two
   stamps milliseconds apart are not reliably ordered. Assert on counted events,
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes
