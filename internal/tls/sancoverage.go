@@ -46,7 +46,19 @@ const RotationRemediation = "Run `bridge cert rotate` (or click Rotate in the ad
 // `bridge doctor`'s tls-cert line, `bridge cert info` and `bridge cert
 // rotate`'s preamble all describe this state, and three copies of a
 // four-clause remedy drift into three different pieces of advice — the
-// dropped clause being, as ever, the one that makes the rest work.
+// dropped clause being, as ever, the one that makes the rest work. All
+// three pin this value in a test.
+//
+// The FOURTH surface, logIfExpiringSoon's startup warning, deliberately
+// does not: it is a structured log line carrying `path` and
+// `not_before` as attributes, sized like the expiry arm beside it, and
+// a four-clause operator sentence is the wrong shape there. Its job is
+// to be greppable, not to be the remedy — the operator who sees it runs
+// `bridge doctor`, which carries this.
+//
+// The admin console's cert tile is not a fifth: it renders a badge and
+// a start date, and sends the operator to the CLI, because rotating
+// from a browser is exactly the thing this state must not do.
 const NotYetValidRemediation = "clients reject a certificate before its NotBefore exactly as they reject an expired one, " +
 	"so every paired device fails to connect until then. This usually means the host clock was ahead when the " +
 	"certificate was minted — CHECK THE CLOCK FIRST (`timedatectl` / `sntp -sS`), because rotating against a " +
