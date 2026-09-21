@@ -7302,6 +7302,40 @@ the cards grid. And the JS-built cells carried no `data-label`, which below
 is the cell's only heading in the stacked card layout, so every value rendered
 with a blank column where its name belongs.
 
+### A flake, and the control that needed the right conditions
+
+A stress run after the first SonarCloud round caught
+`TestTheFailureWarnFiresOncePerFileVersion` failing 1 time in 5. The cause is
+an ordering in `processJob` that the test leaned on without noticing:
+`failedCnt.Add(1)` runs BEFORE `noteFailure` logs and before `releaseDedup`. So
+a waiter that stops at `Failed == n` can observe the count while the line has
+not been written — and, worse, while the dedup slot is still held, which makes
+the next `Enqueue` a SILENT NO-OP (a duplicate returns nil) and hangs the
+following wait on a count that will never arrive. Waiting for the pool to go
+idle fixes both, because `releaseDedup` runs after `noteFailure`.
+
+**The negative control reported 0 failures in 25 runs and was wrong.** The
+original sighting happened while `make test -race` was saturating all twelve
+cores; on an idle machine the window is too narrow to hit, so the control read
+as "the fix is unnecessary". Re-run with a busy-loop per core:
+
+```
+ARM A  idle-wait fix      0 failures / 12 under load   (and 0/25 idle)
+ARM B  Failed-only wait   1 failure  / 12 under load
+                          → "condition not met within deadline", the predicted mode
+```
+
+**A control has to run under the conditions that produced the sighting.** A
+timing-dependent bug controlled on an idle machine gives the answer the
+machine's schedule felt like giving, and it is the reassuring one.
+
+**And `internal/analyze` was `(cached)` in the gate**, so the race detector had
+never run any of these tests — the "a gated test that skips looks exactly like
+one that passed" shape, in the build cache rather than an env var. Forced with
+`go test -race -count=1 ./internal/analyze/`: clean, 34.6 s. Worth doing
+explicitly for any package a change adds concurrency-touching tests to, because
+`make test` will happily report `ok (cached)` for it.
+
 ### Not done
 
 The per-run `AnalysisSweepCounts` breakdown was previously rendered nowhere in
