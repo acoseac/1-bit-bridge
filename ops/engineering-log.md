@@ -7149,7 +7149,7 @@ The audit documents stay out of scope by construction, being gitignored. The one
 stale citation found in `ops/audit-2026-08-06.md` was corrected on this machine
 only, and no PR can carry it.
 
-## 2026-09-21 — a source the decoder refuses stops being retried (#TBD)
+## 2026-09-21 — a source the decoder refuses stops being retried (#947)
 
 ### The report
 
