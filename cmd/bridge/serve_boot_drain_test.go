@@ -81,10 +81,14 @@ func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan 
 // The file list comes from runtime.Caller rather than the working
 // directory, because one of the tests in scope chdirs mid-run.
 //
-// It is a SHAPE check and no more: it sees that the helper is called,
-// not that the goroutine it drains is the one that was launched. Worth
-// saying plainly, since this docblock is all a later reader has to size
-// their trust by.
+// It is a SHAPE check and no more, and both limits are worth stating
+// plainly, since this docblock is all a later reader has to size their
+// trust by. It sees that the helper is called, not that the goroutine
+// it drains is the one that was launched. And it matches only a `go`
+// statement that calls run DIRECTLY: a boot factored out into a fixture
+// helper would not be seen, which the floor cannot reveal either, since
+// the three that exist would still satisfy it. Widen the match in the
+// same change that adds such a helper.
 func TestEveryBackgroundServeDrainsOnCleanup(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {

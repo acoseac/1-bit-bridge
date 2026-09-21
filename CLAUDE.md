@@ -2164,6 +2164,25 @@ its twin.** The top list is older, shorter, and read first.
   after `Stop` (which joins it). One that did neither raced under `-race` on CI
   and was not reproducible locally in 26 runs. Adding a mutex would pay
   production for a test's convenience.
+- **A test that boots a server on a goroutine drains it in a `t.Cleanup`, never
+  a `defer cancel()` plus a cancel-and-assert tail.** The tail runs only when
+  the body completes: a `t.Fatalf` above it Goexits, the deferred cancel fires,
+  and the test returns without waiting. Measured on the failing path — the
+  serve goroutine had NOT finished when the test binary exited, while
+  `t.TempDir`'s cleanup (registered by the fixture earlier, so running later)
+  removes the data dir from under a store still checkpointing, and that removal
+  is then what gets reported instead of the assertion that failed. macOS hides
+  it, because `RemoveAll` over an open file succeeds silently; it surfaces on
+  the Windows leg, or as a leaked server racing the next test.
+  `drainServeOnCleanup` is the ONE definition: wait on a channel the goroutine
+  CLOSES, never `done` (a failure path may already have consumed the exit code
+  — `waitForAdminReady` does), and report with `t.Errorf`, since `FailNow` from
+  a cleanup skips the very removals the drain sequences itself against. Three
+  such tests, written months apart, and the surviving shape had reached only
+  the newest — so `TestEveryBackgroundServeDrainsOnCleanup` pins the
+  POPULATION, by AST: a text scan for the marker is satisfied by the two
+  comments that merely NAME the helper, and one for the old shape flags every
+  in-process loop test in the package, where it is the correct shape. (#944)
 - **Windows CI catches wall-clock assumptions** — ~15.6 ms granularity means two
   stamps milliseconds apart are not reliably ordered. Assert on counted events,
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes

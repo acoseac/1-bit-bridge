@@ -6800,3 +6800,123 @@ the admitted set, with `manifest 0` / `admin 3` / `rest 0` unchanged.
 
 `.github/` only. `make test` is untouched and remains the local gate; the script
 carries the same `-race -timeout 30m` and adds only `-run`.
+
+## 2026-09-21 — a boot test's shutdown belonged in a cleanup (#944)
+
+Follow-up to #936, which wrote the surviving shape for its own test and left
+the two siblings on the old one. Flagged there as a latent flake and deferred;
+this is the sweep.
+
+### The defect
+
+Three tests in `cmd/bridge` boot the real `serve` on a goroutine:
+`TestServeStartsAndServesHealth` (`main_test.go`),
+`TestServeWiresResolvedConfigPathIntoAdminAndBackups`
+(`serve_config_path_test.go`) and `TestServeBakesHealthEndpointsIntoThePairingQR`
+(`serve_pairing_endpoints_test.go`). The first two carried `defer cancel()` at
+the top and a `cancel()` + `select { <-done }` tail at the bottom.
+
+That tail runs only when the body reaches it. A `t.Fatalf` above it — and both
+tests have several, on `GET /v1/health`, on `PATCH /api/settings`, inside
+`waitForAdminReady` — calls `runtime.Goexit`: the deferred cancel fires and the
+test returns immediately, without waiting for serve to notice. Meanwhile
+`t.TempDir`'s own cleanup was registered by the fixture BEFORE anything else,
+so under LIFO it runs LAST, removing the data dir from under a store that is
+still checkpointing. The reported failure is then the removal, not the
+assertion that actually failed.
+
+### The measurement
+
+macOS shows nothing, which is why this sat: `RemoveAll` over an open file
+succeeds silently, so `t.TempDir`'s cleanup does not error and both shapes
+print an identical single failure. Instrumented instead — inject a `t.Fatalf`
+straight after `waitForListening`, then from inside the goroutine, after
+`run()` returns, stat the fixture dir and write the verdict to a file outside
+the tree:
+
+```
+shape = drain in t.Cleanup   ->  "serve returned; fixture dir still present = true"
+shape = defer cancel(), tail ->  probe file NEVER WRITTEN
+```
+
+The old shape's goroutine had not finished when the test binary exited: serve
+was still running, holding the store, past the end of the test. Under `-race`
+in a full package run that is a live server overlapping every subsequent test,
+not just a dirty exit.
+
+### The fix
+
+`drainServeOnCleanup` in `cmd/bridge/serve_boot_drain_test.go`, called by all
+three. #936's test is converted onto it rather than left as a third copy, so
+there is one definition of:
+
+- **waiting on a channel the goroutine CLOSES, not on `done`.**
+  `waitForAdminReady` consumes the exit code on one of its failure paths, so a
+  second bare receive on `done` would block out the whole grace window and then
+  report a shutdown timeout about a process that exited cleanly. `done` is read
+  behind a `default` arm, for the code, when it is still there to read.
+- **`t.Errorf`, never `t.Fatalf`.** `FailNow` from a cleanup skips the cleanups
+  that have not run yet — here, the directory removals the drain exists to
+  sequence itself against.
+- **registration AFTER the fixture's `t.TempDir`**, which is what puts the
+  drain before the removal under LIFO.
+
+The grace window is `shutdownGrace + 5s` for all three; `main_test.go`'s was
+`+2s`, widened to the shared value rather than kept as a second number, given
+this package's history of Windows-runner timing.
+
+### The guard
+
+`TestEveryBackgroundServeDrainsOnCleanup`: every test holding a `go` statement
+that calls `run` must call the helper. The population is the thing to pin — the
+two siblings kept the flake precisely because #936 fixed the site in front of
+it and enumerated nothing.
+
+AST, not grep, and both directions of a text scan were checked rather than
+assumed:
+
+- scanning for the compliance marker is satisfied by PROSE — `main_test.go:128`
+  and `serve_pairing_endpoints_test.go:68` name `drainServeOnCleanup` in
+  comments that point at its reasoning, so a test mentioning the helper without
+  calling it would pass;
+- scanning for the old `defer cancel()` shape flags 12 occurrences across five
+  files (`analyze`, `cadence`, `duplicates_sweeper_defer`, `enrichment`,
+  `live_cadence`) that never boot serve, where it is the correct shape.
+
+Parsing is also eol-agnostic, which matters on the Windows leg where nothing
+pins `eol`. The file list comes from `runtime.Caller(0)`, not the working
+directory, because `TestServeWiresResolvedConfigPathIntoAdminAndBackups`
+chdirs mid-run. Floor of three, so it cannot pass vacuously. The docblock
+states what it does NOT check: that the helper is called, not that the
+goroutine it drains is the one that was launched.
+
+### Negative controls
+
+Committed first — this file already records that lesson twice, and it applied
+again here.
+
+The first attempt was INVALID and said so: deleting the helper call leaves
+`cancel` and `exited` unused, so the control failed to BUILD, which reads as
+"control invalid" rather than as a pass. Re-run with a mutation that compiles
+(`defer cancel()` + `_ = exited`), one file at a time:
+
+```
+main_test.go                     -> guard fires, names TestServeStartsAndServesHealth
+serve_config_path_test.go        -> guard fires, names TestServeWiresResolvedConfigPath…
+serve_pairing_endpoints_test.go  -> guard fires, names TestServeBakesHealthEndpoints…
+scan retargeted at a name that   -> floor fires: "matched 0 test(s) … want at least 3"
+  matches nothing
+```
+
+All three sites individually, not one standing in for the set.
+
+### Declined: the in-process loop tests
+
+The same tail shape appears in ~12 places across `analyze_test.go`,
+`cadence_test.go`, `duplicates_sweeper_defer_test.go`, `enrichment_test.go` and
+`live_cadence_test.go` — `defer cancel()`, a `done` channel closed by the
+goroutine, and a `cancel()` + drain tail a mid-body `t.Fatalf` skips. They are
+a milder shape: in-process loops (a gated sweeper, a disabled ingester), not a
+full server with a SQLite store and two listeners. Left deliberately, and
+listed here rather than swept in silently, because each needs its own reading
+of whether its goroutine touches a `t.TempDir` after the test returns.
