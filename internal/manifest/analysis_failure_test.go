@@ -476,3 +476,69 @@ func utf8ValidString(s string) bool {
 	}
 	return true
 }
+
+// TestMigrationV46AddsColumnsAndIndexIdempotently — the six columns and the
+// partial index exist after a fresh open, and a RE-RUN (version rewound, DDL
+// already applied) neither fails nor duplicates. The ladder is append-only and
+// every shipped migration has already run on both live bridges, so a re-run is
+// the only thing a later edit could ever exercise.
+//
+// The index is part of the claim, not a detail: without it the unreadable
+// count on /api/stats is a full scan of `tracks` on a 5-second SSE tick, which
+// is the shape /api/diagnostics was pulled behind a TTL for.
+func TestMigrationV46AddsColumnsAndIndexIdempotently(t *testing.T) {
+	s := openAnalysisFailStore(t)
+	ctx := context.Background()
+
+	cols := []string{
+		"analysis_fail_count", "analysis_fail_at", "analysis_fail_first_at",
+		"analysis_fail_size", "analysis_fail_mtime_ns", "analysis_fail_reason",
+	}
+	for _, c := range cols {
+		exists, err := atlasColumnExists(s.db, "tracks", c)
+		if err != nil {
+			t.Fatalf("inspect tracks.%s: %v", c, err)
+		}
+		if !exists {
+			t.Errorf("v46 column tracks.%s missing after a fresh open", c)
+		}
+	}
+	indexExists := func() bool {
+		var n int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_tracks_analysis_fail'`).
+			Scan(&n); err != nil {
+			t.Fatalf("inspect index: %v", err)
+		}
+		return n == 1
+	}
+	if !indexExists() {
+		t.Error("v46 partial index idx_tracks_analysis_fail missing after a fresh open")
+	}
+
+	// A recorded verdict survives the re-run: the migration must not touch
+	// data, only shape.
+	seedAnalysisTrack(t, s, "a/broken.flac", 4096, 1234)
+	if _, err := s.RecordAnalysisFailure(ctx, "a/broken.flac", "sox: source appears truncated"); err != nil {
+		t.Fatal(err)
+	}
+
+	for run := 1; run <= 2; run++ {
+		if _, err := s.db.ExecContext(ctx, `PRAGMA user_version = 45`); err != nil {
+			t.Fatalf("rewind user_version: %v", err)
+		}
+		if err := s.migrate(); err != nil {
+			t.Fatalf("re-run %d of migrate: %v", run, err)
+		}
+		if v, want := readUserVersion(t, s.db), migrations[len(migrations)-1].version; v != want {
+			t.Errorf("re-run %d: user_version = %d, want %d", run, v, want)
+		}
+		if !indexExists() {
+			t.Errorf("re-run %d: the partial index is gone", run)
+		}
+		rows, err := s.ListUnreadableTracksForAdmin(ctx)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("re-run %d: list = (%d rows, %v), want the recorded verdict intact", run, len(rows), err)
+		}
+	}
+}
