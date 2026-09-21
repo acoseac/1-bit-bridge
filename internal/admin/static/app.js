@@ -5645,16 +5645,24 @@ function renderUnreadableTracks(data) {
   body.textContent = "";
   for (const t of tracks) {
     const tr = document.createElement("tr");
+    // data-label is not decoration: below 1024px app.css stacks every
+    // table.rows row into a card and renders `attr(data-label)` as the
+    // cell's only heading, so a cell without one is a value with nothing
+    // saying what it is.
     const path = document.createElement("td");
+    path.dataset.label = "Track";
     path.textContent = t.path;
     const reason = document.createElement("td");
     reason.className = "small";
+    reason.dataset.label = "Error";
     reason.textContent = t.reason || "—";
     const first = document.createElement("td");
+    first.dataset.label = "First seen";
     first.textContent = agoOrDash(t.firstSeenAt);
     first.title = t.firstSeenAt || "";
     const tries = document.createElement("td");
     tries.className = "num";
+    tries.dataset.label = "Tries";
     tries.textContent = String(t.strikes ?? 0);
     // A row still being retried says so, rather than looking identical to
     // one the bridge has given up on.

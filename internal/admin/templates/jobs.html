@@ -292,23 +292,6 @@
 
   </div>
 
-  <h2 class="section-head">Upscale &amp; CarPlay batches</h2>
-  <p class="lede">
-    Operator-initiated conversion batches, most recent first. Live
-    batches show their counters as they progress; finished and failed
-    batches stay for audit (last 100 rows). Start batches from
-    <a href="/">Browse</a> — an album, an artist, or a folder.
-  </p>
-
-  <div class="jobs-meta panel" id="jobs-throughput-panel" hidden>
-    <h2>Throughput</h2>
-    <p>
-      <strong id="jobs-throughput-rate">—</strong> jobs / hour ·
-      ETA <strong id="jobs-throughput-eta">—</strong>
-      <span class="hint" id="jobs-throughput-samples"></span>
-    </p>
-  </div>
-
   {{/* Sources the decoders refuse. Painted by app.js renderUnreadableTracks
        from GET /api/analysis/unreadable on the same 10 s jobs chain. Hidden
        entirely when nothing is recorded, which is the normal state — a panel
@@ -339,6 +322,23 @@
       <tbody id="unreadable-body"></tbody>
     </table>
     <p id="unreadable-error" class="error" hidden role="alert"></p>
+  </div>
+
+  <h2 class="section-head">Upscale &amp; CarPlay batches</h2>
+  <p class="lede">
+    Operator-initiated conversion batches, most recent first. Live
+    batches show their counters as they progress; finished and failed
+    batches stay for audit (last 100 rows). Start batches from
+    <a href="/">Browse</a> — an album, an artist, or a folder.
+  </p>
+
+  <div class="jobs-meta panel" id="jobs-throughput-panel" hidden>
+    <h2>Throughput</h2>
+    <p>
+      <strong id="jobs-throughput-rate">—</strong> jobs / hour ·
+      ETA <strong id="jobs-throughput-eta">—</strong>
+      <span class="hint" id="jobs-throughput-samples"></span>
+    </p>
   </div>
 
   {{/* Live SoX pipeline — one row per worker slot, painted by app.js

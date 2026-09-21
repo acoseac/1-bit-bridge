@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/analyze"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -292,5 +293,66 @@ func TestUnreadableSkipIsNotFoldedIntoMissing(t *testing.T) {
 	if res.unreadable != 1 || res.missing != 1 {
 		t.Errorf("unreadable = %d, missing = %d; want 1 and 1 counted separately",
 			res.unreadable, res.missing)
+	}
+}
+
+// TestAFreshWaveformOutranksASuppression pins the ORDER of the two gates, and
+// with it the agreement between the walk and Store.AnalysisCoverage.
+//
+// Both answer "suppressed AND NOT analysed-fresh": the SQL says so in its
+// CASE, the walk says so by checking suppression after the freshness gate. The
+// state is unreachable in production — a successful analysis clears the
+// strikes — but two surfaces that agree only because nothing can reach the
+// disagreement agree by luck, and the next change to either gate's position
+// would not notice.
+func TestAFreshWaveformOutranksASuppression(t *testing.T) {
+	root, ctx := t.TempDir(), context.Background()
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	rel := "Artist/Album/01 Contradictory.flac"
+	seedAnalysisFile(t, store, root, rel, []byte("fLaC-body"))
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
+		SourcePath:    rel,
+		WaveformPath:  filepath.Join(t.TempDir(), "w.bin"),
+		WaveformTag:   "deadbeef",
+		WaveformSize:  42,
+		SourceMTimeNS: info.ModTime().UnixNano(),
+		SourceSize:    info.Size(),
+		SchemaVersion: analyze.WaveformSchemaVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < manifest.AnalysisFailureThreshold(); i++ {
+		if _, err := store.RecordAnalysisFailure(ctx, rel, "sox: source appears truncated"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := collectAnalysisCandidates(ctx, store, bridgefs.New([]string{root}), t.TempDir(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.skipped != 1 || res.unreadable != 0 {
+		t.Errorf("skipped = %d, unreadable = %d; want 1 and 0 — a track with a fresh "+
+			"waveform is up to date, and the coverage query counts it the same way",
+			res.skipped, res.unreadable)
+	}
+
+	// The coverage query must reach the same verdict on the same row.
+	cov, err := store.AnalysisCoverage(ctx, analyze.WaveformSchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cov.UnreadableExcluded != 0 {
+		t.Errorf("coverage excluded %d as unreadable, want 0 — it is analysed",
+			cov.UnreadableExcluded)
 	}
 }

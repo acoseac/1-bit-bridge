@@ -7148,3 +7148,166 @@ grep-masked-exit-status trap, in the harness rather than in the code.
 The audit documents stay out of scope by construction, being gitignored. The one
 stale citation found in `ops/audit-2026-08-06.md` was corrected on this machine
 only, and no PR can carry it.
+
+## 2026-09-21 — a source the decoder refuses stops being retried (#TBD)
+
+### The report
+
+Thirty truncated FLACs in the operator's library failed analysis identically on
+every pass — `analyze: failed … err: "sox: decoded 51.5s of 357.2s probed —
+source appears truncated"`. On the Azure deployment that was **1,385 WARN lines
+in 7 days** for the same 30 paths; on the replacement host the same 30 failed
+again at each start. The files were byte-identical to the backup, i.e. genuinely
+truncated at the source, and nothing anywhere told the operator which ones to
+replace.
+
+The mechanism is the one `variant_failure.go` (v39) documents for transcodes: a
+failed analysis writes no `track_analysis` row, and every candidate query
+selects tracks that LACK a fresh waveform, so the candidate is re-offered
+forever. `collectAnalysisCandidates` already skipped ZERO-BYTE sources for this
+exact reason, and its comment explains why that gate could not be widened — it
+"stays mtime/size-driven so it can't suppress a real file that's only
+TRANSIENTLY failing (those keep a non-zero size)". A truncated file keeps a
+non-zero size.
+
+### What this path has that the transcode path does not
+
+The decoder's own verdict, which is what lets the suppression be narrower than
+v39's "any failure, three times". Two sites in `decode.go` carry
+`ErrSourceUnreadable`:
+
+- the truncation check — sox and ffmpeg BOTH exit 0 on a truncated stream, so a
+  clean exit whose decoded length falls materially short of the probed duration
+  is the only signal separating a short FILE from a short READ;
+- a decoder that RAN and EXITED non-zero, i.e. opened the input and rejected it.
+
+The second needed a split that is easy to get wrong: `exec.ExitError` covers a
+signal death too, and `exec.CommandContext` kills the child on the job timeout
+while the OOM killer kills the BIGGEST decode under memory pressure. Neither
+reached a verdict. `ProcessState.Exited()` is false for a signal, so that is the
+discriminator — `decoderReachedAVerdict`, pinned against real processes (`sh -c
+'exit 3'` vs `sh -c 'kill -9 $$'`) rather than a synthesised ExitError, so the
+test cannot disagree with the platform about what ProcessState reports.
+
+Everything unclassified is transient. A missing sox, a faulted read, a full
+output volume and a cancelled context record nothing.
+
+`markUnreadable` wraps without changing `Error()`. The obvious
+`fmt.Errorf("%w: %w", ErrSourceUnreadable, err)` would have prefixed every
+message with "source unreadable: " — and these are not internal strings: they
+are logged verbatim, persisted as `tracks.analysis_fail_reason`, and rendered in
+the console's list. The operator has been reading the truncation one in their
+journal for a week.
+
+### Stamp from the row; let the live stat overrule it
+
+`RecordAnalysisFailure` takes no size/mtime argument. It writes
+`analysis_fail_size = size, analysis_fail_mtime_ns = mtime_ns` inside the
+statement that reads them, so the version a strike records is by construction
+the version the predicates compare it against. Binding the live stat the job
+decoded would stamp one world and compare in another: a strike written while the
+scanner was behind could never match, and the debounce would never suppress
+anything — the auto-optimize lesson ("staleness compares against the TRACK ROW,
+and the sweeper stamps from that same row") one subsystem over.
+
+That alone would leave a hole in the other direction, so `SuppressedAnalysisPaths`
+returns the version it matched on and the candidate walk re-checks it against
+its LIVE stat. Between an operator replacing a broken file and the next scan the
+row still describes the old one; on any disagreement the walk analyses. Resolved
+toward doing the work, the same posture the scanner's "we could not see this
+path" rule takes.
+
+### Numbers
+
+- Threshold **3**, matching `variantFailureThreshold` and the scanner's
+  missing-count threshold. It costs no log noise to wait, because the WARN is
+  already deduplicated to one line per file version — the threshold buys
+  retries, not silence.
+- TTL **7 days**, shorter than v39's 30. Both exist because the TOOLCHAIN can
+  change the answer, but a suppressed analysis also costs the operator the
+  scrubber, the loudness, the key and the tempo, so the track is missing from
+  every smart mix. One decode per broken file per week is cheap against that.
+  Repairing the file needs no TTL at all.
+- Reason capped at **500 bytes**, trimmed with the `utf8.UTFMax-1` trailing-rune
+  form (never validate-the-whole-string: this is a decoder's stderr about a
+  corrupt file, so interior invalid bytes are expected and that loop shape
+  discards everything after the first one, at O(N²)).
+
+### The defect the tests found
+
+`AnalysisCoverage`'s new unreadable term read **0 on the very population it
+exists to count**, with no error and a plausible-looking answer. The four terms
+beside it test `ta.waveform_tag != ''` POSITIVELY, so a LEFT JOIN miss yields
+NULL, the CASE takes ELSE and the row scores 0 — exactly right for "is it
+analysed". The new term NEGATES that condition, and `NOT NULL` is still NULL, so
+every UNANALYSED track (which is every suppressed track, by definition) scored
+0. `TestCoverageSubtractsTheGivenUpOnSet` was red on first run;
+`COALESCE(ta.waveform_tag, '')` is the fix, and the asymmetry with its four
+siblings now carries its reason in the query.
+
+`analysisFailureSuppressedSQL2` is DERIVED from the base predicate by a single
+`strings.Replace` of its one `?`, never retyped, because SQLite numbers a bare
+`?` by position: dropped unchanged into a query that already uses `?1` it would
+become `?2` today by accident and `?3` the moment a term is inserted above it.
+`TestAnalysisFailurePredicatesTakeOneBind` pins the single-placeholder
+assumption the derivation rests on — and `TestEveryCitedTestNameExists` caught
+that citation as a forward reference before the test existed, which is the guard
+working as designed.
+
+### Measured, with a real decoder
+
+Four deliberately-corrupt FLACs, `bridge analyze` run five times from a cleared
+state, against real ffmpeg (exit 187, "Error opening input: End of file"):
+
+```
+run 1   4 WARN lines    4 to analyze     (each file's FIRST verdict)
+run 2   0 WARN lines    4 to analyze     (strike 2 — Debug)
+run 3   0 WARN lines    4 to analyze     (strike 3 — Debug)
+run 4   0 WARN lines    0 to analyze     (suppressed)
+run 5   0 WARN lines    0 to analyze
+```
+
+Four lines instead of twenty, and no work at all from run 4. Pre-fix both
+columns grew without bound, which is the 1,385-in-7-days shape.
+
+### Negative controls
+
+Committed first. Each reverted afterwards:
+
+```
+skip gate removed from the walk        2 tests red
+live-stat check dropped (trust the set) TestALiveStatOverrulesAStaleSuppression red
+record a strike for EVERY failure      3 of 4 subtests + the transient WARN test red
+WARN logged unconditionally            "3 WARN lines …, want 1"  (the pre-fix number)
+ClearAnalysisFailure dropped on success TestASuccessfulAnalysisClearsTheStrikes red
+--dry-run allowed to clear             TestRetryFailedUnderDryRunClearsNothing red
+```
+
+A seventh control, on the gate ORDER, cost the round it was testing. `git
+checkout --` after it reverted the WHOLE file, taking two uncommitted changes
+(the gate move itself and a singular/plural fix) with it — the trap this log
+already records, walked into again, and only visible because the new test then
+failed against the reverted source. **Commit before EVERY control, including
+the small confirmatory one at the end.**
+
+### Browser
+
+The console half no Go test can see, driven at 1280 and at 375:
+`document.scrollWidth == clientWidth` at phone width, the table inside its
+panel. Two things only the browser showed. The panel was first placed before the
+workers panel, which put it UNDER the "Upscale & CarPlay batches" section
+heading — an analysis concern filed under upscale; it now sits directly after
+the cards grid. And the JS-built cells carried no `data-label`, which below
+1024px is not decoration: `table.rows td::before { content: attr(data-label) }`
+is the cell's only heading in the stacked card layout, so every value rendered
+with a blank column where its name belongs.
+
+### Not done
+
+The per-run `AnalysisSweepCounts` breakdown was previously rendered nowhere in
+JS despite being served on `/api/jobs` — the recursive jobs-field guard stops at
+the exported shared types, so it never saw it. Rather than add one more
+unrendered field beside six others, the new `unreadable` bucket is rendered
+along with the rest of the breakdown on the analysis card's new "Last run" row.
+The remaining question — whether `AnalysisSweepState` should be inside the
+guard's recursion at all — is left alone.

@@ -182,13 +182,13 @@ func runAnalyzeBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	fmt.Fprintf(stdout, "analyze: %d tracks, %d to analyze, %d up-to-date, %d skipped (DSD), %d empty, %d unresolvable, %d unreadable\n",
 		res.total, len(candidates), res.skipped, res.dsdSkipped, res.emptySkipped, res.missing, res.unreadable)
 	if res.unreadable > 0 {
-		noun := "sources"
+		subject, verb, object := "sources", "are", "the files"
 		if res.unreadable == 1 {
-			noun = "source"
+			subject, verb, object = "source", "is", "the file"
 		}
-		fmt.Fprintf(stdout, "analyze: %d %s the decoder refused %d times running are no longer retried; "+
-			"re-run with --retry-failed, or replace the files (see the console's unreadable list)\n",
-			res.unreadable, noun, manifest.AnalysisFailureThreshold())
+		fmt.Fprintf(stdout, "analyze: %d %s the decoder refused %d times running %s no longer retried; "+
+			"re-run with --retry-failed, or replace %s (see the console's unreadable list)\n",
+			res.unreadable, subject, manifest.AnalysisFailureThreshold(), verb, object)
 	}
 	if p.dryRun {
 		return 0
@@ -467,28 +467,6 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 			res.emptySkipped++
 			continue
 		}
-		// A source the decoders have refused analysisFailureThreshold times
-		// running, against the version on disk, stops being offered. The
-		// zero-byte skip above could not cover these — its own comment says
-		// so: it "stays mtime/size-driven so it can't suppress a real file
-		// that's only TRANSIENTLY failing (those keep a non-zero size)", and
-		// a truncated file keeps a non-zero size. What makes THIS skip safe
-		// is that the decoder reached a verdict (analyze.ErrSourceUnreadable)
-		// three separate times.
-		//
-		// The live stat has the last word. `sup` is the version the manifest
-		// row described when the verdicts landed; between an operator
-		// replacing the file and the next scan it describes the old one, so
-		// a mismatch means the thing that was refused is not the thing on
-		// disk and the file is analysed. Skipped under --force too, like the
-		// zero-byte gate: force bypasses the FRESHNESS gate, not
-		// unanalyzability. `bridge analyze --retry-failed` is the way past
-		// it, and repairing the file is the way that needs no flag.
-		if sup, ok := suppressed[rel]; ok &&
-			sup.SizeBytes == info.Size() && sup.MTimeNS == info.ModTime().UnixNano() {
-			res.unreadable++
-			continue
-		}
 		if !force {
 			// WantsAudioMD5Retry is the one thing here that is not a
 			// freshness check. mtime, size and schema version are all
@@ -509,6 +487,37 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 				res.skipped++
 				continue
 			}
+		}
+		// A source the decoders have refused
+		// manifest.AnalysisFailureThreshold() times running, against the
+		// version on disk, stops being offered. The zero-byte skip above
+		// could not cover these — its own comment says so: it "stays
+		// mtime/size-driven so it can't suppress a real file that's only
+		// TRANSIENTLY failing (those keep a non-zero size)", and a truncated
+		// file keeps a non-zero size. What makes THIS skip safe is that the
+		// decoder reached a verdict (analyze.ErrSourceUnreadable) three
+		// separate times.
+		//
+		// AFTER the freshness gate and OUTSIDE the --force guard, which is
+		// two decisions. After, because a track that already has a fresh
+		// waveform is up-to-date, not unreadable, and Store.AnalysisCoverage
+		// makes the same call ("suppressed AND NOT analysed-fresh") — the
+		// state is unreachable today, since a success clears the strikes,
+		// but two surfaces that agree only by unreachability agree by luck.
+		// Outside, because --force bypasses the FRESHNESS gate, not
+		// unanalyzability: the same posture the zero-byte gate takes.
+		// `bridge analyze --retry-failed` is the way past this one, and
+		// repairing the file is the way that needs no flag.
+		//
+		// The live stat has the last word. `sup` is the version the manifest
+		// row described when the verdicts landed; between an operator
+		// replacing the file and the next scan it describes the old one, so
+		// a mismatch means the thing that was refused is not the thing on
+		// disk, and the file is analysed.
+		if sup, ok := suppressed[rel]; ok &&
+			sup.SizeBytes == info.Size() && sup.MTimeNS == info.ModTime().UnixNano() {
+			res.unreadable++
+			continue
 		}
 		res.candidates = append(res.candidates, analyze.AnalyzeSpec{
 			SourceAbsPath:    abs,

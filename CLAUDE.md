@@ -1038,6 +1038,59 @@ no failing test — which is the shape to expect in this area.
   empirically disproven: `-xerror` also fails a glitchy-but-COMPLETE file
   (permanent treadmill), and sox stderr markers cannot distinguish truncation
   from a resynced complete file.
+- **…and a source that will NEVER decode stops being offered, on the decoder's
+  own verdict.** A failed analysis writes no `track_analysis` row and every
+  candidate query selects tracks that LACK a fresh waveform, so a truncated
+  file was re-selected on every sweep forever: 30 of them produced **1,385 WARN
+  lines in 7 days** on one host and re-failed at every start on the next, with
+  nothing naming which files to replace. `internal/analyze` classifies the
+  failure at the site where the fact is KNOWN (never by matching the message
+  later — the enricher's "a 4xx whose body mentions HTTP 503" trap):
+  `ErrSourceUnreadable` covers a clean-exit decode materially short of the
+  probed duration, and a decoder that RAN and EXITED non-zero. A decoder killed
+  by a SIGNAL is excluded — `ProcessState.Exited()` is the split, because the
+  per-job timeout and the OOM killer reach no verdict, and the OOM killer picks
+  the biggest decode. **Everything unclassified is transient**, so a missing
+  sox, a faulted read and a full output volume record nothing; the permissive
+  answer is the safe one here, since a transient verdict costs one decode and a
+  permanent one costs the operator a file that silently stops being analysed.
+  `markUnreadable` deliberately does NOT prefix the message — these strings are
+  logged, persisted as `analysis_fail_reason` and rendered in the console.
+- **The strike is stamped FROM the manifest row; the walk's LIVE stat overrules
+  it.** `RecordAnalysisFailure` takes no size/mtime argument: it writes
+  `analysis_fail_size = size, analysis_fail_mtime_ns = mtime_ns` in the
+  statement that reads them, so the version a strike records IS the version the
+  predicates compare against — binding the live stat would stamp one world and
+  compare in another, and a strike written while the scanner is behind could
+  never match. (The auto-optimize rule below, one subsystem over.) The
+  candidate walk then re-checks against `info`, because it knows what is on
+  disk RIGHT NOW: between a repair and the next scan the row still describes
+  the broken file, and any disagreement resolves toward ANALYSING. Three
+  consecutive verdicts suppress, a 7-day TTL retries (the toolchain is what can
+  change the answer for a file nobody touched), and replacing the file re-opens
+  it with no flag — that last one is the remedy the console list exists to
+  prompt, so a debounce outliving it would be worse than the bug. `--force`
+  does NOT bypass it, like the zero-byte gate; `--retry-failed` does, honouring
+  `--filter` through the explicit-path form because `--filter` is a SUBSTRING
+  match no byte range expresses, and COUNTING under `--dry-run`.
+- **The WARN is kept and deduplicated to one line per (path, size, mtime)** —
+  the strike count is the log gate (`count == 1`). Identical lines forever is
+  the M-SEARCH shape, not the playlist mass-delete shape: every line here is
+  the same by construction, so it is suppressed rather than repeated. A
+  TRANSIENT failure still warns every time, deliberately — it has no marker to
+  dedup against, and silencing a missing sox behind the fix for truncated files
+  is how one alarm hides another. Measured end to end with a real decoder: 4
+  WARN lines over 5 runs of 4 broken files, and zero work at all from run 4.
+- **A NEGATED condition over a LEFT JOIN needs COALESCE, and the sibling terms
+  that do not are why it is easy to miss.** `AnalysisCoverage`'s four existing
+  terms test `ta.waveform_tag != ''` POSITIVELY, so a join miss yields NULL,
+  the CASE takes ELSE and the row scores 0 — right for "is it analysed". The
+  unreadable term NEGATES that, and `NOT NULL` is still NULL, so it scored 0 on
+  the very population it exists to count: no error, a plausible number, and the
+  coverage bar silently unchanged. `TestCoverageSubtractsTheGivenUpOnSet` found
+  it. Suppressed tracks are SUBTRACTED from eligible (a remainder that can
+  never drain reads as a stuck job) while tracks still being retried stay in
+  it.
 - **The auto-optimize candidate query is its own thing, not the Inspector's** —
   it must exclude UPnP-routed rows and suppressed rows, and select on "NO FRESH
   variant exists" via a correlated subquery, never a JOIN and never "some row is
