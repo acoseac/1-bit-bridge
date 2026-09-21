@@ -7051,7 +7051,7 @@ of which is a defect:
 | `ops/plan-web-upload.md` | 30 | a plan listing tests TO BE WRITTEN |
 | `docs/LoupeReviewCycle.md`, `AGENTS.md` | 4 | metasyntactic `-run` placeholders |
 | `ops/deployment-runbook.md` | 1 | a test in the private conductor repo |
-| `ops/engineering-log.md` | 5 | the real drift |
+| `ops/engineering-log.md` | 5 | the real drift: 4 stale citations + 1 false positive |
 
 ### TRACKED, and why the first draft was not a guard
 
@@ -7074,9 +7074,13 @@ alternative — mirroring the `.gitignore` md globs by hand — was considered a
 dropped: it drifts the moment another local doc appears, and it drifts toward a
 false failure on one machine.
 
-### The four real hits, corrected rather than exempted
+### Four stale citations and one false positive, corrected rather than exempted
 
-Three were plain renames the docs had drifted from:
+The accounting matters and the first draft of this entry got it wrong, calling
+it "four real hits" while the table above said five (CodeRabbit on #946). The
+five are **four stale citations plus one thing that was never a citation**.
+
+Three of the four were plain renames the docs had drifted from:
 
 ```
 …NoMatchesUnderPrefixIsByteRanged -> TestClearAcoustIDSuppressionUnderPrefixIsByteRanged
@@ -7086,9 +7090,15 @@ Three were plain renames the docs had drifted from:
 
 The third was confirmed against the fixture rather than guessed from the name:
 the entry describes replacing a fixture value that "cleans to itself", and the
-live test uses `"John Adams*"`, which does not. The fourth was not a citation at
-all — a UA string literal being DISCUSSED, the commentary-quotes-its-subject
-trap in markdown, now described instead of quoted.
+live test uses `"John Adams*"`, which does not.
+
+The **fourth stale citation** is the guard name #945 itself retired, which this
+log named in full; it is now elided (see below). The **false positive** is the
+fifth: a UA string literal being DISCUSSED rather than cited — the
+commentary-quotes-its-subject trap in markdown — now described instead of
+quoted. It is worth keeping the two apart, because they call for opposite
+fixes: a stale citation is repointed or elided, while a false positive means
+the prose should stop spelling a token it is only talking about.
 
 **A note that must name a test which no longer exists elides the `Test`
 prefix** — `…ServeDrainsOnCleanup`. The regex needs `Test` followed by an

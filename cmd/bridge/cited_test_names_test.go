@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -244,8 +246,30 @@ var (
 // test says so rather than quietly widening its scope back to every file.
 func trackedMarkdownSet(t *testing.T, root string) map[string]bool {
 	t.Helper()
-	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
-		return nil // not a checkout: a fixture tree, nothing to filter
+	// Lstat, and ONLY fs.ErrNotExist returns nil. Any other error — a
+	// permission failure, an I/O error, a dangling `.git` symlink — is not
+	// evidence that there are no ignore rules to honour, and treating it as
+	// such silently disables the filter and puts gitignored docs back in
+	// scope: the exact environment-dependence this function exists to remove,
+	// one level up. Lstat rather than Stat so a dangling symlink fails here
+	// instead of reading as absent. (CodeRabbit, PR #946.)
+	if _, err := os.Lstat(filepath.Join(root, ".git")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // not a checkout: a fixture tree, nothing to filter
+		}
+		t.Fatalf("stat %s: %v — cannot tell whether this root has ignore rules, and "+
+			"guessing either way makes this test answer differently in different "+
+			"checkouts", filepath.Join(root, ".git"), err)
+	}
+	// A missing git binary is named as such rather than left as a bare exec
+	// failure: it is the one cause an operator can act on directly. It is NOT
+	// a t.Skip — a skipped guard looks exactly like a passing one, and this
+	// one's whole job is to stop the scope silently widening. (Gemini, #946.)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatalf("git is not on PATH (%v), but %s is a checkout — the markdown scan "+
+			"cannot tell tracked docs from gitignored local ones without it, and "+
+			"scanning both makes this test answer differently in different checkouts",
+			err, root)
 	}
 	out, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.md").Output()
 	if err != nil {
@@ -313,49 +337,18 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 		// the `(?m)^func` anchor and every literal below find nothing.
 		src := strings.ReplaceAll(string(raw), "\r\n", "\n")
 		rel, _ := filepath.Rel(root, path)
-		if isMD {
-			if trackedMD != nil && !trackedMD[filepath.ToSlash(rel)] {
-				return nil // gitignored, so not part of the shared tree
-			}
-			if isPlanDoc(rel) {
-				return nil
-			}
+		switch {
+		case isMD:
+			collectMarkdownCitations(rel, src, trackedMD, cited, mdCitations)
+			return nil
+		case strings.HasSuffix(path, "_test.go"):
+			return collectTestFileCitations(path, rel, src, cited, defined)
+		default:
 			for _, name := range citedRe.FindAllString(src, -1) {
-				if mdPlaceholderNames[name] {
-					continue
-				}
-				if _, foreign := mdForeignRepoTests[name]; foreign {
-					continue
-				}
-				cited[name] = append(cited[name], rel)
-				mdCitations[name] = true
-			}
-			return nil
-		}
-		if strings.HasSuffix(path, "_test.go") {
-			f, err := parser.ParseFile(token.NewFileSet(), path, src, parser.ParseComments|parser.SkipObjectResolution)
-			if err != nil {
-				return err
-			}
-			for _, decl := range f.Decls {
-				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Test") {
-					defined[fn.Name.Name] = true
-				}
-			}
-			var comments strings.Builder
-			for _, g := range f.Comments {
-				comments.WriteString(g.Text())
-				comments.WriteByte('\n')
-			}
-			for _, name := range citedRe.FindAllString(comments.String(), -1) {
 				cited[name] = append(cited[name], rel)
 			}
 			return nil
 		}
-		for _, name := range citedRe.FindAllString(src, -1) {
-			cited[name] = append(cited[name], rel)
-		}
-		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -363,6 +356,54 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 	// Returned rather than stashed in a package var: two tests call this, and
 	// shared mutable state between them is a seam nobody asked for.
 	return cited, defined, len(mdCitations)
+}
+
+// collectMarkdownCitations applies the `.md` policy declared above: skip a
+// document git does not track, skip a plan, and skip the two exempt name
+// classes. Split out of the walk for SonarCloud go:S3776 — the callback had
+// grown to a cognitive complexity of 50 against the 15 allowed, most of it
+// nesting rather than logic.
+func collectMarkdownCitations(rel, src string, trackedMD map[string]bool, cited map[string][]string, mdCitations map[string]bool) {
+	if trackedMD != nil && !trackedMD[filepath.ToSlash(rel)] {
+		return // gitignored, so not part of the shared tree
+	}
+	if isPlanDoc(rel) {
+		return
+	}
+	for _, name := range citedRe.FindAllString(src, -1) {
+		if mdPlaceholderNames[name] {
+			continue
+		}
+		if _, foreign := mdForeignRepoTests[name]; foreign {
+			continue
+		}
+		cited[name] = append(cited[name], rel)
+		mdCitations[name] = true
+	}
+}
+
+// collectTestFileCitations takes definitions from a test file's top-level
+// `Test…` FuncDecls and citations from its comment groups ONLY — its code
+// names tests legitimately, and its string literals can hold anything.
+func collectTestFileCitations(path, rel, src string, cited map[string][]string, defined map[string]bool) error {
+	f, err := parser.ParseFile(token.NewFileSet(), path, src, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		return err
+	}
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Test") {
+			defined[fn.Name.Name] = true
+		}
+	}
+	var comments strings.Builder
+	for _, g := range f.Comments {
+		comments.WriteString(g.Text())
+		comments.WriteByte('\n')
+	}
+	for _, name := range citedRe.FindAllString(comments.String(), -1) {
+		cited[name] = append(cited[name], rel)
+	}
+	return nil
 }
 
 // missingCitations returns the cited names nothing defines, formatted with the

@@ -2363,9 +2363,12 @@ its twin.** The top list is older, shorter, and read first.
   present means git must answer and a failing git is reported, never quietly
   widened back. **Elide the `Test` prefix** (`…ServeDrainsOnCleanup`) when a
   note must name a test that no longer exists: the regex needs `Test` +
-  uppercase, so the name stays readable without claiming to exist. Four real
-  hits were corrected, not exempted — three plain renames plus a UA string
-  literal that was being DISCUSSED rather than cited. (#946)
+  uppercase, so the name stays readable without claiming to exist. Four stale
+  citations were corrected, not exempted — three plain renames and the guard
+  name #945 retired — plus one FALSE POSITIVE, a UA string literal that was
+  being discussed rather than cited. Keep the two apart: a stale citation is
+  repointed or elided, a false positive means the prose should stop spelling a
+  token it is only talking about. (#946)
 
 ### <a name="review-2026-09-18"></a>2026-09-18 — findings review on the post-#899 window
 
