@@ -209,6 +209,10 @@ assert_matrix_is_complete() {
 }
 
 run_rest() {
+  # One leg, so index 0 is the only one that means anything. A matrix that
+  # grew `{ group: rest, index: 1 }` would otherwise run all 44 packages a
+  # second time, silently, and only show up as a slower gate.
+  assert_index_is_a_shard 1 "the rest shard"
   assert_matrix_is_complete
   local all=() skipped=0 pkg
   while IFS= read -r pkg; do
@@ -234,12 +238,37 @@ run_rest() {
   go test -p "$(cores)" "${RACE_FLAGS[@]}" "${all[@]}"
 }
 
+# assert_index_is_a_shard <count> <what> — INDEX must be one of the exact
+# strings 0..count-1.
+#
+# A STRING comparison against the admitted set, never `[ "$INDEX" -lt … ]`.
+# INDEX is caller-supplied, and `[` with `-lt` is arithmetic: it errors on
+# anything non-numeric, and `set -e` does not fire inside an `if` condition,
+# so the guard silently evaluated FALSE and execution carried on into the
+# partition. Measured before fixing — `test-shard.sh manifest abc` printed
+# two lines of raw `[: abc: integer expression expected` and then failed
+# with "shard abc/4 ... is empty (more shards than tests?)", which is a
+# confident wrong diagnosis (CodeRabbit on #943). It did fail CLOSED, which
+# is the right direction, but naming the symptom while hiding the cause is
+# what this file's own docblocks warn about twice already.
+#
+# The set comparison also disposes of three things a numeric check has to
+# handle separately: `007` (bash `test` reads a leading zero as OCTAL while
+# awk reads it as decimal, so the bounds check and the partition would
+# disagree), a 21-digit value (which bash rejects as not an integer at all),
+# and a negative.
+assert_index_is_a_shard() {
+  local count="$1" what="$2" i
+  for ((i = 0; i < count; i++)); do
+    [ "$INDEX" = "$i" ] && return 0
+  done
+  echo "test-shard: index '$INDEX' is not one of $(seq 0 $((count - 1)) | paste -sd, -) for $what" >&2
+  exit 1
+}
+
 run_sharded() {
   local pkg="$1" shards="$2" all_names part total mine rebuilt i
-  if [ "$INDEX" -lt 0 ] || [ "$INDEX" -ge "$shards" ]; then
-    echo "test-shard: index $INDEX is outside 0..$((shards - 1)) for $pkg" >&2
-    exit 1
-  fi
+  assert_index_is_a_shard "$shards" "$pkg"
   all_names="$(names "$pkg")"
 
   # Floor: a silently-empty list would make this shard — and every other —
