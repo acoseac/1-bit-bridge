@@ -24,20 +24,24 @@
 # So: `manifest` and `admin` are sharded by test name, and every other
 # package rides one `rest` shard that keeps `-p $(nproc)`.
 #
-# WHY THE PARTITION IS GUARDED
+# WHAT MUST NOT HAPPEN
 #
-# The failure mode this must not have is a test that runs in NO shard:
-# every shard reports PASS, the gate goes green, and the test silently
-# stopped running — the same shape as a fuzz target that "looks like it ran
-# and did not". Three things are asserted on every invocation, all of them
-# pure text and free:
+# A test that runs in NO shard: every shard reports PASS, the gate goes
+# green, and the test silently stopped running — the same shape as a fuzz
+# target that "looks like it ran and did not". Everything below that reads
+# as paranoia is guarding that one outcome, because nothing else in the
+# tree would notice it:
 #
 #   - the listed set is non-empty (the `checked == 0` floor — a `go test
 #     -list` that silently returns nothing would otherwise make every shard
 #     trivially green);
-#   - the shards are DISJOINT and their union is the whole list, recomputed
-#     here rather than assumed from `NR % SHARDS`;
-#   - this shard's own partition is non-empty.
+#   - the name partitions are DISJOINT and their union is the whole list,
+#     recomputed as set equality rather than as a count, because a matching
+#     count is also what you get when one name lands in two shards and
+#     another lands in none;
+#   - this shard's own partition is non-empty;
+#   - the workflow matrix actually schedules every shard this script
+#     believes in — see assert_matrix_is_complete.
 #
 # FUZZ TARGETS ARE IN THE PARTITION ON PURPOSE. Without `-fuzz` a target
 # runs its seed corpus as an ordinary test, which is how `make test`
@@ -56,22 +60,60 @@
 
 set -euo pipefail
 
-GROUP="${1:?usage: test-shard.sh <manifest|admin|rest> <index> <shards>}"
+GROUP="${1:?usage: test-shard.sh <rest|manifest|admin> <index>}"
 INDEX="${2:?shard index, 0-based}"
-SHARDS="${3:?shard count}"
 
 # The two flags that MUST stay identical to the Makefile's `test` target.
 # They live here as well only because this script bypasses that target to
 # add `-run`; if either changes there, change it here in the same commit.
 RACE_FLAGS=(-race -timeout 30m)
 
-# The packages sharded by test name, as ONE list with two readers: the
-# dispatch at the bottom, and the exclusion `rest` applies. Two copies of
-# this could disagree, and the way they would disagree is a package that
-# runs in no shard at all.
-SHARDED=(manifest admin)
+# group:shards — which packages are sharded by test name AND how many ways,
+# as ONE declaration with three readers: the dispatch at the bottom, the
+# exclusion `rest` applies, and the matrix check.
+#
+# The COUNT lives here rather than in the workflow on purpose. It used to be
+# a `shards:` key each matrix leg passed in, which made the workflow and
+# this script two places that had to agree about the partition — and they
+# could disagree silently, because a leg passing a different count computes
+# a different partition of the same names. The workflow now says only WHICH
+# group and WHICH index; this file decides how many there are, and
+# assert_matrix_is_complete requires the matrix to match.
+SHARDED=(manifest:4 admin:4)
 
 cores() { command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu; }
+
+# sharded_count <group> — how many ways that group splits; non-zero exit
+# when the group is not sharded at all.
+#
+# A `group -> count` associative array would read better and is bash 4;
+# macOS still ships 3.2 and this script is run by hand there, so the pairs
+# are packed into one indexed array instead.
+sharded_count() {
+  local entry
+  for entry in "${SHARDED[@]}"; do
+    if [ "${entry%%:*}" = "$1" ]; then
+      printf '%s' "${entry##*:}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# is_sharded <import path> — true when this package has its own matrix legs.
+#
+# A glob with NO trailing wildcard, which is what makes it an exact tail
+# match: ./internal/adminauth does not match */internal/admin, so it stays
+# in the `rest` leg where it belongs.
+is_sharded() {
+  local pkg="$1" entry
+  for entry in "${SHARDED[@]}"; do
+    if [[ "$pkg" == */internal/"${entry%%:*}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 # names <pkg> — every name `-run` can actually select, one per line.
 #
@@ -79,19 +121,16 @@ cores() { command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu; }
 # tidy. `-race` defines the `race` build tag, so a listing taken without it
 # describes a DIFFERENT build than the one the shard executes: a
 # `//go:build race` test would be absent from the list, land in no
-# partition, and silently never run — behind nine green checks, which is
-# the one failure this whole script is written to prevent. This repo
-# already carries both tags (internal/manifest's racefixture_*_test.go
-# size the compaction fixtures by build), so it is a single new function
-# away rather than hypothetical. The mirror case is harmless by
-# construction: a `//go:build !race` name simply is not in the race
-# listing, and the shard that would have owned it never asks for it.
+# partition, and silently never run. This repo already carries both tags
+# (internal/manifest's racefixture_*_test.go size the compaction fixture by
+# build), so it is a single new function away rather than hypothetical. The
+# mirror case is harmless by construction: a `//go:build !race` name simply
+# is not in the race listing, and the shard that would have owned it never
+# asks for it.
 #
 # It is also strictly less work. The shard has to build the race binary
-# regardless; listing without `-race` builds a SECOND, non-race binary
-# that nothing then uses (measured cold here: 17.0s for the race build the
-# shard needs anyway, on top of which the non-race listing was pure
-# waste).
+# regardless; listing without `-race` builds a SECOND, non-race binary that
+# nothing then uses.
 #
 # The listing is captured BEFORE the filter so a package that fails to
 # compile fails here, loudly, with go's own message — rather than reaching
@@ -106,60 +145,71 @@ names() {
   printf '%s\n' "$out" | grep -E '^(Test|Fuzz|Example)' || true
 }
 
-# partition <index> — this shard's slice of stdin, round-robin by line.
+# partition <names> <index> <count> — one shard's slice, round-robin by line.
 partition() {
-  awk -v i="$1" -v n="$SHARDS" 'NR % n == i'
+  printf '%s\n' "$1" | awk -v i="$2" -v n="$3" 'NR % n == i'
 }
 
-# is_sharded <import path> — true when this package has its own matrix legs.
+# matrix_indices <workflow> <group> — the `index:` of every matrix leg
+# naming that group, ascending.
 #
-# A glob with NO trailing wildcard, which is what makes it an exact tail
-# match: ./internal/adminauth does not match */internal/admin, so it stays
-# in the `rest` leg where it belongs. (Gemini on #943 — the previous pair
-# of parameter expansions was equivalent and much harder to read.)
-is_sharded() {
-  local pkg="$1" g
-  for g in "${SHARDED[@]}"; do
-    if [[ "$pkg" == */internal/"$g" ]]; then
-      return 0
-    fi
-  done
-  return 1
+# One leg per line is the matrix's shape and this depends on it. The
+# dependency is safe in the direction that matters: a leg split across
+# lines yields no index here, the set comes up short, and the caller
+# FAILS. It cannot invent coverage that is not there.
+#
+# `group: <name>` followed by any non-name character or end of line, never
+# a trailing comma — that comma exists only because `index` happens to
+# follow `group` today, and a comma-dependent match would report "runs
+# nowhere" about a perfectly healthy matrix if the keys were reordered.
+# POSIX ERE rather than `\b`, a GNU extension this script cannot assume on
+# every host it is run from.
+# `|| true` because a group with NO legs left is the single most important
+# case this reports, and grep exits 1 on no match — under `pipefail` that
+# killed the whole script before the caller could say what was wrong. It
+# still failed CLOSED, which is the right direction, but a CI failure with
+# an empty log names nothing. Verified by deleting all four admin legs: the
+# script exited 1 and printed not one word.
+matrix_indices() {
+  grep -E "group:[[:space:]]*$2([^[:alnum:]_]|$)" "$1" |
+    sed -nE 's/.*index:[[:space:]]*([0-9]+).*/\1/p' | sort -n || true
 }
 
-# assert_matrix_runs_the_sharded_packages — the one failure this whole
-# arrangement can hide.
+# assert_matrix_is_complete — the failure this whole arrangement can hide.
 #
-# `rest` SKIPS everything in SHARDED on the promise that other legs run it.
-# Delete those legs from the workflow and leave this list alone and the
-# package runs NOWHERE: nine green checks, a green gate, and 668s of tests
-# that quietly stopped existing. Nothing else in the tree would notice, so
-# the leg that does the excluding is the one that checks the promise.
+# `rest` SKIPS every sharded package on the promise that other legs run it.
+# Checking that the group is MENTIONED somewhere is not that promise:
+# delete just `manifest` index 2 and the mention survives, `rest` still
+# excludes internal/manifest, and that partition's 208 tests run nowhere
+# behind nine green checks. Verified by deleting exactly that leg and
+# watching the mention-only check pass (CodeRabbit on #943).
+#
+# So: require the exact index set 0..n-1, which also rejects a duplicate
+# index and a leg naming a group this script does not shard.
 #
 # Skipped when the workflow file is absent, so the script still works when
 # run by hand from somewhere else; in CI it is always there.
-assert_matrix_runs_the_sharded_packages() {
-  local wf=".github/workflows/gate.yml" g
+assert_matrix_is_complete() {
+  local wf=".github/workflows/gate.yml" entry g n want got
   [ -f "$wf" ] || return 0
-  for g in "${SHARDED[@]}"; do
-    # `group: <name>` followed by anything that is not a name character, or
-    # by end of line. NOT a trailing comma, which is only there because
-    # `index` happens to follow `group` in the matrix today — reorder the
-    # flow mapping so `group` is last and a comma-dependent check would
-    # report that the package runs nowhere while it runs perfectly well.
-    # Fails closed, but a false alarm on a green tree is still a bad
-    # guard. POSIX ERE rather than `\b`, which is a GNU extension this
-    # script cannot assume on every host it is run from. (Gemini on #943.)
-    if ! grep -qE "group:[[:space:]]*${g}([^[:alnum:]_]|\$)" "$wf"; then
-      echo "test-shard: internal/${g} is excluded from the 'rest' shard, but no" >&2
-      echo "            matrix leg in ${wf} runs it — its tests would run nowhere." >&2
+  for entry in "${SHARDED[@]}"; do
+    g="${entry%%:*}"
+    n="${entry##*:}"
+    want="$(seq 0 $((n - 1)))"
+    got="$(matrix_indices "$wf" "$g")"
+    if [ "$got" != "$want" ]; then
+      echo "test-shard: ${wf} does not schedule all $n shards of internal/${g}." >&2
+      echo "            want indices: $(printf '%s' "$want" | paste -sd, -)" >&2
+      echo "            got:          $(printf '%s' "$got" | paste -sd, -)" >&2
+      echo "            'rest' skips internal/${g} on the promise those legs run" >&2
+      echo "            it, so a missing one runs nowhere and nothing goes red." >&2
       exit 1
     fi
   done
 }
 
 run_rest() {
-  assert_matrix_runs_the_sharded_packages
+  assert_matrix_is_complete
   local all=() skipped=0 pkg
   while IFS= read -r pkg; do
     if is_sharded "$pkg"; then
@@ -185,43 +235,41 @@ run_rest() {
 }
 
 run_sharded() {
-  local pkg="$1" all_names part i
+  local pkg="$1" shards="$2" all_names part total mine rebuilt i
+  if [ "$INDEX" -lt 0 ] || [ "$INDEX" -ge "$shards" ]; then
+    echo "test-shard: index $INDEX is outside 0..$((shards - 1)) for $pkg" >&2
+    exit 1
+  fi
   all_names="$(names "$pkg")"
 
   # Floor: a silently-empty list would make this shard — and every other —
   # pass without running anything.
-  local total
   total="$(printf '%s\n' "$all_names" | grep -c . || true)"
   if [ "${total:-0}" -lt 1 ]; then
     echo "test-shard: no test names listed for $pkg" >&2
     exit 1
   fi
 
-  # Disjoint + covering, as SET EQUALITY rather than as a count.
-  #
-  # Counting instead would be the weaker check that looks like this one: a
-  # sum that matches is also what you get when one name lands in two shards
-  # and another lands in none, which is exactly the bug worth catching.
-  # Rebuild the union from the same partition function every shard uses and
-  # compare it, sorted, against the whole list.
-  local rebuilt
-  rebuilt="$(for ((i = 0; i < SHARDS; i++)); do
-    printf '%s\n' "$all_names" | partition "$i"
+  # Disjoint + covering, as SET EQUALITY rather than as a count. Counting
+  # instead would be the weaker check that looks like this one: a sum that
+  # matches is also what you get when one name lands in two shards and
+  # another lands in none, which is exactly the bug worth catching.
+  rebuilt="$(for ((i = 0; i < shards; i++)); do
+    partition "$all_names" "$i" "$shards"
   done | sort)"
   if [ "$rebuilt" != "$(printf '%s\n' "$all_names" | sort)" ]; then
-    echo "test-shard: the $SHARDS partitions of $pkg are not a partition of its $total names" >&2
+    echo "test-shard: the $shards partitions of $pkg are not a partition of its $total names" >&2
     exit 1
   fi
 
-  part="$(printf '%s\n' "$all_names" | partition "$INDEX")"
-  local mine
+  part="$(partition "$all_names" "$INDEX" "$shards")"
   mine="$(printf '%s\n' "$part" | grep -c . || true)"
   if [ "${mine:-0}" -lt 1 ]; then
-    echo "test-shard: shard $INDEX/$SHARDS of $pkg is empty (more shards than tests?)" >&2
+    echo "test-shard: shard $INDEX/$shards of $pkg is empty (more shards than tests?)" >&2
     exit 1
   fi
 
-  echo "test-shard: $pkg shard $INDEX/$SHARDS — $mine of $total names"
+  echo "test-shard: $pkg shard $INDEX/$shards — $mine of $total names"
   go test "$pkg" "${RACE_FLAGS[@]}" -run "^($(printf '%s\n' "$part" | paste -sd'|' -))\$"
 }
 
@@ -229,11 +277,9 @@ if [ "$GROUP" = rest ]; then
   run_rest
   exit 0
 fi
-for g in "${SHARDED[@]}"; do
-  if [ "$GROUP" = "$g" ]; then
-    run_sharded "./internal/$g/"
-    exit 0
-  fi
-done
-echo "test-shard: unknown group '$GROUP' (want rest, or one of: ${SHARDED[*]})" >&2
+if shards="$(sharded_count "$GROUP")"; then
+  run_sharded "./internal/$GROUP/" "$shards"
+  exit 0
+fi
+echo "test-shard: unknown group '$GROUP' (want rest, or one of: ${SHARDED[*]%%:*})" >&2
 exit 1

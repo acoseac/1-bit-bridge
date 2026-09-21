@@ -122,7 +122,11 @@ jobs:
   # admin's 131 — more cores cannot touch them, only more processes can.
   #
   # Four ways each, plus one leg for every other package (whose own floor
-  # is cmd/bridge at 218s, so splitting it further buys nothing). Measured
+  # is cmd/bridge at 218s, so splitting it further buys nothing). The COUNT
+  # is the script's (`SHARDED=(manifest:4 admin:4)`), not a `shards:` key
+  # here — two places that must agree about a partition can disagree
+  # silently, and the script's own check requires this matrix to schedule
+  # exactly the indices it believes in. Measured
   # locally: one manifest shard is 95s against 410s for the whole package,
   # near-linear.
   #
@@ -146,15 +150,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { label: manifest 1/4, group: manifest, index: 0, shards: 4 }
-          - { label: manifest 2/4, group: manifest, index: 1, shards: 4 }
-          - { label: manifest 3/4, group: manifest, index: 2, shards: 4 }
-          - { label: manifest 4/4, group: manifest, index: 3, shards: 4 }
-          - { label: admin 1/4,    group: admin,    index: 0, shards: 4 }
-          - { label: admin 2/4,    group: admin,    index: 1, shards: 4 }
-          - { label: admin 3/4,    group: admin,    index: 2, shards: 4 }
-          - { label: admin 4/4,    group: admin,    index: 3, shards: 4 }
-          - { label: rest,         group: rest,     index: 0, shards: 1 }
+          - { label: manifest 1/4, group: manifest, index: 0 }
+          - { label: manifest 2/4, group: manifest, index: 1 }
+          - { label: manifest 3/4, group: manifest, index: 2 }
+          - { label: manifest 4/4, group: manifest, index: 3 }
+          - { label: admin 1/4,    group: admin,    index: 0 }
+          - { label: admin 2/4,    group: admin,    index: 1 }
+          - { label: admin 3/4,    group: admin,    index: 2 }
+          - { label: admin 4/4,    group: admin,    index: 3 }
+          - { label: rest,         group: rest,     index: 0 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -179,7 +183,7 @@ jobs:
             ${{ runner.os }}-gobuild-test-${{ matrix.group }}-${{ hashFiles('**/go.sum') }}-
             ${{ runner.os }}-gobuild-test-${{ matrix.group }}-
       - name: test (race)
-        run: .github/scripts/test-shard.sh ${{ matrix.group }} ${{ matrix.index }} ${{ matrix.shards }}
+        run: .github/scripts/test-shard.sh ${{ matrix.group }} ${{ matrix.index }}
 
   dsd-measure:
     name: dsd-measure
