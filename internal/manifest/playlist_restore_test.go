@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -249,5 +250,115 @@ func TestCountRecentPlaylistTombstonesByCountsOneDeviceInsideTheWindow(t *testin
 	// An unattributed delete must not pool into one phantom device.
 	if got, err := s.CountRecentPlaylistTombstonesBy(ctx, "", since); err != nil || got.Count != 0 {
 		t.Errorf("Count for an empty device token = %+v (err=%v), want 0", got, err)
+	}
+}
+
+// The console's burst grouping. It has to answer the same question the
+// live WARN answers, because the panel's sentence and the journal line
+// describe one event — and the shape CodeRabbit named on #942 (a second
+// device deleting once in the middle of a run) is exactly where the old
+// client-side chain-of-gaps reading disagreed with it.
+
+func runRow(id, deleter, name string, atSec int64) AdminDeletedPlaylist {
+	return AdminDeletedPlaylist{
+		ID: id, Name: id, DeletedByToken: deleter, DeletedByName: name,
+		DeletedAt: atSec * int64(time.Second),
+	}
+}
+
+func TestLargestPlaylistDeleteRunSpansAnInterleavedDevice(t *testing.T) {
+	// Device A deletes six, and device B deletes one in the middle. A
+	// chain-of-gaps reading stops at B and reports three; the window says
+	// six, which is what CountRecentPlaylistTombstonesBy counted live.
+	rows := []AdminDeletedPlaylist{
+		runRow("a6", "devA", "Studio Mac", 106),
+		runRow("a5", "devA", "Studio Mac", 105),
+		runRow("a4", "devA", "Studio Mac", 104),
+		runRow("b1", "devB", "New iPhone", 103),
+		runRow("a3", "devA", "Studio Mac", 102),
+		runRow("a2", "devA", "Studio Mac", 101),
+		runRow("a1", "devA", "Studio Mac", 100),
+	}
+	run, ok := LargestPlaylistDeleteRun(rows)
+	if !ok {
+		t.Fatal("no run found across an interleaved device")
+	}
+	if run.Count != 6 {
+		t.Errorf("Count = %d, want 6 — one delete from another device must not end the run", run.Count)
+	}
+	if run.DeviceToken != "devA" || run.DeviceName != "Studio Mac" {
+		t.Errorf("device = %q/%q, want devA/Studio Mac", run.DeviceToken, run.DeviceName)
+	}
+	if want := 6 * int64(time.Second); run.SpanNS != want {
+		t.Errorf("SpanNS = %d, want %d", run.SpanNS, want)
+	}
+}
+
+func TestLargestPlaylistDeleteRunIsAWindowNotATotal(t *testing.T) {
+	// Twenty this morning, one just now: the run is still twenty, which is
+	// the number the WARN reported at the time. An anchor at the device's
+	// NEWEST tombstone would report one and say nothing happened.
+	var rows []AdminDeletedPlaylist
+	for i := 0; i < 20; i++ {
+		rows = append(rows, runRow(fmt.Sprintf("old-%d", i), "devA", "Studio Mac", 1000+int64(i)))
+	}
+	rows = append(rows, runRow("recent", "devA", "Studio Mac", 100000))
+	run, ok := LargestPlaylistDeleteRun(rows)
+	if !ok || run.Count != 20 {
+		t.Errorf("run = %+v ok=%v, want a count of 20", run, ok)
+	}
+
+	// Spread the same twenty an hour apart and nothing is a burst.
+	var spread []AdminDeletedPlaylist
+	for i := 0; i < 20; i++ {
+		spread = append(spread, runRow(fmt.Sprintf("slow-%d", i), "devA", "Studio Mac", int64(i)*3600))
+	}
+	if run, ok := LargestPlaylistDeleteRun(spread); ok {
+		t.Errorf("twenty deletes an hour apart reported a burst: %+v", run)
+	}
+}
+
+func TestLargestPlaylistDeleteRunNeedsAnAttributableDevice(t *testing.T) {
+	// Tombstones from before migration v45, or from a DELETE that carried
+	// no device token: plenty of them, all unattributable, no claim made.
+	var rows []AdminDeletedPlaylist
+	for i := 0; i < PlaylistDeleteBurstThreshold+5; i++ {
+		rows = append(rows, runRow(fmt.Sprintf("orphan-%d", i), "", "", 100+int64(i)))
+	}
+	if run, ok := LargestPlaylistDeleteRun(rows); ok {
+		t.Errorf("claimed a burst with no deleter recorded: %+v", run)
+	}
+	// And a sub-threshold run is not one either.
+	var few []AdminDeletedPlaylist
+	for i := 0; i < PlaylistDeleteBurstThreshold-1; i++ {
+		few = append(few, runRow(fmt.Sprintf("few-%d", i), "devA", "Studio Mac", 100+int64(i)))
+	}
+	if run, ok := LargestPlaylistDeleteRun(few); ok {
+		t.Errorf("claimed a burst below the threshold: %+v", run)
+	}
+	if run, ok := LargestPlaylistDeleteRun(nil); ok {
+		t.Errorf("claimed a burst from no rows at all: %+v", run)
+	}
+}
+
+// The grouping walks a Go map, so a comparator that leaves two devices
+// equal would flip the reported device between two renders of the same
+// data — the dupe elector's rule, and the reason for the token tie-break.
+func TestLargestPlaylistDeleteRunIsStableAcrossRuns(t *testing.T) {
+	var rows []AdminDeletedPlaylist
+	for _, dev := range []string{"devA", "devB", "devC"} {
+		for i := 0; i < PlaylistDeleteBurstThreshold+1; i++ {
+			rows = append(rows, runRow(dev+fmt.Sprint(i), dev, dev+" name", 100+int64(i)))
+		}
+	}
+	first, ok := LargestPlaylistDeleteRun(rows)
+	if !ok {
+		t.Fatal("no run found")
+	}
+	for i := 0; i < 50; i++ {
+		got, ok := LargestPlaylistDeleteRun(rows)
+		if !ok || got != first {
+			t.Fatalf("run %d = %+v (ok=%v), want the stable %+v", i, got, ok, first)
+		}
 	}
 }

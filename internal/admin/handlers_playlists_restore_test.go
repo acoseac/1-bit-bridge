@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,13 +26,8 @@ func TestDeletedPlaylistsListIsEmptyUntilSomethingIsDeleted(t *testing.T) {
 	if len(got.Deleted) != 0 {
 		t.Errorf("deleted = %+v, want none", got.Deleted)
 	}
-	// The two numbers the panel groups on come from the server, so the
-	// sentence it renders and the bridge's own WARN describe one event.
-	if got.BurstThreshold != manifest.PlaylistDeleteBurstThreshold {
-		t.Errorf("burstThreshold = %d, want %d", got.BurstThreshold, manifest.PlaylistDeleteBurstThreshold)
-	}
-	if want := int(manifest.PlaylistDeleteBurstWindow.Seconds()); got.BurstWindowSec != want {
-		t.Errorf("burstWindowSec = %d, want %d", got.BurstWindowSec, want)
+	if got.Burst != nil {
+		t.Errorf("burst = %+v, want none on an empty list", got.Burst)
 	}
 }
 
@@ -173,5 +169,90 @@ func TestRestoreRoutesAreBehindTheConsoleGuards(t *testing.T) {
 		if rw.Code != http.StatusForbidden {
 			t.Errorf("%s %s from a LAN address = %d, want 403", tc.method, tc.path, rw.Code)
 		}
+	}
+}
+
+// The panel's sentence and the journal's "playlist mass delete" line have
+// to describe one event, so the grouping is the server's — computed from
+// the whole `deleted_by` token over a fixed window, not reconstructed in
+// the browser from eight redacted characters and a chain of gaps
+// (CodeRabbit on #942). This drives the real handler with the shape that
+// reading got wrong: one delete from a second device inside the run.
+func TestTheServedBurstSpansAnInterleavedDevice(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+	store := srv.deps.Manifest
+
+	if err := store.UpsertDeviceRegistration(ctx, "aaaa1111bbbb", "tok-a", "Studio Mac"); err != nil {
+		t.Fatalf("register A: %v", err)
+	}
+	if err := store.UpsertDeviceRegistration(ctx, "beefcafedead", "tok-b", "New iPhone"); err != nil {
+		t.Fatalf("register B: %v", err)
+	}
+
+	// Real time, not an injected clock: manifest's is package-private, and
+	// the property under test is the GROUPING, not the span. Seven
+	// tombstones written back to back land well inside the window, which
+	// is the state the incident produced. The span is pinned in
+	// manifest's own unit tests, where the clock can be set.
+	seed := func(id, deleter string) {
+		t.Helper()
+		p := manifest.PlaylistRow{ID: id, Name: id, LastModifiedAt: 1_700_000_000_000_000_000}
+		if err := store.UpsertPlaylist(ctx, "aaaa1111bbbb", p,
+			[]manifest.PlaylistItemRow{{Position: 0, Path: "A/B/c.flac"}}); err != nil {
+			t.Fatalf("upsert %s: %v", id, err)
+		}
+		if ok, err := store.TombstonePlaylist(ctx, id, deleter); err != nil || !ok {
+			t.Fatalf("tombstone %s: ok=%v err=%v", id, ok, err)
+		}
+	}
+	// Six from A, with one from B landing in the middle of the run.
+	for i := 0; i < 6; i++ {
+		seed(fmt.Sprintf("pl-a%d", i), "aaaa1111bbbb")
+		if i == 2 {
+			seed("pl-b0", "beefcafedead")
+		}
+	}
+
+	var got deletedPlaylistsResponse
+	if code := doJSON(t, srv.Handler(), "GET", "/api/playlists/deleted", nil, &got); code != 200 {
+		t.Fatalf("GET deleted: %d", code)
+	}
+	if len(got.Deleted) != 7 {
+		t.Fatalf("deleted rows = %d, want 7", len(got.Deleted))
+	}
+	if got.Burst == nil {
+		t.Fatal("no burst served — one delete from another device must not end the run")
+	}
+	if got.Burst.Count != 6 {
+		t.Errorf("burst count = %d, want 6 (the chain-of-gaps reading would say 3)", got.Burst.Count)
+	}
+	if got.Burst.DeviceName != "Studio Mac" {
+		t.Errorf("burst device = %q, want Studio Mac", got.Burst.DeviceName)
+	}
+	// The prefix is for display only; the grouping never used it.
+	if got.Burst.DevicePrefix != "aaaa1111…" {
+		t.Errorf("burst devicePrefix = %q, want the redacted aaaa1111…", got.Burst.DevicePrefix)
+	}
+}
+
+// Three deletes is a person tidying up, and the panel must not dress it
+// up as a mass delete.
+func TestNoBurstIsServedBelowTheThreshold(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedDataFixture(t, srv)
+	ctx := context.Background()
+	if ok, err := srv.deps.Manifest.TombstonePlaylist(ctx, "pl-1", "beefcafedead"); err != nil || !ok {
+		t.Fatalf("tombstone: ok=%v err=%v", ok, err)
+	}
+	var got deletedPlaylistsResponse
+	if code := doJSON(t, srv.Handler(), "GET", "/api/playlists/deleted", nil, &got); code != 200 {
+		t.Fatalf("GET deleted: %d", code)
+	}
+	if len(got.Deleted) != 1 {
+		t.Fatalf("deleted rows = %d, want 1", len(got.Deleted))
+	}
+	if got.Burst != nil {
+		t.Errorf("burst = %+v, want none for a single delete", got.Burst)
 	}
 }

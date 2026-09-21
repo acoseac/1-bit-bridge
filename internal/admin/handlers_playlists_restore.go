@@ -51,15 +51,28 @@ type deletedPlaylistRow struct {
 	DeletedByTokenID string `json:"deletedByTokenId,omitempty"`
 }
 
+// playlistDeleteBurstRow is the largest mass delete among the listed
+// tombstones, or absent when none reaches the threshold.
+//
+// Computed server-side, by manifest.LargestPlaylistDeleteRun — the same
+// window and threshold the bridge's own "playlist mass delete" WARN fires
+// on, over the whole `deleted_by` token. The console used to reconstruct
+// this from `deletedByPrefix`, which is eight redacted characters, and
+// from pairwise gaps rather than a fixed window; it could not agree with
+// the journal even in principle (CodeRabbit on #942).
+type playlistDeleteBurstRow struct {
+	Count        int    `json:"count"`
+	DeviceName   string `json:"deviceName,omitempty"`
+	DevicePrefix string `json:"devicePrefix"`
+	// SpanSec is truncated whole seconds, so a run that landed inside one
+	// second reports 0 and the console words it as such rather than
+	// rounding a real measurement up to make a nicer sentence.
+	SpanSec int `json:"spanSec"`
+}
+
 type deletedPlaylistsResponse struct {
-	Deleted []deletedPlaylistRow `json:"deleted"`
-	// BurstThreshold / BurstWindowSec are the same two numbers the
-	// bridge's own "playlist mass delete" WARN fires on
-	// (manifest.PlaylistDeleteBurst*). Served rather than hard-coded in
-	// the console so the panel's "deleted together" grouping and the log
-	// line cannot drift apart — there is one definition and two readers.
-	BurstThreshold int `json:"burstThreshold"`
-	BurstWindowSec int `json:"burstWindowSec"`
+	Deleted []deletedPlaylistRow    `json:"deleted"`
+	Burst   *playlistDeleteBurstRow `json:"burst,omitempty"`
 }
 
 type playlistRestoredResponse struct {
@@ -75,11 +88,7 @@ type playlistRestoredResponse struct {
 // would hide exactly the rows a mass delete just created, which is the case
 // this panel exists for.
 func (s *Server) apiDeletedPlaylistsList(w http.ResponseWriter, r *http.Request) {
-	empty := deletedPlaylistsResponse{
-		Deleted:        []deletedPlaylistRow{},
-		BurstThreshold: manifest.PlaylistDeleteBurstThreshold,
-		BurstWindowSec: int(manifest.PlaylistDeleteBurstWindow / time.Second),
-	}
+	empty := deletedPlaylistsResponse{Deleted: []deletedPlaylistRow{}}
 	if s.deps.Manifest == nil {
 		writeJSON(w, http.StatusOK, empty)
 		return
@@ -110,6 +119,16 @@ func (s *Server) apiDeletedPlaylistsList(w http.ResponseWriter, r *http.Request)
 			row.DeletedByPrefix = redactDeviceToken(p.DeletedByToken)
 		}
 		out.Deleted = append(out.Deleted, row)
+	}
+	// Grouped from the rows just read, not from a second query: the panel
+	// must describe the list it is showing.
+	if run, ok := manifest.LargestPlaylistDeleteRun(rows); ok {
+		out.Burst = &playlistDeleteBurstRow{
+			Count:        run.Count,
+			DeviceName:   run.DeviceName,
+			DevicePrefix: redactDeviceToken(run.DeviceToken),
+			SpanSec:      int(time.Duration(run.SpanNS) / time.Second),
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

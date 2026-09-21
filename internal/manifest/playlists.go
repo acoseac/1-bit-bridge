@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"time"
 )
 
@@ -421,7 +422,8 @@ func (s *Store) ListDeletedPlaylistsForAdmin(ctx context.Context) ([]AdminDelete
 
 // Mass-delete warning thresholds. ONE definition, because the number in
 // the log line and the number the console reasons about have to be the
-// same number.
+// same number — and ONE predicate too (LargestPlaylistDeleteRun below),
+// because two readings of "N within W" drift the moment either moves.
 //
 // Five in a minute is well clear of a person deleting a couple of
 // playlists by hand and well under a client sweep draining a queue: the
@@ -476,6 +478,101 @@ func (s *Store) CountRecentPlaylistTombstonesBy(ctx context.Context, deviceToken
 		return PlaylistDeleteBurst{}, err
 	}
 	return b, nil
+}
+
+// PlaylistDeleteRun is the largest mass delete visible in a set of
+// tombstones: how many one device deleted inside one
+// PlaylistDeleteBurstWindow, and how long that took.
+//
+// SpanNS is the distance between the first and last delete in the winning
+// window, so it is 0 for a run that landed inside a single clock tick and
+// is never larger than the window.
+type PlaylistDeleteRun struct {
+	Count         int
+	SpanNS        int64
+	DeviceToken   string
+	DeviceName    string
+	LastDeletedAt int64
+}
+
+// LargestPlaylistDeleteRun finds the biggest run of tombstones one device
+// wrote inside PlaylistDeleteBurstWindow, or reports that there is none
+// worth calling a mass delete.
+//
+// This is the console's half of the predicate CountRecentPlaylistTombstonesBy
+// evaluates live on the DELETE path, and it exists so the panel's sentence
+// and the journal's "playlist mass delete" line cannot describe different
+// events. The console used to reconstruct the run in JavaScript from
+// `deletedByPrefix` and pairwise gaps, which could not agree with the
+// server even in principle: the prefix is eight characters of a redacted
+// token, and a chain of gaps is not a fixed window — a second device
+// deleting one playlist in the middle of a run ended it, so the panel
+// would say "3 deleted" while the journal said 6 (CodeRabbit on #942).
+// Grouping happens HERE, on the whole `deleted_by` token, and the console
+// renders what it is told.
+//
+// A true sliding window rather than an anchor at the device's newest
+// tombstone: a device that deleted twenty playlists this morning and one
+// more just now must still report twenty, which is what the WARN said at
+// the time.
+//
+// Rows with no recorded deleter are skipped — a tombstone from before
+// migration v45, or a DELETE that carried no device token. Attributing a
+// mass delete to "unknown" is worse than not claiming one.
+//
+// The comparison is a strict TOTAL order (count, then recency, then
+// token), for the dupe-elector's reason: the grouping walks a Go map, so
+// any pair the comparator leaves equal would flip the reported device
+// between two renders of the same data.
+func LargestPlaylistDeleteRun(rows []AdminDeletedPlaylist) (PlaylistDeleteRun, bool) {
+	byDevice := make(map[string][]AdminDeletedPlaylist)
+	for _, r := range rows {
+		if r.DeletedByToken == "" {
+			continue
+		}
+		byDevice[r.DeletedByToken] = append(byDevice[r.DeletedByToken], r)
+	}
+	window := int64(PlaylistDeleteBurstWindow)
+	var best PlaylistDeleteRun
+	for token, group := range byDevice {
+		// Ascending, so the two pointers walk forward together. The
+		// caller's ORDER BY is not relied on: a function that is correct
+		// only for one query's ordering is a trap for the next caller.
+		sort.Slice(group, func(i, j int) bool { return group[i].DeletedAt < group[j].DeletedAt })
+		lo := 0
+		for hi := range group {
+			for group[hi].DeletedAt-group[lo].DeletedAt > window {
+				lo++
+			}
+			run := PlaylistDeleteRun{
+				Count:         hi - lo + 1,
+				SpanNS:        group[hi].DeletedAt - group[lo].DeletedAt,
+				DeviceToken:   token,
+				DeviceName:    group[hi].DeletedByName,
+				LastDeletedAt: group[hi].DeletedAt,
+			}
+			if runOutranks(run, best) {
+				best = run
+			}
+		}
+	}
+	if best.Count < PlaylistDeleteBurstThreshold {
+		return PlaylistDeleteRun{}, false
+	}
+	return best, true
+}
+
+// runOutranks is LargestPlaylistDeleteRun's strict total order: more
+// deletes wins, then the more recent run, then the token as the tie-break
+// that makes the answer independent of map iteration order.
+func runOutranks(a, b PlaylistDeleteRun) bool {
+	if a.Count != b.Count {
+		return a.Count > b.Count
+	}
+	if a.LastDeletedAt != b.LastDeletedAt {
+		return a.LastDeletedAt > b.LastDeletedAt
+	}
+	return a.DeviceToken > b.DeviceToken
 }
 
 // PlaylistHeadPaths returns the first `perPlaylist` LOCAL item paths of

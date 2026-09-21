@@ -483,8 +483,14 @@ lost my library."
 - **The playlist mass-delete WARN counts from the TABLE, never an in-process
   ring**, and fires ONE LINE PER TOMBSTONE past the threshold
   (`manifest.PlaylistDeleteBurstThreshold` = 5 within
-  `PlaylistDeleteBurstWindow` = 60 s, both SERVED to the console so the panel's
-  sentence and the journal line describe one event). Counting from the rows is
+  `PlaylistDeleteBurstWindow` = 60 s). The console's panel gets the SAME
+  predicate, not the same two numbers: `LargestPlaylistDeleteRun` groups the
+  tombstones server-side over the whole `deleted_by` token, because the browser
+  cannot reproduce it even in principle — `deletedByPrefix` is eight redacted
+  characters, and the first draft's chain-of-pairwise-gaps ended a run at one
+  interleaved delete from another device, so the panel said 3 where the journal
+  said 6. **A predicate the client cannot evaluate exactly belongs on the
+  server, whatever the numbers behind it.** Counting from the rows is
   what makes the warning and the restore panel unable to tell different
   stories, and what makes a burst spanning a restart still one burst. The
   repetition is deliberate and is **not** the M-SEARCH case: that ticker's

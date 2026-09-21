@@ -1379,20 +1379,43 @@ export async function renderPlaylists(view, ctx) {
  * the common case — nothing deleted — costs no layout at all and the
  * panel appears only when it has something to say.
  *
- * No generation guard. A reader who navigates away leaves this node
- * detached, and filling a detached node paints nothing; an aborted read
- * is a cancellation, not a failure, and is swallowed with everything
- * else — a panel that cannot load must not put an error where a library
- * should be.
+ * A FAILED read does get a retry, unlike the scope banner. The state that
+ * matters is the one this panel exists for: every playlist deleted, the
+ * grid showing "No playlists backed up", and nothing on the page saying
+ * anything was ever there. Staying silent then is the page telling the
+ * reader their library was never backed up (CodeRabbit on #942). An
+ * ABORT is not a failure — the reader navigated away — and stays silent.
+ *
+ * No generation guard beyond that. A reader who navigates away leaves
+ * this node detached, and filling a detached node paints nothing.
  */
 function deletedPlaylistsPanel() {
   const box = el("div", { class: "deleted-panel", attrs: { hidden: true } });
-  api.deletedPlaylists()
-    .then((r) => fillDeletedPlaylists(box, r))
-    .catch(() => {
-      /* the grid is the page; a missing undo panel is not worth an error state */
-    });
+  void loadDeletedPlaylists(box);
   return box;
+}
+
+async function loadDeletedPlaylists(box) {
+  try {
+    const r = await api.deletedPlaylists();
+    clear(box);
+    // Re-hide before filling: a RETRY that succeeds with nothing deleted
+    // would otherwise leave the error state's reveal behind as an empty
+    // bordered box. fillDeletedPlaylists reveals it only when it has rows.
+    box.setAttribute("hidden", "");
+    fillDeletedPlaylists(box, r);
+  } catch (e) {
+    if (isAborted(e)) return;
+    clear(box);
+    box.append(
+      el("p", { class: "muted small deleted-note",
+        text: "Could not check for deleted playlists." }),
+      el("button", {
+        class: "btn btn-quiet", text: "Try again",
+        on: { click: () => void loadDeletedPlaylists(box) },
+      }));
+    box.removeAttribute("hidden");
+  }
 }
 
 function fillDeletedPlaylists(box, r) {
@@ -1409,7 +1432,7 @@ function fillDeletedPlaylists(box, r) {
   head.appendChild(status);
 
   const note = el("p", { class: "muted small deleted-note" },
-    burstSentence(rows, r) +
+    burstSentence(rows, r.burst) +
     " Deleting only hid these — the tracks are still stored. A cover you " +
     "uploaded is not restored.");
 
@@ -1422,56 +1445,28 @@ function fillDeletedPlaylists(box, r) {
 
 /**
  * The first line of the panel: a plain count, or the mass-delete sentence
- * when the newest run looks like one.
+ * when the server found a run worth calling one.
  *
- * `burstThreshold` / `burstWindowSec` come from the RESPONSE, not from a
- * constant here — they are the same two numbers the bridge's own
- * "playlist mass delete" WARN fires on (manifest.PlaylistDeleteBurst*),
- * so the journal line and this sentence cannot describe different events.
- * The predicate is evaluated twice (a COUNT there, a scan over the run
- * here) because the two have different inputs; the NUMBERS have one home.
+ * `burst` is computed by manifest.LargestPlaylistDeleteRun from the same
+ * window and threshold the bridge's own "playlist mass delete" WARN fires
+ * on, over the whole `deleted_by` token. This used to be reconstructed
+ * here from `deletedByPrefix` and pairwise gaps, which could not agree
+ * with the journal even in principle — eight redacted characters are not
+ * a device id, and a chain of gaps is not a fixed window, so one
+ * interleaved delete from another device ended the run and the panel
+ * said "3" where the log said 6 (CodeRabbit on #942). The predicate lives
+ * server-side now and this only words it.
  */
-function burstSentence(rows, r) {
-  const run = newestDeleteRun(rows, (r?.burstWindowSec ?? 60) * 1000);
-  const threshold = r?.burstThreshold ?? 5;
-  if (run.length < threshold) {
+function burstSentence(rows, burst) {
+  if (!burst) {
     return `${plural(rows.length, "playlist")} deleted and not yet restored.`;
   }
-  const who = run[0].deletedByName || "one device";
-  const spanSec = Math.max(1, Math.round(
-    (Date.parse(run[0].deletedAt) - Date.parse(run[run.length - 1].deletedAt)) / 1000));
-  return `${plural(run.length, "playlist")} deleted by ${who} within ` +
-    `${plural(spanSec, "second")} — usually a client replaying a queued delete.`;
-}
-
-/**
- * The newest run of deletes: consecutive rows from the same device, each
- * within `windowMs` of the one before it.
- *
- * Rows arrive newest-first (the handler's ORDER BY), so this walks
- * forward from the head and stops at the first gap. Consecutive PAIRS
- * rather than a first-to-last span, because a device deleting steadily
- * for five minutes is still one run and a fixed window from the newest
- * row would cut it arbitrarily.
- *
- * A row with no recorded deleter (a tombstone from before the column
- * existed, or a DELETE that carried no device token) ends the run rather
- * than joining it — attributing a burst to "unknown" is worse than not
- * claiming one.
- */
-function newestDeleteRun(rows, windowMs) {
-  if (!rows.length || !rows[0].deletedByPrefix) return [];
-  const who = rows[0].deletedByPrefix;
-  const run = [rows[0]];
-  for (let i = 1; i < rows.length; i++) {
-    const prev = Date.parse(run[run.length - 1].deletedAt);
-    const here = Date.parse(rows[i].deletedAt);
-    if (rows[i].deletedByPrefix !== who) break;
-    if (!Number.isFinite(prev) || !Number.isFinite(here)) break;
-    if (prev - here > windowMs) break;
-    run.push(rows[i]);
-  }
-  return run;
+  const who = burst.deviceName || (burst.devicePrefix ? `device ${burst.devicePrefix}` : "one device");
+  // spanSec is truncated whole seconds, so a run inside one second is 0 —
+  // said as such rather than rounded up into a measurement nobody made.
+  const span = burst.spanSec >= 1 ? `within ${plural(burst.spanSec, "second")}` : "in under a second";
+  return `${plural(burst.count, "playlist")} deleted by ${who} ${span} — ` +
+    "usually a client replaying a queued delete.";
 }
 
 function deletedRow(p, status) {
