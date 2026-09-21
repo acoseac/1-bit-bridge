@@ -244,19 +244,22 @@ func launchesADrainableGoroutine(body *ast.BlockStmt) bool {
 		if !ok {
 			return true
 		}
-		ast.Inspect(g, func(inner ast.Node) bool {
-			if found {
-				return false
-			}
-			d, ok := inner.(*ast.DeferStmt)
-			if !ok {
-				return true
-			}
-			if callsFunc(d, "close") {
+		lit, ok := g.Call.Fun.(*ast.FuncLit)
+		if !ok || lit.Body == nil {
+			return true // `go someFunc()` — no closure to read
+		}
+		// The LAUNCHED closure's own statements, not an ast.Inspect over
+		// the whole `go` statement: that also walks nested FuncLit bodies
+		// that are never called, so an uncalled helper holding a
+		// `defer close(done)` would classify the goroutine as drainable
+		// and this test would then demand a drain for a goroutine that
+		// has no completion signal at all. (CodeRabbit, PR #945.)
+		for _, st := range lit.Body.List {
+			if d, ok := st.(*ast.DeferStmt); ok && callsFunc(d, "close") {
 				found = true
+				break
 			}
-			return !found
-		})
+		}
 		return !found
 	})
 	return found
