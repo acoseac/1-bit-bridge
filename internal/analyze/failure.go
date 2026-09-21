@@ -126,12 +126,30 @@ func SourceUnreadable(err error) bool { return errors.Is(err, ErrSourceUnreadabl
 // the decoder ran to completion and returned a non-zero status, rather
 // than being killed.
 //
-// `ProcessState.Exited()` is false for a signal death, which is exactly
-// the split wanted: exec.CommandContext kills the child when the job
-// context expires, and the OOM killer does the same under memory
-// pressure. Neither is the file's fault. A non-ExitError (the wait
-// itself failed — an I/O error reaping the process) is not a verdict
-// either.
+// `ProcessState.Exited()` is false for a signal death, which is the
+// split wanted on POSIX: the OOM killer takes the biggest decode under
+// memory pressure, and that is not the file's fault. A non-ExitError
+// (the wait itself failed — an I/O error reaping the process) is not a
+// verdict either.
+//
+// # Windows has no signals, so this check cannot make that distinction
+//
+// A process terminated on Windows exits with a STATUS; `Exited()` is
+// true and `TerminateProcess` looks exactly like a program choosing to
+// exit non-zero. There is no discriminator to use instead — Go's
+// os.Process.Kill passes its own exit code, which any decoder could
+// also return. Found by the Windows CI leg, which is the whole reason
+// that leg is blocking.
+//
+// Two things keep the gap narrow, and neither depends on this check.
+// The cases the BRIDGE causes never reach here at all: a per-job
+// timeout is excluded by processJob's DeadlineExceeded branch, and a
+// shutdown by `p.closed`, both platform-independent. What remains is a
+// decoder killed by something ELSE entirely — Task Manager, a
+// scanner — which on Windows is recorded as a strike where POSIX would
+// call it transient. The three mitigations below carry that, and the
+// operator sees the decoder's own message in the console list rather
+// than a silent suppression.
 func decoderReachedAVerdict(err error) bool {
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {

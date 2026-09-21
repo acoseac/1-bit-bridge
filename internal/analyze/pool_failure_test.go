@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestPoolRecordsAStrikeOnlyForAFileVerdict is the whole classification rule
@@ -254,5 +255,55 @@ func TestATransientFailureKeepsWarningEveryTime(t *testing.T) {
 	if n := strings.Count(buf.String(), `level=WARN msg="analyze: failed"`); n != 3 {
 		t.Errorf("%d WARN lines for three toolchain failures, want 3 — a fact about the "+
 			"host is not deduplicated away\n%s", n, buf.String())
+	}
+}
+
+// TestATimedOutJobNeverReachesTheClassifier is the platform-independent half
+// of "we killed it, so it says nothing about the file", and the half that
+// matters most on Windows.
+//
+// decoderReachedAVerdict excludes a signal-killed decoder, but Windows has no
+// signals: a process we terminate exits with a status there, `Exited()` is
+// true, and the classifier alone would read the bridge's own kill as the
+// file's fault. The per-job timeout is the case the bridge causes, and
+// processJob excludes it on `DeadlineExceeded` before asking the classifier
+// at all — which works the same everywhere.
+//
+// The runner returns a decoder-shaped VERDICT, so the exclusion is doing the
+// work rather than the classification: unguarded, this is recorded as a
+// strike. (Windows CI on #947. An earlier version of this test named the
+// cancellation arm instead, which a control showed it never exercised —
+// shutdown is caught by p.closed, so that arm was unreachable and has been
+// removed.)
+func TestATimedOutJobNeverReachesTheClassifier(t *testing.T) {
+	s := newStore(t)
+	putTrack(t, s, "A/B/01.flac")
+	p := NewPool(s, 1, 4,
+		WithJobTimeout(40*time.Millisecond),
+		WithFsync(noFsync),
+		WithRunner(func(ctx context.Context, _ AnalyzeSpec) (Result, error) {
+			<-ctx.Done() // the job context expires under us, as a timeout does
+			// Exactly what a decoder killed on Windows yields: a verdict-shaped
+			// non-zero exit. Unguarded, this is recorded as the file's fault.
+			return Result{}, markUnreadable(errors.New("sox: exit status 1 (stderr: )"))
+		}))
+	defer p.Stop()
+
+	if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		st := p.Stats()
+		return st.Failed == 1 && st.Inflight == 0
+	})
+
+	rows, err := s.ListUnreadableTracksForAdmin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("recorded %d verdict(s) against a job the bridge itself timed out, want 0 "+
+			"— on Windows the classifier cannot tell that kill from a refusal, so this "+
+			"guard is the one that has to hold", len(rows))
 	}
 }

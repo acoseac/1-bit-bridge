@@ -301,11 +301,20 @@ func (p *Pool) processJob(job poolJob) {
 	if err != nil {
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
+			// The per-job timeout is excluded from the debounce BEFORE the
+			// classifier is asked: it is as likely to mean a hung mount as a
+			// pathological file, so it is never a verdict about the source.
+			// Same rule the transcode pool applies to its own timeout, and it
+			// is platform-independent — which matters, because
+			// decoderReachedAVerdict is not (see its docblock on Windows).
+			//
+			// Shutdown needs no arm here: Stop flips p.closed before
+			// cancelling stopCtx, so a cancelled job is already outside this
+			// whole block. A `jobCtx.Err() != nil` arm was written for
+			// symmetry and removed again — it is unreachable, and an
+			// unreachable branch that looks like a safety guard is worse than
+			// none, because the next reader counts on it.
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
-				// Excluded from the debounce BEFORE the classifier is asked:
-				// a timeout is as likely to be a hung mount as a pathological
-				// file, so it is never a verdict about the source. Same rule
-				// the transcode pool applies to its own timeout.
 				logger.Warn("analyze: timed out",
 					"path", job.spec.SourceLibraryRel, "timeout", p.jobTimeout)
 			} else {

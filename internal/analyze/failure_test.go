@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"testing"
 )
 
@@ -48,12 +49,22 @@ func TestOnlyAnExitedDecoderReachesAVerdict(t *testing.T) {
 		t.Errorf("a clean non-zero exit (%v) was not treated as a verdict", exited)
 	}
 
-	signalled := exec.Command("sh", "-c", "kill -9 $$").Run()
-	if signalled == nil {
-		t.Fatal("expected a signal death")
-	}
-	if decoderReachedAVerdict(signalled) {
-		t.Errorf("a signal death (%v) was treated as a verdict about the file", signalled)
+	// The signal half is POSIX-only, as a RUNTIME skip rather than a build
+	// tag: the exit-status half above and the non-ExitError cases below are
+	// meaningful on Windows and must keep running there. Windows has no
+	// signals — a terminated process exits with a status, so Exited() is true
+	// and this distinction does not exist. What replaces it there is the
+	// cancellation guard in processJob, pinned by
+	// TestACancelledJobNeverReachesTheClassifier. (Windows CI on #947, which
+	// is what found the docblock claiming a split that is POSIX-only.)
+	if runtime.GOOS != "windows" {
+		signalled := exec.Command("sh", "-c", "kill -9 $$").Run()
+		if signalled == nil {
+			t.Fatal("expected a signal death")
+		}
+		if decoderReachedAVerdict(signalled) {
+			t.Errorf("a signal death (%v) was treated as a verdict about the file", signalled)
+		}
 	}
 
 	// Anything that is not an ExitError is not a verdict either: the wait
@@ -97,6 +108,11 @@ func TestATruncatedDecodeIsClassifiedUnreadable(t *testing.T) {
 // harness, but the process dies on a signal, so nothing about the source was
 // established and no strike may be recorded.
 func TestADecoderKilledMidStreamIsNotTheFilesFault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no signals on Windows: a terminated process exits with a status, so " +
+			"this distinction does not exist there. processJob's cancellation guard is " +
+			"the platform-independent half — see TestACancelledJobNeverReachesTheClassifier.")
+	}
 	_, err := decodeFramesWith(context.Background(), decoderSox, "sh",
 		[]string{"-c", "kill -9 $$"},
 		"/library/Artist/Album/06. Jasper Sea.flac", 1, 60, func([]float64) {})
