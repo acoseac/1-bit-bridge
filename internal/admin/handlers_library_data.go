@@ -207,7 +207,7 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 	prefix, id, format := q.Get("device"), q.Get("id"), strings.ToLower(q.Get("format"))
 	// Reject an unsupported format before the playlist lookup.
 	if format != "json" && format != "csv" && format != "m3u8" {
-		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv, m3u8")
+		writeError(w, http.StatusBadRequest, errCodeBadFormat, "format must be one of json, csv, m3u8")
 		return
 	}
 	// Optional — see apiPlaylistDetail for why. `id` alone identifies a
@@ -252,7 +252,7 @@ func (s *Server) apiPlaylistExport(w http.ResponseWriter, r *http.Request) {
 		setDownloadHeaders(w, "audio/x-mpegurl", base+".m3u8")
 		s.writeM3U8(w, row.Name, items)
 	default:
-		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv, m3u8")
+		writeError(w, http.StatusBadRequest, errCodeBadFormat, "format must be one of json, csv, m3u8")
 	}
 }
 
@@ -411,7 +411,7 @@ func (s *Server) apiHistoryExport(w http.ResponseWriter, r *http.Request) {
 	// returns 400 without hitting the DB (CodeRabbit on PR #341).
 	format := strings.ToLower(q.Get("format"))
 	if format != "json" && format != "csv" {
-		writeError(w, http.StatusBadRequest, "bad-format", "format must be one of json, csv")
+		writeError(w, http.StatusBadRequest, errCodeBadFormat, "format must be one of json, csv")
 		return
 	}
 	token := ""

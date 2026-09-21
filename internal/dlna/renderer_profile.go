@@ -2,6 +2,17 @@ package dlna
 
 import "strings"
 
+// mimeDSF / mimeDFF are the DSD MIME types this package serves to hardware
+// renderers. Deliberately NOT shared with the admin player's table, which
+// answers a different question (see player_audio.go): `audio/x-flac` is right
+// for a renderer and unplayable in a browser, and the two tables are allowed
+// to disagree. Named here only so the profile map and the fallback that feeds
+// it cannot drift from each other. (SonarCloud go:S1192.)
+const (
+	mimeDSF = "audio/x-dsf"
+	mimeDFF = "audio/x-dff"
+)
+
 // RendererBug is a stable identifier for a documented per-renderer behavior
 // quirk. Used by telemetry labeling AND as a future gating point for
 // file-handler decisions (e.g., a renderer with the >2GB DSF parser overflow
@@ -158,9 +169,9 @@ func PreferredMIMEFor(userAgent, extension string) string {
 func defaultMIMEForExtension(extension string) string {
 	switch extension {
 	case ".dsf":
-		return "audio/x-dsf"
+		return mimeDSF
 	case ".dff":
-		return "audio/x-dff"
+		return mimeDFF
 	case ".flac":
 		return "audio/x-flac"
 	case ".m4a", ".mp4":
@@ -221,8 +232,8 @@ func profileChordFamily() RendererProfile {
 		DisplayName:       "Chord 2go / Poly / Hugo (network)",
 		UserAgentMatchers: []string{"Chord", "2go", "Poly"},
 		PreferredMIME: map[string]string{
-			".dsf": "audio/x-dsf",
-			".dff": "audio/x-dff",
+			".dsf": mimeDSF,
+			".dff": mimeDFF,
 		},
 		KnownBugs: map[RendererBug]bool{
 			BugID3OffsetOverflowOver2GB: true, // assumed per field reports; not empirically confirmed in Phase 0
@@ -242,8 +253,8 @@ func profileIntegraOnkyo() RendererProfile {
 		DisplayName:       "Integra / Onkyo",
 		UserAgentMatchers: []string{"Integra", "Onkyo"},
 		PreferredMIME: map[string]string{
-			".dsf": "audio/x-dsf",
-			".dff": "audio/x-dff",
+			".dsf": mimeDSF,
+			".dff": mimeDFF,
 		},
 	}
 }
@@ -267,8 +278,8 @@ func profileMPDGeneric() RendererProfile {
 		DisplayName:       "Music Player Daemon (Chord 2go, Naim/Linn/Lumin)",
 		UserAgentMatchers: []string{"Music Player Daemon"},
 		PreferredMIME: map[string]string{
-			".dsf": "audio/x-dsf",
-			".dff": "audio/x-dff",
+			".dsf": mimeDSF,
+			".dff": mimeDFF,
 		},
 	}
 }
@@ -286,8 +297,8 @@ func profileLavf() RendererProfile {
 		DisplayName:       "FFmpeg libavformat (control-point metadata probe)",
 		UserAgentMatchers: []string{"Lavf"},
 		PreferredMIME: map[string]string{
-			".dsf": "audio/x-dsf",
-			".dff": "audio/x-dff",
+			".dsf": mimeDSF,
+			".dff": mimeDFF,
 		},
 	}
 }

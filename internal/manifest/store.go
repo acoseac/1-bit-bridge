@@ -26,6 +26,15 @@ import (
 	_ "modernc.org/sqlite" // register "sqlite" driver (pure-Go, no cgo)
 )
 
+// sqliteErrDuplicateColumn is the driver's message for an ALTER TABLE ADD
+// COLUMN against a column that already exists. Migrations are append-only and
+// must be idempotent, so four of them re-run their ADD COLUMN and swallow
+// exactly this error; matched as a substring because modernc.org/sqlite
+// wraps it. One spelling, because a typo in any one of the four turns an
+// idempotent migration into a startup failure on every host that already ran
+// it. (SonarCloud go:S1192.)
+const sqliteErrDuplicateColumn = "duplicate column name"
+
 // observeLockWait records SQLite transaction lock-wait timing into
 // both the Prometheus histogram (for /metrics scrapers) AND the
 // sliding-window backbone (for /v1/diagnostics's p50/p99 read).
@@ -976,7 +985,7 @@ var migrations = []migration{
 		sql: `-- column added in post() for idempotency; see migration v9 docblock`,
 		post: func(db *sql.DB) error {
 			if _, err := db.Exec(`ALTER TABLE track_analysis ADD COLUMN replaygain_track_db REAL`); err != nil &&
-				!strings.Contains(err.Error(), "duplicate column name") {
+				!strings.Contains(err.Error(), sqliteErrDuplicateColumn) {
 				return err
 			}
 			return nil
@@ -1006,7 +1015,7 @@ var migrations = []migration{
 				`ALTER TABLE track_analysis ADD COLUMN bpm INTEGER`,
 			} {
 				if _, err := db.Exec(stmt); err != nil &&
-					!strings.Contains(err.Error(), "duplicate column name") {
+					!strings.Contains(err.Error(), sqliteErrDuplicateColumn) {
 					return err
 				}
 			}
@@ -1092,7 +1101,7 @@ var migrations = []migration{
 				`ALTER TABLE smart_playlists ADD COLUMN modal_rate_hz INTEGER NOT NULL DEFAULT 0`,
 			} {
 				if _, err := db.Exec(stmt); err != nil &&
-					!strings.Contains(err.Error(), "duplicate column name") {
+					!strings.Contains(err.Error(), sqliteErrDuplicateColumn) {
 					return err
 				}
 			}
@@ -1638,7 +1647,7 @@ var migrations = []migration{
 				`ALTER TABLE track_analysis ADD COLUMN spectrum BLOB`,
 			} {
 				if _, err := db.Exec(stmt); err != nil &&
-					!strings.Contains(err.Error(), "duplicate column name") {
+					!strings.Contains(err.Error(), sqliteErrDuplicateColumn) {
 					return err
 				}
 			}

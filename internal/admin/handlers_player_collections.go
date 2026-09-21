@@ -122,7 +122,7 @@ func (s *Server) apiPlayerPlaylists(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.deps.Manifest.ListAllPlaylistsForAdmin(r.Context())
 	if err != nil {
 		logger.Error("player playlists", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	// One query for every tile's leading paths, not one per playlist.
@@ -170,7 +170,7 @@ func (s *Server) apiPlayerPlaylistDetail(w http.ResponseWriter, r *http.Request)
 	row, items, err := s.deps.Manifest.GetPlaylist(r.Context(), id)
 	if err != nil {
 		logger.Error("player playlist detail", "id", id, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	if row == nil {
@@ -186,7 +186,7 @@ func (s *Server) apiPlayerPlaylistDetail(w http.ResponseWriter, r *http.Request)
 	tracks, err := s.hydrateTracks(r, cat, paths)
 	if err != nil {
 		logger.Error("player playlist tracks", "id", id, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	covers := s.coverSet(r, manifest.CoverScopePlaylist)
@@ -216,7 +216,7 @@ func (s *Server) apiPlayerMixes(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.deps.Manifest.LoadSmartPlaylists(r.Context())
 	if err != nil {
 		logger.Error("player mixes", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	covers := s.coverSet(r, manifest.CoverScopeSmartMix)
@@ -249,7 +249,7 @@ func (s *Server) apiPlayerMixDetail(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.deps.Manifest.LoadSmartPlaylists(r.Context())
 	if err != nil {
 		logger.Error("player mix detail", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	// Linear scan, not a binary search: LoadSmartPlaylists orders by
@@ -279,7 +279,7 @@ func (s *Server) apiPlayerMixDetail(w http.ResponseWriter, r *http.Request) {
 	tracks, err := s.hydrateTracks(r, cat, paths)
 	if err != nil {
 		logger.Error("player mix tracks", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	covers := s.coverSet(r, manifest.CoverScopeSmartMix)
@@ -414,7 +414,7 @@ func (s *Server) apiPlayerCollectionCover(w http.ResponseWriter, r *http.Request
 	cover, ok, err := s.deps.Manifest.GetPlaylistCover(r.Context(), scope, key)
 	if err != nil {
 		logger.Error("collection cover lookup", "scope", scope, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	if !ok {
@@ -430,7 +430,7 @@ func (s *Server) apiPlayerCollectionCover(w http.ResponseWriter, r *http.Request
 	// The image hash IS a content key, so this response is immutable —
 	// the same reasoning artworkCacheControl applies to a versioned
 	// cover.
-	cc := "private, max-age=86400"
+	cc := cacheControlPrivateDay
 	if r.URL.Query().Get("v") != "" {
 		cc = "private, max-age=31536000, immutable"
 	}

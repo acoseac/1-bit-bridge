@@ -28,7 +28,7 @@ import (
 func healthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

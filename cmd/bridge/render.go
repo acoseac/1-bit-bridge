@@ -39,7 +39,7 @@ import (
 func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("render", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	quality := fs.String("quality", "very-high", "SoX resampler preset (very-high|high|medium)")
 	workers := fs.Int("workers", 0, "concurrent render pipelines; 0 = min(NumCPU-1, 4)")
 	filter := fs.String("filter", "", "case-sensitive substring filter on track path (empty = all)")

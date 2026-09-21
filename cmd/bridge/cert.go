@@ -56,7 +56,7 @@ Run "bridge cert <subcommand> -h" for subcommand-specific flags.
 func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cert info", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	jsonOut := fs.Bool("json", false, "emit cert info as JSON instead of the human-readable layout")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -111,7 +111,7 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cert rotate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	autoYes := fs.Bool("yes", false, "skip the interactive confirmation prompt")
 	fs.BoolVar(autoYes, "y", *autoYes, "alias for --yes")
 	if err := fs.Parse(args); err != nil {

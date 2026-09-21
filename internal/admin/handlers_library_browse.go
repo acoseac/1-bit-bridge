@@ -297,12 +297,12 @@ func (s *Server) apiLibraryBrowse(w http.ResponseWriter, r *http.Request) {
 	rawPath := safeQuery(r).Get("path")
 	normalised, ok := normaliseBrowsePath(rawPath)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "bad-path",
-			"path contains traversal segments or is otherwise invalid")
+		writeError(w, http.StatusBadRequest, errCodeBadPath,
+			errMsgBadPath)
 		return
 	}
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
 	// Cursor-based pagination (PR C). Folders and tracks paginate
@@ -512,7 +512,7 @@ func (s *Server) browseByKey(w http.ResponseWriter, r *http.Request, camelot str
 		return
 	}
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
 	q := safeQuery(r)
@@ -616,12 +616,12 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 	rawPath := safeQuery(r).Get("path")
 	normalised, ok := normaliseBrowsePath(rawPath)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "bad-path",
-			"path contains traversal segments or is otherwise invalid")
+		writeError(w, http.StatusBadRequest, errCodeBadPath,
+			errMsgBadPath)
 		return
 	}
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
 	if s.deps.ProjectedSize == nil || s.deps.AvailableDiskSpace == nil {

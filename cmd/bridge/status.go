@@ -30,7 +30,7 @@ import (
 func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	jsonOut := fs.Bool("json", false, "print the raw API response as JSON")
 	if err := fs.Parse(args); err != nil {
 		return 2

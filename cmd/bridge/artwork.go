@@ -84,7 +84,7 @@ const artworkGCConfirmPhrase = "GC-ARTWORK"
 func artworkCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("artwork", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	gc := fs.Bool("gc", false, "remove cached artwork files no longer referenced by any track row")
 	dryRun := fs.Bool("dry-run", false, "list orphans without removing them (use with --gc)")
 	allowEmpty := fs.Bool("allow-empty", false, "with --gc: proceed even when no track row references any artwork (the library really was emptied); refused by default, because an empty catalog makes every cached file look like an orphan")
