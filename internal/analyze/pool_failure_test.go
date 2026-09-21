@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // TestPoolRecordsAStrikeOnlyForAFileVerdict is the whole classification rule
@@ -49,19 +51,35 @@ func TestPoolRecordsAStrikeOnlyForAFileVerdict(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.wantStrike {
-				if len(rows) != 1 {
-					t.Fatalf("recorded %d verdict(s), want 1 — a source the decoder refused must "+
-						"stop being offered", len(rows))
-				}
-				if rows[0].Reason != tc.err.Error() {
-					t.Errorf("reason = %q, want the decoder's own message %q", rows[0].Reason, tc.err)
-				}
-			} else if len(rows) != 0 {
-				t.Fatalf("recorded %d verdict(s) for a %s, want 0 — a fact about the host must "+
-					"never sideline a file", len(rows), tc.name)
-			}
+			assertVerdictRows(t, rows, tc.wantStrike, tc.err, tc.name)
 		})
+	}
+}
+
+// assertVerdictRows checks the one thing each case above is about: whether
+// the failure left a row behind, and — when it should have — that the row
+// carries the decoder's own words rather than a rewrite of them.
+//
+// Extracted so the table body stays a table body. Inline it scored 16 on
+// SonarCloud's go:S3776 against a ceiling of 15: the branch nesting inside a
+// subtest inside a range is what the rule measures, and a table-driven test
+// accumulates that without getting harder to read. Pulling the assertion out
+// is the fix the rule is asking for either way.
+func assertVerdictRows(t *testing.T, rows []manifest.AdminUnreadableTrack, wantStrike bool, cause error, kind string) {
+	t.Helper()
+	if !wantStrike {
+		if len(rows) != 0 {
+			t.Fatalf("recorded %d verdict(s) for a %s, want 0 — a fact about the host must "+
+				"never sideline a file", len(rows), kind)
+		}
+		return
+	}
+	if len(rows) != 1 {
+		t.Fatalf("recorded %d verdict(s), want 1 — a source the decoder refused must "+
+			"stop being offered", len(rows))
+	}
+	if rows[0].Reason != cause.Error() {
+		t.Errorf("reason = %q, want the decoder's own message %q", rows[0].Reason, cause)
 	}
 }
 

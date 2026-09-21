@@ -52,6 +52,24 @@
       <dd><span id="comp-variant-files">{{.Data.VariantFiles}}</span> files · <span id="comp-variant-bytes">{{bytesHuman .Data.VariantBytes}}</span> on disk</dd>
     </dl>
 
+    {{/* Sources the decoders refuse. An ALARM, not a composition row: the
+         count is zero on every healthy bridge, so it renders nothing at all
+         rather than adding a permanent "Unreadable — 0" line to the list
+         above, which is the sort of chrome an operator learns to skim past
+         (the Jobs panel it points at hides itself for the same reason).
+
+         Painted by app.js applyStats from the SSE `stats` frame — the same
+         COUNT the Jobs list is built from, off one predicate, so the two
+         cannot describe different libraries. The detail (which files, what
+         the decoder said, how many tries, whether it is still being
+         retried) lives there; this is the pointer to it. No first paint:
+         the page handler runs no count, and the initial SSE emit lands
+         sub-second, as it does for the two blocks below. */}}
+    <p class="warn-banner" id="comp-unreadable" hidden>
+      <span id="comp-unreadable-text"></span>
+      <a href="/jobs">See which files</a>
+    </p>
+
     {{/* Sources — filesystem-vs-UPnP-upstream provenance, painted by
          app.js applySources from the SSE `sources` event (initial-emit on
          connect). Hidden until the first frame AND only shown when a UPnP

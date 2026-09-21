@@ -307,8 +307,6 @@ func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, active
 // unchanged, which is what lets applyStats / applyComposition /
 // applySources / applyEnrichment keep working with no JS edit.
 func (s *Server) pageStats(w http.ResponseWriter, r *http.Request) {
-	cfg := s.deps.CfgHolder.Load()
-	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
 	// Library composition for first paint (live updates come from the
 	// SSE stats frame via app.js applyStats). Best-effort — a SQL
 	// hiccup leaves the breakdown zeroed. RollupByPrefix("") runs the
@@ -326,9 +324,11 @@ func (s *Server) pageStats(w http.ResponseWriter, r *http.Request) {
 			variantBytes += st.Bytes
 		}
 	}
+	// Uptime / StartedAt / DBBytes were in this map and in no template —
+	// dashboard.html renders none of the three and layout.html reads no
+	// .Data at all. They went out with their wire twins on statsResponse
+	// (see the docblocks there); the Diagnostics page owns both facts.
 	data := map[string]any{
-		"Uptime":              time.Since(s.deps.StartedAt),
-		"StartedAt":           s.deps.StartedAt,
 		"TracksIndexed":       rollup.TrackCount,
 		"TracksWithUpscaled":  rollup.UpscaledTrackCount,
 		"TracksWithOptimized": rollup.OptimizedTrackCount,
@@ -337,7 +337,6 @@ func (s *Server) pageStats(w http.ResponseWriter, r *http.Request) {
 		"IsScanning":          s.deps.Scanner.IsScanning(),
 		"ScanProgress":        s.deps.Scanner.ScanProgress(),
 		"LastFullScan":        s.deps.Scanner.LastFullScan(),
-		"DBBytes":             dbBytes,
 		"DeviceCount":         len(s.deps.Auth.List()),
 		"Roots":               s.deps.Scanner.Roots(),
 		"Update":              s.dashboardUpdateStatus(),

@@ -293,6 +293,20 @@ function applyStats(s) {
   setText("comp-optimized", s.tracksWithOptimized ?? 0);
   setText("comp-variant-files", s.variantFiles ?? 0);
   setText("comp-variant-bytes", formatBytes(s.variantBytes ?? 0));
+  // Sources the decoders refuse — hidden at zero, which is every healthy
+  // bridge. This read is also the whole justification for the COUNT:
+  // `tracksUnreadable` is the one field readStatsDBPart runs a query of its
+  // own for, so with nothing rendering it the endpoint paid a SELECT per
+  // snapshot, every five seconds, for nobody. That is the #891 shape, and
+  // TestEveryStatsFieldIsReadSomewhere now fails if this read goes away.
+  const unreadableAlarm = document.getElementById("comp-unreadable");
+  if (unreadableAlarm) {
+    const n = s.tracksUnreadable ?? 0;
+    unreadableAlarm.hidden = n === 0;
+    setText("comp-unreadable-text", n === 1
+      ? "1 track could not be read by the decoder and is excluded from analysis."
+      : `${n} tracks could not be read by the decoders and are excluded from analysis.`);
+  }
   const scanStatus = document.getElementById("scan-status");
   if (scanStatus) {
     scanStatus.innerHTML = s.isScanning
