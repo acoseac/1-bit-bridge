@@ -32,7 +32,7 @@ var certFieldRe = regexp.MustCompile(`\binfo\??\.([A-Za-z_][A-Za-z0-9_]*)`)
 // `node --check`), and a scan that required `[` to abut `?.` would miss
 // them. Non-capturing `(?:…)` so the field stays in m[1]; RE2 supports
 // it, contrary to the review that raised the whitespace gap.
-var jsBracketReadRe = regexp.MustCompile(`\b%s\s*(?:\?\.)?\s*\[\s*["']([A-Za-z_$][A-Za-z0-9_$]*)["']\s*\]`)
+var jsBracketReadRe = regexp.MustCompile(`\b%s\s*(?:\?\.)?\s*\[\s*(?:"([^"]*)"|'([^']*)')\s*\]`)
 
 // jsBracketFieldReads returns the field names read off `root` in bracket
 // form. CodeRabbit raised the gap on PR #951 against the cert guard below;
@@ -54,7 +54,16 @@ func jsBracketFieldReads(t *testing.T, src, root string) map[string]bool {
 	stripped := jsLineCommentRe.ReplaceAllString(jsBlockCommentRe.ReplaceAllString(src, " "), " ")
 	out := map[string]bool{}
 	for _, m := range re.FindAllStringSubmatch(stripped, -1) {
-		out[m[1]] = true
+		// Two alternatives, one per quote style — whichever matched is
+		// the key. RE2 has no backreference, so a single `["']…["']`
+		// class would also accept a mismatched pair.
+		key := m[1]
+		if key == "" {
+			key = m[2]
+		}
+		if key != "" {
+			out[key] = true
+		}
 	}
 	return out
 }
@@ -173,6 +182,12 @@ func TestJSBracketFieldReadsSeesEveryBracketForm(t *testing.T) {
 		{`const a = info ?. ["bothSpaced"];`, "bothSpaced"},
 		{`const a = info['singleQuoted'];`, "singleQuoted"},
 		{`const a = info[ "padded" ];`, "padded"},
+		// Not identifier-shaped, and therefore invisible to a scan that
+		// assumes a json tag looks like a JS identifier. Nothing on
+		// CertInfo carries a hyphen today; a guard that can only see the
+		// tags that exist is one that stops working the day one changes.
+		{`const a = info["not-yet-valid"];`, "not-yet-valid"},
+		{`const a = info?.["kebab-case-key"];`, "kebab-case-key"},
 	} {
 		got := jsBracketFieldReads(t, tc.src, "info")
 		if !got[tc.want] {
@@ -192,5 +207,10 @@ func TestJSBracketFieldReadsSeesEveryBracketForm(t *testing.T) {
 	// A different root must not be picked up, or scoping means nothing.
 	if got := jsBracketFieldReads(t, `const a = other["notOurs"];`, "info"); len(got) != 0 {
 		t.Errorf("read off a different root counted: %v", sortedKeys(got))
+	}
+	// A mismatched quote pair is not a key. RE2 has no backreference, so
+	// a single `["']…["']` character class would accept this.
+	if got := jsBracketFieldReads(t, "const a = info[\"mismatched'];", "info"); len(got) != 0 {
+		t.Errorf("a mismatched quote pair counted as a key: %v", sortedKeys(got))
 	}
 }
