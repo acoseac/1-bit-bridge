@@ -55,7 +55,7 @@ func TestOnlyAnExitedDecoderReachesAVerdict(t *testing.T) {
 	// signals — a terminated process exits with a status, so Exited() is true
 	// and this distinction does not exist. What replaces it there is the
 	// cancellation guard in processJob, pinned by
-	// TestACancelledJobNeverReachesTheClassifier. (Windows CI on #947, which
+	// TestATimedOutJobNeverReachesTheClassifier. (Windows CI on #947, which
 	// is what found the docblock claiming a split that is POSIX-only.)
 	if runtime.GOOS != "windows" {
 		signalled := exec.Command("sh", "-c", "kill -9 $$").Run()
@@ -111,7 +111,7 @@ func TestADecoderKilledMidStreamIsNotTheFilesFault(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no signals on Windows: a terminated process exits with a status, so " +
 			"this distinction does not exist there. processJob's cancellation guard is " +
-			"the platform-independent half — see TestACancelledJobNeverReachesTheClassifier.")
+			"the platform-independent half — see TestATimedOutJobNeverReachesTheClassifier.")
 	}
 	_, err := decodeFramesWith(context.Background(), decoderSox, "sh",
 		[]string{"-c", "kill -9 $$"},

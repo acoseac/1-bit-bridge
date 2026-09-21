@@ -7336,6 +7336,37 @@ one that passed" shape, in the build cache rather than an env var. Forced with
 explicitly for any package a change adds concurrency-touching tests to, because
 `make test` will happily report `ok (cached)` for it.
 
+### I reported a green suite that was red
+
+The Windows fix renamed a test and left two citations in a sibling file
+pointing at the old name. `TestEveryCitedTestNameExists` caught it — on CI, on
+three legs at once, after I had told the user the local suite was clean.
+
+It was not. The command was:
+
+```
+go vet ./... && go test ./... 2>&1 | grep -vE "^ok|no test files" | head -10; git add -A && git commit ...
+```
+
+Three things went wrong in one line, and the third is the one that matters.
+`| grep` makes the pipeline's exit status GREP's, so `go test`'s result is
+gone. `| head -10` then truncated the output to the first ten non-`ok` lines,
+which were INFO logs from an unrelated sweeper — the `FAIL` lines came after
+and were cut off. And `;` rather than `&&` before the commit meant it ran
+anyway. Checking the saved output afterwards with `grep -cE "^FAIL"` returned
+0, because the file only ever held the truncated ten lines.
+
+So every check I made agreed, and all of them were measuring the same
+truncated fragment. This is the grep-masked-exit-status trap this file already
+records, with `head` added: **the filter that makes output readable is the
+same filter that can hide the failure.** Run the suite to a FILE, check the
+exit status of `go test` itself, then grep the file — never filter the command
+whose result you are about to report.
+
+The guard that caught it is the one extended twice this month (#921 to read
+test-file comments, #946 to read the tracked docs), which is the argument for
+that kind of guard in one line.
+
 ### Not done
 
 The per-run `AnalysisSweepCounts` breakdown was previously rendered nowhere in
