@@ -1,9 +1,12 @@
 package analyze
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -130,5 +133,92 @@ func TestASuccessfulAnalysisClearsTheStrikes(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("list still has %d row(s) after a successful analysis, want 0", len(rows))
+	}
+}
+
+// captureLogs points slog.Default at a buffer for the duration of a test.
+// logging.Component resolves slog.Default() at LOG time (never at
+// construction — see its docblock), so redirecting the default handler
+// reaches this package's package-level logger without a seam.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestTheFailureWarnFiresOncePerFileVersion is the other half of the field
+// report, and the half a debounce alone does not fix.
+//
+// Three sweeps produce three refusals before the threshold suppresses, and
+// the operator's host was logging one WARN per refusal per sweep forever —
+// 1,385 lines in 7 days for 30 files. The cost is not disk; it is that every
+// other line in the journal becomes unfindable, which is the same lesson the
+// M-SEARCH send-failure streak suppression records.
+//
+// The strike count is the gate: the FIRST verdict against a file version
+// warns, later ones drop to Debug. A new file version warns again, because
+// that is genuinely new information.
+func TestTheFailureWarnFiresOncePerFileVersion(t *testing.T) {
+	buf := captureLogs(t)
+	s := newStore(t)
+	putTrack(t, s, "A/B/01.flac")
+	p := NewPool(s, 1, 4,
+		WithFsync(noFsync),
+		WithRunner(func(context.Context, AnalyzeSpec) (Result, error) {
+			return Result{}, markUnreadable(errors.New(
+				"sox: decoded 51.5s of 357.2s probed — source appears truncated"))
+		}))
+	defer p.Stop()
+
+	for i := 1; i <= 3; i++ {
+		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+		want := uint64(i)
+		waitFor(t, func() bool { return p.Stats().Failed == want })
+	}
+
+	if n := strings.Count(buf.String(), `level=WARN msg="analyze: failed"`); n != 1 {
+		t.Errorf("%d WARN lines for three refusals of one file version, want 1\n%s", n, buf.String())
+	}
+	// Kept, not silenced: the first line still carries the decoder's message
+	// with both durations, which is what the operator acts on.
+	if !strings.Contains(buf.String(), "decoded 51.5s of 357.2s probed") {
+		t.Errorf("the surviving WARN lost the decoder's message:\n%s", buf.String())
+	}
+	if n := strings.Count(buf.String(), "level=DEBUG"); n != 2 {
+		t.Errorf("%d DEBUG lines, want 2 — the repeats must still be observable at debug", n)
+	}
+}
+
+// TestATransientFailureKeepsWarningEveryTime is the deliberate asymmetry.
+//
+// A transient failure has no marker to deduplicate against, and one that
+// repeats forever is an alarm the operator needs: a missing sox or a failing
+// disk must not be silenced by the fix for truncated files.
+func TestATransientFailureKeepsWarningEveryTime(t *testing.T) {
+	buf := captureLogs(t)
+	s := newStore(t)
+	putTrack(t, s, "A/B/01.flac")
+	p := NewPool(s, 1, 4,
+		WithFsync(noFsync),
+		WithRunner(func(context.Context, AnalyzeSpec) (Result, error) {
+			return Result{}, errors.New(`start sox: exec: "sox": executable file not found in $PATH`)
+		}))
+	defer p.Stop()
+
+	for i := 1; i <= 3; i++ {
+		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+		want := uint64(i)
+		waitFor(t, func() bool { return p.Stats().Failed == want })
+	}
+	if n := strings.Count(buf.String(), `level=WARN msg="analyze: failed"`); n != 3 {
+		t.Errorf("%d WARN lines for three toolchain failures, want 3 — a fact about the "+
+			"host is not deduplicated away\n%s", n, buf.String())
 	}
 }

@@ -8895,6 +8895,16 @@ func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (Ana
 	// beside an existing ?1, and mixing `?1` with bare `?` makes the bare
 	// one index 2 by position — correct here today and silently wrong the
 	// moment a term is inserted above it.
+	//
+	// The unreadable term COALESCEs its analysis-row columns and the four
+	// above it do not, which looks inconsistent and is not. Those test
+	// `ta.waveform_tag != ''` POSITIVELY, so a LEFT JOIN miss yields NULL,
+	// the CASE takes ELSE, and the row scores 0 — exactly right for "is it
+	// analysed". This one NEGATES that condition, and `NOT NULL` is still
+	// NULL, so without the COALESCE every UNANALYSED track scored 0 for
+	// suppression too: the term read 0 on the very population it exists to
+	// count, with no error and a plausible-looking answer.
+	// TestCoverageSubtractsTheGivenUpOnSet is what found it.
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*),
 		       COALESCE(SUM(CASE WHEN lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' THEN 1 ELSE 0 END), 0),
@@ -8907,7 +8917,7 @@ func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (Ana
 		                         THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN `+analysisFailureSuppressedSQL2+`
 		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
-		                          AND NOT (ta.waveform_tag != '' AND ta.schema_version = ?1)
+		                          AND NOT (COALESCE(ta.waveform_tag, '') != '' AND COALESCE(ta.schema_version, '') = ?1)
 		                         THEN 1 ELSE 0 END), 0)
 		FROM tracks t
 		LEFT JOIN track_analysis ta ON ta.source_path = t.path
