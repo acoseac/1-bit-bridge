@@ -863,7 +863,7 @@ retry silently affects 0 rows while reporting success. Locked by
 `TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged` (settled /
 re-encoded / retagged / never-asked),
 `TestAcoustIDNoMatchRecordsVersionAndRespectsTTL`,
-`TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged` and
+`TestClearAcoustIDSuppressionUnderPrefixIsByteRanged` and
 `TestCacheForgetScopesToPrefixAndSweepsBothGenerations` — every one
 negative-control-verified, including the both-generations case, which at
 capacity 2 drops ZERO under a current-generation-only sweep.
@@ -1079,7 +1079,7 @@ always been able to mint variants nobody asked for; only the trigger is new).
   demotes it to the low lane while `Kind` still drives `VariantID()`. Enqueuing a
   library-wide sweep on the foreground lane re-opens the exact HOL blocking the
   two-channel queue exists to prevent — with no symptom visible bridge-side. Pinned by
-  `TestRoutesToOptimizeChannel` + `TestPoolBackgroundOptimizeUsesUpscaleLane` (asserted
+  `TestRoutesToForegroundLane` + `TestPoolBackgroundOptimizeUsesUpscaleLane` (asserted
   through the channels, not through timing) and by the sweeper's own
   `TestAutoOptimizeSweepEnqueuesBackgroundJobs`.
 - **The candidate query is `ListAutoOptimizeCandidates`, deliberately NOT
@@ -3034,7 +3034,7 @@ title 100%; artist / albumArtist / album / trackNumber 13,341 (87.3%); year
   their stored twins, so the first walk after this ships re-upserts them once —
   `enriched_at` back to 0 (which is the point: they can finally be enriched) and
   one `indexed_at` bump each. Tagged rows are untouched.
-- **Test lesson worth more than the fix.** `TestUpstreamMetadataAlwaysWins`
+- **Test lesson worth more than the fix.** `TestUpstreamMetadataIsNeverRewritten`
   originally used the fixture `"Tagged Artist"` — which cleans to itself, so it
   passed against code that overwrote unconditionally and pinned NOTHING. Only a
   negative control exposed it. When a test asserts "we do not transform X", the
@@ -5547,7 +5547,8 @@ the check needed a rebuild + restart, not a reload.
 
 A census of `Test…` names cited in `_test.go` COMMENTS with no definition
 anywhere: **16 hits, 15 real** — the sixteenth was a `"http://server"`
-string literal on a line that also held `"TestUA"`, which the census's
+string literal on a line that also held a test-shaped User-Agent constant,
+which the census's
 regex comment-stripper misread and which is why the guard parses with
 go/parser and scans comment groups only. The fifteen: nine docblocks
 naming a renamed sibling under its old name, four historical notes naming
@@ -6987,9 +6988,11 @@ Hoisted to the test goroutine.
 
 ### The guard, re-keyed
 
-`TestEveryBackgroundServeDrainsOnCleanup` became
+The guard was renamed from `…ServeDrainsOnCleanup` to
 `TestEveryBackgroundGoroutineDrainsOnCleanup`, and the file
-`serve_boot_drain_test.go` became `background_drain_test.go`.
+`serve_boot_drain_test.go` became `background_drain_test.go`. (The old name is
+written elided on purpose: spelled in full it is a citation of a test that no
+longer exists, which is the very thing the guard in `cmd/bridge` reports.)
 
 The match moved from "a `go` statement calling `run`" to "a `go` statement whose
 closure does `defer close(ch)`" — the form that makes a goroutine drainable at
@@ -7026,3 +7029,122 @@ are in `ops/plan-web-upload.md`, a PLAN listing tests to be written, and several
 more are line-wrap or family-prefix artifacts rather than citations. Extending
 the guard to markdown therefore needs a plan-doc exemption and wrap handling,
 and is left as its own change rather than folded in here.
+
+## 2026-09-21 — the citation guard reads the docs now (#946)
+
+#945 renamed a guard and a file, and left three stale citations behind in
+`CLAUDE.md` and this log. `TestEveryCitedTestNameExists` could not have caught
+them: it scanned Go source and test-file comments. `CLAUDE.md` is the file the
+harness loads on every session, which makes it the most expensive place in the
+tree for a stale guard name — precisely the class that test exists to catch.
+
+### The population, once the guard's own rule is applied
+
+An ad-hoc scan said 47 cited-but-undefined names, which was wrong: it did not
+apply `definesWithPrefix`, the existing acceptance of a citation that names a
+PREFIX of the real function (a table-driven parent, or a name truncated at a
+line wrap). With that rule, 40 — and they sort into four categories, only one
+of which is a defect:
+
+| where | count | what it is |
+|---|---|---|
+| `ops/plan-web-upload.md` | 30 | a plan listing tests TO BE WRITTEN |
+| `docs/LoupeReviewCycle.md`, `AGENTS.md` | 4 | metasyntactic `-run` placeholders |
+| `ops/deployment-runbook.md` | 1 | a test in the private conductor repo |
+| `ops/engineering-log.md` | 5 | the real drift: 4 stale citations + 1 false positive |
+
+### TRACKED, and why the first draft was not a guard
+
+The first version scanned every `.md` in the tree and failed on this machine
+over `ops/audit-2026-08-06.md`, which cites `…PIDAlive_SelfAndReaped` —
+since split into `TestPIDAlive_SelfAndBounds` and
+`TestPIDAliveReapedChildReadsDead`. That file is gitignored (`ops/*audit*.md`),
+along with `ops/coordinates.local.md` and the bug reviews, so it differs from
+machine to machine: the guard would have failed here and passed on CI and on a
+fresh clone. **A test whose verdict depends on untracked local files is not a
+guard.**
+
+`trackedMarkdownSet` asks git, and each branch fails in the honest direction. No
+`.git` is a fixture's temp directory, which has no ignore rules, so everything
+in it is in scope — that is also what keeps the fixture test hermetic. With
+`.git`, git must answer; an absent or failing git is a broken environment the
+test reports rather than quietly widening its scope back to every file. There
+was no precedent for shelling out to git in this repo's tests, which is why the
+alternative — mirroring the `.gitignore` md globs by hand — was considered and
+dropped: it drifts the moment another local doc appears, and it drifts toward a
+false failure on one machine.
+
+### Four stale citations and one false positive, corrected rather than exempted
+
+The accounting matters and the first draft of this entry got it wrong, calling
+it "four real hits" while the table above said five (CodeRabbit on #946). The
+five are **four stale citations plus one thing that was never a citation**.
+
+Three of the four were plain renames the docs had drifted from:
+
+```
+…NoMatchesUnderPrefixIsByteRanged -> TestClearAcoustIDSuppressionUnderPrefixIsByteRanged
+…RoutesToOptimizeChannel          -> TestRoutesToForegroundLane
+…UpstreamMetadataAlwaysWins       -> TestUpstreamMetadataIsNeverRewritten
+```
+
+The third was confirmed against the fixture rather than guessed from the name:
+the entry describes replacing a fixture value that "cleans to itself", and the
+live test uses `"John Adams*"`, which does not.
+
+The **fourth stale citation** is the guard name #945 itself retired, which this
+log named in full; it is now elided (see below). The **false positive** is the
+fifth: a UA string literal being DISCUSSED rather than cited — the
+commentary-quotes-its-subject trap in markdown — now described instead of
+quoted. It is worth keeping the two apart, because they call for opposite
+fixes: a stale citation is repointed or elided, while a false positive means
+the prose should stop spelling a token it is only talking about.
+
+**A note that must name a test which no longer exists elides the `Test`
+prefix** — `…ServeDrainsOnCleanup`. The regex needs `Test` followed by an
+uppercase letter, so the name stays readable to a human and invisible to the
+scan. This entry had to obey that rule three times before it would commit: the
+first draft of the table above spelled two of the old names in full and the
+paragraph above spelled a third, and the guard reported all three. That is the mechanical form of the rule #921 already recorded as "reworded
+rather than exempted", and it means a historical record does not have to choose
+between being accurate and being greppable.
+
+### The exemptions are categories, not conveniences
+
+The placeholder names live in a map and are deliberately NOT spelled in the
+docblock beside it: this is a `_test.go`, so its comment groups are scanned like
+any other docblock, and naming them there reports them as missing. The map
+entries are code, which the test-file branch does not read. That is the guard
+scanning its own file, which #921 also recorded, met a second time.
+
+### Negative controls
+
+Committed first. Every exemption and both floors, each restored afterwards:
+
+```
+plan-doc exemption off            30 plan names reported
+placeholder exemption off          3 placeholders reported
+foreign-repo map emptied           1 reported
+tracked filter on, ghost in an ignored file    0 reported  (correct)
+tracked filter off, same file                  1 reported
+md branch collects nothing         floor fires
+git made to fail with .git present loud failure, not a widened scope
+each of the 4 doc fixes reverted   caught, one at a time
+```
+
+Three of those controls were INVALID on the first attempt and each failed in a
+way this file already warns about. One left `foreign` declared-and-unused, so it
+failed to BUILD — which reads as "control invalid", never as a pass; emptying
+the map is the compiling form. One mutated nothing, because the replacement
+pattern did not match and I had not asserted that it applied. And one could not
+reproduce at all, because I had already fixed the offending audit file by hand,
+so the control needed a purpose-built gitignored file carrying a ghost name.
+A fourth reported blank for every case: `grep -o … | head -1` takes `head`'s
+exit status, so the `|| echo "not caught"` fallback never fired — the
+grep-masked-exit-status trap, in the harness rather than in the code.
+
+### Not done
+
+The audit documents stay out of scope by construction, being gitignored. The one
+stale citation found in `ops/audit-2026-08-06.md` was corrected on this machine
+only, and no PR can carry it.
