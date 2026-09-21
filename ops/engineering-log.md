@@ -7524,6 +7524,43 @@ on a warm dark fill.
 and no overflow, zero offending elements. A number read from a layout that is
 still settling is not a measurement.
 
+### The one pre-existing finding this PR surfaced
+
+SonarCloud reported "1 New issue" on the PR with the gate passing:
+`go:S3776` on `apiRootsRemove`, cognitive complexity 16 against a ceiling of
+15. It is **not from this change** — `git blame` dates the function to
+2026-04-24 and the diff touches only lines ~66-112 and ~534-619 of that file.
+A PR surfaces it because the FILE changed, not because the function did.
+
+Fixed anyway, and the fix is the one the rule asks for: the case-twin basename
+guard (a loop with a nested compare, carrying a fifteen-line docblock about why
+an ambiguous destructive removal is refused rather than resolved) is now
+`refuseAmbiguousRootBasename`, returning whether it answered. That removes the
+loop, its nested `if` and their nesting bonus — four points — and the block
+reads as the one thing it is. Behaviour-preserving, controlled by bypassing the
+call: `TestRootsRemoveRefusesCaseTwinBasename` goes red with
+`got 204, want 409`.
+
+⚠️ **The SonarCloud MCP could not scope any of this.** Given `pullRequestId`
+and `componentKeys` it returned 3,066 project-wide issues including `swift:*`
+rules from a different project — so every filter was ignored, and its answer
+looked like a plausible list rather than an error. The PR view in a browser,
+and the public API (`/api/issues/search?componentKeys=…&facets=rules,severities`,
+no auth needed), both answer correctly. Don't take that tool's scoped result
+at face value.
+
+### The rest of the backlog, measured
+
+691 open issues, ~16 days of estimated effort: 644 code smells, 46
+vulnerabilities, 1 bug. By rule — `go:S3776` 252 (plus `javascript:S3776` 18),
+`godre:S8193` 83, `javascript:S6582` 58, `go:S2077` 30, `go:S978` 30,
+`go:S1192` 29, `javascript:S3358` 24, `shelldre:S7688` 17, `Web:S6807` 15,
+`go:S5332` 12. The single BLOCKER — "Open Redirect via unsanitized user input",
+`internal/acoustid/client_test.go:303` — is a false positive: it is an
+httptest handler inside the test that deliberately issues a SAME-HOST redirect,
+to prove the client refuses cross-host ones. The 30 `go:S2077` are the known
+dismissed-in-the-UI class this repo already documents.
+
 ### Not done
 
 `AnalysisSweepCounts`' leaves are still unguarded on `/api/jobs` — that guard

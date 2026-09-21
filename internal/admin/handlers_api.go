@@ -1716,6 +1716,43 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 
 // --- DELETE /api/roots {path} ---
 
+// refuseAmbiguousRootBasename refuses a removal when a SURVIVING root's
+// basename case-folds to the removed one, reporting whether it answered (in
+// which case the caller must stop).
+//
+// `ValidateRoots` now rejects that configuration up front, but a bridge.yaml
+// written before it did — or hand-edited since — can still carry the pair, and
+// the remove handler is the point where it turns destructive: the prefix
+// delete removes rows by basename and unlinks their variant + waveform
+// sidecars from disk. The delete predicate is case-exact now, so the
+// survivor's rows are safe, but the operator's intent is genuinely ambiguous
+// here and the right answer is to make them fix the config rather than guess.
+//
+// The CLI's offline `library remove` has carried an equivalent guard since
+// PR #82; the admin path never did. Folded, not byte-exact, via the same
+// helper ValidateRoots uses — those agreeing is the point.
+//
+// Extracted from the handler rather than inlined: the loop and its nested
+// compare were four of apiRootsRemove's cognitive-complexity points
+// (SonarCloud go:S3776, 16 against a ceiling of 15 — a finding that predates
+// #948 and surfaced on it only because the file changed). Named, the guard
+// also reads as the one thing it is.
+func (s *Server) refuseAmbiguousRootBasename(w http.ResponseWriter, abs, removed string, survivors []string) bool {
+	removedKey := bridgefs.FoldRootBasename(removed)
+	for _, other := range survivors {
+		if bridgefs.FoldRootBasename(other) != removedKey {
+			continue
+		}
+		writeError(w, http.StatusConflict, "ambiguous-basename",
+			fmt.Sprintf("can't remove %q: surviving root %q has a basename that differs only by case (%q vs %q). "+
+				"Track paths are keyed by basename, so the removal target is ambiguous — rename one root's directory, "+
+				"or remove both and re-add the one you want to keep.",
+				abs, other, filepath.Base(removed), filepath.Base(other)))
+		return true
+	}
+	return false
+}
+
 func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -1759,37 +1796,13 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	willCollapse := len(newList) == 1
 	removedBasename := filepath.Base(current[idx])
 
-	// Refuse when a SURVIVING root's basename case-folds to the removed
-	// one. `ValidateRoots` now rejects that configuration up front, but a
-	// bridge.yaml written before it did — or hand-edited since — can
-	// still carry the pair, and this handler is the point where it turns
-	// destructive: the prefix delete below removes rows by basename and
-	// unlinks their variant + waveform sidecars from disk. The delete
-	// predicate is case-exact now, so the survivor's rows are safe, but
-	// the operator's intent is genuinely ambiguous here and the right
-	// answer is to make them fix the config rather than guess.
-	//
-	// The CLI's offline `library remove` has carried an equivalent guard
-	// since PR #82; the admin path never did. Folded, not byte-exact, via
-	// the same helper ValidateRoots uses — those agreeing is the point.
-	//
 	// Skipped on the collapse branch: multi-root → single-root flips the
 	// stored path form, so that path runs WipeFilesystemTracks and
 	// rescans rather than selecting by basename, and there is nothing to
 	// be ambiguous about. The prefix delete is only reachable when two or
 	// more roots survive.
-	if !willCollapse {
-		removedKey := bridgefs.FoldRootBasename(current[idx])
-		for _, other := range newList {
-			if bridgefs.FoldRootBasename(other) == removedKey {
-				writeError(w, http.StatusConflict, "ambiguous-basename",
-					fmt.Sprintf("can't remove %q: surviving root %q has a basename that differs only by case (%q vs %q). "+
-						"Track paths are keyed by basename, so the removal target is ambiguous — rename one root's directory, "+
-						"or remove both and re-add the one you want to keep.",
-						abs, other, removedBasename, filepath.Base(other)))
-				return
-			}
-		}
+	if !willCollapse && s.refuseAmbiguousRootBasename(w, abs, current[idx], newList) {
+		return
 	}
 
 	// Commit order matters: run the destructive manifest op FIRST, and
