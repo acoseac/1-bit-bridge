@@ -26,7 +26,13 @@ var certFieldRe = regexp.MustCompile(`\binfo\??\.([A-Za-z_][A-Za-z0-9_]*)`)
 //
 // Comments still have to go, for the reason this package's other guards
 // record: the prose beside a rule quotes the rule.
-var jsBracketReadRe = regexp.MustCompile(`\b%s\s*\??\.?\[\s*["']([A-Za-z_$][A-Za-z0-9_$]*)["']\s*\]`)
+//
+// Whitespace is permitted everywhere JS permits it — `info?. ["x"]` and
+// `info ?. ["x"]` are valid optional bracket access (verified with
+// `node --check`), and a scan that required `[` to abut `?.` would miss
+// them. Non-capturing `(?:…)` so the field stays in m[1]; RE2 supports
+// it, contrary to the review that raised the whitespace gap.
+var jsBracketReadRe = regexp.MustCompile(`\b%s\s*(?:\?\.)?\s*\[\s*["']([A-Za-z_$][A-Za-z0-9_$]*)["']\s*\]`)
 
 // jsBracketFieldReads returns the field names read off `root` in bracket
 // form. CodeRabbit raised the gap on PR #951 against the cert guard below;
@@ -141,4 +147,50 @@ func certTileSource(t *testing.T) string {
 		body = body[:j+1]
 	}
 	return body
+}
+
+// TestJSBracketFieldReadsSeesEveryBracketForm pins the helper directly,
+// because the two guards that use it can only fail on a field name that
+// is ALSO invalid — so a form the scan cannot see is indistinguishable,
+// from their side, from a codebase that does not use it. That is the
+// vacuous-pass shape, and it is how the `?.` whitespace gap survived the
+// first round: CodeRabbit raised it on PR #951 against a helper whose
+// only coverage was two callers that happened not to exercise it.
+//
+// Every accepted form here is valid JavaScript — `info?. ["x"]` and
+// `info ?. ["x"]` are optional bracket access with the whitespace JS
+// allows between tokens, verified with `node --check` rather than
+// assumed.
+func TestJSBracketFieldReadsSeesEveryBracketForm(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want string
+	}{
+		{`const a = info["plain"];`, "plain"},
+		{`const a = info ["spaced"];`, "spaced"},
+		{`const a = info?.["optional"];`, "optional"},
+		{`const a = info?. ["optionalSpaced"];`, "optionalSpaced"},
+		{`const a = info ?. ["bothSpaced"];`, "bothSpaced"},
+		{`const a = info['singleQuoted'];`, "singleQuoted"},
+		{`const a = info[ "padded" ];`, "padded"},
+	} {
+		got := jsBracketFieldReads(t, tc.src, "info")
+		if !got[tc.want] {
+			t.Errorf("jsBracketFieldReads(%q) missed %q, saw %v", tc.src, tc.want, sortedKeys(got))
+		}
+	}
+
+	// A comment naming a field must NOT count — this package's guards
+	// strip comments precisely because the prose beside a rule quotes
+	// the rule, and this helper does its own stripping.
+	if got := jsBracketFieldReads(t, `// info["fromAComment"] is not a read`, "info"); len(got) != 0 {
+		t.Errorf("a commented-out read counted: %v", sortedKeys(got))
+	}
+	if got := jsBracketFieldReads(t, `/* info["fromABlock"] */`, "info"); len(got) != 0 {
+		t.Errorf("a block-commented read counted: %v", sortedKeys(got))
+	}
+	// A different root must not be picked up, or scoping means nothing.
+	if got := jsBracketFieldReads(t, `const a = other["notOurs"];`, "info"); len(got) != 0 {
+		t.Errorf("read off a different root counted: %v", sortedKeys(got))
+	}
 }
