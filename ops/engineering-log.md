@@ -863,7 +863,7 @@ retry silently affects 0 rows while reporting success. Locked by
 `TestCollectCandidatesSkipsPersistedNoMatchUnlessFileChanged` (settled /
 re-encoded / retagged / never-asked),
 `TestAcoustIDNoMatchRecordsVersionAndRespectsTTL`,
-`TestClearAcoustIDNoMatchesUnderPrefixIsByteRanged` and
+`TestClearAcoustIDSuppressionUnderPrefixIsByteRanged` and
 `TestCacheForgetScopesToPrefixAndSweepsBothGenerations` — every one
 negative-control-verified, including the both-generations case, which at
 capacity 2 drops ZERO under a current-generation-only sweep.
@@ -1079,7 +1079,7 @@ always been able to mint variants nobody asked for; only the trigger is new).
   demotes it to the low lane while `Kind` still drives `VariantID()`. Enqueuing a
   library-wide sweep on the foreground lane re-opens the exact HOL blocking the
   two-channel queue exists to prevent — with no symptom visible bridge-side. Pinned by
-  `TestRoutesToOptimizeChannel` + `TestPoolBackgroundOptimizeUsesUpscaleLane` (asserted
+  `TestRoutesToForegroundLane` + `TestPoolBackgroundOptimizeUsesUpscaleLane` (asserted
   through the channels, not through timing) and by the sweeper's own
   `TestAutoOptimizeSweepEnqueuesBackgroundJobs`.
 - **The candidate query is `ListAutoOptimizeCandidates`, deliberately NOT
@@ -3034,7 +3034,7 @@ title 100%; artist / albumArtist / album / trackNumber 13,341 (87.3%); year
   their stored twins, so the first walk after this ships re-upserts them once —
   `enriched_at` back to 0 (which is the point: they can finally be enriched) and
   one `indexed_at` bump each. Tagged rows are untouched.
-- **Test lesson worth more than the fix.** `TestUpstreamMetadataAlwaysWins`
+- **Test lesson worth more than the fix.** `TestUpstreamMetadataIsNeverRewritten`
   originally used the fixture `"Tagged Artist"` — which cleans to itself, so it
   passed against code that overwrote unconditionally and pinned NOTHING. Only a
   negative control exposed it. When a test asserts "we do not transform X", the
@@ -5547,7 +5547,8 @@ the check needed a rebuild + restart, not a reload.
 
 A census of `Test…` names cited in `_test.go` COMMENTS with no definition
 anywhere: **16 hits, 15 real** — the sixteenth was a `"http://server"`
-string literal on a line that also held `"TestUA"`, which the census's
+string literal on a line that also held a test-shaped User-Agent constant,
+which the census's
 regex comment-stripper misread and which is why the guard parses with
 go/parser and scans comment groups only. The fifteen: nine docblocks
 naming a renamed sibling under its old name, four historical notes naming
@@ -6987,9 +6988,11 @@ Hoisted to the test goroutine.
 
 ### The guard, re-keyed
 
-`TestEveryBackgroundServeDrainsOnCleanup` became
+The guard was renamed from `…ServeDrainsOnCleanup` to
 `TestEveryBackgroundGoroutineDrainsOnCleanup`, and the file
-`serve_boot_drain_test.go` became `background_drain_test.go`.
+`serve_boot_drain_test.go` became `background_drain_test.go`. (The old name is
+written elided on purpose: spelled in full it is a citation of a test that no
+longer exists, which is the very thing the guard in `cmd/bridge` reports.)
 
 The match moved from "a `go` statement calling `run`" to "a `go` statement whose
 closure does `defer close(ch)`" — the form that makes a goroutine drainable at
