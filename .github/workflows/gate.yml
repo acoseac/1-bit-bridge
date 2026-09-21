@@ -9,8 +9,10 @@ name: gate
 # (gofmt.yml = the `fmt` check; this workflow = vet + test + build-all).
 #
 # Structure: vet / test-race / build-all / go-version run as FOUR PARALLEL
-# JOBS (they share no state) so wall time is the slowest single step
-# (~test-race), not the sum — the prior single sequential job ran ~20 min. A
+# JOBS (they share no state) so wall time is the slowest single step, not
+# the sum — the prior single sequential job ran ~20 min. `test-race` is
+# itself a matrix of nine shards (see its own comment), because its wall
+# clock was one package's sequential runtime. A
 # tiny `gate` job fans them back into one green signal (convenient if `main`
 # ever gains a required-status-check rule; today it has none). `go-version` is
 # a fast text check (no Go toolchain) that keeps the Dockerfile's ARG
@@ -107,11 +109,52 @@ jobs:
       - name: vet
         run: make vet
 
+  # The race suite, SHARDED. `make test` remains the local gate and the
+  # single source of the flags; `.github/scripts/test-shard.sh` runs the
+  # same `-race -timeout 30m` over a slice of it, and its header carries
+  # the measurements and the partition guards.
+  #
+  # Why shard at all, measured on the 2026-09-21 run (895s wall, 4 cores):
+  # total work is ~1,970 CPU-seconds and `-p $(nproc)` already packs it
+  # well, but `internal/manifest` alone is 760s and `internal/admin` 668s,
+  # so the wall clock was one package's SEQUENTIAL runtime and nothing
+  # else. `t.Parallel()` appears in 0 of manifest's 138 test files and 0 of
+  # admin's 131 — more cores cannot touch them, only more processes can.
+  #
+  # Four ways each, plus one leg for every other package (whose own floor
+  # is cmd/bridge at 218s, so splitting it further buys nothing). Measured
+  # locally: one manifest shard is 95s against 410s for the whole package,
+  # near-linear.
+  #
+  # Standard GitHub-hosted runners are free for public repositories, so the
+  # extra legs cost minutes that are not billed — which is what makes this
+  # the cheaper answer than a self-hosted runner. The alternative was
+  # measured too (this project's dev Mac runs manifest in 410s against the
+  # runner's 760s, ~1.85x), and GitHub's own guidance is that self-hosted
+  # runners should not be attached to a PUBLIC repo: a fork PR can execute
+  # arbitrary code on the machine.
+  #
+  # fail-fast: false, for the reason cross-platform has it — on a red run
+  # the full picture across shards is worth more than whichever failed
+  # first.
   test:
-    name: test -race
+    name: test -race (${{ matrix.label }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: manifest 1/4, group: manifest, index: 0, shards: 4 }
+          - { label: manifest 2/4, group: manifest, index: 1, shards: 4 }
+          - { label: manifest 3/4, group: manifest, index: 2, shards: 4 }
+          - { label: manifest 4/4, group: manifest, index: 3, shards: 4 }
+          - { label: admin 1/4,    group: admin,    index: 0, shards: 4 }
+          - { label: admin 2/4,    group: admin,    index: 1, shards: 4 }
+          - { label: admin 3/4,    group: admin,    index: 2, shards: 4 }
+          - { label: admin 4/4,    group: admin,    index: 3, shards: 4 }
+          - { label: rest,         group: rest,     index: 0, shards: 1 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -121,20 +164,22 @@ jobs:
           go-version-file: go.mod
           check-latest: true
           cache: false
+      # Keyed per GROUP, not per shard. The four manifest legs compile the
+      # same test binary, so one shared entry is what they all want; giving
+      # each leg its own key would store four near-identical copies and
+      # make every leg miss on the first run after any source change. The
+      # `rest` leg compiles a different set and gets its own.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-gobuild-test-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          key: ${{ runner.os }}-gobuild-test-${{ matrix.group }}-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
           restore-keys: |
-            ${{ runner.os }}-gobuild-test-${{ hashFiles('**/go.sum') }}-
-            ${{ runner.os }}-gobuild-test-
-      # The runner has ample RAM, so the Makefile's conservative default
-      # P (parallelism cap, for memory-constrained laptops) would only
-      # slow CI down — let it use all the runner's cores.
+            ${{ runner.os }}-gobuild-test-${{ matrix.group }}-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-test-${{ matrix.group }}-
       - name: test (race)
-        run: make test P=$(nproc)
+        run: .github/scripts/test-shard.sh ${{ matrix.group }} ${{ matrix.index }} ${{ matrix.shards }}
 
   dsd-measure:
     name: dsd-measure
