@@ -6922,3 +6922,107 @@ a milder shape: in-process loops (a gated sweeper, a disabled ingester), not a
 full server with a SQLite store and two listeners. Left deliberately, and
 listed here rather than swept in silently, because each needs its own reading
 of whether its goroutine touches a `t.TempDir` after the test returns.
+
+## 2026-09-21 — the loop tests drained too, and the guard moved to the shape (#945)
+
+#944 fixed the three `serve` boot tests and listed the in-process loop tests as
+deliberately left, on the reading that they were a milder shape. Half right:
+they are milder in what the goroutine DOES and sharper in what gets torn down
+under it.
+
+### Why they are worse, measured
+
+A stranded `serve` writes into a directory that is merely being removed. These
+loops hold a `*manifest.Store` and an `analyze.Pool` that the fixture tears down
+EXPLICITLY — `t.Cleanup(store.Close)`, `t.Cleanup(pool.Stop)` — so a mid-body
+`t.Fatalf` leaves a live loop calling into a closed SQLite handle.
+
+`TestSmartPlaylistRegeneratorReadsAnalysisLive` was the sharpest, because it used
+`defer store.Close()`, and **a `defer` beats every `t.Cleanup`**: no drain
+registered anywhere could be ordered behind it. Flagging the moment of closure
+and probing from inside the goroutine once the loop returned:
+
+```
+t.Cleanup(store.Close) + drain  ->  store already closed when the loop returned = false
+defer store.Close(), no drain   ->  store already closed when the loop returned = true
+```
+
+Two of the ten had no deferred cancel at all, so on a failing path the loop was
+never even asked to stop.
+
+### The population, and how the enumeration failed again
+
+Ten sites across `analyze_test.go`, `auto_optimize_test.go`,
+`duplicates_sweeper_defer_test.go` and `live_cadence_test.go`.
+
+The first enumeration — five files, listed by hand from a `defer cancel()` grep
+— **missed `auto_optimize_test.go`**, which has the hazard and uses
+`t.Cleanup(cancel)`, so there was no `defer cancel()` to grep for. It also
+counted `cadence_test.go` and `enrichment_test.go` in, which hold a ctx and
+start no goroutine at all. So the "~12 sites across five files" figure in the
+#944 entry was wrong in both directions; the real figure is ten across four,
+and the shape match is what produced it.
+
+Eight of the ten have a stranding failure path between the launch and the tail.
+Two do not, and those keep their tail because there it IS the assertion — the
+drain precedes the assertions in `…ZeroDeferRetryDoesNotSpin`, and is the whole
+subject of `…DeferralExitsOnCancel`. They register the helper as a belt, so a
+`t.Fatalf` added above it later is covered; the cleanup then finds `done`
+already closed and returns.
+
+### A second defect the conversion turned up
+
+`disabledIngester(t)` was called INSIDE the goroutine in both ingest-loop tests:
+
+```go
+go func() { defer close(done); l.runIngestLoop(ctx, disabledIngester(t), interval, nil) }()
+```
+
+So `t.TempDir`, `t.Fatal` and `t.Cleanup` all ran off the test goroutine.
+`FailNow` from a non-test goroutine is documented misuse — it Goexits that
+goroutine rather than failing the test — and the `store.Close` registration
+landed at whatever moment the goroutine happened to be scheduled, which can be
+AFTER the drain and therefore invert the ordering the drain exists to establish.
+Hoisted to the test goroutine.
+
+### The guard, re-keyed
+
+`TestEveryBackgroundServeDrainsOnCleanup` became
+`TestEveryBackgroundGoroutineDrainsOnCleanup`, and the file
+`serve_boot_drain_test.go` became `background_drain_test.go`.
+
+The match moved from "a `go` statement calling `run`" to "a `go` statement whose
+closure does `defer close(ch)`" — the form that makes a goroutine drainable at
+all, and the one thing all thirteen share. Keying on the callee would have meant
+a list of eight functions to edit for the ninth: the same enumeration one level
+down. The floor is thirteen and only trips when the count DROPS, so adding a
+drained test never needs it bumped.
+
+Neither of the two defects above is visible to an AST shape check, so the
+docblock says so rather than implying coverage.
+
+### Negative controls
+
+Committed first. Thirteen sites, each mutated individually back to
+`defer cancel()` (a mutation that COMPILES — deleting the call leaves `cancel`
+unused, and a control that fails to build reads as "control invalid"), the guard
+firing and naming that test each time; plus the floor, re-keyed to match
+nothing, reporting `matched 0 test(s) … want at least 13`.
+
+The first attempt at those controls **refused to patch 8 of the 13** and was
+right to: the helper call line is byte-identical across the three tests in
+`analyze_test.go`, so a file-wide replace would have mutated the wrong
+occurrence and passed. Body-scoped patching by function name fixed it. That is
+this file's own rule about a control mutating the wrong occurrence, met in
+practice.
+
+### Not done: markdown test-name citations
+
+`TestEveryCitedTestNameExists` scans Go source comments, not markdown, so it
+could not catch the three stale citations this rename left in `CLAUDE.md` and
+this log (fixed by hand). Measuring the wider gap: of 374 `Test*` names cited
+across the tracked `.md` files, 47 do not exist in the tree — but 28 of those
+are in `ops/plan-web-upload.md`, a PLAN listing tests to be written, and several
+more are line-wrap or family-prefix artifacts rather than citations. Extending
+the guard to markdown therefore needs a plan-doc exemption and wrap handling,
+and is left as its own change rather than folded in here.
