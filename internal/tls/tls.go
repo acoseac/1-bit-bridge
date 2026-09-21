@@ -18,9 +18,13 @@
 // safety margin under that ceiling.
 //
 // **Operator UX.** Yearly rotation is now expected. Surfaced via:
-//   - Startup log at `.notice` when the cert is within 30 days of expiry
-//     (operator gets a heads-up before iOS clients start failing to handshake).
-//   - `bridge cert info` CLI + admin-console cert tile (DaysUntilExpiry).
+//   - Startup log when the cert is within 30 days of expiry (operator gets a
+//     heads-up before iOS clients start failing to handshake) — or when it has
+//     not STARTED, the near end of the window, which is reachable whenever the
+//     host clock was more than an hour ahead at mint time.
+//   - `bridge cert info` CLI + admin-console cert tile. Both grade BOTH ends;
+//     neither takes a branch on DaysUntilExpiry, which truncates toward zero
+//     and says nothing at all about NotBefore.
 //   - `bridge cert rotate` CLI + admin "Rotate" button — minting a new cert
 //     forces every paired iOS client to re-pair via `bridge://pair?...`
 //     deep-link or admin-console QR.

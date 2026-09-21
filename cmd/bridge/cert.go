@@ -72,15 +72,53 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "inspect cert: %v\n", err)
 		return 1
 	}
+	// ONE `now` for every verdict below — the JSON envelope's three
+	// booleans and the human warning are answers about the same
+	// validity window and must not straddle a tick, the rule
+	// `bridge doctor`'s tls-cert line already states for its own two
+	// comparisons.
+	now := time.Now()
+	// The window has a NEAR end, and a certificate that has not started
+	// is rejected by clients exactly as an expired one is. `Inspect`
+	// reports only DaysUntilExpiry, so this state reads as a comfortable
+	// year of remaining life on every surface that grades that number
+	// alone. Reachable on this product's hardware: the mint allows one
+	// hour of clock skew, so a NUC or Pi that minted before NTP landed
+	// leaves a future NotBefore behind once the clock is corrected.
+	notYetValid := info.NotBefore.After(now)
+	// Derived from NotAfter directly rather than from DaysUntilExpiry's
+	// sign — `days = 0` covers both "expires in 23h" (still valid, the
+	// near-expiry band) and "expired 23h ago" (already past it, the
+	// hard one). Integer truncation makes the two indistinguishable on
+	// that field alone (Gemini flagged on PR #46).
+	//
+	// The `!notYetValid` prefix here and on expiringSoon below is
+	// PRECEDENCE, not redundancy, and it is what makes the three
+	// booleans mutually exclusive — the envelope says exactly what the
+	// switch below prints. Gemini read it as dead on PR #951, on the
+	// premise that NotAfter is always after NotBefore. Nothing in this
+	// path enforces that: `x509.CreateCertificate` and
+	// `x509.ParseCertificate` both accept an inverted window (measured),
+	// `LoadX509KeyPair` ignores dates entirely, and `tlsCertPath` takes
+	// any operator-supplied pair — a hand-assembled or restored data dir
+	// is a documented operator state. Dropped, an inverted window
+	// serialises `notYetValid: true` AND `expired: true`.
+	expired := !notYetValid && now.After(info.NotAfter)
+	// Against the exact remaining duration and servertls's own
+	// threshold, NOT `DaysUntilExpiry <= 30`: the day count truncates
+	// toward zero, so a cert with 30 days 23 hours left reads as 30 and
+	// `bridge cert info` would call it expiring while `bridge doctor`
+	// and the next `bridge serve` — both of which compare the duration —
+	// stay quiet. Same cert, same host, two answers.
+	expiringSoon := !notYetValid && !expired && info.NotAfter.Sub(now) <= servertls.ExpiryWarningWindow
 	if *jsonOut {
-		expired := time.Now().After(info.NotAfter)
-		expiringSoon := !expired && info.DaysUntilExpiry <= 30
 		envelope := map[string]any{
 			"subject":         info.Subject,
 			"fingerprint":     info.Fingerprint,
 			"notBefore":       info.NotBefore.UTC().Format(time.RFC3339),
 			"notAfter":        info.NotAfter.UTC().Format(time.RFC3339),
 			"daysUntilExpiry": info.DaysUntilExpiry,
+			"notYetValid":     notYetValid,
 			"expired":         expired,
 			"expiringSoon":    expiringSoon,
 		}
@@ -91,18 +129,12 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Not before:  %s\n", info.NotBefore.UTC().Format(time.RFC3339))
 	fmt.Fprintf(stdout, "Not after:   %s\n", info.NotAfter.UTC().Format(time.RFC3339))
 	fmt.Fprintf(stdout, "Days until expiry: %d\n", info.DaysUntilExpiry)
-	// Use NotAfter directly for the expired-vs-still-valid split
-	// rather than relying on DaysUntilExpiry's sign — `days = 0`
-	// covers both "expires in 23h" (still valid, near-expiry
-	// warning applies) and "expired 23h ago" (already expired,
-	// hard warning applies). Integer truncation makes the two
-	// indistinguishable on that field alone (Gemini flagged on
-	// PR #46).
-	now := time.Now()
 	switch {
-	case now.After(info.NotAfter):
+	case notYetValid:
+		fmt.Fprintf(stdout, "WARNING: cert is NOT YET VALID — %s\n", servertls.NotYetValidRemediation)
+	case expired:
 		fmt.Fprintln(stdout, "WARNING: cert has expired. iOS clients will reject the connection.")
-	case info.DaysUntilExpiry <= 30:
+	case expiringSoon:
 		fmt.Fprintln(stdout, "WARNING: cert is expiring soon. Plan a rotation; every paired device will need to re-pair.")
 	}
 	return 0
@@ -133,6 +165,19 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fmt.Fprintf(stdout, "Current cert expires: %s (%d days)\n",
 			oldInfo.NotAfter.UTC().Format(time.RFC3339),
 			oldInfo.DaysUntilExpiry)
+		// The one band where this command is NOT the fix, which is why
+		// it is the only one the preamble carries: an expired or
+		// expiring cert is why the operator is here and saying so would
+		// be noise, but a cert that has not STARTED means the host
+		// clock was ahead at mint time, and the mint about to run reads
+		// that same clock. Rotating now produces a second certificate
+		// with the same wrong dates — and burns every device's pin to
+		// do it. Printed BEFORE the confirmation prompt so it is
+		// something the operator can still act on.
+		if oldInfo.NotBefore.After(time.Now()) {
+			fmt.Fprintf(stdout, "\nWARNING: the current cert is NOT YET VALID (starts %s).\n  %s\n",
+				oldInfo.NotBefore.UTC().Format(time.RFC3339), servertls.NotYetValidRemediation)
+		}
 	}
 
 	if !*autoYes {

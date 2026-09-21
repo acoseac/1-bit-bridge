@@ -183,6 +183,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			APIPort:      7788,
 			AdminPort:    7789,
 		}
+		withExistingInstallCertDeps(&d, cfgPath)
 		if code := ensureDoctorClean(stdout, d); code != 0 {
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "fix the fail(s) above, or re-run with --skip-doctor to bypass.")
@@ -821,6 +822,52 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 		return defYes
 	}
 	return line == "y" || line == "yes"
+}
+
+// withExistingInstallCertDeps points `bridge init`'s preflight at the
+// certificate an EXISTING install at cfgPath actually serves, and wires
+// the SAN gather so the tls-cert-sans check runs at all.
+//
+// `bridge init` is re-run far more often than it is run: reinstalling
+// the service, rewriting a hand-edited config, moving a data directory
+// to a new host. Its preflight built Deps from the prompts alone, so on
+// every one of those runs the two cert checks graded
+// `<cfgDir>/data/server.{crt,key}` — which is not where an install with
+// an explicit `tlsCertPath` keeps its pair — and tls-cert-sans skipped
+// itself entirely, because a nil CertSANs is a silent ok. That skip is
+// the wrong way round: the SAN check's own docblock says it belongs in
+// a preflight rather than only in the startup path, and `bridge init`
+// IS the preflight command.
+//
+// JUDGEMENT CALL — this grades the PRE-init state, deliberately. The
+// preflight runs before init writes the config, so the values here are
+// the ones on disk NOW, not the ones init is about to save. For the
+// cert that is the only coherent reading: the cert being graded is the
+// one on disk, and init does not mint a new one over a live install.
+// For the SAN want-set it is also right rather than merely tolerable,
+// because `customEndpoints` is the one input that moves the answer and
+// init never prompts for it — it survives the rewrite verbatim, so the
+// old value IS the new value. A first install has no config to read and
+// keeps the existing skip: nothing is stale on a host whose first mint
+// has not happened yet, and grading a narrower want-set than `bridge
+// serve` builds would be a comparison presented as authoritative that
+// was never made.
+//
+// Everything both checks say about this state is warn-level by design
+// (neither a stale SAN set nor a clock-skewed NotBefore is a reason to
+// refuse to initialise), which is why ensureDoctorClean surfaces warns.
+func withExistingInstallCertDeps(d *doctor.Deps, cfgPath string) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return
+	}
+	d.TLSCertPath, d.TLSKeyPath = resolveCertPaths(cfg)
+	// The same helper `bridge serve`, `bridge cert rotate` and `bridge
+	// doctor` gather from, so the preflight's verdict is a claim about
+	// what a rotation would mint rather than a second opinion about it.
+	d.CertSANs = func(context.Context) servertls.GenerateOptions {
+		return certSANOptions(cfg)
+	}
 }
 
 // maxLibraryPrompts bounds the interactive library-path re-prompt loop so a

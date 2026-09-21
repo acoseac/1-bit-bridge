@@ -482,8 +482,15 @@ func TestCheckTLSCert_NotYetValidWarns(t *testing.T) {
 	}
 	// The remedy differs from every other band here: rotating against a
 	// wrong clock mints another bad cert, so the clock comes first.
-	if !strings.Contains(c.Hint, "CHECK THE CLOCK FIRST") {
-		t.Errorf("hint sends the operator to rotate without checking the clock: %q", c.Hint)
+	//
+	// Asserted against the CONST rather than the "CHECK THE CLOCK
+	// FIRST" substring it contains: `bridge cert info` and `bridge cert
+	// rotate`'s preamble describe this same state and pin the same
+	// value, so a re-inlined copy here would be caught rather than
+	// quietly becoming a second piece of advice. The substring alone
+	// would accept any sentence that happened to carry the phrase.
+	if !strings.Contains(c.Hint, servertls.NotYetValidRemediation) {
+		t.Errorf("hint is not servertls.NotYetValidRemediation: %q", c.Hint)
 	}
 	// It must not be mistaken for the expiry bands — those grade a cert
 	// that IS in its window.

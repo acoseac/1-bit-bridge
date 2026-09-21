@@ -68,10 +68,16 @@ func TestSettingsPrereqsOnlyReadRealJobsFields(t *testing.T) {
 			"reflection walk is broken, so this test proves nothing", len(valid))
 	}
 
-	body := stripJSNoise(readConsoleJS(t, "static/app.js"))
+	src := readConsoleJS(t, "static/app.js")
 	seen := map[string]bool{}
-	for _, m := range jobsFieldRe.FindAllStringSubmatch(body, -1) {
+	for _, m := range jobsFieldRe.FindAllStringSubmatch(stripJSNoise(src), -1) {
 		seen[m[1]] = true
+	}
+	// `jobs["field"]` reads the same endpoint and this scan could not see
+	// it — the gap CodeRabbit raised on #951 against the cert twin, which
+	// this guard shared. jsBracketFieldReads has why it needs its own pass.
+	for f := range jsBracketFieldReads(t, src, "jobs") {
+		seen[f] = true
 	}
 	if len(seen) == 0 {
 		t.Fatal("no jobs.<field> reads found in app.js — the scan is broken")
