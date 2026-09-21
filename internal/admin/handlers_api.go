@@ -89,12 +89,25 @@ type statsResponse struct {
 	// bytes the bridge proxies from an upstream UPnP MediaServer (PR
 	// #353 admin surface). Always emitted; zero when the feature
 	// isn't enabled.
-	UPnPRoutedTracks int    `json:"upnpRoutedTracks"`
-	DBBytes          int64  `json:"dbBytes"`
-	Fingerprint      string `json:"fingerprint"`
-	DeviceCount      int    `json:"deviceCount"`
-	ListenAddress    string `json:"listenAddress"`
-	AdminAddress     string `json:"adminAddress"`
+	UPnPRoutedTracks int `json:"upnpRoutedTracks"`
+
+	// TracksUnreadable is how many local sources the decoders have refused
+	// for the version currently indexed — the operator-facing answer to
+	// "which of my files are broken". Counted from the same predicate the
+	// unreadable list and the analysis candidate walk use, so the number
+	// and the list cannot describe different libraries.
+	//
+	// Every track with at least one current verdict, not only the
+	// threshold-suppressed ones: a file on its second strike is already a
+	// file the operator wants to know about, and showing only the
+	// given-up-on set would make it invisible until the third sweep.
+	TracksUnreadable int `json:"tracksUnreadable"`
+
+	DBBytes       int64  `json:"dbBytes"`
+	Fingerprint   string `json:"fingerprint"`
+	DeviceCount   int    `json:"deviceCount"`
+	ListenAddress string `json:"listenAddress"`
+	AdminAddress  string `json:"adminAddress"`
 }
 
 type rootRow struct {
@@ -491,6 +504,7 @@ type statsDBPart struct {
 	variantFiles    int
 	variantBytes    int64
 	upnpRouted      int
+	unreadable      int
 }
 
 // readStatsDBPart runs the three best-effort stats DB reads under ctx and
@@ -518,6 +532,13 @@ func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 	if err != nil {
 		return statsDBPart{}, fmt.Errorf("upnp routing count: %w", err)
 	}
+	// Indexed (v46's partial index over analysis_fail_count), so this stays
+	// a handful of index entries rather than the full `tracks` scan that
+	// pulled the diagnostics block behind a TTL.
+	unreadable, err := s.deps.Manifest.CountUnreadableTracks(ctx)
+	if err != nil {
+		return statsDBPart{}, fmt.Errorf("unreadable track count: %w", err)
+	}
 	for _, st := range byKind {
 		p.variantFiles += st.Files
 		p.variantBytes += st.Bytes
@@ -526,6 +547,7 @@ func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 	p.upscaledTracks = rollup.UpscaledTrackCount
 	p.optimizedTracks = rollup.OptimizedTrackCount
 	p.upnpRouted = upnpRouted
+	p.unreadable = unreadable.Recorded
 	return p, nil
 }
 
@@ -573,6 +595,7 @@ func (s *Server) getStatsSnapshot() statsResponse {
 		VariantFiles:        part.variantFiles,
 		VariantBytes:        part.variantBytes,
 		UPnPRoutedTracks:    part.upnpRouted,
+		TracksUnreadable:    part.unreadable,
 		DBBytes:             dbBytes,
 		Fingerprint:         s.deps.Fingerprint,
 		DeviceCount:         len(s.deps.Auth.List()),

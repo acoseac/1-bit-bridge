@@ -2023,6 +2023,48 @@ var migrations = []migration{
 			)
 		},
 	},
+	{
+		version: 46,
+		name:    "tracks analysis-failure debounce (versioned + TTL-stamped)",
+		// The transcode debounce (v39) one subsystem over: a source the
+		// decoders refuse writes no `track_analysis` row, so every candidate
+		// query re-selects it forever. See the docblock on
+		// analysisFailureRecordedSQL for why each column is here and what
+		// must never be recorded in them.
+		//
+		// Six columns, not v39's four. `analysis_fail_reason` and
+		// `analysis_fail_first_at` exist because this feature's job is not
+		// only to stop retrying — it is to tell the operator WHICH files to
+		// replace, which needs the decoder's own words and when they were
+		// first heard.
+		//
+		// Append-only / idempotent per the ladder contract: the ALTERs ride
+		// post(), not `sql`, because a failure after a non-idempotent ALTER
+		// leaves the next boot unable to re-run it (see the v9 docblock).
+		sql: `-- columns added idempotently in post(); see the docblock on analysisFailureRecordedSQL`,
+		post: func(db *sql.DB) error {
+			if err := addColumnsIfMissing(db, "tracks",
+				tableColumn{"analysis_fail_count", "ALTER TABLE tracks ADD COLUMN analysis_fail_count INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"analysis_fail_at", "ALTER TABLE tracks ADD COLUMN analysis_fail_at INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"analysis_fail_first_at", "ALTER TABLE tracks ADD COLUMN analysis_fail_first_at INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"analysis_fail_size", "ALTER TABLE tracks ADD COLUMN analysis_fail_size INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"analysis_fail_mtime_ns", "ALTER TABLE tracks ADD COLUMN analysis_fail_mtime_ns INTEGER NOT NULL DEFAULT 0"},
+				tableColumn{"analysis_fail_reason", "ALTER TABLE tracks ADD COLUMN analysis_fail_reason TEXT NOT NULL DEFAULT ''"},
+			); err != nil {
+				return err
+			}
+			// Partial, for the v40 artwork_version reason: the column is 0 for
+			// every row except the broken minority, so the index stays tiny —
+			// 30 entries on the library this was written for. Without it the
+			// unreadable COUNT on /api/stats is a full scan of `tracks` on a
+			// 5-second SSE tick, which is the shape /api/diagnostics was
+			// pulled up for. Every predicate leads with
+			// `analysis_fail_count != 0` so the planner can use it.
+			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_analysis_fail
+				ON tracks(analysis_fail_count) WHERE analysis_fail_count != 0`)
+			return err
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -8818,6 +8860,26 @@ type AnalysisCoverage struct {
 	// are the exact truth.
 	AnalysedFresh int
 	AnalysedStale int
+	// UnreadableExcluded: sources the decoders have refused
+	// analysisFailureThreshold times running, against the version the
+	// manifest currently holds, and which are not already counted as
+	// analysed-fresh.
+	//
+	// SUBTRACTED from eligible, unlike the merely-recorded strikes
+	// /api/stats reports. The difference is what the bridge is still
+	// doing: a track on its first or second verdict is being retried and
+	// belongs in the backlog; one past the threshold is not, and leaving
+	// it there is what makes a coverage bar that can never reach 100% —
+	// the "a shrinking backlog that never reaches zero has a visible
+	// explanation" case SuppressedVariantFailureCount exists for.
+	//
+	// The not-already-analysed term keeps the arithmetic sound. A track
+	// analysed before its file was replaced with a truncated copy can be
+	// BOTH analysed-fresh here (this query is schema-versioned, not
+	// mtime-aware, by documented approximation) and suppressed; counting
+	// it in both would drive Eligible below Analysed and render a
+	// negative remainder.
+	UnreadableExcluded int
 }
 
 // AnalysisCoverage computes the coverage snapshot in ONE pass over
@@ -8829,6 +8891,10 @@ type AnalysisCoverage struct {
 // TTL + singleflight — the admin polls this.
 func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (AnalysisCoverage, error) {
 	var c AnalysisCoverage
+	// NUMBERED binds throughout. The cutoff arrived as a second parameter
+	// beside an existing ?1, and mixing `?1` with bare `?` makes the bare
+	// one index 2 by position — correct here today and silently wrong the
+	// moment a term is inserted above it.
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*),
 		       COALESCE(SUM(CASE WHEN lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' THEN 1 ELSE 0 END), 0),
@@ -8838,12 +8904,17 @@ func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (Ana
 		                         THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version != ?1
 		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                         THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN `+analysisFailureSuppressedSQL2+`
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                          AND NOT (ta.waveform_tag != '' AND ta.schema_version = ?1)
 		                         THEN 1 ELSE 0 END), 0)
 		FROM tracks t
 		LEFT JOIN track_analysis ta ON ta.source_path = t.path
 		WHERE NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)`,
-		schemaVersion)
-	if err := row.Scan(&c.TotalLocal, &c.DSDExcluded, &c.ZeroByteExcluded, &c.AnalysedFresh, &c.AnalysedStale); err != nil {
+		schemaVersion, s.AnalysisFailureCutoff())
+	if err := row.Scan(&c.TotalLocal, &c.DSDExcluded, &c.ZeroByteExcluded,
+		&c.AnalysedFresh, &c.AnalysedStale, &c.UnreadableExcluded); err != nil {
 		return AnalysisCoverage{}, err
 	}
 	return c, nil

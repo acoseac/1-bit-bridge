@@ -69,6 +69,12 @@ type jobsAnalysisCoverage struct {
 	Stale            int `json:"stale,omitempty"`
 	DSDExcluded      int `json:"dsdExcluded"`
 	ZeroByteExcluded int `json:"zeroByteExcluded"`
+	// UnreadableExcluded: sources the decoders refused enough consecutive
+	// times to stop being offered. Subtracted from Eligible like the other
+	// two exclusions, so the bar can reach 100% on a library that holds a
+	// few broken files — a remainder that never drains reads as a stuck job
+	// and is what sent an operator to the journal in the first place.
+	UnreadableExcluded int `json:"unreadableExcluded"`
 }
 
 // jobsAnalysis — the audio-analysis card. Sweep/Coverage omitted when
@@ -436,11 +442,13 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 			return snap, nil
 		}
 		snap := &jobsAnalysisCoverage{
-			Eligible:         cov.TotalLocal - cov.DSDExcluded - cov.ZeroByteExcluded,
-			Analysed:         cov.AnalysedFresh,
-			Stale:            cov.AnalysedStale,
-			DSDExcluded:      cov.DSDExcluded,
-			ZeroByteExcluded: cov.ZeroByteExcluded,
+			Eligible: cov.TotalLocal - cov.DSDExcluded - cov.ZeroByteExcluded -
+				cov.UnreadableExcluded,
+			Analysed:           cov.AnalysedFresh,
+			Stale:              cov.AnalysedStale,
+			DSDExcluded:        cov.DSDExcluded,
+			ZeroByteExcluded:   cov.ZeroByteExcluded,
+			UnreadableExcluded: cov.UnreadableExcluded,
 		}
 		s.analysisCoverageMu.Lock()
 		s.analysisCoverage = snap

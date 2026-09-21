@@ -88,6 +88,8 @@
       <dl>
         <dt>Sweeper</dt>
         <dd id="job-analysis-sweep">—</dd>
+        <dt>Last run</dt>
+        <dd id="job-analysis-lastrun">—</dd>
         <dt>Next sweep</dt>
         <dd id="job-analysis-next">—</dd>
         <dt>Queue</dt>
@@ -305,6 +307,38 @@
       ETA <strong id="jobs-throughput-eta">—</strong>
       <span class="hint" id="jobs-throughput-samples"></span>
     </p>
+  </div>
+
+  {{/* Sources the decoders refuse. Painted by app.js renderUnreadableTracks
+       from GET /api/analysis/unreadable on the same 10 s jobs chain. Hidden
+       entirely when nothing is recorded, which is the normal state — a panel
+       reading "0 unreadable tracks" on every healthy bridge is the kind of
+       chrome an operator learns to stop seeing.
+
+       A TABLE, not a CSS grid: these rows carry full library paths and a
+       decoder's error text, and an implicit grid column sizes to the widest
+       item's max-content — the #942 `.deleted-list` defect, which overflowed
+       a 317px panel to 925px with one long name. */}}
+  <div class="panel" id="unreadable-panel" hidden>
+    <div class="panel-head">
+      <h2>Unreadable / truncated tracks</h2>
+      <span class="panel-actions">
+        <button type="button" id="jobs-unreadable-retry" class="btn">Retry all</button>
+      </span>
+    </div>
+    <p class="hint" id="unreadable-hint"></p>
+    <table class="rows" id="unreadable-table">
+      <thead>
+        <tr>
+          <th>Track</th>
+          <th>What the decoder said</th>
+          <th>First seen</th>
+          <th class="num">Tries</th>
+        </tr>
+      </thead>
+      <tbody id="unreadable-body"></tbody>
+    </table>
+    <p id="unreadable-error" class="error" hidden role="alert"></p>
   </div>
 
   {{/* Live SoX pipeline — one row per worker slot, painted by app.js

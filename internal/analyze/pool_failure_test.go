@@ -1,0 +1,134 @@
+package analyze
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+)
+
+// TestPoolRecordsAStrikeOnlyForAFileVerdict is the whole classification rule
+// at the layer that applies it.
+//
+// A decoder verdict about the source is recorded, so the candidate stops
+// being offered after the threshold. Everything else — a missing sox, a
+// faulted read, a full output volume — is a fact about the host and must
+// leave no trace, because a 30-second outage would otherwise sideline every
+// track that happened to be in flight.
+func TestPoolRecordsAStrikeOnlyForAFileVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStrike bool
+	}{
+		{"decoder verdict", markUnreadable(errors.New("sox: decoded 1.0s of 300.0s probed — source appears truncated")), true},
+		{"toolchain missing", errors.New(`start sox: exec: "sox": executable file not found in $PATH`), false},
+		{"faulted read", fmt.Errorf("read pcm: %w", errors.New("input/output error")), false},
+		{"output volume full", errors.New("write waveform tmp: no space left on device"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStore(t)
+			putTrack(t, s, "A/B/01.flac")
+			p := NewPool(s, 1, 4,
+				WithFsync(noFsync),
+				WithRunner(func(context.Context, AnalyzeSpec) (Result, error) {
+					return Result{}, tc.err
+				}))
+			if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, func() bool { return p.Stats().Failed == 1 })
+			p.Stop()
+
+			rows, err := s.ListUnreadableTracksForAdmin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantStrike {
+				if len(rows) != 1 {
+					t.Fatalf("recorded %d verdict(s), want 1 — a source the decoder refused must "+
+						"stop being offered", len(rows))
+				}
+				if rows[0].Reason != tc.err.Error() {
+					t.Errorf("reason = %q, want the decoder's own message %q", rows[0].Reason, tc.err)
+				}
+			} else if len(rows) != 0 {
+				t.Fatalf("recorded %d verdict(s) for a %s, want 0 — a fact about the host must "+
+					"never sideline a file", len(rows), tc.name)
+			}
+		})
+	}
+}
+
+// TestPoolReachesTheThresholdAndStopsBeingOffered — three refusals of the
+// same file version is what the debounce is for. The count is what the
+// candidate walk reads, so this pins the pool's end of it.
+func TestPoolReachesTheThresholdAndStopsBeingOffered(t *testing.T) {
+	s := newStore(t)
+	putTrack(t, s, "A/B/01.flac")
+	p := NewPool(s, 1, 4,
+		WithFsync(noFsync),
+		WithRunner(func(context.Context, AnalyzeSpec) (Result, error) {
+			return Result{}, markUnreadable(errors.New("sox: source appears truncated"))
+		}))
+	defer p.Stop()
+
+	for i := 1; i <= 3; i++ {
+		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+		want := uint64(i)
+		waitFor(t, func() bool { return p.Stats().Failed == want })
+	}
+	sup, err := s.SuppressedAnalysisPaths(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sup["A/B/01.flac"]; !ok {
+		t.Fatalf("suppressed set = %v, want A/B/01.flac after three verdicts", sup)
+	}
+}
+
+// TestASuccessfulAnalysisClearsTheStrikes — the counter must measure
+// CONSECUTIVE failures, and the pool is the only place a success is observed.
+// Without this a file that fails twice a year suppresses itself eventually,
+// with successful analyses on either side of the strikes.
+func TestASuccessfulAnalysisClearsTheStrikes(t *testing.T) {
+	s := newStore(t)
+	putTrack(t, s, "A/B/01.flac")
+	fail := true
+	p := NewPool(s, 1, 4,
+		WithFsync(noFsync),
+		WithRunner(func(context.Context, AnalyzeSpec) (Result, error) {
+			if fail {
+				return Result{}, markUnreadable(errors.New("sox: source appears truncated"))
+			}
+			return Result{
+				WaveformPath: "/w/x.waveform.bin", WaveformTag: "deadbeef",
+				WaveformSize: 42, SchemaVersion: WaveformSchemaVersion,
+			}, nil
+		}))
+	defer p.Stop()
+
+	if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.Stats().Failed == 1 })
+	rows, err := s.ListUnreadableTracksForAdmin(context.Background())
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("list = (%d rows, %v), want 1 before the success", len(rows), err)
+	}
+
+	fail = false
+	if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.Stats().Done == 1 })
+	rows, err = s.ListUnreadableTracksForAdmin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("list still has %d row(s) after a successful analysis, want 0", len(rows))
+	}
+}

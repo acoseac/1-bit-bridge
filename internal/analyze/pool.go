@@ -302,11 +302,14 @@ func (p *Pool) processJob(job poolJob) {
 		if !p.closed.Load() {
 			p.failedCnt.Add(1)
 			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
+				// Excluded from the debounce BEFORE the classifier is asked:
+				// a timeout is as likely to be a hung mount as a pathological
+				// file, so it is never a verdict about the source. Same rule
+				// the transcode pool applies to its own timeout.
 				logger.Warn("analyze: timed out",
 					"path", job.spec.SourceLibraryRel, "timeout", p.jobTimeout)
 			} else {
-				logger.Warn("analyze: failed",
-					"path", job.spec.SourceLibraryRel, "err", err)
+				p.noteFailure(job.spec, err)
 			}
 		}
 		p.releaseDedup(job.dedup)
@@ -386,10 +389,84 @@ func (p *Pool) processJob(job poolJob) {
 		}
 		return
 	}
+	// A committed row is a success, so the consecutive-failure counter goes
+	// back to zero. Without this the counter measures LIFETIME failures and a
+	// file that fails twice a year — a full disk, a mount blip — eventually
+	// suppresses itself with successes on either side. Best-effort: failing
+	// to clear costs at most one extra retry later, and refusing to count the
+	// job as done because a bookkeeping UPDATE failed would be the worse
+	// trade.
+	if err := p.store.ClearAnalysisFailure(jobCtx, job.spec.SourceLibraryRel); err != nil {
+		logger.Warn("analyze: clear failure marker",
+			"path", job.spec.SourceLibraryRel, "err", err)
+	}
 	p.doneCnt.Add(1)
 	p.releaseDedup(job.dedup)
 	released = true
 	p.fireStateChange()
+}
+
+// failureRecordTimeout bounds the debounce UPDATE. It runs on a context
+// DETACHED from the job's, because the job context is the thing that just
+// expired or was cancelled in a neighbouring branch and the record must
+// still land; a bound is what keeps that from being an unbounded write on a
+// wedged database.
+const failureRecordTimeout = 5 * time.Second
+
+// noteFailure logs one analysis failure and, when the decoder reached a
+// verdict about the FILE, records a strike against it.
+//
+// Two jobs, and the second is what makes the first quiet. A source that can
+// never decode is re-offered on every sweep, so the WARN it produces is
+// per-sweep-forever: the field report was 1,385 lines in 7 days for the same
+// 30 truncated FLACs, which is not a disk-space problem but the reason every
+// other line in the journal becomes unfindable (the same lesson the M-SEARCH
+// send-failure streak suppression records). The strike count IS the dedup
+// key: count == 1 means this is the first verdict against this version of
+// this file, and only that one gets a WARN.
+//
+// The repetition rule differs from the playlist mass-delete WARN on purpose.
+// There each line carries a different count and the last one is where the run
+// stopped; here every line is identical by construction, which is the
+// M-SEARCH shape, so it is suppressed rather than repeated.
+//
+// A TRANSIENT failure still logs every time. That is deliberate: it has no
+// marker to dedup against, and a transient failure that repeats forever is an
+// alarm the operator needs — silencing it would hide a missing sox or a
+// failing disk behind the fix for a different problem.
+func (p *Pool) noteFailure(spec AnalyzeSpec, err error) {
+	if !SourceUnreadable(err) {
+		logger.Warn("analyze: failed",
+			"path", spec.SourceLibraryRel, "err", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(p.stopCtx), failureRecordTimeout)
+	defer cancel()
+	// The spec's own (size, mtime) is deliberately NOT passed: the store
+	// stamps the strike from the manifest row, so the version a verdict
+	// records is the version its predicates compare against. See
+	// RecordAnalysisFailure.
+	strikes, rerr := p.store.RecordAnalysisFailure(ctx, spec.SourceLibraryRel, err.Error())
+	if rerr != nil {
+		// The marker did not land, so the dedup key is unknown — log, as
+		// this is the un-deduplicated state the feature exists to leave.
+		logger.Warn("analyze: failed",
+			"path", spec.SourceLibraryRel, "err", err, "markerErr", rerr)
+		return
+	}
+	if strikes != 1 {
+		// Either a repeat of a verdict already reported (>1), or a track
+		// that no longer has a manifest row (0). Neither is news.
+		logger.Debug("analyze: failed again",
+			"path", spec.SourceLibraryRel, "strikes", strikes, "err", err)
+		return
+	}
+	// The first verdict against this file version — the line the operator
+	// acts on. It carries the decoder's own message, which for the
+	// truncation case names both durations.
+	logger.Warn("analyze: failed",
+		"path", spec.SourceLibraryRel, "err", err,
+		"retriesLeft", manifest.AnalysisFailureThreshold()-1)
 }
 
 // PoolStats is a snapshot of pool counters for the stats surface.
