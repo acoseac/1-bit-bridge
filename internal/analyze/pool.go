@@ -406,6 +406,13 @@ func (p *Pool) processJob(job poolJob) {
 	p.fireStateChange()
 }
 
+// analyzeFailedMsg is the one message every analysis failure logs, whatever
+// its classification. Deliberately identical across the transient, the
+// marker-write-failed and the first-verdict branches: an operator greps one
+// string to find every refused track, and three spellings would make that
+// search silently incomplete. A const so a change to one is a change to all.
+const analyzeFailedMsg = "analyze: failed"
+
 // failureRecordTimeout bounds the debounce UPDATE. It runs on a context
 // DETACHED from the job's, because the job context is the thing that just
 // expired or was cancelled in a neighbouring branch and the record must
@@ -436,7 +443,7 @@ const failureRecordTimeout = 5 * time.Second
 // failing disk behind the fix for a different problem.
 func (p *Pool) noteFailure(spec AnalyzeSpec, err error) {
 	if !SourceUnreadable(err) {
-		logger.Warn("analyze: failed",
+		logger.Warn(analyzeFailedMsg,
 			"path", spec.SourceLibraryRel, "err", err)
 		return
 	}
@@ -450,7 +457,7 @@ func (p *Pool) noteFailure(spec AnalyzeSpec, err error) {
 	if rerr != nil {
 		// The marker did not land, so the dedup key is unknown — log, as
 		// this is the un-deduplicated state the feature exists to leave.
-		logger.Warn("analyze: failed",
+		logger.Warn(analyzeFailedMsg,
 			"path", spec.SourceLibraryRel, "err", err, "markerErr", rerr)
 		return
 	}
@@ -464,7 +471,7 @@ func (p *Pool) noteFailure(spec AnalyzeSpec, err error) {
 	// The first verdict against this file version — the line the operator
 	// acts on. It carries the decoder's own message, which for the
 	// truncation case names both durations.
-	logger.Warn("analyze: failed",
+	logger.Warn(analyzeFailedMsg,
 		"path", spec.SourceLibraryRel, "err", err,
 		"retriesLeft", manifest.AnalysisFailureThreshold()-1)
 }

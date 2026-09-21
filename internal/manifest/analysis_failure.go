@@ -448,11 +448,11 @@ func (s *Store) ListUnreadableTracksForAdmin(ctx context.Context) ([]AdminUnread
 // tailscale.trimPartialTrailingRune and transcode's copy; a string that still
 // ends in genuinely invalid bytes is returned as-is, the same posture those
 // take for interior garbage.
-func trimReasonToRuneBoundary(s string, max int) string {
-	if len(s) <= max {
+func trimReasonToRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
 		return s
 	}
-	s = s[:max]
+	s = s[:maxBytes]
 	for i := 0; i < utf8.UTFMax-1 && len(s) > 0; i++ {
 		r, size := utf8.DecodeLastRuneInString(s)
 		if r != utf8.RuneError || size != 1 {

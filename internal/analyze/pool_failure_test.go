@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -77,11 +78,7 @@ func TestPoolReachesTheThresholdAndStopsBeingOffered(t *testing.T) {
 	defer p.Stop()
 
 	for i := 1; i <= 3; i++ {
-		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
-			t.Fatalf("enqueue %d: %v", i, err)
-		}
-		want := uint64(i)
-		waitFor(t, func() bool { return p.Stats().Failed == want })
+		enqueueAndSettle(t, p, "A/B/01.flac", uint64(i))
 	}
 	sup, err := s.SuppressedAnalysisPaths(context.Background())
 	if err != nil {
@@ -136,17 +133,62 @@ func TestASuccessfulAnalysisClearsTheStrikes(t *testing.T) {
 	}
 }
 
+// syncBuffer is a bytes.Buffer whose writes and reads are serialised.
+//
+// slog's handler locks around its own writes, so the WRITERS are already
+// serialised — but the test goroutine's read is not ordered against them by
+// anything, and "the sequencing happens to make it safe" is not a property a
+// test should rest on. The mutex costs nothing and removes the question.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // captureLogs points slog.Default at a buffer for the duration of a test.
 // logging.Component resolves slog.Default() at LOG time (never at
 // construction — see its docblock), so redirecting the default handler
 // reaches this package's package-level logger without a seam.
-func captureLogs(t *testing.T) *bytes.Buffer {
+func captureLogs(t *testing.T) *syncBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &syncBuffer{}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
+	return buf
+}
+
+// enqueueAndSettle submits one job and waits for the pool to go fully idle.
+//
+// `Failed` ALONE is the wrong signal and made these tests flaky (1 run in 5).
+// processJob increments failedCnt BEFORE it logs and before releaseDedup, so
+// a waiter that stops at `Failed == n` can observe the count while the log
+// line has not been written and — worse — while the dedup slot is still held,
+// which makes the NEXT Enqueue a silent no-op (a duplicate returns nil) and
+// hangs the following wait on a count that will never arrive.
+//
+// Waiting for the dedup to drain fixes both, because releaseDedup runs after
+// noteFailure: idle implies the line has landed and the path is free.
+func enqueueAndSettle(t *testing.T, p *Pool, rel string, wantFailed uint64) {
+	t.Helper()
+	if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: rel, SourceAbsPath: "/lib/" + rel}); err != nil {
+		t.Fatalf("enqueue %s: %v", rel, err)
+	}
+	waitFor(t, func() bool {
+		st := p.Stats()
+		return st.Failed == wantFailed && st.Inflight == 0 && st.QueueLen == 0
+	})
 }
 
 // TestTheFailureWarnFiresOncePerFileVersion is the other half of the field
@@ -174,11 +216,7 @@ func TestTheFailureWarnFiresOncePerFileVersion(t *testing.T) {
 	defer p.Stop()
 
 	for i := 1; i <= 3; i++ {
-		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
-			t.Fatalf("enqueue %d: %v", i, err)
-		}
-		want := uint64(i)
-		waitFor(t, func() bool { return p.Stats().Failed == want })
+		enqueueAndSettle(t, p, "A/B/01.flac", uint64(i))
 	}
 
 	if n := strings.Count(buf.String(), `level=WARN msg="analyze: failed"`); n != 1 {
@@ -211,11 +249,7 @@ func TestATransientFailureKeepsWarningEveryTime(t *testing.T) {
 	defer p.Stop()
 
 	for i := 1; i <= 3; i++ {
-		if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}); err != nil {
-			t.Fatalf("enqueue %d: %v", i, err)
-		}
-		want := uint64(i)
-		waitFor(t, func() bool { return p.Stats().Failed == want })
+		enqueueAndSettle(t, p, "A/B/01.flac", uint64(i))
 	}
 	if n := strings.Count(buf.String(), `level=WARN msg="analyze: failed"`); n != 3 {
 		t.Errorf("%d WARN lines for three toolchain failures, want 3 — a fact about the "+
