@@ -2067,8 +2067,11 @@ its twin.** The top list is older, shorter, and read first.
   `sources.routedTotal` one payload over). **No exemption list, on purpose** —
   it is the frictionless way to put a fifth one back, which is the failure the
   jobs guard exists for. `statsResponse` is FLAT, so the recursion question does
-  not arise, and that is ASSERTED rather than assumed so a future nested field
-  forces the decision. The JS root is scoped to ONE function: `applyStats`'s
+  not arise, and that is ASSERTED rather than assumed so a future NON-SCALAR
+  field forces the decision — an allowlist of scalar kinds plus `time.Time`,
+  not a list of the shapes to reject, because a map or a slice marshals nested
+  leaves exactly as a struct does and `reads` counts every PREFIX of a path.
+  The JS root is scoped to ONE function: `applyStats`'s
   parameter is `s` and app.js has seven one-argument functions whose parameter
   is `s`, so an unscoped root is a false PASS. (#948)
 - **An SSE list handler needs an explicit empty-list teardown branch.** A restart

@@ -7433,9 +7433,26 @@ tracked tree, `deploy/`, the docs and `PROTOCOL.md` (which does not mention
 
 `statsResponse` is flat, so the jobs guard's hardest question — where to stop
 recursing — does not arise here. That is a fact about the current type and not
-a property of it, so `statsFieldPaths` **asserts** it: a nested field fails with
-an explanation rather than being admitted as a container leaf satisfied by one
-read, which is the state `lyrics` was in before #900.
+a property of it, so `statsFieldPaths` **asserts** it: a non-scalar field fails
+with an explanation rather than being admitted as a container leaf satisfied by
+one read, which is the state `lyrics` was in before #900.
+
+The first form of that assertion only caught a nested STRUCT, which CodeRabbit
+was right to call incomplete: a map, slice, array or interface marshals nested
+leaves just the same, and `reads` records every PREFIX of a path, so one read of
+the container would have counted as covering all of them. It is not a
+hypothetical shape for this package — `sourcesResponse.Servers` is a
+`[]sourceServerRow`. It is now an ALLOWLIST of scalar kinds plus `time.Time`
+(the one struct that is a wire leaf), so an unfamiliar kind is refused rather
+than admitted by an incomplete list of the ones to reject. Controlled with
+`map[string]int`, `[]string`, a struct and `any` — all four refused — and with
+a `*string`, which is correctly ACCEPTED as a field and then reported unread,
+so the pointer unwrap still works and the check is not over-rejecting.
+
+Gemini caught the sibling nit in the same round: `statsReadPaths` built its
+scopes with a closure referencing `sc` before `sc`'s own assignment completed.
+It worked — the constructor never calls `isRoot` — but the circular form reads
+as though it might, so the field is wired after construction instead.
 
 ### The root has to be scoped to one function
 
