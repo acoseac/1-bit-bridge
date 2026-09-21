@@ -525,7 +525,7 @@ const statsEntryFn = "applyStats"
 const statsCLIConsumer = "../../cmd/bridge/status.go"
 
 // statsFieldPaths returns every json name on statsResponse, and fails if one
-// of them is a nested struct.
+// of them is anything but a scalar wire leaf.
 //
 // statsResponse is FLAT today, which is why the jobs guard's hardest design
 // question — where to stop recursing — does not arise here. That is a fact
@@ -549,13 +549,19 @@ func statsFieldPaths(t *testing.T, rt reflect.Type) []string {
 		for ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
-		// time.Time is a struct and is a leaf on the wire (a string), so
-		// it is not the nesting this is looking for.
-		if ft.Kind() == reflect.Struct && ft != reflect.TypeOf(time.Time{}) {
-			t.Fatalf("statsResponse.%s is a nested struct (%s).\n"+
+		// Fail CLOSED on every non-scalar, not merely on a nested struct: a
+		// map, slice, array or interface marshals nested leaves just as a
+		// struct does, and `reads` records every PREFIX of a path — so one
+		// read of the container would count as covering all of them.
+		// sourcesResponse.Servers is a []sourceServerRow, so this is not a
+		// hypothetical shape for a payload in this package. (CodeRabbit on
+		// #948.) time.Time is the one struct that IS a wire leaf (a string);
+		// pointers were unwrapped above, so *time.Time and *string pass.
+		if ft != reflect.TypeOf(time.Time{}) && !isScalarWireKind(ft.Kind()) {
+			t.Fatalf("statsResponse.%s is not a scalar wire leaf (%s).\n"+
 				"This guard walks statsResponse as a flat payload and would count "+
-				"one read of %q as covering everything inside it.\n"+
-				"Decide what the bar is for its leaves — jobsFieldPaths recurses "+
+				"one read of %q as covering every JSON leaf inside it.\n"+
+				"Decide what the bar is for those leaves — jobsFieldPaths recurses "+
 				"into the private per-endpoint DTOs and stops at the shared ones — "+
 				"and teach this walk the same.", f.Name, ft, name)
 		}
@@ -564,14 +570,34 @@ func statsFieldPaths(t *testing.T, rt reflect.Type) []string {
 	return out
 }
 
+// isScalarWireKind reports whether a Go kind marshals to a JSON scalar — the
+// allowlist half of the flatness assertion, so an unfamiliar kind is refused
+// rather than admitted by an incomplete list of the ones to reject.
+func isScalarWireKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64,
+		reflect.String:
+		return true
+	default:
+		return false
+	}
+}
+
 // statsReadPaths returns every property path app.js reads off the /api/stats
 // snapshot, rooted at applyStats' parameter and scoped to that function.
 func statsReadPaths(t *testing.T, src string) map[string]bool {
 	t.Helper()
-	var sc *jobsScopes
-	sc = newSnapshotScopes(src, func(fn, ident string) bool {
+	// Built with a nil isRoot and wired afterwards rather than closing over
+	// `sc` before its own assignment completes: the constructor never calls
+	// isRoot, so both work, but the circular form reads as though it might.
+	// (Gemini on #948.)
+	sc := newSnapshotScopes(src, nil)
+	sc.isRoot = func(fn, ident string) bool {
 		return fn == statsEntryFn && ident != "" && ident == sc.param[statsEntryFn]
-	})
+	}
 	if sc.bodies[statsEntryFn] == "" {
 		t.Fatalf("no top-level function %q found in app.js — it was renamed or "+
 			"inlined, and this guard now proves nothing", statsEntryFn)
