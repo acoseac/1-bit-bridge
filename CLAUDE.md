@@ -1924,6 +1924,30 @@ its twin.** The top list is older, shorter, and read first.
 - **The TLS cert is sticky and rotation is warn-only.** iOS pins the SHA-256 at
   pairing, so auto-rotation silently breaks every paired device; `certDuration`
   stays ≤397 days (Apple ATS rejects at handshake, before pinning runs).
+- **A warning that only fires at SERVE time arrives after the damage.** The
+  SAN-staleness check ran once inside `LoadOrGenerateWithOptions` and nowhere
+  else, so a data directory carried to another host reported `[ok] tls-cert
+  present` in `bridge doctor` and only said `cert SANs are stale` once the
+  bridge was up — by which point devices have pinned a cert that fails TLS for
+  every Tailscale and custom-endpoint URL, and the fix costs a re-pair of each.
+  `bridge doctor`'s `tls-cert-sans` runs the SAME comparison
+  (`servertls.InspectSANCoverage`) against the SAME want-set BEFORE the first
+  start. **That want-set is `cmd/bridge`'s `certSANOptions`, the one gather all
+  four cert paths use** — serve, `init`, `cert rotate`, doctor; they were four
+  copies of three lines, and the copy that drifts is the one that calls a cert
+  fine when a rotation would mint something different
+  (`TestCertSANOptionsIsWhatEveryCertPathMints` pins it structurally). The
+  doctor's cert checks read `cfg.TLSCertPath` too, via `doctor.certPaths` —
+  resolved from `DataDir` alone they graded a cert nobody serves. Expiry is on
+  the `tls-cert` line against the exported `servertls.ExpiryWarningWindow`, the
+  startup warning's own threshold. Both are WARN, never fail: `bridge init`
+  bails on a fail, and refusing to initialise because the old cert lapsed would
+  block the run that mints the new one. `tls-cert-sans` skips on a managed
+  bridge (the control plane owns rotation and the tenant reaches it over the
+  autocert domain); **expiry does not** — `TestManagedReportsExpiryButNotStaleSANs`
+  pins the split, which was prose in a docblock and nothing else. `--fix` does
+  NOT rotate: that invalidates every pin and is an operator decision with a
+  device in hand.
 - **The pairing QR advertises the SERVED cert**, resolved by SNI —
   `FingerprintForServerName` mirrors `Get`'s routing rather than delegating, so
   **every freshness and validity gate in `Get` must be restated there**; losing

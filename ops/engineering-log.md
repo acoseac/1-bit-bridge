@@ -7722,3 +7722,104 @@ long, deliberately-commented handlers this tree treats as load-bearing. The 30
 Redirect via unsanitized user input" at `internal/acoustid/client_test.go`, is
 a false positive: an httptest handler inside the test that deliberately issues
 a SAME-HOST redirect, to prove the client refuses cross-host ones.
+
+## 2026-09-21 — the cert-SAN check moves from serve time to preflight
+
+**Field report, 2026-09-20.** After a host move the data dir carried the old
+host's `server.crt` / `server.key`, whose SANs read `localhost, 1bitbridge,
+1bitbridge.local, bridge.ars.md, 127.0.0.1, ::1, 0.0.0.0, 10.0.0.4`. `bridge
+doctor` reported `[ok] tls-cert present`. Only at serve time did the tls
+component warn:
+
+```
+cert SANs are stale relative to advertised endpoints — Tailscale and
+custom-endpoint URLs will fail TLS until you rotate …
+  missing_dns: [nuc nuc.local nuc.sable-eagle.ts.net]
+  missing_ips: [192.168.0.24 100.102.105.89 fd7a:…]
+```
+
+and `/v1/health` withheld the uncovered endpoints. The remedy is two commands
+(`bridge cert rotate --yes`, restart) plus a re-pair of every device — cheap
+before the devices have pinned the stale cert, and the re-pair is the whole
+cost afterwards. So the check belongs in the preflight, not only in the
+startup path.
+
+### What was actually shared, and what was four copies
+
+The comparison moved out of `logIfSANsStale` into
+`servertls.InspectSANCoverage` (`internal/tls/sancoverage.go`) — the startup
+warning and the new `tls-cert-sans` doctor check now run the same function
+over the same cert. `SANCoverage` carries the FULL merged want-sets beside the
+missing ones, so the ok summary can report what it covered ("covers all 4
+name(s) and 6 address(es)") rather than an unfalsifiable all-clear.
+
+The half that was NOT shared, and mattered more: the want-set. `bridge serve`,
+`bridge init` and `bridge cert rotate` each had the same three lines —
+`advertise.CertSANConfig{…}` → `GatherCertSANDNS` / `GatherCertSANIPs` →
+`GenerateOptions` — copied out. A doctor grading against a fourth copy would
+be a second opinion about a rotation rather than a claim about it. They now
+all call `cmd/bridge`'s `certSANOptions(cfg)`, and
+`TestCertSANOptionsIsWhatEveryCertPathMints` asserts structurally that every
+one of the four files names it and that none but the declaring file reaches
+for the gatherers directly. (Anchored on identifiers through
+`readPackageFile`, which blanks comments AND string literals — this package's
+commentary names the symbols it discusses.)
+
+### The cert the doctor was grading
+
+`checkTLSCert` resolved `servertls.DefaultPaths(d.DataDir)` unconditionally,
+while serve and `bridge cert` apply `cfg.TLSCertPath`-or-defaults. On an
+install with an explicit path it therefore graded a pair nobody serves —
+reporting "absent (init will mint)" about a bridge whose cert is fine, or a
+partial-state FAIL about two files it does not use. `doctor.certPaths` now
+applies the same fallback, fed by `resolveCertPaths` from `buildDoctorDeps`.
+Latent (no live bridge sets the override), and the new check cannot be correct
+without it: it would have skipped with an all-clear on exactly the installs it
+could not see.
+
+### Decisions
+
+- **Warn, never fail, on both cert lines.** `bridge init` bails on a fail, so
+  an expired cert graded as a fail would block the very run that mints the
+  replacement. The summary says `present, EXPIRED (past its NotAfter)` in as
+  many words instead. Exit codes and `--json` consumers are unchanged.
+- **One expiry threshold.** `expiryWarningWindow` was unexported and used only
+  by `logIfExpiringSoon`; it is now `servertls.ExpiryWarningWindow` and the
+  doctor grades against it. A doctor that said ok about a cert the next
+  `bridge serve` warns on would be describing a different bridge.
+- **Managed skips the SAN check and NOT the expiry one.** A hosted tenant
+  reaches its bridge over the autocert domain, whose Let's Encrypt cert the
+  SNI switcher serves instead of this one, and `bridge cert rotate` needs a
+  shell they do not have — the unactionable-preflight shape `Deps.Managed`
+  exists for. Expiry is a deadline after which every paired device stops
+  connecting, and `TestManagedDoesNotSilenceTheRestOfThePreflight`'s docblock
+  had already promised it is reported "even if not to fix" — a promise nothing
+  asserted until `TestManagedReportsExpiryButNotStaleSANs`, which drives both
+  halves off one expired stale cert and carries an unmanaged negative control.
+- **`--fix` does not rotate.** Unchanged, and worth writing down: rotation
+  invalidates every paired device's pin. That is an operator decision with a
+  device in hand, not a mkdir-class remediation.
+- **The hint lists every missing entry rather than sampling.** The set is
+  bounded by what one host advertises — single digits — and "which ones" is
+  the operator's next question. Unlike `variants-index`, where the orphan list
+  is unbounded and capped at five.
+
+### Two things the real CLI showed that the suite did not
+
+Driven against a throwaway install (`bridge init --no-service`, a
+`customEndpoints` entry appended, `bridge doctor`):
+
+1. The hint read **"clients dialling bridge.example.test *fails* TLS"** — the
+   singular/plural switch keyed on `len(missing)`, but the subject is
+   "clients", always plural. And the one-entry case is the COMMON one (a single
+   endpoint added since the mint), so the broken grammar was the default
+   output.
+2. It said the cause was "a data directory moved between hosts", which is the
+   field report's route and not the only one — adding a `customEndpoints` entry
+   does it too, which is precisely what the fixture did. Naming only the first
+   sends an operator looking for a move that never happened. Both are named now.
+
+The loop was then verified end to end: doctor warns → `bridge cert rotate` →
+`[ok] tls-cert-sans covers all 4 name(s) and 6 address(es)`.
+
+Ships as #950 on `feat/doctor-cert-sans`.

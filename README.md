@@ -55,7 +55,12 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 ```
 [ok]   platform            darwin/arm64
 [ok]   config-dir          /Users/me/Library/Application Support/1-bit-bridge
-[ok]   tls-cert            present
+[ok]   tls-cert            present, expires in 312 days
+[warn] tls-cert-sans       stale — 3 of 6 name(s) and 3 of 6 address(es) this bridge advertises are not in the certificate
+  ↳ clients dialling nuc, nuc.local, nuc.sable-eagle.ts.net, 192.168.0.24, 100.102.105.89, fd7a:115c:a1e0::1 fail TLS
+    hostname verification. Either the data directory was moved to a host this certificate was not minted on, or an
+    endpoint was added since. Run `bridge cert rotate` (or click Rotate in the admin console's Cert tile) and restart
+    the bridge, then re-pair every paired device — a rotation changes the SHA-256 fingerprint iOS pinned at pairing.
 [FAIL] port-api            :7788 in use
   ↳ another process owns this port; stop it or pick a different address in bridge.yaml
 [ok]   port-admin          free (:7789)

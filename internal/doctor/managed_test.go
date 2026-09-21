@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
 // TestManagedSkipsTheHostOperatorChecks — measured against a live hosted
@@ -53,7 +56,7 @@ func TestManagedSkipsTheHostOperatorChecks(t *testing.T) {
 }
 
 // TestManagedDoesNotSilenceTheRestOfThePreflight — the skip is scoped to
-// the two checks that are advice for whoever started the process. A
+// the checks that are advice for whoever started the process. A
 // managed bridge still has roots that can vanish and a cert that expires,
 // and those are the reader's problem to report even if not to fix.
 func TestManagedDoesNotSilenceTheRestOfThePreflight(t *testing.T) {
@@ -70,6 +73,43 @@ func TestManagedDoesNotSilenceTheRestOfThePreflight(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("library-roots check absent from a managed report")
+	}
+}
+
+// TestManagedReportsExpiryButNotStaleSANs pins the split between the two
+// cert checks on a hosted bridge, which was prose in the docblock above
+// and nothing else.
+//
+// They answer differently on purpose. An expired certificate is a
+// deadline after which every paired device stops connecting, and the
+// tenant has to know even though the control plane is who rotates it.
+// Stale SANs are the opposite: the tenant reaches its bridge over the
+// autocert domain, whose Let's Encrypt certificate the SNI switcher
+// serves instead of this one, and the only remedy named is a shell
+// command they cannot run.
+//
+// Both halves are driven with a real expired cert, so neither arm can
+// pass because nothing was checked.
+func TestManagedReportsExpiryButNotStaleSANs(t *testing.T) {
+	d := certFixture(t, oldHostCert, newHostEndpoints)
+	certPath, _ := servertls.DefaultPaths(d.DataDir)
+	writeCertWithNotAfter(t, certPath, time.Now().Add(-48*time.Hour))
+	d.Managed = true
+
+	if c := checkTLSCert(t.Context(), d); c.Status != Warn {
+		t.Errorf("tls-cert on a managed bridge = %q, want warn about the expired cert (%q)", c.Status, c.Summary)
+	}
+	c := checkTLSCertSANs(t.Context(), d)
+	if c.Status != OK || !strings.Contains(c.Summary, "skipped") {
+		t.Errorf("tls-cert-sans on a managed bridge = %q/%q, want an ok that says it was skipped", c.Status, c.Summary)
+	}
+
+	// NEGATIVE CONTROL: unmanaged, the same fixture warns on BOTH. An
+	// arm that skipped for some other reason would otherwise read as the
+	// managed skip working.
+	d.Managed = false
+	if c := checkTLSCertSANs(t.Context(), d); c.Status != Warn {
+		t.Errorf("tls-cert-sans unmanaged = %q, want warn for the stale cert (%q)", c.Status, c.Summary)
 	}
 }
 

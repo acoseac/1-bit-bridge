@@ -20,7 +20,6 @@ import (
 	"net"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
-	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
@@ -341,18 +340,14 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// first serve onwards. If the cert already exists (re-init case),
 	// LoadOrGenerate preserves it.
 	certPath, keyPath := servertls.DefaultPaths(dataDir)
-	host, _ := os.Hostname()
 	// First-mint at `bridge init` time picks up the broader SAN set
 	// so the cert covers every URL the bridge will advertise from
 	// the very first serve. Re-init against an existing cert leaves
 	// the on-disk cert untouched (LoadOrGenerate path) and emits the
-	// SAN-stale warning if the operator's CustomEndpoints changed.
-	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}
-	opts := servertls.GenerateOptions{
-		Hostname:      host,
-		ExtraDNSNames: advertise.GatherCertSANDNS(sanCfg),
-		ExtraIPs:      advertise.GatherCertSANIPs(sanCfg),
-	}
+	// SAN-stale warning if the operator's CustomEndpoints changed —
+	// which `bridge doctor`'s tls-cert-sans check reports from the
+	// same gather.
+	opts := certSANOptions(cfg)
 	if _, fp, err := servertls.LoadOrGenerateWithOptions(certPath, keyPath, opts); err != nil {
 		fmt.Fprintf(stderr, "TLS cert: %v\n", err)
 		return 1

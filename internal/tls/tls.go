@@ -59,10 +59,15 @@ const (
 	// this past 398 will break iOS clients at the TLS handshake layer
 	// before pinning is consulted.
 	certDuration = 397 * 24 * time.Hour
-	// expiryWarningWindow controls when LoadOrGenerate logs an
+	// ExpiryWarningWindow controls when LoadOrGenerate logs an
 	// approaching-expiry warning. 30 days covers a typical
 	// notice-to-operator → re-pair-every-device cycle.
-	expiryWarningWindow = 30 * 24 * time.Hour
+	//
+	// Exported because `bridge doctor`'s tls-cert line grades expiry
+	// against it too. One threshold: a doctor that said "ok" about a
+	// cert the very next `bridge serve` warns on would be reporting a
+	// different bridge than the one the operator is about to start.
+	ExpiryWarningWindow = 30 * 24 * time.Hour
 )
 
 // DefaultPaths returns the cert and key paths used when the user hasn't
@@ -150,7 +155,7 @@ func LoadOrGenerateWithOptions(certPath, keyPath string, opts GenerateOptions) (
 }
 
 // logIfExpiringSoon parses the on-disk cert and logs a warning when its
-// remaining validity is below expiryWarningWindow. Runs once per process
+// remaining validity is below ExpiryWarningWindow. Runs once per process
 // start (called from LoadOrGenerate) — operators see the warning in the
 // startup log alongside the usual listen-address line. Best-effort: a
 // parse failure here is silent (Inspect already covers the operator-facing
@@ -165,7 +170,7 @@ func logIfExpiringSoon(certPath string) {
 	case remaining <= 0:
 		logger.Error("cert expired — every paired iOS client will fail at TLS handshake until you rotate (`bridge cert rotate` or admin console) and re-pair",
 			"path", certPath, "expired_days_ago", -info.DaysUntilExpiry)
-	case remaining <= expiryWarningWindow:
+	case remaining <= ExpiryWarningWindow:
 		logger.Warn("cert expires soon — schedule a `bridge cert rotate` and re-pair every paired iOS client before then (Apple ATS rejects expired certs at the handshake layer)",
 			"path", certPath, "days_remaining", info.DaysUntilExpiry)
 	}
@@ -469,82 +474,6 @@ func ParseHostFromURL(raw string) (host string, isIP bool) {
 		return h, true
 	}
 	return h, false
-}
-
-// logIfSANsStale parses the on-disk cert and warns if the operator-
-// supplied SAN options aren't fully covered. Best-effort: a parse
-// failure is silent; the operator surface (`Inspect` / admin Cert
-// tile) carries the user-facing diagnostic. Runs once at startup
-// from LoadOrGenerateWithOptions.
-//
-// Why this exists: cert auto-rotation on upgrade would silently
-// invalidate every paired iOS device's pinned fingerprint. Warning-
-// only preserves the pinning contract — the operator drives rotation
-// when they have an iOS device in hand to re-pair.
-func logIfSANsStale(certPath string, opts GenerateOptions) {
-	raw, err := os.ReadFile(certPath)
-	if err != nil {
-		return
-	}
-	block, _ := pem.Decode(raw)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return
-	}
-	parsed, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return
-	}
-	wantDNS := mergeDNSNames(opts.Hostname, opts.ExtraDNSNames)
-	wantIPs := mergeIPs(opts.ExtraIPs)
-	missingDNS := stringDiff(wantDNS, parsed.DNSNames)
-	missingIPs := ipDiff(wantIPs, parsed.IPAddresses)
-	if len(missingDNS) == 0 && len(missingIPs) == 0 {
-		return
-	}
-	logger.Warn(
-		"cert SANs are stale relative to advertised endpoints — Tailscale and custom-endpoint URLs will fail TLS until you rotate. Use `bridge cert rotate` or click Rotate in the admin Cert tile, then re-pair every iOS device.",
-		"missing_dns", missingDNS,
-		"missing_ips", ipsToStrings(missingIPs),
-	)
-}
-
-// stringDiff returns elements in `want` that aren't in `got`, case-
-// insensitively. Order preserves `want`. Used by logIfSANsStale to
-// list missing DNS SAN names.
-func stringDiff(want, got []string) []string {
-	have := make(map[string]bool, len(got))
-	for _, g := range got {
-		have[strings.ToLower(g)] = true
-	}
-	var miss []string
-	for _, w := range want {
-		if !have[strings.ToLower(w)] {
-			miss = append(miss, w)
-		}
-	}
-	return miss
-}
-
-func ipDiff(want, got []net.IP) []net.IP {
-	have := make(map[string]bool, len(got))
-	for _, g := range got {
-		have[string(g.To16())] = true
-	}
-	var miss []net.IP
-	for _, w := range want {
-		if !have[string(w.To16())] {
-			miss = append(miss, w)
-		}
-	}
-	return miss
-}
-
-func ipsToStrings(ips []net.IP) []string {
-	out := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		out = append(out, ip.String())
-	}
-	return out
 }
 
 // stagePEM encodes der as a PEM block into a fresh temp file in the SAME
