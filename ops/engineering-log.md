@@ -7381,3 +7381,189 @@ unrendered field beside six others, the new `unreadable` bucket is rendered
 along with the rest of the breakdown on the analysis card's new "Last run" row.
 The remaining question — whether `AnalysisSweepState` should be inside the
 guard's recursion at all — is left alone.
+
+## 2026-09-21 — the stats payload had four fields nobody read (#948)
+
+#947 added `tracksUnreadable` to `/api/stats` and wired no renderer. That is
+the #891 shape exactly — a field marshalled into a response nothing reads,
+with a passing DTO test — and it arrived one endpoint over from the guard
+written to stop it.
+
+### What the sweep actually found
+
+Four fields, not one. The verdicts differ, and the differences are the whole
+design of the guard that now covers them:
+
+| field | cost | why it had no reader |
+|---|---|---|
+| `tracksUnreadable` | a dedicated indexed COUNT in `readStatsDBPart` | nothing else reads `part.unreadable`, so the query existed for this field alone |
+| `upnpRoutedTracks` | none — the query is shared | `trackSourceCounts` reads `part.upnpRouted` and hands it to `/api/sources`, which the dashboard renders as the filesystem-vs-upstream split. The COUNT is earned; the scalar was `sources.routedTotal` one payload over |
+| `startedAt` | none | `uptimeSec` is the same fact on the same payload, and `bridge status` reads that one |
+| `dbBytes` | an `os.Stat` per snapshot | `/api/diagnostics` serves the database footprint with its page and freelist siblings, and that is where the console reads it |
+
+The same three duplicates were also dead in `pageStats`' template map, where
+`dbBytes` was a second `os.Stat` per page render. `dashboard.html` renders none
+of the three and `layout.html` reads no `.Data` at all.
+
+**Cost turned out to be the wrong discriminator**, which is worth recording
+because it was the first framing tried. A guard scoped to "the fields the
+endpoint pays a DB query for" is mechanically derivable from the
+`part.*` assignments and self-maintaining — and it *exonerates*
+`upnpRoutedTracks`, whose query is shared and therefore earned, while that
+field is exactly the dead wire the sweep is for. The honest bar is the jobs
+guard's: a field on the payload has a named reader, or it is not on the
+payload.
+
+### Why it is not a copy of the jobs guard
+
+`/api/stats` has a second consumer that `/api/jobs` does not. `cmd/bridge/status.go`
+fetches it into a `map[string]any` and prints ten fields — `libraryName`,
+`serverVersion`, `protocolVersion`, `uptimeSec`, `tracksIndexed`, `isScanning`,
+`scanProgress`, `listenAddress`, `adminAddress`, `fingerprint`. A Go→JS sweep
+alone reports all seven of the ones app.js never touches as unrendered, every
+one falsely.
+
+`bridge status --json` also dumps the decoded map verbatim. That is deliberately
+NOT counted as a read: a passthrough exonerates every field including the four
+above, so admitting it is the same as having no guard. It is also why dropping
+three keys is a visible change to that command's JSON — checked against the
+tracked tree, `deploy/`, the docs and `PROTOCOL.md` (which does not mention
+`/api/stats` at all) before acting; the `startedAt` hits in `PROTOCOL.md` are
+`/v1/health` and `/v1/history`, different DTOs.
+
+`statsResponse` is flat, so the jobs guard's hardest question — where to stop
+recursing — does not arise here. That is a fact about the current type and not
+a property of it, so `statsFieldPaths` **asserts** it: a non-scalar field fails
+with an explanation rather than being admitted as a container leaf satisfied by
+one read, which is the state `lyrics` was in before #900.
+
+The first form of that assertion only caught a nested STRUCT, which CodeRabbit
+was right to call incomplete: a map, slice, array or interface marshals nested
+leaves just the same, and `reads` records every PREFIX of a path, so one read of
+the container would have counted as covering all of them. It is not a
+hypothetical shape for this package — `sourcesResponse.Servers` is a
+`[]sourceServerRow`. It is now an ALLOWLIST of scalar kinds plus `time.Time`
+(the one struct that is a wire leaf), so an unfamiliar kind is refused rather
+than admitted by an incomplete list of the ones to reject. Controlled with
+`map[string]int`, `[]string`, a struct and `any` — all four refused — and with
+a `*string`, which is correctly ACCEPTED as a field and then reported unread,
+so the pointer unwrap still works and the check is not over-rejecting.
+
+Gemini caught the sibling nit in the same round: `statsReadPaths` built its
+scopes with a closure referencing `sc` before `sc`'s own assignment completed.
+It worked — the constructor never calls `isRoot` — but the circular form reads
+as though it might, so the field is wired after construction instead.
+
+### The root has to be scoped to one function
+
+`/api/jobs` arrives under package-wide names (`j`, `jobs`) that nothing else in
+app.js uses, so its resolver can treat them as roots anywhere. `/api/stats`
+arrives as `applyStats`' PARAMETER, which is `s` — and app.js has **seven**
+one-argument functions whose parameter is `s`. A root that ignored the enclosing
+function would attribute six other functions' reads to this payload: a false
+PASS, the direction `jobsReadPaths`' docblock already warns about for its own
+parameter binding.
+
+`jobsScopes.isRoot` therefore takes `(fn, ident)`. The jobs path keeps
+byte-identical behaviour through `newJobsScopes`; the stats path answers true
+only inside `applyStats`. Negative-controlled by planting
+`const _decoy = s.tracksUnreadable ?? 0;` in `renderTailscaleTile` (a
+one-argument function whose parameter is `s`) with the real render removed: the
+guard stayed red and named the field.
+
+`applyStats` is reached as a CALLBACK — `safeApply("stats", e.data, applyStats)`
+— so the resolver's call-site parameter binding cannot discover it: the argument
+there is `e.data`, which resolves to nothing. `statsEntryFn` is that missing
+edge, named as a const, and the test fatals if the function is renamed or stops
+taking exactly one parameter rather than passing vacuously.
+
+### The other direction is a quieter bug than the JS one
+
+`writeStatusHuman` builds rows from `stats["<key>"]` lookups and then skips
+every row whose value formatted empty. A key that does not exist yields nil,
+formats to `""`, and the row simply is not printed — so renaming a json tag on
+`statsResponse` drops a line from `bridge status` with no error, no build
+failure and no failing test. It is the map-lookup twin of reading an undefined
+property in JS, and it was unguarded.
+
+Keys are collected **by AST**, not by regex. The subject is a string literal,
+and this repo's scan-based guards strip comments precisely because the prose
+beside a rule quotes the rule — but the tool that does it (`stripJSNoise`)
+blanks literals along with them, which would blank exactly the thing being
+matched. The AST also ignores a field name merely mentioned in a docblock,
+which `status.go` does.
+
+### Controls
+
+Committed first — the lesson this file already records, learned again on #935 —
+then each run with `-count=1`:
+
+| control | result |
+|---|---|
+| delete the `tracksUnreadable` render from app.js | red, names the field |
+| re-add `upnpRoutedTracks` to the wire | red, names the field |
+| plant the read in `renderTailscaleTile` instead | red — the scoping holds |
+| typo `stats["listenAddress"]` in `status.go` | red in BOTH directions |
+| add a nested struct field to `statsResponse` | red — the flatness assertion |
+
+The fourth is the one worth keeping in mind: a single typo turns the CLI guard
+red naming the bad key AND the payload guard red naming the now-unread field,
+which is what both-directions is for.
+
+### Verified in a browser
+
+The Go suite cannot see this class of change, so the alarm row was driven
+against a throwaway fixture bridge at 1024px and 375px, light and dark,
+singular and plural, and back to hidden at zero. `scrollWidth == clientWidth`
+at both widths with no element past the viewport — the #942/#934 check. Banner
+654×40 at desktop, 293×80 wrapped at 375px; dark mode resolves to an amber rule
+on a warm dark fill.
+
+⚠️ **Two measurements taken in the same tick as the unhide were both wrong** —
+31px wide and "document overflows". Re-measured once the page had settled: 654px
+and no overflow, zero offending elements. A number read from a layout that is
+still settling is not a measurement.
+
+### The one pre-existing finding this PR surfaced
+
+SonarCloud reported "1 New issue" on the PR with the gate passing:
+`go:S3776` on `apiRootsRemove`, cognitive complexity 16 against a ceiling of
+15. It is **not from this change** — `git blame` dates the function to
+2026-04-24 and the diff touches only lines ~66-112 and ~534-619 of that file.
+A PR surfaces it because the FILE changed, not because the function did.
+
+Fixed anyway, and the fix is the one the rule asks for: the case-twin basename
+guard (a loop with a nested compare, carrying a fifteen-line docblock about why
+an ambiguous destructive removal is refused rather than resolved) is now
+`refuseAmbiguousRootBasename`, returning whether it answered. That removes the
+loop, its nested `if` and their nesting bonus — four points — and the block
+reads as the one thing it is. Behaviour-preserving, controlled by bypassing the
+call: `TestRootsRemoveRefusesCaseTwinBasename` goes red with
+`got 204, want 409`.
+
+⚠️ **The SonarCloud MCP could not scope any of this.** Given `pullRequestId`
+and `componentKeys` it returned 3,066 project-wide issues including `swift:*`
+rules from a different project — so every filter was ignored, and its answer
+looked like a plausible list rather than an error. The PR view in a browser,
+and the public API (`/api/issues/search?componentKeys=…&facets=rules,severities`,
+no auth needed), both answer correctly. Don't take that tool's scoped result
+at face value.
+
+### The rest of the backlog, measured
+
+691 open issues, ~16 days of estimated effort: 644 code smells, 46
+vulnerabilities, 1 bug. By rule — `go:S3776` 252 (plus `javascript:S3776` 18),
+`godre:S8193` 83, `javascript:S6582` 58, `go:S2077` 30, `go:S978` 30,
+`go:S1192` 29, `javascript:S3358` 24, `shelldre:S7688` 17, `Web:S6807` 15,
+`go:S5332` 12. The single BLOCKER — "Open Redirect via unsanitized user input",
+`internal/acoustid/client_test.go:303` — is a false positive: it is an
+httptest handler inside the test that deliberately issues a SAME-HOST redirect,
+to prove the client refuses cross-host ones. The 30 `go:S2077` are the known
+dismissed-in-the-UI class this repo already documents.
+
+### Not done
+
+`AnalysisSweepCounts`' leaves are still unguarded on `/api/jobs` — that guard
+stops at the exported shared types. Whether `AnalysisSweepState` belongs inside
+its recursion is the question #947 left open, and this change does not answer
+it.

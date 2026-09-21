@@ -1,11 +1,16 @@
 package admin
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // readConsoleJS reads a console asset, normalising CRLF first. A Windows
@@ -249,9 +254,10 @@ func jsFunctionBodies(src string) map[string]string {
 // const/let/var bindings plus its own parameter, and a parameter is bound
 // only when some call site passes it an expression that itself resolves.
 //
-// Both roots are accepted — `j` is renderJobCards' binding and `jobs` is
-// renderSettingsPrereqs' — so a field the settings prerequisites read counts
-// as rendered, which is what the top-level guard already allowed.
+// Both roots are accepted (see newJobsScopes) — `j` is renderJobCards'
+// binding and `jobs` is renderSettingsPrereqs' — so a field the settings
+// prerequisites read counts as rendered, which is what the top-level guard
+// already allowed.
 //
 // What it follows: member chains, `?.`, const/let/var aliases (including a
 // bare re-alias of the root, `const snap = j`), and a one-parameter helper's
@@ -271,19 +277,38 @@ func jobsReadPaths(src string) map[string]bool {
 // each body's const/let/var aliases, its single parameter name if it has
 // exactly one, and — once bindParams has run — what that parameter is bound
 // to at a resolvable call site.
+//
+// isRoot decides which identifier IS the payload, and takes the enclosing
+// function because the two payloads this file guards need different answers.
+// /api/jobs arrives under package-wide names (`j`, `jobs`) that nothing else
+// in app.js uses. /api/stats arrives as applyStats' PARAMETER, which is `s` —
+// and app.js has seven one-argument functions whose parameter is `s`, so a
+// root that ignored the enclosing function would attribute six other
+// functions' reads to the stats snapshot. That is a false PASS, the direction
+// this file exists to avoid.
 type jobsScopes struct {
 	bodies map[string]string            // fn → source
 	locals map[string]map[string]string // fn → alias → expression
 	param  map[string]string            // fn → its one parameter name
 	bound  map[string]string            // fn → snapshot path its parameter carries
+	isRoot func(fn, ident string) bool  // is this identifier the payload here?
 }
 
 func newJobsScopes(src string) *jobsScopes {
+	return newSnapshotScopes(src, func(_, ident string) bool {
+		// Both roots are accepted — `j` is renderJobCards' binding and
+		// `jobs` is renderSettingsPrereqs'.
+		return ident == "j" || ident == "jobs"
+	})
+}
+
+func newSnapshotScopes(src string, isRoot func(fn, ident string) bool) *jobsScopes {
 	sc := &jobsScopes{
 		bodies: jsFunctionBodies(src),
 		locals: map[string]map[string]string{},
 		param:  map[string]string{},
 		bound:  map[string]string{},
+		isRoot: isRoot,
 	}
 	for name, body := range sc.bodies {
 		m := map[string]string{}
@@ -314,7 +339,7 @@ func (sc *jobsScopes) walk(fn, expr string, depth int) (string, bool) {
 		return "", false
 	}
 	root, rest, _ := strings.Cut(expr, ".")
-	if root == "j" || root == "jobs" {
+	if sc.isRoot(fn, root) {
 		// The root itself resolves to the empty path, so a direct re-alias
 		// (`const snap = j`) and a helper handed the whole snapshot both
 		// work; joinPath folds the empty base away.
@@ -478,6 +503,240 @@ func TestEveryJobsFieldIsRenderedSomewhere(t *testing.T) {
 				"A field the console does not render is a query the endpoint runs for "+
 				"nobody — and if it was meant to be rendered, nothing else will say so.\n"+
 				"Render it, or drop it from the response.", p)
+		}
+	}
+}
+
+// --- /api/stats -------------------------------------------------------------
+
+// statsEntryFn is the app.js function the SSE `stats` frame is handed to. It
+// is passed as a CALLBACK (`safeApply("stats", e.data, applyStats)`), so the
+// resolver's call-site parameter binding cannot discover it the way it does
+// for an ordinary helper — the argument at that call site is `e.data`, which
+// resolves to nothing. Naming it here is that missing edge.
+const statsEntryFn = "applyStats"
+
+// statsCLIConsumer is the OTHER consumer of this payload, and the reason a
+// stats guard is not a copy of the jobs one. `bridge status` fetches
+// /api/stats into a map[string]any and prints ten of its fields; /api/jobs has
+// no such second reader. A sweep that only looked at app.js would report
+// libraryName, serverVersion, protocolVersion, uptimeSec, listenAddress,
+// adminAddress and fingerprint as unrendered, all seven falsely.
+const statsCLIConsumer = "../../cmd/bridge/status.go"
+
+// statsFieldPaths returns every json name on statsResponse, and fails if one
+// of them is anything but a scalar wire leaf.
+//
+// statsResponse is FLAT today, which is why the jobs guard's hardest design
+// question — where to stop recursing — does not arise here. That is a fact
+// about the current type, not a property of it, so it is asserted rather than
+// assumed: a future nested field would otherwise be admitted silently as a
+// container leaf, satisfied by one read of the container, with everything
+// inside it exactly as unguarded as `lyrics` was before #900. Whoever adds one
+// has to decide what the bar is for its contents, the way jobsFieldPaths'
+// docblock had to.
+func statsFieldPaths(t *testing.T, rt reflect.Type) []string {
+	t.Helper()
+	var out []string
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		tag := f.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		ft := f.Type
+		for ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		// Fail CLOSED on every non-scalar, not merely on a nested struct: a
+		// map, slice, array or interface marshals nested leaves just as a
+		// struct does, and `reads` records every PREFIX of a path — so one
+		// read of the container would count as covering all of them.
+		// sourcesResponse.Servers is a []sourceServerRow, so this is not a
+		// hypothetical shape for a payload in this package. (CodeRabbit on
+		// #948.) time.Time is the one struct that IS a wire leaf (a string);
+		// pointers were unwrapped above, so *time.Time and *string pass.
+		if ft != reflect.TypeOf(time.Time{}) && !isScalarWireKind(ft.Kind()) {
+			t.Fatalf("statsResponse.%s is not a scalar wire leaf (%s).\n"+
+				"This guard walks statsResponse as a flat payload and would count "+
+				"one read of %q as covering every JSON leaf inside it.\n"+
+				"Decide what the bar is for those leaves — jobsFieldPaths recurses "+
+				"into the private per-endpoint DTOs and stops at the shared ones — "+
+				"and teach this walk the same.", f.Name, ft, name)
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// isScalarWireKind reports whether a Go kind marshals to a JSON scalar — the
+// allowlist half of the flatness assertion, so an unfamiliar kind is refused
+// rather than admitted by an incomplete list of the ones to reject.
+func isScalarWireKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64,
+		reflect.String:
+		return true
+	default:
+		return false
+	}
+}
+
+// statsReadPaths returns every property path app.js reads off the /api/stats
+// snapshot, rooted at applyStats' parameter and scoped to that function.
+func statsReadPaths(t *testing.T, src string) map[string]bool {
+	t.Helper()
+	// Built with a nil isRoot and wired afterwards rather than closing over
+	// `sc` before its own assignment completes: the constructor never calls
+	// isRoot, so both work, but the circular form reads as though it might.
+	// (Gemini on #948.)
+	sc := newSnapshotScopes(src, nil)
+	sc.isRoot = func(fn, ident string) bool {
+		return fn == statsEntryFn && ident != "" && ident == sc.param[statsEntryFn]
+	}
+	if sc.bodies[statsEntryFn] == "" {
+		t.Fatalf("no top-level function %q found in app.js — it was renamed or "+
+			"inlined, and this guard now proves nothing", statsEntryFn)
+	}
+	if sc.param[statsEntryFn] == "" {
+		t.Fatalf("%s does not take exactly one parameter — the snapshot root "+
+			"cannot be identified, so this guard now proves nothing", statsEntryFn)
+	}
+	sc.bindParams()
+	return sc.reads()
+}
+
+// statsKeysReadBy returns every key the named Go file reads out of a
+// `stats[...]` map, by AST.
+//
+// By AST and not by regex because the thing being matched is a STRING
+// LITERAL: this repo's scan-based guards strip comments precisely because the
+// prose beside a rule quotes the rule, and the tool that does it
+// (stripJSNoise) blanks literals along with them — which would blank exactly
+// the subject here. The AST has no such ambiguity, and it also ignores a field
+// name merely mentioned in a docblock, which status.go does.
+func statsKeysReadBy(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	out := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		ix, ok := n.(*ast.IndexExpr)
+		if !ok {
+			return true
+		}
+		id, ok := ix.X.(*ast.Ident)
+		if !ok || id.Name != "stats" {
+			return true
+		}
+		lit, ok := ix.Index.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if key, err := strconv.Unquote(lit.Value); err == nil {
+			out[key] = true
+		}
+		return true
+	})
+	return out
+}
+
+// TestEveryStatsFieldIsReadSomewhere is TestEveryJobsFieldIsRenderedSomewhere
+// for the other live payload, and it is deliberately not a copy of it.
+//
+// /api/stats is the SSE stream's busiest frame — every five seconds, to every
+// connected console — and four of its fields had no reader at all when this
+// was written:
+//
+//   - `tracksUnreadable`, which readStatsDBPart runs a dedicated indexed
+//     COUNT for and nothing else reads. A query per snapshot for nobody: the
+//     #891 shape exactly, and the one the originating issue asked to surface.
+//     It is now the dashboard's alarm row.
+//   - `upnpRoutedTracks`, whose count IS earned (trackSourceCounts hands it
+//     to /api/sources, which the dashboard renders) but whose scalar here was
+//     a second spelling of `sources.routedTotal`.
+//   - `startedAt`, a second spelling of `uptimeSec` on the same payload.
+//   - `dbBytes`, an os.Stat per snapshot for a number /api/diagnostics
+//     already serves and the console already reads from there.
+//
+// All three duplicates are gone rather than exempted, and that is the point:
+// an exemption list is the path of least resistance that recreates the very
+// failure this guards. A field that no named consumer reads is not on the
+// payload.
+//
+// "Named consumer" is the one place this differs in SHAPE from the jobs
+// guard, and it is not a relaxation — see statsCLIConsumer. A `bridge status
+// --json` dump does not count: it passes the whole decoded map through
+// verbatim, so it would exonerate every field including the four above, which
+// is the same as having no guard.
+func TestEveryStatsFieldIsReadSomewhere(t *testing.T) {
+	fields := statsFieldPaths(t, reflect.TypeOf(statsResponse{}))
+	// Vacuous-pass guard, the same one both siblings carry.
+	if len(fields) < 12 {
+		t.Fatalf("only %d json fields found on statsResponse — the reflection "+
+			"walk is broken, so this test proves nothing", len(fields))
+	}
+
+	// Comments stripped, string literals KEPT: the alarm row's read sits
+	// beside a template interpolation, and stripJSNoise blanks those.
+	console := statsReadPaths(t, stripJSComments(readConsoleJS(t, "static/app.js")))
+	if len(console) < 6 {
+		t.Fatalf("only %d reads resolved inside %s — the root resolution is "+
+			"broken, so this test proves nothing", len(console), statsEntryFn)
+	}
+	cli := statsKeysReadBy(t, statsCLIConsumer)
+	if len(cli) < 6 {
+		t.Fatalf("only %d stats keys found in %s — the AST scan is broken, so "+
+			"this test proves nothing", len(cli), statsCLIConsumer)
+	}
+
+	for _, f := range fields {
+		if console[f] || cli[f] {
+			continue
+		}
+		t.Errorf("/api/stats returns %q and nothing reads it.\n"+
+			"Not %s in static/app.js, and not %s.\n"+
+			"This payload is rebuilt every five seconds for every connected "+
+			"console, so a field nobody reads is work the endpoint does for "+
+			"nobody — and if it was meant to be rendered, nothing else will say "+
+			"so.\nRender it, or drop it from the response.",
+			f, statsEntryFn, statsCLIConsumer)
+	}
+}
+
+// TestBridgeStatusOnlyReadsRealStatsFields is the other direction, and it
+// guards a failure that is silent in the same way the jobs one was.
+//
+// writeStatusHuman builds its rows from `stats["<key>"]` lookups on a
+// map[string]any and then SKIPS every row whose value formatted empty — so a
+// key that does not exist on the payload yields nil, formats to "", and the
+// row simply is not printed. Renaming a json tag on statsResponse drops a line
+// from `bridge status` with no error, no build failure and no failing test;
+// it is the map-lookup twin of reading an undefined property in JS.
+func TestBridgeStatusOnlyReadsRealStatsFields(t *testing.T) {
+	valid := map[string]bool{}
+	for _, f := range statsFieldPaths(t, reflect.TypeOf(statsResponse{})) {
+		valid[f] = true
+	}
+	keys := statsKeysReadBy(t, statsCLIConsumer)
+	if len(keys) < 6 {
+		t.Fatalf("only %d stats keys found in %s — the AST scan is broken, so "+
+			"this test proves nothing", len(keys), statsCLIConsumer)
+	}
+	for k := range keys {
+		if !valid[k] {
+			t.Errorf("%s reads stats[%q], which /api/stats does not return.\n"+
+				"Fields it does return: %s\n"+
+				"A missing key is nil, not an error — writeStatusHuman formats it "+
+				"to \"\" and skips the row, so the line silently stops printing.",
+				statsCLIConsumer, k, sortedKeys(valid))
 		}
 	}
 }

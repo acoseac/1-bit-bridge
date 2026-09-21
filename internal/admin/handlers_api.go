@@ -63,15 +63,16 @@ func writeCfgUpdateErr(w http.ResponseWriter, err error) {
 // --- response shapes ---
 
 type statsResponse struct {
-	LibraryName     string     `json:"libraryName"`
-	ProtocolVersion int        `json:"protocolVersion"`
-	ServerVersion   string     `json:"serverVersion"`
-	UptimeSec       int64      `json:"uptimeSec"`
-	StartedAt       time.Time  `json:"startedAt"`
-	TracksIndexed   int        `json:"tracksIndexed"`
-	IsScanning      bool       `json:"isScanning"`
-	ScanProgress    int64      `json:"scanProgress"`
-	LastFullScan    *time.Time `json:"lastFullScan,omitempty"`
+	LibraryName     string `json:"libraryName"`
+	ProtocolVersion int    `json:"protocolVersion"`
+	ServerVersion   string `json:"serverVersion"`
+	// UptimeSec is the process age. It is zeroed on the SSE path (see
+	// getStatsSSESnapshot) and read on the REST path by `bridge status`.
+	UptimeSec     int64      `json:"uptimeSec"`
+	TracksIndexed int        `json:"tracksIndexed"`
+	IsScanning    bool       `json:"isScanning"`
+	ScanProgress  int64      `json:"scanProgress"`
+	LastFullScan  *time.Time `json:"lastFullScan,omitempty"`
 	// Library composition — an honest breakdown of what the bridge
 	// holds. TracksIndexed above is originals-only (the `tracks`
 	// table never includes variants); these surface the variant
@@ -85,17 +86,18 @@ type statsResponse struct {
 	TracksWithOptimized int   `json:"tracksWithOptimized"`
 	VariantFiles        int   `json:"variantFiles"`
 	VariantBytes        int64 `json:"variantBytes"`
-	// UPnPRoutedTracks is the count of tracks in the manifest whose
-	// bytes the bridge proxies from an upstream UPnP MediaServer (PR
-	// #353 admin surface). Always emitted; zero when the feature
-	// isn't enabled.
-	UPnPRoutedTracks int `json:"upnpRoutedTracks"`
-
 	// TracksUnreadable is how many local sources the decoders have refused
 	// for the version currently indexed — the operator-facing answer to
 	// "which of my files are broken". Counted from the same predicate the
 	// unreadable list and the analysis candidate walk use, so the number
 	// and the list cannot describe different libraries.
+	//
+	// Rendered by app.js applyStats as the dashboard's alarm row, which
+	// stays hidden at zero and links to the Jobs page panel that lists
+	// the files. That render is the whole justification for the COUNT:
+	// it is the one query in readStatsDBPart run for this field alone,
+	// so an unrendered `tracksUnreadable` is a SELECT per snapshot for
+	// nobody. TestEveryStatsFieldIsReadSomewhere is what keeps it wired.
 	//
 	// Every track with at least one current verdict, not only the
 	// threshold-suppressed ones: a file on its second strike is already a
@@ -103,11 +105,33 @@ type statsResponse struct {
 	// given-up-on set would make it invisible until the third sweep.
 	TracksUnreadable int `json:"tracksUnreadable"`
 
-	DBBytes       int64  `json:"dbBytes"`
 	Fingerprint   string `json:"fingerprint"`
 	DeviceCount   int    `json:"deviceCount"`
 	ListenAddress string `json:"listenAddress"`
 	AdminAddress  string `json:"adminAddress"`
+
+	// Deliberately ABSENT, and each was here until #948 with no reader
+	// anywhere — not applyStats, not `bridge status`. Listed so they are
+	// not helpfully restored: this payload is rebuilt every five seconds
+	// for every connected console, and all three were a second spelling
+	// of a fact already carried somewhere a reader looks.
+	//
+	//   startedAt        — `uptimeSec` above is the same fact on the same
+	//                      payload, and that one IS read.
+	//   dbBytes          — GET /api/diagnostics serves the database
+	//                      footprint with its page and freelist siblings,
+	//                      and that is where the console reads it. Here it
+	//                      cost an os.Stat per snapshot for nobody.
+	//   upnpRoutedTracks — the COUNT is earned (statsDBPart.upnpRouted is
+	//                      what trackSourceCounts hands /api/sources, which
+	//                      the dashboard renders as the filesystem-vs-
+	//                      upstream split); the scalar here was not.
+	//                      `sources.routedTotal` is the same number one
+	//                      payload over.
+	//
+	// TestEveryStatsFieldIsReadSomewhere is what keeps the rule, and it
+	// has no exemption list on purpose — an exemption is the frictionless
+	// way to put a fourth one back.
 }
 
 type rootRow struct {
@@ -507,7 +531,7 @@ type statsDBPart struct {
 	unreadable      int
 }
 
-// readStatsDBPart runs the three best-effort stats DB reads under ctx and
+// readStatsDBPart runs the four best-effort stats DB reads under ctx and
 // returns them as a unit. Returns the FIRST error encountered (with a
 // zero part) so the caller falls back to the cached last-good values as
 // a whole rather than mixing a fresh field with stale siblings.
@@ -560,7 +584,6 @@ func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 func (s *Server) getStatsSnapshot() statsResponse {
 	cfg := s.deps.CfgHolder.Load()
 	now := time.Now().UTC()
-	dbBytes := dbSize(filepath.Join(cfg.DataDir, "bridge.db"))
 
 	// No request context here (the SSE publisher also calls this), so a
 	// wedged read would otherwise block that goroutine indefinitely.
@@ -585,7 +608,6 @@ func (s *Server) getStatsSnapshot() statsResponse {
 		ProtocolVersion:     version.ProtocolVersion,
 		ServerVersion:       version.ServerVersion,
 		UptimeSec:           int64(now.Sub(s.deps.StartedAt).Seconds()),
-		StartedAt:           s.deps.StartedAt,
 		TracksIndexed:       part.tracks,
 		IsScanning:          s.deps.Scanner.IsScanning(),
 		ScanProgress:        s.deps.Scanner.ScanProgress(),
@@ -594,9 +616,7 @@ func (s *Server) getStatsSnapshot() statsResponse {
 		TracksWithOptimized: part.optimizedTracks,
 		VariantFiles:        part.variantFiles,
 		VariantBytes:        part.variantBytes,
-		UPnPRoutedTracks:    part.upnpRouted,
 		TracksUnreadable:    part.unreadable,
-		DBBytes:             dbBytes,
 		Fingerprint:         s.deps.Fingerprint,
 		DeviceCount:         len(s.deps.Auth.List()),
 		ListenAddress:       cfg.ListenAddress,
@@ -1696,6 +1716,43 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 
 // --- DELETE /api/roots {path} ---
 
+// refuseAmbiguousRootBasename refuses a removal when a SURVIVING root's
+// basename case-folds to the removed one, reporting whether it answered (in
+// which case the caller must stop).
+//
+// `ValidateRoots` now rejects that configuration up front, but a bridge.yaml
+// written before it did — or hand-edited since — can still carry the pair, and
+// the remove handler is the point where it turns destructive: the prefix
+// delete removes rows by basename and unlinks their variant + waveform
+// sidecars from disk. The delete predicate is case-exact now, so the
+// survivor's rows are safe, but the operator's intent is genuinely ambiguous
+// here and the right answer is to make them fix the config rather than guess.
+//
+// The CLI's offline `library remove` has carried an equivalent guard since
+// PR #82; the admin path never did. Folded, not byte-exact, via the same
+// helper ValidateRoots uses — those agreeing is the point.
+//
+// Extracted from the handler rather than inlined: the loop and its nested
+// compare were four of apiRootsRemove's cognitive-complexity points
+// (SonarCloud go:S3776, 16 against a ceiling of 15 — a finding that predates
+// #948 and surfaced on it only because the file changed). Named, the guard
+// also reads as the one thing it is.
+func (s *Server) refuseAmbiguousRootBasename(w http.ResponseWriter, abs, removed string, survivors []string) bool {
+	removedKey := bridgefs.FoldRootBasename(removed)
+	for _, other := range survivors {
+		if bridgefs.FoldRootBasename(other) != removedKey {
+			continue
+		}
+		writeError(w, http.StatusConflict, "ambiguous-basename",
+			fmt.Sprintf("can't remove %q: surviving root %q has a basename that differs only by case (%q vs %q). "+
+				"Track paths are keyed by basename, so the removal target is ambiguous — rename one root's directory, "+
+				"or remove both and re-add the one you want to keep.",
+				abs, other, filepath.Base(removed), filepath.Base(other)))
+		return true
+	}
+	return false
+}
+
 func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -1739,37 +1796,13 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	willCollapse := len(newList) == 1
 	removedBasename := filepath.Base(current[idx])
 
-	// Refuse when a SURVIVING root's basename case-folds to the removed
-	// one. `ValidateRoots` now rejects that configuration up front, but a
-	// bridge.yaml written before it did — or hand-edited since — can
-	// still carry the pair, and this handler is the point where it turns
-	// destructive: the prefix delete below removes rows by basename and
-	// unlinks their variant + waveform sidecars from disk. The delete
-	// predicate is case-exact now, so the survivor's rows are safe, but
-	// the operator's intent is genuinely ambiguous here and the right
-	// answer is to make them fix the config rather than guess.
-	//
-	// The CLI's offline `library remove` has carried an equivalent guard
-	// since PR #82; the admin path never did. Folded, not byte-exact, via
-	// the same helper ValidateRoots uses — those agreeing is the point.
-	//
 	// Skipped on the collapse branch: multi-root → single-root flips the
 	// stored path form, so that path runs WipeFilesystemTracks and
 	// rescans rather than selecting by basename, and there is nothing to
 	// be ambiguous about. The prefix delete is only reachable when two or
 	// more roots survive.
-	if !willCollapse {
-		removedKey := bridgefs.FoldRootBasename(current[idx])
-		for _, other := range newList {
-			if bridgefs.FoldRootBasename(other) == removedKey {
-				writeError(w, http.StatusConflict, "ambiguous-basename",
-					fmt.Sprintf("can't remove %q: surviving root %q has a basename that differs only by case (%q vs %q). "+
-						"Track paths are keyed by basename, so the removal target is ambiguous — rename one root's directory, "+
-						"or remove both and re-add the one you want to keep.",
-						abs, other, removedBasename, filepath.Base(other)))
-				return
-			}
-		}
+	if !willCollapse && s.refuseAmbiguousRootBasename(w, abs, current[idx], newList) {
+		return
 	}
 
 	// Commit order matters: run the destructive manifest op FIRST, and

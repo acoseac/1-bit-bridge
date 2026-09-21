@@ -2047,6 +2047,33 @@ its twin.** The top list is older, shorter, and read first.
   which `stripJSNoise` blanks. Recursion stops at the exported shared types
   (`*JobRunState` and kin), which have other consumers. **A guard that checks
   containers proves nothing about their contents.**
+- **`/api/stats` is guarded in both directions too, and there "read" means the
+  console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
+  consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and
+  prints ten fields — so an app.js-only sweep reports seven false positives, and
+  a missing KEY there is nil, formats to `""`, and silently drops a line from
+  `bridge status` (`TestBridgeStatusOnlyReadsRealStatsFields`, by AST: the
+  subject is a string literal, which this repo's comment strippers blank). **A
+  `bridge status --json` dump does NOT count as a read** — it passes the whole
+  decoded map through verbatim, so it would exonerate every field, which is the
+  same as having no guard. Four had no reader at all: `tracksUnreadable` (the
+  one query in `readStatsDBPart` run for a single field — a SELECT per snapshot
+  for nobody, #947's own addition, now the dashboard's alarm row, hidden at zero
+  and pointing at the Jobs list built from the same predicate), plus three
+  duplicates now GONE rather than exempted — `startedAt` (`uptimeSec` on the
+  same payload), `dbBytes` (an `os.Stat` per snapshot for what
+  `/api/diagnostics` serves) and `upnpRoutedTracks` (the COUNT is earned,
+  `trackSourceCounts` hands it to `/api/sources`; the scalar was
+  `sources.routedTotal` one payload over). **No exemption list, on purpose** —
+  it is the frictionless way to put a fifth one back, which is the failure the
+  jobs guard exists for. `statsResponse` is FLAT, so the recursion question does
+  not arise, and that is ASSERTED rather than assumed so a future NON-SCALAR
+  field forces the decision — an allowlist of scalar kinds plus `time.Time`,
+  not a list of the shapes to reject, because a map or a slice marshals nested
+  leaves exactly as a struct does and `reads` counts every PREFIX of a path.
+  The JS root is scoped to ONE function: `applyStats`'s
+  parameter is `s` and app.js has seven one-argument functions whose parameter
+  is `s`, so an unscoped root is a false PASS. (#948)
 - **An SSE list handler needs an explicit empty-list teardown branch.** A restart
   wipes the in-memory pairing store, so the next snapshot is `[]`, and
   `applyPairing([])` must clear the optimistic-action latch and hide the panel —
