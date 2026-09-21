@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// SSDP header prefixes, shared by the three datagram builders (alive, byebye
+// and the M-SEARCH response) so a header name is spelled once. The trailing
+// space is part of the constant: these are concatenated straight onto their
+// value. (SonarCloud go:S1192.)
+const (
+	ssdpHeaderLocation = "LOCATION: "
+	ssdpHeaderServer   = "SERVER: "
+)
+
 // SSDPMulticastAddr is the canonical SSDP IPv4 multicast endpoint per
 // UPnP Device Architecture 1.0 / 1.1. Every UPnP device on a LAN
 // listens here for M-SEARCH requests and sends NOTIFY announcements
@@ -102,8 +111,8 @@ func BuildNotifyAlive(location, server string, target NotifyTarget) []byte {
 		"NOTIFY * HTTP/1.1\r\n" +
 			"HOST: " + SSDPMulticastAddr + "\r\n" +
 			ssdpCacheControlLine +
-			"LOCATION: " + location + "\r\n" +
-			"SERVER: " + server + "\r\n" +
+			ssdpHeaderLocation + location + "\r\n" +
+			ssdpHeaderServer + server + "\r\n" +
 			"NT: " + target.NT + "\r\n" +
 			"NTS: ssdp:alive\r\n" +
 			"USN: " + target.USN + "\r\n" +
@@ -125,8 +134,8 @@ func BuildNotifyByeBye(location, server string, target NotifyTarget) []byte {
 	return []byte(
 		"NOTIFY * HTTP/1.1\r\n" +
 			"HOST: " + SSDPMulticastAddr + "\r\n" +
-			"LOCATION: " + location + "\r\n" +
-			"SERVER: " + server + "\r\n" +
+			ssdpHeaderLocation + location + "\r\n" +
+			ssdpHeaderServer + server + "\r\n" +
 			"NT: " + target.NT + "\r\n" +
 			"NTS: ssdp:byebye\r\n" +
 			"USN: " + target.USN + "\r\n" +
@@ -153,8 +162,8 @@ func BuildMSearchResponse(location, server, st, usn string, date time.Time) []by
 			ssdpCacheControlLine +
 			"DATE: " + date.UTC().Format(http.TimeFormat) + "\r\n" +
 			"EXT:\r\n" +
-			"LOCATION: " + location + "\r\n" +
-			"SERVER: " + server + "\r\n" +
+			ssdpHeaderLocation + location + "\r\n" +
+			ssdpHeaderServer + server + "\r\n" +
 			"ST: " + st + "\r\n" +
 			"USN: " + usn + "\r\n" +
 			"\r\n",

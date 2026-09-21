@@ -7567,3 +7567,158 @@ dismissed-in-the-UI class this repo already documents.
 stops at the exported shared types. Whether `AnalysisSweepState` belongs inside
 its recursion is the question #947 left open, and this change does not answer
 it.
+
+## 2026-09-21 — the curated SonarCloud sweep, and what it was actually made of (#949)
+
+691 open issues, ~16 days of estimated effort. A curated subset was taken — the
+buckets that are mechanical and safe — and the triage is the finding: **less
+than half of what was flagged was worth changing, and two suggestions would
+have introduced bugs.**
+
+### `godre:S8188` — 0 of 6 were real, and 2 would have regressed a rule
+
+"Defer the cancel function after this context creation to prevent resource
+leaks", six sites. Every one is a false positive:
+
+- `cmd/bridge/upnp_upstream_wiring.go` — `manualCancel` is deliberately NOT
+  deferred: `withManualPoller` stores it on the lifecycle so `Stop()` cancels
+  and JOINS the poller. Deferring it would kill the manual poller the moment
+  the wiring function returned. Every return path after its creation goes
+  through `withManualPoller`, so there is no leak to fix.
+- `internal/upload/upload_test.go` and `internal/admin/admin_test.go` — both
+  use `t.Cleanup(func(){ cancel(); <join> })`, and the upload one carries a
+  comment saying exactly why: *"Cleanup rather than a bare `defer cancel()`:
+  cancelling without JOINING leaves the sweeper running against a temp dir
+  t.TempDir is removing, and t.Cleanup covers the t.Fatal paths a defer at the
+  bottom would not."* Taking the suggestion would have reverted #944/#945.
+- The three `internal/enrich` sites cancel from a goroutine as the test's
+  MECHANISM (they measure that cancellation interrupts the pacer); one is a
+  `WithTimeout` that self-expires.
+
+**A rule that names a real hazard still has to be read against the code.** The
+hazard here — a context whose cancel is never reached — is not what any of the
+six do.
+
+### `go:S1192` — worth doing, and it found a dead const
+
+74 sites. The codebase already had a const block created for this exact rule,
+with a docblock saying so, which settles whether the convention fits.
+
+The find: **`configFlagUsage` in `cmd/bridge/cli_consts.go` had ZERO users**,
+under a docblock claiming it had been extracted for go:S1192 — while 28
+subcommands hardcoded a DIFFERENT, longer spelling of the same help text. The
+const said `"path to config file"`; the 28 said `"path to config file (default:
+./bridge.yaml, else the platform config dir)"`. Wiring the 28 to the existing
+const would have silently dropped the fallback from every subcommand's help —
+and that fallback is a promise only `loadCLIConfig` keeps, the subject of
+`TestNoSubcommandTailBypassesLoadCLIConfig`. The value moved to the accurate
+string instead. Verified against the built binary: `bridge token list -h` and
+`bridge backup -h` both still print the long form.
+
+Declined: the HTTP header names (`Content-Type`, `Cache-Control`,
+`Accept-Ranges`, `Content-Disposition`, `Retry-After`). Go's idiom is the
+literal, and the existing block's docblock says the point is that code-points
+stay **grep-able** — `const contentType = "Content-Type"` is the opposite.
+
+Kept distinct: the three applied-but-inert settings reports share a TAIL and
+differ in the clause naming which subsystem is unwired. Only the tail was
+extracted. A table of near-identical strings is how the two that carry
+information get skipped.
+
+### `javascript:S6582` — one conversion is a bug, and the rule suggests it
+
+47 `x && x.y` chains collapsed. Every site was read for CONTEXT first, because
+`a && a.b` and `a?.b` are not the same expression: they agree in a condition
+and disagree as a value (`null && x` is `null`; `null?.x` is `undefined`). All
+47 are conditions, ternary tests, or assignments immediately falsy-tested.
+
+⚠️ **One is not convertible, and it is the shape the rule gets wrong:**
+
+```js
+if (fpEnable && fpEnable.dataset.latched !== "true") fpEnable.hidden = fp.enabled;
+```
+
+As `fpEnable?.dataset.latched !== "true"` a missing element reads
+`undefined !== "true"` — **true** — so the body runs and throws on
+`fpEnable.hidden`. Measured in node: old `null`, new `true`. The `&&` guards
+the ELEMENT; `?.` guards only the lookup, and a `!==` downstream inverts the
+miss. It is left as-is with the reasoning beside it so the next sweep does not
+"finish the job".
+
+⚠️ **And the mechanical rewrite emitted invalid JavaScript.** Collapsing
+`resp && resp.fields && resp.fields[field]` produced `resp?.fields?[field]` —
+computed access needs `?.[`, not `?[`. That is a PARSE error in app.js: the
+whole operator console would have been blank, and the Go suite was green,
+because app.js is a static asset no Go test executes.
+
+⚠️ **`node --check <file>` does not catch it in an ES module.** On Node 26 a
+`.js` file is parsed as CommonJS and `node --check` exited **0** on a player
+module containing `export const w = x?[y];`. The form that works is
+`node --check --input-type=module < file`. Negative-controlled both ways:
+breaking a script and a module now produces one error each, and the clean tree
+produces none. **This repo has no JS syntax check in CI at all** — worth one,
+given a parse error ships as a blank console with every check green.
+
+### `javascript:S3358` — 3 of 24
+
+Three genuine nested ternaries became statements: the settings initial-tab pick
+(nested in the else branch), the doctor verdict ladder, and the player's repeat
+cycle — now a lookup table.
+
+⚠️ **The first form of that table was WRONG, and my equivalence check missed
+it.** `REPEAT_CYCLE[state.repeat] ?? "off"` reads INHERITED properties: a
+persisted `"__proto__"`, `"constructor"`, `"toString"` or `"valueOf"` returns
+an object or a function — truthy, so `??` never fires — and `state.repeat`
+stops being a string. The chained ternary it replaced answered `"off"` for all
+four. Caught by CodeRabbit on #949; the fix is `Object.hasOwn`.
+
+**The claim "verified equivalent on every input" was false when I wrote it**,
+in the commit message, the PR body and this entry. The truth table I ran was
+`["off","all","one","bogus",undefined,null,""]` — seven inputs, none of them a
+prototype key, so it agreed with itself. A table-driven equivalence check is
+only as good as the adversarial inputs in the table, and for a JS object
+keyed on untrusted persisted state those keys are the first ones to try. The
+re-run covers fourteen inputs including all four prototype keys: zero
+mismatches. The other 21 are `${n === 1 ? "" : "s"}`
+pluralisation inside a template literal inside a ternary. Extracting those
+costs a line of indirection per string and buys no reader anything.
+
+### A textual guard broke on punctuation
+
+`TestUploadPanelIsHiddenUntilEnabled` asserted `strings.Contains(js,
+"cfg.uploadEnabled")`. The optional-chaining pass wrote `cfg?.uploadEnabled` —
+the same field, the same consultation — and the guard went red on a change that
+did not touch its subject. It now matches either spelling and was re-controlled
+against an actual removal. **A scan guard should anchor on the thing it is
+about, not on the punctuation around it.**
+
+### The second pre-existing S3776, and an uncovered branch
+
+`DeleteTracksBatch` (blame 2026-06-06, #351) surfaced the same way
+`apiRootsRemove` did on #948 — the file changed, so a pre-existing finding
+attached to the PR. Fixed by extracting the mass-op journal decision into
+`decideDeletionJournalMode`, which returns whether to journal each chunk
+having ALREADY reset coverage when it decides not to, so the two halves of
+that decision cannot be separated by a caller. It runs on the caller's tx
+because the count it reads and the reset it may write must land in the same
+commit as the DELETEs they describe — this is the deletion path, and the
+atomicity contract in the docblock above it is the whole point.
+
+⚠️ **The first negative control passed, and that was the finding.**
+Neutralising the ABSOLUTE arm (`n > deletionJournalMassOpAbsolute`, >10k
+paths) left `TestJournal_DeleteTracksBatchMassOpResetsCoverage` green — the
+mutation was verified present in the file first, so this was not the vacuous
+kind. That test drives the PERCENTAGE arm; neutralising THAT one turns it red
+(`mass-op must NOT write per-path tombstones, got map[...]`), which is what
+pins the extraction. **The >10k absolute threshold has no test at all.** Not
+added here: it needs a 10,001-path fixture in the package whose race-detector
+cost this file already documents at ~48x.
+
+### What was NOT swept
+
+`go:S3776` (252 Go + 18 JS) — restructuring ~270 functions, many of them the
+long, deliberately-commented handlers this tree treats as load-bearing. The 30
+`go:S2077` are the known dismissed-in-the-UI class. The single BLOCKER, "Open
+Redirect via unsanitized user input" at `internal/acoustid/client_test.go`, is
+a false positive: an httptest handler inside the test that deliberately issues
+a SAME-HOST redirect, to prove the client refuses cross-host ones.

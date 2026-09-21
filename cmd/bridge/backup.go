@@ -28,7 +28,7 @@ import (
 func backupCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	keep := fs.Int("keep", 7, "number of snapshots to retain (0 disables prune)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -99,7 +99,7 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	autoYes := fs.Bool("yes", false, "skip the interactive confirmation prompt")
 	fs.BoolVar(autoYes, "y", *autoYes, "alias for --yes")
 	if err := fs.Parse(args); err != nil {

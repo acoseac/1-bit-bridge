@@ -89,7 +89,7 @@ func enrichmentCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 func enrichmentMissesCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("enrichment misses", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	facet := fs.String("facet", "", "narrow to one facet: artwork | artist | release")
 	limit := fs.Int("limit", 50, "maximum paths to print per facet (0 = counts only)")
 	pathScope := fs.String("path", "", "restrict to a library subtree (default: whole library)")
@@ -353,7 +353,7 @@ func printMissSamples(w io.Writer, rep *missReport, facets []string, limit int) 
 func enrichmentRetryCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("enrichment retry", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	pathScope := fs.String("path", "", "restrict to a library subtree (default: whole library)")
 	if err := fs.Parse(args); err != nil {
 		return 2

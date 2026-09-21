@@ -8,6 +8,10 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// pageNameDevices is the Devices page's template key, shared by the page
+// handler and the two partial-render paths. (SonarCloud go:S1192.)
+const pageNameDevices = "admin.devices"
+
 // Admin device + playlist-backup surfaces. Loopback-only, owner-visible,
 // read-only. Device tokens are the client's recovery secrets, so they are
 // truncated to a short prefix for display correlation — never returned in
@@ -206,15 +210,15 @@ func (s *Server) apiHistorySummary(w http.ResponseWriter, r *http.Request) {
 	}
 	codecs, err := s.deps.Manifest.CodecHistogram(ctx, "")
 	if err != nil {
-		logging.Component("admin.devices").Warn("CodecHistogram failed", "err", err)
+		logging.Component(pageNameDevices).Warn("CodecHistogram failed", "err", err)
 	}
 	routes, err := s.deps.Manifest.RouteHistogram(ctx, "")
 	if err != nil {
-		logging.Component("admin.devices").Warn("RouteHistogram failed", "err", err)
+		logging.Component(pageNameDevices).Warn("RouteHistogram failed", "err", err)
 	}
 	top, err := s.deps.Manifest.TopTracks(ctx, 20)
 	if err != nil {
-		logging.Component("admin.devices").Warn("TopTracks failed", "err", err)
+		logging.Component(pageNameDevices).Warn("TopTracks failed", "err", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"totalEvents": total,

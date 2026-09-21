@@ -69,13 +69,13 @@ type enrichmentMissesResponse struct {
 func (s *Server) apiEnrichmentMisses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
 	normalised, ok := normaliseBrowsePath(safeQuery(r).Get("path"))
 	if !ok {
-		writeError(w, http.StatusBadRequest, "bad-path",
-			"path contains traversal segments or is otherwise invalid")
+		writeError(w, http.StatusBadRequest, errCodeBadPath,
+			errMsgBadPath)
 		return
 	}
 	facet := r.URL.Query().Get("facet")

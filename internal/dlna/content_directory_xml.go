@@ -462,7 +462,7 @@ func DIDLForContainer(opts DIDLContainerOpts) string {
 	// hierarchy — other classes (musicAlbum, musicArtist,
 	// playlistContainer) have their own mandatory-attribute
 	// contracts that this helper doesn't touch.
-	if strings.HasPrefix(upnpClass, "object.container.storageFolder") {
+	if strings.HasPrefix(upnpClass, upnpClassStorageFolder) {
 		sb.WriteString(`<upnp:storageUsed>-1</upnp:storageUsed>`)
 	}
 	if opts.ArtworkURL != "" {

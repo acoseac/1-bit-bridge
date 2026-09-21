@@ -11,6 +11,12 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
+// loginStaleLinkRedirect is where every unusable login ticket lands — a
+// ticket that never existed, one already spent, one past its window, and one
+// refused on shape. They share a destination on purpose: the GET consults no
+// store, so the page is not an oracle for "is this link live". (go:S1192.)
+const loginStaleLinkRedirect = "/login?link=stale"
+
 // sessionCookieName is the cookie key carrying the raw session
 // token. The browser sends it on every same-origin request; the
 // server validates via adminauth.Store.ValidateSession.
@@ -365,7 +371,7 @@ func (s *Server) pageLoginTicket(w http.ResponseWriter, r *http.Request) {
 		// the POST would send a bad ticket to — a link that cannot redeem is
 		// a stale link's shape — and it keeps an unbounded query out of the
 		// page, which echoes the ticket into the form action.
-		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
+		http.Redirect(w, r, loginStaleLinkRedirect, http.StatusFound)
 		return
 	}
 	cfg := s.deps.CfgHolder.Load()
@@ -414,7 +420,7 @@ func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
 		// spent, as it must be. Refused by shape so an unbounded or
 		// malformed query never reaches the hash or the file read under
 		// the mutex every authenticated console request takes.
-		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
+		http.Redirect(w, r, loginStaleLinkRedirect, http.StatusFound)
 		return
 	}
 	username, err := s.deps.AdminAuth.RedeemLoginTicket(ticket)
@@ -442,7 +448,7 @@ func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
 		// Load-bearing, because the obvious recovery is futile: re-opening the
 		// SAME link can never work once any touch has spent it, and without
 		// this the page gives a user no reason to think otherwise.
-		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
+		http.Redirect(w, r, loginStaleLinkRedirect, http.StatusFound)
 		return
 	}
 	raw, err := s.deps.AdminAuth.CreateSession(username)
@@ -454,7 +460,7 @@ func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
 		// crypto/rand failure reaches here; a persist failure is logged
 		// inside CreateSession and the session still works.)
 		logger.Error("admin create session from ticket", "err", err)
-		http.Redirect(w, r, "/login?link=stale", http.StatusFound)
+		http.Redirect(w, r, loginStaleLinkRedirect, http.StatusFound)
 		return
 	}
 	s.setSessionCookie(w, raw)

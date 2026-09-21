@@ -436,7 +436,7 @@ function revealActiveSection() {
   // marker for "you are here", so this keeps working for any future row
   // in the rail that is not a .player-section — and route() already sets
   // the two together, so it is not a second thing to remember.
-  const active = nav && nav.querySelector('[aria-current="page"]');
+  const active = nav?.querySelector('[aria-current="page"]');
   if (!active) return;
   const navBox = nav.getBoundingClientRect();
   const itemBox = active.getBoundingClientRect();

@@ -53,7 +53,7 @@ func libraryCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("library add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -117,7 +117,7 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("library remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

@@ -269,7 +269,7 @@ type variantFailureRetryResponse struct {
 // a genuinely broken file simply earns its strikes again.
 func (s *Server) apiVariantFailureRetry(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
 	defer r.Body.Close()
@@ -281,7 +281,7 @@ func (s *Server) apiVariantFailureRetry(w http.ResponseWriter, r *http.Request) 
 	}
 	normalised, ok := normaliseBrowsePath(req.Path)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "bad-path", "path escapes the library root")
+		writeError(w, http.StatusBadRequest, errCodeBadPath, "path escapes the library root")
 		return
 	}
 	n, err := s.deps.Manifest.ClearVariantFailuresUnderPrefix(r.Context(), normalised)

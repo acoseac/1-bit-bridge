@@ -12,6 +12,10 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// errMsgPlaylistIDRequired is the 400 body for a playlist route reached
+// without an id. (SonarCloud go:S1192.)
+const errMsgPlaylistIDRequired = "playlist id is required"
+
 // PlaylistStore is the optional backing store for the /v1/playlists
 // backup endpoints. Nil-safe — when unwired the routes return 404
 // (feature-off). *manifest.Store satisfies it in production.
@@ -270,7 +274,7 @@ func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
 	if id == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "playlist id is required")
+		writeError(w, http.StatusBadRequest, "bad_request", errMsgPlaylistIDRequired)
 		return
 	}
 	p, items, err := s.playlistStore.GetPlaylist(r.Context(), id)
@@ -297,7 +301,7 @@ func (s *Server) putPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	pathID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
 	if pathID == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "playlist id is required")
+		writeError(w, http.StatusBadRequest, "bad_request", errMsgPlaylistIDRequired)
 		return
 	}
 	if len(pathID) > maxPlaylistIDLen {
@@ -407,7 +411,7 @@ func (s *Server) deletePlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
 	if id == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "playlist id is required")
+		writeError(w, http.StatusBadRequest, "bad_request", errMsgPlaylistIDRequired)
 		return
 	}
 	deleted, err := s.playlistStore.TombstonePlaylist(r.Context(), id, dt)

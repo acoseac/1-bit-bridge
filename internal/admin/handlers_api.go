@@ -32,6 +32,25 @@ const (
 	errCodeSaveConfig      = "save-config"
 	errCodeNoUpdater       = "no-updater"
 	errMsgUpdaterNotConfig = "updater is not configured"
+
+	// Codes. `bad-path` is the traversal refusal every path-bearing
+	// handler answers with, and errMsgBadPath is the body that goes with
+	// it — they travel together, so they are declared together.
+	errCodeBadPath   = "bad-path"
+	errCodeBadFormat = "bad-format"
+
+	// Messages.
+	errMsgBadPath    = "path contains traversal segments or is otherwise invalid"
+	errMsgInternal   = "internal error"
+	errMsgNoManifest = "manifest store not wired"
+	errMsgNotCached  = "not cached"
+
+	// errMsgPersistedNeedsRestart is the shared TAIL of the three
+	// applied-but-inert settings reports. Only the tail: each site keeps
+	// its own leading clause naming WHICH subsystem is unwired, because
+	// that half is the information — a table of near-identical strings is
+	// how the two that carry meaning get skipped.
+	errMsgPersistedNeedsRestart = "so the persisted value cannot take effect until a restart"
 )
 
 // cfgAbort lets a config-mutation fn passed to CfgHolder.Update carry
@@ -1611,7 +1630,7 @@ func normalizeRootPathReq(w http.ResponseWriter, raw string) (abs string, ok boo
 	}
 	abs, err := filepath.Abs(raw)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad-path", err.Error())
+		writeError(w, http.StatusBadRequest, errCodeBadPath, err.Error())
 		return "", false
 	}
 	return abs, true
@@ -2542,7 +2561,7 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				if s.deps.TrashManager == nil {
 					report.restartBecause("allowDelete",
 						"the trash subsystem is not wired on this bridge, "+
-							"so the persisted value cannot take effect until a restart")
+							errMsgPersistedNeedsRestart)
 				} else {
 					report.live("allowDelete")
 				}
@@ -2560,7 +2579,7 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				if s.deps.Upload == nil {
 					report.restartBecause("uploadEnabled",
 						"the upload subsystem is not wired on this bridge, "+
-							"so the persisted value cannot take effect until a restart")
+							errMsgPersistedNeedsRestart)
 				} else {
 					report.live("uploadEnabled")
 				}
@@ -2587,7 +2606,7 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 					report.restartBecause("autoOptimizeEnabled",
 						"no auto-optimize sweeper is wired on this bridge "+
 							"(the upscale pool is absent, or the optimize kind is off), "+
-							"so the persisted value cannot take effect until a restart")
+							errMsgPersistedNeedsRestart)
 				} else {
 					report.live("autoOptimizeEnabled")
 				}

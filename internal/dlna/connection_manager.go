@@ -47,10 +47,10 @@ func buildSourceProtocolInfo() string {
 		// DSD formats — advertise both audio/x-dsf and audio/dsd /
 		// audio/x-dsd so Chord-family + Sony + Integra/Onkyo
 		// renderers all see their preferred form somewhere.
-		mkEntry("audio/x-dsf"),
+		mkEntry(mimeDSF),
 		mkEntry("audio/x-dsd"),
 		mkEntry("audio/dsd"),
-		mkEntry("audio/x-dff"),
+		mkEntry(mimeDFF),
 		// PCM lossless
 		mkEntry("audio/x-flac"),
 		mkEntry("audio/wav"),

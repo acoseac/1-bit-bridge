@@ -71,7 +71,7 @@ Run "bridge variants <subcommand> -h" for subcommand-specific flags.`
 func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("variants move", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	to := fs.String("to", "", "absolute destination directory for variants (required)")
 	dryRun := fs.Bool("dry-run", false, "list planned moves without touching files or DB")
 	confirm := fs.String("confirm", "", "type MOVE to confirm destructive relocation (skipped under --dry-run)")

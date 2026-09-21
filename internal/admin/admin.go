@@ -50,6 +50,10 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/upload"
 )
 
+// errMsgBadRemoteAddr is the refusal body for a request whose RemoteAddr does
+// not parse — the loopback gate's fail-closed answer. (SonarCloud go:S1192.)
+const errMsgBadRemoteAddr = "admin refused: bad remote addr"
+
 var logger = logging.Component("admin")
 
 // adminMaxBodyBytes caps the JSON request body size every admin
@@ -2212,7 +2216,7 @@ func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
-			http.Error(w, "admin refused: bad remote addr", http.StatusForbidden)
+			http.Error(w, errMsgBadRemoteAddr, http.StatusForbidden)
 			return
 		}
 		ip := net.ParseIP(host)
@@ -2244,12 +2248,12 @@ func (s *Server) metricsGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
-			http.Error(w, "admin refused: bad remote addr", http.StatusForbidden)
+			http.Error(w, errMsgBadRemoteAddr, http.StatusForbidden)
 			return
 		}
 		ip := net.ParseIP(host)
 		if ip == nil {
-			http.Error(w, "admin refused: bad remote addr", http.StatusForbidden)
+			http.Error(w, errMsgBadRemoteAddr, http.StatusForbidden)
 			return
 		}
 		if ip.IsLoopback() {

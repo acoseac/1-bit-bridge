@@ -70,7 +70,7 @@ func (s *Server) apiPlayerFavorites(w http.ResponseWriter, r *http.Request) {
 	meta, favTracks, favAlbums, err := s.deps.Manifest.ListFavoritesForAdmin(r.Context())
 	if err != nil {
 		logger.Error("player favorites", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	resp := playerFavoritesResponse{
@@ -109,7 +109,7 @@ func (s *Server) apiPlayerFavorites(w http.ResponseWriter, r *http.Request) {
 	tracks, err := s.hydrateTracks(r, cat, paths)
 	if err != nil {
 		logger.Error("player favorites tracks", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	if tracks != nil {

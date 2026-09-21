@@ -152,7 +152,7 @@ export function engineCanPlay(contentType) {
  * honesty.
  */
 export function resolvePlayable(track, audioURLFor) {
-  const play = track && track.play;
+  const play = track?.play;
   if (!play) return null;
   if (play.kind !== "none" && engineCanPlay(play.contentType)) {
     return { url: audioURLFor(track.path, null), contentType: play.contentType, degraded: false };

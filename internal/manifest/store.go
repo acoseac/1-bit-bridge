@@ -26,6 +26,15 @@ import (
 	_ "modernc.org/sqlite" // register "sqlite" driver (pure-Go, no cgo)
 )
 
+// sqliteErrDuplicateColumn is the driver's message for an ALTER TABLE ADD
+// COLUMN against a column that already exists. Migrations are append-only and
+// must be idempotent, so four of them re-run their ADD COLUMN and swallow
+// exactly this error; matched as a substring because modernc.org/sqlite
+// wraps it. One spelling, because a typo in any one of the four turns an
+// idempotent migration into a startup failure on every host that already ran
+// it. (SonarCloud go:S1192.)
+const sqliteErrDuplicateColumn = "duplicate column name"
+
 // observeLockWait records SQLite transaction lock-wait timing into
 // both the Prometheus histogram (for /metrics scrapers) AND the
 // sliding-window backbone (for /v1/diagnostics's p50/p99 read).
@@ -976,7 +985,7 @@ var migrations = []migration{
 		sql: `-- column added in post() for idempotency; see migration v9 docblock`,
 		post: func(db *sql.DB) error {
 			if _, err := db.Exec(`ALTER TABLE track_analysis ADD COLUMN replaygain_track_db REAL`); err != nil &&
-				!strings.Contains(err.Error(), "duplicate column name") {
+				!strings.Contains(err.Error(), sqliteErrDuplicateColumn) {
 				return err
 			}
 			return nil
@@ -1006,7 +1015,7 @@ var migrations = []migration{
 				`ALTER TABLE track_analysis ADD COLUMN bpm INTEGER`,
 			} {
 				if _, err := db.Exec(stmt); err != nil &&
-					!strings.Contains(err.Error(), "duplicate column name") {
+					!strings.Contains(err.Error(), sqliteErrDuplicateColumn) {
 					return err
 				}
 			}
@@ -1092,7 +1101,7 @@ var migrations = []migration{
 				`ALTER TABLE smart_playlists ADD COLUMN modal_rate_hz INTEGER NOT NULL DEFAULT 0`,
 			} {
 				if _, err := db.Exec(stmt); err != nil &&
-					!strings.Contains(err.Error(), "duplicate column name") {
+					!strings.Contains(err.Error(), sqliteErrDuplicateColumn) {
 					return err
 				}
 			}
@@ -1638,7 +1647,7 @@ var migrations = []migration{
 				`ALTER TABLE track_analysis ADD COLUMN spectrum BLOB`,
 			} {
 				if _, err := db.Exec(stmt); err != nil &&
-					!strings.Contains(err.Error(), "duplicate column name") {
+					!strings.Contains(err.Error(), sqliteErrDuplicateColumn) {
 					return err
 				}
 			}
@@ -3246,6 +3255,41 @@ func (s *Store) DeleteTrack(ctx context.Context, path string) error {
 	return nil
 }
 
+// decideDeletionJournalMode applies the mass-op guard (deletion_journal.go):
+// a call reaping >10k paths or >25% of the library is a reorganization, not a
+// deletion list — reset journal coverage (delta clients answer
+// deltaIncomplete and full-sync) instead of writing a five-digit tombstone
+// set. Returns whether each chunk should be journalled, having ALREADY reset
+// coverage when it decides not to, so the two halves of that decision cannot
+// be separated by a caller.
+//
+// Runs on the caller's tx, inside the batch's single transaction: the count
+// it reads and the coverage reset it may write must both be part of the same
+// commit as the DELETEs they describe. Extracted from DeleteTracksBatch, whose
+// cognitive complexity this was most of (SonarCloud go:S3776, 16 against a
+// ceiling of 15 — a finding that predates #949 and surfaced on it only because
+// the file changed).
+func (s *Store) decideDeletionJournalMode(ctx context.Context, tx *sql.Tx, n int) (bool, error) {
+	perChunk := true
+	if n > deletionJournalMassOpAbsolute {
+		perChunk = false
+	} else {
+		var total int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks`).Scan(&total); err != nil {
+			return false, fmt.Errorf("count tracks: %w", err)
+		}
+		if total > 0 && n*deletionJournalMassOpLibraryDivisor > total {
+			perChunk = false
+		}
+	}
+	if !perChunk {
+		if err := resetDeletionJournalCoverageTx(ctx, tx, s.now().UnixNano()); err != nil {
+			return false, fmt.Errorf("reset journal coverage: %w", err)
+		}
+	}
+	return perChunk, nil
+}
+
 // DeleteTracksBatch removes many tracks in a SINGLE transaction +
 // single lock acquisition. Designed for the reconcile sweeps that may
 // reap thousands of rows after a configuration change (e.g. a UPnP
@@ -3288,26 +3332,9 @@ func (s *Store) DeleteTracksBatch(ctx context.Context, paths []string) error {
 	}
 	defer tx.Rollback() // no-op after Commit; structural rollback guarantee.
 
-	// Mass-op guard (deletion_journal.go): a call reaping >10k paths or
-	// >25% of the library is a reorganization, not a deletion list —
-	// reset journal coverage (delta clients answer deltaIncomplete and
-	// full-sync) instead of writing a five-digit tombstone set.
-	journalPerChunk := true
-	if len(paths) > deletionJournalMassOpAbsolute {
-		journalPerChunk = false
-	} else {
-		var total int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks`).Scan(&total); err != nil {
-			return fmt.Errorf("manifest: DeleteTracksBatch count tracks: %w", err)
-		}
-		if total > 0 && len(paths)*deletionJournalMassOpLibraryDivisor > total {
-			journalPerChunk = false
-		}
-	}
-	if !journalPerChunk {
-		if err := resetDeletionJournalCoverageTx(ctx, tx, s.now().UnixNano()); err != nil {
-			return fmt.Errorf("manifest: DeleteTracksBatch reset journal coverage: %w", err)
-		}
+	journalPerChunk, err := s.decideDeletionJournalMode(ctx, tx, len(paths))
+	if err != nil {
+		return fmt.Errorf("manifest: DeleteTracksBatch %w", err)
 	}
 
 	// Chunk to keep the SQL parameter list (and the `IN (?, ?, ...)`

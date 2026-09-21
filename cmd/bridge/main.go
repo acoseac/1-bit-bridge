@@ -2071,7 +2071,7 @@ type serveOpts struct {
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	addrOverride := fs.String("addr", "", "override listenAddress from config (host:port)")
 	initIfMissing := fs.Bool("init-if-missing", false, "on first run, write a default config if --config is missing, then serve (container convenience; env overrides still apply)")
 	if err := fs.Parse(args); err != nil {
@@ -5104,7 +5104,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 func pairCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	name := fs.String("name", "", "client name (e.g. \"iPhone 15 Pro\")")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -5139,7 +5139,7 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

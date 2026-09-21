@@ -124,7 +124,7 @@ func (s *Server) resolveVariantScope(r *http.Request, req scopeRequest) (variant
 		// the entire library.
 		normalised, ok := normaliseBrowsePath(req.Path)
 		if !ok {
-			return variantScope{}, badScope("bad-path",
+			return variantScope{}, badScope(errCodeBadPath,
 				"path must be a clean library-relative path (no traversal, no backslashes)")
 		}
 		return variantScope{Label: normalised, Prefix: normalised}, nil
@@ -187,7 +187,7 @@ func resolveTrackPathScope(raw []string) (variantScope, *scopeError) {
 		// one identity form that is not catalog-derived.
 		normalised, ok := normaliseBrowsePath(p)
 		if !ok || normalised == "" {
-			return variantScope{}, badScope("bad-path",
+			return variantScope{}, badScope(errCodeBadPath,
 				"trackPaths entries must be clean library-relative paths")
 		}
 		paths = append(paths, normalised)

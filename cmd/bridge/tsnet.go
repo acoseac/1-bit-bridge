@@ -34,7 +34,7 @@ import (
 func loadConfigForCmd(args []string, stderr io.Writer) (*config.Config, error) {
 	fs := flag.NewFlagSet("tsnet", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -446,7 +446,7 @@ const logoutConfirmPhrase = "WIPE"
 func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tsnet logout", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	force := fs.Bool("force", false, "skip running-instance check")
 	if err := fs.Parse(args); err != nil {
 		return 1

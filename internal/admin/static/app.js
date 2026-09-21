@@ -233,12 +233,12 @@ function initStats() {
       try {
         const r = await API.post("/api/enrichment/retry");
         enrichRetryBtn.textContent =
-          r && r.resetTracks > 0 ? `Re-queued ${r.resetTracks}` : "Re-checked";
+          r?.resetTracks > 0 ? `Re-queued ${r.resetTracks}` : "Re-checked";
         // Repaint from the snapshot the handler computed post-reset. The
         // enrichment SSE event rides the 30s slow ticker, so without this the
         // panel keeps showing "0 tracks in the queue · all caught up" for up
         // to half a minute after a click that just queued thousands.
-        if (r && r.enrichment) applyEnrichment(r.enrichment);
+        if (r?.enrichment) applyEnrichment(r.enrichment);
         // The breakdown just became stale by construction. Drop it so a
         // reopen re-fetches rather than showing the pre-retry answer.
         enrichMissesLoaded = false;
@@ -424,7 +424,7 @@ function applySidebarSourceStatus(servers) {
   if (!nav) return;
   const byID = new Map();
   for (const srv of servers) {
-    if (srv && srv.sourceId) byID.set(srv.sourceId, !!srv.online);
+    if (srv?.sourceId) byID.set(srv.sourceId, !!srv.online);
   }
   for (const a of nav.querySelectorAll("[data-source-id]")) {
     const online = byID.get(a.dataset.sourceId);
@@ -1461,7 +1461,7 @@ async function restoreTrash(id) {
     const failed = (res.outcomes || []).find((o) => o.status === "failed");
     setText("trash-status", failed ? `Could not restore: ${failed.reason}` : "Restored.");
   } catch (e) {
-    setText("trash-status", e && e.message ? e.message : String(e));
+    setText("trash-status", e?.message ? e.message : String(e));
   }
   refreshTrash();
   refreshSpaceMeter();
@@ -1478,7 +1478,7 @@ async function emptyTrash() {
     const res = await API.delete("/api/library/trash");
     setText("trash-status", `Reclaimed ${formatBytes(res.bytes || 0)}.`);
   } catch (e) {
-    setText("trash-status", e && e.message ? e.message : String(e));
+    setText("trash-status", e?.message ? e.message : String(e));
   }
   refreshTrash();
   refreshSpaceMeter();
@@ -1542,7 +1542,7 @@ function initUpload() {
 
   API.get("/api/settings")
     .then((cfg) => {
-      if (cfg && cfg.uploadEnabled) {
+      if (cfg?.uploadEnabled) {
         panel.hidden = false;
         wireUpload(signal);
         return;
@@ -1578,7 +1578,7 @@ function wireUpload(signal) {
   const folderInput = document.getElementById("upload-folder");
 
   API.get("/api/library/space")
-    .then((sp) => setText("upload-root", sp && sp.root ? sp.root : "your library"))
+    .then((sp) => setText("upload-root", sp?.root ? sp.root : "your library"))
     .catch(() => {});
 
   // Surface an interrupted session BEFORE the operator re-picks. A browser
@@ -1705,7 +1705,7 @@ async function discardResumable() {
   try {
     await API.delete(`/api/upload/sessions/${encodeURIComponent(s.id)}`);
   } catch (e) {
-    showUploadError(e && e.message ? e.message : String(e));
+    showUploadError(e?.message ? e.message : String(e));
     return;
   }
   await refreshResumable();
@@ -1758,7 +1758,7 @@ async function collectFromDataTransfer(dt) {
 }
 
 function stageFiles(picked) {
-  const present = picked.filter((p) => p.file && p.file.size >= 0);
+  const present = picked.filter((p) => p.file?.size >= 0);
   const usable = present.filter((p) => !isOSJunkPath(p.path));
   const junk = present.length - usable.length;
   if (!usable.length) {
@@ -1840,7 +1840,7 @@ async function startUpload() {
 
     // Files the SERVER would not take. Reported, not fatal — the acceptable
     // ones still upload.
-    if (session.rejected && session.rejected.length) {
+    if (session.rejected?.length) {
       showUploadError(
         `${session.rejected.length} file${session.rejected.length === 1 ? " was" : "s were"} skipped:`,
         session.rejected.map((r) => `${r.path} — ${r.reason}`),
@@ -1854,7 +1854,7 @@ async function startUpload() {
     if (dupes.length && !overwrite) {
       const keep = uploadState.picked.filter((p) => {
         const f = session.files.find((x) => x.path === p.path);
-        return !(f && f.duplicateOf);
+        return !(f?.duplicateOf);
       });
       const note = document.getElementById("upload-dupe-note");
       note.hidden = false;
@@ -1885,7 +1885,7 @@ async function startUpload() {
     const res = await API.post(`/api/upload/sessions/${encodeURIComponent(session.id)}/commit`);
     reportCommit(res);
   } catch (e) {
-    showUploadError(e && e.message ? e.message : String(e));
+    showUploadError(e?.message ? e.message : String(e));
   } finally {
     start.disabled = false;
     document.getElementById("upload-progress").hidden = true;
@@ -1968,7 +1968,7 @@ async function transferAll(session) {
 // end, because silently dropping an integrity guarantee is worse than not
 // having offered one.
 async function chunkDigestHeaders(bytes) {
-  const subtle = globalThis.crypto && globalThis.crypto.subtle;
+  const subtle = globalThis.crypto?.subtle;
   if (!subtle) {
     if (uploadState) uploadState.digestUnavailable = true;
     return null;
@@ -2071,7 +2071,7 @@ function showUploadError(msg, details) {
   if (!el) return;
   el.replaceChildren();
   el.appendChild(document.createTextNode(msg));
-  if (details && details.length) {
+  if (details?.length) {
     const ul = document.createElement("ul");
     ul.className = "error-details";
     for (const d of details.slice(0, 6)) {
@@ -2740,7 +2740,7 @@ function upnpConfiguredRowHTML(s) {
  */
 let upnpWasWalking = false;
 function applyUpnpWalk(data) {
-  const walking = !!(data && data.walking);
+  const walking = !!(data?.walking);
   // Recorded BEFORE anything can return early. A frame arriving while the
   // list is still loading would otherwise leave the transition
   // unrecorded, and the closing frame would then find no rising edge to
@@ -3001,14 +3001,14 @@ const RESTART_PENDING_KEY = "bridge.restartPending";
  * against a stale tab reporting nothing at all.
  */
 function applyStatusFor(resp, field) {
-  const entry = resp && resp.fields && resp.fields[field];
-  if (entry && entry.status) return entry;
-  return { status: resp && resp.restartRequired ? "restart" : "live" };
+  const entry = resp?.fields?.[field];
+  if (entry?.status) return entry;
+  return { status: resp?.restartRequired ? "restart" : "live" };
 }
 
 /** Field names from a PATCH response whose status is `restart`. */
 function fieldsNeedingRestart(resp) {
-  const fields = (resp && resp.fields) || {};
+  const fields = (resp?.fields) || {};
   const out = Object.keys(fields).filter((k) => fields[k].status === "restart");
   // Sorted so the same set of edits always reads the same way; an
   // object's key order is insertion-dependent and would otherwise shuffle
@@ -3020,7 +3020,7 @@ function fieldsNeedingRestart(resp) {
   // two agree — the comparator is what keeps that from being load-bearing.
   out.sort((a, b) => a.localeCompare(b));
   // A bridge too old to send `fields` still sets the boolean.
-  if (!out.length && resp && resp.restartRequired) return ["some settings"];
+  if (!out.length && resp?.restartRequired) return ["some settings"];
   return out;
 }
 
@@ -3783,7 +3783,11 @@ function initSettingsTabs() {
   const urlTab = new URLSearchParams(window.location.search).get("tab");
   let saved = null;
   try { saved = sessionStorage.getItem("settings.activeTab"); } catch { /* private mode */ }
-  const initial = (urlTab && byId.has(urlTab)) ? urlTab : (saved && byId.has(saved) ? saved : null);
+  // URL wins over the remembered tab, and both must still name a section
+  // that exists — a saved id survives a release that removed its pane.
+  let initial = null;
+  if (urlTab && byId.has(urlTab)) initial = urlTab;
+  else if (saved && byId.has(saved)) initial = saved;
   if (initial) {
     // Jump without smooth scrolling on load — animating to a section
     // the operator asked for by URL just delays it.
@@ -3829,7 +3833,7 @@ async function renderSettingsPrereqs() {
     API.get("/api/upscale/stats").catch(() => null),
   ]);
   const checks = new Map();
-  if (doctor && doctor.available && doctor.report && Array.isArray(doctor.report.checks)) {
+  if (doctor?.available && doctor.report && Array.isArray(doctor.report.checks)) {
     for (const c of doctor.report.checks) checks.set(c.name, c);
   }
 
@@ -3846,7 +3850,7 @@ async function renderSettingsPrereqs() {
       // way the disagreement points, because the fix differs: a
       // missing tool needs installing, a tool that is present now
       // needs a restart to be picked up.
-      const live = check && check.status === "ok";
+      const live = check?.status === "ok";
       slot.dataset.state = "warn";
       slot.textContent = live
         ? "not running — restart to apply"
@@ -3859,27 +3863,27 @@ async function renderSettingsPrereqs() {
 
   const audio = checks.get("audio-toolchain");
   paint(slots.analysis, {
-    running: !!(jobs && jobs.analysis && jobs.analysis.enabled && !jobs.analysis.degradedReason),
-    degradedReason: jobs && jobs.analysis && jobs.analysis.enabled ? jobs.analysis.degradedReason : "",
+    running: !!(jobs?.analysis?.enabled && !jobs.analysis.degradedReason),
+    degradedReason: jobs?.analysis?.enabled ? jobs.analysis.degradedReason : "",
     check: audio,
-    offLabel: audio && audio.status === "ok" ? "off — sox is available" : "off",
+    offLabel: audio?.status === "ok" ? "off — sox is available" : "off",
   });
   // `enabled` here is the RUNTIME verdict, not the persisted config flag:
   // the handler reports it as "the pool exists", so a config that says on
   // with a boot-time precheck that failed reads as off — which is the
   // disagreement this chip exists to surface.
   paint(slots.upscale, {
-    running: !!(upscale && upscale.enabled),
+    running: !!(upscale?.enabled),
     degradedReason: "",
     check: audio,
-    offLabel: audio && audio.status === "ok" ? "off — sox is available" : "off",
+    offLabel: audio?.status === "ok" ? "off — sox is available" : "off",
   });
   const fp = checks.get("fingerprint-toolchain");
   paint(slots.fingerprint, {
-    running: !!(jobs && jobs.fingerprint && jobs.fingerprint.enabled),
+    running: !!(jobs?.fingerprint?.enabled),
     degradedReason: "",
     check: fp,
-    offLabel: fp && fp.status === "ok" ? "off" : "off — needs fpcalc and an AcoustID key",
+    offLabel: fp?.status === "ok" ? "off" : "off — needs fpcalc and an AcoustID key",
   });
 }
 
@@ -4288,7 +4292,7 @@ function initSettings() {
       let post = supervised
         ? "Restart signalled. Reload the page in a few seconds."
         : "Stop signalled. Start the bridge again manually, then reload.";
-      if (r && r.drained === false && r.inflight > 0) {
+      if (r?.drained === false && r.inflight > 0) {
         // Say it plainly rather than reporting a clean restart: someone
         // was listening and we went ahead anyway.
         post = `${post} (${r.inflight} stream${r.inflight === 1 ? "" : "s"} still ` +
@@ -4599,7 +4603,7 @@ function renderWorkerGrid(r) {
   const panel = document.getElementById("workers-panel");
   const grid = document.getElementById("workers-grid");
   if (!panel || !grid) return; // not on the Jobs page
-  const workers = (r && r.pool && r.pool.activeWorkers) || [];
+  const workers = (r?.pool?.activeWorkers) || [];
   if (workers.length === 0) {
     panel.hidden = true;
     grid.textContent = "";
@@ -5099,7 +5103,7 @@ function initJobs() {
       retry.disabled = true;
       try {
         const r = await API.post("/api/enrichment/retry");
-        if (r && r.enrichment) applyEnrichment(r.enrichment);
+        if (r?.enrichment) applyEnrichment(r.enrichment);
         retry.textContent = "Re-queued";
       } catch (err) {
         retry.textContent = err.message.includes("rate_limited") ? "Try again in a minute" : "Retry failed";
@@ -5445,7 +5449,14 @@ function renderJobCards(j) {
     // the restart, so the click handler latches the button and this
     // refresh must not un-latch it back to "Enable".
     const fpEnable = document.getElementById("jobs-fp-enable");
-    if (fpEnable && fpEnable.dataset.latched !== "true") fpEnable.hidden = fp.enabled;
+    // NOT `fpEnable?.dataset.latched !== "true"`, which SonarCloud js:S6582
+    // would have you write: with no element that reads `undefined !== "true"`,
+    // i.e. TRUE, and the body then throws on fpEnable.hidden. The `&&` form
+    // guards the element; the optional-chain form guards only the lookup, and
+    // a `!==` downstream inverts the miss.
+    if (fpEnable && fpEnable.dataset.latched !== "true") {
+      fpEnable.hidden = fp.enabled;
+    }
     const fpHint = document.getElementById("job-fp-hint");
     if (fpHint && fp.enabled && !fp.active && fp.degradedReason) {
       // textContent wipes the static settings link along with the old
@@ -5490,8 +5501,8 @@ function renderJobCards(j) {
   // which is what a card keyed on the numbers alone would show.
   const lyr = j.lyrics;
   const lyrCard = document.getElementById("job-lyrics-card");
-  if (lyrCard) lyrCard.hidden = !(lyr && lyr.enabled);
-  if (lyr && lyr.enabled) {
+  if (lyrCard) lyrCard.hidden = !(lyr?.enabled);
+  if (lyr?.enabled) {
     setBadge("job-lyrics-state", "running", "on");
     if (lyr.available) {
       setText("job-lyrics-stored",
@@ -5755,7 +5766,7 @@ function jobsRender(payload) {
   // values when a later poll yielded `samples < 3` (e.g., after
   // the bridge restarted and the rolling window emptied). Per
   // CodeRabbit minor on PR #205 round 2.
-  if (tp && tp.samples >= 3) {
+  if (tp?.samples >= 3) {
     document.getElementById("jobs-throughput-panel").hidden = false;
     document.getElementById("jobs-throughput-rate").textContent =
       tp.jobsPerHour.toFixed(0);
@@ -6252,11 +6263,10 @@ function renderDoctorReport(report) {
   // Lead with the verdict, in the operator's terms. "11 ok, 0 warn,
   // 0 fail" is the CLI footer; saying whether anything needs attention
   // first means the common case is readable without parsing counts.
-  status.textContent = fail > 0
-    ? `${fail} check${fail === 1 ? "" : "s"} failing — see below.`
-    : warn > 0
-      ? `No failures, ${warn} warning${warn === 1 ? "" : "s"}.`
-      : "All checks passed.";
+  let verdict = "All checks passed.";
+  if (fail > 0) verdict = `${fail} check${fail === 1 ? "" : "s"} failing — see below.`;
+  else if (warn > 0) verdict = `No failures, ${warn} warning${warn === 1 ? "" : "s"}.`;
+  status.textContent = verdict;
 
   const ul = document.createElement("ul");
   ul.className = "doctor-list";
@@ -6801,7 +6811,7 @@ function highlightCamelot(code, segByCode, coverage) {
 function clearCamelot(segByCode) {
   segByCode.forEach((seg) => seg.classList.remove("is-hover", "is-compat", "is-dim"));
   const readout = document.getElementById("camelot-readout");
-  if (readout && readout.dataset.summary) readout.textContent = readout.dataset.summary;
+  if (readout?.dataset.summary) readout.textContent = readout.dataset.summary;
 }
 
 // camelotOpenKeyByCode deep-links to the player's key-filtered track
@@ -7121,7 +7131,7 @@ function initDuplicates() {
     btn.disabled = true;
     try {
       const ack = await API.post("/api/duplicates/sweep");
-      if (ack && ack.scanInFlight) {
+      if (ack?.scanInFlight) {
         // The nudge is deferred while a scan runs (its tail stamps under
         // the current policy) — say so instead of silently no-opping.
         const stampLine = document.getElementById("dupes-stamp-line");
@@ -7358,7 +7368,7 @@ function markNavCurrent(links, match) {
 // page load would have given. Without this, client-side navigation is silent.
 function boostFocusMain(main) {
   const h = main.querySelector("h1");
-  const label = (h && h.textContent.trim()) || "";
+  const label = h?.textContent.trim() || "";
   if (h) {
     if (!h.hasAttribute("tabindex")) h.setAttribute("tabindex", "-1");
     try { h.focus({ preventScroll: true }); } catch { /* ignore */ }

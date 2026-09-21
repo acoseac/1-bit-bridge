@@ -167,7 +167,7 @@ export function emptyState(title, detail, action) {
 export function errorState(err, retry) {
   const box = el("div", { class: "player-empty" },
     el("h2", { text: "Something went wrong" }),
-    el("p", { class: "muted", text: String(err && err.message ? err.message : err) }));
+    el("p", { class: "muted", text: String(err?.message ? err.message : err) }));
   if (retry) box.appendChild(el("button", { class: "btn", text: "Try again", on: { click: retry } }));
   return box;
 }

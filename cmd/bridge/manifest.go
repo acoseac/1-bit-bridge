@@ -12,6 +12,12 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// cmdNameManifestClearMissing is this subcommand's name, used for the
+// FlagSet and as the subject of the running-bridge refusal — a mismatch
+// between the two would tell the operator to re-run a command that does
+// not exist. (SonarCloud go:S1192.)
+const cmdNameManifestClearMissing = "manifest clear-missing"
+
 // manifestCmd dispatches `bridge manifest <subcommand>`. The single
 // subcommand today is `clear-missing` — an operator escape hatch for
 // the missing_count grace period. An operator who KNOWS a mount has
@@ -61,7 +67,7 @@ func manifestCmd(ctx context.Context, args []string, stdin io.Reader, stdout, st
 // is touched (on the --yes path too, so a scripted run leaves a record
 // of which database it hit).
 func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("manifest clear-missing", flag.ContinueOnError)
+	fs := flag.NewFlagSet(cmdNameManifestClearMissing, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var yes bool
 	fs.BoolVar(&yes, "yes", false, "skip the WIPE confirmation prompt")
@@ -92,7 +98,7 @@ func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader
 	// process, and Store.mu serialises writers within one process only —
 	// busy_timeout is a retry, not a serializer. enrichmentRetryCmd and
 	// tryLibraryViaAdmin both refuse the same state for the same reason.
-	if refuseIfBridgeMayBeRunning(ctx, cfg, "manifest clear-missing", stderr) {
+	if refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
 		return 1
 	}
 
@@ -114,7 +120,7 @@ func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader
 	}
 
 	// Re-probe after the confirmation wait — same reason as restore's.
-	if refuseIfBridgeMayBeRunning(ctx, cfg, "manifest clear-missing", stderr) {
+	if refuseIfBridgeMayBeRunning(ctx, cfg, cmdNameManifestClearMissing, stderr) {
 		return 1
 	}
 

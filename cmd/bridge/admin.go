@@ -177,7 +177,7 @@ func loadConfigForAdminCmd(override string) (*config.Config, string, error) {
 func adminLoginLink(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("admin login-link", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	username := fs.String("username", "admin", "account to log in as (single-user system; \"admin\" by default)")
 	base := fs.String("base", "", "absolute base URL to prefix, e.g. https://host:7789 (default: print the path only)")
 	ttl := fs.Duration("ttl", adminauth.LoginTicketTTL,

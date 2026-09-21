@@ -60,7 +60,7 @@ func duplicatesFlagSet(stderr io.Writer) (*flag.FlagSet, *duplicatesOpts) {
 	o := &duplicatesOpts{}
 	fs := flag.NewFlagSet("duplicates", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.StringVar(&o.configPath, "config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	fs.StringVar(&o.configPath, "config", "", configFlagUsage)
 	fs.StringVar(&o.pathScope, "path", "", "restrict to a library subtree (default: whole library)")
 	fs.StringVar(&o.tier, "tier", "", "narrow to one tier: different-format | different-audio | same-format | identical-audio | inconclusive | self-nested")
 	fs.IntVar(&o.limit, "limit", 50, "maximum groups to print per tier (0 = counts only)")

@@ -43,7 +43,7 @@ import (
 func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	check := fs.Bool("check", false, "poll for an update and print the result; don't install")
 	yes := fs.Bool("yes", false, "non-interactive: skip the install + post-install restart prompts")
 	fs.BoolVar(yes, "y", *yes, "alias for --yes")

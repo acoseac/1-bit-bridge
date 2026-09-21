@@ -31,7 +31,7 @@ import (
 func analyzeCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", "", "path to config file (default: ./bridge.yaml, else the platform config dir)")
+	configPath := fs.String("config", "", configFlagUsage)
 	workers := fs.Int("workers", 0, "concurrent decoders; 0 = max(1, NumCPU/2)")
 	filter := fs.String("filter", "", "case-sensitive substring filter on track path (empty = all)")
 	dryRun := fs.Bool("dry-run", false, "list how many tracks would be analyzed without doing it")

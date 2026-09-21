@@ -48,6 +48,13 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// cacheControlPrivateDay is the Cache-Control for derived artwork the console
+// re-requests on every grid paint: private because it is library content on a
+// credentialed surface, a day because the key already carries the artwork
+// version, so a cover change produces a different URL rather than a stale
+// hit. (SonarCloud go:S1192.)
+const cacheControlPrivateDay = "private, max-age=86400"
+
 // adminMBIDPattern / adminArtworkMBIDPattern mirror the /v1 twins in
 // internal/api/artwork.go (mbidPattern / artworkMBIDPattern — keep in
 // lockstep; TestAdminArtworkPatternMatchesV1 fails the build of the
@@ -492,13 +499,13 @@ func (s *Server) libMetaInvalidateUnder(prefix string) {
 func (s *Server) apiLibraryEnrichmentRefs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
 	normalised, ok := normaliseBrowsePath(safeQuery(r).Get("path"))
 	if !ok {
-		writeError(w, http.StatusBadRequest, "bad-path",
-			"path contains traversal segments or is otherwise invalid")
+		writeError(w, http.StatusBadRequest, errCodeBadPath,
+			errMsgBadPath)
 		return
 	}
 	s.libMetaRefs.serve(w, r, normalised, "meta-refs",
@@ -694,13 +701,13 @@ type libraryMetaDetailResponse struct {
 func (s *Server) apiLibraryEnrichmentDetail(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
 	normalised, ok := normaliseBrowsePath(safeQuery(r).Get("path"))
 	if !ok {
-		writeError(w, http.StatusBadRequest, "bad-path",
-			"path contains traversal segments or is otherwise invalid")
+		writeError(w, http.StatusBadRequest, errCodeBadPath,
+			errMsgBadPath)
 		return
 	}
 	s.libMetaDetail.serve(w, r, normalised, "meta-detail",
@@ -840,7 +847,7 @@ type libraryMetaRetryResponse struct {
 // don't raise the call rate.
 func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "manifest store not wired")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
 		return
 	}
 	var req libraryMetaRetryRequest
@@ -851,8 +858,8 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 	}
 	normalised, ok := normaliseBrowsePath(req.Path)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "bad-path",
-			"path contains traversal segments or is otherwise invalid")
+		writeError(w, http.StatusBadRequest, errCodeBadPath,
+			errMsgBadPath)
 		return
 	}
 
@@ -984,18 +991,18 @@ func serveCacheFile(w http.ResponseWriter, r *http.Request, path, contentType, c
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "not_found", "not cached")
+			writeError(w, http.StatusNotFound, "not_found", errMsgNotCached)
 			return
 		}
 		logger.Error("open cache file", "path", path, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
 		logger.Error("stat cache file", "path", path, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
@@ -1012,7 +1019,7 @@ func artworkCacheControl(mbid string, hasVersionParam bool) string {
 	if hasVersionParam || strings.HasPrefix(mbid, "local-") {
 		return "private, max-age=31536000, immutable"
 	}
-	return "private, max-age=86400"
+	return cacheControlPrivateDay
 }
 
 // apiLibraryArtwork handles GET /api/library/artwork/{mbid}?size=&v=.
@@ -1039,17 +1046,17 @@ func (s *Server) apiLibraryArtwork(w http.ResponseWriter, r *http.Request) {
 	hasVersionParam := r.URL.Query().Get("v") != ""
 	if adminArtworkVersionAliasPattern.MatchString(mbid) {
 		if s.deps.Manifest == nil {
-			writeError(w, http.StatusNotFound, "not_found", "not cached")
+			writeError(w, http.StatusNotFound, "not_found", errMsgNotCached)
 			return
 		}
 		resolved, err := s.deps.Manifest.ResolveArtworkVersionMBID(r.Context(), mbid)
 		if err != nil {
 			logger.Error("resolve artwork version", "version", mbid, "err", err)
-			writeError(w, http.StatusInternalServerError, "internal", "internal error")
+			writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 			return
 		}
 		if resolved == "" {
-			writeError(w, http.StatusNotFound, "not_found", "not cached")
+			writeError(w, http.StatusNotFound, "not_found", errMsgNotCached)
 			return
 		}
 		// The tag IS the content key, so the resolved response is
@@ -1071,7 +1078,7 @@ func (s *Server) apiLibraryArtwork(w http.ResponseWriter, r *http.Request) {
 		return s.deps.ArtworkPath(mbid, px)
 	})
 	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "not cached")
+		writeError(w, http.StatusNotFound, "not_found", errMsgNotCached)
 		return
 	}
 	serveCacheFile(w, r, path, "image/jpeg", cc)
@@ -1134,7 +1141,7 @@ func (s *Server) apiLibraryArtistImage(w http.ResponseWriter, r *http.Request) {
 // is a pure function of the source, and deriveThumb already rebuilds it
 // when the source moves.
 func artistImageCacheControl(src, token string) string {
-	const short = "private, max-age=86400"
+	const short = cacheControlPrivateDay
 	if token == "" {
 		return short
 	}
@@ -1165,7 +1172,7 @@ func (s *Server) apiLibraryBooklet(w http.ResponseWriter, r *http.Request) {
 	row, err := s.deps.Manifest.GetBooklet(r.Context(), mbid)
 	if err != nil {
 		logger.Error("booklet lookup", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	if row == nil || !row.Available {
@@ -1184,19 +1191,19 @@ func (s *Server) apiLibraryBooklet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Error("open booklet", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
 		logger.Error("stat booklet", "mbid", mbid, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error")
+		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", `inline; filename="booklet-`+mbid+`.pdf"`)
-	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("Cache-Control", cacheControlPrivateDay)
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 

@@ -11,6 +11,12 @@ import (
 	"sync/atomic"
 )
 
+// upnpClassStorageFolder is the DIDL-Lite class every folder container
+// advertises. A spec string, repeated across the browse response builder and
+// the XML walker that parses it back — one spelling so the writer and the
+// reader cannot disagree. (SonarCloud go:S1192.)
+const upnpClassStorageFolder = "object.container.storageFolder"
+
 // -----------------------------------------------------------------------------
 // LibrarySource — the adapter interface ContentDirectory depends on
 // -----------------------------------------------------------------------------
@@ -601,7 +607,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 				// storageUsed>` for storageFolder spec compliance.
 				// See the BrowseDirectChildren root branch below
 				// for the full reference-vs-ours diff rationale.
-				UPnPClass: "object.container.storageFolder",
+				UPnPClass: upnpClassStorageFolder,
 			})
 		case foldersRootObjectID:
 			// "Folders" root container — surfaced alongside All
@@ -612,7 +618,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 			selfDIDL = DIDLForContainer(DIDLContainerOpts{
 				ID: foldersRootObjectID, ParentID: "0", Title: "Folders",
 				ChildCount: len(folderIndex.TopLevelFolderIDs) + len(folderIndex.TopLevelTrackIDs),
-				UPnPClass:  "object.container.storageFolder",
+				UPnPClass:  upnpClassStorageFolder,
 			})
 		default:
 			// Could be a hashed folder ObjectID OR an individual track
@@ -623,7 +629,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 				selfDIDL = DIDLForContainer(DIDLContainerOpts{
 					ID: node.ObjectID, ParentID: node.ParentID, Title: node.Name,
 					ChildCount: len(node.ChildFolderIDs) + len(node.ChildTrackIDs),
-					UPnPClass:  "object.container.storageFolder",
+					UPnPClass:  upnpClassStorageFolder,
 					ArtworkURL: folderArtworkURL(folderIndex, node, emit),
 				})
 				break
@@ -760,7 +766,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 				// 2Go reference proves. **Don't reintroduce
 				// `playlistContainer`** here — it was a wrong-
 				// hypothesis detour from Gemini round-3.
-				UPnPClass: "object.container.storageFolder",
+				UPnPClass: upnpClassStorageFolder,
 			}),
 			// "Folders" sibling container — emitted alongside All
 			// Tracks per PR #316's folder-hierarchy work. Lets users
@@ -770,7 +776,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc 
 			DIDLForContainer(DIDLContainerOpts{
 				ID: foldersRootObjectID, ParentID: "0", Title: "Folders",
 				ChildCount: len(folderIndex.TopLevelFolderIDs) + len(folderIndex.TopLevelTrackIDs),
-				UPnPClass:  "object.container.storageFolder",
+				UPnPClass:  upnpClassStorageFolder,
 			}),
 		}
 		// Honour StartingIndex / RequestedCount on the root too — strict
@@ -1178,7 +1184,7 @@ func browseFolderChildren(
 			out = append(out, DIDLForContainer(DIDLContainerOpts{
 				ID: node.ObjectID, ParentID: parentID, Title: node.Name,
 				ChildCount: len(node.ChildFolderIDs) + len(node.ChildTrackIDs),
-				UPnPClass:  "object.container.storageFolder",
+				UPnPClass:  upnpClassStorageFolder,
 				ArtworkURL: folderArtworkURL(folderIndex, node, emit),
 			}))
 			continue
