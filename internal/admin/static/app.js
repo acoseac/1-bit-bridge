@@ -5449,12 +5449,14 @@ function renderJobCards(j) {
     // the restart, so the click handler latches the button and this
     // refresh must not un-latch it back to "Enable".
     const fpEnable = document.getElementById("jobs-fp-enable");
-    // NOT `fpEnable?.dataset.latched !== "true"`, which SonarCloud go/js S6582
-  // would have you write: with no element that reads `undefined !== "true"`,
-  // i.e. TRUE, and the body then throws on fpEnable.hidden. The `&&` form
-  // guards the element; the optional-chain form guards only the lookup, and
-  // a `!==` downstream inverts the miss.
-  if (fpEnable && fpEnable.dataset.latched !== "true") fpEnable.hidden = fp.enabled;
+    // NOT `fpEnable?.dataset.latched !== "true"`, which SonarCloud js:S6582
+    // would have you write: with no element that reads `undefined !== "true"`,
+    // i.e. TRUE, and the body then throws on fpEnable.hidden. The `&&` form
+    // guards the element; the optional-chain form guards only the lookup, and
+    // a `!==` downstream inverts the miss.
+    if (fpEnable && fpEnable.dataset.latched !== "true") {
+      fpEnable.hidden = fp.enabled;
+    }
     const fpHint = document.getElementById("job-fp-hint");
     if (fpHint && fp.enabled && !fp.active && fp.degradedReason) {
       // textContent wipes the static settings link along with the old

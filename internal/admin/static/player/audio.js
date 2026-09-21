@@ -680,9 +680,17 @@ const REPEAT_CYCLE = { off: "all", all: "one", one: "off" };
 
 export function cycleRepeat() {
   // off -> all -> one -> off. A table, not a chained ternary: the cycle is
-  // data, and the `?? "off"` keeps the old fall-through for a persisted
+  // data, and the fall-through keeps the old ladder's answer for a persisted
   // value this build does not know.
-  state.repeat = REPEAT_CYCLE[state.repeat] ?? "off";
+  //
+  // Object.hasOwn, NOT `REPEAT_CYCLE[state.repeat] ?? "off"`: a plain lookup
+  // reads INHERITED properties, so a persisted "__proto__" / "constructor" /
+  // "toString" returns an object or a function — truthy, so `??` never fires —
+  // and state.repeat stops being a string. The chained ternary this replaced
+  // answered "off" for all four. (CodeRabbit on #949.)
+  state.repeat = Object.hasOwn(REPEAT_CYCLE, state.repeat)
+    ? REPEAT_CYCLE[state.repeat]
+    : "off";
   maybePrime();
   persist();
   emit();

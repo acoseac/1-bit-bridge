@@ -7663,8 +7663,23 @@ given a parse error ships as a blank console with every check green.
 
 Three genuine nested ternaries became statements: the settings initial-tab pick
 (nested in the else branch), the doctor verdict ladder, and the player's repeat
-cycle — now a lookup table, verified equivalent on all seven inputs including
-the unknown-value fall-through. The other 21 are `${n === 1 ? "" : "s"}`
+cycle — now a lookup table.
+
+⚠️ **The first form of that table was WRONG, and my equivalence check missed
+it.** `REPEAT_CYCLE[state.repeat] ?? "off"` reads INHERITED properties: a
+persisted `"__proto__"`, `"constructor"`, `"toString"` or `"valueOf"` returns
+an object or a function — truthy, so `??` never fires — and `state.repeat`
+stops being a string. The chained ternary it replaced answered `"off"` for all
+four. Caught by CodeRabbit on #949; the fix is `Object.hasOwn`.
+
+**The claim "verified equivalent on every input" was false when I wrote it**,
+in the commit message, the PR body and this entry. The truth table I ran was
+`["off","all","one","bogus",undefined,null,""]` — seven inputs, none of them a
+prototype key, so it agreed with itself. A table-driven equivalence check is
+only as good as the adversarial inputs in the table, and for a JS object
+keyed on untrusted persisted state those keys are the first ones to try. The
+re-run covers fourteen inputs including all four prototype keys: zero
+mismatches. The other 21 are `${n === 1 ? "" : "s"}`
 pluralisation inside a template literal inside a ternary. Extracting those
 costs a line of indirection per string and buys no reader anything.
 
@@ -7676,6 +7691,28 @@ the same field, the same consultation — and the guard went red on a change tha
 did not touch its subject. It now matches either spelling and was re-controlled
 against an actual removal. **A scan guard should anchor on the thing it is
 about, not on the punctuation around it.**
+
+### The second pre-existing S3776, and an uncovered branch
+
+`DeleteTracksBatch` (blame 2026-06-06, #351) surfaced the same way
+`apiRootsRemove` did on #948 — the file changed, so a pre-existing finding
+attached to the PR. Fixed by extracting the mass-op journal decision into
+`decideDeletionJournalMode`, which returns whether to journal each chunk
+having ALREADY reset coverage when it decides not to, so the two halves of
+that decision cannot be separated by a caller. It runs on the caller's tx
+because the count it reads and the reset it may write must land in the same
+commit as the DELETEs they describe — this is the deletion path, and the
+atomicity contract in the docblock above it is the whole point.
+
+⚠️ **The first negative control passed, and that was the finding.**
+Neutralising the ABSOLUTE arm (`n > deletionJournalMassOpAbsolute`, >10k
+paths) left `TestJournal_DeleteTracksBatchMassOpResetsCoverage` green — the
+mutation was verified present in the file first, so this was not the vacuous
+kind. That test drives the PERCENTAGE arm; neutralising THAT one turns it red
+(`mass-op must NOT write per-path tombstones, got map[...]`), which is what
+pins the extraction. **The >10k absolute threshold has no test at all.** Not
+added here: it needs a 10,001-path fixture in the package whose race-detector
+cost this file already documents at ~48x.
 
 ### What was NOT swept
 
