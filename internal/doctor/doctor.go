@@ -427,6 +427,27 @@ func tlsCertPairCheck(certPath, keyPath string) Check {
 	// `Validate()` does not stat the library roots. Expiry still grades,
 	// because it was read from the cert, which is 0644.
 	//
+	// ONE `now` for both ends of the validity window, so the two
+	// comparisons below cannot straddle a tick.
+	now := time.Now()
+	// The window has a FAR end too, and a cert that has not started is
+	// rejected by clients exactly like an expired one. `LoadX509KeyPair`
+	// does not look at dates, so the pair check above passes and this
+	// would otherwise read `present, expires in 396 days` about a cert
+	// nothing will accept. Reachable on this product's hardware: the
+	// mint allows one hour of clock skew (`NotBefore: now-1h`), so a
+	// host whose clock was further ahead than that when the cert was
+	// minted — a NUC or Pi with no RTC, before NTP lands — leaves a
+	// NotBefore in the future once the clock is corrected. Moving the
+	// data directory off such a host is this check's own subject.
+	if info.NotBefore.After(now) {
+		return warn(checkNameTLSCert,
+			fmt.Sprintf("present, NOT YET VALID (starts %s)", info.NotBefore.UTC().Format(time.RFC3339)),
+			"clients reject a certificate before its NotBefore exactly as they reject an expired one, so every "+
+				"paired device fails to connect until then. This usually means the host clock was ahead when the "+
+				"certificate was minted — CHECK THE CLOCK FIRST (`timedatectl` / `sntp -sS`), because rotating "+
+				"against a wrong clock mints another one. Once the clock is right: "+servertls.RotationRemediation)
+	}
 	// Remaining validity comes from NotAfter directly, NOT from
 	// DaysUntilExpiry: that count truncates toward zero, so a cert with
 	// 30 days 23 hours left reads as 30 and would trip a
@@ -435,7 +456,7 @@ func tlsCertPairCheck(certPath, keyPath string) Check {
 	// window in which doctor and the next `bridge serve` disagree, which
 	// is the one thing this grading exists not to do. The day count is
 	// for the sentence only.
-	remaining := time.Until(info.NotAfter)
+	remaining := info.NotAfter.Sub(now)
 	switch {
 	case remaining <= 0:
 		return warn(checkNameTLSCert, fmt.Sprintf("present, EXPIRED %s", expiryPhrase(info.DaysUntilExpiry)),

@@ -379,7 +379,23 @@ func TestCheckTLSCert_WarningBoundaryIsTheExactRemainingDuration(t *testing.T) {
 // landed — which is the check working, but it also means a helper that
 // only rewrites the cert silently tests a different state than the one
 // its caller named.
+//
+// NotBefore is pinned to the PAST for the same reason, and that one was
+// not caught by anything. It used to be `notAfter.Add(-24h)`, so the
+// "expiring soon" fixture started 27 days from now and the boundary
+// fixture 30 — both NOT YET VALID, and the boundary test asserted `ok`
+// about one of them. A fixture has to be broken in exactly the way its
+// caller names and no other, or a green test is about a state nobody
+// chose. Callers that want a future NotBefore say so.
 func writeCertWithNotAfter(t *testing.T, path string, notAfter time.Time) {
+	t.Helper()
+	writeCertWithWindow(t, path, time.Now().Add(-time.Hour), notAfter)
+}
+
+// writeCertWithWindow is the same, with both ends of the validity
+// window given — for the not-yet-valid band, which no NotAfter can
+// express.
+func writeCertWithWindow(t *testing.T, path string, notBefore, notAfter time.Time) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -388,7 +404,7 @@ func writeCertWithNotAfter(t *testing.T, path string, notAfter time.Time) {
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "1-bit-bridge doctor fixture"},
-		NotBefore:    notAfter.Add(-24 * time.Hour),
+		NotBefore:    notBefore,
 		NotAfter:     notAfter,
 		DNSNames:     []string{"localhost"},
 	}
@@ -438,4 +454,74 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestCheckTLSCert_NotYetValidWarns — the validity window has a near end
+// too, and `LoadX509KeyPair` does not look at dates, so the pair check
+// passes and the expiry arm reads a comfortable year of life left while
+// no client will accept the certificate for another month.
+//
+// Reachable on this product's hardware rather than theoretical: the
+// mint allows one hour of clock skew (`NotBefore: now-1h`), so a host
+// whose clock was further ahead than that when the cert was minted — a
+// NUC or Pi with no RTC, before NTP lands — leaves exactly this behind
+// once the clock is corrected. Moving the data directory off such a
+// host is this check's own subject.
+func TestCheckTLSCert_NotYetValidWarns(t *testing.T) {
+	d := certFixture(t, newHostEndpoints, newHostEndpoints)
+	certPath, _ := servertls.DefaultPaths(d.DataDir)
+	starts := time.Now().Add(30 * 24 * time.Hour)
+	writeCertWithWindow(t, certPath, starts, starts.Add(397*24*time.Hour))
+
+	c := checkTLSCert(t.Context(), d)
+	if c.Status != Warn {
+		t.Fatalf("status = %q, want warn (%q)", c.Status, c.Summary)
+	}
+	if !strings.Contains(c.Summary, "NOT YET VALID") {
+		t.Errorf("summary = %q, want it to say the cert has not started", c.Summary)
+	}
+	// The remedy differs from every other band here: rotating against a
+	// wrong clock mints another bad cert, so the clock comes first.
+	if !strings.Contains(c.Hint, "CHECK THE CLOCK FIRST") {
+		t.Errorf("hint sends the operator to rotate without checking the clock: %q", c.Hint)
+	}
+	// It must not be mistaken for the expiry bands — those grade a cert
+	// that IS in its window.
+	if strings.Contains(c.Summary, "EXPIRED") || strings.Contains(c.Summary, "expires in") {
+		t.Errorf("summary = %q, want the not-yet-valid band, not an expiry one", c.Summary)
+	}
+
+	// NEGATIVE CONTROL: the same long-lived cert with a past NotBefore
+	// is plainly ok, so the warn above is about the window and not about
+	// the fixture.
+	writeCertWithWindow(t, certPath, time.Now().Add(-time.Hour), starts.Add(397*24*time.Hour))
+	if c := checkTLSCert(t.Context(), d); c.Status != OK {
+		t.Errorf("a started cert = %q, want ok (%q)", c.Status, c.Summary)
+	}
+}
+
+// TestExpiryFixturesAreInsideTheirValidityWindow — the fixtures this
+// file hands the expiry bands must be broken in exactly the way their
+// caller names. `writeCertWithNotAfter` used to derive NotBefore from
+// NotAfter, so "expiring in 28 days" also meant "starts in 27", and the
+// check now warns for the wrong reason. This pins the helper rather
+// than each caller.
+func TestExpiryFixturesAreInsideTheirValidityWindow(t *testing.T) {
+	d := certFixture(t, newHostEndpoints, newHostEndpoints)
+	certPath, _ := servertls.DefaultPaths(d.DataDir)
+	for _, notAfter := range []time.Time{
+		time.Now().Add(servertls.ExpiryWarningWindow - 48*time.Hour),
+		time.Now().Add(servertls.ExpiryWarningWindow + 23*time.Hour),
+		time.Now().Add(-48 * time.Hour),
+	} {
+		writeCertWithNotAfter(t, certPath, notAfter)
+		info, err := servertls.Inspect(certPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.NotBefore.After(time.Now()) {
+			t.Errorf("fixture expiring %v has NotBefore %v — not yet valid, so the band under test is not the one being exercised",
+				notAfter.UTC(), info.NotBefore.UTC())
+		}
+	}
 }

@@ -154,8 +154,9 @@ func LoadOrGenerateWithOptions(certPath, keyPath string, opts GenerateOptions) (
 	return &cert, fp, nil
 }
 
-// logIfExpiringSoon parses the on-disk cert and logs a warning when its
-// remaining validity is below ExpiryWarningWindow. Runs once per process
+// logIfExpiringSoon parses the on-disk cert and logs a warning when it
+// is outside — or close to the end of — its validity window: not yet
+// started, already past NotAfter, or within ExpiryWarningWindow of it. Runs once per process
 // start (called from LoadOrGenerate) — operators see the warning in the
 // startup log alongside the usual listen-address line. Best-effort: a
 // parse failure here is silent (Inspect already covers the operator-facing
@@ -165,7 +166,20 @@ func logIfExpiringSoon(certPath string) {
 	if err != nil {
 		return
 	}
-	remaining := time.Until(info.NotAfter)
+	now := time.Now()
+	// The near end of the window. A cert that has not STARTED is
+	// rejected by clients exactly like an expired one, and
+	// LoadX509KeyPair does not look at dates, so the bridge comes up
+	// and every device fails — silently, before this arm existed. The
+	// mint allows one hour of skew (`NotBefore: now-1h`), so a host
+	// whose clock was further ahead than that at mint time leaves this
+	// state behind once the clock is corrected.
+	if info.NotBefore.After(now) {
+		logger.Warn("cert is not valid yet — clients reject it exactly as they reject an expired one. Check the host clock before rotating: a rotation against a wrong clock mints another one",
+			"path", certPath, "not_before", info.NotBefore.UTC().Format(time.RFC3339))
+		return
+	}
+	remaining := info.NotAfter.Sub(now)
 	switch {
 	case remaining <= 0:
 		logger.Error("cert expired — every paired iOS client will fail at TLS handshake until you rotate (`bridge cert rotate` or admin console) and re-pair",
