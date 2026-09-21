@@ -331,7 +331,7 @@ function select(name, value, options) {
 // console rather than as somebody else’s library. An album spanning both
 // keeps its button for the local half and says what it is leaving alone.
 async function appendDeleteAction(actions, tracks, label) {
-  const all = (tracks || []).filter((t) => t && t.path);
+  const all = (tracks || []).filter((t) => t?.path);
   const routed = all.filter((t) => t.routed).length;
   const paths = all.filter((t) => !t.routed).map((t) => t.path);
   if (!paths.length) return;
@@ -369,7 +369,7 @@ async function appendDeleteAction(actions, tracks, label) {
         } catch (e) {
           btn.disabled = false;
           btn.textContent = "Delete…";
-          alert(e && e.message ? e.message : String(e));
+          alert(e?.message ? e.message : String(e));
         }
       },
     },
@@ -456,7 +456,7 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // the Library page is where the space is actually reclaimed.
   appendDeleteAction(actions, d.tracks, a.title);
 
-  const unplayable = d.tracks.filter((t) => t.play && t.play.kind === "none").length;
+  const unplayable = d.tracks.filter((t) => t.play?.kind === "none").length;
 
   view.appendChild(el("div", { class: "detail" },
     el("div", { class: "detail-art" }, cover(art, a.title)),

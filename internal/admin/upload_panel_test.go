@@ -113,7 +113,11 @@ func TestUploadPanelIsHiddenUntilEnabled(t *testing.T) {
 		t.Errorf("the upload panel renders visible by default: %q", openTag)
 	}
 	js := readFile(t, "static/app.js")
-	if !strings.Contains(js, "cfg.uploadEnabled") {
+	// Either spelling of the member read. The guard is about whether app.js
+	// CONSULTS the flag, and `cfg.uploadEnabled` vs `cfg?.uploadEnabled` is
+	// punctuation — pinning one made an optional-chaining cleanup (#949) fail
+	// a test whose subject had not changed.
+	if !regexp.MustCompile(`cfg\??\.uploadEnabled`).MatchString(js) {
 		t.Error("app.js never consults uploadEnabled, so the panel would either always or never show")
 	}
 }

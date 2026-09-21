@@ -453,7 +453,7 @@ function load(index, { autoplay }) {
       if (at !== playbackGen) return;
       state.playing = false;
       state.loading = false;
-      if (e && e.name === "NotAllowedError") state.error = "Press play to start.";
+      if (e?.name === "NotAllowedError") state.error = "Press play to start.";
       emit();
     });
   }
@@ -676,8 +676,13 @@ export function setShuffle(on) {
   emit();
 }
 
+const REPEAT_CYCLE = { off: "all", all: "one", one: "off" };
+
 export function cycleRepeat() {
-  state.repeat = state.repeat === "off" ? "all" : state.repeat === "all" ? "one" : "off";
+  // off -> all -> one -> off. A table, not a chained ternary: the cycle is
+  // data, and the `?? "off"` keeps the old fall-through for a persisted
+  // value this build does not know.
+  state.repeat = REPEAT_CYCLE[state.repeat] ?? "off";
   maybePrime();
   persist();
   emit();
