@@ -221,6 +221,19 @@ func auditBackgroundTestsIn(t *testing.T, fset *token.FileSet, path string) int 
 // callees are eight different functions across the package and the list
 // would need editing for a ninth — which is the enumeration this test
 // exists to replace, moved one level down.
+//
+// The `close` is looked for ANYWHERE inside the deferred call, not just
+// as `defer close(done)`: `defer func() { close(done); wg.Done() }()`
+// is the same signal, and a matcher that missed it would let a test
+// bypass this guard in silence, with the floor none the wiser — the
+// count would simply stay where it is. (Gemini, PR #945.)
+//
+// Widening further, to any `close` anywhere in the `go` statement, was
+// measured and REJECTED: it adds exactly one test,
+// TestWaitForWorkersLetsHealthyWorkersFinish, whose goroutine is a stub
+// worker (`time.Sleep` then `close`) with no context and no cancel func
+// to hand a drain — the test already waits for it. That is a false
+// positive, and it would demand a drain that cannot be written.
 func launchesADrainableGoroutine(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -239,7 +252,7 @@ func launchesADrainableGoroutine(body *ast.BlockStmt) bool {
 			if !ok {
 				return true
 			}
-			if id, ok := d.Call.Fun.(*ast.Ident); ok && id.Name == "close" {
+			if callsFunc(d, "close") {
 				found = true
 			}
 			return !found
