@@ -2189,6 +2189,60 @@ its twin.** The top list is older, shorter, and read first.
   close. **Before optimising a test, measure which PACKAGE the job is spending
   its time in** — a batch that fixed `internal/adminauth` (297s → 40s, real) was
   first written up as fixing the job, which it does not.
+- **…and its WALL CLOCK is one package's SEQUENTIAL runtime, which no number
+  of cores touches.** `-p $(nproc)` parallelises across PACKAGES; inside one,
+  tests run in a single binary unless they call `t.Parallel()`, and that appears
+  in **0 of `internal/manifest`'s 138 test files and 0 of `internal/admin`'s
+  131**. Measured 2026-09-21: 895s wall over ~1,970 CPU-seconds — the scheduler
+  was packing four cores well and the floor was `manifest` alone at 760s
+  (`admin` 668s, `cmd/bridge` 218s, everything else under 140s). So the race job
+  is SHARDED BY TEST NAME (`.github/scripts/test-shard.sh`, four legs each for
+  those two plus one `rest` leg): **895s → 287s**, near-linear, with
+  `cmd/bridge` at 218s the new floor — splitting `rest` further buys nothing.
+  The gate's critical path is now `test (windows-latest)` at 353s, so measure
+  again before optimising the race job any further. **A self-hosted runner is
+  the WORSE answer here**: measured at ~1.85x (the dev Mac runs `manifest` in
+  410s against the runner's 760s), it is less than sharding, GitHub's own
+  guidance is that self-hosted runners do not belong on a PUBLIC repo (a fork PR
+  runs arbitrary code on the machine), and standard hosted runners are free for
+  public repos so the extra legs cost nothing billed.
+- **A sharded suite's whole risk is a test that runs in NO shard** — every leg
+  reports PASS, the gate is green, and nothing in the tree notices. Four guards,
+  each of which caught something: the partition is verified as **SET EQUALITY**
+  against the full list, never a count (a matching sum is also what you get when
+  one name lands in two shards and another in none); `-run` is **ANCHORED**
+  `^(A|B)$`, because it matches each `/`-part UNANCHORED and `internal/manifest`
+  really has **23 name pairs where one is a prefix of the other** (unanchored
+  `TestAnalysisCoverage` selects 2, anchored selects 1); discovery runs under
+  **the same `-race`**, because `-race` defines the `race` build tag, so a
+  listing taken WITHOUT it describes a different build — and a `//go:build race`
+  test would then be in neither the listing nor any shard. Not hypothetical:
+  this repo already carries `racefixture_race_test.go`. (It is also strictly
+  less work — the non-race listing builds a second binary nothing uses.) And the
+  `rest` leg asserts the WORKFLOW MATRIX schedules the exact index set
+  `0..n-1` of every group it skips, because checking that the group is merely
+  MENTIONED passes when one leg is deleted and 208 tests then run nowhere.
+  **Fuzz targets belong in the partition** — without `-fuzz` they run their seed
+  corpora as ordinary tests, so dropping `Fuzz*` retires every corpus from CI
+  with no red X. The shard COUNT lives in the script
+  (`SHARDED=(manifest:4 admin:4)`), never in the matrix: two places that must
+  agree about a partition can disagree silently, since a leg passing a different
+  count partitions the same names differently.
+- **`set -e` does not fire inside an `if` condition, so `[ "$x" -lt N ]` on
+  caller input is not a guard.** A non-numeric value makes both halves error,
+  the condition evaluate FALSE, and execution carry on — `test-shard.sh manifest
+  abc` printed two lines of raw `[: abc: integer expression expected` and then
+  failed with "is empty (more shards than tests?)", a confident wrong diagnosis.
+  Compare against the admitted STRING set instead, which also disposes of `007`
+  (bash `test` reads a leading zero as OCTAL while awk reads decimal, so the
+  bounds check and the partition disagree about which shard it is) and of a
+  21-digit value (bash rejects it as not an integer at all, so a numeric guard
+  could never bound it). Same family as the grep below.
+- **A guard that fails closed but prints NOTHING is half a guard.** `grep` exits
+  1 on no match, and under `pipefail` inside a command substitution that killed
+  `test-shard.sh` before the caller could report anything — on the single case
+  it most needed to report, a sharded group with no matrix legs left. It exited
+  1, correctly, with an empty log. `|| true` on that pipeline.
 - **A test fixture that bulk-loads or bulk-deletes rows uses the BATCH APIs.**
   `UpsertTrackBatch` / `DeleteTracksBatch` exist because the one-at-a-time calls
   each take `Store.mu` and run their own BEGIN/COMMIT/fsync; a fixture calling

@@ -6660,3 +6660,143 @@ notice.
 `s.managed(...)`. The managed-controls set covers actions a control plane owns
 on a bridge somebody else runs — restart, updates, roots, variantsDir, backups.
 Restoring the operator's own playlist data is not one of them.
+
+## 2026-09-21 — the race job's wall clock was one package's sequential runtime (#943)
+
+### What the measurement actually said
+
+`test -race` was ~15 minutes and dominated every PR. The instinct is "the runner
+is slow, get a faster one". The numbers say otherwise — from the 2026-09-21 gate
+run (895s wall, `ubuntu-latest`, 4 cores):
+
+```
+internal/manifest  760s      internal/api         72s
+internal/admin     668s      internal/analyze     66s
+cmd/bridge         218s      internal/adminauth   40s
+internal/transcode 137s      everything else     <10s each
+```
+
+Total work ≈ **1,970 CPU-seconds** against 895s wall. `-p $(nproc)` was already
+packing four cores well; the job was not slow because the scheduler was bad. It
+was slow because ONE package takes 760s and nothing can start its second half
+early.
+
+The decisive fact, and the one that makes hardware the wrong lever:
+
+```
+t.Parallel() in internal/manifest:  0 of 138 test files
+t.Parallel() in internal/admin:     0 of 131 test files
+```
+
+`go test` parallelises across PACKAGES, not within one. Those two run strictly
+sequentially inside a single binary, so **more cores cannot touch them** — only
+more processes can, or a faster core.
+
+### Sharding, and why not a runner
+
+`manifest` and `admin` get four legs each, partitioned by test name; every other
+package rides one `rest` leg keeping `-p $(nproc)`. Measured locally,
+near-linear both times: a manifest shard is 95s against 410s for the whole
+package, an admin shard 85s.
+
+Result on the first sharded run: **895s → 287s** (slowest of nine legs; the band
+was 226–287s, so the partition is balanced). Projection had been ~300s.
+
+**The bottleneck then moved**, which is worth stating rather than quoting the
+flattering number: `test (windows-latest)` at 353s is now the gate's critical
+path, so the honest end-to-end figure is 895s → 353s and further sharding of the
+race job buys nothing. `cmd/bridge` at 218s is the `rest` leg's own floor, so
+splitting that further buys nothing either. Windows is a separate problem — it
+runs without `-race` (no cgo on a pure-Go project), is materially slower per
+operation, and is already a matrix leg alongside macOS.
+
+**The self-hosted runner was measured, not dismissed.** This project's dev Mac
+runs `internal/manifest` in 410s against the runner's 760s — ~1.85x, i.e. the
+race job would land near 480s. That is less than sharding buys, and it comes
+with a real constraint: GitHub's own guidance is that self-hosted runners should
+not be attached to a PUBLIC repo, because a fork PR can execute arbitrary code
+on the machine. Standard hosted runners are free for public repositories, so the
+nine extra legs cost nothing that is billed. The two compose if ever wanted.
+
+### The guards, and what each one caught
+
+The whole risk of a sharded suite is a test that runs in NO shard: every leg
+reports PASS, the gate is green, and nothing else in the tree notices. Four
+guards, each verified by breaking it:
+
+- **Set equality, not a count.** The union of the partitions is rebuilt from the
+  same function every shard uses and compared sorted against the whole list. A
+  count would be the weaker check that looks identical — a matching sum is also
+  what you get when one name lands in two shards and another in none.
+  Verified: 842 names, union 842, zero duplicates, all 16 fuzz targets present.
+- **Anchored `-run`.** `-run` matches each `/`-separated part with an
+  UNANCHORED regexp, and `internal/manifest` really carries **23 name pairs
+  where one is a prefix of the other** (`TestAnalysisCoverage` ⊂
+  `TestAnalysisCoverageEmptyLibrary`). Measured: unanchored
+  `-run TestAnalysisCoverage` selects 2 tests, `^(TestAnalysisCoverage)$`
+  selects 1. Without the anchor those 23 would each run in two shards.
+- **Discovery under the same `-race`** (CodeRabbit, round 1). `-race` defines
+  the `race` build tag, so a listing taken without it describes a different
+  build: a `//go:build race` test is in neither the listing nor any shard. Not
+  hypothetical — `internal/manifest` already carries
+  `racefixture_race_test.go` / `racefixture_norace_test.go`, which size the
+  compaction fixture by build. The two listings agree at 842 names *today* only
+  because those files declare constants, which is exactly why it would have
+  broken quietly. It is also strictly less work: the shard builds the race
+  binary regardless, and the non-race listing built a second binary nothing
+  used (cold: 0.83s wasted on top of the 17.0s the shard needed anyway).
+- **The matrix must schedule every index** (CodeRabbit, round 2). The first
+  form only checked that a group was MENTIONED. Deleting just `manifest`
+  index 2 left the mention intact, `rest` still skipped `internal/manifest`,
+  and that partition's 208 tests ran nowhere — verified by deleting the leg
+  and watching the check pass. Fixed by removing the disagreement rather than
+  checking harder: the shard COUNT moved into the script
+  (`SHARDED=(manifest:4 admin:4)`), the matrix now says only which group and
+  which index, and the `rest` leg requires the exact index set `0..n-1`.
+
+Fuzz targets are in the partition on purpose — without `-fuzz` a target runs its
+seed corpus as an ordinary test, which is how `make test` absorbs 39 of them for
+free, so dropping `Fuzz*` would retire every corpus from CI with no red X.
+
+### Two bash failures the checking itself produced
+
+Both are the same family and both are recorded in `CLAUDE.md`, because each is
+the shape this file's other docblocks already warn about:
+
+- **A guard that fails closed but prints nothing is half a guard.** `grep` exits
+  1 on no match; under `pipefail`, inside a command substitution, that killed
+  the script before the caller could report anything — on the single case it
+  most needed to report, a sharded group with no matrix legs left. It exited 1,
+  correctly, with an empty log. Found by running the negative control rather
+  than by reading.
+- **`set -e` does not fire inside an `if` condition** (CodeRabbit, round 3), so
+  `[ "$INDEX" -lt 0 ]` on caller input is not a guard: a non-numeric value made
+  both halves error, the condition evaluate FALSE, and execution carry on into
+  the partition. `test-shard.sh manifest abc` printed two lines of raw
+  `[: abc: integer expression expected` and then failed with "is empty (more
+  shards than tests?)" — a confident wrong diagnosis. Comparing against the
+  admitted STRING set also disposes of `007` (bash `test` reads a leading zero
+  as OCTAL while awk reads decimal, so a numeric guard would validate one shard
+  and partition a different one) and of a 21-digit value (bash rejects it as not
+  an integer at all, so the old comparison could never have bounded it).
+
+### Negative controls
+
+The matrix check, five ways, each restored afterwards:
+
+```
+healthy matrix                  does not fire   (must not)
+manifest index 2 deleted        fires
+all four admin legs deleted     fires, and says so
+duplicate index (3 -> 0)        fires
+group listed last, no comma     does not fire   (must not)
+```
+
+The index check, seven ways — `abc`, `1x`, `-1`, `999999999999999999999`,
+`007`, `4` of a 4-way split, and `rest` with index 1 — each refused while naming
+the admitted set, with `manifest 0` / `admin 3` / `rest 0` unchanged.
+
+### No product change
+
+`.github/` only. `make test` is untouched and remains the local gate; the script
+carries the same `-race -timeout 30m` and adds only `-run`.
