@@ -48,7 +48,7 @@ func TestDoctorReportsACertThatDoesNotCoverTheAdvertisedEndpoints(t *testing.T) 
 	if !strings.Contains(c.Hint, "bridge.example.test") {
 		t.Errorf("hint does not name the uncovered custom endpoint: %q", c.Hint)
 	}
-	if !strings.Contains(c.Hint, servertls.SANStaleRemediation) {
+	if !strings.Contains(c.Hint, servertls.RotationRemediation) {
 		t.Errorf("hint does not carry the remediation: %q", c.Hint)
 	}
 }

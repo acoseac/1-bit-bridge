@@ -124,15 +124,15 @@ func TestInspectSANCoverage_UnreadableCertIsAnError(t *testing.T) {
 	}
 }
 
-// TestSANStaleRemediationNamesBothSteps — the const is the single copy
-// of the fix both the startup warning and the doctor hint end with, and
-// a rotation that is not followed by a re-pair leaves every paired
-// device unable to connect. Losing either half of that sentence is the
-// failure worth pinning.
-func TestSANStaleRemediationNamesBothSteps(t *testing.T) {
+// TestRotationRemediationNamesBothSteps — the const is the single copy
+// of the fix the startup warning and both doctor cert checks end with,
+// and a rotation that is not followed by a re-pair leaves every paired
+// device unable to connect: the cert it pinned no longer exists.
+// Losing either half of that sentence is the failure worth pinning.
+func TestRotationRemediationNamesBothSteps(t *testing.T) {
 	for _, want := range []string{"bridge cert rotate", "re-pair", "fingerprint"} {
-		if !strings.Contains(SANStaleRemediation, want) {
-			t.Errorf("SANStaleRemediation does not mention %q: %q", want, SANStaleRemediation)
+		if !strings.Contains(RotationRemediation, want) {
+			t.Errorf("RotationRemediation does not mention %q: %q", want, RotationRemediation)
 		}
 	}
 }

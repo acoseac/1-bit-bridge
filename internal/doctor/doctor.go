@@ -405,11 +405,11 @@ func tlsCertExpiryCheck(certPath string) Check {
 	case days < 0:
 		return warn(checkNameTLSCert, fmt.Sprintf("present, EXPIRED %s", expiryPhrase(days)),
 			"an expired certificate is rejected at the TLS handshake layer before pinning is consulted, so every "+
-				"paired device fails to connect. "+servertls.SANStaleRemediation)
+				"paired device fails to connect. "+servertls.RotationRemediation)
 	case time.Duration(days)*24*time.Hour <= servertls.ExpiryWarningWindow:
 		return warn(checkNameTLSCert, fmt.Sprintf("present, expires %s", expiryPhrase(days)),
 			"renew before it lapses — an expired certificate is rejected at the TLS handshake layer, so every "+
-				"paired device fails to connect. "+servertls.SANStaleRemediation)
+				"paired device fails to connect. "+servertls.RotationRemediation)
 	default:
 		return ok(checkNameTLSCert, fmt.Sprintf("present, expires %s", expiryPhrase(days)))
 	}

@@ -80,7 +80,7 @@ func TestCheckTLSCertSANs_StaleCertWarnsWithTheExactMissingSet(t *testing.T) {
 		t.Errorf("hint lists %v, want %v", got, wantMissing)
 	}
 	// The remediation, from the one const both surfaces share.
-	if !strings.Contains(c.Hint, servertls.SANStaleRemediation) {
+	if !strings.Contains(c.Hint, servertls.RotationRemediation) {
 		t.Errorf("hint does not carry the shared remediation: %q", c.Hint)
 	}
 	// The summary counts rather than lists, and says which way it went.

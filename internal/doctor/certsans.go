@@ -116,6 +116,6 @@ func sansHint(cov servertls.SANCoverage) string {
 	// who just added an endpoint looking for a move that never happened.
 	b.WriteString("Either the data directory was moved to a host this certificate was not minted on, ")
 	b.WriteString("or an endpoint was added since. ")
-	b.WriteString(servertls.SANStaleRemediation)
+	b.WriteString(servertls.RotationRemediation)
 	return b.String()
 }

@@ -21,12 +21,17 @@ import (
 	"strings"
 )
 
-// SANStaleRemediation is the one sentence every surface that reports
-// stale SANs ends with. A const rather than a string in each caller:
-// the startup log, the doctor hint and anything that follows them are
-// describing the same two-step fix, and a second copy is a second
-// thing to forget to update.
-const SANStaleRemediation = "Run `bridge cert rotate` (or click Rotate in the admin console's Cert tile) and restart the bridge, " +
+// RotationRemediation is the one sentence every surface whose answer is
+// "rotate the certificate" ends with — stale SANs and an approaching or
+// passed expiry both. Named for the FIX rather than for one trigger,
+// because it has two.
+//
+// A const rather than a string in each caller: the startup log and the
+// doctor's two cert checks describe the same two-step fix, and the
+// second step is the one that gets dropped. A rotation not followed by
+// a re-pair leaves every paired device unable to connect — the cert it
+// pinned no longer exists.
+const RotationRemediation = "Run `bridge cert rotate` (or click Rotate in the admin console's Cert tile) and restart the bridge, " +
 	"then re-pair every paired device — a rotation changes the SHA-256 fingerprint iOS pinned at pairing."
 
 // SANCoverage compares the SAN set a cert minted right now would carry
@@ -101,7 +106,7 @@ func logIfSANsStale(certPath string, opts GenerateOptions) {
 		return
 	}
 	logger.Warn(
-		"cert SANs are stale relative to advertised endpoints — Tailscale and custom-endpoint URLs will fail TLS until you rotate. "+SANStaleRemediation,
+		"cert SANs are stale relative to advertised endpoints — Tailscale and custom-endpoint URLs will fail TLS until you rotate. "+RotationRemediation,
 		"missing_dns", cov.MissingDNS,
 		"missing_ips", cov.MissingIPStrings(),
 	)
