@@ -1786,6 +1786,24 @@ mentions across the four `ops/audit-*.md` files.
   already written under **Build, CI, and test discipline** and was still tripped
   by a session that had read it — the platform leg is what closes that gap.
 
+- **`bridge init`'s preflight grades the install that is THERE, and
+  `ensureDoctorClean` prints warns.** init is re-run far more often than it is
+  run (service reinstall, config rewrite, data dir moved to a new host) and it
+  built `doctor.Deps` from its prompts alone — so the cert checks graded
+  `<cfgDir>/data/server.{crt,key}` rather than `cfg.TLSCertPath`, and
+  `tls-cert-sans` skipped itself, a nil `CertSANs` being a silent ok. Both are
+  wired from a config readable at the TARGET path
+  (`withExistingInstallCertDeps`); a first install keeps the skip, because a
+  narrower want-set than `bridge serve` builds would be a comparison presented
+  as authoritative that nobody made. Grading the PRE-init state is the point,
+  not a compromise: the cert on disk IS the cert, and init never prompts for
+  `customEndpoints`, so the old value survives the rewrite. **The warn printing
+  is what makes any of it reach an operator** — every verdict these two checks
+  give about that state is warn-level by design (neither is a reason to refuse
+  to initialise), and `ensureDoctorClean` printed only on a FAIL, so a check
+  wired into the preflight would compute a finding and discard it. Warn-lines
+  only, in `printReport`'s layout, nothing at all on a clean host.
+
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as
 the most authoritative place in the document and had drifted from the hardened
@@ -1953,7 +1971,19 @@ its twin.** The top list is older, shorter, and read first.
   NUC or Pi with no RTC, pre-NTP) leaves a future `NotBefore` that reads as a
   comfortable year of life left; `logIfExpiringSoon` carries the same arm, and
   the hint says CHECK THE CLOCK FIRST because rotating against a wrong clock
-  mints another bad cert. **A permission failure reading the 0600 key is NOT
+  mints another bad cert. **Every surface that grades the window grades BOTH
+  ends** — the console tile, `bridge cert info` (human AND `--json`, where the
+  verdict is `notYetValid` beside `expired`/`expiringSoon`) and `bridge cert
+  rotate`'s preamble all stayed on `DaysUntilExpiry` and read a cert starting
+  in 30 days as `(426 days)`, unbadged. The prose is
+  ONE const, `servertls.NotYetValidRemediation`, pinned by a test on all three;
+  it is deliberately NOT `RotationRemediation` with a lead-in, because this is
+  the one band where rotating FIRST mints a second wrong cert — which is why
+  `bridge cert rotate`'s preamble carries it and carries NO other band (an
+  expiring cert is why the operator is there). The startup log keeps its own
+  shorter wording on purpose (structured, sized like its expiry sibling) and
+  the console keeps a badge plus a date, because rotating from a browser is
+  exactly what this state must not do. **A permission failure reading the 0600 key is NOT
   a finding** — on the public-mode layout the operator is not the service user,
   and that is a fact about the doctor run, the same reason `Validate()` does not
   stat the roots. **Every cert READER skips to the first CERTIFICATE block**

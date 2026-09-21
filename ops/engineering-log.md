@@ -7943,3 +7943,159 @@ The generalisable rule, which is the second time this PR has paid for it (the
 round-1 mismatched-key helper was the first): **a fixture has to be broken in
 exactly the way its caller names and in no other way**, or a green test is
 about a state nobody chose.
+
+## 2026-09-21 — the three surfaces #950 did not reach, and init's preflight
+
+#950 taught `bridge doctor`'s `tls-cert` line and the serve-time
+`logIfExpiringSoon` that the validity window has a NEAR end. It left behind
+every other surface that grades the same window. All three branched on
+`DaysUntilExpiry` or `now.After(NotAfter)` and none looked at `NotBefore`, so
+a certificate starting in 30 days reported ~426 days of remaining life on each
+of them. Measured on a live fixture, before the fix:
+
+```
+Not before:  2026-10-21T19:59:15Z      (30 days away)
+Not after:   2027-11-22T19:59:15Z
+Days until expiry: 426
+```
+
+and the console tile rendered `10/23/2027 (426 days)`, unbadged, about a
+certificate no paired device would accept for another month.
+
+### The wording is one const, and it is not the usual one
+
+`servertls.NotYetValidRemediation` sits beside `RotationRemediation` and is
+deliberately not that string with a different lead-in. Everywhere else in the
+package the answer is "rotate". Here the mint reads the same clock that
+produced the bad dates (`NotBefore: now-1h`), so rotating FIRST produces a
+second certificate with the same wrong window — and burns every paired
+device's pinned fingerprint to do it. The sentence therefore leads with CHECK
+THE CLOCK FIRST and reaches the rotation only after "once the clock is right".
+
+Three surfaces pin the const in a test: `bridge doctor`'s hint, `bridge cert
+info`'s warning, `bridge cert rotate`'s preamble. The doctor's own test
+previously asserted the `"CHECK THE CLOCK FIRST"` substring, which accepts any
+sentence carrying the phrase — exactly what a re-inlined copy is. The control
+that re-inlines a plausible paraphrase is red, and the paraphrase it produced
+had silently dropped `timedatectl` / `sntp -sS`, which is the half an operator
+can act on.
+
+Two surfaces deliberately do NOT use it, and the const's docblock says so, so
+the next reader does not "finish the job":
+
+- `logIfExpiringSoon`'s startup line is structured, carries `path` and
+  `not_before` as attributes, and is sized like the expiry arm beside it. Its
+  job is to be greppable. The operator who sees it runs `bridge doctor`.
+- The console tile renders a badge and a start date and sends the operator to
+  the CLI, because rotating from a browser is precisely what this state must
+  not do.
+
+### `bridge cert rotate` carries this band and no other
+
+The preamble names the not-yet-valid state and stays silent about expiry. An
+expired or expiring certificate is *why the operator is running this command*,
+so saying it back to them is noise; a certificate that has not started is the
+one band where this command is not the fix. The rotate test
+asserts ORDERING rather than presence — the warning must precede the
+confirmation bullets, or an operator reading top-down has already decided.
+
+### Two adjacent bands in the same ladders were also wrong
+
+Found while rewriting them, same data, same few lines, so they ship together:
+
+- The console announced an **expired** certificate as "expiring soon". `Inspect`
+  forces a `-1` sentinel past `NotAfter`, which reached the `days <= 7` arm —
+  future tense about something that had already happened.
+- The console rendered the ≤30-day band with `.badge.running`, which is GREEN
+  (`--ok`), while `refreshCertInfo`'s own docblock said yellow. `.badge.warn`
+  predates the cert tile by one day (app.css 2026-04-24, the tile 2026-04-25),
+  so this was a slip from the first commit: "expiring within a month" rendered
+  in the same colour as healthy for seventeen months.
+- `bridge cert info` graded its 30-day band on `DaysUntilExpiry <= 30`. The day
+  count truncates toward zero, so at 30d23h it printed "cert is expiring soon"
+  while `bridge doctor` and the next `bridge serve` — both comparing the
+  duration against `servertls.ExpiryWarningWindow` — stayed quiet about the same
+  file. The same rule #950 wrote for the doctor, one command over. The test
+  asserts its own fixture is still inside the gap (`Days until expiry: 30`)
+  before asserting the silence, or it passes vacuously the moment the fixture
+  drifts.
+
+### Verified in a real browser, because no Go test can see it
+
+Four bands plus the negative control, driven against a seeded loopback fixture
+with the cert swapped on disk between reloads (`/api/cert` re-Inspects per
+request, so no restart is needed):
+
+| on disk | rendered | badge class | colour |
+|---|---|---|---|
+| NotBefore now+30d | `not valid yet starts 10/21/2026 — check the host clock` | `badge danger` | `rgb(190,18,60)` |
+| 9 days left | `expiring 10/1/2026 (9 days)` | `badge warn` | `rgb(154,82,0)` |
+| 4 days left | `expiring soon 9/26/2026 (4 days)` | `badge danger` | `rgb(190,18,60)` |
+| expired 3d ago | `expired 9/18/2026 (-3 days)` | `badge danger` | `rgb(190,18,60)` |
+| `bridge cert rotate` | `10/23/2027 (396 days)` | — | — |
+
+Dark mode at 375 px: badge `rgb(251,113,133)`, `document.scrollWidth ==
+clientWidth` and the panel's too, so the longer string does not overflow the
+phone layout — the `.deleted-list` lesson from 2026-09-20 applied before the
+fact rather than after.
+
+### `bridge init`'s preflight, and the reason it needed a third change
+
+`init` is re-run far more often than it is run — reinstalling the service,
+rewriting a hand-edited config, moving a data directory to a new host — and it
+built `doctor.Deps` from its prompts alone. So on every one of those runs the
+cert checks graded `<cfgDir>/data/server.{crt,key}`, which is not where an
+install with an explicit `tlsCertPath` keeps its pair, and `tls-cert-sans`
+skipped itself entirely, a nil `CertSANs` being a silent ok.
+
+The judgement call, decided explicitly: this grades the PRE-init state, because
+the preflight runs before init writes the config. That is right rather than
+merely tolerable. The certificate on disk IS the certificate — init does not
+mint over a live install — and `customEndpoints`, the one SAN input that moves
+the answer, is never prompted for, so the old value survives the rewrite
+verbatim. A first install keeps the existing skip: nothing is stale on a host
+whose first mint has not happened, and a want-set narrower than the one `bridge
+serve` builds would be a comparison presented as authoritative that nobody made.
+
+**And then the wiring would have reached nobody.** Every verdict those two
+checks give about this state is warn-level by design — neither a stale SAN set
+nor a clock-skewed `NotBefore` is a reason to refuse to initialise a bridge —
+and `ensureDoctorClean` printed only when the report had a FAIL. Wiring a
+warn-only check into a preflight that discards warns is this repo's recorded
+shape for shipping a dead feature with a green suite, so `printWarnings` was
+the third change rather than an optional extra. Warn lines only, in
+`printReport`'s layout; on a clean host it prints nothing, so first-run output
+is unchanged except where there is something to say.
+
+The probe cost is zero: `certSANOptions` is TTL-cached for 30 s process-wide and
+init already calls it for the mint, which now hits the warm cache.
+
+### The test drives `initCmd`, and says which path printed
+
+Asserting on the report meant deciding what to do about the ports: init's Deps
+hardcodes 7788 / 7789, so a dev box already running a bridge fails those checks
+and init exits 1. Both outcomes print the cert lines — a fail prints the whole
+report, a clean run prints the warning block — so the test asserts WHICH path
+ran and then on the content, rather than tolerating either silently. Verified
+green on both, by running it with the fixture bridge up and then down.
+
+### Controls
+
+Eight, each red for its own reason, all run against a committed tree:
+
+| reverted | result |
+|---|---|
+| `cert info`'s not-yet-valid branch | red, output is the pre-fix `Days until expiry: 426` with no warning |
+| `cert rotate`'s preamble warning | red |
+| `notYetValid` in the `--json` envelope | red — "notYetValid is false for a cert whose window opens in 30 days" |
+| 30-day band back on the day count | red, printing "expiring soon" at 30d23h |
+| `withExistingInstallCertDeps` call | red on all four assertions |
+| just the `d.CertSANs` assignment | red on the SAN assertion ALONE — the two halves are independently pinned |
+| `printWarnings` call (ports free) | red — "neither a report nor a warning block" |
+| doctor's hint re-inlined | red, and the paraphrase had dropped the clock commands |
+
+`PROTOCOL.md`'s cert section was read and deliberately left alone: no wire
+change, and its sentence ("a yellow / red badge at ≤30 / ≤7 days") is still
+true. It does not track the validity-window bands — it did not gain the
+not-yet-valid arm at #950 either — and a Mirror-PR on the iOS repo for an
+admin-console badge detail buys the client nothing.
