@@ -540,8 +540,8 @@ func ensureDoctorClean(w io.Writer, d doctor.Deps) int {
 //
 // Same badge and hint rendering as the full report on purpose: an
 // operator who has seen `bridge doctor` output should not have to learn
-// a second format to read the same three checks, and the hint is the
-// half that says what to do.
+// a second format to read the same checks, and the hint is the half
+// that says what to do.
 func printWarnings(w io.Writer, r doctor.Report) {
 	if r.WarnCount() == 0 {
 		return

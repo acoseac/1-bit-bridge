@@ -86,6 +86,11 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	// hour of clock skew, so a NUC or Pi that minted before NTP landed
 	// leaves a future NotBefore behind once the clock is corrected.
 	notYetValid := info.NotBefore.After(now)
+	// Derived from NotAfter directly rather than from DaysUntilExpiry's
+	// sign — `days = 0` covers both "expires in 23h" (still valid, the
+	// near-expiry band) and "expired 23h ago" (already past it, the
+	// hard one). Integer truncation makes the two indistinguishable on
+	// that field alone (Gemini flagged on PR #46).
 	expired := !notYetValid && now.After(info.NotAfter)
 	// Against the exact remaining duration and servertls's own
 	// threshold, NOT `DaysUntilExpiry <= 30`: the day count truncates
@@ -112,13 +117,6 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Not before:  %s\n", info.NotBefore.UTC().Format(time.RFC3339))
 	fmt.Fprintf(stdout, "Not after:   %s\n", info.NotAfter.UTC().Format(time.RFC3339))
 	fmt.Fprintf(stdout, "Days until expiry: %d\n", info.DaysUntilExpiry)
-	// Use NotAfter directly for the expired-vs-still-valid split
-	// rather than relying on DaysUntilExpiry's sign — `days = 0`
-	// covers both "expires in 23h" (still valid, near-expiry
-	// warning applies) and "expired 23h ago" (already expired,
-	// hard warning applies). Integer truncation makes the two
-	// indistinguishable on that field alone (Gemini flagged on
-	// PR #46).
 	switch {
 	case notYetValid:
 		fmt.Fprintf(stdout, "WARNING: cert is NOT YET VALID — %s\n", servertls.NotYetValidRemediation)
