@@ -542,3 +542,91 @@ func TestMigrationV46AddsColumnsAndIndexIdempotently(t *testing.T) {
 		}
 	}
 }
+
+// TestASuppressedTrackIsNotAlsoCountedAsAwaitingReanalysis — the coverage
+// buckets are documented as DISJOINT, and a suppressed row with an
+// OLD-SCHEMA waveform landed in two of them.
+//
+// Reachable: a track analysed under one WaveformSchemaVersion becomes a
+// candidate when the version bumps, its file is then replaced with a
+// truncated copy, and three refusals suppress it. It now has a stale waveform
+// AND a suppression, so it was counted in `AnalysedStale` (rendered as "N
+// awaiting re-analysis (schema update)") while also being subtracted from
+// eligible as unreadable — the console promising a re-analysis that will
+// never happen.
+//
+// The walk already answers this the other way round: its freshness gate only
+// skips a FRESH sidecar, so a stale+suppressed track falls through to the
+// suppression check and is counted unreadable. The query has to agree, for
+// the same reason TestAFreshWaveformOutranksASuppression exists. (CodeRabbit
+// on #947.)
+func TestASuppressedTrackIsNotAlsoCountedAsAwaitingReanalysis(t *testing.T) {
+	s := openAnalysisFailStore(t)
+	ctx := context.Background()
+	seedAnalysisTrack(t, s, "a/stale-and-broken.flac", 4096, 1234)
+	if err := s.UpsertAnalysis(ctx, AnalysisRow{
+		SourcePath:    "a/stale-and-broken.flac",
+		WaveformPath:  "/w/x.bin",
+		WaveformTag:   "deadbeef",
+		WaveformSize:  42,
+		SourceMTimeNS: 1234,
+		SourceSize:    4096,
+		SchemaVersion: "wf-OLD",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < analysisFailureThreshold; i++ {
+		if _, err := s.RecordAnalysisFailure(ctx, "a/stale-and-broken.flac",
+			"sox: source appears truncated"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cov, err := s.AnalysisCoverage(ctx, "wf-CURRENT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cov.UnreadableExcluded != 1 {
+		t.Fatalf("unreadableExcluded = %d, want 1 — the rest of this test proves nothing",
+			cov.UnreadableExcluded)
+	}
+	if cov.AnalysedStale != 0 {
+		t.Errorf("analysedStale = %d, want 0 — a suppressed track is not awaiting "+
+			"re-analysis, and counting it in both buckets makes the console promise "+
+			"work that will never happen", cov.AnalysedStale)
+	}
+}
+
+// TestRecordAnalysisFailureSurfacesADatabaseError — a database fault must not
+// read as a missing row.
+//
+// The post-update read tells the caller whether this is the FIRST verdict
+// against this file version, and the pool uses that as its once-per-version
+// log gate. Every Scan failure used to return `(0, nil)`: the strike had
+// committed, the caller was told there was none, and the error vanished.
+// (Gemini and CodeRabbit on #947.)
+//
+// SCOPE, stated because the two halves are not equally strong. The
+// missing-row half is exact. The fault half exercises the UPDATE's error
+// path, not the SELECT's — a cancelled context fails at the Exec and never
+// reaches the Scan, and reaching the Scan's error branch on its own would need
+// a fault injected between two statements that run under the same mutex. The
+// property asserted here is the one that matters to the caller either way:
+// a fault is returned, never laundered into "no row".
+func TestRecordAnalysisFailureSurfacesADatabaseError(t *testing.T) {
+	s := openAnalysisFailStore(t)
+	seedAnalysisTrack(t, s, "a/broken.flac", 4096, 1234)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	n, err := s.RecordAnalysisFailure(ctx, "a/broken.flac", "sox: source appears truncated")
+	if err == nil {
+		t.Errorf("a cancelled context returned (%d, nil)", n)
+	}
+	// And the genuine missing-row case still reads as "not a first strike",
+	// so the error path above has not been widened over it.
+	if n, err := s.RecordAnalysisFailure(context.Background(),
+		"gone/entirely.flac", "sox: source appears truncated"); err != nil || n != 0 {
+		t.Errorf("missing row = (%d, %v), want (0, nil)", n, err)
+	}
+}

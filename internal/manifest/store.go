@@ -8914,6 +8914,7 @@ func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (Ana
 		                         THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version != ?1
 		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                          AND NOT `+analysisFailureSuppressedSQL2+`
 		                         THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN `+analysisFailureSuppressedSQL2+`
 		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)

@@ -2,7 +2,9 @@ package manifest
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -221,10 +223,16 @@ func (s *Store) RecordAnalysisFailure(ctx context.Context, path, reason string) 
 	var n int
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT analysis_fail_count FROM tracks WHERE path = ?`, path).Scan(&n); err != nil {
-		// No row: the track was removed between the job starting and the
-		// verdict landing. Not an error the pool can act on, and not a first
-		// strike either.
-		return 0, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			// The track was removed between the job starting and the verdict
+			// landing. Not an error the pool can act on, and not a first
+			// strike either.
+			return 0, nil
+		}
+		// Anything else is a fault, and the caller's log gate must not read
+		// it as "no row": the UPDATE above has already committed a strike, so
+		// reporting zero both loses the error and mis-sequences the WARN.
+		return 0, err
 	}
 	return n, nil
 }
@@ -448,6 +456,15 @@ func (s *Store) ListUnreadableTracksForAdmin(ctx context.Context) ([]AdminUnread
 // tailscale.trimPartialTrailingRune and transcode's copy; a string that still
 // ends in genuinely invalid bytes is returned as-is, the same posture those
 // take for interior garbage.
+//
+// A review asked it to inspect the original suffix first, so a PRE-EXISTING
+// invalid byte that happens to sit at the cut is preserved rather than
+// dropped (DecodeLastRuneInString returns RuneError,1 for both cases and
+// cannot tell them apart). Declined: the effect is at most three bytes off
+// the end of a DISPLAY-ONLY string, and the change would make this copy
+// diverge from the two it is deliberately identical to — which is the more
+// expensive defect, since the whole point of naming them lockstep twins is
+// that a reader can check one and trust the others. (CodeRabbit on #947.)
 func trimReasonToRuneBoundary(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s

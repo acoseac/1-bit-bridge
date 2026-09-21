@@ -134,6 +134,21 @@ func runAnalyzeRetryFailed(ctx context.Context, stdout, stderr io.Writer, store 
 		for _, p := range paths {
 			fmt.Fprintf(stdout, "  %s\n", p)
 		}
+		// Say which library the summary below describes. Nothing was cleared,
+		// so the walk still applies these suppressions and its `to analyze`
+		// count excludes the very paths just listed — accurate about the
+		// library as it stands, and easy to read as a prediction of the real
+		// run if nobody says otherwise. Threading a bypass set into
+		// collectAnalysisCandidates would make the number predictive, at the
+		// cost of a new parameter on the function the CLI and the serve-side
+		// sweeper share — and that function's whole job is that the two
+		// cannot drift on what "needs analysis" means. A sentence is the
+		// cheaper honest answer. (CodeRabbit on #947.)
+		if len(paths) > 0 {
+			fmt.Fprintf(stdout, "analyze: the summary below describes the library AS IT STANDS — "+
+				"those %d are still suppressed, so they are counted unreadable rather than "+
+				"to-analyze. Re-run without --dry-run to clear them.\n", len(paths))
+		}
 		return 0
 	}
 	var n int64

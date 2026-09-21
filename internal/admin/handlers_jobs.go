@@ -393,6 +393,16 @@ func (s *Server) getLastBackupAt(ctx context.Context) *time.Time {
 //
 // A snapshot taken by the SCHEDULER is deliberately not hooked: nobody is
 // watching for it, so TTL-bounded staleness is fine.
+// invalidateAnalysisCoverage drops the TTL-cached coverage snapshot so the
+// next /api/jobs poll rebuilds it. Called by anything that changes what the
+// snapshot counts — today, clearing the analysis-failure markers.
+func (s *Server) invalidateAnalysisCoverage() {
+	s.analysisCoverageMu.Lock()
+	s.analysisCoverage = nil
+	s.analysisCoverageAt = time.Time{}
+	s.analysisCoverageMu.Unlock()
+}
+
 func (s *Server) invalidateLastBackup() {
 	s.lastBackupMu.Lock()
 	s.lastBackupAt = time.Time{}

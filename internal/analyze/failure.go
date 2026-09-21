@@ -71,6 +71,17 @@ import (
 //  3. The operator is TOLD. The console's unreadable list carries the
 //     decoder's own message, so "Permission denied" reads as itself.
 //
+// A review proposed narrowing this to the truncation verdict alone, so a
+// generic non-zero exit stays transient. Declined on evidence: a file whose
+// HEADER is unreadable never reaches the truncation check at all. The probe
+// fails, expectedSec is 0, and decodedShortOfDuration is documented as a
+// no-op for an unknown duration — so sox and ffmpeg refuse it with a plain
+// non-zero exit and nothing else. That is the other half of "permanently
+// broken", and on this PR's own live fixture it was ALL of it: four corrupt
+// FLACs produced `ffmpeg: exit status 187 (Error opening input: End of file)`,
+// never a truncation verdict. Narrowing would have shipped a debounce that
+// did not fire on the files it was tested against.
+//
 // Be precise about what re-opens a suppressed file, because the two
 // cases differ. A REPAIRED file changes (size, mtime_ns) and the version
 // gate re-offers it with no operator action. A CHMOD changes neither, so

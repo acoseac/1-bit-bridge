@@ -131,6 +131,12 @@ func (s *Server) apiUnreadableTracksRetry(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	// The Jobs card's coverage snapshot is TTL-cached for 30 s and carries
+	// `unreadableExcluded`, so without this the card goes on subtracting a
+	// set the list no longer shows — the panel empty, the line above it still
+	// naming N refused tracks and pointing at it. Same invalidate-on-mutation
+	// shape as invalidateDatabaseStats after a compaction. (CodeRabbit on #947.)
+	s.invalidateAnalysisCoverage()
 	out := unreadableRetryResponse{Cleared: n}
 	if trigger := s.deps.TriggerAnalysisSweep; trigger != nil {
 		out.Analysis = true

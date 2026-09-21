@@ -205,3 +205,40 @@ func TestCoverageSubtractsTheGivenUpOnSet(t *testing.T) {
 		t.Errorf("eligible = %d, want %d", gotEligible, wantEligible)
 	}
 }
+
+// TestRetryInvalidatesTheCoverageSnapshot — the Jobs card subtracts
+// `unreadableExcluded` from eligible and its snapshot is TTL-cached for 30s,
+// so without an invalidation the card goes on subtracting a set the list no
+// longer shows: the panel empty, the line above it still naming N refused
+// tracks and pointing at it. (CodeRabbit on #947.)
+//
+// Drives the real route, because the invalidation is wiring and a test that
+// calls the helper directly would pass with the handler never calling it.
+func TestRetryInvalidatesTheCoverageSnapshot(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	seedDataFixture(t, srv)
+	seedRefusedTrack(t, srv, "Unknown Artist/Qobuz/06. Jasper Sea.flac", manifest.AnalysisFailureThreshold())
+
+	// getAnalysisCoverage returns nil (tile disabled) without a schema
+	// version, and the fixture leaves it empty. Any non-empty value works —
+	// the seeded track has no analysis row at all, so it is unanalysed under
+	// every version.
+	srv.deps.AnalysisSchemaVersion = "wf-test"
+
+	ctx := context.Background()
+	// Warm the cache the way a Jobs poll does.
+	if cov := srv.getAnalysisCoverage(ctx); cov == nil || cov.UnreadableExcluded != 1 {
+		t.Fatalf("warmed coverage = %+v, want 1 excluded — the rest proves nothing", cov)
+	}
+
+	var out unreadableRetryResponse
+	if code := doJSON(t, srv.Handler(), "POST", "/api/analysis/unreadable/retry", nil, &out); code != 200 {
+		t.Fatalf("POST retry: %d", code)
+	}
+	// Same call again: a live cache would answer 1 from the snapshot taken
+	// before the clear.
+	if cov := srv.getAnalysisCoverage(ctx); cov == nil || cov.UnreadableExcluded != 0 {
+		t.Errorf("coverage after the retry = %+v, want 0 excluded — the snapshot was "+
+			"not invalidated, so the card still subtracts a set the list no longer has", cov)
+	}
+}

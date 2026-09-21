@@ -5684,6 +5684,12 @@ async function unreadableRefresh() {
     renderUnreadableTracks(await API.get("/api/analysis/unreadable"));
     if (err) err.hidden = true;
   } catch (e) {
+    // Reveal the PANEL too. It starts hidden and only renderUnreadableTracks
+    // unhides it, so on a failed first fetch the error sat inside a hidden
+    // parent and the page silently omitted the whole feature — `hidden =
+    // false` says nothing about an ancestor. (CodeRabbit on #947.)
+    const panel = document.getElementById("unreadable-panel");
+    if (panel) panel.hidden = false;
     if (err) {
       err.hidden = false;
       err.textContent = `Couldn’t load the unreadable list: ${e.message}`;

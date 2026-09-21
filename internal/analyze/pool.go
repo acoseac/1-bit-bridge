@@ -396,7 +396,17 @@ func (p *Pool) processJob(job poolJob) {
 	// to clear costs at most one extra retry later, and refusing to count the
 	// job as done because a bookkeeping UPDATE failed would be the worse
 	// trade.
-	if err := p.store.ClearAnalysisFailure(jobCtx, job.spec.SourceLibraryRel); err != nil {
+	//
+	// DETACHED and bounded, like noteFailure's write and for the same reason:
+	// UpsertAnalysis has already committed by here, so the row is a success
+	// whatever jobCtx does next. Leaving it on jobCtx meant a per-job timeout
+	// or a shutdown landing in that gap left the strikes standing on a track
+	// that had just analysed cleanly — and the two writes being asymmetric
+	// was itself the tell. (CodeRabbit on #947.)
+	clearCtx, clearCancel := context.WithTimeout(
+		context.WithoutCancel(p.stopCtx), failureRecordTimeout)
+	defer clearCancel()
+	if err := p.store.ClearAnalysisFailure(clearCtx, job.spec.SourceLibraryRel); err != nil {
 		logger.Warn("analyze: clear failure marker",
 			"path", job.spec.SourceLibraryRel, "err", err)
 	}
