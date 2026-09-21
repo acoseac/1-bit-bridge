@@ -17,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
+	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
 // doctorCmd runs the preflight report. Exit codes:
@@ -216,6 +217,19 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 	if candidatePath != "" {
 		if cfg, err := config.Load(candidatePath); err == nil {
 			d.DataDir = cfg.DataDir
+			// The cert pair `bridge serve` would load — an explicit
+			// `tlsCertPath` included, which the cert checks used to
+			// ignore in favour of the DataDir defaults and so graded a
+			// cert nobody serves.
+			d.TLSCertPath, d.TLSKeyPath = resolveCertPaths(cfg)
+			// The SAN set a mint right now would produce. THE SAME
+			// helper serve hands LoadOrGenerateWithOptions and `bridge
+			// cert rotate` mints from — the doctor's claim is about
+			// what a rotation would cover, so it has to ask the
+			// question rotation answers.
+			d.CertSANs = func(context.Context) servertls.GenerateOptions {
+				return certSANOptions(cfg)
+			}
 			d.LibraryRoots = cfg.LibraryRoots
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			d.UpscaleEnabled = cfg.Upscale.Enabled

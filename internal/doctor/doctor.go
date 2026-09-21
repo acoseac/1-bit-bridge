@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -93,6 +94,46 @@ type Deps struct {
 	APIPort int
 	// AdminPort is the loopback admin console port, typically 7789.
 	AdminPort int
+	// TLSCertPath / TLSKeyPath mirror cfg.TLSCertPath / cfg.TLSKeyPath:
+	// the cert pair `bridge serve` would actually load. BOTH empty (the
+	// usual case, and what `bridge init` passes) falls back to
+	// `<DataDir>/server.{crt,key}` — the same
+	// `cfg.TLSCertPath`-or-defaults resolution serve and `bridge cert`
+	// apply, and config validation already refuses one without the
+	// other.
+	//
+	// Before this existed the cert checks always looked at the DataDir
+	// defaults, so on an install with an explicit path they graded a
+	// cert nobody serves — reporting "absent (init will mint)" about a
+	// bridge whose cert is fine, or a partial-state fail about two
+	// files it does not use.
+	TLSCertPath string
+	TLSKeyPath  string
+
+	// CertSANs returns the SAN inputs a cert minted RIGHT NOW would
+	// carry: the hostname, the Tailscale MagicDNS name and CGNAT
+	// addresses, every up non-loopback interface IP, and the hosts of
+	// `cfg.customEndpoints`. checkTLSCertSANs compares them against the
+	// cert on disk.
+	//
+	// cmd/bridge wires it from the SAME helper `bridge serve` hands
+	// LoadOrGenerateWithOptions and `bridge cert rotate` mints from, so
+	// the doctor's verdict is a claim about what a rotation would
+	// produce rather than a second opinion about it.
+	//
+	// Optional, like LibraryHasCodec: nil SKIPS the check rather than
+	// guessing — `bridge doctor` with no readable config has no
+	// customEndpoints to gather and would grade against a narrower set
+	// than serve uses.
+	//
+	// It takes the context for the reason every check here does, but
+	// what actually bounds it is its own probe: the Tailscale CLI call
+	// underneath caps at 1.5 s and is TTL-cached for 30 s across the
+	// process, which is what keeps `/api/doctor` on a settings-page
+	// render from forking one per fetch. It does not observe
+	// cancellation.
+	CertSANs func(context.Context) servertls.GenerateOptions
+
 	// OwnPIDFile, when set, points at the file `bridge serve` writes
 	// when it's running. A port bound by this PID is treated as OK
 	// (doctor must be idempotent while the server is running). Empty
@@ -237,6 +278,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkPlatform,
 		checkConfigDir,
 		checkTLSCert,
+		checkTLSCertSANs,
 		checkAPIPort,
 		checkAdminPort,
 		checkLibraryRoots,
@@ -293,17 +335,48 @@ func checkConfigDir(_ context.Context, d Deps) Check {
 	return ok(checkNameConfigDir, dir)
 }
 
-func checkTLSCert(_ context.Context, d Deps) Check {
+// certPaths resolves the cert pair the running bridge would load,
+// applying the same `cfg.TLSCertPath`-or-defaults fallback as
+// `bridge serve` and `bridge cert`. Returns ("", "") when there is
+// nothing to resolve from, which both cert checks report as a warn
+// rather than answering about a path they invented.
+func certPaths(d Deps) (certPath, keyPath string) {
+	if d.TLSCertPath != "" && d.TLSKeyPath != "" {
+		return d.TLSCertPath, d.TLSKeyPath
+	}
 	if d.DataDir == "" {
+		return "", ""
+	}
+	return servertls.DefaultPaths(d.DataDir)
+}
+
+// checkTLSCert reports the cert pair's presence AND its remaining
+// validity.
+//
+// Expiry matters here and not only in the startup log because Apple
+// ATS rejects an expired cert at the handshake layer, before
+// `URLSessionDelegate` is consulted — so pinning cannot save it and
+// every paired device stops working at once, with the only signal
+// being a log line on a host the operator may not be watching. The
+// threshold is servertls.ExpiryWarningWindow, the same one
+// LoadOrGenerate warns on, so doctor and the next `bridge serve`
+// cannot disagree.
+//
+// An expired cert is a WARN, not a fail: `bridge init` bails on a
+// fail, and refusing to initialise a bridge because its old cert
+// lapsed would block the very run that mints a new one. The summary
+// says "EXPIRED" in as many words instead.
+func checkTLSCert(_ context.Context, d Deps) Check {
+	certPath, keyPath := certPaths(d)
+	if certPath == "" {
 		return warn(checkNameTLSCert, "no data dir set",
 			"pass Deps.DataDir so doctor can inspect cert state")
 	}
-	certPath, keyPath := servertls.DefaultPaths(d.DataDir)
 	certExists := fileExists(certPath)
 	keyExists := fileExists(keyPath)
 	switch {
 	case certExists && keyExists:
-		return ok(checkNameTLSCert, "present")
+		return tlsCertPairCheck(certPath, keyPath)
 	case !certExists && !keyExists:
 		// Fresh install — init() will mint on first serve.
 		return ok(checkNameTLSCert, "absent (init will mint)")
@@ -314,6 +387,105 @@ func checkTLSCert(_ context.Context, d Deps) Check {
 		return fail(checkNameTLSCert, "partial state",
 			fmt.Sprintf("found %q but not its pair; remove the orphan and re-run init",
 				firstPresent(certPath, keyPath, certExists, keyExists)))
+	}
+}
+
+// tlsCertPairCheck grades a present cert pair: does it LOAD, and how
+// long is it good for.
+//
+// The split between fail and warn here is "can `bridge serve` start":
+// a pair it cannot load is a fail, like the partial-state branch above
+// and for the same reason; an expired or expiring certificate loads
+// fine and serve starts, so it is a warn about the clients.
+func tlsCertPairCheck(certPath, keyPath string) Check {
+	info, err := servertls.Inspect(certPath)
+	if err != nil {
+		// The pair is there and the cert half will not parse. "present"
+		// was the old answer and it is a confident wrong one.
+		return fail(checkNameTLSCert, "present but unreadable",
+			fmt.Sprintf("%s did not parse as a certificate (%v) — `bridge serve` will fail to load it. "+
+				"Remove the cert and key and re-run `bridge init`, or restore them from a backup.", certPath, err))
+	}
+	// A certificate that parses says nothing about the key beside it,
+	// and a mismatched pair is reachable: GenerateWithOptions commits
+	// the two files in two renames, and a crash between them leaves a
+	// new cert with the old key — a residual its own docblock records.
+	// Measured on that state, Inspect returns a clean 396-day verdict
+	// while `bridge serve` exits on "private key does not match public
+	// key".
+	if err := servertls.VerifyKeyPair(certPath, keyPath); err != nil && !errors.Is(err, fs.ErrPermission) {
+		return fail(checkNameTLSCert, "present, but the cert and key are not a pair",
+			fmt.Sprintf("`bridge serve` loads both files together and will not start: %v. "+
+				"This is what an interrupted `bridge cert rotate` leaves behind. Re-run `bridge cert rotate` "+
+				"— it re-mints BOTH files — then re-pair every paired device.", err))
+	}
+	// A permission failure on the key is deliberately NOT a finding.
+	// The key is 0600 and owned by the service user; on the public-mode
+	// layout the operator running `bridge doctor` is somebody else, and
+	// the bridge reads it perfectly well. That is a fact about this
+	// doctor run, not about the bridge — the same reason config
+	// `Validate()` does not stat the library roots. Expiry still grades,
+	// because it was read from the cert, which is 0644.
+	//
+	// ONE `now` for both ends of the validity window, so the two
+	// comparisons below cannot straddle a tick.
+	now := time.Now()
+	// The window has a FAR end too, and a cert that has not started is
+	// rejected by clients exactly like an expired one. `LoadX509KeyPair`
+	// does not look at dates, so the pair check above passes and this
+	// would otherwise read `present, expires in 396 days` about a cert
+	// nothing will accept. Reachable on this product's hardware: the
+	// mint allows one hour of clock skew (`NotBefore: now-1h`), so a
+	// host whose clock was further ahead than that when the cert was
+	// minted — a NUC or Pi with no RTC, before NTP lands — leaves a
+	// NotBefore in the future once the clock is corrected. Moving the
+	// data directory off such a host is this check's own subject.
+	if info.NotBefore.After(now) {
+		return warn(checkNameTLSCert,
+			fmt.Sprintf("present, NOT YET VALID (starts %s)", info.NotBefore.UTC().Format(time.RFC3339)),
+			"clients reject a certificate before its NotBefore exactly as they reject an expired one, so every "+
+				"paired device fails to connect until then. This usually means the host clock was ahead when the "+
+				"certificate was minted — CHECK THE CLOCK FIRST (`timedatectl` / `sntp -sS`), because rotating "+
+				"against a wrong clock mints another one. Once the clock is right: "+servertls.RotationRemediation)
+	}
+	// Remaining validity comes from NotAfter directly, NOT from
+	// DaysUntilExpiry: that count truncates toward zero, so a cert with
+	// 30 days 23 hours left reads as 30 and would trip a
+	// `days*24h <= ExpiryWarningWindow` test while `logIfExpiringSoon`,
+	// which compares `time.Until(NotAfter)`, stays quiet — a 23-hour
+	// window in which doctor and the next `bridge serve` disagree, which
+	// is the one thing this grading exists not to do. The day count is
+	// for the sentence only.
+	remaining := info.NotAfter.Sub(now)
+	switch {
+	case remaining <= 0:
+		return warn(checkNameTLSCert, fmt.Sprintf("present, EXPIRED %s", expiryPhrase(info.DaysUntilExpiry)),
+			"an expired certificate is rejected at the TLS handshake layer before pinning is consulted, so every "+
+				"paired device fails to connect. "+servertls.RotationRemediation)
+	case remaining <= servertls.ExpiryWarningWindow:
+		return warn(checkNameTLSCert, fmt.Sprintf("present, expires %s", expiryPhrase(info.DaysUntilExpiry)),
+			"renew before it lapses — an expired certificate is rejected at the TLS handshake layer, so every "+
+				"paired device fails to connect. "+servertls.RotationRemediation)
+	default:
+		return ok(checkNameTLSCert, fmt.Sprintf("present, expires %s", expiryPhrase(info.DaysUntilExpiry)))
+	}
+}
+
+// expiryPhrase renders CertInfo.DaysUntilExpiry as the tail of a
+// sentence. DISPLAY ONLY — the day count truncates toward zero, so no
+// branch is taken on it; its caller decides from the exact remaining
+// duration. Inspect's -1 sentinel for "already past NotAfter" is why
+// this reads the sign rather than the magnitude on the expired side.
+func expiryPhrase(days int) string {
+	switch {
+	case days < 0:
+		return "(past its NotAfter)"
+	case days == 0:
+		return "in under a day"
+	case days == 1:
+		return "in 1 day"
+	default:
+		return fmt.Sprintf("in %d days", days)
 	}
 }
 

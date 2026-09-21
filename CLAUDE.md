@@ -1924,6 +1924,48 @@ its twin.** The top list is older, shorter, and read first.
 - **The TLS cert is sticky and rotation is warn-only.** iOS pins the SHA-256 at
   pairing, so auto-rotation silently breaks every paired device; `certDuration`
   stays ≤397 days (Apple ATS rejects at handshake, before pinning runs).
+- **A warning that only fires at SERVE time arrives after the damage.** The
+  SAN-staleness check ran once inside `LoadOrGenerateWithOptions` and nowhere
+  else, so a data directory carried to another host reported `[ok] tls-cert
+  present` in `bridge doctor` and only said `cert SANs are stale` once the
+  bridge was up — by which point devices have pinned a cert that fails TLS for
+  every Tailscale and custom-endpoint URL, and the fix costs a re-pair of each.
+  `bridge doctor`'s `tls-cert-sans` runs the SAME comparison
+  (`servertls.InspectSANCoverage`) against the SAME want-set BEFORE the first
+  start. **That want-set is `cmd/bridge`'s `certSANOptions`, the one gather all
+  four cert paths use** — serve, `init`, `cert rotate`, doctor; they were four
+  copies of three lines, and the copy that drifts is the one that calls a cert
+  fine when a rotation would mint something different
+  (`TestCertSANOptionsIsWhatEveryCertPathMints` pins it structurally). The
+  doctor's cert checks read `cfg.TLSCertPath` too, via `doctor.certPaths` —
+  resolved from `DataDir` alone they graded a cert nobody serves. Expiry is on
+  the `tls-cert` line against the exported `servertls.ExpiryWarningWindow`, the
+  startup warning's own threshold — **compared as an exact duration, never
+  `DaysUntilExpiry`**, which truncates toward zero, so a day count would warn at
+  30d23h while `logIfExpiringSoon` stays quiet. The fail/warn split is **"can
+  `bridge serve` start"**: a pair it cannot LOAD fails (partial, unparseable, or
+  mismatched — `VerifyKeyPair` is `LoadX509KeyPair`, serve's own call, and an
+  interrupted two-rename rotate leaves a new cert with the old key, which
+  `Inspect` grades as a clean 396 days); an expiring, expired or NOT-YET-VALID
+  cert loads, so it warns about the clients. **The validity window has a near
+  end** — `LoadX509KeyPair` ignores dates, and the mint allows one hour of skew
+  (`NotBefore: now-1h`), so a host whose clock was further ahead at mint time (a
+  NUC or Pi with no RTC, pre-NTP) leaves a future `NotBefore` that reads as a
+  comfortable year of life left; `logIfExpiringSoon` carries the same arm, and
+  the hint says CHECK THE CLOCK FIRST because rotating against a wrong clock
+  mints another bad cert. **A permission failure reading the 0600 key is NOT
+  a finding** — on the public-mode layout the operator is not the service user,
+  and that is a fact about the doctor run, the same reason `Validate()` does not
+  stat the roots. **Every cert READER skips to the first CERTIFICATE block**
+  (`decodeCertificatePEM`, shared by `Inspect`, `fingerprintFromPEM` and
+  `InspectSANCoverage`) because `LoadX509KeyPair` does: a key-first or
+  `Bag Attributes` PEM loads at serve time and read as "unreadable" on both
+  doctor lines. `tls-cert-sans` skips on a managed
+  bridge (the control plane owns rotation and the tenant reaches it over the
+  autocert domain); **expiry does not** — `TestManagedReportsExpiryButNotStaleSANs`
+  pins the split, which was prose in a docblock and nothing else. `--fix` does
+  NOT rotate: that invalidates every pin and is an operator decision with a
+  device in hand.
 - **The pairing QR advertises the SERVED cert**, resolved by SNI —
   `FingerprintForServerName` mirrors `Get`'s routing rather than delegating, so
   **every freshness and validity gate in `Get` must be restated there**; losing

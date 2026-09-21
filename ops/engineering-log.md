@@ -7722,3 +7722,224 @@ long, deliberately-commented handlers this tree treats as load-bearing. The 30
 Redirect via unsanitized user input" at `internal/acoustid/client_test.go`, is
 a false positive: an httptest handler inside the test that deliberately issues
 a SAME-HOST redirect, to prove the client refuses cross-host ones.
+
+## 2026-09-21 — the cert-SAN check moves from serve time to preflight
+
+**Field report, 2026-09-20.** After a host move the data dir carried the old
+host's `server.crt` / `server.key`, whose SANs read `localhost, 1bitbridge,
+1bitbridge.local, bridge.ars.md, 127.0.0.1, ::1, 0.0.0.0, 10.0.0.4`. `bridge
+doctor` reported `[ok] tls-cert present`. Only at serve time did the tls
+component warn:
+
+```
+cert SANs are stale relative to advertised endpoints — Tailscale and
+custom-endpoint URLs will fail TLS until you rotate …
+  missing_dns: [nuc nuc.local nuc.sable-eagle.ts.net]
+  missing_ips: [192.168.0.24 100.102.105.89 fd7a:…]
+```
+
+and `/v1/health` withheld the uncovered endpoints. The remedy is two commands
+(`bridge cert rotate --yes`, restart) plus a re-pair of every device — cheap
+before the devices have pinned the stale cert, and the re-pair is the whole
+cost afterwards. So the check belongs in the preflight, not only in the
+startup path.
+
+### What was actually shared, and what was four copies
+
+The comparison moved out of `logIfSANsStale` into
+`servertls.InspectSANCoverage` (`internal/tls/sancoverage.go`) — the startup
+warning and the new `tls-cert-sans` doctor check now run the same function
+over the same cert. `SANCoverage` carries the FULL merged want-sets beside the
+missing ones, so the ok summary can report what it covered ("covers all 4
+name(s) and 6 address(es)") rather than an unfalsifiable all-clear.
+
+The half that was NOT shared, and mattered more: the want-set. `bridge serve`,
+`bridge init` and `bridge cert rotate` each had the same three lines —
+`advertise.CertSANConfig{…}` → `GatherCertSANDNS` / `GatherCertSANIPs` →
+`GenerateOptions` — copied out. A doctor grading against a fourth copy would
+be a second opinion about a rotation rather than a claim about it. They now
+all call `cmd/bridge`'s `certSANOptions(cfg)`, and
+`TestCertSANOptionsIsWhatEveryCertPathMints` asserts structurally that every
+one of the four files names it and that none but the declaring file reaches
+for the gatherers directly. (Anchored on identifiers through
+`readPackageFile`, which blanks comments AND string literals — this package's
+commentary names the symbols it discusses.)
+
+### The cert the doctor was grading
+
+`checkTLSCert` resolved `servertls.DefaultPaths(d.DataDir)` unconditionally,
+while serve and `bridge cert` apply `cfg.TLSCertPath`-or-defaults. On an
+install with an explicit path it therefore graded a pair nobody serves —
+reporting "absent (init will mint)" about a bridge whose cert is fine, or a
+partial-state FAIL about two files it does not use. `doctor.certPaths` now
+applies the same fallback, fed by `resolveCertPaths` from `buildDoctorDeps`.
+Latent (no live bridge sets the override), and the new check cannot be correct
+without it: it would have skipped with an all-clear on exactly the installs it
+could not see.
+
+### Decisions
+
+- **Warn, never fail, on both cert lines.** `bridge init` bails on a fail, so
+  an expired cert graded as a fail would block the very run that mints the
+  replacement. The summary says `present, EXPIRED (past its NotAfter)` in as
+  many words instead. Exit codes and `--json` consumers are unchanged.
+- **One expiry threshold.** `expiryWarningWindow` was unexported and used only
+  by `logIfExpiringSoon`; it is now `servertls.ExpiryWarningWindow` and the
+  doctor grades against it. A doctor that said ok about a cert the next
+  `bridge serve` warns on would be describing a different bridge.
+- **Managed skips the SAN check and NOT the expiry one.** A hosted tenant
+  reaches its bridge over the autocert domain, whose Let's Encrypt cert the
+  SNI switcher serves instead of this one, and `bridge cert rotate` needs a
+  shell they do not have — the unactionable-preflight shape `Deps.Managed`
+  exists for. Expiry is a deadline after which every paired device stops
+  connecting, and `TestManagedDoesNotSilenceTheRestOfThePreflight`'s docblock
+  had already promised it is reported "even if not to fix" — a promise nothing
+  asserted until `TestManagedReportsExpiryButNotStaleSANs`, which drives both
+  halves off one expired stale cert and carries an unmanaged negative control.
+- **`--fix` does not rotate.** Unchanged, and worth writing down: rotation
+  invalidates every paired device's pin. That is an operator decision with a
+  device in hand, not a mkdir-class remediation.
+- **The hint lists every missing entry rather than sampling.** The set is
+  bounded by what one host advertises — single digits — and "which ones" is
+  the operator's next question. Unlike `variants-index`, where the orphan list
+  is unbounded and capped at five.
+
+### Two things the real CLI showed that the suite did not
+
+Driven against a throwaway install (`bridge init --no-service`, a
+`customEndpoints` entry appended, `bridge doctor`):
+
+1. The hint read **"clients dialling bridge.example.test *fails* TLS"** — the
+   singular/plural switch keyed on `len(missing)`, but the subject is
+   "clients", always plural. And the one-entry case is the COMMON one (a single
+   endpoint added since the mint), so the broken grammar was the default
+   output.
+2. It said the cause was "a data directory moved between hosts", which is the
+   field report's route and not the only one — adding a `customEndpoints` entry
+   does it too, which is precisely what the fixture did. Naming only the first
+   sends an operator looking for a move that never happened. Both are named now.
+
+The loop was then verified end to end: doctor warns → `bridge cert rotate` →
+`[ok] tls-cert-sans covers all 4 name(s) and 6 address(es)`.
+
+Ships as #950 on `feat/doctor-cert-sans`.
+
+### Review round 1 on #950 — three real, one declined
+
+Both bots reviewed for real (no CodeRabbit rate-limit marker; "Actionable
+comments posted: 3"). Every finding was verified against the code with a
+throwaway probe before being acted on.
+
+**Gemini, `pem.Decode` reads only the first block — REAL, and widened.**
+`crypto/tls.LoadX509KeyPair`, the load `bridge serve` performs, walks every
+block and collects the CERTIFICATE ones, so a key-first or `Bag Attributes`
+PEM loads fine. Measured on one such file: `LoadX509KeyPair` nil, `Inspect`
+and `InspectSANCoverage` both "no CERTIFICATE block in PEM". Pre-existing in
+`Inspect` and `fingerprintFromPEM`, so fixing only the new function would have
+left doctor's two cert lines able to disagree about one file. One shared
+`decodeCertificatePEM`; the negative control is that a file with NO certificate
+still errors.
+
+**CodeRabbit, validate the pair — REAL, and it is a documented state.**
+`GenerateWithOptions` commits cert and key in two renames and its own docblock
+records the residual: a crash between them leaves a new cert with the old key.
+Measured on exactly that: `LoadX509KeyPair` → "tls: private key does not match
+public key" while `Inspect` returns err=nil, days=396 — doctor said `present,
+expires in 396 days` about a bridge that exits on startup. `servertls.
+VerifyKeyPair` is that same call, so doctor gets serve's answer rather than a
+second opinion.
+
+Two things the finding did not say, both decided here:
+
+- It is a **fail**, not a warn, and that settles the whole grading: the split
+  is "can `bridge serve` start". Partial, unparseable and mismatched all stop
+  it, so all three fail (the partial-state branch already did). Expiring and
+  expired load fine — serve starts, clients suffer — so they warn. The
+  "present but unreadable" case moved from warn to fail with it.
+- **A permission failure on the key is deliberately not a finding.** The key is
+  0600 and owned by the service user; on the public-mode VPS layout the person
+  running `bridge doctor` is somebody else, and adding a key READ where the
+  checks previously only stat'd would have failed the preflight on every such
+  host — with `bridge init` bailing on a fail. Same precedent as
+  `config.Validate()` not stat'ing the library roots. Expiry still grades,
+  because it comes from the 0644 cert.
+
+**CodeRabbit, the boundary truncates — REAL.** `DaysUntilExpiry` truncates
+toward zero, so 30d23h reads as 30 and `days*24h <= ExpiryWarningWindow`
+warned while `logIfExpiringSoon`, comparing `time.Until(NotAfter)`, stayed
+quiet. A 23-hour window in which doctor and the next `bridge serve` disagree —
+directly contradicting the docblock claiming they cannot. The day count is
+display-only now, and the test asserts the fixture reproduces the disagreement
+before asserting the verdict.
+
+**CodeRabbit, README `3 of 6 name(s)` — REAL.** Hand-counted; the merged want
+set is 4 (`localhost` is in the total even though the cert carries it). The
+corrected numbers were taken by running the code, and the counts are now
+pinned in `TestCheckTLSCertSANs_StaleCertWarnsWithTheExactMissingSet` so the
+next hand-written number cannot drift.
+
+**Gemini, nil guards in `ipDiff` — DECLINED.** `want` is always
+`mergeIPs(...)`, which already skips any entry whose `To16()` is nil, with a
+comment naming the exact aliasing hazard the finding describes; `got` comes
+from x509, which parses IP SANs as 4- or 16-byte values or errors. Probed:
+`ExtraIPs{nil, 3-byte, valid}` yields `WantIPs [127.0.0.1 ::1 0.0.0.0
+10.0.0.1]` and `MissingIPs [10.0.0.1]` — no `<nil>` reachable.
+
+**And the pair check caught the test helper that introduced it.**
+`writeCertWithNotAfter` rewrote the cert with a freshly generated key and left
+the fixture's original key in place, so every expiry fixture was a mismatched
+pair — which the new check immediately failed. The helper writes both halves
+now. A fixture that only rewrites one half of a pair silently tests a
+different state than the one its caller named.
+
+### Review round 2 on #950 — the near end of the validity window
+
+One finding, real, and its second half was the sharper one.
+
+**`tlsCertPairCheck` graded only `NotAfter`.** `LoadX509KeyPair` does not look
+at dates, so the pair check passes and the expiry arm reports a comfortable
+year of life left while no client will accept the certificate for another
+month — clients reject a not-yet-valid cert exactly as they reject an expired
+one. Reachable on this product's hardware rather than theoretical: the mint
+sets `NotBefore: time.Now().Add(-time.Hour)`, one hour of skew allowance, so a
+host whose clock was further ahead than that when the cert was minted — a NUC
+or Pi with no RTC, before NTP lands — leaves a future `NotBefore` once the
+clock is corrected. Moving the data directory off such a host is this check's
+own subject.
+
+Warn, not fail, per the split settled in round 1: serve loads it and starts.
+Both ends now read one captured `now`, so the two comparisons cannot straddle
+a tick. `logIfExpiringSoon` graded the same window and checked the same half,
+so it gets the arm too — leaving serve silent about a cert every client
+rejects would be a gap to write up rather than a decision.
+
+**The hint is not the usual one, deliberately.** Every other band here ends in
+`RotationRemediation`; this one leads with CHECK THE CLOCK FIRST
+(`timedatectl` / `sntp -sS`), because a rotation against a wrong clock mints
+another bad certificate. `TestCheckTLSCert_NotYetValidWarns` asserts that
+wording, not just the status.
+
+**And the fixtures were already in that state.** `writeCertWithNotAfter`
+derived `NotBefore: notAfter.Add(-24h)`, so measured against `time.Now()`:
+
+```
+expiring soon    NotBefore = now+648.0h  → valid yet? false
+boundary 30d23h  NotBefore = now+719.0h  → valid yet? false
+expired          NotBefore = now-72.0h   → valid yet? true
+```
+
+Two of the three expiry fixtures described certificates that would not be
+valid for another 27–30 days, and
+`TestCheckTLSCert_WarningBoundaryIsTheExactRemainingDuration` asserted `ok`
+about one of them. The helper pins `NotBefore` to the past now; callers that
+want a future one say so through `writeCertWithWindow`; and
+`TestExpiryFixturesAreInsideTheirValidityWindow` pins the HELPER rather than
+each caller, because the next fixture added will go through it too. The
+negative control reverting the derivation turns three tests red with
+`present, NOT YET VALID (starts 2026-10-18T…)` — the pre-fix state named
+explicitly.
+
+The generalisable rule, which is the second time this PR has paid for it (the
+round-1 mismatched-key helper was the first): **a fixture has to be broken in
+exactly the way its caller names and in no other way**, or a green test is
+about a state nobody chose.

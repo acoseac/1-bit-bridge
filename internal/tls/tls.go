@@ -59,10 +59,15 @@ const (
 	// this past 398 will break iOS clients at the TLS handshake layer
 	// before pinning is consulted.
 	certDuration = 397 * 24 * time.Hour
-	// expiryWarningWindow controls when LoadOrGenerate logs an
+	// ExpiryWarningWindow controls when LoadOrGenerate logs an
 	// approaching-expiry warning. 30 days covers a typical
 	// notice-to-operator → re-pair-every-device cycle.
-	expiryWarningWindow = 30 * 24 * time.Hour
+	//
+	// Exported because `bridge doctor`'s tls-cert line grades expiry
+	// against it too. One threshold: a doctor that said "ok" about a
+	// cert the very next `bridge serve` warns on would be reporting a
+	// different bridge than the one the operator is about to start.
+	ExpiryWarningWindow = 30 * 24 * time.Hour
 )
 
 // DefaultPaths returns the cert and key paths used when the user hasn't
@@ -149,8 +154,9 @@ func LoadOrGenerateWithOptions(certPath, keyPath string, opts GenerateOptions) (
 	return &cert, fp, nil
 }
 
-// logIfExpiringSoon parses the on-disk cert and logs a warning when its
-// remaining validity is below expiryWarningWindow. Runs once per process
+// logIfExpiringSoon parses the on-disk cert and logs a warning when it
+// is outside — or close to the end of — its validity window: not yet
+// started, already past NotAfter, or within ExpiryWarningWindow of it. Runs once per process
 // start (called from LoadOrGenerate) — operators see the warning in the
 // startup log alongside the usual listen-address line. Best-effort: a
 // parse failure here is silent (Inspect already covers the operator-facing
@@ -160,12 +166,25 @@ func logIfExpiringSoon(certPath string) {
 	if err != nil {
 		return
 	}
-	remaining := time.Until(info.NotAfter)
+	now := time.Now()
+	// The near end of the window. A cert that has not STARTED is
+	// rejected by clients exactly like an expired one, and
+	// LoadX509KeyPair does not look at dates, so the bridge comes up
+	// and every device fails — silently, before this arm existed. The
+	// mint allows one hour of skew (`NotBefore: now-1h`), so a host
+	// whose clock was further ahead than that at mint time leaves this
+	// state behind once the clock is corrected.
+	if info.NotBefore.After(now) {
+		logger.Warn("cert is not valid yet — clients reject it exactly as they reject an expired one. Check the host clock before rotating: a rotation against a wrong clock mints another one",
+			"path", certPath, "not_before", info.NotBefore.UTC().Format(time.RFC3339))
+		return
+	}
+	remaining := info.NotAfter.Sub(now)
 	switch {
 	case remaining <= 0:
 		logger.Error("cert expired — every paired iOS client will fail at TLS handshake until you rotate (`bridge cert rotate` or admin console) and re-pair",
 			"path", certPath, "expired_days_ago", -info.DaysUntilExpiry)
-	case remaining <= expiryWarningWindow:
+	case remaining <= ExpiryWarningWindow:
 		logger.Warn("cert expires soon — schedule a `bridge cert rotate` and re-pair every paired iOS client before then (Apple ATS rejects expired certs at the handshake layer)",
 			"path", certPath, "days_remaining", info.DaysUntilExpiry)
 	}
@@ -327,9 +346,9 @@ func Inspect(certPath string) (CertInfo, error) {
 	if err != nil {
 		return CertInfo{}, err
 	}
-	block, _ := pem.Decode(raw)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return CertInfo{}, errors.New("no CERTIFICATE block in PEM")
+	block, err := decodeCertificatePEM(raw)
+	if err != nil {
+		return CertInfo{}, err
 	}
 	parsed, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
@@ -471,82 +490,6 @@ func ParseHostFromURL(raw string) (host string, isIP bool) {
 	return h, false
 }
 
-// logIfSANsStale parses the on-disk cert and warns if the operator-
-// supplied SAN options aren't fully covered. Best-effort: a parse
-// failure is silent; the operator surface (`Inspect` / admin Cert
-// tile) carries the user-facing diagnostic. Runs once at startup
-// from LoadOrGenerateWithOptions.
-//
-// Why this exists: cert auto-rotation on upgrade would silently
-// invalidate every paired iOS device's pinned fingerprint. Warning-
-// only preserves the pinning contract — the operator drives rotation
-// when they have an iOS device in hand to re-pair.
-func logIfSANsStale(certPath string, opts GenerateOptions) {
-	raw, err := os.ReadFile(certPath)
-	if err != nil {
-		return
-	}
-	block, _ := pem.Decode(raw)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return
-	}
-	parsed, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return
-	}
-	wantDNS := mergeDNSNames(opts.Hostname, opts.ExtraDNSNames)
-	wantIPs := mergeIPs(opts.ExtraIPs)
-	missingDNS := stringDiff(wantDNS, parsed.DNSNames)
-	missingIPs := ipDiff(wantIPs, parsed.IPAddresses)
-	if len(missingDNS) == 0 && len(missingIPs) == 0 {
-		return
-	}
-	logger.Warn(
-		"cert SANs are stale relative to advertised endpoints — Tailscale and custom-endpoint URLs will fail TLS until you rotate. Use `bridge cert rotate` or click Rotate in the admin Cert tile, then re-pair every iOS device.",
-		"missing_dns", missingDNS,
-		"missing_ips", ipsToStrings(missingIPs),
-	)
-}
-
-// stringDiff returns elements in `want` that aren't in `got`, case-
-// insensitively. Order preserves `want`. Used by logIfSANsStale to
-// list missing DNS SAN names.
-func stringDiff(want, got []string) []string {
-	have := make(map[string]bool, len(got))
-	for _, g := range got {
-		have[strings.ToLower(g)] = true
-	}
-	var miss []string
-	for _, w := range want {
-		if !have[strings.ToLower(w)] {
-			miss = append(miss, w)
-		}
-	}
-	return miss
-}
-
-func ipDiff(want, got []net.IP) []net.IP {
-	have := make(map[string]bool, len(got))
-	for _, g := range got {
-		have[string(g.To16())] = true
-	}
-	var miss []net.IP
-	for _, w := range want {
-		if !have[string(w.To16())] {
-			miss = append(miss, w)
-		}
-	}
-	return miss
-}
-
-func ipsToStrings(ips []net.IP) []string {
-	out := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		out = append(out, ip.String())
-	}
-	return out
-}
-
 // stagePEM encodes der as a PEM block into a fresh temp file in the SAME
 // directory as path, fsync'd and chmod'd to mode, and returns the temp
 // file's path WITHOUT renaming it into place. The caller commits it via
@@ -592,6 +535,58 @@ func stagePEM(path, blockType string, der []byte, mode os.FileMode) (tmpName str
 	return name, nil
 }
 
+// decodeCertificatePEM returns the first CERTIFICATE block in a PEM
+// file, SKIPPING any other block type ahead of it.
+//
+// It has to skip, because `crypto/tls.LoadX509KeyPair` — the load
+// `bridge serve` actually performs — does: its X509KeyPair loop walks
+// every block and collects only the CERTIFICATE ones. A file whose
+// first block is a key, or an openssl `Bag Attributes` preamble,
+// therefore loads FINE at serve time, while a bare `pem.Decode` of the
+// first block answers "no CERTIFICATE block" — so every read-side
+// surface here called a certificate the bridge is happily serving
+// unreadable. Measured on one key-first file: LoadX509KeyPair nil,
+// Inspect and InspectSANCoverage both erroring.
+//
+// All three readers share it so they cannot disagree about the same
+// file: `bridge doctor` prints an expiry line and a SAN line for one
+// certificate, and one of them calling it unreadable while the other
+// grades it would be worse than either answer alone.
+func decodeCertificatePEM(raw []byte) (*pem.Block, error) {
+	for {
+		var block *pem.Block
+		block, raw = pem.Decode(raw)
+		if block == nil {
+			return nil, errors.New("no CERTIFICATE block in PEM")
+		}
+		if block.Type == "CERTIFICATE" {
+			return block, nil
+		}
+	}
+}
+
+// VerifyKeyPair reports whether the cert and key at these paths load as
+// a pair — the SAME `crypto/tls.LoadX509KeyPair` call `bridge serve`
+// makes, so a caller gets serve's own answer rather than a second
+// opinion about it.
+//
+// It exists for `bridge doctor`: a certificate that parses on its own
+// says nothing about the key beside it, and a MISMATCHED pair is a
+// state this package documents as reachable — GenerateWithOptions
+// commits cert and key in two renames, and a crash between them leaves
+// a new cert with the old key (see the two-rename residual in
+// GenerateWithOptions). Measured on exactly that state: Inspect returns
+// a clean 396-day verdict while LoadX509KeyPair returns "tls: private
+// key does not match public key" and the bridge does not start.
+//
+// Read-only. The returned error is LoadX509KeyPair's, unwrapped, so a
+// caller can tell a permission failure (`fs.ErrPermission` — a reader
+// who is not the service user) from a real mismatch.
+func VerifyKeyPair(certPath, keyPath string) error {
+	_, err := cryptotls.LoadX509KeyPair(certPath, keyPath)
+	return err
+}
+
 // fingerprintFromPEM reads the PEM-encoded cert file and returns its SHA-256
 // fingerprint. Helper for the LoadOrGenerate path that already has a file
 // handy; callers with a parsed cert should use FingerprintFromDER.
@@ -600,9 +595,9 @@ func fingerprintFromPEM(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	block, _ := pem.Decode(raw)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return "", errors.New("no CERTIFICATE block in PEM")
+	block, err := decodeCertificatePEM(raw)
+	if err != nil {
+		return "", err
 	}
 	return FingerprintFromDER(block.Bytes), nil
 }

@@ -162,17 +162,12 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	// files here — that would defeat the atomic overwrite and reintroduce
 	// the unbootable-on-failed-rotation hazard the two-phase commit closes
 	// (PR #487).
-	hostname, _ := os.Hostname()
 	// Rotate is the operator-driven path that picks up Tailscale +
-	// custom-endpoint SAN changes since the last cert was minted. We
-	// gather the broader SAN set here so the rotated cert covers every
-	// URL the bridge currently advertises in /v1/health.
-	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}
-	opts := servertls.GenerateOptions{
-		Hostname:      hostname,
-		ExtraDNSNames: advertise.GatherCertSANDNS(sanCfg),
-		ExtraIPs:      advertise.GatherCertSANIPs(sanCfg),
-	}
+	// custom-endpoint SAN changes since the last cert was minted. The
+	// gather is shared with serve and with `bridge doctor`, so the
+	// rotated cert covers every URL the bridge currently advertises in
+	// /v1/health and the doctor's verdict was about this very set.
+	opts := certSANOptions(cfg)
 	if err := servertls.GenerateWithOptions(certPath, keyPath, opts); err != nil {
 		fmt.Fprintf(stderr, "rotate: %v\n", err)
 		return 1
@@ -194,6 +189,30 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	fmt.Fprintln(stdout, "     'Pair new device' / per-token 'Rotate' flows emit fresh QR codes")
 	fmt.Fprintln(stdout, "     carrying the new fingerprint.")
 	return 0
+}
+
+// certSANOptions builds the TLS SAN inputs every cert path in this
+// binary mints or grades against: `bridge init`'s first mint, `bridge
+// serve`'s load-or-mint, `bridge cert rotate`, and `bridge doctor`'s
+// tls-cert-sans check.
+//
+// One helper because the four had the same three lines copied out four
+// times, and the one that drifts is the one that decides an operator's
+// cert is fine when a rotation would produce something different. The
+// doctor's whole claim is "a rotation right now would cover these", so
+// it has to be asking the same question `bridge cert rotate` answers.
+//
+// The Tailscale half of the gather shells out, bounded at 1.5 s and
+// TTL-cached for 30 s process-wide (see internal/advertise) — the same
+// probe `/v1/health` runs per request.
+func certSANOptions(cfg *config.Config) servertls.GenerateOptions {
+	hostname, _ := os.Hostname()
+	sanCfg := advertise.CertSANConfig{CustomEndpoints: cfg.CustomEndpoints}
+	return servertls.GenerateOptions{
+		Hostname:      hostname,
+		ExtraDNSNames: advertise.GatherCertSANDNS(sanCfg),
+		ExtraIPs:      advertise.GatherCertSANIPs(sanCfg),
+	}
 }
 
 // resolveCertPaths returns the cert + key paths the running bridge
