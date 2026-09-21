@@ -2349,6 +2349,23 @@ its twin.** The top list is older, shorter, and read first.
   A historical note naming a removed test is REWORDED rather than exempted,
   and the guard scans its own file, so its examples cannot name one either.
   (#921)
+- **…and the TRACKED `.md` docs, with three exemptions and one hard
+  constraint.** It read Go only, which is how #945's rename left three stale
+  citations in `CLAUDE.md` and the log — the auto-loaded file being the most
+  expensive place for a stale guard name. Exempt: `ops/plan-*.md` (a plan
+  names coverage it INTENDS — thirty of the forty stale names were in one,
+  all correct as written), three metasyntactic `-run` placeholders, and one
+  test owned by the private conductor repo. **TRACKED is load-bearing**:
+  `ops/*audit*.md` and friends are gitignored and differ per machine, so the
+  first draft failed on this one and would have passed on CI and a fresh
+  clone — a verdict that depends on untracked local files is not a guard. The
+  discriminator is `.git`: absent means a fixture tree with no ignore rules,
+  present means git must answer and a failing git is reported, never quietly
+  widened back. **Elide the `Test` prefix** (`…ServeDrainsOnCleanup`) when a
+  note must name a test that no longer exists: the regex needs `Test` +
+  uppercase, so the name stays readable without claiming to exist. Four real
+  hits were corrected, not exempted — three plain renames plus a UA string
+  literal that was being DISCUSSED rather than cited. (#946)
 
 ### <a name="review-2026-09-18"></a>2026-09-18 — findings review on the post-#899 window
 

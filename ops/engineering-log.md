@@ -7029,3 +7029,112 @@ are in `ops/plan-web-upload.md`, a PLAN listing tests to be written, and several
 more are line-wrap or family-prefix artifacts rather than citations. Extending
 the guard to markdown therefore needs a plan-doc exemption and wrap handling,
 and is left as its own change rather than folded in here.
+
+## 2026-09-21 — the citation guard reads the docs now (#946)
+
+#945 renamed a guard and a file, and left three stale citations behind in
+`CLAUDE.md` and this log. `TestEveryCitedTestNameExists` could not have caught
+them: it scanned Go source and test-file comments. `CLAUDE.md` is the file the
+harness loads on every session, which makes it the most expensive place in the
+tree for a stale guard name — precisely the class that test exists to catch.
+
+### The population, once the guard's own rule is applied
+
+An ad-hoc scan said 47 cited-but-undefined names, which was wrong: it did not
+apply `definesWithPrefix`, the existing acceptance of a citation that names a
+PREFIX of the real function (a table-driven parent, or a name truncated at a
+line wrap). With that rule, 40 — and they sort into four categories, only one
+of which is a defect:
+
+| where | count | what it is |
+|---|---|---|
+| `ops/plan-web-upload.md` | 30 | a plan listing tests TO BE WRITTEN |
+| `docs/LoupeReviewCycle.md`, `AGENTS.md` | 4 | metasyntactic `-run` placeholders |
+| `ops/deployment-runbook.md` | 1 | a test in the private conductor repo |
+| `ops/engineering-log.md` | 5 | the real drift |
+
+### TRACKED, and why the first draft was not a guard
+
+The first version scanned every `.md` in the tree and failed on this machine
+over `ops/audit-2026-08-06.md`, which cites `…PIDAlive_SelfAndReaped` —
+since split into `TestPIDAlive_SelfAndBounds` and
+`TestPIDAliveReapedChildReadsDead`. That file is gitignored (`ops/*audit*.md`),
+along with `ops/coordinates.local.md` and the bug reviews, so it differs from
+machine to machine: the guard would have failed here and passed on CI and on a
+fresh clone. **A test whose verdict depends on untracked local files is not a
+guard.**
+
+`trackedMarkdownSet` asks git, and each branch fails in the honest direction. No
+`.git` is a fixture's temp directory, which has no ignore rules, so everything
+in it is in scope — that is also what keeps the fixture test hermetic. With
+`.git`, git must answer; an absent or failing git is a broken environment the
+test reports rather than quietly widening its scope back to every file. There
+was no precedent for shelling out to git in this repo's tests, which is why the
+alternative — mirroring the `.gitignore` md globs by hand — was considered and
+dropped: it drifts the moment another local doc appears, and it drifts toward a
+false failure on one machine.
+
+### The four real hits, corrected rather than exempted
+
+Three were plain renames the docs had drifted from:
+
+```
+…NoMatchesUnderPrefixIsByteRanged -> TestClearAcoustIDSuppressionUnderPrefixIsByteRanged
+…RoutesToOptimizeChannel          -> TestRoutesToForegroundLane
+…UpstreamMetadataAlwaysWins       -> TestUpstreamMetadataIsNeverRewritten
+```
+
+The third was confirmed against the fixture rather than guessed from the name:
+the entry describes replacing a fixture value that "cleans to itself", and the
+live test uses `"John Adams*"`, which does not. The fourth was not a citation at
+all — a UA string literal being DISCUSSED, the commentary-quotes-its-subject
+trap in markdown, now described instead of quoted.
+
+**A note that must name a test which no longer exists elides the `Test`
+prefix** — `…ServeDrainsOnCleanup`. The regex needs `Test` followed by an
+uppercase letter, so the name stays readable to a human and invisible to the
+scan. This entry had to obey that rule three times before it would commit: the
+first draft of the table above spelled two of the old names in full and the
+paragraph above spelled a third, and the guard reported all three. That is the mechanical form of the rule #921 already recorded as "reworded
+rather than exempted", and it means a historical record does not have to choose
+between being accurate and being greppable.
+
+### The exemptions are categories, not conveniences
+
+The placeholder names live in a map and are deliberately NOT spelled in the
+docblock beside it: this is a `_test.go`, so its comment groups are scanned like
+any other docblock, and naming them there reports them as missing. The map
+entries are code, which the test-file branch does not read. That is the guard
+scanning its own file, which #921 also recorded, met a second time.
+
+### Negative controls
+
+Committed first. Every exemption and both floors, each restored afterwards:
+
+```
+plan-doc exemption off            30 plan names reported
+placeholder exemption off          3 placeholders reported
+foreign-repo map emptied           1 reported
+tracked filter on, ghost in an ignored file    0 reported  (correct)
+tracked filter off, same file                  1 reported
+md branch collects nothing         floor fires
+git made to fail with .git present loud failure, not a widened scope
+each of the 4 doc fixes reverted   caught, one at a time
+```
+
+Three of those controls were INVALID on the first attempt and each failed in a
+way this file already warns about. One left `foreign` declared-and-unused, so it
+failed to BUILD — which reads as "control invalid", never as a pass; emptying
+the map is the compiling form. One mutated nothing, because the replacement
+pattern did not match and I had not asserted that it applied. And one could not
+reproduce at all, because I had already fixed the offending audit file by hand,
+so the control needed a purpose-built gitignored file carrying a ghost name.
+A fourth reported blank for every case: `grep -o … | head -1` takes `head`'s
+exit status, so the `|| echo "not caught"` fallback never fired — the
+grep-masked-exit-status trap, in the harness rather than in the code.
+
+### Not done
+
+The audit documents stay out of scope by construction, being gitignored. The one
+stale citation found in `ops/audit-2026-08-06.md` was corrected on this machine
+only, and no PR can carry it.
