@@ -8010,7 +8010,7 @@ Found while rewriting them, same data, same few lines, so they ship together:
   (`--ok`), while `refreshCertInfo`'s own docblock said yellow. `.badge.warn`
   predates the cert tile by one day (app.css 2026-04-24, the tile 2026-04-25),
   so this was a slip from the first commit: "expiring within a month" rendered
-  in the same colour as healthy for seventeen months.
+  in the same colour as healthy for the 149 days since.
 - `bridge cert info` graded its 30-day band on `DaysUntilExpiry <= 30`. The day
   count truncates toward zero, so at 30d23h it printed "cert is expiring soon"
   while `bridge doctor` and the next `bridge serve` — both comparing the
