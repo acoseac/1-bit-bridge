@@ -405,7 +405,6 @@ func TestRunAutoOptimizeSweeperSweepsOnNudge(t *testing.T) {
 	t.Cleanup(func() { autoOptimizeSettleDelay = prev })
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	nudge := make(chan struct{}, 1)
 	done := make(chan struct{})
 	go func() {
@@ -414,6 +413,7 @@ func TestRunAutoOptimizeSweeperSweepsOnNudge(t *testing.T) {
 		// of racing a ticker.
 		runAutoOptimizeSweeper(ctx, f.sweeper, staticInterval(0), nudge, nil, nil)
 	}()
+	drainLoopOnCleanup(t, cancel, done, "runAutoOptimizeSweeper")
 
 	// The post-settle sweep already covers the seeded track; wait for it,
 	// then seed another and nudge.
@@ -435,12 +435,6 @@ func TestRunAutoOptimizeSweeperSweepsOnNudge(t *testing.T) {
 		t.Fatalf("nudge did not trigger a sweep; submitted %d jobs", f.submitted.count())
 	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("runAutoOptimizeSweeper did not return on ctx cancel")
-	}
 }
 
 // seedALACTrack is seedTrack's ALAC twin: a real file plus a hi-res

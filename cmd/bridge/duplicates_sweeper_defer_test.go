@@ -70,7 +70,6 @@ func TestDuplicatesSweeperReArmsNudgeDeferredBehindAScan(t *testing.T) {
 	nudge <- struct{}{} // the settings PATCH, landing mid-scan
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -78,6 +77,7 @@ func TestDuplicatesSweeperReArmsNudgeDeferredBehindAScan(t *testing.T) {
 		// cadence is not what this test pins.
 		runDuplicatesSweeper(ctx, r, nudge, nil, time.Millisecond)
 	}()
+	drainLoopOnCleanup(t, cancel, done, "the duplicates sweeper")
 
 	// While the scan is in flight the pass must not run — the deferral
 	// itself is still correct behaviour, only the dropping was not.
@@ -105,12 +105,6 @@ func TestDuplicatesSweeperReArmsNudgeDeferredBehindAScan(t *testing.T) {
 			"(the re-armed nudge must be consumed by the pass, not perpetuate)", n)
 	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("sweeper did not exit on ctx cancellation")
-	}
 }
 
 // A non-positive deferRetry must NOT turn the re-arm branch into a spin.
@@ -138,6 +132,10 @@ func TestDuplicatesSweeperZeroDeferRetryDoesNotSpin(t *testing.T) {
 		defer close(done)
 		runDuplicatesSweeper(ctx, r, nudge, nil, 0) // the clamp's input
 	}()
+	// The tail below is this test's ASSERTION, not teardown, so it stays.
+	// This is the belt for a t.Fatalf that might later be added above
+	// it: the cleanup then finds `done` already closed and returns.
+	drainLoopOnCleanup(t, cancel, done, "the duplicates sweeper")
 
 	const window = 300 * time.Millisecond
 	time.Sleep(window)
@@ -180,6 +178,10 @@ func TestDuplicatesSweeperDeferralExitsOnCancel(t *testing.T) {
 		// cancellation can end the wait.
 		runDuplicatesSweeper(ctx, r, nudge, nil, time.Hour)
 	}()
+	// The tail below is this test's ASSERTION, not teardown, so it stays.
+	// This is the belt for a t.Fatalf that might later be added above
+	// it: the cleanup then finds `done` already closed and returns.
+	drainLoopOnCleanup(t, cancel, done, "the duplicates sweeper")
 
 	time.Sleep(20 * time.Millisecond)
 	cancel()

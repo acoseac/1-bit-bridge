@@ -92,11 +92,19 @@ func TestRunIngestLoopRereadsItsIntervalEveryIteration(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	l := &upnpUpstreamLifecycle{log: testLogger()}
 	l.ingestWg.Add(1)
+	// Built on the TEST goroutine, deliberately. disabledIngester calls
+	// t.TempDir, t.Fatal and t.Cleanup, and FailNow from a non-test
+	// goroutine is documented misuse — it Goexits that goroutine, not the
+	// test. It also has to register its store.Close BEFORE the drain, or
+	// LIFO closes the store while the loop is still holding it; called
+	// inside the `go func` that registration happened at whatever moment
+	// the goroutine got scheduled.
+	ing := disabledIngester(t)
 	done := make(chan struct{})
-	go func() { defer close(done); l.runIngestLoop(ctx, disabledIngester(t), interval, nil) }()
+	go func() { defer close(done); l.runIngestLoop(ctx, ing, interval, nil) }()
+	drainLoopOnCleanup(t, cancel, done, "the ingest loop")
 
 	deadline := time.After(5 * time.Second)
 	for calls.Load() < 3 {
@@ -108,12 +116,6 @@ func TestRunIngestLoopRereadsItsIntervalEveryIteration(t *testing.T) {
 		}
 	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the ingest loop did not exit on ctx cancel")
-	}
 }
 
 // TestRunIngestLoopRearmDoesNotIngest pins that a cadence change re-reads the
@@ -134,11 +136,13 @@ func TestRunIngestLoopRearmDoesNotIngest(t *testing.T) {
 	rearm := make(chan struct{}, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	l := &upnpUpstreamLifecycle{log: testLogger()}
 	l.ingestWg.Add(1)
+	// On the test goroutine — see the sibling above for why.
+	ing := disabledIngester(t)
 	done := make(chan struct{})
-	go func() { defer close(done); l.runIngestLoop(ctx, disabledIngester(t), interval, rearm) }()
+	go func() { defer close(done); l.runIngestLoop(ctx, ing, interval, rearm) }()
+	drainLoopOnCleanup(t, cancel, done, "the ingest loop")
 
 	// Wait for the loop to arm its first timer.
 	deadline := time.After(5 * time.Second)
@@ -165,12 +169,6 @@ func TestRunIngestLoopRearmDoesNotIngest(t *testing.T) {
 		}
 	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the ingest loop did not exit on ctx cancel")
-	}
 }
 
 // --- the smart-playlist regenerator's analysis gate --------------------------
@@ -192,7 +190,11 @@ func TestSmartPlaylistRegeneratorReadsAnalysisLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	// t.Cleanup, not defer: a defer runs BEFORE every cleanup, so a
+	// deferred Close here would shut the store on the failing path while
+	// the regenerator goroutine was still using it — the one ordering no
+	// drain registered below can fix.
+	t.Cleanup(func() { _ = store.Close() })
 
 	oldSettle := smartPlaylistSettleDelay
 	smartPlaylistSettleDelay = time.Millisecond
@@ -202,7 +204,6 @@ func TestSmartPlaylistRegeneratorReadsAnalysisLive(t *testing.T) {
 	analysisActive := func() bool { analysisReads.Add(1); return false }
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	status := &sweepStatus[struct{}]{}
 	done := make(chan struct{})
 	go func() {
@@ -210,6 +211,7 @@ func TestSmartPlaylistRegeneratorReadsAnalysisLive(t *testing.T) {
 		runSmartPlaylistRegenerator(ctx, store, analysisActive,
 			func() bool { return true }, staticInterval(5*time.Millisecond), nil, status)
 	}()
+	drainLoopOnCleanup(t, cancel, done, "the smart-playlist regenerator")
 
 	deadline := time.After(5 * time.Second)
 	for analysisReads.Load() < 2 {
@@ -221,10 +223,4 @@ func TestSmartPlaylistRegeneratorReadsAnalysisLive(t *testing.T) {
 		}
 	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the regenerator did not exit on ctx cancel")
-	}
 }

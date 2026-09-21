@@ -2179,10 +2179,26 @@ its twin.** The top list is older, shorter, and read first.
   — `waitForAdminReady` does), and report with `t.Errorf`, since `FailNow` from
   a cleanup skips the very removals the drain sequences itself against. Three
   such tests, written months apart, and the surviving shape had reached only
-  the newest — so `TestEveryBackgroundServeDrainsOnCleanup` pins the
-  POPULATION, by AST: a text scan for the marker is satisfied by the two
-  comments that merely NAME the helper, and one for the old shape flags every
-  in-process loop test in the package, where it is the correct shape. (#944)
+  the newest — so `TestEveryBackgroundGoroutineDrainsOnCleanup` pins the
+  POPULATION, by AST: a text scan for the marker is satisfied by the comments
+  that merely NAME a helper, and one for the old `defer cancel()` shape misses
+  the sites that never had one. (#944; extended to the in-process loops, and
+  `drainLoopOnCleanup` added beside it, in #945 — where a hand-written list of
+  five files missed a sixth site that the shape match found.)
+- **Two things the drain cannot fix by itself, both found converting the loop
+  tests (#945).** A **`defer` beats EVERY `t.Cleanup`**, so a fixture that tears
+  down with `defer store.Close()` can have no drain ordered behind it — the
+  Close runs first, by construction, on the failing path. Measured on the
+  smart-playlist test: pre-fix the regenerator was still running against a
+  CLOSED SQLite handle (`store already closed when the loop returned = true`);
+  as a `t.Cleanup` registered before the drain, false. And **a fixture that
+  takes `*testing.T` must be built on the TEST goroutine** — `disabledIngester(t)`
+  was called inside the `go func`, so `t.TempDir`, `t.Fatal` and `t.Cleanup` all
+  ran off it; `FailNow` from a non-test goroutine is documented misuse (it
+  Goexits that goroutine, not the test), and the `store.Close` registration
+  landed at whatever moment the goroutine was scheduled, which can be AFTER the
+  drain and so invert the very ordering the drain establishes. Neither is
+  visible to an AST shape check, so the guard does not claim them.
 - **Windows CI catches wall-clock assumptions** — ~15.6 ms granularity means two
   stamps milliseconds apart are not reliably ordered. Assert on counted events,
   and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes
