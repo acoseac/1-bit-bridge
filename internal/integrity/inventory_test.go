@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -640,5 +641,78 @@ func TestSidecarInventoryCountsASymlinkItCannotStat(t *testing.T) {
 	}
 	if inv.Files != 1 {
 		t.Errorf("Files = %d, want 1 — only the real sidecar is a candidate", inv.Files)
+	}
+}
+
+// fakeFileInfo is the minimum fs.FileInfo classifyWalkEntry reads: it
+// asks IsDir() and nothing else.
+type fakeFileInfo struct {
+	fs.FileInfo
+	dir bool
+}
+
+func (f fakeFileInfo) IsDir() bool { return f.dir }
+
+// TestClassifyWalkEntryHandlesAWindowsJunction.
+//
+// The symlink skip added in #959 tested the ModeSymlink BIT, and the
+// shape that matters most on Windows does not carry it. Since Go 1.23's
+// winsymlink change, os.Lstat gives a name-surrogate reparse point
+// ModeIrregular and withholds ModeDir, so a directory JUNCTION
+// (`mklink /J`, IO_REPARSE_TAG_MOUNT_POINT) reports IsDir() false with
+// no ModeSymlink bit — it fell through every arm and `upscale --gc`'s
+// nil Consider made it an orphan FILE. A junction is the ORDINARY way
+// to park an album on another volume there: a real symlink needs a
+// privilege a service account usually does not have. One junction is
+// below the mass-orphan floor of ten, so no guard could see it, and
+// os.Remove takes the junction while the target's files stay behind
+// with nothing pointing at them.
+//
+// Driven as (mode, stat) because the Windows shape cannot be built on
+// any other platform, and a test that skips everywhere but one CI leg
+// looks exactly like one that passed.
+func TestClassifyWalkEntryHandlesAWindowsJunction(t *testing.T) {
+	dir := func() (fs.FileInfo, error) { return fakeFileInfo{dir: true}, nil }
+	file := func() (fs.FileInfo, error) { return fakeFileInfo{}, nil }
+	dangling := func() (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+	walled := func() (fs.FileInfo, error) { return nil, fs.ErrPermission }
+
+	for _, tc := range []struct {
+		name string
+		mode fs.FileMode
+		stat func() (fs.FileInfo, error)
+		want walkEntryVerdict
+	}{
+		// The live defect: a Windows junction to a directory.
+		{"junction to a directory", fs.ModeIrregular, dir, walkEntrySkip},
+		{"junction to a file", fs.ModeIrregular, file, walkEntryClassify},
+		{"junction that cannot be stat'd", fs.ModeIrregular, walled, walkEntryUnreadable},
+		// The cases #959 already covered, unchanged.
+		{"symlink to a directory", fs.ModeSymlink, dir, walkEntrySkip},
+		{"symlink to a file", fs.ModeSymlink, file, walkEntryClassify},
+		{"dangling symlink", fs.ModeSymlink, dangling, walkEntryClassify},
+		{"symlink behind a permission wall", fs.ModeSymlink, walled, walkEntryUnreadable},
+		// The other non-regular POSIX kinds stat to themselves, so the
+		// wider test must not change what they were.
+		{"a named pipe", fs.ModeNamedPipe, file, walkEntryClassify},
+		{"a socket", fs.ModeSocket, file, walkEntryClassify},
+		{"a device node", fs.ModeDevice, file, walkEntryClassify},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyWalkEntry(tc.mode, tc.stat); got != tc.want {
+				t.Errorf("classifyWalkEntry(%v) = %d, want %d", tc.mode, got, tc.want)
+			}
+		})
+	}
+
+	// A plain file never pays for a stat: this runs once per entry on a
+	// tree that can hold 100k of them, and WalkDir's Lstat has already
+	// said what it is.
+	statted := false
+	if got := classifyWalkEntry(0, func() (fs.FileInfo, error) {
+		statted = true
+		return fakeFileInfo{}, nil
+	}); got != walkEntryClassify || statted {
+		t.Errorf("a regular file: verdict %d, statted %v — want classify with no stat", got, statted)
 	}
 }
