@@ -241,12 +241,10 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 			// Skips the two checks that are advice for whoever started
 			// the process — see doctor.Deps.Managed.
 			d.Managed = cfg.Deployment.IsManaged()
-			if host, port, ok := splitHostPort(cfg.ListenAddress); ok {
-				_ = host
+			if port, ok := configuredPort(cfg.ListenAddress); ok {
 				d.APIPort = port
 			}
-			if host, port, ok := splitHostPort(cfg.AdminAddress); ok {
-				_ = host
+			if port, ok := configuredPort(cfg.AdminAddress); ok {
 				d.AdminPort = port
 			}
 			// `bridge serve` writes this file while it runs
@@ -439,6 +437,12 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 // splitHostPort is a tiny wrapper around net.SplitHostPort that returns
 // ok=false on error so callers can branch cleanly without a separate
 // err dance.
+//
+// Port 0 answers ok=false, which is right for every caller that wants
+// an address to DIAL: there is no listener on port 0, and probing it
+// would be probing nothing. A caller that wants the port the operator
+// CONFIGURED wants configuredPort instead — the two questions differ
+// exactly on this value.
 func splitHostPort(addr string) (host string, port int, ok bool) {
 	if addr == "" {
 		return "", 0, false
@@ -448,6 +452,34 @@ func splitHostPort(addr string) (host string, port int, ok bool) {
 		return "", 0, false
 	}
 	return h, p, true
+}
+
+// configuredPort is the port an address NAMES, with ok reporting only
+// whether the address parsed — so a legal `:0` comes back as 0 rather
+// than as "no answer".
+//
+// config.validatePort accepts 0: it is the documented
+// OS-picks-an-ephemeral-port mode every `:0` test fixture uses. But
+// splitHostPort folds it in with a parse failure, and both Deps
+// assemblies seed the DEFAULTS (7788 / 7789) and overwrite them only
+// when splitHostPort says ok. So an install on `listenAddress: ":0"`
+// was graded on 7788 and 7789 — ports it does not use, which are
+// usually free, so the checks passed about listeners this bridge does
+// not have, and a re-init aborted if something else held 7789.
+// checkPort already has the honest answer for 0 ("no port set", warn,
+// non-blocking); it simply never received it.
+//
+// Every spelling of zero, because validatePort runs Atoi and `"00"` is
+// as legal as `"0"` — a text compare against "0" would admit the rest.
+func configuredPort(addr string) (port int, ok bool) {
+	if addr == "" {
+		return 0, false
+	}
+	_, p, err := splitHostPortRaw(addr)
+	if err != nil {
+		return 0, false
+	}
+	return p, true
 }
 
 // printReport emits a fixed-width formatted table. Each line is

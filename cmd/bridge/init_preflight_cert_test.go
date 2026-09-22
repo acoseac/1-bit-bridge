@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -286,5 +288,353 @@ func TestInitPreflightLeavesAFirstInstallsPortsAlone(t *testing.T) {
 	}
 	if d.OwnPIDFile != "" {
 		t.Errorf("OwnPIDFile = %q, want empty — there is no install to own a pid file", d.OwnPIDFile)
+	}
+}
+
+// TestInitRefusesToSaveAPortItNeverGraded drives the real initCmd,
+// because the gap is in the ORDER and no assertion on doctor.Deps can
+// see it.
+//
+// The preflight runs before the keep-or-overwrite decision, against the
+// config already on disk. For the certificate that reading is right and
+// deliberate: init does not rewrite the cert, so the pair on disk IS
+// the pair. The ports are the opposite — baseConfig always seeds the
+// loopback defaults and --public replaces them — so an install on
+// :9090/:9091 was graded on 9090/9091, passed, and was then handed
+// :7788/127.0.0.1:7789. If something else holds one of those, the
+// operator learns it from a `bridge serve` that cannot bind, having
+// just been told the host was fine.
+//
+// #963's own test asserts the Deps and never runs initCmd, which is why
+// it stayed green.
+func TestInitRefusesToSaveAPortItNeverGraded(t *testing.T) {
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(tmp, "cfg")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
+
+	// Hold the port this init is ABOUT to write, and nothing else. An
+	// ephemeral listener gives a real number to put in the existing
+	// config, so the ports genuinely differ.
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	_, heldPortStr, err := net.SplitHostPort(held.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The install that is THERE listens somewhere else entirely, so the
+	// preflight's own pass grades two ports that are free.
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherPortStr, err := net.SplitHostPort(free.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	free.Close()
+
+	body := "libraryRoots:\n  - " + lib + "\n" +
+		"dataDir: " + filepath.Join(cfgDir, "data") + "\n" +
+		"listenAddress: \"127.0.0.1:" + otherPortStr + "\"\n" +
+		"adminAddress: \"127.0.0.1:" + otherPortStr + "\"\n" +
+		"libraryName: Existing\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := initCmd([]string{
+		"--yes", "--force", "--no-service",
+		"--dir", cfgDir,
+		"--library", lib,
+		"--name", "Rewritten",
+		// The admin address this run will actually save, which is the
+		// one nothing graded.
+		"--public", "--domain", "example.test", "--admin-tls-proxy",
+		"--admin-address", "127.0.0.1:" + heldPortStr,
+		"--listen-address", "127.0.0.1:" + otherPortStr,
+	}, strings.NewReader(""), &out, &errOut)
+
+	if code == 0 {
+		t.Fatalf("init exited 0 while saving a port another process holds\n--- stdout ---\n%s\n--- stderr ---\n%s",
+			out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "port-admin") {
+		t.Errorf("the refusal does not name port-admin:\n%s", out.String())
+	}
+	// And the existing config survives a refusal — the whole reason the
+	// second pass runs before Save.
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Existing") {
+		t.Errorf("the config was rewritten despite the refusal:\n%s", raw)
+	}
+}
+
+// TestInitWritesAConfigWhosePortsAreFree is the positive control: the
+// second pass must not refuse an ordinary overwrite, or "grade the
+// ports you will save" would be indistinguishable from "refuse to
+// save".
+func TestInitWritesAConfigWhosePortsAreFree(t *testing.T) {
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(tmp, "cfg")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
+
+	free := func(t *testing.T) string {
+		t.Helper()
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, p, err := net.SplitHostPort(l.Addr().String())
+		l.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	oldPort, newAPI, newAdmin := free(t), free(t), free(t)
+
+	body := "libraryRoots:\n  - " + lib + "\n" +
+		"dataDir: " + filepath.Join(cfgDir, "data") + "\n" +
+		"listenAddress: \"127.0.0.1:" + oldPort + "\"\n" +
+		"adminAddress: \"127.0.0.1:" + oldPort + "\"\n" +
+		"libraryName: Existing\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	if code := initCmd([]string{
+		"--yes", "--force", "--no-service",
+		"--dir", cfgDir, "--library", lib, "--name", "Rewritten",
+		"--public", "--domain", "example.test", "--admin-tls-proxy",
+		"--admin-address", "127.0.0.1:" + newAdmin,
+		"--listen-address", "127.0.0.1:" + newAPI,
+	}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("init exited %d on free ports\n--- stdout ---\n%s\n--- stderr ---\n%s",
+			code, out.String(), errOut.String())
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Rewritten") {
+		t.Errorf("the config was not rewritten:\n%s", raw)
+	}
+}
+
+// TestConfiguredPortReadsAnEphemeralPortAsItself.
+//
+// splitHostPort folds port 0 in with a parse failure, and both Deps
+// assemblies seed the DEFAULTS and overwrite them only when it says ok.
+// So an install on `listenAddress: ":0"` — the documented
+// OS-picks-an-ephemeral-port mode config.validatePort accepts, and what
+// every `:0` fixture uses — was graded on 7788 and 7789: ports it does
+// not use, usually free, so the checks passed about listeners this
+// bridge does not have, and a re-init aborted if something else held
+// 7789. checkPort has had the honest answer for 0 all along ("no port
+// set", warn, non-blocking); it simply never received it.
+func TestConfiguredPortReadsAnEphemeralPortAsItself(t *testing.T) {
+	for _, tc := range []struct {
+		addr string
+		port int
+		ok   bool
+	}{
+		{":0", 0, true},
+		{"127.0.0.1:0", 0, true},
+		// Atoi, not a text compare: validatePort runs Atoi, so every
+		// spelling of zero is legal and a compare against "0" would
+		// admit the rest.
+		{"127.0.0.1:00", 0, true},
+		{":7788", 7788, true},
+		{"", 0, false},
+		{"no-port-here", 0, false},
+		{"127.0.0.1:http", 0, false},
+	} {
+		t.Run(tc.addr, func(t *testing.T) {
+			port, ok := configuredPort(tc.addr)
+			if port != tc.port || ok != tc.ok {
+				t.Errorf("configuredPort(%q) = %d, %v; want %d, %v", tc.addr, port, ok, tc.port, tc.ok)
+			}
+		})
+	}
+
+	// And through the Deps assembly, which is where the defaults were
+	// substituted.
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "bridge.yaml")
+	body := "libraryRoots:\n  - " + tmp + "\n" +
+		"dataDir: " + filepath.Join(tmp, "data") + "\n" +
+		"listenAddress: \":0\"\n" +
+		"adminAddress: \"127.0.0.1:0\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := doctor.Deps{APIPort: 7788, AdminPort: 7789}
+	withExistingInstallDeps(&d, cfgPath)
+	if d.APIPort != 0 || d.AdminPort != 0 {
+		t.Errorf("ports = %d/%d, want 0/0 — the defaults were substituted for an install "+
+			"that names no port, so the checks answered about listeners it does not have",
+			d.APIPort, d.AdminPort)
+	}
+}
+
+// TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID.
+//
+// checkPort's "is it us?" ladder answers ok or warn — never fail —
+// whenever the pid in OwnPIDFile is alive: a probe that could not
+// attribute the port warns, and a listener merely owned by this uid is
+// reported ok. That is right for a port the running bridge is supposed
+// to hold, and wrong for one it is not. A live bridge binds what ITS
+// config says, so it cannot legitimately own a port absent from it —
+// and with the fallback left on, an occupied NEW port read as "our
+// bridge is still running", HasFail stayed false, and the config was
+// saved anyway.
+//
+// Which is the check passing because the thing it guards is absent, one
+// level in from the defect this whole pass exists for. (CodeRabbit on
+// #970.)
+//
+// The fixture is this test process: its own pid in the pid file is
+// alive by construction, and it holds the port on a listener the port
+// prober will not attribute to a bridge.
+func TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID(t *testing.T) {
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(tmp, "cfg")
+	dataDir := filepath.Join(cfgDir, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The pid file the preflight wires from the config's dataDir. Our
+	// own pid, so pidAliveFunc says yes.
+	if err := os.WriteFile(filepath.Join(dataDir, "server.pid"),
+		[]byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	_, heldPortStr, err := net.SplitHostPort(held.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	freeL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherPortStr, err := net.SplitHostPort(freeL.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	freeL.Close()
+
+	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
+	body := "libraryRoots:\n  - " + lib + "\n" +
+		"dataDir: " + dataDir + "\n" +
+		"listenAddress: \"127.0.0.1:" + otherPortStr + "\"\n" +
+		"adminAddress: \"127.0.0.1:" + otherPortStr + "\"\n" +
+		"libraryName: Existing\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := initCmd([]string{
+		"--yes", "--force", "--no-service",
+		"--dir", cfgDir, "--library", lib, "--name", "Rewritten",
+		"--public", "--domain", "example.test", "--admin-tls-proxy",
+		"--admin-address", "127.0.0.1:" + heldPortStr,
+		"--listen-address", "127.0.0.1:" + otherPortStr,
+	}, strings.NewReader(""), &out, &errOut)
+
+	if code == 0 {
+		t.Fatalf("init exited 0: a changed port held by another process was excused because our own "+
+			"recorded pid is alive\n--- stdout ---\n%s\n--- stderr ---\n%s", out.String(), errOut.String())
+	}
+	// WHICH check refused, not merely that something did. The released
+	// api port cannot fail here — the live recorded pid downgrades any
+	// conflict on it to ok or warn, which is the very behaviour under
+	// test — so a bare "nonzero exit plus an unchanged config" would be
+	// satisfied by an unrelated failure and prove nothing about the held
+	// admin port (CodeRabbit on #970).
+	if !strings.Contains(out.String(), "port-admin") {
+		t.Errorf("the refusal does not name port-admin, so it is not the held port that stopped "+
+			"this init:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "these are the ports this init would write") {
+		t.Errorf("the refusal did not come from the second port pass:\n%s", out.String())
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Existing") {
+		t.Errorf("the config was rewritten despite the refusal:\n%s", raw)
+	}
+}
+
+// TestAutoStartProbeTargetSkipsAnEphemeralPort.
+//
+// spawnNowOrWarn skips its auto-start when something already holds the
+// admin port. With `adminAddress: ":0"` there is no such port — the OS
+// picks one at bind time — and the old code folded that in with a parse
+// failure and substituted 127.0.0.1:7789, so a listener the operator
+// never asked for could suppress an auto-start that would have worked.
+//
+// The decision is extracted because spawnNowOrWarn's other branch
+// starts a real detached process, so the behaviour had no test at all.
+func TestAutoStartProbeTargetSkipsAnEphemeralPort(t *testing.T) {
+	for _, tc := range []struct {
+		addr, host string
+		port       int
+		probe      bool
+	}{
+		// The ephemeral modes: parsed, but nothing to dial.
+		{":0", "", 0, false},
+		{"127.0.0.1:0", "127.0.0.1", 0, false},
+		{"127.0.0.1:00", "127.0.0.1", 0, false},
+		// An ordinary address is probed as before.
+		{"127.0.0.1:7789", "127.0.0.1", 7789, true},
+		{":7789", "", 7789, true},
+		// And an unparseable one takes the documented fallback.
+		{"", "127.0.0.1", 7789, true},
+		{"no-port-here", "127.0.0.1", 7789, true},
+		{"127.0.0.1:http", "127.0.0.1", 7789, true},
+	} {
+		t.Run(tc.addr, func(t *testing.T) {
+			host, port, probe := autoStartProbeTarget(tc.addr)
+			if host != tc.host || port != tc.port || probe != tc.probe {
+				t.Errorf("autoStartProbeTarget(%q) = %q, %d, %v; want %q, %d, %v",
+					tc.addr, host, port, probe, tc.host, tc.port, tc.probe)
+			}
+		})
 	}
 }
