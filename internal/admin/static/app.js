@@ -1055,13 +1055,21 @@ function renderTailscaleTile(s) {
       const left = when.getTime() - Date.now();
       const days = Math.max(0, Math.floor(left / 86_400_000));
       const tooltip = s.certPath ? ` title="${escapeHTML(s.certPath)}"` : "";
-      // Same two corrections the self-signed tile above carries, and for
+      // The three corrections the self-signed tile above carries, and for
       // the same reasons: grade on the exact remaining time rather than
-      // the truncated day count, and use the YELLOW badge for the
-      // 30-day band. `.badge.running` is green — this arm rendered the
-      // word "expiring" in the healthy colour.
+      // the truncated day count; use the YELLOW badge for the 30-day
+      // band (`.badge.running` is green, so this arm rendered the word
+      // "expiring" in the healthy colour); and split EXPIRED out ahead
+      // of it, because `left <= 0` satisfies the seven-day test too and
+      // "expiring soon" is future tense about something that has already
+      // happened. That split is why the self-signed tile has an expired
+      // arm at all, and it did not reach the two tiles beside it — the
+      // day count was clamped at 0 here, so an expired LE cert has been
+      // announcing itself as expiring soon since these tiles were
+      // written. (CodeRabbit on #952.)
       let badge = "";
-      if (left <= CERT_EXPIRING_SOON_MS) badge = '<span class="badge danger">expiring soon</span> ';
+      if (left <= 0) badge = '<span class="badge danger">expired</span> ';
+      else if (left <= CERT_EXPIRING_SOON_MS) badge = '<span class="badge danger">expiring soon</span> ';
       else if (left <= CERT_EXPIRY_WARNING_MS) badge = '<span class="badge warn">expiring</span> ';
       certEl.innerHTML = `${badge}<span${tooltip}>expires in ${days} day${days === 1 ? "" : "s"} (${when.toLocaleDateString()})</span>`;
     }
@@ -1170,9 +1178,12 @@ async function refreshAutocertTile() {
       const left = when.getTime() - Date.now();
       const days = Math.max(0, Math.floor(left / 86_400_000));
       // The third copy of the grading the two tiles above carry: exact
-      // remaining time, and the yellow badge for the 30-day band.
+      // remaining time, the yellow badge for the 30-day band, and the
+      // expired arm ahead of both — see the Tailscale tile for why that
+      // ordering is the whole point rather than tidying.
       let badge = "";
-      if (left <= CERT_EXPIRING_SOON_MS) badge = '<span class="badge danger">expiring soon</span> ';
+      if (left <= 0) badge = '<span class="badge danger">expired</span> ';
+      else if (left <= CERT_EXPIRING_SOON_MS) badge = '<span class="badge danger">expiring soon</span> ';
       else if (left <= CERT_EXPIRY_WARNING_MS) badge = '<span class="badge warn">expiring</span> ';
       expiryEl.innerHTML = `${badge}expires in ${days} day${days === 1 ? "" : "s"} (${when.toLocaleDateString()})`;
     }

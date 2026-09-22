@@ -239,6 +239,35 @@ var certExpiryWindowConstRe = regexp.MustCompile(`const\s+(CERT_[A-Z_]+_MS)\s*=\
 // literal 2592000000 is what makes this a PARITY test: the Go window is
 // the subject, and a change to it has to reach the console or fail
 // here.
+// rejectedCertGradingShapes are the two ways a cert tile drifts from the
+// CLI, as REGEXPS rather than substrings.
+//
+// `strings.Contains("days <= ")` was the first form and is bypassed by
+// `days<=30` or `days  <=  30` — spacing this repo happens not to use
+// today, which is exactly the kind of thing that changes without anyone
+// deciding to. A guard that can be stepped over by a formatting choice
+// is a guard whose absence looks identical to its presence. (Gemini on
+// #952; the suggested pattern is not taken verbatim — it carried a
+// doubled `>` that would have matched nothing at all, which is the same
+// failure one level down.)
+//
+// `\b` on the identifier so `elapsedDays <= n` in some future helper is
+// not reported as this defect, and `<[^=]` so the `<` alternative does
+// not also fire on every `<=` and double every message.
+var rejectedCertGradingShapes = []struct {
+	re  *regexp.Regexp
+	why string
+}{
+	{regexp.MustCompile(`\bdays\s*<=`),
+		"grades on a truncated day count; compare the remaining duration against CERT_EXPIRY_WARNING_MS"},
+	{regexp.MustCompile(`\bdays\s*<[^=]`),
+		"grades on a truncated day count; compare the remaining duration against CERT_EXPIRY_WARNING_MS"},
+	{regexp.MustCompile(`\bdaysUntilExpiry\s*<=?`),
+		"grades on the server's truncated day count; /api/cert also carries notAfter"},
+	{regexp.MustCompile(`badge\s+running"\s*>\s*expiring`),
+		"renders an expiry warning in the healthy green badge; .badge.warn is the yellow one"},
+}
+
 func TestCertExpiryBandsMirrorTheGoWindow(t *testing.T) {
 	js := stripJSNoise(readConsoleJS(t, "static/app.js"))
 	got := map[string]int64{}
@@ -302,15 +331,61 @@ func TestCertTilesGradeOnTheRemainingDurationNotADayCount(t *testing.T) {
 				"a threshold spelled locally is how two of these three drifted from the CLI",
 				tile.name)
 		}
-		for _, bad := range []struct{ frag, why string }{
-			{"days <= ", "grades on a truncated day count; compare the remaining duration against CERT_EXPIRY_WARNING_MS"},
-			{"days < ", "grades on a truncated day count; compare the remaining duration against CERT_EXPIRY_WARNING_MS"},
-			{"daysUntilExpiry <=", "grades on the server's truncated day count; /api/cert also carries notAfter"},
-			{`badge running">expiring`, "renders an expiry warning in the healthy green badge; .badge.warn is the yellow one"},
-		} {
-			if strings.Contains(body, bad.frag) {
-				t.Errorf("the %s cert tile contains %q, which %s", tile.name, bad.frag, bad.why)
+		for _, bad := range rejectedCertGradingShapes {
+			if bad.re.MatchString(body) {
+				t.Errorf("the %s cert tile matches %s, which %s", tile.name, bad.re, bad.why)
 			}
+		}
+	}
+}
+
+// TestRejectedCertGradingShapesSeeEverySpacing pins the patterns
+// directly, for the reason TestJSBracketFieldReadsSeesEveryBracketForm
+// exists: the guard that uses them can only fail on a tile that is ALSO
+// wrong, so a spacing the scan cannot see is indistinguishable, from its
+// side, from a codebase that does not use it. That is the vacuous-pass
+// shape, and it is precisely how the substring form survived — its two
+// callers happened to be spaced the way it expected.
+//
+// Both directions, because a pattern that matches everything is no
+// better than one that matches nothing: `elapsedDays <= 30` in some
+// future helper must not be reported as this defect, and neither must
+// the accepted form.
+func TestRejectedCertGradingShapesSeeEverySpacing(t *testing.T) {
+	matches := func(s string) bool {
+		for _, r := range rejectedCertGradingShapes {
+			if r.re.MatchString(s) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, bad := range []string{
+		"if (days <= 30) badge",
+		"if (days<=30) badge",
+		"if (days  <=  30) badge",
+		"if (days < 0) badge",
+		"if (days<0) badge",
+		"if (info.daysUntilExpiry <= 30)",
+		"if (info.daysUntilExpiry<=30)",
+		`badge running">expiring`,
+		`badge running" >expiring`,
+		`badge  running">expiring`,
+	} {
+		if !matches(bad) {
+			t.Errorf("no rejected shape matched %q — a tile spelled this way would pass", bad)
+		}
+	}
+	for _, ok := range []string{
+		"if (left <= CERT_EXPIRY_WARNING_MS) badge",
+		"if (left <= 0) badge",
+		"const days = Math.max(0, Math.floor(left / 86_400_000));",
+		"if (elapsedDays <= 30) somethingElse",
+		`badge warn">expiring`,
+		`badge danger">expired`,
+	} {
+		if matches(ok) {
+			t.Errorf("a rejected shape matched the ACCEPTED form %q", ok)
 		}
 	}
 }
