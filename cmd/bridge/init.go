@@ -766,11 +766,8 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 // operator never asked for, and a yes suppresses an auto-start that
 // would have worked.
 func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath, adminAddr string) bool {
-	host, port, dialable := splitHostPort(adminAddr)
-	if _, parsed := configuredPort(adminAddr); !parsed {
-		host, port, dialable = "127.0.0.1", 7789, true
-	}
-	if dialable && packaging.IsListening(host, port) {
+	host, port, probe := autoStartProbeTarget(adminAddr)
+	if probe && packaging.IsListening(host, port) {
 		fmt.Fprintf(stdout, "A bridge is already running on %s:%d; skipping auto-start.\n", host, port)
 		return true
 	}
@@ -781,6 +778,28 @@ func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath, adminAdd
 		return false
 	}
 	return true
+}
+
+// autoStartProbeTarget says what spawnNowOrWarn should probe before it
+// starts a detached bridge, and whether to probe at all.
+//
+// One parse, not two: net.SplitHostPort + Atoi answers all three
+// questions — host, port, and whether there is an address to dial — and
+// calling splitHostPort beside configuredPort ran both over the same
+// string (Gemini on #970).
+//
+// An address that does not parse takes the documented
+// 127.0.0.1:7789 fallback. A parsed port of 0 does NOT: that is the
+// OS-picks-an-ephemeral-port mode, the port this bridge will bind is not
+// known until it binds, and asking "is 7789 already taken?" answers
+// about a listener the operator never asked for — a yes there suppresses
+// an auto-start that would have worked.
+func autoStartProbeTarget(adminAddr string) (host string, port int, probe bool) {
+	h, p, err := splitHostPortRaw(adminAddr)
+	if err != nil {
+		return "127.0.0.1", 7789, true
+	}
+	return h, p, p != 0
 }
 
 // stdinIsTerminal reports whether the bridge process's stdin is

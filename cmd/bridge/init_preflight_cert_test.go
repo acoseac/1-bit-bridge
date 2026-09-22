@@ -600,3 +600,41 @@ func TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID(t *testing.T) {
 		t.Errorf("the config was rewritten despite the refusal:\n%s", raw)
 	}
 }
+
+// TestAutoStartProbeTargetSkipsAnEphemeralPort.
+//
+// spawnNowOrWarn skips its auto-start when something already holds the
+// admin port. With `adminAddress: ":0"` there is no such port — the OS
+// picks one at bind time — and the old code folded that in with a parse
+// failure and substituted 127.0.0.1:7789, so a listener the operator
+// never asked for could suppress an auto-start that would have worked.
+//
+// The decision is extracted because spawnNowOrWarn's other branch
+// starts a real detached process, so the behaviour had no test at all.
+func TestAutoStartProbeTargetSkipsAnEphemeralPort(t *testing.T) {
+	for _, tc := range []struct {
+		addr, host string
+		port       int
+		probe      bool
+	}{
+		// The ephemeral modes: parsed, but nothing to dial.
+		{":0", "", 0, false},
+		{"127.0.0.1:0", "127.0.0.1", 0, false},
+		{"127.0.0.1:00", "127.0.0.1", 0, false},
+		// An ordinary address is probed as before.
+		{"127.0.0.1:7789", "127.0.0.1", 7789, true},
+		{":7789", "", 7789, true},
+		// And an unparseable one takes the documented fallback.
+		{"", "127.0.0.1", 7789, true},
+		{"no-port-here", "127.0.0.1", 7789, true},
+		{"127.0.0.1:http", "127.0.0.1", 7789, true},
+	} {
+		t.Run(tc.addr, func(t *testing.T) {
+			host, port, probe := autoStartProbeTarget(tc.addr)
+			if host != tc.host || port != tc.port || probe != tc.probe {
+				t.Errorf("autoStartProbeTarget(%q) = %q, %d, %v; want %q, %d, %v",
+					tc.addr, host, port, probe, tc.host, tc.port, tc.probe)
+			}
+		})
+	}
+}
