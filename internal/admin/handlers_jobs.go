@@ -394,8 +394,17 @@ func (s *Server) getLastBackupAt(ctx context.Context) *time.Time {
 // A snapshot taken by the SCHEDULER is deliberately not hooked: nobody is
 // watching for it, so TTL-bounded staleness is fine.
 // invalidateAnalysisCoverage drops the TTL-cached coverage snapshot so the
-// next /api/jobs poll rebuilds it. Called by anything that changes what the
-// snapshot counts — today, clearing the analysis-failure markers.
+// next /api/jobs poll rebuilds it.
+//
+// Called by the OPERATOR-driven change only — "Retry all", which clears the
+// analysis-failure markers. A third strike also changes what the snapshot
+// counts (a suppressed track is subtracted from eligible), and is
+// deliberately NOT hooked: it is written by the analysis pool, two packages
+// away with no handle on this server, and the cost of not hooking it is that
+// the bar moves within one TTL instead of immediately. Nobody is watching
+// for a strike the way they watch for the button they just pressed — the
+// same split invalidateLastBackup makes between an operator snapshot and a
+// scheduled one.
 func (s *Server) invalidateAnalysisCoverage() {
 	s.analysisCoverageMu.Lock()
 	s.analysisCoverage = nil

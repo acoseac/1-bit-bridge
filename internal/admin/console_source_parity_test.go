@@ -746,3 +746,40 @@ func TestBridgeStatusOnlyReadsRealStatsFields(t *testing.T) {
 		}
 	}
 }
+
+// TestTheUnreadableBannerDoesNotClaimExclusion — two surfaces counting
+// the same population must not describe it differently.
+//
+// `tracksUnreadable` is `AnalysisFailureCounts.Recorded`: every track
+// carrying a CURRENT decode verdict, first strike included. The Jobs
+// panel gets that right from the same query's second column ("N of them
+// failed 3 times running and are no longer retried"); the dashboard
+// banner said all of them were "excluded from analysis", which is true
+// only of the suppressed subset and is the more alarming of the two
+// readings — an operator acts on "excluded" by going to replace files
+// the bridge is still perfectly happy to retry.
+//
+// Scanned rather than pinned to an exact sentence: the claim is what
+// must not come back, and prose that has to match byte-for-byte is a
+// guard that gets deleted the first time somebody rewords a banner.
+func TestTheUnreadableBannerDoesNotClaimExclusion(t *testing.T) {
+	body := jsFunctionBody(t, "function applyStats(")
+	i := strings.Index(body, "comp-unreadable")
+	if i < 0 {
+		t.Fatal("applyStats no longer renders comp-unreadable — the scan is broken")
+	}
+	// Bounded to the banner's own branch: "excluded" is a reasonable
+	// word elsewhere in a function this size.
+	window := body[i:]
+	if j := strings.Index(window, "scan-status"); j > 0 {
+		window = window[:j]
+	}
+	for _, claim := range []string{"excluded", "no longer retried", "given up"} {
+		if strings.Contains(strings.ToLower(window), claim) {
+			t.Errorf("the dashboard's unreadable banner says %q about a count that "+
+				"includes tracks on their first and second strike. Those are still "+
+				"being retried, which is what the Jobs panel says about the same "+
+				"number: %s", claim, strings.TrimSpace(window))
+		}
+	}
+}

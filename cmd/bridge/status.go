@@ -132,6 +132,11 @@ func writeStatusHuman(w io.Writer, stats map[string]any, endpoints []any) int {
 		{"Server version", fmt.Sprintf("%s (protocol v%v)", asString(stats["serverVersion"]), stats["protocolVersion"])},
 		{"Uptime", uptimeFromSec(stats["uptimeSec"])},
 		{"Tracks indexed", fmt.Sprintf("%v", asNumber(stats["tracksIndexed"]))},
+		// Only when there ARE some: this is an alarm row, and a
+		// permanent "Unreadable: 0" is a line an operator learns to
+		// skip past — the same reason the dashboard banner is hidden at
+		// zero. The empty-string skip below is what drops it.
+		{"Unreadable", unreadableRow(stats["tracksUnreadable"])},
 		{"Scanning", scanStateLabel(stats)},
 		{"Listen address", asString(stats["listenAddress"])},
 		{"Admin address", asString(stats["adminAddress"])},
@@ -264,4 +269,28 @@ func isConnRefused(err error) bool {
 		}
 	}
 	return false
+}
+
+// unreadableRow renders the decode-refusal count for `bridge status`,
+// or "" when it is zero or absent so the row is skipped.
+//
+// The count is every track carrying a CURRENT verdict, not only the
+// ones past the threshold — a file on its second strike is already one
+// the operator wants to know about. Which files, and how many have
+// stopped being retried, is the console's Jobs page; this is the
+// headline that says to go and look, and it is the only place a
+// headless operator would ever see the number.
+func unreadableRow(v any) string {
+	// float64: every JSON number decodes as one through the map[string]any
+	// the probe returns, so a type switch on int would silently match
+	// nothing and the row would never appear — the vacuous shape this
+	// package's guards keep finding.
+	n, ok := v.(float64)
+	if !ok || n < 1 {
+		return ""
+	}
+	if n == 1 {
+		return "1 track the decoder could not read (see the console's Jobs page)"
+	}
+	return fmt.Sprintf("%.0f tracks the decoder could not read (see the console's Jobs page)", n)
 }

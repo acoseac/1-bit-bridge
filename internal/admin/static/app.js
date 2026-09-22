@@ -303,9 +303,15 @@ function applyStats(s) {
   if (unreadableAlarm) {
     const n = s.tracksUnreadable ?? 0;
     unreadableAlarm.hidden = n === 0;
+    // "could not be read", NOT "excluded from analysis". This count is
+    // every track carrying a CURRENT verdict — a file on its first or
+    // second strike is still being retried, and only the third stops
+    // it. Saying excluded about all of them contradicts the Jobs panel,
+    // which gets the split right from the same query's second column
+    // and is where the detail belongs; this line is the pointer to it.
     setText("comp-unreadable-text", n === 1
-      ? "1 track could not be read by the decoder and is excluded from analysis."
-      : `${n} tracks could not be read by the decoders and are excluded from analysis.`);
+      ? "1 track could not be read by the decoder."
+      : `${n} tracks could not be read by the decoders.`);
   }
   const scanStatus = document.getElementById("scan-status");
   if (scanStatus) {
@@ -5410,7 +5416,12 @@ function formatAutoOptimizeResult(last) {
   const parts = [`${last.enqueued} queued`];
   if (last.regenerated) parts.push(`${last.regenerated} refreshed (source changed)`);
   if (last.alreadyInflight) parts.push(`${last.alreadyInflight} already building`);
-  if (last.unresolvable) parts.push(`${last.unresolvable} unreadable`);
+  // "unresolvable", the sweeper's own word: these are tracks whose
+  // eligibility could not be decided — a path that no longer resolves, a
+  // format the classifier could not read. NOT the decoder's
+  // "unreadable", which is the analysis strike population one card over,
+  // counted from a different predicate and listed on the Jobs page.
+  if (last.unresolvable) parts.push(`${last.unresolvable} unresolvable`);
   let text = parts.join(" · ");
   if (last.diskFloorReached) {
     text += ` — paused, ${formatBytes(last.freeBytes)} free is at the ${formatBytes(last.minFreeBytes)} floor`;
