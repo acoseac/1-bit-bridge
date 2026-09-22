@@ -504,6 +504,27 @@ func TestDLNAVariantLocatorAdoptsARelocatedSidecar(t *testing.T) {
 	if newDLNAVariantLocator(store, nil, slog.Default()) != nil {
 		t.Error("a locator with no variants dir must be nil")
 	}
+	// A missing LOGGER is defaulted, not refused: it is not a dependency
+	// the lookup needs, and the only deref is in the branch where the
+	// adoption UPDATE has already failed — the worst place to find a
+	// second fault.
+	//
+	// The CONSTRUCTOR is what gets pinned, not that branch. Reaching it
+	// needs UpdateVariantSidecarPath to fail AFTER LookupVariant found
+	// the row, i.e. a concurrent delete or a DB fault, and neither is
+	// expressible through this API: a first draft deleted the row and
+	// re-inserted it, which left the update succeeding and the warn
+	// never firing, so the control passed with the default removed. A
+	// decision that cannot be driven is pinned where it CAN be — here,
+	// that the field is never left nil.
+	nolog := newDLNAVariantLocator(store, func() string { return newDir }, nil)
+	if nolog == nil {
+		t.Fatal("a locator with no logger must still be built — the feature does not depend on it")
+	}
+	if l, ok := nolog.(*dlnaVariantLocator); !ok || l.log == nil {
+		t.Errorf("a locator built with no logger kept a nil one (%T): the adoption-failure "+
+			"branch would deref it, on the path that has already gone wrong", nolog)
+	}
 }
 
 // TestAnalysisStoreAdapterAdoptsARelocatedWaveform — the waveform half

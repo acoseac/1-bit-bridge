@@ -18,6 +18,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -831,9 +832,22 @@ type dlnaVariantLocator struct {
 // handler's `locate != nil` gate stays off — when either dependency is
 // missing, rather than a live locator that would nil-deref on the one
 // request it exists for.
+//
+// A missing LOGGER is different in kind and is defaulted instead: it is
+// not a dependency the feature needs to work, and refusing over it would
+// disable a relocation lookup because nowhere to write one warn line was
+// supplied. Without the default the deref would land on exactly the path
+// that already went wrong — an adoption UPDATE failing — which is the
+// worst place to find a second fault. `logging.Component` rather than
+// `slog.Default()` directly, because it resolves the handler at LOG time
+// and so still picks up a Windows service redirect installed after this
+// constructor ran. (Gemini on #954.)
 func newDLNAVariantLocator(store *manifest.Store, variantsDir func() string, log *slog.Logger) dlna.VariantLocator {
 	if store == nil || variantsDir == nil {
 		return nil
+	}
+	if log == nil {
+		log = logging.Component("dlna")
 	}
 	return &dlnaVariantLocator{store: store, variantsDir: variantsDir, log: log}
 }
