@@ -50,6 +50,12 @@ type stubVariantDeleter struct {
 	// whose last file this very request unlinked. Only meaningful
 	// alongside storeUnavailable.
 	storeEmpty bool
+	// storeID names the directory INSTANCE the probe reports. Changing
+	// it mid-request is how a test spells "the mount dropped and a
+	// different directory is at that path now". Empty means no identity
+	// at all (a probe that could not stat), which the handler must read
+	// as "cannot claim I emptied it".
+	storeID string
 	// storeProbes counts SidecarStoreState calls. The probe answers "is
 	// a missing sidecar evidence about the FILE or about the VOLUME",
 	// which is a question about a file that is missing — asking it of a
@@ -62,7 +68,19 @@ func (s *stubVariantDeleter) SidecarStoreState() VariantSidecarStoreState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.storeProbes++
-	return VariantSidecarStoreState{Available: !s.storeUnavailable, Empty: s.storeEmpty}
+	st := VariantSidecarStoreState{Available: !s.storeUnavailable, Empty: s.storeEmpty}
+	if s.storeID != "" {
+		st.Store = stubStoreIdentity(s.storeID)
+	}
+	return st
+}
+
+// stubStoreIdentity stands in for the adapter's os.SameFile wrapper.
+type stubStoreIdentity string
+
+func (a stubStoreIdentity) Same(other SidecarStoreIdentity) bool {
+	b, ok := other.(stubStoreIdentity)
+	return ok && a == b
 }
 
 func (s *stubVariantDeleter) LocateVariantSidecar(v VariantSummary) VariantSidecarLocation {
@@ -881,6 +899,12 @@ func TestUpscaleDeleteUnlinksAFileItLocatedThoughTheDirIsEmpty(t *testing.T) {
 	}}
 	deleter.mu.Lock()
 	deleter.storeUnavailable, deleter.storeEmpty = true, true
+	// The file is on the OLD tree — that is what makes the newly
+	// configured directory empty — so the locate says so rather than
+	// leaning on the default.
+	deleter.locate = func(v VariantSummary) VariantSidecarLocation {
+		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: false}
+	}
 	deleter.mu.Unlock()
 
 	resp := authDelete(t, hs, "/v1/upscale/variants?path=Music/Album/01.flac", raw)
@@ -899,13 +923,17 @@ func TestUpscaleDeleteUnlinksAFileItLocatedThoughTheDirIsEmpty(t *testing.T) {
 	if dr.DeletedCount != 1 || dr.FreedBytes != 10 {
 		t.Errorf("deletedCount/freedBytes = %d/%d, want 1/10", dr.DeletedCount, dr.FreedBytes)
 	}
-	// And the probe was not consulted at all: nothing was missing.
+	// The probe was not consulted to DECIDE anything here: nothing was
+	// missing. It is called at most once, to record which directory
+	// instance the first in-store unlink happened in — and this row's
+	// unlink was NOT in-store (the file is on the old tree), so not even
+	// that.
 	deleter.mu.Lock()
 	probes := deleter.storeProbes
 	deleter.mu.Unlock()
 	if probes != 0 {
-		t.Errorf("SidecarStoreState was probed %d time(s) for a row whose file was present — "+
-			"the question is about a file that is missing", probes)
+		t.Errorf("SidecarStoreState was probed %d time(s) for a row whose file was present and "+
+			"outside the store — the question is about a file that is missing", probes)
 	}
 }
 
@@ -937,8 +965,12 @@ func TestUpscaleDeleteFinishesAFlatTreeItEmptiedItself(t *testing.T) {
 	// first row's unlink emptied it. The stub cannot watch the disk, so
 	// it is set up front — which is the stricter fixture: it is empty for
 	// the first row too, and that row's file is still found and removed.
+	//
+	// One stable identity throughout: the same directory all along, which
+	// is what "this request emptied it" means.
 	deleter.mu.Lock()
 	deleter.storeUnavailable, deleter.storeEmpty = true, true
+	deleter.storeID = "vol-A"
 	deleter.mu.Unlock()
 
 	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true", raw)
@@ -1036,5 +1068,98 @@ func TestUpscaleDeleteWillNotExplainAnEmptyStoreWithAnUnlinkOutsideIt(t *testing
 	// The first row is still reconciled: its file really was removed.
 	if len(got) != 1 || !strings.Contains(got[0], "01.flac") {
 		t.Errorf("DeleteVariant calls: got %v, want only the row whose file was unlinked", got)
+	}
+}
+
+// TestUpscaleDeleteWillNotExplainAnEmptyStoreAfterTheMountChanged.
+//
+// The empty-store exception argued from "this request unlinked
+// something here", and a clean unmount reverts a mountpoint to an empty
+// LOCAL directory — which exists, is a directory, and holds no entries.
+// So an unlink at row k proved only that the volume was mounted at row
+// k, and said nothing about row k+1.
+//
+// That matters because the probe is per row precisely BECAUSE a
+// whole-library delete runs long enough for a mount to drop underneath
+// it. Without an identity compare, the drop let every row after it be
+// deleted while its sidecar sat intact on the volume that will come
+// back — the stranding this handler is being fixed for, re-entered
+// through its own exception. (CodeRabbit on #968.)
+func TestUpscaleDeleteWillNotExplainAnEmptyStoreAfterTheMountChanged(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	dir := t.TempDir()
+	first := filepath.Join(dir, "abc-v1.flac")
+	if err := os.WriteFile(first, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deleter.all = []VariantSummary{
+		{SourcePath: "Music/Album/01.flac", VariantID: "v1", SidecarPath: first, SizeBytes: 10},
+		{SourcePath: "Music/Album/02.flac", VariantID: "v1", SidecarPath: filepath.Join(dir, "def-v1.flac"), SizeBytes: 20},
+	}
+	// The mount drops after the first row: the path is still an empty
+	// directory, but it is a DIFFERENT directory — the local mountpoint,
+	// not the volume that was on it.
+	deleter.mu.Lock()
+	deleter.storeUnavailable, deleter.storeEmpty = true, true
+	deleter.storeID = "the-mounted-volume"
+	deleter.locate = func(v VariantSummary) VariantSidecarLocation {
+		if v.SourcePath == "Music/Album/02.flac" {
+			// Row two runs after the drop: both stats land under a dead
+			// mountpoint and answer ENOENT, which is "absent at both".
+			deleter.storeID = "the-bare-mountpoint"
+			return VariantSidecarLocation{Placement: VariantSidecarAbsent}
+		}
+		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: true}
+	}
+	deleter.mu.Unlock()
+
+	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	got := deleter.deletedKeys()
+	for _, k := range got {
+		if strings.Contains(k, "02.flac") {
+			t.Fatalf("the row after the mount dropped was deleted (%v) — an unlink from the volume "+
+				"that WAS mounted was taken as proof this request emptied the directory that is "+
+				"there now, and its sidecar comes back with the volume", got)
+		}
+	}
+	if len(got) != 1 {
+		t.Errorf("DeleteVariant calls: got %v, want only the row unlinked before the drop", got)
+	}
+}
+
+// TestUpscaleDeleteWillNotExplainAnEmptyStoreWithNoIdentity is the
+// fail-closed half: a probe that could not stat the directory reports no
+// identity, and "I cannot tell you which directory this is" must not
+// satisfy "it is the one I emptied".
+func TestUpscaleDeleteWillNotExplainAnEmptyStoreWithNoIdentity(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	dir := t.TempDir()
+	first := filepath.Join(dir, "abc-v1.flac")
+	if err := os.WriteFile(first, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deleter.all = []VariantSummary{
+		{SourcePath: "Music/Album/01.flac", VariantID: "v1", SidecarPath: first, SizeBytes: 10},
+		{SourcePath: "Music/Album/02.flac", VariantID: "v1", SidecarPath: filepath.Join(dir, "def-v1.flac"), SizeBytes: 20},
+	}
+	deleter.mu.Lock()
+	deleter.storeUnavailable, deleter.storeEmpty = true, true
+	deleter.storeID = "" // no identity at all
+	deleter.mu.Unlock()
+
+	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	for _, k := range deleter.deletedKeys() {
+		if strings.Contains(k, "02.flac") {
+			t.Fatalf("a probe with no identity satisfied the empty-store exception (%v)",
+				deleter.deletedKeys())
+		}
 	}
 }

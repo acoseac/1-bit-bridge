@@ -592,7 +592,28 @@ func (a *variantDeleterAdapter) SidecarStoreState() api.VariantSidecarStoreState
 		return api.VariantSidecarStoreState{}
 	}
 	block := integrity.VariantsDirSweepBlock(dir)
-	return api.VariantSidecarStoreState{Available: block.Reason == "", Empty: block.Empty}
+	st := api.VariantSidecarStoreState{Available: block.Reason == "", Empty: block.Empty}
+	// The directory INSTANCE, so the delete handler can tell "I emptied
+	// this" from "something else is at this path now". os.SameFile is
+	// the portable comparison (device+inode on POSIX, volume+file index
+	// on Windows) and there is no exported value type for it, hence the
+	// wrapper. A failed stat leaves it nil, which the handler reads as
+	// "cannot claim I emptied it".
+	if fi, err := os.Stat(dir); err == nil {
+		st.Store = sidecarStoreIdentity{fi}
+	}
+	return st
+}
+
+// sidecarStoreIdentity is api.SidecarStoreIdentity over an os.FileInfo.
+type sidecarStoreIdentity struct{ fi os.FileInfo }
+
+// Same reports whether other observed the same directory. A nil or
+// foreign implementation is NOT the same — the comparison exists to
+// refuse an unmount, so anything it cannot verify is a refusal.
+func (s sidecarStoreIdentity) Same(other api.SidecarStoreIdentity) bool {
+	o, ok := other.(sidecarStoreIdentity)
+	return ok && s.fi != nil && o.fi != nil && os.SameFile(s.fi, o.fi)
 }
 
 // An EMPTY recorded path is still asked where its file is. The

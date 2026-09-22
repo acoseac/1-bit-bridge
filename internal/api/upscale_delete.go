@@ -98,6 +98,33 @@ type VariantSidecarStoreState struct {
 	// is the split gcCheckOutputDirBeforeReverseSweep makes one layer up
 	// (#941).
 	Empty bool
+	// Store identifies the directory INSTANCE this probe observed. Nil
+	// when there is nothing to identify (no directory configured, or the
+	// probe could not stat one).
+	//
+	// "We emptied it" and "it unmounted" look identical to a stat: a
+	// clean unmount reverts a mountpoint to an empty LOCAL directory,
+	// which exists, is a directory, and holds no entries. So an
+	// in-store unlink at row k proves the volume was mounted at row k
+	// and says nothing about row k+1 — a whole-library delete runs long
+	// enough for a mount to drop underneath it, which is why the probe
+	// is per row in the first place. Comparing the instance is what
+	// tells them apart: the local directory under a mountpoint is not
+	// the same directory as the volume that was mounted on it
+	// (CodeRabbit on #968).
+	Store SidecarStoreIdentity
+}
+
+// SidecarStoreIdentity is an opaque handle to one observation of the
+// variants directory, compared only with Same.
+//
+// Opaque because identity is a filesystem question — device and inode on
+// POSIX, volume and file index on Windows — that os.SameFile answers
+// portably and no exported type carries as a value. cmd/bridge wraps a
+// FileInfo; this package only ever asks whether two observations are the
+// same directory.
+type SidecarStoreIdentity interface {
+	Same(other SidecarStoreIdentity) bool
 }
 
 // VariantSidecarPlacement says where a variant row's sidecar actually is.
@@ -583,14 +610,20 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// per-row logging is the M-SEARCH flood shape — thousands of
 	// identical lines that make every other line unfindable.
 	skippedUnavailable := 0
-	// unlinkedInStore counts files THIS request removed from UNDER the
-	// directory SidecarStoreState probes, which is what makes that
+	// unlinkedFrom identifies the directory instance THIS request first
+	// removed a file from, which is the only thing that makes that
 	// directory being empty explicable rather than evidence of an
-	// unmount. Distinct from DeletedCount, which also counts rows whose
-	// sidecar was already gone, and deliberately narrower than "files
-	// removed": a recorded path can name the OLD tree, and unlinking
-	// from there explains nothing about the current one.
-	unlinkedInStore := 0
+	// unmount. Nil until such an unlink happens.
+	//
+	// Narrower than "files removed" twice over: a recorded path can name
+	// the OLD tree, and unlinking from there explains nothing about the
+	// current one (hence WithinStore); and the directory that was there
+	// when we unlinked need not be the one that is there now (hence the
+	// identity). Recorded once, on the FIRST in-store unlink — a
+	// re-probe per deleted row would put a stat on the happy path of a
+	// whole-library delete, and a later instance that differs is refused
+	// by the comparison anyway.
+	var unlinkedFrom SidecarStoreIdentity
 	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(ctx)
 	for _, row := range rows {
@@ -662,8 +695,8 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// #959's lookup exists to fix.
 		//
 		// And EMPTY is explicable once this request has unlinked
-		// something FROM THAT DIRECTORY: on the legacy hash-flat layout
-		// (no subdirectories) the last successful unlink is what
+		// something FROM THAT SAME DIRECTORY: on the legacy hash-flat
+		// layout (no subdirectories) the last successful unlink is what
 		// emptied it, so a probe after that would refuse the remaining
 		// rows on a state this very request created —
 		// gcCheckOutputDirBeforeReverseSweep's lesson (#941), which
@@ -672,19 +705,34 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// unlinked: this loop removes files and never directories, so
 		// it cannot be what took the root.
 		//
+		// SAME directory, not merely "we unlinked something": a clean
+		// unmount reverts a mountpoint to an empty LOCAL directory, so
+		// an unlink at row k proves only that the volume was mounted at
+		// row k. Without the identity compare, a mount dropping
+		// mid-request lets the rows after it be deleted while their
+		// sidecars sit intact on the volume that will come back — which
+		// is the stranding this handler is being fixed for, re-entered
+		// through its own exception (CodeRabbit on #968).
+		//
 		// Per row rather than once, because a whole-library delete runs
-		// long enough for a mount to drop underneath it. The cost is
-		// one stat beside the two LocateVariantSidecar already took on
-		// the same volume, and only on rows that unlinked nothing.
+		// long enough for that to happen. The cost is one stat beside
+		// the two LocateVariantSidecar already took on the same volume,
+		// and only on rows that unlinked nothing.
 		if errors.Is(removeErr, os.ErrNotExist) {
 			st := s.variantDeleter.SidecarStoreState()
-			if !st.Available && (!st.Empty || unlinkedInStore == 0) {
+			emptiedByUs := st.Empty && unlinkedFrom != nil &&
+				st.Store != nil && st.Store.Same(unlinkedFrom)
+			if !st.Available && !emptiedByUs {
 				skippedUnavailable++
 				continue
 			}
 		}
-		if removeErr == nil && loc.WithinStore {
-			unlinkedInStore++
+		if removeErr == nil && loc.WithinStore && unlinkedFrom == nil {
+			// FIRST in-store unlink only — see unlinkedFrom. A store
+			// that differs by the time the exception is asked is
+			// refused by the comparison, so re-probing per row would
+			// buy nothing and cost a stat on the happy path.
+			unlinkedFrom = s.variantDeleter.SidecarStoreState().Store
 		}
 		if removeErr == nil && loc.Placement == VariantSidecarRelocated {
 			// AFTER the unlink succeeded, not before it is attempted:
