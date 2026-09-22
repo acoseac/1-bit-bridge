@@ -749,7 +749,14 @@ func buildTrackAndRouting(w upnp.Walked, serverUDN string, walkStart time.Time) 
 		tn := w.TrackNumber
 		tr.TrackNumber = &tn
 	}
-	if dur := parseDurationSeconds(w.Duration); dur > 0 {
+	// The same gate every extractor-derived duration passes
+	// (manifest.PlausibleDuration: finite, inside [100 ms, one week)).
+	// A DIDL `res@duration` is an untrusted header by another name —
+	// whatever the upstream put in an XML attribute — and `> 0` admits
+	// `0:00:00.001` as readily as `10000:00:00`, both of which parse
+	// cleanly here and land in tags_json, on the wire and in the phone's
+	// track list, where nothing re-derives them.
+	if dur := parseDurationSeconds(w.Duration); manifest.PlausibleDuration(dur) {
 		d := dur
 		tr.Duration = &d
 	}

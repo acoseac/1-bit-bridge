@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -175,6 +176,67 @@ func TestIFFUnknownPayloadSizeStampsNoDuration(t *testing.T) {
 	}
 	if tr.Duration != nil {
 		t.Errorf("a data chunk declaring the unknown-length sentinel stamped Duration = %v", *tr.Duration)
+	}
+}
+
+// TestAIFFSSNDSentinelSurvivesTheNarrowing is the AIFF half of the rule
+// above, which v13 broke and no fixture could show.
+//
+// ssndSoundSpan subtracts the 8-byte SSND prefix from the declared size
+// before anything else looks at it, so the sentinel reached
+// iffPayloadFits as 0xFFFFFFF7 — an ordinary number to the arm that
+// refuses 0xFFFFFFFF. The narrowing landed one release after the
+// sentinel rule, in the function in front of it.
+//
+// The property is checked on the SPAN rather than end to end, for the
+// reason the sentinel's own test gives: the two states it reaches are a
+// Stat that fails on a handle this process just opened, and a file of
+// 4 GiB or more. Below that, 0xFFFFFFF7 fails the physical-bounds check
+// on arithmetic alone — which is exactly why a small fixture stayed
+// green while the rule was off.
+func TestAIFFSSNDSentinelSurvivesTheNarrowing(t *testing.T) {
+	// A real file, so the ReadAt of the prefix succeeds and the span
+	// would be returned if the sentinel were not refused. The SSND body
+	// holds its 8-byte prefix plus 8 bytes of sound; only the DECLARED
+	// size is the sentinel.
+	openAt := func(t *testing.T, ssnd []byte) *os.File {
+		t.Helper()
+		path := writeTempAIFF(t, buildAIFFWithID3(t, nil,
+			buildAIFFCOMMChunk(2, 26_460_000, 16, 44100), ssnd))
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		// Position the handle where the walker leaves it: just past the
+		// SSND header, which is where ssndSoundSpan reads from.
+		if _, err := f.Seek(int64(len(buildAIFFWithID3(t, nil,
+			buildAIFFCOMMChunk(2, 26_460_000, 16, 44100)))+8), io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	f := openAt(t, buildAIFFSSNDDeclaring(iffUnknownPayloadSize, 16))
+	span := ssndSoundSpan(f, iffUnknownPayloadSize)
+	if span.seen {
+		t.Errorf("an SSND declaring the unknown-length sentinel produced a span of %d bytes at offset %d; "+
+			"narrowed to 0x%X it is no longer the sentinel, and fails OPEN against an unknown bound",
+			span.size, span.offset, span.size)
+	}
+	if iffPayloadFits(span, 0) {
+		t.Error("the narrowed sentinel passed the fit check against an unknown bound")
+	}
+	if iffPayloadFits(span, 1<<33) {
+		t.Error("the narrowed sentinel passed the fit check against an 8 GiB file")
+	}
+
+	// Positive control: one byte under the sentinel is an ordinary
+	// declared size and must still produce a span, or "refuse the
+	// sentinel" would be indistinguishable from "refuse everything".
+	g := openAt(t, buildAIFFSSNDDeclaring(iffUnknownPayloadSize-1, 16))
+	if ordinary := ssndSoundSpan(g, iffUnknownPayloadSize-1); !ordinary.seen {
+		t.Error("an ordinary declared size no longer produces a span")
 	}
 }
 
