@@ -281,12 +281,31 @@ func isConnRefused(err error) bool {
 // headline that says to go and look, and it is the only place a
 // headless operator would ever see the number.
 func unreadableRow(v any) string {
-	// float64: every JSON number decodes as one through the map[string]any
-	// the probe returns, so a type switch on int would silently match
-	// nothing and the row would never appear — the vacuous shape this
-	// package's guards keep finding.
-	n, ok := v.(float64)
-	if !ok || n < 1 {
+	// The same float64 / int64 / int switch uptimeFromSec carries three
+	// functions up, and for its reason rather than for symmetry. Every
+	// JSON number decodes as float64 through the map[string]any the probe
+	// returns, so that arm is the production one — but a bare
+	// `v.(float64)` makes any OTHER numeric shape return "" silently,
+	// which for a row that is hidden at zero is indistinguishable from a
+	// healthy library. A Go caller assembling the map directly (a test, a
+	// future in-process status path) would get exactly that, and the
+	// symptom is the absence of an alarm. (Gemini on #955.)
+	//
+	// The default arm still returns "": a non-numeric value here is a
+	// payload this build does not understand, and inventing a count from
+	// it would be worse than the missing row.
+	var n float64
+	switch val := v.(type) {
+	case float64:
+		n = val
+	case int64:
+		n = float64(val)
+	case int:
+		n = float64(val)
+	default:
+		return ""
+	}
+	if n < 1 {
 		return ""
 	}
 	if n == 1 {

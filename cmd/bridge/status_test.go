@@ -105,18 +105,31 @@ func TestStatusNamesUnreadableTracksOnlyWhenThereAreSome(t *testing.T) {
 		t.Errorf("a payload with no tracksUnreadable key prints the row:\n%s", absent.String())
 	}
 
-	// The number arrives as a float64 — every JSON number does, through
-	// the map[string]any the probe decodes into. An int type switch here
-	// would match nothing and the row would never appear at all.
-	base["tracksUnreadable"] = float64(3)
-	var loud bytes.Buffer
-	writeStatusHuman(&loud, base, nil)
-	out := loud.String()
-	if !strings.Contains(out, "Unreadable:") || !strings.Contains(out, "3 tracks") {
-		t.Errorf("status does not name the 3 unreadable tracks:\n%s", out)
+	// float64 is the PRODUCTION shape — every JSON number decodes as one
+	// through the map[string]any the probe returns — but the other two
+	// numeric shapes are accepted for uptimeFromSec's reason: a bare
+	// float64 assertion returns "" for an int, and for a row that is
+	// hidden at zero a silently missing alarm is indistinguishable from
+	// a healthy library.
+	for _, n := range []any{float64(3), int64(3), 3} {
+		base["tracksUnreadable"] = n
+		var loud bytes.Buffer
+		writeStatusHuman(&loud, base, nil)
+		out := loud.String()
+		if !strings.Contains(out, "Unreadable:") || !strings.Contains(out, "3 tracks") {
+			t.Errorf("status does not name the 3 unreadable tracks for %T:\n%s", n, out)
+		}
+		if strings.Contains(out, "3.0") || strings.Contains(out, "+e") {
+			t.Errorf("the count rendered as a float for %T:\n%s", n, out)
+		}
 	}
-	if strings.Contains(out, "3.0") || strings.Contains(out, "+e") {
-		t.Errorf("the count rendered as a float:\n%s", out)
+	// A shape this build does not understand stays silent rather than
+	// inventing a count from it.
+	base["tracksUnreadable"] = "three"
+	var odd bytes.Buffer
+	writeStatusHuman(&odd, base, nil)
+	if strings.Contains(odd.String(), "Unreadable") {
+		t.Errorf("a non-numeric tracksUnreadable rendered a row:\n%s", odd.String())
 	}
 
 	base["tracksUnreadable"] = float64(1)
