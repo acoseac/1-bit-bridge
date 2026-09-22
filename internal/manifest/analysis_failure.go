@@ -113,14 +113,42 @@ const analysisFailureRecordedSQL = `(
 	AND analysis_fail_at > ?
 )`
 
-// analysisFailureSuppressedSQL is analysisFailureRecordedSQL plus the
+// analysisFailureSuppressedSQL is analysisFailureRecordedSQL AND the
 // threshold: enough consecutive verdicts to stop offering the track as a
 // candidate. Written once and referenced by every candidate query and count
 // so the CLI, the serve-side sweeper and the console cannot drift apart.
 //
-// Takes one bind: the cutoff, as above.
+// The leading `analysis_fail_count != 0` is NOT redundant with the `>= 3`
+// beside it, and this predicate did without it until the v46 index was
+// measured against it. SQLite admits a partial index only when a query term
+// matches the index's WHERE expression; it does not reason that `x >= 3`
+// implies `x != 0`. So the term the index is built on has to APPEAR, and this
+// predicate — which is the ENTIRE WHERE of SuppressedAnalysisPaths — dropped
+// it while v46's own comment claimed "every predicate leads with
+// analysis_fail_count != 0 so the planner can use it".
+//
+// Measured with EXPLAIN QUERY PLAN over 5,000 rows (sqlite 3.54.0):
+//
+//	recorded            SCAN tracks USING INDEX idx_tracks_analysis_fail
+//	suppressed, before  SCAN tracks                       <- full table scan
+//	suppressed, after   SEARCH tracks USING INDEX idx_tracks_analysis_fail
+//	                                       (analysis_fail_count>?)
+//
+// A scan here steps every row of `tracks` — whose tags_json BLOB sits ahead
+// of these columns in the record — to return the handful of suppressed paths,
+// on the hourly serve-side sweep and on every `bridge analyze`.
+//
+// The earlier docblock said this was the recorded predicate "plus" the
+// threshold. It REPLACED the `!= 0` term rather than adding to it, and that
+// replacement is exactly what cost the index.
+//
+// Takes one bind: the cutoff, as above. The threshold is INLINED
+// (analysisFailureThresholdSQL is the literal "3"), which is what keeps
+// analysisFailureSuppressedSQL2's single-Replace derivation sound —
+// TestAnalysisFailurePredicatesTakeOneBind pins it.
 const analysisFailureSuppressedSQL = `(
-	analysis_fail_count >= ` + analysisFailureThresholdSQL + `
+	analysis_fail_count != 0
+	AND analysis_fail_count >= ` + analysisFailureThresholdSQL + `
 	AND analysis_fail_size = size
 	AND analysis_fail_mtime_ns = mtime_ns
 	AND analysis_fail_at > ?

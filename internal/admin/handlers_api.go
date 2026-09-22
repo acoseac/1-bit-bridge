@@ -889,17 +889,20 @@ type sourcesResponse struct {
 // trackSourceCounts returns the library total and the UPnP-routed total,
 // preferring the in-memory stats cache (s.statsDB, populated by the stats
 // path every 5s and first in the SSE initial-emit) so the slow-tick
-// `sources` publish costs zero DB reads and zero os.Stat, and stays byte-
-// consistent with the headline "Original tracks" card.
+// `sources` publish costs zero DB reads, and stays byte-consistent with
+// the headline "Original tracks" card.
 //
 // The cold path — reachable only by a bare GET /api/sources on a freshly-
 // started bridge before any stats read, since the SSE initial-emit runs
 // publishStats before publishSources — runs the same readStatsDBPart the
 // stats path uses (it holds the two counts we need), warms the cache for
 // subsequent calls, and degrades to the last-good part on a read error. It
-// deliberately does NOT route through getStatsSnapshot: that also does an
-// os.Stat on the DB file, a scanner-status read, and an auth-store lock we
-// don't need here (Gemini on PR #510).
+// deliberately does NOT route through getStatsSnapshot: that also does a
+// scanner-status read and an auth-store lock we don't need here (Gemini on
+// PR #510). It used to name an os.Stat on the DB file as a third reason —
+// #948 removed that when it dropped `dbBytes`, whose value /api/diagnostics
+// already served. The decision is unchanged; the evidence for it had gone
+// stale, which is the class #955 swept and this one outlived.
 func (s *Server) trackSourceCounts() (total, routed int) {
 	s.statsMu.Lock()
 	warm := s.statsDBValid
@@ -3470,17 +3473,6 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 
 func writeError(w http.ResponseWriter, code int, short, msg string) {
 	writeJSON(w, code, map[string]string{"error": short, "message": msg})
-}
-
-// dbSize returns the bridge.db file size, or 0 if stat fails. Used for
-// the dashboard — a missing DB right after `bridge init` legitimately
-// stats to zero and that's fine.
-func dbSize(path string) int64 {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return info.Size()
 }
 
 // Statically assert the Manifest store has the helpers we need. A missing
