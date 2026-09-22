@@ -297,7 +297,28 @@ var Ext = map[string]bool{
 // stays 1 and a pre-v11 phone simply keeps its fallback. Rows that
 // already carried a duration re-extract byte-identical and ride the
 // version-stamp leg; the rows that GAIN one are exactly the iOS delta.
-const ExtractorVersion = 11
+//
+// v12 — the duration sites v11's own docblock claims for
+// plausibleDuration and did not route through it. FLAC (STREAMINFO's
+// 36-bit totalSamples) and DSF (a uint64 sampleCount) each divide an
+// unbounded header field by a declared rate, so a forged header stamped
+// a Duration nothing downstream questions again — 99 days for FLAC's
+// 2^36-1 samples at 8 kHz (2,177 years at the 1 Hz its rate field
+// permits), 207,000 years for a DSF uint64 at DSD64 — and it went into
+// tags_json, onto the wire, and into the phone's track list. SACD's TOC frame count goes
+// through the same gate but is bounded by its own M:S:F timecode to
+// about four hours, so that one is structural rather than a live fix
+// and says so at the site. Also: a WAV/AIFF payload size of 0xFFFFFFFF
+// — the streaming writer's "length unknown" sentinel — is treated as
+// unknown rather than as 4 GiB of audio, which it passed for whenever
+// the physical-size bound was itself unknown.
+//
+// NO legitimate file's duration changes: every rejected value is
+// non-finite, non-positive, or longer than a week. The bump is the
+// unconditional rule for an extraction-logic change, and the
+// version-stale diff-guard is what keeps the client delta to rows that
+// actually differ — here, none.
+const ExtractorVersion = 12
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -1814,9 +1835,18 @@ func extractFLACFormatFromReader(r io.ReadSeeker, absPath string, t *Track) erro
 	// in `extractDSF` below.
 	isDSD := false
 	t.IsDSD = &isDSD
+	// Through plausibleDuration like every other derived duration (v12).
+	// STREAMINFO's totalSamples is a 36-bit field read straight out of an
+	// untrusted header, and the rate beside it is declared by the same
+	// header: 2^36-1 samples is 99 days at 8 kHz and 2,177 YEARS at the
+	// 1 Hz the format's 20-bit rate field permits. Nothing downstream
+	// questions a Duration once it is in tags_json. No legitimate file's
+	// value moves — the gate rejects only non-finite, non-positive, and
+	// past a week.
 	if sampleRate > 0 && totalSamples > 0 {
-		d := float64(totalSamples) / float64(sampleRate)
-		t.Duration = &d
+		if d := float64(totalSamples) / float64(sampleRate); plausibleDuration(d) {
+			t.Duration = &d
+		}
 	}
 	return nil
 }
@@ -1903,9 +1933,14 @@ func extractDSFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			"path", absPath, "bitsPerSample", bitsPerSample, "sampleRate", sampleRate)
 	}
 	t.IsDSD = &isDSD
+	// Gated like the rest (v12). `sampleCount` is a full uint64 from the
+	// fmt chunk, so a forged header stamps millennia; the conversion to
+	// float64 cannot trap, and plausibleDuration is what refuses the
+	// result.
 	if sampleRate > 0 && sampleCount > 0 {
-		d := float64(sampleCount) / float64(sampleRate)
-		t.Duration = &d
+		if d := float64(sampleCount) / float64(sampleRate); plausibleDuration(d) {
+			t.Duration = &d
+		}
 	}
 
 	// Tags: ID3v2 at metadataPointer (if non-zero).

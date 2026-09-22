@@ -533,14 +533,37 @@ func physicalFileSize(f *os.File) uint64 {
 	return 0
 }
 
+// iffUnknownPayloadSize is the 32-bit all-ones a streaming writer puts
+// in a RIFF/AIFF size field when it cannot know the length in advance:
+// it is writing to a pipe or a socket and can never seek back to patch
+// the header. ffmpeg does exactly this (the `-f wav` over a pipe case
+// this repo already records, where sox then warns "Premature EOF" on
+// every otherwise-successful job).
+//
+// It is a SENTINEL, not a length. Divided by a CD-rate
+// `nAvgBytesPerSec` it works out at about 6.8 hours, comfortably inside
+// the week-long plausibility ceiling, so nothing above catches it — and
+// a real payload of exactly 4 GiB − 1 is indistinguishable from it
+// anyway, which is why RF64 exists for genuinely larger files.
+const iffUnknownPayloadSize = 0xFFFFFFFF
+
 // iffPayloadFits reports whether the declared payload physically fits
 // inside the file: offset + size <= physicalSize, overflow-safe. An
-// unknown bound (0) fails OPEN; an unseen payload fails CLOSED — a
-// duration nothing can verify must not be stamped. The AIFF / WAV twin
-// of the DFF walker's `payloadFits`, kept as its own function because
-// that one is a method over the DFF walk's own state.
+// unknown bound (0) fails OPEN; an unseen payload, and a declared size
+// that is the unknown-length sentinel, fail CLOSED — a duration nothing
+// can verify must not be stamped. The AIFF / WAV twin of the DFF
+// walker's `payloadFits`, kept as its own function because that one is
+// a method over the DFF walk's own state.
+//
+// The sentinel is refused BEFORE the bound is consulted, deliberately.
+// With a known physical size it is already refused, by arithmetic: no
+// sub-4-GiB file can hold 4 GiB of payload. The case it exists for is
+// the one where the bound is UNKNOWN — a Stat that failed on the open
+// handle, which the docblock beside physicalFileSize calls rare rather
+// than impossible — and there the fail-open would stamp 6.8 hours of
+// audio onto a file that never declared a length at all.
 func iffPayloadFits(span iffPayloadSpan, physicalSize uint64) bool {
-	if !span.seen {
+	if !span.seen || span.size == iffUnknownPayloadSize {
 		return false
 	}
 	if physicalSize == 0 {
