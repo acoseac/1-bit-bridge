@@ -366,20 +366,30 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// just been told the host was fine.
 	//
 	// Before Save, so a refusal leaves the existing config intact, and
-	// only when the ports actually CHANGED — otherwise a re-init would
-	// dial the same two ports twice and print the same verdict twice.
+	// only over the ports that actually CHANGED: an unchanged one was
+	// already graded by the preflight, correctly and with the pid file.
+	//
+	// And the pid file is CLEARED for the ones that did change.
+	// checkPort's "is it us?" ladder answers ok or warn — never fail —
+	// whenever our own recorded pid is alive, which is right for a port
+	// the running bridge is supposed to hold and wrong for one it is
+	// not: a live bridge binds what ITS config says, so it cannot
+	// legitimately own a port that is not in it. Left set, an occupied
+	// new port on a host that cannot attribute it (a capability-bound
+	// binary, a blocked probe) read as "our bridge is still running",
+	// HasFail stayed false, and the config was saved anyway — the check
+	// passing because the thing it guards is absent, one level in from
+	// the defect this whole pass exists for (CodeRabbit on #970).
 	if !*skipDoctor {
 		d := preflightDeps
 		apiPort, apiOK := configuredPort(cfg.ListenAddress)
 		adminPort, adminOK := configuredPort(cfg.AdminAddress)
-		if (apiOK && apiPort != d.APIPort) || (adminOK && adminPort != d.AdminPort) {
-			if apiOK {
-				d.APIPort = apiPort
-			}
-			if adminOK {
-				d.AdminPort = adminPort
-			}
-			report := doctor.RunPortChecks(context.Background(), d)
+		apiChanged := apiOK && apiPort != d.APIPort
+		adminChanged := adminOK && adminPort != d.AdminPort
+		if apiChanged || adminChanged {
+			d.APIPort, d.AdminPort = apiPort, adminPort
+			d.OwnPIDFile = ""
+			report := doctor.RunPortChecks(context.Background(), d, apiChanged, adminChanged)
 			if report.HasFail() {
 				printReport(stdout, report)
 				fmt.Fprintln(stdout)
