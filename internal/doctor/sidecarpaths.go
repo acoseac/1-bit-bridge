@@ -81,7 +81,7 @@ func checkSidecarPaths(ctx context.Context, d Deps) Check {
 		hint += fmt.Sprintf("%d waveform row(s) point outside %s. A curve whose file sits at its source-mirrored "+
 			"path under that directory is adopted on the first analysis lookup for the track — the row is rewritten "+
 			"and nothing is re-decoded — but there is no proactive waveform sweep, so that happens when the track is "+
-			"next played and not before. Rows still listed after that point at curves which are NOT there, and the "+
+			"next played and not before. Rows still listed afterwards point at curves which are NOT there, and the "+
 			"analysis skip gate reads the row rather than the file, so a plain `bridge analyze` will not notice them: "+
 			"`bridge analyze --force` rebuilds those.",
 			rel.Waveforms, rel.WaveformDir)
