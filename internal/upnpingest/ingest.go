@@ -1033,7 +1033,14 @@ func parseDurationSeconds(s string) float64 {
 	if err != nil || sec < 0 {
 		return 0
 	}
-	return float64(h*3600+m*60) + sec
+	// Widen BEFORE multiplying. `h*3600` in int wraps on a 64-bit build,
+	// and the wrap can land INSIDE the plausibility gate rather than
+	// outside it: Atoi accepts the hours of "1152921504606846977:00:00"
+	// (2^60+1), 2^60*3600 is a multiple of 2^64, and the product comes
+	// back as exactly 3600 — one hour, from an upstream attribute that
+	// said 131 billion years. float64 cannot wrap; an absurd value stays
+	// absurd and the gate refuses it (CodeRabbit on #967).
+	return float64(h)*3600 + float64(m)*60 + sec
 }
 
 // yearFromDate extracts the 4-digit leading year from a DLNA date

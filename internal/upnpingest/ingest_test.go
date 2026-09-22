@@ -391,6 +391,15 @@ func TestBuildTrackAndRouting_DurationPassesThePlausibilityGate(t *testing.T) {
 		{"just under the floor", "0:00:00.099", nil},
 		// The ceiling: 10,000 hours is 417 days.
 		{"ten thousand hours", "10000:00:00", nil},
+		// And the ceiling cannot be walked UNDER by overflowing into
+		// it. Atoi accepts these hours on a 64-bit build, and an int
+		// multiplication by 3600 wraps: 2^60+1 lands on exactly 3600
+		// — one hour, from an attribute that said 131 billion years —
+		// while max int64 lands on -3600. Widening before the multiply
+		// is what keeps an absurd value absurd (CodeRabbit on #967).
+		{"hours that wrap into the plausible band", "1152921504606846977:00:00", nil},
+		{"hours at max int64", "9223372036854775807:00:00", nil},
+		{"minutes that wrap", "0:307445734561825861:00", nil},
 		// And the ordinary case must be untouched, or "refuse the
 		// implausible" would be indistinguishable from "refuse
 		// everything".
