@@ -30,14 +30,19 @@ type RelocatedSidecars struct {
 // under the variants dir, `track_analysis.waveform_path` under
 // `<dataDir>/waveforms` — so a database copied to a host where either
 // directory has a different path leaves every row naming the old one.
-// For variants that state is now self-healing: the integrity sweep and
-// the serve-side lookup adopt a row whose file sits at its canonical
-// place under the current directory (2026-09-20). For waveforms nothing
-// adopts yet, and the failure is silent twice over: `/v1/waveform`
-// answers 410 for each row, and the analysis skip gate compares the
-// row's source mtime and size — never the file — so the sweeper sees
-// every one as up to date and regenerates nothing. This check is where
-// an operator finds that out.
+//
+// BOTH are self-healing now, by different routes, and neither re-decodes
+// anything. A variant row is adopted by the hourly integrity sweep and
+// on first play (2026-09-20). A waveform row is adopted on the first
+// analysis lookup — #954 wired integrity.LocateWaveform into
+// analysisStoreAdapter — and has no proactive sweep, so it heals when
+// its track is next asked for and not before.
+//
+// What this check is still for is the row whose file is at NEITHER
+// location. For waveforms that is the silent case: the analysis skip
+// gate keys on the SOURCE's mtime and size, never the curve, so the
+// candidate walk never offers the track again and a plain
+// `bridge analyze` regenerates nothing.
 //
 // Warn, not fail: `bridge init` refuses to proceed on a fail, and a
 // stale path in a sidecar table is not a reason to refuse a new install.
@@ -73,9 +78,12 @@ func checkSidecarPaths(ctx context.Context, d Deps) Check {
 			rel.Variants, humanBytes(rel.VariantBytes), rel.VariantsDir, rel.VariantsDir)
 	}
 	if rel.Waveforms > 0 {
-		hint += fmt.Sprintf("%d waveform row(s) point outside %s: each answers 410 on /v1/waveform and the analysis "+
-			"sweeper will not regenerate them (its skip gate reads the row, not the file). No relocation exists for "+
-			"waveforms yet; `bridge analyze --force` rebuilds them, or copy the old waveform tree to that path.",
+		hint += fmt.Sprintf("%d waveform row(s) point outside %s. A curve whose file sits at its source-mirrored "+
+			"path under that directory is adopted on the first analysis lookup for the track — the row is rewritten "+
+			"and nothing is re-decoded — but there is no proactive waveform sweep, so that happens when the track is "+
+			"next played and not before. Rows still listed after that point at curves which are NOT there, and the "+
+			"analysis skip gate reads the row rather than the file, so a plain `bridge analyze` will not notice them: "+
+			"`bridge analyze --force` rebuilds those.",
 			rel.Waveforms, rel.WaveformDir)
 	}
 	return warn(checkNameSidecarPaths, summary, hint)
