@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -114,13 +115,23 @@ type SidecarInventoryOptions struct {
 // prune is gated on d.IsDir() because SkipDir returned for a FILE skips
 // the rest of its parent directory and would end the walk early.
 //
+// The root is RESOLVED before the walk (resolveSidecarRoot) and paths are
+// REPORTED under the configured one. Both halves are load-bearing:
+// unresolved, a symlinked variants directory is one non-directory entry
+// that `upscale --gc`'s nil Consider classifies as an orphan file and
+// unlinks; reported resolved, every key in a KnownSidecarSet built from
+// the configured dir would miss and a healthy tree would read as orphans.
+// A symlinked subdirectory is skipped rather than classified, for the
+// first reason one level down.
+//
 // A missing root is an empty inventory and no error — a bridge that never
 // transcoded anything has no directory, and both sweeps have always
-// treated that as nothing to do. Any other walk error aborts and is
-// returned: a tree that cannot be read is not evidence its files are junk,
-// and it is the same fail-closed reading TreeHoldsVariantSidecars takes.
-// A directory that cannot be DESCENDED into is the softer case — see
-// SidecarInventory.Unreadable.
+// treated that as nothing to do; a DANGLING root reads the same way, and
+// refusing the sweep on it is the directory check's job. Any other walk
+// error aborts and is returned: a tree that cannot be read is not
+// evidence its files are junk, and it is the same fail-closed reading
+// TreeHoldsVariantSidecars takes. A directory that cannot be DESCENDED
+// into is the softer case — see SidecarInventory.Unreadable.
 func TakeSidecarInventory(ctx context.Context, root string, known map[string]struct{}, opts SidecarInventoryOptions) (SidecarInventory, error) {
 	var (
 		inv SidecarInventory
@@ -134,7 +145,35 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 		// everything under the cwd".
 		return inv, fmt.Errorf("integrity: no sidecar directory")
 	}
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+	// Resolve before walking — see resolveSidecarRoot. Unresolved, a
+	// symlinked variants directory is handed to the callback as one
+	// non-directory entry, classified as an orphan FILE, and unlinked by
+	// the forward sweep.
+	//
+	// ENOENT keeps the reading a missing root has always had here
+	// ("nothing to inventory"), and that covers a DANGLING symlink too:
+	// there is no tree to classify, and refusing the sweep is the
+	// directory check's job (VariantsDirSweepBlock), not this walk's. Any
+	// other error fails closed — and crucially neither branch falls back
+	// to walking `root` unresolved, which is the defect itself.
+	walkRoot, resolveErr := resolveSidecarRoot(root)
+	if resolveErr != nil {
+		if errors.Is(resolveErr, fs.ErrNotExist) {
+			return inv, nil
+		}
+		return SidecarInventory{}, fmt.Errorf("integrity: resolve sidecar directory %q: %w", root, resolveErr)
+	}
+	// Paths are REPORTED under the configured root, not the resolved one.
+	// KnownSidecarSet keys on the recorded sidecar_path and on
+	// CanonicalSidecarPath(variantsDir, …) — both in the configured
+	// spelling — so emitting resolved paths would miss every one of them
+	// and classify an entire healthy tree as orphans. Cheap because
+	// WalkDir builds each path by joining onto walkRoot, so the prefix is
+	// exact; a no-op when nothing was a symlink.
+	reportPath := func(p string) string {
+		return root + strings.TrimPrefix(p, walkRoot)
+	}
+	walkErr := filepath.WalkDir(walkRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -144,7 +183,7 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 			// because its absence from the counts can only shrink what a
 			// caller goes on to delete.
 			if errors.Is(walkErr, fs.ErrNotExist) {
-				if path == root {
+				if path == walkRoot {
 					return filepath.SkipDir
 				}
 				return nil
@@ -167,27 +206,42 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 			traversed++
 		}
 		if d.IsDir() {
-			if path != root && strings.HasPrefix(d.Name(), ".") {
+			if path != walkRoot && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+		// A symlink that points at a DIRECTORY is not a candidate file.
+		// WalkDir does not descend into it (it Lstats), so unresolved it
+		// would arrive here as one non-directory entry and — under a nil
+		// Consider — be unlinked as an orphan, taking an album an
+		// operator parked on another volume with it. Skipped rather than
+		// followed: descending would raise the cycle question, and the
+		// files under it are not this tree's to reclaim. A symlink to a
+		// regular FILE still counts, the #207 broken-link rule
+		// TreeHoldsVariantSidecars follows.
+		if d.Type()&fs.ModeSymlink != 0 {
+			if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+				return nil
+			}
+		}
 		name := d.Name()
 		if opts.Scratch != nil && opts.Scratch(name) {
-			inv.ScratchPaths = append(inv.ScratchPaths, path)
+			inv.ScratchPaths = append(inv.ScratchPaths, reportPath(path))
 			return nil
 		}
 		if opts.Consider != nil && !opts.Consider(name) {
 			return nil
 		}
 		inv.Files++
-		if _, ok := known[strings.ToLower(filepath.Clean(path))]; ok {
+		reported := reportPath(path)
+		if _, ok := known[strings.ToLower(filepath.Clean(reported))]; ok {
 			inv.Known++
 			return nil
 		}
 		inv.Orphans++
 		if opts.MaxOrphanPaths == 0 || len(inv.OrphanPaths) < opts.MaxOrphanPaths {
-			inv.OrphanPaths = append(inv.OrphanPaths, path)
+			inv.OrphanPaths = append(inv.OrphanPaths, reported)
 		}
 		return nil
 	})

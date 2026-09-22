@@ -182,6 +182,34 @@ func looksLikeVariantSidecar(name string) bool {
 // first hit; it never escapes the function.
 var errFoundSidecar = errors.New("integrity: sidecar found")
 
+// resolveSidecarRoot is the one place a sidecar walk turns a configured
+// directory into the path filepath.WalkDir may be handed.
+//
+// WalkDir Lstats its root and follows no link, so a variants directory
+// that is itself a symlink (`/srv/variants -> /mnt/vol/…`, the ordinary
+// mountpoint alias) arrives at the callback as ONE non-directory entry
+// and the walk ends there. The two consumers read that differently and
+// both read it wrong: TreeHoldsVariantSidecars sees a tree that "holds
+// nothing", and TakeSidecarInventory — whose `upscale --gc` caller
+// passes a nil Consider, so every non-directory is a candidate —
+// classifies the variants directory ITSELF as an orphan file and hands
+// it to the forward sweep to unlink. One orphan is below the
+// mass-orphan floor of ten, so no guard can see it.
+//
+// ONE body, because the two have to agree about what the tree IS before
+// they can disagree about what is in it: #937 resolved the root in the
+// read-only guard and #940's new shared walker — the one that DELETES —
+// did not get it.
+//
+// The error is returned raw. "Missing" means opposite things to the two
+// callers — fail closed for a guard, "a bridge that never transcoded
+// anything" for an inventory — so the classification stays with the
+// caller. What neither may do is fall back to the unresolved path: that
+// walks the symlink raw and is the defect.
+func resolveSidecarRoot(dir string) (string, error) {
+	return filepath.EvalSymlinks(dir)
+}
+
 // TreeHoldsVariantSidecars reports whether at least one file under dir
 // is a bridge sidecar (looksLikeVariantSidecar), pruning dot-directories
 // the way the orphan sweep does — a `.Trashes/` full of sidecars an
@@ -207,7 +235,7 @@ func TreeHoldsVariantSidecars(dir string) (bool, error) {
 	if dir == "" {
 		return false, errors.New("integrity: no variants directory")
 	}
-	root, err := filepath.EvalSymlinks(dir)
+	root, err := resolveSidecarRoot(dir)
 	if err != nil {
 		return false, err
 	}
