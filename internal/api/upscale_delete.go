@@ -63,6 +63,60 @@ type VariantDeleter interface {
 	ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]VariantSummary, error)
 	ListVariantsForPath(ctx context.Context, sourcePath string) ([]VariantSummary, error)
 	DeleteVariant(ctx context.Context, sourcePath, variantID string) error
+	// LocateVariantSidecar says where this row's file actually is, so the
+	// unlink acts on the file rather than on the row's CLAIM about it.
+	// Required rather than an optional capability: there is one production
+	// implementation and a bridge that could not answer would silently be
+	// the bug this method exists to close.
+	LocateVariantSidecar(v VariantSummary) VariantSidecarLocation
+	// SidecarStoreAvailable reports whether the variants directory is in
+	// a state where a MISSING sidecar is evidence about the FILE rather
+	// than about the VOLUME. False when the directory is gone, unreadable,
+	// not a directory, or empty — a clean unmount reverts a mountpoint to
+	// an empty local directory, which is why "empty" belongs here too.
+	//
+	// serveVariant's reactive reap is the third of the three reapers
+	// #937 named, and the only one that had no mount check: the sweep in
+	// VariantWatcher.tick and the one in `upscale --gc` both refuse
+	// wholesale via VariantsDirSweepBlock, while this one deleted a row
+	// per PLAY.
+	SidecarStoreAvailable() bool
+}
+
+// VariantSidecarPlacement says where a variant row's sidecar actually is.
+//
+// It is api's projection of integrity.SidecarLocation's verdict — the api
+// package cannot import internal/integrity (upward cycle), so cmd/bridge
+// translates at the wiring point, the same pattern VariantSummary uses for
+// manifest.VariantRow.
+type VariantSidecarPlacement int
+
+const (
+	// VariantSidecarRecorded — the file is at the path the row records.
+	// The zero value, so a caller that cannot locate degrades to today's
+	// behaviour rather than to "skip everything".
+	VariantSidecarRecorded VariantSidecarPlacement = iota
+	// VariantSidecarRelocated — absent at the recorded path, present at
+	// the canonical one with the recorded size. The tree moved; the file
+	// is real and is the one this row names.
+	VariantSidecarRelocated
+	// VariantSidecarCopyInFlight — something is at the canonical path but
+	// it is not this row's file (the size disagrees).
+	VariantSidecarCopyInFlight
+	// VariantSidecarAbsent — neither location holds it, or the row never
+	// recorded a path at all.
+	VariantSidecarAbsent
+)
+
+// VariantSidecarLocation is one row's answer from LocateVariantSidecar.
+type VariantSidecarLocation struct {
+	Placement VariantSidecarPlacement
+	// Path is the file to act on: the recorded path when Recorded, the
+	// canonical one when Relocated, empty for the other two. Empty is
+	// what keeps os.Remove("") off Windows, where it returns
+	// ERROR_INVALID_NAME rather than anything errors.Is(ErrNotExist)
+	// matches.
+	Path string
 }
 
 // InflightDropper is the interface the delete handler uses to
@@ -489,6 +543,12 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// with whatever DID disappear.
 	deletedPaths := map[string]struct{}{}
 	seenVariantIDs := map[string]struct{}{}
+	// skippedUnavailable counts rows left alone because the variants
+	// directory was unreachable. ONE line after the loop, never one per
+	// row: the condition is the same for every row in the request, so
+	// per-row logging is the M-SEARCH flood shape — thousands of
+	// identical lines that make every other line unfindable.
+	skippedUnavailable := 0
 	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(ctx)
 	for _, row := range rows {
@@ -500,17 +560,76 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		// An empty SidecarPath (a legacy row whose sidecar path was never
-		// recorded) has nothing to unlink. Treat it as already-gone rather than
-		// calling os.Remove("") — on Windows that returns a platform-specific
-		// error (ERROR_INVALID_NAME) that errors.Is(os.ErrNotExist) does NOT
-		// match, which would log a warning and `continue`, stranding the DB row
-		// forever. Seeding removeErr with ErrNotExist flows through the guard
-		// below (no warning, row still deleted) and correctly frees 0 bytes
-		// (Gemini PR #518).
+		// WHERE is the file? `sidecar_path` is a CLAIM, never proof
+		// (#937). It is absolute, so a variants directory moved to
+		// another host leaves every row naming the old one while every
+		// file sits, byte-identical, at its canonical place under the
+		// current one. Unlinking the recorded path alone then returns
+		// ENOENT for every row, which the guard below reads as "already
+		// gone" — so "delete all renditions" answered
+		// `deletedCount: 10248, freedBytes: 0`, left 259 GiB on disk
+		// with nothing referencing it, and handed `--gc` a tree it now
+		// refuses to reclaim (orphans > rows). #937 enumerated three
+		// reapers; this path deletes rows too and was not among them.
+		// Is the volume even there? With the variants directory
+		// unmounted, LocateSidecar stats both the recorded and the
+		// canonical path under the same dead mountpoint, answers
+		// "absent at both", and the ENOENT that follows flows through
+		// the already-gone guard as success — deleting the row while
+		// its sidecar sits intact on the volume that will come back.
+		// That is the same stranding this handler was just fixed for,
+		// reached by a different cause, so it takes the same answer the
+		// two sweeps give: keep the row.
+		//
+		// Per row rather than once, because a whole-library delete runs
+		// long enough for a mount to drop underneath it. The cost is a
+		// stat beside a LocateSidecar that already stats twice and an
+		// os.Remove that follows.
+		if !s.variantDeleter.SidecarStoreAvailable() {
+			skippedUnavailable++
+			continue
+		}
+		loc := s.variantDeleter.LocateVariantSidecar(row)
+		if loc.Placement == VariantSidecarCopyInFlight {
+			// Something is at the canonical path but it is not this
+			// row's file. Unlinking it would take a file the pool may
+			// still be writing; deleting the row would strand it.
+			// Neither — the same reading LookupVariant takes when it
+			// answers 410 instead of reaping.
+			logger.Warn("variant delete skipped; a copy is in flight at the canonical path",
+				slog.String("source_path", row.SourcePath),
+				slog.String("variant_id", row.VariantID),
+				slog.String("recorded", row.SidecarPath),
+			)
+			continue
+		}
+		// An empty Path — a legacy row that never recorded one, or a
+		// sidecar absent from both locations — has nothing to unlink.
+		// Treat it as already-gone rather than calling os.Remove("") —
+		// on Windows that returns a platform-specific error
+		// (ERROR_INVALID_NAME) that errors.Is(os.ErrNotExist) does NOT
+		// match, which would log a warning and `continue`, stranding the
+		// DB row forever. Seeding removeErr with ErrNotExist flows
+		// through the guard below (no warning, row still deleted) and
+		// correctly frees 0 bytes (Gemini PR #518).
 		removeErr := os.ErrNotExist
-		if row.SidecarPath != "" {
-			removeErr = os.Remove(row.SidecarPath)
+		if loc.Path != "" {
+			removeErr = os.Remove(loc.Path)
+		}
+		if removeErr == nil && loc.Placement == VariantSidecarRelocated {
+			// AFTER the unlink succeeded, not before it is attempted:
+			// logged early, a failing os.Remove produced a journal that
+			// reported the unlink and then reported it failing
+			// (CodeRabbit on #959). Name BOTH paths — the journal
+			// otherwise records what the row claimed rather than what
+			// was actually removed, which is the whole distinction this
+			// branch exists to make.
+			logger.Info("variant delete unlinked a relocated sidecar",
+				slog.String("source_path", row.SourcePath),
+				slog.String("variant_id", row.VariantID),
+				slog.String("recorded", row.SidecarPath),
+				slog.String("unlinked", loc.Path),
+			)
 		}
 		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			logger.Warn("variant unlink failed; leaving DB row in place",
@@ -550,6 +669,16 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 			deletedPaths[row.SourcePath] = struct{}{}
 			resp.DeletedPaths = append(resp.DeletedPaths, row.SourcePath)
 		}
+	}
+	if skippedUnavailable > 0 {
+		// One line carrying the count, for the reason the per-row
+		// logging was not taken: every skipped row has the SAME reason,
+		// so N identical lines say nothing the count does not and bury
+		// everything else in the journal.
+		logger.Warn("variant delete skipped rows; the variants directory is unavailable",
+			slog.Int("skipped", skippedUnavailable),
+			slog.Int("considered", len(rows)),
+		)
 	}
 
 	// Phase 4: fan-out to SSE subscribers (iOS). Single event

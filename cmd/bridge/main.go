@@ -557,6 +557,60 @@ func (a *lyricsStoreAdapter) LookupLyrics(ctx context.Context, sourcePath string
 
 type variantDeleterAdapter struct {
 	store *manifest.Store
+	// variantsDir is liveVariantsDir — the CURRENT directory, asked per
+	// row, for the reason variantStoreAdapter asks per lookup: the
+	// recorded sidecar_path is absolute and a moved tree leaves every
+	// row naming the old one. nil in fixtures, which degrades to
+	// unlinking the recorded path (the pre-relocation behaviour).
+	variantsDir func() string
+}
+
+// LocateVariantSidecar projects integrity.LocateSidecar's verdict into the
+// api-package shape, at the wiring point — internal/api cannot import
+// internal/integrity without an upward cycle, the same reason
+// VariantSummary exists rather than manifest.VariantRow.
+//
+// Present and Unknown both take the RECORDED path: Present because it is
+// right, Unknown because a stat that failed for a reason other than
+// "absent" is not grounds to change what a delete unlinks.
+// SidecarStoreAvailable answers serveVariant's "is the file gone, or the
+// volume?" from the same probe the two sweeps refuse on, so the three
+// reapers cannot disagree about what an unmounted variants directory
+// looks like.
+//
+// A nil variantsDir (fixtures) answers true: no live directory to judge,
+// and the reap is the behaviour those fixtures were written against.
+func (a *variantDeleterAdapter) SidecarStoreAvailable() bool {
+	if a.variantsDir == nil {
+		return true
+	}
+	dir := a.variantsDir()
+	if dir == "" {
+		return false
+	}
+	return integrity.VariantsDirSweepBlock(dir).Reason == ""
+}
+
+func (a *variantDeleterAdapter) LocateVariantSidecar(v api.VariantSummary) api.VariantSidecarLocation {
+	if a.variantsDir == nil || v.SidecarPath == "" {
+		return api.VariantSidecarLocation{Placement: api.VariantSidecarRecorded, Path: v.SidecarPath}
+	}
+	loc := integrity.LocateSidecar(a.variantsDir(), integrity.VariantSnapshot{
+		SourcePath:  v.SourcePath,
+		VariantID:   v.VariantID,
+		SidecarPath: v.SidecarPath,
+		SizeBytes:   v.SizeBytes,
+	})
+	switch loc.Verdict {
+	case integrity.SidecarRelocated:
+		return api.VariantSidecarLocation{Placement: api.VariantSidecarRelocated, Path: loc.Canonical}
+	case integrity.SidecarMismatched:
+		return api.VariantSidecarLocation{Placement: api.VariantSidecarCopyInFlight}
+	case integrity.SidecarMissing:
+		return api.VariantSidecarLocation{Placement: api.VariantSidecarAbsent}
+	default:
+		return api.VariantSidecarLocation{Placement: api.VariantSidecarRecorded, Path: v.SidecarPath}
+	}
 }
 
 func (a *variantDeleterAdapter) AllVariants(ctx context.Context) ([]api.VariantSummary, error) {
@@ -3675,7 +3729,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// `deleteVariants` in /v1/health reliably reflects whether
 		// the underlying paths are reachable — see api.go's health
 		// handler for the gate.
-		apiSrv.WithVariantDeleter(&variantDeleterAdapter{store: manifestStore})
+		apiSrv.WithVariantDeleter(&variantDeleterAdapter{store: manifestStore, variantsDir: liveVariantsDir})
 		apiSrv.WithInflightDropper(&inflightDropperAdapter{pool: upscalePool})
 
 		// Auto-optimize sweeper: pre-generates CarPlay `optimized-*`

@@ -472,3 +472,173 @@ func TestMassOrphanLowerBoundIsMonotoneAndTheRatioIsNot(t *testing.T) {
 	}
 	t.Logf("prefix says refuse, completed says proceed, at pct=%d: %+v", defaultPct, *found)
 }
+
+// TestSidecarInventoryResolvesASymlinkedRoot.
+//
+// filepath.WalkDir Lstats its root and follows no link, so a variants
+// directory that is itself a symlink — `/srv/variants -> /mnt/vol/…`,
+// the ordinary mountpoint alias — arrives at the callback as ONE
+// non-directory entry and the walk ends there. `upscale --gc` passes a
+// nil Consider, so that entry is a candidate: it is counted, missed by
+// the known set, and appended to OrphanPaths, whereupon the forward
+// sweep unlinks the variants directory itself. One orphan is below the
+// mass-orphan floor of ten, so no guard can see it, and `bridge doctor`
+// reports it as reclaimable and names `bridge upscale --gc` in the hint.
+//
+// TreeHoldsVariantSidecars resolved its root for exactly this reason in
+// #937; #940's shared walker — the one that DELETES — did not get it.
+//
+// The assertion that matters is the one on OrphanPaths: a count alone
+// would be satisfied by "1 orphan", which is what the bug produces.
+func TestSidecarInventoryResolvesASymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	paths := seedTree(t, real,
+		"Artist/Album/01.flac.upscaled-v2-176400-24.flac",
+		"Artist/Album/02.flac.upscaled-v2-176400-24.flac",
+	)
+	link := filepath.Join(base, "variants")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	// The known set is in the CONFIGURED spelling, the way
+	// KnownSidecarSet builds it — recorded sidecar_path plus
+	// CanonicalSidecarPath(variantsDir, …), neither symlink-resolved.
+	known := knownOf(filepath.Join(link, "Artist", "Album", filepath.Base(paths[0])))
+
+	inv, err := TakeSidecarInventory(context.Background(), link, known, SidecarInventoryOptions{})
+	if err != nil {
+		t.Fatalf("TakeSidecarInventory through a symlinked root: %v", err)
+	}
+	for _, p := range inv.OrphanPaths {
+		if filepath.Clean(p) == filepath.Clean(link) {
+			t.Fatalf("the variants directory itself is listed as an orphan (%s) — "+
+				"the forward sweep would os.Remove the mountpoint alias", p)
+		}
+	}
+	if inv.Files != 2 || inv.Known != 1 || inv.Orphans != 1 {
+		t.Fatalf("Files/Known/Orphans = %d/%d/%d, want 2/1/1 — the walk did not descend through the link",
+			inv.Files, inv.Known, inv.Orphans)
+	}
+	// Reported under the CONFIGURED root: the known set keys that way, so
+	// emitting resolved paths would miss every entry in it and classify a
+	// healthy tree as orphans.
+	want := filepath.Join(link, "Artist", "Album", filepath.Base(paths[1]))
+	if len(inv.OrphanPaths) != 1 || inv.OrphanPaths[0] != want {
+		t.Fatalf("OrphanPaths = %v, want [%s] in the configured spelling", inv.OrphanPaths, want)
+	}
+}
+
+// TestSidecarInventoryTreatsADanglingRootAsNothingToDo — the error path
+// of the fix above, pinned rather than assumed.
+//
+// EvalSymlinks fails with ENOENT on a dangling link exactly as it does
+// on a missing directory, and both mean the same thing here: there is no
+// tree to classify. What must NOT happen is a fall back to walking the
+// unresolved path, which reproduces the defect precisely — one
+// non-directory entry, classified as an orphan, unlinked.
+func TestSidecarInventoryTreatsADanglingRootAsNothingToDo(t *testing.T) {
+	base := t.TempDir()
+	link := filepath.Join(base, "variants")
+	if err := os.Symlink(filepath.Join(base, "never-mounted"), link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	inv, err := TakeSidecarInventory(context.Background(), link, nil, SidecarInventoryOptions{})
+	if err != nil {
+		t.Fatalf("a dangling root is nothing to do, not an error: %v", err)
+	}
+	if inv.Files != 0 || inv.Orphans != 0 || len(inv.OrphanPaths) != 0 {
+		t.Fatalf("inventory = %+v, want empty — the dangling link must not be classified as a file", inv)
+	}
+}
+
+// TestSidecarInventorySkipsASymlinkedDirectory — the same hazard one
+// level down, and the reason the fix is not only about the root.
+//
+// WalkDir does not descend into a symlinked subdirectory either, so an
+// album an operator parked on another volume arrives as a single
+// non-directory entry. Under `upscale --gc`'s nil Consider that is an
+// orphan, and unlinking it takes the whole subtree's only reference.
+// Skipped rather than followed: descending raises the cycle question,
+// and the files under it are not this tree's to reclaim.
+func TestSidecarInventorySkipsASymlinkedDirectory(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "variants")
+	seedTree(t, root, "Artist/Album/01.flac.upscaled-v2-176400-24.flac")
+	elsewhere := filepath.Join(base, "other-volume", "Album")
+	seedTree(t, elsewhere, "09.flac.upscaled-v2-176400-24.flac")
+	if err := os.Symlink(elsewhere, filepath.Join(root, "Artist", "Parked")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range inv.OrphanPaths {
+		if strings.HasSuffix(filepath.Clean(p), filepath.Join("Artist", "Parked")) {
+			t.Fatalf("a symlinked album directory is listed as an orphan (%s) — "+
+				"the forward sweep would unlink the only reference to its subtree", p)
+		}
+	}
+	if inv.Files != 1 {
+		t.Fatalf("Files = %d, want 1 — only the real sidecar is a candidate", inv.Files)
+	}
+}
+
+// TestSidecarInventoryCountsASymlinkItCannotStat.
+//
+// The symlink-skip added in round 1 asked os.Stat and treated ANY
+// failure as "not a directory", so a link whose target sits behind a
+// permission wall fell through to orphan classification and the forward
+// sweep would os.Remove the only reference to that subtree.
+//
+// A DANGLING link still falls through on purpose — it is junk in this
+// tree and reclaiming it is the sweep's job. The distinction is between
+// "the target is not there" and "I could not find out", and only the
+// second is a reason to leave it alone. (CodeRabbit Major on #959.)
+func TestSidecarInventoryCountsASymlinkItCannotStat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory modes do not deny stat on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "variants")
+	seedTree(t, root, "Artist/Album/01.flac.upscaled-v2-176400-24.flac")
+
+	blocked := filepath.Join(base, "blocked")
+	if err := os.MkdirAll(filepath.Join(blocked, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "Artist", "Parked")
+	if err := os.Symlink(filepath.Join(blocked, "sub"), link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Skipf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+	if _, err := os.Stat(link); err == nil {
+		t.Skip("this user can stat through a 0000 directory — the fixture cannot reproduce the state")
+	}
+
+	inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range inv.OrphanPaths {
+		if filepath.Clean(p) == filepath.Clean(link) {
+			t.Fatalf("a symlink the walk could not stat is listed as an orphan (%s) — "+
+				"the forward sweep would remove the only reference to its subtree", p)
+		}
+	}
+	if inv.Unreadable != 1 {
+		t.Errorf("Unreadable = %d, want 1 — an entry that could not be resolved is reported, not classified", inv.Unreadable)
+	}
+	if inv.Files != 1 {
+		t.Errorf("Files = %d, want 1 — only the real sidecar is a candidate", inv.Files)
+	}
+}
