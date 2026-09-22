@@ -938,14 +938,38 @@ function certExpiryBadge(left) {
 // so a certificate forty days dead rendered `expired 8/1/2026
 // (-40 days)`.
 //
-// Magnitude only — the tense carries the direction. `days === 0` gets
-// its own wording at both ends because "expires in 0 days" and "expired
-// 0 days ago" are the two spellings this function exists to remove.
-function certValidityText(left) {
-  const days = Math.floor(Math.abs(left) / 86_400_000);
+// Magnitude only — the tense carries the direction. "Today" gets its own
+// wording at both ends because "expires in 0 days" and "expired 0 days
+// ago" are the two spellings this function exists to remove.
+//
+// "Today" is a CALENDAR question, not a 24-hour one. A duration-based
+// test called a certificate expiring at 00:30 tomorrow "expires today",
+// beside a parenthesised date reading tomorrow — the same sentence
+// disagreeing with itself, which is the whole defect this helper was
+// written for, one unit down (CodeRabbit on #962). `now` is derived from
+// the caller's own `left` rather than read again, so the two cannot
+// drift between the badge and the phrase, and a test can drive any
+// instant without touching the clock.
+//
+// Comparing Y/M/D locally is DST-safe: a 23- or 25-hour day changes the
+// duration between two instants and not which calendar date each falls
+// on.
+function certValidityText(left, when) {
+  const now = new Date(when.getTime() - left);
+  if (
+    when.getFullYear() === now.getFullYear() &&
+    when.getMonth() === now.getMonth() &&
+    when.getDate() === now.getDate()
+  ) {
+    return left > 0 ? "expires today" : "expired today";
+  }
+  // At least one whole day, because the calendar test above has already
+  // ruled out today: an expiry two hours away across midnight is
+  // "tomorrow", and rounding it to zero would reprint the wording this
+  // function exists to remove.
+  const days = Math.max(1, Math.round(Math.abs(left) / 86_400_000));
   const plural = days === 1 ? "" : "s";
-  if (left > 0) return days === 0 ? "expires today" : `expires in ${days} day${plural}`;
-  return days === 0 ? "expired today" : `expired ${days} day${plural} ago`;
+  return left > 0 ? `expires in ${days} day${plural}` : `expired ${days} day${plural} ago`;
 }
 
 // refreshCertInfo populates the "Expires" line under the TLS
@@ -1006,7 +1030,7 @@ async function refreshCertInfo() {
     // NotAfter, so showing it rendered `(-40 days)` beside the badge.
     const left = when.getTime() - Date.now();
     const badge = certExpiryBadge(left);
-    cell.innerHTML = `${badge}${certValidityText(left)} (${when.toLocaleDateString()})`;
+    cell.innerHTML = `${badge}${certValidityText(left, when)} (${when.toLocaleDateString()})`;
   } catch {
     cell.textContent = "—";
   }
@@ -1109,7 +1133,7 @@ function renderTailscaleTile(s) {
       const left = when.getTime() - Date.now();
       const tooltip = s.certPath ? ` title="${escapeHTML(s.certPath)}"` : "";
       const badge = certExpiryBadge(left);
-      certEl.innerHTML = `${badge}<span${tooltip}>${certValidityText(left)} (${when.toLocaleDateString()})</span>`;
+      certEl.innerHTML = `${badge}<span${tooltip}>${certValidityText(left, when)} (${when.toLocaleDateString()})</span>`;
     }
   }
 
@@ -1215,7 +1239,7 @@ async function refreshAutocertTile() {
       const when = new Date(snap.notAfter);
       const left = when.getTime() - Date.now();
       const badge = certExpiryBadge(left);
-      expiryEl.innerHTML = `${badge}${certValidityText(left)} (${when.toLocaleDateString()})`;
+      expiryEl.innerHTML = `${badge}${certValidityText(left, when)} (${when.toLocaleDateString()})`;
     }
   }
 }

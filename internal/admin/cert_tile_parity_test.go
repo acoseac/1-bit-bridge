@@ -452,4 +452,22 @@ func TestCertTilesRenderTheirRemainingTimeThroughOneHelper(t *testing.T) {
 	if checked != 3 {
 		t.Fatalf("scanned %d tiles, want 3 — the scan is not seeing app.js and would pass no matter what", checked)
 	}
+
+	// "Today" is a CALENDAR question, not a 24-hour one. A duration-only
+	// test labelled a certificate expiring at 00:30 tomorrow "expires
+	// today" — beside a parenthesised date reading TOMORROW, the same
+	// sentence disagreeing with itself, which is the defect this helper
+	// exists for one unit down (CodeRabbit on #962).
+	//
+	// Structural, because the Go suite cannot run the helper: it can
+	// still say that the calendar comparison is present, which is what a
+	// regression to `Math.floor(ms / 86_400_000) === 0` would remove.
+	helper := jsFunctionBody(t, "function certValidityText(")
+	for _, need := range []string{"getFullYear()", "getMonth()", "getDate()"} {
+		if !strings.Contains(helper, need) {
+			t.Errorf("certValidityText no longer compares calendar dates (%s missing) — "+
+				"a 24-hour test calls an expiry just after midnight tomorrow \"today\", "+
+				"next to a date that says otherwise", need)
+		}
+	}
 }
