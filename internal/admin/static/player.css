@@ -909,6 +909,16 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   padding: 0;
   display: grid;
   gap: 2px;
+  /* minmax(0, 1fr), not the implicit `auto` track — the same fix
+   * .deleted-list carries, and this is the rule .deleted-list was
+   * copied FROM. An auto track sizes to its widest item's max-content,
+   * and every child below is nowrap-plus-ellipsis, which does not
+   * shrink a track: one long unresolved title resolves the column past
+   * the panel, the rows overflow and the list grows a horizontal
+   * scrollbar. Latent only because the fixtures were short — the
+   * markup is correct and the page renders wrong, which no Go guard
+   * here can see. Measured at 375px. */
+  grid-template-columns: minmax(0, 1fr);
   /* Bounded: a backup whose whole library lives on another bridge names
    * up to 200 members, and an unbounded block would bury the actions
    * below it under a page of grey rows. */
@@ -922,8 +932,21 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   font-size: var(--text-sm);
   color: var(--fg-muted);
   padding: 3px 0;
+  /* The track can shrink; this is what lets the ITEM inside it shrink
+   * with it, so the ellipsis on the title and artist below actually
+   * gets a chance to apply. */
+  min-width: 0;
 }
 .unresolved-pos { min-width: 2.2em; text-align: right; opacity: 0.7; font-variant-numeric: tabular-nums; }
+/* No explicit `min-width: 0` on these two, and that is measured rather
+ * than assumed: the automatic minimum size applies only to a flex item
+ * whose computed `overflow` is `visible` (CSS Flexbox 4.5), and both
+ * carry `overflow: hidden` for the ellipsis. At 375px the title's
+ * clientWidth is 114px against a 724px scrollWidth — the ellipsis is
+ * already active — and adding the declaration reproduces those numbers
+ * byte for byte. The control that shows what IS doing the work:
+ * switching these to `overflow: visible` takes the row's scrollWidth to
+ * 1253px and the list overflows again. (Gemini on #957.) */
 .unresolved-title { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .unresolved-artist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Pushes the chip to the trailing edge without a second grid column,
@@ -1311,6 +1334,14 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   min-width: 0;
 }
 .deleted-item:first-child { border-top: 0; }
+/* No `flex: 0 0 auto` on the Restore button. It was proposed as the
+ * smaller sibling of the grid fix above and measured as a NO-OP: at
+ * 375px the button is 82px with the default flex and 82px with it, and
+ * it stays 82px even against an unbreakable 400-character meta line,
+ * because `.deleted-item-text` is `flex: 1 1 auto; min-width: 0` and
+ * absorbs every pixel of the squeeze before the button is asked for
+ * one. A declaration that changes nothing, under a comment explaining
+ * what it prevents, is how the next reader inherits a false reason. */
 .deleted-item-text {
   display: flex; flex-direction: column; gap: 1px;
   flex: 1 1 auto; min-width: 0;
