@@ -501,8 +501,29 @@ func expiryPhrase(days int) string {
 // is unchanged by the config init is about to write, and re-running the
 // toolchain probes would double the preflight's wall clock for a second
 // copy of the same answers.
-func RunPortChecks(ctx context.Context, d Deps) Report {
-	return Report{Checks: []Check{checkAPIPort(ctx, d), checkAdminPort(ctx, d)}}
+//
+// `api` and `admin` select which ports to grade, because the caller has
+// a reason to ask about one and not the other and no honest way to say
+// so otherwise: port 0 is a legal value with its own verdict, so it
+// cannot double as "skip this one".
+//
+// A caller grading a port it is about to CHOOSE should also clear
+// Deps.OwnPIDFile. The "is it us?" ladder below checkPort's conflict
+// branch answers ok or warn — never fail — whenever our own recorded
+// pid is alive, which is right for a port the running bridge is
+// supposed to hold and wrong for one it is not: a live bridge binds
+// what ITS config says, so it cannot legitimately own a port that is
+// not in it, and the excuse then hides a conflict that will stop the
+// next serve from binding (CodeRabbit on #970).
+func RunPortChecks(ctx context.Context, d Deps, api, admin bool) Report {
+	var checks []Check
+	if api {
+		checks = append(checks, checkAPIPort(ctx, d))
+	}
+	if admin {
+		checks = append(checks, checkAdminPort(ctx, d))
+	}
+	return Report{Checks: checks}
 }
 
 func checkAPIPort(ctx context.Context, d Deps) Check {

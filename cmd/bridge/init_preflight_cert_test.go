@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -496,5 +497,93 @@ func TestConfiguredPortReadsAnEphemeralPortAsItself(t *testing.T) {
 		t.Errorf("ports = %d/%d, want 0/0 — the defaults were substituted for an install "+
 			"that names no port, so the checks answered about listeners it does not have",
 			d.APIPort, d.AdminPort)
+	}
+}
+
+// TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID.
+//
+// checkPort's "is it us?" ladder answers ok or warn — never fail —
+// whenever the pid in OwnPIDFile is alive: a probe that could not
+// attribute the port warns, and a listener merely owned by this uid is
+// reported ok. That is right for a port the running bridge is supposed
+// to hold, and wrong for one it is not. A live bridge binds what ITS
+// config says, so it cannot legitimately own a port absent from it —
+// and with the fallback left on, an occupied NEW port read as "our
+// bridge is still running", HasFail stayed false, and the config was
+// saved anyway.
+//
+// Which is the check passing because the thing it guards is absent, one
+// level in from the defect this whole pass exists for. (CodeRabbit on
+// #970.)
+//
+// The fixture is this test process: its own pid in the pid file is
+// alive by construction, and it holds the port on a listener the port
+// prober will not attribute to a bridge.
+func TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID(t *testing.T) {
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(tmp, "cfg")
+	dataDir := filepath.Join(cfgDir, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The pid file the preflight wires from the config's dataDir. Our
+	// own pid, so pidAliveFunc says yes.
+	if err := os.WriteFile(filepath.Join(dataDir, "server.pid"),
+		[]byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	_, heldPortStr, err := net.SplitHostPort(held.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	freeL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherPortStr, err := net.SplitHostPort(freeL.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	freeL.Close()
+
+	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
+	body := "libraryRoots:\n  - " + lib + "\n" +
+		"dataDir: " + dataDir + "\n" +
+		"listenAddress: \"127.0.0.1:" + otherPortStr + "\"\n" +
+		"adminAddress: \"127.0.0.1:" + otherPortStr + "\"\n" +
+		"libraryName: Existing\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := initCmd([]string{
+		"--yes", "--force", "--no-service",
+		"--dir", cfgDir, "--library", lib, "--name", "Rewritten",
+		"--public", "--domain", "example.test", "--admin-tls-proxy",
+		"--admin-address", "127.0.0.1:" + heldPortStr,
+		"--listen-address", "127.0.0.1:" + otherPortStr,
+	}, strings.NewReader(""), &out, &errOut)
+
+	if code == 0 {
+		t.Fatalf("init exited 0: a changed port held by another process was excused because our own "+
+			"recorded pid is alive\n--- stdout ---\n%s\n--- stderr ---\n%s", out.String(), errOut.String())
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Existing") {
+		t.Errorf("the config was rewritten despite the refusal:\n%s", raw)
 	}
 }
