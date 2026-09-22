@@ -12,6 +12,24 @@ import (
 // provider that is read once at the top of the loop is exactly as
 // restart-bound as the captured duration it replaced, and nothing about
 // the type signature would say so.
+//
+// Each drains its loop through drainLoopOnCleanup rather than a bare
+// `defer cancel()`. On a t.Fatalf the body Goexits, the deferred cancel
+// fires, and the test returns with the loop still running — so what
+// gets reported afterwards is whatever the leaked goroutine trips over,
+// not the assertion that failed. These four are in-memory, which makes
+// them the mild end of the class #944/#945 fixed, but they are also
+// invisible to TestEveryBackgroundGoroutineDrainsOnCleanup: its shape
+// match is `go func(){ defer close(ch) … }()`, and a bare
+// `go runSweepLoop(...)` has no channel to wait on at all. Wrapping
+// them in that shape is what puts them IN the population the guard
+// counts, which is the point — the guard exists so the next one does
+// not have to be found by hand.
+//
+// The `defer cancel()` each used to carry is gone rather than kept
+// beside the drain: a defer beats every t.Cleanup, so it would cancel
+// the context before the drain's own cancel ran and quietly invert the
+// ordering the helper establishes.
 
 // TestSweepLoopRereadsIntervalEveryIteration is the core conversion.
 //
@@ -34,14 +52,18 @@ func TestSweepLoopRereadsIntervalEveryIteration(t *testing.T) {
 
 	sweeps := make(chan struct{}, 8)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	rearm := make(chan struct{}, 1)
-	go runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0, interval, nil, rearm, func() {
-		select {
-		case sweeps <- struct{}{}:
-		default:
-		}
-	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0, interval, nil, rearm, func() {
+			select {
+			case sweeps <- struct{}{}:
+			default:
+			}
+		})
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
 
 	// The settle-delay sweep.
 	waitSweep(t, sweeps, "initial")
@@ -59,10 +81,14 @@ func TestSweepLoopRereadsIntervalEveryIteration(t *testing.T) {
 func TestSweepLoopRearmDoesNotSweep(t *testing.T) {
 	var sweeps atomic.Int64
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	rearm := make(chan struct{}, 1)
-	go runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0, staticInterval(time.Hour), nil, rearm,
-		func() { sweeps.Add(1) })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0, staticInterval(time.Hour), nil, rearm,
+			func() { sweeps.Add(1) })
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
 
 	// Wait out the initial sweep.
 	waitFor(t, func() bool { return sweeps.Load() == 1 }, "initial sweep")
@@ -89,11 +115,15 @@ func TestSweepLoopDormantIntervalIsResumable(t *testing.T) {
 	var sweeps atomic.Int64
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	rearm := make(chan struct{}, 1)
-	go runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0,
-		func() time.Duration { return time.Duration(d.Load()) }, nil, rearm,
-		func() { sweeps.Add(1) })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSweepLoop(ctx, &sweepStatus[struct{}]{}, 0,
+			func() time.Duration { return time.Duration(d.Load()) }, nil, rearm,
+			func() { sweeps.Add(1) })
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
 
 	waitFor(t, func() bool { return sweeps.Load() == 1 }, "initial sweep")
 	time.Sleep(60 * time.Millisecond)
@@ -116,10 +146,14 @@ func TestSweepLoopDormantClearsScheduledNext(t *testing.T) {
 	status := &sweepStatus[struct{}]{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	rearm := make(chan struct{}, 1)
-	go runSweepLoop(ctx, status, 0,
-		func() time.Duration { return time.Duration(d.Load()) }, nil, rearm, func() {})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSweepLoop(ctx, status, 0,
+			func() time.Duration { return time.Duration(d.Load()) }, nil, rearm, func() {})
+	}()
+	drainLoopOnCleanup(t, cancel, done, "the cadence sweep loop")
 
 	waitFor(t, func() bool {
 		_, _, _, next, _ := status.snapshot()

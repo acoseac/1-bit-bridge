@@ -27,6 +27,18 @@ func sessionCookie(resp *http.Response) *http.Cookie {
 	return nil
 }
 
+// publicFixtureOrigin is the address bar of a browser that has opened a
+// login link against newPublicTestServer: its `autocert.domain` is
+// bridge.example.com, and originMatchesPublicMode compares every POST's
+// Origin host to exactly that. The httptest server's own
+// `http://127.0.0.1:PORT` is NOT it and is correctly refused — the rule
+// CLAUDE.md records for the live fixture too ("the browser must use the
+// HOST that autocert.domain names").
+//
+// Named once so redeemTicket can default to the Origin a browser would
+// actually send here, rather than to a base URL no operator ever types.
+const publicFixtureOrigin = "https://bridge.example.com:7789"
+
 // redeemTicket is the interstitial's one button, submitted the way a browser
 // submits a form with no successful controls: `Content-Type:
 // application/x-www-form-urlencoded` with an EMPTY body (Content-Length: 0),
@@ -35,6 +47,26 @@ func sessionCookie(resp *http.Response) *http.Cookie {
 // named control and a real browser started sending a urlencoded body the
 // guard 415s (CodeRabbit on #909); assertInterstitial pins the other half,
 // that the form has no such control.
+//
+// **It sends an Origin by default**, which is the rule #910 paid for. A
+// browser appends one to every non-GET, non-`cors` request, and csrfGuard
+// checks the header only when it is PRESENT — so a test that omits it
+// exercises a shape no browser makes, and passes straight over the refusal
+// the field hit: the Continue button answering `admin refused: cross-origin
+// request` on every tenant, one build after the interstitial shipped, with
+// the whole suite green. Exactly one test here sent one, and it was the test
+// written for that bug.
+//
+// The default is publicFixtureOrigin — what a browser at the console sends
+// under loginTicketReferrerPolicy (`strict-origin`, same-origin, no
+// downgrade), which is what browserFormPostOrigin derives. The fixture's
+// autocert domain, not `base`: originMatchesPublicMode compares the POST's
+// Origin host to that domain and refuses the httptest server's own
+// 127.0.0.1, correctly — and that refusal is what two of these tests began
+// reporting the moment any Origin was sent at all, which is the measurement
+// that says this header was doing nothing here before. A decorator that
+// sets Origin replaces it, so the `null` and cross-origin cases still say
+// what they mean.
 func redeemTicket(t *testing.T, base, query string, decorate ...func(*http.Request)) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, base+"/login/ticket"+query, strings.NewReader(""))
@@ -42,6 +74,7 @@ func redeemTicket(t *testing.T, base, query string, decorate ...func(*http.Reque
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", publicFixtureOrigin)
 	for _, d := range decorate {
 		d(req)
 	}
@@ -507,8 +540,10 @@ func TestLoginTicketRedeemsUnderTheOriginABrowserSends(t *testing.T) {
 
 	// The public origin the fixture's allowlist admits (bridge.example.com,
 	// proxy-terminated so the port is opaque) — the address bar of the
-	// browser that opened the link.
-	const pageOrigin = "https://bridge.example.com:7789"
+	// browser that opened the link. The same value redeemTicket now
+	// defaults to; this test DERIVES it from the served policy rather
+	// than assuming it, which is the whole point of it.
+	const pageOrigin = publicFixtureOrigin
 
 	ticket, err := store.MintLoginTicket("admin")
 	if err != nil {
