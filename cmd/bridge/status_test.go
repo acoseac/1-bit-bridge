@@ -91,6 +91,13 @@ func TestStatusNamesUnreadableTracksOnlyWhenThereAreSome(t *testing.T) {
 		"serverVersion": "0.0.0-test",
 		"tracksIndexed": float64(10),
 	}
+
+	// PRESENT and zero — a healthy library, which is what this row is
+	// hidden for. The first draft asserted this against a `base` that
+	// had no `tracksUnreadable` key at all and then `delete`d it, so
+	// both halves tested ABSENCE and a regression rendering a row for a
+	// real 0 would have passed. (CodeRabbit on #955.)
+	base["tracksUnreadable"] = float64(0)
 	var quiet bytes.Buffer
 	writeStatusHuman(&quiet, base, nil)
 	if strings.Contains(quiet.String(), "Unreadable") {
