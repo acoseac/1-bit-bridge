@@ -573,26 +573,39 @@ type variantDeleterAdapter struct {
 // Present and Unknown both take the RECORDED path: Present because it is
 // right, Unknown because a stat that failed for a reason other than
 // "absent" is not grounds to change what a delete unlinks.
-// SidecarStoreAvailable answers serveVariant's "is the file gone, or the
+// SidecarStoreState answers serveVariant's "is the file gone, or the
 // volume?" from the same probe the two sweeps refuse on, so the three
 // reapers cannot disagree about what an unmounted variants directory
-// looks like.
+// looks like. Both halves of integrity.VariantsDirBlock are carried
+// across: the delete handler can explain an EMPTY directory away once it
+// has unlinked files itself, and nothing else on that list.
 //
-// A nil variantsDir (fixtures) answers true: no live directory to judge,
-// and the reap is the behaviour those fixtures were written against.
-func (a *variantDeleterAdapter) SidecarStoreAvailable() bool {
+// A nil variantsDir (fixtures) answers available: no live directory to
+// judge, and the reap is the behaviour those fixtures were written
+// against.
+func (a *variantDeleterAdapter) SidecarStoreState() api.VariantSidecarStoreState {
 	if a.variantsDir == nil {
-		return true
+		return api.VariantSidecarStoreState{Available: true}
 	}
 	dir := a.variantsDir()
 	if dir == "" {
-		return false
+		return api.VariantSidecarStoreState{}
 	}
-	return integrity.VariantsDirSweepBlock(dir).Reason == ""
+	block := integrity.VariantsDirSweepBlock(dir)
+	return api.VariantSidecarStoreState{Available: block.Reason == "", Empty: block.Empty}
 }
 
+// An EMPTY recorded path is still asked where its file is. The
+// short-circuit that skipped the lookup for one made the row's silence
+// about its own path the end of the enquiry, when the canonical path
+// under the current variants directory is exactly where a file with no
+// recorded path would be found — locateRecordedFile stats "" (ENOENT on
+// every platform), then the canonical one, which is the whole shape
+// #959 added the lookup for. Without it such a row was deleted as
+// already-gone while its file stayed on disk: deletedCount up,
+// freedBytes flat, and a tree `--gc` then refuses.
 func (a *variantDeleterAdapter) LocateVariantSidecar(v api.VariantSummary) api.VariantSidecarLocation {
-	if a.variantsDir == nil || v.SidecarPath == "" {
+	if a.variantsDir == nil {
 		return api.VariantSidecarLocation{Placement: api.VariantSidecarRecorded, Path: v.SidecarPath}
 	}
 	loc := integrity.LocateSidecar(a.variantsDir(), integrity.VariantSnapshot{

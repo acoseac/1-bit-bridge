@@ -607,3 +607,72 @@ func TestAnalysisStoreAdapterAdoptsARelocatedWaveform(t *testing.T) {
 		t.Errorf("bare adapter: rec=%+v err=%v", rec, err)
 	}
 }
+
+// TestVariantDeleterAdapterLocatesARowThatRecordedNoPath.
+//
+// LocateVariantSidecar short-circuited on an empty `sidecar_path` and
+// answered "at the recorded path", with no path — which the delete
+// handler reads as already-gone and reconciles by deleting the row.
+// That makes the row's silence about its own file the end of the
+// enquiry, when the canonical path under the current variants directory
+// is exactly where a file with no recorded path would be found:
+// locateRecordedFile stats "" (ENOENT everywhere) and then the
+// canonical one, which is the whole shape #959 added the lookup for.
+//
+// The cost of the short-circuit was the failure #959 fixed, one branch
+// over: deletedCount up, freedBytes flat, the file still on disk, and a
+// tree `bridge upscale --gc` then refuses as orphans it cannot explain.
+func TestVariantDeleterAdapterLocatesARowThatRecordedNoPath(t *testing.T) {
+	dir := t.TempDir()
+	const (
+		src     = "Artist/Album/01 - Track.flac"
+		variant = "upscaled-v2-176400-24"
+	)
+	canonical := transcode.VariantSidecarPath(dir, src, variant)
+	if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(canonical, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &variantDeleterAdapter{variantsDir: func() string { return dir }}
+
+	got := a.LocateVariantSidecar(api.VariantSummary{
+		SourcePath: src, VariantID: variant, SidecarPath: "", SizeBytes: 10,
+	})
+	if got.Placement != api.VariantSidecarRelocated || got.Path != canonical {
+		t.Errorf("locate over an empty recorded path = %+v, want Relocated at %s — "+
+			"the file is exactly where a row with no path would put it", got, canonical)
+	}
+
+	// A size that disagrees is a copy in flight, the same reading every
+	// other row gets: unlink nothing, delete nothing.
+	if err := os.WriteFile(canonical, []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.LocateVariantSidecar(api.VariantSummary{
+		SourcePath: src, VariantID: variant, SizeBytes: 10,
+	}); got.Placement != api.VariantSidecarCopyInFlight {
+		t.Errorf("locate over a size mismatch = %+v, want CopyInFlight", got)
+	}
+
+	// Nothing at the canonical path either: the row really is orphaned,
+	// and the handler's already-gone path reconciles it. This is the
+	// case the short-circuit answered correctly by accident.
+	if err := os.Remove(canonical); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.LocateVariantSidecar(api.VariantSummary{
+		SourcePath: src, VariantID: variant, SizeBytes: 10,
+	}); got.Placement != api.VariantSidecarAbsent || got.Path != "" {
+		t.Errorf("locate over a row missing everywhere = %+v, want Absent with no path", got)
+	}
+
+	// And a fixture with no live directory keeps the pre-relocation
+	// behaviour: no directory to judge, nothing to unlink.
+	nilDir := &variantDeleterAdapter{}
+	if got := nilDir.LocateVariantSidecar(api.VariantSummary{SourcePath: src, VariantID: variant}); got.Path != "" ||
+		got.Placement != api.VariantSidecarRecorded {
+		t.Errorf("locate with no variants directory = %+v, want Recorded with no path", got)
+	}
+}

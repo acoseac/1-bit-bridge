@@ -69,18 +69,35 @@ type VariantDeleter interface {
 	// implementation and a bridge that could not answer would silently be
 	// the bug this method exists to close.
 	LocateVariantSidecar(v VariantSummary) VariantSidecarLocation
-	// SidecarStoreAvailable reports whether the variants directory is in
-	// a state where a MISSING sidecar is evidence about the FILE rather
-	// than about the VOLUME. False when the directory is gone, unreadable,
-	// not a directory, or empty — a clean unmount reverts a mountpoint to
-	// an empty local directory, which is why "empty" belongs here too.
+	// SidecarStoreState probes the variants directory once and reports
+	// both halves of its answer.
 	//
 	// serveVariant's reactive reap is the third of the three reapers
 	// #937 named, and the only one that had no mount check: the sweep in
 	// VariantWatcher.tick and the one in `upscale --gc` both refuse
 	// wholesale via VariantsDirSweepBlock, while this one deleted a row
 	// per PLAY.
-	SidecarStoreAvailable() bool
+	SidecarStoreState() VariantSidecarStoreState
+}
+
+// VariantSidecarStoreState is the variants directory's state at one
+// probe — api's projection of integrity.VariantsDirBlock, translated at
+// the wiring point for the reason VariantSidecarPlacement is.
+type VariantSidecarStoreState struct {
+	// Available reports whether a MISSING sidecar is evidence about the
+	// FILE rather than about the VOLUME. False when the directory is
+	// gone, unreadable, not a directory, or empty — a clean unmount
+	// reverts a mountpoint to an empty local directory, which is why
+	// "empty" belongs here too.
+	Available bool
+	// Empty is true only for the exists-is-a-directory-holds-no-entries
+	// case, and is the ONE reason a caller can explain away: a request
+	// that has just unlinked files from this directory is what made it
+	// empty. A MISSING directory is not Empty — the two are different
+	// facts and a caller acting on one must not act on the other, which
+	// is the split gcCheckOutputDirBeforeReverseSweep makes one layer up
+	// (#941).
+	Empty bool
 }
 
 // VariantSidecarPlacement says where a variant row's sidecar actually is.
@@ -549,6 +566,11 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// per-row logging is the M-SEARCH flood shape — thousands of
 	// identical lines that make every other line unfindable.
 	skippedUnavailable := 0
+	// unlinked counts files THIS request removed from disk, which is what
+	// makes an empty variants directory explicable rather than evidence
+	// of an unmount. Distinct from DeletedCount, which also counts rows
+	// whose sidecar was already gone.
+	unlinked := 0
 	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(ctx)
 	for _, row := range rows {
@@ -571,24 +593,6 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// with nothing referencing it, and handed `--gc` a tree it now
 		// refuses to reclaim (orphans > rows). #937 enumerated three
 		// reapers; this path deletes rows too and was not among them.
-		// Is the volume even there? With the variants directory
-		// unmounted, LocateSidecar stats both the recorded and the
-		// canonical path under the same dead mountpoint, answers
-		// "absent at both", and the ENOENT that follows flows through
-		// the already-gone guard as success — deleting the row while
-		// its sidecar sits intact on the volume that will come back.
-		// That is the same stranding this handler was just fixed for,
-		// reached by a different cause, so it takes the same answer the
-		// two sweeps give: keep the row.
-		//
-		// Per row rather than once, because a whole-library delete runs
-		// long enough for a mount to drop underneath it. The cost is a
-		// stat beside a LocateSidecar that already stats twice and an
-		// os.Remove that follows.
-		if !s.variantDeleter.SidecarStoreAvailable() {
-			skippedUnavailable++
-			continue
-		}
 		loc := s.variantDeleter.LocateVariantSidecar(row)
 		if loc.Placement == VariantSidecarCopyInFlight {
 			// Something is at the canonical path but it is not this
@@ -615,6 +619,50 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		removeErr := os.ErrNotExist
 		if loc.Path != "" {
 			removeErr = os.Remove(loc.Path)
+		}
+		// Nothing was unlinked. Is the volume even there? With the
+		// variants directory unmounted, LocateSidecar stats both the
+		// recorded and the canonical path under the same dead
+		// mountpoint, answers "absent at both", and the ENOENT flows
+		// through the already-gone guard as success — deleting the row
+		// while its sidecar sits intact on the volume that will come
+		// back. That is the same stranding this handler was fixed for
+		// in #959, reached by a different cause, so it takes the same
+		// answer the two sweeps give: keep the row.
+		//
+		// AFTER the locate and only on the already-gone path, not
+		// before every row. The probe answers "is a missing sidecar
+		// evidence about the FILE or about the VOLUME", which is a
+		// question about a file that is missing — asked of every row it
+		// skipped ones whose file LocateSidecar had just found. A
+		// variants directory pointed at a fresh empty folder, with
+		// every rendition still at the absolute path its row records,
+		// is the ordinary shape of that: "delete all renditions"
+		// unlinked nothing and left the bytes, which is the state
+		// #959's lookup exists to fix.
+		//
+		// And EMPTY is explicable once this request has unlinked
+		// something: on the legacy hash-flat layout (no
+		// subdirectories) the last successful unlink is what emptied
+		// the directory, so a probe after it would refuse the
+		// remaining rows on a state this very request created —
+		// gcCheckOutputDirBeforeReverseSweep's lesson (#941), which
+		// took a `removed` count for exactly this reason. Missing,
+		// unreadable and not-a-directory still refuse however much was
+		// unlinked: this loop removes files and never directories, so
+		// it cannot be what took the root.
+		//
+		// Per row rather than once, because a whole-library delete runs
+		// long enough for a mount to drop underneath it.
+		if errors.Is(removeErr, os.ErrNotExist) {
+			st := s.variantDeleter.SidecarStoreState()
+			if !st.Available && !(st.Empty && unlinked > 0) {
+				skippedUnavailable++
+				continue
+			}
+		}
+		if removeErr == nil {
+			unlinked++
 		}
 		if removeErr == nil && loc.Placement == VariantSidecarRelocated {
 			// AFTER the unlink succeeded, not before it is attempted:

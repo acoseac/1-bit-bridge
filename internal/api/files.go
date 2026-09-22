@@ -439,7 +439,7 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 			// stat only once the open has already failed, so the
 			// open-on-serve happy path above keeps the syscall it
 			// was written to save.
-			reapable := s.variantDeleter != nil && s.variantDeleter.SidecarStoreAvailable()
+			reapable := s.variantDeleter != nil && s.variantDeleter.SidecarStoreState().Available
 			if s.variantDeleter != nil && !reapable {
 				LoggerFromContext(r.Context()).Warn(
 					"variant sidecar missing, but the variants directory is unavailable; keeping the row",
