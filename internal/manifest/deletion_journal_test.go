@@ -460,3 +460,154 @@ func TestManifest_DeltaOmitsPathsWithServedRows(t *testing.T) {
 		t.Fatalf("a served row's path must not be reported deleted, got %v", deleted)
 	}
 }
+
+// journalDecision is what one decideDeletionJournalMode call did: the
+// answer it gave, and BOTH halves of the reset it may have performed.
+//
+// Both, because `resetDeletionJournalCoverageTx` runs two statements —
+// it DELETEs every tombstone and it stamps `deletionJournalCoverageKey`
+// in scan_state — and an assertion on the tombstones alone passes
+// against a version that drops the marker. The marker is what makes a
+// delta client answer `deltaIncomplete` and full-sync; without it the
+// client reads a wiped journal as "nothing was deleted", which is the
+// exact wrong answer in the exact case this guard exists for.
+// (CodeRabbit on #958.)
+type journalDecision struct {
+	perChunk      bool
+	tombstoneKept bool
+	markerWritten bool
+}
+
+// runJournalDecision seeds a library of `seedTracks`, one tombstone and
+// NO coverage marker, then reports what a decision over `n` paths did.
+//
+// The marker is cleared deliberately: migration v41's post() seeds it on
+// every OpenStore, so "the mass-op arm stamps it" is unfalsifiable
+// against a store that already had one. Clearing it first makes the
+// ordinary arm's "leaves it absent" and the mass-op arms' "writes it"
+// two different observations rather than the same one twice.
+//
+// One recursive-CTE INSERT rather than seedTracks calls through
+// UpsertTrack. The decision reads `SELECT COUNT(*) FROM tracks` and
+// nothing else, so what these rows need to be is COUNTABLE — and the
+// threshold case needs 40,000 of them. Through the upsert path that
+// subtest took 72 seconds on its own, in the package whose sequential
+// runtime is the CI race job's floor, and 48x that under the detector.
+// Well under a second this way.
+func runJournalDecision(t *testing.T, seedTracks, n int) journalDecision {
+	t.Helper()
+	ctx := context.Background()
+	s := openJournalTestStore(t)
+	if seedTracks > 0 {
+		if _, err := s.db.ExecContext(ctx, `
+			WITH RECURSIVE n(i) AS (
+				SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?
+			)
+			INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
+			SELECT 'A/' || i || '.flac', 1, 1, x'7b7d', 1 FROM n
+		`, seedTracks); err != nil {
+			t.Fatalf("seed %d tracks: %v", seedTracks, err)
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rolled back, never committed: every write below — the tombstone,
+	// the marker DELETE, and whatever decideDeletionJournalMode does —
+	// is fixture state that must not outlive the case. The errcheck
+	// waiver is because the rollback of a transaction nothing commits
+	// has no failure a test could act on.
+	defer tx.Rollback() //nolint:errcheck // fixture tx, never committed
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO manifest_deletions(path, deleted_at) VALUES('A/gone.flac', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM scan_state WHERE k = ?`, deletionJournalCoverageKey); err != nil {
+		t.Fatal(err)
+	}
+
+	out := journalDecision{}
+	if out.perChunk, err = s.decideDeletionJournalMode(ctx, tx, n); err != nil {
+		t.Fatalf("decideDeletionJournalMode(%d over %d tracks): %v", n, seedTracks, err)
+	}
+
+	var tombstones, markers int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM manifest_deletions`).Scan(&tombstones); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM scan_state WHERE k = ?`, deletionJournalCoverageKey).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	out.tombstoneKept = tombstones > 0
+	out.markerWritten = markers > 0
+	return out
+}
+
+// TestDecideDeletionJournalModeCoversBothMassOpArms drives the guard
+// directly, because its ABSOLUTE arm has no other way in.
+//
+// #949 extracted this decision out of DeleteTracksBatch to bring that
+// function under the complexity ceiling, and left the extracted function
+// with no test of its own. The RATIO arm is reachable from a fixture of
+// a few rows; the `n > 10,000` arm is not, without a library four times
+// that size — see runJournalDecision for how it is seeded.
+//
+// Every case asserts all THREE outcomes together, because the two duties
+// can regress apart: a version that answers "do not journal" and forgets
+// either half of the reset is the one that ships a wiped journal a delta
+// client reads as "nothing was deleted".
+func TestDecideDeletionJournalModeCoversBothMassOpArms(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		seedTracks int
+		n          int
+		want       journalDecision
+		why        string
+	}{
+		{
+			name: "ordinary deletion journals and resets nothing",
+			// 2 of 40 is not a reorganization.
+			seedTracks: 40, n: 2,
+			want: journalDecision{perChunk: true, tombstoneKept: true, markerWritten: false},
+			why:  "a 2-of-40 deletion must journal and leave coverage alone",
+		},
+		{
+			name: "ratio arm",
+			// 20 of 40 is half the library, past the quarter divisor.
+			seedTracks: 40, n: 20,
+			want: journalDecision{perChunk: false, tombstoneKept: false, markerWritten: true},
+			why:  "a 20-of-40 deletion is a reorganization; both halves of the reset must run",
+		},
+		{
+			name: "absolute arm, reached with no rows at all",
+			// `n` alone decides, BEFORE the COUNT is run. An empty
+			// library proves it: under the ratio rule `total > 0` is
+			// false and this would journal.
+			seedTracks: 0, n: deletionJournalMassOpAbsolute + 1,
+			want: journalDecision{perChunk: false, tombstoneKept: false, markerWritten: true},
+			why:  "a past-the-cap deletion must not journal, whatever the library size",
+		},
+		{
+			name: "absolute arm is exclusive at the threshold",
+			// Exactly the threshold is NOT past it — `>` and `>=` read
+			// identically and differ by one path at the one size nobody
+			// tests by accident. The library is four times the cap so
+			// the RATIO arm cannot be what answers; derived from both
+			// constants rather than typed, so it follows either.
+			seedTracks: deletionJournalMassOpAbsolute * deletionJournalMassOpLibraryDivisor,
+			n:          deletionJournalMassOpAbsolute,
+			want:       journalDecision{perChunk: true, tombstoneKept: true, markerWritten: false},
+			why:        "exactly the cap is not past it; the comparison is `>`",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runJournalDecision(t, tc.seedTracks, tc.n); got != tc.want {
+				t.Errorf("decision = %+v, want %+v — %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}

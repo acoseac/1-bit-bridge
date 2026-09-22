@@ -192,24 +192,39 @@ matrix_indices() {
 # watching the mention-only check pass (CodeRabbit on #943).
 #
 # So: require the exact index set 0..n-1, which also rejects a duplicate
-# index and a leg naming a group this script does not shard.
+# index and a leg naming a group this script does not shard. And `rest`
+# itself is checked the same way, because it is the leg that runs the
+# other ~44 packages: delete IT and every sharded leg still passes while
+# nothing covers internal/api, internal/transcode or cmd/bridge. That
+# asymmetry is why this now runs on EVERY leg rather than only inside
+# run_rest — a guard reachable only from the leg it is guarding against
+# is not reachable at all.
 #
 # Skipped when the workflow file is absent, so the script still works when
 # run by hand from somewhere else; in CI it is always there.
 assert_matrix_is_complete() {
   local wf=".github/workflows/gate.yml" entry g n want got
   [ -f "$wf" ] || return 0
-  for entry in "${SHARDED[@]}"; do
+  for entry in "${SHARDED[@]}" rest:1; do
     g="${entry%%:*}"
     n="${entry##*:}"
     want="$(seq 0 $((n - 1)))"
     got="$(matrix_indices "$wf" "$g")"
     if [ "$got" != "$want" ]; then
-      echo "test-shard: ${wf} does not schedule all $n shards of internal/${g}." >&2
+      echo "test-shard: ${wf} does not schedule all $n shards of ${g}." >&2
       echo "            want indices: $(printf '%s' "$want" | paste -sd, -)" >&2
       echo "            got:          $(printf '%s' "$got" | paste -sd, -)" >&2
-      echo "            'rest' skips internal/${g} on the promise those legs run" >&2
-      echo "            it, so a missing one runs nowhere and nothing goes red." >&2
+      # `[[` rather than `[`, matching the pkg match in is_sharded above:
+      # the file is bash-shebanged and the safer construct is already in
+      # use here (SonarCloud shelldre:S7688).
+      if [[ "$g" == rest ]]; then
+        echo "            the 'rest' leg is what runs every NON-sharded package —" >&2
+        echo "            without it internal/api, internal/transcode and cmd/bridge" >&2
+        echo "            run nowhere, and every sharded leg still passes." >&2
+      else
+        echo "            'rest' skips internal/${g} on the promise those legs run" >&2
+        echo "            it, so a missing one runs nowhere and nothing goes red." >&2
+      fi
       exit 1
     fi
   done
@@ -276,6 +291,12 @@ assert_index_is_a_shard() {
 run_sharded() {
   local pkg="$1" shards="$2" all_names part total mine rebuilt i
   assert_index_is_a_shard "$shards" "$pkg"
+  # Every leg asserts the WHOLE matrix, not just its own group. Running
+  # this only from run_rest made it unreachable in the one case it is
+  # most needed: if the `rest` entry is the one deleted, run_rest never
+  # executes and the check never runs, while the sharded legs go green
+  # over a gate that no longer tests two thirds of the tree.
+  assert_matrix_is_complete
   all_names="$(names "$pkg")"
 
   # Floor: a silently-empty list would make this shard — and every other —

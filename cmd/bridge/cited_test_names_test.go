@@ -189,8 +189,15 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 // dead code. (Gemini on #897.)
 //
 // No minimum length: an earlier `{5,}` silently ignored every name shorter than
-// ten characters — TestApply, TestLogin, TestParse — which is a large and
+// ten characters — …Apply, …Login, …Parse — which is a large and
 // ordinary slice of what a docblock might cite.
+//
+// The `Test` prefix is ELIDED on those three, per the rule #946 set for a
+// note that must NAME a token it is only talking about: this file's comment
+// groups are scanned like any other docblock, so spelling them in full made
+// the guard collect three citations of its own prose. They passed, which is
+// worse than failing — each was satisfied by definesWithPrefix against
+// eighty-eight, eighteen and fifteen unrelated tests.
 var citedRe = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*`)
 
 // The markdown docs are scanned too, and they need three exemptions that Go
@@ -222,6 +229,15 @@ var citedRe = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*`)
 var (
 	mdPlaceholderNames = map[string]bool{
 		"TestX": true, "TestFoo": true, "TestBar": true,
+		// The two single-letter forms, from a `-run '^(…|…)$'` example
+		// in the engineering log. They reached this list only when
+		// somebody looked on purpose, because definesWithPrefix
+		// answered first: a five-character citation prefixes hundreds
+		// of this module's real test names, so it was "verified" by
+		// matching almost everything. See that function's docblock —
+		// which describes them rather than spelling them, for the
+		// reason it gives there.
+		"TestA": true, "TestB": true,
 	}
 	mdForeignRepoTests = map[string]string{
 		"TestTenantsStayPassthroughOn443": "1-bit-conductor (private)",
@@ -424,6 +440,33 @@ func missingCitations(cited map[string][]string, defined map[string]bool) []stri
 	return missing
 }
 
+// definesWithPrefix is what accepts a citation that names a PREFIX of the
+// real function: a table-driven parent (`TestArtwork` for
+// `TestArtwork/ArtistImageReturns404…`, where the regex stops at the `/`),
+// or a name truncated at a line wrap. Both are ordinary in a docblock and
+// both point at something that exists, which is all this guard claims.
+//
+// **It does not verify a SHORT name, and cannot.** A citation is accepted
+// when it prefixes ANY defined test, so the shorter it is the more certainly
+// it passes: measured over this module, the two single-letter placeholders
+// in mdPlaceholderNames prefix 392 and 131 real test names respectively.
+// They are exempted there by name rather than caught here, and that is
+// deliberate — the obvious alternative, a minimum length, was tried and
+// reverted (see citedRe: it silently ignored every name under ten
+// characters, and real tests are that short), and requiring
+// equality-or-`name+"_"` would reject ten legitimate truncations in the
+// tree today.
+//
+// The two are DESCRIBED rather than spelled, and that is this rule biting
+// its own author: mdPlaceholderNames is consulted only by
+// collectMarkdownCitations, so writing them out in a Go docblock collects
+// them as ordinary citations — which then pass through the very masking
+// this paragraph is about. Same elision the citedRe note above uses, same
+// reason. (Gemini on #958.)
+//
+// So the rule to keep is the one the exemption map encodes: a citation too
+// short to identify anything is a PLACEHOLDER, and belongs in that map where
+// a reader can see it, not passing quietly through here.
 func definesWithPrefix(defined map[string]bool, name string) bool {
 	for def := range defined {
 		if strings.HasPrefix(def, name) {
