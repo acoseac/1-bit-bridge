@@ -173,24 +173,6 @@ func pairAlternates(primary string, cfg *config.Config, endpoints func() []adver
 	return out
 }
 
-// advertisedEndpoints is the classed list this bridge advertises to
-// paired devices — `Deps.Endpoints`, the api layer's `/v1/health`
-// enumeration — or nothing when no provider is wired. Shared by the
-// pairing QR and the Settings "Reachable endpoints" panel so the two
-// cannot disagree about what the phone will see.
-//
-// Nil is NOT a fallback to the host-network walk. That walk is what
-// both consumers ran before, and it is exactly the degraded shape the
-// provider replaces (no Tailscale entry since PR #269, no
-// customEndpoints in the QR); reproducing it here would be a second
-// enumeration to keep in step, and one that a forgotten wiring line
-// could never be told apart from — on a host without Tailscale the two
-// lists are byte-identical, which is how the first draft's boot control
-// stayed green with the line deleted. An absent dependency answers the
-// way every other Deps closure does: with nothing, never a guess. The
-// QR then carries only the operator's primary, which always pairs, and
-// the panel renders its "No external addresses detected" state, which
-// in that wiring is the truth.
 // declaredEndpointForHost returns the first customEndpoint whose host is
 // `host`, or "" when the operator has declared none for it.
 //
@@ -250,6 +232,24 @@ func endpointHost(raw string) string {
 	return strings.ToLower(u.Hostname())
 }
 
+// advertisedEndpoints is the classed list this bridge advertises to
+// paired devices — `Deps.Endpoints`, the api layer's `/v1/health`
+// enumeration — or nothing when no provider is wired. Shared by the
+// pairing QR and the Settings "Reachable endpoints" panel so the two
+// cannot disagree about what the phone will see.
+//
+// Nil is NOT a fallback to the host-network walk. That walk is what
+// both consumers ran before, and it is exactly the degraded shape the
+// provider replaces (no Tailscale entry since PR #269, no
+// customEndpoints in the QR); reproducing it here would be a second
+// enumeration to keep in step, and one that a forgotten wiring line
+// could never be told apart from — on a host without Tailscale the two
+// lists are byte-identical, which is how the first draft's boot control
+// stayed green with the line deleted. An absent dependency answers the
+// way every other Deps closure does: with nothing, never a guess. The
+// QR then carries only the operator's primary, which always pairs, and
+// the panel renders its "No external addresses detected" state, which
+// in that wiring is the truth.
 func advertisedEndpoints(provider func() []advertise.Endpoint) []advertise.Endpoint {
 	if provider == nil {
 		return nil

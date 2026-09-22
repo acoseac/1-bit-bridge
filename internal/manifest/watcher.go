@@ -16,6 +16,19 @@ import (
 
 var watcherLogger = logging.Component("watcher")
 
+// pendingScan is one armed debounce entry. Wrapping the timer in a
+// pointer struct gives each AfterFunc callback a STABLE IDENTITY to
+// compare against wt.pending[dir]. time.Timer.Reset/Stop cannot cancel a
+// callback that has already been dispatched, so a timer that fired but
+// whose callback hasn't yet re-acquired wt.mu must NOT delete a fresh
+// entry a concurrent scheduleScan installed in the meantime. Without the
+// identity check the stale callback evicts the live entry, and under a
+// sustained event storm the map loses track of the current timer per dir
+// → unbounded timer creation + overlapping ScanSubtree dispatches.
+type pendingScan struct {
+	timer *time.Timer
+}
+
 // Watcher is the optional fsnotify-based instant-update layer.
 // Off by default in config (LibraryWatchConfig.Enabled). When on,
 // it adds a recursive watch over every configured library root and
@@ -31,19 +44,6 @@ var watcherLogger = logging.Component("watcher")
 // loop and spawns one fire-and-forget goroutine per debounced
 // dispatch. The debounce map is mutex-protected; scan invocations
 // serialise via Scanner's own s.mu.
-// pendingScan is one armed debounce entry. Wrapping the timer in a
-// pointer struct gives each AfterFunc callback a STABLE IDENTITY to
-// compare against wt.pending[dir]. time.Timer.Reset/Stop cannot cancel a
-// callback that has already been dispatched, so a timer that fired but
-// whose callback hasn't yet re-acquired wt.mu must NOT delete a fresh
-// entry a concurrent scheduleScan installed in the meantime. Without the
-// identity check the stale callback evicts the live entry, and under a
-// sustained event storm the map loses track of the current timer per dir
-// → unbounded timer creation + overlapping ScanSubtree dispatches.
-type pendingScan struct {
-	timer *time.Timer
-}
-
 type Watcher struct {
 	scanner  *Scanner
 	debounce time.Duration

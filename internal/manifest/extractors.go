@@ -2385,27 +2385,6 @@ func readDIINPString(payload []byte, fourcc, absPath string) (string, bool) {
 	return string(payload[1 : 1+length]), true
 }
 
-// parsePropChunks walks the body of a DSDIFF PROP chunk (after the
-// leading "SND " form-type) and pulls FS (sample rate) + CMPR
-// (compression). Other property chunks (CHNL, ABSS, LSCO) aren't
-// needed for the iOS Track row.
-//
-// FS values are held in locals during the walk and committed to the
-// Track only after CMPR has been confirmed as "DSD " (uncompressed).
-// Any other CMPR FOURCC — including "DST " (Direct Stream Transfer)
-// AND any future / unknown variant — leaves IsDSD/SampleRate nil so
-// iOS classifies the row as unknown audio rather than DSD that
-// fails to load. Pre-this-fix, the parser stamped the DSD fields as
-// soon as it saw FS and only rolled back for "DST " specifically;
-// any other compression code (corrupt encoder, future variant) was
-// left as playable uncompressed DFF (Greptile + CodeRabbit on PR #186).
-//
-// Returns true when CMPR == "DST " so the caller can log a specific
-// "DST not supported" message; an unknown CMPR (or absent CMPR)
-// returns false but still leaves the DSD fields nil unless the
-// compression was confirmed as "DSD ". Chunk-walking errors aren't
-// surfaced because PROP is well-bounded by its parent and partial
-// reads stay inside the buffer.
 // dffCompression classifies the PROP `CMPR` chunk. `Absent` is
 // spec-legal (DSDIFF 1.5 allows omission — treat as uncompressed);
 // `Unknown` is any FOURCC that is neither "DSD " nor "DST " and keeps
@@ -2432,6 +2411,27 @@ type dffPropInfo struct {
 	compression dffCompression
 }
 
+// parsePropChunks walks the body of a DSDIFF PROP chunk (after the
+// leading "SND " form-type) and pulls FS (sample rate) + CMPR
+// (compression). Other property chunks (CHNL, ABSS, LSCO) aren't
+// needed for the iOS Track row.
+//
+// FS values are held in locals during the walk and committed to the
+// Track only after CMPR has been confirmed as "DSD " (uncompressed).
+// Any other CMPR FOURCC — including "DST " (Direct Stream Transfer)
+// AND any future / unknown variant — leaves IsDSD/SampleRate nil so
+// iOS classifies the row as unknown audio rather than DSD that
+// fails to load. Pre-this-fix, the parser stamped the DSD fields as
+// soon as it saw FS and only rolled back for "DST " specifically;
+// any other compression code (corrupt encoder, future variant) was
+// left as playable uncompressed DFF (Greptile + CodeRabbit on PR #186).
+//
+// Returns true when CMPR == "DST " so the caller can log a specific
+// "DST not supported" message; an unknown CMPR (or absent CMPR)
+// returns false but still leaves the DSD fields nil unless the
+// compression was confirmed as "DSD ". Chunk-walking errors aren't
+// surfaced because PROP is well-bounded by its parent and partial
+// reads stay inside the buffer.
 func parsePropChunks(body []byte) dffPropInfo {
 	info := dffPropInfo{compression: dffCompressionAbsent}
 	for len(body) >= 12 {

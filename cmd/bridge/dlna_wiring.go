@@ -34,26 +34,6 @@ type dlnaLifecycle struct {
 	log    *slog.Logger
 }
 
-// startDLNAIfEnabled is the single chokepoint for DLNA wiring. Routes
-// the operator's `cfg.DLNA.Enabled` + deployment-mode posture through
-// `dlna.ShouldEnableDLNA` (the load-bearing safety gate that refuses
-// in public mode), then constructs + starts the server.
-//
-// Returns a nil-safe *dlnaLifecycle in all paths — caller defers
-// `.Stop(ctx)` without a nil check. Failure to start (port in use,
-// SSDP bind error) is logged at WARN level and the bridge continues
-// without DLNA; this matches the project's "additive features fail
-// open" convention (lossy fallback, never crash the bridge over an
-// optional capability).
-//
-// The returned `enabled` bool tells the api.Server wiring whether to
-// advertise `dlnaServer` in /v1/health.features.
-//
-// `artwork` is the cover read path the listener mounts as
-// `/dlna/artwork/{key}` and the CDS advertises as `<upnp:albumArtURI>` —
-// the api server, whose ServeArtwork IS `/v1/artwork/{key}`. Passed in
-// rather than looked up so the api package stays un-imported here and the
-// two listeners provably serve one function. nil leaves both off.
 // dlnaWiring is what the listener needs from the rest of the process,
 // as one value rather than a parameter list.
 //
@@ -79,6 +59,26 @@ type dlnaWiring struct {
 	Logger      *slog.Logger
 }
 
+// startDLNAIfEnabled is the single chokepoint for DLNA wiring. Routes
+// the operator's `cfg.DLNA.Enabled` + deployment-mode posture through
+// `dlna.ShouldEnableDLNA` (the load-bearing safety gate that refuses
+// in public mode), then constructs + starts the server.
+//
+// Returns a nil-safe *dlnaLifecycle in all paths — caller defers
+// `.Stop(ctx)` without a nil check. Failure to start (port in use,
+// SSDP bind error) is logged at WARN level and the bridge continues
+// without DLNA; this matches the project's "additive features fail
+// open" convention (lossy fallback, never crash the bridge over an
+// optional capability).
+//
+// The returned `enabled` bool tells the api.Server wiring whether to
+// advertise `dlnaServer` in /v1/health.features.
+//
+// `artwork` is the cover read path the listener mounts as
+// `/dlna/artwork/{key}` and the CDS advertises as `<upnp:albumArtURI>` —
+// the api server, whose ServeArtwork IS `/v1/artwork/{key}`. Passed in
+// rather than looked up so the api package stays un-imported here and the
+// two listeners provably serve one function. nil leaves both off.
 func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, enabled bool) {
 	cfg, store, resolver := w.Cfg, w.Store, w.Resolver
 	artwork, upnpLC, logger := w.Artwork, w.UPnP, w.Logger

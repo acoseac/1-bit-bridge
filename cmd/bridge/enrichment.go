@@ -363,12 +363,12 @@ func enrichmentRetryCmd(ctx context.Context, args []string, stdout, stderr io.Wr
 	// for — parses cleanly with --path still EMPTY, and the empty scope means
 	// the WHOLE LIBRARY. That is a whole-library delta to every paired device
 	// in place of one album. `library remove` guards exactly this way.
-	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "enrichment retry: unexpected argument %q\n", fs.Arg(0))
-		fmt.Fprintln(stderr, "  A subtree is given with the flag, not positionally:")
-		fmt.Fprintf(stderr, "    bridge enrichment retry --path %s\n", fs.Arg(0))
-		fmt.Fprintln(stderr, "  Without --path the retry covers the WHOLE library, so this is refused")
-		fmt.Fprintln(stderr, "  rather than silently widened.")
+	//
+	// Through the SHARED helper, which #856 wrote this block before there
+	// was one: a second hand-written copy in the file that also holds
+	// `enrichment misses` made the sweep below unable to tell a guarded
+	// command from a file that merely contains one.
+	if refusePositionalScope(fs, "enrichment retry", "path", stderr) {
 		return 2
 	}
 	cfg, _, err := loadCLIConfig(*configPath)

@@ -98,12 +98,6 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 // protocol — this is a CLI report, not a paired-client surface.
 const doctorJSONSchemaVersion = 1
 
-// jsonDoctorReport is the wire shape of `bridge doctor --json`. The
-// envelope is intentionally simple — self-describing metadata, a flat list
-// of checks, plus summary counts — so jq-style scripting and container
-// health-probes are one filter away. The per-check fields mirror
-// doctor.Check exactly so a future admin-API surface can re-use the same
-// shape without translation.
 type jsonDoctorCheck struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
@@ -111,6 +105,12 @@ type jsonDoctorCheck struct {
 	Hint    string `json:"hint,omitempty"`
 }
 
+// jsonDoctorReport is the wire shape of `bridge doctor --json`. The
+// envelope is intentionally simple — self-describing metadata, a flat list
+// of checks, plus summary counts — so jq-style scripting and container
+// health-probes are one filter away. The per-check fields mirror
+// doctor.Check exactly so a future admin-API surface can re-use the same
+// shape without translation.
 type jsonDoctorReport struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	GeneratedAt   string            `json:"generatedAt"` // RFC3339, UTC

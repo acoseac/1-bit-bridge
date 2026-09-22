@@ -26,14 +26,6 @@ import (
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
-// initCmd walks a first-time operator through the minimum answers needed
-// to get a running bridge: config dir, library root, then writes
-// bridge.yaml, mints the TLS cert, installs a launchd/systemd user unit,
-// and prints the admin console URL so they can open it and pair.
-//
-// Idempotent: re-running on a populated config dir offers to keep or
-// rewrite the existing bridge.yaml. The TLS cert is always preserved —
-// rotating it breaks every paired client's pin.
 // baseConfig builds the minimal loopback-mode config shared by two
 // writers: `bridge init` (as its base, before any --public mutations) and
 // serve's --init-if-missing auto-init. Values are the loopback defaults;
@@ -50,6 +42,14 @@ func baseConfig(roots []string, name, dataDir string) *config.Config {
 	}
 }
 
+// initCmd walks a first-time operator through the minimum answers needed
+// to get a running bridge: config dir, library root, then writes
+// bridge.yaml, mints the TLS cert, installs a launchd/systemd user unit,
+// and prints the admin console URL so they can open it and pair.
+//
+// Idempotent: re-running on a populated config dir offers to keep or
+// rewrite the existing bridge.yaml. The TLS cert is always preserved —
+// rotating it breaks every paired client's pin.
 func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)

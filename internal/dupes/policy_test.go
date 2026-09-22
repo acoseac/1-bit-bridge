@@ -165,8 +165,26 @@ func TestOutranks_TotalOrderPins(t *testing.T) {
 
 func TestKeyID_StableAndInjectiveOnBoundaries(t *testing.T) {
 	k := Key{AlbumID: "a|b|2020", Disc: 1, Track: 2, NormTitle: "song"}
-	if k.ID() != k.ID() {
-		t.Fatal("ID must be deterministic")
+	// A GOLDEN value, not `k.ID() != k.ID()`.
+	//
+	// That comparison called one pure function twice on one receiver:
+	// there is no map iteration, no clock and no randomness behind it,
+	// so it could not fail for any implementation that compiles. It
+	// claimed to pin determinism and pinned nothing (SonarCloud
+	// go:S1764, correctly).
+	//
+	// Determinism across BUILDS is the property that matters, because
+	// this hash is PERSISTED: scanner_dupes.go takes `g.Key.ID()`
+	// straight into `tracks.dupe_group_id`, which dupe_refs.go reads
+	// back and the console groups by. A change to the field order, the
+	// length prefixing or the digest would silently re-key every dupe
+	// group in every deployed database — exactly what the old assertion
+	// said it prevented.
+	const wantID = "35db1899d2bb92d38f849419410821ef3e1a0a6eb4dcb5d056c172cc8790ec27"
+	if got := k.ID(); got != wantID {
+		t.Fatalf("Key.ID() = %s, want %s — this value is persisted as tracks.dupe_group_id, "+
+			"so changing it re-keys every dupe group in every deployed database. If the "+
+			"change is intended, it needs a migration, not a new constant here.", got, wantID)
 	}
 	if len(k.ID()) != 64 || strings.ToLower(k.ID()) != k.ID() {
 		t.Fatalf("ID must be lowercase hex sha256, got %q", k.ID())

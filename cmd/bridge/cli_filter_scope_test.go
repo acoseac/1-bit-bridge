@@ -180,3 +180,60 @@ func TestPathScopedCommandsRefuseAPositionalScope(t *testing.T) {
 		})
 	}
 }
+
+// flagSetDeclaresPathScope matches a --path scope flag declaration, in
+// either spelling the two commands use: `pathScope := fs.String(` and
+// `fs.StringVar(&o.pathScope,`.
+//
+// Anchored on the IDENTIFIER for flagSetDeclaresFilter's reason —
+// readPackageFile runs the body through stripGoComments, which blanks
+// string LITERALS as well as comments, so a pattern spelling "path"
+// would match nothing and the sweep would pass vacuously.
+var flagSetDeclaresPathScope = regexp.MustCompile(`(?m)(^\s*pathScope\s*:?=\s*fs\.String\(|fs\.StringVar\(&[A-Za-z_][A-Za-z0-9_]*\.pathScope,)`)
+
+// TestEveryPathScopedFlagsetGuardsItsPositionals is the --path half of
+// the sweep beside it, and it exists because closing a class twice
+// without sweeping it is how this one stayed open.
+//
+// #856 added the fs.NArg() guard to `enrichment retry`. #882 added it to
+// the four --filter commands and wrote TestEveryFilterFlagsetGuardsItsPositionals
+// to keep THAT flag closed. `refusePositionalScope` was then generalised
+// over the scope-flag name so `bridge duplicates` and `bridge enrichment
+// misses` could use it — but the SWEEP was not generalised with it, so a
+// new command growing a --path scope is caught by nothing.
+// TestPathScopedCommandsRefuseAPositionalScope drives the two known
+// commands by name; a fixture list is not a sweep.
+//
+// The rule is the same one: flag.Parse stops at the first non-flag
+// argument, so a positional scope parses with the flag EMPTY, and an
+// empty path scope is the whole library — the prefix helpers emit a
+// query with no WHERE clause at all and the operator gets a full-table
+// answer presented as the scoped one they asked for.
+func TestEveryPathScopedFlagsetGuardsItsPositionals(t *testing.T) {
+	checked := 0
+	for _, f := range nonTestGoFilesInPackage(t) {
+		body := readPackageFile(t, f) // comments already stripped
+		if !flagSetDeclaresPathScope.MatchString(body) {
+			continue
+		}
+		// COUNTED, not merely present. enrichment.go holds two --path
+		// commands, so "the file calls the helper somewhere" was
+		// satisfied by `enrichment misses` while `enrichment retry`
+		// hand-rolled its own copy — a file-level check cannot tell a
+		// guarded command from a file that merely contains one, and
+		// the next --path command added beside an existing one would
+		// inherit that blind spot.
+		decls := len(flagSetDeclaresPathScope.FindAllString(body, -1))
+		guards := strings.Count(body, "refusePositionalScope(")
+		checked += decls
+		if guards < decls {
+			t.Errorf("%s declares %d --path scope flag(s) but calls refusePositionalScope %d time(s). "+
+				"flag.Parse stops at the first non-flag argument, so a positional scope parses "+
+				"with --path empty — and empty means the WHOLE LIBRARY.", f, decls, guards)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no file declares a --path scope flag — the scan is not seeing the package, " +
+			"so this test would pass no matter what")
+	}
+}

@@ -5756,7 +5756,12 @@ function renderAnalysisCoverage(cov) {
   const parts = [];
   if (cov.dsdExcluded > 0) parts.push(`${cov.dsdExcluded} DSD excluded by design (sox can't decode DSD)`);
   if (cov.zeroByteExcluded > 0) parts.push(`${cov.zeroByteExcluded} zero-byte (upload never finished)`);
-  if (cov.unreadableExcluded > 0) parts.push(`${cov.unreadableExcluded} the decoder refused (see below)`);
+  // `unreadableExcluded` is the SUPPRESSED subset — the right number for
+  // "not counted as eligible". The list below is broader: it carries every
+  // recorded strike, including files still being retried, which are still
+  // eligible. "(see below)" implied the two were the same set; the panel's
+  // own hint has always drawn the distinction, and now so does the pointer.
+  if (cov.unreadableExcluded > 0) parts.push(`${cov.unreadableExcluded} the decoder gave up on (listed below, among the ones still being retried)`);
   if (cov.stale > 0) parts.push(`${cov.stale} awaiting re-analysis (schema update)`);
   excl.textContent = parts.length
     ? `Not counted as eligible: ${parts.join(" · ")}.`
