@@ -8099,3 +8099,307 @@ change, and its sentence ("a yellow / red badge at ≤30 / ≤7 days") is still
 true. It does not track the validity-window bands — it did not gain the
 not-yet-valid arm at #950 either — and a Mirror-PR on the iOS repo for an
 admin-console badge detail buys the client nothing.
+
+## 2026-09-22 — the 2026-09-22 batch's own record (#952–#958)
+
+Seven PRs merged on 2026-09-22 before the review below, and none of them left
+a record here. The rules reached `CLAUDE.md` — verified by symbol rather than
+by PR number: `NotYetValidRemediation`, `withExistingInstallCertDeps`,
+`certSANOptions`, `plausibleDuration`, `iffPayloadFits`, `tracksUnreadable`,
+`deleted_by` and `analysis_fail` are all present there — so the auto-loaded
+half of the obligation was met and only this half was missing.
+
+Their commit messages are unusually complete, so this entry is a pointer
+rather than a transcription; `git show` each one for the reasoning.
+
+| PR | What it settled |
+|---|---|
+| #952 | `RotationRemediation` told operators to "click Rotate in the admin console's Cert tile". **There is no such button**, deliberately — rotating from a browser burns every paired device's pin, and the tile's own panel note says rotation is CLI-only. #950 had made that sentence the shared copy for `bridge doctor`, the startup SAN warning and the README, so one false step reached every surface at once. The three console tiles also still graded the 30-day band on a truncated day count. |
+| #953 | The public-mode pairing QR kept synthesising `https://<autocert.domain>:<listenPort>` after `/v1/health` learned to skip it. On the hosted layout each tenant listens on a loopback high port and is published on one shared external port, so the synthesized URL is an address no client can reach — and iOS puts every advertised URL into its failover rotation, so each one costs a timeout. #936 had deliberately left public mode its own synthesis (the QR names `:443` explicitly, because a port-less dial URL trips the iOS 7788-default bug), so the host skip never reached this copy. |
+| #954 | #937 taught the three REAPERS to ask `LocateSidecar`; three SERVE paths were left on the recorded path, answering 410 about files sitting on disk. The admin player was the worst of them — the console is exactly where an operator goes to find out whether a move worked, and it was the surface most confidently telling them it had not. **This is what made `CLAUDE.md`'s "waveform_path has NO adoption yet" bullet stale**, which the review below then found. |
+| #955 | `tracksUnreadable` is every track carrying a current decode verdict, first strike included. The dashboard banner called all of them "excluded from analysis" — true only of the suppressed subset, and the more alarming reading, so an operator acts on it by replacing files the bridge is still happily retrying. `bridge status` never printed the number at all, so every headless install had no surface for it. |
+| #956 | Two duration sites older than `plausibleDuration` stamped straight onto the Track, against a docblock calling that gate "the ONE gate every Duration write site consults": FLAC's 36-bit `totalSamples` (272 years at 2^36−1 samples / 8 kHz) and DSF's full `uint64` sampleCount (hundreds of millennia from a forged fmt chunk). ExtractorVersion 11 → 12. |
+| #957 | `UpsertPlaylist`'s `ON CONFLICT` arm — the client's revive-by-PUT — set `deleted = 0` and left `deleted_by` behind. Latent, since every reader filters `deleted = 1`; but the burst warning and the Recently-deleted panel both attribute FROM that column, and a stale value on a live row names the wrong device the moment something reads it. Which is the half the 2026-09-20 incident was missing. |
+| #958 | Four guards that could be satisfied by things they were not meant to accept. |
+
+**The rule this leaves behind is the one already written down**: every batch
+writes the rule in `CLAUDE.md` and the record here, and a batch that ships
+seven PRs in a day is exactly when the second half gets skipped.
+
+## 2026-09-22 — full review of the post-v0.2.0 window (#959–#966)
+
+Twenty-four PRs had merged since the `v0.2.0` tag (#934–#958, ~19.5k lines)
+with no review as a window and nothing deployed. Three parallel sweeps
+(integrity/doctor/cert, manifest/extractors/playlists, cross-cutting + console
++ CI), every finding verified against the code before it was written down, and
+two agent findings downgraded on evidence rather than dropped silently.
+
+**The build was healthy throughout.** `gofmt`, `vet`, the whole suite, the race
+suite on every changed package, `PROTOCOL.md` byte-identical with the iOS
+mirror, `ExtractorVersion` correctly bumped, nightly fuzz green. The
+adversarial pass over #935/#956's new MP3/MP4/AIFF/WAV duration parsers — the
+window's largest untrusted-input surface — found no overflow, no negative-length
+slice and no division by zero. Nothing in the window broke anything measurable;
+every defect below is one the suite cannot see.
+
+### The worst of it: a `--gc` that could unlink the variants directory (#959)
+
+`filepath.WalkDir` `Lstat`s its root and follows no link, so a variants
+directory that is itself a symlink — `/srv/variants -> /mnt/vol/variants`, the
+ordinary mountpoint alias — arrives at the callback as ONE non-directory entry
+and the walk ends there. `upscale --gc` passes `SidecarInventoryOptions{}`, so
+`Consider` is nil and every non-directory is a candidate: the variants
+directory itself was counted, missed by the known set, appended to
+`OrphanPaths`, and handed to the forward sweep to `os.Remove`.
+
+Measured rather than reasoned about:
+
+```
+WalkDir("real")                WalkDir("link")
+  real            IsDir=true     link      IsDir=false   <-- root, not a dir
+  real/b.flac     IsDir=false    entries=1
+  real/sub        IsDir=true
+  real/sub/a.flac IsDir=false
+  entries=4
+```
+
+One orphan is below the mass-orphan floor of ten, so no guard could see it —
+and `bridge doctor`'s `variants-index` probe (also no `Consider`) reported it
+as reclaimable and named `bridge upscale --gc` in the hint.
+
+`TreeHoldsVariantSidecars` has resolved its root since #937, under a docblock
+naming this exact deployment. #940's shared walker — **the one that deletes** —
+did not get it.
+
+**The fix needed a second half the finding did not anticipate.** Resolving the
+root makes the walk emit paths under `/mnt/vol/…`, while `KnownSidecarSet` keys
+on the recorded `sidecar_path` and on `CanonicalSidecarPath(variantsDir, …)`,
+neither symlink-resolved. A naive resolve would therefore have missed every
+known key and classified an entire healthy tree as orphans — strictly worse
+than the bug. The walk starts at the RESOLVED root and REPORTS under the
+configured one.
+
+A symlinked SUBDIRECTORY is the same hazard one level down and is skipped
+rather than classified. `analyze --gc` was never exposed: its `Consider`
+requires the `.1bwf` suffix, which a directory symlink does not have.
+
+### Two more paths that turned a missing recorded path into a deletion (#959)
+
+`DELETE /v1/upscale/variants` unlinked `row.SidecarPath` and nothing else.
+After a host move every `os.Remove` returns ENOENT, which flowed through the
+already-gone guard as success — so "delete all renditions" answered
+`deletedCount: 10248, freedBytes: 0`: disk unchanged, the whole tree
+unreferenced, and `upscale --gc` refusing to reclaim it (`orphans > rows`) at
+exactly the moment nothing can tell a relocation from junk.
+
+`serveVariant`'s reactive reap had no mount check, while the other two reapers
+refuse wholesale via `VariantsDirSweepBlock`. An NFS drop at 19:00 with the
+watcher's next tick at 19:30 costs every track played in between its row, each
+with an SSE telling the client the variant is gone. The guard sits INSIDE the
+`fs.ErrNotExist` branch, so it costs a stat only once the open has already
+failed and the open-on-serve happy path keeps the syscall its own comment says
+it was written to save.
+
+**Round 2 added a third, from CodeRabbit**: the DELETE handler located each
+sidecar without ever asking whether the volume was reachable — the same
+stranding, reached by a different cause. Checked per row, because a
+whole-library delete runs long enough for a mount to drop underneath it, with
+ONE summary line carrying the count (every skipped row has the same reason, so
+a line each is the M-SEARCH flood shape).
+
+### The index v46 built and one predicate could not use (#965)
+
+Migration v46 creates `idx_tracks_analysis_fail … WHERE analysis_fail_count != 0`
+under a comment asserting that "every predicate leads with
+`analysis_fail_count != 0` so the planner can use it". That held for
+`analysisFailureRecordedSQL` and not for the suppressed twin, which opened on
+`analysis_fail_count >= 3`. SQLite admits a partial index only when a query
+term matches the index's WHERE EXPRESSION; it does not infer it from `>= 3`.
+
+`EXPLAIN QUERY PLAN` over a 5,000-row fixture, sqlite 3.54.0:
+
+```
+recorded            SCAN tracks USING INDEX idx_tracks_analysis_fail
+suppressed, before  SCAN tracks                       <- full table scan
+suppressed, after   SEARCH tracks USING INDEX idx_tracks_analysis_fail
+                                       (analysis_fail_count>?)
+```
+
+`SuppressedAnalysisPaths` uses that predicate as its ENTIRE where clause, so
+the miss stepped every row of `tracks` — whose `tags_json` BLOB sits ahead of
+these columns in the record — to return a handful of paths, on the hourly
+serve-side sweep and on every `bridge analyze`. The prefixed form lands on a
+BETTER plan than the recorded predicate gets.
+
+The term is a planner hint and nothing more: `>= 3` already implies `!= 0` for
+any value the column can hold. The threshold stays INLINED
+(`analysisFailureThresholdSQL` is the literal `"3"`), which is what keeps
+`analysisFailureSuppressedSQL2`'s single-`Replace` derivation sound.
+
+**The test asserts the PLAN, not a duration** — the property that regressed is
+"the planner reaches the index", and a timing test measures the host. Its
+control runs FIRST and checks the recorded predicate still reaches the index,
+so a fixture with no index at all cannot pass the real assertion for the wrong
+reason.
+
+### The duration gate had no floor, and "empty" had three spellings (#966)
+
+`plausibleDuration` defended the ceiling alone. `d > 0` admits any positive
+value, and a forged header reaches absurdly SMALL as easily as absurdly large:
+an `mvhd` declaring `timescale = 0xFFFFFFFF, duration = 1` yields **2.3e-10 s**
+— finite, positive, comfortably under a week — stamped into `tags_json` and
+onto the wire, where nothing re-derives it and the phone renders "0:00" instead
+of the absence it is.
+
+The docblock matched the code EXACTLY, which is why neither a test nor a review
+caught it: the gap was in the policy, not its implementation. And
+`TestPlausibleDuration_TruthTable` asserted `{"tiny positive", 1e-9, true}` —
+the missing half written down as intended behaviour. **A test can encode the
+bug and pass forever.**
+
+Round 1 also refused a declared IFF payload of zero, which `0 <= physicalSize -
+offset` had accepted for any bound. **CodeRabbit then found that fix
+incomplete**, and it was right: an AIFF SSND body opens with an 8-byte prefix
+(`offset`, `blockSize`), so a chunk declaring 8 is equally empty. Probed before
+fixing, on the round-1 build:
+
+```
+GAP CONFIRMED: Duration = 600 on an SSND holding only its 8-byte prefix
+```
+
+`ssndSoundSpan` narrows the span past the prefix rather than merely testing it:
+subtracting from `size` alone would leave the offset pointing at the prefix and
+weaken the physical bounds check by those same bytes, so the fit test would be
+measuring audio-plus-eight against the file. Three ways to hold no audio, all
+now unseen spans — declares nothing, holds only its prefix, cannot hold its own
+prefix — with a positive control, because "reject the empty ones" must not
+degrade into "reject everything".
+
+ExtractorVersion 12 → 13.
+
+### Sixteen docblocks attached to the wrong declaration (#964)
+
+A comment for `X` glued, with no blank line, onto the declaration of a
+different `Y`: `go doc Y` printed `X`'s prose and `X` had none. It happens when
+something is INSERTED between a comment and its subject, which is why the two
+worst cases were recent — #840 put `lyricsStoreAdapter` between
+`variantDeleterAdapter`'s docblock and its type, and #953 did the same to
+`advertisedEndpoints`, whose orphaned paragraph is the written record of the
+"nil is NO list, not the old walk" invariant, with two live cross-references
+still pointing at it.
+
+All sixteen pre-existing; none from the window under review.
+
+The detector flags only where the named identifier is DECLARED in the same
+package and has NO doc of its own. Both conditions carry weight: without the
+first, prose legitimately naming a helper is reported; without the second, a
+sentence opening by referring to a documented sibling is. That pair took the
+raw candidate count **467 → 21 → 16**, with a 5-of-5 spot-check rate. Five are
+deliberately not moved, and the guard does not report them.
+
+**Gemini's `doc.Text()` suggestion was taken and then controlled**, because a
+refactor of a detector is exactly where a guard quietly stops guarding:
+
+```
+branch, before the refactor:  3687 comments / 396 files / 0 misattached
+branch, after:                3687 comments / 396 files / 0 misattached
+parent commit, after:         3673 comments / 396 files / 16 misattached
+```
+
+The same sixteen, named identically — behaviour-preserving and strictly more
+capable (it now sees `/* */` blocks and docblocks opening with a bare `//`).
+
+After all eight PRs merged, the guard sweeps **3691** comments and still
+reports 0, so nothing in the batch reintroduced the class.
+
+### The CI gate waited for a job and never read its result (#961)
+
+`gate`'s `needs` listed six jobs and its verification step checked five,
+omitting `dsd-measure`. With `if: always()`, a `needs` entry only makes the job
+WAIT. Demonstrated by resolving the old step's interpolations to that scenario:
+
+```
+$ bash oldgate.sh          # dsd-measure=failure
+gate passed: vet, test -race, build-all, go-version, cross-platform all green
+exit=0
+```
+
+The hole sat in the one job that exists BECAUSE those tests had silently never
+run in CI since they were written. The echo was honest — it named five — which
+is how nobody noticed.
+
+Adding the sixth name would have left the seventh to be forgotten the same way,
+so the verdict derives from `needs` itself. Verified by extracting the new
+`run:` block from the workflow and executing it, rather than reading it:
+
+```
+all six success        rc=0   gate passed: …six jobs…
+dsd-measure fails      rc=1   ::error::gate failed (… dsd-measure=failure …)
+test fails             rc=1
+a job skipped          rc=1
+a job cancelled        rc=1
+empty needs            rc=1   ::error::gate saw no upstream jobs
+```
+
+`skipped` and `cancelled` count as not-passing deliberately: neither verified
+anything. The empty-`needs` arm is the `checked == 0` floor this repo puts on
+every sweep.
+
+### The rest
+
+- **#960** — #954 wired waveform adoption; three surfaces still denied it, one
+  of them (`bridge doctor`'s `sidecar-paths` hint) prescribing `bridge analyze
+  --force`, i.e. hours of decoding to recover curves the next request rebinds
+  for free. `TestCheckSidecarPaths` ASSERTED the stale sentence in its
+  want-list, so the suite required the bug.
+- **#963** — `bridge init`'s preflight hard-coded ports 7788/7789 and never set
+  `OwnPIDFile`, under a helper whose whole argument is "grade the install that
+  is THERE". A public-mode install on `:443` therefore graded two free ports as
+  `ok` — a check passing because the thing it guards is absent — and a re-init
+  against a live bridge aborted, which the call site's own comment named as a
+  reason to pass `--skip-doctor`.
+- **#962** — #952 gave the three cert tiles one ladder and left their wording
+  alone, so an expired certificate rendered `expired · expires in 0 days`. The
+  self-signed tile reached the same place from the other side, displaying the
+  `daysUntilExpiry` sentinel `Inspect` forces negative as `(-40 days)`.
+  CodeRabbit then caught that the first fix tested a DURATION, so an expiry at
+  00:30 tomorrow read "expires today" beside a date saying otherwise.
+
+### Two findings declined on evidence
+
+- **"The public-mode pairing QR still ships a port-less dial URL."** The
+  verbatim pass-through of `customEndpoints` is deliberate and reasoned at
+  `pairing.go:107`. A review round later proposed defaulting a bare host to the
+  ACTIVE API PORT, which would re-open #953/#936 — synthesising from this
+  process's listen port is precisely what those removed. The safe form is
+  `explicitHTTPSPort` → `:443`, which the scheme already implies. (Also for the
+  record: the iOS default on a port-less URL is **7788**, not 80.)
+- **`bridge doctor --rate-limit`** was proposed for the re-extraction window.
+  No such flag exists — `bridge doctor` takes `--config`, `--json` and `--fix`,
+  and no subcommand in the tree declares `rate-limit`. Nor would it help as
+  stated: the tenants, the operator bridge and the demo each run their own unit
+  against their OWN SQLite file, so they never contend on a shared write lock.
+  The lever that exists is staggering the restarts.
+
+### Process notes
+
+- **A timeout is not a failure, and the difference is one flag.** A local race
+  run of `internal/admin` reported `FAIL … 600.758s` — Go's default 10-minute
+  limit, hit because the invocation omitted `-timeout` (the Makefile passes
+  `30m`) while another gate held the cores. The re-run passes in **826s**. The
+  signature is the duration landing on exactly 600s with a goroutine dump and
+  no assertion.
+- **A package-local run cannot see a tree-wide guard.** Renaming a test in
+  `internal/manifest` left a docblock citing the old name;
+  `TestEveryCitedTestNameExists` lives in `cmd/bridge` and caught it on CI's
+  macOS leg, after a local `go test ./internal/manifest/` had passed.
+- **PR 7 was split in two.** The duration floor bumps `ExtractorVersion`, and
+  burying a library-wide re-extraction in a docblock-cleanup PR means a
+  reviewer scanning "comment fixes" would miss it.
+- **Merge order was derived from file overlap, not guessed.** The docblock PR
+  was the only branch sharing files with others (`cmd/bridge/main.go` and
+  `upscale.go` with #959, `app.js` with #962, `init.go` with #963,
+  `extractors.go` with #966); the other seven were mutually disjoint. Merging
+  it LAST cost exactly one merge-from-main instead of scattering four. `main`
+  was merged INTO the branch rather than rebasing, to keep bot-review history
+  addressable, and the combined tree was gated in full before the merge.
