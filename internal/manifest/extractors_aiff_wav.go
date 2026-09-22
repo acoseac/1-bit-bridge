@@ -544,7 +544,21 @@ func iffPayloadSpanAt(f *os.File, size uint32) iffPayloadSpan {
 // failed read, a size that cannot hold its own prefix, or a span with no
 // sound data at all, all yield an UNSEEN span — no duration rather than
 // one nothing verified.
+//
+// The unknown-length sentinel is refused FIRST, before the narrowing,
+// because the narrowing destroys it: 0xFFFFFFFF less the 8-byte prefix
+// is 0xFFFFFFF7, an ordinary-looking declared size that
+// iffPayloadFits's sentinel arm can no longer recognise. It then fails
+// open against an unknown bound (a Stat that failed on the open
+// handle), and fits by arithmetic on any file of 4 GiB or more — so a
+// COMM claiming ten minutes beside an SSND that declared NO length at
+// all stamped the ten minutes. v12 claimed this rule for both IFF
+// walkers and it held until v13 gave AIFF a narrowing step in front of
+// it; WAV, which does not narrow, was never affected.
 func ssndSoundSpan(f *os.File, size uint32) iffPayloadSpan {
+	if uint64(size) == iffUnknownPayloadSize {
+		return iffPayloadSpan{}
+	}
 	span := iffPayloadSpanAt(f, size)
 	if !span.seen {
 		return iffPayloadSpan{}

@@ -119,4 +119,62 @@ func TestWaveformHintDoesNotPrescribeAFullReDecodeForARelocation(t *testing.T) {
 	if !strings.Contains(c.Hint, "adopted on the first analysis lookup") {
 		t.Errorf("the hint does not tell the operator the rows heal by themselves:\n%s", c.Hint)
 	}
+
+	// And it must not claim that every row still listed is a curve that
+	// is GONE. CountWaveformsNotUnderPrefix is pure SQL over the recorded
+	// paths — it stats nothing — so a curve still AT the path its row
+	// records is counted too, and that one is served from there,
+	// LocateWaveform answers "present", the row is never rewritten, and
+	// it stays in the count forever. That is the ordinary shape of a
+	// dataDir change with the old tree still mounted, and the hint sent
+	// its operator into `bridge analyze --force`: hours of sox and
+	// ffmpeg to rebuild curves that already play.
+	for _, stale := range []string{
+		"Rows still listed afterwards point at curves which are NOT there",
+		"point at curves which are NOT there",
+	} {
+		if strings.Contains(c.Hint, stale) {
+			t.Errorf("the hint still claims %q about a count that stats nothing:\n%s", stale, c.Hint)
+		}
+	}
+	// Positive: it says what the number measures, and scopes --force to
+	// the case that needs it. Anchored on the claim rather than banning
+	// the command — `--force` is still the right answer for a curve at
+	// neither location.
+	for _, need := range []string{
+		"recorded PATHS alone",
+		"needs nothing",
+		"NEITHER location",
+	} {
+		if !strings.Contains(c.Hint, need) {
+			t.Errorf("the hint does not say %q, so the count still reads as a list of missing curves:\n%s",
+				need, c.Hint)
+		}
+	}
+}
+
+// TestVariantHintDoesNotClaimEveryListedRowIsGone is the same property
+// on the other half of the same hint.
+//
+// CountVariantsNotUnderPrefix stats nothing either, and the hourly
+// integrity sweep adopts a RELOCATED row while leaving a row whose file
+// is still at the recorded path exactly as it is — so "rows still
+// listed after a sweep point at files that are not there" was false for
+// that population too. The remedy was already right (`bridge variants
+// move` is for exactly those); only the claim was wrong, which is the
+// shape that gets the NEXT change made on the same reasoning.
+func TestVariantHintDoesNotClaimEveryListedRowIsGone(t *testing.T) {
+	c := checkSidecarPaths(context.Background(), Deps{
+		RelocatedSidecars: func(context.Context) (RelocatedSidecars, error) {
+			return RelocatedSidecars{Variants: 10248, VariantBytes: 278_845_403_136, VariantsDir: "/srv/variants"}, nil
+		}})
+	if c.Status != Warn {
+		t.Fatalf("got %+v, want warn", c)
+	}
+	if strings.Contains(c.Hint, "point at files that are not there") {
+		t.Errorf("the hint still claims every row still listed has lost its file:\n%s", c.Hint)
+	}
+	if !strings.Contains(c.Hint, "still has its file at the old path") {
+		t.Errorf("the hint does not name the case `bridge variants move` exists for:\n%s", c.Hint)
+	}
 }

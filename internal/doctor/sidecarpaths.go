@@ -44,6 +44,18 @@ type RelocatedSidecars struct {
 // candidate walk never offers the track again and a plain
 // `bridge analyze` regenerates nothing.
 //
+// But the COUNTS cannot tell those cases apart. CountVariantsNotUnderPrefix
+// and CountWaveformsNotUnderPrefix are pure SQL over the recorded paths
+// and stat nothing, so a row whose file is still AT the path it records
+// is counted too — and that one is served from there, is never
+// relocated (LocateWaveform answers "present"), and stays in the count
+// forever. Which is the ordinary shape of a dataDir change with the old
+// tree still mounted. The hint therefore says what the number is
+// measuring before it says what to do about it: "rows still listed
+// afterwards point at curves which are NOT there" was false for exactly
+// that population, and it named `bridge analyze --force`, i.e. hours of
+// sox and ffmpeg to rebuild curves that already play.
+//
 // Warn, not fail: `bridge init` refuses to proceed on a fail, and a
 // stale path in a sidecar table is not a reason to refuse a new install.
 // Skipped when no probe is wired (a first run with no manifest, or a
@@ -72,18 +84,21 @@ func checkSidecarPaths(ctx context.Context, d Deps) Check {
 	hint := ""
 	if rel.Variants > 0 {
 		hint += fmt.Sprintf("%d variant row(s) (%s) point outside %s. Rows whose file sits at its source-mirrored "+
-			"path under that directory are adopted by the hourly integrity sweep and on first play; rows still listed "+
-			"after a sweep point at files that are not there — `bridge variants move --to %s --confirm MOVE` relocates "+
-			"any still at the old path, `bridge upscale --gc` reaps the rest. ",
+			"path under that directory are adopted by the hourly integrity sweep and on first play; a row still "+
+			"listed after a sweep either still has its file at the old path or has none at either location — "+
+			"`bridge variants move --to %s --confirm MOVE` relocates the first, `bridge upscale --gc` reaps the "+
+			"second. ",
 			rel.Variants, humanBytes(rel.VariantBytes), rel.VariantsDir, rel.VariantsDir)
 	}
 	if rel.Waveforms > 0 {
-		hint += fmt.Sprintf("%d waveform row(s) point outside %s. A curve whose file sits at its source-mirrored "+
-			"path under that directory is adopted on the first analysis lookup for the track — the row is rewritten "+
-			"and nothing is re-decoded — but there is no proactive waveform sweep, so that happens when its curve is "+
-			"next requested and not before. Rows still listed afterwards point at curves which are NOT there, and the "+
-			"analysis skip gate reads the row rather than the file, so a plain `bridge analyze` will not notice them: "+
-			"`bridge analyze --force` rebuilds those.",
+		hint += fmt.Sprintf("%d waveform row(s) point outside %s. This count is from the recorded PATHS alone — "+
+			"nothing here stats them — so a row stays listed whether its curve moved or not. A curve still at the "+
+			"path its row records is served from there and needs nothing; one that sits at its source-mirrored path "+
+			"under that directory is adopted on the first analysis lookup for the track, rewriting the row with "+
+			"nothing re-decoded, though there is no proactive waveform sweep so that happens when the curve is next "+
+			"requested and not before. Only a curve at NEITHER location needs rebuilding, and the analysis skip gate "+
+			"reads the row rather than the file, so a plain `bridge analyze` will not notice it: "+
+			"`bridge analyze --force` is for that case, and re-decodes the whole library to reach it.",
 			rel.Waveforms, rel.WaveformDir)
 	}
 	return warn(checkNameSidecarPaths, summary, hint)

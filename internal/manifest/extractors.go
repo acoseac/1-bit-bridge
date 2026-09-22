@@ -336,7 +336,24 @@ var Ext = map[string]bool{
 // the shortest thing a library legitimately holds, and a zero-size audio
 // chunk beside a non-zero frame count is an inconsistent file by
 // definition.
-const ExtractorVersion = 13
+//
+// v14 — the AIFF sentinel v12 claimed, restored. v13's SSND narrowing
+// runs BEFORE iffPayloadFits and subtracts the 8-byte prefix from the
+// declared size, so the unknown-length sentinel arrived at the fit check
+// as 0xFFFFFFF7 and the arm that refuses it saw an ordinary number. The
+// fix that closed one hole opened the one beside it, in the same
+// function, one release apart — and a small fixture cannot see it,
+// because 0xFFFFFFF7 fails the physical-bounds check on any file under
+// 4 GiB. What it reaches is the case v12 was written for: an unknown
+// bound, where iffPayloadFits fails OPEN. So the sentinel is refused at
+// the top of ssndSoundSpan, before any narrowing can disguise it. WAV
+// does not narrow and was never affected.
+//
+// Once more NO legitimate file changes: 0xFFFFFFFF is what a streaming
+// writer puts in a size field it cannot fill, and a genuine 4 GiB − 1
+// payload is indistinguishable from it anyway (which is why RF64
+// exists).
+const ExtractorVersion = 14
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -2570,6 +2587,23 @@ const minPlausibleDurationSeconds = 0.1
 func plausibleDuration(d float64) bool {
 	return d >= minPlausibleDurationSeconds && d < dffMaxPlausibleDurationSeconds
 }
+
+// PlausibleDuration is plausibleDuration for the one writer of
+// `Track.Duration` outside this package: internal/upnpingest, which
+// stamps a duration parsed out of a DIDL-Lite `res@duration` attribute.
+//
+// That value is no more trustworthy than a file header — it is whatever
+// an upstream server chose to put in an XML attribute — and it reached
+// the same `tags_json`, the same wire field and the same track list with
+// only a `> 0` check in front of it. `0:00:00.001` and `10000:00:00` are
+// both well-formed DLNA durations.
+//
+// Exported rather than duplicated: this file's docblock is the policy,
+// and a second copy in the ingest package is the copy that drifts. The
+// gate itself is the only thing shared — the extractor's per-format
+// derivations stay here, because there is nothing about a DIDL string to
+// derive.
+func PlausibleDuration(d float64) bool { return plausibleDuration(d) }
 
 // applyDFFStamps is the single commit policy over everything the DFF
 // walk gathered — called once, at the EOF terminator. Truth table
