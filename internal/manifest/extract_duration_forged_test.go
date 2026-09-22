@@ -219,3 +219,59 @@ func TestSACDTimecodeCannotExpressAnImplausibleDuration(t *testing.T) {
 			"too close to call the gate structural", seconds, dffMaxPlausibleDurationSeconds)
 	}
 }
+
+// TestExtractAIFF_EmptySSNDStampsNoDuration is the end-to-end shape the
+// unit test above protects: a well-formed COMM claiming ten minutes of
+// frames beside an SSND holding no audio. The COMM arithmetic is fine
+// and plausibleDuration accepts 600 s, so the payload check is the only
+// thing standing between a corrupt file and a confident wrong answer in
+// the phone's track list.
+func TestExtractAIFF_EmptySSNDStampsNoDuration(t *testing.T) {
+	// An SSND body is NOT all audio: it opens with an 8-byte prefix
+	// (`offset`, `blockSize`). So "empty" has two spellings, and the
+	// second is the one a size==0 check misses — a chunk of exactly 8
+	// bytes holds the prefix and no sound at all, yet looked like 8
+	// bytes of audio and stamped the COMM duration (CodeRabbit on #966).
+	for _, tc := range []struct {
+		name             string
+		declared, actual int
+	}{
+		{"declares nothing", 0, 0},
+		{"holds only its 8-byte prefix", 8, 8},
+		{"cannot hold its own prefix", 4, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempAIFF(t, buildAIFFWithID3(t, nil,
+				buildAIFFCOMMChunk(2, 26_460_000, 16, 44100),
+				buildAIFFSSNDDeclaring(uint32(tc.declared), tc.actual)))
+			tr := &Track{}
+			if err := extractAIFFWithContext(path, tr, nil); err != nil {
+				t.Fatalf("extractAIFFWithContext: %v", err)
+			}
+			if tr.Duration != nil {
+				t.Fatalf("Duration = %v, want nil — the SSND holds no audio, so ten minutes "+
+					"of COMM frames is an inconsistent file, not a ten-minute track", *tr.Duration)
+			}
+		})
+	}
+}
+
+// TestExtractAIFF_SSNDPrefixIsNotCountedAsAudio is the positive control
+// for the narrowing above: a chunk that DOES hold sound must still time,
+// or "reject the empty ones" would be indistinguishable from "reject
+// everything".
+//
+// It also pins that the prefix is EXCLUDED rather than merely tested —
+// the span is narrowed past `offset`, so the physical-bounds check
+// measures the audio against the file rather than the audio plus eight
+// bytes it is not.
+func TestExtractAIFF_SSNDPrefixIsNotCountedAsAudio(t *testing.T) {
+	// 44 100 frames at 44.1 kHz = 1 s, with a real 64-byte payload.
+	path := writeTempAIFF(t, buildAIFFWithID3(t, nil,
+		buildAIFFCOMMChunk(2, 44100, 16, 44100), buildAIFFSSNDChunk(64)))
+	tr := &Track{}
+	if err := extractAIFFWithContext(path, tr, nil); err != nil {
+		t.Fatalf("extractAIFFWithContext: %v", err)
+	}
+	assertDuration(t, tr.Duration, 1)
+}

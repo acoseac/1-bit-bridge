@@ -1190,10 +1190,16 @@ no failing test — which is the shape to expect in this area.
   the FILES). The summary is Warn when it deleted or refused, Info
   otherwise; per-row lines are sampled at 10 per message per tick, the
   M-SEARCH lesson applied before the flood. `waveform_path` has the same
-  shape and NO adoption yet (the analysis skip gate reads the row, not the
-  file, so a moved dataDir strands the whole waveform cache as 410s that
-  never regenerate) — `bridge doctor`'s `sidecar-paths` check reports
-  both tables; the schema-relative follow-up is #938. (#937)
+  shape and adopts too, by a narrower route: #954 wired
+  `integrity.LocateWaveform` into `analysisStoreAdapter`, so a relocated
+  curve rebinds on the first analysis lookup — served from canonical, row
+  rewritten, no `indexed_at` bump, nothing re-decoded. There is no
+  proactive waveform sweep, so it heals when the track is next asked for
+  and not before, and the analysis skip gate still reads the row rather
+  than the file — which is why a curve at NEITHER location stays silent
+  and needs `bridge analyze --force`. `bridge doctor`'s `sidecar-paths`
+  check reports both tables; the schema-relative follow-up is still #938.
+  (#937, #954)
 - **A forward sweep's denominator is the TREE, never the catalog, and the
   term that knows a lost index is `orphans > rows`.** Adoption and the
   canonical known set both need the ROWS; the 2026-09-20 aftermath had

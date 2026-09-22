@@ -630,3 +630,63 @@ func TestRecordAnalysisFailureSurfacesADatabaseError(t *testing.T) {
 		t.Errorf("missing row = (%d, %v), want (0, nil)", n, err)
 	}
 }
+
+// TestSuppressedPredicateUsesThePartialIndex.
+//
+// Migration v46 creates `idx_tracks_analysis_fail … WHERE
+// analysis_fail_count != 0` and its comment asserts that "every predicate
+// leads with `analysis_fail_count != 0` so the planner can use it". That
+// held for analysisFailureRecordedSQL and not for the suppressed twin,
+// which opened on `analysis_fail_count >= 3`: SQLite admits a partial
+// index only when a query term matches the index's WHERE EXPRESSION, and
+// it does not reason that `x >= 3` implies `x != 0`.
+//
+// SuppressedAnalysisPaths uses that predicate as its ENTIRE where clause,
+// so the miss was a full scan of `tracks` — whose tags_json BLOB sits
+// ahead of these columns in the record — on the hourly serve-side sweep
+// and on every `bridge analyze`.
+//
+// Asserted on the PLAN, not on a duration: the property that regressed is
+// "the planner reaches the index", and a timing test measures the host.
+func TestSuppressedPredicateUsesThePartialIndex(t *testing.T) {
+	st := openAnalysisFailStore(t)
+	plan := func(where string) string {
+		rows, err := st.db.QueryContext(context.Background(),
+			"EXPLAIN QUERY PLAN SELECT path FROM tracks WHERE "+where, int64(0))
+		if err != nil {
+			t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, detail)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(out, " | ")
+	}
+
+	// Control FIRST: the sibling predicate already reached the index, so
+	// a fixture where NEITHER does would pass the assertion below for the
+	// wrong reason (a missing index, a planner that ignores partials).
+	if got := plan(analysisFailureRecordedSQL); !strings.Contains(got, idxAnalysisFail) {
+		t.Fatalf("the RECORDED predicate does not reach %s either — the fixture cannot "+
+			"tell a predicate problem from an index problem.\nplan: %s", idxAnalysisFail, got)
+	}
+	if got := plan(analysisFailureSuppressedSQL); !strings.Contains(got, idxAnalysisFail) {
+		t.Errorf("the SUPPRESSED predicate does not reach %s, so SuppressedAnalysisPaths "+
+			"scans every row of `tracks` on the hourly sweep and on every `bridge analyze`.\n"+
+			"plan: %s\nLead with `analysis_fail_count != 0` — SQLite matches the index's "+
+			"WHERE expression and does not infer it from `>= 3`.", idxAnalysisFail, got)
+	}
+}
+
+// idxAnalysisFail is the v46 partial index the two predicates above are
+// shaped for. Named rather than inlined twice so a rename reaches both.
+const idxAnalysisFail = "idx_tracks_analysis_fail"

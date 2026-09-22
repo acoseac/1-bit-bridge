@@ -282,9 +282,20 @@ func mp3CBRDurationEstimate(r io.ReadSeeker, frame mpegFrame, frameOffset int64)
 }
 
 // extractMP3SampleRate returns the sample rate (Hz) from the first valid
-// MPEG audio frame header, skipping a leading ID3v2 tag if present —
-// extractMP3Format's rate alone, kept for the callers that want only
-// that. Returns 0 (no error) when no plausible frame is found.
+// MPEG audio frame header, skipping a leading ID3v2 tag if present.
+// Returns 0 (no error) when no plausible frame is found.
+//
+// TEST-ONLY. It is the thin wrapper #935 left behind so the rate tests
+// written against the pre-v11 extractor did not have to move, and it has
+// had no production caller since: everything that wants a rate now takes
+// it from the extractMP3Format result it already holds.
+//
+// Its docblock used to say it was "kept for the callers that want only
+// that", which named callers that do not exist and also stopped being
+// true of the function: it now runs the WHOLE duration ladder, and on a
+// header-less file mp3CBRDurationEstimate seeks to EOF, so a caller
+// reaching for "just the rate" would pay a whole-file seek and get its
+// reader back repositioned.
 func extractMP3SampleRate(r io.ReadSeeker) (float64, error) {
 	info, err := extractMP3Format(r)
 	if err != nil {
@@ -354,6 +365,10 @@ func parseMPEGFrameHeader(hdr []byte) (mpegFrame, bool) {
 
 // mpegFrameSampleRate validates a 4-byte MPEG audio frame header and
 // returns its sample rate — parseMPEGFrameHeader's rate alone.
+//
+// TEST-ONLY, like extractMP3SampleRate above, and for the same reason:
+// production reads the whole frame geometry. Kept because the header
+// validation cases are worth exercising against the narrow answer.
 func mpegFrameSampleRate(hdr []byte) (int, bool) {
 	frame, ok := parseMPEGFrameHeader(hdr)
 	if !ok {

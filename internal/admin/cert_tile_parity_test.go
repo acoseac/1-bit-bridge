@@ -386,13 +386,88 @@ func TestRejectedCertGradingShapesSeeEverySpacing(t *testing.T) {
 	for _, ok := range []string{
 		"if (left <= CERT_EXPIRY_WARNING_MS) badge",
 		"if (left <= 0) badge",
-		"const days = Math.max(0, Math.floor(left / 86_400_000));",
+		// The accepted form is now certValidityText's own arithmetic.
+		// The line this used to list —
+		// `const days = Math.max(0, Math.floor(left / 86_400_000));` —
+		// no longer exists: it WAS the defect
+		// TestCertTilesRenderTheirRemainingTimeThroughOneHelper closes,
+		// and a false-positive control citing deleted code stops being
+		// one.
+		"const days = Math.floor(Math.abs(left) / 86_400_000);",
 		"if (elapsedDays <= 30) somethingElse",
 		`badge warn">expiring`,
 		`badge danger">expired`,
 	} {
 		if matches(ok) {
 			t.Errorf("a rejected shape matched the ACCEPTED form %q", ok)
+		}
+	}
+}
+
+// TestCertTilesRenderTheirRemainingTimeThroughOneHelper is the TEXT half
+// of TestCertTilesGradeOnTheRemainingDurationNotADayCount, and it exists
+// because the badge and the sentence beside it were computed from
+// different numbers.
+//
+// #952 gave all three tiles one ladder (certExpiryBadge, which returns
+// `expired` for `left <= 0`) and left each tile's wording alone. The two
+// that clamped with `Math.max(0, …)` — a form that made sense only
+// against the PRE-#952 ladder, which had no expired arm — then rendered
+// `expired · expires in 0 days`: past tense against future tense, on the
+// surface where an operator chooses between rotating now and scheduling
+// it. The self-signed tile reached the same place from the other side,
+// displaying the `daysUntilExpiry` sentinel Inspect forces negative past
+// NotAfter, as `(-40 days)`.
+//
+// Neither is visible to a Go type check and neither breaks a page, which
+// is why this is a source scan and not a render assertion.
+//
+// The rejected fragments are the three spellings that produced it, not
+// "anything that mentions days": certValidityText computes a day count
+// itself, and a tile is free to name one in any other sentence.
+func TestCertTilesRenderTheirRemainingTimeThroughOneHelper(t *testing.T) {
+	checked := 0
+	for _, tile := range []struct{ name, decl string }{
+		{"self-signed", "async function refreshCertInfo("},
+		{"tailscale", "function renderTailscaleTile("},
+		{"autocert", "async function refreshAutocertTile("},
+	} {
+		body := jsFunctionBody(t, tile.decl)
+		checked++
+		if !strings.Contains(body, "certValidityText(") {
+			t.Errorf("the %s cert tile does not render its remaining time through certValidityText — "+
+				"a phrase spelled locally is how two of these three came to say "+
+				"`expires in 0 days` under an `expired` badge", tile.name)
+		}
+		for _, bad := range []struct{ frag, why string }{
+			{"expires in ", "spells the phrase inline, so it cannot say `expired` when the badge does"},
+			{"Math.max(0,", "clamps the remaining time, which is what rendered `expires in 0 days` for an expired cert"},
+			{"daysUntilExpiry", "displays the sentinel Inspect forces NEGATIVE past NotAfter, which rendered `(-40 days)`"},
+		} {
+			if strings.Contains(body, bad.frag) {
+				t.Errorf("the %s cert tile %s (%q)", tile.name, bad.why, bad.frag)
+			}
+		}
+	}
+	if checked != 3 {
+		t.Fatalf("scanned %d tiles, want 3 — the scan is not seeing app.js and would pass no matter what", checked)
+	}
+
+	// "Today" is a CALENDAR question, not a 24-hour one. A duration-only
+	// test labelled a certificate expiring at 00:30 tomorrow "expires
+	// today" — beside a parenthesised date reading TOMORROW, the same
+	// sentence disagreeing with itself, which is the defect this helper
+	// exists for one unit down (CodeRabbit on #962).
+	//
+	// Structural, because the Go suite cannot run the helper: it can
+	// still say that the calendar comparison is present, which is what a
+	// regression to `Math.floor(ms / 86_400_000) === 0` would remove.
+	helper := jsFunctionBody(t, "function certValidityText(")
+	for _, need := range []string{"getFullYear()", "getMonth()", "getDate()"} {
+		if !strings.Contains(helper, need) {
+			t.Errorf("certValidityText no longer compares calendar dates (%s missing) — "+
+				"a 24-hour test calls an expiry just after midnight tomorrow \"today\", "+
+				"next to a date that says otherwise", need)
 		}
 	}
 }

@@ -2067,8 +2067,14 @@ var migrations = []migration{
 			// 30 entries on the library this was written for. Without it the
 			// unreadable COUNT on /api/stats is a full scan of `tracks` on a
 			// 5-second SSE tick, which is the shape /api/diagnostics was
-			// pulled up for. Every predicate leads with
-			// `analysis_fail_count != 0` so the planner can use it.
+			// pulled up for.
+			//
+			// Every predicate must lead with `analysis_fail_count != 0` for
+			// the planner to use it, and one of them did not: the suppressed
+			// twin opened on `analysis_fail_count >= 3` instead, which SQLite
+			// does not accept as implying the index's WHERE. This comment
+			// asserted the invariant while a predicate broke it — see
+			// analysisFailureSuppressedSQL for the measured plans.
 			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_analysis_fail
 				ON tracks(analysis_fail_count) WHERE analysis_fail_count != 0`)
 			return err

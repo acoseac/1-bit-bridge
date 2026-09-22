@@ -52,7 +52,17 @@ func TestPlausibleDuration_TruthTable(t *testing.T) {
 		{"NaN", math.NaN(), false},
 		{"+Inf", math.Inf(1), false},
 		{"-Inf", math.Inf(-1), false},
-		{"tiny positive", 1e-9, true},
+		// The FLOOR, v13. This row read `{"tiny positive", 1e-9,
+		// true}` — the missing half of the policy, asserted as
+		// intended behaviour, which is why nothing caught it. A
+		// forged `mvhd` (`timescale = 0xFFFFFFFF, duration = 1`)
+		// lands at 2.3e-10 and was stamped onto the wire, where the
+		// phone renders "0:00" rather than the absence it is.
+		{"a forged mvhd timescale", 1.0 / 4294967295.0, false},
+		{"one microsecond", 1e-6, false},
+		{"just under the floor", minPlausibleDurationSeconds - 1e-4, false},
+		{"the floor itself", minPlausibleDurationSeconds, true},
+		{"a UI stinger", 0.25, true},
 		{"typical track", 240.5, true},
 		{"just under the ceiling", dffMaxPlausibleDurationSeconds - 1e-3, true},
 		{"the ceiling itself", dffMaxPlausibleDurationSeconds, false},
@@ -800,6 +810,16 @@ func TestIFFPayloadFits_TruthTable(t *testing.T) {
 	}{
 		{"unseen payload fails closed", iffPayloadSpan{}, 1000, false},
 		{"unknown physical size fails open", iffPayloadSpan{seen: true, offset: 100, size: 1 << 40}, 0, true},
+		// A declared payload of ZERO, v13. It fitted trivially —
+		// `0 <= physicalSize - offset` holds for any bound — so a
+		// chunk claiming no audio passed the check whose whole job is
+		// "does the audio fit the file". WAV was covered by accident
+		// (its seconds derive FROM the data size, so an empty chunk
+		// yields 0 and the plausibility gate rejects it); AIFF derives
+		// from COMM and stamped ten minutes onto an empty file.
+		// Both bounds, because the offset check does not reach it.
+		{"zero payload, known bound", iffPayloadSpan{seen: true, offset: 12, size: 0}, 4096, false},
+		{"zero payload, unknown bound", iffPayloadSpan{seen: true, offset: 12, size: 0}, 0, false},
 		{"fits exactly", iffPayloadSpan{seen: true, offset: 100, size: 900}, 1000, true},
 		{"one byte over", iffPayloadSpan{seen: true, offset: 100, size: 901}, 1000, false},
 		{"offset past the end", iffPayloadSpan{seen: true, offset: 1001, size: 0}, 1000, false},

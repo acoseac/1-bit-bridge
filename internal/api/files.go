@@ -419,7 +419,35 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 			// reality regardless of who hung up first. 5 s
 			// budget bounds the response goroutine if the DB
 			// is wedged. Gemini HIGH on PR #218.
-			if s.variantDeleter != nil {
+			// Is the FILE gone, or the VOLUME? LocateSidecar has
+			// already stated both the recorded and the canonical
+			// path — and on an unmounted variants volume BOTH are
+			// under the dead mountpoint, so "missing at both" is
+			// exactly what a healthy catalog looks like through a
+			// hole in the filesystem.
+			//
+			// The other two reapers refuse the whole sweep in that
+			// state (VariantsDirSweepBlock, the 2026-07-21 H4
+			// hazard). This one had no such check, so an NFS drop at
+			// 19:00 with the watcher's next tick at 19:30 meant
+			// every track played in between lost its row — each with
+			// an SSE telling the client the variant was gone — and
+			// when the mount returned those files were unreferenced,
+			// in the one shape `--gc` now refuses to reclaim.
+			//
+			// Deliberately INSIDE the ENOENT branch: this costs a
+			// stat only once the open has already failed, so the
+			// open-on-serve happy path above keeps the syscall it
+			// was written to save.
+			reapable := s.variantDeleter != nil && s.variantDeleter.SidecarStoreAvailable()
+			if s.variantDeleter != nil && !reapable {
+				LoggerFromContext(r.Context()).Warn(
+					"variant sidecar missing, but the variants directory is unavailable; keeping the row",
+					slog.String("source_path", sourcePath),
+					slog.String("variant_id", variantID),
+				)
+			}
+			if reapable {
 				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				// Use the canonical values from the looked-up
