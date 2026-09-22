@@ -566,7 +566,30 @@ func ExpandSACDISO(absPath, relPath string, size int64, mtime time.Time) ([]*Tra
 		if artist == "" {
 			artist = toc.albumArtist
 		}
-		duration := float64(te.durationFrames) / float64(sacdFramesPerSecond)
+		// Through the shared gate like every other derived duration
+		// (ExtractorVersion 12) — STRUCTURAL here, not a live fix, and
+		// worth saying which.
+		//
+		// `durationFrames` comes from the container's TOC, which is
+		// untrusted input this walker parses; but it arrives through
+		// sacdTimecodeFrames, whose M:S:F triple is bounded by one
+		// byte of minutes with seconds < 60 and frames < 75. The
+		// largest value expressible is ~4.3 hours, so no SACD image
+		// can forge a duration past the week-long ceiling. The gate is
+		// here so the rule "every Duration write passes
+		// plausibleDuration" has no exception to remember, and so the
+		// day that decoder widens — a four-byte timecode, a different
+		// TOC revision — this site does not have to be found again.
+		// TestSACDTimecodeCannotExpressAnImplausibleDuration pins the
+		// bound the claim rests on.
+		//
+		// Nil rather than a clamped value: Duration is a pointer and
+		// its absence already means "unknown" to every consumer — iOS
+		// falls back to the file size, as every pre-v11 row does.
+		var durationPtr *float64
+		if d := float64(te.durationFrames) / float64(sacdFramesPerSecond); plausibleDuration(d) {
+			durationPtr = &d
+		}
 		rate := sacdDSDSampleRate
 		bits := 1
 		isDSD := true
@@ -583,7 +606,7 @@ func ExpandSACDISO(absPath, relPath string, size int64, mtime time.Time) ([]*Tra
 			Album:         album,
 			TrackNumber:   &trackNo,
 			DiscNumber:    &discNo,
-			Duration:      &duration,
+			Duration:      durationPtr,
 			SampleRate:    &rate,
 			BitsPerSample: &bits,
 			IsDSD:         &isDSD,
