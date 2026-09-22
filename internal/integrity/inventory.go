@@ -61,12 +61,18 @@ type SidecarInventory struct {
 	// ask for them remove them unconditionally.
 	ScratchPaths []string
 	// Unreadable counts entries the walk could not resolve: a directory
-	// it could not descend into, and a symlink it could not stat (so it
-	// cannot know whether the target is a directory whose only reference
-	// this is). Both are missing from every count above, which can only
-	// make the deletion set SMALLER — the known set comes from the
-	// database, not from the walk — so they are reported rather than
-	// refused. A report built from a partial tree should say so.
+	// it could not descend into, and a NON-REGULAR entry it could not
+	// stat (a symlink, a Windows junction — so it cannot know whether
+	// the target is a directory whose only reference this is). Both are
+	// missing from every count above, which can only make the deletion
+	// set SMALLER — the known set comes from the database, not from the
+	// walk — so they are reported rather than refused. A report built
+	// from a partial tree should say so.
+	//
+	// It is therefore a count of ENTRIES, not of directories, and the
+	// two CLI sweeps that print it say so: the message named directories
+	// and their contents, which was already imprecise for an unstattable
+	// link and is plainly wrong for a junction (CodeRabbit on #969).
 	Unreadable int
 	// Truncated is true when the walk stopped at MaxEntries with more of
 	// the tree unseen. A caller that deletes must not truncate; a caller

@@ -5,11 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -605,5 +609,63 @@ func TestAnalysisStoreAdapterAdoptsARelocatedWaveform(t *testing.T) {
 	bare := &analysisStoreAdapter{provider: manifest.NewProvider(store, nil)}
 	if rec, err := bare.LookupAnalysis(ctx, source); err != nil || rec == nil || rec.WaveformPath != recorded {
 		t.Errorf("bare adapter: rec=%+v err=%v", rec, err)
+	}
+}
+
+// TestUnreadableIsReportedAsEntriesNotDirectories.
+//
+// SidecarInventory.Unreadable counts entries the walk could not
+// resolve — a directory it could not descend into, AND a non-regular
+// entry it could not stat, which since #969 includes a Windows
+// junction as well as a symlink. Both CLI sweeps print that one count,
+// and both called it directories and spoke of "their contents": already
+// imprecise for an unstattable link, and plainly wrong for a junction,
+// which sends the operator looking for the wrong thing in their own
+// tree (CodeRabbit on #969).
+//
+// Walked over string LITERALS via go/parser rather than a text scan,
+// because the subject here IS a literal and this repo's comment
+// strippers blank those — and the comments beside these two lines
+// discuss directories by name, so a text scan would find its own
+// commentary. Both files, because one count printed from two places is
+// the enumeration failure this repo keeps paying for: CodeRabbit
+// flagged upscale.go and analyze.go carries the same string.
+func TestUnreadableIsReportedAsEntriesNotDirectories(t *testing.T) {
+	checked := 0
+	for _, file := range []string{"upscale.go", "analyze.go"} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		found := false
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			s, err := strconv.Unquote(lit.Value)
+			if err != nil || !strings.Contains(s, "could not be read") {
+				return true
+			}
+			found = true
+			checked++
+			if strings.Contains(s, "director") {
+				t.Errorf("%s reports Unreadable as directories (%q) — it also counts a link or "+
+					"junction the walk could not stat, and naming those directories sends the "+
+					"operator after the wrong thing", file, s)
+			}
+			if !strings.Contains(s, "entr") {
+				t.Errorf("%s no longer says what Unreadable counts (%q)", file, s)
+			}
+			return true
+		})
+		if !found {
+			t.Errorf("%s has no Unreadable report line — if it moved, move this guard with it", file)
+		}
+	}
+	if checked != 2 {
+		t.Fatalf("scanned %d report lines, want 2 — the scan is not seeing both sweeps and "+
+			"would pass no matter what they say", checked)
 	}
 }
