@@ -22,6 +22,28 @@ contract. Routine update one-liners:
 
 ## Production deployments
 
+> **⚠️ The operator bridge moved (2026-09-22).** `bridge.ars.md` was replaced by
+> a home NUC, reached over Tailscale as `<OPERATOR-SSH>`. The `bridge.ars.md`
+> subsection below still describes a live host — it keeps running the **public
+> demo** — but it is **no longer where the operator bridge lives**, so the
+> "Step 3" post-merge target is now the NUC. Coordinates, unit name, paths and
+> auth resolve in `ops/coordinates.local.md` as usual.
+>
+> Two things differ from the Azure host and both bite the tooling:
+>
+> - **Self-signed cert, so every health probe needs `curl -k`.**
+>   `deploy/linux/deploy-bridge-vps.sh` polls `curl -s "$HEALTH_URL"` with no
+>   `-k`, so on this host the poll can never match and the script exits 1 with
+>   its rollback guidance AFTER a swap that actually succeeded. It does not roll
+>   back, so nothing is broken — but the exit code lies. **Drive the manual form**
+>   (cross-compile → scp `.new` → SHA gate → DETACHED swap → `setcap` → restart),
+>   which is what the `bridge.ars.md` subsection documents, and verify with
+>   `curl -sk` from the host over the ControlMaster.
+> - **The library is a local USB SSD, not an rclone/B2 mount.** A full
+>   re-extraction of 21,460 tracks took **under two minutes** on 2026-09-22,
+>   against the hours the B2-mounted VPS needed. Don't carry the VPS's timing
+>   intuition over: size a re-extraction window from the host's storage.
+
 ### home-pc (Windows, SSH `<HOMEPC-SSH>`)
 
 Operator's home Windows machine. Reachable from the operator's macOS workstation via SSH (OpenSSH server, **session is auto-elevated to admin** — no UAC popup needed for `New-NetFirewallRule` etc.). PowerShell 7 (`pwsh`), Git, and Go are pre-installed. Tailscale runs in CLI mode (`tailscale.exe` on PATH). **Audio toolchain for the DSD → PCM renditions (`upscale.dsdRender.enabled`, PR #863):** `choco install ffmpeg` — the stock Chocolatey build carries the `dsd_*` and `dst` decoders; verify with `ffmpeg -hide_banner -decoders | findstr dsd_` (all FOUR `dsd_*` names — the runtime probe requires every one) and, separately, `ffmpeg -hide_banner -decoders | findstr " dst "`, since `dst` is its own capability and only DST-compressed DSDIFF depends on it, before flipping the flag, and `bridge doctor` (`dsd-render-toolchain`) names the install line when it is missing. Enabling the flag starts a sweep that reads every DSD track once, so do it when the library disk is not otherwise busy.
@@ -544,6 +566,7 @@ bridge that already had the fix.
 |---|---|---|---|---|
 | `v0.1.9-154` | 2026-09-08 | bridge.ars.md | `upscale.dsdRender.*`, `upscale.tempDir` (#863) | `bridge doctor` → `dsd-render-toolchain` ok; `/v1/health` advertises `dsdRender`; `upscale.tempDir` set explicitly (PrivateTmp) |
 | `v0.2.0` | 2026-09-18 | bridge.ars.md (operator) → the three hosted tenants → demo, all from the RELEASE ARTIFACT (`1-bit-bridge_0.2.0_linux_amd64.tar.gz`, checksum-verified); **home-pc not deployed** | `atlas.lyricsEnabled` (#887), `deployment.managedControls` (#876). Both `omitempty`, both default off; neither was written on any host, so the one-step binary rollback applies: `bridge.old-20260918-114618`, `bridge-demo.old-20260918-114647`, tenants `releases/v0.1.9-216-g393a47e` (flip `current`, restart `bridge@*`). | Items 1 and 7 done on the day: all five endpoints `0.2.0` with `lyrics`, `dsdRender` on bridge.ars.md only, `dlnaArtwork` absent, `demoMode` true on the demo, `bridge doctor` exit 0 on the live config. Item 2: NO re-extraction — every deployed host was on `-216`, which already carried `ExtractorVersion` 10 (8 → 10 landed with `-207`), and every row on all five live DBs is stamped 10 (measured 12:58Z), so no version-stale re-extraction was required — which is all the histogram proves; see item 2. Items 3–5 OPEN (the steady-state checks, per unit; 4's wall-clock is the #850 detector, 3's grep only counts extraction errors). Item 6 is the next nightly fuzz run; item 8 DONE (the note is marked). |
+| `v0.2.0-39-gdc2e171` | 2026-09-22 | **`<OPERATOR-SSH>` (the NUC) ONLY** — first deploy to the host that replaced `bridge.ars.md`. Demo, tenants and home-pc NOT deployed; they remain on `v0.2.0`. | **NONE.** The window added one config field (`integrity.variantSweepMaxDeletePercent`, #940) but it is `omitempty` with a default and was not written here, so the one-step binary rollback applies: `sudo mv /usr/local/bin/bridge.old-20260922-144244 /usr/local/bin/bridge && sudo setcap cap_net_bind_service=+ep /usr/local/bin/bridge && sudo systemctl restart 1-bit-bridge` — the `setcap` is not optional, the swap drops the file capability and this unit binds `:443` as an unprivileged user. | Carries #934–#966: the post-v0.2.0 window plus its review. **`ExtractorVersion` 10 → 13**, so the startup scan re-extracted all 21,460 tracks — **completed in under 2 minutes** on the local USB SSD, against the hours a B2-mounted host needs. Verified on the day: health `v0.2.0-39-gdc2e171`, **cert fingerprint UNCHANGED** (`AB:1B:79:…:76:3E` — iOS pins survive, no re-pairing), `bridge doctor` 14 ok / 2 warn / 0 fail on the live config (both warns benign: the `:443` bind probe cannot elevate, and no browser opener on a headless box), `variants-index` 10248 rows / 10248 files all referenced, `sidecar-paths` clean, 0 restarts. **#947's debounce fired on its first run and found 29 genuinely truncated FLACs** (`tracksUnreadable: 29`, threshold 3, suppressed 0 — they are on strike one); they are listed by `GET /api/analysis/unreadable`, by the Jobs page and now by `bridge status`, and they are files to REPLACE, not a bridge fault. Re-check that they reach `suppressed: 29` rather than being retried forever. |
 
 ### `v0.2.0` post-deploy checklist
 
