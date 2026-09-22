@@ -229,13 +229,14 @@ var citedRe = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*`)
 var (
 	mdPlaceholderNames = map[string]bool{
 		"TestX": true, "TestFoo": true, "TestBar": true,
-		// The two-name form, from a `-run '^(…|…)$'` example in the
-		// engineering log. They reached the exemption list only when
+		// The two single-letter forms, from a `-run '^(…|…)$'` example
+		// in the engineering log. They reached this list only when
 		// somebody looked on purpose, because definesWithPrefix
-		// answered first: a five-character citation is a prefix of 392
-		// and 131 of this module's real test names respectively, so it
-		// was "verified" by matching almost everything. See that
-		// function's docblock.
+		// answered first: a five-character citation prefixes hundreds
+		// of this module's real test names, so it was "verified" by
+		// matching almost everything. See that function's docblock —
+		// which describes them rather than spelling them, for the
+		// reason it gives there.
 		"TestA": true, "TestB": true,
 	}
 	mdForeignRepoTests = map[string]string{
@@ -447,13 +448,21 @@ func missingCitations(cited map[string][]string, defined map[string]bool) []stri
 //
 // **It does not verify a SHORT name, and cannot.** A citation is accepted
 // when it prefixes ANY defined test, so the shorter it is the more certainly
-// it passes: measured over this module, `TestA` prefixes 392 real tests and
-// `TestB` 131. Those two are exempted by name in mdPlaceholderNames rather
-// than caught here, and that is deliberate — the obvious alternative, a
-// minimum length, was tried and reverted (see citedRe: it silently ignored
-// every name under ten characters, and real tests are that short), and
-// requiring equality-or-`name+"_"` would reject ten legitimate truncations
-// in the tree today.
+// it passes: measured over this module, the two single-letter placeholders
+// in mdPlaceholderNames prefix 392 and 131 real test names respectively.
+// They are exempted there by name rather than caught here, and that is
+// deliberate — the obvious alternative, a minimum length, was tried and
+// reverted (see citedRe: it silently ignored every name under ten
+// characters, and real tests are that short), and requiring
+// equality-or-`name+"_"` would reject ten legitimate truncations in the
+// tree today.
+//
+// The two are DESCRIBED rather than spelled, and that is this rule biting
+// its own author: mdPlaceholderNames is consulted only by
+// collectMarkdownCitations, so writing them out in a Go docblock collects
+// them as ordinary citations — which then pass through the very masking
+// this paragraph is about. Same elision the citedRe note above uses, same
+// reason. (Gemini on #958.)
 //
 // So the rule to keep is the one the exemption map encodes: a citation too
 // short to identify anything is a PLACEHOLDER, and belongs in that map where
