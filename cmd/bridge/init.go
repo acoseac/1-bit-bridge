@@ -178,9 +178,15 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// Preflight. Run after library-path resolution so doctor sees the
 	// real path the user chose, not a default. --skip-doctor bypasses
-	// for the rare case where the operator knows better than the check
-	// (say: doctor fails on port 7789 bound by an existing bridge and
-	// you're re-running init on purpose to rewrite config).
+	// for the rare case where the operator knows better than the check.
+	//
+	// It used to bypass something else as well: an admin port bound by
+	// the operator's OWN running bridge graded FAIL, because the Deps
+	// built here carried no OwnPIDFile and checkPort's "is it us?"
+	// ladder needs one. Re-running init against a live install — the
+	// most ordinary reason to run it twice — therefore aborted, and this
+	// comment named that as a reason to pass the flag. withExistingInstallDeps
+	// reads the pid file and the real ports now, so the check answers.
 	if !*skipDoctor {
 		var roots []string
 		if abs != "" {
@@ -193,7 +199,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			APIPort:      7788,
 			AdminPort:    7789,
 		}
-		withExistingInstallCertDeps(&d, cfgPath)
+		withExistingInstallDeps(&d, cfgPath)
 		if code := ensureDoctorClean(stdout, d); code != 0 {
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "fix the fail(s) above, or re-run with --skip-doctor to bypass.")
@@ -834,9 +840,10 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 	return line == "y" || line == "yes"
 }
 
-// withExistingInstallCertDeps points `bridge init`'s preflight at the
-// certificate an EXISTING install at cfgPath actually serves, and wires
-// the SAN gather so the tls-cert-sans check runs at all.
+// withExistingInstallDeps points `bridge init`'s preflight at the
+// install that is ALREADY at cfgPath: the certificate it serves, the SAN
+// gather (so tls-cert-sans runs at all), its deployment posture, and the
+// ports and pid file it listens with.
 //
 // `bridge init` is re-run far more often than it is run: reinstalling
 // the service, rewriting a hand-edited config, moving a data directory
@@ -866,7 +873,7 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 // Everything both checks say about this state is warn-level by design
 // (neither a stale SAN set nor a clock-skewed NotBefore is a reason to
 // refuse to initialise), which is why ensureDoctorClean surfaces warns.
-func withExistingInstallCertDeps(d *doctor.Deps, cfgPath string) {
+func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return
@@ -888,6 +895,29 @@ func withExistingInstallCertDeps(d *doctor.Deps, cfgPath string) {
 	// helper copied the cert fields beside it and not this one, so the
 	// two commands graded the same host differently.
 	d.Managed = cfg.Deployment.IsManaged()
+	// The PORTS this install actually listens on. 7788/7789 are the
+	// DEFAULTS, and the preflight hard-coded them: a public-mode install
+	// on :443 was graded against two ports nothing was using, which are
+	// free, so `port-api: ok` — a check passing because the thing it
+	// guards is absent. `bridge doctor` has read them from the config
+	// since it learned to (buildDoctorDeps); this helper copied the cert
+	// fields beside them and not these, so the two commands graded the
+	// same host differently.
+	if _, port, ok := splitHostPort(cfg.ListenAddress); ok {
+		d.APIPort = port
+	}
+	if _, port, ok := splitHostPort(cfg.AdminAddress); ok {
+		d.AdminPort = port
+	}
+	// And the pid file `bridge serve` writes while it runs, without
+	// which checkPort cannot run its "is that bound port US?" ladder at
+	// all — an empty OwnPIDFile skips it, and a bound admin port then
+	// grades FAIL. That is not hypothetical: it is the situation the
+	// --skip-doctor comment at the call site describes as the reason
+	// the flag exists, i.e. the defect was being worked around rather
+	// than fixed, in the command whose whole job here is to grade the
+	// install that is there.
+	d.OwnPIDFile = filepath.Join(cfg.DataDir, "server.pid")
 }
 
 // maxLibraryPrompts bounds the interactive library-path re-prompt loop so a
