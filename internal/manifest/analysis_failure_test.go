@@ -649,7 +649,7 @@ func TestRecordAnalysisFailureSurfacesADatabaseError(t *testing.T) {
 // Asserted on the PLAN, not on a duration: the property that regressed is
 // "the planner reaches the index", and a timing test measures the host.
 func TestSuppressedPredicateUsesThePartialIndex(t *testing.T) {
-	st := openTestStore(t)
+	st := openAnalysisFailStore(t)
 	plan := func(where string) string {
 		rows, err := st.db.QueryContext(context.Background(),
 			"EXPLAIN QUERY PLAN SELECT path FROM tracks WHERE "+where, int64(0))
