@@ -461,123 +461,148 @@ func TestManifest_DeltaOmitsPathsWithServedRows(t *testing.T) {
 	}
 }
 
+// journalDecision is what one decideDeletionJournalMode call did: the
+// answer it gave, and BOTH halves of the reset it may have performed.
+//
+// Both, because `resetDeletionJournalCoverageTx` runs two statements —
+// it DELETEs every tombstone and it stamps `deletionJournalCoverageKey`
+// in scan_state — and an assertion on the tombstones alone passes
+// against a version that drops the marker. The marker is what makes a
+// delta client answer `deltaIncomplete` and full-sync; without it the
+// client reads a wiped journal as "nothing was deleted", which is the
+// exact wrong answer in the exact case this guard exists for.
+// (CodeRabbit on #958.)
+type journalDecision struct {
+	perChunk      bool
+	tombstoneKept bool
+	markerWritten bool
+}
+
+// runJournalDecision seeds a library of `seedTracks`, one tombstone and
+// NO coverage marker, then reports what a decision over `n` paths did.
+//
+// The marker is cleared deliberately: migration v41's post() seeds it on
+// every OpenStore, so "the mass-op arm stamps it" is unfalsifiable
+// against a store that already had one. Clearing it first makes the
+// ordinary arm's "leaves it absent" and the mass-op arms' "writes it"
+// two different observations rather than the same one twice.
+//
+// One recursive-CTE INSERT rather than seedTracks calls through
+// UpsertTrack. The decision reads `SELECT COUNT(*) FROM tracks` and
+// nothing else, so what these rows need to be is COUNTABLE — and the
+// threshold case needs 40,000 of them. Through the upsert path that
+// subtest took 72 seconds on its own, in the package whose sequential
+// runtime is the CI race job's floor, and 48x that under the detector.
+// Well under a second this way.
+func runJournalDecision(t *testing.T, seedTracks, n int) journalDecision {
+	t.Helper()
+	ctx := context.Background()
+	s := openJournalTestStore(t)
+	if seedTracks > 0 {
+		if _, err := s.db.ExecContext(ctx, `
+			WITH RECURSIVE n(i) AS (
+				SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?
+			)
+			INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
+			SELECT 'A/' || i || '.flac', 1, 1, x'7b7d', 1 FROM n
+		`, seedTracks); err != nil {
+			t.Fatalf("seed %d tracks: %v", seedTracks, err)
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only on the assert path
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO manifest_deletions(path, deleted_at) VALUES('A/gone.flac', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM scan_state WHERE k = ?`, deletionJournalCoverageKey); err != nil {
+		t.Fatal(err)
+	}
+
+	out := journalDecision{}
+	if out.perChunk, err = s.decideDeletionJournalMode(ctx, tx, n); err != nil {
+		t.Fatalf("decideDeletionJournalMode(%d over %d tracks): %v", n, seedTracks, err)
+	}
+
+	var tombstones, markers int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM manifest_deletions`).Scan(&tombstones); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM scan_state WHERE k = ?`, deletionJournalCoverageKey).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	out.tombstoneKept = tombstones > 0
+	out.markerWritten = markers > 0
+	return out
+}
+
 // TestDecideDeletionJournalModeCoversBothMassOpArms drives the guard
 // directly, because its ABSOLUTE arm has no other way in.
 //
 // #949 extracted this decision out of DeleteTracksBatch to bring that
 // function under the complexity ceiling, and left the extracted function
 // with no test of its own. The RATIO arm is reachable from a fixture of
-// a few rows; the `n > 10,000` arm is not — seeding ten thousand tracks
-// to exercise one comparison would be the slowest test in a package
-// whose sequential runtime is already the CI job's floor, and under the
-// race detector that is 48x.
+// a few rows; the `n > 10,000` arm is not, without a library four times
+// that size — see runJournalDecision for how it is seeded.
 //
-// Both arms have the same two duties: report "do not journal", and
-// RESET coverage before returning, so the two halves of the decision
-// cannot be separated by a caller. Asserting only the boolean would
-// pass against a version that forgot the reset, which is the half that
-// makes delta clients answer `deltaIncomplete` and full-sync instead of
-// reading a five-digit tombstone set.
+// Every case asserts all THREE outcomes together, because the two duties
+// can regress apart: a version that answers "do not journal" and forgets
+// either half of the reset is the one that ships a wiped journal a delta
+// client reads as "nothing was deleted".
 func TestDecideDeletionJournalModeCoversBothMassOpArms(t *testing.T) {
-	ctx := context.Background()
-
-	// journalled reports whether coverage is intact after the call: the
-	// reset DELETEs every manifest_deletions row, so a tombstone seeded
-	// beforehand surviving means the decision left coverage alone.
-	run := func(t *testing.T, seedTracks, n int) (perChunk, coverageKept bool) {
-		t.Helper()
-		s := openJournalTestStore(t)
-		// One recursive-CTE INSERT rather than seedTracks calls through
-		// UpsertTrack. The decision under test reads `SELECT COUNT(*)
-		// FROM tracks` and nothing else, so what these rows need to be
-		// is COUNTABLE — and the threshold case needs 40,000 of them
-		// (four times the absolute cap, so the ratio arm cannot be what
-		// fires). Through the upsert path that subtest took 72 seconds
-		// on its own, in the package whose sequential runtime is the CI
-		// race job's floor, and 48x that under the detector. Measured at
-		// well under a second this way.
-		if seedTracks > 0 {
-			if _, err := s.db.ExecContext(ctx, `
-				WITH RECURSIVE n(i) AS (
-					SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?
-				)
-				INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at)
-				SELECT 'A/' || i || '.flac', 1, 1, x'7b7d', 1 FROM n
-			`, seedTracks); err != nil {
-				t.Fatalf("seed %d tracks: %v", seedTracks, err)
+	for _, tc := range []struct {
+		name       string
+		seedTracks int
+		n          int
+		want       journalDecision
+		why        string
+	}{
+		{
+			name: "ordinary deletion journals and resets nothing",
+			// 2 of 40 is not a reorganization.
+			seedTracks: 40, n: 2,
+			want: journalDecision{perChunk: true, tombstoneKept: true, markerWritten: false},
+			why:  "a 2-of-40 deletion must journal and leave coverage alone",
+		},
+		{
+			name: "ratio arm",
+			// 20 of 40 is half the library, past the quarter divisor.
+			seedTracks: 40, n: 20,
+			want: journalDecision{perChunk: false, tombstoneKept: false, markerWritten: true},
+			why:  "a 20-of-40 deletion is a reorganization; both halves of the reset must run",
+		},
+		{
+			name: "absolute arm, reached with no rows at all",
+			// `n` alone decides, BEFORE the COUNT is run. An empty
+			// library proves it: under the ratio rule `total > 0` is
+			// false and this would journal.
+			seedTracks: 0, n: deletionJournalMassOpAbsolute + 1,
+			want: journalDecision{perChunk: false, tombstoneKept: false, markerWritten: true},
+			why:  "a past-the-cap deletion must not journal, whatever the library size",
+		},
+		{
+			name: "absolute arm is exclusive at the threshold",
+			// Exactly the threshold is NOT past it — `>` and `>=` read
+			// identically and differ by one path at the one size nobody
+			// tests by accident. The library is four times the cap so
+			// the RATIO arm cannot be what answers; derived from both
+			// constants rather than typed, so it follows either.
+			seedTracks: deletionJournalMassOpAbsolute * deletionJournalMassOpLibraryDivisor,
+			n:          deletionJournalMassOpAbsolute,
+			want:       journalDecision{perChunk: true, tombstoneKept: true, markerWritten: false},
+			why:        "exactly the cap is not past it; the comparison is `>`",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runJournalDecision(t, tc.seedTracks, tc.n); got != tc.want {
+				t.Errorf("decision = %+v, want %+v — %s", got, tc.want, tc.why)
 			}
-		}
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer tx.Rollback() //nolint:errcheck // read-only on the assert path
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO manifest_deletions(path, deleted_at) VALUES('A/gone.flac', 1)`); err != nil {
-			t.Fatal(err)
-		}
-		perChunk, err = s.decideDeletionJournalMode(ctx, tx, n)
-		if err != nil {
-			t.Fatalf("decideDeletionJournalMode(%d over %d tracks): %v", n, seedTracks, err)
-		}
-		var left int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM manifest_deletions`).Scan(&left); err != nil {
-			t.Fatal(err)
-		}
-		return perChunk, left > 0
+		})
 	}
-
-	t.Run("ordinary deletion journals and keeps coverage", func(t *testing.T) {
-		perChunk, kept := run(t, 40, 2)
-		if !perChunk {
-			t.Error("a 2-of-40 deletion is not a reorganization — it must journal")
-		}
-		if !kept {
-			t.Error("coverage was reset for an ordinary deletion")
-		}
-	})
-
-	t.Run("ratio arm", func(t *testing.T) {
-		// 20 of 40 is half the library, past the quarter divisor.
-		perChunk, kept := run(t, 40, 20)
-		if perChunk {
-			t.Error("a 20-of-40 deletion is a reorganization — it must not journal")
-		}
-		if kept {
-			t.Error("the ratio arm did not reset coverage, so delta clients would read " +
-				"a partial tombstone set as complete")
-		}
-	})
-
-	t.Run("absolute arm, reached with no rows at all", func(t *testing.T) {
-		// The point of this case: `n` alone decides, BEFORE the COUNT is
-		// even run. An empty library proves it — under the ratio rule
-		// `total > 0` is false and the deletion would journal.
-		perChunk, kept := run(t, 0, deletionJournalMassOpAbsolute+1)
-		if perChunk {
-			t.Errorf("a %d-path deletion must not journal, whatever the library size",
-				deletionJournalMassOpAbsolute+1)
-		}
-		if kept {
-			t.Error("the absolute arm did not reset coverage")
-		}
-	})
-
-	t.Run("absolute arm is exclusive at the threshold", func(t *testing.T) {
-		// Exactly the threshold is NOT past it. Pinned because `>` and
-		// `>=` read identically and differ by one path at the one size
-		// nobody tests by accident.
-		//
-		// The library has to be big enough that the RATIO arm is not
-		// what answers — n*4 > total must be false at n = 10,000 — so
-		// the size here is derived from both constants rather than
-		// typed, and follows either if it moves.
-		total := deletionJournalMassOpAbsolute * deletionJournalMassOpLibraryDivisor
-		perChunk, _ := run(t, total, deletionJournalMassOpAbsolute)
-		if !perChunk {
-			t.Errorf("exactly %d paths tripped the absolute arm; the comparison is `>`",
-				deletionJournalMassOpAbsolute)
-		}
-	})
 }

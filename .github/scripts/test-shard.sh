@@ -214,7 +214,10 @@ assert_matrix_is_complete() {
       echo "test-shard: ${wf} does not schedule all $n shards of ${g}." >&2
       echo "            want indices: $(printf '%s' "$want" | paste -sd, -)" >&2
       echo "            got:          $(printf '%s' "$got" | paste -sd, -)" >&2
-      if [ "$g" = rest ]; then
+      # `[[` rather than `[`, matching the pkg match in is_sharded above:
+      # the file is bash-shebanged and the safer construct is already in
+      # use here (SonarCloud shelldre:S7688).
+      if [[ "$g" == rest ]]; then
         echo "            the 'rest' leg is what runs every NON-sharded package —" >&2
         echo "            without it internal/api, internal/transcode and cmd/bridge" >&2
         echo "            run nowhere, and every sharded leg still passes." >&2
