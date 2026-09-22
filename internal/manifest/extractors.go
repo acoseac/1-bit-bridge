@@ -318,7 +318,25 @@ var Ext = map[string]bool{
 // unconditional rule for an extraction-logic change, and the
 // version-stale diff-guard is what keeps the client delta to rows that
 // actually differ — here, none.
-const ExtractorVersion = 12
+//
+// v13 — the duration gate gains its FLOOR, and the IFF payload rule
+// gains its zero. plausibleDuration defended the ceiling alone, so an
+// `mvhd` declaring `timescale = 0xFFFFFFFF, duration = 1` stamped
+// 2.3e-10 s: finite, positive, under a week, and rendered by the phone
+// as "0:00" rather than as the absence it is. Its docblock matched the
+// code exactly, which is why neither a test nor a review caught it —
+// the gap was in the POLICY, not its implementation. And iffPayloadFits
+// accepted a declared payload size of 0 as "fits", so an AIFF with a
+// well-formed COMM and an SSND claiming no audio stamped ten minutes
+// onto an empty file; #935 claimed that rule for both IFF walkers and
+// shipped it in one (WAV was covered by accident, deriving its seconds
+// from the data size it was checking).
+//
+// Again NO legitimate file changes: 100 ms is orders of magnitude below
+// the shortest thing a library legitimately holds, and a zero-size audio
+// chunk beside a non-zero frame count is an inconsistent file by
+// definition.
+const ExtractorVersion = 13
 
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
@@ -2517,16 +2535,40 @@ func (s dffSoundInfo) payloadFits() bool {
 // WAV, v11) applies the SAME ceiling through plausibleDuration.
 const dffMaxPlausibleDurationSeconds = 604_800.0
 
+// minPlausibleDurationSeconds is the FLOOR the ceiling above was missing.
+//
+// `d > 0` admits any positive value, and a forged header reaches absurdly
+// SMALL as easily as absurdly large: an `mvhd` declaring
+// `timescale = 0xFFFFFFFF, duration = 1` yields 2.3e-10 s, which is
+// finite, positive and comfortably under a week — so it was stamped into
+// tags_json and onto the wire as a real duration, where nothing
+// downstream re-derives it. A WAV with a forged `nAvgBytesPerSec`
+// arrives at the same place from the other side.
+//
+// 100 ms, because a track shorter than that is not a track. The shortest
+// things a music library legitimately holds — UI stingers, sample
+// slices, the silent lead-in some rips keep as a separate index point —
+// are comfortably above it, while every value this gate exists to reject
+// is orders of magnitude below. An honest absent Duration beats a
+// confident wrong one: iOS renders nil as "--:--" and renders 0.0000000002
+// as "0:00".
+const minPlausibleDurationSeconds = 0.1
+
 // plausibleDuration reports whether a derived duration may be stamped:
-// finite, strictly positive, and under the week-long ceiling. NaN fails
-// `d > 0` and +Inf fails `d < ceiling`, so no separate checks are needed.
+// finite and inside [100 ms, one week). NaN fails every comparison and
+// +Inf fails the ceiling, so no separate checks are needed.
+//
 // The ONE gate every Duration write site consults — a forged header
 // (an `mvhd` timescale of 1, a Xing frame count of 2^32−1, a WAV
 // `nAvgBytesPerSec` of 1) must not persist a multi-year duration, and
 // a non-finite value would fail json.Marshal for the whole tags_json
 // batch (the parseAIFFExtended precedent).
+//
+// It defended the ceiling and not the floor until v13. The docblock
+// matched the code exactly, which is why no test and no review caught
+// it: the gap was in the POLICY, not in its implementation.
 func plausibleDuration(d float64) bool {
-	return d > 0 && d < dffMaxPlausibleDurationSeconds
+	return d >= minPlausibleDurationSeconds && d < dffMaxPlausibleDurationSeconds
 }
 
 // applyDFFStamps is the single commit policy over everything the DFF

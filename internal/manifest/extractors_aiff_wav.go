@@ -176,7 +176,7 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 			// sits, for the fit check. First SSND wins (a second one
 			// is malformed; the spec allows exactly one).
 			if !ssnd.seen {
-				ssnd = iffPayloadSpanAt(f, size)
+				ssnd = ssndSoundSpan(f, size)
 			}
 			if err := seekPastChunk(f, int64(size)); err != nil {
 				return err
@@ -522,6 +522,48 @@ func iffPayloadSpanAt(f *os.File, size uint32) iffPayloadSpan {
 	return iffPayloadSpan{seen: true, offset: uint64(pos), size: uint64(size)}
 }
 
+// ssndSoundSpan is iffPayloadSpanAt for an AIFF SSND chunk, whose body
+// is NOT all audio: it opens with an 8-byte prefix (`offset` and
+// `blockSize`, both uint32 BE), and `offset` counts further padding
+// bytes before the first sample frame.
+//
+// Recording the whole declared size as payload — which is what the plain
+// helper does — makes an SSND of exactly 8 bytes look like 8 bytes of
+// audio. It holds NONE: the body is the prefix and nothing else. So a
+// file whose COMM claims ten minutes and whose SSND claims 8 passed the
+// fit check and stamped the ten minutes, which is the zero case one
+// prefix along (CodeRabbit on #966).
+//
+// The span is narrowed rather than merely tested, so the physical bounds
+// check still measures the AUDIO against the file: subtracting from
+// `size` alone would leave `offset` pointing at the prefix and weaken
+// that comparison by 8 + offset bytes.
+//
+// Read with ReadAt so the walker's own file position is untouched and
+// the `seekPastChunk(f, size)` that follows stays correct. A short or
+// failed read, a size that cannot hold its own prefix, or a span with no
+// sound data at all, all yield an UNSEEN span — no duration rather than
+// one nothing verified.
+func ssndSoundSpan(f *os.File, size uint32) iffPayloadSpan {
+	span := iffPayloadSpanAt(f, size)
+	if !span.seen {
+		return iffPayloadSpan{}
+	}
+	var prefix [8]byte
+	if _, err := f.ReadAt(prefix[:], int64(span.offset)); err != nil {
+		return iffPayloadSpan{}
+	}
+	skip := uint64(8) + uint64(binary.BigEndian.Uint32(prefix[:4]))
+	if span.size <= skip {
+		// Cannot hold its own prefix, or holds the prefix and no
+		// sound: either way there is no audio to time.
+		return iffPayloadSpan{}
+	}
+	span.offset += skip
+	span.size -= skip
+	return span
+}
+
 // physicalFileSize is the on-disk byte count, 0 when Stat fails — an
 // unknown bound fails OPEN in iffPayloadFits (typing and duration land),
 // parity with the DFF walker and the iOS `fileSizeBound: nil` rule. In
@@ -549,9 +591,9 @@ const iffUnknownPayloadSize = 0xFFFFFFFF
 
 // iffPayloadFits reports whether the declared payload physically fits
 // inside the file: offset + size <= physicalSize, overflow-safe. An
-// unknown bound (0) fails OPEN; an unseen payload, and a declared size
-// that is the unknown-length sentinel, fail CLOSED — a duration nothing
-// can verify must not be stamped. The AIFF / WAV twin of the DFF
+// unknown bound (0) fails OPEN; an unseen payload, a declared size of
+// ZERO, and a declared size that is the unknown-length sentinel, all
+// fail CLOSED — a duration nothing can verify must not be stamped. The AIFF / WAV twin of the DFF
 // walker's `payloadFits`, kept as its own function because that one is
 // a method over the DFF walk's own state.
 //
@@ -564,6 +606,27 @@ const iffUnknownPayloadSize = 0xFFFFFFFF
 // audio onto a file that never declared a length at all.
 func iffPayloadFits(span iffPayloadSpan, physicalSize uint64) bool {
 	if !span.seen || span.size == iffUnknownPayloadSize {
+		return false
+	}
+	// A declared payload of ZERO is the sentinel's other half, and it
+	// reached here fitting trivially: `0 <= physicalSize - offset` is
+	// true for any bound, so a chunk claiming no audio at all passed the
+	// check whose whole job is "does the audio fit the file".
+	//
+	// WAV never noticed, because wavDurationSeconds derives its seconds
+	// FROM the data size and returns 0 for an empty chunk, which the
+	// plausibility gate then rejects. AIFF derives from COMM instead, so
+	// a file with a well-formed COMM (numSampleFrames 26,460,000 at
+	// 44100) and an SSND declaring size 0 stamped Duration = 600 on a
+	// file holding no audio bytes. #935 claimed the rule for BOTH IFF
+	// walkers; it shipped in one.
+	//
+	// Narrow in practice — a real streaming-writer AIFF has
+	// numSampleFrames == 0 too, so it stamps nothing — which is exactly
+	// why it needs the gate rather than the coincidence: the shape that
+	// reaches it is a corrupt or forged file, and that is the input this
+	// function exists for.
+	if span.size == 0 {
 		return false
 	}
 	if physicalSize == 0 {
