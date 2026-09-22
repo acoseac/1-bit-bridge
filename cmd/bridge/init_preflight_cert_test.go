@@ -579,6 +579,19 @@ func TestInitDoesNotExcuseAChangedPortWithItsOwnLivePID(t *testing.T) {
 		t.Fatalf("init exited 0: a changed port held by another process was excused because our own "+
 			"recorded pid is alive\n--- stdout ---\n%s\n--- stderr ---\n%s", out.String(), errOut.String())
 	}
+	// WHICH check refused, not merely that something did. The released
+	// api port cannot fail here — the live recorded pid downgrades any
+	// conflict on it to ok or warn, which is the very behaviour under
+	// test — so a bare "nonzero exit plus an unchanged config" would be
+	// satisfied by an unrelated failure and prove nothing about the held
+	// admin port (CodeRabbit on #970).
+	if !strings.Contains(out.String(), "port-admin") {
+		t.Errorf("the refusal does not name port-admin, so it is not the held port that stopped "+
+			"this init:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "these are the ports this init would write") {
+		t.Errorf("the refusal did not come from the second port pass:\n%s", out.String())
+	}
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
