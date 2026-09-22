@@ -309,4 +309,21 @@ func TestUpsertPlaylistRevivesTombstone(t *testing.T) {
 	if got == nil || got.Name != "revived" {
 		t.Errorf("tombstoned row not revived: %+v", got)
 	}
+
+	// And `deleted_by` goes with the flag, the way RestorePlaylist
+	// clears it: it is provenance for a tombstone, and this row's
+	// tombstone has just been undone. Read back through the raw column
+	// rather than a list helper, because every list filters
+	// `deleted = 1` — which is exactly why a stale value here is
+	// invisible until something finally reads it on a live row and
+	// names the wrong device.
+	var deletedBy string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT deleted_by FROM playlists WHERE id = ?`, "pl-1").Scan(&deletedBy); err != nil {
+		t.Fatalf("read deleted_by: %v", err)
+	}
+	if deletedBy != "" {
+		t.Errorf("a revived row still carries deleted_by = %q — the delete it attributes "+
+			"has been undone", deletedBy)
+	}
 }

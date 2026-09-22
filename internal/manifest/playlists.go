@@ -108,7 +108,21 @@ func (s *Store) UpsertPlaylist(ctx context.Context, deviceToken string, p Playli
 			name             = excluded.name,
 			last_modified_at = excluded.last_modified_at,
 			updated_at       = excluded.updated_at,
-			deleted          = 0
+			deleted          = 0,
+			-- Cleared WITH the flag, exactly as RestorePlaylist does it.
+			-- deleted_by is provenance for a tombstone, and this arm is
+			-- the client's own revive-by-PUT: leaving it behind means a
+			-- LIVE row carrying the token of a device whose delete has
+			-- already been undone. Nothing reads it on a live row today
+			-- (every reader filters deleted = 1) and the next tombstone
+			-- overwrites it, so this is latent rather than live — but
+			-- the burst warning and the Recently-deleted panel both
+			-- attribute FROM this column, and a stale value on a revived
+			-- row is the kind that names the wrong device once something
+			-- does read it. The 2026-09-20 incident is on record
+			-- precisely because attribution was the half that was
+			-- missing.
+			deleted_by       = ''
 	`, p.ID, deviceToken, p.Name, p.LastModifiedAt, now); err != nil {
 		return err
 	}
