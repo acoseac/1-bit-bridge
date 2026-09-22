@@ -134,6 +134,23 @@ type VariantSidecarLocation struct {
 	// ERROR_INVALID_NAME rather than anything errors.Is(ErrNotExist)
 	// matches.
 	Path string
+	// WithinStore reports whether Path lies under the directory
+	// SidecarStoreState probes, which is the ONLY unlink that can
+	// explain that directory being empty.
+	//
+	// A recorded path is absolute and need not be under the current
+	// variants directory at all — that is the relocation this whole
+	// lookup exists for. So a request that unlinks a file from the OLD
+	// tree has not emptied the CURRENT one, and counting it would let
+	// the empty-store exception run while the current volume is
+	// unmounted, deleting a row whose sidecar is intact on the volume
+	// that will come back (CodeRabbit on #968).
+	//
+	// True for Relocated by construction (the canonical path is built
+	// from the probed directory), and true when no directory is
+	// configured at all, where the probe answers Available and the
+	// exception is never reached.
+	WithinStore bool
 }
 
 // InflightDropper is the interface the delete handler uses to
@@ -566,11 +583,14 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// per-row logging is the M-SEARCH flood shape — thousands of
 	// identical lines that make every other line unfindable.
 	skippedUnavailable := 0
-	// unlinked counts files THIS request removed from disk, which is what
-	// makes an empty variants directory explicable rather than evidence
-	// of an unmount. Distinct from DeletedCount, which also counts rows
-	// whose sidecar was already gone.
-	unlinked := 0
+	// unlinkedInStore counts files THIS request removed from UNDER the
+	// directory SidecarStoreState probes, which is what makes that
+	// directory being empty explicable rather than evidence of an
+	// unmount. Distinct from DeletedCount, which also counts rows whose
+	// sidecar was already gone, and deliberately narrower than "files
+	// removed": a recorded path can name the OLD tree, and unlinking
+	// from there explains nothing about the current one.
+	unlinkedInStore := 0
 	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(ctx)
 	for _, row := range rows {
@@ -642,10 +662,10 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// #959's lookup exists to fix.
 		//
 		// And EMPTY is explicable once this request has unlinked
-		// something: on the legacy hash-flat layout (no
-		// subdirectories) the last successful unlink is what emptied
-		// the directory, so a probe after it would refuse the
-		// remaining rows on a state this very request created —
+		// something FROM THAT DIRECTORY: on the legacy hash-flat layout
+		// (no subdirectories) the last successful unlink is what
+		// emptied it, so a probe after that would refuse the remaining
+		// rows on a state this very request created —
 		// gcCheckOutputDirBeforeReverseSweep's lesson (#941), which
 		// took a `removed` count for exactly this reason. Missing,
 		// unreadable and not-a-directory still refuse however much was
@@ -653,16 +673,18 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// it cannot be what took the root.
 		//
 		// Per row rather than once, because a whole-library delete runs
-		// long enough for a mount to drop underneath it.
+		// long enough for a mount to drop underneath it. The cost is
+		// one stat beside the two LocateVariantSidecar already took on
+		// the same volume, and only on rows that unlinked nothing.
 		if errors.Is(removeErr, os.ErrNotExist) {
 			st := s.variantDeleter.SidecarStoreState()
-			if !st.Available && !(st.Empty && unlinked > 0) {
+			if !st.Available && (!st.Empty || unlinkedInStore == 0) {
 				skippedUnavailable++
 				continue
 			}
 		}
-		if removeErr == nil {
-			unlinked++
+		if removeErr == nil && loc.WithinStore {
+			unlinkedInStore++
 		}
 		if removeErr == nil && loc.Placement == VariantSidecarRelocated {
 			// AFTER the unlink succeeded, not before it is attempted:

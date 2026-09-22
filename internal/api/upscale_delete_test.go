@@ -33,9 +33,12 @@ type stubVariantDeleter struct {
 	// ctx early-break.
 	afterDelete func()
 	// locate, when set, answers LocateVariantSidecar. nil means every
-	// row is at its recorded path, which is what the bridge reported
-	// before #937's rule reached this handler and is what keeps the
-	// pre-existing cases in this file describing the same bridge.
+	// row is at its recorded path INSIDE the current variants directory,
+	// which is what the bridge reported before #937's rule reached this
+	// handler and is what keeps the pre-existing cases in this file
+	// describing the same bridge. WithinStore false is the relocation
+	// shape — a recorded path on some OTHER tree — and a case that wants
+	// it says so.
 	locate func(VariantSummary) VariantSidecarLocation
 	// storeUnavailable makes SidecarStoreState answer unavailable — the
 	// unmounted-volume state. Default false (available), which is the
@@ -67,7 +70,7 @@ func (s *stubVariantDeleter) LocateVariantSidecar(v VariantSummary) VariantSidec
 	fn := s.locate
 	s.mu.Unlock()
 	if fn == nil {
-		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath}
+		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: true}
 	}
 	return fn(v)
 }
@@ -977,5 +980,61 @@ func TestUpscaleDeleteKeepsRowsWhenAnEmptyDirIsNotItsOwnDoing(t *testing.T) {
 	if got := deleter.deletedKeys(); len(got) != 0 {
 		t.Fatalf("DeleteVariant calls: got %v, want none — nothing was unlinked, so an empty "+
 			"directory is still the unmount it has always been", got)
+	}
+}
+
+// TestUpscaleDeleteWillNotExplainAnEmptyStoreWithAnUnlinkOutsideIt.
+//
+// The empty-store exception exists because on the legacy hash-flat
+// layout THIS request's own unlinks empty the directory. Counting every
+// removed file made that argument from evidence it does not have: a
+// recorded sidecar_path is absolute and need not be under the current
+// variants directory at all — that is the relocation the whole lookup
+// exists for — so unlinking from the OLD tree said nothing about the
+// CURRENT one.
+//
+// The shape: rows recorded on a still-mounted old tree, the current
+// variants directory unmounted (a clean unmount reverts a mountpoint to
+// an empty local directory). One old file is removed, and the next row —
+// whose sidecar sits intact on the volume that will come back — was then
+// deleted under the exception and orphaned. (CodeRabbit on #968.)
+func TestUpscaleDeleteWillNotExplainAnEmptyStoreWithAnUnlinkOutsideIt(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	oldTree := t.TempDir()
+	present := filepath.Join(oldTree, "abc-v1.flac")
+	if err := os.WriteFile(present, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deleter.all = []VariantSummary{
+		// On the old tree, and still there: unlinked, but from a
+		// directory the probe is not describing.
+		{SourcePath: "Music/Album/01.flac", VariantID: "v1", SidecarPath: present, SizeBytes: 10},
+		// Absent at both locations — which is what an unmounted current
+		// volume looks like from a stat.
+		{SourcePath: "Music/Album/02.flac", VariantID: "v1", SidecarPath: filepath.Join(oldTree, "def-v1.flac"), SizeBytes: 20},
+	}
+	deleter.mu.Lock()
+	deleter.locate = func(v VariantSummary) VariantSidecarLocation {
+		// Recorded paths on the OLD tree: outside the probed store.
+		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: false}
+	}
+	deleter.storeUnavailable, deleter.storeEmpty = true, true
+	deleter.mu.Unlock()
+
+	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	got := deleter.deletedKeys()
+	for _, k := range got {
+		if strings.Contains(k, "02.flac") {
+			t.Fatalf("the second row was deleted (%v) — an unlink from the OLD tree was taken as "+
+				"proof this request emptied the CURRENT one, which is unmounted", got)
+		}
+	}
+	// The first row is still reconciled: its file really was removed.
+	if len(got) != 1 || !strings.Contains(got[0], "01.flac") {
+		t.Errorf("DeleteVariant calls: got %v, want only the row whose file was unlinked", got)
 	}
 }

@@ -676,3 +676,42 @@ func TestVariantDeleterAdapterLocatesARowThatRecordedNoPath(t *testing.T) {
 		t.Errorf("locate with no variants directory = %+v, want Recorded with no path", got)
 	}
 }
+
+// TestPathUnderRefusesASiblingWithAPrefixName.
+//
+// `pathUnder` decides whether an unlink can explain the probed variants
+// directory being empty, and a string-prefix compare would call
+// `/srv/variants-old/x` a child of `/srv/variants` — which is exactly
+// the relocation shape, so the one wrong answer it could give is the
+// one that matters.
+func TestPathUnderRefusesASiblingWithAPrefixName(t *testing.T) {
+	dir := filepath.Join("/srv", "variants")
+	for _, tc := range []struct {
+		name, p string
+		want    bool
+	}{
+		{"a child", filepath.Join(dir, "Artist", "Album", "t.flac.upscaled-v2-176400-24.flac"), true},
+		{"the directory itself", dir, true},
+		{"a trailing-slash spelling", dir + string(filepath.Separator), true},
+		// The prefix trap: a sibling whose name starts with dir's.
+		{"a prefix-named sibling", filepath.Join("/srv", "variants-old", "x.flac"), false},
+		{"a parent", "/srv", false},
+		{"an unrelated tree", filepath.Join("/mnt", "other", "x.flac"), false},
+		{"no directory", "", false},
+		{"no path", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := dir
+			if tc.name == "no directory" {
+				d = ""
+			}
+			p := tc.p
+			if tc.name == "no path" {
+				p = ""
+			}
+			if got := pathUnder(d, p); got != tc.want {
+				t.Errorf("pathUnder(%q, %q) = %v, want %v", d, p, got, tc.want)
+			}
+		})
+	}
+}
