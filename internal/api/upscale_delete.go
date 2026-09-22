@@ -112,19 +112,19 @@ type VariantSidecarStoreState struct {
 	// tells them apart: the local directory under a mountpoint is not
 	// the same directory as the volume that was mounted on it
 	// (CodeRabbit on #968).
-	Store SidecarStoreIdentity
+	Store SidecarStoreIdentifier
 }
 
-// SidecarStoreIdentity is an opaque handle to one observation of the
-// variants directory, compared only with Same.
+// SidecarStoreIdentifier identifies one observation of the variants
+// directory. Two of them are compared only with Same.
 //
 // Opaque because identity is a filesystem question — device and inode on
 // POSIX, volume and file index on Windows — that os.SameFile answers
 // portably and no exported type carries as a value. cmd/bridge wraps a
-// FileInfo; this package only ever asks whether two observations are the
+// FileInfo; this package only ever asks whether two observations name the
 // same directory.
-type SidecarStoreIdentity interface {
-	Same(other SidecarStoreIdentity) bool
+type SidecarStoreIdentifier interface {
+	Same(other SidecarStoreIdentifier) bool
 }
 
 // VariantSidecarPlacement says where a variant row's sidecar actually is.
@@ -623,7 +623,7 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// re-probe per deleted row would put a stat on the happy path of a
 	// whole-library delete, and a later instance that differs is refused
 	// by the comparison anyway.
-	var unlinkedFrom SidecarStoreIdentity
+	var unlinkedFrom SidecarStoreIdentifier
 	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(ctx)
 	for _, row := range rows {

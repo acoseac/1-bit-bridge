@@ -600,19 +600,19 @@ func (a *variantDeleterAdapter) SidecarStoreState() api.VariantSidecarStoreState
 	// wrapper. A failed stat leaves it nil, which the handler reads as
 	// "cannot claim I emptied it".
 	if fi, err := os.Stat(dir); err == nil {
-		st.Store = sidecarStoreIdentity{fi}
+		st.Store = sidecarStoreID{fi}
 	}
 	return st
 }
 
-// sidecarStoreIdentity is api.SidecarStoreIdentity over an os.FileInfo.
-type sidecarStoreIdentity struct{ fi os.FileInfo }
+// sidecarStoreID is api.SidecarStoreIdentifier over an os.FileInfo.
+type sidecarStoreID struct{ fi os.FileInfo }
 
 // Same reports whether other observed the same directory. A nil or
 // foreign implementation is NOT the same — the comparison exists to
 // refuse an unmount, so anything it cannot verify is a refusal.
-func (s sidecarStoreIdentity) Same(other api.SidecarStoreIdentity) bool {
-	o, ok := other.(sidecarStoreIdentity)
+func (s sidecarStoreID) Same(other api.SidecarStoreIdentifier) bool {
+	o, ok := other.(sidecarStoreID)
 	return ok && s.fi != nil && o.fi != nil && os.SameFile(s.fi, o.fi)
 }
 
