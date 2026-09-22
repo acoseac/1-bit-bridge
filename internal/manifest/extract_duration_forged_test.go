@@ -220,12 +220,12 @@ func TestSACDTimecodeCannotExpressAnImplausibleDuration(t *testing.T) {
 	}
 }
 
-// TestExtractAIFF_ZeroSSNDStampsNoDuration is the end-to-end shape the
+// TestExtractAIFF_EmptySSNDStampsNoDuration is the end-to-end shape the
 // unit test above protects: a well-formed COMM claiming ten minutes of
-// frames beside an SSND declaring no audio bytes. The COMM arithmetic
-// is fine and plausibleDuration accepts 600 s, so the payload check is
-// the only thing standing between a corrupt file and a confident wrong
-// answer in the phone's track list.
+// frames beside an SSND holding no audio. The COMM arithmetic is fine
+// and plausibleDuration accepts 600 s, so the payload check is the only
+// thing standing between a corrupt file and a confident wrong answer in
+// the phone's track list.
 func TestExtractAIFF_EmptySSNDStampsNoDuration(t *testing.T) {
 	// An SSND body is NOT all audio: it opens with an 8-byte prefix
 	// (`offset`, `blockSize`). So "empty" has two spellings, and the
