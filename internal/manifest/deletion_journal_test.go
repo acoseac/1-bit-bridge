@@ -513,7 +513,12 @@ func runJournalDecision(t *testing.T, seedTracks, n int) journalDecision {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback() //nolint:errcheck // read-only on the assert path
+	// Rolled back, never committed: every write below — the tombstone,
+	// the marker DELETE, and whatever decideDeletionJournalMode does —
+	// is fixture state that must not outlive the case. The errcheck
+	// waiver is because the rollback of a transaction nothing commits
+	// has no failure a test could act on.
+	defer tx.Rollback() //nolint:errcheck // fixture tx, never committed
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO manifest_deletions(path, deleted_at) VALUES('A/gone.flac', 1)`); err != nil {
 		t.Fatal(err)
