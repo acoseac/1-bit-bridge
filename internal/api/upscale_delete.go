@@ -728,10 +728,14 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 			}
 		}
 		if removeErr == nil && loc.WithinStore && unlinkedFrom == nil {
-			// FIRST in-store unlink only — see unlinkedFrom. A store
-			// that differs by the time the exception is asked is
-			// refused by the comparison, so re-probing per row would
-			// buy nothing and cost a stat on the happy path.
+			// One probe, on the FIRST in-store unlink, to record which
+			// directory instance this request is removing files from —
+			// the exception below has nothing to compare against
+			// otherwise. The `unlinkedFrom == nil` guard is what keeps
+			// it to one: probing on every subsequent unlink would put a
+			// stat on the happy path of a whole-library delete and buy
+			// nothing, since a store that differs by the time the
+			// exception is asked is refused by the comparison anyway.
 			unlinkedFrom = s.variantDeleter.SidecarStoreState().Store
 		}
 		if removeErr == nil && loc.Placement == VariantSidecarRelocated {
