@@ -486,6 +486,25 @@ func expiryPhrase(days int) string {
 	}
 }
 
+// RunPortChecks runs the two listen-port checks and nothing else.
+//
+// `bridge init` needs them TWICE against different inputs. The
+// preflight grades the install that is already at the target path (see
+// withExistingInstallDeps) — right for the certificate, whose SAN set
+// and validity window are facts about a file init does not rewrite.
+// The ports are not like that: init may be about to SAVE different
+// ones, and a config saved with a port something else holds produces a
+// `bridge serve` that cannot bind, having just been told the host was
+// fine.
+//
+// Narrow rather than a second full Run: everything else in the report
+// is unchanged by the config init is about to write, and re-running the
+// toolchain probes would double the preflight's wall clock for a second
+// copy of the same answers.
+func RunPortChecks(ctx context.Context, d Deps) Report {
+	return Report{Checks: []Check{checkAPIPort(ctx, d), checkAdminPort(ctx, d)}}
+}
+
 func checkAPIPort(ctx context.Context, d Deps) Check {
 	if owned := ownedPortCheck("port-api", d.APIPort, d.OwnedPorts); owned != nil {
 		return *owned

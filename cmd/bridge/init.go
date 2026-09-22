@@ -187,6 +187,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// most ordinary reason to run it twice — therefore aborted, and this
 	// comment named that as a reason to pass the flag. withExistingInstallDeps
 	// reads the pid file and the real ports now, so the check answers.
+	//
+	// preflightDeps is kept for the SECOND port pass below: the ports
+	// graded here are the install's CURRENT ones, and a run that goes on
+	// to overwrite the config may be about to save different ones.
+	var preflightDeps doctor.Deps
 	if !*skipDoctor {
 		var roots []string
 		if abs != "" {
@@ -200,6 +205,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			AdminPort:    7789,
 		}
 		withExistingInstallDeps(&d, cfgPath)
+		preflightDeps = d
 		if code := ensureDoctorClean(stdout, d); code != 0 {
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "fix the fail(s) above, or re-run with --skip-doctor to bypass.")
@@ -347,6 +353,42 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := cfg.NormalizeAndValidate(); err != nil {
 		fmt.Fprintf(stderr, "validate: %v\n", err)
 		return 1
+	}
+	// The ports this run is about to SAVE, which the preflight could not
+	// have graded: it ran before the keep-or-overwrite decision, against
+	// the config already on disk. For the certificate that reading is
+	// right and deliberate — init does not rewrite the cert, so the pair
+	// on disk IS the pair. The ports are the opposite: baseConfig always
+	// seeds the loopback defaults and --public replaces them, so an
+	// install on :9090/:9091 was graded on 9090/9091 and then handed
+	// :7788/127.0.0.1:7789 — and if something else holds 7789, the
+	// operator learns it from a `bridge serve` that cannot bind, having
+	// just been told the host was fine.
+	//
+	// Before Save, so a refusal leaves the existing config intact, and
+	// only when the ports actually CHANGED — otherwise a re-init would
+	// dial the same two ports twice and print the same verdict twice.
+	if !*skipDoctor {
+		d := preflightDeps
+		apiPort, apiOK := configuredPort(cfg.ListenAddress)
+		adminPort, adminOK := configuredPort(cfg.AdminAddress)
+		if (apiOK && apiPort != d.APIPort) || (adminOK && adminPort != d.AdminPort) {
+			if apiOK {
+				d.APIPort = apiPort
+			}
+			if adminOK {
+				d.AdminPort = adminPort
+			}
+			report := doctor.RunPortChecks(context.Background(), d)
+			if report.HasFail() {
+				printReport(stdout, report)
+				fmt.Fprintln(stdout)
+				fmt.Fprintln(stdout, "these are the ports this init would write; the config was NOT changed.")
+				fmt.Fprintln(stdout, "free them, pick others, or re-run with --skip-doctor to bypass.")
+				return 1
+			}
+			printWarnings(stdout, report)
+		}
 	}
 	if err := cfg.Save(cfgPath); err != nil {
 		fmt.Fprintf(stderr, "save config: %v\n", err)
@@ -706,12 +748,19 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 // log. `adminAddr` comes from the loaded config (caller passes
 // `cfg.AdminAddress`); falls back to 127.0.0.1:7789 only if the addr
 // isn't host:port parseable.
+//
+// A configured port of 0 (the OS-picks-an-ephemeral-port mode) skips
+// the probe instead of taking that fallback. There is no address to
+// dial — the port this bridge will bind is not known until it binds —
+// so asking "is 7789 already taken?" answers about a listener the
+// operator never asked for, and a yes suppresses an auto-start that
+// would have worked.
 func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath, adminAddr string) bool {
-	host, port, ok := splitHostPort(adminAddr)
-	if !ok {
-		host, port = "127.0.0.1", 7789
+	host, port, dialable := splitHostPort(adminAddr)
+	if _, parsed := configuredPort(adminAddr); !parsed {
+		host, port, dialable = "127.0.0.1", 7789, true
 	}
-	if packaging.IsListening(host, port) {
+	if dialable && packaging.IsListening(host, port) {
 		fmt.Fprintf(stdout, "A bridge is already running on %s:%d; skipping auto-start.\n", host, port)
 		return true
 	}
@@ -903,10 +952,10 @@ func withExistingInstallDeps(d *doctor.Deps, cfgPath string) {
 	// since it learned to (buildDoctorDeps); this helper copied the cert
 	// fields beside them and not these, so the two commands graded the
 	// same host differently.
-	if _, port, ok := splitHostPort(cfg.ListenAddress); ok {
+	if port, ok := configuredPort(cfg.ListenAddress); ok {
 		d.APIPort = port
 	}
-	if _, port, ok := splitHostPort(cfg.AdminAddress); ok {
+	if port, ok := configuredPort(cfg.AdminAddress); ok {
 		d.AdminPort = port
 	}
 	// And the pid file `bridge serve` writes while it runs, without
