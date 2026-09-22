@@ -453,21 +453,41 @@ func TestCertTilesRenderTheirRemainingTimeThroughOneHelper(t *testing.T) {
 		t.Fatalf("scanned %d tiles, want 3 — the scan is not seeing app.js and would pass no matter what", checked)
 	}
 
-	// "Today" is a CALENDAR question, not a 24-hour one. A duration-only
-	// test labelled a certificate expiring at 00:30 tomorrow "expires
-	// today" — beside a parenthesised date reading TOMORROW, the same
-	// sentence disagreeing with itself, which is the defect this helper
-	// exists for one unit down (CodeRabbit on #962).
+	// The whole count is a CALENDAR question, not a 24-hour one, because
+	// it is printed beside when.toLocaleDateString() and has to agree
+	// with it. A duration-only test labelled a certificate expiring at
+	// 00:30 tomorrow "expires today" — beside a parenthesised date
+	// reading TOMORROW, the same sentence disagreeing with itself
+	// (CodeRabbit on #962).
 	//
-	// Structural, because the Go suite cannot run the helper: it can
-	// still say that the calendar comparison is present, which is what a
-	// regression to `Math.floor(ms / 86_400_000) === 0` would remove.
+	// "Today" got the calendar then and the days after it kept
+	// Math.round over a duration, which disagrees with the date in BOTH
+	// directions: 47 hours from 00:30 rendered "in 2 days" beside
+	// tomorrow, 25.5 hours from 23:30 rendered "in 1 day" beside the day
+	// after tomorrow, and 26 hours back rendered "expired 1 day ago"
+	// beside a date two days behind. This test required only that the
+	// Y/M/D getters appear SOMEWHERE in the helper, which Math.round
+	// satisfied, so it passed throughout.
+	//
+	// Structural, because the Go suite cannot run the helper. What it
+	// can say is that the day count is derived from two calendar dates
+	// and not from `left`, which is exactly what a regression would
+	// undo.
 	helper := jsFunctionBody(t, "function certValidityText(")
-	for _, need := range []string{"getFullYear()", "getMonth()", "getDate()"} {
+	for _, need := range []string{"getFullYear()", "getMonth()", "getDate()", "Date.UTC("} {
 		if !strings.Contains(helper, need) {
-			t.Errorf("certValidityText no longer compares calendar dates (%s missing) — "+
-				"a 24-hour test calls an expiry just after midnight tomorrow \"today\", "+
-				"next to a date that says otherwise", need)
+			t.Errorf("certValidityText no longer derives its count from calendar dates (%s missing) — "+
+				"a duration test calls an expiry just after midnight tomorrow \"today\", and a "+
+				"rounded duration disagrees with the date beside it in both directions", need)
 		}
+	}
+	// And `left` carries the TENSE, never the count: any expression that
+	// divides it by a day is the rounded-duration form this closes.
+	// certValidityText's own `now` derivation subtracts `left` from
+	// `when` and names no day length, so it does not match.
+	if leftOverADay := regexp.MustCompile(`\bleft\b[^;\n]*86_400_000`); leftOverADay.MatchString(helper) {
+		t.Errorf("certValidityText derives its day count from the remaining DURATION (%q) — "+
+			"the number is printed beside a calendar date and has to agree with it",
+			leftOverADay.FindString(helper))
 	}
 }

@@ -942,18 +942,24 @@ function certExpiryBadge(left) {
 // wording at both ends because "expires in 0 days" and "expired 0 days
 // ago" are the two spellings this function exists to remove.
 //
-// "Today" is a CALENDAR question, not a 24-hour one. A duration-based
-// test called a certificate expiring at 00:30 tomorrow "expires today",
-// beside a parenthesised date reading tomorrow — the same sentence
-// disagreeing with itself, which is the whole defect this helper was
-// written for, one unit down (CodeRabbit on #962). `now` is derived from
-// the caller's own `left` rather than read again, so the two cannot
-// drift between the badge and the phrase, and a test can drive any
+// The whole count is a CALENDAR question, not a 24-hour one, because
+// the number is printed beside `when.toLocaleDateString()` and has to
+// agree with it. "Today" got the calendar in #962 and the days after it
+// kept `Math.round` over a duration, which disagrees with the date in
+// both directions: 47 hours from 00:30 reads "in 2 days" beside
+// TOMORROW's date, and 25.5 hours from 23:30 reads "in 1 day" beside
+// the day after tomorrow. Same sentence, same defect, one row down
+// (CodeRabbit on #962).
+//
+// `now` is derived from the caller's own `left` rather than read again,
+// so the badge and the phrase cannot drift and a test can drive any
 // instant without touching the clock.
 //
-// Comparing Y/M/D locally is DST-safe: a 23- or 25-hour day changes the
-// duration between two instants and not which calendar date each falls
-// on.
+// Date.UTC over the LOCAL Y/M/D is the standard calendar-difference
+// idiom and is DST-safe for the reason the same-day test is: a 23- or
+// 25-hour day changes the duration between two instants, not which
+// calendar date each falls on, and the two UTC midnights it builds are
+// exactly N×86_400_000 apart by construction.
 function certValidityText(left, when) {
   const now = new Date(when.getTime() - left);
   if (
@@ -963,11 +969,12 @@ function certValidityText(left, when) {
   ) {
     return left > 0 ? "expires today" : "expired today";
   }
-  // At least one whole day, because the calendar test above has already
-  // ruled out today: an expiry two hours away across midnight is
-  // "tomorrow", and rounding it to zero would reprint the wording this
-  // function exists to remove.
-  const days = Math.max(1, Math.round(Math.abs(left) / 86_400_000));
+  // Calendar days between the two local dates. At least one, because
+  // the test above has already ruled out today — an expiry two hours
+  // away across midnight is tomorrow, and a zero here would reprint the
+  // wording this function exists to remove.
+  const midnight = (d) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+  const days = Math.max(1, Math.abs(midnight(when) - midnight(now)) / 86_400_000);
   const plural = days === 1 ? "" : "s";
   return left > 0 ? `expires in ${days} day${plural}` : `expired ${days} day${plural} ago`;
 }
