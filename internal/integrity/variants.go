@@ -191,6 +191,12 @@ type SweepReport struct {
 	// Skipped is true when the tick did not sweep at all — the
 	// mount-loss guard fired, or the catalog query failed.
 	Skipped bool
+	// Cancelled is true when the context ended mid-tick, so the counts
+	// describe a PARTIAL pass. Distinct from Skipped, which means
+	// nothing was swept: a cancelled tick has real adoptions and real
+	// deletions behind it, and a seam that could not tell the two apart
+	// would read a shutdown as a no-op.
+	Cancelled bool
 }
 
 // NewVariantWatcher constructs a watcher. interval ≤ 0 disables
@@ -407,6 +413,15 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		// hold the process up for minutes.
 		select {
 		case <-ctx.Done():
+			// Still one summary line. The docblock's promise is
+			// "every tick that saw rows logs ONE summary line",
+			// and a cancelled pass one has already applied its
+			// adoptions — returning bare left a shutdown mid-sweep
+			// with per-row lines (sampled at ten) and no totals,
+			// which is a smaller copy of the silence the field
+			// report's first finding was about.
+			report.Cancelled = true
+			w.logSummary(dir, report)
 			return report
 		default:
 		}
@@ -489,7 +504,11 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	for _, r := range missing {
 		select {
 		case <-ctx.Done():
+			// Same as pass one: the rows deleted before the
+			// cancellation are real and the count is what says so.
+			report.Cancelled = true
 			w.publishDeleted(paths, variantIDs)
+			w.logSummary(dir, report)
 			return report
 		default:
 		}
@@ -533,6 +552,12 @@ func (w *VariantWatcher) publishDeleted(paths, variantIDs []string) {
 // those are the ticks an operator scrolling a journal is looking
 // for — Info otherwise, so a healthy hourly tick is one findable
 // line rather than silence.
+//
+// Reached from every exit that saw rows, INCLUDING the two
+// cancellation arms. They used to return bare, so a shutdown partway
+// through left ten sampled per-row lines and no totals — the same
+// silence at a smaller scale, and the counts carry `cancelled` so the
+// line is not read as a complete tick.
 func (w *VariantWatcher) logSummary(dir string, r SweepReport) {
 	level := slog.LevelInfo
 	if r.Deleted > 0 || r.Refused > 0 {
@@ -546,6 +571,7 @@ func (w *VariantWatcher) logSummary(dir string, r SweepReport) {
 		slog.Int("mismatched", r.Mismatched),
 		slog.Int("failed", r.Failed),
 		slog.Int("refused", r.Refused),
+		slog.Bool("cancelled", r.Cancelled),
 		slog.String("variants_dir", dir),
 	)
 }

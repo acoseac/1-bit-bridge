@@ -378,16 +378,6 @@ func validateUpscaleTarget(targetRate, targetBits int) error {
 	return nil
 }
 
-// submitUpscaleProjections is everything Submit and SubmitPaths share:
-// filter, project size, disk pre-flight, batch row, enqueue. `path` is
-// the display label for the batch row, NOT a scope — the scope was
-// already resolved into `projections` by the caller.
-// upscaleCandidates is what the eligibility walk produces: the tracks
-// to enqueue, the projected total, and how many were already covered.
-//
-// Mirrors optimizeCandidates on the CarPlay side. The upscale walk was
-// the only one still inline in its submit function, which is what made
-// that function the largest thing in this package.
 type upscaleCandidate struct {
 	path       string
 	absPath    string
@@ -527,6 +517,16 @@ func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []man
 	return out
 }
 
+// submitUpscaleProjections is everything Submit and SubmitPaths share:
+// filter, project size, disk pre-flight, batch row, enqueue. `path` is
+// the display label for the batch row, NOT a scope — the scope was
+// already resolved into `projections` by the caller.
+// upscaleCandidates is what the eligibility walk produces: the tracks
+// to enqueue, the projected total, and how many were already covered.
+//
+// Mirrors optimizeCandidates on the CarPlay side. The upscale walk was
+// the only one still inline in its submit function, which is what made
+// that function the largest thing in this package.
 func (c *Coordinator) submitUpscaleProjections(ctx context.Context, path string, projections []manifest.TrackProjection, targetRate, targetBits int, outputDir string) (*SubmitResult, error) {
 	picked := c.buildUpscaleCandidates(path, projections, targetRate, targetBits)
 	cands, alreadyCovered, totalProjected := picked.cands, picked.alreadyCovered, picked.totalProjected
@@ -1039,12 +1039,6 @@ func (c *Coordinator) submitPCMRenderProjections(ctx context.Context, path strin
 	return c.submitRenditionProjections(ctx, path, picked, outputDir, JobKindPCMRender, 24, "submit pcm")
 }
 
-// submitRenditionProjections is the pipeline the optimize and pcm batch
-// entry points share once their candidates are picked: disk pre-flight
-// (the output volume for the sidecars and, when the batch renders DSD,
-// the scratch volume for the largest single Stage A intermediate), the
-// batch row, the empty-batch short-circuit, the enqueue. `path` is the
-// batch row's display label, not a scope; `op` prefixes diagnostics.
 // laneCount is how many render jobs the pool can hold in flight at once, and
 // therefore how many Stage A scratch files the batch must budget for. Falls
 // back to one lane when the pool is absent (direct-construction tests) or
@@ -1057,6 +1051,12 @@ func (c *Coordinator) laneCount() int {
 	return c.pool.workers
 }
 
+// submitRenditionProjections is the pipeline the optimize and pcm batch
+// entry points share once their candidates are picked: disk pre-flight
+// (the output volume for the sidecars and, when the batch renders DSD,
+// the scratch volume for the largest single Stage A intermediate), the
+// batch row, the empty-batch short-circuit, the enqueue. `path` is the
+// batch row's display label, not a scope; `op` prefixes diagnostics.
 func (c *Coordinator) submitRenditionProjections(ctx context.Context, path string, picked optimizeCandidates, outputDir string, kind JobKind, targetBits int, op string) (*SubmitResult, error) {
 	// The scratch check FIRST, graded on the temp volume. A DSD render's
 	// Stage A intermediate is int32 at the target rate for the whole

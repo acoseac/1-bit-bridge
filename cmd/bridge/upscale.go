@@ -1427,14 +1427,6 @@ func fingerprintFeatureReady(ctx context.Context, hasAPIKey bool, stderr io.Writ
 	return true, ""
 }
 
-// soxCLIReady is the CLI-side sox preflight shared by `bridge upscale`,
-// `bridge optimize`, and `bridge analyze`: it checks sox is present AND its
-// build has FLAC support, printing the appropriate install / format hint to
-// stderr on failure and returning false so the caller can exit. featureNeed
-// completes the sentence "…lacks FLAC support, which <featureNeed>." The
-// conservative FormatsKnown gate matches soxFeatureReady. Extracted so the
-// per-subcommand call sites stay one line (and keeps analyzeCmd under the
-// cognitive-complexity budget).
 // classifyDSDShape answers the two source-shape questions the DSD
 // renditions add to the classifier, in one place so the parent stays
 // under the repo's cognitive-complexity gate (that gate is why
@@ -1560,6 +1552,14 @@ func printFFmpegInstallHint(w io.Writer) {
 	}
 }
 
+// soxCLIReady is the CLI-side sox preflight shared by `bridge upscale`,
+// `bridge optimize`, and `bridge analyze`: it checks sox is present AND its
+// build has FLAC support, printing the appropriate install / format hint to
+// stderr on failure and returning false so the caller can exit. featureNeed
+// completes the sentence "…lacks FLAC support, which <featureNeed>." The
+// conservative FormatsKnown gate matches soxFeatureReady. Extracted so the
+// per-subcommand call sites stay one line (and keeps analyzeCmd under the
+// cognitive-complexity budget).
 func soxCLIReady(ctx context.Context, stderr io.Writer, featureNeed string) bool {
 	info, err := transcode.ProbeSox(ctx)
 	if err != nil {

@@ -8,9 +8,19 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
-// pageNameDevices is the Devices page's template key, shared by the page
-// handler and the two partial-render paths. (SonarCloud go:S1192.)
-const pageNameDevices = "admin.devices"
+// devicesLogComponent is the slog component name the Devices handlers log
+// under, shared by the three call sites that emit a warning there.
+// (SonarCloud go:S1192.)
+//
+// It was introduced by #949's duplicate-literal sweep as
+// `devicesLogComponent`, described as "the Devices page's template key,
+// shared by the page handler and the two partial-render paths" — false in
+// every clause. It is not a template key ("admin.devices" appears nowhere
+// else in the tree; renderPage uses "content"/"layout"), there is no page
+// handler reading it, and there are no partial-render paths. A reader
+// renaming the Devices template to match would silently change the
+// component on three log lines and break any journald filter keyed on it.
+const devicesLogComponent = "admin.devices"
 
 // Admin device + playlist-backup surfaces. Loopback-only, owner-visible,
 // read-only. Device tokens are the client's recovery secrets, so they are
@@ -210,15 +220,15 @@ func (s *Server) apiHistorySummary(w http.ResponseWriter, r *http.Request) {
 	}
 	codecs, err := s.deps.Manifest.CodecHistogram(ctx, "")
 	if err != nil {
-		logging.Component(pageNameDevices).Warn("CodecHistogram failed", "err", err)
+		logging.Component(devicesLogComponent).Warn("CodecHistogram failed", "err", err)
 	}
 	routes, err := s.deps.Manifest.RouteHistogram(ctx, "")
 	if err != nil {
-		logging.Component(pageNameDevices).Warn("RouteHistogram failed", "err", err)
+		logging.Component(devicesLogComponent).Warn("RouteHistogram failed", "err", err)
 	}
 	top, err := s.deps.Manifest.TopTracks(ctx, 20)
 	if err != nil {
-		logging.Component(pageNameDevices).Warn("TopTracks failed", "err", err)
+		logging.Component(devicesLogComponent).Warn("TopTracks failed", "err", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"totalEvents": total,

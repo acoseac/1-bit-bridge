@@ -210,7 +210,25 @@ func checkPhoneBlockRules(t *testing.T, phone string) {
 	}
 	rules := map[string]string{}
 	for _, r := range inner {
+		// Keyed by every MEMBER of the selector group, not by the group
+		// as one string.
+		//
+		// The "must not" assertions below look rules up by a single
+		// class name, so `.sidebar-foot, .meta { flex-direction: row }`
+		// produced the key ".sidebar-foot,.meta" and matched none of
+		// them — the exact top-bar layout #934 removed could come back
+		// silently. The POSITIVE assertions fail closed under grouping
+		// (a missing key is a missing declaration); only the negative
+		// half failed open, which is the direction that matters.
+		//
+		// The whole group is kept as a key too, so a lookup written
+		// against the literal selector still resolves.
 		rules[normSelector(r.sel)] += r.body
+		for _, member := range splitSelectorGroup(r.sel) {
+			if m := normSelector(member); m != "" {
+				rules[m] += r.body
+			}
+		}
 	}
 	if !strings.Contains(compactCSS(rules[".sidebar-drawer"]), "display:none") {
 		t.Errorf("the phone block must hide .sidebar-drawer (got %q)", rules[".sidebar-drawer"])
@@ -437,4 +455,102 @@ func normSelector(s string) string {
 // formatting. Selectors go through normSelector.
 func compactCSS(s string) string {
 	return strings.Join(strings.Fields(s), "")
+}
+
+// splitSelectorGroup splits a CSS selector group on its TOP-LEVEL commas.
+//
+// Quotes and brackets are tracked because a comma inside `[title="a,b"]`
+// or `:is(a, b)` does not separate group members, and a naive Split would
+// produce two keys that match nothing — a guard that silently stops
+// guarding, which is the failure this helper exists to remove rather than
+// to reintroduce one level down.
+func splitSelectorGroup(sel string) []string {
+	var (
+		out   []string
+		cur   strings.Builder
+		quote rune
+		depth int
+	)
+	flush := func() {
+		if t := strings.TrimSpace(cur.String()); t != "" {
+			out = append(out, t)
+		}
+		cur.Reset()
+	}
+	for _, r := range sel {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == '[' || r == '(':
+			depth++
+		case r == ']' || r == ')':
+			if depth > 0 {
+				depth--
+			}
+		case r == ',' && depth == 0:
+			flush()
+			continue
+		}
+		cur.WriteRune(r)
+	}
+	flush()
+	return out
+}
+
+// TestSplitSelectorGroupKeepsStructuralCommas pins the helper directly,
+// for the reason TestRejectedCertGradingShapesSeeEverySpacing exists: the
+// guard that uses it can only fail on CSS that is ALSO wrong, so a split
+// it gets wrong is indistinguishable, from the guard's side, from CSS
+// that does not use grouping.
+func TestSplitSelectorGroupKeepsStructuralCommas(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{".a", []string{".a"}},
+		{".sidebar-foot, .meta", []string{".sidebar-foot", ".meta"}},
+		{".a,.b ,  .c", []string{".a", ".b", ".c"}},
+		{`a[title="x,y"], .b`, []string{`a[title="x,y"]`, ".b"}},
+		{":is(.a, .b) .c", []string{":is(.a, .b) .c"}},
+		{`header[data-nav-open="true"] .sidebar-drawer`, []string{`header[data-nav-open="true"] .sidebar-drawer`}},
+	} {
+		got := splitSelectorGroup(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("splitSelectorGroup(%q) = %q, want %q", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("splitSelectorGroup(%q) = %q, want %q", tc.in, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+// TestPhoneBlockNegativeAssertionsSeeAGroupedSelector is the negative
+// control for the keying above: the "must not" lookups have to fire on a
+// grouped rule, which is the form that slipped past them.
+func TestPhoneBlockNegativeAssertionsSeeAGroupedSelector(t *testing.T) {
+	rules := map[string]string{}
+	for _, r := range []struct{ sel, body string }{
+		{".sidebar-foot, .meta", "flex-direction: row;"},
+	} {
+		rules[normSelector(r.sel)] += r.body
+		for _, member := range splitSelectorGroup(r.sel) {
+			if m := normSelector(member); m != "" {
+				rules[m] += r.body
+			}
+		}
+	}
+	for _, sel := range []string{".sidebar-foot", ".meta"} {
+		if _, ok := rules[sel]; !ok {
+			t.Errorf("a grouped rule is invisible to a lookup on %s — the phone-block "+
+				"negative assertions would pass while the top-bar layout came back", sel)
+		}
+	}
 }

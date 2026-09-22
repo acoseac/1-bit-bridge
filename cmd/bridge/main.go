@@ -533,10 +533,6 @@ func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath st
 	return rec, nil
 }
 
-// variantDeleterAdapter implements api.VariantDeleter on top of a
-// manifest.Store. Translates between manifest.VariantRow and
-// api.VariantSummary (the api-package-local projection). Same
-// upward-cycle-avoidance pattern variantStoreAdapter uses.
 // lyricsStoreAdapter implements api.LyricsStore on top of the manifest
 // provider — the sibling of analysisStoreAdapter.
 type lyricsStoreAdapter struct {
@@ -555,6 +551,10 @@ func (a *lyricsStoreAdapter) LookupLyrics(ctx context.Context, sourcePath string
 	}, nil
 }
 
+// variantDeleterAdapter implements api.VariantDeleter on top of a
+// manifest.Store. Translates between manifest.VariantRow and
+// api.VariantSummary (the api-package-local projection). Same
+// upward-cycle-avoidance pattern variantStoreAdapter uses.
 type variantDeleterAdapter struct {
 	store *manifest.Store
 }

@@ -307,11 +307,6 @@ type AnalysisLookup struct {
 	Spectrum []byte
 }
 
-// LookupAnalysis returns the cached waveform metadata for one source
-// path, or nil if no analysis row exists. Routes through
-// Store.LookupAnalysis (case-insensitive) so iOS-shaped lowercased
-// paths from /v1/waveform resolve against the case-preserved rows —
-// same shape + rationale as LookupVariant.
 // LyricsLookup is the provider-level view of a track_lyrics row.
 type LyricsLookup struct {
 	SourcePath    string
@@ -339,6 +334,11 @@ func (p *Provider) LookupLyrics(ctx context.Context, sourcePath string) (*Lyrics
 	}, nil
 }
 
+// LookupAnalysis returns the cached waveform metadata for one source
+// path, or nil if no analysis row exists. Routes through
+// Store.LookupAnalysis (case-insensitive) so iOS-shaped lowercased
+// paths from /v1/waveform resolve against the case-preserved rows —
+// same shape + rationale as LookupVariant.
 func (p *Provider) LookupAnalysis(ctx context.Context, sourcePath string) (*AnalysisLookup, error) {
 	a, err := p.store.LookupAnalysis(ctx, sourcePath)
 	if err != nil {

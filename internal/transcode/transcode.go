@@ -1264,34 +1264,6 @@ var soxFormatsForExt = map[string][]string{
 	".dff":  {"dff", "dsdiff"},
 }
 
-// CanDecode reports whether this sox build can read the given source file.
-//
-// It exists because the eligibility gate and the decoder disagreed. ALAC
-// clears every check upstream — manifest.IsLossyCodec doesn't list it (it
-// is lossless), canSetBitsPerSample allowlists it, and OptimizeEligible
-// names "ALAC" outright — so an .m4a reached sox, which has no MP4
-// demuxer in any stock build. The job then failed after being advertised
-// to the client as eligible: on iOS the wand renders enabled, the user
-// taps it, and the work fails downstream.
-//
-// That path only became reachable when PR #440 started extracting PCM
-// geometry for M4A. Before it, SampleRate was nil and the gate refused
-// early — which is the honest answer this restores.
-//
-// Fail-OPEN in two cases, both deliberate:
-//
-//   - !FormatsKnown — an unparseable `sox --help` must never disable a
-//     working install. Same posture as ProbeSox's HasFLAC contract.
-//   - an extension absent from soxFormatsForExt — the map covers what the
-//     upstream gate lets through; anything else is a shape this guard was
-//     not written to judge, and refusing it here would silently narrow
-//     the pipeline as a side effect of an unrelated change. (MP4
-//     extensions are therefore listed rather than omitted — see the map.)
-//
-// The check is against the LIVE build's format list, so it also covers
-// the minimal-install case ProbeSox's HasFLAC field handles globally: an
-// apt sox without libsox-fmt-all can't read FLAC either, and this refuses
-// those per-source instead of only at feature-gate time.
 // CanDecodeVia reports whether the sox build described by `probe` can read
 // sourcePath, and is the single home for the FAIL-OPEN policy every consumer
 // of that verdict shares.
@@ -1358,6 +1330,34 @@ func SnapshotOrOpen(probe func() (SoxInfo, error)) SoxInfo {
 	return info
 }
 
+// CanDecode reports whether this sox build can read the given source file.
+//
+// It exists because the eligibility gate and the decoder disagreed. ALAC
+// clears every check upstream — manifest.IsLossyCodec doesn't list it (it
+// is lossless), canSetBitsPerSample allowlists it, and OptimizeEligible
+// names "ALAC" outright — so an .m4a reached sox, which has no MP4
+// demuxer in any stock build. The job then failed after being advertised
+// to the client as eligible: on iOS the wand renders enabled, the user
+// taps it, and the work fails downstream.
+//
+// That path only became reachable when PR #440 started extracting PCM
+// geometry for M4A. Before it, SampleRate was nil and the gate refused
+// early — which is the honest answer this restores.
+//
+// Fail-OPEN in two cases, both deliberate:
+//
+//   - !FormatsKnown — an unparseable `sox --help` must never disable a
+//     working install. Same posture as ProbeSox's HasFLAC contract.
+//   - an extension absent from soxFormatsForExt — the map covers what the
+//     upstream gate lets through; anything else is a shape this guard was
+//     not written to judge, and refusing it here would silently narrow
+//     the pipeline as a side effect of an unrelated change. (MP4
+//     extensions are therefore listed rather than omitted — see the map.)
+//
+// The check is against the LIVE build's format list, so it also covers
+// the minimal-install case ProbeSox's HasFLAC field handles globally: an
+// apt sox without libsox-fmt-all can't read FLAC either, and this refuses
+// those per-source instead of only at feature-gate time.
 func (i SoxInfo) CanDecode(sourcePath string) bool {
 	if !i.FormatsKnown {
 		return true

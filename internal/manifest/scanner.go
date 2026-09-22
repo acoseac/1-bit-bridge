@@ -1467,16 +1467,6 @@ func mergePostScanFields(fresh, old *Track) {
 	}
 }
 
-// runScanWriter is the single writer goroutine that consumes Tracks
-// from `writes`, batches them into `scanBatchSize`-row chunks, and
-// flushes via `Store.UpsertTrackBatch` (one BEGIN/COMMIT per chunk).
-// `committed` is incremented post-flush so `ScanProgress()` always
-// reflects rows actually persisted to disk.
-//
-// On a flush error we log and clear the batch — partial rows are lost
-// but the scan continues. The legacy walker had the same behaviour
-// (bare `log.Printf` on UpsertTrack failure); per-batch failure is
-// rarer because a single transaction wraps many rows.
 // processSACDISO is the worker leg for an `.iso` container: its own
 // skip-gate (the generic gate keys `GetTrackStat` on `pi.rel`, and a
 // container has NO row — the representative FIRST virtual row carries
@@ -1549,6 +1539,16 @@ func (s *Scanner) processSACDISO(ctx context.Context, pi pathInfo) []*Track {
 	return tracks
 }
 
+// runScanWriter is the single writer goroutine that consumes Tracks
+// from `writes`, batches them into `scanBatchSize`-row chunks, and
+// flushes via `Store.UpsertTrackBatch` (one BEGIN/COMMIT per chunk).
+// `committed` is incremented post-flush so `ScanProgress()` always
+// reflects rows actually persisted to disk.
+//
+// On a flush error we log and clear the batch — partial rows are lost
+// but the scan continues. The legacy walker had the same behaviour
+// (bare `log.Printf` on UpsertTrack failure); per-batch failure is
+// rarer because a single transaction wraps many rows.
 func (s *Scanner) runScanWriter(ctx context.Context, writes <-chan *Track, committed *atomic.Int64, wg *sync.WaitGroup) {
 	defer wg.Done()
 	batch := make([]*Track, 0, scanBatchSize)

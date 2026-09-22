@@ -716,7 +716,6 @@ func (s *Server) WithAnalysis(enabled func() bool, as AnalysisStore) *Server {
 	return s
 }
 
-// analysisActive reports whether the analysis surface should answer.
 // WithLyrics attaches the track_lyrics lookup behind GET /v1/lyrics and
 // advertises the `lyrics` health feature. Optional; nil = the route
 // answers 404 lyrics_not_found and the flag is absent (a pre-lyrics
@@ -726,6 +725,7 @@ func (s *Server) WithLyrics(ls LyricsStore) *Server {
 	return s
 }
 
+// analysisActive reports whether the analysis surface should answer.
 func (s *Server) analysisActive() bool {
 	return s.analysisEnabled != nil && s.analysisEnabled()
 }

@@ -1005,9 +1005,6 @@ const (
 	skipReasonFingerprintVetoed = "fingerprint_vetoed"
 )
 
-// acousticSkipReason maps a declined fallback onto its bounded skip reason.
-// fallback is used when the feature is off entirely, so a bridge without
-// fingerprinting reports exactly what it always did.
 // mbMinInterval / caaMinInterval resolve the pacing for the NEXT request.
 //
 // They ask the client when it has a LIVE base, because the interval is a
@@ -1030,6 +1027,9 @@ func (e *Enricher) caaMinInterval() time.Duration {
 	return e.CAAMinInterval
 }
 
+// acousticSkipReason maps a declined fallback onto its bounded skip reason.
+// fallback is used when the feature is off entirely, so a bridge without
+// fingerprinting reports exactly what it always did.
 func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) string {
 	if !e.acousticActive() {
 		return fallback

@@ -544,8 +544,6 @@ func CanonicalHTTPSBase(raw string) string {
 	return u.Scheme + "://" + strings.TrimSuffix(u.Host, ":443")
 }
 
-// CanonicalHarvestBaseURL is the configured pin in canonical form, or "" when
-// unset/invalid (= unpinned). Shares CanonicalHTTPSBase with the handler.
 // LyricsTierActive is the ONE definition of whether the network lyrics tier
 // should be doing anything.
 //
@@ -570,6 +568,8 @@ func (a AtlasConfig) LyricsTierActive() bool {
 	return a.Enabled && a.HarvestEnabled && a.LyricsEnabled
 }
 
+// CanonicalHarvestBaseURL is the configured pin in canonical form, or "" when
+// unset/invalid (= unpinned). Shares CanonicalHTTPSBase with the handler.
 func (a AtlasConfig) CanonicalHarvestBaseURL() string {
 	return CanonicalHTTPSBase(a.HarvestBaseURL)
 }
