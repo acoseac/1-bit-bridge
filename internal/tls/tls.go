@@ -124,11 +124,13 @@ func LoadOrGenerate(certPath, keyPath, hostname string) (*cryptotls.Certificate,
 // cert with the full SAN set (hostname + ExtraDNSNames + loopback IPs +
 // ExtraIPs); existing installs LOAD the on-disk cert without
 // regenerating, even if the cert's SANs no longer match `opts` — that
-// would silently break iOS pinning. A SAN mismatch is logged at
-// `.notice` so operators see the staleness signal in the startup log
-// and can drive a deliberate `bridge cert rotate` (every paired iOS
+// would silently break iOS pinning. A SAN mismatch is logged at WARN
+// (logIfSANsStale) so operators see the staleness signal in the startup
+// log and can drive a deliberate `bridge cert rotate` (every paired iOS
 // device must re-pair afterward; we don't pay that cost without
-// operator consent).
+// operator consent). `bridge doctor`'s tls-cert-sans check runs the
+// same comparison BEFORE the first start, which is where it can still
+// be acted on cheaply.
 func LoadOrGenerateWithOptions(certPath, keyPath string, opts GenerateOptions) (*cryptotls.Certificate, string, error) {
 	certExists := fileExists(certPath)
 	keyExists := fileExists(keyPath)

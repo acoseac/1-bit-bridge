@@ -285,8 +285,17 @@ func jsFunctionBody(t *testing.T, decl string) string {
 		t.Fatalf("%s not found in app.js — the scan is broken", decl)
 	}
 	body := js[i:]
-	if j := strings.Index(body[1:], "\nfunction "); j > 0 {
-		body = body[:j+1]
+	// Both top-level declaration keywords, narrowing to whichever comes
+	// first. `\nfunction ` alone bounded every caller until the cert
+	// tiles needed it: two of the three are `async function`, and a
+	// window that ran past one of them into the next would grade two
+	// tiles as one and report the wrong name. Anchored on a newline, so
+	// only a COLUMN-ZERO declaration ends the window — a nested closure
+	// is indented and cannot truncate it.
+	for _, next := range []string{"\nfunction ", "\nasync function "} {
+		if j := strings.Index(body[1:], next); j > 0 {
+			body = body[:j+1]
+		}
 	}
 	body = jsBlockCommentRe.ReplaceAllString(body, " ")
 	return jsLineCommentRe.ReplaceAllString(body, " ")

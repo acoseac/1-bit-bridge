@@ -865,6 +865,23 @@ async function refreshBackups() {
   }
 }
 
+// CERT_EXPIRY_WARNING_MS mirrors servertls.ExpiryWarningWindow — the 30
+// days `bridge doctor`, `bridge cert info` and the startup warning all
+// grade against — and CERT_EXPIRING_SOON_MS is the console's own,
+// narrower red band beneath it.
+//
+// Milliseconds because that is what Date arithmetic yields, and the
+// comparison is against an exact remaining DURATION, never a day count:
+// `Math.floor(ms / 86400000)` and the server's `DaysUntilExpiry` both
+// truncate toward zero, so 30 days 23 hours reads as 30 and a tile
+// keyed on `<= 30` says "expiring" about a certificate every CLI
+// surface calls healthy. #951 moved the Go side off the day count for
+// exactly this; these two constants are what let all three tiles here
+// follow. Shared rather than repeated: three copies of a threshold is
+// how two of them came to be green when the third was yellow.
+const CERT_EXPIRY_WARNING_MS = 30 * 24 * 60 * 60 * 1000;
+const CERT_EXPIRING_SOON_MS = 7 * 24 * 60 * 60 * 1000;
+
 // refreshCertInfo populates the "Expires" line under the TLS
 // fingerprint panel (Settings → Networking) with the live cert's
 // validity. Errors degrade silently — the panel just shows the
@@ -917,14 +934,24 @@ async function refreshCertInfo() {
         `starts ${starts.toLocaleDateString()} — check the host clock`;
       return;
     }
+    // GRADED ON THE EXACT REMAINING TIME, never on `days`. #951 moved
+    // `bridge doctor`, `bridge cert info` and the startup warning onto
+    // `NotAfter.Sub(now) <= ExpiryWarningWindow` because the day count
+    // truncates toward zero: a cert with 30 days 23 hours left reads as
+    // 30. Left on the day count, this tile called that cert expiring
+    // while every CLI surface stayed quiet — same cert, same host, two
+    // answers, which is the whole thing that const exists to prevent.
+    // `days` stays as the DISPLAY, where "at least N days" is the right
+    // reading of a floor.
+    const left = when.getTime() - Date.now();
     let badge = "";
-    if (days < 0) badge = '<span class="badge danger">expired</span> ';
-    else if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
+    if (left <= 0) badge = '<span class="badge danger">expired</span> ';
+    else if (left <= CERT_EXPIRING_SOON_MS) badge = '<span class="badge danger">expiring soon</span> ';
     // Yellow, as this function's contract has always said. `.badge.warn`
     // is the yellow one; `.badge.running` is green (--ok) and was what
     // this arm emitted from the day the tile was written, so "expiring
     // within a month" rendered in the same colour as healthy.
-    else if (days <= 30) badge = '<span class="badge warn">expiring</span> ';
+    else if (left <= CERT_EXPIRY_WARNING_MS) badge = '<span class="badge warn">expiring</span> ';
     cell.innerHTML = `${badge}${when.toLocaleDateString()} (${days} days)`;
   } catch {
     cell.textContent = "—";
@@ -1025,12 +1052,17 @@ function renderTailscaleTile(s) {
       certEl.textContent = "—";
     } else {
       const when = new Date(s.certNotAfter);
-      const now = new Date();
-      const days = Math.max(0, Math.floor((when.getTime() - now.getTime()) / 86_400_000));
+      const left = when.getTime() - Date.now();
+      const days = Math.max(0, Math.floor(left / 86_400_000));
       const tooltip = s.certPath ? ` title="${escapeHTML(s.certPath)}"` : "";
+      // Same two corrections the self-signed tile above carries, and for
+      // the same reasons: grade on the exact remaining time rather than
+      // the truncated day count, and use the YELLOW badge for the
+      // 30-day band. `.badge.running` is green — this arm rendered the
+      // word "expiring" in the healthy colour.
       let badge = "";
-      if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
-      else if (days <= 30) badge = '<span class="badge running">expiring</span> ';
+      if (left <= CERT_EXPIRING_SOON_MS) badge = '<span class="badge danger">expiring soon</span> ';
+      else if (left <= CERT_EXPIRY_WARNING_MS) badge = '<span class="badge warn">expiring</span> ';
       certEl.innerHTML = `${badge}<span${tooltip}>expires in ${days} day${days === 1 ? "" : "s"} (${when.toLocaleDateString()})</span>`;
     }
   }
@@ -1135,11 +1167,13 @@ async function refreshAutocertTile() {
       expiryEl.textContent = "—";
     } else {
       const when = new Date(snap.notAfter);
-      const now = new Date();
-      const days = Math.max(0, Math.floor((when.getTime() - now.getTime()) / 86_400_000));
+      const left = when.getTime() - Date.now();
+      const days = Math.max(0, Math.floor(left / 86_400_000));
+      // The third copy of the grading the two tiles above carry: exact
+      // remaining time, and the yellow badge for the 30-day band.
       let badge = "";
-      if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
-      else if (days <= 30) badge = '<span class="badge running">expiring</span> ';
+      if (left <= CERT_EXPIRING_SOON_MS) badge = '<span class="badge danger">expiring soon</span> ';
+      else if (left <= CERT_EXPIRY_WARNING_MS) badge = '<span class="badge warn">expiring</span> ';
       expiryEl.innerHTML = `${badge}expires in ${days} day${days === 1 ? "" : "s"} (${when.toLocaleDateString()})`;
     }
   }
@@ -4243,8 +4277,9 @@ function initSettings() {
         "Saving will change the advertised endpoint list, but the TLS " +
         "certificate's SAN coverage stays unchanged until you rotate it.\n\n" +
         "iOS devices will only be able to connect to a custom endpoint " +
-        "AFTER you rotate the cert (Cert tile → Rotate) and re-pair every " +
-        "device.\n\nProceed with saving?"
+        "AFTER you rotate the cert (`bridge cert rotate` — there is no " +
+        "console button, by design) and re-pair every device." +
+        "\n\nProceed with saving?"
       );
       if (!ok) return;
     }

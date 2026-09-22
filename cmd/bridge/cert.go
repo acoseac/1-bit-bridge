@@ -132,10 +132,19 @@ func certInfoCmd(args []string, stdout, stderr io.Writer) int {
 	switch {
 	case notYetValid:
 		fmt.Fprintf(stdout, "WARNING: cert is NOT YET VALID — %s\n", servertls.NotYetValidRemediation)
+	// Both expiry bands end with the SHARED remediation rather than a
+	// sentence of their own. The expired line said only "iOS clients will
+	// reject the connection" — true, and it dropped the step that makes
+	// the fix work: a rotation not followed by a re-pair leaves every
+	// device unable to connect for a second reason. That dropped second
+	// step is the whole argument for the const existing
+	// (servertls.RotationRemediation's docblock), and this was the one
+	// surface repeating the advice instead of carrying it.
 	case expired:
-		fmt.Fprintln(stdout, "WARNING: cert has expired. iOS clients will reject the connection.")
+		fmt.Fprintf(stdout, "WARNING: cert has expired. iOS clients will reject the connection. %s\n",
+			servertls.RotationRemediation)
 	case expiringSoon:
-		fmt.Fprintln(stdout, "WARNING: cert is expiring soon. Plan a rotation; every paired device will need to re-pair.")
+		fmt.Fprintf(stdout, "WARNING: cert is expiring soon. %s\n", servertls.RotationRemediation)
 	}
 	return 0
 }

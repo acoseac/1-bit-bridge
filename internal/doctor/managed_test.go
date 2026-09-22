@@ -113,6 +113,34 @@ func TestManagedReportsExpiryButNotStaleSANs(t *testing.T) {
 	}
 }
 
+// TestManagedReportsANotYetValidCert is the near end of the same split.
+//
+// The test above drives the FAR end only, so "managed reports expiry"
+// was pinned for a passed NotAfter and assumed for an unopened
+// NotBefore — and the two bands are separate arms of checkTLSCert with
+// separate remediation. A managed tenant on a host whose clock ran ahead
+// at mint time has a certificate every paired device refuses, for a
+// reason the control plane's rotation cannot fix: the mint reads the
+// same clock. That is precisely the band a tenant must hear about.
+//
+// The remedy is asserted too, because this is the one band where the
+// shared rotation sentence would be wrong advice.
+func TestManagedReportsANotYetValidCert(t *testing.T) {
+	d := certFixture(t, oldHostCert, newHostEndpoints)
+	certPath, _ := servertls.DefaultPaths(d.DataDir)
+	writeCertWithWindow(t, certPath,
+		time.Now().Add(30*24*time.Hour), time.Now().Add(395*24*time.Hour))
+	d.Managed = true
+
+	c := checkTLSCert(t.Context(), d)
+	if c.Status != Warn {
+		t.Errorf("tls-cert on a managed bridge = %q, want warn about the unopened window (%q)", c.Status, c.Summary)
+	}
+	if !strings.Contains(c.Hint, servertls.NotYetValidRemediation) {
+		t.Errorf("tls-cert hint does not carry NotYetValidRemediation: %q", c.Hint)
+	}
+}
+
 // mustBigLog writes a file over the warn threshold, so the unmanaged arm
 // of the test above has something to warn ABOUT. A control against an
 // absent file would pass for the wrong reason: checkLogSize skips a

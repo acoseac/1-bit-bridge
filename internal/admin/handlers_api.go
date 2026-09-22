@@ -2478,8 +2478,11 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// Live behaviour: handlers read `cfg.CustomEndpoints` per-request
 		// (Endpoints / /v1/health), so config-on-disk + in-memory cfg
 		// updates suffice — no restart_required for this field alone.
-		// Cert SAN coverage for new entries is operator-driven via the
-		// admin Cert tile (PR feat/tls-broader-sans).
+		// Cert SAN coverage for new entries is operator-driven from the
+		// CLI — `bridge cert rotate`, then a re-pair of every device. The
+		// console reports the staleness (the Cert tile, `bridge doctor`'s
+		// tls-cert-sans line) and deliberately offers no button: rotating
+		// from a browser burns every paired device's pin.
 		if p.UpscaleEnabled != nil {
 			if *p.UpscaleEnabled != next.Upscale.Enabled {
 				next.Upscale.Enabled = *p.UpscaleEnabled
