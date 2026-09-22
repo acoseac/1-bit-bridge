@@ -91,3 +91,50 @@ func TestServeVariantKeepsTheRowWhenTheStoreSaysUnavailable(t *testing.T) {
 		}
 	})
 }
+
+// TestServeVariantKeepsTheRowWhenTheVariantsDirIsUnavailable.
+//
+// The reactive reaper is the third of the three reapers #937 named, and
+// the only one with no mount check. VariantWatcher.tick and `upscale
+// --gc` both refuse the whole sweep when the variants directory reads
+// missing or empty — a clean unmount reverts a mountpoint to an empty
+// local directory, the 2026-07-21 H4 hazard. This one reaped a row per
+// PLAY: an NFS drop at 19:00 with the watcher's next tick at 19:30 cost
+// every track played in between its row, each with an SSE telling the
+// client the variant was gone, and when the mount returned those files
+// were unreferenced — the one shape `--gc` now refuses to reclaim.
+//
+// The fixture is the positive control's, with one flag flipped, so the
+// only difference between reaping and not is the question this guard
+// asks. 410 either way: the client cannot play the file in either state
+// and already handles it.
+func TestServeVariantKeepsTheRowWhenTheVariantsDirIsUnavailable(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone.flac")
+	vs := &sentinelVariantStore{rec: &VariantRecord{
+		SourcePath: "Artist/Album/01.flac", VariantID: "upscaled-v2-176400-24", SidecarPath: gone,
+	}}
+	hs, tok, root, deleter := reactiveFixture(t, vs)
+	info, err := os.Stat(filepath.Join(root, "Artist/Album/01.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs.rec.SourceMTimeNS, vs.rec.SourceSize = info.ModTime().UnixNano(), info.Size()
+
+	// The volume went away: both the recorded and the canonical path are
+	// under the dead mountpoint, so "missing at both" is what a perfectly
+	// healthy catalog looks like through the hole.
+	deleter.mu.Lock()
+	deleter.storeUnavailable = true
+	deleter.mu.Unlock()
+
+	resp := authGet(t, hs, "/v1/download?path=Artist/Album/01.flac&variant=upscaled-v2-176400-24", tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != 410 {
+		t.Fatalf("status = %d, want 410", resp.StatusCode)
+	}
+	assertWireErrorCode(t, resp, "variant_missing_on_disk")
+	if got := deleter.deletedKeys(); len(got) != 0 {
+		t.Fatalf("the reactive reaper deleted %v while the variants directory was unavailable — "+
+			"a mount flap reaps one row per play", got)
+	}
+}

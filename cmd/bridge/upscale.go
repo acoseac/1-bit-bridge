@@ -970,6 +970,15 @@ func gcRefuseEmptyKnownSetOverPopulatedDir(stderr io.Writer, outputDir, rowNoun,
 // mid-run — the mount going away under us, which is exactly the
 // hazard. Those still refuse however much this run removed.
 //
+// That parenthesis is a DEPENDENCY, not an observation. It held only
+// once TakeSidecarInventory began resolving its root: unresolved, a
+// symlinked variants directory reached the callback as one
+// non-directory entry, and with `--gc`'s nil Consider the forward
+// sweep unlinked the mountpoint alias itself — so this guard then
+// refused on a state that same run had just created, and no flag
+// reached it. If the inventory ever stops resolving, or starts
+// handing back a directory, this reasoning goes with it.
+//
 // `forwardRemoved == 0` keeps the guard whole for the case it was
 // written for: the directory read empty and this run did nothing to
 // make it so.
