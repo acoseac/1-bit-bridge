@@ -29,7 +29,23 @@ import (
 // second step is the one that gets dropped. A rotation not followed by
 // a re-pair leaves every paired device unable to connect — the cert it
 // pinned no longer exists.
-const RotationRemediation = "Run `bridge cert rotate` (or click Rotate in the admin console's Cert tile) and restart the bridge, " +
+//
+// # It names the CLI and nothing else
+//
+// It used to offer "or click Rotate in the admin console's Cert tile".
+// There is no such button and there never was: the tile renders the
+// fingerprint and an expiry date and says, in its own panel note,
+// "Rotation is CLI-only". #950 made this the shared sentence for
+// `bridge doctor`, the startup SAN warning and the README, so one false
+// step reached every surface at once — and the two places it sends an
+// operator are exactly the ones they reach when something is already
+// wrong. `TestRotationRemediationNamesBothSteps` rejects the phrasing
+// as well as pinning the two real steps.
+//
+// Rotating from a browser is also the thing the not-yet-valid band must
+// not do (see NotYetValidRemediation), so the tile pointing at the CLI
+// is the design, not an omission.
+const RotationRemediation = "Run `bridge cert rotate` and restart the bridge, " +
 	"then re-pair every paired device — a rotation changes the SHA-256 fingerprint iOS pinned at pairing."
 
 // NotYetValidRemediation is what every surface says about a certificate
@@ -124,7 +140,7 @@ func InspectSANCoverage(certPath string, opts GenerateOptions) (SANCoverage, err
 // logIfSANsStale warns at startup when the on-disk cert doesn't cover
 // the SAN set `opts` describes. Best-effort: a read or parse failure is
 // silent here, because the operator surfaces (`Inspect`, `bridge
-// doctor`'s tls-cert-sans check, the admin Cert tile) carry the
+// doctor`'s tls-cert-sans check) carry the
 // user-facing diagnostic and a startup log is the wrong place to
 // report one twice. Runs once per process from
 // LoadOrGenerateWithOptions.

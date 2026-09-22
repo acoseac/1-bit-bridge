@@ -138,10 +138,16 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// mount points. Either order should work without manual
 	// gymnastics.
 	// abs is the resolved library root, or empty for public-mode
-	// installs that defer mount setup. Doctor preflight is
-	// skipped when there's no root to preflight against —
-	// public-mode operators run `bridge doctor` separately after
-	// mounting their storage.
+	// installs that defer mount setup. The preflight still RUNS
+	// without one — checkLibraryRoots answers "none configured
+	// (init will prompt)" for an empty list, and every other check
+	// is about the host and the install, not the library. It was
+	// gated on `abs != ""` until the cert checks were wired in
+	// (#951): a public-mode re-init — the exact flow that carries a
+	// data directory to a new host — then printed nothing at all
+	// about a certificate whose SANs no longer cover the endpoints
+	// it advertises, which is the state those checks exist to catch
+	// BEFORE devices pin it.
 	var abs string
 	switch {
 	case *libraryRoot != "":
@@ -175,11 +181,15 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// for the rare case where the operator knows better than the check
 	// (say: doctor fails on port 7789 bound by an existing bridge and
 	// you're re-running init on purpose to rewrite config).
-	if !*skipDoctor && abs != "" {
+	if !*skipDoctor {
+		var roots []string
+		if abs != "" {
+			roots = []string{abs}
+		}
 		d := doctor.Deps{
 			ConfigDir:    cfgDir,
 			DataDir:      dataDir,
-			LibraryRoots: []string{abs},
+			LibraryRoots: roots,
 			APIPort:      7788,
 			AdminPort:    7789,
 		}
@@ -868,6 +878,16 @@ func withExistingInstallCertDeps(d *doctor.Deps, cfgPath string) {
 	d.CertSANs = func(context.Context) servertls.GenerateOptions {
 		return certSANOptions(cfg)
 	}
+	// And the posture, from the same file, for the same reason the paths
+	// come from it: this is the install that is THERE. checkTLSCertSANs
+	// skips on a managed bridge because the control plane owns rotation
+	// and the tenant reaches the console over the autocert domain — the
+	// only remedy that check names is a shell command they cannot run.
+	// Without this, a re-init of a hosted install printed exactly that
+	// advice. `bridge doctor` has always set it (buildDoctorDeps); this
+	// helper copied the cert fields beside it and not this one, so the
+	// two commands graded the same host differently.
+	d.Managed = cfg.Deployment.IsManaged()
 }
 
 // maxLibraryPrompts bounds the interactive library-path re-prompt loop so a

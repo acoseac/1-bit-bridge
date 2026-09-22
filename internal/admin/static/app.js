@@ -871,6 +871,53 @@ async function refreshBackups() {
   }
 }
 
+// CERT_EXPIRY_WARNING_MS mirrors servertls.ExpiryWarningWindow — the 30
+// days `bridge doctor`, `bridge cert info` and the startup warning all
+// grade against — and CERT_EXPIRING_SOON_MS is the console's own,
+// narrower red band beneath it.
+//
+// Milliseconds because that is what Date arithmetic yields, and the
+// comparison is against an exact remaining DURATION, never a day count:
+// `Math.floor(ms / 86400000)` and the server's `DaysUntilExpiry` both
+// truncate toward zero, so 30 days 23 hours reads as 30 and a tile
+// keyed on `<= 30` says "expiring" about a certificate every CLI
+// surface calls healthy. #951 moved the Go side off the day count for
+// exactly this; these two constants are what let all three tiles here
+// follow. Shared rather than repeated: three copies of a threshold is
+// how two of them came to be green when the third was yellow.
+const CERT_EXPIRY_WARNING_MS = 30 * 24 * 60 * 60 * 1000;
+const CERT_EXPIRING_SOON_MS = 7 * 24 * 60 * 60 * 1000;
+
+// certExpiryBadge is the ONE ladder all three cert tiles grade with —
+// self-signed, Tailscale and autocert — taking the milliseconds of
+// validity remaining and returning the badge markup, or "" for healthy.
+//
+// A shared function and not three copies, because three copies is
+// precisely what this PR is about: the 30-day threshold was spelled in
+// each tile, two of them rendered the band in `.badge.running` (green,
+// the healthy colour) under the word "expiring", and only the third was
+// ever corrected. Sharing the CONSTANTS alone would have left the same
+// shape one level down — the ordering is as driftable as the numbers.
+//
+// The ordering is the load-bearing part. `left <= 0` satisfies the
+// seven-day test too, so an expired certificate reads as "expiring
+// soon" — future tense about something that has already happened —
+// unless expired is checked FIRST. That was the state of the Tailscale
+// and autocert tiles, whose day count was clamped at `Math.max(0, …)`;
+// only the self-signed one had the split. (Gemini and CodeRabbit on
+// #952, one finding each, converging on this function.)
+//
+// Milliseconds rather than a day count throughout: `DaysUntilExpiry`
+// and `Math.floor(ms / 86_400_000)` both truncate toward zero, so 30
+// days 23 hours reads as 30 and a tile keyed on it disagrees with every
+// CLI surface about the same certificate.
+function certExpiryBadge(left) {
+  if (left <= 0) return '<span class="badge danger">expired</span> ';
+  if (left <= CERT_EXPIRING_SOON_MS) return '<span class="badge danger">expiring soon</span> ';
+  if (left <= CERT_EXPIRY_WARNING_MS) return '<span class="badge warn">expiring</span> ';
+  return "";
+}
+
 // refreshCertInfo populates the "Expires" line under the TLS
 // fingerprint panel (Settings → Networking) with the live cert's
 // validity. Errors degrade silently — the panel just shows the
@@ -923,14 +970,11 @@ async function refreshCertInfo() {
         `starts ${starts.toLocaleDateString()} — check the host clock`;
       return;
     }
-    let badge = "";
-    if (days < 0) badge = '<span class="badge danger">expired</span> ';
-    else if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
-    // Yellow, as this function's contract has always said. `.badge.warn`
-    // is the yellow one; `.badge.running` is green (--ok) and was what
-    // this arm emitted from the day the tile was written, so "expiring
-    // within a month" rendered in the same colour as healthy.
-    else if (days <= 30) badge = '<span class="badge warn">expiring</span> ';
+    // GRADED ON THE EXACT REMAINING TIME, never on `days` — see
+    // certExpiryBadge, which is the one ladder all three tiles use.
+    // `days` stays as the DISPLAY, where "at least N days" is the right
+    // reading of a floor.
+    const badge = certExpiryBadge(when.getTime() - Date.now());
     cell.innerHTML = `${badge}${when.toLocaleDateString()} (${days} days)`;
   } catch {
     cell.textContent = "—";
@@ -1031,12 +1075,10 @@ function renderTailscaleTile(s) {
       certEl.textContent = "—";
     } else {
       const when = new Date(s.certNotAfter);
-      const now = new Date();
-      const days = Math.max(0, Math.floor((when.getTime() - now.getTime()) / 86_400_000));
+      const left = when.getTime() - Date.now();
+      const days = Math.max(0, Math.floor(left / 86_400_000));
       const tooltip = s.certPath ? ` title="${escapeHTML(s.certPath)}"` : "";
-      let badge = "";
-      if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
-      else if (days <= 30) badge = '<span class="badge running">expiring</span> ';
+      const badge = certExpiryBadge(left);
       certEl.innerHTML = `${badge}<span${tooltip}>expires in ${days} day${days === 1 ? "" : "s"} (${when.toLocaleDateString()})</span>`;
     }
   }
@@ -1141,11 +1183,9 @@ async function refreshAutocertTile() {
       expiryEl.textContent = "—";
     } else {
       const when = new Date(snap.notAfter);
-      const now = new Date();
-      const days = Math.max(0, Math.floor((when.getTime() - now.getTime()) / 86_400_000));
-      let badge = "";
-      if (days <= 7) badge = '<span class="badge danger">expiring soon</span> ';
-      else if (days <= 30) badge = '<span class="badge running">expiring</span> ';
+      const left = when.getTime() - Date.now();
+      const days = Math.max(0, Math.floor(left / 86_400_000));
+      const badge = certExpiryBadge(left);
       expiryEl.innerHTML = `${badge}expires in ${days} day${days === 1 ? "" : "s"} (${when.toLocaleDateString()})`;
     }
   }
@@ -4249,8 +4289,9 @@ function initSettings() {
         "Saving will change the advertised endpoint list, but the TLS " +
         "certificate's SAN coverage stays unchanged until you rotate it.\n\n" +
         "iOS devices will only be able to connect to a custom endpoint " +
-        "AFTER you rotate the cert (Cert tile → Rotate) and re-pair every " +
-        "device.\n\nProceed with saving?"
+        "AFTER you rotate the cert (`bridge cert rotate` — there is no " +
+        "console button, by design) and re-pair every device." +
+        "\n\nProceed with saving?"
       );
       if (!ok) return;
     }

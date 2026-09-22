@@ -171,3 +171,53 @@ func TestInitPreflightLeavesAFirstInstallUnwired(t *testing.T) {
 		t.Errorf("cert paths resolved from a config that does not exist: %q / %q", d.TLSCertPath, d.TLSKeyPath)
 	}
 }
+
+// TestInitPreflightCarriesTheManagedPosture — the third field on the
+// same install, and the one the helper copied its neighbours without.
+//
+// `bridge doctor` sets Deps.Managed from the loaded config, and
+// checkTLSCertSANs skips on it: a hosted tenant reaches its bridge over
+// the autocert domain, whose Let's Encrypt certificate the SNI switcher
+// serves instead of the self-signed pair, and the only remedy that
+// check names is a shell command the tenant cannot run. The preflight
+// read the cert PATHS and the SAN want-set from the config on disk and
+// then graded them as if the bridge were self-hosted, so a re-init of a
+// managed install printed advice for somebody else's console.
+//
+// Asserted on the Deps rather than through initCmd because Managed is
+// only observable through a check's verdict, and the verdict that
+// changes is the one the test above already drives from the unmanaged
+// side.
+func TestInitPreflightCarriesTheManagedPosture(t *testing.T) {
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(tmp, "bridge.yaml")
+	body := "libraryRoots:\n  - " + lib + "\n" +
+		"dataDir: " + filepath.Join(tmp, "data") + "\n" +
+		"deployment:\n  managedControls:\n    - restart\n    - updates\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Control first: the same helper against a config with no
+	// deployment block must NOT claim the posture, or an unconditional
+	// `true` would pass the assertion below.
+	plain := filepath.Join(tmp, "plain.yaml")
+	if err := os.WriteFile(plain, []byte("libraryRoots:\n  - "+lib+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var unmanaged doctor.Deps
+	withExistingInstallCertDeps(&unmanaged, plain)
+	if unmanaged.Managed {
+		t.Error("a config with no deployment block graded as managed")
+	}
+
+	var d doctor.Deps
+	withExistingInstallCertDeps(&d, cfgPath)
+	if !d.Managed {
+		t.Error("the preflight does not carry the managed posture, so a hosted tenant " +
+			"re-running init is told to run `bridge cert rotate` on a host it does not own")
+	}
+}

@@ -130,10 +130,26 @@ func TestInspectSANCoverage_UnreadableCertIsAnError(t *testing.T) {
 // and a rotation that is not followed by a re-pair leaves every paired
 // device unable to connect: the cert it pinned no longer exists.
 // Losing either half of that sentence is the failure worth pinning.
+//
+// The reject half is the other lesson. The sentence offered "or click
+// Rotate in the admin console's Cert tile" for as long as it existed,
+// and no such control has ever been rendered — the tile's own panel
+// note says rotation is CLI-only. A remediation is read by an operator
+// who is already stuck, so a step that cannot be taken costs them the
+// search. The rejected substrings are lowercased on both sides so a
+// reworded reintroduction ("the Cert tile's Rotate button") is caught
+// too.
 func TestRotationRemediationNamesBothSteps(t *testing.T) {
 	for _, want := range []string{"bridge cert rotate", "re-pair", "fingerprint"} {
 		if !strings.Contains(RotationRemediation, want) {
 			t.Errorf("RotationRemediation does not mention %q: %q", want, RotationRemediation)
+		}
+	}
+	lower := strings.ToLower(RotationRemediation)
+	for _, reject := range []string{"cert tile", "click rotate", "rotate button"} {
+		if strings.Contains(lower, reject) {
+			t.Errorf("RotationRemediation offers %q — the admin console has no Rotate control, "+
+				"and its own panel note says rotation is CLI-only: %q", reject, RotationRemediation)
 		}
 	}
 }
