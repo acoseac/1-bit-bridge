@@ -60,10 +60,12 @@ type SidecarInventory struct {
 	// ScratchPaths holds every scratch file, uncapped: the callers that
 	// ask for them remove them unconditionally.
 	ScratchPaths []string
-	// Unreadable counts directories the walk could not descend into.
-	// Their contents are missing from every count above, which can only
+	// Unreadable counts entries the walk could not resolve: a directory
+	// it could not descend into, and a symlink it could not stat (so it
+	// cannot know whether the target is a directory whose only reference
+	// this is). Both are missing from every count above, which can only
 	// make the deletion set SMALLER — the known set comes from the
-	// database, not from the walk — so it is reported rather than
+	// database, not from the walk — so they are reported rather than
 	// refused. A report built from a partial tree should say so.
 	Unreadable int
 	// Truncated is true when the walk stopped at MaxEntries with more of
@@ -221,7 +223,21 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 		// regular FILE still counts, the #207 broken-link rule
 		// TreeHoldsVariantSidecars follows.
 		if d.Type()&fs.ModeSymlink != 0 {
-			if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+			info, statErr := os.Stat(path)
+			switch {
+			case statErr == nil && info.IsDir():
+				return nil
+			case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
+				// Could not tell what it points at. A DANGLING link
+				// (ErrNotExist) falls through on purpose — it is junk
+				// in this tree and reclaiming it is the sweep's job —
+				// but a permission or I/O error is not evidence about
+				// the target at all, and classifying it would let the
+				// forward sweep remove the only reference to a subtree
+				// (CodeRabbit on #959). Counted, not refused: the
+				// entry is simply absent from every total, which can
+				// only make the deletion set smaller.
+				inv.Unreadable++
 				return nil
 			}
 		}

@@ -800,3 +800,40 @@ func TestUpscaleDeleteLeavesACopyInFlightAlone(t *testing.T) {
 		t.Errorf("deletedCount/freedBytes = %d/%d, want 0/0", dr.DeletedCount, dr.FreedBytes)
 	}
 }
+
+// TestUpscaleDeleteKeepsRowsWhileTheVariantsDirIsUnavailable.
+//
+// The round-1 fix taught this handler to ask WHERE the file is, and
+// left open the case where the answer cannot be trusted: with the
+// variants directory unmounted, LocateSidecar stats both the recorded
+// and the canonical path under the same dead mountpoint, answers
+// "absent at both", and the ENOENT that follows flows through the
+// already-gone guard as success — deleting the row while its sidecar
+// sits intact on the volume that will come back.
+//
+// That is the same stranding the relocation case produces, reached by a
+// different cause, so it takes the answer the two sweeps already give:
+// keep the row. (CodeRabbit Major on #959.)
+func TestUpscaleDeleteKeepsRowsWhileTheVariantsDirIsUnavailable(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	deleter.byPath["Music/Album/01.flac"] = []VariantSummary{{
+		SourcePath: "Music/Album/01.flac", VariantID: "v1",
+		SidecarPath: filepath.Join(t.TempDir(), "unmounted", "abc-v1.flac"), SizeBytes: 10,
+	}}
+	deleter.mu.Lock()
+	deleter.storeUnavailable = true
+	deleter.mu.Unlock()
+
+	resp := authDelete(t, hs, "/v1/upscale/variants?path=Music/Album/01.flac", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	if got := deleter.deletedKeys(); len(got) != 0 {
+		t.Fatalf("DeleteVariant calls: got %v, want none — the row must outlive an unmounted volume", got)
+	}
+	dr := decodeDeleteResponse(t, resp)
+	if dr.DeletedCount != 0 || dr.FreedBytes != 0 {
+		t.Errorf("deletedCount/freedBytes = %d/%d, want 0/0", dr.DeletedCount, dr.FreedBytes)
+	}
+}

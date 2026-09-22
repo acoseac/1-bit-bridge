@@ -543,6 +543,12 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 	// with whatever DID disappear.
 	deletedPaths := map[string]struct{}{}
 	seenVariantIDs := map[string]struct{}{}
+	// skippedUnavailable counts rows left alone because the variants
+	// directory was unreachable. ONE line after the loop, never one per
+	// row: the condition is the same for every row in the request, so
+	// per-row logging is the M-SEARCH flood shape — thousands of
+	// identical lines that make every other line unfindable.
+	skippedUnavailable := 0
 	deletedVariantIDs := make([]string, 0, len(rows))
 	logger := LoggerFromContext(ctx)
 	for _, row := range rows {
@@ -565,6 +571,24 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		// with nothing referencing it, and handed `--gc` a tree it now
 		// refuses to reclaim (orphans > rows). #937 enumerated three
 		// reapers; this path deletes rows too and was not among them.
+		// Is the volume even there? With the variants directory
+		// unmounted, LocateSidecar stats both the recorded and the
+		// canonical path under the same dead mountpoint, answers
+		// "absent at both", and the ENOENT that follows flows through
+		// the already-gone guard as success — deleting the row while
+		// its sidecar sits intact on the volume that will come back.
+		// That is the same stranding this handler was just fixed for,
+		// reached by a different cause, so it takes the same answer the
+		// two sweeps give: keep the row.
+		//
+		// Per row rather than once, because a whole-library delete runs
+		// long enough for a mount to drop underneath it. The cost is a
+		// stat beside a LocateSidecar that already stats twice and an
+		// os.Remove that follows.
+		if !s.variantDeleter.SidecarStoreAvailable() {
+			skippedUnavailable++
+			continue
+		}
 		loc := s.variantDeleter.LocateVariantSidecar(row)
 		if loc.Placement == VariantSidecarCopyInFlight {
 			// Something is at the canonical path but it is not this
@@ -592,10 +616,14 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 		if loc.Path != "" {
 			removeErr = os.Remove(loc.Path)
 		}
-		if loc.Placement == VariantSidecarRelocated {
-			// Name BOTH paths: the journal otherwise records what the
-			// row claimed rather than what was actually removed, which
-			// is the whole distinction this branch exists to make.
+		if removeErr == nil && loc.Placement == VariantSidecarRelocated {
+			// AFTER the unlink succeeded, not before it is attempted:
+			// logged early, a failing os.Remove produced a journal that
+			// reported the unlink and then reported it failing
+			// (CodeRabbit on #959). Name BOTH paths — the journal
+			// otherwise records what the row claimed rather than what
+			// was actually removed, which is the whole distinction this
+			// branch exists to make.
 			logger.Info("variant delete unlinked a relocated sidecar",
 				slog.String("source_path", row.SourcePath),
 				slog.String("variant_id", row.VariantID),
@@ -641,6 +669,16 @@ func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest)
 			deletedPaths[row.SourcePath] = struct{}{}
 			resp.DeletedPaths = append(resp.DeletedPaths, row.SourcePath)
 		}
+	}
+	if skippedUnavailable > 0 {
+		// One line carrying the count, for the reason the per-row
+		// logging was not taken: every skipped row has the SAME reason,
+		// so N identical lines say nothing the count does not and bury
+		// everything else in the journal.
+		logger.Warn("variant delete skipped rows; the variants directory is unavailable",
+			slog.Int("skipped", skippedUnavailable),
+			slog.Int("considered", len(rows)),
+		)
 	}
 
 	// Phase 4: fan-out to SSE subscribers (iOS). Single event

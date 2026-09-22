@@ -586,3 +586,59 @@ func TestSidecarInventorySkipsASymlinkedDirectory(t *testing.T) {
 		t.Fatalf("Files = %d, want 1 — only the real sidecar is a candidate", inv.Files)
 	}
 }
+
+// TestSidecarInventoryCountsASymlinkItCannotStat.
+//
+// The symlink-skip added in round 1 asked os.Stat and treated ANY
+// failure as "not a directory", so a link whose target sits behind a
+// permission wall fell through to orphan classification and the forward
+// sweep would os.Remove the only reference to that subtree.
+//
+// A DANGLING link still falls through on purpose — it is junk in this
+// tree and reclaiming it is the sweep's job. The distinction is between
+// "the target is not there" and "I could not find out", and only the
+// second is a reason to leave it alone. (CodeRabbit Major on #959.)
+func TestSidecarInventoryCountsASymlinkItCannotStat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory modes do not deny stat on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "variants")
+	seedTree(t, root, "Artist/Album/01.flac.upscaled-v2-176400-24.flac")
+
+	blocked := filepath.Join(base, "blocked")
+	if err := os.MkdirAll(filepath.Join(blocked, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "Artist", "Parked")
+	if err := os.Symlink(filepath.Join(blocked, "sub"), link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Skipf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+	if _, err := os.Stat(link); err == nil {
+		t.Skip("this user can stat through a 0000 directory — the fixture cannot reproduce the state")
+	}
+
+	inv, err := TakeSidecarInventory(context.Background(), root, nil, SidecarInventoryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range inv.OrphanPaths {
+		if filepath.Clean(p) == filepath.Clean(link) {
+			t.Fatalf("a symlink the walk could not stat is listed as an orphan (%s) — "+
+				"the forward sweep would remove the only reference to its subtree", p)
+		}
+	}
+	if inv.Unreadable != 1 {
+		t.Errorf("Unreadable = %d, want 1 — an entry that could not be resolved is reported, not classified", inv.Unreadable)
+	}
+	if inv.Files != 1 {
+		t.Errorf("Files = %d, want 1 — only the real sidecar is a candidate", inv.Files)
+	}
+}
