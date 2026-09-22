@@ -466,10 +466,11 @@ func compactCSS(s string) string {
 // to reintroduce one level down.
 func splitSelectorGroup(sel string) []string {
 	var (
-		out   []string
-		cur   strings.Builder
-		quote rune
-		depth int
+		out     []string
+		cur     strings.Builder
+		quote   rune
+		depth   int
+		escaped bool
 	)
 	flush := func() {
 		if t := strings.TrimSpace(cur.String()); t != "" {
@@ -478,6 +479,19 @@ func splitSelectorGroup(sel string) []string {
 		cur.Reset()
 	}
 	for _, r := range sel {
+		// A backslash escapes the next rune, so `[title="a\"b"]` does not
+		// close its quote. Without this the state went out of sync and the
+		// rest of the group was swallowed (Gemini on #964).
+		if escaped {
+			escaped = false
+			cur.WriteRune(r)
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			cur.WriteRune(r)
+			continue
+		}
 		switch {
 		case quote != 0:
 			if r == quote {
@@ -515,6 +529,7 @@ func TestSplitSelectorGroupKeepsStructuralCommas(t *testing.T) {
 		{".sidebar-foot, .meta", []string{".sidebar-foot", ".meta"}},
 		{".a,.b ,  .c", []string{".a", ".b", ".c"}},
 		{`a[title="x,y"], .b`, []string{`a[title="x,y"]`, ".b"}},
+		{`a[title="x\",y"], .b`, []string{`a[title="x\",y"]`, ".b"}},
 		{":is(.a, .b) .c", []string{":is(.a, .b) .c"}},
 		{`header[data-nav-open="true"] .sidebar-drawer`, []string{`header[data-nav-open="true"] .sidebar-drawer`}},
 	} {

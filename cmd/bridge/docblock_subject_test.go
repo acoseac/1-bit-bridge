@@ -11,12 +11,20 @@ import (
 	"testing"
 )
 
-// docOpenerVerbs are the words a Go doc comment uses immediately after
-// the identifier it documents. Deliberately a closed list: matching
-// "<Ident> <anything>" would flag every sentence that happens to open
-// with a capitalised name, and the shape being caught is specifically a
-// DOC COMMENT that lost its subject.
-var docOpener = regexp.MustCompile(`^//\s+([A-Za-z_][A-Za-z0-9_]*)\s+` +
+// docOpener matches the opening of a Go doc comment: the identifier it
+// documents, then one of the words such a comment uses next.
+//
+// The verb list is deliberately CLOSED. Matching "<Ident> <anything>"
+// would flag every sentence that happens to open with a capitalised
+// name, and the shape being caught is specifically a doc comment that
+// lost its subject.
+//
+// Applied to the group's RENDERED text (ast.CommentGroup.Text), not to
+// the first raw line: that strips `//` and `/* */` alike, drops
+// directive lines, and skips a leading blank comment line — so a block
+// comment or a docblock that opens with a bare `//` is seen rather than
+// silently passing (Gemini on #964).
+var docOpener = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s+` +
 	`(is|are|implements|returns|holds|wraps|reports|takes|does|builds|maps|` +
 	`counts|stamps|resolves|answers|records|serves|walks|parses|converts|` +
 	`emits|adds|removes|creates|deletes|renders|describes|provides|tracks|` +
@@ -72,8 +80,16 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
+			// `vendor` and `testdata` are skipped for the reason the go
+			// tool skips them: they are not this module's code. Neither
+			// exists here today (no `.go` under any testdata/, no vendor
+			// dir), so this is the walk agreeing with the toolchain
+			// rather than a live fix — but a `go mod vendor` would
+			// otherwise parse thousands of dependency files and report
+			// findings nobody here can act on (Gemini on #964).
 			if name := d.Name(); path != root && (strings.HasPrefix(name, ".") ||
-				strings.HasPrefix(name, "_") || name == "node_modules") {
+				strings.HasPrefix(name, "_") || name == "node_modules" ||
+				name == "vendor" || name == "testdata") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -118,11 +134,11 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 
 	checked, found := 0, 0
 	inspect := func(path string, dir string, name string, doc *ast.CommentGroup, fset *token.FileSet) {
-		if doc == nil || len(doc.List) == 0 {
+		if doc == nil {
 			return
 		}
 		checked++
-		m := docOpener.FindStringSubmatch(doc.List[0].Text)
+		m := docOpener.FindStringSubmatch(doc.Text())
 		if m == nil || m[1] == name {
 			return
 		}
