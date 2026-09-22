@@ -61,12 +61,18 @@ type SidecarInventory struct {
 	// ask for them remove them unconditionally.
 	ScratchPaths []string
 	// Unreadable counts entries the walk could not resolve: a directory
-	// it could not descend into, and a symlink it could not stat (so it
-	// cannot know whether the target is a directory whose only reference
-	// this is). Both are missing from every count above, which can only
-	// make the deletion set SMALLER — the known set comes from the
-	// database, not from the walk — so they are reported rather than
-	// refused. A report built from a partial tree should say so.
+	// it could not descend into, and a NON-REGULAR entry it could not
+	// stat (a symlink, a Windows junction — so it cannot know whether
+	// the target is a directory whose only reference this is). Both are
+	// missing from every count above, which can only make the deletion
+	// set SMALLER — the known set comes from the database, not from the
+	// walk — so they are reported rather than refused. A report built
+	// from a partial tree should say so.
+	//
+	// It is therefore a count of ENTRIES, not of directories, and the
+	// two CLI sweeps that print it say so: the message named directories
+	// and their contents, which was already imprecise for an unstattable
+	// link and is plainly wrong for a junction (CodeRabbit on #969).
 	Unreadable int
 	// Truncated is true when the walk stopped at MaxEntries with more of
 	// the tree unseen. A caller that deletes must not truncate; a caller
@@ -213,33 +219,35 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 			}
 			return nil
 		}
-		// A symlink that points at a DIRECTORY is not a candidate file.
+		// A link that points at a DIRECTORY is not a candidate file.
 		// WalkDir does not descend into it (it Lstats), so unresolved it
 		// would arrive here as one non-directory entry and — under a nil
 		// Consider — be unlinked as an orphan, taking an album an
 		// operator parked on another volume with it. Skipped rather than
 		// followed: descending would raise the cycle question, and the
-		// files under it are not this tree's to reclaim. A symlink to a
+		// files under it are not this tree's to reclaim. A link to a
 		// regular FILE still counts, the #207 broken-link rule
 		// TreeHoldsVariantSidecars follows.
-		if d.Type()&fs.ModeSymlink != 0 {
-			info, statErr := os.Stat(path)
-			switch {
-			case statErr == nil && info.IsDir():
-				return nil
-			case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
-				// Could not tell what it points at. A DANGLING link
-				// (ErrNotExist) falls through on purpose — it is junk
-				// in this tree and reclaiming it is the sweep's job —
-				// but a permission or I/O error is not evidence about
-				// the target at all, and classifying it would let the
-				// forward sweep remove the only reference to a subtree
-				// (CodeRabbit on #959). Counted, not refused: the
-				// entry is simply absent from every total, which can
-				// only make the deletion set smaller.
-				inv.Unreadable++
-				return nil
-			}
+		//
+		// The test is "not a REGULAR file", not "is a symlink", because
+		// a Windows directory JUNCTION (`mklink /J`,
+		// IO_REPARSE_TAG_MOUNT_POINT) is neither. Since Go 1.23's
+		// winsymlink change, os.Lstat gives a name-surrogate reparse
+		// point ModeIrregular and withholds ModeDir — so a junction has
+		// IsDir() false and no ModeSymlink bit, fell through every arm
+		// here, and was classified as an orphan file. A junction is the
+		// ORDINARY way to park an album on another volume on Windows: a
+		// real symlink needs a privilege a service account usually does
+		// not have. One of them is below the mass-orphan floor of ten,
+		// so no guard could see it, and os.Remove takes the junction
+		// while its target's files stay behind with nothing pointing at
+		// them.
+		switch classifyWalkEntry(d.Type(), func() (fs.FileInfo, error) { return os.Stat(path) }) {
+		case walkEntrySkip:
+			return nil
+		case walkEntryUnreadable:
+			inv.Unreadable++
+			return nil
 		}
 		name := d.Name()
 		if opts.Scratch != nil && opts.Scratch(name) {
@@ -273,6 +281,69 @@ func TakeSidecarInventory(ctx context.Context, root string, known map[string]str
 // errInventoryBudget stops the walk at MaxEntries; it never escapes
 // TakeSidecarInventory.
 var errInventoryBudget = errors.New("integrity: inventory budget reached")
+
+// walkEntryVerdict is what the inventory does with one non-directory
+// entry the walk handed it.
+type walkEntryVerdict uint8
+
+const (
+	// walkEntryClassify — an ordinary candidate: Scratch, Consider and
+	// the known-set lookup decide from here.
+	walkEntryClassify walkEntryVerdict = iota
+	// walkEntrySkip — a link whose target is a DIRECTORY. Not a file,
+	// and unlinking it would take a subtree's only reference.
+	walkEntrySkip
+	// walkEntryUnreadable — the target could not be determined. "Not
+	// there" and "could not find out" are different questions and only
+	// the first is junk.
+	walkEntryUnreadable
+)
+
+// classifyWalkEntry decides what a non-directory walk entry is, from its
+// Lstat MODE and a stat of its target.
+//
+// A plain file answers immediately and the stat is never taken — this
+// runs once per entry on a tree that can hold 100k of them, and
+// WalkDir's own Lstat already said what it is.
+//
+// Everything else is stat'd, and the test is "not a REGULAR file"
+// rather than "is a symlink" because the shapes that matter are not all
+// symlinks. A Windows directory JUNCTION (`mklink /J`,
+// IO_REPARSE_TAG_MOUNT_POINT) is the live one: since Go 1.23's
+// winsymlink change, os.Lstat gives a name-surrogate reparse point
+// ModeIrregular and withholds ModeDir, so a junction reports IsDir()
+// false with no ModeSymlink bit. It fell through every arm and was
+// classified as an orphan FILE — and a junction is the ordinary way to
+// park an album on another volume there, because a real symlink needs a
+// privilege a service account usually does not have. ONE of them is
+// below the mass-orphan floor of ten, so no guard could see it, and
+// os.Remove takes the junction while its target's files stay behind
+// with nothing pointing at them.
+//
+// A DANGLING link classifies (ErrNotExist): it is junk in this tree and
+// reclaiming it is the sweep's job. A permission or I/O error is not
+// evidence about the target at all, and classifying it would let the
+// forward sweep remove the only reference to a subtree (CodeRabbit on
+// #959). The other non-regular POSIX kinds — a FIFO, a socket, a device
+// node — stat to themselves, so they classify exactly as before; only a
+// DIRECTORY target changes the answer.
+//
+// Taken as a function of (mode, stat) rather than inline because the
+// Windows shape cannot be constructed on any other platform, and a
+// guard that only runs on one CI leg looks exactly like one that passed.
+func classifyWalkEntry(mode fs.FileMode, stat func() (fs.FileInfo, error)) walkEntryVerdict {
+	if mode.IsRegular() {
+		return walkEntryClassify
+	}
+	info, err := stat()
+	switch {
+	case err == nil && info.IsDir():
+		return walkEntrySkip
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return walkEntryUnreadable
+	}
+	return walkEntryClassify
+}
 
 // MassOrphanLowerBound reports whether the two terms of MassOrphanRefusal
 // that SURVIVE A PARTIAL WALK hold: the deletion clears the floor, and

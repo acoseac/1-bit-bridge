@@ -5,11 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -605,5 +609,71 @@ func TestAnalysisStoreAdapterAdoptsARelocatedWaveform(t *testing.T) {
 	bare := &analysisStoreAdapter{provider: manifest.NewProvider(store, nil)}
 	if rec, err := bare.LookupAnalysis(ctx, source); err != nil || rec == nil || rec.WaveformPath != recorded {
 		t.Errorf("bare adapter: rec=%+v err=%v", rec, err)
+	}
+}
+
+// stringLiteralsContaining returns every string literal in a Go source
+// file whose value contains marker.
+//
+// go/parser rather than a text scan, because the subject here IS a
+// literal and this repo's comment strippers blank those — and the
+// comments beside the lines this serves discuss directories by name, so
+// a text scan would find its own commentary.
+func stringLiteralsContaining(t *testing.T, file, marker string) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if v, err := strconv.Unquote(lit.Value); err == nil && strings.Contains(v, marker) {
+			out = append(out, v)
+		}
+		return true
+	})
+	return out
+}
+
+// TestUnreadableIsReportedAsEntriesNotDirectories.
+//
+// SidecarInventory.Unreadable counts entries the walk could not
+// resolve — a directory it could not descend into, AND a non-regular
+// entry it could not stat, which since #969 includes a Windows
+// junction as well as a symlink. Both CLI sweeps print that one count,
+// and both called it directories and spoke of "their contents": already
+// imprecise for an unstattable link, and plainly wrong for a junction,
+// which sends the operator looking for the wrong thing in their own
+// tree (CodeRabbit on #969).
+//
+// Both files, because one count printed from two places is the
+// enumeration failure this repo keeps paying for: CodeRabbit flagged
+// upscale.go and analyze.go carries the same string.
+func TestUnreadableIsReportedAsEntriesNotDirectories(t *testing.T) {
+	checked := 0
+	for _, file := range []string{"upscale.go", "analyze.go"} {
+		lines := stringLiteralsContaining(t, file, "could not be read")
+		if len(lines) == 0 {
+			t.Errorf("%s has no Unreadable report line — if it moved, move this guard with it", file)
+		}
+		for _, line := range lines {
+			checked++
+			if strings.Contains(line, "director") {
+				t.Errorf("%s reports Unreadable as directories (%q) — it also counts a link or "+
+					"junction the walk could not stat, and naming those directories sends the "+
+					"operator after the wrong thing", file, line)
+			}
+			if !strings.Contains(line, "entr") {
+				t.Errorf("%s no longer says what Unreadable counts (%q)", file, line)
+			}
+		}
+	}
+	if checked != 2 {
+		t.Fatalf("scanned %d report lines, want 2 — the scan is not seeing both sweeps and "+
+			"would pass no matter what they say", checked)
 	}
 }

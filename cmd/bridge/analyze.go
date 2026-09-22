@@ -350,7 +350,11 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 		return 1
 	}
 	if inv.Unreadable > 0 {
-		fmt.Fprintf(stderr, "analyze --gc: %d director(y/ies) under %s could not be read; their contents were neither counted nor removed.\n",
+		// ENTRIES, not directories — see the twin in upscale.go. Both
+		// sites print the same count from the same walk, so a wording
+		// fix that reached one of them would be the enumeration failure
+		// this repo keeps paying for.
+		fmt.Fprintf(stderr, "analyze --gc: %d entr(y/ies) under %s could not be read; they were neither counted nor removed.\n",
 			inv.Unreadable, outputDir)
 	}
 	if !allowMassOrphans {

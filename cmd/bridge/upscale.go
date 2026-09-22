@@ -834,11 +834,16 @@ func gcTakeInventory(ctx context.Context, stderr io.Writer, outputDir string, kn
 		return integrity.SidecarInventory{}, 1
 	}
 	if inv.Unreadable > 0 {
-		// Not a refusal: a directory the walk could not descend into is
-		// simply absent from the counts, and its files are absent from
+		// Not a refusal: an entry the walk could not resolve is simply
+		// absent from the counts, and anything under it is absent from
 		// the deletion list. Say so, because the summary that follows is
 		// then about part of the tree.
-		fmt.Fprintf(stderr, "GC forward sweep: %d director(y/ies) under %s could not be read; their contents were neither counted nor removed.\n",
+		//
+		// ENTRIES, not directories: Unreadable also counts a link the
+		// walk could not stat, which since #969 includes a Windows
+		// junction. Naming them directories told the operator to go
+		// looking for the wrong thing.
+		fmt.Fprintf(stderr, "GC forward sweep: %d entr(y/ies) under %s could not be read; they were neither counted nor removed.\n",
 			inv.Unreadable, outputDir)
 	}
 	return inv, 0
