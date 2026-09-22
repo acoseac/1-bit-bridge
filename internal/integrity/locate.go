@@ -111,23 +111,46 @@ func CanonicalSidecarPath(variantsDir string, row VariantSnapshot) string {
 // writer stat'd after the atomic rename, and a sidecar is never modified
 // in place — so a partial copy can never be adopted.
 func LocateSidecar(variantsDir string, row VariantSnapshot) SidecarLocation {
-	_, err := os.Stat(row.SidecarPath)
+	return locateRecordedFile(row.SidecarPath, CanonicalSidecarPath(variantsDir, row), row.SizeBytes)
+}
+
+// locateRecordedFile is the classification itself, over a recorded path,
+// the canonical path it belongs at, and the size the row claims.
+//
+// ONE body, because LocateSidecar and LocateWaveform make the same
+// decision about two different tables and there is no reading on which
+// they should ever answer differently: both are "a recorded path is a
+// claim about where the file was". Two copies would be two places to fix
+// the day a verdict moves, and the one that drifts is the one deciding
+// whether a file is adopted or stranded. (The variants half already
+// keeps `MassDeleteRefusal` this way, for the same reason.)
+//
+// `canonical == ""` means the caller had nothing to probe — no
+// directory, or a row with no source identity — and `canonical ==
+// recorded` means the row already points where the file belongs, i.e.
+// the ordinary "the operator deleted this one" case. Both are Missing:
+// there is nowhere else to look.
+//
+// os.Stat, not Lstat, on both probes: a symlink to a missing target is
+// missing from the serving path's point of view, which is the point of
+// view a reaper must take (Gemini on PR #207, pinned by the CLI's
+// broken-link test). The size compare is exact — the writer stat'd it
+// after the atomic rename, and neither a variant nor a waveform is
+// modified in place — so a partial copy can never be adopted.
+func locateRecordedFile(recorded, canonical string, wantSize int64) SidecarLocation {
+	_, err := os.Stat(recorded)
 	if err == nil {
 		return SidecarLocation{Verdict: SidecarPresent}
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return SidecarLocation{Verdict: SidecarUnknown, Err: err}
 	}
-	canonical := CanonicalSidecarPath(variantsDir, row)
-	if canonical == "" || canonical == row.SidecarPath {
-		// Nowhere else to look: the row already points at the canonical
-		// place (the ordinary "operator deleted this one" case), or the
-		// caller gave no directory to probe (legacy unconditional sweep).
+	if canonical == "" || canonical == recorded {
 		return SidecarLocation{Verdict: SidecarMissing}
 	}
 	info, err := os.Stat(canonical)
 	switch {
-	case err == nil && info.Mode().IsRegular() && info.Size() == row.SizeBytes:
+	case err == nil && info.Mode().IsRegular() && info.Size() == wantSize:
 		return SidecarLocation{Verdict: SidecarRelocated, Canonical: canonical}
 	case err == nil:
 		return SidecarLocation{Verdict: SidecarMismatched, Canonical: canonical}

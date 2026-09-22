@@ -39,8 +39,12 @@ const upnpClassStorageFolder = "object.container.storageFolder"
 // AND we have field reports of large-library responsiveness pain.
 type LibrarySource interface {
 	// ListTrackInfos returns every track in the library, in stable order.
-	// Stable ordering (e.g., by AbsolutePath) is load-bearing for
-	// pagination correctness once it lands — see comment above.
+	// Stable ordering is load-bearing for pagination correctness once it
+	// lands — see comment above. RelativePath is the key to order on:
+	// AbsolutePath is EMPTY for every UPnP-routed track (dlna_wiring.go
+	// leaves it so the proxy fast-path takes over), so it is not a
+	// stable key on a bridge with an upstream. BuildFolderIndex sorts
+	// children that way for the same reason (#919).
 	ListTrackInfos() []TrackInfo
 
 	// TrackCount returns the number of tracks in the library. It exists
@@ -211,6 +215,32 @@ type TrackInfo struct {
 	// manifest DB. The DLNA package never imports manifest — this is
 	// the decoupling boundary.
 	Variants []VariantInfo
+}
+
+// VariantLocator answers, at REQUEST time, where one variant's sidecar
+// is now — for the case where the path the index carries is no longer
+// where the file sits.
+//
+// `track_variants.sidecar_path` is absolute, so moving the variants
+// directory (or restoring the database onto a host that lays it out
+// differently) leaves every recorded path reading ENOENT while every
+// file sits, byte-identical, at its canonical place under the CURRENT
+// directory. `/v1/download` and the admin player resolve that at lookup
+// time; this index cannot, because it bakes the path into VariantInfo
+// once per cache rebuild and a probe there would be a stat per variant
+// of every track, behind a 30 s TTL.
+//
+// So it is asked ONLY on the open failure: free in the healthy case,
+// and the one moment the answer changes the response. Returning ""
+// means "nowhere", and the renderer gets the 410 it would have got
+// anyway — this can add a served file, never remove one. Whether to
+// ADOPT the row is the implementation's business, not this interface's;
+// the wiring layer shares that decision with the API adapter.
+//
+// Optional, and an interface, for ArtworkSource's reason: the dlna
+// package must not import manifest or integrity.
+type VariantLocator interface {
+	LocateVariantSidecar(ctx context.Context, sourcePath, variantID, recorded string) string
 }
 
 // VariantInfo describes one offline-cached alternate rendering of a

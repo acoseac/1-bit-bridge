@@ -77,6 +77,16 @@ type ServerConfig struct {
 	// a key. Optional; the wiring layer passes the api server.
 	Artwork ArtworkSource
 
+	// VariantLocator, when non-nil, gets one chance to say where a
+	// variant sidecar moved to before a missing one becomes a 410 —
+	// the index carries the path the row RECORDED, which a moved
+	// variants directory invalidates wholesale. Consulted only on the
+	// open failure, so it costs nothing when the file is where the
+	// index says. Optional; the wiring layer passes an adapter over the
+	// manifest store. See the interface's docblock in
+	// content_directory.go.
+	VariantLocator VariantLocator
+
 	// UDN is the device's stable unique identifier WITH the `uuid:`
 	// prefix (e.g. "uuid:f1b3a5c2-..."). Required. Should remain stable
 	// across bridge restarts so renderers don't re-add us on every
@@ -487,7 +497,7 @@ func (s *Server) mountHandlers() {
 	s.mux.Handle("/dlna/cds/control", cdsHandler)
 	s.mux.Handle("/dlna/cm/control", ConnectionManagerHandler())
 
-	s.mux.Handle(FilePathPrefix, FileHandler(s.cfg.Library, s.cfg.UPnPRouting, s.cfg.UPnPProxy))
+	s.mux.Handle(FilePathPrefix, FileHandler(s.cfg.Library, s.cfg.UPnPRouting, s.cfg.UPnPProxy, s.cfg.VariantLocator))
 
 	// Cover bytes for third-party control points, under `/dlna/file/`'s
 	// posture (LAN-only, unauthenticated, opaque key, GET/HEAD). Mounted

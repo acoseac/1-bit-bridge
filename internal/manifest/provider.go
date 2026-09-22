@@ -289,9 +289,16 @@ type AnalysisLookup struct {
 	// SourcePath is the CANONICAL row value (case-preserved);
 	// LookupAnalysis matches case-insensitively but downstream
 	// consumers want the canonical form. Mirrors VariantLookup.
-	SourcePath    string
-	WaveformPath  string
-	WaveformTag   string
+	SourcePath   string
+	WaveformPath string
+	WaveformTag  string
+	// WaveformSize is the sidecar's recorded byte count — what the
+	// serve-side relocation probe compares against a file found at the
+	// canonical location under the CURRENT waveform directory when the
+	// recorded path is gone, so it adopts the operator's byte-identical
+	// copy and never a partial one. The waveform twin of
+	// VariantLookup.SizeBytes.
+	WaveformSize  int64
 	SourceMTimeNS int64
 	SourceSize    int64
 	// Spectrum is the `1BSP` file-provenance curve, or nil when the row
@@ -344,6 +351,7 @@ func (p *Provider) LookupAnalysis(ctx context.Context, sourcePath string) (*Anal
 		SourcePath:    a.SourcePath,
 		WaveformPath:  a.WaveformPath,
 		WaveformTag:   a.WaveformTag,
+		WaveformSize:  a.WaveformSize,
 		SourceMTimeNS: a.SourceMTimeNS,
 		SourceSize:    a.SourceSize,
 		Spectrum:      a.Spectrum,

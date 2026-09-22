@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"os"
@@ -9,9 +10,23 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
+
+// variantGoneMessage is the 410 body every "the row is there, the file is
+// not" answer carries — the locate miss, the containment refusal and the
+// stat failure alike.
+//
+// ONE string on purpose, and not because a linter counted three copies.
+// The three arms are deliberately indistinguishable to the client: the
+// contract is "was here, fall back to the source", and which of them
+// fired is an operator question, answered by the log line beside the
+// containment refusal rather than by a body the browser will retry
+// against. Splitting them would invite a client to branch on the
+// difference.
+const variantGoneMessage = "the variant row exists but its sidecar does not"
 
 // playerContentType is the BROWSER MIME table.
 //
@@ -323,6 +338,25 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 				"the variant is stale; request the source instead")
 			return
 		}
+		// A recorded sidecar path is a CLAIM about where the file was,
+		// never proof that it is gone. Ask integrity.LocateSidecar and
+		// adopt a relocated row here, the way `/v1/download` does
+		// through cmd/bridge's variantStoreAdapter — this handler holds
+		// the raw store, so the adapter's probe never reached it and
+		// the console answered 410 for a rendition sitting, byte-
+		// identical, at its canonical place under the CURRENT variants
+		// directory. The background VariantWatcher heals the row on its
+		// own cadence (an hour by default, never if the operator set the
+		// interval to 0), and the console is exactly where an operator
+		// goes to find out whether the move worked.
+		cfg := s.deps.CfgHolder.Load()
+		variantsDir := cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
+		sidecarPath := s.locateVariantSidecar(r.Context(), variantsDir, v)
+		if sidecarPath == "" {
+			writeError(w, http.StatusGone, "variant_missing_on_disk",
+				variantGoneMessage)
+			return
+		}
 		// Confine the sidecar to the variants directory before opening
 		// it. The path is server-authored — the transcode pool wrote it,
 		// and the request only SELECTS a row by a validated (path,
@@ -332,23 +366,23 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 		// CAN do that": a hand-edited row, a restored DB from a host
 		// with a different variants dir, or a future writer that stores
 		// an absolute path from elsewhere would otherwise all end in an
-		// os.Open of whatever the row says.
-		cfg := s.deps.CfgHolder.Load()
-		variantsDir := cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
-		if fsutil.IsUnderAny(v.SidecarPath, []string{variantsDir}) == "" {
+		// os.Open of whatever the row says. It runs AFTER the locate,
+		// because the canonical path is built from variantsDir and is
+		// under it by construction while the recorded one may not be.
+		if fsutil.IsUnderAny(sidecarPath, []string{variantsDir}) == "" {
 			logger.Error("player audio: sidecar outside the variants dir",
 				"variantID", v.VariantID, "variantsDir", variantsDir)
 			writeError(w, http.StatusGone, "variant_missing_on_disk",
-				"the variant row exists but its sidecar does not")
+				variantGoneMessage)
 			return
 		}
-		vi, err := os.Stat(v.SidecarPath)
+		vi, err := os.Stat(sidecarPath)
 		if err != nil {
 			writeError(w, http.StatusGone, "variant_missing_on_disk",
-				"the variant row exists but its sidecar does not")
+				variantGoneMessage)
 			return
 		}
-		servePath, serveInfo = v.SidecarPath, vi
+		servePath, serveInfo = sidecarPath, vi
 	}
 
 	f, err := os.Open(servePath)
@@ -600,4 +634,54 @@ func sourceIDForRow(routingKey string) string {
 		return ""
 	}
 	return librarycat.SourceID(routingKey)
+}
+
+// locateVariantSidecar answers WHICH file this variant row addresses
+// right now, adopting a relocated one on the way, and returns "" when
+// neither location holds it.
+//
+// The three verdicts that are not "present" each have a different right
+// answer, and they are the ones cmd/bridge's variantStoreAdapter
+// settles for `/v1/download`:
+//
+//   - Relocated — the file is at its canonical place under the CURRENT
+//     variants dir with the recorded size. Serve it and write the row
+//     back. No `indexed_at` bump: nothing a client can see has changed,
+//     and bumping would push a delta row to every paired device for a
+//     path correction.
+//   - Mismatched — something is at the canonical place but is not the
+//     file the row records, i.e. a copy in flight. Serve neither: the
+//     recorded path is gone and the canonical one is partial. 410, and
+//     the row waits.
+//   - Missing / Unknown — the ordinary "operator deleted it" case, or a
+//     stat this process could not make. 410 either way; the console has
+//     no reaper and must not grow one here.
+//
+// A failed adoption UPDATE is logged and the file served anyway. The
+// bytes are there, the watcher will try again, and refusing to play a
+// file that exists because a bookkeeping write failed is the wrong
+// direction.
+func (s *Server) locateVariantSidecar(ctx context.Context, variantsDir string, v *manifest.VariantRow) string {
+	loc := integrity.LocateSidecar(variantsDir, integrity.VariantSnapshot{
+		SourcePath:  v.SourcePath,
+		VariantID:   v.VariantID,
+		SidecarPath: v.SidecarPath,
+		SizeBytes:   v.SizeBytes,
+	})
+	if loc.Verdict != integrity.SidecarRelocated {
+		if loc.Verdict == integrity.SidecarPresent {
+			return v.SidecarPath
+		}
+		return ""
+	}
+	if err := s.deps.Manifest.UpdateVariantSidecarPath(ctx, v.SourcePath, v.VariantID, loc.Canonical); err != nil {
+		logger.Warn("player audio: adopting relocated sidecar failed; serving it anyway",
+			"source_path", v.SourcePath, "variant_id", v.VariantID,
+			"canonical", loc.Canonical, "err", err)
+	} else {
+		logger.Info("player audio: adopted relocated sidecar",
+			"source_path", v.SourcePath, "variant_id", v.VariantID,
+			"from", v.SidecarPath, "to", loc.Canonical)
+	}
+	return loc.Canonical
 }

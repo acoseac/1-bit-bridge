@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -437,5 +438,172 @@ func TestDoctorSidecarProbeReportsAnUnreadableManifest(t *testing.T) {
 	}
 	if d = buildDoctorDeps(cfgPath); d.RelocatedSidecars != nil {
 		t.Fatal("probe wired for a manifest that does not exist")
+	}
+}
+
+// TestDLNAVariantLocatorAdoptsARelocatedSidecar — the renderer-facing
+// consumer, and the one that could not ask at lookup time.
+//
+// The DLNA index bakes `sidecar_path` into VariantInfo once per 30 s
+// cache rebuild, so after a move every rendition's `<res>` names a file
+// that is not there and the file handler answers 410 — which a renderer
+// does not fall back from, it just stops. The locator is consulted only
+// on the open failure, which is why it can afford to hit the database.
+func TestDLNAVariantLocatorAdoptsARelocatedSidecar(t *testing.T) {
+	oldDir := filepath.Join(t.TempDir(), "mnt", "bridge-variants")
+	newDir := t.TempDir()
+	store, canonical := relocatedStore(t, oldDir, newDir, 3)
+	ctx := context.Background()
+	loc := newDLNAVariantLocator(store, func() string { return newDir }, slog.Default())
+	const variant = "upscaled-v2-176400-24"
+	recorded := transcode.VariantSidecarPath(oldDir, "Artist/Album 0/00 - Track.flac", variant)
+
+	got := loc.LocateVariantSidecar(ctx, "Artist/Album 0/00 - Track.flac", variant, recorded)
+	if got != canonical[0] {
+		t.Errorf("locate = %q, want the canonical %q", got, canonical[0])
+	}
+	row, err := store.GetVariant(ctx, "Artist/Album 0/00 - Track.flac", variant)
+	if err != nil || row == nil || row.SidecarPath != canonical[0] {
+		t.Errorf("store row after locate = %+v (err %v), want adopted to %s", row, err, canonical[0])
+	}
+
+	// A partial copy answers "nowhere": streaming half a rendition to a
+	// renderer is worse than the 410 it already handles.
+	if err := os.Truncate(canonical[1], 10); err != nil {
+		t.Fatal(err)
+	}
+	partial := transcode.VariantSidecarPath(oldDir, "Artist/Album 1/01 - Track.flac", variant)
+	if got := loc.LocateVariantSidecar(ctx, "Artist/Album 1/01 - Track.flac", variant, partial); got != "" {
+		t.Errorf("locate over a partial copy = %q, want \"\"", got)
+	}
+
+	// Missing at both → nowhere. Unlike the API adapter this must NOT
+	// hand back the recorded path: there is no reaper on this side, and
+	// the caller has already failed to open it.
+	if err := os.Remove(canonical[2]); err != nil {
+		t.Fatal(err)
+	}
+	gone := transcode.VariantSidecarPath(oldDir, "Artist/Album 2/02 - Track.flac", variant)
+	if got := loc.LocateVariantSidecar(ctx, "Artist/Album 2/02 - Track.flac", variant, gone); got != "" {
+		t.Errorf("locate over a row missing at both locations = %q, want \"\"", got)
+	}
+
+	// The path the caller already failed on is never handed back, even
+	// when the probe says the file is present — that failure was
+	// permissions or I/O, and re-offering it is a retry loop.
+	if got := loc.LocateVariantSidecar(ctx, "Artist/Album 0/00 - Track.flac", variant, canonical[0]); got != "" {
+		t.Errorf("locate over the path the caller tried = %q, want \"\"", got)
+	}
+
+	// Unwired dependencies yield a nil locator, so the handler's gate
+	// stays off rather than nil-dereferencing on the one request it
+	// exists for.
+	if newDLNAVariantLocator(nil, func() string { return newDir }, slog.Default()) != nil {
+		t.Error("a locator with no store must be nil")
+	}
+	if newDLNAVariantLocator(store, nil, slog.Default()) != nil {
+		t.Error("a locator with no variants dir must be nil")
+	}
+	// A missing LOGGER is defaulted, not refused: it is not a dependency
+	// the lookup needs, and the only deref is in the branch where the
+	// adoption UPDATE has already failed — the worst place to find a
+	// second fault.
+	//
+	// The CONSTRUCTOR is what gets pinned, not that branch. Reaching it
+	// needs UpdateVariantSidecarPath to fail AFTER LookupVariant found
+	// the row, i.e. a concurrent delete or a DB fault, and neither is
+	// expressible through this API: a first draft deleted the row and
+	// re-inserted it, which left the update succeeding and the warn
+	// never firing, so the control passed with the default removed. A
+	// decision that cannot be driven is pinned where it CAN be — here,
+	// that the field is never left nil.
+	nolog := newDLNAVariantLocator(store, func() string { return newDir }, nil)
+	if nolog == nil {
+		t.Fatal("a locator with no logger must still be built — the feature does not depend on it")
+	}
+	if l, ok := nolog.(*dlnaVariantLocator); !ok || l.log == nil {
+		t.Errorf("a locator built with no logger kept a nil one (%T): the adoption-failure "+
+			"branch would deref it, on the path that has already gone wrong", nolog)
+	}
+}
+
+// TestAnalysisStoreAdapterAdoptsARelocatedWaveform — the waveform half
+// of the relocation story (#938), and the one with no second chance.
+//
+// Nothing reaps a `track_analysis` row and nothing regenerates one: the
+// analysis skip gate keys on the SOURCE's mtime and size, which a host
+// move leaves untouched, so a stranded curve is a 410 that stays a 410
+// for the lifetime of the install.
+func TestAnalysisStoreAdapterAdoptsARelocatedWaveform(t *testing.T) {
+	oldData := filepath.Join(t.TempDir(), "old-data")
+	newData := filepath.Join(t.TempDir(), "new-data")
+	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	const source = "Artist/Album/01 - Track.flac"
+	if err := store.UpsertTrack(ctx, &manifest.Track{Path: source, Size: 100, ModTime: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	newDir := analyze.WaveformDirFor(newData)
+	canonical := analyze.AnalyzeSpec{OutputDir: newDir, SourceLibraryRel: source}.SidecarPath()
+	if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := make([]byte, 2048)
+	if err := os.WriteFile(canonical, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The row records the OLD dataDir, which is what a copied database
+	// looks like on the new host.
+	recorded := analyze.AnalyzeSpec{
+		OutputDir: analyze.WaveformDirFor(oldData), SourceLibraryRel: source,
+	}.SidecarPath()
+	if err := store.UpsertAnalysis(ctx, manifest.AnalysisRow{
+		SourcePath: source, WaveformPath: recorded, WaveformTag: "deadbeef",
+		WaveformSize: int64(len(body)), SourceMTimeNS: 1, SourceSize: 100,
+		SchemaVersion: analyze.WaveformSchemaVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := &analysisStoreAdapter{
+		provider:    manifest.NewProvider(store, nil),
+		store:       store,
+		waveformDir: func() string { return newDir },
+	}
+	rec, err := adapter.LookupAnalysis(ctx, source)
+	if err != nil || rec == nil {
+		t.Fatalf("lookup: rec=%v err=%v", rec, err)
+	}
+	if rec.WaveformPath != canonical {
+		t.Errorf("record path = %s, want the canonical %s", rec.WaveformPath, canonical)
+	}
+	row, err := store.GetAnalysis(ctx, source)
+	if err != nil || row == nil || row.WaveformPath != canonical {
+		t.Errorf("store row after lookup = %+v (err %v), want waveform_path adopted to %s", row, err, canonical)
+	}
+
+	// A partial copy is NOT adopted — the recorded path comes back, the
+	// open fails, and the handler answers as it always has.
+	if err := os.Truncate(canonical, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAnalysisWaveformPath(ctx, source, recorded); err != nil {
+		t.Fatal(err)
+	}
+	rec, err = adapter.LookupAnalysis(ctx, source)
+	if err != nil || rec == nil || rec.WaveformPath != recorded {
+		t.Errorf("lookup over a partial copy: rec=%+v err=%v, want the recorded path back", rec, err)
+	}
+
+	// The projection-only fixture (no store, no dir) is the
+	// pre-relocation behaviour, unchanged.
+	bare := &analysisStoreAdapter{provider: manifest.NewProvider(store, nil)}
+	if rec, err := bare.LookupAnalysis(ctx, source); err != nil || rec == nil || rec.WaveformPath != recorded {
+		t.Errorf("bare adapter: rec=%+v err=%v", rec, err)
 	}
 }

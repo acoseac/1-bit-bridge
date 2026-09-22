@@ -292,9 +292,13 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store *manifest
 	// row naming the old one — and a known set of recorded paths alone
 	// then reads the whole moved waveform tree as orphans and unlinks it.
 	// Same class as `upscale --gc`'s 2026-09-20 relocation hazard, the
-	// cheaper-to-rebuild half; the serve path has no adoption for waveforms
-	// yet (see the doctor's sidecar-paths check), so at least the files
-	// survive for the day it does.
+	// cheaper-to-rebuild half. The serve path adopts too now
+	// (analysisStoreAdapter, via integrity.LocateWaveform), so a curve
+	// this sweep spares is one the next /v1/waveform request rebinds to
+	// its row — but the two are independent on purpose: this set is
+	// what stops a moved tree reading as 10k orphans and getting
+	// UNLINKED, and it has to hold whether or not anybody asks for the
+	// track.
 	known := make(map[string]struct{}, 2*len(rows))
 	for _, r := range rows {
 		if r.WaveformPath != "" {

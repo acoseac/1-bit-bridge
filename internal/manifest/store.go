@@ -8175,6 +8175,48 @@ func (s *Store) UpdateVariantSidecarPath(ctx context.Context, sourcePath, varian
 	return nil
 }
 
+// UpdateAnalysisWaveformPath rewrites the `waveform_path` of a single
+// `track_analysis` row keyed by `source_path`. The waveform twin of
+// UpdateVariantSidecarPath, and it exists for exactly the same reason:
+// a recorded sidecar path is a CLAIM about where the file was, never
+// proof that it is gone.
+//
+// `waveform_path` is absolute under `<dataDir>/waveforms`, so moving the
+// data directory leaves every row reading ENOENT while every curve sits,
+// byte-identical, at its source-mirrored place under the CURRENT one.
+// The variants half of that has three reapers and an adoption; waveforms
+// had neither, and the analysis skip gate keys on the SOURCE's mtime and
+// size rather than on the sidecar, so a moved tree never regenerates
+// either: the whole cache becomes 410s that stay 410s. (The follow-up
+// #937 named, tracked as #938.)
+//
+// **Does NOT bump the parent track's `indexed_at`**, for UpdateVariant-
+// SidecarPath's reason: a path correction changes nothing iOS can see,
+// and bumping it across a whole relocated library would push a delta row
+// to every paired device to say so.
+//
+// Returns `sql.ErrNoRows` (wrapped) when the keyed row doesn't exist.
+func (s *Store) UpdateAnalysisWaveformPath(ctx context.Context, sourcePath, newWaveformPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE track_analysis
+		   SET waveform_path = ?
+		 WHERE source_path = ?
+	`, newWaveformPath, sourcePath)
+	if err != nil {
+		return fmt.Errorf("update analysis waveform_path: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("analysis row not found for source=%q: %w", sourcePath, sql.ErrNoRows)
+	}
+	return nil
+}
+
 // CountVariantsNotUnderPrefix returns (count, totalSizeBytes) of
 // variants whose sidecar_path is NOT a descendant of `prefix`. Used
 // by the admin variants-dir endpoint to surface a "Migrate legacy
