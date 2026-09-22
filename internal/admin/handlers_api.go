@@ -107,9 +107,16 @@ type statsResponse struct {
 	VariantBytes        int64 `json:"variantBytes"`
 	// TracksUnreadable is how many local sources the decoders have refused
 	// for the version currently indexed — the operator-facing answer to
-	// "which of my files are broken". Counted from the same predicate the
-	// unreadable list and the analysis candidate walk use, so the number
-	// and the list cannot describe different libraries.
+	// "which of my files are broken". It is `AnalysisFailureCounts.
+	// Recorded`, the same predicate the unreadable LIST is built from, so
+	// the number and the list cannot describe different libraries.
+	//
+	// Not the candidate walk's predicate, which is the narrower
+	// `Suppressed` one PLUS a live stat the walk holds and a count
+	// cannot. This comment said "the analysis candidate walk" and that
+	// was the reading behind the dashboard calling all of these
+	// "excluded from analysis" — see the render, and the Jobs panel that
+	// gets the split right.
 	//
 	// Rendered by app.js applyStats as the dashboard's alarm row, which
 	// stays hidden at zero and links to the Jobs page panel that lists
@@ -647,10 +654,14 @@ func (s *Server) getStatsSnapshot() statsResponse {
 // but with UptimeSec zeroed. The SSE handler diffs serialised JSON
 // frame-to-frame and only emits on change; UptimeSec increments
 // every second and would otherwise force a frame on every tick,
-// defeating the diff optimisation. The dashboard never renders
-// UptimeSec in its live tick (uptime is server-rendered from
-// StartedAt at first paint via the Go template), so zeroing it on
-// the wire breaks nothing on the frontend.
+// defeating the diff optimisation.
+//
+// Nothing in the console reads it: the one uptime an operator sees is
+// the Diagnostics panel's, painted from `/api/diagnostics`. This
+// docblock said it was server-rendered from StartedAt via the Go
+// template, which was true until #948 removed StartedAt from this
+// payload as a field with no reader. `UptimeSec` itself stays because
+// `bridge status` prints it off the non-SSE form.
 func (s *Server) getStatsSSESnapshot() statsResponse {
 	snap := s.getStatsSnapshot()
 	snap.UptimeSec = 0
@@ -2880,9 +2891,12 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			return &cfgAbort{status: http.StatusBadRequest, code: "validate", msg: err.Error()}
 		}
 		// Now that pruning has run, compare what was actually SAVED against
-		// what was there before. Read per request by advertise.Endpoints()
-		// and the /v1/health handler, both off the live snapshot, so a real
-		// change is live.
+		// what was there before. Read per request by the /v1/health handler
+		// — `api.(*Server).ReachableEndpoints`, which is also what the
+		// pairing QR and the console's endpoints panel go through since
+		// #936 — off the live snapshot, so a real change is live. (It said
+		// `advertise.Endpoints()` here; that walk stopped being the reader
+		// in #269.)
 		if customEndpointsTouched {
 			if slices.Equal(next.CustomEndpoints, customEndpointsBefore) {
 				report.unchanged("customEndpoints")

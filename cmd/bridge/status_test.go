@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http/httptest"
 	"os"
@@ -70,5 +71,78 @@ func TestStatusJSONFlagSurfacesNotRunning(t *testing.T) {
 	code := statusCmd(context.Background(), []string{"-config", cfg, "-json"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("exit = %d, want 1 (not running, no JSON to emit)", code)
+	}
+}
+
+// TestStatusNamesUnreadableTracksOnlyWhenThereAreSome — the CLI's one
+// view of the decode-refusal count.
+//
+// `/api/stats` has carried `tracksUnreadable` since #947 and the human
+// `bridge status` never printed it, so a headless operator — which is
+// every VPS install — had no surface at all for "some of my files are
+// broken" short of opening an SSH tunnel to the console.
+//
+// Hidden at zero, deliberately: a permanent `Unreadable: 0` is a row
+// that trains the reader to skip the block, which is the same reason
+// the dashboard banner has a `hidden` attribute.
+func TestStatusNamesUnreadableTracksOnlyWhenThereAreSome(t *testing.T) {
+	base := map[string]any{
+		"libraryName":   "Fixture",
+		"serverVersion": "0.0.0-test",
+		"tracksIndexed": float64(10),
+	}
+
+	// PRESENT and zero — a healthy library, which is what this row is
+	// hidden for. The first draft asserted this against a `base` that
+	// had no `tracksUnreadable` key at all and then `delete`d it, so
+	// both halves tested ABSENCE and a regression rendering a row for a
+	// real 0 would have passed. (CodeRabbit on #955.)
+	base["tracksUnreadable"] = float64(0)
+	var quiet bytes.Buffer
+	writeStatusHuman(&quiet, base, nil)
+	if strings.Contains(quiet.String(), "Unreadable") {
+		t.Errorf("a bridge with no decode refusals prints an Unreadable row:\n%s", quiet.String())
+	}
+
+	// Absent, as an older bridge serves it — also silent, never "0".
+	delete(base, "tracksUnreadable")
+	var absent bytes.Buffer
+	writeStatusHuman(&absent, base, nil)
+	if strings.Contains(absent.String(), "Unreadable") {
+		t.Errorf("a payload with no tracksUnreadable key prints the row:\n%s", absent.String())
+	}
+
+	// float64 is the PRODUCTION shape — every JSON number decodes as one
+	// through the map[string]any the probe returns — but the other two
+	// numeric shapes are accepted for uptimeFromSec's reason: a bare
+	// float64 assertion returns "" for an int, and for a row that is
+	// hidden at zero a silently missing alarm is indistinguishable from
+	// a healthy library.
+	for _, n := range []any{float64(3), int64(3), 3} {
+		base["tracksUnreadable"] = n
+		var loud bytes.Buffer
+		writeStatusHuman(&loud, base, nil)
+		out := loud.String()
+		if !strings.Contains(out, "Unreadable:") || !strings.Contains(out, "3 tracks") {
+			t.Errorf("status does not name the 3 unreadable tracks for %T:\n%s", n, out)
+		}
+		if strings.Contains(out, "3.0") || strings.Contains(out, "+e") {
+			t.Errorf("the count rendered as a float for %T:\n%s", n, out)
+		}
+	}
+	// A shape this build does not understand stays silent rather than
+	// inventing a count from it.
+	base["tracksUnreadable"] = "three"
+	var odd bytes.Buffer
+	writeStatusHuman(&odd, base, nil)
+	if strings.Contains(odd.String(), "Unreadable") {
+		t.Errorf("a non-numeric tracksUnreadable rendered a row:\n%s", odd.String())
+	}
+
+	base["tracksUnreadable"] = float64(1)
+	var one bytes.Buffer
+	writeStatusHuman(&one, base, nil)
+	if !strings.Contains(one.String(), "1 track the decoder") {
+		t.Errorf("the singular is not used for one track:\n%s", one.String())
 	}
 }

@@ -181,6 +181,37 @@ func AnalysisFailureThreshold() int { return analysisFailureThreshold }
 // file replaced since the last scan is retried rather than suppressed. The
 // disagreement is resolved in the direction of doing the work.
 //
+// # The residual, and why it is left
+//
+// That disagreement does not converge while it lasts. A suppressed file
+// that is TOUCHED and is still unreadable — same path, new mtime, no scan
+// yet — is offered by the walk on every sweep (live mtime != the strike's),
+// fails, and re-stamps from the row, which still matches the row, so the
+// count climbs and nothing suppresses. One wasted decode per sweep per
+// file, silent: the WARN is gated on `count == 1`, which never recurs.
+//
+// It IS self-terminating. The next scan writes the new mtime onto the
+// track row, the strike then mismatches it, the count resets to 1, and
+// three further failures suppress the file for good. So the cost is
+// bounded by the scan interval (six hours by default), and the state
+// needs a file that is corrupt, already suppressed, modified on disk,
+// STILL corrupt, and racing the scanner.
+//
+// The obvious fix — stamp the live stat the job decoded — moves the bug
+// rather than closing it: every predicate above compares the strike
+// against `size`/`mtime_ns`, so a strike recorded against a version the
+// row does not know fails `analysisFailureRecordedSQL` and the row leaves
+// the suppressed set entirely. Closing it properly means the walk's query
+// dropping the version terms (its live comparison is strictly better
+// information) while `AnalysisCoverage` and `CountUnreadableTracks`, which
+// have no filesystem, either keep them — and then transiently disagree
+// with the walk, reintroducing the remainder-that-never-drains symptom
+// #947 fixed — or drop them too and over-count suppression in the same
+// window. Reviewed externally (Gemini, 2026-09-22) and declined on the
+// balance: a predicate-shape change across three surfaces, plus divergence
+// from the variant debounce this one deliberately mirrors, against a
+// bounded and self-clearing cost.
+//
 // Deliberately does NOT touch `indexed_at`. A suppressed analysis changes
 // nothing a client can see, and bumping it would push a no-op delta row to
 // every paired device — the same reason RecordVariantFailure doesn't.
