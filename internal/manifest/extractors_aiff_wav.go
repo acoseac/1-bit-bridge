@@ -176,7 +176,7 @@ func extractAIFFWithContext(absPath string, t *Track, ec *ExtractContext) error 
 			// sits, for the fit check. First SSND wins (a second one
 			// is malformed; the spec allows exactly one).
 			if !ssnd.seen {
-				ssnd = iffPayloadSpanAt(f, size)
+				ssnd = ssndSoundSpan(f, size)
 			}
 			if err := seekPastChunk(f, int64(size)); err != nil {
 				return err
@@ -520,6 +520,48 @@ func iffPayloadSpanAt(f *os.File, size uint32) iffPayloadSpan {
 		return iffPayloadSpan{}
 	}
 	return iffPayloadSpan{seen: true, offset: uint64(pos), size: uint64(size)}
+}
+
+// ssndSoundSpan is iffPayloadSpanAt for an AIFF SSND chunk, whose body
+// is NOT all audio: it opens with an 8-byte prefix (`offset` and
+// `blockSize`, both uint32 BE), and `offset` counts further padding
+// bytes before the first sample frame.
+//
+// Recording the whole declared size as payload — which is what the plain
+// helper does — makes an SSND of exactly 8 bytes look like 8 bytes of
+// audio. It holds NONE: the body is the prefix and nothing else. So a
+// file whose COMM claims ten minutes and whose SSND claims 8 passed the
+// fit check and stamped the ten minutes, which is the zero case one
+// prefix along (CodeRabbit on #966).
+//
+// The span is narrowed rather than merely tested, so the physical bounds
+// check still measures the AUDIO against the file: subtracting from
+// `size` alone would leave `offset` pointing at the prefix and weaken
+// that comparison by 8 + offset bytes.
+//
+// Read with ReadAt so the walker's own file position is untouched and
+// the `seekPastChunk(f, size)` that follows stays correct. A short or
+// failed read, a size that cannot hold its own prefix, or a span with no
+// sound data at all, all yield an UNSEEN span — no duration rather than
+// one nothing verified.
+func ssndSoundSpan(f *os.File, size uint32) iffPayloadSpan {
+	span := iffPayloadSpanAt(f, size)
+	if !span.seen {
+		return iffPayloadSpan{}
+	}
+	var prefix [8]byte
+	if _, err := f.ReadAt(prefix[:], int64(span.offset)); err != nil {
+		return iffPayloadSpan{}
+	}
+	skip := uint64(8) + uint64(binary.BigEndian.Uint32(prefix[:4]))
+	if span.size <= skip {
+		// Cannot hold its own prefix, or holds the prefix and no
+		// sound: either way there is no audio to time.
+		return iffPayloadSpan{}
+	}
+	span.offset += skip
+	span.size -= skip
+	return span
 }
 
 // physicalFileSize is the on-disk byte count, 0 when Stat fails — an
