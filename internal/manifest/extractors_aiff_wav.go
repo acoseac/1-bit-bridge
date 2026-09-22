@@ -549,9 +549,9 @@ const iffUnknownPayloadSize = 0xFFFFFFFF
 
 // iffPayloadFits reports whether the declared payload physically fits
 // inside the file: offset + size <= physicalSize, overflow-safe. An
-// unknown bound (0) fails OPEN; an unseen payload, and a declared size
-// that is the unknown-length sentinel, fail CLOSED — a duration nothing
-// can verify must not be stamped. The AIFF / WAV twin of the DFF
+// unknown bound (0) fails OPEN; an unseen payload, a declared size of
+// ZERO, and a declared size that is the unknown-length sentinel, all
+// fail CLOSED — a duration nothing can verify must not be stamped. The AIFF / WAV twin of the DFF
 // walker's `payloadFits`, kept as its own function because that one is
 // a method over the DFF walk's own state.
 //
@@ -564,6 +564,27 @@ const iffUnknownPayloadSize = 0xFFFFFFFF
 // audio onto a file that never declared a length at all.
 func iffPayloadFits(span iffPayloadSpan, physicalSize uint64) bool {
 	if !span.seen || span.size == iffUnknownPayloadSize {
+		return false
+	}
+	// A declared payload of ZERO is the sentinel's other half, and it
+	// reached here fitting trivially: `0 <= physicalSize - offset` is
+	// true for any bound, so a chunk claiming no audio at all passed the
+	// check whose whole job is "does the audio fit the file".
+	//
+	// WAV never noticed, because wavDurationSeconds derives its seconds
+	// FROM the data size and returns 0 for an empty chunk, which the
+	// plausibility gate then rejects. AIFF derives from COMM instead, so
+	// a file with a well-formed COMM (numSampleFrames 26,460,000 at
+	// 44100) and an SSND declaring size 0 stamped Duration = 600 on a
+	// file holding no audio bytes. #935 claimed the rule for BOTH IFF
+	// walkers; it shipped in one.
+	//
+	// Narrow in practice — a real streaming-writer AIFF has
+	// numSampleFrames == 0 too, so it stamps nothing — which is exactly
+	// why it needs the gate rather than the coincidence: the shape that
+	// reaches it is a corrupt or forged file, and that is the input this
+	// function exists for.
+	if span.size == 0 {
 		return false
 	}
 	if physicalSize == 0 {

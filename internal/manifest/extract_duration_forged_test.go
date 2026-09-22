@@ -219,3 +219,23 @@ func TestSACDTimecodeCannotExpressAnImplausibleDuration(t *testing.T) {
 			"too close to call the gate structural", seconds, dffMaxPlausibleDurationSeconds)
 	}
 }
+
+// TestExtractAIFF_ZeroSSNDStampsNoDuration is the end-to-end shape the
+// unit test above protects: a well-formed COMM claiming ten minutes of
+// frames beside an SSND declaring no audio bytes. The COMM arithmetic
+// is fine and plausibleDuration accepts 600 s, so the payload check is
+// the only thing standing between a corrupt file and a confident wrong
+// answer in the phone's track list.
+func TestExtractAIFF_ZeroSSNDStampsNoDuration(t *testing.T) {
+	path := writeTempAIFF(t, buildAIFFWithID3(t, nil,
+		buildAIFFCOMMChunk(2, 26_460_000, 16, 44100),
+		buildAIFFSSNDDeclaring(0, 0)))
+	tr := &Track{}
+	if err := extractAIFFWithContext(path, tr, nil); err != nil {
+		t.Fatalf("extractAIFFWithContext: %v", err)
+	}
+	if tr.Duration != nil {
+		t.Fatalf("Duration = %v, want nil — the SSND declares no audio, so ten minutes "+
+			"of COMM frames is an inconsistent file, not a ten-minute track", *tr.Duration)
+	}
+}
