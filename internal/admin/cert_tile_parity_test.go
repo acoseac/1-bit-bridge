@@ -311,6 +311,12 @@ func TestCertExpiryBandsMirrorTheGoWindow(t *testing.T) {
 // the defect #951 fixed on the self-signed tile and left standing on the
 // two beside it.
 //
+// The ladder itself lives in ONE function now (certExpiryBadge), so the
+// positive half of this test is that each tile calls it. The rejected
+// shapes stay: a tile that stops calling it and spells its own ladder
+// again is exactly the regression, and "does not call the helper" alone
+// would not say what it did instead.
+//
 // Scanned per FUNCTION, because the scan has to be able to say which
 // tile regressed, and because `days` is an ordinary local name that
 // other code may legitimately compare. jsFunctionBody strips COMMENTS
@@ -326,9 +332,10 @@ func TestCertTilesGradeOnTheRemainingDurationNotADayCount(t *testing.T) {
 		{"autocert", "async function refreshAutocertTile("},
 	} {
 		body := jsFunctionBody(t, tile.decl)
-		if !strings.Contains(body, "CERT_EXPIRY_WARNING_MS") {
-			t.Errorf("the %s cert tile does not grade against CERT_EXPIRY_WARNING_MS — "+
-				"a threshold spelled locally is how two of these three drifted from the CLI",
+		if !strings.Contains(body, "certExpiryBadge(") {
+			t.Errorf("the %s cert tile does not grade through certExpiryBadge — "+
+				"a ladder spelled locally is how two of these three came to render "+
+				"the 30-day band green, and how all three missed the expired arm",
 				tile.name)
 		}
 		for _, bad := range rejectedCertGradingShapes {
