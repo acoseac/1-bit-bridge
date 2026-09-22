@@ -163,7 +163,7 @@ func TestInitPreflightIsQuietAboutACertMintedForThisHost(t *testing.T) {
 // has not happened yet.
 func TestInitPreflightLeavesAFirstInstallUnwired(t *testing.T) {
 	var d doctor.Deps
-	withExistingInstallCertDeps(&d, filepath.Join(t.TempDir(), "bridge.yaml"))
+	withExistingInstallDeps(&d, filepath.Join(t.TempDir(), "bridge.yaml"))
 	if d.CertSANs != nil {
 		t.Error("cert-SAN gather wired from a config that does not exist")
 	}
@@ -209,15 +209,82 @@ func TestInitPreflightCarriesTheManagedPosture(t *testing.T) {
 		t.Fatal(err)
 	}
 	var unmanaged doctor.Deps
-	withExistingInstallCertDeps(&unmanaged, plain)
+	withExistingInstallDeps(&unmanaged, plain)
 	if unmanaged.Managed {
 		t.Error("a config with no deployment block graded as managed")
 	}
 
 	var d doctor.Deps
-	withExistingInstallCertDeps(&d, cfgPath)
+	withExistingInstallDeps(&d, cfgPath)
 	if !d.Managed {
 		t.Error("the preflight does not carry the managed posture, so a hosted tenant " +
 			"re-running init is told to run `bridge cert rotate` on a host it does not own")
+	}
+}
+
+// TestInitPreflightGradesTheInstallsOwnPortsAndPidFile — the fourth and
+// fifth fields on the same install, and the two that made the port
+// checks answer about a bridge nobody runs.
+//
+// `bridge init`'s Deps literal hard-codes APIPort 7788 / AdminPort 7789,
+// the DEFAULTS. On a public-mode install listening on :443 those two are
+// free, so `port-api` graded ok — a check passing because the thing it
+// guards is absent, which is the vacuous shape this repo keeps paying
+// for. And with no OwnPIDFile, checkPort cannot run its "is that bound
+// port US?" ladder at all, so a re-init while the operator's own bridge
+// is running graded FAIL and aborted init. The call site's own comment
+// named that as the reason --skip-doctor exists.
+//
+// Asserted on the Deps, like the managed-posture test above: what the
+// ports change is which address checkPort dials, and driving that would
+// be a test about the network rather than about the wiring.
+func TestInitPreflightGradesTheInstallsOwnPortsAndPidFile(t *testing.T) {
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(tmp, "data")
+	cfgPath := filepath.Join(tmp, "bridge.yaml")
+	body := "libraryRoots:\n  - " + lib + "\n" +
+		"dataDir: " + dataDir + "\n" +
+		"listenAddress: \"0.0.0.0:443\"\n" +
+		"adminAddress: \"127.0.0.1:7791\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seeded with the defaults the call site passes, so the assertions
+	// below fail if the helper simply leaves them alone.
+	d := doctor.Deps{APIPort: 7788, AdminPort: 7789}
+	withExistingInstallDeps(&d, cfgPath)
+
+	if d.APIPort != 443 {
+		t.Errorf("APIPort = %d, want 443 — the preflight graded the DEFAULT port, "+
+			"which is free on this host, so the check passed about a listener nobody runs", d.APIPort)
+	}
+	if d.AdminPort != 7791 {
+		t.Errorf("AdminPort = %d, want 7791", d.AdminPort)
+	}
+	wantPID := filepath.Join(dataDir, "server.pid")
+	if d.OwnPIDFile != wantPID {
+		t.Errorf("OwnPIDFile = %q, want %q — without it checkPort cannot tell the operator's "+
+			"own running bridge from a stranger, and a re-init aborts", d.OwnPIDFile, wantPID)
+	}
+}
+
+// TestInitPreflightLeavesAFirstInstallsPortsAlone is the negative
+// control for the test above: with no config at the target path the
+// helper must not invent ports or a pid file, or the "first install
+// keeps the existing skip" judgement recorded in its docblock would be
+// quietly untrue for the port checks.
+func TestInitPreflightLeavesAFirstInstallsPortsAlone(t *testing.T) {
+	d := doctor.Deps{APIPort: 7788, AdminPort: 7789}
+	withExistingInstallDeps(&d, filepath.Join(t.TempDir(), "bridge.yaml"))
+	if d.APIPort != 7788 || d.AdminPort != 7789 {
+		t.Errorf("ports = %d/%d, want the caller's 7788/7789 untouched", d.APIPort, d.AdminPort)
+	}
+	if d.OwnPIDFile != "" {
+		t.Errorf("OwnPIDFile = %q, want empty — there is no install to own a pid file", d.OwnPIDFile)
 	}
 }
