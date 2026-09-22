@@ -612,6 +612,33 @@ func TestAnalysisStoreAdapterAdoptsARelocatedWaveform(t *testing.T) {
 	}
 }
 
+// stringLiteralsContaining returns every string literal in a Go source
+// file whose value contains marker.
+//
+// go/parser rather than a text scan, because the subject here IS a
+// literal and this repo's comment strippers blank those — and the
+// comments beside the lines this serves discuss directories by name, so
+// a text scan would find its own commentary.
+func stringLiteralsContaining(t *testing.T, file, marker string) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if v, err := strconv.Unquote(lit.Value); err == nil && strings.Contains(v, marker) {
+			out = append(out, v)
+		}
+		return true
+	})
+	return out
+}
+
 // TestUnreadableIsReportedAsEntriesNotDirectories.
 //
 // SidecarInventory.Unreadable counts entries the walk could not
@@ -623,45 +650,26 @@ func TestAnalysisStoreAdapterAdoptsARelocatedWaveform(t *testing.T) {
 // which sends the operator looking for the wrong thing in their own
 // tree (CodeRabbit on #969).
 //
-// Walked over string LITERALS via go/parser rather than a text scan,
-// because the subject here IS a literal and this repo's comment
-// strippers blank those — and the comments beside these two lines
-// discuss directories by name, so a text scan would find its own
-// commentary. Both files, because one count printed from two places is
-// the enumeration failure this repo keeps paying for: CodeRabbit
-// flagged upscale.go and analyze.go carries the same string.
+// Both files, because one count printed from two places is the
+// enumeration failure this repo keeps paying for: CodeRabbit flagged
+// upscale.go and analyze.go carries the same string.
 func TestUnreadableIsReportedAsEntriesNotDirectories(t *testing.T) {
 	checked := 0
 	for _, file := range []string{"upscale.go", "analyze.go"} {
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, file, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", file, err)
+		lines := stringLiteralsContaining(t, file, "could not be read")
+		if len(lines) == 0 {
+			t.Errorf("%s has no Unreadable report line — if it moved, move this guard with it", file)
 		}
-		found := false
-		ast.Inspect(f, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			s, err := strconv.Unquote(lit.Value)
-			if err != nil || !strings.Contains(s, "could not be read") {
-				return true
-			}
-			found = true
+		for _, line := range lines {
 			checked++
-			if strings.Contains(s, "director") {
+			if strings.Contains(line, "director") {
 				t.Errorf("%s reports Unreadable as directories (%q) — it also counts a link or "+
 					"junction the walk could not stat, and naming those directories sends the "+
-					"operator after the wrong thing", file, s)
+					"operator after the wrong thing", file, line)
 			}
-			if !strings.Contains(s, "entr") {
-				t.Errorf("%s no longer says what Unreadable counts (%q)", file, s)
+			if !strings.Contains(line, "entr") {
+				t.Errorf("%s no longer says what Unreadable counts (%q)", file, line)
 			}
-			return true
-		})
-		if !found {
-			t.Errorf("%s has no Unreadable report line — if it moved, move this guard with it", file)
 		}
 	}
 	if checked != 2 {
