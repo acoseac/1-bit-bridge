@@ -358,6 +358,34 @@ lost my library."
   those bytes. Three unseen-span cases — declares nothing, holds only its
   prefix, cannot hold its prefix — and a positive control, because "reject
   the empty ones" must not become "reject everything".
+- **A fix placed IN FRONT of a check can destroy that check's input, and
+  the AIFF sentinel is the case** (ExtractorVersion 14, #967).
+  `iffPayloadFits` refuses the streaming writer's `0xFFFFFFFF` — v12's
+  rule, written for BOTH IFF walkers. v13 then gave AIFF a narrowing step
+  ahead of it: `ssndSoundSpan` subtracts the 8-byte SSND prefix, so the
+  sentinel arrived as `0xFFFFFFF7`, an ordinary number to the arm that
+  refuses `0xFFFFFFFF`. It reaches the unknown-bound case v12 was written
+  for (where `iffPayloadFits` fails OPEN) and any file of 4 GiB or more.
+  **A small fixture cannot see it** — below 4 GiB the narrowed value fails
+  the physical bound anyway — so the pin drives the SPAN, as the
+  sentinel's own test does. Refuse the sentinel at the TOP of
+  `ssndSoundSpan`, before any narrowing. WAV does not narrow.
+- **A range gate does not protect a value computed in a type that can wrap
+  INTO the range.** `parseDurationSeconds` did `float64(h*3600+m*60)`:
+  `Atoi` accepts the hours of `"1152921504606846977:00:00"` on a 64-bit
+  build, `2^60*3600` is a multiple of `2^64`, and the product is **exactly
+  3600** — one hour, from an attribute claiming 131 billion years, which
+  `PlausibleDuration` then accepts (max int64 lands on -3600 the same way).
+  Widen BEFORE multiplying. Found by a bot against the gate the same PR was
+  adding.
+- **`internal/upnpingest` is the one `Track.Duration` writer outside
+  `internal/manifest`, and it passes the same gate** via the exported
+  `manifest.PlausibleDuration` — not a second copy, which is the copy that
+  drifts. A DIDL `res@duration` is an untrusted header by another name:
+  `0:00:00.001` and `10000:00:00` both parse cleanly and both reached
+  `tags_json`, the wire and the phone's track list. `walkFieldsEqual`
+  compares `Duration`, so an affected routed row re-upserts once and then
+  stabilises.
 - **Every derived `Track.Duration` passes ONE gate, `plausibleDuration`, and
   the AIFF / WAV walkers add the DFF `payloadFits` rule through one
   `iffPayloadFits`** (ExtractorVersion 11, #935 — MP4 `mvhd`, MP3 Xing / Info /
@@ -1259,6 +1287,68 @@ no failing test — which is the shape to expect in this area.
   and needs `bridge analyze --force`. `bridge doctor`'s `sidecar-paths`
   check reports both tables; the schema-relative follow-up is still #938.
   (#937, #954)
+- **`sidecar-paths` counts RECORDED PATHS and stats nothing, so it must not
+  be described as a list of files that are gone** (#972).
+  `CountVariantsNotUnderPrefix` / `CountWaveformsNotUnderPrefix` are pure
+  SQL, so a row whose file is still AT the path it records is counted too —
+  served from there, never relocated, in the count forever, which is the
+  ordinary shape of a dataDir change with the old tree still mounted. The
+  waveform hint said "Rows still listed afterwards point at curves which are
+  NOT there" and named `bridge analyze --force`: hours of decoding to
+  rebuild curves that already play, for an operator who had just done what
+  the same hint told them to. Say what the number MEASURES before saying
+  what to do about it, and scope `--force` to a curve at NEITHER location.
+  The variants half carried the same false claim beside a remedy that was
+  already right — which is how the next change gets made on the same
+  reasoning.
+- **The delete handler LOCATES before it judges the volume, and only the
+  already-gone path asks** (#968). `SidecarStoreState` answers "is a MISSING
+  sidecar evidence about the file or about the volume" — a question about a
+  file that is missing. Asked per row BEFORE the locate it also answered for
+  rows whose file had just been found, and an EMPTY variants directory is
+  one of its unavailable reasons: a directory repointed at a fresh folder
+  with every rendition still at its recorded path made "delete all
+  renditions" unlink nothing and leave the bytes, which is #959's own
+  stranding one commit later. An empty recorded path is still asked — 
+  `locateRecordedFile` stats `""` (ENOENT everywhere) and then the canonical
+  path, which is exactly where a file with no recorded path would be found.
+- **EMPTY is explicable only by an unlink from the SAME directory
+  INSTANCE.** Two things had to be narrowed, both found by review. A
+  recorded path can name the OLD tree, so unlinking there explains nothing
+  about the current directory (`VariantSidecarLocation.WithinStore`,
+  `filepath.Rel` containment so `/srv/variants-old` is not a child of
+  `/srv/variants`). And a clean unmount reverts a mountpoint to an empty
+  LOCAL directory, so an unlink at row k proves the volume was mounted at
+  row k and says NOTHING about row k+1 — which is why the probe is per row
+  in the first place. `SidecarStoreIdentifier` is opaque because identity is
+  device+inode on POSIX and volume+file index on Windows, which
+  `os.SameFile` answers portably and no exported type carries as a value;
+  nil or foreign is NOT the same, because the compare exists to refuse an
+  unmount. Captured on the FIRST in-store unlink only — a re-probe per row
+  puts a stat on the happy path of a whole-library delete and a differing
+  instance is refused by the comparison anyway. Missing, unreadable and
+  not-a-directory still refuse however much was unlinked: the loop removes
+  files and never directories, so it cannot be what took the root.
+- **A sidecar walk tests "not a REGULAR file", never "is a symlink"** (#969).
+  Since Go 1.23's `winsymlink` change a Windows directory JUNCTION
+  (`mklink /J`, `IO_REPARSE_TAG_MOUNT_POINT`) gets `ModeIrregular` and is
+  denied `ModeDir`, so it reports `IsDir()` false with NO symlink bit, fell
+  through every arm in `TakeSidecarInventory`, and `upscale --gc`'s nil
+  `Consider` unlinked it as an orphan file — taking the only reference to an
+  album parked on another volume, which is the ORDINARY way to do that on
+  Windows (a real symlink needs a privilege a service account lacks). One
+  junction is below the mass-orphan floor, so no guard could see it.
+  **`os.Lstat` is the wrong probe here**: it does not follow the link, so
+  `IsDir()` is false for a link TO a directory and the skip never fires —
+  proposed in review, and it turns two tests red. The decision is taken as
+  `(mode, stat)` so the Windows shape is driveable on any platform; a plain
+  file answers without a stat, and the closure does not escape (measured).
+- **`SidecarInventory.Unreadable` is a count of ENTRIES, and BOTH sweeps say
+  so.** It covers a directory the walk could not descend into AND a
+  non-regular entry it could not stat. `upscale --gc` and `analyze --gc`
+  print that one count from two places and both called it directories; a
+  wording fix reaching one of them is the enumeration failure this file
+  keeps recording.
 - **A forward sweep's denominator is the TREE, never the catalog, and the
   term that knows a lost index is `orphans > rows`.** Adoption and the
   canonical known set both need the ROWS; the 2026-09-20 aftermath had
@@ -1777,6 +1867,40 @@ what it claimed**, and none of it had a failing test.
   for what it does rather than for certs — a name that says otherwise is
   how the next field gets left out. The first-install skip keeps its own
   control. (#963)
+- **…and grades the ports it is about to SAVE, which is a different
+  question** (#970). The preflight runs BEFORE the keep-or-overwrite
+  decision, so it grades the install's current ports. For the certificate
+  that is right and deliberate — init does not rewrite the pair on disk.
+  For the ports it is backwards: `baseConfig` always seeds the loopback
+  defaults and `--public` replaces them, so an install on `:9090`/`:9091`
+  was graded on those, passed, and was then handed `:7788` /
+  `127.0.0.1:7789`. A second narrow pass (`doctor.RunPortChecks`) grades
+  what the config will contain, BEFORE `Save`, so a refusal leaves the
+  existing config intact — and only over the ports that CHANGED, since an
+  unchanged one was already graded correctly.
+- **The "is it us?" fallback must NOT reach a port the run is choosing.**
+  `checkPort` answers ok or warn — never fail — whenever the pid in
+  `OwnPIDFile` is alive: an unattributable port warns, and one merely owned
+  by this uid is reported **ok** (the capability-bound `:443` case it exists
+  for). A live bridge binds what ITS config says, so it cannot legitimately
+  own a port absent from it; left set, an occupied NEW port read as "our
+  bridge is still running", `HasFail` stayed false, and the config saved
+  anyway — the check passing because the thing it guards is absent, one
+  level in from the defect the pass exists for. Clear `OwnPIDFile` for a
+  changed port. `RunPortChecks` takes WHICH ports to grade, because port 0
+  is a legal value with its own verdict and cannot double as "skip this one".
+- **`configuredPort` asks what an address NAMES; `splitHostPort` asks what
+  can be DIALED, and they differ on exactly port 0.** `config.validatePort`
+  accepts 0 (the OS-picks-an-ephemeral-port mode every `:0` fixture uses),
+  but `splitHostPort` folds it in with a parse failure and both Deps
+  assemblies seed the DEFAULTS — so such an install was graded on 7788/7789,
+  ports it does not use and which are usually free, and a re-init aborted
+  when something else held 7789. `checkPort` has always had the honest
+  answer (`"no port set"`, warn, non-blocking); it never received it. Every
+  spelling of zero, because `validatePort` runs `Atoi` and `"00"` is as
+  legal as `"0"`. `autoStartProbeTarget` is the same question for
+  `spawnNowOrWarn` — extracted because the other branch starts a real
+  detached process, so the behaviour otherwise has no test at all.
 
 
 The largest package in the repo — 52 production files, ~19k lines, `main.go`
@@ -2157,6 +2281,18 @@ its twin.** The top list is older, shorter, and read first.
   clock read, so the badge and the phrase cannot drift and a test can
   drive any instant. The Go suite cannot run it, so the guard is
   structural — it requires the calendar comparison to be present. (#962)
+- **…and so is the COUNT after it** (#971). #962 gave "today" the calendar
+  and left the days on `Math.round(Math.abs(left)/86_400_000)`. All three
+  tiles print that beside `toLocaleDateString()`, and a rounded duration
+  disagrees with the date in BOTH directions: 47 h from 00:30 read "in 2
+  days" beside TOMORROW, 25.5 h from 23:30 read "in 1 day" beside the day
+  after. `Date.UTC` over the local Y/M/D is DST-safe for the reason the
+  same-day test is, and the `Math.max(1, …)` clamp the duration form needed
+  becomes unreachable — keeping it would only suggest the arithmetic can
+  produce a zero. `left` carries the TENSE, never the count, and the
+  structural guard now says so: it rejects any expression dividing `left` by
+  a day, because requiring the Y/M/D getters to appear SOMEWHERE was
+  satisfied by `Math.round` and passed throughout.
 
 
 - **The catalog is computed, not stored.** Album identity is
@@ -2639,6 +2775,19 @@ its twin.** The top list is older, shorter, and read first.
   comments to this day. #901 was limited from its FIRST review too, which left
   both fix rounds unread while all twelve checks stayed green — it was only
   caught by looking for the notice on purpose.
+  **And the verdict is in the WALKTHROUGH, not in `pulls/N/reviews`.**
+  Querying the reviews API showed CodeRabbit's last review sitting on an
+  older commit for five of six PRs while every one of them had in fact
+  passed on its current head — the pass is an EDIT to the walkthrough issue
+  comment, which carries the `headCommitId` it covers. The check that works
+  is grepping that comment for the verdict string and comparing its
+  `headCommitId` to the PR head. Absence of new findings is not a pass, and
+  saying so out loud without checking is how this was learned twice. (#967–#972)
+- **A fix round needs a FRESH pass from every bot, not just the one that
+  found something.** Gemini does not re-review each push: after four rounds
+  on one PR its last review still predated every fix commit on five of six
+  branches, and `/gemini review` on each head then produced two more real
+  findings. Ask both, per head.
 - The `test (windows-latest)` leg was non-blocking until 2026-09-01 — a
   permanently-red non-blocking leg hides every genuine regression behind it.
 - **Merging with review comments outstanding is a process failure**, not a
@@ -2678,6 +2827,50 @@ its twin.** The top list is older, shorter, and read first.
   being discussed rather than cited. Keep the two apart: a stale citation is
   repointed or elided, a false positive means the prose should stop spelling a
   token it is only talking about. (#946)
+
+### <a name="review-2026-09-22-fixes"></a>2026-09-22 — review of the #959–#966 fix window
+
+The eight PRs that closed the window below had merged the same day with
+no review as a window. A pass over `9f1289f`..`9b1a5a8` found eight
+defects plus one adjacent; shipped as #967–#972. The record is in
+`ops/engineering-log.md`.
+
+**Every defect was a behaviour the existing tests still accept**, and
+THREE were introduced by the fixes they sit in — one release or one
+commit from the rule they broke. That is the thing to expect when
+reviewing a hardening batch: the new code is where the new defects are,
+and its own tests were written by the same reasoning that missed them.
+
+- **A fix placed in FRONT of a check can destroy that check's input.**
+  v13's SSND narrowing ran ahead of v12's sentinel refusal and handed it
+  `0xFFFFFFF7`. Neither PR was wrong on its own; the ORDER was.
+- **A range gate does not protect a value that can wrap into the range.**
+  A bot found an `int` overflow landing on exactly 3600 — inside the
+  plausibility band the same PR was adding.
+- **An escape hatch re-opens the failure its own PR fixes.** The
+  empty-store exception on the variant delete took two more rounds to
+  narrow: an unlink outside the store explained the store, then an
+  unlink before a mid-request unmount did. Both were bot findings on my
+  own fix, and the second is the sharper: "we emptied it" and "it
+  unmounted" are the same stat.
+- **Four of eleven accepted findings were on my own fixes.** Two rounds
+  is the documented floor; #968 took five.
+- **Three findings were declined by MEASUREMENT, not argument** — escape
+  analysis for a claimed allocation, two red tests for a proposed
+  `os.Lstat`, and the top-level `ReadDir(1)` for a claimed symlink
+  escape. One more was declined with its premise CONCEDED: the config
+  really is validated, but the invariant is split across two validators
+  chosen by deployment mode, and the failure mode of dropping the guard
+  is the vacuous pass the PR existed to fix.
+- **"No new findings" is not "reviewed", and I reported it as such
+  before checking.** The verdict lives in the walkthrough comment, not
+  `pulls/N/reviews`. Rule and the check that works under **### Build, CI,
+  and test discipline**.
+- **Disjointness decays across review rounds.** Six branches were
+  file-disjoint at open and I said so; by round 3 two of them shared a
+  test file. Re-derive the overlap matrix before merging.
+- **Commit BEFORE the negative control — hit again**, one commit after
+  reading the rule, and a tree that did not build was pushed.
 
 ### <a name="review-2026-09-22"></a>2026-09-22 — full review of the post-v0.2.0 window
 
