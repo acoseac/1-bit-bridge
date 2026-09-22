@@ -573,29 +573,66 @@ type variantDeleterAdapter struct {
 // Present and Unknown both take the RECORDED path: Present because it is
 // right, Unknown because a stat that failed for a reason other than
 // "absent" is not grounds to change what a delete unlinks.
-// SidecarStoreAvailable answers serveVariant's "is the file gone, or the
+// SidecarStoreState answers serveVariant's "is the file gone, or the
 // volume?" from the same probe the two sweeps refuse on, so the three
 // reapers cannot disagree about what an unmounted variants directory
-// looks like.
+// looks like. Both halves of integrity.VariantsDirBlock are carried
+// across: the delete handler can explain an EMPTY directory away once it
+// has unlinked files itself, and nothing else on that list.
 //
-// A nil variantsDir (fixtures) answers true: no live directory to judge,
-// and the reap is the behaviour those fixtures were written against.
-func (a *variantDeleterAdapter) SidecarStoreAvailable() bool {
+// A nil variantsDir (fixtures) answers available: no live directory to
+// judge, and the reap is the behaviour those fixtures were written
+// against.
+func (a *variantDeleterAdapter) SidecarStoreState() api.VariantSidecarStoreState {
 	if a.variantsDir == nil {
-		return true
+		return api.VariantSidecarStoreState{Available: true}
 	}
 	dir := a.variantsDir()
 	if dir == "" {
-		return false
+		return api.VariantSidecarStoreState{}
 	}
-	return integrity.VariantsDirSweepBlock(dir).Reason == ""
+	block := integrity.VariantsDirSweepBlock(dir)
+	st := api.VariantSidecarStoreState{Available: block.Reason == "", Empty: block.Empty}
+	// The directory INSTANCE, so the delete handler can tell "I emptied
+	// this" from "something else is at this path now". os.SameFile is
+	// the portable comparison (device+inode on POSIX, volume+file index
+	// on Windows) and there is no exported value type for it, hence the
+	// wrapper. A failed stat leaves it nil, which the handler reads as
+	// "cannot claim I emptied it".
+	if fi, err := os.Stat(dir); err == nil {
+		st.Store = sidecarStoreID{fi}
+	}
+	return st
 }
 
+// sidecarStoreID is api.SidecarStoreIdentifier over an os.FileInfo.
+type sidecarStoreID struct{ fi os.FileInfo }
+
+// Same reports whether other observed the same directory. A nil or
+// foreign implementation is NOT the same — the comparison exists to
+// refuse an unmount, so anything it cannot verify is a refusal.
+func (s sidecarStoreID) Same(other api.SidecarStoreIdentifier) bool {
+	o, ok := other.(sidecarStoreID)
+	return ok && s.fi != nil && o.fi != nil && os.SameFile(s.fi, o.fi)
+}
+
+// An EMPTY recorded path is still asked where its file is. The
+// short-circuit that skipped the lookup for one made the row's silence
+// about its own path the end of the enquiry, when the canonical path
+// under the current variants directory is exactly where a file with no
+// recorded path would be found — locateRecordedFile stats "" (ENOENT on
+// every platform), then the canonical one, which is the whole shape
+// #959 added the lookup for. Without it such a row was deleted as
+// already-gone while its file stayed on disk: deletedCount up,
+// freedBytes flat, and a tree `--gc` then refuses.
 func (a *variantDeleterAdapter) LocateVariantSidecar(v api.VariantSummary) api.VariantSidecarLocation {
-	if a.variantsDir == nil || v.SidecarPath == "" {
-		return api.VariantSidecarLocation{Placement: api.VariantSidecarRecorded, Path: v.SidecarPath}
+	if a.variantsDir == nil {
+		// No directory to be inside, and SidecarStoreState answers
+		// available for the same reason, so WithinStore is never read.
+		return api.VariantSidecarLocation{Placement: api.VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: true}
 	}
-	loc := integrity.LocateSidecar(a.variantsDir(), integrity.VariantSnapshot{
+	dir := a.variantsDir()
+	loc := integrity.LocateSidecar(dir, integrity.VariantSnapshot{
 		SourcePath:  v.SourcePath,
 		VariantID:   v.VariantID,
 		SidecarPath: v.SidecarPath,
@@ -603,14 +640,42 @@ func (a *variantDeleterAdapter) LocateVariantSidecar(v api.VariantSummary) api.V
 	})
 	switch loc.Verdict {
 	case integrity.SidecarRelocated:
-		return api.VariantSidecarLocation{Placement: api.VariantSidecarRelocated, Path: loc.Canonical}
+		// The canonical path is BUILT from dir, so it is under it by
+		// construction rather than by comparison.
+		return api.VariantSidecarLocation{Placement: api.VariantSidecarRelocated, Path: loc.Canonical, WithinStore: true}
 	case integrity.SidecarMismatched:
 		return api.VariantSidecarLocation{Placement: api.VariantSidecarCopyInFlight}
 	case integrity.SidecarMissing:
 		return api.VariantSidecarLocation{Placement: api.VariantSidecarAbsent}
 	default:
-		return api.VariantSidecarLocation{Placement: api.VariantSidecarRecorded, Path: v.SidecarPath}
+		return api.VariantSidecarLocation{
+			Placement:   api.VariantSidecarRecorded,
+			Path:        v.SidecarPath,
+			WithinStore: pathUnder(dir, v.SidecarPath),
+		}
 	}
+}
+
+// pathUnder reports whether p lies at or below dir.
+//
+// filepath.Rel rather than a string prefix, the rule the fsnotify
+// watcher's containment already follows: a prefix compare calls
+// `/srv/variants-old/x` a child of `/srv/variants`, and here that would
+// let an unlink from the old tree explain the current one being empty.
+//
+// Byte-exact, so a case-twin spelling answers false on a
+// case-insensitive filesystem. That is the safe direction for the one
+// caller: a false reads as "this unlink proves nothing about the probed
+// directory", which keeps the row rather than deleting it.
+func pathUnder(dir, p string) bool {
+	if dir == "" || p == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(p))
+	if err != nil {
+		return false // different volumes on Windows; cannot be nested.
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (a *variantDeleterAdapter) AllVariants(ctx context.Context) ([]api.VariantSummary, error) {

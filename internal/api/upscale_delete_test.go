@@ -33,20 +33,54 @@ type stubVariantDeleter struct {
 	// ctx early-break.
 	afterDelete func()
 	// locate, when set, answers LocateVariantSidecar. nil means every
-	// row is at its recorded path, which is what the bridge reported
-	// before #937's rule reached this handler and is what keeps the
-	// pre-existing cases in this file describing the same bridge.
+	// row is at its recorded path INSIDE the current variants directory,
+	// which is what the bridge reported before #937's rule reached this
+	// handler and is what keeps the pre-existing cases in this file
+	// describing the same bridge. WithinStore false is the relocation
+	// shape — a recorded path on some OTHER tree — and a case that wants
+	// it says so.
 	locate func(VariantSummary) VariantSidecarLocation
-	// storeUnavailable makes SidecarStoreAvailable answer false — the
+	// storeUnavailable makes SidecarStoreState answer unavailable — the
 	// unmounted-volume state. Default false (available), which is the
 	// bridge every pre-existing case in this file describes.
 	storeUnavailable bool
+	// storeEmpty is the one unavailable reason a caller can explain
+	// away, so it is separable here: an unmounted mountpoint reverts to
+	// an empty local directory, and so does a flat variants directory
+	// whose last file this very request unlinked. Only meaningful
+	// alongside storeUnavailable.
+	storeEmpty bool
+	// storeID names the directory INSTANCE the probe reports. Changing
+	// it mid-request is how a test spells "the mount dropped and a
+	// different directory is at that path now". Empty means no identity
+	// at all (a probe that could not stat), which the handler must read
+	// as "cannot claim I emptied it".
+	storeID string
+	// storeProbes counts SidecarStoreState calls. The probe answers "is
+	// a missing sidecar evidence about the FILE or about the VOLUME",
+	// which is a question about a file that is missing — asking it of a
+	// row whose file was just located and unlinked is the defect, and a
+	// status assertion cannot see it.
+	storeProbes int
 }
 
-func (s *stubVariantDeleter) SidecarStoreAvailable() bool {
+func (s *stubVariantDeleter) SidecarStoreState() VariantSidecarStoreState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !s.storeUnavailable
+	s.storeProbes++
+	st := VariantSidecarStoreState{Available: !s.storeUnavailable, Empty: s.storeEmpty}
+	if s.storeID != "" {
+		st.Store = stubStoreIdentity(s.storeID)
+	}
+	return st
+}
+
+// stubStoreIdentity stands in for the adapter's os.SameFile wrapper.
+type stubStoreIdentity string
+
+func (a stubStoreIdentity) Same(other SidecarStoreIdentifier) bool {
+	b, ok := other.(stubStoreIdentity)
+	return ok && a == b
 }
 
 func (s *stubVariantDeleter) LocateVariantSidecar(v VariantSummary) VariantSidecarLocation {
@@ -54,7 +88,7 @@ func (s *stubVariantDeleter) LocateVariantSidecar(v VariantSummary) VariantSidec
 	fn := s.locate
 	s.mu.Unlock()
 	if fn == nil {
-		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath}
+		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: true}
 	}
 	return fn(v)
 }
@@ -836,4 +870,263 @@ func TestUpscaleDeleteKeepsRowsWhileTheVariantsDirIsUnavailable(t *testing.T) {
 	if dr.DeletedCount != 0 || dr.FreedBytes != 0 {
 		t.Errorf("deletedCount/freedBytes = %d/%d, want 0/0", dr.DeletedCount, dr.FreedBytes)
 	}
+}
+
+// emptyStoreFixture seeds the shape every empty-store case needs: a flat
+// variants directory holding ONE file, and two catalog rows — the first
+// whose sidecar is present, the second whose sidecar is already gone (a
+// prior --gc, a manual wipe). Reconciling that second row is what the
+// empty-store exception decides, and every case below differs only in
+// WHY the directory reads empty.
+//
+// Returns the server, a bearer token, the stub and the directory.
+func emptyStoreFixture(t *testing.T) (*httptest.Server, string, *stubVariantDeleter, string) {
+	t.Helper()
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	dir := t.TempDir()
+	first := filepath.Join(dir, "abc-v1.flac")
+	if err := os.WriteFile(first, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deleter.all = []VariantSummary{
+		{SourcePath: "Music/Album/01.flac", VariantID: "v1", SidecarPath: first, SizeBytes: 10},
+		{SourcePath: "Music/Album/02.flac", VariantID: "v1", SidecarPath: filepath.Join(dir, "def-v1.flac"), SizeBytes: 20},
+	}
+	// Unavailable AND empty: the one unavailable reason a caller can
+	// explain away, which is what each case then does or fails to do.
+	deleter.mu.Lock()
+	deleter.storeUnavailable, deleter.storeEmpty = true, true
+	deleter.mu.Unlock()
+	return hs, raw, deleter, dir
+}
+
+// deleteAllAndDecode runs the unscoped delete and returns the decoded
+// body, failing on anything but 200.
+func deleteAllAndDecode(t *testing.T, hs *httptest.Server, raw string) VariantDeleteResponse {
+	t.Helper()
+	resp := authDelete(t, hs, "/v1/upscale/variants?confirm=true", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	return decodeDeleteResponse(t, resp)
+}
+
+// requireSecondRowKept asserts the already-gone row outlived the
+// request: its sidecar may still exist somewhere this process cannot
+// see, and deleting the row would strand it.
+func requireSecondRowKept(t *testing.T, deleter *stubVariantDeleter, why string) {
+	t.Helper()
+	got := deleter.deletedKeys()
+	for _, k := range got {
+		if strings.Contains(k, "02.flac") {
+			t.Fatalf("the already-gone row was deleted (%v) — %s", got, why)
+		}
+	}
+	if len(got) != 1 {
+		t.Errorf("DeleteVariant calls: got %v, want only the row whose file was unlinked", got)
+	}
+}
+
+// TestUpscaleDeleteUnlinksAFileItLocatedThoughTheDirIsEmpty is the
+// other half of the rule above, and the one the round-2 shape had
+// backwards.
+//
+// The probe answers "is a MISSING sidecar evidence about the file or
+// about the volume". Asked before the locate, of every row, it also
+// answered for rows whose file the locate had just found — and an EMPTY
+// variants directory is one of its unavailable reasons. So the ordinary
+// shape of a moved variants directory (config repointed at a fresh
+// folder, every rendition still at the absolute path its row records)
+// made "delete all renditions" unlink nothing and leave the bytes:
+// exactly the stranding #959's lookup was added to end, reached one
+// commit later through the guard added beside it.
+func TestUpscaleDeleteUnlinksAFileItLocatedThoughTheDirIsEmpty(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	// The file is where the row says — on the OLD tree, which is why the
+	// newly-configured variants directory has nothing in it.
+	old := filepath.Join(t.TempDir(), "abc-v1.flac")
+	if err := os.WriteFile(old, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deleter.byPath["Music/Album/01.flac"] = []VariantSummary{{
+		SourcePath: "Music/Album/01.flac", VariantID: "v1",
+		SidecarPath: old, SizeBytes: 10,
+	}}
+	deleter.mu.Lock()
+	deleter.storeUnavailable, deleter.storeEmpty = true, true
+	// The file is on the OLD tree — that is what makes the newly
+	// configured directory empty — so the locate says so rather than
+	// leaning on the default.
+	deleter.locate = func(v VariantSummary) VariantSidecarLocation {
+		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: false}
+	}
+	deleter.mu.Unlock()
+
+	resp := authDelete(t, hs, "/v1/upscale/variants?path=Music/Album/01.flac", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("the located sidecar is still on disk (%v) — the volume probe answered "+
+			"about a file that had just been found", err)
+	}
+	if got := deleter.deletedKeys(); len(got) != 1 {
+		t.Errorf("DeleteVariant calls: got %v, want the one row", got)
+	}
+	dr := decodeDeleteResponse(t, resp)
+	if dr.DeletedCount != 1 || dr.FreedBytes != 10 {
+		t.Errorf("deletedCount/freedBytes = %d/%d, want 1/10", dr.DeletedCount, dr.FreedBytes)
+	}
+	// The probe was not consulted to DECIDE anything here: nothing was
+	// missing. It is called at most once, to record which directory
+	// instance the first in-store unlink happened in — and this row's
+	// unlink was NOT in-store (the file is on the old tree), so not even
+	// that.
+	deleter.mu.Lock()
+	probes := deleter.storeProbes
+	deleter.mu.Unlock()
+	if probes != 0 {
+		t.Errorf("SidecarStoreState was probed %d time(s) for a row whose file was present and "+
+			"outside the store — the question is about a file that is missing", probes)
+	}
+}
+
+// TestUpscaleDeleteFinishesAFlatTreeItEmptiedItself.
+//
+// On the legacy hash-flat layout (`<dir>/<hash>-<variantID>.flac`, no
+// subdirectories) this request's own unlinks are what empty the
+// directory. A probe after that refuses the remaining rows on a state
+// the request just created, and no re-run clears it: the directory is
+// still empty, so it refuses again having removed nothing. That is
+// gcCheckOutputDirBeforeReverseSweep's defect (#941) one layer over, and
+// it takes the same answer — EMPTY alone is explicable once files have
+// been removed; missing, unreadable and not-a-directory are not, because
+// this loop unlinks files and never directories.
+func TestUpscaleDeleteFinishesAFlatTreeItEmptiedItself(t *testing.T) {
+	hs, raw, deleter, _ := emptyStoreFixture(t)
+	// One stable identity throughout: the same directory all along, which
+	// is what "this request emptied it" means. The stub cannot watch the
+	// disk, so the directory reads empty for the FIRST row too — the
+	// stricter fixture, since that row's file is still found and removed.
+	deleter.mu.Lock()
+	deleter.storeID = "vol-A"
+	deleter.mu.Unlock()
+
+	dr := deleteAllAndDecode(t, hs, raw)
+	if got := deleter.deletedKeys(); len(got) != 2 {
+		t.Fatalf("DeleteVariant calls: got %v, want both rows — the second was refused on a state "+
+			"the first row's unlink created", got)
+	}
+	// One file's bytes: the already-gone row frees nothing.
+	if dr.DeletedCount != 2 || dr.FreedBytes != 10 {
+		t.Errorf("deletedCount/freedBytes = %d/%d, want 2/10", dr.DeletedCount, dr.FreedBytes)
+	}
+}
+
+// TestUpscaleDeleteKeepsRowsWhenAnEmptyDirIsNotItsOwnDoing is the
+// negative control for the exception above: EMPTY only explains itself
+// once this request has unlinked something. With nothing removed, an
+// empty directory is the cleanly-unmounted mountpoint it has always
+// been, and the row stays.
+func TestUpscaleDeleteKeepsRowsWhenAnEmptyDirIsNotItsOwnDoing(t *testing.T) {
+	hs, raw, deleter, _ := deleteFixture(t, true)
+	deleter.byPath["Music/Album/01.flac"] = []VariantSummary{{
+		SourcePath: "Music/Album/01.flac", VariantID: "v1",
+		SidecarPath: filepath.Join(t.TempDir(), "unmounted", "abc-v1.flac"), SizeBytes: 10,
+	}}
+	deleter.mu.Lock()
+	deleter.storeUnavailable, deleter.storeEmpty = true, true
+	deleter.mu.Unlock()
+
+	resp := authDelete(t, hs, "/v1/upscale/variants?path=Music/Album/01.flac", raw)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	if got := deleter.deletedKeys(); len(got) != 0 {
+		t.Fatalf("DeleteVariant calls: got %v, want none — nothing was unlinked, so an empty "+
+			"directory is still the unmount it has always been", got)
+	}
+}
+
+// TestUpscaleDeleteWillNotExplainAnEmptyStoreWithAnUnlinkOutsideIt.
+//
+// The empty-store exception exists because on the legacy hash-flat
+// layout THIS request's own unlinks empty the directory. Counting every
+// removed file made that argument from evidence it does not have: a
+// recorded sidecar_path is absolute and need not be under the current
+// variants directory at all — that is the relocation the whole lookup
+// exists for — so unlinking from the OLD tree said nothing about the
+// CURRENT one.
+//
+// The shape: rows recorded on a still-mounted old tree, the current
+// variants directory unmounted (a clean unmount reverts a mountpoint to
+// an empty local directory). One old file is removed, and the next row —
+// whose sidecar sits intact on the volume that will come back — was then
+// deleted under the exception and orphaned. (CodeRabbit on #968.)
+func TestUpscaleDeleteWillNotExplainAnEmptyStoreWithAnUnlinkOutsideIt(t *testing.T) {
+	hs, raw, deleter, _ := emptyStoreFixture(t)
+	deleter.mu.Lock()
+	deleter.storeID = "vol-A"
+	// Recorded paths on a still-mounted OLD tree: outside the probed
+	// store, so unlinking from there says nothing about it.
+	deleter.locate = func(v VariantSummary) VariantSidecarLocation {
+		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: false}
+	}
+	deleter.mu.Unlock()
+
+	deleteAllAndDecode(t, hs, raw)
+	requireSecondRowKept(t, deleter, "an unlink from the OLD tree was taken as proof this request "+
+		"emptied the CURRENT one, which is unmounted")
+}
+
+// TestUpscaleDeleteWillNotExplainAnEmptyStoreAfterTheMountChanged.
+//
+// The empty-store exception argued from "this request unlinked
+// something here", and a clean unmount reverts a mountpoint to an empty
+// LOCAL directory — which exists, is a directory, and holds no entries.
+// So an unlink at row k proved only that the volume was mounted at row
+// k, and said nothing about row k+1.
+//
+// That matters because the probe is per row precisely BECAUSE a
+// whole-library delete runs long enough for a mount to drop underneath
+// it. Without an identity compare, the drop let every row after it be
+// deleted while its sidecar sat intact on the volume that will come
+// back — the stranding this handler is being fixed for, re-entered
+// through its own exception. (CodeRabbit on #968.)
+func TestUpscaleDeleteWillNotExplainAnEmptyStoreAfterTheMountChanged(t *testing.T) {
+	hs, raw, deleter, _ := emptyStoreFixture(t)
+	// The mount drops after the first row: the path is still an empty
+	// directory, but it is a DIFFERENT directory — the local mountpoint,
+	// not the volume that was on it.
+	deleter.mu.Lock()
+	deleter.storeID = "the-mounted-volume"
+	deleter.locate = func(v VariantSummary) VariantSidecarLocation {
+		if v.SourcePath == "Music/Album/02.flac" {
+			// Row two runs after the drop: both stats land under a dead
+			// mountpoint and answer ENOENT, which is "absent at both".
+			deleter.storeID = "the-bare-mountpoint"
+			return VariantSidecarLocation{Placement: VariantSidecarAbsent}
+		}
+		return VariantSidecarLocation{Placement: VariantSidecarRecorded, Path: v.SidecarPath, WithinStore: true}
+	}
+	deleter.mu.Unlock()
+
+	deleteAllAndDecode(t, hs, raw)
+	requireSecondRowKept(t, deleter, "an unlink from the volume that WAS mounted was taken as proof "+
+		"this request emptied the directory that is there now, and its sidecar comes back with the volume")
+}
+
+// TestUpscaleDeleteWillNotExplainAnEmptyStoreWithNoIdentity is the
+// fail-closed half: a probe that could not stat the directory reports no
+// identity, and "I cannot tell you which directory this is" must not
+// satisfy "it is the one I emptied".
+func TestUpscaleDeleteWillNotExplainAnEmptyStoreWithNoIdentity(t *testing.T) {
+	hs, raw, deleter, _ := emptyStoreFixture(t)
+	// storeID stays empty: the probe could not stat the directory, so it
+	// reports no identity at all.
+	deleteAllAndDecode(t, hs, raw)
+	requireSecondRowKept(t, deleter, "a probe with no identity satisfied the empty-store exception")
 }
