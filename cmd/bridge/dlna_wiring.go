@@ -53,22 +53,35 @@ type dlnaLifecycle struct {
 // the api server, whose ServeArtwork IS `/v1/artwork/{key}`. Passed in
 // rather than looked up so the api package stays un-imported here and the
 // two listeners provably serve one function. nil leaves both off.
-// `variantsDir` is the LIVE effective variants directory (the same
-// closure every other consumer reads — `POST /api/upscale/variants-dir`
-// is hot, and a boot snapshot probes the tree the operator moved away
-// from). It feeds the request-time relocation lookup the file handler
-// falls back to; nil disables it, leaving a moved sidecar as the 410 it
-// was before.
-func startDLNAIfEnabled(
-	ctx context.Context,
-	cfg *config.Config,
-	store *manifest.Store,
-	resolver *bridgefs.Resolver,
-	artwork dlna.ArtworkSource,
-	upnpLC *upnpUpstreamLifecycle,
-	variantsDir func() string,
-	logger *slog.Logger,
-) (lc *dlnaLifecycle, enabled bool) {
+// dlnaWiring is what the listener needs from the rest of the process,
+// as one value rather than a parameter list.
+//
+// A struct for the reason analysisSweeper and autoOptimizeSweeper are
+// one: the list had grown to eight and the next reader could no longer
+// tell an argument from its neighbour at a call site. It is also what
+// `Store` is doing here — three different jobs (the catalog adapter, the
+// UPnP routing lookup, the relocation probe) behind one name.
+type dlnaWiring struct {
+	Cfg      *config.Config
+	Store    *manifest.Store
+	Resolver *bridgefs.Resolver
+	// Artwork is the cover read path — see the note above.
+	Artwork dlna.ArtworkSource
+	UPnP    *upnpUpstreamLifecycle
+	// VariantsDir is the LIVE effective variants directory (the same
+	// closure every other consumer reads — `POST
+	// /api/upscale/variants-dir` is hot, and a boot snapshot probes the
+	// tree the operator moved away from). It feeds the request-time
+	// relocation lookup the file handler falls back to; nil disables it,
+	// leaving a moved sidecar as the 410 it was before.
+	VariantsDir func() string
+	Logger      *slog.Logger
+}
+
+func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, enabled bool) {
+	cfg, store, resolver := w.Cfg, w.Store, w.Resolver
+	artwork, upnpLC, logger := w.Artwork, w.UPnP, w.Logger
+	variantsDir := w.VariantsDir
 	// Deployment posture → typed mode.
 	var mode dlna.DeploymentMode
 	if cfg.IsPublic() {

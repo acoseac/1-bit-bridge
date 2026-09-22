@@ -3312,7 +3312,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// apiSrv doubles as the DLNA listener's ArtworkSource: its ServeArtwork
 	// IS /v1/artwork/{key}, so /dlna/artwork/{key} serves the same bytes by
 	// construction, and `dlnaArtwork` in /v1/health advertises exactly that.
-	dlnaLC, dlnaEnabled := startDLNAIfEnabled(ctx, cfg, manifestStore, apiSrv.Resolver(), apiSrv, upnpLC, liveVariantsDir, logger)
+	dlnaLC, dlnaEnabled := startDLNAIfEnabled(ctx, dlnaWiring{
+		Cfg:         cfg,
+		Store:       manifestStore,
+		Resolver:    apiSrv.Resolver(),
+		Artwork:     apiSrv,
+		UPnP:        upnpLC,
+		VariantsDir: liveVariantsDir,
+		Logger:      logger,
+	})
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()

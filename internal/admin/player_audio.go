@@ -15,6 +15,19 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
+// variantGoneMessage is the 410 body every "the row is there, the file is
+// not" answer carries — the locate miss, the containment refusal and the
+// stat failure alike.
+//
+// ONE string on purpose, and not because a linter counted three copies.
+// The three arms are deliberately indistinguishable to the client: the
+// contract is "was here, fall back to the source", and which of them
+// fired is an operator question, answered by the log line beside the
+// containment refusal rather than by a body the browser will retry
+// against. Splitting them would invite a client to branch on the
+// difference.
+const variantGoneMessage = "the variant row exists but its sidecar does not"
+
 // playerContentType is the BROWSER MIME table.
 //
 // Deliberately NOT dlna.defaultMIMEForExtension. That table is
@@ -341,7 +354,7 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 		sidecarPath := s.locateVariantSidecar(r.Context(), variantsDir, v)
 		if sidecarPath == "" {
 			writeError(w, http.StatusGone, "variant_missing_on_disk",
-				"the variant row exists but its sidecar does not")
+				variantGoneMessage)
 			return
 		}
 		// Confine the sidecar to the variants directory before opening
@@ -360,13 +373,13 @@ func (s *Server) servePlayerBytes(w http.ResponseWriter, r *http.Request, downlo
 			logger.Error("player audio: sidecar outside the variants dir",
 				"variantID", v.VariantID, "variantsDir", variantsDir)
 			writeError(w, http.StatusGone, "variant_missing_on_disk",
-				"the variant row exists but its sidecar does not")
+				variantGoneMessage)
 			return
 		}
 		vi, err := os.Stat(sidecarPath)
 		if err != nil {
 			writeError(w, http.StatusGone, "variant_missing_on_disk",
-				"the variant row exists but its sidecar does not")
+				variantGoneMessage)
 			return
 		}
 		servePath, serveInfo = sidecarPath, vi
