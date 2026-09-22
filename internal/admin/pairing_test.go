@@ -376,3 +376,110 @@ func TestPairURLHost(t *testing.T) {
 		}
 	}
 }
+
+// TestPublicPairingSkipsTheRemappedListenPort is the QR half of the rule
+// api.publicModeEndpoints applies to /v1/health: when customEndpoints
+// already names the autocert HOST, the listen port is not the port a
+// client dials, and synthesizing a URL from it advertises an address no
+// client can reach.
+//
+// The fixture is the hosted layout, which is the only one where the two
+// disagree: the tenant listens on a loopback high port and is published
+// on a shared external one. iOS puts every advertised URL into its
+// failover rotation, so an unreachable entry is a timeout per attempt,
+// and the PRIMARY is worse than an alternate — it is the `url=` field,
+// the only one the oldest shipped builds read.
+//
+// #936 moved /v1/health onto ReachableEndpoints and deliberately left
+// public mode with its own synthesis here (the explicit `:443` the iOS
+// 7788-default bug needs), so the host skip added there never reached
+// this copy. Measured against the live demo tenant, whose /v1/health
+// advertises exactly `https://bridge.1-bit.app`.
+func TestPublicPairingSkipsTheRemappedListenPort(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress: "127.0.0.1:20001",
+		Deployment: config.DeploymentConfig{
+			Mode:                      "public",
+			AdminTLSTerminatedByProxy: true,
+		},
+		Autocert:        config.AutocertConfig{Domain: "tenant.example.test"},
+		CustomEndpoints: []string{"https://tenant.example.test:8443"},
+	}
+
+	primary := defaultBridgeURL(cfg)
+	if primary != "https://tenant.example.test:8443" {
+		t.Errorf("pairing primary = %q; the operator declared https://tenant.example.test:8443, "+
+			"and :20001 is the loopback port behind the proxy", primary)
+	}
+	for _, u := range pairAlternates(primary, cfg, nil) {
+		if strings.Contains(u, ":20001") {
+			t.Errorf("the QR carries %q — the listen port, which nothing outside this host dials", u)
+		}
+	}
+}
+
+// TestPublicPairingPrimaryAlwaysNamesAPort — the guard that the fix
+// above must not break. An operator writes customEndpoints for a
+// browser, where `https://host` is the normal spelling; shipped iOS
+// builds default a port-less bridge URL to 7788 and time out. So taking
+// the declaration as the primary has to add the explicit `:443`.
+//
+// This is the live demo tenant's exact config shape.
+func TestPublicPairingPrimaryAlwaysNamesAPort(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress:   "127.0.0.1:20001",
+		Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        config.AutocertConfig{Domain: "demo.example.test"},
+		CustomEndpoints: []string{"https://demo.example.test"},
+	}
+	if got := defaultBridgeURL(cfg); got != "https://demo.example.test:443" {
+		t.Errorf("pairing primary = %q, want https://demo.example.test:443 — a port-less "+
+			"dial URL trips the iOS 7788-default bug on shipped builds", got)
+	}
+}
+
+// TestPublicPairingStillSynthesizesAnUndeclaredHost is the negative
+// control on both. With the host NOT declared, there is nothing saying
+// the listen port is remapped, and the synthesized URL is the only
+// address the QR can carry — dropping it would leave the default VPS
+// install with no dial URL at all.
+func TestPublicPairingStillSynthesizesAnUndeclaredHost(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddress:   ":443",
+		Deployment:      config.DeploymentConfig{Mode: "public", AdminTLSTerminatedByProxy: true},
+		Autocert:        config.AutocertConfig{Domain: "bridge.example.test"},
+		CustomEndpoints: []string{"https://elsewhere.example.test:9000"},
+	}
+	primary := defaultBridgeURL(cfg)
+	if primary != "https://bridge.example.test:443" {
+		t.Errorf("pairing primary = %q, want the synthesized https://bridge.example.test:443", primary)
+	}
+	var found bool
+	for _, u := range pairAlternates(primary, cfg, nil) {
+		if u == "https://bridge.example.test:443" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("an undeclared autocert host must still be synthesized into the QR")
+	}
+}
+
+// TestExplicitHTTPSPortLeavesEverythingElseAlone pins the helper
+// directly: its callers choose between operator-supplied strings, they
+// do not normalise them, so anything that is not https-without-a-port
+// must come back byte-identical.
+func TestExplicitHTTPSPortLeavesEverythingElseAlone(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"https://h.example", "https://h.example:443"},
+		{"https://h.example/", "https://h.example:443/"},
+		{"https://h.example:8443", "https://h.example:8443"},
+		{"http://h.example", "http://h.example"},
+		{"not a url at all", "not a url at all"},
+		{"", ""},
+	} {
+		if got := explicitHTTPSPort(tc.in); got != tc.want {
+			t.Errorf("explicitHTTPSPort(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

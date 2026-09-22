@@ -108,12 +108,41 @@ func pairAlternates(primary string, cfg *config.Config, endpoints func() []adver
 		// the explicit-port primary from defaultBridgeURL is what the
 		// device dials first, so a bare-host customEndpoint only ever
 		// shows up as a lower-priority failover entry.
+		declared := map[string]bool{}
 		for _, e := range cfg.CustomEndpoints {
 			if e = strings.TrimSpace(e); e != "" {
 				urls = append(urls, e)
+				if h := endpointHost(e); h != "" {
+					declared[h] = true
+				}
 			}
 		}
-		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
+		// SKIPPED when customEndpoints already names that HOST — the same
+		// rule api.publicModeEndpoints applies to /v1/health, and the one
+		// place the two public-mode enumerations have to agree even though
+		// their URL SHAPES deliberately differ.
+		//
+		// `portStr` is the port THIS PROCESS listens on, which is the port
+		// a client dials only when nothing remaps it. Behind a proxy that
+		// does — the hosted layout, where each tenant listens on a loopback
+		// high port and is published on one shared external port — the
+		// synthesized URL is an address no client can reach, and iOS puts
+		// every advertised URL into its failover rotation. The operator
+		// declaring the host in customEndpoints is them saying what the
+		// reachable address is.
+		//
+		// A HOST comparison, not a URL one: the two strings differ in
+		// exactly the part that is wrong, so the dedupe below — which is
+		// byte-equality — cannot see it. And `autocert.domain` cannot
+		// simply be left unset: public mode refuses to start without it.
+		//
+		// #936 moved health onto ReachableEndpoints and left public mode
+		// with its own synthesis here on purpose (the explicit `:443` the
+		// iOS 7788-default bug needs), so the host skip added to health
+		// never reached this copy: a tenant whose customEndpoints is
+		// `https://demo…:8443` on listen port 20001 had a clean
+		// /v1/health and an unreachable URL baked into its QR.
+		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" && !declared[strings.ToLower(d)] {
 			// Explicit port (incl. :443) — see defaultBridgeURL: a
 			// port-less URL trips the iOS 7788-default bug on shipped
 			// builds, so every dial URL the QR carries names its port.
@@ -162,6 +191,65 @@ func pairAlternates(primary string, cfg *config.Config, endpoints func() []adver
 // QR then carries only the operator's primary, which always pairs, and
 // the panel renders its "No external addresses detected" state, which
 // in that wiring is the truth.
+// declaredEndpointForHost returns the first customEndpoint whose host is
+// `host`, or "" when the operator has declared none for it.
+//
+// The comparison is on the HOST alone, never the whole URL: what the
+// caller needs to know is whether the operator has already said how this
+// domain is reached, and the declaration differs from the synthesis in
+// exactly the port — the part that is wrong behind a proxy.
+func declaredEndpointForHost(endpoints []string, host string) string {
+	want := strings.ToLower(strings.TrimSpace(host))
+	if want == "" {
+		return ""
+	}
+	for _, e := range endpoints {
+		if e = strings.TrimSpace(e); e != "" && endpointHost(e) == want {
+			return e
+		}
+	}
+	return ""
+}
+
+// explicitHTTPSPort adds `:443` to an https URL that names no port.
+//
+// Every dial URL the pairing payload carries names its port, `:443`
+// included, because the shipped iOS builds default a port-less bridge
+// URL to 7788 — the LAN listen default — and time out against a public
+// bridge. An operator's customEndpoint is written for a browser, where
+// the port-less form is the normal one, so taking it as the primary
+// without this would re-open that bug on exactly the deployments this
+// change exists to fix. Anything not https-without-a-port is returned
+// unchanged: the caller is choosing between operator-supplied strings,
+// not normalising them.
+func explicitHTTPSPort(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.Port() != "" {
+		return raw
+	}
+	u.Host = net.JoinHostPort(u.Hostname(), "443")
+	return u.String()
+}
+
+// endpointHost is the lowercased hostname of an advertised URL, or ""
+// if it has none.
+//
+// A deliberate second copy of api.endpointHost rather than an import:
+// the api package does not export it, and admin importing api for one
+// four-line URL helper would couple the console to the wire layer for
+// nothing. What matters is that the two answer the same QUESTION —
+// "has the operator already declared this host?" — not that they share
+// a body; the enumerations they serve return different URL shapes on
+// purpose. TestPublicPairingSkipsTheRemappedListenPort and the
+// api-side test pin the shared behaviour from both ends.
+func endpointHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
 func advertisedEndpoints(provider func() []advertise.Endpoint) []advertise.Endpoint {
 	if provider == nil {
 		return nil
@@ -199,9 +287,24 @@ func ensurePrimaryFirst(primary string, alternates []string) []string {
 // **Public mode**: the device dials the public endpoint from off-network,
 // so a `<hostname>.local` mDNS default is useless (it only resolves on
 // the bridge's own LAN). Prefer the operator's configured autocert domain,
-// then the first customEndpoint. Synthesize the autocert URL without
-// `:443` when the listen port is the https default — mirrors the shape
-// `pairAlternates` builds so downstream dedupe collapses near-duplicates.
+// then the first customEndpoint.
+//
+// The autocert URL names the LISTEN port — which is the port a client
+// dials only when nothing remaps it. So when customEndpoints already
+// declares that HOST, the declaration wins: the operator naming the host
+// there is them saying what the reachable address is, and on the hosted
+// layout (each tenant on a loopback high port, published on one shared
+// external port) the synthesized form is an address no client can reach.
+// This is the PRIMARY — the `url=` field every shipped iOS build dials
+// first, and the only one the oldest ones read — so getting it from the
+// declaration matters more here than in the alternates beside it.
+// Measured on the live demo tenant, whose /v1/health advertises exactly
+// `https://bridge.1-bit.app` while this function was handing the QR the
+// loopback port behind the proxy.
+//
+// Either way the result names a port explicitly, `:443` included: a
+// port-less dial URL trips the iOS 7788-default bug on shipped builds,
+// which is what `explicitHTTPSPort` is for.
 //
 // **Loopback / LAN mode** (historical): `https://<hostname>.local:<port>`.
 // Users on networks where mDNS is flaky override in the modal input.
@@ -214,6 +317,9 @@ func defaultBridgeURL(cfg *config.Config) string {
 	}
 	if cfg.IsPublic() {
 		if d := strings.TrimSpace(cfg.Autocert.Domain); d != "" {
+			if declared := declaredEndpointForHost(cfg.CustomEndpoints, d); declared != "" {
+				return explicitHTTPSPort(declared)
+			}
 			// Emit the port EXPLICITLY, including :443. The iOS app
 			// (≤ the build that fixes this) defaults a port-less bridge
 			// URL to 7788 (the LAN listenAddress default), which dials
@@ -222,6 +328,14 @@ func defaultBridgeURL(cfg *config.Config) string {
 			// already-shipped apps; newer apps keep working too.
 			return httpsScheme + d + ":" + port
 		}
+		// Left VERBATIM, unlike the declared-endpoint branch above. That
+		// one replaces a form that always named its port, so dropping
+		// the port there would re-open the iOS 7788 bug; this one has
+		// returned the operator's string unchanged since it was written,
+		// and it is reached only with NO autocert domain — a state
+		// Validate refuses in public mode. Normalising a path nothing
+		// takes, to fix a bug on it, is a behaviour change with no
+		// deployment behind it.
 		for _, e := range cfg.CustomEndpoints {
 			if e = strings.TrimSpace(e); e != "" {
 				return e
