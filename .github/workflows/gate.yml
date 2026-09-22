@@ -433,14 +433,48 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      - name: Verify all gate jobs passed
+      # Verdict derived from `needs` itself, never from a second list of
+      # job names spelled out here.
+      #
+      # `needs` lists six jobs; the hand-written condition checked five.
+      # It omitted `dsd-measure`, and with `if: always()` a `needs` entry
+      # only makes this job WAIT — so a failing DSD measurement produced
+      # a GREEN gate. That hole sat in the one job that exists because
+      # those tests had silently never run in CI since they were written,
+      # and whose numbers CLAUDE.md cites as settling the decimation
+      # design. The echo was honest ("vet, test -race, build-all,
+      # go-version, cross-platform all green") and named only five, which
+      # is how it went unnoticed.
+      #
+      # Adding the sixth name would have left the seventh to be
+      # forgotten the same way. Iterating is correct by construction for
+      # every job added later.
+      #
+      # `skipped` and `cancelled` count as NOT passing, deliberately:
+      # neither verified anything, and no job here is conditional today.
+      # A future job that is legitimately skippable has to say so at this
+      # line, which is the decision being forced rather than defaulted.
+      #
+      # WHAT THIS STILL DOES NOT COVER: a job absent from `needs`
+      # altogether is not waited on and cannot be seen from here — the
+      # `needs` list above is the thing to keep in step when adding one.
+      - name: Verify every job this gate waits for passed
+        env:
+          # Through the environment rather than interpolated into the
+          # script: `${{ }}` inside `run:` splices text into the shell.
+          # These values are runner-controlled, so it was safe, but the
+          # shape is the one that is not.
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          if [ "${{ needs.vet.result }}" != "success" ] \
-            || [ "${{ needs.test.result }}" != "success" ] \
-            || [ "${{ needs.build-all.result }}" != "success" ] \
-            || [ "${{ needs.go-version.result }}" != "success" ] \
-            || [ "${{ needs['cross-platform'].result }}" != "success" ]; then
-            echo "::error::gate failed (vet=${{ needs.vet.result }} test=${{ needs.test.result }} build-all=${{ needs.build-all.result }} go-version=${{ needs.go-version.result }} cross-platform=${{ needs['cross-platform'].result }})"
+          set -euo pipefail
+          summary=$(printf '%s' "$NEEDS" | jq -r 'to_entries | map("\(.key)=\(.value.result)") | join(" ")')
+          failed=$(printf '%s' "$NEEDS" | jq -r 'to_entries | map(select(.value.result != "success")) | length')
+          if [ "$failed" -eq 0 ] && [ -z "$summary" ]; then
+            echo "::error::gate saw no upstream jobs - the needs list is empty, so this gate proves nothing"
             exit 1
           fi
-          echo "gate passed: vet, test -race, build-all, go-version, cross-platform all green"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::gate failed ($summary)"
+            exit 1
+          fi
+          echo "gate passed: $summary"
