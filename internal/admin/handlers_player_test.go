@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -355,6 +356,38 @@ func TestPlayerDownloadSetsAttachment(t *testing.T) {
 	}
 }
 
+// seedPlayerTrack writes a source file under the fixture's library root
+// and upserts its manifest row, returning the relative path and the
+// stat the variant rows have to agree with.
+//
+// Shared because the two variant tests below need the same four steps
+// and got them by copy — which Sonar reads as duplication and a reader
+// reads as two fixtures that might differ. The `info` return is the
+// point: a variant row's SourceMTimeNS/SourceSize must match what is on
+// disk or `variantFresh` refuses before any of this is reached, and
+// deriving both from one stat is what makes that impossible to get
+// subtly wrong in one copy.
+func seedPlayerTrack(t *testing.T, cfg *config.Config, st *manifest.Store, rel, title string) (string, os.FileInfo) {
+	t.Helper()
+	abs := filepath.Join(cfg.LibraryRoots[0], rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTrack(t.Context(), &manifest.Track{
+		Path: rel, Title: title, Size: info.Size(), ModTime: info.ModTime(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return abs, info
+}
+
 // TestPlayerAudioRefusesSidecarOutsideVariantsDir pins the containment
 // check on the variant path.
 //
@@ -367,25 +400,8 @@ func TestPlayerDownloadSetsAttachment(t *testing.T) {
 func TestPlayerAudioRefusesSidecarOutsideVariantsDir(t *testing.T) {
 	srv, cfg, _ := newTestServer(t)
 	st := srv.deps.Manifest
-	dir := cfg.LibraryRoots[0]
-
-	rel := "Rock/Alpha/01.flac"
-	abs := filepath.Join(dir, rel)
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(abs, []byte("source"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.UpsertTrack(t.Context(), &manifest.Track{
-		Path: rel, Title: "One", Size: info.Size(), ModTime: info.ModTime(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	const rel = "Rock/Alpha/01.flac"
+	_, info := seedPlayerTrack(t, cfg, st, rel, "One")
 
 	// A sidecar that exists on disk but lives OUTSIDE the variants dir.
 	outside := filepath.Join(t.TempDir(), "escaped.flac")
@@ -501,23 +517,8 @@ func TestPlayerSearchTrackHitsCarryTheirAlbum(t *testing.T) {
 func TestPlayerAudioAdoptsARelocatedSidecar(t *testing.T) {
 	srv, cfg, _ := newTestServer(t)
 	st := srv.deps.Manifest
-	rel := "Rock/Alpha/01.flac"
-	abs := filepath.Join(cfg.LibraryRoots[0], rel)
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(abs, []byte("source"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.UpsertTrack(t.Context(), &manifest.Track{
-		Path: rel, Title: "One", Size: info.Size(), ModTime: info.ModTime(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	const rel = "Rock/Alpha/01.flac"
+	_, info := seedPlayerTrack(t, cfg, st, rel, "One")
 
 	const variantID = "optimized-v2-44100-16"
 	const body = "RENDITION-BYTES"

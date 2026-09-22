@@ -1,10 +1,6 @@
 package integrity
 
 import (
-	"errors"
-	"io/fs"
-	"os"
-
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
 )
 
@@ -65,33 +61,15 @@ func CanonicalWaveformPath(waveformDir string, row WaveformSnapshot) string {
 
 // LocateWaveform stats the recorded path and, on ENOENT, the canonical
 // one. Pure classification — it writes nothing, so the caller acts on
-// the verdict in its own way. The verdicts and their meanings are
-// LocateSidecar's, down to os.Stat rather than Lstat (a symlink to a
-// missing target is missing from the serving path's point of view) and
-// the exact size compare (the writer stat'd it after the atomic rename,
-// and a waveform is never modified in place, so a partial copy can
-// never be adopted).
+// the verdict in its own way.
+//
+// It DELEGATES to locateRecordedFile rather than restating the ladder:
+// this and LocateSidecar make the same decision about two different
+// tables, and there is no reading on which they should answer
+// differently. A second copy would be a second place to fix the day a
+// verdict moves, and the copy that drifts is the one deciding whether a
+// file is adopted or stranded. All this function owns is WHERE a
+// waveform belongs; the classifier owns what the answer means.
 func LocateWaveform(waveformDir string, row WaveformSnapshot) SidecarLocation {
-	_, err := os.Stat(row.WaveformPath)
-	if err == nil {
-		return SidecarLocation{Verdict: SidecarPresent}
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return SidecarLocation{Verdict: SidecarUnknown, Err: err}
-	}
-	canonical := CanonicalWaveformPath(waveformDir, row)
-	if canonical == "" || canonical == row.WaveformPath {
-		return SidecarLocation{Verdict: SidecarMissing}
-	}
-	info, err := os.Stat(canonical)
-	switch {
-	case err == nil && info.Mode().IsRegular() && info.Size() == row.SizeBytes:
-		return SidecarLocation{Verdict: SidecarRelocated, Canonical: canonical}
-	case err == nil:
-		return SidecarLocation{Verdict: SidecarMismatched, Canonical: canonical}
-	case errors.Is(err, fs.ErrNotExist):
-		return SidecarLocation{Verdict: SidecarMissing, Canonical: canonical}
-	default:
-		return SidecarLocation{Verdict: SidecarUnknown, Canonical: canonical, Err: err}
-	}
+	return locateRecordedFile(row.WaveformPath, CanonicalWaveformPath(waveformDir, row), row.SizeBytes)
 }
