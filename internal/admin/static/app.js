@@ -969,12 +969,15 @@ function certValidityText(left, when) {
   ) {
     return left > 0 ? "expires today" : "expired today";
   }
-  // Calendar days between the two local dates. At least one, because
-  // the test above has already ruled out today — an expiry two hours
-  // away across midnight is tomorrow, and a zero here would reprint the
-  // wording this function exists to remove.
+  // Calendar days between the two local dates, which is at least one by
+  // construction: the test above has already ruled out the same date,
+  // and two different dates' midnights are a whole number of days
+  // apart. The duration form needed a Math.max(1, …) here — two hours
+  // across midnight rounds to zero, reprinting the "0 days" wording
+  // this function exists to remove — and clamping calendar arithmetic
+  // would only suggest it can produce a zero (Gemini on #971).
   const midnight = (d) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
-  const days = Math.max(1, Math.abs(midnight(when) - midnight(now)) / 86_400_000);
+  const days = Math.abs(midnight(when) - midnight(now)) / 86_400_000;
   const plural = days === 1 ? "" : "s";
   return left > 0 ? `expires in ${days} day${plural}` : `expired ${days} day${plural} ago`;
 }
