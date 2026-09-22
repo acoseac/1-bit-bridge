@@ -240,7 +240,7 @@ func explicitHTTPSPort(raw string) string {
 // nothing. What matters is that the two answer the same QUESTION —
 // "has the operator already declared this host?" — not that they share
 // a body; the enumerations they serve return different URL shapes on
-// purpose. TestPublicPairAlternatesSkipTheRemappedListenPort and the
+// purpose. TestPublicPairingSkipsTheRemappedListenPort and the
 // api-side test pin the shared behaviour from both ends.
 func endpointHost(raw string) string {
 	u, err := url.Parse(raw)
