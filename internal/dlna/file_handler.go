@@ -26,6 +26,9 @@ const FilePathPrefix = "/dlna/file/"
 //     learns the bytes live elsewhere — to it this is just a normal
 //     bridge file fetch.
 //  4. Otherwise: open the resolved `AbsolutePath`. Open failure → 500.
+//     For a VARIANT segment whose sidecar is not where the index says,
+//     `locate` gets one chance to answer before that becomes a 410 —
+//     see VariantLocator.
 //  5. Set DLNA-required response headers (Content-Type via
 //     PreferredMIMEFor, transferMode.dlna.org: Streaming,
 //     contentFeatures.dlna.org, Accept-Ranges: bytes).
@@ -51,7 +54,7 @@ const FilePathPrefix = "/dlna/file/"
 // behavior — useful for libavformat / mConnect probes that test
 // reachability before issuing the full GET. The UPnP proxy's
 // `Serve` also honours HEAD by skipping the body copy.
-func FileHandler(lib LibrarySource, routing upnpproxy.RoutingLookup, proxy *upnpproxy.Proxy) http.HandlerFunc {
+func FileHandler(lib LibrarySource, routing upnpproxy.RoutingLookup, proxy *upnpproxy.Proxy, locate VariantLocator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Accept GET + HEAD; reject everything else.
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -78,7 +81,7 @@ func FileHandler(lib LibrarySource, routing upnpproxy.RoutingLookup, proxy *upnp
 			return
 		}
 
-		serveFromFilesystem(w, r, info, trackID)
+		serveFromFilesystem(w, r, info, trackID, locate)
 	}
 }
 
@@ -180,7 +183,7 @@ func tryServeViaUPnPProxy(
 // SonarCloud's S3776 threshold (PR #356). Behavior unchanged — every
 // branch lifted verbatim from the inline shape, just behind a
 // function boundary.
-func serveFromFilesystem(w http.ResponseWriter, r *http.Request, info TrackInfo, trackID string) {
+func serveFromFilesystem(w http.ResponseWriter, r *http.Request, info TrackInfo, trackID string, locate VariantLocator) {
 	// Resolve which file to serve: the source, or an offline variant
 	// addressed via the trailing `/variant-{id}{ext}` path segment.
 	servePath, ext, isVariant, known := resolveServeTarget(info, r.URL.Path)
@@ -192,6 +195,19 @@ func serveFromFilesystem(w http.ResponseWriter, r *http.Request, info TrackInfo,
 	}
 
 	f, err := os.Open(servePath)
+	if err != nil && isVariant && locate != nil {
+		// The index baked in the path the row RECORDED, which is a
+		// claim about where the sidecar was and not proof that it is
+		// gone. Ask once, here, at the one moment the answer matters —
+		// never per row at index time, which would put a stat on every
+		// variant of every track behind a 30 s cache.
+		if moved := locate.LocateVariantSidecar(
+			r.Context(), info.RelativePath, extractVariantID(r.URL.Path), servePath,
+		); moved != "" && moved != servePath {
+			servePath = moved
+			f, err = os.Open(servePath)
+		}
+	}
 	if err != nil {
 		if isVariant {
 			// The DB row pointed at a sidecar that's no longer on

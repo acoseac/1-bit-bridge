@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
 
 func playerGet(t *testing.T, srv *Server, target string) (*httptest.ResponseRecorder, map[string]any) {
@@ -482,5 +483,100 @@ func TestPlayerSearchTrackHitsCarryTheirAlbum(t *testing.T) {
 	first, _ := tracks[0].(map[string]any)
 	if first["albumId"] == nil || first["albumId"] == "" {
 		t.Errorf("track hit carries no albumId, so it cannot link anywhere playable: %v", first)
+	}
+}
+
+// TestPlayerAudioAdoptsARelocatedSidecar — the console half of the
+// 2026-09-20 relocation story.
+//
+// A recorded `sidecar_path` is a CLAIM about where the file was, never
+// proof that it is gone: move the variants directory and every row reads
+// ENOENT while every rendition sits, byte-identical, at its canonical
+// place under the current one. `/v1/download` resolves that through
+// cmd/bridge's variantStoreAdapter, but this handler holds the raw store,
+// so the probe never reached it — and the console is exactly where an
+// operator goes to find out whether the move worked. The background
+// VariantWatcher heals the rows on its own cadence: an hour by default,
+// never if the operator set the interval to 0.
+func TestPlayerAudioAdoptsARelocatedSidecar(t *testing.T) {
+	srv, cfg, _ := newTestServer(t)
+	st := srv.deps.Manifest
+	rel := "Rock/Alpha/01.flac"
+	abs := filepath.Join(cfg.LibraryRoots[0], rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTrack(t.Context(), &manifest.Track{
+		Path: rel, Title: "One", Size: info.Size(), ModTime: info.ModTime(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const variantID = "optimized-v2-44100-16"
+	const body = "RENDITION-BYTES"
+	live := cfg.Upscale.EffectiveVariantsDir(cfg.DataDir)
+	canonical := transcode.VariantSidecarPath(live, rel, variantID)
+	if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(canonical, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The row records a variants dir that does not exist on this host —
+	// what a moved directory, or a database carried to a new machine,
+	// leaves behind.
+	recorded := transcode.VariantSidecarPath(filepath.Join(t.TempDir(), "mnt", "old"), rel, variantID)
+	if err := st.UpsertVariant(t.Context(), manifest.VariantRow{
+		SourcePath: rel, VariantID: variantID, SidecarPath: recorded,
+		Format: "flac", SampleRate: 44100, BitsPerSample: 16, SizeBytes: int64(len(body)),
+		SourceMTimeNS: info.ModTime().UnixNano(), SourceSize: info.Size(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/player/audio?path="+rel+"&variant="+variantID, nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s), want 200 — the rendition is on disk at %s",
+			w.Code, strings.TrimSpace(w.Body.String()), canonical)
+	}
+	if got := w.Body.String(); got != body {
+		t.Errorf("served %q, want the relocated sidecar's %q", got, body)
+	}
+	row, err := st.GetVariant(t.Context(), rel, variantID)
+	if err != nil || row == nil || row.SidecarPath != canonical {
+		t.Errorf("row after the request = %+v (err %v), want sidecar_path adopted to %s",
+			row, err, canonical)
+	}
+
+	// A partial copy at the canonical place is NOT adopted and NOT
+	// served: half a rendition is worse than the 410 the client already
+	// falls back from.
+	if err := st.UpdateVariantSidecarPath(t.Context(), rel, variantID, recorded); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(canonical, []byte("part"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet,
+		"/api/player/audio?path="+rel+"&variant="+variantID, nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusGone {
+		t.Errorf("status over a partial copy = %d, want 410", w.Code)
+	}
+	if row, _ := st.GetVariant(t.Context(), rel, variantID); row == nil || row.SidecarPath != recorded {
+		t.Errorf("a partial copy must leave the row as recorded, got %+v", row)
 	}
 }

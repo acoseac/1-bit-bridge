@@ -1,6 +1,7 @@
 package dlna
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -66,7 +67,7 @@ func Test_FileHandler_ServesKnownTrack(t *testing.T) {
 		TrackID: "abc123", AbsolutePath: path,
 		FileExtension: ".dsf", Size: 16,
 	})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc123", nil)
 	req.Header.Set("User-Agent", "Music Player Daemon 0.21.26")
@@ -97,7 +98,7 @@ func Test_FileHandler_ServesKnownTrack(t *testing.T) {
 func Test_FileHandler_PerUserAgentMIME_Sony(t *testing.T) {
 	path := createTempFile(t, ".dsf", "x")
 	lib := newTestLib(TrackInfo{TrackID: "sony", AbsolutePath: path, FileExtension: ".dsf", Size: 1})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/sony", nil)
 	req.Header.Set("User-Agent", "Sony SRS-HG1/3.2")
@@ -113,7 +114,7 @@ func Test_FileHandler_PerUserAgentMIME_Sony(t *testing.T) {
 func Test_FileHandler_PerUserAgentMIME_Chord(t *testing.T) {
 	path := createTempFile(t, ".dsf", "x")
 	lib := newTestLib(TrackInfo{TrackID: "chord", AbsolutePath: path, FileExtension: ".dsf", Size: 1})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/chord", nil)
 	req.Header.Set("User-Agent", "Chord 2go/1.5.7")
@@ -129,7 +130,7 @@ func Test_FileHandler_RangeRequestReturns206(t *testing.T) {
 	const contents = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	path := createTempFile(t, ".flac", contents)
 	lib := newTestLib(TrackInfo{TrackID: "rng", AbsolutePath: path, FileExtension: ".flac", Size: int64(len(contents))})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/rng", nil)
 	req.Header.Set("Range", "bytes=5-9")
@@ -149,7 +150,7 @@ func Test_FileHandler_RangeRequestReturns206(t *testing.T) {
 
 func Test_FileHandler_UnknownTrackID_Returns404(t *testing.T) {
 	lib := newTestLib()
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/nonexistent", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -160,7 +161,7 @@ func Test_FileHandler_UnknownTrackID_Returns404(t *testing.T) {
 
 func Test_FileHandler_FileMissingOnDisk_Returns404(t *testing.T) {
 	lib := newTestLib(TrackInfo{TrackID: "missing", AbsolutePath: "/this/path/does/not/exist.dsf", FileExtension: ".dsf", Size: 1})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/missing", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -171,7 +172,7 @@ func Test_FileHandler_FileMissingOnDisk_Returns404(t *testing.T) {
 
 func Test_FileHandler_NonGETOrHEAD_Returns405(t *testing.T) {
 	lib := newTestLib()
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
 		req := httptest.NewRequest(method, "/dlna/file/anything", nil)
 		rec := httptest.NewRecorder()
@@ -186,7 +187,7 @@ func Test_FileHandler_HEAD_ReturnsHeadersWithoutBody(t *testing.T) {
 	const contents = "1234567890"
 	path := createTempFile(t, ".flac", contents)
 	lib := newTestLib(TrackInfo{TrackID: "headtest", AbsolutePath: path, FileExtension: ".flac", Size: int64(len(contents))})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodHead, "/dlna/file/headtest", nil)
 	rec := httptest.NewRecorder()
@@ -210,7 +211,7 @@ func Test_FileHandler_FileExtensionInferredFromPathIfBlank(t *testing.T) {
 	// the handler should derive it from the AbsolutePath defensively.
 	path := createTempFile(t, ".flac", "x")
 	lib := newTestLib(TrackInfo{TrackID: "inferred", AbsolutePath: path, FileExtension: "", Size: 1})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/inferred", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -221,7 +222,7 @@ func Test_FileHandler_FileExtensionInferredFromPathIfBlank(t *testing.T) {
 
 func Test_FileHandler_EmptyTrackIDInURL_Returns404(t *testing.T) {
 	lib := newTestLib()
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -265,7 +266,7 @@ func Test_FileHandler_ServesVariantSidecar(t *testing.T) {
 			FileExtension: ".flac", Size: 19, BitDepth: 24, SampleRate: 176400,
 		}},
 	})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-upscaled-v2-176400-24.flac", nil)
 	req.Header.Set("User-Agent", "Music Player Daemon 0.21.26")
 	rec := httptest.NewRecorder()
@@ -294,7 +295,7 @@ func Test_FileHandler_VariantSidecarMissing_Returns410(t *testing.T) {
 			FileExtension: ".flac",
 		}},
 	})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-upscaled-v2-176400-24.flac", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -310,7 +311,7 @@ func Test_FileHandler_UnknownVariantID_Returns404(t *testing.T) {
 	lib := newTestLib(TrackInfo{
 		TrackID: "trk", AbsolutePath: srcPath, FileExtension: ".dsf", Size: 6,
 	})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-does-not-exist.flac", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -327,7 +328,7 @@ func Test_FileHandler_NoVariantSegmentServesSource(t *testing.T) {
 		TrackID: "trk", AbsolutePath: srcPath, FileExtension: ".flac", Size: 11,
 		Variants: []VariantInfo{{VariantID: "upscaled-v2-176400-24", AbsolutePath: "/unused.flac", FileExtension: ".flac"}},
 	})
-	h := FileHandler(lib, nil, nil)
+	h := FileHandler(lib, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -336,5 +337,99 @@ func Test_FileHandler_NoVariantSegmentServesSource(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != "SOURCE FLAC" {
 		t.Errorf("body = %q, want the source bytes", got)
+	}
+}
+
+// stubVariantLocator is a VariantLocator that answers from a map and
+// records what it was asked, so a test can assert both the served bytes
+// and that the fallback is reached only when it should be.
+type stubVariantLocator struct {
+	answer map[string]string
+	calls  int
+}
+
+func (s *stubVariantLocator) LocateVariantSidecar(_ context.Context, sourcePath, variantID, recorded string) string {
+	s.calls++
+	return s.answer[sourcePath+"|"+variantID+"|"+recorded]
+}
+
+// Test_FileHandler_VariantSidecarMoved_ServesFromTheLocator — the
+// relocation fallback, driven through the real handler.
+//
+// The index carries the path the row RECORDED, rebuilt at most once per
+// cache TTL, so after the variants directory moves every `<res>` names a
+// file that is not there. A renderer given 410 does not fall back — it
+// stops — so the one chance to answer is here, on the open failure.
+func Test_FileHandler_VariantSidecarMoved_ServesFromTheLocator(t *testing.T) {
+	srcPath := createTempFile(t, ".dsf", "SOURCE")
+	moved := createTempFile(t, ".flac", "RELOCATED FLAC BYTES")
+	const recorded = "/no/such/old-variants/sidecar.flac"
+	lib := newTestLib(TrackInfo{
+		TrackID: "trk", AbsolutePath: srcPath, RelativePath: "Artist/Album/01.dsf",
+		FileExtension: ".dsf", Size: 6,
+		Variants: []VariantInfo{{
+			VariantID: "upscaled-v2-176400-24", AbsolutePath: recorded, FileExtension: ".flac",
+		}},
+	})
+	loc := &stubVariantLocator{answer: map[string]string{
+		"Artist/Album/01.dsf|upscaled-v2-176400-24|" + recorded: moved,
+	}}
+	h := FileHandler(lib, nil, nil, loc)
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-upscaled-v2-176400-24.flac", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "RELOCATED FLAC BYTES" {
+		t.Errorf("body = %q, want the relocated sidecar's bytes", got)
+	}
+	if loc.calls != 1 {
+		t.Errorf("locator called %d times, want exactly 1", loc.calls)
+	}
+}
+
+// Test_FileHandler_VariantSidecarPresent_NeverAsksTheLocator is the cost
+// half: the fallback must be free when the file is where the index says.
+// A probe on every variant of every track — the alternative, at index
+// build time — is what this shape exists to avoid.
+func Test_FileHandler_VariantSidecarPresent_NeverAsksTheLocator(t *testing.T) {
+	srcPath := createTempFile(t, ".dsf", "SOURCE")
+	sidecarPath := createTempFile(t, ".flac", "UPSCALED FLAC BYTES")
+	lib := newTestLib(TrackInfo{
+		TrackID: "trk", AbsolutePath: srcPath, RelativePath: "Artist/Album/01.dsf",
+		FileExtension: ".dsf", Size: 6,
+		Variants: []VariantInfo{{
+			VariantID: "upscaled-v2-176400-24", AbsolutePath: sidecarPath, FileExtension: ".flac",
+		}},
+	})
+	loc := &stubVariantLocator{}
+	h := FileHandler(lib, nil, nil, loc)
+	req := httptest.NewRequest(http.MethodGet, "/dlna/file/trk/variant-upscaled-v2-176400-24.flac", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if loc.calls != 0 {
+		t.Errorf("locator called %d times for a sidecar that is where the index says", loc.calls)
+	}
+
+	// And a locator that answers "nowhere" leaves the 410 exactly as it
+	// was: this fallback can add a served file, never remove one.
+	lib = newTestLib(TrackInfo{
+		TrackID: "gone", AbsolutePath: srcPath, RelativePath: "Artist/Album/02.dsf",
+		FileExtension: ".dsf", Size: 6,
+		Variants: []VariantInfo{{
+			VariantID: "upscaled-v2-176400-24", AbsolutePath: "/no/such/sidecar.flac",
+			FileExtension: ".flac",
+		}},
+	})
+	rec = httptest.NewRecorder()
+	FileHandler(lib, nil, nil, loc)(rec,
+		httptest.NewRequest(http.MethodGet, "/dlna/file/gone/variant-upscaled-v2-176400-24.flac", nil))
+	if rec.Code != http.StatusGone {
+		t.Errorf("status = %d, want 410 when the locator finds nothing either", rec.Code)
 	}
 }

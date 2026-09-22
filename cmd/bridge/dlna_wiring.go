@@ -17,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -52,6 +53,12 @@ type dlnaLifecycle struct {
 // the api server, whose ServeArtwork IS `/v1/artwork/{key}`. Passed in
 // rather than looked up so the api package stays un-imported here and the
 // two listeners provably serve one function. nil leaves both off.
+// `variantsDir` is the LIVE effective variants directory (the same
+// closure every other consumer reads — `POST /api/upscale/variants-dir`
+// is hot, and a boot snapshot probes the tree the operator moved away
+// from). It feeds the request-time relocation lookup the file handler
+// falls back to; nil disables it, leaving a moved sidecar as the 410 it
+// was before.
 func startDLNAIfEnabled(
 	ctx context.Context,
 	cfg *config.Config,
@@ -59,6 +66,7 @@ func startDLNAIfEnabled(
 	resolver *bridgefs.Resolver,
 	artwork dlna.ArtworkSource,
 	upnpLC *upnpUpstreamLifecycle,
+	variantsDir func() string,
 	logger *slog.Logger,
 ) (lc *dlnaLifecycle, enabled bool) {
 	// Deployment posture → typed mode.
@@ -160,6 +168,7 @@ func startDLNAIfEnabled(
 		UPnPRouting:        dlnaUPnPRouting,
 		UPnPProxy:          dlnaUPnPProxy,
 		Artwork:            artwork,
+		VariantLocator:     newDLNAVariantLocator(store, variantsDir, dlnaLog),
 		UDN:                udn,
 		FriendlyName:       cfg.DLNA.EffectiveDLNAFriendlyName(),
 		Manufacturer:       "1-bit",
@@ -782,3 +791,89 @@ func dlnaVariantsFromRows(rows []manifest.VariantRow) []dlna.VariantInfo {
 
 // Compile-time interface assertion.
 var _ dlna.LibrarySource = (*manifestLibraryAdapter)(nil)
+
+// dlnaVariantLocator is the dlna.VariantLocator the file handler falls
+// back to when a variant sidecar is not where the 30-second index says
+// it is.
+//
+// It is the DLNA half of the rule the API adapter and the admin player
+// already follow: a recorded `sidecar_path` is a CLAIM about where the
+// file was, never proof that it is gone. Moving the variants directory
+// leaves every row's absolute path reading ENOENT while every file sits
+// at its canonical place under the CURRENT one — and a renderer that
+// gets a 410 does not fall back, it just stops.
+//
+// `VariantWatcher` heals the rows on its own cadence (an hour by
+// default, never with the interval at 0), and even once a row IS
+// adopted the DLNA index carries the stale path for up to its TTL. This
+// closes both gaps from the serving side, and adopts on the way so
+// every other consumer is healed with it.
+type dlnaVariantLocator struct {
+	store       *manifest.Store
+	variantsDir func() string
+	log         *slog.Logger
+}
+
+// newDLNAVariantLocator returns nil — a nil dlna.VariantLocator, so the
+// handler's `locate != nil` gate stays off — when either dependency is
+// missing, rather than a live locator that would nil-deref on the one
+// request it exists for.
+func newDLNAVariantLocator(store *manifest.Store, variantsDir func() string, log *slog.Logger) dlna.VariantLocator {
+	if store == nil || variantsDir == nil {
+		return nil
+	}
+	return &dlnaVariantLocator{store: store, variantsDir: variantsDir, log: log}
+}
+
+// LocateVariantSidecar returns where the sidecar is NOW, or "" for
+// nowhere. `recorded` is the path the index baked in, which is what the
+// open already failed on.
+//
+// Mismatched — a file at the canonical place that is not the one the
+// row records, i.e. a copy in flight — answers "" like a true miss:
+// streaming a partial rendition to a renderer is worse than the 410 it
+// already handles, and it is the same call the API adapter makes.
+func (l *dlnaVariantLocator) LocateVariantSidecar(ctx context.Context, sourcePath, variantID, recorded string) string {
+	if sourcePath == "" || variantID == "" {
+		return ""
+	}
+	row, err := l.store.LookupVariant(ctx, sourcePath, variantID)
+	if err != nil || row == nil {
+		return ""
+	}
+	loc := integrity.LocateSidecar(l.variantsDir(), integrity.VariantSnapshot{
+		SourcePath:  row.SourcePath,
+		VariantID:   row.VariantID,
+		SidecarPath: row.SidecarPath,
+		SizeBytes:   row.SizeBytes,
+	})
+	switch loc.Verdict {
+	case integrity.SidecarPresent:
+		// The row already names a file that exists. Either the index is
+		// simply stale — what an adoption between rebuilds looks like
+		// from here — or the row names the very path the caller just
+		// failed to open, in which case the failure was permissions or
+		// I/O and there is nothing to offer. Compare against what the
+		// caller tried rather than handing back a path it has already
+		// proved it cannot read.
+		if row.SidecarPath == recorded {
+			return ""
+		}
+		return row.SidecarPath
+	case integrity.SidecarRelocated:
+	default:
+		return ""
+	}
+	if err := l.store.UpdateVariantSidecarPath(ctx, row.SourcePath, row.VariantID, loc.Canonical); err != nil {
+		// Serve it anyway: the bytes are there, the watcher tries
+		// again, and refusing a file that exists because a bookkeeping
+		// write failed is the wrong direction. No `indexed_at` bump on
+		// success either — nothing a client can see has changed.
+		l.log.Warn("dlna: adopting relocated sidecar failed; serving it anyway",
+			slog.String("source_path", row.SourcePath),
+			slog.String("variant_id", row.VariantID),
+			slog.String("canonical", loc.Canonical),
+			slog.String("err", err.Error()))
+	}
+	return loc.Canonical
+}

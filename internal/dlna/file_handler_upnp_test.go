@@ -106,7 +106,7 @@ func routedHandlerFixture(t *testing.T) (handler http.HandlerFunc, upstreamBody 
 		},
 	}}
 	proxy := upnpproxy.New(&stubHostResolver{host: host}, nil)
-	return FileHandler(lib, routing, proxy), body, seenRange, closeFn
+	return FileHandler(lib, routing, proxy, nil), body, seenRange, closeFn
 }
 
 // Test_FileHandler_UPnPRoutedTrack_GET — bit-exact upstream bytes
@@ -199,7 +199,7 @@ func Test_FileHandler_UPnPRoutedTrack_UpstreamOffline_Returns503(t *testing.T) {
 	}}
 	// Empty host → resolver returns ("", false) → 503.
 	proxy := upnpproxy.New(&stubHostResolver{host: ""}, nil)
-	h := FileHandler(lib, routing, proxy)
+	h := FileHandler(lib, routing, proxy, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/abc", nil)
 	rec := httptest.NewRecorder()
@@ -252,7 +252,7 @@ func expectFilesystemServeOK(t *testing.T, h http.HandlerFunc, trackID, wantBody
 // is the documented zero-config call from `internal/dlna/server.go`).
 func Test_FileHandler_NoRoutingLookup_FallsThroughToFilesystem(t *testing.T) {
 	lib := filesystemTrackLib(t, "local", "fLaC local content")
-	expectFilesystemServeOK(t, FileHandler(lib, nil, nil), "local", "fLaC local content")
+	expectFilesystemServeOK(t, FileHandler(lib, nil, nil, nil), "local", "fLaC local content")
 }
 
 // Test_FileHandler_RoutingWithNilMatch_FallsThroughToFilesystem — the
@@ -264,7 +264,7 @@ func Test_FileHandler_RoutingMissForFilesystemTrack_StillServesLocally(t *testin
 	// Routing lookup is wired but the path isn't mapped → (nil, nil).
 	routing := &stubRoutingLookup{m: map[string]*manifest.UPnPRouting{}}
 	proxy := upnpproxy.New(&stubHostResolver{host: "127.0.0.1:9"}, nil)
-	expectFilesystemServeOK(t, FileHandler(lib, routing, proxy), "fs", "local-fs")
+	expectFilesystemServeOK(t, FileHandler(lib, routing, proxy, nil), "fs", "local-fs")
 }
 
 // Test_FileHandler_RoutingLookupError_OnRoutedTrack_Returns500 — the
@@ -292,7 +292,7 @@ func Test_FileHandler_RoutingLookupError_OnRoutedTrack_Returns500(t *testing.T) 
 	// failure, connection reset, etc.
 	routing := &stubRoutingLookup{err: errors.New("simulated transient DB error")}
 	proxy := upnpproxy.New(&stubHostResolver{host: "127.0.0.1:1"}, nil)
-	h := FileHandler(lib, routing, proxy)
+	h := FileHandler(lib, routing, proxy, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/routed-err", nil)
 	rec := httptest.NewRecorder()
@@ -319,7 +319,7 @@ func Test_FileHandler_RoutingLookupError_OnFilesystemTrack_FallsThrough(t *testi
 	lib := filesystemTrackLib(t, "fs-err", "local-fs-bytes")
 	routing := &stubRoutingLookup{err: errors.New("simulated transient DB error")}
 	proxy := upnpproxy.New(&stubHostResolver{host: "127.0.0.1:1"}, nil)
-	expectFilesystemServeOK(t, FileHandler(lib, routing, proxy), "fs-err", "local-fs-bytes")
+	expectFilesystemServeOK(t, FileHandler(lib, routing, proxy, nil), "fs-err", "local-fs-bytes")
 }
 
 // Test_FileHandler_VariantTrailingSegment_BypassesProxy — a request
@@ -343,7 +343,7 @@ func Test_FileHandler_VariantSegment_BypassesUPnPProxy(t *testing.T) {
 		relPath: {SourcePath: relPath, ServerUDN: "u", ResURL: "/x.flac"},
 	}}
 	proxy := upnpproxy.New(&stubHostResolver{host: "127.0.0.1:1"}, nil) // would 502 if hit
-	h := FileHandler(lib, routing, proxy)
+	h := FileHandler(lib, routing, proxy, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/dlna/file/vbypass/variant-v1.flac", nil)
 	rec := httptest.NewRecorder()

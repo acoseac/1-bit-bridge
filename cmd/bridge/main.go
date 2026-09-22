@@ -456,9 +456,29 @@ func hashFileShort(path string) (string, error) {
 
 // analysisStoreAdapter implements api.AnalysisStore on top of a
 // manifest.Provider — the /v1/waveform handler's lookup. Same
-// upward-cycle-avoidance pattern as variantStoreAdapter.
+// upward-cycle-avoidance pattern as variantStoreAdapter, and the same
+// relocation duty: a recorded `waveform_path` is a CLAIM about where
+// the curve was, never proof that it is gone.
+//
+// Where the variant adapter is protecting a row from serveVariant's
+// reaper, this one is protecting the FILE from never being looked at
+// again. Nothing reaps a waveform row, and nothing regenerates one
+// either: the analysis skip gate keys on the SOURCE's mtime and size,
+// which a host move leaves untouched, so the candidate walk never
+// offers the track and `/v1/waveform` answers 410 for the lifetime of
+// the install. `bridge doctor`'s sidecar-paths check reports it and can
+// only suggest re-running analysis over the whole library to recover
+// curves that are already on disk. (#937's named follow-up, #938.)
 type analysisStoreAdapter struct {
 	provider *manifest.Provider
+	// store performs the adoption UPDATE; nil in fixtures that only
+	// project, which turns a relocated row into the plain 410 it was
+	// before rather than a nil deref.
+	store *manifest.Store
+	// waveformDir is the CURRENT `<dataDir>/waveforms`, asked per
+	// lookup for liveVariantsDir's reason: the probe has to look where
+	// a curve belongs NOW.
+	waveformDir func() string
 }
 
 func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath string) (*api.AnalysisRecord, error) {
@@ -469,7 +489,7 @@ func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath st
 	if al == nil {
 		return nil, nil
 	}
-	return &api.AnalysisRecord{
+	rec := &api.AnalysisRecord{
 		// Canonical row values — the case-insensitive lookup may have
 		// resolved a folded request against the canonical-case row.
 		SourcePath:    al.SourcePath,
@@ -478,7 +498,39 @@ func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath st
 		SourceMTimeNS: al.SourceMTimeNS,
 		SourceSize:    al.SourceSize,
 		Spectrum:      al.Spectrum,
-	}, nil
+	}
+	if a.store == nil || a.waveformDir == nil || al.WaveformPath == "" {
+		return rec, nil
+	}
+	loc := integrity.LocateWaveform(a.waveformDir(), integrity.WaveformSnapshot{
+		SourcePath:   al.SourcePath,
+		WaveformPath: al.WaveformPath,
+		SizeBytes:    al.WaveformSize,
+	})
+	if loc.Verdict != integrity.SidecarRelocated {
+		// Present (serve it), Mismatched (a copy in flight — the open
+		// fails and the handler answers as it always has, rather than
+		// streaming a partial curve), Missing at both, or Unknown.
+		return rec, nil
+	}
+	// Serve from the canonical path whether or not the UPDATE lands:
+	// the bytes are there. No `indexed_at` bump — a path correction
+	// changes nothing a client can see.
+	if err := a.store.UpdateAnalysisWaveformPath(ctx, al.SourcePath, loc.Canonical); err != nil {
+		logger.Warn("waveform lookup: adopting relocated sidecar failed; serving it anyway",
+			slog.String("source_path", al.SourcePath),
+			slog.String("canonical", loc.Canonical),
+			slog.Any("err", err),
+		)
+	} else {
+		logger.Info("waveform lookup: adopted relocated sidecar",
+			slog.String("source_path", al.SourcePath),
+			slog.String("from", al.WaveformPath),
+			slog.String("to", loc.Canonical),
+		)
+	}
+	rec.WaveformPath = loc.Canonical
+	return rec, nil
 }
 
 // variantDeleterAdapter implements api.VariantDeleter on top of a
@@ -2492,6 +2544,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		live := liveCfg()
 		return live.Upscale.EffectiveVariantsDir(live.DataDir)
 	}
+	// The waveform twin, read live for the same reason even though
+	// dataDir is a boot value today: the rule is that every consumer of
+	// a sidecar directory reads ONE closure, so the day one of them
+	// becomes hot there is no second half to remember.
+	liveWaveformDir := func() string {
+		return analyze.WaveformDirFor(liveCfg().DataDir)
+	}
 	// cadenceRearms collects every buffered-1 channel that wants a poke
 	// when a CADENCE setting changes, so the loop re-reads its interval
 	// and re-arms instead of waiting out the old one. Fanned out by
@@ -3077,7 +3136,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// flag ∧ the cached ffmpeg probe, fail-closed), so the health
 		// response cannot advertise a kind the enqueuer would refuse.
 		WithDSDRender(func() bool { return dsdRenderCapsFn().Active() }).
-		WithAnalysis(analysisActiveFn, &analysisStoreAdapter{provider: provider}).
+		WithAnalysis(analysisActiveFn, &analysisStoreAdapter{provider: provider, store: manifestStore, waveformDir: liveWaveformDir}).
 		WithLyrics(&lyricsStoreAdapter{provider: provider}).
 		WithAnalysisStats(&analysisStatsAdapter{
 			enabled: analysisActiveFn,
@@ -3253,7 +3312,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// apiSrv doubles as the DLNA listener's ArtworkSource: its ServeArtwork
 	// IS /v1/artwork/{key}, so /dlna/artwork/{key} serves the same bytes by
 	// construction, and `dlnaArtwork` in /v1/health advertises exactly that.
-	dlnaLC, dlnaEnabled := startDLNAIfEnabled(ctx, cfg, manifestStore, apiSrv.Resolver(), apiSrv, upnpLC, logger)
+	dlnaLC, dlnaEnabled := startDLNAIfEnabled(ctx, cfg, manifestStore, apiSrv.Resolver(), apiSrv, upnpLC, liveVariantsDir, logger)
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
