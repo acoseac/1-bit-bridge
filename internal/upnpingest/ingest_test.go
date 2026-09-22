@@ -354,3 +354,73 @@ func TestAChangeOfImplausibleReasonRestartsTheGrace(t *testing.T) {
 		t.Errorf("unknown-baseline inherited the shape window: authorized=%v elapsed=%v", ok, elapsed)
 	}
 }
+
+// TestBuildTrackAndRouting_DurationPassesThePlausibilityGate pins the
+// DIDL side of manifest's one duration policy.
+//
+// A `res@duration` attribute is an untrusted header wearing different
+// clothes: whatever an upstream chose to put in an XML attribute. The
+// stamp site gated it on `> 0` alone, so `0:00:00.001` and
+// `10000:00:00` both landed in tags_json, on the wire and in the
+// phone's track list, where nothing re-derives them — the same
+// permanent wrong answer plausibleDuration exists to prevent on the
+// file side, reached by the one Duration writer outside
+// internal/manifest.
+//
+// Both ends are driven, because the gate has two and the ceiling alone
+// is what the file side shipped with for a release (ExtractorVersion
+// 13's own lesson).
+func TestBuildTrackAndRouting_DurationPassesThePlausibilityGate(t *testing.T) {
+	now := time.Unix(2_000_000, 0).UTC()
+	base := upnp.Walked{
+		Path:         "Up/Artist/Album/01 - Title.flac",
+		ObjectID:     "64$0$1",
+		Res:          "http://h:8200/MediaItems/5.flac",
+		ProtocolInfo: "http-get:*:audio/x-flac:*",
+		Title:        "Title",
+	}
+	for _, tc := range []struct {
+		name, duration string
+		want           *float64
+	}{
+		// The floor. A millisecond is a well-formed DLNA duration and
+		// renders as "0:00" on the phone — the absence dressed as a
+		// number, which is the thing the floor exists to refuse.
+		{"one millisecond", "0:00:00.001", nil},
+		{"the floor itself", "0:00:00.100", ptrTo(0.1)},
+		{"just under the floor", "0:00:00.099", nil},
+		// The ceiling: 10,000 hours is 417 days.
+		{"ten thousand hours", "10000:00:00", nil},
+		// And the ceiling cannot be walked UNDER by overflowing into
+		// it. Atoi accepts these hours on a 64-bit build, and an int
+		// multiplication by 3600 wraps: 2^60+1 lands on exactly 3600
+		// — one hour, from an attribute that said 131 billion years —
+		// while max int64 lands on -3600. Widening before the multiply
+		// is what keeps an absurd value absurd (CodeRabbit on #967).
+		{"hours that wrap into the plausible band", "1152921504606846977:00:00", nil},
+		{"hours at max int64", "9223372036854775807:00:00", nil},
+		{"minutes that wrap", "0:307445734561825861:00", nil},
+		// And the ordinary case must be untouched, or "refuse the
+		// implausible" would be indistinguishable from "refuse
+		// everything".
+		{"an ordinary track", "0:04:30.000", ptrTo(270.0)},
+		{"malformed", "not a duration", nil},
+		{"absent", "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := base
+			w.Duration = tc.duration
+			tr, _ := buildTrackAndRouting(w, "uuid:abc", now)
+			switch {
+			case tc.want == nil && tr.Duration != nil:
+				t.Fatalf("Duration = %v, want nil — %q is outside [100 ms, one week)", *tr.Duration, tc.duration)
+			case tc.want != nil && tr.Duration == nil:
+				t.Fatalf("Duration = nil, want %v — the gate is refusing an ordinary value", *tc.want)
+			case tc.want != nil && *tr.Duration != *tc.want:
+				t.Fatalf("Duration = %v, want %v", *tr.Duration, *tc.want)
+			}
+		})
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }
