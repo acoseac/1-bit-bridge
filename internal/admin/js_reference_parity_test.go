@@ -285,17 +285,30 @@ func jsFunctionBody(t *testing.T, decl string) string {
 		t.Fatalf("%s not found in app.js — the scan is broken", decl)
 	}
 	body := js[i:]
-	// Both top-level declaration keywords, narrowing to whichever comes
-	// first. `\nfunction ` alone bounded every caller until the cert
-	// tiles needed it: two of the three are `async function`, and a
-	// window that ran past one of them into the next would grade two
-	// tiles as one and report the wrong name. Anchored on a newline, so
-	// only a COLUMN-ZERO declaration ends the window — a nested closure
-	// is indented and cannot truncate it.
+	// Both top-level declaration keywords, cut at whichever comes FIRST.
+	// `\nfunction ` alone bounded every caller until the cert tiles
+	// needed it: two of the three are `async function`, and a window
+	// that ran past one of them into the next would grade two tiles as
+	// one and report the wrong name. Anchored on a newline, so only a
+	// COLUMN-ZERO declaration ends the window — a nested closure is
+	// indented and cannot truncate it.
+	//
+	// Earliest-of-all rather than truncate-in-a-loop. The loop form was
+	// equivalent — each pass can only shrink the body, and a terminator
+	// nearer than the current cut is still inside the shortened text, so
+	// the next pass finds it; verified over all 219 top-level
+	// declarations in app.js plus both synthetic orderings, no
+	// divergence. But it took that paragraph to say so, and this takes
+	// none. (Gemini raised it on #952 as an order-dependence bug; it is
+	// not one, and the rewrite is for the reader.)
+	end := -1
 	for _, next := range []string{"\nfunction ", "\nasync function "} {
-		if j := strings.Index(body[1:], next); j > 0 {
-			body = body[:j+1]
+		if j := strings.Index(body[1:], next); j > 0 && (end == -1 || j+1 < end) {
+			end = j + 1
 		}
+	}
+	if end != -1 {
+		body = body[:end]
 	}
 	body = jsBlockCommentRe.ReplaceAllString(body, " ")
 	return jsLineCommentRe.ReplaceAllString(body, " ")
