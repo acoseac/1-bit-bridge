@@ -286,6 +286,29 @@ lost my library."
   you can't say why folding is wanted, you want `subtreeRangeBase`.
   `DeleteTracksByPrefix` **errors on an empty base**; sidecar enumerations must
   use the SAME bounds as the DELETE.
+- **`unicode_lower` does TWO jobs, and only the CASE half is unwanted on a
+  destructive path — so the fold stays as the CANDIDATE GENERATOR and the
+  strictness moves to the acceptance.** Both queries behind
+  `DELETE /v1/upscale/variants` (`ListVariantsForPath`,
+  `ListVariantsByPathPrefix`) selected with `unicode_lower` and
+  `RunVariantDelete` unlinks every row it is handed, so `?prefix=Jazz` also
+  reaped `jazz/` and `JAZZ/` — measured: `selected [JAZZ/c.flac Jazz/a.flac
+  jazz/b.flac]`. Byte-exact SQL is the WRONG fix: `unicode_lower` also
+  NFC-composes, the scanner stores the on-disk form (NFD from HFS+ or a
+  Linux/NAS sync) while clients send NFC, and dropping it answers
+  `deletedCount: 0` for every accented album, silently.
+  `acceptCaseExactVariants` re-uses the same `nfcCompose` the scalar itself
+  calls, so generator and acceptance cannot disagree about composition and
+  acceptance adds case and nothing else. This is the enricher's rule —
+  *relaxations in the query, strictness in the acceptance* — on a delete.
+  **Every OTHER `unicode_lower` predicate is a READ and already failed closed**
+  (exact first, folded fallback, `LIMIT 2`, "refusing to pick a row"); the two
+  that unlinked bytes had neither, and the asymmetry was the bug.
+  `subtreeLikePattern`'s sanctioned exception named a variant-GC caller **that
+  does not exist** — `--gc` drives off `AllVariants` — and the log repeats it
+  under a third name that does not exist either. PROTOCOL.md already said "one
+  exact source track", so the spec was right and the code was not: no spec
+  change, no Mirror-PR.
 - **The threshold reap unlinks its sidecars**, and both DELETE arms and both
   sidecar enumerations are derived at compile time from one shared `where`
   const so the unlink set and the row set cannot diverge. The ill-formed-UTF-8

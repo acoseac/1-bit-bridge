@@ -259,3 +259,120 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+func variantPaths(rows []VariantRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, v := range rows {
+		out = append(out, v.SourcePath)
+	}
+	return out
+}
+
+// TestListVariantsByPathPrefixIsCaseExact is the destructive case, and
+// the one this whole file's subject had never been applied to.
+//
+// Both queries behind DELETE /v1/upscale/variants selected with
+// unicode_lower, and RunVariantDelete feeds every returned row to
+// os.Remove and then DeleteVariant. So `?prefix=Jazz` also reaped the
+// renditions of `jazz/` and `JAZZ/` — different real directories on a
+// case-sensitive filesystem, which is Linux, so the VPS, the tenants and
+// the Docker image.
+//
+// Runs on any platform: the rows go in directly and nothing touches the
+// filesystem, unlike a case-twin DIRECTORY fixture, which would skip on
+// the dev Mac.
+func TestListVariantsByPathPrefixIsCaseExact(t *testing.T) {
+	s, ctx := prefixCaseStore(t)
+	seedPaths(t, s, ctx, "Jazz/a.flac", "jazz/b.flac", "JAZZ/c.flac", "Jazzy/d.flac")
+	seedVariant(t, s, "Jazz/a.flac", "optimized-v1-44100-16")
+	seedVariant(t, s, "jazz/b.flac", "optimized-v1-44100-16")
+	seedVariant(t, s, "JAZZ/c.flac", "optimized-v1-44100-16")
+	seedVariant(t, s, "Jazzy/d.flac", "optimized-v1-44100-16")
+
+	got, err := s.ListVariantsByPathPrefix(ctx, "Jazz")
+	if err != nil {
+		t.Fatalf("ListVariantsByPathPrefix: %v", err)
+	}
+	paths := variantPaths(got)
+	if len(paths) != 1 || paths[0] != "Jazz/a.flac" {
+		t.Errorf("prefix Jazz selected %v, want exactly [Jazz/a.flac] — a case twin or a name-prefix sibling would be unlinked", paths)
+	}
+}
+
+// TestListVariantsForPathIsCaseExact is the same defect on the
+// exact-path shape, which the admin console drives once per track when
+// it expands an artist into req.Paths.
+//
+// PROTOCOL.md documents `?path=<rel>` as "the variants of one exact
+// source track". The spec was right and the code did not match it, which
+// is why this needs no spec change and no Mirror-PR.
+func TestListVariantsForPathIsCaseExact(t *testing.T) {
+	s, ctx := prefixCaseStore(t)
+	seedPaths(t, s, ctx, "Album/Track.flac", "album/track.flac")
+	seedVariant(t, s, "Album/Track.flac", "optimized-v1-44100-16")
+	seedVariant(t, s, "album/track.flac", "optimized-v1-44100-16")
+
+	got, err := s.ListVariantsForPath(ctx, "Album/Track.flac")
+	if err != nil {
+		t.Fatalf("ListVariantsForPath: %v", err)
+	}
+	paths := variantPaths(got)
+	if len(paths) != 1 || paths[0] != "Album/Track.flac" {
+		t.Errorf("exact path selected %v, want exactly [Album/Track.flac] — the case twin's sidecar would be unlinked", paths)
+	}
+}
+
+// TestListVariantsStillMatchesAcrossUnicodeNormalisation is the positive
+// control, and it is the reason the SQL still folds rather than going
+// byte-exact.
+//
+// unicode_lower does TWO jobs — case folding and NFC composition. The
+// composition is load-bearing: the scanner stores the on-disk form,
+// which is NFD for anything from HFS+ or synced from a Linux/NAS, while
+// iOS sends NFC. A byte-exact query would answer deletedCount: 0 for
+// every album with an accent in its path, silently. Acceptance adds
+// case-sensitivity and nothing else.
+func TestListVariantsStillMatchesAcrossUnicodeNormalisation(t *testing.T) {
+	const (
+		nfd = "Björk/Vespertine.flac" // o + combining diaeresis
+		nfc = "Björk/Vespertine.flac"  // precomposed ö
+	)
+	s, ctx := prefixCaseStore(t)
+	seedPaths(t, s, ctx, nfd)
+	seedVariant(t, s, nfd, "optimized-v1-44100-16")
+
+	// The client sends NFC; the row is stored NFD.
+	got, err := s.ListVariantsForPath(ctx, nfc)
+	if err != nil {
+		t.Fatalf("ListVariantsForPath: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("NFC request matched %d rows for an NFD-stored path, want 1 — going byte-exact would silently delete nothing for every accented album", len(got))
+	}
+
+	prefixed, err := s.ListVariantsByPathPrefix(ctx, "Björk")
+	if err != nil {
+		t.Fatalf("ListVariantsByPathPrefix: %v", err)
+	}
+	if len(prefixed) != 1 {
+		t.Errorf("NFC prefix matched %d rows for an NFD-stored path, want 1", len(prefixed))
+	}
+}
+
+// TestListVariantsByPathPrefixStillAnswersEverythingUnscoped pins the
+// delete-all shape the handler gates behind ?confirm=true. Narrowing
+// must not have turned an unscoped request into an empty one.
+func TestListVariantsByPathPrefixStillAnswersEverythingUnscoped(t *testing.T) {
+	s, ctx := prefixCaseStore(t)
+	seedPaths(t, s, ctx, "Jazz/a.flac", "Rock/b.flac")
+	seedVariant(t, s, "Jazz/a.flac", "optimized-v1-44100-16")
+	seedVariant(t, s, "Rock/b.flac", "optimized-v1-44100-16")
+
+	got, err := s.ListVariantsByPathPrefix(ctx, "")
+	if err != nil {
+		t.Fatalf("ListVariantsByPathPrefix(\"\"): %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("unscoped prefix selected %d rows, want 2 (every row)", len(got))
+	}
+}

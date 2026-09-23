@@ -8687,3 +8687,106 @@ Mirror-PR obligation. The nightly fuzz corpora pass.
   gate on that exact SHA is green. Most likely one of the timing flakes
   this repo already records. **Do not truncate the output of a run that
   might fail.**
+
+## 2026-09-23 — the variant delete selected its victims case-insensitively (#TBD)
+
+Found by the 2026-09-23 code pass's mechanical sweep of the `LIKE`-on-a-path
+class.
+
+### The defect
+
+```go
+listVariantsByPathPrefixSQL = variantRowSelect + `
+    WHERE unicode_lower(source_path) LIKE unicode_lower(?) ESCAPE '\'`
+listVariantsForPathSQL = variantRowSelect + `
+    WHERE unicode_lower(source_path) = unicode_lower(?)`
+```
+
+`RunVariantDelete` feeds every returned row to `os.Remove` and then
+`DeleteVariant`. Measured with the fix reverted:
+
+    prefix Jazz selected [JAZZ/c.flac Jazz/a.flac jazz/b.flac], want [Jazz/a.flac]
+    exact path selected [Album/Track.flac album/track.flac], want [Album/Track.flac]
+
+Three directories, one request. On a case-sensitive filesystem — Linux, so the
+VPS, the tenants and the Docker image — those are different real directories.
+Reachable from the `/v1` endpoint and from the console's delete-renditions
+action, which expands an artist into `req.Paths`.
+
+### Three things that made it a defect rather than a judgement call
+
+1. `subtreeLikePattern`'s own docblock forbids exactly this: "Case-folding is
+   the wrong answer for anything that writes, deletes, or decides a scope".
+2. Its sanctioned exception justified `ListVariantsByPathPrefix` "so the variant
+   GC finds sidecars written under a differently-cased source path (PR #477)" —
+   **no GC calls it**. `bridge upscale --gc` drives off `AllVariants`, and each
+   query has exactly one production caller: the delete handler. This log's own
+   2026-07 entry repeats the claim under a third name
+   (`ListVariantsUnderPrefix`) that does not exist either.
+3. **Every other `unicode_lower` predicate in the tree already failed closed.**
+   Six query sites; four are reads and all four use exact-first + folded
+   fallback + `LIMIT 2` so a collision is DETECTED —
+   `lookupTrackByLowerCase`, `lookupVariantByLowerCase` (whose comment names
+   this precise hazard), `LookupAnalysis`, `lyricsRowByFoldedPathSQL`. The two
+   that unlink bytes had neither the exact-first attempt nor the ambiguity
+   refusal. The asymmetry was the bug.
+
+### Why byte-exact SQL is the wrong fix
+
+`unicode_lower` does two jobs: Unicode case folding AND NFC composition. The
+composition was added deliberately (2026-07-21, M9) because the scanner stores
+the on-disk form — NFD for anything from HFS+ or synced from a Linux/NAS —
+while clients send NFC, and without it "every accented NFD path missed the
+LookupTrack / LookupVariant / LookupAnalysis fallback". Going byte-exact would
+answer `deletedCount: 0` for every album with an accent in its path, silently.
+
+Only the case half is unwanted. So the query stays the relaxed candidate
+generator and `acceptCaseExactVariants` adds the strictness — the rule this repo
+already states for the enricher, applied to a delete. Acceptance runs the same
+`nfcCompose` that `unicodeLowerScalar` itself calls, so the two cannot disagree
+about composition.
+
+Verified rather than assumed, because the design depends on it: `unicode_lower`
+is NOT SQLite's C `LOWER()`. `sqlfunc.go` registers a Go implementation via
+`MustRegisterDeterministicScalarFunction`, and its body is
+`cases.Lower(language.Und)` + `norm.NFC`. Had it been the C builtin — ASCII-only,
+no composition — candidates would have been selected under different rules than
+they are judged by.
+
+### A test asserted the defect, and its premise was checkable
+
+The former `…ForPath_exactMatchCaseInsensitive` claimed "iOS sends
+lowercase-normalized paths, the manifest stores filesystem-canonical case" (the
+`Test` prefix is elided here on purpose — the citation guard reads tracked `.md`
+docs since #946, and a note about a test that deliberately no longer exists must
+not read as a claim that it does). If
+true, case-exact matching would break every client delete — a worse regression
+than the bug.
+
+**iOS does not call this endpoint at all.** `BridgeSourceClient.swift` describes
+`DELETE /v1/upscale/variants` as "(admin-driven)" and records that "the iOS-side
+upscale REQUEST surfaces were removed entirely ... so iOS never initiates jobs";
+a grep of the whole iOS repo finds a feature-flag comment and no call site. The
+real callers are the admin console (paths straight out of the server's own
+catalog) and a bearer-token holder following PROTOCOL.md, which documents
+`?path=<rel>` as "the variants of ONE EXACT SOURCE TRACK" — so the spec was
+right and the code did not match it. No spec change and no Mirror-PR.
+
+The fourth instance of this class the repo has recorded. Worth noting that the
+premise was resolvable in two greps of the coupled repo, which is cheaper than
+the reasoning it replaced.
+
+### Also corrected here
+
+`bumpIndexedAtByPathSQL`'s docblock said it was "the whole statement for the
+FIVE writers … one const, five callers, so those five cannot drift". There are
+six; `UpsertAtlasLyrics` is the sixth and uses the const correctly. The rule
+held, the count did not.
+
+### Tests
+
+Beside `TestDeleteTracksByPrefixIsCaseExact` in `store_prefix_case_test.go`,
+which seeds rows directly and touches no filesystem — so unlike a case-twin
+DIRECTORY fixture these run on the dev Mac rather than skipping. The variant
+queries, the ones that unlink files, were simply absent from the file whose
+whole subject is this rule.
