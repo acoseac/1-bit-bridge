@@ -2236,6 +2236,30 @@ mentions across the four `ops/audit-*.md` files.
   would credit ANY occupied port to a running bridge (measured: a root-held
   `:8080` read `bound by our own bridge (pid 1)`, where the package reports a
   warn). (#984)
+- **The HEALTHCHECK's connect-and-close is silenced at the LISTENER, never by
+  making the probe speak TLS.** net/http logs every failed handshake and
+  `bridge health` closes before any ClientHello, so each probe was `http: TLS
+  handshake error from 127.0.0.1:…: EOF`: 2,880 lines a day, the M-SEARCH
+  class. `handshakelog.Wrap` takes the RAW listener and returns the server's
+  `ErrorLog`. For a peer on this host only (loopback, or source ==
+  destination: `bridge health` dials a specific bound IP as-is, so it arrives
+  FROM that IP), the listener records whether the peer's first answer was
+  EOF, and the logger drops a line only on that evidence. **The text cannot identify the probe**:
+  a client that sends a whole ClientHello (1,483 bytes from Go's) and then
+  vanishes gets the byte-identical `: EOF`, and that one is a real failure.
+  **Nor can a verifying probe replace it** (`InsecureSkipVerify` was refused in
+  #485): checked against the cert on disk, it reports a live bridge DEAD
+  whenever the served cert is expired, not yet valid, or rotated ahead of the
+  restart, and logs `remote error: tls: bad certificate` per probe in each
+  case, so the flood returns exactly when someone is reading the log. Kept
+  lines go to `log.Print`, where a nil `ErrorLog` sends them;
+  `TestEveryOtherHandshakeFailureIsLoggedAsBefore` compares against a
+  nil-`ErrorLog` server rather than restating net/http's wording. Never wrap a
+  listener that yields `*tls.Conn` (tsnet's `ListenTLS` does): http.Server
+  asserts that type to find the handshake, ALPN and `r.TLS`. The console's
+  public-mode TLS branch takes the same pair, since the launcher's
+  `probeAdminRunning` and `waitForListen` hit it the same way, and **a new TLS
+  listener takes it too.** (#986)
 
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as

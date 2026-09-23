@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -43,6 +44,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/pairing"
@@ -1877,13 +1879,23 @@ func (s *Server) Serve(ctx context.Context) error {
 	// unknown SNI. cmd-side wiring sets TLSConfig to nil for
 	// loopback mode and for public mode with
 	// AdminTLSTerminatedByProxy=true.
+	//
+	// The TLS branch also takes the handshakelog pair, on the RAW listener:
+	// the CLI's own liveness probes of this port (probeAdminRunning on
+	// every launcher repaint, waitForListen after a restart) connect and
+	// close before any ClientHello, and each would otherwise log a
+	// handshake failure. Plain HTTP has no handshake to fail, so its
+	// ErrorLog stays nil — the net/http default.
 	scheme := "http"
+	var errorLog *log.Logger
 	if s.deps.TLSConfig != nil {
+		lis, errorLog = handshakelog.Wrap(lis)
 		lis = tls.NewListener(lis, s.deps.TLSConfig)
 		scheme = "https"
 	}
 	srv := &http.Server{
-		Handler: s.Handler(),
+		Handler:  s.Handler(),
+		ErrorLog: errorLog,
 		// BaseContext derives every request's r.Context() from the
 		// parent shutdown context. Long-lived endpoints (the SSE
 		// stream at /api/events in particular) select on

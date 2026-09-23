@@ -9826,3 +9826,247 @@ created.
   tree, three beside this file in `internal/doctor`. The "general rules" it
   cited do not exist; there is no `.gemini/` style guide. Replied on the
   thread.
+
+## 2026-09-23 — the HEALTHCHECK's handshake-error line, dropped at the listener (#986)
+
+On an image built from `4938d1d` (Docker 29.1.3), every run of the image's
+`HEALTHCHECK` (`bridge health`, a TCP connect) wrote this to `docker logs`,
+30 s apart:
+
+    {"time":"…","level":"INFO","msg":"http: TLS handshake error from 127.0.0.1:41418: EOF"}
+
+That is 2,880 lines a day per container: the M-SEARCH class of flood.
+
+### The chain
+
+- Nothing in the tree set `http.Server.ErrorLog`. net/http then calls
+  `log.Printf`, and `logging.Init`'s `slog.SetDefault` routes the standard
+  logger into slog at INFO, which is why the line carries no `component`.
+- `http.(*conn).serve` logs `http: TLS handshake error from %s: %v` for
+  every failed handshake. It does so synchronously, before its deferred
+  `close()`.
+- A peer that closes before sending a byte fails the server's first
+  `readRecord` with `io.ErrUnexpectedEOF` on an empty buffer, and crypto/tls
+  maps that to `io.EOF` ("accept it if and only if at the record boundary").
+  The reason is the bare `EOF`.
+
+### Measured: what each client shape makes net/http log
+
+Go 1.26.6, a real `ServeTLS` with a cert minted by `internal/tls`, bytes
+counted by a wrapping listener:
+
+| client shape | bytes from peer | server line's reason |
+|---|---|---|
+| TCP connect + close (`bridge health`) | 0 | `EOF` |
+| 3 bytes of a record header, then close | 3 | `unexpected EOF` |
+| ClientHello, then gone without an alert | 1,483 | `EOF` |
+| TLS client on the system roots (rejects the cert) | 1,513 | `remote error: tls: bad certificate` |
+| plaintext HTTP to the TLS port | 36 | `client sent an HTTP request to an HTTPS server` |
+| verifying client, the on-disk cert as its only root | 1,571 | (nothing) |
+
+The probe and the ClientHello-then-gone client produce the byte-identical
+line. Only the byte count separates them, so a filter on the text would hide
+a real client giving up mid-handshake.
+
+### Measured: option (b), a probe that finishes a verified handshake
+
+A probe verifying against the cert on disk, which needs no
+`InsecureSkipVerify` (refused in #485 as a real CodeQL
+`go/disabled-certificate-check` finding). The self-signed cert is not a CA,
+but Go accepts a leaf that is itself in `RootCAs`. Tried across the states a
+running bridge can be in:
+
+| served cert | probe says | server logs, per probe |
+|---|---|---|
+| matches the disk, in date | healthy | nothing |
+| expired | UNHEALTHY: `certificate has expired or is not yet valid` | `remote error: tls: bad certificate` |
+| `NotBefore` 2 h ahead (clock skew at mint) | UNHEALTHY: same | same |
+| rotated on disk, not yet restarted | UNHEALTHY: `certificate signed by unknown authority` | same |
+
+`bridge cert rotate` tells the operator to restart; `LoadOrGenerate` is
+sticky. So the third row is the documented rotation window, and a restart
+cannot fix the first two. A liveness probe that fails there invites a
+restart loop, which is the `/healthz`-vs-`/readyz` lesson (#800). The line
+also comes back as `bad certificate` in exactly the states someone is
+debugging. Cost per probe over loopback (n = 2,000): connect+close 157 µs, a
+verifying handshake 694 µs. Neither matters at a 30 s interval, and the
+decision does not rest on it.
+
+### Decisions
+
+- **(a), on per-connection evidence.** `handshakelog.Wrap(raw)` returns the
+  listener to serve and the server's `ErrorLog`. For a peer on this host the
+  listener records whether the first read came back as EOF before any byte.
+  The logger drops `http: TLS handshake error from <addr>: EOF` only when the
+  connection registered under `<addr>` holds that record. Any other shape
+  fails OPEN: if a Go release rewords the line, the noise comes back and no
+  real failure goes missing, and the oracle assertion turns red.
+- **"This host" is loopback OR source == destination.** Loopback alone
+  misses one case: `bridge health` dials a specific bound IP as-is ("so the
+  probe follows the operator's networking intent"), so an install bound to
+  `192.168.1.5:7788` sends the probe from `192.168.1.5`, not loopback. A
+  completed TCP handshake cannot fake either form, since the SYN-ACK goes to
+  the claimed source. A silent close from anywhere else (a scanner, a load
+  balancer's TCP check) is still logged.
+- **Only this host's connections are wrapped at all.** Every LAN or tailnet
+  client comes back from `Accept` untouched, so the multi-GB download path
+  pays nothing. The map is keyed by the peer address as net/http prints it.
+  It is deregistered with `CompareAndDelete`, because a late `Close` must not
+  remove a newer registration on a reused address.
+- **Kept lines go to `log.Print`.** That is where a nil `ErrorLog` sends
+  them, so panics, accept errors, HTTP/2 errors and every other handshake
+  failure reach the operator unchanged, with no `component`, exactly as
+  before. Adding one was left out: it would change the shape of lines this
+  PR does not concern.
+- **Wired:** the API's LAN listener, and the console's public-mode
+  direct-TLS branch (the launcher's `probeAdminRunning` on every repaint, and
+  `waitForListen` after a restart, are the same connect-and-close).
+  **Not wired:** tsnet's `ListenTLS` yields `*tls.Conn` (a wrapper would hide
+  the type http.Server asserts on for the handshake, ALPN and `r.TLS`) and
+  never sees a peer on this host. The console's plain-HTTP branch and DLNA
+  have no handshake to fail.
+- **HTTP/3: nothing to do.** The probe is TCP, and quic-go v0.62's
+  `http3.Server` logs a failed connection only at Debug, through a `Logger`
+  the bridge never sets.
+
+### Tests and controls
+
+`internal/handshakelog` runs every shape against two otherwise identical
+servers: one on the raw listener with a nil `ErrorLog` (net/http's own
+behaviour, used as the oracle) and one through `Wrap`. The barrier is the
+server's `ConnState(StateClosed)`, which net/http reports after it has
+written the line and closed the connection. So every "not logged" assertion
+is exact, not a sleep. The first draft waited for the registry entry to go
+away instead, which is only a barrier for a connection that was registered:
+a mis-classified probe would have passed without ever being checked.
+
+Wiring: `TestServeDoesNotLogItsOwnHealthProbe` boots the real `serve` and
+runs the real `bridge health`. `TestTLSConsoleDoesNotLogALocalProbe` drives
+the console's `Serve` with a TLS config. Both were red on the unfixed tree
+with the production line (`… from 127.0.0.1:54410: EOF`) before any fix
+existed.
+
+Eleven negative controls, run `-count=1` against the committed fix, each
+building and vetting, each red:
+
+| mutation | red |
+|---|---|
+| API serves the raw listener | `TestServeDoesNotLogItsOwnHealthProbe` |
+| console keeps the logger, loses the listener | `TestTLSConsoleDoesNotLogALocalProbe` |
+| `fromThisHost` always false | silent-probe (v4 + v6), specific-IP, `TestFromThisHost` |
+| drop the source == destination arm | specific-IP, two `TestFromThisHost` rows |
+| text-only filter | `TestEveryOtherHandshakeFailureIsLoggedAsBefore/ClientHello_then_silence` |
+| `Read` never records a silent peer | silent-probe (v4 + v6) |
+| `Delete` for `CompareAndDelete` | `TestALateCloseLeavesANewerRegistration` |
+| `Close` never deregisters | `TestNoRegistrationOutlivesItsConnection` + the late-close test |
+| forward through slog, not the std logger | every row of the forwarding table |
+| register every connection | `TestASilentPeerFromElsewhereIsLogged` |
+| a Go release rewords the reason | the oracle assertion, v4 + v6 |
+
+### Measured in a real container
+
+dido (Ubuntu 26.04, Docker 29.1.3, x86_64). Two images were built with
+`docker buildx build --load` from `git archive` trees: `main` at `21a3883`
+and this branch. They ran side by side with identical arguments: an empty
+`/library` mounted read-only, separate state volumes, and the image's own
+HEALTHCHECK unchanged (30 s interval, 40 s start period). After 6 m 44 s:
+
+| image | probes (all `exit=0 ok`) | `TLS handshake error … EOF` lines from the probe |
+|---|---|---|
+| `main` @ `21a3883` | 14 | 14, spaced 30 s apart |
+| this branch | 14 | 0 |
+
+The fixed image listens on `[::]:7788`, so the probe arrives as an
+IPv4-mapped loopback peer. `IsLoopback` handles that form.
+
+Then deliberate clients against the fixed container. The loopback ones ran as
+a second process in its network namespace (`docker run --network
+container:…`, a static Go client). The others ran from the host, whose
+address inside the container is the bridge gateway `172.17.0.1`:
+
+| client | peer | fixed image logs |
+|---|---|---|
+| connect + close (the probe's shape, another process) | 127.0.0.1 | nothing |
+| ClientHello, then gone (the same `EOF` text) | 127.0.0.1 | `…: EOF` |
+| Go TLS client rejecting the cert | 127.0.0.1 | `…: remote error: tls: bad certificate` |
+| connect + close from the host | 172.17.0.1 | `…: EOF` |
+| plaintext HTTP from the host | 172.17.0.1 | `…: client sent an HTTP request to an HTTPS server` |
+
+**`curl` without `-k` is not a handshake failure at all, in either image.**
+curl 8 on OpenSSL 3 completes the TLS 1.3 handshake, sends its Finished, and
+only then checks the certificate (`OpenSSL verify result`) and aborts. The
+server's line is the HTTP/2 server's:
+
+    http2: server: error reading preface from client 127.0.0.1:…: read: connection reset by peer
+
+That line arrives when curl's close lands as a reset. When it lands as a
+clean EOF, net/http's h2 `condlogf` counts it as a "boring, expected" error
+and does not log it. Over 25 loopback runs the baseline logged 18 and the
+fixed image 21: curl's own close race, not a difference between the images.
+The filter rejects that line at its prefix check. So this is also direct
+evidence that non-handshake lines pass through the new `ErrorLog` unchanged.
+
+The containers and volumes were removed afterwards. The two images are kept
+on dido as `1-bit-bridge:main-21a3883` and `1-bit-bridge:dev`.
+
+### Process notes
+
+- **The first battery script grepped only for `TLS handshake error`**, so it
+  reported "no new lines" for curl. That read like a bad client going
+  unlogged, and the filter could not have caused it: curl had sent a
+  ClientHello, so its connection was never eligible. Printing every new line
+  showed the HTTP/2 line in both images. When a verification looks for one
+  message shape, a client that fails in a different shape reads as silence.
+- **The first draft of the package tests used the registry entry going away
+  as the barrier.** That is only a barrier for a connection that was
+  registered. A probe mis-classified as remote would pass the "not logged"
+  assertion before the server had processed it. `ConnState(StateClosed)`
+  fires for every connection, after the line.
+
+### Round 1: both review bots clean, the duplication gate not
+
+- **CodeRabbit** passed `3d683f6` with "No actionable comments were
+  generated": the walkthrough's `coveredCommitId` is that head, with no
+  rate-limit marker. **Gemini** reported "No review comments".
+- **SonarCloud failed `new_duplicated_lines_density` at 6.7%** (77 of 1,150
+  new lines, limit 3%). All of it was one block: `lockedBuffer` plus
+  `captureStdLog`, written into both `internal/handshakelog`'s tests and the
+  console's, 38 lines each. Test files count toward that gate here. The fix
+  is one definition, `internal/handshakelog/handshaketest`, imported only by
+  tests (the `net/http/httptest` pattern). `cmd/bridge`'s variant moved
+  there too. That package also records why its rejecting client is Go's and
+  not curl's. The eleven controls were re-run after the refactor, and all
+  are still red.
+- **Process note:** the same helper was written twice in one session, with
+  this file already recording a 6.5% failure of the same gate. A helper
+  written for a second package's tests is a copy. Decide where its one
+  definition lives before the second use, not after the gate.
+
+### Rounds 2 and 3: all clean, and CodeRabbit was slow rather than skipping
+
+- **Round 2 (`09bfaa5`).** The Sonar gate passed with duplication at 0.0%.
+  Gemini, asked for a fresh pass, was clean. Seven minutes after the push,
+  CodeRabbit's walkthrough still covered `3d683f6`. Its pre-merge check put
+  docstring coverage at 59.46% for the functions this diff touches, where
+  the last three PRs it scored were at 100%.
+- **Round 3 (`eb149fa`).** All 47 functions in the new files got a doc
+  comment, each opening with its own name so
+  `TestNoDocblockNamesAnotherDeclaration` has nothing to misread. CodeRabbit
+  covered `eb149fa` with "No actionable comments were generated", and
+  docstring coverage rose to 96.88%. The one function left is `runServe`,
+  which had no doc comment before this PR. Gemini reported no review
+  comments, and the SonarCloud gate passed. CI ran all 20 checks green on
+  `eb149fa`: both platform legs, all nine `-race` shards, and CodeQL.
+- **CodeRabbit's lag was not a skip.** The `@coderabbitai review` sent after
+  the round-3 push got the answer "Already reviewed the last commit". Its
+  walkthrough's last pass reads "between `09bfaa5` and `eb149fa`", so it had
+  reviewed `09bfaa5` on its own as well, just more than seven minutes after
+  that push. Every commit got an automatic pass, none with a finding, and
+  the explicit request did nothing: the command only acts while automatic
+  reviews are paused. **A `coveredCommitId` behind the head means "not yet",
+  not "not reviewing".** The PR description said at first that CodeRabbit
+  reviewed the fix push only when asked. That was wrong, and it is
+  corrected there.
+- **Process note:** doc comments belong with the code. CodeRabbit's
+  docstring check covers every function the diff touches, test helpers
+  and fakes included, and the recent norm here is 100%.

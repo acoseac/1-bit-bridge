@@ -50,6 +50,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
@@ -4892,6 +4893,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
 		return 1
 	}
+	// The image's HEALTHCHECK (`bridge health`) connects and closes before
+	// any ClientHello, and net/http logs every failed handshake: one line
+	// per probe, every 30 s. Wrap drops exactly that line (see
+	// internal/handshakelog). It needs a RAW listener, so the tsnet one
+	// below, which yields *tls.Conn and never sees a local peer, goes
+	// without.
+	lis, httpSrv.ErrorLog = handshakelog.Wrap(lis)
 
 	// Format string uses bare %s — ServerVersion already carries the
 	// "v" prefix when the Makefile / goreleaser inject it via -ldflags

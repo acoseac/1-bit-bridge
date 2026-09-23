@@ -196,7 +196,10 @@ USER bridge
 # listen address from the config so it works in loopback (:7788) and public
 # (:443/:8443) alike, and (unlike the admin API that `bridge status` uses)
 # isn't gated by public-mode auth. start-period covers the first-boot cert
-# mint + listener bind.
+# mint + listener bind. The connect closes before any TLS ClientHello; the
+# bridge does not log that as a handshake failure (internal/handshakelog), so
+# `docker logs` does not grow by a line per probe. Any other failed handshake
+# is still logged.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD ["/usr/local/bin/bridge", "health", "--config", "/data/bridge.yaml"]
 
