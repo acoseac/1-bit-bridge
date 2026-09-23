@@ -50,12 +50,23 @@ jobs:
       #   Loaded a configuration file for version '4.37.3',
       #   but running version '4.37.1'
       #
-      # Dependabot treats them as three independent dependencies and
-      # opens three separate PRs (#577 / #578 / #580 for this bump), each
-      # of which fails on its own branch and would break CodeQL on main
-      # if merged alone. Bump all three in ONE commit and close the
-      # singles — do not merge a partial set to "make progress".
-      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      # Dependabot treats them as independent dependencies and opens a
+      # separate PR per step, each of which fails on its own branch and
+      # would break CodeQL on main if merged alone. Bump all three in ONE
+      # commit and close the singles — do not merge a partial set to
+      # "make progress".
+      #
+      # **It does not always open three.** 4.37.8 → 4.37.9 came as three
+      # (#577 / #578 / #580); 4.37.9 → 4.38.0 came as TWO, #932 `init` and
+      # #933 `autobuild`, with no PR for `analyze` at all. So a missing
+      # third PR is not evidence that one already merged, and the count of
+      # open singles is not what says whether the set is complete — the
+      # three SHAs on the lines below are. They must be equal, and a
+      # one-line check says so:
+      #
+      #   grep -oE 'codeql-action/[a-z]+@[0-9a-f]+' .github/workflows/codeql.yml \
+      #     | cut -d@ -f2 | sort -u | wc -l     # must print 1
+      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           languages: ${{ matrix.language }}
           # The `security-extended` suite adds taint-flow + data-flow
@@ -65,8 +76,8 @@ jobs:
           # the extra coverage is worth the occasional false positive.
           queries: security-extended
 
-      - uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      - uses: github/codeql-action/autobuild@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
 
-      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           category: "/language:${{ matrix.language }}"
