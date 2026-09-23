@@ -9325,7 +9325,7 @@ the summary format invited reading as noise. Same family as the memory entry on
 `grep`-masked exit status, and the reason the gate is now run with its output
 captured whole and `$?` checked directly rather than inferred from a filter.
 
-## 2026-09-23 — the Dockerfile required BuildKit and said so in a regex (#TBD)
+## 2026-09-23 — the Dockerfile required BuildKit and said so in a regex (#983)
 
 A plain `docker build .` on a clean Ubuntu 26.04 host with the distro
 `docker.io` package (Docker 29.1.3) failed on the builder stage:

@@ -3002,7 +3002,7 @@ its twin.** The top list is older, shorter, and read first.
   docker` is `docker buildx build --load` behind a `check-buildx` guard.
   **`docker.yml` runs only on tags and dispatch**, so a Dockerfile PR gets no
   CI build at all: verify on a real daemon under BOTH builders
-  (`DOCKER_BUILDKIT=0` forces the legacy one). (#TBD)
+  (`DOCKER_BUILDKIT=0` forces the legacy one). (#983)
 
 ### <a name="review-2026-09-22-fixes"></a>2026-09-22 — review of the #959–#966 fix window
 
