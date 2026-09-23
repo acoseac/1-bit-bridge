@@ -27,16 +27,26 @@ func TestCheckConfigFile(t *testing.T) {
 		file *ConfigFile
 		want Status
 		has  []string
+		// lacks pins WHICH branch answered where two can share a word:
+		// fs.ErrNotExist's own text is "file does not exist", so the
+		// generic does-not-load line would satisfy a "does not exist"
+		// substring on its own.
+		lacks []string
 	}{
-		{"no lookup", nil, OK, []string{"skipped"}},
-		{"loaded", &ConfigFile{Path: path}, OK, []string{path}},
+		{"no lookup", nil, OK, []string{"skipped"}, nil},
+		{"loaded", &ConfigFile{Path: path}, OK, []string{path}, nil},
 		{"none found", &ConfigFile{Tried: []string{path, "/home/b/.config/1-bit-bridge/bridge.yaml"}},
-			OK, []string{"none found", path, "/home/b/.config/1-bit-bridge/bridge.yaml"}},
-		{"none found, nothing tried", &ConfigFile{}, OK, []string{"none found"}},
+			OK, []string{"none found", path, "/home/b/.config/1-bit-bridge/bridge.yaml"}, nil},
+		{"none found, nothing tried", &ConfigFile{}, OK, []string{"none found"}, nil},
 		{"there and does not load", &ConfigFile{Path: path, LoadErr: parseErr},
-			Fail, []string{path, "does not load", "line 6: field libraryNmae not found"}},
+			Fail, []string{path, "does not load", "line 6: field libraryNmae not found"}, nil},
 		{"there and not readable by this user", &ConfigFile{Path: path, LoadErr: permErr},
-			Warn, []string{path, "not readable by this user"}},
+			Warn, []string{path, "not readable by this user"}, nil},
+		// A path the caller NAMED that is not there: the shape os.Stat
+		// returns for it.
+		{"named and not there", &ConfigFile{Path: path,
+			LoadErr: &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}},
+			Fail, []string{path, "does not exist"}, []string{"does not load"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,6 +60,11 @@ func TestCheckConfigFile(t *testing.T) {
 			for _, s := range tc.has {
 				if !strings.Contains(c.Summary, s) {
 					t.Errorf("Summary %q does not contain %q", c.Summary, s)
+				}
+			}
+			for _, s := range tc.lacks {
+				if strings.Contains(c.Summary, s) {
+					t.Errorf("Summary %q contains %q: the wrong branch answered", c.Summary, s)
 				}
 			}
 			// The report prints one line per check.

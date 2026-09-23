@@ -2213,12 +2213,20 @@ mentions across the four `ops/audit-*.md` files.
   exit 0, where `bridge status` exits 2 on the same file. The local-first
   lookup made that worse: a broken `./bridge.yaml` shadows a good platform
   config (CodeRabbit's finding). The FAIL is what makes the runbook's
-  "validate a config edit BEFORE restarting" step true. A MISSING config is
-  ok, and the line names where doctor looked. One this user cannot READ
-  only WARNS, because that is a fact about the doctor run (the public-mode
-  layout, as with the cert key). `bridge init`'s preflight leaves the
-  lookup nil, so the check reports itself skipped and a broken existing
-  config cannot block the re-init that replaces it. (#984, #985)
+  "validate a config edit BEFORE restarting" step true. **A `--config` that
+  names a file that is NOT THERE fails too** ("does not exist"), because an
+  operator who names a file asserts it exists; that is loadCLIConfig's rule
+  for every other subcommand. With no flag, a missing config is ok and the
+  line names where doctor looked. **`resolveConfigPath` folds EVERY stat
+  error into "not found"**, which is right for its fallback walk and wrong
+  for a named path, so doctor re-stats a named path to learn why. One this
+  user cannot reach or READ only WARNS, because that is a fact about the
+  doctor run (the public-mode layout, as with the cert key). The launcher's
+  pre-setup row names the platform path through `buildDoctorDepsFor(path,
+  true)`, never `--config`, so its absence stays "none found", ok.
+  `bridge init`'s preflight leaves the lookup nil, so the check reports
+  itself skipped and a broken existing config cannot block the re-init
+  that replaces it. (#984, #985)
 - **The image's `lsof` package is load-bearing — don't drop it to slim the
   image.** Alpine's own `/usr/bin/lsof` is busybox's applet, which ignores
   `-iTCP:<port> -sTCP:LISTEN -t` and lists every open file, and

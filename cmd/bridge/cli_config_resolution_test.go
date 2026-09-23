@@ -331,6 +331,71 @@ func TestDoctorOnlyWarnsAboutAConfigItCannotRead(t *testing.T) {
 	}
 }
 
+// TestDoctorFailsANamedConfigThatIsNotThere (CodeRabbit on #985, round 2):
+// `--config` naming a file that does not exist, the typo'd path of a
+// validate-before-restart run, used to read "none found", ok, and grade
+// defaults, so doctor could exit 0 having validated nothing. An operator
+// who names a file asserts it exists, so it FAILs, as loadCLIConfig refuses
+// it for every other subcommand. The no-flag pre-init run stays ok (the
+// nothing-found subtest above) and so does the menu's pre-setup row
+// (TestMenuDoctorGradesTheMenusOwnConfig).
+func TestDoctorFailsANamedConfigThatIsNotThere(t *testing.T) {
+	cwd, _ := isolateConfigEnv(t)
+	// A good config sits in the working directory, so a fallback to it
+	// would pass for the right answer. It must not be graded instead.
+	writeInstallAt(t, cwd, "local-track.flac")
+	named := filepath.Join(t.TempDir(), "bridge.yml")
+
+	var so, se bytes.Buffer
+	if code := doctorCmd([]string{"--json", "--config", named}, &so, &se); code != 1 {
+		t.Errorf("doctor exited %d for a --config that is not there, want 1; stderr:\n%s", code, se.String())
+	}
+	var rep jsonDoctorReport
+	if err := json.Unmarshal(so.Bytes(), &rep); err != nil {
+		t.Fatalf("decode the JSON report: %v\n%s", err, so.String())
+	}
+	for _, c := range rep.Checks {
+		if c.Name != "config-file" {
+			continue
+		}
+		if c.Status != string(doctor.Fail) || !strings.Contains(c.Summary, named) ||
+			!strings.Contains(c.Summary, "does not exist") {
+			t.Errorf("config-file = %s %q, want a fail naming %s as not there", c.Status, c.Summary, named)
+		}
+		return
+	}
+	t.Fatalf("no config-file check in the report:\n%s", so.String())
+}
+
+// TestDoctorWarnsWhenANamedConfigCannotBeReached (CodeRabbit on #985, round
+// 2): resolveConfigPath folds EVERY stat error into "not found", so a named
+// config under a directory this user cannot traverse (a service-owned 0700
+// config dir) read as "none found", ok. That is a permission failure, and
+// it gets the permission WARN, like a file this user cannot read.
+func TestDoctorWarnsWhenANamedConfigCannotBeReached(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not deny traversal on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root traverses a mode-0000 directory")
+	}
+	_, _ = isolateConfigEnv(t)
+	locked := filepath.Join(t.TempDir(), "locked")
+	named := writeInstallAt(t, locked, "local-track.flac")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Registered after t.TempDir, so it runs first: RemoveAll cannot
+	// descend into a directory with no permissions.
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	c := findCheck(t, doctor.Run(context.Background(), buildDoctorDeps(named)), "config-file")
+	if c.Status != doctor.Warn || !strings.Contains(c.Summary, named) {
+		t.Errorf("config-file = %s %q for a named config this user cannot reach, want a warn naming it",
+			c.Status, c.Summary)
+	}
+}
+
 // TestDoctorConfigDirFollowsTheResolvedConfig pins the config-dir check's
 // subject when the working directory holds no config. That check CREATES the
 // directory it is handed, and `--fix` chmods it, so an answer that slid to
@@ -400,16 +465,22 @@ func TestMenuDoctorGradesTheMenusOwnConfig(t *testing.T) {
 	if code := actDoctor(context.Background(), nil, &so, &se, s); code != -1 {
 		t.Fatalf("actDoctor returned %d, want -1 (stay in the menu)", code)
 	}
-	var line string
-	for _, l := range strings.Split(so.String(), "\n") {
-		if strings.Contains(l, " config-dir ") {
-			line = l
-			break
+	line := func(check string) string {
+		for _, l := range strings.Split(so.String(), "\n") {
+			if strings.Contains(l, " "+check+" ") {
+				return l
+			}
 		}
+		return ""
 	}
-	if !strings.Contains(line, platform) {
+	if l := line("config-dir"); !strings.Contains(l, platform) {
 		t.Errorf("the menu's doctor graded %q, want the platform dir %s that Setup writes to; "+
-			"report:\n%s\nstderr:\n%s", line, platform, so.String(), se.String())
+			"report:\n%s\nstderr:\n%s", l, platform, so.String(), se.String())
+	}
+	// And the platform config's absence is the pre-setup state this row is
+	// for, not the FAIL a --config naming a missing file gets.
+	if l := line("config-file"); !strings.Contains(l, "[ok]") || !strings.Contains(l, "none found") {
+		t.Errorf("the menu's config-file line is %q, want ok \"none found\"; report:\n%s", l, so.String())
 	}
 }
 

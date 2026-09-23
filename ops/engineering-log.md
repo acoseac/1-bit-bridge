@@ -9729,3 +9729,69 @@ reachable.
 
 - **After.** The same typo'd file gives `[FAIL] config-file … field
   libraryNmae not found in type config.Config` and exit 1.
+
+### Round 2: a named config that is not there, or cannot be reached (CodeRabbit)
+
+CodeRabbit's pass on the round-1 commit kept the walkthrough at Moderate for
+the same promise, from two new sides. Both were verified before acting.
+
+- **A `--config` naming a file that is not there** read "none found", ok, and
+  graded defaults, so the typo'd path of a validate-before-restart run could
+  exit 0 having validated nothing. It now FAILs ("does not exist"). An
+  operator who names a file asserts it exists, and that is loadCLIConfig's
+  rule for every other subcommand; `configpath_test.go` states it ("an
+  explicit --config always wins, existing or not … a silent fallback to some
+  other config would be worse than an error about the one they asked for").
+  The no-flag pre-init run is unchanged, which is what "a missing config is
+  not an error" was for.
+- **`resolveConfigPath` folds EVERY stat error into "not found."** So a named
+  config under a directory the user cannot traverse (a service-owned 0700
+  config dir) read "none found" too. For a named path doctor now stats again
+  to learn why, and a permission error takes the round-1 WARN. The suggested
+  fix changed `resolveConfigPath`'s signature. Declined, because its fallback
+  walk is right to skip an unreadable candidate and a new return value would
+  reach every subcommand. The reason matters only where a path was named.
+- **The launcher's doctor row names the platform path BEFORE `bridge init`
+  writes it**, so `--config` semantics would FAIL every pre-setup run.
+  `doctorCmd` is split into flag parsing and `runDoctorReport`, and the row
+  calls `buildDoctorDepsFor(path, absentIsPreSetup=true)`: its missing config
+  stays "none found", ok. `buildDoctorDeps` is the strict form, and the
+  console uses it too, so a config deleted under a running bridge FAILs
+  there.
+
+Controls, with the code committed first:
+
+| Control | Red |
+|---|---|
+| no does-not-exist branch | the named-missing CLI test; the unit subtest only after the fix below |
+| named path not re-statted | the named-missing and the unreachable tests |
+| the menu row on `--config` semantics | the menu test (config-file FAIL where it wants ok "none found") |
+
+**The unit test's first form was vacuous, and a control found it.**
+`fs.ErrNotExist`'s own text is "file does not exist", so with the dedicated
+branch disabled the generic "does not load: stat …: file does not exist" line
+still satisfied a `"does not exist"` substring. The cmd test caught it only
+because a real `os.Stat` says "no such file or directory". The unit case now
+also asserts what the answering branch must NOT say ("does not load"). **The
+first edit of that assertion did not compile**: a new field made the
+positional case literals too short. The chained command amended it anyway,
+because `tail -1` succeeded, and the control's "[build failed]" read like a
+red. It was caught before any push, and re-run with `go vet` gating the
+mutation: CLAUDE.md's "a control that fails to BUILD reads as control
+invalid, never as a pass".
+
+Measured on the built binary: `bridge doctor --config <missing>/bridge.yml`
+gives `[FAIL] config-file … does not exist`, exit 1. A named config under a
+`chmod 0` directory gives `[warn] config-file … not readable by this user:
+stat …: permission denied`.
+
+**Found, not fixed (pre-existing).** For an explicit `--config`, the
+config-dir check is handed the named file's directory and `MkdirAll`s it, as
+main's code did too (`d.ConfigDir = filepath.Dir(cfgPath)`). So a typo'd
+`--config /x/bridge.yml` CREATES `/x` (0700) and reports it ok, beside the
+new `config-file … does not exist`. As root that can leave a stray directory
+wherever a typo points. A diagnostic should not leave artifacts (the
+`bridge.db` stat in `buildDoctorDeps` is this file's own statement of that
+rule). It is left for its own change, because grading a named-but-missing
+directory without creating it needs a config-dir message for that state,
+which the check does not have.

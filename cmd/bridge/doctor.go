@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,9 +29,12 @@ import (
 //
 // The command reads the config every other subcommand would read (see
 // buildDoctorDeps) so the LibraryRoots / ports / pid file are the
-// install's own; a missing config isn't an error (users run `bridge
-// doctor` before `bridge init`, and the platform / ports /
-// service-manager checks work without a config).
+// install's own. With no --config, a missing config isn't an error (users
+// run `bridge doctor` before `bridge init`, and the platform / ports /
+// service-manager checks work without a config). A --config naming a file
+// that is not there, or one that does not load, FAILS config-file: an
+// "all clear" graded on defaults would answer for a different config than
+// the one asked about.
 func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -39,8 +44,14 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	return runDoctorReport(buildDoctorDeps(*cfgPath), *jsonOut, *doFix, stdout, stderr)
+}
 
-	d := buildDoctorDeps(*cfgPath)
+// runDoctorReport runs the checks against d, applies --fix, renders the
+// table or the JSON envelope, and returns doctorCmd's exit code. It is
+// split from the flag parsing so the launcher menu can hand it Deps built
+// with pre-setup semantics (buildDoctorDepsFor), which no flag spells.
+func runDoctorReport(d doctor.Deps, jsonOut, doFix bool, stdout, stderr io.Writer) int {
 	// The CLI is a short-lived foreground process with no signal-wired
 	// scope to inherit, so Background is honest here — what actually
 	// bounds this run is doctor's own per-subprocess deadline, which is
@@ -49,7 +60,7 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	report := doctor.Run(ctx, d)
 
-	if *doFix {
+	if doFix {
 		// Best-effort remediation. The set of safely auto-fixable
 		// checks is small (mkdir-class items where the only failure
 		// mode is "directory missing"); destructive or
@@ -60,7 +71,7 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 		// JSON envelope on stdout (Qodo Bug on PR #78 — without this
 		// `bridge doctor --json --fix` emits invalid JSON).
 		fixOut := stdout
-		if *jsonOut {
+		if jsonOut {
 			fixOut = stderr
 		}
 		runFixes(fixOut, &report, d)
@@ -68,7 +79,7 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 		report = doctor.Run(ctx, d)
 	}
 
-	if *jsonOut {
+	if jsonOut {
 		if code := writeJSONIndent(stdout, stderr, "doctor", jsonReportEnvelope(report)); code != 0 {
 			return code
 		}
@@ -214,6 +225,17 @@ func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
 // does not load (a config-file FAIL beside the rest of the report, not an
 // exit before it).
 func buildDoctorDeps(cfgPath string) doctor.Deps {
+	return buildDoctorDepsFor(cfgPath, false)
+}
+
+// buildDoctorDepsFor is buildDoctorDeps with one decision exposed: what a
+// NAMED path that is not there means. For --config, and for the console,
+// which names serve's own config, it is a FAIL, because the caller
+// asserted the file exists. absentIsPreSetup makes it the pre-setup state
+// instead ("none found", ok) for the one caller that names a path BEFORE
+// it is meant to exist: the launcher's doctor row (actDoctor), offered
+// only until `bridge init` writes the platform config.
+func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 	d := doctor.Deps{
 		APIPort:   7788,
 		AdminPort: 7789,
@@ -222,12 +244,30 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 		LogPath: adminLogPath(),
 	}
 	path, found := resolveConfigPath(cfgPath)
+	// resolveConfigPath answers "not found" for ANY stat error. That is
+	// right for its fallback walk and wrong for a path the caller named,
+	// where the reason IS the finding: a typo'd path, or a directory this
+	// user cannot traverse (a service-owned 0700 config dir), must not read
+	// as "no config yet" and grade defaults behind an "all clear".
+	var lookupErr error
+	if cfgPath != "" && !found {
+		if _, err := os.Stat(path); err != nil {
+			lookupErr = err
+		} else {
+			found = true // it appeared between the two stats
+		}
+	}
 	d.ConfigDir = doctorConfigDir(cfgPath, path, found)
 	// The report names the config it graded, or where it looked for one.
 	d.ConfigFile = &doctor.ConfigFile{}
 	if !found {
-		for _, p := range configSearchPaths(cfgPath) {
-			d.ConfigFile.Tried = append(d.ConfigFile.Tried, absOrAsGiven(p))
+		if lookupErr != nil && !(absentIsPreSetup && errors.Is(lookupErr, fs.ErrNotExist)) {
+			d.ConfigFile.Path = absOrAsGiven(path)
+			d.ConfigFile.LoadErr = lookupErr
+		} else {
+			for _, p := range configSearchPaths(cfgPath) {
+				d.ConfigFile.Tried = append(d.ConfigFile.Tried, absOrAsGiven(p))
+			}
 		}
 	}
 	// If a config file was found, pull LibraryRoots / ports / dataDir

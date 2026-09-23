@@ -19,22 +19,26 @@ type ConfigFile struct {
 	// Tried lists every location the caller consulted, for the line that
 	// says none was found.
 	Tried []string
-	// LoadErr is why Path did not load. Nil when it loaded, and when
-	// there was no Path.
+	// LoadErr is why Path could not be graded: a named file that is not
+	// there, one this user cannot reach or read, or one that does not
+	// load. Nil when it loaded, and when there was no Path.
 	LoadErr error
 }
 
 // checkConfigFile names the bridge.yaml the report graded, and FAILS on
-// one that is there but does not load.
+// one that was named or found but cannot be graded.
 //
-// A MISSING config is not an error: doctor runs before `bridge init` has
-// written one, so "none found" is ok, and it names where the caller
-// looked. A config that EXISTS and does not load is a different fact.
-// Every command that reads it refuses it, `bridge serve` will not start
-// with it, and the checks beside this one ran on defaults. Until this
-// check the load error was dropped without a word: a typo'd key read
-// "all clear", exit 0, graded against ports the file does not name,
-// while `bridge status` exited 2 on the same file.
+// A config that nobody named and nothing found is not an error: doctor
+// runs before `bridge init` has written one, so "none found" is ok, and
+// it names where the caller looked. A config that EXISTS and does not
+// load is a different fact. Every command that reads it refuses it,
+// `bridge serve` will not start with it, and the checks beside this one
+// ran on defaults. Until this check the load error was dropped without a
+// word: a typo'd key read "all clear", exit 0, graded against ports the
+// file does not name, while `bridge status` exited 2 on the same file.
+// A path the caller NAMED that is not there fails for the same reason: an
+// "all clear" graded on defaults would answer for a different config
+// than the one asked about.
 //
 // A permission failure is a WARN, not a fail. It is a fact about the
 // doctor run rather than the file: on the public-mode layout the operator
@@ -49,6 +53,10 @@ func checkConfigFile(_ context.Context, d Deps) Check {
 		return warn(checkNameConfigFile,
 			c.Path+" is not readable by this user: "+oneLine(c.LoadErr.Error()),
 			"run `bridge doctor` as the user the bridge runs as to grade this install; the checks below ran on defaults")
+	case c.LoadErr != nil && errors.Is(c.LoadErr, fs.ErrNotExist):
+		return fail(checkNameConfigFile,
+			c.Path+" does not exist",
+			"the config named for this run is not there, so nothing was graded against it; check the path (the checks below ran on defaults). Before `bridge init`, run `bridge doctor` without --config")
 	case c.LoadErr != nil:
 		return fail(checkNameConfigFile,
 			c.Path+" does not load: "+oneLine(c.LoadErr.Error()),
