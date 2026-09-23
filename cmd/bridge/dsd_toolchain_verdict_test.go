@@ -84,6 +84,33 @@ func TestDSDRenderToolchainVerdict(t *testing.T) {
 	}
 }
 
+// TestTheVerdictComposesWithTheConsolePrefix pins the SENTENCE, not just
+// its substrings.
+//
+// The admin handler renders this as `"saved, but "+why+", so no DSD
+// track will be rendered"`. Doctor's standalone wording — "ffmpeg is on
+// PATH but its decoder listing could not be read" — produced "saved, but
+// ffmpeg is on PATH but …" when composed. The substring assertions above
+// all passed; it took reading the real response from a container to see
+// it.
+func TestTheVerdictComposesWithTheConsolePrefix(t *testing.T) {
+	for _, info := range []transcode.FFmpegInfo{
+		{MissingBinaries: []string{"ffprobe"}},
+		{Path: "/x", ProbeErr: "boom"},
+		{Path: "/x"},
+		{Path: "/x", DecodersKnown: true},
+	} {
+		ok, why := dsdRenderToolchainVerdict(info)
+		if ok {
+			continue
+		}
+		sentence := "saved, but " + why + ", so no DSD track will be rendered"
+		if strings.Contains(sentence, "but ffmpeg is on PATH but") || strings.Count(sentence, " but ") > 1 {
+			t.Errorf("verdict does not compose with the console prefix: %q", sentence)
+		}
+	}
+}
+
 // TestFFmpegSnapshotCarriesTheProbeReason pins the plumbing the branch
 // above depends on: FFmpegSnapshot discards ProbeFFmpeg's error, so
 // without ProbeErr the console could say the listing was unreadable but

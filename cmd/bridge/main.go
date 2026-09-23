@@ -2321,7 +2321,14 @@ func dsdRenderToolchainVerdict(ff transcode.FFmpegInfo) (ok bool, why string) {
 	case !ff.Available():
 		return false, "ffmpeg (with ffprobe) is not on PATH on the bridge host"
 	case !ff.DecodersKnown:
-		why = "ffmpeg is on PATH but its decoder listing could not be read"
+		// Phrased to COMPOSE. The caller renders this as
+		// "saved, but "+why+", so no DSD track will be rendered", so
+		// doctor's standalone wording ("ffmpeg is on PATH but its
+		// decoder listing could not be read") produces "saved, but
+		// ffmpeg is on PATH but …". Caught by running the real
+		// container, not by the unit test — the test asserts the
+		// substrings, and a reader is what notices the sentence.
+		why = "ffmpeg's decoder listing could not be read"
 		if ff.ProbeErr != "" {
 			why += ": " + ff.ProbeErr
 		}
