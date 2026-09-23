@@ -59,6 +59,11 @@ var docVerbs = []string{
 	"validates", "verifies", "walks", "wipes", "wires", "wraps", "writes",
 }
 
+// openerSubject is the identifier a doc comment's first sentence opens
+// with. docOpener and anyOpener share it, so the two always capture the
+// same name, which the coverage count relies on.
+const openerSubject = `^\s*([A-Za-z_][A-Za-z0-9_]*)\s+`
+
 // docOpener matches the opening of a Go doc comment: the identifier it
 // documents, then one of docVerbs. The optional `re-` is there because `\b`
 // splits a hyphenated verb at the hyphen, so "resetArtistImageGaps re-queues"
@@ -69,12 +74,12 @@ var docVerbs = []string{
 // directive lines, and skips a leading blank comment line — so a block
 // comment or a docblock that opens with a bare `//` is seen rather than
 // silently passing (Gemini on #964).
-var docOpener = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s+((?:re-)?(?:` +
+var docOpener = regexp.MustCompile(openerSubject + `((?:re-)?(?:` +
 	strings.Join(docVerbs, "|") + `))\b`)
 
 // anyOpener is docOpener with the verb left open. It is only ever the
 // denominator of the coverage floor, never a detector — see docVerbs for why.
-var anyOpener = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s+((?:re-)?[a-z]+)\b`)
+var anyOpener = regexp.MustCompile(openerSubject + `((?:re-)?[a-z]+)\b`)
 
 // docVerbCoverageFloor is the share of subject-first openers — correctly
 // attached doc comments that open "<their own name> <word>" — whose word
@@ -179,6 +184,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	}
 
 	record := func(dir, name, file string, line int, hasDoc bool) {
+		// `var _ Iface = impl{}` declares nothing a doc could be about.
 		if name == "_" {
 			return
 		}
@@ -204,6 +210,8 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 						hasDoc := n.Doc != nil || s.Doc != nil
 						record(dir, s.Name.Name, path, fset.Position(s.Pos()).Line, hasDoc)
 					case *ast.ValueSpec:
+						// Inside `( … )` only the spec's own doc or line comment
+						// counts: the group's describes the group (see above).
 						hasDoc := s.Doc != nil || s.Comment != nil ||
 							(n.Doc != nil && !n.Lparen.IsValid())
 						for _, id := range s.Names {
