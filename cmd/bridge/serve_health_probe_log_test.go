@@ -6,13 +6,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog/handshaketest"
 )
 
 // TestServeDoesNotLogItsOwnHealthProbe pins the one line in runServe that
@@ -37,7 +38,7 @@ import (
 func TestServeDoesNotLogItsOwnHealthProbe(t *testing.T) {
 	// Registered before the drain, so the restore runs AFTER it (cleanups
 	// are LIFO) and a line written during shutdown still lands here.
-	logs := captureStdLog(t)
+	logs := handshaketest.CaptureStdLog(t)
 
 	dir := t.TempDir()
 	lib := filepath.Join(dir, "Music")
@@ -78,9 +79,9 @@ func TestServeDoesNotLogItsOwnHealthProbe(t *testing.T) {
 			code, probeErr.String())
 	}
 
-	rejecter := rejectTheBridgeCert(t, addr)
+	rejecter := handshaketest.RejectTheCert(t, addr)
 	want := "http: TLS handshake error from " + rejecter + ": remote error: tls: bad certificate"
-	waitForLogLine(t, logs, want, 10*time.Second)
+	handshaketest.WaitForLine(t, logs, want, 10*time.Second)
 	// The probe connected first; a little slack for its goroutine anyway.
 	time.Sleep(300 * time.Millisecond)
 
@@ -89,31 +90,6 @@ func TestServeDoesNotLogItsOwnHealthProbe(t *testing.T) {
 			t.Errorf("the health probe was logged as a handshake failure: %q", line)
 		}
 	}
-}
-
-// captureStdLog points the standard library's default logger at a buffer
-// for the length of the test. That is where an http.Server with no
-// ErrorLog writes, and where handshakelog forwards every line it keeps —
-// in production it reaches slog through the bridge that slog.SetDefault
-// installs, which logging.Init never runs under `go test`.
-//
-// Flags are forced to 0 so a line reads exactly as it was formatted, and
-// all three settings are restored: slog.SetDefault changes the output
-// and the flags, and restoring a previous slog default does NOT put them
-// back, so a test cannot assume the defaults it started with.
-func captureStdLog(t *testing.T) *safeBuffer {
-	t.Helper()
-	buf := &safeBuffer{}
-	prevOut, prevFlags, prevPrefix := log.Writer(), log.Flags(), log.Prefix()
-	log.SetOutput(buf)
-	log.SetFlags(0)
-	log.SetPrefix("")
-	t.Cleanup(func() {
-		log.SetOutput(prevOut)
-		log.SetFlags(prevFlags)
-		log.SetPrefix(prevPrefix)
-	})
-	return buf
 }
 
 // completeVerifiedHandshake finishes a TLS handshake against the bridge,
@@ -138,40 +114,4 @@ func completeVerifiedHandshake(t *testing.T, addr, certPath string) {
 		t.Fatalf("a handshake verified against the bridge's own cert failed: %v", err)
 	}
 	_ = conn.Close()
-}
-
-// rejectTheBridgeCert runs a real TLS client that does not trust the
-// bridge's self-signed certificate — what a browser or `curl` without
-// `-k` does — and returns the address the server saw it connect from.
-// Go's client answers an unknown authority with a bad_certificate alert,
-// so the server's line is deterministic.
-func rejectTheBridgeCert(t *testing.T, addr string) string {
-	t.Helper()
-	raw, err := net.DialTimeout("tcp", addr, 10*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn := tls.Client(raw, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
-	if err := conn.Handshake(); err == nil {
-		t.Fatal("a client with only the system roots trusted the bridge's self-signed cert; " +
-			"the positive control needs a rejected handshake")
-	}
-	return raw.LocalAddr().String()
-}
-
-func waitForLogLine(t *testing.T, logs *safeBuffer, want string, within time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		if strings.Contains(logs.String(), want) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("log never carried %q within %v; the capture holds:\n%s", want, within, logs.String())
 }

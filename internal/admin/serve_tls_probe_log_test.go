@@ -4,14 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"log"
 	"net"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog/handshaketest"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
@@ -31,7 +30,7 @@ import (
 // line is in, the probe's would have been.
 func TestTLSConsoleDoesNotLogALocalProbe(t *testing.T) {
 	// Before newTestServer, so it is restored after every other cleanup.
-	logs := captureStdLog(t)
+	logs := handshaketest.CaptureStdLog(t)
 
 	srv, cfg, _ := newTestServer(t)
 	dir := t.TempDir()
@@ -81,8 +80,8 @@ func TestTLSConsoleDoesNotLogALocalProbe(t *testing.T) {
 	}
 	_ = probe.Close()
 
-	rejecter := rejectTheCert(t, addr)
-	waitForLogLine(t, logs, "http: TLS handshake error from "+rejecter+": remote error: tls: bad certificate", 10*time.Second)
+	rejecter := handshaketest.RejectTheCert(t, addr)
+	handshaketest.WaitForLine(t, logs, "http: TLS handshake error from "+rejecter+": remote error: tls: bad certificate", 10*time.Second)
 	time.Sleep(300 * time.Millisecond)
 
 	for _, line := range strings.Split(logs.String(), "\n") {
@@ -90,43 +89,6 @@ func TestTLSConsoleDoesNotLogALocalProbe(t *testing.T) {
 			t.Errorf("a local liveness probe of the TLS console was logged as a handshake failure: %q", line)
 		}
 	}
-}
-
-type lockedBuffer struct {
-	mu sync.Mutex
-	b  strings.Builder
-}
-
-func (l *lockedBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *lockedBuffer) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
-}
-
-// captureStdLog points the standard library's default logger — where an
-// http.Server with no ErrorLog writes, and where handshakelog forwards
-// every line it keeps — at a buffer for the length of the test. Flags
-// are zeroed so a line reads as formatted; output, flags and prefix are
-// all restored, because restoring a previous slog default does not.
-func captureStdLog(t *testing.T) *lockedBuffer {
-	t.Helper()
-	buf := &lockedBuffer{}
-	prevOut, prevFlags, prevPrefix := log.Writer(), log.Flags(), log.Prefix()
-	log.SetOutput(buf)
-	log.SetFlags(0)
-	log.SetPrefix("")
-	t.Cleanup(func() {
-		log.SetOutput(prevOut)
-		log.SetFlags(prevFlags)
-		log.SetPrefix(prevPrefix)
-	})
-	return buf
 }
 
 // waitForVerifiedHandshake retries until a handshake that trusts exactly
@@ -151,36 +113,4 @@ func waitForVerifiedHandshake(t *testing.T, addr string, roots *x509.CertPool) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-}
-
-// rejectTheCert runs a TLS client that trusts only the system roots, so
-// it refuses the self-signed cert with a bad_certificate alert, and
-// returns the address the server saw it connect from.
-func rejectTheCert(t *testing.T, addr string) string {
-	t.Helper()
-	raw, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := tls.Client(raw, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}).Handshake(); err == nil {
-		t.Fatal("a client with only the system roots trusted a self-signed cert; the positive control needs a rejected handshake")
-	}
-	return raw.LocalAddr().String()
-}
-
-func waitForLogLine(t *testing.T, logs *lockedBuffer, want string, within time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		if strings.Contains(logs.String(), want) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("log never carried %q within %v; the capture holds:\n%s", want, within, logs.String())
 }

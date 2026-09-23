@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"io"
-	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -17,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog/handshaketest"
 )
 
 // Every case runs a client shape against two otherwise identical servers:
@@ -28,7 +29,7 @@ import (
 func TestTheSilentLoopbackProbeIsNotLogged(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "::1"} {
 		t.Run(host, func(t *testing.T) {
-			logs := captureStdLog(t)
+			logs := handshaketest.CaptureStdLog(t)
 
 			// The oracle: net/http, left alone, logs the probe in exactly
 			// the shape isSilentProbe parses. A Go release that rewords
@@ -67,7 +68,7 @@ func TestEveryOtherHandshakeFailureIsLoggedAsBefore(t *testing.T) {
 		// bare "EOF", so the only thing keeping it in the log is the
 		// per-connection record of what the peer sent.
 		{name: "ClientHello then silence", run: helloThenHalfClose, reason: ": EOF"},
-		{name: "client rejects the cert", run: rejectTheCert, reason: ": remote error: tls: bad certificate"},
+		{name: "client rejects the cert", run: handshaketest.RejectTheCert, reason: ": remote error: tls: bad certificate"},
 		{name: "plaintext HTTP", run: plaintextHTTP, reason: ": client sent an HTTP request to an HTTPS server"},
 		{name: "partial record header", run: partialRecord, reason: ": unexpected EOF"},
 		// Silent, but it never CLOSED: a stalled peer, not a probe.
@@ -75,7 +76,7 @@ func TestEveryOtherHandshakeFailureIsLoggedAsBefore(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			logs := captureStdLog(t)
+			logs := handshaketest.CaptureStdLog(t)
 
 			plain := startServer(t, false, tc.handshakeTimeout)
 			from := tc.run(t, plain.addr)
@@ -99,7 +100,7 @@ func TestEveryOtherHandshakeFailureIsLoggedAsBefore(t *testing.T) {
 // balancer's TCP check, and stays in the log. The peer address is faked
 // BELOW Wrap, so Wrap sees exactly what it would see from the network.
 func TestASilentPeerFromElsewhereIsLogged(t *testing.T) {
-	logs := captureStdLog(t)
+	logs := handshaketest.CaptureStdLog(t)
 	inner, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +125,7 @@ func TestASilentPeerFromElsewhereIsLogged(t *testing.T) {
 // is still this host, and still the probe.
 func TestAProbeOfASpecificBoundIPIsNotLogged(t *testing.T) {
 	ip := firstNonLoopbackIPv4(t)
-	logs := captureStdLog(t)
+	logs := handshaketest.CaptureStdLog(t)
 	inner, err := net.Listen("tcp", net.JoinHostPort(ip.String(), "0"))
 	if err != nil {
 		t.Skipf("cannot listen on %v: %v", ip, err)
@@ -170,11 +171,11 @@ func TestFromThisHost(t *testing.T) {
 // otherwise a long-lived bridge accumulates one entry per local
 // connection it ever served.
 func TestNoRegistrationOutlivesItsConnection(t *testing.T) {
-	captureStdLog(t)
+	handshaketest.CaptureStdLog(t)
 	s := startServer(t, true, 0)
 	var peers []string
 	for i := 0; i < 3; i++ {
-		peers = append(peers, silentProbe(t, s.addr), rejectTheCert(t, s.addr), verifiedHandshake(t, s.addr))
+		peers = append(peers, silentProbe(t, s.addr), handshaketest.RejectTheCert(t, s.addr), verifiedHandshake(t, s.addr))
 	}
 	for _, p := range peers {
 		s.waitUntilClosed(t, p)
@@ -379,18 +380,6 @@ func helloThenHalfClose(t *testing.T, addr string) string {
 	return c.LocalAddr().String()
 }
 
-// rejectTheCert is a browser, or curl without -k: the system roots do not
-// include a self-signed cert, and Go's client says so with an alert.
-func rejectTheCert(t *testing.T, addr string) string {
-	t.Helper()
-	c := dial(t, addr)
-	defer c.Close()
-	if err := tls.Client(c, &tls.Config{ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12}).Handshake(); err == nil {
-		t.Fatal("the system roots trusted a self-signed test cert")
-	}
-	return c.LocalAddr().String()
-}
-
 func plaintextHTTP(t *testing.T, addr string) string {
 	t.Helper()
 	c := dial(t, addr)
@@ -500,43 +489,7 @@ func firstNonLoopbackIPv4(t *testing.T) net.IP {
 
 // ---- log capture ----
 
-type lockedBuffer struct {
-	mu sync.Mutex
-	b  strings.Builder
-}
-
-func (l *lockedBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *lockedBuffer) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
-}
-
-// captureStdLog points the standard library's default logger — where a
-// nil ErrorLog writes, and where Wrap forwards what it keeps — at a
-// buffer. Flags zeroed so a line reads as formatted; all three settings
-// restored, since restoring a previous slog default does not.
-func captureStdLog(t *testing.T) *lockedBuffer {
-	t.Helper()
-	buf := &lockedBuffer{}
-	prevOut, prevFlags, prevPrefix := log.Writer(), log.Flags(), log.Prefix()
-	log.SetOutput(buf)
-	log.SetFlags(0)
-	log.SetPrefix("")
-	t.Cleanup(func() {
-		log.SetOutput(prevOut)
-		log.SetFlags(prevFlags)
-		log.SetPrefix(prevPrefix)
-	})
-	return buf
-}
-
-func linesFrom(logs *lockedBuffer, peer string) []string {
+func linesFrom(logs *handshaketest.Buffer, peer string) []string {
 	var out []string
 	for _, line := range strings.Split(logs.String(), "\n") {
 		if strings.HasPrefix(line, handshakeErrorPrefix+peer+": ") {
@@ -548,7 +501,7 @@ func linesFrom(logs *lockedBuffer, peer string) []string {
 
 // oneLineFrom returns the single handshake-error line for peer. Called
 // after waitUntilClosed, so there is nothing left to wait for.
-func oneLineFrom(t *testing.T, logs *lockedBuffer, peer string) string {
+func oneLineFrom(t *testing.T, logs *handshaketest.Buffer, peer string) string {
 	t.Helper()
 	got := linesFrom(logs, peer)
 	if len(got) != 1 {
