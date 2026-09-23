@@ -13,10 +13,12 @@ package main
 const (
 	defaultConfigPath = "bridge.yaml"
 	// configFlagUsage is a PROMISE, and the one that matters: the fallback
-	// it describes is implemented by loadCLIConfig ALONE, so a command that
-	// parses --config and then calls config.Load directly dies with
-	// `read config ""` on any host where the operator did not pass the flag
-	// — the defect TestNoSubcommandTailBypassesLoadCLIConfig sweeps for.
+	// it describes is implemented by resolveConfigPath ALONE (loadCLIConfig
+	// wraps it; `bridge doctor` calls it directly, because a missing config
+	// is not an error there), so a command that parses --config and then
+	// calls config.Load directly dies with `read config ""` on any host
+	// where the operator did not pass the flag — the defect
+	// TestNoSubcommandTailBypassesLoadCLIConfig sweeps for.
 	//
 	// It read "path to config file" and had ZERO users until #949, while 28
 	// subcommands hardcoded the longer form below: the const was dead, under

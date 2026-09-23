@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,6 +210,120 @@ func TestTranscodeCmdResolvesPlatformConfigWithoutExplicitFlag(t *testing.T) {
 	}
 }
 
+// TestDoctorResolvesTheWorkingDirectoryConfig pins `bridge doctor` to the
+// lookup every other subcommand uses. It tried an explicit --config or the
+// platform path and nothing between, so inside the Docker image (WORKDIR
+// /data, config /data/bridge.yaml, no platform config) it graded an install
+// with no config at all. With no data dir there was no server.pid, and both
+// port checks FAILed against the bridge's own listeners. With no env
+// overrides, audio-toolchain read "not enabled" beside
+// BRIDGE_UPSCALE_ENABLED=true (#984).
+//
+// An install sits at BOTH locations here and the local one must win: that is
+// resolveConfigPath's precedence, and what `bridge status` run from the same
+// directory reads.
+func TestDoctorResolvesTheWorkingDirectoryConfig(t *testing.T) {
+	cwd, platform := isolateConfigEnv(t)
+	writeInstallAt(t, platform, "platform-track.flac")
+	writeInstallAt(t, cwd, "local-track.flac")
+	// config.Load applies the env overrides, so a doctor that never loads the
+	// file never sees them either.
+	t.Setenv("BRIDGE_UPSCALE_ENABLED", "true")
+
+	d := buildDoctorDeps("")
+
+	wantData := filepath.Join(cwd, "data")
+	if d.DataDir != wantData {
+		t.Fatalf("DataDir = %q, want %q: doctor did not grade ./bridge.yaml", d.DataDir, wantData)
+	}
+	if want := filepath.Join(wantData, "server.pid"); d.OwnPIDFile != want {
+		t.Errorf("OwnPIDFile = %q, want %q; without it the port checks cannot "+
+			"recognise the bridge's own listeners", d.OwnPIDFile, want)
+	}
+	if !d.UpscaleEnabled {
+		t.Error("UpscaleEnabled is false with BRIDGE_UPSCALE_ENABLED=true: the env " +
+			"overrides config.Load applies never reached doctor")
+	}
+	// The config-dir check grades the directory the config came from, not the
+	// platform dir it did not use. The report prints it, so it must be
+	// absolute, where resolveConfigPath hands back the bare "bridge.yaml".
+	if !filepath.IsAbs(d.ConfigDir) || !sameFile(t, d.ConfigDir, cwd) {
+		t.Errorf("ConfigDir = %q, want the working directory %q as an absolute path", d.ConfigDir, cwd)
+	}
+}
+
+// TestDoctorConfigDirFollowsTheResolvedConfig pins the config-dir check's
+// subject when the working directory holds no config. That check CREATES the
+// directory it is handed, and `--fix` chmods it, so an answer that slid to
+// the working directory would act on wherever doctor happened to be run from.
+func TestDoctorConfigDirFollowsTheResolvedConfig(t *testing.T) {
+	t.Run("a platform config grades the platform dir", func(t *testing.T) {
+		_, platform := isolateConfigEnv(t)
+		writeInstallAt(t, platform, "platform-track.flac")
+		d := buildDoctorDeps("")
+		if d.ConfigDir != platform {
+			t.Errorf("ConfigDir = %q, want %q", d.ConfigDir, platform)
+		}
+		if want := filepath.Join(platform, "data"); d.DataDir != want {
+			t.Errorf("DataDir = %q, want %q: the platform config was not read", d.DataDir, want)
+		}
+	})
+	t.Run("no config anywhere grades the platform dir, where init writes", func(t *testing.T) {
+		_, platform := isolateConfigEnv(t)
+		if got := buildDoctorDeps("").ConfigDir; got != platform {
+			t.Errorf("ConfigDir = %q, want the platform dir %q", got, platform)
+		}
+	})
+	t.Run("an explicit relative path grades its directory, made absolute", func(t *testing.T) {
+		_, _ = isolateConfigEnv(t)
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := buildDoctorDeps(filepath.Join("elsewhere", "bridge.yaml")).ConfigDir
+		if want := filepath.Join(wd, "elsewhere"); got != want {
+			t.Errorf("ConfigDir = %q, want %q", got, want)
+		}
+	})
+	t.Run("no config and no platform dir grades nothing", func(t *testing.T) {
+		_, _ = isolateConfigEnv(t)
+		// isolateConfigEnv's cleanup restores the production lookup.
+		defaultConfigDirFn = func() (string, error) { return "", errors.New("no home directory") }
+		if got := buildDoctorDeps("").ConfigDir; got != "" {
+			t.Errorf("ConfigDir = %q; want empty, which the check reports as a warn, "+
+				"not the working directory graded on behalf of a config that is not there", got)
+		}
+	})
+}
+
+// TestMenuDoctorGradesTheMenusOwnConfig pins the launcher's doctor row to the
+// platform path the rest of the menu acts on. The row is offered only before
+// that install exists, beside the Setup wizard that writes it. A bare `bridge
+// doctor` tries ./bridge.yaml first, so run from a directory holding its own
+// config it would grade that file instead of the directory Setup is about to
+// write to.
+func TestMenuDoctorGradesTheMenusOwnConfig(t *testing.T) {
+	cwd, platform := isolateConfigEnv(t)
+	writeInstallAt(t, cwd, "local-track.flac")
+	s := menuState{cfgPath: filepath.Join(platform, defaultConfigPath)}
+
+	var so, se bytes.Buffer
+	if code := actDoctor(context.Background(), nil, &so, &se, s); code != -1 {
+		t.Fatalf("actDoctor returned %d, want -1 (stay in the menu)", code)
+	}
+	var line string
+	for _, l := range strings.Split(so.String(), "\n") {
+		if strings.Contains(l, " config-dir ") {
+			line = l
+			break
+		}
+	}
+	if !strings.Contains(line, platform) {
+		t.Errorf("the menu's doctor graded %q, want the platform dir %s that Setup writes to; "+
+			"report:\n%s\nstderr:\n%s", line, platform, so.String(), se.String())
+	}
+}
+
 // TestNoSubcommandTailBypassesLoadCLIConfig is the class guard. Both defects
 // above were one call each, in a shared tail, invisible from the subcommand
 // that owned the flag — so a fix that only corrects today's two sites leaves
@@ -224,12 +339,11 @@ func TestNoSubcommandTailBypassesLoadCLIConfig(t *testing.T) {
 		// with a path it just resolved.
 		"configpath.go": true,
 		// These never hand config.Load the flag's empty default: init.go
-		// writes the file then reads it back; doctor.go loads an explicit
-		// --config or else the platform path and ignores a failed load
-		// (unlike loadCLIConfig it never tries ./bridge.yaml, which is
-		// why a container's `bridge doctor` needs --config
-		// /data/bridge.yaml); menu.go holds packaging.IsInitialized()'s
-		// platform path.
+		// writes the file then reads it back; doctor.go resolves through
+		// resolveConfigPath, the same lookup as loadCLIConfig, and loads
+		// only a path it found, because it must also run with NO config
+		// (before `bridge init`), which loadCLIConfig treats as an error;
+		// menu.go holds packaging.IsInitialized()'s platform path.
 		"init.go":   true,
 		"doctor.go": true,
 		"menu.go":   true,

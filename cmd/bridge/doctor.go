@@ -16,7 +16,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
-	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
@@ -26,14 +25,15 @@ import (
 //	1  — at least one fail
 //	2  — usage error
 //
-// The command reads whatever config it can find so the LibraryRoots /
-// ports are accurate; a missing config isn't an error (users run
-// `bridge doctor` before `bridge init`, and the platform / ports /
+// The command reads the config every other subcommand would read (see
+// buildDoctorDeps) so the LibraryRoots / ports / pid file are the
+// install's own; a missing config isn't an error (users run `bridge
+// doctor` before `bridge init`, and the platform / ports /
 // service-manager checks work without a config).
 func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	cfgPath := fs.String("config", "", "path to bridge.yaml (default: try the OS-standard location)")
+	cfgPath := fs.String("config", "", configFlagUsage)
 	jsonOut := fs.Bool("json", false, "emit the report as JSON instead of the human-readable table")
 	doFix := fs.Bool("fix", false, "best-effort remediation for warn/fail checks that have a known safe fix")
 	if err := fs.Parse(args); err != nil {
@@ -194,6 +194,23 @@ func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
 // config (if readable) plus per-OS default dirs. A best-effort
 // resolution is fine — doctor's checks handle missing inputs with
 // warn-level messages rather than outright failures.
+//
+// The config is the one every other subcommand reads, found the same
+// way: resolveConfigPath's explicit --config, else ./bridge.yaml, else
+// the platform config dir's. Doctor used to skip the middle step, and
+// the Docker image is where that bit: its WORKDIR is /data and its
+// config is /data/bridge.yaml, so `bridge status` and `bridge cert
+// info` found the config unaided while a plain `docker exec … bridge
+// doctor` graded an install with no config at all. It had no data dir,
+// so no server.pid to attribute the bridge's own listeners, and both
+// port checks FAILed as "another process owns this port". It had no
+// env overrides either (config.Load applies them), so audio-toolchain
+// read "not enabled" beside BRIDGE_UPSCALE_ENABLED=true (#984 measured
+// both).
+//
+// resolveConfigPath rather than loadCLIConfig, because the two disagree
+// about absence: loadCLIConfig makes a missing config an error, and
+// doctor runs before `bridge init` has written one.
 func buildDoctorDeps(cfgPath string) doctor.Deps {
 	d := doctor.Deps{
 		APIPort:   7788,
@@ -202,20 +219,12 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 		// three agree on which file is the log.
 		LogPath: adminLogPath(),
 	}
-	// Config dir: either derived from --config, or the OS default.
-	if cfgPath != "" {
-		d.ConfigDir = filepath.Dir(cfgPath)
-	} else if dir, err := packaging.DefaultConfigDir(); err == nil {
-		d.ConfigDir = dir
-	}
-	// If a config file exists at the derived path, pull LibraryRoots /
-	// ports / dataDir from it so doctor's checks are accurate.
-	candidatePath := cfgPath
-	if candidatePath == "" && d.ConfigDir != "" {
-		candidatePath = filepath.Join(d.ConfigDir, "bridge.yaml")
-	}
-	if candidatePath != "" {
-		if cfg, err := config.Load(candidatePath); err == nil {
+	path, found := resolveConfigPath(cfgPath)
+	d.ConfigDir = doctorConfigDir(cfgPath, path, found)
+	// If a config file was found, pull LibraryRoots / ports / dataDir
+	// from it so doctor's checks are accurate.
+	if found {
+		if cfg, err := config.Load(path); err == nil {
 			d.DataDir = cfg.DataDir
 			// The cert pair `bridge serve` would load — an explicit
 			// `tlsCertPath` included, which the cert checks used to
@@ -319,6 +328,45 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 		}
 	}
 	return d
+}
+
+// doctorConfigDir is the directory the config-dir check grades: the one
+// holding the config this run resolved, as an absolute path.
+//
+// That check asks whether the directory can be created and written to,
+// and everything that writes there writes BESIDE the config the bridge
+// reads. `bridge init` puts bridge.yaml there. The console's settings
+// save and `bridge library add` rewrite it through config.Save, which
+// stages a temp file in the same directory and renames it over. A
+// relative dataDir (`data`, the default) resolves against it. So when
+// the config found is ./bridge.yaml, the answer is the working
+// directory, not the platform dir. Grading the platform dir would vouch
+// for a directory nothing writes to, and checkConfigDir CREATES what it
+// is handed, so it would also leave an unused ~/.config/1-bit-bridge
+// behind (in the Docker image, /home/bridge/.config/1-bit-bridge beside
+// a config at /data).
+//
+// Absolute because the check prints it and --fix acts on it: the local
+// hit comes back from resolveConfigPath as the bare "bridge.yaml", and a
+// report reading `config-dir .` does not say where. An explicit --config
+// names its directory whether or not the file exists yet. With neither,
+// it stays the platform dir, which is where `bridge init` writes and so
+// what a pre-init run is checking. When the platform dir cannot be
+// resolved either, it is empty and the check warns, rather than grading
+// the working directory on behalf of a config that is not there.
+func doctorConfigDir(explicit, resolved string, found bool) string {
+	if explicit == "" && !found {
+		dir, err := defaultConfigDirFn()
+		if err != nil {
+			return ""
+		}
+		return dir
+	}
+	dir := filepath.Dir(resolved)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return dir
 }
 
 // relocatedSidecarCounts opens the manifest for one doctor probe and
