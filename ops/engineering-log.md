@@ -8687,3 +8687,64 @@ Mirror-PR obligation. The nightly fuzz corpora pass.
   gate on that exact SHA is green. Most likely one of the timing flakes
   this repo already records. **Do not truncate the output of a run that
   might fail.**
+
+## 2026-09-23 — Uninstall no-opped on a system install and the menu wiped anyway (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/packaging` — 1,636 lines with
+the thinnest production:test ratio in the repo (2.44) and no appearance in any
+dated review section.
+
+### The defect
+
+`Stop`, `Start` and `Restart` all gate on `KindLaunchdSystem` / `KindSystemdSystem`
+and return `ErrSystemInstallNeedsRoot`. `Uninstall` had no such gate: it
+dispatched straight to `uninstallLaunchd` / `uninstallSystemd`, which touch only
+the fixed USER-level path and treat a missing file as success.
+
+So with a sudo install, `InstalledKind()` returns `KindLaunchdSystem`,
+`cmd/bridge/menu.go` asks "Uninstall the background service (macOS
+LaunchDaemon)?", gets `(userPath, nil)` and prints "service uninstalled." The
+LaunchDaemon is still registered and still running. The same menu flow then
+offers `os.RemoveAll(cfgDir)`: config, data, certs and the token store, under a
+live bridge.
+
+The Windows arm of the same function already reasons about precisely this — it
+surfaces the SCM error rather than swallowing it, so a stuck stop is not "a
+zombie service reported as a clean uninstall". The POSIX arms did not make the
+distinction.
+
+### The fix
+
+One predicate, `NeedsRootFor`, read by all four entry points. The condition was
+previously the same two terms written out in three places and absent from the
+fourth, which is the enumeration shape this repo keeps recording.
+
+The menu now skips the wipe after a refused uninstall AND says why: a
+silently-skipped step reads as the menu being finished.
+
+### Both first-draft tests were vacuous, and the controls are what said so
+
+**The menu test.** It drove the real `actUninstall` with a fake uninstall that
+refuses, and asserted the config dir survived. It passed with the guard removed.
+The input was `"y\n"` — enough for the uninstall question — so a regression that
+offered the wipe anyway read `""` at the exact-phrase prompt, the phrase check
+refused, nothing was deleted, and the file assertions passed while the guard was
+gone. Queuing `"y\nWIPE\n"` makes the second line consumable ONLY if the wipe is
+offered; the control now deletes `tokens.json` and the dir, which is the failure
+in its real shape.
+
+**The packaging test.** It called the real `Uninstall` and asserted the refusal
+shape. It passed with the gate removed, and always will on CI:
+`installedKindForOS` probes `/Library/LaunchDaemons` and `/etc/systemd/system`,
+which only root can create, so the gate never fires on a test host. A
+behavioural test of that wiring cannot fail.
+
+Replaced with an AST walk requiring each of the four entry points to reference
+`NeedsRootFor`, anchored on the IDENTIFIER rather than a string because this
+package's own commentary names what it discusses. It has a `checked` floor, and
+the control (deleting the gate from `Uninstall`) reports exactly
+"Uninstall does not consult NeedsRootFor".
+
+The transferable point is not new but it arrived in a new shape: a control that
+PASSES is the one worth acting on, and both of these did before either test was
+worth keeping.

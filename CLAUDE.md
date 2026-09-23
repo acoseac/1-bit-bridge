@@ -1662,6 +1662,23 @@ no failing test — which is the shape to expect in this area.
   three fragments that then vanish in validation. Two legacy enrich base-URL
   names are kept as aliases — losing them sends an Atlas-configured bridge back
   to public MusicBrainz at the self-hosted pace.
+- **`Uninstall` refuses a system-level install, like `Stop`/`Start`/`Restart` —
+  and the four read ONE predicate.** The condition was spelled out in the first
+  three and missing from the fourth, and the two POSIX uninstallers touch only
+  the fixed USER-level path (`~/Library/LaunchAgents`,
+  `~/.config/systemd/user`) and treat a missing file as success. So against a
+  sudo install `Uninstall` returned `(userPath, nil)`, the menu printed "service
+  uninstalled." with the LaunchDaemon still registered and running, and the same
+  flow then offered `os.RemoveAll(cfgDir)` — config, data, certs and TOKENS —
+  out from under a live bridge. The Windows arm already reasoned about exactly
+  this ("a zombie service reported as a clean uninstall"); the POSIX arms did
+  not. The menu now skips the wipe after a refused uninstall and SAYS SO, since
+  a silently-skipped step reads as the menu being finished.
+  **`NeedsRootFor` is exported so the decision is drivable** — `installedKindForOS`
+  probes absolute paths only root can create, so a behavioural test of the
+  wiring passes on CI whether the call is there or not (verified: the control
+  stayed green). The wiring is pinned structurally by AST across all four entry
+  points; the classification is pinned by table.
 - **`POST /api/restart` must invoke the same cancellation closure as
   SIGINT/SIGTERM**, never `os.Exit(0)` — that is what honours the `bgScans`
   WaitGroup (SQLite corruption), cleans up in-flight jobs, and flushes the auth

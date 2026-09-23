@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -526,18 +527,50 @@ func actPair(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s me
 // Fprint call sites in this file — not the whole source — because the
 // paragraph you are reading has to be able to describe the old claim
 // without tripping its own guard.
+// uninstallService is packaging.Uninstall behind a seam, so the wipe
+// gate below can be driven without a real system-level install —
+// installedKindForOS probes absolute paths (/Library/LaunchDaemons,
+// /etc/systemd/system) a test cannot create without root.
+//
+// A package var rather than a parameter because actUninstall's
+// signature is the menu's dispatch contract, shared with every other
+// act*; and safe as one because the menu is a single-threaded TTY
+// dispatcher with no concurrent reader — unlike the seams this repo
+// warns about, where a package-var write can race a live handler.
+var uninstallService = packaging.Uninstall
+
 func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
 	fmt.Fprintln(stdout)
+	// serviceLeftRunning records that the operator asked to remove the
+	// service and it is still there. The wipe below deletes the config
+	// dir — certs, tokens, the database — and doing that under a LIVE
+	// bridge is the shape this guard exists to prevent. Offering it
+	// after a refused uninstall is how the operator ends up there.
+	serviceLeftRunning := false
 	if s.kind != packaging.KindNone {
 		fmt.Fprintf(stdout, "  Uninstall the %s? [y/N] ", s.kind.Description())
 		line, _ := in.ReadString('\n')
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y") {
-			if _, err := packaging.Uninstall(); err != nil {
+			if _, err := uninstallService(); err != nil {
+				serviceLeftRunning = true
 				fmt.Fprintf(stderr, "  service uninstall failed: %v\n", err)
+				if errors.Is(err, packaging.ErrSystemInstallNeedsRoot) {
+					fmt.Fprintln(stderr, "  the service is still registered and still running.")
+					fmt.Fprintln(stderr, "  re-run this as root to remove it, or convert to a user-context install.")
+				}
 			} else {
 				fmt.Fprintln(stdout, "  service uninstalled.")
 			}
 		}
+	}
+	if serviceLeftRunning {
+		// Not merely skipping the prompt: say why, or the operator
+		// reads a missing step as the menu being done.
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "  Skipping the config + data wipe while the service is still installed —")
+		fmt.Fprintln(stdout, "  it would delete the certs, tokens and database out from under a running")
+		fmt.Fprintln(stdout, "  bridge. Remove the service first, then run this again.")
+		return 1
 	}
 	if s.cfgPath != "" {
 		// Derive the config dir from `s.cfgPath`'s parent rather
