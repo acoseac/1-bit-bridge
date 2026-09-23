@@ -126,8 +126,8 @@ check-go-version:
 # builder and fails at that FROM line; this names the missing piece first.
 check-buildx:
 	@docker buildx version >/dev/null 2>&1 || { \
-		echo "check-buildx: 'docker buildx' is unavailable — the Dockerfile requires BuildKit, which needs the buildx plugin"; \
-		echo "  install it (Ubuntu/Debian docker.io: sudo apt install docker-buildx); docs/docker.md → 'Build it yourself' lists the rest"; \
+		echo "check-buildx: 'docker buildx' is unavailable — the Dockerfile requires BuildKit, which needs the buildx plugin" >&2; \
+		echo "  install it (Ubuntu/Debian docker.io: sudo apt install docker-buildx); docs/docker.md → 'Build it yourself' lists the rest" >&2; \
 		exit 1; \
 	}; \
 	echo "check-buildx: OK ($$(docker buildx version))"
