@@ -8779,3 +8779,245 @@ update is not the place to change a binary's permissions, whichever way the
 operator set them, and preserving fixes the divergence in both directions. 0755
 is the fallback for a `dst` that cannot be statted, which is what a first install
 looks like.
+## 2026-09-23 — a repeat install ate the rollback target (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/updater` — 3,567 lines, the
+largest package in the tree that had never appeared in a dated review section,
+and the one that swaps the running binary.
+
+### The chain
+
+Four facts compose, each verified by reading:
+
+- `u.status.CurrentVersion` is set ONCE, at construction (`updater.go:312`).
+  `install.go` writes the "(pending restart)" value to the LOCAL copy it returns
+  — its own comment says "for the response … The cached Status itself will
+  refresh on the new binary's first poll", which assumes a restart happens.
+  `Status()` returns `u.status` verbatim.
+- `pendingRestart` — the flag whose whole job is "don't re-install per poll" —
+  was set at exactly one site, inside the auto-install branch.
+- `Install` gated on `status.UpdateAvailable` and never asked whether `dst` was
+  already the target version.
+- **`apiUpdatesInstall` does not restart.** It installs and returns 200; restart
+  is a separate operator action (the rollback handler's own docblock says
+  "operator clicks Restart next").
+
+So: operator clicks Install → `dst` = v2, `.bak` = v1, process still v1 → the
+console STILL shows an update available, because the cached status never moved →
+operator clicks Install again (or, with `autoInstall` on, the next poll does) →
+full re-download and re-verify → `swapBinary`'s `linkFunc` returns EEXIST →
+`os.Remove(bak)` deletes v1 → `.bak` is re-linked to v2. Rollback is now a no-op
+and `canRollback()` returns true, because it only stats for existence.
+
+`swap_unix.go:88-97`'s docblock shows the authors reasoned carefully about
+preserving `.bak` on the FAILURE path (that is what the R5 EEXIST-only clear is
+for); the repeat-SUCCESS path was not considered.
+
+### Measured
+
+With the guard reverted, `TestSecondInstallWithoutARestartKeepsTheRollbackTarget`
+reports `.bak = "bridge-binary-0.2.0", want "bridge-binary-0.1.0"` — and
+`TestSecondInstallIsRefusedFromAFreshUpdater` reports the same from a second
+process. The first draft of both tests used `t.Fatalf` on the ERROR assertion,
+which stopped the control before it reached the file assertion: it proved the
+error changed and never that the rollback target was destroyed. `t.Errorf` +
+assert on the FILES, which is #941's lesson applied to a different reaper.
+
+### Why the persisted marker rather than the flag
+
+The in-memory `pendingRestart` is version-agnostic: it records THAT a swap
+landed, not which version. Refusing on it turned
+`TestANewerReleaseIsStillInstallable` red during development — a newer release
+would have been refused, stranding the host on a version it had not booted,
+which is worse than the bug being fixed. `bridge update` is also a separate
+process and sees no `atomic.Bool` the serving bridge set.
+
+`State.TargetVersion` + `State.SwapStarted` already existed and are written
+before the swap, so the marker is version-aware, durable and cross-process. The
+recency bound is the same `recencyWindow` `DecideBootAction` uses for
+`BootClearAbandoned` — deliberately the same constant, so the refusal expires
+exactly when boot would have cleared the marker and the engine and the boot path
+cannot disagree about whether one is still live. That is what stops the guard
+being a wedge after a crash, and `TestAnInterruptedInstallDoesNotWedgeTheEngine`
+asserts both halves against each other.
+
+Verified as the plan required: `maybeRollbackOnBoot` (`main.go:3005`) runs
+BEFORE `updater.New` (`main.go:3103`) on the serve path, and every branch of it
+ends in `ClearState` or a rollback, so no boot returns with the marker still
+`installing`.
+
+### Ordering, and what the existing lock test now proves
+
+The refusal sits AFTER the `installInFlight` try-lock, not before it: a caller
+arriving mid-install should hear "an install is already in progress", the more
+immediate truth. A side effect worth keeping — `TestInstallConcurrentCallsSerialized`'s
+final assertion used to be "a follow-up attempt succeeds", which the guard
+correctly breaks. It now asserts the follow-up is refused with
+`ErrInstallPendingRestart`, which is only reachable PAST the lock, so it still
+proves the lock was released — and distinguishes that from `ErrInstallInFlight`,
+which is what a still-held lock would give.
+
+### H1, fixed in the same PR
+
+`Options.AutoInstallRestart`'s docblock said "cmd/bridge/main.go wires this to
+`os.Exit(0)` — same restart contract as the admin console's Restart endpoint".
+The wiring does `cancel()` and its own comment says why: "os.Exit(0) here would
+skip every runServe defer (the 'restart MUST NOT os.Exit(0)' contract)". The
+docblock recommended precisely what the invariant forbids, on the package's
+PUBLIC configuration surface — which is what a second caller reads instead of
+main.go. No `os.Exit` appears anywhere in `internal/updater`, so nothing else
+contradicted it.
+
+### Process note: the untagged-sibling trap, caught by CI rather than locally
+
+The first push failed `test (windows-latest)` with
+`undefined: noopVerifier` — the new test file was untagged while the fixture it
+used lives in `install_test.go`, which is `//go:build !windows`. That is the
+trap CLAUDE.md already records for `internal/manifest` ("untagged siblings
+referencing them broke the Windows compile of the whole test binary,
+invisibly"), in a package where the convention is just as established: every
+test that drives a real swap here is `!windows`.
+
+It was caught by CI and not locally because `GOOS=windows go vet` was run for
+the swap PR and not for this one — the cross-vet has to be per-PR, not per
+session.
+
+The fix is not simply "add the tag". The predicate is pure marker arithmetic and
+platform-independent, and the platform whose swap has no hardlink fallback at
+all is exactly the one that should not lose coverage of it. The
+fixture-dependent tests stay `!windows`; the marker tests were rewritten to
+write the State by hand — which is what Install writes anyway — and live in an
+untagged file.
+## 2026-09-23 — an upstream-chosen MBID reached filepath.Join, on a write and a delete (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/atlasharvest` — 2,231 lines that
+had never appeared in a dated review section and have no invariants section of
+their own.
+
+### The chain
+
+`client.go:534` takes `it.MBID` verbatim off the harvest RESULTS page. There is
+no shape check, and the bridge never verifies that a returned MBID is one it
+SUBMITTED — so the upstream chooses the set. `state.go:180` (`AddPendingCovers`)
+skips only `""` and persists to the state JSON, so a hostile value survives
+restarts and is re-offered every tick; `PendingCovers` has no age-based
+eviction. The refresh sweep then reaches `cmd/bridge/main.go:395`:
+
+    path := enrich.ArtworkCachePath(a.artworkDir, releaseMBID, size)
+    // → filepath.Join(cacheDir, fmt.Sprintf("%s-%d.jpg", mbid, size))
+
+`filepath.Join` Cleans, so `../../..` escapes. `writeArtworkAtomicStream` then
+does `os.MkdirAll(filepath.Dir(path), 0o700)` — the traversing value **creates
+its own parents** rather than failing — and streams up to `MaxCoverArtBytes` of
+upstream-chosen bytes there. `main.go:414` drives `os.Remove` over the same
+unvalidated path for the other two `SupportedCoverSizes`.
+
+`grep` for any MBID shape gate across `internal/atlasharvest` returned nothing,
+and `RefetchPremium` adds none. Of `ArtworkCachePath`'s six non-test callers
+these two were the only ones receiving an unvalidated value: the tag, MB-search,
+release-group and AcoustID paths all gate on `isValidMBID`, and the two read
+handlers regex-match. Primitive: the attacker chooses the directory and the name
+prefix; the suffix is pinned to `-{250,500,1200}.jpg`.
+
+### Why it was not an accepted residual
+
+`config.go:476-495` permits an unpinned `harvestBaseUrl` on a non-demo bridge and
+bounds the risk explicitly at content injection — "the bios it returns land in
+`artist_atlas` … with an attacker-chosen `SourceURL`" — concluding that unpinned
+is acceptable because "the bearer set is the operator's own paired devices". An
+arbitrary file write and delete as the bridge user is outside that stated bound.
+The decision was taken against an incomplete model rather than knowingly.
+
+Reachability needs `atlas.harvestEnabled` (defaults false) plus either a hostile
+upstream or a bearer-token holder POSTing an `atlasBaseUrl`, which
+`refuseUnpinnedHarvestBaseURL` deliberately allows off-demo.
+
+### The fix — three layers, each negative-controlled on its own
+
+1. **Shape**, at ingest (`pollResults`, so nothing hostile is persisted) and at
+   the sink (`atlasCoverRefetcher.RefetchPremium`). The sink returns a nil error:
+   a malformed entry must not abort the sweep for the releases behind it.
+2. **Containment**, in `writeArtworkAtomicStream`, via `fsutil.IsUnderAny` — the
+   tree's canonical check rather than a hand-rolled `filepath.Rel`. It resolves
+   symlinks on BOTH sides (so a symlinked parent cannot be written through),
+   treats a cross-volume `Rel` error on Windows as not-nested, and compares in
+   the filesystem's own case sensitivity. `atlasPremiumFetcher` had to gain the
+   cache root to bound its own two writes; it receives a built `path` and cannot
+   otherwise know what bounds it.
+3. **Signature**, on the body. See the correction below.
+
+Cost of layer 2, measured rather than reasoned about: `fsutil.IsUnderAny` is
+**29.4 µs / 125 allocs** per call (`-benchtime 2000x`, taken while the race suite
+was saturating the machine, so pessimistic). It is not free — `EvalSymlinksOrClean`
+walks and the case-sensitivity probe stats — but every call site sits immediately
+after a network cover fetch of hundreds of milliseconds and immediately before an
+fsync, so it is 0.01% of the operation it guards. Worth the number here because
+"don't add syscalls to a hot path" is a live concern in this tree (#973 reasons
+explicitly about one extra stat per directory entry) and this genuinely is not one.
+
+### A correction the fix turned up
+
+CLAUDE.md said "Artwork is JPEG-only, two-layer verified (MIME *and* the
+`FF D8 FF` magic bytes)". That rule describes `internal/manifest`'s LOCAL
+folder-art path (`looksLikeJPEG` + `folderArtCandidates`). **`internal/enrich`
+had no content check of any kind, on any of its five write sites** — CAA release,
+CAA release-group, iTunes, and both premium paths. So the finding as first
+written ("the premium path skips the verification") was narrower than the truth,
+and the bullet read as a property of the whole artwork surface when it was a
+property of a different subsystem.
+
+The gate refuses anything that is not a recognised image, and deliberately
+accepts PNG as well as JPEG. JPEG-only is what this path's contract says —
+`artwork_scale.go`: "a verbatim PNG write would put PNG bytes behind an
+image/jpeg label", which is why the scanner TRANSCODES — but CAA can serve PNG,
+those covers render today because clients sniff, and dropping them inside a
+security fix would be a user-visible regression bought for nothing: the
+arbitrary-payload hole closes either way. A warn line names the mislabeling so
+the transcode-or-refuse decision stays visible instead of being entrenched.
+
+### Three copies of the UUID pattern, and the guard that stops them drifting
+
+`api.mbidPattern` and `enrich.mbidValidPattern` were already separate, each
+documenting that the dependency direction forbids sharing.
+`internal/atlasharvest` is a third: its imports are fsutil, logging, atomicwrite
+and lyrics, while enrich pulls in manifest, so importing it to reach one regexp
+would invert an edge for a constant. `TestHarvestMBIDPatternMatchesEnrich` lives
+in `cmd/bridge` — the one package importing both — and compares ANSWERS over a
+table rather than regexp source, since the source agreeing is neither necessary
+nor sufficient for the two gates to admit the same set.
+
+### Controls
+
+Four, each reverting one layer and leaving the rest green: containment
+(`TestWriteArtworkRefusesAPathOutsideTheCacheDir`), signature
+(`TestWriteArtworkRefusesBytesThatAreNotAnImage`), the sink gate
+(`TestRefetchPremiumRefusesAMalformedReleaseMBID` — its failure output prints the
+escaped path it reached), and the ingest filter
+(`TestPollResultsDoesNotQueueAMalformedReleaseMBID`). Each has a positive control
+beside it, because a layer that refuses everything passes the negative assertion
+for the wrong reason.
+
+The existing `atomic_write_test.go` payloads were `bytes.Repeat([]byte("X"), …)`
+and had to become JPEG-prefixed: a fixture must be a value the transformation
+would accept, or a test about write MECHANICS starts failing on the signature
+gate in front of it and pins nothing.
+
+`TestClientSubmitAndPoll` failed on the race gate for the same reason in the
+other direction, and it is the most useful thing the run produced: its release
+fixtures were the placeholders `"r1"` / `"r2"` / `"r3"`, which is EXACTLY what the
+new ingest filter exists to drop. The fixtures became real UUIDs — the test's
+subject is submit-and-poll, not MBID shape — and the failure stands as evidence
+that the gate is live in the real `tick` path rather than only in the test that
+drives `pollResults` directly. A placeholder MBID in a fixture is worth grepping
+for after any change that shape-gates one.
+
+### Process note: a grep-masked gate result
+
+The first attempt to confirm the re-run piped `make test` through
+`grep -E "^(FAIL|--- FAIL|ok  github)"`. `go test` separates its verdict from the
+package path with a TAB, not two spaces, so the pattern matched NOTHING, the
+capture file was empty, and the summary printed "0 failures" — a vacuous pass
+that looked exactly like a real one. The only tell was an `exit=1` beside it that
+the summary format invited reading as noise. Same family as the memory entry on
+`grep`-masked exit status, and the reason the gate is now run with its output
+captured whole and `$?` checked directly rather than inferred from a filter.

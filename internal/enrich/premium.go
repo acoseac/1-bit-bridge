@@ -48,17 +48,24 @@ type atlasPremiumFetcher struct {
 	cred      AtlasCredentialSource
 	userAgent string
 	http      *http.Client
+	// cacheDir bounds every write this fetcher makes. Both of its write
+	// sites receive a fully-built `path` from a caller, and one of those
+	// callers (cmd/bridge's atlasCoverRefetcher) builds it from an MBID
+	// the ATLAS UPSTREAM chose — so the fetcher has to carry the root
+	// itself rather than trust the path it was handed. Empty disables
+	// the bound; production always sets it.
+	cacheDir string
 }
 
 // NewAtlasPremiumFetcher builds the premium-cover fetcher. A nil httpClient
 // gets a 30s-timeout default — an image fetch over a high-latency relay link
 // must not hang background enrichment forever (http.DefaultClient has no
 // timeout).
-func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpClient *http.Client) PremiumCoverFetcher {
+func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpClient *http.Client, cacheDir string) PremiumCoverFetcher {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &atlasPremiumFetcher{cred: cred, userAgent: userAgent, http: httpClient}
+	return &atlasPremiumFetcher{cred: cred, userAgent: userAgent, http: httpClient, cacheDir: cacheDir}
 }
 
 // TryCache fetches the premium cover for (mbid, size) and streams it to path.
@@ -99,7 +106,7 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 		drainBody(resp.Body)
 		return false
 	}
-	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {
+	if err := writeArtworkAtomicStream(f.cacheDir, path, resp.Body, MaxCoverArtBytes); err != nil {
 		logger.Warn("atlas premium cover write", "mbid", mbid, "size", size, "err", err)
 		return false
 	}
@@ -201,7 +208,7 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 		}
 		return false, nil
 	}
-	if err := writeArtworkAtomicStream(path, resp.Body, MaxCoverArtBytes); err != nil {
+	if err := writeArtworkAtomicStream(f.cacheDir, path, resp.Body, MaxCoverArtBytes); err != nil {
 		return false, err
 	}
 	logger.Info("atlas premium cover upgraded", "mbid", mbid, "size", size)
