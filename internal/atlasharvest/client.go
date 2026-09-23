@@ -534,7 +534,17 @@ func (c *Client) pollResults(ctx context.Context) error {
 				// re-fetch the (now premium) cover. "release_text" is text-only
 				// (the album's cover is served from local artwork), so it never
 				// feeds the cover sweep.
-				if it.Kind == "release" && it.Found {
+				// Shape-gate before the value is PERSISTED. it.MBID is
+				// chosen by the upstream — the bridge never checks that a
+				// returned MBID is one it submitted — and AddPendingCovers
+				// writes it to the state JSON, so an unfiltered value
+				// survives restarts and is re-offered to the cover sweep
+				// every tick. The sweep's sink refuses it (see cmd/bridge's
+				// atlasCoverRefetcher, where it is the leading component of
+				// a filepath.Join), but a store full of garbage nobody can
+				// act on is its own problem: PendingCovers has no
+				// age-based eviction, so anything that lands here stays.
+				if it.Kind == "release" && it.Found && isValidMBID(it.MBID) {
 					pendingReleases = append(pendingReleases, it.MBID)
 				}
 				// Album text overlay (Phase D): store only when the harvest actually
