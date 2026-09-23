@@ -118,7 +118,7 @@ const docVerbCoverageFloor = 0.85
 // second, a sentence that opens by referring to a documented sibling is.
 // That pair is what took the raw 467 candidates down to 21 and then to 16.
 //
-// Consts and vars are inspected too, on both sides (#PRNUM). They were not,
+// Consts and vars are inspected too, on both sides (#989). They were not,
 // and an insertion lands between a docblock and a function as easily as
 // between two functions: processJob's whole docblock sat on
 // `const variantFailureWriteTimeout` until #988 moved it back, and 18 of

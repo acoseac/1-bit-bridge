@@ -2805,7 +2805,7 @@ its twin.** The top list is older, shorter, and read first.
   `doc.Text()` change was verified to find the same sixteen, since that is
   exactly where a guard quietly stops guarding. (#964)
 - **…and it reads consts and vars, against a verb list DERIVED from the
-  tree** (#PRNUM). #964 inspected func and type docs only, against 31
+  tree** (#989). #964 inspected func and type docs only, against 31
   hand-picked verbs, and a 2026-09-24 census found 36 more: 18 glued onto a
   const or var (`handleBrowse`'s on `maxSOAPBodyBytes`, `VariantWatcher`'s
   43 lines on `stopGrace`), and 28 opening with a verb

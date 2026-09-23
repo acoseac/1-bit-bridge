@@ -10393,7 +10393,7 @@ shape is what review guards, as in #987.
   `df -h /` first, as CLAUDE.md's 2026-09-09 LOUPE section already says of
   the DSD fixtures.
 
-## 2026-09-24 — the docblock guard reads consts and vars, and knows the verbs this tree uses (#PRNUM)
+## 2026-09-24 — the docblock guard reads consts and vars, and knows the verbs this tree uses (#989)
 
 #988 moved `processJob`'s docblock off `const variantFailureWriteTimeout` and
 recorded why `TestNoDocblockNamesAnotherDeclaration` (#964) had not seen it:
