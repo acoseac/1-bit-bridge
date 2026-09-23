@@ -115,18 +115,43 @@ func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) 
 	if err := armSwap(markSwapStarted); err != nil {
 		return err
 	}
+	// Stage BEFORE vacating dst. This is not a fallback here — the
+	// hardlink trick cannot apply on Windows at all (see the note above),
+	// so EVERY swap on this OS goes through the two-rename shape, and
+	// until now every one of them called placeNewBinaryWindows with dst
+	// already gone. That function's own docblock names the host where its
+	// cross-volume branch fires: "bridge.exe on D: and the data dir under
+	// %LOCALAPPDATA% on C: — a small-SSD media PC — EVERY update failed".
+	// On exactly that host, every update then spent the duration of a
+	// ~30 MiB copy plus a flush with no bridge.exe on disk.
+	//
+	// mode 0: NTFS has no executable bit to set.
+	staged, err := stageIntoDir(newBinary, dst, 0)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(staged)
+		}
+	}()
 	if err := os.Rename(dst, bak); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
 	}
-	if err := placeNewBinaryWindows(newBinary, dst); err != nil {
+	// Same directory as dst, so never cross-volume — the window this
+	// leaves is the gap between two adjacent renames, which is what the
+	// note above has always claimed it was.
+	if err := os.Rename(staged, dst); err != nil {
 		// Restore .bak so we don't leave the operator with no
 		// executable.
 		if rerr := os.Rename(bak, dst); rerr != nil {
 			return fmt.Errorf("install %s -> %s failed (%v); rollback also failed (%v); manual recovery needed",
-				newBinary, dst, err, rerr)
+				staged, dst, err, rerr)
 		}
-		return fmt.Errorf("install %s -> %s: %w (rolled back)", newBinary, dst, err)
+		return fmt.Errorf("install %s -> %s: %w (rolled back)", staged, dst, err)
 	}
+	committed = true
 
 	// No directory fsync on Windows: FlushFileBuffers rejects directory
 	// handles (ERROR_ACCESS_DENIED / ERROR_INVALID_HANDLE) regardless of
@@ -152,88 +177,21 @@ var (
 	errServiceNotRegistered = errors.New("bridge service not registered with SCM")
 )
 
-// placeNewBinaryWindows moves the staged binary onto dst, falling back to
-// a copy when the two live on different volumes.
+// isCrossDeviceErr reports whether a rename failed because the two paths
+// live on different volumes — the one condition that makes staging fall
+// back to a copy.
 //
-// Go's Windows os.Rename is MoveFileEx WITHOUT MOVEFILE_COPY_ALLOWED (see
-// internal/syscall/windows), so a cross-volume move returns
-// ERROR_NOT_SAME_DEVICE. The staged binary lives under
-// <DataDir>/updates; on a host with bridge.exe on D: and the data dir
-// under %LOCALAPPDATA% on C: — a small-SSD media PC — EVERY update failed
-// with an opaque "cannot move the file to a different disk drive". The
-// Unix side has handled exactly this since #522 via placeNewBinary +
-// copyAndRename on EXDEV; Windows had no counterpart and no test (F0b).
-//
-// The copy lands in dst's OWN directory first, so the committing step is
-// still a same-volume rename. Caller has already vacated dst to bak, so a
-// failure here is recoverable by renaming bak back — which swapBinary
-// does.
-func placeNewBinaryWindows(newBinary, dst string) error {
-	err := os.Rename(newBinary, dst)
-	if err != nil && errors.Is(err, windows.ERROR_NOT_SAME_DEVICE) {
-		return copyAcrossVolumesWindows(newBinary, dst)
-	}
-	return err
+// Go's Windows os.Rename is MoveFileEx WITHOUT MOVEFILE_COPY_ALLOWED
+// (see internal/syscall/windows), so a cross-volume move returns
+// ERROR_NOT_SAME_DEVICE rather than doing the copy itself. The staged
+// binary lives under <DataDir>/updates, which need not share a volume
+// with the install path — that is the D:-and-C: host this branch exists
+// for (#522 on the Unix side; Windows had no counterpart and no test,
+// F0b).
+func isCrossDeviceErr(err error) bool {
+	return errors.Is(err, windows.ERROR_NOT_SAME_DEVICE)
 }
 
-// copyAcrossVolumesWindows copies src into a temp file in dst's directory,
-// flushes it, then renames it over dst. Mirrors the Unix copyAndRename,
-// minus the executable-bit chmod (meaningless on NTFS) and the parent-dir
-// fsync (FlushFileBuffers rejects directory handles on Windows — see the
-// note in swapBinary).
-func copyAcrossVolumesWindows(src, dst string) error {
-	// mode 0: NTFS has no executable bit to set.
-	return copyIntoDirAndRename(src, dst, 0)
-}
-
-// stopServiceIfRunning attempts to stop the bridge SCM service so
-// the swap doesn't race a running process. Returns:
-//
-//   - (handle, nil) when the service was running and is now stopped.
-//     Caller MUST close the handle (via the deferred path) and is
-//     responsible for restarting after the swap.
-//   - (nil, errSCMUnavailable) when SCM access is denied (no admin).
-//     Caller treats as "skip stop, proceed with rename".
-//   - (nil, errServiceNotRegistered) when no service exists. Same
-//     treatment.
-//   - (nil, otherErr) on any other SCM-side failure.
-//
-// Already-stopped services return (nil, nil) — no handle needed,
-// no restart action needed.
-//
-// SELF-STOP GUARD: returns (nil, nil) immediately when THIS process is
-// itself running as the Windows service. Without it, the admin console's
-// "Install update" — which calls Updater.Install synchronously on an HTTP
-// handler goroutine INSIDE the serving process — sent
-// SERVICE_CONTROL_STOP to its own service. The SCM delivers that straight
-// back to this process's own handler (cmd/bridge/service_windows.go),
-// which cancels runServe and returns, so the process exits while the
-// install goroutine is still parked in waitServiceStopped (200ms poll,
-// 15s budget, no ctx awareness) and dies with it.
-//
-// Two outcomes, both bad. Usually the poll misses the sub-millisecond
-// Stopped->exit window: no rename happens, nothing reaches the
-// svc.Start() defer, and the rollback marker is left armed — so the next
-// manual start sees `installing`/vNEW against a running vOLD and renames
-// a STALE .bak over the working binary (a silent downgrade). Rarely the
-// poll lands inside the window and the swap proceeds into
-// os.Rename(dst, bak) while the runtime is exiting; if the process dies
-// before the second rename there is NO bridge.exe at all. That is
-// ordinary control flow, not a power-loss window. With
-// update.autoInstall it repeats on every boot.
-//
-// Skipping the stop is safe: the rename-over-a-running-image trick this
-// file is built around works precisely BECAUSE the image can't be
-// replaced in place — dst is vacated to bak first — and the caller's own
-// restart contract (Deps.Restart, the same cancellation closure as
-// SIGINT) drives the bounce. The CLI path (`bridge update`, a separate
-// short-lived process) is unaffected and still stops the service, which
-// is what the docblock above describes.
-//
-// Found by a cross-PR review of the #511-#540 audit batch (F0). It stayed
-// invisible because the CLI path is correct and the live Windows host
-// runs from a Scheduled Task, whose stale registered service is already
-// Stopped — so this call no-ops there.
 func stopServiceIfRunning() (*scmStopHandle, error) {
 	if inService, err := svc.IsWindowsService(); err == nil && inService {
 		logger.Info("skipping SCM stop: this process IS the service (a self-stop would kill the install mid-swap)")

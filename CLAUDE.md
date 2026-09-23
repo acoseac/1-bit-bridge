@@ -1713,6 +1713,32 @@ no failing test — which is the shape to expect in this area.
   as the EXDEV fallback: a power loss between two renames is permanently
   unbootable and rollback-on-boot cannot help, because the missing file IS the
   bridge. On Windows a stop-timeout must best-effort `Start()` again.
+- **The new bytes are STAGED beside `dst` before anything is vacated, so the
+  no-file window is two adjacent renames and never encloses a copy.** Both
+  fallback shapes vacated `dst` first and then called `placeNewBinary`, which
+  falls back to a ~30 MiB cross-volume copy plus an fsync on EXDEV /
+  `ERROR_NOT_SAME_DEVICE` — so the gap both files described as "the tiny no-file
+  window between the two renames" was the duration of a full transfer. **The
+  POSIX hardlink path was never affected** (dst keeps resolving through its own
+  dentry for the whole copy); the two that were are `swapBinaryViaRename` and
+  **Windows, where the hardlink trick cannot apply at all and this is the ONLY
+  path** — on the very host `placeNewBinaryWindows`' docblock names ("bridge.exe
+  on D: and the data dir under %LOCALAPPDATA% on C:"), every update spent seconds
+  with no `bridge.exe` on disk. The in-process restore cannot cover a power loss
+  there. Staging tries the cheap same-volume move FIRST, so an ordinary install
+  still pays a rename rather than a copy. `swap_test.go` exercised each fallback
+  alone and never composed them, which is why nothing saw it — the pin now walks
+  all four combinations and asserts the ORDER (copy before vacate), because
+  "dst is never absent" is false by construction for the two-rename commit.
+- **A swap PRESERVES the mode `dst` already has; it does not impose one.** The
+  rename path inherited the extractor's `O_CREATE 0o755`, which IS umask-masked,
+  while the copy path chmod'd an unmasked `0o755` — under a comment asserting the
+  two matched. Measured under `UMask=0027`, which this repo's own deployment
+  runbook prescribes: the same-volume path installed **0750** and the
+  cross-volume path **0600**. The service user still execs it, so the bridge
+  runs and nothing looks wrong; every other account on the host gets `EACCES` on
+  a binary that worked yesterday, with no log line. The divergence is invisible
+  at umask 0, so the test sets one.
 - **Booklet GC is skipped while a scan is in flight** — mid-rescan the release
   universe is transiently partial, so GC deletes every filesystem album's
   booklets and re-fetches them next cycle. An empty universe is a deliberate

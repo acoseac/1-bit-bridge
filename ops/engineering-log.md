@@ -8687,3 +8687,95 @@ Mirror-PR obligation. The nightly fuzz corpora pass.
   gate on that exact SHA is green. Most likely one of the timing flakes
   this repo already records. **Do not truncate the output of a run that
   might fail.**
+
+## 2026-09-23 — the swap's no-file window enclosed a cross-volume copy (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/updater`, alongside the
+repeat-install defect.
+
+### What was actually wrong, and what was not
+
+The documented ordering (`Link(dst,bak)` → `Rename(new,dst)`) holds and is
+correct. **The POSIX hardlink path was never affected**: `dst` keeps resolving
+through its own directory entry for the whole operation, so even when
+`placeNewBinary` fell back to a cross-volume copy, `dst` was present throughout.
+Worth stating precisely, because the first write-up of this finding implied all
+paths were exposed.
+
+The two that were exposed both vacate `dst` first:
+
+- `swapBinaryViaRename`, the POSIX fallback for a filesystem that cannot
+  hardlink (exFAT / SMB / some FUSE mounts).
+- **Windows `swapBinary` — not a fallback there but the ONLY path.**
+  `swap_windows.go:101-108` explains why the hardlink fix cannot apply, so every
+  Windows swap vacates `dst` to `bak` and then installs.
+
+In both, the install step is `placeNewBinary`, which on EXDEV /
+`ERROR_NOT_SAME_DEVICE` copies ~30 MiB and fsyncs — with `dst` absent. Both files
+call that gap "the tiny no-file window between the two renames". And
+`placeNewBinaryWindows`' own docblock names the host where its branch fires:
+"bridge.exe on D: and the data dir under %LOCALAPPDATA% on C: — a small-SSD media
+PC — EVERY update failed". On exactly that host every update now spent multiple
+seconds with no executable on disk. There is an in-process restore
+(`rename(bak, dst)`), but a power loss leaves no executable and no process to run
+it, and boot-time rollback cannot help — the missing file IS the bridge.
+
+### The fix
+
+Stage into `dst`'s own directory BEFORE vacating: `stageIntoDir` tries a
+same-volume move first and copies only on a genuine cross-device error, then sets
+the mode. The commit is then `Link`/`Rename` for the vacate plus a plain
+`os.Rename` of the staged file — two adjacent renames in one directory, which is
+what the comments always claimed. **It reorders the staging, never the commit**:
+the vacate→install order and the restore-on-failure behaviour are unchanged.
+
+Trying the cheap move first is load-bearing: Windows takes the same-volume branch
+on an ordinary single-volume host, and making it copy 30 MiB unconditionally
+would be a real regression bought for nothing.
+
+`renameFunc` moved from `swap_unix.go` to the shared file so Windows has the same
+seam. The seam discipline is preserved exactly: `renameFunc` for the move that
+may genuinely be cross-device, plain `os.Rename` for a commit within one
+directory (which cannot be).
+
+### The test, and two controls that were wrong first
+
+`swap_test.go` exercised each fallback alone and never composed them — the
+enumeration gap, in the test file. The new pin walks all four combinations.
+
+The first instrumentation asserted "dst is never absent", which is **false by
+construction**: the two-rename commit has an irreducible gap between
+`rename(dst,bak)` and `rename(staged,dst)`, and that gap is the intended
+residual. It failed on the correct code. The property is that the EXPENSIVE step
+is outside it, so the test records a trace — "copy" when the stub returns EXDEV
+(the copy follows directly) and "vacate" when dst moves to .bak — and asserts
+copy precedes vacate.
+
+Two negative controls were artifacts before one was faithful. Restoring the
+staging call to "just before the link block" did not reproduce anything, because
+the vacate happens later still, inside `commitViaRename`. Re-staging from the
+already-staged file inside `commitViaRename` did not reproduce it either, because
+the stub models cross-device as "different directories" and the staged file is
+already in dst's. Only staging from the SCRATCH dir after the vacate reproduces
+it, and it prints the right message: "dst was absent while the cross-volume copy
+ran". The lesson is the recorded one, in a new shape — a control has to be
+checked for WHY it went red, not only that it did, and a control that fails for
+an artifact is as misleading as one that passes.
+
+### B2, fixed in the same change
+
+Measured under `syscall.Umask(0o027)` — the umask the deployment runbook
+prescribes — with the mode preservation removed:
+
+    same volume:  installed mode = 0750, want 0755
+    cross volume: installed mode = 0600, want 0755
+
+The rename path inherited the extractor's umask-masked `O_CREATE 0o755`; the copy
+path chmod'd an unmasked `0o755` under a comment claiming the two matched; and
+`CreateTemp`'s 0600 shows through when the chmod is skipped entirely.
+
+The fix preserves the mode `dst` ALREADY has rather than hardcoding 0755. An
+update is not the place to change a binary's permissions, whichever way the
+operator set them, and preserving fixes the divergence in both directions. 0755
+is the fallback for a `dst` that cannot be statted, which is what a first install
+looks like.
