@@ -10,6 +10,23 @@ import "errors"
 // commands that would silently no-op against the wrong namespace.
 var ErrSystemInstallNeedsRoot = errors.New("system-level install detected; re-run as root or convert to a user-context install")
 
+// NeedsRootFor reports whether `kind` is a system-level install this
+// process must not drive from a user context.
+//
+// One predicate, four readers — Stop, Restart, Start and Uninstall. It
+// used to be the same two-term condition spelled out in the first three
+// and MISSING from the fourth, which is how Uninstall came to no-op on a
+// sudo install and report success: the two POSIX uninstallers touch only
+// the fixed user-level path and treat a missing file as done.
+//
+// Exported so the decision is drivable. `installedKindForOS` probes
+// absolute system paths (/Library/LaunchDaemons, /etc/systemd/system)
+// that a test cannot create without root, so a gate expressed only
+// inside Uninstall would be a decision nothing pins.
+func NeedsRootFor(kind ServiceKind) bool {
+	return kind == KindLaunchdSystem || kind == KindSystemdSystem
+}
+
 // Stop asks the service manager to stop the running bridge service
 // (launchd / systemd / SCM) but leaves the install in place. A
 // follow-up Start (via the OS itself or via Restart below) brings
@@ -27,7 +44,7 @@ func Stop() error {
 	if kind == KindNone {
 		return nil
 	}
-	if kind == KindLaunchdSystem || kind == KindSystemdSystem {
+	if NeedsRootFor(kind) {
 		return ErrSystemInstallNeedsRoot
 	}
 	return stopForOS(kind)
@@ -42,7 +59,7 @@ func Restart() error {
 	if kind == KindNone {
 		return nil
 	}
-	if kind == KindLaunchdSystem || kind == KindSystemdSystem {
+	if NeedsRootFor(kind) {
 		return ErrSystemInstallNeedsRoot
 	}
 	return restartForOS(kind)
@@ -62,7 +79,7 @@ func Start() error {
 	if kind == KindNone {
 		return nil
 	}
-	if kind == KindLaunchdSystem || kind == KindSystemdSystem {
+	if NeedsRootFor(kind) {
 		return ErrSystemInstallNeedsRoot
 	}
 	return startForOS(kind)

@@ -121,6 +121,27 @@ func InstallStartup(p Params) (unitPath string, err error) {
 // file. Missing files are not an error so `bridge init` can rerun
 // idempotently. Returns (unitPath, err).
 func Uninstall() (string, error) {
+	// A system-level install is NOT ours to remove from here, and saying
+	// so is the whole point. Stop / Start / Restart have gated on these
+	// two kinds since they were written; Uninstall did not, and the two
+	// POSIX uninstallers below touch only the fixed USER-level path
+	// (~/Library/LaunchAgents, ~/.config/systemd/user) and treat a
+	// missing file as success.
+	//
+	// So against a sudo install this returned (userPath, nil) — and
+	// cmd/bridge's menu, having asked "Uninstall the background service
+	// (macOS LaunchDaemon)?", printed "service uninstalled." while the
+	// LaunchDaemon stayed registered and running. The same menu flow then
+	// offers os.RemoveAll(cfgDir): config, data, certs and TOKENS, out
+	// from under a live bridge.
+	//
+	// The Windows arm below already reasons about precisely this — it
+	// surfaces the SCM error rather than swallowing it, so that a stuck
+	// stop is not "a zombie service reported as a clean uninstall". The
+	// POSIX arms now make the same distinction.
+	if kind, _ := InstalledKind(); NeedsRootFor(kind) {
+		return "", ErrSystemInstallNeedsRoot
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		return uninstallLaunchd()
