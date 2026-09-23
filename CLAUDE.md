@@ -2804,6 +2804,24 @@ its twin.** The top list is older, shorter, and read first.
   `//` are seen. **Re-run the control after refactoring a detector**: the
   `doc.Text()` change was verified to find the same sixteen, since that is
   exactly where a guard quietly stops guarding. (#964)
+- **…and it reads consts and vars, against a verb list DERIVED from the
+  tree** (#PRNUM). #964 inspected func and type docs only, against 31
+  hand-picked verbs, and a 2026-09-24 census found 36 more: 18 glued onto a
+  const or var (`processJob`'s on `variantFailureWriteTimeout`,
+  `VariantWatcher`'s 43 lines on `stopGrace`), and 28 opening with a verb
+  the list lacked ("GetTrack fetches", "Extract reads"). **#964's 5-of-5
+  spot check measured PRECISION; nothing measured RECALL**, and the list
+  recognised 61% of the openers correctly-attached docs use, which is the
+  share of displaced blocks it could see. A closed list in a detector is an
+  enumeration, and its reach has to be measured: a verb is now listed when
+  five correctly-attached docs open with it or when it opened a real
+  misattachment, and `docVerbCoverageFloor` fails below 85% (it reads 90%),
+  naming the words to add. Don't trim the list for tidiness. A grouped
+  `const ( … )` doc's subject is every member, but a member counts as
+  documented only by its OWN spec doc or line comment, which is what lets a
+  spec doc displaced inside a documented group be caught. Still unseen:
+  `_test.go` files, a doc opening with a name nothing declares, and a
+  subject that has since grown a second doc of its own.
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`
