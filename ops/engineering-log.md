@@ -9478,9 +9478,10 @@ ports, for a different reason.
   from the config. `buildDoctorDeps` loads an explicit `--config` or else
   `packaging.DefaultConfigDir()/bridge.yaml` (in the image,
   `/home/bridge/.config/1-bit-bridge/bridge.yaml`, which does not exist) and
-  never calls `loadCLIConfig`, so unlike every other subcommand it never tries
-  `./bridge.yaml`. `docker exec` runs in `/data`, where `bridge cert info` and
-  `bridge status` find the config unaided; doctor does not.
+  never calls `loadCLIConfig`, so unlike every other subcommand that takes
+  `--config` it never tries `./bridge.yaml`. `docker exec` runs in `/data`,
+  where `bridge cert info` and `bridge status` find the config unaided;
+  doctor does not.
 - Config-less, doctor has no `OwnPIDFile`, so `checkPort` cannot attribute the
   bound ports, and with lsof present the verdict is FAIL "another process owns
   this port". Env overrides are applied inside `config.Load`, so
