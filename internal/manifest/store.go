@@ -8053,6 +8053,17 @@ func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
 //
 // `match` receives the row's composed path and decides. Exact-equality
 // and prefix callers differ only in that predicate.
+//
+// `rows[:0:0]` — a fresh backing array — and NOT the in-place `rows[:0]`
+// filter that avoids the allocation (Gemini on #979). The in-place form
+// is correct for both callers TODAY, because each builds `rows` locally
+// and discards it. But this is a SHARED helper whose whole job is to
+// decide what a destructive path may touch, and in-place filtering
+// silently overwrites its input: a third caller that keeps the unfiltered
+// slice — to log what was excluded, say — would read rewritten rows with
+// no compile error and no test failure. The saving is one allocation of
+// a handful of rows per request, against a function that is about to
+// unlink files.
 func acceptCaseExactVariants(rows []VariantRow, match func(composedPath string) bool) []VariantRow {
 	out := rows[:0:0]
 	for _, v := range rows {
