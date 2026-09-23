@@ -82,6 +82,9 @@ type listener struct {
 	local sync.Map // string → *conn
 }
 
+// Accept registers each connection from this host under its peer's
+// address, wrapped so its first read is recorded. Every other connection
+// is returned exactly as it came.
 func (l *listener) Accept() (net.Conn, error) {
 	c, err := l.Listener.Accept()
 	if err != nil || !fromThisHost(c) {
@@ -122,6 +125,8 @@ type conn struct {
 	once  sync.Once
 }
 
+// Read passes through, and the first read that returns data or EOF
+// records which of the two it was.
 func (c *conn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if c.first.Load() == undecided {
@@ -150,8 +155,12 @@ const (
 	silentPeerReason     = ": EOF"
 )
 
+// errorLog is the writer behind the logger Wrap returns: net/http formats
+// each line and hands it over whole.
 type errorLog struct{ l *listener }
 
+// Write forwards the line to the standard logger, exactly as a nil
+// ErrorLog would, unless it is a silent probe's.
 func (w errorLog) Write(p []byte) (int, error) {
 	line := string(p)
 	if !w.l.isSilentProbe(line) {

@@ -26,12 +26,15 @@ type Buffer struct {
 	b  strings.Builder
 }
 
+// Write appends p. The servers under test call it from their own
+// goroutines.
 func (b *Buffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.b.Write(p)
 }
 
+// String returns everything written so far.
 func (b *Buffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()

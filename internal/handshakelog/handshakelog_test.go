@@ -26,6 +26,9 @@ import (
 // through Wrap. The oracle is what keeps these tests honest about the
 // stdlib: they never restate its wording, they ask it.
 
+// TestTheSilentLoopbackProbeIsNotLogged is the probe itself, over IPv4
+// and IPv6 loopback. The oracle first asserts that net/http still logs it
+// in exactly the shape isSilentProbe parses.
 func TestTheSilentLoopbackProbeIsNotLogged(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "::1"} {
 		t.Run(host, func(t *testing.T) {
@@ -52,6 +55,9 @@ func TestTheSilentLoopbackProbeIsNotLogged(t *testing.T) {
 	}
 }
 
+// TestEveryOtherHandshakeFailureIsLoggedAsBefore runs each failing client
+// shape against the oracle and the wrapped server, and requires the same
+// line from both, addresses aside.
 func TestEveryOtherHandshakeFailureIsLoggedAsBefore(t *testing.T) {
 	cases := []struct {
 		name string
@@ -141,6 +147,9 @@ func TestAProbeOfASpecificBoundIPIsNotLogged(t *testing.T) {
 	}
 }
 
+// TestFromThisHost pins which peers count as this host: every loopback
+// spelling, and a source equal to the destination. A LAN or tailnet peer
+// never does.
 func TestFromThisHost(t *testing.T) {
 	tcp := func(ip string, port int) *net.TCPAddr { return &net.TCPAddr{IP: net.ParseIP(ip), Port: port} }
 	cases := []struct {
@@ -227,11 +236,14 @@ type server struct {
 	closed sync.Map  // peer address → struct{}, once net/http has closed it
 }
 
+// startServer serves on an ephemeral IPv4 loopback port.
 func startServer(t *testing.T, filtered bool, handshakeTimeout time.Duration) *server {
 	t.Helper()
 	return startServerOn(t, "127.0.0.1", filtered, handshakeTimeout)
 }
 
+// startServerOn serves on an ephemeral port of host, and skips the test
+// when this machine cannot bind there (no IPv6, for one).
 func startServerOn(t *testing.T, host string, filtered bool, handshakeTimeout time.Duration) *server {
 	t.Helper()
 	inner, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
@@ -342,6 +354,7 @@ func testCert(t *testing.T) tls.Certificate {
 
 // ---- client shapes; each returns the address the server saw ----
 
+// dial connects to addr, failing the test if it cannot.
 func dial(t *testing.T, addr string) *net.TCPConn {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -366,12 +379,15 @@ func silentProbe(t *testing.T, addr string) string {
 // clean EOF this case is about.
 type halfCloseAfterWrite struct{ *net.TCPConn }
 
+// Write sends p, then shuts the write side.
 func (c halfCloseAfterWrite) Write(p []byte) (int, error) {
 	n, err := c.TCPConn.Write(p)
 	_ = c.CloseWrite()
 	return n, err
 }
 
+// helloThenHalfClose is a real client that sends its ClientHello and then
+// goes quiet: the one shape whose line reads exactly like the probe's.
 func helloThenHalfClose(t *testing.T, addr string) string {
 	t.Helper()
 	c := dial(t, addr)
@@ -380,6 +396,8 @@ func helloThenHalfClose(t *testing.T, addr string) string {
 	return c.LocalAddr().String()
 }
 
+// plaintextHTTP speaks HTTP/1.1 to the TLS port and reads the server's
+// 400.
 func plaintextHTTP(t *testing.T, addr string) string {
 	t.Helper()
 	c := dial(t, addr)
@@ -391,6 +409,8 @@ func plaintextHTTP(t *testing.T, addr string) string {
 	return c.LocalAddr().String()
 }
 
+// partialRecord sends three of a record header's five bytes, then
+// half-closes.
 func partialRecord(t *testing.T, addr string) string {
 	t.Helper()
 	c := dial(t, addr)
@@ -413,6 +433,8 @@ func stallUntilClosed(t *testing.T, addr string) string {
 	return c.LocalAddr().String()
 }
 
+// verifiedHandshake completes a handshake that trusts exactly the test
+// cert, and returns the address the server saw.
 func verifiedHandshake(t *testing.T, addr string) string {
 	t.Helper()
 	roots := x509.NewCertPool()
@@ -435,6 +457,7 @@ type elsewhereListener struct {
 	remote, local net.Addr
 }
 
+// Accept hands back the next connection with both addresses replaced.
 func (l elsewhereListener) Accept() (net.Conn, error) {
 	c, err := l.Listener.Accept()
 	if err != nil {
@@ -448,8 +471,11 @@ type addrConn struct {
 	remote, local net.Addr
 }
 
+// RemoteAddr is the faked peer.
 func (c addrConn) RemoteAddr() net.Addr { return c.remote }
-func (c addrConn) LocalAddr() net.Addr  { return c.local }
+
+// LocalAddr is the faked destination.
+func (c addrConn) LocalAddr() net.Addr { return c.local }
 
 // fakeConn is only ever asked for its addresses, and closed.
 type fakeConn struct {
@@ -457,21 +483,29 @@ type fakeConn struct {
 	remote, local net.Addr
 }
 
+// RemoteAddr is the configured peer.
 func (c fakeConn) RemoteAddr() net.Addr { return c.remote }
-func (c fakeConn) LocalAddr() net.Addr  { return c.local }
-func (fakeConn) Close() error           { return nil }
+
+// LocalAddr is the configured destination.
+func (c fakeConn) LocalAddr() net.Addr { return c.local }
+
+// Close succeeds: there is nothing underneath to close.
+func (fakeConn) Close() error { return nil }
 
 type queueListener struct {
 	net.Listener
 	conns []net.Conn
 }
 
+// Accept hands out the queued connections in order.
 func (l *queueListener) Accept() (net.Conn, error) {
 	c := l.conns[0]
 	l.conns = l.conns[1:]
 	return c, nil
 }
 
+// firstNonLoopbackIPv4 returns an IPv4 address this machine holds that is
+// neither loopback nor link-local, and skips the test when there is none.
 func firstNonLoopbackIPv4(t *testing.T) net.IP {
 	t.Helper()
 	addrs, err := net.InterfaceAddrs()
@@ -489,6 +523,7 @@ func firstNonLoopbackIPv4(t *testing.T) net.IP {
 
 // ---- log capture ----
 
+// linesFrom returns the handshake-error lines logged for peer.
 func linesFrom(logs *handshaketest.Buffer, peer string) []string {
 	var out []string
 	for _, line := range strings.Split(logs.String(), "\n") {
