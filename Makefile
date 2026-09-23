@@ -1,4 +1,4 @@
-.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version docker
+.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version check-buildx docker
 
 BINARY      := bridge
 IMAGE       := 1-bit-bridge
@@ -120,9 +120,23 @@ check-go-version:
 	fi; \
 	echo "check-go-version: OK (go.mod go $$gomod, Dockerfile GO_VERSION $$dockerfile -> major.minor $$gomm)"
 
+# Guard: the Dockerfile requires BuildKit (see the comment on its builder
+# FROM line), which the docker CLI reaches only through the buildx plugin.
+# Without the plugin `docker build` falls back to the deprecated legacy
+# builder and fails at that FROM line; this names the missing piece first.
+check-buildx:
+	@docker buildx version >/dev/null 2>&1 || { \
+		echo "check-buildx: 'docker buildx' is unavailable — the Dockerfile requires BuildKit, which needs the buildx plugin" >&2; \
+		echo "  install it (Ubuntu/Debian docker.io: sudo apt install docker-buildx); docs/docker.md → 'Build it yourself' lists the rest" >&2; \
+		exit 1; \
+	}; \
+	echo "check-buildx: OK ($$(docker buildx version))"
+
 # Convenience: build the container image for the host arch, injecting VERSION
 # so `bridge version` reports the build identity (mirrors the ServerVersion
-# injection `make build` does). Multi-arch builds use `docker buildx` — see
-# docs/docker.md. Runs the go-version guard first for a clear early failure.
-docker: check-go-version
-	docker build --build-arg VERSION="$(VERSION)" -t $(IMAGE):dev .
+# injection `make build` does). `docker buildx build`, not `docker build`: the
+# Dockerfile requires BuildKit, and `--load` lands the image in the local
+# store whichever buildx driver is selected. Multi-arch builds — see
+# docs/docker.md. Runs both guards first for a clear early failure.
+docker: check-go-version check-buildx
+	docker buildx build --load --build-arg VERSION="$(VERSION)" -t $(IMAGE):dev .

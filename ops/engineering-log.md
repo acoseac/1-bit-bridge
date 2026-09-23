@@ -9324,3 +9324,136 @@ that looked exactly like a real one. The only tell was an `exit=1` beside it tha
 the summary format invited reading as noise. Same family as the memory entry on
 `grep`-masked exit status, and the reason the gate is now run with its output
 captured whole and `$?` checked directly rather than inferred from a filter.
+
+## 2026-09-23 — the Dockerfile required BuildKit and said so in a regex (#983)
+
+A plain `docker build .` on a clean Ubuntu 26.04 host with the distro
+`docker.io` package (Docker 29.1.3) failed on the builder stage:
+
+    Step 3/23 : FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine AS builder
+    failed to parse platform : "" is an invalid OS component of "": OSAndVersion specifier component must match "^([A-Za-z0-9_-]+)(?:\\(([A-Za-z0-9_.-]*)\\))?$": invalid argument
+
+Not a defect in the shipped image: `docker.yml` runs
+`docker/setup-buildx-action`, and the published v0.2.0 image is correct. It is
+the path a contributor or self-hoster takes, and `make docker` took it too.
+
+### The chain
+
+- `BUILDPLATFORM` is one of BuildKit's automatic platform ARGs. The legacy
+  builder sets none of them, so `--platform=${BUILDPLATFORM}` expanded to the
+  empty string and containerd's platform parser printed its regex. Nothing in
+  the message names BuildKit or buildx.
+- The legacy builder is what a plain `docker build` gets whenever the buildx
+  CLI plugin is missing, and distro packaging makes that the default: Ubuntu
+  26.04's `docker.io` only SUGGESTS `docker-buildx` (`apt-cache show`), and
+  Debian trixie's does not list it at all. The CLI does print a DEPRECATED
+  notice naming buildx, above an error that does not connect to it.
+- The pin landed in #451 (2026-06-29) with `ARG TARGETOS=linux`, commented as
+  letting "a non-BuildKit `docker build` … still build a linux binary", in a
+  commit whose message said "Plain `docker build` is unchanged". On the legacy
+  builder neither was ever true: the FROM failed before the builder stage ran.
+  The comment described a degrade path that had been dead since the day it was
+  written, and nothing noticed for three months, because the only path CI
+  exercises is buildx on a tag push.
+
+### Measured
+
+Docker 29.1.3 (Ubuntu `docker.io`), embedded BuildKit v0.26.2, buildx 0.30.1,
+amd64, no QEMU `binfmt_misc` handlers registered. `DOCKER_BUILDKIT=0` forces
+the legacy builder. Tiny probe Dockerfiles first:
+
+| Probe | Legacy builder | BuildKit |
+|---|---|---|
+| `FROM --platform=${BUILDPLATFORM:-this-Dockerfile-requires-BuildKit--build-with-docker-buildx}` | `failed to parse platform this-Dockerfile-requires-BuildKit--build-with-docker-buildx: … unknown operating system or architecture` | `BUILDPLATFORM=[linux/amd64]`; with `--platform linux/arm64`, `BUILDPLATFORM=[linux/amd64] TARGETPLATFORM=[linux/arm64]`; `--check` clean |
+| `${BUILDPLATFORM:?this-Dockerfile-requires-BuildKit}` | `failed to process arguments for platform : … BUILDPLATFORM: this-Dockerfile-requires-BuildKit` | works; `--check` clean |
+| global `ARG BUILDPLATFORM=linux/s390x`, echoed in a stage | — | `BUILDPLATFORM=[linux/s390x]` |
+| in-stage `ARG TARGETOS=bogus-os` / `ARG TARGETARCH=bogus-arch` | — | `TARGETOS=[bogus-os] TARGETARCH=[bogus-arch]` |
+| global `ARG BUILDPLATFORM=linux/arm64` + `FROM --platform=${BUILDPLATFORM} alpine` | ran the locally cached AMD64 alpine (`uname=[x86_64]`, same image ID as the amd64 probe) | pulled arm64 alpine: `exec /bin/sh: exec format error` |
+| `FROM --platform=${BUILDPLATFORM:-linux}` | `uname=[x86_64]` — the daemon's own arch | `BUILDPLATFORM` wins, inert |
+
+Rows three and four are the finding that decides option (c): **under BuildKit a
+declared ARG default is not a fallback — it REPLACES the automatic value**,
+globally and inside a stage. #451's comment said the opposite of TARGETOS
+("BuildKit overrides it per target"). That was harmless only because this
+image's TARGETOS is always `linux`. The same pattern on TARGETARCH would have
+put the amd64 binary into the arm64 leg of every release image. Row five's
+legacy column adds a second reason not to trust that builder with platforms:
+it ran a cached image of the wrong architecture rather than the one the FROM
+named.
+
+Full image, main against the fix (same context, `VERSION=buildkit-test`):
+
+- BuildKit amd64: `/usr/local/bin/bridge` sha256 `f2c0cd40…` on main, on the
+  fix built `--no-cache`, and on the fix built cached — byte-identical. Both
+  logs expand the compile to `RUN GOOS=linux GOARCH=amd64 go build`, so
+  dropping `=linux` from `ARG TARGETOS` changed nothing BuildKit executes.
+  The fixed image runs (`1-bit-bridge buildkit-test (protocol v1)`), carries
+  sox, ffmpeg, ffprobe, fpcalc and lsof and all four `dsd_*` decoders plus
+  `dst`, and runs as uid 100.
+- BuildKit `--platform linux/arm64 --target builder`: `out/bridge` sha256
+  `219fb2a3…` on both, `ARM aarch64, statically linked`, compiled by
+  `GOARCH=arm64` inside an amd64 golang stage. On a host with no QEMU
+  registered, an arm64 builder stage could not have run `apk add` at all, so
+  the pin to the native platform held.
+- Legacy, fix: `failed to parse platform this-Dockerfile-requires-BuildKit--build-with-docker-buildx: …`.
+- Legacy, `:-linux`: built in 91 s, `linux/amd64`, runs
+  (`1-bit-bridge legacy-c2 (protocol v1)`), five decoders, `/data` owned by
+  `bridge`. The rejected option works on this host. It was refused on judgment,
+  not correctness.
+
+The reported scenario itself: the host's own 29.1.3 CLI (`/usr/bin/docker`,
+libc-only) bind-mounted into a throwaway `ubuntu:26.04` container with the
+daemon socket and NO `cli-plugins` directory, which is `docker.io` without
+`docker-buildx` with nothing on the host touched. Plain `docker build` printed
+the DEPRECATED notice and then the original regex error on main, and the
+sentinel on the fix. `docker buildx version` answered `unknown command`, rc=1.
+`make docker` stopped at `check-buildx` with its install line (make rc=2), and
+built `1-bit-bridge:dev` once the plugin directory was mounted.
+
+### Decisions
+
+- **Why not (c).** `ARG BUILDPLATFORM=<arch>` is refused outright by row three:
+  it would pin every BuildKit build, so arm64 hosts (Apple Silicon Docker
+  Desktop, arm64 Linux and CI runners) would run the Go compile under QEMU, or
+  fail where none is registered. `:-linux` is correct as far as this host can
+  show and was refused anyway. It is a second build path that no CI runs, for a
+  builder Docker has deprecated and prints a removal notice for on every build,
+  in a file whose previous degrade path (#451's TARGETOS default) rotted
+  unnoticed. Failing loudly on one path keeps the file free to use BuildKit
+  features (cache mounts, heredocs) without a legacy-compat decision each time.
+- **Why `:-` and not `:?`.** `:?` is the operator that means "error if unset",
+  and both builders here support it. But a lexer that cannot parse it errors
+  whether or not the variable is set, so a builder that does provide
+  BUILDPLATFORM and has an older lexer would go from building to failing. `:-`
+  is in every Dockerfile lexer. The sentinel is hyphens only, and each other
+  spelling was probed: a space splits the FROM line and breaks BuildKit too
+  (`FROM requires either one or three arguments`, on both builders); a `/`
+  makes an os/arch pair that PARSES, so the legacy builder goes looking for it
+  (`no matching manifest for buildkit/required in the manifest list entries`);
+  and a `.` falls outside the OS-component regex, which prints the regex again.
+- **`ARG TARGETOS` lost its `=linux` default.** Its only purpose was the dead
+  non-BuildKit path, and its comment made the wrong claim about BuildKit. The
+  byte-identical binaries above show the removal changed nothing.
+
+### Process notes
+
+- The test host had buildx installed later on the day of the report. With the
+  plugin present, `docker build` routes to BuildKit, so the report's
+  `sudo docker build .` no longer reproduces there. Use `DOCKER_BUILDKIT=0`, or
+  the no-plugin container above for the full CLI behaviour.
+- The report said `DOCKER_BUILDKIT=1` "prints … and falls back to the legacy
+  builder". On 29.1.3 it does not fall back: it refuses with `ERROR: BuildKit
+  is enabled but the buildx component is missing or broken` and exits 1. The
+  docs say that.
+- `docker compose build` got through without the plugin. Compose 2.40.3 warned
+  `configured to build using Bake, but buildx isn't installed` and fell back to
+  its internal builder; upstream `pkg/compose/build_bake.go` (`buildWithBake`)
+  returns false on a NOT-FOUND plugin for exactly that. A review bot said
+  Compose ≥ 2.40.2 fails when buildx is missing, citing docker/compose#13295;
+  that check (`compose build requires buildx 0.17 or later`) runs only on the
+  Bake path, i.e. when buildx is PRESENT and old. The docs still don't offer
+  the fallback as a route, because upstream has deprecated the internal builder
+  ("will be removed in next release").
+- `docker.yml` runs only on tags and `workflow_dispatch`, so a PR that changes
+  only the Dockerfile gets no image build in CI. Everything above ran on a real
+  daemon, under both builders.

@@ -93,17 +93,75 @@ non-root `bridge` user, exposes `7788`, and keeps all state under the
 
 ## Build it yourself
 
+The Dockerfile needs **BuildKit**, which the `docker` CLI reaches through the
+**buildx** plugin, so build with `docker buildx`:
+
 ```sh
 git clone https://github.com/acoseac/1-bit-bridge.git
 cd 1-bit-bridge
-docker build -t 1-bit-bridge:dev .
+docker buildx build --load -t 1-bit-bridge:dev .
 ```
 
-Multi-arch builds (linux/amd64 + linux/arm64 for Apple Silicon
-hosts) work via `docker buildx build --platform=linux/amd64,linux/arm64`.
-The builder cross-compiles natively per target arch (it pins the build
-stage to `$BUILDPLATFORM`), so an arm64 image builds without QEMU-emulating
-the whole Go compile.
+`make docker` runs the same build after checking that the plugin is installed.
+
+Docker Desktop ships the plugin, and Docker's own install instructions for
+Engine (`docker-ce`) install it alongside, so a plain `docker build` already
+uses it there. Distribution packages often leave it out: Ubuntu's `docker.io`
+only *suggests* `docker-buildx`, and Debian's doesn't mention it at all, so
+neither installs the plugin by default. Without it, `docker build` falls back
+to Docker's deprecated legacy builder, which stops at the builder stage:
+
+```text
+failed to parse platform this-Dockerfile-requires-BuildKit--build-with-docker-buildx: "this-Dockerfile-requires-BuildKit--build-with-docker-buildx": unknown operating system or architecture: invalid argument
+```
+
+Install the plugin, then build again. `docker buildx version` confirms that the
+CLI finds it.
+
+| Docker installed from | Install buildx with |
+|---|---|
+| Ubuntu's own `docker.io` (22.04 and later), or Debian's (13 "trixie" and later) | `sudo apt install docker-buildx` |
+| Docker's apt repository (`docker-ce`) | `sudo apt install docker-buildx-plugin` |
+| Docker's dnf repository (`docker-ce`) | `sudo dnf install docker-buildx-plugin` |
+| Fedora's own `moby-engine` | `sudo dnf install docker-buildx` |
+| Arch Linux | `sudo pacman -S docker-buildx` |
+| Alpine | `sudo apk add docker-cli-buildx` |
+
+Anywhere else, download the binary for your platform from the
+[buildx releases](https://github.com/docker/buildx/releases), rename it to
+`docker-buildx`, make it executable, and put it in `~/.docker/cli-plugins/` (for
+your user only; `sudo docker` runs as root, which looks in root's home instead)
+or `/usr/local/lib/docker/cli-plugins/` (for every user).
+
+Setting `DOCKER_BUILDKIT=1` is no substitute: without the plugin, Docker
+refuses with `BuildKit is enabled but the buildx component is missing or
+broken`.
+
+`docker compose build` (the commented-out `build: .` in the shipped
+`compose.yaml`) still gets through without the plugin today. Compose 2.40 warns
+that buildx isn't installed and falls back to its internal builder. Don't rely
+on it: upstream has deprecated that builder, and an installed buildx older than
+0.17 makes Compose refuse outright. Install the plugin.
+
+The Dockerfile is deliberately not built to get past the legacy builder. Its
+builder stage is pinned to the platform of the machine doing the build
+(`FROM --platform=$BUILDPLATFORM`), so Go cross-compiles for each target
+instead of running the whole toolchain under QEMU. Only BuildKit supplies
+`$BUILDPLATFORM`. A fallback that let the legacy builder through would be a
+second build path that nothing tests, for a builder Docker has deprecated, so
+the build fails and names what it needs instead.
+
+Multi-arch builds (linux/amd64 + linux/arm64, e.g. an image for Apple Silicon
+hosts) use the same plugin:
+`docker buildx build --platform=linux/amd64,linux/arm64 -t 1-bit-bridge:dev .`
+Add `--push` with a registry tag to publish the result, or `--load` to keep it
+locally. `--load` needs the containerd image store, which Docker Desktop and
+Docker Engine 29 and later use by default. Go cross-compiles natively for each
+target, but the small runtime stage (`apk add` and the user setup) still runs
+*as* each target arch. Docker Desktop emulates the other arch out of the box. On
+a Linux host where that stage fails with `exec format error`, register QEMU once
+with `docker run --privileged --rm tonistiigi/binfmt --install all` (see Docker's
+[multi-platform guide](https://docs.docker.com/build/building/multi-platform/)).
 
 ## First-time setup
 
@@ -272,8 +330,8 @@ container. All are **off by default** and cost nothing until enabled. Bundling `
 image to roughly **260 MB** (it dominates the size) — the deliberate
 trade for in-container audio processing. The same `ffmpeg` decodes the
 **DSD → PCM renditions** (`upscale.dsdRender.enabled`, off by default):
-the image build asserts that its ffmpeg carries the `dsd_lsbf_planar`
-and `dst` decoders, so a base-image change that dropped them fails the
+the image build asserts that its ffmpeg carries all four `dsd_*` decoders
+and `dst`, so a base-image change that dropped any of them fails the
 build rather than the first render. Point `upscale.tempDir` at a local
 volume if the variants directory is network-mounted — render scratch
 (up to ~5 GB for an hour-long faithful render) must never land there.
@@ -612,6 +670,12 @@ install. Use `docker logs` for container deployments.
 
 ## Troubleshooting
 
+- **`docker build` fails with `failed to parse platform
+  this-Dockerfile-requires-BuildKit…`** (or, from a Dockerfile older than
+  this note, `failed to parse platform : "" is an invalid OS component`):
+  the buildx plugin is missing (or `DOCKER_BUILDKIT=0` is set), so Docker
+  used its legacy builder. Install the plugin — see
+  [Build it yourself](#build-it-yourself).
 - **iOS can't connect**: confirm `7788` is published (`-p 7788:7788`)
   and that the host's firewall (`ufw`, `firewalld`, Synology
   Security Advisor) isn't blocking it. Check

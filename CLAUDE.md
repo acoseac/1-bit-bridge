@@ -2979,6 +2979,30 @@ its twin.** The top list is older, shorter, and read first.
   being discussed rather than cited. Keep the two apart: a stale citation is
   repointed or elided, a false positive means the prose should stop spelling a
   token it is only talking about. (#946)
+- **The Dockerfile REQUIRES BuildKit, and its builder `FROM` says so through
+  an invalid fallback:**
+  `--platform=${BUILDPLATFORM:-this-Dockerfile-requires-BuildKit--build-with-docker-buildx}`.
+  BuildKit always sets `BUILDPLATFORM`, so the fallback is inert there
+  (measured: amd64 and cross-compiled arm64 binaries byte-identical to the
+  bare form's, `--check` clean). The legacy builder — what `docker build`
+  falls back to when the buildx plugin is missing, which is the DEFAULT with
+  Ubuntu's and Debian's `docker.io` — sets nothing, and the bare form died
+  with a platform-regex dump naming neither BuildKit nor buildx. **Never
+  replace it with a real default.** Under BuildKit a declared `ARG` default
+  does not fill a gap, it REPLACES the automatic value, globally and in a
+  stage (`ARG BUILDPLATFORM=linux/s390x` echoes `linux/s390x`; `ARG
+  TARGETARCH=bogus` echoes `bogus`), so `ARG BUILDPLATFORM=linux/amd64` puts
+  every arm64 host's Go compile under QEMU and a `TARGETARCH` default ships
+  one arch's binary in every leg. `:-linux` did build a working image on the
+  legacy builder (measured on amd64) and was refused anyway: a second path no
+  CI runs, for a builder Docker has deprecated. #451 had already shipped one
+  such path — `ARG TARGETOS=linux` "so a non-BuildKit `docker build` still
+  builds", dead from the day it landed because the `FROM` failed first. `:?`
+  would read better; `:-` is the form every Dockerfile lexer parses. `make
+  docker` is `docker buildx build --load` behind a `check-buildx` guard.
+  **`docker.yml` runs only on tags and dispatch**, so a Dockerfile PR gets no
+  CI build at all: verify on a real daemon under BOTH builders
+  (`DOCKER_BUILDKIT=0` forces the legacy one). (#983)
 
 ### <a name="review-2026-09-22-fixes"></a>2026-09-22 — review of the #959–#966 fix window
 
