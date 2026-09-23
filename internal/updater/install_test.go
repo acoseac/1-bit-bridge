@@ -838,8 +838,15 @@ func parkInstallMidVerify(t *testing.T, oldVersion, newVersion string) *parkedIn
 // fail fast with ErrInstallInFlight rather than race the first on the
 // scratch dir, the .bak rename target, and update-state.json (one
 // installer's deferred cleanScratch could otherwise delete the other's
-// verified binary mid-swap). Once the first completes, the lock is
-// released and a fresh attempt succeeds.
+// verified binary mid-swap).
+//
+// Once the first completes, the lock is released — which the follow-up
+// attempt proves by reaching a refusal that lives PAST the try-lock.
+// That refusal is ErrInstallPendingRestart: the first install staged
+// 0.2.0 and nothing has restarted into it, so a second install of the
+// same target is exactly the repeat that would eat the .bak. A held
+// lock would still answer ErrInstallInFlight, so the distinction is
+// what carries the assertion.
 func TestInstallConcurrentCallsSerialized(t *testing.T) {
 	parked := parkInstallMidVerify(t, "0.1.0", "0.2.0")
 	retryOpts := InstallOptions{
@@ -857,9 +864,10 @@ func TestInstallConcurrentCallsSerialized(t *testing.T) {
 		t.Fatalf("first Install: %v", err)
 	}
 
-	// Lock released: a follow-up attempt proceeds.
-	if _, err := parked.upd.Install(context.Background(), retryOpts); err != nil {
-		t.Fatalf("Install after the first completed: %v (lock not released?)", err)
+	// Lock released: the follow-up gets PAST the try-lock and is then
+	// refused by the pending-restart guard, not by ErrInstallInFlight.
+	if _, err := parked.upd.Install(context.Background(), retryOpts); !errors.Is(err, ErrInstallPendingRestart) {
+		t.Fatalf("Install after the first completed: err = %v, want ErrInstallPendingRestart (ErrInstallInFlight would mean the lock was not released)", err)
 	}
 }
 

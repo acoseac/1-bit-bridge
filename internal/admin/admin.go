@@ -1177,6 +1177,12 @@ var (
 	ErrUpdateNoUpdate        = errors.New("no update available")
 	ErrUpdateActiveSessions  = errors.New("active downloads in flight")
 	ErrUpdateInstallInFlight = errors.New("an install is already in progress")
+	// ErrUpdatePendingRestart: the candidate is already on disk and the
+	// process has not restarted into it. A second install would re-run
+	// the download and destroy the .bak the first one created, so the
+	// remedy is Restart — which is why this is its own code rather than
+	// falling through to the generic install-failed 502.
+	ErrUpdatePendingRestart  = errors.New("this release is already installed and waiting for a restart")
 	ErrUpdateNotSupported    = errors.New("self-install not supported on this platform")
 	ErrUpdatePathNotWritable = errors.New("binary path not writable")
 )
