@@ -95,8 +95,8 @@ func TestWriteArtworkAtomicStream_HappyPath(t *testing.T) {
 	// memory. Verifies the round-trip plus the size-cap reject path.
 	cacheDir := t.TempDir()
 	dst := filepath.Join(cacheDir, "stream-mbid-500.jpg")
-	payload := bytes.Repeat([]byte("X"), 4096)
-	if err := writeArtworkAtomicStream(dst, bytes.NewReader(payload), int64(len(payload)+1)); err != nil {
+	payload := jpegFixture(4096)
+	if err := writeArtworkAtomicStream(cacheDir, dst, bytes.NewReader(payload), int64(len(payload)+1)); err != nil {
 		t.Fatalf("writeArtworkAtomicStream: %v", err)
 	}
 	got, err := os.ReadFile(dst)
@@ -121,8 +121,8 @@ func TestWriteArtworkAtomicStream_OversizedRejected(t *testing.T) {
 	// can detect "would have read more" without unbounded memory.
 	cacheDir := t.TempDir()
 	dst := filepath.Join(cacheDir, "stream-mbid-oversized.jpg")
-	payload := bytes.Repeat([]byte("X"), 1024)
-	if err := writeArtworkAtomicStream(dst, bytes.NewReader(payload), 100); err == nil {
+	payload := jpegFixture(1024)
+	if err := writeArtworkAtomicStream(cacheDir, dst, bytes.NewReader(payload), 100); err == nil {
 		t.Fatal("expected oversized error")
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
@@ -146,14 +146,14 @@ func TestWriteArtworkAtomicStream_RaceWinnerSizeMatch(t *testing.T) {
 	// (mbid, size).
 	cacheDir := t.TempDir()
 	dst := filepath.Join(cacheDir, "stream-mbid-race.jpg")
-	payload := bytes.Repeat([]byte("X"), 4096)
+	payload := jpegFixture(4096)
 	if err := os.WriteFile(dst, payload, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	orig := atomicwrite.SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
 	t.Cleanup(func() { atomicwrite.SetRenameFuncForTest(orig) })
 
-	if err := writeArtworkAtomicStream(dst, bytes.NewReader(payload), int64(len(payload)+1)); err != nil {
+	if err := writeArtworkAtomicStream(cacheDir, dst, bytes.NewReader(payload), int64(len(payload)+1)); err != nil {
 		t.Fatalf("writeArtworkAtomicStream: %v (expected nil — race winner with matching size)", err)
 	}
 	entries, _ := os.ReadDir(cacheDir)
@@ -170,11 +170,41 @@ type errReader struct{ err error }
 
 func (r errReader) Read(p []byte) (int, error) { return 0, r.err }
 
+// failAfterPrefixReader serves a valid JPEG signature and then fails.
+//
+// errReader alone no longer reaches the staging file at all: the
+// image-signature check peeks the first bytes BEFORE os.CreateTemp runs,
+// so a reader that fails immediately short-circuits there and the
+// "no tmp leak" assertion below becomes vacuous — it asserts the absence
+// of a file that was never created. This one gets past the sniff and
+// fails during io.Copy, which is the path the test was written for
+// (CodeRabbit on #976).
+type failAfterPrefixReader struct {
+	prefix []byte
+	off    int
+	err    error
+}
+
+func (r *failAfterPrefixReader) Read(p []byte) (int, error) {
+	if r.off < len(r.prefix) {
+		n := copy(p, r.prefix[r.off:])
+		r.off += n
+		return n, nil
+	}
+	return 0, r.err
+}
+
 func TestWriteArtworkAtomicStream_PropagatesReadError(t *testing.T) {
 	cacheDir := t.TempDir()
 	dst := filepath.Join(cacheDir, "stream-mbid-readerr.jpg")
-	if err := writeArtworkAtomicStream(dst, errReader{err: io.ErrUnexpectedEOF}, 1024); err == nil {
+	src := &failAfterPrefixReader{prefix: jpegFixture(64), err: io.ErrUnexpectedEOF}
+	if err := writeArtworkAtomicStream(cacheDir, dst, src, 1024); err == nil {
 		t.Fatal("expected error from failing reader")
+	}
+	// The staging file must actually have been created, or the leak
+	// assertion below proves nothing.
+	if src.off == 0 {
+		t.Fatal("the reader was never drained past the signature; this test is not exercising the copy path")
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
 		t.Errorf("destination should not exist after read error; stat err = %v", err)
@@ -197,8 +227,8 @@ func TestWriteArtworkAtomicStream_RenameFailRejectsDifferentBytesOfSameSize(t *t
 	// length must NOT be accepted; the rename error propagates.
 	cacheDir := t.TempDir()
 	dst := filepath.Join(cacheDir, "stream-mbid-collision.jpg")
-	want := bytes.Repeat([]byte("X"), 4096)
-	collision := bytes.Repeat([]byte("Y"), 4096) // same size, different bytes
+	want := jpegFixture(4096)
+	collision := jpegFixtureFilled(4096, 'Y') // same size, different bytes
 	if err := os.WriteFile(dst, collision, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +236,7 @@ func TestWriteArtworkAtomicStream_RenameFailRejectsDifferentBytesOfSameSize(t *t
 	orig := atomicwrite.SetRenameFuncForTest(func(src, dst string) error { return os.ErrPermission })
 	t.Cleanup(func() { atomicwrite.SetRenameFuncForTest(orig) })
 
-	if err := writeArtworkAtomicStream(dst, bytes.NewReader(want), int64(len(want)+1)); err == nil {
+	if err := writeArtworkAtomicStream(cacheDir, dst, bytes.NewReader(want), int64(len(want)+1)); err == nil {
 		t.Fatal("writeArtworkAtomicStream returned nil; expected the rename error to propagate when destination is size-equal but byte-different")
 	}
 	// Cache file must NOT have been overwritten (the rename failed and
@@ -224,5 +254,35 @@ func TestWriteArtworkAtomicStream_RenameFailRejectsDifferentBytesOfSameSize(t *t
 		if strings.HasPrefix(e.Name(), ".caa-") {
 			t.Errorf("leaked tmp on collision-reject path: %s", e.Name())
 		}
+	}
+}
+
+// jpegFixture returns n bytes that begin with the JPEG SOI marker, so a
+// test about the atomic-write MECHANICS is not failed by the image-
+// signature gate in front of them. A fixture must be a value the
+// transformation would accept, or the test pins nothing.
+func jpegFixture(n int) []byte { return jpegFixtureFilled(n, 'X') }
+
+func jpegFixtureFilled(n int, fill byte) []byte {
+	b := append([]byte{}, 0xFF, 0xD8, 0xFF)
+	return append(b, bytes.Repeat([]byte{fill}, n-len(b))...)
+}
+
+// TestWriteArtworkAtomicStream_RefusesBeforeStagingOnAnImmediateError pins
+// the OTHER half explicitly, so errReader keeps a job and the short-circuit
+// is a stated property rather than an accident: a reader that fails before
+// any signature can be read never creates a staging file at all.
+func TestWriteArtworkAtomicStream_RefusesBeforeStagingOnAnImmediateError(t *testing.T) {
+	cacheDir := t.TempDir()
+	dst := filepath.Join(cacheDir, "stream-mbid-immediate.jpg")
+	if err := writeArtworkAtomicStream(cacheDir, dst, errReader{err: io.ErrUnexpectedEOF}, 1024); err == nil {
+		t.Fatal("expected error from failing reader")
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a body that failed before the signature check still created %d file(s): %v", len(entries), entries)
 	}
 }

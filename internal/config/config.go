@@ -494,6 +494,20 @@ type AtlasConfig struct {
 	// is the operator's own paired devices, which is the trust model the rest
 	// of the device→bridge write surface already assumes.
 	//
+	// **That reasoning bounded the risk at CONTENT INJECTION, and the bound
+	// was wrong.** Until the 2026-09-23 fix the harvest results page also
+	// chose the MBID that became the leading component of
+	// ArtworkCachePath's filepath.Join — a write of up to MaxCoverArtBytes
+	// and two os.Remove calls at an upstream-chosen path, with MkdirAll
+	// creating the way there. That is closed at three layers now (shape at
+	// ingest and at the sink, containment in the write primitive, an
+	// image-signature check on the body), so the paragraph above is true
+	// again as written. It is left standing WITH this note rather than
+	// rewritten, because the lesson is that an accepted-residual argument
+	// is only as good as its enumeration of what the untrusted value can
+	// reach — and this one enumerated the bios and missed the filesystem.
+	// Pinning remains the stronger posture for any bridge with harvest on.
+	//
 	// Compared verbatim against the handler's canonical `scheme://host` form,
 	// so a trailing slash or a `https://host/` spelling still matches.
 	// Validated at load as a plain https base URL — the same shape the

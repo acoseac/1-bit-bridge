@@ -8773,3 +8773,554 @@ both are now fixed upstream. The decision stands for a different reason (Parse
 would still allocate from a 128 MiB picture cap taken off an unvalidated field,
 and a bound we control beats one that moves with a dependency), and the comment
 says so rather than leaving stale reasoning in place.
+## 2026-09-23 — Uninstall no-opped on a system install and the menu wiped anyway (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/packaging` — 1,636 lines with
+the thinnest production:test ratio in the repo (2.44) and no appearance in any
+dated review section.
+
+### The defect
+
+`Stop`, `Start` and `Restart` all gate on `KindLaunchdSystem` / `KindSystemdSystem`
+and return `ErrSystemInstallNeedsRoot`. `Uninstall` had no such gate: it
+dispatched straight to `uninstallLaunchd` / `uninstallSystemd`, which touch only
+the fixed USER-level path and treat a missing file as success.
+
+So with a sudo install, `InstalledKind()` returns `KindLaunchdSystem`,
+`cmd/bridge/menu.go` asks "Uninstall the background service (macOS
+LaunchDaemon)?", gets `(userPath, nil)` and prints "service uninstalled." The
+LaunchDaemon is still registered and still running. The same menu flow then
+offers `os.RemoveAll(cfgDir)`: config, data, certs and the token store, under a
+live bridge.
+
+The Windows arm of the same function already reasons about precisely this — it
+surfaces the SCM error rather than swallowing it, so a stuck stop is not "a
+zombie service reported as a clean uninstall". The POSIX arms did not make the
+distinction.
+
+### The fix
+
+One predicate, `NeedsRootFor`, read by all four entry points. The condition was
+previously the same two terms written out in three places and absent from the
+fourth, which is the enumeration shape this repo keeps recording.
+
+The menu now skips the wipe after a refused uninstall AND says why: a
+silently-skipped step reads as the menu being finished.
+
+### Both first-draft tests were vacuous, and the controls are what said so
+
+**The menu test.** It drove the real `actUninstall` with a fake uninstall that
+refuses, and asserted the config dir survived. It passed with the guard removed.
+The input was `"y\n"` — enough for the uninstall question — so a regression that
+offered the wipe anyway read `""` at the exact-phrase prompt, the phrase check
+refused, nothing was deleted, and the file assertions passed while the guard was
+gone. Queuing `"y\nWIPE\n"` makes the second line consumable ONLY if the wipe is
+offered; the control now deletes `tokens.json` and the dir, which is the failure
+in its real shape.
+
+**The packaging test.** It called the real `Uninstall` and asserted the refusal
+shape. It passed with the gate removed, and always will on CI:
+`installedKindForOS` probes `/Library/LaunchDaemons` and `/etc/systemd/system`,
+which only root can create, so the gate never fires on a test host. A
+behavioural test of that wiring cannot fail.
+
+Replaced with an AST walk requiring each of the four entry points to reference
+`NeedsRootFor`, anchored on the IDENTIFIER rather than a string because this
+package's own commentary names what it discusses. It has a `checked` floor, and
+the control (deleting the gate from `Uninstall`) reports exactly
+"Uninstall does not consult NeedsRootFor".
+
+The transferable point is not new but it arrived in a new shape: a control that
+PASSES is the one worth acting on, and both of these did before either test was
+worth keeping.
+## 2026-09-23 — the variant delete selected its victims case-insensitively (#TBD)
+
+Found by the 2026-09-23 code pass's mechanical sweep of the `LIKE`-on-a-path
+class.
+
+### The defect
+
+```go
+listVariantsByPathPrefixSQL = variantRowSelect + `
+    WHERE unicode_lower(source_path) LIKE unicode_lower(?) ESCAPE '\'`
+listVariantsForPathSQL = variantRowSelect + `
+    WHERE unicode_lower(source_path) = unicode_lower(?)`
+```
+
+`RunVariantDelete` feeds every returned row to `os.Remove` and then
+`DeleteVariant`. Measured with the fix reverted:
+
+    prefix Jazz selected [JAZZ/c.flac Jazz/a.flac jazz/b.flac], want [Jazz/a.flac]
+    exact path selected [Album/Track.flac album/track.flac], want [Album/Track.flac]
+
+Three directories, one request. On a case-sensitive filesystem — Linux, so the
+VPS, the tenants and the Docker image — those are different real directories.
+Reachable from the `/v1` endpoint and from the console's delete-renditions
+action, which expands an artist into `req.Paths`.
+
+### Three things that made it a defect rather than a judgement call
+
+1. `subtreeLikePattern`'s own docblock forbids exactly this: "Case-folding is
+   the wrong answer for anything that writes, deletes, or decides a scope".
+2. Its sanctioned exception justified `ListVariantsByPathPrefix` "so the variant
+   GC finds sidecars written under a differently-cased source path (PR #477)" —
+   **no GC calls it**. `bridge upscale --gc` drives off `AllVariants`, and each
+   query has exactly one production caller: the delete handler. This log's own
+   2026-07 entry repeats the claim under a third name
+   (`ListVariantsUnderPrefix`) that does not exist either.
+3. **Every other `unicode_lower` predicate in the tree already failed closed.**
+   Six query sites; four are reads and all four use exact-first + folded
+   fallback + `LIMIT 2` so a collision is DETECTED —
+   `lookupTrackByLowerCase`, `lookupVariantByLowerCase` (whose comment names
+   this precise hazard), `LookupAnalysis`, `lyricsRowByFoldedPathSQL`. The two
+   that unlink bytes had neither the exact-first attempt nor the ambiguity
+   refusal. The asymmetry was the bug.
+
+### Why byte-exact SQL is the wrong fix
+
+`unicode_lower` does two jobs: Unicode case folding AND NFC composition. The
+composition was added deliberately (2026-07-21, M9) because the scanner stores
+the on-disk form — NFD for anything from HFS+ or synced from a Linux/NAS —
+while clients send NFC, and without it "every accented NFD path missed the
+LookupTrack / LookupVariant / LookupAnalysis fallback". Going byte-exact would
+answer `deletedCount: 0` for every album with an accent in its path, silently.
+
+Only the case half is unwanted. So the query stays the relaxed candidate
+generator and `acceptCaseExactVariants` adds the strictness — the rule this repo
+already states for the enricher, applied to a delete. Acceptance runs the same
+`nfcCompose` that `unicodeLowerScalar` itself calls, so the two cannot disagree
+about composition.
+
+Verified rather than assumed, because the design depends on it: `unicode_lower`
+is NOT SQLite's C `LOWER()`. `sqlfunc.go` registers a Go implementation via
+`MustRegisterDeterministicScalarFunction`, and its body is
+`cases.Lower(language.Und)` + `norm.NFC`. Had it been the C builtin — ASCII-only,
+no composition — candidates would have been selected under different rules than
+they are judged by.
+
+### A test asserted the defect, and its premise was checkable
+
+The former `…ForPath_exactMatchCaseInsensitive` claimed "iOS sends
+lowercase-normalized paths, the manifest stores filesystem-canonical case" (the
+`Test` prefix is elided here on purpose — the citation guard reads tracked `.md`
+docs since #946, and a note about a test that deliberately no longer exists must
+not read as a claim that it does). If
+true, case-exact matching would break every client delete — a worse regression
+than the bug.
+
+**iOS does not call this endpoint at all.** `BridgeSourceClient.swift` describes
+`DELETE /v1/upscale/variants` as "(admin-driven)" and records that "the iOS-side
+upscale REQUEST surfaces were removed entirely ... so iOS never initiates jobs";
+a grep of the whole iOS repo finds a feature-flag comment and no call site. The
+real callers are the admin console (paths straight out of the server's own
+catalog) and a bearer-token holder following PROTOCOL.md, which documents
+`?path=<rel>` as "the variants of ONE EXACT SOURCE TRACK" — so the spec was
+right and the code did not match it. No spec change and no Mirror-PR.
+
+The fourth instance of this class the repo has recorded. Worth noting that the
+premise was resolvable in two greps of the coupled repo, which is cheaper than
+the reasoning it replaced.
+
+### Also corrected here
+
+`bumpIndexedAtByPathSQL`'s docblock said it was "the whole statement for the
+FIVE writers … one const, five callers, so those five cannot drift". There are
+six; `UpsertAtlasLyrics` is the sixth and uses the const correctly. The rule
+held, the count did not.
+
+### Tests
+
+Beside `TestDeleteTracksByPrefixIsCaseExact` in `store_prefix_case_test.go`,
+which seeds rows directly and touches no filesystem — so unlike a case-twin
+DIRECTORY fixture these run on the dev Mac rather than skipping. The variant
+queries, the ones that unlink files, were simply absent from the file whose
+whole subject is this rule.
+## 2026-09-23 — the console blamed an ffmpeg build for a probe it could not read (field report, #TBD)
+
+An operator on the v0.2.0 Docker image reported: "The ffmpeg build that ships
+with the Docker image doesn't seem to support DSD conversion", quoting
+*"this ffmpeg build lacks the dsd_* decoders (dsd_lsbf, dsd_lsbf_planar,
+dsd_msbf, dsd_msbf_planar)"*. They were repeating what the bridge told them.
+
+### Why the build is the one thing it could not have been
+
+`Dockerfile` asserts all four `dsd_*` decoders AND `dst` at BUILD time, in the
+runtime stage, and `exit 1`s without them — a deliberate choice recorded as "a
+base-image change that drops them then fails here rather than at the first
+render in the field". `git show v0.2.0:Dockerfile` contains that assertion, so
+an image built from the tag cannot lack them.
+
+### The actual defect
+
+`ProbeFFmpeg` sets `DecodersKnown=false` on a timeout, an unparseable listing or
+a failed exec, and `HasDSD` is false in all of those. Three surfaces turn the
+probe into an operator-facing verdict:
+
+- `doctor.checkDSDRenderToolchain` — calls `ProbeFFmpeg` directly, keeps the
+  error, has its own branch: "ffmpeg is on PATH but its decoder listing could
+  not be read: …". **Correct.**
+- `ffmpegDSDCLIReady` (`bridge render` / `optimize` precheck) — same shape,
+  prints "ffmpeg precheck: <err>" before it can reach the HasDSD message.
+  **Correct.**
+- The console's `DSDRenderToolchain` closure — reads `FFmpegSnapshot()`, which
+  does `info, _ := ProbeFFmpeg(...)` and **discards the error**, and had a
+  two-case ladder: not-on-PATH, then `!HasDSD`. **Every probe failure landed on
+  "this ffmpeg build lacks the dsd_* decoders".**
+
+So the one surface a Docker operator actually looks at — the settings page — was
+the one that could not tell the two apart. Reproduced by the negative control,
+which prints the reported sentence verbatim for an `FFmpegInfo` whose only
+problem is `ProbeErr: "ffmpeg -decoders timed out after 5s"`.
+
+### The fix
+
+`FFmpegInfo.ProbeErr` carries the reason through the cache, and the verdict
+gains its `!DecodersKnown` branch. Extracted as the pure
+`dsdRenderToolchainVerdict(FFmpegInfo)` for the reason `packaging.NeedsRootFor`
+was: the closure sits inside a Deps literal in `runServe` and cannot be driven,
+and a verdict nothing pins is how this one came to be wrong.
+
+The snapshot's 30 s TTL was checked and is NOT implicated — a transient failure
+self-heals on the next call; it is the WORDING that was wrong for the whole
+window, not the caching.
+
+### What this does and does not settle
+
+It does not prove the operator's decoders are present. It proves the message
+they were shown is not evidence that they are absent, and that the bridge had a
+better answer available the whole time. The distinguishing commands are
+`bridge doctor` inside the container (the honest ladder) and
+`ffmpeg -hide_banner -decoders | grep dsd_`.
+## 2026-09-23 — the swap's no-file window enclosed a cross-volume copy (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/updater`, alongside the
+repeat-install defect.
+
+### What was actually wrong, and what was not
+
+The documented ordering (`Link(dst,bak)` → `Rename(new,dst)`) holds and is
+correct. **The POSIX hardlink path was never affected**: `dst` keeps resolving
+through its own directory entry for the whole operation, so even when
+`placeNewBinary` fell back to a cross-volume copy, `dst` was present throughout.
+Worth stating precisely, because the first write-up of this finding implied all
+paths were exposed.
+
+The two that were exposed both vacate `dst` first:
+
+- `swapBinaryViaRename`, the POSIX fallback for a filesystem that cannot
+  hardlink (exFAT / SMB / some FUSE mounts).
+- **Windows `swapBinary` — not a fallback there but the ONLY path.**
+  `swap_windows.go:101-108` explains why the hardlink fix cannot apply, so every
+  Windows swap vacates `dst` to `bak` and then installs.
+
+In both, the install step is `placeNewBinary`, which on EXDEV /
+`ERROR_NOT_SAME_DEVICE` copies ~30 MiB and fsyncs — with `dst` absent. Both files
+call that gap "the tiny no-file window between the two renames". And
+`placeNewBinaryWindows`' own docblock names the host where its branch fires:
+"bridge.exe on D: and the data dir under %LOCALAPPDATA% on C: — a small-SSD media
+PC — EVERY update failed". On exactly that host every update now spent multiple
+seconds with no executable on disk. There is an in-process restore
+(`rename(bak, dst)`), but a power loss leaves no executable and no process to run
+it, and boot-time rollback cannot help — the missing file IS the bridge.
+
+### The fix
+
+Stage into `dst`'s own directory BEFORE vacating: `stageIntoDir` tries a
+same-volume move first and copies only on a genuine cross-device error, then sets
+the mode. The commit is then `Link`/`Rename` for the vacate plus a plain
+`os.Rename` of the staged file — two adjacent renames in one directory, which is
+what the comments always claimed. **It reorders the staging, never the commit**:
+the vacate→install order and the restore-on-failure behaviour are unchanged.
+
+Trying the cheap move first is load-bearing: Windows takes the same-volume branch
+on an ordinary single-volume host, and making it copy 30 MiB unconditionally
+would be a real regression bought for nothing.
+
+`renameFunc` moved from `swap_unix.go` to the shared file so Windows has the same
+seam. The seam discipline is preserved exactly: `renameFunc` for the move that
+may genuinely be cross-device, plain `os.Rename` for a commit within one
+directory (which cannot be).
+
+### The test, and two controls that were wrong first
+
+`swap_test.go` exercised each fallback alone and never composed them — the
+enumeration gap, in the test file. The new pin walks all four combinations.
+
+The first instrumentation asserted "dst is never absent", which is **false by
+construction**: the two-rename commit has an irreducible gap between
+`rename(dst,bak)` and `rename(staged,dst)`, and that gap is the intended
+residual. It failed on the correct code. The property is that the EXPENSIVE step
+is outside it, so the test records a trace — "copy" when the stub returns EXDEV
+(the copy follows directly) and "vacate" when dst moves to .bak — and asserts
+copy precedes vacate.
+
+Two negative controls were artifacts before one was faithful. Restoring the
+staging call to "just before the link block" did not reproduce anything, because
+the vacate happens later still, inside `commitViaRename`. Re-staging from the
+already-staged file inside `commitViaRename` did not reproduce it either, because
+the stub models cross-device as "different directories" and the staged file is
+already in dst's. Only staging from the SCRATCH dir after the vacate reproduces
+it, and it prints the right message: "dst was absent while the cross-volume copy
+ran". The lesson is the recorded one, in a new shape — a control has to be
+checked for WHY it went red, not only that it did, and a control that fails for
+an artifact is as misleading as one that passes.
+
+### B2, fixed in the same change
+
+Measured under `syscall.Umask(0o027)` — the umask the deployment runbook
+prescribes — with the mode preservation removed:
+
+    same volume:  installed mode = 0750, want 0755
+    cross volume: installed mode = 0600, want 0755
+
+The rename path inherited the extractor's umask-masked `O_CREATE 0o755`; the copy
+path chmod'd an unmasked `0o755` under a comment claiming the two matched; and
+`CreateTemp`'s 0600 shows through when the chmod is skipped entirely.
+
+The fix preserves the mode `dst` ALREADY has rather than hardcoding 0755. An
+update is not the place to change a binary's permissions, whichever way the
+operator set them, and preserving fixes the divergence in both directions. 0755
+is the fallback for a `dst` that cannot be statted, which is what a first install
+looks like.
+## 2026-09-23 — a repeat install ate the rollback target (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/updater` — 3,567 lines, the
+largest package in the tree that had never appeared in a dated review section,
+and the one that swaps the running binary.
+
+### The chain
+
+Four facts compose, each verified by reading:
+
+- `u.status.CurrentVersion` is set ONCE, at construction (`updater.go:312`).
+  `install.go` writes the "(pending restart)" value to the LOCAL copy it returns
+  — its own comment says "for the response … The cached Status itself will
+  refresh on the new binary's first poll", which assumes a restart happens.
+  `Status()` returns `u.status` verbatim.
+- `pendingRestart` — the flag whose whole job is "don't re-install per poll" —
+  was set at exactly one site, inside the auto-install branch.
+- `Install` gated on `status.UpdateAvailable` and never asked whether `dst` was
+  already the target version.
+- **`apiUpdatesInstall` does not restart.** It installs and returns 200; restart
+  is a separate operator action (the rollback handler's own docblock says
+  "operator clicks Restart next").
+
+So: operator clicks Install → `dst` = v2, `.bak` = v1, process still v1 → the
+console STILL shows an update available, because the cached status never moved →
+operator clicks Install again (or, with `autoInstall` on, the next poll does) →
+full re-download and re-verify → `swapBinary`'s `linkFunc` returns EEXIST →
+`os.Remove(bak)` deletes v1 → `.bak` is re-linked to v2. Rollback is now a no-op
+and `canRollback()` returns true, because it only stats for existence.
+
+`swap_unix.go:88-97`'s docblock shows the authors reasoned carefully about
+preserving `.bak` on the FAILURE path (that is what the R5 EEXIST-only clear is
+for); the repeat-SUCCESS path was not considered.
+
+### Measured
+
+With the guard reverted, `TestSecondInstallWithoutARestartKeepsTheRollbackTarget`
+reports `.bak = "bridge-binary-0.2.0", want "bridge-binary-0.1.0"` — and
+`TestSecondInstallIsRefusedFromAFreshUpdater` reports the same from a second
+process. The first draft of both tests used `t.Fatalf` on the ERROR assertion,
+which stopped the control before it reached the file assertion: it proved the
+error changed and never that the rollback target was destroyed. `t.Errorf` +
+assert on the FILES, which is #941's lesson applied to a different reaper.
+
+### Why the persisted marker rather than the flag
+
+The in-memory `pendingRestart` is version-agnostic: it records THAT a swap
+landed, not which version. Refusing on it turned
+`TestANewerReleaseIsStillInstallable` red during development — a newer release
+would have been refused, stranding the host on a version it had not booted,
+which is worse than the bug being fixed. `bridge update` is also a separate
+process and sees no `atomic.Bool` the serving bridge set.
+
+`State.TargetVersion` + `State.SwapStarted` already existed and are written
+before the swap, so the marker is version-aware, durable and cross-process. The
+recency bound is the same `recencyWindow` `DecideBootAction` uses for
+`BootClearAbandoned` — deliberately the same constant, so the refusal expires
+exactly when boot would have cleared the marker and the engine and the boot path
+cannot disagree about whether one is still live. That is what stops the guard
+being a wedge after a crash, and `TestAnInterruptedInstallDoesNotWedgeTheEngine`
+asserts both halves against each other.
+
+Verified as the plan required: `maybeRollbackOnBoot` (`main.go:3005`) runs
+BEFORE `updater.New` (`main.go:3103`) on the serve path, and every branch of it
+ends in `ClearState` or a rollback, so no boot returns with the marker still
+`installing`.
+
+### Ordering, and what the existing lock test now proves
+
+The refusal sits AFTER the `installInFlight` try-lock, not before it: a caller
+arriving mid-install should hear "an install is already in progress", the more
+immediate truth. A side effect worth keeping — `TestInstallConcurrentCallsSerialized`'s
+final assertion used to be "a follow-up attempt succeeds", which the guard
+correctly breaks. It now asserts the follow-up is refused with
+`ErrInstallPendingRestart`, which is only reachable PAST the lock, so it still
+proves the lock was released — and distinguishes that from `ErrInstallInFlight`,
+which is what a still-held lock would give.
+
+### H1, fixed in the same PR
+
+`Options.AutoInstallRestart`'s docblock said "cmd/bridge/main.go wires this to
+`os.Exit(0)` — same restart contract as the admin console's Restart endpoint".
+The wiring does `cancel()` and its own comment says why: "os.Exit(0) here would
+skip every runServe defer (the 'restart MUST NOT os.Exit(0)' contract)". The
+docblock recommended precisely what the invariant forbids, on the package's
+PUBLIC configuration surface — which is what a second caller reads instead of
+main.go. No `os.Exit` appears anywhere in `internal/updater`, so nothing else
+contradicted it.
+
+### Process note: the untagged-sibling trap, caught by CI rather than locally
+
+The first push failed `test (windows-latest)` with
+`undefined: noopVerifier` — the new test file was untagged while the fixture it
+used lives in `install_test.go`, which is `//go:build !windows`. That is the
+trap CLAUDE.md already records for `internal/manifest` ("untagged siblings
+referencing them broke the Windows compile of the whole test binary,
+invisibly"), in a package where the convention is just as established: every
+test that drives a real swap here is `!windows`.
+
+It was caught by CI and not locally because `GOOS=windows go vet` was run for
+the swap PR and not for this one — the cross-vet has to be per-PR, not per
+session.
+
+The fix is not simply "add the tag". The predicate is pure marker arithmetic and
+platform-independent, and the platform whose swap has no hardlink fallback at
+all is exactly the one that should not lose coverage of it. The
+fixture-dependent tests stay `!windows`; the marker tests were rewritten to
+write the State by hand — which is what Install writes anyway — and live in an
+untagged file.
+## 2026-09-23 — an upstream-chosen MBID reached filepath.Join, on a write and a delete (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/atlasharvest` — 2,231 lines that
+had never appeared in a dated review section and have no invariants section of
+their own.
+
+### The chain
+
+`client.go:534` takes `it.MBID` verbatim off the harvest RESULTS page. There is
+no shape check, and the bridge never verifies that a returned MBID is one it
+SUBMITTED — so the upstream chooses the set. `state.go:180` (`AddPendingCovers`)
+skips only `""` and persists to the state JSON, so a hostile value survives
+restarts and is re-offered every tick; `PendingCovers` has no age-based
+eviction. The refresh sweep then reaches `cmd/bridge/main.go:395`:
+
+    path := enrich.ArtworkCachePath(a.artworkDir, releaseMBID, size)
+    // → filepath.Join(cacheDir, fmt.Sprintf("%s-%d.jpg", mbid, size))
+
+`filepath.Join` Cleans, so `../../..` escapes. `writeArtworkAtomicStream` then
+does `os.MkdirAll(filepath.Dir(path), 0o700)` — the traversing value **creates
+its own parents** rather than failing — and streams up to `MaxCoverArtBytes` of
+upstream-chosen bytes there. `main.go:414` drives `os.Remove` over the same
+unvalidated path for the other two `SupportedCoverSizes`.
+
+`grep` for any MBID shape gate across `internal/atlasharvest` returned nothing,
+and `RefetchPremium` adds none. Of `ArtworkCachePath`'s six non-test callers
+these two were the only ones receiving an unvalidated value: the tag, MB-search,
+release-group and AcoustID paths all gate on `isValidMBID`, and the two read
+handlers regex-match. Primitive: the attacker chooses the directory and the name
+prefix; the suffix is pinned to `-{250,500,1200}.jpg`.
+
+### Why it was not an accepted residual
+
+`config.go:476-495` permits an unpinned `harvestBaseUrl` on a non-demo bridge and
+bounds the risk explicitly at content injection — "the bios it returns land in
+`artist_atlas` … with an attacker-chosen `SourceURL`" — concluding that unpinned
+is acceptable because "the bearer set is the operator's own paired devices". An
+arbitrary file write and delete as the bridge user is outside that stated bound.
+The decision was taken against an incomplete model rather than knowingly.
+
+Reachability needs `atlas.harvestEnabled` (defaults false) plus either a hostile
+upstream or a bearer-token holder POSTing an `atlasBaseUrl`, which
+`refuseUnpinnedHarvestBaseURL` deliberately allows off-demo.
+
+### The fix — three layers, each negative-controlled on its own
+
+1. **Shape**, at ingest (`pollResults`, so nothing hostile is persisted) and at
+   the sink (`atlasCoverRefetcher.RefetchPremium`). The sink returns a nil error:
+   a malformed entry must not abort the sweep for the releases behind it.
+2. **Containment**, in `writeArtworkAtomicStream`, via `fsutil.IsUnderAny` — the
+   tree's canonical check rather than a hand-rolled `filepath.Rel`. It resolves
+   symlinks on BOTH sides (so a symlinked parent cannot be written through),
+   treats a cross-volume `Rel` error on Windows as not-nested, and compares in
+   the filesystem's own case sensitivity. `atlasPremiumFetcher` had to gain the
+   cache root to bound its own two writes; it receives a built `path` and cannot
+   otherwise know what bounds it.
+3. **Signature**, on the body. See the correction below.
+
+Cost of layer 2, measured rather than reasoned about: `fsutil.IsUnderAny` is
+**29.4 µs / 125 allocs** per call (`-benchtime 2000x`, taken while the race suite
+was saturating the machine, so pessimistic). It is not free — `EvalSymlinksOrClean`
+walks and the case-sensitivity probe stats — but every call site sits immediately
+after a network cover fetch of hundreds of milliseconds and immediately before an
+fsync, so it is 0.01% of the operation it guards. Worth the number here because
+"don't add syscalls to a hot path" is a live concern in this tree (#973 reasons
+explicitly about one extra stat per directory entry) and this genuinely is not one.
+
+### A correction the fix turned up
+
+CLAUDE.md said "Artwork is JPEG-only, two-layer verified (MIME *and* the
+`FF D8 FF` magic bytes)". That rule describes `internal/manifest`'s LOCAL
+folder-art path (`looksLikeJPEG` + `folderArtCandidates`). **`internal/enrich`
+had no content check of any kind, on any of its five write sites** — CAA release,
+CAA release-group, iTunes, and both premium paths. So the finding as first
+written ("the premium path skips the verification") was narrower than the truth,
+and the bullet read as a property of the whole artwork surface when it was a
+property of a different subsystem.
+
+The gate refuses anything that is not a recognised image, and deliberately
+accepts PNG as well as JPEG. JPEG-only is what this path's contract says —
+`artwork_scale.go`: "a verbatim PNG write would put PNG bytes behind an
+image/jpeg label", which is why the scanner TRANSCODES — but CAA can serve PNG,
+those covers render today because clients sniff, and dropping them inside a
+security fix would be a user-visible regression bought for nothing: the
+arbitrary-payload hole closes either way. A warn line names the mislabeling so
+the transcode-or-refuse decision stays visible instead of being entrenched.
+
+### Three copies of the UUID pattern, and the guard that stops them drifting
+
+`api.mbidPattern` and `enrich.mbidValidPattern` were already separate, each
+documenting that the dependency direction forbids sharing.
+`internal/atlasharvest` is a third: its imports are fsutil, logging, atomicwrite
+and lyrics, while enrich pulls in manifest, so importing it to reach one regexp
+would invert an edge for a constant. `TestHarvestMBIDPatternMatchesEnrich` lives
+in `cmd/bridge` — the one package importing both — and compares ANSWERS over a
+table rather than regexp source, since the source agreeing is neither necessary
+nor sufficient for the two gates to admit the same set.
+
+### Controls
+
+Four, each reverting one layer and leaving the rest green: containment
+(`TestWriteArtworkRefusesAPathOutsideTheCacheDir`), signature
+(`TestWriteArtworkRefusesBytesThatAreNotAnImage`), the sink gate
+(`TestRefetchPremiumRefusesAMalformedReleaseMBID` — its failure output prints the
+escaped path it reached), and the ingest filter
+(`TestPollResultsDoesNotQueueAMalformedReleaseMBID`). Each has a positive control
+beside it, because a layer that refuses everything passes the negative assertion
+for the wrong reason.
+
+The existing `atomic_write_test.go` payloads were `bytes.Repeat([]byte("X"), …)`
+and had to become JPEG-prefixed: a fixture must be a value the transformation
+would accept, or a test about write MECHANICS starts failing on the signature
+gate in front of it and pins nothing.
+
+`TestClientSubmitAndPoll` failed on the race gate for the same reason in the
+other direction, and it is the most useful thing the run produced: its release
+fixtures were the placeholders `"r1"` / `"r2"` / `"r3"`, which is EXACTLY what the
+new ingest filter exists to drop. The fixtures became real UUIDs — the test's
+subject is submit-and-poll, not MBID shape — and the failure stands as evidence
+that the gate is live in the real `tick` path rather than only in the test that
+drives `pollResults` directly. A placeholder MBID in a fixture is worth grepping
+for after any change that shape-gates one.
+
+### Process note: a grep-masked gate result
+
+The first attempt to confirm the re-run piped `make test` through
+`grep -E "^(FAIL|--- FAIL|ok  github)"`. `go test` separates its verdict from the
+package path with a TAB, not two spaces, so the pattern matched NOTHING, the
+capture file was empty, and the summary printed "0 failures" — a vacuous pass
+that looked exactly like a real one. The only tell was an `exit=1` beside it that
+the summary format invited reading as noise. Same family as the memory entry on
+`grep`-masked exit status, and the reason the gate is now run with its output
+captured whole and `$?` checked directly rather than inferred from a filter.
