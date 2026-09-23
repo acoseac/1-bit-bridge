@@ -344,11 +344,18 @@ func TestDoctorFailsANamedConfigThatIsNotThere(t *testing.T) {
 	// A good config sits in the working directory, so a fallback to it
 	// would pass for the right answer. It must not be graded instead.
 	writeInstallAt(t, cwd, "local-track.flac")
-	named := filepath.Join(t.TempDir(), "bridge.yml")
+	// In a directory that is not there either, the shape of a typo'd path.
+	named := filepath.Join(t.TempDir(), "typo", "bridge.yml")
 
 	var so, se bytes.Buffer
 	if code := doctorCmd([]string{"--json", "--config", named}, &so, &se); code != 1 {
 		t.Errorf("doctor exited %d for a --config that is not there, want 1; stderr:\n%s", code, se.String())
+	}
+	// config-dir used to MkdirAll the named file's directory, reporting it ok
+	// beside "does not exist" (CodeRabbit on #985, round 3). A diagnostic
+	// must not leave that behind.
+	if _, err := os.Stat(filepath.Dir(named)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("doctor left %s behind for a --config that is not there (stat: %v)", filepath.Dir(named), err)
 	}
 	var rep jsonDoctorReport
 	if err := json.Unmarshal(so.Bytes(), &rep); err != nil {

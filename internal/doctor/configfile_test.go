@@ -4,9 +4,45 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestConfigDirCheckDoesNotCreateTheDirectoryOfANamedConfigThatIsNotThere
+// pins both sides of the config-dir guard. A config the caller NAMED that is
+// not there leaves the check nothing to vouch for, and creating the named
+// file's directory left a typo'd `--config /x/bridge.yml`'s /x behind,
+// reported ok. A config that is merely not there YET (the no-flag and
+// launcher lookups, which record where they looked rather than an error)
+// still gets the directory `bridge init` will write to created and probed.
+func TestConfigDirCheckDoesNotCreateTheDirectoryOfANamedConfigThatIsNotThere(t *testing.T) {
+	named := filepath.Join(t.TempDir(), "typo")
+	c := checkConfigDir(t.Context(), Deps{
+		ConfigDir: named,
+		ConfigFile: &ConfigFile{Path: filepath.Join(named, "bridge.yml"),
+			LoadErr: &fs.PathError{Op: "stat", Path: named, Err: fs.ErrNotExist}},
+	})
+	if c.Status != OK || !strings.Contains(c.Summary, "not checked") {
+		t.Errorf("config-dir = %s %q for a named config that is not there, want ok \"not checked\"", c.Status, c.Summary)
+	}
+	if _, err := os.Stat(named); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("config-dir created %s for a named config that is not there (stat: %v)", named, err)
+	}
+
+	preSetup := filepath.Join(t.TempDir(), "1-bit-bridge")
+	c = checkConfigDir(t.Context(), Deps{
+		ConfigDir:  preSetup,
+		ConfigFile: &ConfigFile{Tried: []string{filepath.Join(preSetup, "bridge.yaml")}},
+	})
+	if c.Status != OK || c.Summary != preSetup {
+		t.Errorf("config-dir = %s %q before setup, want ok naming %s", c.Status, c.Summary, preSetup)
+	}
+	if fi, err := os.Stat(preSetup); err != nil || !fi.IsDir() {
+		t.Errorf("config-dir did not create %s before setup (stat: %v)", preSetup, err)
+	}
+}
 
 // TestCheckConfigFile pins every branch of checkConfigFile, and the two
 // distinctions that make it worth having: a config that is MISSING is ok

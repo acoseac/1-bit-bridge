@@ -2216,8 +2216,10 @@ mentions across the four `ops/audit-*.md` files.
   "validate a config edit BEFORE restarting" step true. **A `--config` that
   names a file that is NOT THERE fails too** ("does not exist"), because an
   operator who names a file asserts it exists; that is loadCLIConfig's rule
-  for every other subcommand. With no flag, a missing config is ok and the
-  line names where doctor looked. **`resolveConfigPath` folds EVERY stat
+  for every other subcommand. `config-dir` then reports "not checked" rather
+  than `MkdirAll` the named file's directory, which it always did, so a
+  typo'd path created that directory and called it ok. With no flag, a
+  missing config is ok and the line names where doctor looked. **`resolveConfigPath` folds EVERY stat
   error into "not found"**, which is right for its fallback walk and wrong
   for a named path, so doctor re-stats a named path to learn why. One this
   user cannot reach or READ only WARNS, because that is a fact about the

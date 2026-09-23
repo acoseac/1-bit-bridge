@@ -9785,7 +9785,7 @@ gives `[FAIL] config-file … does not exist`, exit 1. A named config under a
 `chmod 0` directory gives `[warn] config-file … not readable by this user:
 stat …: permission denied`.
 
-**Found, not fixed (pre-existing).** For an explicit `--config`, the
+**Found, not fixed (pre-existing); fixed in round 3 below.** For an explicit `--config`, the
 config-dir check is handed the named file's directory and `MkdirAll`s it, as
 main's code did too (`d.ConfigDir = filepath.Dir(cfgPath)`). So a typo'd
 `--config /x/bridge.yml` CREATES `/x` (0700) and reports it ok, beside the
@@ -9795,3 +9795,34 @@ wherever a typo points. A diagnostic should not leave artifacts (the
 rule). It is left for its own change, because grading a named-but-missing
 directory without creating it needs a config-dir message for that state,
 which the check does not have.
+
+### Round 3: CodeRabbit at Minimal; the directory side effect fixed after all
+
+CodeRabbit's pass on the round-2 commit lowered the walkthrough to "⚪ Minimal"
+("no PR-introduced merge-blocking risk is established"). It still posted one
+Minor, the directory side effect above, and it was right that the fix is
+small. The deferral's stated reason (the check "does not have" a message for
+that state) cost one line to remove. Keeping the fix out would have left the
+report contradicting itself beside this PR's own new line: `config-file …
+does not exist` above `config-dir … ok`, for a directory doctor had just
+created.
+
+- **The fix.** When `config-file` records a NAMED config as not there
+  (`LoadErr` is `fs.ErrNotExist`), `checkConfigDir` returns ok "not checked:
+  the named config does not exist" and touches nothing. The pre-setup lookups
+  (no `--config`, and the launcher's row) record where they looked rather
+  than an error, so they still create and probe the directory `bridge init`
+  will write to, which is that check's documented purpose.
+- **Controls** (committed first, both mutations built): with the guard
+  removed, the unit test and the extended
+  `TestDoctorFailsANamedConfigThatIsNotThere` (whose named file now sits in a
+  directory that does not exist either) both find the directory created. With
+  the guard widened to any lookup, the unit test's pre-setup half finds the
+  init directory NOT created.
+- **Declined:** Gemini (medium) said `t.Context()` in the new unit test
+  "requires Go 1.24" and that the repo supports 1.23. `go.mod` declares `go
+  1.26.6`, the Dockerfile builds 1.26, every workflow installs from
+  `go-version-file: go.mod`, and `t.Context()` has 118 call sites in the
+  tree, three beside this file in `internal/doctor`. The "general rules" it
+  cited do not exist; there is no `.gemini/` style guide. Replied on the
+  thread.
