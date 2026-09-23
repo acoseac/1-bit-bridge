@@ -10022,3 +10022,22 @@ on dido as `1-bit-bridge:main-21a3883` and `1-bit-bridge:dev`.
   registered. A probe mis-classified as remote would pass the "not logged"
   assertion before the server had processed it. `ConnState(StateClosed)`
   fires for every connection, after the line.
+
+### Round 1: both review bots clean, the duplication gate not
+
+- **CodeRabbit** passed `3d683f6` with "No actionable comments were
+  generated": the walkthrough's `coveredCommitId` is that head, with no
+  rate-limit marker. **Gemini** reported "No review comments".
+- **SonarCloud failed `new_duplicated_lines_density` at 6.7%** (77 of 1,150
+  new lines, limit 3%). All of it was one block: `lockedBuffer` plus
+  `captureStdLog`, written into both `internal/handshakelog`'s tests and the
+  console's, 38 lines each. Test files count toward that gate here. The fix
+  is one definition, `internal/handshakelog/handshaketest`, imported only by
+  tests (the `net/http/httptest` pattern). `cmd/bridge`'s variant moved
+  there too. That package also records why its rejecting client is Go's and
+  not curl's. The eleven controls were re-run after the refactor, and all
+  are still red.
+- **Process note:** the same helper was written twice in one session, with
+  this file already recording a 6.5% failure of the same gate. A helper
+  written for a second package's tests is a copy. Decide where its one
+  definition lives before the second use, not after the gate.
