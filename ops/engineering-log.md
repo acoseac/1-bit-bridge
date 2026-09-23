@@ -10041,3 +10041,32 @@ on dido as `1-bit-bridge:main-21a3883` and `1-bit-bridge:dev`.
   this file already recording a 6.5% failure of the same gate. A helper
   written for a second package's tests is a copy. Decide where its one
   definition lives before the second use, not after the gate.
+
+### Rounds 2 and 3: all clean, and CodeRabbit was slow rather than skipping
+
+- **Round 2 (`09bfaa5`).** The Sonar gate passed with duplication at 0.0%.
+  Gemini, asked for a fresh pass, was clean. Seven minutes after the push,
+  CodeRabbit's walkthrough still covered `3d683f6`. Its pre-merge check put
+  docstring coverage at 59.46% for the functions this diff touches, where
+  the last three PRs it scored were at 100%.
+- **Round 3 (`eb149fa`).** All 47 functions in the new files got a doc
+  comment, each opening with its own name so
+  `TestNoDocblockNamesAnotherDeclaration` has nothing to misread. CodeRabbit
+  covered `eb149fa` with "No actionable comments were generated", and
+  docstring coverage rose to 96.88%. The one function left is `runServe`,
+  which had no doc comment before this PR. Gemini reported no review
+  comments, and the SonarCloud gate passed. CI ran all 20 checks green on
+  `eb149fa`: both platform legs, all nine `-race` shards, and CodeQL.
+- **CodeRabbit's lag was not a skip.** The `@coderabbitai review` sent after
+  the round-3 push got the answer "Already reviewed the last commit". Its
+  walkthrough's last pass reads "between `09bfaa5` and `eb149fa`", so it had
+  reviewed `09bfaa5` on its own as well, just more than seven minutes after
+  that push. Every commit got an automatic pass, none with a finding, and
+  the explicit request did nothing: the command only acts while automatic
+  reviews are paused. **A `coveredCommitId` behind the head means "not yet",
+  not "not reviewing".** The PR description said at first that CodeRabbit
+  reviewed the fix push only when asked. That was wrong, and it is
+  corrected there.
+- **Process note:** doc comments belong with the code. CodeRabbit's
+  docstring check covers every function the diff touches, test helpers
+  and fakes included, and the recent norm here is 100%.
