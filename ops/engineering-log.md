@@ -9445,9 +9445,15 @@ built `1-bit-bridge:dev` once the plugin directory was mounted.
   builder". On 29.1.3 it does not fall back: it refuses with `ERROR: BuildKit
   is enabled but the buildx component is missing or broken` and exits 1. The
   docs say that.
-- `docker compose build` needs no plugin. Compose 2.40.3 warned `configured to
-  build using Bake, but buildx isn't installed` and built through its own
-  BuildKit client, so the `build: .` route in `compose.yaml` always worked.
+- `docker compose build` got through without the plugin. Compose 2.40.3 warned
+  `configured to build using Bake, but buildx isn't installed` and fell back to
+  its internal builder; upstream `pkg/compose/build_bake.go` (`buildWithBake`)
+  returns false on a NOT-FOUND plugin for exactly that. A review bot said
+  Compose ≥ 2.40.2 fails when buildx is missing, citing docker/compose#13295;
+  that check (`compose build requires buildx 0.17 or later`) runs only on the
+  Bake path, i.e. when buildx is PRESENT and old. The docs still don't offer
+  the fallback as a route, because upstream has deprecated the internal builder
+  ("will be removed in next release").
 - `docker.yml` runs only on tags and `workflow_dispatch`, so a PR that changes
   only the Dockerfile gets no image build in CI. Everything above ran on a real
   daemon, under both builders.

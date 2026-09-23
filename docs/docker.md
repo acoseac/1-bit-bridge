@@ -137,10 +137,11 @@ Setting `DOCKER_BUILDKIT=1` is no substitute: without the plugin, Docker
 refuses with `BuildKit is enabled but the buildx component is missing or
 broken`.
 
-One route does work without the plugin: `docker compose build`. Compose
-carries its own BuildKit client, so the commented-out `build: .` in the shipped
-`compose.yaml` builds either way (Compose 2.40 warns that buildx isn't installed
-and carries on).
+`docker compose build` (the commented-out `build: .` in the shipped
+`compose.yaml`) still gets through without the plugin today. Compose 2.40 warns
+that buildx isn't installed and falls back to its internal builder. Don't rely
+on it: upstream has deprecated that builder, and an installed buildx older than
+0.17 makes Compose refuse outright. Install the plugin.
 
 The Dockerfile is deliberately not built to get past the legacy builder. Its
 builder stage is pinned to the platform of the machine doing the build
@@ -151,12 +152,16 @@ second build path that nothing tests, for a builder Docker has deprecated, so
 the build fails and names what it needs instead.
 
 Multi-arch builds (linux/amd64 + linux/arm64, e.g. an image for Apple Silicon
-hosts) use the same plugin: `docker buildx build --platform=linux/amd64,linux/arm64`.
-Go cross-compiles for each target natively. The small runtime stage (`apk add`
-and the user setup) still runs *as* each target arch, so the build host needs
-QEMU registered for any arch that isn't its own. Docker's
-[multi-platform guide](https://docs.docker.com/build/building/multi-platform/)
-sets that up with `docker run --privileged --rm tonistiigi/binfmt --install all`.
+hosts) use the same plugin:
+`docker buildx build --platform=linux/amd64,linux/arm64 -t 1-bit-bridge:dev .`
+Add `--push` with a registry tag to publish the result, or `--load` to keep it
+locally. `--load` needs the containerd image store, which Docker Desktop and
+Docker Engine 29 and later use by default. Go cross-compiles natively for each
+target, but the small runtime stage (`apk add` and the user setup) still runs
+*as* each target arch. Docker Desktop emulates the other arch out of the box. On
+a Linux host where that stage fails with `exec format error`, register QEMU once
+with `docker run --privileged --rm tonistiigi/binfmt --install all` (see Docker's
+[multi-platform guide](https://docs.docker.com/build/building/multi-platform/)).
 
 ## First-time setup
 
