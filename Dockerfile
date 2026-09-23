@@ -3,8 +3,13 @@
 # runtime stage is alpine + ca-certificates + the binary, no Go
 # toolchain.
 #
-# Build:
-#   docker build -t 1-bit-bridge:dev .
+# Build — this file REQUIRES BuildKit, which the docker CLI reaches through
+# the buildx plugin:
+#   docker buildx build --load -t 1-bit-bridge:dev .      (or: make docker)
+# Without the plugin, `docker build` falls back to Docker's deprecated legacy
+# builder, which stops at the builder stage with an error naming buildx (see
+# the comment on that FROM line). docs/docker.md → "Build it yourself" has
+# the install line per distro.
 #
 # Run (single-root, persistent state mounted at /data):
 #   docker run --rm \
@@ -38,8 +43,27 @@ ARG ALPINE_VERSION=3.22
 # Pinned to the native build platform (BuildKit-provided $BUILDPLATFORM)
 # so the Go compile runs natively and cross-compiles to $TARGETARCH,
 # rather than running the whole builder under QEMU emulation for arm64.
-# Requires BuildKit (the default in modern Docker / `docker buildx`).
-FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine AS builder
+#
+# Requires BuildKit, and the `:-` fallback is how this line says so. BuildKit
+# always sets BUILDPLATFORM, so there the fallback is never read. The legacy
+# builder does not set it, and a bare ${BUILDPLATFORM} then dies with `failed
+# to parse platform : "" is an invalid OS component…`, which names neither
+# BuildKit nor buildx; with the fallback, the error IS the instruction. It
+# must stay an invalid platform spelled with letters, digits and hyphens only:
+# a space breaks this line under BuildKit too ("FROM requires either one or
+# three arguments"), and a `/` parses as an os/arch pair that the legacy
+# builder then tries to pull. Two alternatives were measured and refused
+# (Docker 29.1 / BuildKit 0.26):
+#   - `ARG BUILDPLATFORM=linux/amd64` above the FROM gets the legacy builder
+#     through, but a declared default is not a fallback under BuildKit — it
+#     REPLACES the automatic value, so on every arm64 build host this stage
+#     would run under QEMU (or die with `exec format error` where none is
+#     registered), the cost this pin exists to avoid.
+#   - `:-linux` (the daemon's own arch) built a working image on the legacy
+#     builder (measured on amd64), and was refused anyway: a second build
+#     path no CI runs, for a builder Docker has deprecated. Fail loudly on
+#     one path instead.
+FROM --platform=${BUILDPLATFORM:-this-Dockerfile-requires-BuildKit--build-with-docker-buildx} golang:${GO_VERSION}-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -61,13 +85,13 @@ COPY . .
 # on PR #80).
 ARG VERSION=docker
 # TARGETOS / TARGETARCH are BuildKit-provided per target platform and
-# drive the cross-compile. TARGETOS defaults to "linux" (the only OS the
-# alpine runtime stage supports) so a non-BuildKit `docker build` — where
-# these predefined args aren't populated — still builds a linux binary;
-# BuildKit overrides it per target. TARGETARCH has no default: empty makes
-# `go build` use the builder's native arch (the host on a plain build),
-# while BuildKit sets it per target for a multi-arch build.
-ARG TARGETOS=linux
+# drive the cross-compile. Declared WITHOUT defaults, deliberately: under
+# BuildKit a declared default does not fill in a missing value, it REPLACES
+# the per-target one (measured: `ARG TARGETARCH=bogus` builds with
+# TARGETARCH=bogus). A TARGETARCH default would put that one arch's binary
+# into every leg of the multi-arch image. There is no non-BuildKit build to
+# default for — the builder FROM above refuses to start without BuildKit.
+ARG TARGETOS
 ARG TARGETARCH
 ENV CGO_ENABLED=0
 
