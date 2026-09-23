@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,6 +152,138 @@ func TestASuccessfulAnalysisClearsTheStrikes(t *testing.T) {
 		t.Errorf("list still has %d row(s) after a successful analysis, want 0", len(rows))
 	}
 }
+
+// TestACountedFailureHasAlreadyReleasedItsPath pins what a failure count
+// means: the job is FINISHED. Its own bookkeeping has landed and its path is
+// free, so a retry sent the moment the count moves is accepted.
+//
+// The CI failure behind it (#986's `test -race (rest)` leg) was
+// TestASuccessfulAnalysisClearsTheStrikes waiting for Failed == 1 and then
+// re-enqueueing the same path. processJob counted the failure first, then
+// wrote the strike and its WARN, and released the path last. Enqueue answers
+// a path that is still held with nil and queues nothing, so a retry landing
+// in that window was dropped without a trace and the wait for Done ran out.
+// The same test passed 900 runs in a row on a laptop: a window between two
+// statements shows up on a loaded runner and nowhere else.
+//
+// So this test does not race the window. It parks the worker inside it,
+// in the failure's own WARN. That is the one step between the old count and
+// the old release a test can hold without a hook in production code: the
+// package logger resolves slog.Default at log time.
+func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
+	park := parkOnLog(t, analyzeFailedMsg)
+	s := newStore(t)
+	putTrack(t, s, "A/B/01.flac")
+	var runs atomic.Int32
+	p := NewPool(s, 1, 4,
+		WithFsync(noFsync),
+		WithRunner(func(context.Context, AnalyzeSpec) (Result, error) {
+			if runs.Add(1) == 1 {
+				return Result{}, markUnreadable(errors.New("sox: source appears truncated"))
+			}
+			return Result{WaveformPath: "/w/x.waveform.bin", WaveformTag: "t", SchemaVersion: WaveformSchemaVersion}, nil
+		}))
+	// Deferred in this order so the worker is let go BEFORE Stop waits for
+	// it, on every way out of the test, a failed assertion included.
+	defer p.Stop()
+	defer park.release()
+
+	spec := AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatal(err)
+	}
+	park.wait(t)
+
+	// The job is still writing its own failure, so it is still running: in
+	// flight, and not counted. Every accepted job is exactly one of in
+	// flight, done or failed.
+	if st := p.Stats(); st.Inflight != 1 || st.Done+st.Failed != 0 {
+		// What a caller acting on that count gets: the CI failure.
+		retryErr := p.Enqueue(spec)
+		t.Fatalf("parked in its own failure WARN, the job reads Inflight=%d Done=%d Failed=%d; "+
+			"a retry sent on that count returned %v and Enqueued went %d -> %d",
+			st.Inflight, st.Done, st.Failed, retryErr, st.Enqueued, p.Stats().Enqueued)
+	}
+	park.release()
+
+	waitFor(t, func() bool { return p.Stats().Failed == 1 })
+	rows, err := s.ListUnreadableTracksForAdmin(context.Background())
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("list = (%d rows, %v) once the failure is counted, want the strike already recorded", len(rows), err)
+	}
+	if err := p.Enqueue(spec); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Stats().Enqueued; got != 2 {
+		t.Fatalf("Enqueued = %d after a retry sent on Failed == 1, want 2: the retry was dropped "+
+			"as a duplicate of a job that had already been counted", got)
+	}
+	waitFor(t, func() bool { return p.Stats().Done == 1 })
+}
+
+// logPark holds the first goroutine that logs one message until the test lets
+// it go: a way to stop a worker between two statements of processJob with no
+// hook in production code. parkOnLog installs it; the other methods drive it.
+type logPark struct {
+	msg        string
+	hold       sync.Once // only the first matching record parks
+	parked     chan struct{}
+	resume     chan struct{}
+	resumeOnce sync.Once
+}
+
+// parkOnLog points slog.Default at a handler that parks the first goroutine
+// to log msg, and restores the previous default when the test ends. The same
+// redirection captureLogs relies on: logging.Component resolves slog.Default
+// at log time.
+func parkOnLog(t *testing.T, msg string) *logPark {
+	t.Helper()
+	lp := &logPark{msg: msg, parked: make(chan struct{}), resume: make(chan struct{})}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(parkHandler{lp}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return lp
+}
+
+// wait blocks until a goroutine is parked in the log call, failing the test
+// if none arrives. A deadline rather than a bare receive, so a message that
+// is never logged reads as a failure and not as a hung test binary.
+func (lp *logPark) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-lp.parked:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("nothing logged %q within 3s", lp.msg)
+	}
+}
+
+// release lets the parked goroutine go. Idempotent, because a test calls it
+// inline and defers it as well.
+func (lp *logPark) release() { lp.resumeOnce.Do(func() { close(lp.resume) }) }
+
+// parkHandler is the slog.Handler behind logPark. Every other record is
+// dropped.
+type parkHandler struct{ lp *logPark }
+
+// Enabled accepts every level, so the record reaches Handle whatever its level.
+func (h parkHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+// Handle parks the first goroutine whose record carries the watched message.
+func (h parkHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == h.lp.msg {
+		h.lp.hold.Do(func() {
+			close(h.lp.parked)
+			<-h.lp.resume
+		})
+	}
+	return nil
+}
+
+// WithAttrs returns the same handler: the attributes do not decide anything.
+func (h parkHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+// WithGroup returns the same handler, for the reason WithAttrs does.
+func (h parkHandler) WithGroup(string) slog.Handler { return h }
 
 // syncBuffer is a bytes.Buffer whose writes and reads are serialised.
 //
