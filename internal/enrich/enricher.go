@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -42,6 +44,20 @@ var mbidValidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-
 
 // isValidMBID reports whether s is a well-formed MusicBrainz UUID.
 func isValidMBID(s string) bool { return mbidValidPattern.MatchString(s) }
+
+// IsValidMBID is isValidMBID exported for the WRITE sides outside this
+// package, the same reason api.IsValidBookletMBID is exported: the value
+// is the LEADING component of ArtworkCachePath's filepath.Join, and
+// writeArtworkAtomicStream does os.MkdirAll(filepath.Dir(path)) — so a
+// traversing value CREATES its own parent directories rather than
+// failing.
+//
+// The caller that needs it is cmd/bridge's atlasCoverRefetcher, which
+// receives an MBID chosen by the ATLAS UPSTREAM (the harvest results
+// page), not by this bridge — the one ArtworkCachePath caller whose
+// input no entry point had validated. Every other caller in this package
+// validates at entry (tags, MB search, release-group, AcoustID).
+func IsValidMBID(s string) bool { return isValidMBID(s) }
 
 // maxLoggedValueLen bounds an untrusted value written to logs so a hostile
 // tag can't flood the log. slog already quotes + escapes control chars in the
@@ -1166,7 +1182,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		// dropped one of the early returns.
 		werr := func() error {
 			defer body.Close()
-			return writeArtworkAtomicStream(path, body, MaxCoverArtBytes)
+			return writeArtworkAtomicStream(e.CacheDir, path, body, MaxCoverArtBytes)
 		}()
 		if werr != nil {
 			return false, werr
@@ -1195,7 +1211,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		if rgFetchErr == nil {
 			werr := func() error {
 				defer rgBody.Close()
-				return writeArtworkAtomicStream(path, rgBody, MaxCoverArtBytes)
+				return writeArtworkAtomicStream(e.CacheDir, path, rgBody, MaxCoverArtBytes)
 			}()
 			if werr != nil {
 				return false, werr
@@ -1228,7 +1244,7 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 			// the CAA fetches rather than buffering the whole image.
 			werr := func() error {
 				defer itBody.Close()
-				return writeArtworkAtomicStream(path, itBody, MaxCoverArtBytes)
+				return writeArtworkAtomicStream(e.CacheDir, path, itBody, MaxCoverArtBytes)
 			}()
 			if werr != nil {
 				return false, werr
@@ -1364,7 +1380,68 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 //
 // `maxBytes` parameter (not `max`) so it doesn't shadow Go 1.21's
 // builtin `max` (CodeRabbit nit on PR #123).
-func writeArtworkAtomicStream(path string, src io.Reader, maxBytes int64) error {
+// jpegSOI and pngMagic are the two image signatures the artwork cache
+// accepts. Mirrors internal/manifest's jpegSOI (that package cannot be
+// imported from here — the dependency runs enrich -> manifest, and this
+// is a three-byte constant, not a behaviour worth inverting an edge for).
+var (
+	jpegSOI  = []byte{0xFF, 0xD8, 0xFF}
+	pngMagic = []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
+)
+
+func writeArtworkAtomicStream(root, path string, src io.Reader, maxBytes int64) error {
+	// SECOND LAYER, under the MBID shape checks every caller runs. The
+	// alphabet a valid UUID draws from makes traversal impossible, so
+	// this can only fire once a shape check has been lost — which is
+	// exactly when it is worth having, because the next line is an
+	// os.MkdirAll that CREATES whatever parents the path names.
+	//
+	// fsutil.IsUnderAny, not a prefix compare and not a hand-rolled
+	// filepath.Rel: it is the tree's canonical containment check, it
+	// resolves symlinks on BOTH sides (so a symlinked parent cannot be
+	// written through), it treats a cross-volume Rel error on Windows as
+	// NOT nested, and it compares in the filesystem's own case
+	// sensitivity. Failing closed on all three is the point.
+	//
+	// An empty root disables the check rather than refusing everything:
+	// this helper predates the bound and a caller that has no root to
+	// offer is a programming error worth surfacing as a test failure,
+	// not a runtime refusal of every artwork write. Production callers
+	// all pass one.
+	if root != "" && fsutil.IsUnderAny(path, []string{root}) == "" {
+		return fmt.Errorf("artwork path %q is outside the cache directory", filepath.Base(path))
+	}
+	// THIRD LAYER: what the bytes ARE. Every caller of this helper writes
+	// into a `<mbid>-<size>.jpg` path that /v1/artwork later serves as
+	// `Content-Type: image/jpeg`, from a body an UPSTREAM chose — CAA,
+	// iTunes, or Atlas. Nothing between the socket and this write looked
+	// at the bytes, so a hostile or broken upstream could park an
+	// arbitrary payload behind an image URL the app renders.
+	//
+	// Refuses anything that is not a recognised image. Deliberately NOT
+	// JPEG-only, though that is what this path's contract says (see
+	// internal/manifest/artwork_scale.go: "a verbatim PNG write would put
+	// PNG bytes behind an image/jpeg label", which is why the SCANNER
+	// transcodes PNG rather than storing it): CAA can serve PNG, those
+	// covers render today because browsers and iOS sniff, and dropping
+	// them inside a security fix would be a user-visible regression
+	// bought for nothing — the arbitrary-payload hole closes either way.
+	// Transcode-or-refuse for the PNG case is a separate decision; the
+	// warning below is what stops it staying invisible.
+	sniffed := bufio.NewReader(src)
+	head, perr := sniffed.Peek(len(pngMagic))
+	switch {
+	case perr != nil && perr != io.EOF:
+		return perr
+	case bytes.HasPrefix(head, jpegSOI):
+		// The contract shape.
+	case bytes.HasPrefix(head, pngMagic):
+		logger.Warn("artwork upstream served PNG into a .jpg cache path; stored verbatim",
+			"path", filepath.Base(path))
+	default:
+		return fmt.Errorf("artwork body is not a recognised image")
+	}
+	src = sniffed
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -1416,6 +1493,16 @@ func writeArtworkAtomicStream(path string, src io.Reader, maxBytes int64) error 
 	// here benefits all streaming callers (CAA release, CAA
 	// release-group, iTunes) — an empty 200 from any of them is
 	// equally bogus (qodo bot review on PR #143).
+	//
+	// UNREACHABLE since the image-signature check above, which an empty
+	// body cannot clear — three magic bytes mean n >= 3 by the time
+	// execution gets here. Kept rather than deleted because it guards a
+	// DIFFERENT property (what landed on disk) from a different premise,
+	// and the signature gate is the kind of thing a future change might
+	// relax for one caller. Left with this note instead of silently: a
+	// branch whose comment explains a live hazard, sitting in code that
+	// can no longer reach it, is how the next reader misjudges what is
+	// protecting what.
 	if n == 0 {
 		return fmt.Errorf("artwork body was empty")
 	}

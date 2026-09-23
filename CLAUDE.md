@@ -916,8 +916,38 @@ no failing test — which is the shape to expect in this area.
   `sync.Map` — the unbounded form leaked for the process lifetime on a
   multi-decade library. The Deezer negative cache is presence-only and must not
   promote to MRU, or a stale entry outlives a positive re-fetch.
-- **Artwork is JPEG-only, two-layer verified** (MIME *and* the `FF D8 FF` magic
-  bytes) because the cache path and Content-Type are both jpeg. Folder-art
+- **An MBID that reaches a path is validated at the site that BUILDS the path,
+  and the artwork write is bounded to its own directory.** `ArtworkCachePath`
+  makes the value the LEADING component of a `filepath.Join` (which Cleans) and
+  `writeArtworkAtomicStream` then `MkdirAll`s the parent — so a traversing value
+  CREATES its way out rather than failing. Every caller validated at entry
+  except the pair fed by the ATLAS HARVEST RESULTS PAGE, where the UPSTREAM
+  chooses the MBID and the bridge never checks it against what it submitted:
+  `atlasCoverRefetcher.RefetchPremium` wrote up to `MaxCoverArtBytes` there and
+  the stale-tier loop beside it `os.Remove`d two more. Persisted, too —
+  `AddPendingCovers` skipped only `""`, so a hostile value survived restarts and
+  came back every tick. Three layers now, each negative-controlled separately:
+  shape at ingest (`pollResults`) and at the sink, containment via
+  `fsutil.IsUnderAny` inside the write primitive, and an image-signature check on
+  the body. **`config.go`'s unpinned-`harvestBaseUrl` note bounds the accepted
+  risk at CONTENT INJECTION** ("the bios it returns land in `artist_atlas`") —
+  that was written against an incomplete model, and an arbitrary file write is
+  outside it. Pin `atlas.harvestBaseUrl` on any bridge with harvest enabled.
+- **Artwork is JPEG-only and two-layer verified (MIME *and* the `FF D8 FF` magic
+  bytes) ON THE SCANNER'S LOCAL FOLDER-ART PATH — that rule never covered the
+  NETWORK path, and this bullet read as though it did.** `internal/manifest` has
+  `looksLikeJPEG` + the `folderArtCandidates` sniff; `internal/enrich` had no
+  content check of any kind, on ANY of its five write sites (CAA release, CAA
+  release-group, iTunes, and both premium paths), so whatever an upstream
+  returned was stored behind a `*-N.jpg` name that `/v1/artwork` serves as
+  `image/jpeg`. The write primitive now refuses bytes that are not a recognised
+  image. Deliberately NOT JPEG-only, though that is what this path's contract
+  says: CAA can serve PNG, those covers render today because clients sniff, and
+  dropping them inside a security fix buys nothing the arbitrary-payload refusal
+  does not already buy. `artwork_scale.go`'s rule — **"a verbatim PNG write would
+  put PNG bytes behind an image/jpeg label"**, which is why the SCANNER
+  transcodes — still applies here and is still unimplemented on the network
+  side; the warn line is what stops that staying invisible. Folder-art
   lookup is single-flighted per directory (a `sync.Once` promise stored with
   `LoadOrStore` — **never compute-then-`LoadOrStore`**, which runs N concurrent
   ReadDir+hash per album under contention) and reset per scan. The disc-subfolder
