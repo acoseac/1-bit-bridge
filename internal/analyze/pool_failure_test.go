@@ -155,7 +155,9 @@ func TestASuccessfulAnalysisClearsTheStrikes(t *testing.T) {
 
 // TestACountedFailureHasAlreadyReleasedItsPath pins what a failure count
 // means: the job is FINISHED. Its own bookkeeping has landed and its path is
-// free, so a retry sent the moment the count moves is accepted.
+// free, so a retry sent the moment the count moves is accepted. Along the way,
+// every snapshot shows each accepted job in exactly one place: in flight, done
+// or failed.
 //
 // The CI failure behind it (#986's `test -race (rest)` leg) was
 // TestASuccessfulAnalysisClearsTheStrikes waiting for Failed == 1 and then
@@ -188,6 +190,20 @@ func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
 	defer p.Stop()
 	defer park.release()
 
+	// settle waits for cond and checks, on every poll rather than only at the
+	// end, that each accepted job is exactly one of in flight, done or
+	// failed: never both, never neither.
+	settle := func(cond func(PoolStats) bool) {
+		t.Helper()
+		waitFor(t, func() bool {
+			st := p.Stats()
+			if st.Enqueued != uint64(st.Inflight)+st.Done+st.Failed {
+				t.Fatalf("Stats() = %+v: a job is counted twice, or missing, across in flight / done / failed", st)
+			}
+			return cond(st)
+		})
+	}
+
 	spec := AnalyzeSpec{SourceLibraryRel: "A/B/01.flac", SourceAbsPath: "/lib/A/B/01.flac"}
 	if err := p.Enqueue(spec); err != nil {
 		t.Fatal(err)
@@ -195,18 +211,18 @@ func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
 	park.wait(t)
 
 	// The job is still writing its own failure, so it is still running: in
-	// flight, and not counted. Every accepted job is exactly one of in
-	// flight, done or failed.
+	// flight, and not counted.
 	if st := p.Stats(); st.Inflight != 1 || st.Done+st.Failed != 0 {
-		// What a caller acting on that count gets: the CI failure.
+		// Show what a retry gets at this point before failing. With the count
+		// published early, it is the CI failure: dropped as a duplicate.
 		retryErr := p.Enqueue(spec)
-		t.Fatalf("parked in its own failure WARN, the job reads Inflight=%d Done=%d Failed=%d; "+
-			"a retry sent on that count returned %v and Enqueued went %d -> %d",
+		t.Fatalf("parked in its own failure WARN, the job reads Inflight=%d Done=%d Failed=%d, want 1/0/0; "+
+			"a retry sent now returned %v and Enqueued went %d -> %d",
 			st.Inflight, st.Done, st.Failed, retryErr, st.Enqueued, p.Stats().Enqueued)
 	}
 	park.release()
 
-	waitFor(t, func() bool { return p.Stats().Failed == 1 })
+	settle(func(st PoolStats) bool { return st.Failed == 1 })
 	rows, err := s.ListUnreadableTracksForAdmin(context.Background())
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("list = (%d rows, %v) once the failure is counted, want the strike already recorded", len(rows), err)
@@ -218,7 +234,7 @@ func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
 		t.Fatalf("Enqueued = %d after a retry sent on Failed == 1, want 2: the retry was dropped "+
 			"as a duplicate of a job that had already been counted", got)
 	}
-	waitFor(t, func() bool { return p.Stats().Done == 1 })
+	settle(func(st PoolStats) bool { return st.Done == 1 })
 }
 
 // logPark holds the first goroutine that logs one message until the test lets
