@@ -180,11 +180,14 @@ func TestACountedTranscodeFailureHasAlreadyReleasedItsPath(t *testing.T) {
 			// The job is still doing its own bookkeeping, so it is still
 			// running: in flight, and not counted.
 			if st := p.Stats(); st.Inflight != 1 || st.Done+st.Failed != 0 {
-				// Show what a retry gets at this point before failing: the
-				// count says the job is over, the dedup set says it is not.
+				// Show what a retry gets at this point before failing. Counted
+				// early, it is refused as a duplicate of a job the count calls
+				// finished; released early, a second attempt is admitted while
+				// the first is still writing its strike or removing its sidecar.
 				retryErr := p.Enqueue(spec)
 				t.Fatalf("parked in its own %q line, the job reads Inflight=%d Done=%d Failed=%d, want 1/0/0: "+
-					"it was counted before it finished, and a retry sent on that count returned %v",
+					"it is still doing its own bookkeeping, so it must be in flight and uncounted. "+
+					"A retry sent at this moment returned %v",
 					tc.logMsg, st.Inflight, st.Done, st.Failed, retryErr)
 			}
 			park.Release()
@@ -318,7 +321,9 @@ func TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath(t *testing.T) {
 			for p.ActiveWorkers()[0].Busy {
 				if time.Now().After(deadline) {
 					unlock()
-					t.Fatal("the worker never cleared its slot: it did not reach the release")
+					t.Fatal("the worker never cleared its slot, so it never reached finishJob. With p.mu " +
+						"held here, the likely cause is a worker blocked on the pool lock inside its exit: " +
+						"something there counts or releases before the tail does")
 				}
 				time.Sleep(time.Millisecond)
 			}
