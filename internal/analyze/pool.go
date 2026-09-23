@@ -36,22 +36,32 @@ var ErrPoolClosed = errors.New("analyze pool is closed")
 // non-blocking (select + default → ErrQueueFull). Dedup keys on the
 // source library-relative path (one waveform per source), so a
 // duplicate enqueue while a job is queued or running is a silent no-op.
+// A job stops being "queued or running" at the same instant it is
+// counted done or failed, never later: see finishJob.
 type Pool struct {
 	store    *manifest.Store
 	workers  int
 	jobs     chan poolJob
 	queueCap int
 
-	mu       sync.Mutex
-	inflight map[string]struct{} // key = source library-relative path
+	// mu guards the dedup set and the three counters as ONE state. Enqueue
+	// claims a path and counts it in one critical section, finishJob
+	// releases it and counts the outcome in another, and Stats reads all of
+	// them under the same lock, so no snapshot shows a job both in flight
+	// and counted, or in neither place. Plain integers rather than atomics
+	// on purpose: an increment written outside the lock is then a data race
+	// the race detector reports, not an atomic that compiles and quietly
+	// reopens the window finishJob closes.
+	mu          sync.Mutex
+	inflight    map[string]struct{} // key = source library-relative path
+	enqueuedCnt uint64
+	doneCnt     uint64
+	failedCnt   uint64
 
-	wg          sync.WaitGroup
-	stopCtx     context.Context
-	stopCancel  context.CancelFunc
-	closed      atomic.Bool
-	enqueuedCnt atomic.Uint64
-	doneCnt     atomic.Uint64
-	failedCnt   atomic.Uint64
+	wg         sync.WaitGroup
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	closed     atomic.Bool
 
 	// Injectable seams (set via PoolOption before workers start so
 	// there's no data race with the worker goroutines). Production uses
@@ -62,11 +72,12 @@ type Pool struct {
 	now        func() time.Time
 
 	// Coalescing state-change publisher: a single long-lived goroutine
-	// drains a cap-1 channel and invokes the wired callback (cmd/bridge
-	// publishes a fresh /v1/analysis/stats snapshot to the SSE broker).
-	// Workers non-blocking-send signals; a full buffer means a signal
-	// is already pending, so dropping the new one is correct (the
-	// callback always reads a fresh snapshot).
+	// drains a cap-1 channel and invokes the wired callback. Nothing in
+	// cmd/bridge wires one today: /v1/analysis/stats and the console's
+	// analysis card read Stats() when asked, and the SSE topics are the
+	// transcode pool's. Workers non-blocking-send signals; a full buffer
+	// means a signal is already pending, so dropping the new one is
+	// correct (the callback always reads a fresh snapshot).
 	stateChangeMu   sync.RWMutex
 	onStateChange   func()
 	stateChangeChan chan struct{}
@@ -174,7 +185,7 @@ func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	p.inflight[dedup] = struct{}{} // optimistic claim; rolled back on full
 	select {
 	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
-		p.enqueuedCnt.Add(1)
+		p.enqueuedCnt++
 		// fireStateChange BEFORE the unlock — mirrors internal/transcode
 		// Pool. Stop() closes stateChangeChan only after acquiring p.mu
 		// (to close jobs) + wg.Wait, so a send under the lock strictly
@@ -256,41 +267,84 @@ func (p *Pool) workerLoop() {
 	}
 }
 
-func (p *Pool) releaseDedup(key string) {
+// jobOutcome is the counter finishJob adds a job to. outcomeUncounted is a
+// job the pool was shutting down under: its path must still be released,
+// but it is neither a success nor a failure of the source.
+type jobOutcome int
+
+const (
+	outcomeUncounted jobOutcome = iota
+	outcomeDone
+	outcomeFailed
+)
+
+// finishJob is the last thing that happens to every job, however it went:
+// it releases the path's dedup slot and adds the job to its outcome counter
+// in ONE critical section, under the p.mu that Enqueue's dedup check and
+// Stats both take.
+//
+// One step, because each half answers a question somebody acts on, and
+// splitting them opens a window whichever order they run in. Counting first
+// is what this pool used to do, with the failure's strike and WARN written
+// in between: a caller that saw the count and re-enqueued the path, which is
+// what a retry is, landed on a path the job still held, and Enqueue's nil
+// for a duplicate dropped the retry without a trace (the #986 CI failure).
+// Releasing first leaves a snapshot between the two steps that shows the job
+// nowhere, neither in flight nor counted.
+//
+// It runs AFTER the job's own bookkeeping (the strike and its WARN, or the
+// row and the cleared marker), so a count also means those have landed.
+// Releasing the path any earlier would let a retry run while the previous
+// attempt was still writing, and a strike landing after the retry's success
+// is a verdict against a file that has just analysed cleanly.
+func (p *Pool) finishJob(job poolJob, outcome jobOutcome) {
 	p.mu.Lock()
-	delete(p.inflight, key)
+	delete(p.inflight, job.dedup)
+	switch outcome {
+	case outcomeDone:
+		p.doneCnt++
+	case outcomeFailed:
+		p.failedCnt++
+	}
 	p.mu.Unlock()
 }
 
 // processJob runs one job: decode + waveform via the runner, fsync the
 // sidecar, then commit the analysis row. Lives in its own method so the
 // per-job timeout context's `defer cancel()` releases per job rather
-// than accumulating for the worker's lifetime. The recover contains a
-// panic to this single job (releasing the dedup slot so the path isn't
-// blacklisted until restart) and keeps the worker alive. Shutdown
-// gating reads p.closed (flipped before stopCtx is cancelled) so a
-// graceful-shutdown error isn't miscounted as a real failure.
+// than accumulating for the worker's lifetime.
+//
+// Every way out ends in the ONE deferred finishJob, a panic included: the
+// recover contains it to this job, counts it as a failure, and keeps the
+// worker alive, and the release means the path is not blacklisted until
+// restart. The exits used to carry their own release-and-count tails, and
+// every one of them counted first. One exit point is what stops the next
+// path added here from getting the order wrong again. Each path records its
+// outcome where it learns it, and finishJob applies it once that path's
+// bookkeeping is done.
+//
+// Shutdown gating reads p.closed (flipped before stopCtx is cancelled) so
+// a graceful-shutdown error isn't miscounted as a real failure. It is read
+// at those decision points and never after the release: `bridge analyze`
+// answers an idle pool by calling Stop, so a re-read there would un-count
+// the last job of the run.
 func (p *Pool) processJob(job poolJob) {
-	released := false
+	outcome := outcomeUncounted
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("analyze: recovered panic in job",
 				"path", job.spec.SourceLibraryRel, "panic", r)
 			if !p.closed.Load() {
-				p.failedCnt.Add(1)
+				outcome = outcomeFailed
 			}
 		}
-		if !released {
-			p.releaseDedup(job.dedup)
-			if !p.closed.Load() {
-				p.fireStateChange()
-			}
+		p.finishJob(job, outcome)
+		if !p.closed.Load() {
+			p.fireStateChange()
 		}
 	}()
 
 	if p.closed.Load() {
-		p.releaseDedup(job.dedup)
-		released = true
 		return
 	}
 
@@ -300,7 +354,7 @@ func (p *Pool) processJob(job poolJob) {
 	res, err := p.runner(jobCtx, job.spec)
 	if err != nil {
 		if !p.closed.Load() {
-			p.failedCnt.Add(1)
+			outcome = outcomeFailed
 			// The per-job timeout is excluded from the debounce BEFORE the
 			// classifier is asked: it is as likely to mean a hung mount as a
 			// pathological file, so it is never a verdict about the source.
@@ -321,11 +375,6 @@ func (p *Pool) processJob(job poolJob) {
 				p.noteFailure(job.spec, err)
 			}
 		}
-		p.releaseDedup(job.dedup)
-		released = true
-		if !p.closed.Load() {
-			p.fireStateChange()
-		}
 		return
 	}
 
@@ -342,14 +391,9 @@ func (p *Pool) processJob(job poolJob) {
 		// mark-and-sweep instead. (CodeRabbit on #395, correcting the
 		// round-1 unconditional-remove.)
 		if !p.closed.Load() {
-			p.failedCnt.Add(1)
+			outcome = outcomeFailed
 			logger.Error("analyze: fsync sidecar",
 				"path", job.spec.SourceLibraryRel, "err", err)
-		}
-		p.releaseDedup(job.dedup)
-		released = true
-		if !p.closed.Load() {
-			p.fireStateChange()
 		}
 		return
 	}
@@ -387,14 +431,9 @@ func (p *Pool) processJob(job poolJob) {
 		// reused per source, so a prior row could already point at it);
 		// `--gc` reconciles a true first-analysis orphan. (CodeRabbit #395.)
 		if !p.closed.Load() {
-			p.failedCnt.Add(1)
+			outcome = outcomeFailed
 			logger.Error("analyze: store analysis",
 				"path", job.spec.SourceLibraryRel, "err", err)
-		}
-		p.releaseDedup(job.dedup)
-		released = true
-		if !p.closed.Load() {
-			p.fireStateChange()
 		}
 		return
 	}
@@ -419,10 +458,7 @@ func (p *Pool) processJob(job poolJob) {
 		logger.Warn("analyze: clear failure marker",
 			"path", job.spec.SourceLibraryRel, "err", err)
 	}
-	p.doneCnt.Add(1)
-	p.releaseDedup(job.dedup)
-	released = true
-	p.fireStateChange()
+	outcome = outcomeDone
 }
 
 // analyzeFailedMsg is the one message every analysis failure logs, whatever
@@ -507,17 +543,22 @@ type PoolStats struct {
 }
 
 // Stats returns the current snapshot. Safe to call concurrently.
+//
+// The in-flight count and the three counters are read in one critical
+// section, the lock finishJob moves a job from one to the other under. So
+// an observer can act on what it reads: Done or Failed having moved means
+// that job has also left Inflight, and a re-enqueue of its path is
+// accepted.
 func (p *Pool) Stats() PoolStats {
 	p.mu.Lock()
-	inflight := len(p.inflight)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
 	return PoolStats{
 		Workers:  p.workers,
 		QueueCap: p.queueCap,
 		QueueLen: len(p.jobs),
-		Inflight: inflight,
-		Enqueued: p.enqueuedCnt.Load(),
-		Done:     p.doneCnt.Load(),
-		Failed:   p.failedCnt.Load(),
+		Inflight: len(p.inflight),
+		Enqueued: p.enqueuedCnt,
+		Done:     p.doneCnt,
+		Failed:   p.failedCnt,
 	}
 }
