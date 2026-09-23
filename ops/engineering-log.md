@@ -10209,3 +10209,186 @@ that no poll can be relied on to hit.
 - **The session that flagged the failure measured before handing it over.**
   Its 900 idle passes are what showed that stress on this machine could not
   answer the question.
+
+## 2026-09-23 — the transcode pool counts and announces a job only once it has released its path (#988)
+
+#987 fixed the analysis pool and left its transcode sibling with a note: that
+pool's `processJob` also counted before it released, and `fireJobFailed`'s
+docblock claimed an order two of its exits did not follow. This entry is that
+sibling.
+
+### What the code did
+
+- Five terminal exits: runner error (sox failed, or timed out), fsync error,
+  store error (`UpsertVariant`), success, recovered panic. Every one bumped
+  `failedCnt` / `doneCnt` (atomics) and the Prometheus counter BEFORE
+  `finishJob` cleared the worker slot and released the dedup claim. The
+  sox-failed exit wrote its strike (a SQLite UPDATE) in between; the fsync and
+  store exits removed the orphan sidecar in between.
+- The fsync and store exits also sent `jobFailed`, a BLOCKING send to the
+  publisher, before `finishJob`. The runner-error, success and panic exits sent
+  theirs after it. `fireJobFailed`'s docblock said every caller sent it "after
+  releaseDedup".
+- `Stats()` read `len(p.inflight)` under `p.mu` and the counters as atomics
+  outside it, so a snapshot could show a job both in flight and counted.
+- The runner-error exit read `p.closed` twice, once to count and once, after
+  the release, to announce. A `Stop` landing between the two counted a failure
+  and dropped its event.
+
+### Who acts on it
+
+Latent in the sense #987 recorded (nothing re-enqueues on these counters), but
+three consumers read the snapshot or the event as "the job is over":
+
+- **The console.** `notifyUpscaleProgress` (app.js) dispatches `bridge:upscale`
+  when Done+Failed advances, with `settled = !(inflight > 0 || queueLen > 0)`
+  taken from the SAME frame, and the player's `wireVariantRefresh` bypasses its
+  8 s throttle only on `settled`. A frame that counted a batch's last job while
+  it still read in flight carried `settled: false`, and the next frame
+  (in flight 0, same count) dispatches nothing, because the event fires only
+  when the count advances. The panel's own comment says that final update "must
+  never be the update that gets throttled away". The window only had to overlap
+  one 500 ms fast-tick sample.
+- **The batch Coordinator** answers `ErrDuplicateInflight` by dropping the path
+  from the batch it is building ("the in-flight job produces the variant"). A
+  batch re-submitted after the `upscale.batch` terminal event (which, for the
+  fsync and store exits, came from a `jobFailed` sent before the release) could
+  meet the finished job's claim and drop the very path it was re-running.
+- **`POST /v1/upscale`** treats `ErrDuplicateInflight` as accepted, so a
+  re-request landing in the window waited for an `upscale.complete` the failed
+  job would never send.
+- `/v1/diagnostics` and the admin diagnostics read `inflight` and
+  `done + failed` from the one snapshot as well.
+
+How likely each was is set by what sits in the window. Between an event and
+the release there were only a few statements, far shorter than any SSE round
+trip, so the Coordinator and `POST /v1/upscale` cases needed a descheduled
+worker. Between a count and the release, the sox-failed exit wrote its strike,
+a SQLite UPDATE that waits on `Store.mu` for up to 8 s under contention (a scan
+writing), and every exit logged, so a 500 ms console sample could land inside
+it. No field report exists for either; this is the contract, fixed before a
+consumer relies on it the way #987's test did.
+
+### Measured
+
+| run | old pool | fixed pool |
+|---|---|---|
+| the two new tests (4 + 6 exits), `-race -count=10` | every subtest red, 10/10 | green |
+| the same, `-count=10 -cpu 1,4`, no race | 20/20 red | green |
+| throwaway loop: fail a job, poll `Stats` with a 1 ms sleep until Failed moves, retry at once (idle dev Mac) | 0/100 saw it in flight | 0/100 |
+| the same loop with a busy poll (`runtime.Gosched`), with and without `-race` | **400/400** counted while in flight, **400/400** retries refused with `ErrDuplicateInflight` | 0/400, 0/400 |
+
+The window is open on every job; a 1 ms sleep simply outlasts it on an idle
+machine. #987's lesson again: an idle poll passing says nothing about the
+window.
+
+### Decisions
+
+- **The analysis pool's shape, one step further.** `finishJob(workerID, job,
+  outcome)` clears the slot, then releases the claim (ownership-checked, now
+  `releaseDedupLocked` under the caller's lock) and counts in ONE `p.mu`
+  section. `Stats` reads under the same lock. The counters are plain `uint64`
+  under `p.mu`.
+- **The events move into the tail too.** This pool has what the analysis pool
+  does not: blocking per-job events that consumers act on. `announce` sends
+  them after `finishJob`, outside the lock (they block on a full buffer and must
+  never do so under `p.mu`). So an event now promises what a count promises:
+  the path is free and the count has moved.
+- **One deferred tail, one `jobEnd`.** Each exit decides the outcome and the
+  event's content where it learns them, does its own bookkeeping, and returns.
+  Every exit had the order wrong, so a fix per exit would leave the next new
+  exit to choose its own.
+- **The bookkeeping stays inside the claim.** The strike is written, and the
+  orphan sidecar removed, BEFORE the release. Releasing any earlier would let a
+  retry run while the old attempt is still writing: the retry's success clears
+  the strikes and the old strike lands afterwards, against a file that has just
+  converted cleanly; or the retry renames its fresh sidecar into place and the
+  old attempt's `os.Remove` deletes it.
+- **`p.closed` is read once per exit, where it decides.** A counted job is
+  always announced and an uncounted one never is. The success exit reads it not
+  at all, as before: its row has committed, so it counts and announces during
+  shutdown and `Stop` drains the event.
+- **Prometheus moves with the count**, in `finishJob`, after the unlock: a
+  scrape has no in-flight figure to agree with.
+- **Side effects, all deliberate.** A panic after an exit had decided used to
+  count twice (the exit, then the recover) and now counts once. The sox error
+  is redacted once instead of twice (log line and event). `defer cancel()` of
+  the job context now runs before the tail (LIFO), which nothing in the tail
+  needs.
+- **`Enqueue` keeps `ErrDuplicateInflight`.** Once a count or an event implies
+  the release, a caller acting on either cannot meet it from the job it is
+  reacting to.
+- **Stale docblocks corrected on the way.** The `Pool` type claimed a
+  `bridge upscale` CLI consumer (`git log -S` finds no `NewPool` in
+  `cmd/bridge/upscale.go`, ever: the CLI commands run their own worker loop)
+  and that `serve` built it only when enabled (it is constructed
+  unconditionally). The dedup was "a silent no-op" and `Enqueue`'s doc said a
+  duplicate "returns nil"; it has returned `ErrDuplicateInflight` since #515.
+  `processJob`'s docblock was glued onto `variantFailureWriteTimeout`, where
+  `TestNoDocblockNamesAnotherDeclaration` could not see it: that guard inspects
+  funcs and types, not consts, and "runs" is not in its verb list. Three
+  comments called `Stats()` an atomic probe.
+
+### Tests and controls
+
+- `TestACountedTranscodeFailureHasAlreadyReleasedItsPath` parks each failure
+  exit in its own log line (`pool: sox failed`, `pool: sox timed out`,
+  `pool: fsync sidecar`, `pool: store variant`) with `loggingtest.ParkOn`:
+  #987's `parkOnLog`, moved into a test-only package so both pools share one
+  definition, as #986's `handshaketest` did for the TLS-log capture. While
+  parked, the job must be in flight and uncounted. Then conservation
+  (`Enqueued == Inflight + Done + Failed`) on every poll; the exit's bookkeeping
+  already landed once Failed moves (the strike found by the operator's
+  retry-clear, none for a timeout, the sidecar gone); and a retry sent on
+  `Failed == 1` accepted.
+- `TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath` needs no log
+  line, which is what reaches the success exit. The release takes `p.mu`, and
+  **the test holds `p.mu`**, so the worker stops exactly at the release,
+  whatever it did on the way. `finishJob` clears the worker's slot (an
+  `atomic.Pointer`, read lock-free) just before it locks, so an idle slot says
+  the worker has arrived. The publisher is held in its first callback (the
+  enqueue's state change), so an event already sent stays in its channel where
+  `len()` counts it. Then: the path still held, nothing counted, nothing sent;
+  and once let go, the event's own `Stats()` shows the job released and counted.
+  Six exits, success and panic included.
+- The red commit read the counters in their atomic form through a one-line
+  `countedLocked` accessor. The fix changed that line with the representation
+  and nothing else in the test.
+
+Controls ran in a throwaway worktree at the committed fix, `-race -count=3`
+each (C6: the whole package once). Each built and vetted:
+
+| control | mutation | red at |
+|---|---|---|
+| C1 | count at each failure's decision point (four exits and the recover), before the bookkeeping | the parked check (`Inflight=1 … Failed=1`); the held check (the worker blocks on `p.mu` inside its exit) |
+| C2 | release at each failure's decision point, before the bookkeeping | the parked check (`Inflight=0`, and a retry sent then admitted: `<nil>`); the held check (blocked on `p.mu`) |
+| C3 | count, 100 ms, release, in two sections | conservation: `Inflight:1 … Failed:1` |
+| C4 | release, 100 ms, count | conservation: `Inflight:0 Enqueued:1 Done:0 Failed:0` |
+| C5 | the pre-fix `pool.go` (the fix's identifiers checked absent), accessor reverted | all ten subtests; the fsync and store exits on the event check as well |
+| C6 | the increments after the unlock | 14 `DATA RACE` reports across 12 tests |
+| C7 | `announce` before `finishJob` | the held check on all six exits: `1 terminal event(s) sent while the job still holds its path` |
+
+C3 and C4 are caught only by the conservation check, and only because of the
+gap. The held test cannot see a split into two critical sections, since the
+worker blocks on the first of them; two back-to-back sections leave a
+nanosecond window no test here can be relied on to hit, so the one-section
+shape is what review guards, as in #987.
+
+### Process notes
+
+- **Two failure messages fitted one mutation only**, and the controls caught
+  both. The parked check said "counted before it finished" under C2, where
+  nothing was counted, and the held check said the worker "did not reach the
+  release" under C1, where it was blocked on the lock the test holds. #987 had
+  already corrected the first wording in its own test; copying the test copied
+  the phrasing it had fixed. Both now describe the observed state.
+- **Holding the lock a window ends in** is the second way to park a worker, and
+  it reaches a window with no log line in it. It is white-box (the test reads
+  `p.inflight` and the event channels), which this package's tests already are.
+- **The gate ran with 6.6 GiB free against a 48 GiB build cache.** A comment
+  edit in `internal/metrics` invalidates most of the tree, so it ran in stages
+  with `df` between them: 6.6 GiB free before, 3.2 after `make fmt vet test`
+  (11 min), 1.8 after `make build-all`. A full gate that touches a widely
+  imported package costs about 5 GiB of fresh cache on the dev Mac; check
+  `df -h /` first, as CLAUDE.md's 2026-09-09 LOUPE section already says of
+  the DSD fixtures.
