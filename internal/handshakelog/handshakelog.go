@@ -22,13 +22,14 @@
 //     NOTHING, so the listener records, per connection, whether the peer's
 //     first answer was EOF, and the logger drops a line only on that
 //     evidence.
-//   - Making the probe finish a real handshake instead does not remove the
-//     line; it moves it. Verified against the cert on disk, the probe
-//     reports a live bridge dead whenever the served cert is expired, not
-//     yet valid (a clock that ran ahead at mint time) or rotated on disk
-//     ahead of the restart that serves it — and in each of those the
-//     server logs `remote error: tls: bad certificate` for every probe, so
-//     the noise returns exactly when an operator is reading the log.
+//   - Making the probe finish a real handshake instead removes the line
+//     only while the cert is healthy. Verified against the cert on disk,
+//     the probe reports a live bridge dead whenever the served cert is
+//     expired, not yet valid (a clock that ran ahead at mint time) or
+//     rotated on disk ahead of the restart that serves it — and in each of
+//     those the server logs `remote error: tls: bad certificate` for every
+//     probe, so the noise returns exactly when an operator is reading the
+//     log.
 //
 // Only a peer on this host is ever dropped: a loopback source, or a
 // source address equal to the destination, which is what `bridge health`

@@ -20,6 +20,17 @@ import (
 // Kubernetes TCPSocketAction): the listener accepts once serve is up and a
 // crashed process refuses the connection.
 //
+// Why not a handshake verified against the bridge's own cert on disk, which
+// needs no skipped verification: measured, it reports a live bridge dead
+// whenever the served cert is expired, not yet valid (a clock that ran ahead
+// at mint time) or rotated on disk ahead of the restart that serves it — a
+// liveness failure a restart cannot fix, or is the fix already pending — and
+// the bridge then logs `remote error: tls: bad certificate` for every probe.
+// The connect's own line (`http: TLS handshake error … EOF`, one per probe)
+// is handled where it is written: the API listener goes through
+// internal/handshakelog, which drops a handshake failure only for a peer on
+// this host that closed without sending a byte.
+//
 // Why not `bridge status`: status probes the ADMIN API, which is wrapped in
 // session auth in public mode — a healthy public-mode container would get
 // 401/403 and Docker would mark it unhealthy forever. Reading the API listen
