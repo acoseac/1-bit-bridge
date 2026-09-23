@@ -127,6 +127,41 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		return status, ErrInstallInFlight
 	}
 	defer u.installInFlight.Store(false)
+	// A swap for this same target has already landed and the process has
+	// not restarted into it. Installing again re-runs the whole ~30 MiB
+	// download, and — worse — swapBinary's EEXIST retry does
+	// os.Remove(bak) before re-linking, so the SECOND install destroys
+	// the operator's rollback target and replaces it with a copy of what
+	// is already live. canRollback() keeps reporting true throughout,
+	// because it only stats for the file's existence.
+	//
+	// Reachable through the ordinary console flow, not an exotic one:
+	// apiUpdatesInstall does NOT restart (restart is a separate operator
+	// action), and u.status.CurrentVersion is written ONCE at
+	// construction — Install only decorates the local copy it returns —
+	// so UpdateAvailable stays true for the process lifetime and the
+	// console keeps inviting the click that does the damage.
+	//
+	// AFTER the in-flight try-lock, not before it: a caller arriving
+	// while another install is mid-flight should hear "an install is
+	// already in progress", which is the more immediate and more
+	// actionable truth. This one is a fact about the HOST and only
+	// matters once the caller would otherwise have proceeded. It also
+	// means reaching this refusal PROVES the lock was free, which is
+	// what TestInstallConcurrentCallsSerialized now leans on.
+	//
+	// The marker ALONE, deliberately — NOT `u.pendingRestart.Load() ||
+	// …`. The in-memory flag records THAT a swap landed and not WHICH
+	// version, so an install of a genuinely newer release would have
+	// been refused by it, stranding the host on a version it had not
+	// even booted (TestANewerReleaseIsStillInstallable caught exactly
+	// that during development). The marker is version-aware, is written
+	// before every swap, and is visible to the CLI's separate process —
+	// so it is strictly stronger here, and the flag keeps its one real
+	// job: the auto-installer's pending-restart fast path.
+	if u.swapAwaitingRestart(opts.DataDir, status.LatestVersion) {
+		return status, fmt.Errorf("%w: %s is already staged on disk", ErrInstallPendingRestart, status.LatestVersion)
+	}
 	if !opts.Force && opts.Sessions != nil && opts.Sessions.Inflight() > 0 {
 		return status, fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
@@ -306,6 +341,19 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		return status, fmt.Errorf("swap: %w", err)
 	}
 
+	// Mark pending-restart for EVERY install path, not just the auto
+	// one. It used to be set by maybeAutoInstall after Install returned,
+	// so an admin-console or CLI install left it false — and those are
+	// exactly the callers that do not restart, which is what let the
+	// next poll re-run the whole install. Setting it here means the one
+	// place that knows a swap landed is the place that records it.
+	//
+	// The persisted marker is the durable half (see swapAwaitingRestart);
+	// this is the in-process half, and it is what lets the auto-
+	// installer's pending-restart fast path pick up an install the
+	// operator started by hand rather than attempting a refused one.
+	u.pendingRestart.Store(true)
+
 	// Refresh status's CurrentVersion field for the response —
 	// we'll be running TargetVersion after restart. The cached
 	// Status itself will refresh on the new binary's first poll.
@@ -314,7 +362,7 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 }
 
 // Sentinel errors so callers can distinguish "client-fixable"
-// (no-update / active-sessions / install-in-flight /
+// (no-update / active-sessions / install-in-flight / pending-restart /
 // unsupported-platform) from "something went wrong".
 var (
 	ErrNoUpdate            = errors.New("no update available")
@@ -323,6 +371,12 @@ var (
 	ErrPathNotWritable     = errors.New("binary path not writable by this user (try sudo bridge update)")
 	ErrInstallNotSupported = errors.New("self-install not yet supported on this platform; download manually and replace the binary (see PROTOCOL.md → Updates)")
 	ErrCompatGateRefused   = errors.New("install would orphan a paired iOS client below the candidate's MinClientVersion floor")
+	// ErrInstallPendingRestart means the candidate is already on disk
+	// and the process has not restarted into it. The remedy is a
+	// RESTART, not another install — which is the whole point of
+	// naming it: a second install re-downloads the same bytes and
+	// destroys the .bak the first one created.
+	ErrInstallPendingRestart = errors.New("this release is already installed and waiting for a restart; restart the bridge instead of installing again")
 )
 
 // Rollback restores bridge.bak over the live binary. Used by the
@@ -390,6 +444,59 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 // Falls back to the running version when no marker survives (a
 // hand-staged .bak, or a rollback after BootCleanupBak retired the
 // marker).
+// swapAwaitingRestart reports whether a swap for `target` has ALREADY
+// landed on this host and the process has not yet restarted into it.
+//
+// Keyed on the PERSISTED marker rather than the in-memory pendingRestart
+// flag, because the two callers that need protecting are different
+// PROCESSES. `bridge update` is its own process and sees no atomic.Bool
+// the serving bridge set; and a marker written before a crash must still
+// refuse the next attempt. The in-memory flag stays as the cheap first
+// arm in Install — this is the one that is actually load-bearing.
+//
+// Three terms, all required:
+//
+//   - Status "installing" AND SwapStarted. Together they mean the
+//     destructive step ran, so .bak now holds the binary we were running
+//     when the marker was armed. A marker armed but not swapped (the
+//     Windows SCM-stop window) must NOT refuse: nothing was mutated, and
+//     DecideBootAction reads that state as BootClearNotSwapped.
+//
+//   - Same target. A NEWER release is a legitimate install: refusing it
+//     would strand the host on a version it has not even booted. Only a
+//     repeat of the target already on disk is the defect.
+//
+//   - Within recencyWindow. This is what keeps the refusal from becoming
+//     a wedge. Past the window DecideBootAction returns
+//     BootClearAbandoned, so the marker is going to be cleared by the
+//     next boot anyway; refusing on it would block installs on a host
+//     that never restarts, with no way out. The two bounds are the same
+//     constant ON PURPOSE — the refusal expires exactly when boot would
+//     have cleared it, so the engine and the boot path cannot disagree
+//     about whether a marker is still live.
+//
+// A marker that cannot be read is NOT a refusal: LoadState already
+// normalises missing and malformed to the zero State, and failing closed
+// here would make an unreadable file block every install on the host.
+// The guard exists to stop a SECOND install eating .bak, and the cost of
+// missing one is the bug we already had — not a new one.
+func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
+	if dataDir == "" || target == "" {
+		return false
+	}
+	st, err := LoadState(dataDir)
+	if err != nil {
+		return false
+	}
+	if st.Status != "installing" || !st.SwapStarted {
+		return false
+	}
+	if normalizeTag(st.TargetVersion) != normalizeTag(target) {
+		return false
+	}
+	return u.now().Sub(st.AttemptedAt) <= recencyWindow
+}
+
 func rejectedVersionFor(dataDir string) string {
 	if st, err := LoadState(dataDir); err == nil && st.TargetVersion != "" {
 		return normalizeTag(st.TargetVersion)

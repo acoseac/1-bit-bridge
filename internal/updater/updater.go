@@ -201,9 +201,21 @@ type Options struct {
 
 	// AutoInstallRestart is invoked after a successful auto-install
 	// to trigger the process restart that loads the new binary.
-	// Nil disables the auto-install path. cmd/bridge/main.go wires
-	// this to os.Exit(0) — same restart contract as the admin
-	// console's Restart endpoint.
+	// Nil disables the auto-install path.
+	//
+	// **It must route through the graceful cancellation closure, NEVER
+	// os.Exit(0)** — the same closure SIGINT/SIGTERM and the admin
+	// console's Restart use. os.Exit skips every runServe defer: the
+	// bgWriters drain (SQLite corruption), the in-flight job cleanup,
+	// the auth store's last-used debounce flush, and the manifest DB
+	// checkpoint. cmd/bridge/main.go wires it to `cancel()` and says so
+	// at the call site.
+	//
+	// This docblock said the opposite — "cmd/bridge/main.go wires this
+	// to os.Exit(0)" — while the wiring did the right thing and the
+	// invariant forbade what the comment recommended. Options is the
+	// package's public configuration surface: a second caller reads
+	// THIS, not main.go.
 	AutoInstallRestart func()
 
 	// TokenSnapshot returns the live token list. Used by the
@@ -479,10 +491,12 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		}
 		return
 	}
-	// The binary on disk is now the candidate. Mark pending-restart
-	// BEFORE restartWhenDrained so a deferred restart skips the
-	// re-install on later poll cycles (see pendingRestart).
-	u.pendingRestart.Store(true)
+	// The binary on disk is now the candidate. Install itself has
+	// already marked pending-restart — for EVERY install path, not just
+	// this one, which is what stops an admin-console or CLI install
+	// (neither of which restarts) from being re-run by the next poll.
+	// It used to be set here, so those two paths left it false.
+	//
 	// restartWhenDrained re-checks the sessions gate AFTER the
 	// install: the download phase can run for many minutes and a
 	// stream may have started in the meantime (Install itself only

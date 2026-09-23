@@ -8687,3 +8687,92 @@ Mirror-PR obligation. The nightly fuzz corpora pass.
   gate on that exact SHA is green. Most likely one of the timing flakes
   this repo already records. **Do not truncate the output of a run that
   might fail.**
+
+## 2026-09-23 — a repeat install ate the rollback target (#TBD)
+
+Found by the 2026-09-23 code pass, in `internal/updater` — 3,567 lines, the
+largest package in the tree that had never appeared in a dated review section,
+and the one that swaps the running binary.
+
+### The chain
+
+Four facts compose, each verified by reading:
+
+- `u.status.CurrentVersion` is set ONCE, at construction (`updater.go:312`).
+  `install.go` writes the "(pending restart)" value to the LOCAL copy it returns
+  — its own comment says "for the response … The cached Status itself will
+  refresh on the new binary's first poll", which assumes a restart happens.
+  `Status()` returns `u.status` verbatim.
+- `pendingRestart` — the flag whose whole job is "don't re-install per poll" —
+  was set at exactly one site, inside the auto-install branch.
+- `Install` gated on `status.UpdateAvailable` and never asked whether `dst` was
+  already the target version.
+- **`apiUpdatesInstall` does not restart.** It installs and returns 200; restart
+  is a separate operator action (the rollback handler's own docblock says
+  "operator clicks Restart next").
+
+So: operator clicks Install → `dst` = v2, `.bak` = v1, process still v1 → the
+console STILL shows an update available, because the cached status never moved →
+operator clicks Install again (or, with `autoInstall` on, the next poll does) →
+full re-download and re-verify → `swapBinary`'s `linkFunc` returns EEXIST →
+`os.Remove(bak)` deletes v1 → `.bak` is re-linked to v2. Rollback is now a no-op
+and `canRollback()` returns true, because it only stats for existence.
+
+`swap_unix.go:88-97`'s docblock shows the authors reasoned carefully about
+preserving `.bak` on the FAILURE path (that is what the R5 EEXIST-only clear is
+for); the repeat-SUCCESS path was not considered.
+
+### Measured
+
+With the guard reverted, `TestSecondInstallWithoutARestartKeepsTheRollbackTarget`
+reports `.bak = "bridge-binary-0.2.0", want "bridge-binary-0.1.0"` — and
+`TestSecondInstallIsRefusedFromAFreshUpdater` reports the same from a second
+process. The first draft of both tests used `t.Fatalf` on the ERROR assertion,
+which stopped the control before it reached the file assertion: it proved the
+error changed and never that the rollback target was destroyed. `t.Errorf` +
+assert on the FILES, which is #941's lesson applied to a different reaper.
+
+### Why the persisted marker rather than the flag
+
+The in-memory `pendingRestart` is version-agnostic: it records THAT a swap
+landed, not which version. Refusing on it turned
+`TestANewerReleaseIsStillInstallable` red during development — a newer release
+would have been refused, stranding the host on a version it had not booted,
+which is worse than the bug being fixed. `bridge update` is also a separate
+process and sees no `atomic.Bool` the serving bridge set.
+
+`State.TargetVersion` + `State.SwapStarted` already existed and are written
+before the swap, so the marker is version-aware, durable and cross-process. The
+recency bound is the same `recencyWindow` `DecideBootAction` uses for
+`BootClearAbandoned` — deliberately the same constant, so the refusal expires
+exactly when boot would have cleared the marker and the engine and the boot path
+cannot disagree about whether one is still live. That is what stops the guard
+being a wedge after a crash, and `TestAnInterruptedInstallDoesNotWedgeTheEngine`
+asserts both halves against each other.
+
+Verified as the plan required: `maybeRollbackOnBoot` (`main.go:3005`) runs
+BEFORE `updater.New` (`main.go:3103`) on the serve path, and every branch of it
+ends in `ClearState` or a rollback, so no boot returns with the marker still
+`installing`.
+
+### Ordering, and what the existing lock test now proves
+
+The refusal sits AFTER the `installInFlight` try-lock, not before it: a caller
+arriving mid-install should hear "an install is already in progress", the more
+immediate truth. A side effect worth keeping — `TestInstallConcurrentCallsSerialized`'s
+final assertion used to be "a follow-up attempt succeeds", which the guard
+correctly breaks. It now asserts the follow-up is refused with
+`ErrInstallPendingRestart`, which is only reachable PAST the lock, so it still
+proves the lock was released — and distinguishes that from `ErrInstallInFlight`,
+which is what a still-held lock would give.
+
+### H1, fixed in the same PR
+
+`Options.AutoInstallRestart`'s docblock said "cmd/bridge/main.go wires this to
+`os.Exit(0)` — same restart contract as the admin console's Restart endpoint".
+The wiring does `cancel()` and its own comment says why: "os.Exit(0) here would
+skip every runServe defer (the 'restart MUST NOT os.Exit(0)' contract)". The
+docblock recommended precisely what the invariant forbids, on the package's
+PUBLIC configuration surface — which is what a second caller reads instead of
+main.go. No `os.Exit` appears anywhere in `internal/updater`, so nothing else
+contradicted it.
