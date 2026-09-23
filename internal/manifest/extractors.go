@@ -670,10 +670,14 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		// block via mewkiz/flac and overrides `t.Artist` /
 		// `t.AlbumArtist` with `"; "`-joined strings when multi-value
 		// is detected. Cheap: only the Vorbis Comment block body is
-		// actually parsed (typically a few hundred bytes); the
-		// PICTURE block (the heavy 5-10 MiB JPEG) is skipped via the
-		// block header's length field. No extra `os.Open` — uses the
-		// same `*os.File` after a rewind.
+		// actually parsed (typically a few hundred bytes); every other
+		// block, PICTURE included, is seeked past using the length its
+		// header declares. No extra `os.Open` — uses the same
+		// `*os.File` after a rewind.
+		//
+		// That claim was true of the INTENT and false of the code until
+		// 2026-09-23: the walk called block.Skip(), which drains. The
+		// wording is kept because it is what the pass is for.
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
@@ -1132,14 +1136,17 @@ func skipID3v2(r io.ReadSeeker) error {
 //
 // Cost: parses the block header for every metadata block (cheap —
 // 4 bytes each) and the BODY of only the Vorbis Comment block.
-// PICTURE blocks (the 5–10 MiB JPEGs the existing single-open
-// optimization was protecting) get skipped via the block's
-// `Skip()` method — which checks whether the body
-// reader is an `io.Seeker`. `meta.New` wraps the body in an
-// `io.LimitReader`, and `*io.LimitedReader` is never a Seeker — so
-// `Skip()` always reads+discards the body via `io.Copy(io.Discard,
-// ...)`, advancing `r` past the block without materialising the
-// large payload into any buffer of ours.
+// Every other block is SEEKED past using the length its header
+// declares, so a PICTURE block's 5–25 MiB never crosses the wire
+// here.
+//
+// This used to say the payload was "skipped via the block's Skip()
+// method ... without materialising the large payload into any buffer
+// of ours" — accurate about ALLOCATION and silent about I/O, which is
+// the distinction that matters on a NAS mount and the one #165 had
+// already drawn for the STREAMINFO walk ("CONSUMES the bytes from the
+// underlying reader, not just the bufio buffer"). Skip() always
+// drains, because `*io.LimitedReader` is never an io.Seeker.
 //
 // Best-effort: malformed / corrupt FLAC streams silently no-op
 // rather than failing the scan. Single-value tags also no-op (the
@@ -1188,6 +1195,18 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			// block.Skip() at all three of its own call sites; Parse() is
 			// documented as "additional granularity" with validation left
 			// to the caller. So this is ours to bound.
+			//
+			// **The two hazards named above were fixed upstream in
+			// mewkiz/flac v1.0.14** (readString now refuses a length past
+			// its *io.LimitedReader, and parseVorbisComment caps the tag
+			// count at 50000). The DECISION still stands and the
+			// reasoning is now different: Parse() would still allocate
+			// from a 128 MiB picture cap taken off an unvalidated field,
+			// and a bound we control is worth more than a bound that
+			// moves with a dependency. Recorded rather than quietly left
+			// in place, because a comment that explains a choice by
+			// naming a hazard that no longer exists is how the next
+			// change gets made on stale reasoning.
 			tags, perr := parseVorbisCommentBounded(r, block.Length)
 			if perr != nil {
 				return
@@ -1241,12 +1260,40 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			}
 			return
 		}
-		// Non-Vorbis block (STREAMINFO, PICTURE, PADDING, etc.) —
-		// skip the body without buffering it. `block.Skip()` reads the
-		// body through the block's internal `io.LimitReader` (bounded to
-		// `block.Length`) and discards it via `io.Copy`, advancing `r` to
-		// the next block header without touching the payload bytes.
-		if err := block.Skip(); err != nil {
+		// Non-Vorbis block (STREAMINFO, PICTURE, PADDING, etc.) — SEEK
+		// past the body, do not drain it.
+		//
+		// `block.Skip()` checks whether the body reader is an io.Seeker;
+		// `meta.New` wraps it in a plain io.LimitReader and
+		// `*io.LimitedReader` never is, so Skip ALWAYS falls to
+		// `io.Copy(io.Discard, …)` — which reads every byte off the
+		// underlying file. That is fine for a buffer and not fine for a
+		// NAS mount: a 5–25 MiB embedded cover crosses the wire here,
+		// having already crossed it once for dhowden two rewinds
+		// earlier.
+		//
+		// This exact defect was diagnosed and fixed once already, for
+		// the STREAMINFO walk. extractFLACFormatFromReader's docblock:
+		// "flac.New(r) ... walks every remaining metadata block via
+		// block.Skip() — which CONSUMES the bytes from the underlying
+		// reader, NOT JUST THE BUFIO BUFFER ... so the only thing the
+		// single-open path had actually saved was the second os.Open
+		// syscall." PR #208's multi-value walk then reintroduced it,
+		// justified as avoiding "any buffer of ours" — which is true
+		// about allocation and silent about I/O, the distinction #165
+		// had already drawn.
+		//
+		// Same pattern as flacPictureBlocksSane 30 lines below: note the
+		// body start, then seek to the next header. `meta.New` consumed
+		// exactly the 4-byte header through a non-buffering reader
+		// (verified against mewkiz/flac v1.0.14), so the offset here IS
+		// the body start and an external Seek stays consistent with the
+		// walk. Fail-open on a seek error, like every other bail here.
+		pos, perr := r.Seek(0, io.SeekCurrent)
+		if perr != nil {
+			return
+		}
+		if _, serr := r.Seek(pos+block.Length, io.SeekStart); serr != nil {
 			return
 		}
 		if block.IsLast {

@@ -310,3 +310,73 @@ func TestFLACPictureBlocksSaneLeavesWalkAlignedAfterPicture(t *testing.T) {
 			"the reader is misaligned after skipping the first payload")
 	}
 }
+
+// flacVorbisCommentBody builds a minimal VORBIS_COMMENT block body:
+// a vendor string then a tag count then that many `KEY=value` entries,
+// all little-endian (unlike PICTURE's big-endian fields).
+func flacVorbisCommentBody(tags ...string) []byte {
+	var b bytes.Buffer
+	const vendor = "test"
+	_ = binary.Write(&b, binary.LittleEndian, uint32(len(vendor)))
+	b.WriteString(vendor)
+	_ = binary.Write(&b, binary.LittleEndian, uint32(len(tags)))
+	for _, t := range tags {
+		_ = binary.Write(&b, binary.LittleEndian, uint32(len(t)))
+		b.WriteString(t)
+	}
+	return b.Bytes()
+}
+
+// TestApplyFLACMultiValueArtistsDoesNotReadPayloadsBeforeTheComment is
+// the sibling of TestFLACPictureBlocksSaneDoesNotReadThePayload, on the
+// walk that did not have it.
+//
+// applyFLACMultiValueArtists is the THIRD pass over the same *os.File
+// (format, then dhowden, then this one), and it used block.Skip() for
+// every non-Vorbis block. Skip checks whether the body reader is an
+// io.Seeker; meta.New wraps it in a plain io.LimitReader and
+// *io.LimitedReader never is, so Skip always falls to
+// io.Copy(io.Discard, …) and reads every byte off the file. On a NAS
+// mount that is the embedded cover crossing the wire a second time —
+// the per-track double read the single-open path exists to eliminate,
+// and the exact defect extractFLACFormatFromReader's docblock records
+// being fixed for the STREAMINFO walk in #165.
+//
+// PICTURE is placed BEFORE VORBIS_COMMENT deliberately. The walk
+// returns as soon as it finds the comment block, so the canonical
+// flac/metaflac layout (STREAMINFO, SEEKTABLE, VORBIS_COMMENT, PICTURE)
+// never reaches a picture at all — which is why this was latent, and
+// why a fixture in that order would prove nothing.
+func TestApplyFLACMultiValueArtistsDoesNotReadPayloadsBeforeTheComment(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xAB}, 4<<20)
+	pic := flacPictureBody("image/jpeg", "cover", uint32(len(payload)), payload)
+	comment := flacVorbisCommentBody("ARTIST=Abdullah Ibrahim", "ARTIST=Ekaya")
+
+	var f bytes.Buffer
+	f.WriteString("fLaC")
+	f.Write(flacBlockHeader(false, 6 /* PICTURE */, uint32(len(pic))))
+	f.Write(pic)
+	f.Write(flacBlockHeader(true, 4 /* VORBIS_COMMENT */, uint32(len(comment))))
+	f.Write(comment)
+
+	c := &countingReadSeeker{rs: bytes.NewReader(f.Bytes())}
+	var tr Track
+	applyFLACMultiValueArtists(c, &tr)
+
+	// The walk must still have done its job — otherwise "reads few
+	// bytes" is satisfied by a walk that gave up at the picture.
+	if tr.Artist != "Abdullah Ibrahim; Ekaya" {
+		t.Fatalf("multi-value artists = %q, want %q (the walk did not reach the comment block past the picture)",
+			tr.Artist, "Abdullah Ibrahim; Ekaya")
+	}
+
+	// magic + two block headers + the comment body — comfortably under
+	// 1 KiB. The 4 MiB picture payload must never be transferred.
+	const budget = 1 << 10
+	if c.read > budget {
+		t.Errorf("the walk read %d bytes for a %d-byte picture payload (budget %d) — "+
+			"the PICTURE body is being drained instead of seeked past, "+
+			"reintroducing the per-track double read on NAS-mounted libraries",
+			c.read, len(payload), budget)
+	}
+}
