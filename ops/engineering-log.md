@@ -8776,3 +8776,24 @@ docblock recommended precisely what the invariant forbids, on the package's
 PUBLIC configuration surface — which is what a second caller reads instead of
 main.go. No `os.Exit` appears anywhere in `internal/updater`, so nothing else
 contradicted it.
+
+### Process note: the untagged-sibling trap, caught by CI rather than locally
+
+The first push failed `test (windows-latest)` with
+`undefined: noopVerifier` — the new test file was untagged while the fixture it
+used lives in `install_test.go`, which is `//go:build !windows`. That is the
+trap CLAUDE.md already records for `internal/manifest` ("untagged siblings
+referencing them broke the Windows compile of the whole test binary,
+invisibly"), in a package where the convention is just as established: every
+test that drives a real swap here is `!windows`.
+
+It was caught by CI and not locally because `GOOS=windows go vet` was run for
+the swap PR and not for this one — the cross-vet has to be per-PR, not per
+session.
+
+The fix is not simply "add the tag". The predicate is pure marker arithmetic and
+platform-independent, and the platform whose swap has no hardlink fallback at
+all is exactly the one that should not lose coverage of it. The
+fixture-dependent tests stay `!windows`; the marker tests were rewritten to
+write the State by hand — which is what Install writes anyway — and live in an
+untagged file.

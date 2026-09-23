@@ -1,3 +1,5 @@
+//go:build !windows
+
 package updater
 
 import (
@@ -136,78 +138,5 @@ func TestANewerReleaseIsStillInstallable(t *testing.T) {
 	}
 	if got, want := string(live), "bridge-binary-0.3.0"; got != want {
 		t.Errorf("live binary = %q, want %q", got, want)
-	}
-}
-
-// TestAnInterruptedInstallDoesNotWedgeTheEngine pins the property the
-// whole persisted-marker design rests on.
-//
-// A crash or power loss after SwapStarted leaves an "installing" marker
-// on disk. Keyed naively, the refusal would then fire forever and the
-// host could never install anything again. It does not, for two reasons
-// that are asserted here rather than assumed: the marker expires at
-// recencyWindow — the SAME constant DecideBootAction uses for
-// BootClearAbandoned, so the engine and the boot path cannot disagree
-// about whether a marker is still live — and a serve boot clears it
-// outright.
-func TestAnInterruptedInstallDoesNotWedgeTheEngine(t *testing.T) {
-	fix := newInstallFixture(t, "0.2.0")
-	livePath, upd, err := fix.install(t, "0.1.0")
-	if err != nil {
-		t.Fatalf("first Install: %v", err)
-	}
-	dir := filepath.Dir(livePath)
-
-	// Simulate the interrupted process: the marker survives, nothing in
-	// memory does.
-	upd.pendingRestart.Store(false)
-	if !upd.swapAwaitingRestart(dir, "0.2.0") {
-		t.Fatal("fixture error: the marker should still be live inside the recency window")
-	}
-
-	// Age the marker past the window — the same point at which
-	// DecideBootAction would call it abandoned.
-	st, err := LoadState(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.AttemptedAt = time.Now().Add(-RecencyWindow() - time.Minute)
-	if err := SaveState(dir, st); err != nil {
-		t.Fatal(err)
-	}
-
-	if upd.swapAwaitingRestart(dir, "0.2.0") {
-		t.Error("an abandoned marker still refuses installs; the guard is a wedge")
-	}
-	if got := DecideBootAction(st, "0.1.0", time.Now()); got != BootClearAbandoned {
-		t.Errorf("the boot path disagrees about the same marker: DecideBootAction = %v, want BootClearAbandoned", got)
-	}
-}
-
-// TestSwapAwaitingRestartIgnoresAnArmedButUnswappedMarker pins the
-// SwapStarted term.
-//
-// A marker armed with nothing mutated is reachable — a kill during the
-// Windows swap's SCM stop is up to 15 s of exactly that state — and
-// .bak then belongs to an EARLIER cycle. Nothing is staged, so nothing
-// should be refused; DecideBootAction reads the same state as
-// BootClearNotSwapped.
-func TestSwapAwaitingRestartIgnoresAnArmedButUnswappedMarker(t *testing.T) {
-	dir := t.TempDir()
-	upd := New(Options{})
-	st := State{
-		Status:        "installing",
-		TargetVersion: "0.2.0",
-		AttemptedAt:   time.Now(),
-		SwapStarted:   false,
-	}
-	if err := SaveState(dir, st); err != nil {
-		t.Fatal(err)
-	}
-	if upd.swapAwaitingRestart(dir, "0.2.0") {
-		t.Error("an armed-but-unswapped marker refused an install; nothing was staged")
-	}
-	if got := DecideBootAction(st, "0.1.0", time.Now()); got != BootClearNotSwapped {
-		t.Errorf("DecideBootAction = %v, want BootClearNotSwapped", got)
 	}
 }
