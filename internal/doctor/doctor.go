@@ -855,6 +855,16 @@ func checkBrowserOpener(_ context.Context, d Deps) Check {
 		"install missing; bridge will still print the admin URL for you to paste manually")
 }
 
+// probeSox / ffmpegAvailable are the test seams for checkAudioToolchain.
+// Without them this check is untestable anywhere the host toolchain differs
+// from the case under test — and CI runners have neither binary, so the sox
+// probe would fail first and the branches below would never be reached.
+// Production MUST NOT mutate them (the soxLookPath / renameFunc convention).
+var (
+	probeSox      = transcode.ProbeSox
+	missingFFmpeg = transcode.MissingFFmpegBinaries
+)
+
 // checkAudioToolchain verifies the sox dependency for the offline-decode
 // features (upscaling / audio analysis). It is a no-op "not enabled" when
 // neither feature is on — doctor must not nag about an optional dependency
@@ -867,16 +877,6 @@ func checkBrowserOpener(_ context.Context, d Deps) Check {
 // hard-to-diagnose failure. ProbeSox's FormatsKnown lets us stay
 // conservative: a confirmed FLAC-absence fails the check; an unparseable
 // `sox --help` is treated as "FLAC present" rather than crying wolf.
-// probeSox / ffmpegAvailable are the test seams for checkAudioToolchain.
-// Without them this check is untestable anywhere the host toolchain differs
-// from the case under test — and CI runners have neither binary, so the sox
-// probe would fail first and the branches below would never be reached.
-// Production MUST NOT mutate them (the soxLookPath / renameFunc convention).
-var (
-	probeSox      = transcode.ProbeSox
-	missingFFmpeg = transcode.MissingFFmpegBinaries
-)
-
 func checkAudioToolchain(ctx context.Context, d Deps) Check {
 	if !d.UpscaleEnabled && !d.AnalysisEnabled {
 		return ok(checkNameAudioToolchain, "not enabled (sox not required)")

@@ -525,6 +525,18 @@ func handleGetSystemUpdateID(w http.ResponseWriter) {
 	writeSOAPSuccess(w, body)
 }
 
+// maxSOAPBodyBytes caps the SOAP Browse / GetProtocolInfo / Search
+// envelope size we'll read into memory. 1 MB is two orders of
+// magnitude above any well-formed UPnP SOAP request (typical Browse
+// envelope is ~500 bytes); a body larger than that is either a
+// renderer bug or a DoS attempt. Without the cap, `io.ReadAll`
+// would OOM on a hostile payload. The handlers wrap r.Body in
+// http.MaxBytesReader (not a bare io.LimitReader) so an over-limit body
+// also tears down the TCP connection instead of being silently drained
+// for keep-alive — matching the admin handlers' discipline on this
+// LAN-exposed surface.
+const maxSOAPBodyBytes = 1 << 20 // 1 MB
+
 // handleBrowse processes a SOAP Browse request. ObjectID dispatch:
 //
 //   - "0"           → root: emits the `all_tracks` storage-folder container
@@ -545,18 +557,6 @@ func handleGetSystemUpdateID(w http.ResponseWriter) {
 // are deferred to a v1.x follow-up — the "All Tracks" flat path is what
 // Phase 0 confirmed real renderers (Chord 2go via mConnect Lite) walk
 // by default, and serves as the minimum viable browse surface for v1.
-// maxSOAPBodyBytes caps the SOAP Browse / GetProtocolInfo / Search
-// envelope size we'll read into memory. 1 MB is two orders of
-// magnitude above any well-formed UPnP SOAP request (typical Browse
-// envelope is ~500 bytes); a body larger than that is either a
-// renderer bug or a DoS attempt. Without the cap, `io.ReadAll`
-// would OOM on a hostile payload. The handlers wrap r.Body in
-// http.MaxBytesReader (not a bare io.LimitReader) so an over-limit body
-// also tears down the TCP connection instead of being silently drained
-// for keep-alive — matching the admin handlers' discipline on this
-// LAN-exposed surface.
-const maxSOAPBodyBytes = 1 << 20 // 1 MB
-
 func handleBrowse(w http.ResponseWriter, r *http.Request, lib LibrarySource, fc *folderIndexCache, emit didlEnv) {
 	serverURL := emit.serverURL
 	r.Body = http.MaxBytesReader(w, r.Body, maxSOAPBodyBytes)

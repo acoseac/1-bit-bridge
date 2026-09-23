@@ -172,9 +172,6 @@ func (s *Server) apiExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// buildExport assembles the bundle. Separate from the handler so the suite can
-// assert on the CONTENT rather than on a decoded HTTP body, which is where the
-// credential-leak check belongs.
 // exportCaps returns the history cap and page size for this server.
 //
 // Per-SERVER, not package-level. The boundary that matters ("the history ends
@@ -199,6 +196,9 @@ func (s *Server) exportCaps() (capRows, page int) {
 	return capRows, page
 }
 
+// buildExport assembles the bundle. Separate from the handler so the suite can
+// assert on the CONTENT rather than on a decoded HTTP body, which is where the
+// credential-leak check belongs.
 func (s *Server) buildExport(ctx context.Context) (*exportBundle, error) {
 	st := s.deps.Manifest
 	capRows, pageSize := s.exportCaps()

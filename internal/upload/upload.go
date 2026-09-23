@@ -728,15 +728,6 @@ func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutco
 	return out, "."
 }
 
-// openStagedFile opens a .part for positioned writing.
-//
-// The flags are the point: NOT O_APPEND. POSIX sets the file offset to
-// end-of-file before EVERY O_APPEND write, so an explicit Seek is silently
-// ignored. Here that would produce the right bytes by accident — the caller
-// truncates to the durable offset first, making EOF equal that offset — and an
-// accident that happens to be correct is one edit away from not being. With
-// explicit positioning the offset is an assertion: a future change that drops
-// the truncate fails loudly instead of appending to garbage.
 // destLockKey folds a commit destination so two spellings of one file take one
 // lock.
 //
@@ -750,6 +741,15 @@ func (m *Manager) commitOne(doc sessionDoc, sid string, fd fileDoc) (CommitOutco
 // which file is written changes.
 func destLockKey(dest string) string { return strings.ToLower(dest) }
 
+// openStagedFile opens a .part for positioned writing.
+//
+// The flags are the point: NOT O_APPEND. POSIX sets the file offset to
+// end-of-file before EVERY O_APPEND write, so an explicit Seek is silently
+// ignored. Here that would produce the right bytes by accident — the caller
+// truncates to the durable offset first, making EOF equal that offset — and an
+// accident that happens to be correct is one edit away from not being. With
+// explicit positioning the offset is an assertion: a future change that drops
+// the truncate fails loudly instead of appending to garbage.
 func openStagedFile(path string) (*os.File, error) {
 	// 0o644, not 0o600: this mode SURVIVES the commit rename, so it is the
 	// mode the file has once it is part of the library. 0o600 leaves an

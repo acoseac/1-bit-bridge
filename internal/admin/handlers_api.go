@@ -1420,12 +1420,6 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resetArtistImageGaps re-queues enriched tracks whose resolved artist lacks
-// a cached image file — one dir read + one distinct-MBID query computing the
-// missing set directly (calling artistImageCoverage first would duplicate
-// both reads; Gemini on PR #495). Best-effort: any failure degrades to 0
-// (covers-only retry) rather than failing the caller's request.
-// ResetEnrichedByArtistMBIDs no-ops on an empty set.
 // clearFingerprintSuppression re-opens files the fingerprint path has already
 // settled — whether AcoustID declined them or the enricher vetoed the answer
 // against their own tags — for a scope, "" being the whole library.
@@ -1473,6 +1467,12 @@ func (s *Server) clearFingerprintSuppression(ctx context.Context, scope, prefix 
 	}
 }
 
+// resetArtistImageGaps re-queues enriched tracks whose resolved artist lacks
+// a cached image file — one dir read + one distinct-MBID query computing the
+// missing set directly (calling artistImageCoverage first would duplicate
+// both reads; Gemini on PR #495). Best-effort: any failure degrades to 0
+// (covers-only retry) rather than failing the caller's request.
+// ResetEnrichedByArtistMBIDs no-ops on an empty set.
 func (s *Server) resetArtistImageGaps(ctx context.Context) int64 {
 	if s.deps.ArtistImages == nil {
 		return 0

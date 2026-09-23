@@ -76,15 +76,6 @@ type transcodeBootstrapResult struct {
 	tempDir string
 }
 
-// bootstrapTranscodeCmd runs the shared CLI scaffolding both
-// `upscaleCmd` and `optimizeCmd` need: config load + upscale feature
-// gate + sox precheck (gated on `gcMode`) + quality validation +
-// manifest store open + outputDir resolve + bridgefs resolver
-// construction. Returns the populated result + 0 on success, or
-// `(nil, exitCode)` on any failure (caller `return exitCode`s).
-//
-// `gcMode == true` skips the sox precheck — GC sweeps only consult
-// the DB and the filesystem, no sox required.
 // parseTranscodeArgs parses a transcode-family command's flags and applies the
 // positional guard, returning false when the caller should exit 2.
 //
@@ -143,6 +134,15 @@ func refusePositionalScope(fs *flag.FlagSet, cmd, scopeFlag string, stderr io.Wr
 	return true
 }
 
+// bootstrapTranscodeCmd runs the shared CLI scaffolding both
+// `upscaleCmd` and `optimizeCmd` need: config load + upscale feature
+// gate + sox precheck (gated on `gcMode`) + quality validation +
+// manifest store open + outputDir resolve + bridgefs resolver
+// construction. Returns the populated result + 0 on success, or
+// `(nil, exitCode)` on any failure (caller `return exitCode`s).
+//
+// `gcMode == true` skips the sox precheck — GC sweeps only consult
+// the DB and the filesystem, no sox required.
 func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, configPath, qualityFlag string, gcMode bool) (*transcodeBootstrapResult, int) {
 	// loadCLIConfig, not config.Load — see openTokenStoreFromCfg for the
 	// same fix. This tail is shared by `bridge upscale` and
@@ -756,28 +756,6 @@ producerLoop:
 	return 0
 }
 
-// runGC performs symmetric garbage collection on the variant store:
-//
-//  1. **Forward sweep** — walks `<dataDir>/transcoded/` and removes
-//     any file that doesn't have a matching row in `track_variants`.
-//     Companion to the proactive sidecar deletion in DeleteTrack;
-//     catches sidecars that escape the proactive path (interrupted
-//     DeleteTrack, manual SQL tampering, restored-from-backup
-//     mismatch).
-//
-//  2. **Reverse sweep** — walks `track_variants` and removes any
-//     row whose `sidecar_path` does not exist on disk. Closes the
-//     "phantom variant" loop where the bridge advertises a variant
-//     in `/v1/manifest`, iOS clients persist the ID and request it
-//     on play, then every download attempt hits `410 Gone` because
-//     the file was already removed (e.g. an earlier `bridge upscale`
-//     pass switched the sidecar naming scheme — v1 64-char-hash to
-//     v2 16-char-hash — without cleaning up the v1 DB rows). Without
-//     this sweep, iOS clients pay a 410 round-trip on every fresh
-//     play even after the stale-variant fallback ships (acoseac/1-bit
-//     PR #351) — the next manifest rescan re-pulls the same dead ID
-//     and the loop restarts.
-//
 // runGCForwardSweep unlinks every file the inventory classified as an
 // orphan. Returns `(removed, kept, failed, exitCode)` — `exitCode != 0`
 // signals a SIGINT and runGC bails immediately.
@@ -1231,6 +1209,27 @@ type gcOptions struct {
 	maxDeletePercent int
 }
 
+// runGC performs symmetric garbage collection on the variant store:
+//
+//  1. **Forward sweep** — walks `<dataDir>/transcoded/` and removes
+//     any file that doesn't have a matching row in `track_variants`.
+//     Companion to the proactive sidecar deletion in DeleteTrack;
+//     catches sidecars that escape the proactive path (interrupted
+//     DeleteTrack, manual SQL tampering, restored-from-backup
+//     mismatch).
+//
+//  2. **Reverse sweep** — walks `track_variants` and removes any
+//     row whose `sidecar_path` does not exist on disk. Closes the
+//     "phantom variant" loop where the bridge advertises a variant
+//     in `/v1/manifest`, iOS clients persist the ID and request it
+//     on play, then every download attempt hits `410 Gone` because
+//     the file was already removed (e.g. an earlier `bridge upscale`
+//     pass switched the sidecar naming scheme — v1 64-char-hash to
+//     v2 16-char-hash — without cleaning up the v1 DB rows). Without
+//     this sweep, iOS clients pay a 410 round-trip on every fresh
+//     play even after the stale-variant fallback ships (acoseac/1-bit
+//     PR #351) — the next manifest rescan re-pulls the same dead ID
+//     and the loop restarts.
 func runGC(ctx context.Context, stdout, stderr io.Writer, store *manifest.Store, outputDir, tempDir string, opts gcOptions) int {
 	// DSD-render scratch first: the crash-orphan case the render's
 	// deferred remove cannot cover. Independent of the sidecar sweeps and

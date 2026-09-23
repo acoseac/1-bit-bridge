@@ -473,8 +473,6 @@ func acceptRecordings(in Input, top Result, tied bool) (Decision, RejectReason) 
 	return d, ReasonNone
 }
 
-// recordingsWithEnoughSources keeps the recordings whose fingerprint→recording
-// link carries at least `required` independent submissions.
 // recordingsWithNamedArtist drops recordings credited to MusicBrainz's
 // [unknown] placeholder.
 //
@@ -498,6 +496,8 @@ func recordingsWithNamedArtist(recordings []Recording) []Recording {
 	return out
 }
 
+// recordingsWithEnoughSources keeps the recordings whose fingerprint→recording
+// link carries at least `required` independent submissions.
 func recordingsWithEnoughSources(recordings []Recording, required int) []Recording {
 	var out []Recording
 	for _, rec := range recordings {

@@ -2434,23 +2434,6 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 	return out, rows.Err()
 }
 
-// marshalForStorage encodes a Track into the JSON blob written to
-// `tags_json`. **Strips `Enriched` before marshalling** so the field
-// is never persisted in the blob — the column-truth invariant is that
-// `Track.Enriched` is column-derived (`enriched_at != 0`) at read
-// time and must not exist in `tags_json`.
-//
-// Without this, a caller that takes a `Track` from `ListTracks` /
-// `ListTracksPage` (which DO splice `Enriched` from the column) and
-// passes it back into `UpsertTrack` or `MarkEnriched` would persist
-// the spliced value into `tags_json`. Then `GetTrack` /
-// `UnenrichedTracks` (which read only the JSON, not the column)
-// would deserialize a stale `Enriched` flag — and an `UpsertTrack`
-// that resets `enriched_at = 0` would leave the column saying "not
-// enriched" while the JSON says "enriched: true". CodeRabbit caught
-// the latent risk on PR #68 even though no caller exercises it
-// today; this defensive shim makes the invariant structural rather
-// than relying on every future caller to remember.
 // HasTracksWithCodec reports whether any indexed track carries the given
 // codec, matched case-insensitively against the v25 `codec` column.
 //
@@ -2504,6 +2487,23 @@ func formatColumnBinds(t *Track) (rate, bits, isDSD, codec, compression any) {
 	return rate, bits, isDSD, codec, compression
 }
 
+// marshalForStorage encodes a Track into the JSON blob written to
+// `tags_json`. **Strips `Enriched` before marshalling** so the field
+// is never persisted in the blob — the column-truth invariant is that
+// `Track.Enriched` is column-derived (`enriched_at != 0`) at read
+// time and must not exist in `tags_json`.
+//
+// Without this, a caller that takes a `Track` from `ListTracks` /
+// `ListTracksPage` (which DO splice `Enriched` from the column) and
+// passes it back into `UpsertTrack` or `MarkEnriched` would persist
+// the spliced value into `tags_json`. Then `GetTrack` /
+// `UnenrichedTracks` (which read only the JSON, not the column)
+// would deserialize a stale `Enriched` flag — and an `UpsertTrack`
+// that resets `enriched_at = 0` would leave the column saying "not
+// enriched" while the JSON says "enriched: true". CodeRabbit caught
+// the latent risk on PR #68 even though no caller exercises it
+// today; this defensive shim makes the invariant structural rather
+// than relying on every future caller to remember.
 func marshalForStorage(t *Track) ([]byte, error) {
 	clone := *t
 	clone.Enriched = nil
@@ -2568,14 +2568,6 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	return json.Marshal(&clone)
 }
 
-// MarkEnriched updates a Track's stored tags (with enricher additions) and
-// stamps enriched_at so the worker won't re-process it.
-//
-// Holds `s.mu` for the SQL exec so an in-flight enrichment update never
-// races a `UpsertTrackBatch` from the scanner — both are writers and
-// the contract documented on the Store type forbids them from
-// overlapping in SQLite. JSON marshalling stays outside the lock so
-// the critical section is one statement long.
 // markEnrichedSQL binds (tags_json, enriched_at, clock, path). The
 // indexed_at expression is indexedAtAdvanceSQL verbatim — see its docblock
 // for why it is not concatenated in.
@@ -2586,6 +2578,14 @@ const markEnrichedSQL = `
 		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
 		 WHERE path = ?`
 
+// MarkEnriched updates a Track's stored tags (with enricher additions) and
+// stamps enriched_at so the worker won't re-process it.
+//
+// Holds `s.mu` for the SQL exec so an in-flight enrichment update never
+// races a `UpsertTrackBatch` from the scanner — both are writers and
+// the contract documented on the Store type forbids them from
+// overlapping in SQLite. JSON marshalling stays outside the lock so
+// the critical section is one statement long.
 func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	raw, err := marshalForStorage(t)
 	if err != nil {
@@ -2797,9 +2797,6 @@ func (s *Store) ApplyAlbumTitleReconciliation(ctx context.Context, changed []Tra
 	return s.applyReconciledTracks(ctx, changed)
 }
 
-// applyReconciledTracks is the shared writer behind the post-scan
-// metadata-reconciliation passes (AlbumArtist, Year, TrackNumber). See
-// ApplyAlbumArtistReconciliation's docblock above for the full invariants.
 // applyReconciledTrackSQL binds (tags_json, clock, path). The indexed_at
 // expression is indexedAtAdvanceSQL verbatim — see its docblock.
 const applyReconciledTrackSQL = `
@@ -2808,6 +2805,9 @@ const applyReconciledTrackSQL = `
 		       indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
 		 WHERE path = ?`
 
+// applyReconciledTracks is the shared writer behind the post-scan
+// metadata-reconciliation passes (AlbumArtist, Year, TrackNumber). See
+// ApplyAlbumArtistReconciliation's docblock above for the full invariants.
 func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int, error) {
 	if len(changed) == 0 {
 		return 0, nil
@@ -3462,23 +3462,6 @@ func buildPathInQuery(prefix string, paths []string) (string, []any) {
 	return b.String(), args
 }
 
-// GetTrack fetches a single track by EXACT path match. Returns
-// (nil, nil) if absent.
-//
-// Case-sensitive by design: `tracks.path` is the SQL PRIMARY KEY
-// and on case-sensitive filesystems (most Linux deployments) two
-// files can legitimately coexist whose paths differ only by case.
-// `Scanner.runScanWorker`'s unchanged-file fast-path calls this
-// with the exact path it just walked; any case-folding here would
-// risk returning an arbitrary sibling and silently skipping the
-// real file from indexing.
-//
-// External callers that hand in iOS-shaped paths (lowercase +
-// leading slash from `share.normalize(path:)`) should call
-// `LookupTrack` instead — that path tolerates the iOS normalisation
-// at the cost of a slower index scan, which is fine for the
-// once-per-request /v1/upscale eligibility gate but wrong for the
-// scanner's hot inner loop. (Qodo on PR #126.)
 // TrackStat is the narrow projection the scanner's unchanged-file
 // skip gate needs: the two scalars it compares against the walked
 // `os.FileInfo`, plus the one tag it inspects for local-artwork cache
@@ -3551,6 +3534,23 @@ func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, erro
 	return &st, nil
 }
 
+// GetTrack fetches a single track by EXACT path match. Returns
+// (nil, nil) if absent.
+//
+// Case-sensitive by design: `tracks.path` is the SQL PRIMARY KEY
+// and on case-sensitive filesystems (most Linux deployments) two
+// files can legitimately coexist whose paths differ only by case.
+// `Scanner.runScanWorker`'s unchanged-file fast-path calls this
+// with the exact path it just walked; any case-folding here would
+// risk returning an arbitrary sibling and silently skipping the
+// real file from indexing.
+//
+// External callers that hand in iOS-shaped paths (lowercase +
+// leading slash from `share.normalize(path:)`) should call
+// `LookupTrack` instead — that path tolerates the iOS normalisation
+// at the cost of a slower index scan, which is fine for the
+// once-per-request /v1/upscale eligibility gate but wrong for the
+// scanner's hot inner loop. (Qodo on PR #126.)
 func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 	var raw []byte
 	err := s.db.QueryRowContext(ctx, `SELECT tags_json FROM tracks WHERE path = ?`, path).Scan(&raw)
@@ -7805,6 +7805,15 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 	return tx.Commit()
 }
 
+// setArtworkVersionSQL binds (version, clock, artworkMBID, version). The
+// indexed_at expression is indexedAtAdvanceSQL verbatim — see its docblock.
+const setArtworkVersionSQL = `
+		UPDATE tracks
+		   SET artwork_version = ?,
+		       indexed_at      = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		 WHERE json_extract(tags_json, '$.artworkMBID') = ?
+		   AND COALESCE(artwork_version, '') <> ?`
+
 // SetArtworkVersionAndBumpIndex records the content version of a freshly
 // (re)fetched premium cover for every track whose artworkMBID matches, and
 // STRICTLY advances those tracks' indexed_at so the iOS delta-sync re-receives
@@ -7822,15 +7831,6 @@ func (s *Store) UpsertVariant(ctx context.Context, v VariantRow) error {
 // json_extract(tags_json,'$.artworkMBID'). Returns the number of track rows
 // updated (0 when unchanged or no track carries the MBID). Holds s.mu (SQLite
 // single-writer contract).
-// setArtworkVersionSQL binds (version, clock, artworkMBID, version). The
-// indexed_at expression is indexedAtAdvanceSQL verbatim — see its docblock.
-const setArtworkVersionSQL = `
-		UPDATE tracks
-		   SET artwork_version = ?,
-		       indexed_at      = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
-		 WHERE json_extract(tags_json, '$.artworkMBID') = ?
-		   AND COALESCE(artwork_version, '') <> ?`
-
 func (s *Store) SetArtworkVersionAndBumpIndex(ctx context.Context, artworkMBID, version string) (int64, error) {
 	if artworkMBID == "" || version == "" {
 		return 0, nil

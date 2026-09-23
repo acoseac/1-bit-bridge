@@ -50,13 +50,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+var logger = logging.Component("adminauth")
+
 // adminBcryptCost is the bcrypt work factor. 12 is a deliberate
 // sweet spot (~250 ms on the slowest supported target — Windows
 // arm64). Lower would weaken brute-force resistance; higher would
 // make the login path feel sluggish on weak hardware. Bump only via
 // a deliberate PR with target-host benchmarks.
-var logger = logging.Component("adminauth")
-
 const adminBcryptCost = 12
 
 // testHashCost, when positive, replaces adminBcryptCost for NEWLY GENERATED

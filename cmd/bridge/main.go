@@ -242,10 +242,6 @@ func (a atlasHarvestSink) UpsertReleaseMeta(ctx context.Context, m atlasharvest.
 	})
 }
 
-// bookletSinkAdapter adapts *manifest.Store to the harvest client's
-// BookletSink — a pass-through except BookletsToFetch, whose row type is
-// narrowed to the (mbid, etag) pair the fetch sweep needs (keeps the
-// atlasharvest package from importing internal/manifest).
 // Compile-time proof the adapters satisfy the harvest client's interfaces. The
 // conversion below is hand-written, so a signature change on either side would
 // otherwise surface as a feature that silently stopped being wired.
@@ -284,6 +280,10 @@ func (l lyricsSinkAdapter) MarkAtlasLyricsAttempt(ctx context.Context, path, alb
 	return l.store.MarkAtlasLyricsAttempt(ctx, path, albumMBID, trackMBID, resolvedMBID, status, nextAttemptAt)
 }
 
+// bookletSinkAdapter adapts *manifest.Store to the harvest client's
+// BookletSink — a pass-through except BookletsToFetch, whose row type is
+// narrowed to the (mbid, etag) pair the fetch sweep needs (keeps the
+// atlasharvest package from importing internal/manifest).
 type bookletSinkAdapter struct{ store *manifest.Store }
 
 func (b bookletSinkAdapter) DistinctAlbumReleaseMBIDs(ctx context.Context) ([]string, error) {
@@ -2322,10 +2322,6 @@ func writeAutoInitConfig(cfgPath string) error {
 	return nil
 }
 
-// runServe is the library-callable serve loop. Identical behavior to
-// the flag-driven serveCmd path — same TLS material, same admin
-// listener, same SIGINT graceful-shutdown — just with the inputs
-// pre-parsed. Returns the exit code the CLI would.
 // thumbKeyPattern bounds the cache keys ArtworkThumbPath will build a
 // path from: a release UUID, a local-<sha256> cover sentinel, a 16-hex
 // artworkVersion alias, or an "artist-"-prefixed UUID. It mirrors
@@ -2381,6 +2377,10 @@ func dsdRenderToolchainVerdict(ff transcode.FFmpegInfo) (ok bool, why string) {
 	return true, ""
 }
 
+// runServe is the library-callable serve loop. Identical behavior to
+// the flag-driven serveCmd path — same TLS material, same admin
+// listener, same SIGINT graceful-shutdown — just with the inputs
+// pre-parsed. Returns the exit code the CLI would.
 func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

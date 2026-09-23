@@ -28,6 +28,11 @@ import (
 // difference.
 const variantGoneMessage = "the variant row exists but its sidecar does not"
 
+// octetStream is the "opaque bytes" answer: what the audio route
+// announces for a format no browser decodes, and what a download always
+// announces regardless of format.
+const octetStream = "application/octet-stream"
+
 // playerContentType is the BROWSER MIME table.
 //
 // Deliberately NOT dlna.defaultMIMEForExtension. That table is
@@ -40,11 +45,6 @@ const variantGoneMessage = "the variant row exists but its sidecar does not"
 //
 // Two tables, two contracts. TestPlayerMIMEDivergesFromDLNA enumerates
 // every delta so the divergence stays deliberate.
-// octetStream is the "opaque bytes" answer: what the audio route
-// announces for a format no browser decodes, and what a download always
-// announces regardless of format.
-const octetStream = "application/octet-stream"
-
 func playerContentType(ext string) string {
 	switch strings.ToLower(ext) {
 	case ".flac":
@@ -119,13 +119,13 @@ func playabilityKind(codec, ext string, isDSD bool) string {
 	}
 }
 
-// variantFreshFor mirrors api.serveVariant's freshness gate exactly: a
+const variantMTimeToleranceNS = 2_000_000_000
+
+// variantFresh mirrors api.serveVariant's freshness gate exactly: a
 // sidecar is only offered when its recorded source mtime is within 2 s
 // of the file on disk AND the recorded size matches exactly. Anything
 // looser hands the player a sidecar of a file that has since been
 // re-encoded.
-const variantMTimeToleranceNS = 2_000_000_000
-
 func variantFresh(v manifest.VariantRow, info os.FileInfo) bool {
 	if info == nil {
 		return false

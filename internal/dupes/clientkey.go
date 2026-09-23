@@ -411,24 +411,6 @@ func nonEmptyTrimmed(s string) string {
 	return trimSpace(s)
 }
 
-// KeyFor computes the client's ContentKey for one manifest row —
-// CrossSourceTrackDedup's ContentKey{albumID, disc, track, normTitle}
-// with the field values resolved exactly as BridgeSyncActor.
-// upsertBridgeTrack resolves them (BridgeSyncActor.swift:693-724):
-//
-//   - sharePath is "/" + path; path-inferred defaults come from
-//     MetadataNormalizer.pathDefaults over it;
-//   - title:  tag (trimmed) or the cleaned filename;
-//   - artist: cleanArtistName(tag or path default);
-//   - albumArtist: cleanArtistName(tag), FALLING BACK TO THE CLEANED
-//     ARTIST when the tag is empty (6.7% of the measured library);
-//   - album:  tag (trimmed, NOT display-cleaned — cleaning happens
-//     inside albumID's bracket gate) or the path default;
-//   - track:  tag if present (an explicit 0 is a value), else the
-//     Swift filename rule; disc: tag if present, else the disc-folder
-//     rule (which yields 1, never 0, when no disc folder matches);
-//   - year:   ≤ 0 is absent.
-//
 // Resolved is the value set KeyFor derives BEFORE it keys: the
 // tag → artist → path-default ladder, already applied. It is exported
 // because the album/artist catalog (internal/librarycat) has to label a
@@ -526,6 +508,23 @@ func AlbumIDOf(res Resolved) string {
 	return albumID(res.AlbumArtist, res.Album, res.Year)
 }
 
+// KeyFor computes the client's ContentKey for one manifest row —
+// CrossSourceTrackDedup's ContentKey{albumID, disc, track, normTitle}
+// with the field values resolved exactly as BridgeSyncActor.
+// upsertBridgeTrack resolves them (BridgeSyncActor.swift:693-724):
+//
+//   - sharePath is "/" + path; path-inferred defaults come from
+//     MetadataNormalizer.pathDefaults over it;
+//   - title:  tag (trimmed) or the cleaned filename;
+//   - artist: cleanArtistName(tag or path default);
+//   - albumArtist: cleanArtistName(tag), FALLING BACK TO THE CLEANED
+//     ARTIST when the tag is empty (6.7% of the measured library);
+//   - album:  tag (trimmed, NOT display-cleaned — cleaning happens
+//     inside albumID's bracket gate) or the path default;
+//   - track:  tag if present (an explicit 0 is a value), else the
+//     Swift filename rule; disc: tag if present, else the disc-folder
+//     rule (which yields 1, never 0, when no disc folder matches);
+//   - year:   ≤ 0 is absent.
 func KeyFor(r Row) Key {
 	res := Resolve(r)
 	return Key{

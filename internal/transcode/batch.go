@@ -176,19 +176,6 @@ type batchState struct {
 	RemainingIDs map[string]struct{} // source-path keys for tracks the batch still expects callbacks for
 }
 
-// NewCoordinator constructs a Coordinator and runs the boot-time
-// `RecoverInterruptedBatches` pass against `store`. The recovery
-// pass MUST complete before the Coordinator accepts new Submit
-// calls — repeated boots between which a batch was running would
-// otherwise leave phantom in-flight rows.
-//
-// `publish` is the SSE broker emitter; nil disables event emission
-// (test harness) but counter writes still land in the DB.
-//
-// `resolver` converts library-relative paths to absolute paths at
-// JobSpec construction time. nil is permitted (test harness) but
-// Submit then refuses with an explicit error rather than enqueueing
-// broken JobSpecs.
 // WithSoxInfo wires the cached sox probe used by the candidate walks to
 // refuse sources this build cannot decode. Returns the receiver so it can
 // be chained onto NewCoordinator at the call site.
@@ -234,6 +221,19 @@ func (c *Coordinator) soxSnapshot() SoxInfo {
 	return SnapshotOrOpen(c.soxInfo)
 }
 
+// NewCoordinator constructs a Coordinator and runs the boot-time
+// `RecoverInterruptedBatches` pass against `store`. The recovery
+// pass MUST complete before the Coordinator accepts new Submit
+// calls — repeated boots between which a batch was running would
+// otherwise leave phantom in-flight rows.
+//
+// `publish` is the SSE broker emitter; nil disables event emission
+// (test harness) but counter writes still land in the DB.
+//
+// `resolver` converts library-relative paths to absolute paths at
+// JobSpec construction time. nil is permitted (test harness) but
+// Submit then refuses with an explicit error rather than enqueueing
+// broken JobSpecs.
 func NewCoordinator(
 	pool *Pool,
 	store *manifest.Store,
