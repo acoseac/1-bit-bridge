@@ -49,6 +49,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
@@ -388,6 +389,32 @@ func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID str
 	if a.premium == nil {
 		return false, atlasharvest.ErrNoCredential
 	}
+	// FIRST LAYER. releaseMBID comes off the Atlas harvest RESULTS page
+	// (atlasharvest pollResults -> AddPendingCovers -> this sweep), so it
+	// is chosen by the UPSTREAM and not by this bridge — and it is then
+	// the LEADING component of ArtworkCachePath's filepath.Join, whose
+	// writer does os.MkdirAll(filepath.Dir(path)). A traversing value
+	// therefore CREATED its own parent directories and wrote up to
+	// MaxCoverArtBytes of attacker-chosen bytes outside artworkDir, then
+	// unlinked two sibling paths beside it.
+	//
+	// Every other ArtworkCachePath caller validates at entry — tags, MB
+	// search, release-group, AcoustID all gate on isValidMBID, and the
+	// two read handlers regex-match. This adapter and the delete loop
+	// below were the pair that did not. Same class, same remedy as
+	// api.IsValidBookletMBID (2026-07-20 review, F29): the [0-9a-f-]
+	// alphabet a UUID draws from makes traversal impossible.
+	//
+	// Refusing rather than sanitising: a value that is not a UUID is not
+	// a release this bridge asked about, so there is nothing to recover.
+	// nil error — a hostile or broken upstream entry must not abort the
+	// sweep for the releases behind it (the "a release is not the RUN"
+	// rule), and burning an attempt on it is exactly right.
+	if !enrich.IsValidMBID(releaseMBID) {
+		logging.Component("atlasharvest").Warn("refusing cover refetch for a malformed release MBID",
+			"mbid", releaseMBID)
+		return false, nil
+	}
 	size := a.coverSize
 	if size == 0 {
 		size = enrich.DefaultCoverSize
@@ -412,6 +439,18 @@ func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID str
 				continue
 			}
 			stale := enrich.ArtworkCachePath(a.artworkDir, releaseMBID, s)
+			// Redundant today — the shape gate at the top of this
+			// function returns before `got` can be true for a value
+			// that could escape — and kept because this is the half
+			// that UNLINKS. The gate and the loop are twenty lines
+			// apart, and the enumeration this whole fix exists to
+			// correct was itself a list that had stopped matching its
+			// sites. fsutil.IsUnderAny is the tree's canonical
+			// containment check: symlink-resolving on both sides, and
+			// not-nested on a cross-volume Rel error.
+			if fsutil.IsUnderAny(stale, []string{a.artworkDir}) == "" {
+				continue
+			}
 			if rmErr := os.Remove(stale); rmErr != nil && !os.IsNotExist(rmErr) {
 				logging.Component("atlasharvest").Warn("artwork upgrade: remove stale tier", "mbid", releaseMBID, "size", s, "err", rmErr)
 			}
@@ -2852,7 +2891,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// store at request time (never baked into the open-source binary).
 	var premiumCovers enrich.PremiumCoverFetcher
 	if harvestState != nil {
-		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil)
+		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil, artworkDir)
 		enricher.WithPremiumCovers(premiumCovers)
 	}
 	// Acoustic fingerprinting: the cache is constructed here and attached
