@@ -2196,14 +2196,14 @@ mentions across the four `ops/audit-*.md` files.
   "`bridge serve` writes no PID file" for seven weeks after #639 made it write
   one, and a re-check without the flag would have CONFIRMED that, since it
   fails identically for another reason. **Measure a container doctor claim
-  with `--config`, or you are measuring doctor's config lookup.** (#TBD)
+  with `--config`, or you are measuring doctor's config lookup.** (#984)
 - **The image's `lsof` package is load-bearing — don't drop it to slim the
   image.** Alpine's own `/usr/bin/lsof` is busybox's applet, which ignores
   `-iTCP:<port> -sTCP:LISTEN -t` and lists every open file, and
   `isPIDListeningOnPort` searches that output for the pidfile's PID — so doctor
   would credit ANY occupied port to a running bridge (measured: a root-held
   `:8080` read `bound by our own bridge (pid 1)`, where the package reports a
-  warn). (#TBD)
+  warn). (#984)
 
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as

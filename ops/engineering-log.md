@@ -9458,7 +9458,7 @@ built `1-bit-bridge:dev` once the plugin directory was mounted.
   only the Dockerfile gets no image build in CI. Everything above ran on a real
   daemon, under both builders.
 
-## 2026-09-23 — `bridge doctor` in a container: the pidfile is there, the config lookup is not (#TBD)
+## 2026-09-23 — `bridge doctor` in a container: the pidfile is there, the config lookup is not (#984)
 
 The Dockerfile's `lsof` comment and docs/docker.md → "Verify the toolchain
 resolved" both said a `bridge doctor` run inside a live container reports the
