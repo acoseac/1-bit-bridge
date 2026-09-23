@@ -496,6 +496,24 @@ func actPair(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s me
 	return -1
 }
 
+// uninstallService is packaging.Uninstall behind a seam, so the wipe
+// gate in actUninstall can be driven without a real system-level
+// install — installedKindForOS probes absolute paths
+// (/Library/LaunchDaemons, /etc/systemd/system) a test cannot create
+// without root.
+//
+// A package var rather than a parameter because actUninstall's
+// signature is the menu's dispatch contract, shared with every other
+// act*; and safe as one because the menu is a single-threaded TTY
+// dispatcher with no concurrent reader — unlike the seams this repo
+// warns about, where a package-var write can race a live handler.
+//
+// Declared BEFORE actUninstall's own docblock, with a blank line
+// between: glued after it, this paragraph became actUninstall's
+// documentation and left the real one describing a var (#964's rule —
+// a doc comment must be attached to the declaration it names).
+var uninstallService = packaging.Uninstall
+
 // actUninstall removes the service-manager artifact AND offers to
 // wipe the config dir. Two confirms: one for the service uninstall
 // (no-op when no service installed), one for the destructive wipe.
@@ -527,49 +545,53 @@ func actPair(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s me
 // Fprint call sites in this file — not the whole source — because the
 // paragraph you are reading has to be able to describe the old claim
 // without tripping its own guard.
-// uninstallService is packaging.Uninstall behind a seam, so the wipe
-// gate below can be driven without a real system-level install —
-// installedKindForOS probes absolute paths (/Library/LaunchDaemons,
-// /etc/systemd/system) a test cannot create without root.
-//
-// A package var rather than a parameter because actUninstall's
-// signature is the menu's dispatch contract, shared with every other
-// act*; and safe as one because the menu is a single-threaded TTY
-// dispatcher with no concurrent reader — unlike the seams this repo
-// warns about, where a package-var write can race a live handler.
-var uninstallService = packaging.Uninstall
-
 func actUninstall(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
 	fmt.Fprintln(stdout)
-	// serviceLeftRunning records that the operator asked to remove the
-	// service and it is still there. The wipe below deletes the config
-	// dir — certs, tokens, the database — and doing that under a LIVE
-	// bridge is the shape this guard exists to prevent. Offering it
-	// after a refused uninstall is how the operator ends up there.
-	serviceLeftRunning := false
+	// serviceStillInstalled is the condition the wipe must not run under,
+	// and it starts TRUE whenever anything is installed.
+	//
+	// An earlier draft initialised it to false and set it only when
+	// Uninstall returned an error — so declining the prompt ("n") left it
+	// false and the wipe was still offered, with the service registered
+	// and running (Gemini HIGH on #980). The hazard does not care WHY the
+	// service is still there: os.RemoveAll(cfgDir) takes the certs, the
+	// tokens and the database, the service manager restarts the bridge
+	// into an empty config dir, and every paired device breaks on the
+	// re-minted cert.
+	//
+	// So the predicate is "is a service still installed", not "did the
+	// uninstall fail" — and only a SUCCESSFUL uninstall clears it. Keyed
+	// on kind rather than menuState.running deliberately: an
+	// installed-but-stopped service is restarted by launchd/SCM later and
+	// finds the config gone, which is the same broken state one reboot
+	// deferred.
+	serviceStillInstalled := s.kind != packaging.KindNone
 	if s.kind != packaging.KindNone {
 		fmt.Fprintf(stdout, "  Uninstall the %s? [y/N] ", s.kind.Description())
 		line, _ := in.ReadString('\n')
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y") {
 			if _, err := uninstallService(); err != nil {
-				serviceLeftRunning = true
 				fmt.Fprintf(stderr, "  service uninstall failed: %v\n", err)
 				if errors.Is(err, packaging.ErrSystemInstallNeedsRoot) {
 					fmt.Fprintln(stderr, "  the service is still registered and still running.")
 					fmt.Fprintln(stderr, "  re-run this as root to remove it, or convert to a user-context install.")
 				}
 			} else {
+				serviceStillInstalled = false
 				fmt.Fprintln(stdout, "  service uninstalled.")
 			}
 		}
 	}
-	if serviceLeftRunning {
-		// Not merely skipping the prompt: say why, or the operator
-		// reads a missing step as the menu being done.
+	if serviceStillInstalled {
+		// Not merely skipping the prompt: say why, or the operator reads
+		// a missing step as the menu being done. Worded for BOTH routes
+		// here — a refused uninstall and a declined one leave the same
+		// state, and the operator who typed "n" needs to know the wipe
+		// was withheld rather than forgotten.
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "  Skipping the config + data wipe while the service is still installed —")
-		fmt.Fprintln(stdout, "  it would delete the certs, tokens and database out from under a running")
-		fmt.Fprintln(stdout, "  bridge. Remove the service first, then run this again.")
+		fmt.Fprintln(stdout, "  it would delete the certs, tokens and database from under a service the")
+		fmt.Fprintln(stdout, "  system will restart. Remove the service first, then run this again.")
 		return 1
 	}
 	if s.cfgPath != "" {

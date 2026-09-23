@@ -109,3 +109,53 @@ func TestUninstallStillWipesWhenTheServiceIsGone(t *testing.T) {
 		t.Errorf("a successful uninstall was not reported:\n%s", stdout.String())
 	}
 }
+
+// TestDecliningTheUninstallAlsoBlocksTheWipe is Gemini's HIGH on #980.
+//
+// The first draft set the guard only when Uninstall returned an ERROR, so
+// answering "n" to the uninstall prompt left it false and the wipe was
+// still offered — with the service registered and running. The hazard
+// does not care why the service is still there: the config dir holds the
+// certs, the tokens and the database, the service manager restarts the
+// bridge into an empty one, and every paired device breaks on the
+// re-minted cert.
+func TestDecliningTheUninstallAlsoBlocksTheWipe(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(cfgPath, []byte("libraryRoots: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokens := filepath.Join(dir, "tokens.json")
+	if err := os.WriteFile(tokens, []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	called := 0
+	orig := uninstallService
+	uninstallService = func() (string, error) { called++; return "", nil }
+	t.Cleanup(func() { uninstallService = orig })
+
+	var stdout, stderr bytes.Buffer
+	// "n" to the uninstall, then WIPE queued behind it. The second line
+	// is consumable ONLY if the wipe is offered — the same reason the
+	// refused-uninstall test queues it.
+	in := bufio.NewReader(strings.NewReader("n\nWIPE\n"))
+	// A USER-level install: this path has nothing to do with the
+	// system-install refusal, which is what makes it a separate case.
+	state := menuState{initialized: true, cfgPath: cfgPath, kind: packaging.KindLaunchdUser}
+
+	actUninstall(context.Background(), in, &stdout, &stderr, state)
+
+	if called != 0 {
+		t.Errorf("declining the prompt still called Uninstall %d time(s)", called)
+	}
+	if _, err := os.Stat(tokens); err != nil {
+		t.Errorf("the token store was removed while the service is still installed: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the config dir was wiped while the service is still installed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "still installed") {
+		t.Errorf("nothing told the operator why the wipe was withheld:\n%s", stdout.String())
+	}
+}
