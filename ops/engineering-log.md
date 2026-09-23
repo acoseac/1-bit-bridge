@@ -9457,3 +9457,93 @@ built `1-bit-bridge:dev` once the plugin directory was mounted.
 - `docker.yml` runs only on tags and `workflow_dispatch`, so a PR that changes
   only the Dockerfile gets no image build in CI. Everything above ran on a real
   daemon, under both builders.
+
+## 2026-09-23 — `bridge doctor` in a container: the pidfile is there, the config lookup is not (#TBD)
+
+The Dockerfile's `lsof` comment and docs/docker.md → "Verify the toolchain
+resolved" both said a `bridge doctor` run inside a live container reports the
+API/admin ports in use because "`bridge serve` writes no PID file". True when
+written (#484, 2026-07-09); false since #639 (2026-08-04) added
+`writeServerPIDFile`. Measured before rewriting either text, and the
+conclusion outlived its premise: the documented command still FAILs both
+ports, for a different reason.
+
+### The chain
+
+- `bridge serve` writes its PID to `<dataDir>/server.pid`. Under the auto-init
+  config (`dataDir: data` beside `/data/bridge.yaml`) that is
+  `/data/data/server.pid`, and it held `1`: the ENTRYPOINT execs the bridge as
+  PID 1.
+- `bridge doctor` reads that file only once it knows the data dir, which comes
+  from the config. `buildDoctorDeps` loads an explicit `--config` or else
+  `packaging.DefaultConfigDir()/bridge.yaml` (in the image,
+  `/home/bridge/.config/1-bit-bridge/bridge.yaml`, which does not exist) and
+  never calls `loadCLIConfig`, so unlike every other subcommand it never tries
+  `./bridge.yaml`. `docker exec` runs in `/data`, where `bridge cert info` and
+  `bridge status` find the config unaided; doctor does not.
+- Config-less, doctor has no `OwnPIDFile`, so `checkPort` cannot attribute the
+  bound ports, and with lsof present the verdict is FAIL "another process owns
+  this port". Env overrides are applied inside `config.Load`, so
+  `audio-toolchain` also read "not enabled" beside
+  `BRIDGE_UPSCALE_ENABLED=true`: the docs' claim that `docker exec` inheriting
+  the env makes that check run was false for the command they showed.
+- The allowlist in `TestNoSubcommandTailBypassesLoadCLIConfig` justified
+  exempting doctor.go with "probes each candidate path in turn". It probes
+  one. Corrected in the same PR.
+
+### Measured
+
+`dido` (Ubuntu 26.04, Docker 29.1.3, buildx 0.30.1). Image built from main
+4938d1d with `docker buildx build --load -t 1-bit-bridge:dev .` (`COPY . .`
+and `go build` both ran, not cached), started with the docs' "Enabling"
+command (`BRIDGE_UPSCALE_ENABLED` + `BRIDGE_ANALYSIS_ENABLED`, a six-track
+FLAC/MP3/M4A library, a named state volume), doctor run as the image's
+`bridge` user:
+
+| Run | port-api / port-admin | audio-toolchain | exit |
+|---|---|---|---|
+| `bridge doctor`, as documented | FAIL `:7788 in use` / `:7789 in use`, "another process owns this port" | `not enabled (sox not required)` | 1 |
+| `bridge doctor --config /data/bridge.yaml` | ok `bound by our own bridge (pid 1)` | `sox v14.4.2, FLAC supported` | 0 |
+| same, `server.pid` moved aside | FAIL, as in the first row | | 1 |
+| `--init` container, with `--config` | ok `(pid 7)`: tini is PID 1 and the pidfile says 7 | | 0 |
+| `BRIDGE_DATA_DIR=/data` (the Dockerfile header's example), with `--config` | ok `(pid 1)`, pidfile at `/data/server.pid` | | 0 |
+
+Without `--config` every one of those containers FAILs both ports. The
+fingerprint sentence beside the section has the same shape: with
+`BRIDGE_FINGERPRINT_ENABLED=true` and no key, `--config` gives FAIL
+`no AcoustID API key` (what the docs promise), and the plain command gives
+`not enabled (fpcalc not required)`.
+
+The `lsof` sentence was wrong as well. It said that without the package "the
+check falls back to a vaguer Warn". Alpine 3.22's base image ships
+`/usr/bin/lsof -> /bin/busybox`, and busybox's applet ignores every option:
+asked about port 9, which nothing holds, it exits 0 and lists every open file
+it can read (`1  /usr/local/bin/bridge  0  /dev/null` …).
+`isPIDListeningOnPort` searches that output for the pidfile's PID, so doctor
+credits ANY occupied port to a running bridge. End to end, with a root-owned
+`busybox nc -l -p 8080` and a probe config listening on :8080, the package
+reports `warn :8080 in use` and the busybox applet swapped into
+`/usr/bin/lsof` reports `ok bound by our own bridge (pid 1)`. The Warn the
+comment described appears only when doctor has no pidfile to look for; with
+lsof hidden and `--config` passed, the Linux socket-table fallback answers ok,
+"in use by a process running as this user (uid 100; pid attribution blocked —
+capability-bound binary)", a hint that names a capability the container's
+binary does not have.
+
+### Decisions
+
+- **Docs, not code, in this PR.** The texts say what doctor reports today and
+  tell the operator to pass `--config /data/bridge.yaml`, the path the
+  HEALTHCHECK and CMD already name. Making doctor resolve `./bridge.yaml` the
+  way `loadCLIConfig` does is the real fix and changes behaviour on every
+  platform (a doctor run from a directory holding a bridge.yaml would grade
+  that file), so it gets its own PR; the explicit flag keeps working after it.
+
+### Process notes
+
+- A re-check WITHOUT `--config` would have confirmed the stale claim: same
+  FAIL, different cause. The texts said "no PID file" for seven weeks while
+  the file existed.
+- `docker exec` as `bridge` can read `/proc/1/fd` of the serve process (same
+  uid, dumpable, no file capabilities in the image), so the real lsof
+  attributes the port without root.

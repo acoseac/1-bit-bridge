@@ -120,12 +120,17 @@ FROM alpine:${ALPINE_VERSION}
 # links its own FFmpeg for decoding, so it is independent of the sox
 # above. Inert unless `fingerprint.enabled` is set AND an AcoustID API
 # key is configured — `internal/doctor` verifies both.
-# lsof: `bridge doctor`'s preflight port check runs `lsof -nP -iTCP…`
-# to name the process occupying the API/admin ports (busybox lsof lacks
-# those flags, so without it the check falls back to a vaguer Warn). It
-# doesn't currently distinguish our own running bridge — `bridge serve`
-# writes no PID file yet — so a `doctor` run inside a live-serving
-# container still reports those ports in use.
+# lsof: `bridge doctor`'s port checks run `lsof -nP -iTCP:<port>
+# -sTCP:LISTEN -t` to confirm that the PID `bridge serve` records in
+# <dataDir>/server.pid (/data/data/server.pid under the auto-init config)
+# is the one listening, so `docker exec <container> bridge doctor --config
+# /data/bridge.yaml` reports port-api / port-admin as "bound by our own
+# bridge (pid 1)". Keep the --config: without it doctor looks for its
+# config only under ~/.config/1-bit-bridge, never reads /data/bridge.yaml,
+# cannot find the pidfile, and FAILs both ports as held by another
+# process. The package itself matters: Alpine's own /usr/bin/lsof is the
+# busybox applet, which ignores those options and lists every open file,
+# so doctor would credit any occupied port to the running bridge.
 # sox, ffmpeg and fpcalc all run as separate executables invoked via
 # os/exec (aggregation, not linked into the Go binary), so their
 # GPL/LGPL terms don't affect the bridge's own license (FSL-1.1-MIT) — chromaprint is

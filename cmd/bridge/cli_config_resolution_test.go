@@ -223,9 +223,12 @@ func TestNoSubcommandTailBypassesLoadCLIConfig(t *testing.T) {
 		// loadCLIConfig itself — the one place that MAY call config.Load
 		// with a path it just resolved.
 		"configpath.go": true,
-		// These pass a concrete path they already hold, never a flag value:
-		// init.go writes the file then reads it back; doctor.go probes each
-		// candidate path in turn; menu.go holds packaging.IsInitialized()'s
+		// These never hand config.Load the flag's empty default: init.go
+		// writes the file then reads it back; doctor.go loads an explicit
+		// --config or else the platform path and ignores a failed load
+		// (unlike loadCLIConfig it never tries ./bridge.yaml, which is
+		// why a container's `bridge doctor` needs --config
+		// /data/bridge.yaml); menu.go holds packaging.IsInitialized()'s
 		// platform path.
 		"init.go":   true,
 		"doctor.go": true,

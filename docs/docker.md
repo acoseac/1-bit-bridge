@@ -346,7 +346,9 @@ The bridge ships no built-in key on purpose — a key embedded in an open-source
 binary is shared by every install, which is how it gets rate-limited and then
 revoked for everyone. Enabling the feature without a key is not an error: the
 bridge boots normally and disables it with one line in the log. Run
-`bridge doctor` to see the `fingerprint-toolchain` check say so plainly.
+`docker exec 1-bit-bridge bridge doctor --config /data/bridge.yaml` to see the
+`fingerprint-toolchain` check say so plainly (the `--config` matters — see
+[Enabling](#enabling)).
 
 ### Enabling
 
@@ -372,18 +374,26 @@ ignored, so a typo reads as "unchanged," not "off."
 Verify the toolchain resolved:
 
 ```sh
-docker exec 1-bit-bridge bridge doctor
+docker exec 1-bit-bridge bridge doctor --config /data/bridge.yaml
 ```
 
 Look at the **`audio-toolchain`** line — it reports `sox vX, FLAC
 supported` when the toolchain is present (`docker exec` inherits the
 container's `BRIDGE_*_ENABLED`, so the check runs rather than reporting
-a no-op "not enabled"). The `port-api` / `port-admin` checks will show
-**in use** here — that's expected, not a problem: `bridge serve` is
-already holding those ports in the same container, and the bridge writes
-no PID file for `doctor` to recognise its own listener, so it can't tell
-itself apart from a foreign process. Those checks are a preflight signal
-for a fresh host, not a running container.
+a no-op "not enabled"). The `port-api` / `port-admin` lines read **ok**,
+`bound by our own bridge (pid 1)` (another PID if the container runs an
+init, e.g. `docker run --init`): `bridge serve` records its PID in
+`server.pid` under its data dir — `/data/data/server.pid` with the
+auto-init config, see [Where state lives](#where-state-lives-data) — and
+doctor uses `lsof` to confirm that PID is the one listening.
+
+**Keep the `--config`.** Without it, `bridge doctor` looks for its config
+only under the container user's `~/.config/1-bit-bridge/`, never at
+`/data/bridge.yaml`, so it grades an install with no config at all:
+`audio-toolchain` reads "not enabled" whatever the env says,
+`port-api` / `port-admin` **FAIL** with "another process owns this
+port", and doctor exits 1. Those are the bridge's own listeners; doctor
+can't recognise them without the data dir that holds `server.pid`.
 
 ### Variant storage (`variantsDir`)
 
