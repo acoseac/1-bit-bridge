@@ -916,8 +916,38 @@ no failing test — which is the shape to expect in this area.
   `sync.Map` — the unbounded form leaked for the process lifetime on a
   multi-decade library. The Deezer negative cache is presence-only and must not
   promote to MRU, or a stale entry outlives a positive re-fetch.
-- **Artwork is JPEG-only, two-layer verified** (MIME *and* the `FF D8 FF` magic
-  bytes) because the cache path and Content-Type are both jpeg. Folder-art
+- **An MBID that reaches a path is validated at the site that BUILDS the path,
+  and the artwork write is bounded to its own directory.** `ArtworkCachePath`
+  makes the value the LEADING component of a `filepath.Join` (which Cleans) and
+  `writeArtworkAtomicStream` then `MkdirAll`s the parent — so a traversing value
+  CREATES its way out rather than failing. Every caller validated at entry
+  except the pair fed by the ATLAS HARVEST RESULTS PAGE, where the UPSTREAM
+  chooses the MBID and the bridge never checks it against what it submitted:
+  `atlasCoverRefetcher.RefetchPremium` wrote up to `MaxCoverArtBytes` there and
+  the stale-tier loop beside it `os.Remove`d two more. Persisted, too —
+  `AddPendingCovers` skipped only `""`, so a hostile value survived restarts and
+  came back every tick. Three layers now, each negative-controlled separately:
+  shape at ingest (`pollResults`) and at the sink, containment via
+  `fsutil.IsUnderAny` inside the write primitive, and an image-signature check on
+  the body. **`config.go`'s unpinned-`harvestBaseUrl` note bounds the accepted
+  risk at CONTENT INJECTION** ("the bios it returns land in `artist_atlas`") —
+  that was written against an incomplete model, and an arbitrary file write is
+  outside it. Pin `atlas.harvestBaseUrl` on any bridge with harvest enabled.
+- **Artwork is JPEG-only and two-layer verified (MIME *and* the `FF D8 FF` magic
+  bytes) ON THE SCANNER'S LOCAL FOLDER-ART PATH — that rule never covered the
+  NETWORK path, and this bullet read as though it did.** `internal/manifest` has
+  `looksLikeJPEG` + the `folderArtCandidates` sniff; `internal/enrich` had no
+  content check of any kind, on ANY of its five write sites (CAA release, CAA
+  release-group, iTunes, and both premium paths), so whatever an upstream
+  returned was stored behind a `*-N.jpg` name that `/v1/artwork` serves as
+  `image/jpeg`. The write primitive now refuses bytes that are not a recognised
+  image. Deliberately NOT JPEG-only, though that is what this path's contract
+  says: CAA can serve PNG, those covers render today because clients sniff, and
+  dropping them inside a security fix buys nothing the arbitrary-payload refusal
+  does not already buy. `artwork_scale.go`'s rule — **"a verbatim PNG write would
+  put PNG bytes behind an image/jpeg label"**, which is why the SCANNER
+  transcodes — still applies here and is still unimplemented on the network
+  side; the warn line is what stops that staying invisible. Folder-art
   lookup is single-flighted per directory (a `sync.Once` promise stored with
   `LoadOrStore` — **never compute-then-`LoadOrStore`**, which runs N concurrent
   ReadDir+hash per album under contention) and reset per scan. The disc-subfolder
@@ -1727,6 +1757,58 @@ no failing test — which is the shape to expect in this area.
   as the EXDEV fallback: a power loss between two renames is permanently
   unbootable and rollback-on-boot cannot help, because the missing file IS the
   bridge. On Windows a stop-timeout must best-effort `Start()` again.
+- **The new bytes are STAGED beside `dst` before anything is vacated, so the
+  no-file window is two adjacent renames and never encloses a copy.** Both
+  fallback shapes vacated `dst` first and then called `placeNewBinary`, which
+  falls back to a ~30 MiB cross-volume copy plus an fsync on EXDEV /
+  `ERROR_NOT_SAME_DEVICE` — so the gap both files described as "the tiny no-file
+  window between the two renames" was the duration of a full transfer. **The
+  POSIX hardlink path was never affected** (dst keeps resolving through its own
+  dentry for the whole copy); the two that were are `swapBinaryViaRename` and
+  **Windows, where the hardlink trick cannot apply at all and this is the ONLY
+  path** — on the very host `placeNewBinaryWindows`' docblock names ("bridge.exe
+  on D: and the data dir under %LOCALAPPDATA% on C:"), every update spent seconds
+  with no `bridge.exe` on disk. The in-process restore cannot cover a power loss
+  there. Staging tries the cheap same-volume move FIRST, so an ordinary install
+  still pays a rename rather than a copy. `swap_test.go` exercised each fallback
+  alone and never composed them, which is why nothing saw it — the pin now walks
+  all four combinations and asserts the ORDER (copy before vacate), because
+  "dst is never absent" is false by construction for the two-rename commit.
+- **A swap PRESERVES the mode `dst` already has; it does not impose one.** The
+  rename path inherited the extractor's `O_CREATE 0o755`, which IS umask-masked,
+  while the copy path chmod'd an unmasked `0o755` — under a comment asserting the
+  two matched. Measured under `UMask=0027`, which this repo's own deployment
+  runbook prescribes: the same-volume path installed **0750** and the
+  cross-volume path **0600**. The service user still execs it, so the bridge
+  runs and nothing looks wrong; every other account on the host gets `EACCES` on
+  a binary that worked yesterday, with no log line. The divergence is invisible
+  at umask 0, so the test sets one.
+- **An install of a target already staged on disk is REFUSED, and the refusal
+  reads the PERSISTED marker.** `swapBinary`'s EEXIST retry does
+  `os.Remove(bak)` before re-linking, so a SECOND install of the same version
+  destroys the operator's rollback target and replaces it with a copy of what is
+  already live — while `canRollback()` keeps reporting true, because it only
+  stats for the file's existence. Measured, not argued: with the guard removed
+  the test's `.bak` goes from `0.1.0` to `0.2.0`. Reachable through the ORDINARY
+  console flow — `apiUpdatesInstall` does **not** restart (restart is a separate
+  operator action), and `u.status.CurrentVersion` is written ONCE at
+  construction (`Install` only decorates the local copy it returns), so
+  `UpdateAvailable` stays true for the process lifetime and the console keeps
+  inviting the click. Three terms, each load-bearing: **`Status=="installing"`
+  AND `SwapStarted`** (an armed-but-unswapped marker mutated nothing — the
+  Windows SCM-stop window — and `DecideBootAction` reads it as
+  `BootClearNotSwapped`); **the SAME target**, because refusing a newer release
+  would strand the host on a version it has not booted; and **within
+  `recencyWindow`**, the same constant `DecideBootAction` uses for
+  `BootClearAbandoned`, so the refusal expires exactly when boot would clear the
+  marker and the two cannot disagree about whether it is live. **Marker, not the
+  in-memory `pendingRestart` flag** — the flag records THAT a swap landed and
+  not WHICH version, so refusing on it blocked a legitimate newer install (caught
+  by the positive control), and `bridge update` is a separate PROCESS that sees
+  no `atomic.Bool` anyway. `Install` now sets `pendingRestart` for EVERY path;
+  it used to be set by `maybeAutoInstall` after the fact, so the admin and CLI
+  installs — the two that never restart — left it false. An unreadable marker is
+  NOT a refusal: failing closed there would block every install on the host.
 - **Booklet GC is skipped while a scan is in flight** — mid-rescan the release
   universe is transiently partial, so GC deletes every filesystem album's
   booklets and re-fetches them next cycle. An empty universe is a deliberate

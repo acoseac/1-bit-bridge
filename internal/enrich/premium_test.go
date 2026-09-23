@@ -50,8 +50,9 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: srv.URL, ok: true}, "test-ua", srv.Client())
-		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
+		dir := t.TempDir()
+		f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: srv.URL, ok: true}, "test-ua", srv.Client(), dir)
+		path := filepath.Join(dir, mbid+"-500.jpg")
 		if !f.TryCache(context.Background(), path, mbid, 500) {
 			t.Fatal("TryCache returned false on a 200 response")
 		}
@@ -92,8 +93,9 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 				}))
 				defer srv.Close()
 				cred := &fakeClearableCred{fakeCred: fakeCred{token: "tok", base: srv.URL, ok: true}}
-				f := NewAtlasPremiumFetcher(cred, "ua", srv.Client())
-				path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
+				dir := t.TempDir()
+				f := NewAtlasPremiumFetcher(cred, "ua", srv.Client(), dir)
+				path := filepath.Join(dir, mbid+"-500.jpg")
 				if f.TryCache(context.Background(), path, mbid, 500) {
 					t.Errorf("TryCache returned true on %d", status)
 				}
@@ -115,8 +117,9 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 		}))
 		defer srv.Close()
 		// ok=false → fetcher must short-circuit before any HTTP call.
-		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", srv.Client())
-		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
+		dir := t.TempDir()
+		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", srv.Client(), dir)
+		path := filepath.Join(dir, mbid+"-500.jpg")
 		if f.TryCache(context.Background(), path, mbid, 500) {
 			t.Error("TryCache returned true with no credential")
 		}
@@ -132,8 +135,9 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 			_, _ = w.Write(premiumJPEG)
 		}))
 		defer srv.Close()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL + "/", ok: true}, "ua", srv.Client())
-		path := filepath.Join(t.TempDir(), mbid+"-1200.jpg")
+		dir := t.TempDir()
+		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL + "/", ok: true}, "ua", srv.Client(), dir)
+		path := filepath.Join(dir, mbid+"-1200.jpg")
 		if !f.TryCache(context.Background(), path, mbid, 1200) {
 			t.Fatal("TryCache returned false")
 		}
@@ -162,11 +166,12 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 			_, _ = w.Write(premiumBytes)
 		}))
 		t.Cleanup(srv.Close)
-		path := filepath.Join(t.TempDir(), mbid+"-500.jpg")
+		dir := t.TempDir()
+		path := filepath.Join(dir, mbid+"-500.jpg")
 		if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client()), path
+		return NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client(), dir), path
 	}
 
 	t.Run("premium source overwrites the cache", func(t *testing.T) {
@@ -192,8 +197,9 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 	})
 
 	t.Run("no credential returns ErrNoCredential", func(t *testing.T) {
-		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", nil)
-		got, err := f.RefetchPremium(context.Background(), filepath.Join(t.TempDir(), "x.jpg"), mbid, 500)
+		dir := t.TempDir()
+		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", nil, dir)
+		got, err := f.RefetchPremium(context.Background(), filepath.Join(dir, "x.jpg"), mbid, 500)
 		if got || !errors.Is(err, ErrNoCredential) {
 			t.Errorf("got=%v err=%v, want false + ErrNoCredential", got, err)
 		}
@@ -204,8 +210,9 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 		}))
 		defer srv.Close()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client())
-		got, err := f.RefetchPremium(context.Background(), filepath.Join(t.TempDir(), "x.jpg"), mbid, 500)
+		dir := t.TempDir()
+		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client(), dir)
+		got, err := f.RefetchPremium(context.Background(), filepath.Join(dir, "x.jpg"), mbid, 500)
 		if got || err == nil {
 			t.Errorf("got=%v err=%v, want false + error on 5xx", got, err)
 		}
