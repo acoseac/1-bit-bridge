@@ -212,6 +212,8 @@ Directory listing. Replaces `SMBConnectionPool.list`.
 ]
 ```
 
+**`isDir`, `size` and `mtime` describe the TARGET of an entry that merely points at its content**, so a listing row agrees with what `/v1/stat` reports and `/v1/download` acts on for the same path. This covers a POSIX symlink and a Windows directory junction (`mklink /J`) alike — the ordinary way an operator parks one album on another volume, and on Windows the only one available to a service account, since a real symlink there needs a privilege it usually lacks. A link whose target cannot be reached (dangling, or a mount that just went away) still APPEARS in the listing, carrying the link's own metadata rather than vanishing from the directory. Clients need no special handling: a linked album is a row with `isDir: true`, and descending into it works.
+
 `reachable` / `reason` (additive since v1.2, both with `omitempty`) appear ONLY on the synthetic root-level entries returned in multi-root mode for an empty `path` query. Ordinary directories and files inside a root omit both fields. `reachable` is a `*bool` (the zero-value-omits-`false` rule means pointer is needed to send explicit `false`). When `reachable` is `false`, `reason` carries the same stable code set as the `roots` block of `/v1/health` (`"offline"`, `"not_mounted"`, `"permission_denied"`). Pre-v1.2 iOS ignores the field; iOS 1.2+ uses it to render a "library offline" hint instead of inferring from a silent zero-size row.
 
 ### `GET /v1/stat?path=<rel>`
@@ -393,9 +395,28 @@ count or, failing one, the first frame's bitrate over the audio byte span
 from COMM `numSampleFrames` over its rate, WAV from the `data` payload
 over the fmt chunk's `nAvgBytesPerSec`. The AIFF and WAV values are
 omitted when the audio payload does not fit the physical file (the DFF
-rule below); every value is omitted at or past a week. The wire shape is
+rule below). The wire shape is
 unchanged and `ProtocolVersion` stays 1: a pre-v11 bridge simply omits
 the field for those rows, and a client keeps whatever fallback it had.
+
+**One plausibility gate applies to every duration the bridge stamps, and
+it has BOTH ends.** A value is omitted below **0.1 s** as well as at or
+past a week, so a `duration` that reaches a client is always within
+`[0.1, 604800)` seconds — anything outside is ABSENT, never clamped to
+the bound. The floor arrived one release after the ceiling
+(ExtractorVersion 13, the bridge release after v0.2.0) because a forged
+or broken header reaches absurdly SMALL as easily as absurdly large: an
+MP4 `mvhd` declaring `timescale = 0xFFFFFFFF, duration = 1` is
+2.3e-10 s, finite and positive and under a week, and a client renders
+that as `0:00` rather than as the absence it actually is. Treat a
+present `duration` as a real measurement and a missing one as "unknown,
+use your own fallback"; there is no third state on the wire.
+
+Since ExtractorVersion 14 a **UPnP-routed** row's duration passes the
+same gate. Its value is the upstream server's DIDL-Lite `res@duration`
+attribute, which is no more trustworthy than a file header —
+`0:00:00.001` and `10000:00:00` are both well-formed DLNA durations —
+and it previously reached the wire behind a `> 0` check alone.
 
 #### DST-compressed DSDIFF (additive, since v1.10)
 
