@@ -144,10 +144,15 @@ type Store struct {
 // TestIndexedAtAdvanceIsShared does.
 const indexedAtAdvanceSQL = `MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)`
 
-// bumpIndexedAtByPathSQL is the whole statement for the five writers whose
+// bumpIndexedAtByPathSQL is the whole statement for the six writers whose
 // ONLY job is the bump (UpsertVariant / DeleteVariant / UpsertAnalysis /
-// DeleteAnalysis / writeLyricsRowTx) — one const, five callers, so those five
-// cannot drift from each other at all. Binds: (clock, path).
+// DeleteAnalysis / writeLyricsRowTx / UpsertAtlasLyrics) — one const, six
+// callers, so those six cannot drift from each other at all. Binds:
+// (clock, path).
+//
+// Said FIVE until 2026-09-23, having missed UpsertAtlasLyrics
+// (atlas_lyrics.go), which uses the const correctly. The rule held; the
+// count did not — an enumeration in a docblock is a claim like any other.
 const bumpIndexedAtByPathSQL = `
 		UPDATE tracks
 		   SET indexed_at = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
@@ -5184,6 +5189,17 @@ func subtreeRangeBase(prefix string) (base string, scoped bool) {
 //     also needs a match-everything fallback the range form can't
 //     express in one static statement.
 //
+// **The ListVariantsByPathPrefix entry was justified by a caller that
+// does not exist.** No GC calls it — `bridge upscale --gc` drives off
+// AllVariants — and `grep` gives exactly one production caller for it and
+// for its sibling ListVariantsForPath: the DELETE handler, which unlinks
+// every row it is handed. `ops/engineering-log.md` repeats the same claim
+// under a third name (ListVariantsUnderPrefix) that no longer exists
+// either. The folding there is now the CANDIDATE GENERATOR only, with a
+// case-exact acceptance in Go (acceptCaseExactVariants) — the fold is
+// kept because unicode_lower also NFC-composes, which the delete needs
+// and byte-exact SQL would lose.
+//
 // If you are adding a caller and cannot point at a reason case-folding
 // is *wanted*, you want subtreeRangeBase.
 func subtreeLikePattern(prefix string) (pattern string, scoped bool) {
@@ -8007,10 +8023,65 @@ func (s *Store) AllVariants(ctx context.Context) ([]VariantRow, error) {
 	return out, rows.Err()
 }
 
+// acceptCaseExactVariants filters a folded candidate set down to the
+// rows whose source_path matches `want` EXACTLY, once both sides are
+// NFC-composed.
+//
+// The two queries behind the variant-delete endpoint select with
+// `unicode_lower(source_path)`, which does two jobs: Unicode case
+// folding AND NFC composition. The composition is wanted and load-
+// bearing — the scanner stores the on-disk form, which is NFD for
+// anything from HFS+ or synced from a Linux/NAS, while iOS sends NFC,
+// and without composing "every accented NFD path missed the LookupTrack
+// / LookupVariant / LookupAnalysis fallback" (2026-07-21 review, M9).
+// Going byte-exact in SQL would silently answer `deletedCount: 0` for
+// every album with an accent in its path.
+//
+// The CASE FOLD is the half that must not reach a deletion.
+// `subtreeLikePattern`'s own docblock says so: "Case-folding is the
+// wrong answer for anything that writes, deletes, or decides a scope …
+// a case-twin sibling directory is a DIFFERENT directory on a
+// case-sensitive filesystem, and treating it as the same one is how rows
+// and their on-disk sidecars got destroyed."
+//
+// So the query stays the relaxed CANDIDATE GENERATOR and the strictness
+// moves here — the rule this repo already states for the enricher:
+// relaxations belong in the query, strictness in the acceptance. Both
+// sides go through the same `nfcCompose` that `unicodeLowerScalar`
+// itself calls, so the generator and the acceptance cannot disagree
+// about composition; the only thing acceptance adds is case.
+//
+// `match` receives the row's composed path and decides. Exact-equality
+// and prefix callers differ only in that predicate.
+//
+// `rows[:0:0]` — a fresh backing array — and NOT the in-place `rows[:0]`
+// filter that avoids the allocation (Gemini on #979). The in-place form
+// is correct for both callers TODAY, because each builds `rows` locally
+// and discards it. But this is a SHARED helper whose whole job is to
+// decide what a destructive path may touch, and in-place filtering
+// silently overwrites its input: a third caller that keeps the unfiltered
+// slice — to log what was excluded, say — would read rewritten rows with
+// no compile error and no test failure. The saving is one allocation of
+// a handful of rows per request, against a function that is about to
+// unlink files.
+func acceptCaseExactVariants(rows []VariantRow, match func(composedPath string) bool) []VariantRow {
+	out := rows[:0:0]
+	for _, v := range rows {
+		if match(nfcCompose(v.SourcePath)) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // ListVariantsByPathPrefix returns every variant row whose
-// source_path starts with `prefix` (case-insensitively via the
-// project's `unicode_lower` SQLite scalar; Unicode case-folding
-// matches every other path lookup in the store). Used by the
+// source_path starts with `prefix` — CASE-EXACTLY, and NFC-insensitively.
+// The SQL selects case-folded candidates via the project's
+// `unicode_lower` scalar (which also NFC-composes, the half this lookup
+// needs) and acceptCaseExactVariants then narrows to the rows whose
+// composed path really is under `prefix`. A case-twin sibling directory
+// is a DIFFERENT directory on a case-sensitive filesystem, and this
+// result set is unlinked from disk. Used by the
 // admin DELETE /v1/upscale/variants?prefix=<rel-path> route to
 // resolve the deletion target set BEFORE unlinking sidecars from
 // disk.
@@ -8061,13 +8132,34 @@ func (s *Store) ListVariantsByPathPrefix(ctx context.Context, prefix string) ([]
 		}
 		out = append(out, v)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !scoped {
+		// The delete-all shape, which the handler gates behind an
+		// explicit ?confirm=true. Nothing to narrow.
+		return out, nil
+	}
+	// Case-EXACT acceptance over the folded candidates. `?prefix=Jazz`
+	// must not reap `jazz/` and `JAZZ/`, which are different real
+	// directories on a case-sensitive filesystem — Linux, so the VPS,
+	// the tenants and the Docker image.
+	base := nfcCompose(strings.TrimRight(prefix, "/")) + "/"
+	return acceptCaseExactVariants(out, func(p string) bool {
+		return strings.HasPrefix(p, base)
+	}), nil
 }
 
 // ListVariantsForPath returns every variant row whose source_path
-// equals `sourcePath` (case-insensitively via the project's
-// `unicode_lower` scalar; matches DeleteVariant / LookupVariant
-// case-folding semantics). Used by DELETE /v1/upscale/variants?path=<rel>
+// equals `sourcePath` — CASE-EXACTLY, and NFC-insensitively; see
+// acceptCaseExactVariants for why those two differ and why the SQL still
+// folds. PROTOCOL.md documents this endpoint's `?path=<rel>` as "the
+// variants of one exact source track", which is now what it means.
+//
+// Deliberately NOT LookupVariant's semantics: that one is a READ and
+// fails closed on ambiguity (exact first, folded fallback, LIMIT 2,
+// "refusing to pick a row"). This feeds a DELETE, so it narrows rather
+// than picks. Used by DELETE /v1/upscale/variants?path=<rel>
 // — a single source file typically has 0 or 1 variants, but the
 // schema doesn't enforce that (different `variant_id` values for
 // the same source path coexist via the composite primary key) so
@@ -8089,7 +8181,15 @@ func (s *Store) ListVariantsForPath(ctx context.Context, sourcePath string) ([]V
 		}
 		out = append(out, v)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Case-EXACT acceptance. PROTOCOL.md documents this endpoint's
+	// `?path=<rel>` as "the variants of ONE EXACT SOURCE TRACK"; the
+	// folded query answered for `album/t.flac` as well as
+	// `Album/T.flac`, and the handler unlinks every row it is handed.
+	want := nfcCompose(sourcePath)
+	return acceptCaseExactVariants(out, func(p string) bool { return p == want }), nil
 }
 
 // DeleteVariant removes one row by (source_path, variant_id) AND bumps

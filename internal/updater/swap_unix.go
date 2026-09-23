@@ -16,10 +16,9 @@ import (
 // the new-binary rename to return EXDEV (exercising the cross-device
 // copy fallback). Test-only seams — production code MUST NOT mutate them
 // (same convention as renameFunc / removeFunc elsewhere in the package).
-var (
-	linkFunc   = os.Link
-	renameFunc = os.Rename
-)
+// linkFunc is the hardlink seam. renameFunc lives in swap_copy.go
+// because staging is shared and Windows needs the same seam.
+var linkFunc = os.Link
 
 // swapBinary atomically replaces the running binary on darwin/linux.
 //
@@ -74,26 +73,34 @@ var (
 // marker's meaning is identical everywhere.
 func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) error {
 	bak := dst + backupExt
-
 	if err := armSwap(markSwapStarted); err != nil {
 		return err
 	}
+	// Stage BEFORE anything is vacated. On this path it changes nothing
+	// about the window — the hardlink keeps dst resolving through its own
+	// dentry for the whole operation, so dst was never absent here even
+	// when placeNewBinary fell back to a cross-volume copy. It matters
+	// for the FALLBACK below, which had no such protection, and doing it
+	// once for both keeps a single definition of "the new bytes are on
+	// dst's volume, durable, with the right mode".
+	staged, err := stageIntoDir(newBinary, dst, installedMode(dst))
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(staged)
+		}
+	}()
 
-	// os.Link refuses to create bak if it already exists (EEXIST), so a
-	// stale .bak from a previous cycle has to go — but ONLY once we know
-	// that is actually why the link failed.
-	//
-	// Pre-fix this was an unconditional os.Remove(bak) BEFORE the link.
-	// The shape it replaced opened with os.Rename(dst, bak) — an atomic
-	// overwrite that left the previous .bak intact on failure — and the
-	// remove-first version gave that up. If linkFunc then failed
-	// (link-less FS, fs.protected_hardlinks) AND swapBinaryViaRename's
-	// first rename also failed, the install aborted with the operator's
-	// rollback target already destroyed, and RollbackBinary hard-fails on
-	// a missing bak. Narrow (both must fail in a directory
-	// preflightWritable just certified) but strictly worse than what it
-	// replaced. So: try the link first, and clear a stale bak only when
-	// EEXIST says that is the obstacle (R5).
+	// Try the link first, and clear a stale bak only when EEXIST says
+	// that is the obstacle (R5). Removing bak unconditionally gave up the
+	// atomic overwrite that left the previous .bak intact on failure: if
+	// linkFunc then failed (link-less FS, fs.protected_hardlinks) AND the
+	// fallback's first rename also failed, the install aborted with the
+	// operator's rollback target already destroyed, and RollbackBinary
+	// hard-fails on a missing bak.
 	linkErr := linkFunc(dst, bak)
 	if linkErr != nil && errors.Is(linkErr, fs.ErrExist) {
 		if rmErr := os.Remove(bak); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -103,87 +110,95 @@ func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) 
 	}
 	if linkErr != nil {
 		// Link-less / cross-device filesystem — fall back to the
-		// two-rename swap (which overwrites any bak itself).
-		return swapBinaryViaRename(dst, newBinary, bak)
+		// two-rename swap. Its window is now two adjacent renames on one
+		// volume, because the bytes are already staged beside dst.
+		if err := commitViaRename(dst, staged, bak); err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	}
 
 	// dst and bak now hardlink the same (old) inode. Atomically point dst
 	// at the new binary; bak keeps the old inode alive for rollback. On
 	// POSIX os.Rename over an existing dst is atomic, so a crash here
 	// leaves dst as either the old or the new binary — never absent.
-	// placeNewBinary falls back to a copy-into-dst-dir on EXDEV (cross-fs).
-	if err := placeNewBinary(newBinary, dst); err != nil {
+	//
+	// Plain os.Rename, not renameFunc: staged sits in dst's OWN
+	// directory, so this rename cannot be cross-device, and the test seam
+	// forces EXDEV on every call it sees.
+	if err := os.Rename(staged, dst); err != nil {
 		// The install didn't happen, so dst still resolves to the old
 		// binary via its own directory entry (the surviving hardlink) —
 		// the bridge stays bootable. Drop the bak link we just made so a
 		// stale .bak (identical to the live binary, with no install
 		// marker committed) doesn't linger.
 		_ = os.Remove(bak)
-		return fmt.Errorf("install %s -> %s: %w", newBinary, dst, err)
+		return fmt.Errorf("install %s -> %s: %w", staged, dst, err)
 	}
-
+	committed = true
 	fsyncDir(filepath.Dir(dst))
 	return nil
 }
 
-// swapBinaryViaRename is the fallback two-rename swap used when the
-// filesystem can't hardlink (EXDEV / no-hardlink-support). It carries the
-// original no-file window between the two renames; the hardlink path in
-// swapBinary is preferred precisely to avoid that window on filesystems
-// that support it. bak is dst+backupExt and has already been cleared by
-// the caller.
-func swapBinaryViaRename(dst, newBinary, bak string) error {
-	// Move dst → dst.bak. os.Rename overwrites on POSIX, so an existing
-	// .bak from a previous cycle is consumed here — unavoidable on this
-	// path, since bak IS the vacate target the two-rename swap needs.
-	// Routed through renameFunc (not bare os.Rename) so tests can drive
-	// the "this rename fails" branch; that is the case where the caller's
-	// deferred-clear fix actually pays off, because a pre-existing .bak
-	// survives untouched (R5).
+// installedMode is the permission bits a swap should leave on dst: the
+// ones dst ALREADY has.
+//
+// Not a hardcoded 0o755. The two swap paths used to disagree — the
+// rename path inherited the extractor's `O_CREATE 0o755`, which IS
+// umask-masked, while the copy path chmod'd an unmasked 0o755, under a
+// comment asserting the two matched. Under `UMask=0027`, which this
+// repo's own deployment runbook prescribes, that meant an update
+// silently took the binary from 0755 to 0750: the service user still
+// execs it, so the bridge runs, and every other account on the host gets
+// EACCES on a binary that worked yesterday, with no log line.
+//
+// Preserving dst's mode fixes the divergence in both directions and is
+// the least surprising rule — an update is not the place to change a
+// binary's permissions, whichever way the operator set them. 0o755 is
+// the fallback for a dst we cannot stat, which is the shape a first
+// install has.
+func installedMode(dst string) os.FileMode {
+	if fi, err := os.Stat(dst); err == nil {
+		if perm := fi.Mode().Perm(); perm != 0 {
+			return perm
+		}
+	}
+	return 0o755
+}
+
+// isCrossDeviceErr reports whether a rename failed because the two paths
+// live on different filesystems — the one condition that makes staging
+// fall back to a copy.
+func isCrossDeviceErr(err error) bool { return errors.Is(err, syscall.EXDEV) }
+
+// commitViaRename is the two-rename commit used when the filesystem
+// cannot hardlink (EXDEV / no-hardlink-support), and the shape Windows
+// uses unconditionally.
+//
+// `staged` is already beside dst, on dst's volume, with its mode set —
+// so the no-file window really is the gap between two renames in one
+// directory, which is what this path's comments have always claimed. It
+// used to enclose placeNewBinary's cross-volume copy plus an fsync.
+//
+// A failure of the second rename restores bak, so the operator is never
+// left without an executable by a swap that merely failed. The hazard
+// this reordering removes is the one no in-process restore can cover: a
+// power loss while dst is absent.
+func commitViaRename(dst, staged, bak string) error {
 	if err := renameFunc(dst, bak); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
 	}
-	// Move new binary into place (EXDEV → copy into dst's dir; see
-	// placeNewBinary). If this fails, restore .bak so we don't leave the
-	// operator with no executable at all.
-	if err := placeNewBinary(newBinary, dst); err != nil {
+	// Plain os.Rename: same directory, so never cross-device.
+	if err := os.Rename(staged, dst); err != nil {
 		if rerr := os.Rename(bak, dst); rerr != nil {
 			return fmt.Errorf("install %s -> %s failed (%v); rollback also failed (%v); manual recovery needed",
-				newBinary, dst, err, rerr)
+				staged, dst, err, rerr)
 		}
-		return fmt.Errorf("install %s -> %s: %w (rolled back)", newBinary, dst, err)
+		return fmt.Errorf("install %s -> %s: %w (rolled back)", staged, dst, err)
 	}
 	fsyncDir(filepath.Dir(dst))
 	return nil
-}
-
-// placeNewBinary installs newBinary at dst. It first tries an atomic
-// os.Rename (no extra copy) and falls back to copyAndRename ONLY on EXDEV
-// — the cross-filesystem case where the scratch dir under DataDir and
-// the install path live on different mounts (e.g. /var vs /usr on
-// Linux). Both paths
-// leave the OLD binary reachable via bak (the caller's rollback contract);
-// copyAndRename's own rename happens WITHIN dst's directory, so it's atomic
-// on that filesystem and dst is never absent. Any non-EXDEV rename error
-// surfaces directly (a permission/IO fault is not a cross-device case).
-func placeNewBinary(newBinary, dst string) error {
-	err := renameFunc(newBinary, dst)
-	if err != nil && errors.Is(err, syscall.EXDEV) {
-		return copyAndRename(newBinary, dst)
-	}
-	return err
-}
-
-// copyAndRename copies src into a temp file in dst's OWN directory, fsyncs
-// it, sets the executable bit, then atomically renames it over dst (a
-// same-filesystem rename, so never EXDEV and never leaves dst absent).
-// Used only as placeNewBinary's cross-device fallback. On success src is
-// removed (it's the now-consumed scratch-dir copy). The tmp file is
-// cleaned up on any failure via the deferred Remove (LIFO after Close, so
-// Close runs first — Windows-safe ordering isn't needed here but mirrors
-// the atomic-write idiom used elsewhere in the tree).
-func copyAndRename(src, dst string) error {
-	return copyIntoDirAndRename(src, dst, 0o755)
 }
 
 // fsyncDir fsyncs a directory so a rename inside it is durable. A crash

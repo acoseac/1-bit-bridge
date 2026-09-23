@@ -66,6 +66,15 @@ type FFmpegInfo struct {
 	Path string
 	// Decoders is every decoder name the listing carried, in listing order.
 	Decoders []string
+	// ProbeErr is why the decoder listing could not be read, or "" when it
+	// was. Carried because FFmpegSnapshot discards ProbeFFmpeg's error, and
+	// a caller that phrases a VERDICT for an operator needs to be able to
+	// say "we could not read the listing" rather than "your build lacks the
+	// decoders" — two different claims, and only one of them was
+	// established. `bridge doctor` and the CLI precheck both call
+	// ProbeFFmpeg directly and keep the error; the admin console reads the
+	// snapshot, and said the wrong one.
+	ProbeErr string
 	// DecodersKnown is true only when the listing parsed as a decoder table
 	// with at least one row. False means the probe could not run or its
 	// output was not recognised — and every capability below is false.
@@ -238,7 +247,10 @@ func FFmpegSnapshot() FFmpegInfo {
 	if ffmpegSnap.path == path && !ffmpegSnap.at.IsZero() && time.Since(ffmpegSnap.at) < ffmpegSnapshotTTL {
 		return ffmpegSnap.info
 	}
-	info, _ := ProbeFFmpeg(context.Background())
+	info, err := ProbeFFmpeg(context.Background())
+	if err != nil {
+		info.ProbeErr = err.Error()
+	}
 	ffmpegSnap.path, ffmpegSnap.at, ffmpegSnap.info = path, time.Now(), info
 	return info
 }

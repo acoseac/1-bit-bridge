@@ -57,6 +57,17 @@ func (f *fakeSink) UpsertReleaseMeta(_ context.Context, m ReleaseMeta) error {
 
 // One tick submits the library + drains the results, storing bios (done) and
 // tombstones (exhausted) and advancing the cursor.
+// Release MBIDs here are real UUIDs, not the "r1"/"r2"/"r3" placeholders they
+// started as: pollResults shape-gates what it queues for cover refetch, because
+// that value becomes the leading component of an artwork filepath.Join. A
+// placeholder is precisely what the gate drops, so a fixture using one would
+// fail this test for a reason that has nothing to do with submit-and-poll.
+const (
+	relTextAndCover = "11111111-1111-4111-8111-111111111111"
+	relCoverOnly    = "22222222-2222-4222-8222-222222222222"
+	relTextOnly     = "33333333-3333-4333-8333-333333333333"
+)
+
 func TestClientSubmitAndPoll(t *testing.T) {
 	var gotSubmit []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,9 +87,9 @@ func TestClientSubmitAndPoll(t *testing.T) {
 					Results: []resultItem{
 						{MBID: "a1", Status: "done", Found: true, Bio: "Bio A", Genres: []string{"jazz"}, Source: "lastfm", SourceURL: "https://last.fm/a", Cursor: 1},
 						{MBID: "a2", Status: "exhausted", Found: false, Cursor: 2},
-						{MBID: "r1", Kind: "release", Status: "done", Found: true, Description: "About this album", RecordLabel: "Blue Note", Genres: []string{"jazz"}, Source: "wikipedia", SourceURL: "https://en.wikipedia.org/wiki/x", Cursor: 3},
-						{MBID: "r2", Kind: "release", Status: "done", Found: true, Cursor: 4},                                                                                         // cover-only (no text) → must NOT be stored
-						{MBID: "r3", Kind: "release_text", Status: "done", Found: true, Description: "Local-art album", Source: "lastfm", SourceURL: "https://last.fm/r3", Cursor: 5}, // text-only → stored, but NOT cover-pending
+						{MBID: relTextAndCover, Kind: "release", Status: "done", Found: true, Description: "About this album", RecordLabel: "Blue Note", Genres: []string{"jazz"}, Source: "wikipedia", SourceURL: "https://en.wikipedia.org/wiki/x", Cursor: 3},
+						{MBID: relCoverOnly, Kind: "release", Status: "done", Found: true, Cursor: 4},                                                                                        // cover-only (no text) → must NOT be stored
+						{MBID: relTextOnly, Kind: "release_text", Status: "done", Found: true, Description: "Local-art album", Source: "lastfm", SourceURL: "https://last.fm/r3", Cursor: 5}, // text-only → stored, but NOT cover-pending
 					},
 					NextCursor: 5,
 				})
@@ -115,29 +126,30 @@ func TestClientSubmitAndPoll(t *testing.T) {
 	if got := sink.stored[1]; got.MBID != "a2" || got.Found {
 		t.Errorf("result[1] = %+v, want a2 tombstone (found=false)", got)
 	}
-	// Album text (Phase D): r1 (release, has text) + r3 (release_text) are stored;
-	// the cover-only release (r2, no description/label/genre) leaves no overlay row.
+	// Album text (Phase D): the text-bearing release and the release_text are
+	// stored; the cover-only release (no description/label/genre) leaves no
+	// overlay row.
 	storedByMBID := map[string]ReleaseMeta{}
 	for _, m := range sink.storedReleases {
 		storedByMBID[m.MBID] = m
 	}
 	if len(sink.storedReleases) != 2 {
-		t.Fatalf("stored %d release metas, want 2 (r1 + r3; cover-only r2 skipped)", len(sink.storedReleases))
+		t.Fatalf("stored %d release metas, want 2 (text+cover and text-only; cover-only skipped)", len(sink.storedReleases))
 	}
-	if got := storedByMBID["r1"]; got.Description != "About this album" || got.RecordLabel != "Blue Note" || got.Source != "wikipedia" {
-		t.Errorf("r1 release meta = %+v", got)
+	if got := storedByMBID[relTextAndCover]; got.Description != "About this album" || got.RecordLabel != "Blue Note" || got.Source != "wikipedia" {
+		t.Errorf("text+cover release meta = %+v", got)
 	}
-	if got := storedByMBID["r3"]; got.Description != "Local-art album" || got.Source != "lastfm" {
-		t.Errorf("r3 (release_text) meta = %+v", got)
+	if got := storedByMBID[relTextOnly]; got.Description != "Local-art album" || got.Source != "lastfm" {
+		t.Errorf("text-only release meta = %+v", got)
 	}
 	// Only cover-bearing "release" results feed the cover sweep; the text-only
 	// "release_text" (r3) must NOT be queued for a cover refetch.
 	pending := state.PendingCoversSnapshot()
-	if _, ok := pending["r3"]; ok {
-		t.Error("release_text r3 must NOT be added to pending covers")
+	if _, ok := pending[relTextOnly]; ok {
+		t.Error("release_text (text-only) must NOT be added to pending covers")
 	}
-	if _, ok := pending["r1"]; !ok {
-		t.Error("release r1 should be queued for cover refetch")
+	if _, ok := pending[relTextAndCover]; !ok {
+		t.Error("release should be queued for cover refetch")
 	}
 	if c := state.Snapshot().ResultCursor; c != 5 {
 		t.Errorf("cursor = %d, want 5", c)

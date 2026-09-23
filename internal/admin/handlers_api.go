@@ -3426,6 +3426,10 @@ func classifyUpdateError(err error) (status int, short string) {
 		return http.StatusConflict, "active-sessions"
 	case errors.Is(err, ErrUpdateInstallInFlight):
 		return http.StatusConflict, "install-in-flight"
+	case errors.Is(err, ErrUpdatePendingRestart):
+		// 409, not the default 502: nothing went wrong, the host is in a
+		// state where the requested action is the wrong one.
+		return http.StatusConflict, "pending-restart"
 	case errors.Is(err, ErrUpdateNotSupported):
 		return http.StatusNotImplemented, "platform-unsupported"
 	case errors.Is(err, ErrUpdatePathNotWritable):
