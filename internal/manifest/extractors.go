@@ -1199,14 +1199,24 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 			// **The two hazards named above were fixed upstream in
 			// mewkiz/flac v1.0.14** (readString now refuses a length past
 			// its *io.LimitedReader, and parseVorbisComment caps the tag
-			// count at 50000). The DECISION still stands and the
-			// reasoning is now different: Parse() would still allocate
-			// from a 128 MiB picture cap taken off an unvalidated field,
-			// and a bound we control is worth more than a bound that
-			// moves with a dependency. Recorded rather than quietly left
-			// in place, because a comment that explains a choice by
-			// naming a hazard that no longer exists is how the next
-			// change gets made on stale reasoning.
+			// count at 50000). The DECISION still stands, for a reason
+			// the upstream caps do not cover: our bound is BLOCK-RELATIVE
+			// and theirs is absolute.
+			//
+			// parseVorbisCommentBounded refuses a count above `lr.N/4` —
+			// four bytes being the smallest a tag can occupy — so a
+			// 100-byte block can never claim 50000 tags, and the initial
+			// allocation is capped at 64 entries regardless of what the
+			// count declares. Upstream still does `make([][2]string, x)`
+			// for x up to 50000 (~1.6 MB) whether or not the block could
+			// hold them. Our parser also leaves the reader positioned at
+			// the next block header, which this walk depends on and
+			// TestParseVorbisCommentBoundedLeavesReaderAtNextBlock pins.
+			//
+			// (An earlier draft of this paragraph justified the decision
+			// with parsePicture's 128 MiB cap. That cap is real and
+			// irrelevant here: this branch reaches parseVorbisComment,
+			// never parsePicture. CodeRabbit on #981.)
 			tags, perr := parseVorbisCommentBounded(r, block.Length)
 			if perr != nil {
 				return
@@ -1283,17 +1293,19 @@ func applyFLACMultiValueArtists(r io.ReadSeeker, t *Track) {
 		// about allocation and silent about I/O, the distinction #165
 		// had already drawn.
 		//
-		// Same pattern as flacPictureBlocksSane 30 lines below: note the
-		// body start, then seek to the next header. `meta.New` consumed
-		// exactly the 4-byte header through a non-buffering reader
-		// (verified against mewkiz/flac v1.0.14), so the offset here IS
-		// the body start and an external Seek stays consistent with the
-		// walk. Fail-open on a seek error, like every other bail here.
-		pos, perr := r.Seek(0, io.SeekCurrent)
-		if perr != nil {
-			return
-		}
-		if _, serr := r.Seek(pos+block.Length, io.SeekStart); serr != nil {
+		// ONE relative seek. `meta.New` consumed exactly the 4-byte
+		// header through a non-buffering reader (verified against
+		// mewkiz/flac v1.0.14), so the offset here IS the body start and
+		// advancing by block.Length lands on the next header.
+		//
+		// flacPictureBlocksSane 30 lines below notes the position and
+		// seeks absolutely because it READS part of the body first and
+		// needs the start to come back to; this walk reads nothing, so
+		// the query is a syscall bought for nothing — and this runs per
+		// block on the NAS mounts the whole single-open path exists for
+		// (Gemini on #981). Fail-open on a seek error, like every other
+		// bail here.
+		if _, serr := r.Seek(block.Length, io.SeekCurrent); serr != nil {
 			return
 		}
 		if block.IsLast {
