@@ -135,13 +135,12 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		if len(ri.Name()) > 0 && ri.Name()[0] == '.' {
 			continue
 		}
-		// Readdir yields Lstat-shaped info, so a symlinked album
-		// directory would report IsDir:false + the link's own byte
-		// length here while /v1/stat (which goes through the
-		// resolver's os.Stat) calls the same path a directory. Resolve
-		// the link so one listing can't disagree with the endpoints
-		// that act on its rows.
-		fi := followSymlink(abs, ri)
+		// Readdir yields Lstat-shaped info, so a linked album directory
+		// would report IsDir:false + the link's own byte length here
+		// while /v1/stat (which goes through the resolver's os.Stat)
+		// calls the same path a directory. Resolve it so one listing
+		// can't disagree with the endpoints that act on its rows.
+		fi := listEntryInfo(abs, ri)
 		entries = append(entries, Entry{
 			Name:    ri.Name(),
 			Path:    childPath(clientPath, ri.Name()),
@@ -501,25 +500,31 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 
-// followSymlink resolves a directory entry that is itself a symlink to
-// the metadata of its TARGET, matching what `/v1/stat` and
+// listEntryInfo is the FileInfo a /v1/list row reports for one entry of
+// the directory at `dir`. It resolves an entry that merely POINTS at its
+// content to the metadata of the TARGET, matching what `/v1/stat` and
 // `/v1/download` see. `os.File.Readdir` documents its values as "as
 // would be returned by Lstat", while both of those endpoints reach the
 // file through `bridgefs.Resolver.ResolveChecked` → `os.Stat`, which
-// follows. Without this, a symlinked album directory listed as
+// follows. Without this, a linked album directory listed as
 // `{"isDir": false, "size": 31}` (the link's own byte length) is called
 // a directory by /v1/stat and rejected as one by /v1/download.
 //
 // Following is the right call rather than the reverse: `internal/fs`'s
-// package doc states that symlinked content inside a configured root is
+// package doc states that linked content inside a configured root is
 // trusted and served, so the divergence is an oversight, not a carve-out.
 // The traversal guard is unaffected — it runs on the request path, and
 // this only re-stats an entry the walk already reached.
 //
-// Non-symlinks return the Readdir info untouched (no extra syscall). A
-// stat failure — a dangling link, or a target on a mount that just went
-// away — falls back to the same info, so a broken link still appears in
-// the listing instead of vanishing from it.
+// The RESOLVER-side endpoints need nothing: every one of them
+// (`/v1/stat`, `/v1/read`, `/v1/download`, `/v1/lyrics`, `/v1/waveform`,
+// the upscale path scope) goes through `ResolveChecked`'s `os.Stat`, so
+// the listing is the one surface that ever saw the link itself. The
+// SCANNER is a separate, deliberate story: `filepath.WalkDir` Lstats and
+// descends into no link of any kind, on any platform, so an album behind
+// one has never reached the manifest — a pre-existing property of the
+// walk, not of this decision, and widening it would raise the cycle
+// question.
 //
 // **CodeQL `go/path-injection` on the Join below is a false positive of
 // the class dismissed for alerts #1-4** (see CLAUDE.md v0.1.4). Both
@@ -530,12 +535,54 @@ func (s *Server) serveVariant(w http.ResponseWriter, r *http.Request, sourcePath
 // analysis cannot model; and `ri.Name()` is not client-supplied at all,
 // it is a bare basename from `os.File.Readdir` on that already-validated
 // directory. Don't contort this into a lexical re-check to appease the
-// scanner — the caller two lines up already `os.Open`s the same `dir`.
-func followSymlink(dir string, ri os.FileInfo) os.FileInfo {
-	if ri.Mode()&os.ModeSymlink == 0 {
+// scanner — the caller already `os.Open`s the same `dir`.
+func listEntryInfo(dir string, ri os.FileInfo) os.FileInfo {
+	return resolveEntryInfo(ri, func() (os.FileInfo, error) {
+		return os.Stat(filepath.Join(dir, ri.Name()))
+	})
+}
+
+// resolveEntryInfo decides, from a listing entry's Lstat-shaped info and
+// a stat of its target, which of the two the row reports.
+//
+// A REGULAR file and a DIRECTORY answer immediately and the stat is
+// never taken — this runs once per entry on a directory that can hold
+// thousands, often over a network mount where the second syscall is the
+// expensive one, and Readdir's own Lstat has already said what they are.
+// (`os.Stat` of a real directory returns the same directory; there is
+// nothing to resolve.)
+//
+// Everything else is stat'd, and the test is "neither a regular file NOR
+// a directory" rather than "is a symlink" because the shape that matters
+// most is neither. A Windows directory JUNCTION (`mklink /J`,
+// IO_REPARSE_TAG_MOUNT_POINT) is the live one: since Go 1.23's
+// winsymlink change, `isReparseTagNameSurrogate` is true for a mount
+// point, so Lstat gives it ModeIrregular and WITHHOLDS ModeDir — the
+// junction reports IsDir() false with no ModeSymlink bit, failed the
+// symlink test, and an album parked on another volume listed as a
+// non-directory that iOS cannot open. A junction is the ORDINARY way to
+// park one there, because a real symlink needs
+// SeCreateSymbolicLinkPrivilege that a service account usually lacks.
+// Read-only either way: nothing is deleted, the folder is just
+// unbrowsable.
+//
+// The other non-regular POSIX kinds — a FIFO, a socket, a device node —
+// stat to THEMSELVES, so widening the test costs them one syscall and
+// changes no field of the row they were already getting.
+//
+// A stat failure falls back to the Readdir info, so a dangling link (or
+// a target on a mount that just went away) still appears in the listing
+// instead of vanishing from it.
+//
+// Taken as a function of (info, stat) rather than inline because the
+// Windows shape cannot be constructed on any other platform, and a test
+// that skips everywhere but one CI leg looks exactly like one that
+// passed.
+func resolveEntryInfo(ri os.FileInfo, stat func() (os.FileInfo, error)) os.FileInfo {
+	if mode := ri.Mode(); mode.IsRegular() || mode.IsDir() {
 		return ri
 	}
-	target, err := os.Stat(filepath.Join(dir, ri.Name()))
+	target, err := stat()
 	if err != nil {
 		return ri
 	}
