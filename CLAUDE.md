@@ -2183,6 +2183,28 @@ mentions across the four `ops/audit-*.md` files.
   wired into the preflight would compute a finding and discard it. Warn-lines
   only, in `printReport`'s layout, nothing at all on a clean host.
 
+- **`bridge doctor` never tries `./bridge.yaml`, so inside the container it
+  needs `--config /data/bridge.yaml`.** It is the one subcommand taking
+  `--config` that does not go through `loadCLIConfig`: `buildDoctorDeps` loads
+  an explicit `--config` or else the platform path (`~/.config/1-bit-bridge/`,
+  absent in the image). A plain `docker exec … bridge doctor` therefore grades
+  an install with NO config — no data dir, so no `server.pid` to attribute the
+  bridge's own listeners, and both port checks FAIL "another process owns this
+  port"; no env overrides either, so `audio-toolchain` reads "not enabled"
+  beside `BRIDGE_UPSCALE_ENABLED=true`. With the flag both ports read `bound by
+  our own bridge (pid 1)`. The Dockerfile and docs/docker.md blamed the FAIL on
+  "`bridge serve` writes no PID file" for seven weeks after #639 made it write
+  one, and a re-check without the flag would have CONFIRMED that, since it fails
+  identically for another reason. **Measure a container doctor claim with
+  `--config`, or you are measuring doctor's config lookup.** (#984)
+- **The image's `lsof` package is load-bearing — don't drop it to slim the
+  image.** Alpine's own `/usr/bin/lsof` is busybox's applet, which ignores
+  `-iTCP:<port> -sTCP:LISTEN -t` and lists every open file, and
+  `isPIDListeningOnPort` searches that output for the pidfile's PID — so doctor
+  would credit ANY occupied port to a running bridge (measured: a root-held
+  `:8080` read `bound by our own bridge (pid 1)`, where the package reports a
+  warn). (#984)
+
 **The four stale claims this run corrected in THIS file** — all four sat in the
 "Don't regress these cross-cutting invariants" list at the top, which reads as
 the most authoritative place in the document and had drifted from the hardened
