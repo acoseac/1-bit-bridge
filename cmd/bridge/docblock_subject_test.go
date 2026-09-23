@@ -27,13 +27,13 @@ import (
 // It is also deliberately DERIVED, not recalled. #964 hand-picked 31 verbs,
 // and a census on 2026-09-24 found they covered 61% of the openers this
 // tree's correctly-attached doc comments use: 28 of the 36 misattached
-// blocks it found opened with a verb outside them ("processJob runs …",
-// "GetTrack fetches …", "Extract reads …"). A word is listed when at least
-// five correctly-attached doc comments open with it, or when it opened one
-// of those 36. Four of #964's picks meet neither bar (does, provides, takes,
-// tracks) and are kept, since removing a verb can only lose recall.
-// docVerbCoverageFloor keeps the list from quietly falling behind the
-// vocabulary again.
+// blocks it found opened with a verb outside them ("bootstrapTranscodeCmd
+// runs …", "GetTrack fetches …", "Extract reads …"). A word is listed when
+// at least five correctly-attached doc comments open with it, or when it
+// opened one of those 36. Four of #964's picks meet neither bar (does,
+// provides, takes, tracks) and are kept, since removing a verb can only
+// lose recall. docVerbCoverageFloor keeps the list from quietly falling
+// behind the vocabulary again.
 var docVerbs = []string{
 	"accepts", "adapts", "adds", "answers", "appends", "applies", "are",
 	"asks", "assembles", "attaches", "binds", "blocks", "bounds", "builds",

@@ -2807,8 +2807,8 @@ its twin.** The top list is older, shorter, and read first.
 - **…and it reads consts and vars, against a verb list DERIVED from the
   tree** (#PRNUM). #964 inspected func and type docs only, against 31
   hand-picked verbs, and a 2026-09-24 census found 36 more: 18 glued onto a
-  const or var (`processJob`'s on `variantFailureWriteTimeout`,
-  `VariantWatcher`'s 43 lines on `stopGrace`), and 28 opening with a verb
+  const or var (`handleBrowse`'s on `maxSOAPBodyBytes`, `VariantWatcher`'s
+  43 lines on `stopGrace`), and 28 opening with a verb
   the list lacked ("GetTrack fetches", "Extract reads"). **#964's 5-of-5
   spot check measured PRECISION; nothing measured RECALL**, and the list
   recognised 61% of the openers correctly-attached docs use, which is the
