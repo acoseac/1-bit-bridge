@@ -1743,6 +1743,32 @@ no failing test — which is the shape to expect in this area.
   as the EXDEV fallback: a power loss between two renames is permanently
   unbootable and rollback-on-boot cannot help, because the missing file IS the
   bridge. On Windows a stop-timeout must best-effort `Start()` again.
+- **An install of a target already staged on disk is REFUSED, and the refusal
+  reads the PERSISTED marker.** `swapBinary`'s EEXIST retry does
+  `os.Remove(bak)` before re-linking, so a SECOND install of the same version
+  destroys the operator's rollback target and replaces it with a copy of what is
+  already live — while `canRollback()` keeps reporting true, because it only
+  stats for the file's existence. Measured, not argued: with the guard removed
+  the test's `.bak` goes from `0.1.0` to `0.2.0`. Reachable through the ORDINARY
+  console flow — `apiUpdatesInstall` does **not** restart (restart is a separate
+  operator action), and `u.status.CurrentVersion` is written ONCE at
+  construction (`Install` only decorates the local copy it returns), so
+  `UpdateAvailable` stays true for the process lifetime and the console keeps
+  inviting the click. Three terms, each load-bearing: **`Status=="installing"`
+  AND `SwapStarted`** (an armed-but-unswapped marker mutated nothing — the
+  Windows SCM-stop window — and `DecideBootAction` reads it as
+  `BootClearNotSwapped`); **the SAME target**, because refusing a newer release
+  would strand the host on a version it has not booted; and **within
+  `recencyWindow`**, the same constant `DecideBootAction` uses for
+  `BootClearAbandoned`, so the refusal expires exactly when boot would clear the
+  marker and the two cannot disagree about whether it is live. **Marker, not the
+  in-memory `pendingRestart` flag** — the flag records THAT a swap landed and
+  not WHICH version, so refusing on it blocked a legitimate newer install (caught
+  by the positive control), and `bridge update` is a separate PROCESS that sees
+  no `atomic.Bool` anyway. `Install` now sets `pendingRestart` for EVERY path;
+  it used to be set by `maybeAutoInstall` after the fact, so the admin and CLI
+  installs — the two that never restart — left it false. An unreadable marker is
+  NOT a refusal: failing closed there would block every install on the host.
 - **Booklet GC is skipped while a scan is in flight** — mid-rescan the release
   universe is transiently partial, so GC deletes every filesystem album's
   booklets and re-fetches them next cycle. An empty universe is a deliberate
