@@ -366,8 +366,23 @@ func actSetup(_ context.Context, in *bufio.Reader, stdout, stderr io.Writer, _ m
 // actDoctor runs the preflight against the platform-default paths.
 // Useful when the user wants to debug a "doctor failed" before
 // committing to a setup wizard.
-func actDoctor(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, _ menuState) int {
-	_ = doctorCmd(nil, stdout, stderr)
+//
+// It names the platform path explicitly, although that is the path a
+// bare `bridge doctor` falls back to. A bare run tries ./bridge.yaml
+// FIRST, like every other subcommand, and the menu's view of the world
+// is the platform install alone (detectState). This row is offered only
+// before that install exists, beside the Setup wizard that will write
+// it, so from a directory holding its own bridge.yaml (a test fixture,
+// a second instance) the bare form would grade that file instead of the
+// directory Setup is about to write to.
+//
+// And it names the path with PRE-SETUP semantics, which is why this
+// calls buildDoctorDepsFor rather than passing --config. A --config that
+// names a missing file FAILs, because an operator who names a file
+// asserts it exists. Here the file's absence is exactly the state this
+// row exists for, so it reads as "none found", ok.
+func actDoctor(_ context.Context, _ *bufio.Reader, stdout, stderr io.Writer, s menuState) int {
+	_ = runDoctorReport(buildDoctorDepsFor(s.cfgPath, true), false, false, stdout, stderr)
 	return -1
 }
 

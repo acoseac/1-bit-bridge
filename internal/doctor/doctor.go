@@ -90,6 +90,13 @@ type Deps struct {
 	ConfigDir    string
 	DataDir      string
 	LibraryRoots []string
+	// ConfigFile is the caller's bridge.yaml lookup: which file it found
+	// and whether that file loaded (checkConfigFile). Nil means the
+	// caller did not look one up, which the check reports as skipped.
+	// `bridge init`'s preflight leaves it nil on purpose: it grades the
+	// install it is about to write, and a broken existing config must
+	// not block the re-init that replaces it.
+	ConfigFile *ConfigFile
 	// APIPort is the main HTTPS port the server binds, typically 7788.
 	APIPort int
 	// AdminPort is the loopback admin console port, typically 7789.
@@ -276,6 +283,7 @@ func (r *Report) HasFail() bool { return r.FailCount() > 0 }
 func Run(ctx context.Context, d Deps) Report {
 	checks := []func(context.Context, Deps) Check{
 		checkPlatform,
+		checkConfigFile,
 		checkConfigDir,
 		checkTLSCert,
 		checkTLSCertSANs,
@@ -317,6 +325,16 @@ func checkConfigDir(_ context.Context, d Deps) Check {
 	dir := d.ConfigDir
 	if dir == "" {
 		return warn(checkNameConfigDir, "no config dir set", "pass Deps.ConfigDir so doctor can verify write access")
+	}
+	// A config the caller NAMED that is not there (config-file FAILs it)
+	// leaves this check nothing to vouch for, and the create below would
+	// make the named file's directory: a typo'd `--config /x/bridge.yml`
+	// left /x behind, 0700, and reported it ok beside "does not exist". A
+	// diagnostic must not have that side effect. The pre-setup lookups
+	// (no --config, or the launcher's row) record no error for a config
+	// that is not there yet, so they still create the dir init will use.
+	if c := d.ConfigFile; c != nil && c.LoadErr != nil && errors.Is(c.LoadErr, fs.ErrNotExist) {
+		return ok(checkNameConfigDir, "not checked: the named config does not exist")
 	}
 	// Ensure it exists (create if missing — init() does this anyway,
 	// but doctor running standalone should report the same outcome

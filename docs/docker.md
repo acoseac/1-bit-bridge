@@ -347,8 +347,7 @@ binary is shared by every install, which is how it gets rate-limited and then
 revoked for everyone. Enabling the feature without a key is not an error: the
 bridge boots normally and disables it with one line in the log. Run
 `docker exec 1-bit-bridge bridge doctor --config /data/bridge.yaml` to see the
-`fingerprint-toolchain` check say so plainly (the `--config` matters — see
-[Enabling](#enabling)).
+`fingerprint-toolchain` check say so plainly.
 
 ### Enabling
 
@@ -387,13 +386,18 @@ init, e.g. `docker run --init`): `bridge serve` records its PID in
 auto-init config, see [Where state lives](#where-state-lives-data) — and
 doctor uses `lsof` to confirm that PID is the one listening.
 
-**Keep the `--config`.** Without it, `bridge doctor` looks for its config
-only under the container user's `~/.config/1-bit-bridge/`, never at
-`/data/bridge.yaml`, so it grades an install with no config at all:
-`audio-toolchain` reads "not enabled" whatever the env says,
-`port-api` / `port-admin` **FAIL** with "another process owns this
-port", and doctor exits 1. Those are the bridge's own listeners; doctor
-can't recognise them without the data dir that holds `server.pid`.
+**The `--config` works on every image, and images up to v0.2.0 need
+it.** Their `bridge doctor` looked for its config only under the
+container user's `~/.config/1-bit-bridge/`, never at `/data/bridge.yaml`,
+so without the flag it graded an install with no config at all:
+`audio-toolchain` read "not enabled" whatever the env said, and
+`port-api` / `port-admin` **FAILed** with "another process owns this
+port" against the bridge's own listeners, since the data dir that holds
+`server.pid` comes from the config. Later images read
+`/data/bridge.yaml` from the container's working directory, as
+`bridge status` and `bridge cert info` do. They also name the file they
+graded on the report's `config-file` line, which FAILs if the file is
+there but will not load.
 
 ### Variant storage (`variantsDir`)
 

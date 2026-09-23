@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +18,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
-	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
@@ -26,21 +27,31 @@ import (
 //	1  — at least one fail
 //	2  — usage error
 //
-// The command reads whatever config it can find so the LibraryRoots /
-// ports are accurate; a missing config isn't an error (users run
-// `bridge doctor` before `bridge init`, and the platform / ports /
-// service-manager checks work without a config).
+// The command reads the config every other subcommand would read (see
+// buildDoctorDeps) so the LibraryRoots / ports / pid file are the
+// install's own. With no --config, a missing config isn't an error (users
+// run `bridge doctor` before `bridge init`, and the platform / ports /
+// service-manager checks work without a config). A --config naming a file
+// that is not there, or one that does not load, FAILS config-file: an
+// "all clear" graded on defaults would answer for a different config than
+// the one asked about.
 func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	cfgPath := fs.String("config", "", "path to bridge.yaml (default: try the OS-standard location)")
+	cfgPath := fs.String("config", "", configFlagUsage)
 	jsonOut := fs.Bool("json", false, "emit the report as JSON instead of the human-readable table")
 	doFix := fs.Bool("fix", false, "best-effort remediation for warn/fail checks that have a known safe fix")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	return runDoctorReport(buildDoctorDeps(*cfgPath), *jsonOut, *doFix, stdout, stderr)
+}
 
-	d := buildDoctorDeps(*cfgPath)
+// runDoctorReport runs the checks against d, applies --fix, renders the
+// table or the JSON envelope, and returns doctorCmd's exit code. It is
+// split from the flag parsing so the launcher menu can hand it Deps built
+// with pre-setup semantics (buildDoctorDepsFor), which no flag spells.
+func runDoctorReport(d doctor.Deps, jsonOut, doFix bool, stdout, stderr io.Writer) int {
 	// The CLI is a short-lived foreground process with no signal-wired
 	// scope to inherit, so Background is honest here — what actually
 	// bounds this run is doctor's own per-subprocess deadline, which is
@@ -49,7 +60,7 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	report := doctor.Run(ctx, d)
 
-	if *doFix {
+	if doFix {
 		// Best-effort remediation. The set of safely auto-fixable
 		// checks is small (mkdir-class items where the only failure
 		// mode is "directory missing"); destructive or
@@ -60,7 +71,7 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 		// JSON envelope on stdout (Qodo Bug on PR #78 — without this
 		// `bridge doctor --json --fix` emits invalid JSON).
 		fixOut := stdout
-		if *jsonOut {
+		if jsonOut {
 			fixOut = stderr
 		}
 		runFixes(fixOut, &report, d)
@@ -68,7 +79,7 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 		report = doctor.Run(ctx, d)
 	}
 
-	if *jsonOut {
+	if jsonOut {
 		if code := writeJSONIndent(stdout, stderr, "doctor", jsonReportEnvelope(report)); code != 0 {
 			return code
 		}
@@ -194,7 +205,37 @@ func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
 // config (if readable) plus per-OS default dirs. A best-effort
 // resolution is fine — doctor's checks handle missing inputs with
 // warn-level messages rather than outright failures.
+//
+// The config is the one every other subcommand reads, found the same
+// way: resolveConfigPath's explicit --config, else ./bridge.yaml, else
+// the platform config dir's. Doctor used to skip the middle step, and
+// the Docker image is where that bit: its WORKDIR is /data and its
+// config is /data/bridge.yaml, so `bridge status` and `bridge cert
+// info` found the config unaided while a plain `docker exec … bridge
+// doctor` graded an install with no config at all. It had no data dir,
+// so no server.pid to attribute the bridge's own listeners, and both
+// port checks FAILed as "another process owns this port". It had no
+// env overrides either (config.Load applies them), so audio-toolchain
+// read "not enabled" beside BRIDGE_UPSCALE_ENABLED=true (#984 measured
+// both).
+//
+// resolveConfigPath rather than loadCLIConfig, because loadCLIConfig
+// makes two things an error that doctor must report instead: a missing
+// config (doctor runs before `bridge init` has written one) and one that
+// does not load (a config-file FAIL beside the rest of the report, not an
+// exit before it).
 func buildDoctorDeps(cfgPath string) doctor.Deps {
+	return buildDoctorDepsFor(cfgPath, false)
+}
+
+// buildDoctorDepsFor is buildDoctorDeps with one decision exposed: what a
+// NAMED path that is not there means. For --config, and for the console,
+// which names serve's own config, it is a FAIL, because the caller
+// asserted the file exists. absentIsPreSetup makes it the pre-setup state
+// instead ("none found", ok) for the one caller that names a path BEFORE
+// it is meant to exist: the launcher's doctor row (actDoctor), offered
+// only until `bridge init` writes the platform config.
+func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 	d := doctor.Deps{
 		APIPort:   7788,
 		AdminPort: 7789,
@@ -202,20 +243,49 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 		// three agree on which file is the log.
 		LogPath: adminLogPath(),
 	}
-	// Config dir: either derived from --config, or the OS default.
-	if cfgPath != "" {
-		d.ConfigDir = filepath.Dir(cfgPath)
-	} else if dir, err := packaging.DefaultConfigDir(); err == nil {
-		d.ConfigDir = dir
+	path, found := resolveConfigPath(cfgPath)
+	// resolveConfigPath answers "not found" for ANY stat error. That is
+	// right for its fallback walk and wrong for a path the caller named,
+	// where the reason IS the finding: a typo'd path, or a directory this
+	// user cannot traverse (a service-owned 0700 config dir), must not read
+	// as "no config yet" and grade defaults behind an "all clear".
+	var lookupErr error
+	if cfgPath != "" && !found {
+		if _, err := os.Stat(path); err != nil {
+			lookupErr = err
+		} else {
+			found = true // it appeared between the two stats
+		}
 	}
-	// If a config file exists at the derived path, pull LibraryRoots /
-	// ports / dataDir from it so doctor's checks are accurate.
-	candidatePath := cfgPath
-	if candidatePath == "" && d.ConfigDir != "" {
-		candidatePath = filepath.Join(d.ConfigDir, "bridge.yaml")
+	d.ConfigDir = doctorConfigDir(cfgPath, path, found)
+	// The report names the config it graded, or where it looked for one.
+	d.ConfigFile = &doctor.ConfigFile{}
+	if !found {
+		if lookupErr != nil && !(absentIsPreSetup && errors.Is(lookupErr, fs.ErrNotExist)) {
+			d.ConfigFile.Path = absOrAsGiven(path)
+			d.ConfigFile.LoadErr = lookupErr
+		} else {
+			for _, p := range configSearchPaths(cfgPath) {
+				d.ConfigFile.Tried = append(d.ConfigFile.Tried, absOrAsGiven(p))
+			}
+		}
 	}
-	if candidatePath != "" {
-		if cfg, err := config.Load(candidatePath); err == nil {
+	// If a config file was found, pull LibraryRoots / ports / dataDir
+	// from it so doctor's checks are accurate.
+	if found {
+		d.ConfigFile.Path = absOrAsGiven(path)
+		// Loaded by its absolute name so a load error spells the path the
+		// way the report does (config.Load absolutizes it anyway).
+		cfg, err := config.Load(d.ConfigFile.Path)
+		// One that is there and does not load is REPORTED, never graded
+		// as though it were absent. Every command that reads it refuses
+		// it, so an "all clear" beside it would describe an install
+		// nothing runs. This is reachable from the working directory
+		// too: a broken ./bridge.yaml is what gets graded even when the
+		// platform config is fine, because it is what `bridge status`
+		// and `bridge serve` run from there would read.
+		d.ConfigFile.LoadErr = err
+		if err == nil {
 			d.DataDir = cfg.DataDir
 			// The cert pair `bridge serve` would load — an explicit
 			// `tlsCertPath` included, which the cert checks used to
@@ -319,6 +389,51 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 		}
 	}
 	return d
+}
+
+// doctorConfigDir is the directory the config-dir check grades: the one
+// holding the config this run resolved, as an absolute path.
+//
+// That check asks whether the directory can be created and written to,
+// and everything that writes there writes BESIDE the config the bridge
+// reads. `bridge init` puts bridge.yaml there. The console's settings
+// save and `bridge library add` rewrite it through config.Save, which
+// stages a temp file in the same directory and renames it over. A
+// relative dataDir (`data`, the default) resolves against it. So when
+// the config found is ./bridge.yaml, the answer is the working
+// directory, not the platform dir. Grading the platform dir would vouch
+// for a directory nothing writes to, and checkConfigDir CREATES what it
+// is handed, so it would also leave an unused ~/.config/1-bit-bridge
+// behind (in the Docker image, /home/bridge/.config/1-bit-bridge beside
+// a config at /data).
+//
+// Absolute because the check prints it and --fix acts on it: the local
+// hit comes back from resolveConfigPath as the bare "bridge.yaml", and a
+// report reading `config-dir .` does not say where. An explicit --config
+// names its directory whether or not the file exists yet. With neither,
+// it stays the platform dir, which is where `bridge init` writes and so
+// what a pre-init run is checking. When the platform dir cannot be
+// resolved either, it is empty and the check warns, rather than grading
+// the working directory on behalf of a config that is not there.
+func doctorConfigDir(explicit, resolved string, found bool) string {
+	if explicit == "" && !found {
+		dir, err := defaultConfigDirFn()
+		if err != nil {
+			return ""
+		}
+		return dir
+	}
+	return absOrAsGiven(filepath.Dir(resolved))
+}
+
+// absOrAsGiven is p made absolute for the report. It keeps p as given in
+// the one case filepath.Abs refuses, an unreadable working directory,
+// rather than losing the path entirely.
+func absOrAsGiven(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 // relocatedSidecarCounts opens the manifest for one doctor probe and

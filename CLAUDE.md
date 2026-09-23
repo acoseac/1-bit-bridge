@@ -2183,20 +2183,52 @@ mentions across the four `ops/audit-*.md` files.
   wired into the preflight would compute a finding and discard it. Warn-lines
   only, in `printReport`'s layout, nothing at all on a clean host.
 
-- **`bridge doctor` never tries `./bridge.yaml`, so inside the container it
-  needs `--config /data/bridge.yaml`.** It is the one subcommand taking
-  `--config` that does not go through `loadCLIConfig`: `buildDoctorDeps` loads
-  an explicit `--config` or else the platform path (`~/.config/1-bit-bridge/`,
-  absent in the image). A plain `docker exec … bridge doctor` therefore grades
-  an install with NO config — no data dir, so no `server.pid` to attribute the
-  bridge's own listeners, and both port checks FAIL "another process owns this
-  port"; no env overrides either, so `audio-toolchain` reads "not enabled"
-  beside `BRIDGE_UPSCALE_ENABLED=true`. With the flag both ports read `bound by
-  our own bridge (pid 1)`. The Dockerfile and docs/docker.md blamed the FAIL on
-  "`bridge serve` writes no PID file" for seven weeks after #639 made it write
-  one, and a re-check without the flag would have CONFIRMED that, since it fails
-  identically for another reason. **Measure a container doctor claim with
-  `--config`, or you are measuring doctor's config lookup.** (#984)
+- **`bridge doctor` finds its config through `resolveConfigPath` (explicit,
+  then `./bridge.yaml`, then the platform dir) and loads only a path it
+  FOUND.** A missing config is not an error there, because doctor runs before
+  `bridge init`, which is why it is not `loadCLIConfig`. Until #985 it tried
+  the explicit path or the platform path and nothing between, so in the image
+  (WORKDIR `/data`, config `/data/bridge.yaml`) a plain `docker exec … bridge
+  doctor` graded an install with NO config. With no data dir there was no
+  `server.pid`, and both port checks FAILed against the bridge's own
+  listeners. With no env overrides, `audio-toolchain` read "not enabled"
+  beside `BRIDGE_UPSCALE_ENABLED=true`. **`config-dir` grades the absolute
+  directory of the config it RESOLVED**: init, `config.Save` and a relative
+  `dataDir` all write beside the config the bridge reads, and the check
+  CREATES what it is handed, so grading the platform dir beside a
+  `./bridge.yaml` vouches for (and leaves behind) a directory nothing uses.
+  With nothing found it is the platform dir, where init writes, and it is
+  EMPTY when that cannot be resolved, never the working directory. **The
+  launcher's doctor row passes the platform path explicitly**: it is offered
+  only before that install exists, beside the Setup wizard that writes it.
+  **Images up to v0.2.0 still need `--config /data/bridge.yaml`**, which is
+  why the docs keep passing it. On those images the Dockerfile and
+  docs/docker.md blamed the FAIL on "`bridge serve` writes no PID file" for
+  seven weeks after #639 made it write one, and a re-check without the flag
+  would have CONFIRMED that, since it failed identically for another reason:
+  **measure an old image's doctor with `--config`, or you are measuring its
+  config lookup.** **The `config-file` line names the config the report
+  graded, and one that is THERE but will not load FAILS.** Until #985 the
+  load error was dropped without a word, so a typo'd key read "all clear",
+  exit 0, where `bridge status` exits 2 on the same file. The local-first
+  lookup made that worse: a broken `./bridge.yaml` shadows a good platform
+  config (CodeRabbit's finding). The FAIL is what makes the runbook's
+  "validate a config edit BEFORE restarting" step true. **A `--config` that
+  names a file that is NOT THERE fails too** ("does not exist"), because an
+  operator who names a file asserts it exists; that is loadCLIConfig's rule
+  for every other subcommand. `config-dir` then reports "not checked" rather
+  than `MkdirAll` the named file's directory, which it always did, so a
+  typo'd path created that directory and called it ok. With no flag, a
+  missing config is ok and the line names where doctor looked. **`resolveConfigPath` folds EVERY stat
+  error into "not found"**, which is right for its fallback walk and wrong
+  for a named path, so doctor re-stats a named path to learn why. One this
+  user cannot reach or READ only WARNS, because that is a fact about the
+  doctor run (the public-mode layout, as with the cert key). The launcher's
+  pre-setup row names the platform path through `buildDoctorDepsFor(path,
+  true)`, never `--config`, so its absence stays "none found", ok.
+  `bridge init`'s preflight leaves the lookup nil, so the check reports
+  itself skipped and a broken existing config cannot block the re-init
+  that replaces it. (#984, #985)
 - **The image's `lsof` package is load-bearing — don't drop it to slim the
   image.** Alpine's own `/usr/bin/lsof` is busybox's applet, which ignores
   `-iTCP:<port> -sTCP:LISTEN -t` and lists every open file, and

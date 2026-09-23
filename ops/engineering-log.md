@@ -9548,3 +9548,281 @@ binary does not have.
 - `docker exec` as `bridge` can read `/proc/1/fd` of the serve process (same
   uid, dumpable, no file capabilities in the image), so the real lsof
   attributes the port without root.
+
+## 2026-09-23 — `bridge doctor` finds `./bridge.yaml` like every other subcommand (#985)
+
+#984 documented `--config /data/bridge.yaml` as the container workaround and
+left the code for its own PR. This is that PR.
+
+### The change
+
+- `buildDoctorDeps` resolves through `resolveConfigPath` (explicit `--config`,
+  else `./bridge.yaml`, else the platform dir) and calls `config.Load` only on a
+  path it found. Not `loadCLIConfig`: that one makes a missing config an error,
+  and doctor runs before `bridge init`. doctor.go stays in
+  `TestNoSubcommandTailBypassesLoadCLIConfig`'s allowlist, now for the reason
+  the allowlist states (a path already resolved), and its comment says so.
+- The `--config` help is the shared `configFlagUsage`. Doctor's own string
+  said "default: try the OS-standard location". `configFlagUsage`'s docblock
+  said the fallback is implemented by `loadCLIConfig` alone; it is
+  `resolveConfigPath`, which both use.
+
+### What `config-dir` grades
+
+The check `MkdirAll`s its directory and writes a probe file into it. What it
+vouches for is that the bridge can write beside its config: `bridge init`
+writes bridge.yaml there, `config.Save` (the console's settings save,
+`bridge library add/remove`) stages `.bridge-*.yaml` in the same directory and
+renames it over, and a relative `dataDir` resolves against it. All three
+follow the config the bridge READS.
+
+| Resolved | `ConfigDir` |
+|---|---|
+| `./bridge.yaml` | the working directory, absolute |
+| the platform `bridge.yaml` | the platform dir (unchanged) |
+| an explicit `--config`, found or not | its directory, absolute (was verbatim, so `--config bridge.yaml` printed `config-dir .`) |
+| nothing found | the platform dir, where `init` writes (unchanged) |
+| nothing found, platform dir unresolvable | empty, so the check warns (unchanged) |
+
+Rejected: keeping the platform dir for the `./bridge.yaml` row. It grades a
+directory nothing writes to, and because the check creates what it grades, it
+leaves that directory behind. The v0.2.0 image's plain `docker exec … bridge
+doctor` created `/home/bridge/.config/1-bit-bridge` (measured below). For the
+last row, `filepath.Dir` of resolveConfigPath's fallback answer (the bare
+"bridge.yaml") would have made it the working directory: a check graded on
+behalf of a config that is not there.
+
+### The menu
+
+`actDoctor`, the bare-`bridge` launcher's "Run preflight (doctor)", called
+`doctorCmd(nil)`. It is offered only in the not-initialised state, beside the
+Setup wizard that writes the platform install, and the menu reads the platform
+path everywhere else (`detectState` → `packaging.IsInitialized`). With the
+local-first lookup, a menu started from a directory holding its own
+bridge.yaml would have graded that file. It now passes `--config <platform
+path>`; an absent explicit path is graded as that directory with no config,
+which is what the row did before.
+
+### Unaffected
+
+- `bridge init`'s preflight builds its own `doctor.Deps` from `--dir` (or the
+  platform dir), and `withExistingInstallDeps` loads the config at that target.
+  Neither goes through `buildDoctorDeps`.
+- The console's Diagnostics run (`adminDoctorRunner`) is handed serve's
+  absolute resolved path, so it takes the explicit branch as before.
+
+### Tests and controls
+
+`TestDoctorResolvesTheWorkingDirectoryConfig` puts installs in both the
+working directory and the seam's platform dir, with
+`BRIDGE_UPSCALE_ENABLED=true` in the env, and requires the local one.
+`TestDoctorConfigDirFollowsTheResolvedConfig` has one subtest per table row
+other than the local hit. `TestMenuDoctorGradesTheMenusOwnConfig` drives
+`actDoctor` itself and reads the report's config-dir line. All ran with
+`-count=1`, with the fix committed before any control:
+
+| Control | Red |
+|---|---|
+| main's doctor.go | the working-directory test, whose DataDir came from this Mac's REAL platform install (the old code called `packaging.DefaultConfigDir` directly, past the `defaultConfigDirFn` seam, so it could not be tested in isolation), and all four subtests |
+| main's menu.go | the menu test: config-dir named the working directory |
+| `doctorConfigDir` without `filepath.Abs` | the working-directory test and the explicit-relative subtest |
+| no not-found special case | only the unresolvable-platform subtest |
+| the platform dir whenever `--config` is absent | only the working-directory test's ConfigDir assertion |
+| `d.UpscaleEnabled` not copied | only the working-directory test's env assertion |
+
+### Measured
+
+`dido` (Docker 29.1.3, buildx 0.30.1). Both containers ran docs/docker.md's
+"Running" command plus the "Enabling" env vars, over a two-file library
+(FLAC and ALAC), under separate names, ports and volumes. Doctor ran as the
+image's `bridge` user. The branch image was built with `docker buildx build
+--load` at `fa5fb65`, which carries the round-1 check below, and the compile
+was not cached. (A first build at `dd42c31`, before that check, gave the same
+rows with one line fewer: 14 ok.)
+
+| Run | v0.2.0 (`ghcr.io/acoseac/1-bit-bridge:0.2.0`) | this branch |
+|---|---|---|
+| `bridge doctor` | config-dir `/home/bridge/.config/1-bit-bridge`; port-api / port-admin FAIL `in use`; audio-toolchain `not enabled`; exit 1 | config-file `/data/bridge.yaml`; config-dir `/data`; both ports `bound by our own bridge (pid 1)`; `sox v14.4.2, FLAC supported`; 15 ok / 2 warn / 0 fail; exit 0 |
+| `bridge doctor --config /data/bridge.yaml` | ok; exit 0 | identical to the plain run; exit 0 |
+| `docker exec -e BRIDGE_FINGERPRINT_ENABLED=true … bridge doctor` (at `dd42c31`) | fingerprint-toolchain `not enabled` | fingerprint-toolchain FAIL `no AcoustID API key`, which is what the docs promise |
+| `--config` a copy of the config plus `libraryNmae: typo` | both ports FAIL; exit 1 | config-file FAIL `… line 8: field libraryNmae not found in type config.Config`, both ports FAIL; exit 1 |
+| `--config` a copy with mode 0000 | both ports FAIL; exit 1 | config-file WARN `… not readable by this user: … permission denied`, both ports FAIL; exit 1 |
+| `docker exec -w / … bridge doctor` | FAIL; exit 1 | config-file `none found (looked at /bridge.yaml, /home/bridge/.config/1-bit-bridge/bridge.yaml)`, both ports FAIL; exit 1. Nothing sits at `/`, so the pass in the first row is the WORKDIR lookup |
+| `/home/bridge/.config/1-bit-bridge` after the plain run (at `dd42c31`) | created | absent (created later by the `-w /` run, whose nothing-found answer is the platform dir) |
+
+`bridge status --config` and `bridge cert info --config` exit 2 on the typo'd
+copy in both images.
+
+The old image's exit 1 on the typo'd copy is the trap in this table. It is
+right only by accident: doctor graded defaults, and in a live container the
+defaults are the bridge's own ports, which it then could not attribute. A host
+whose bridge listens anywhere else got "all clear" instead (the Mac
+measurement in round 1 below). So the runbook's validation step looked as
+though it worked on any bridge on the default ports. That is #984's lesson
+again, where a check fails for a reason other than the one it names.
+
+The two warns in the plain runs are service-manager and browser-opener, which
+a container has no use for; they appear with `--config` too.
+
+### Docs
+
+The published `latest` is v0.2.0, which still has the old lookup. So
+docs/docker.md keeps `--config /data/bridge.yaml` in every example (it works
+on every image) and puts the failure in the past tense, scoped to images up to
+v0.2.0. It also names the `config-file` line for later images. The
+Dockerfile describes the image built from its own tree, so its `lsof`
+comment states the fixed behaviour and gives the version history only as
+the reason the docs pass the flag. ops/deployment-runbook.md's "Validate a
+config edit BEFORE restarting" now holds, and it says from which PR, and
+that a config doctor cannot READ is only a warn, so it should be run as the
+service's user.
+
+### Round 1: a config that does not load (CodeRabbit), fixed here
+
+The first push recorded this as found-not-fixed and CodeRabbit flagged it as
+Major, correctly: the defect is old, but this PR made a new case of it
+reachable.
+
+- **The defect.** `buildDoctorDeps` ignored `config.Load`'s error, as it had
+  since doctor landed (#24, 2026-04-24), and graded the install config-less.
+  Measured on a Mac before the fix: a bridge.yaml with one typo'd key
+  (`libraryNmae`) on free ports gave `bridge doctor --config <it>` "all clear"
+  and exit 0. It graded the default ports 7788/7789 rather than the file's,
+  while `bridge status` and `bridge cert info` exited 2 on the same file. So
+  `ops/deployment-runbook.md`'s "Validate a config edit BEFORE restarting"
+  (`bridge doctor --config <path>` … "a bad key is a non-zero exit") had not
+  held since it was written on 2026-09-08.
+- **Why it belongs to this PR.** The local-first lookup made a broken
+  `./bridge.yaml` shadow a platform config that loads, because it is the file
+  `bridge status` and `bridge serve` run from there read. Before this PR,
+  doctor ignored the local file. The first push's entry conceded as much ("this
+  PR changes which file can hit that, not whether") and deferred it as scope.
+  CLAUDE.md's rule that a fix's own blast radius is its PR's to check says
+  otherwise.
+- **The fix.** A `config-file` check, first after `platform`:
+  - ok, naming the file, when it loaded;
+  - ok "none found (looked at …)" when missing, so a missing config stays
+    acceptable;
+  - FAIL "`<path>` does not load: `<error>`" when it is there and does not
+    load, flattened to one line because a YAML error spans lines;
+  - WARN when that error is a permission failure (`errors.Is(err,
+    fs.ErrPermission)`), a fact about who ran doctor rather than the file,
+    which is the cert checks' precedent for an unreadable key on the
+    public-mode layout;
+  - skipped when the lookup is nil. That is `bridge init`'s preflight, on
+    purpose: a broken existing config must not block the re-init that
+    replaces it.
+
+  The config is loaded by its absolute name, so the embedded error spells the
+  path the way the report does. The first draft loaded the relative
+  "bridge.yaml" and the permission control printed `read config
+  "bridge.yaml"` beside the absolute path.
+- **Controls** (committed first, `-count=1`):
+
+  | Control | Red |
+  |---|---|
+  | check not dispatched | the names test and both cmd/bridge tests |
+  | load error not recorded | only `TestDoctorReportsAWorkingDirectoryConfigThatDoesNotLoad` and `TestDoctorOnlyWarnsAboutAConfigItCannotRead`: the unit test builds its Deps by hand, so only these can see the wiring |
+  | no permission branch | the unit subtest and the end-to-end permission test (real `EACCES` through config.Load's `%w`) |
+  | summary not flattened | only the unit subtest |
+  | `Tried` not recorded | only the nothing-found subtest |
+
+- **After.** The same typo'd file gives `[FAIL] config-file … field
+  libraryNmae not found in type config.Config` and exit 1.
+
+### Round 2: a named config that is not there, or cannot be reached (CodeRabbit)
+
+CodeRabbit's pass on the round-1 commit kept the walkthrough at Moderate for
+the same promise, from two new sides. Both were verified before acting.
+
+- **A `--config` naming a file that is not there** read "none found", ok, and
+  graded defaults, so the typo'd path of a validate-before-restart run could
+  exit 0 having validated nothing. It now FAILs ("does not exist"). An
+  operator who names a file asserts it exists, and that is loadCLIConfig's
+  rule for every other subcommand; `configpath_test.go` states it ("an
+  explicit --config always wins, existing or not … a silent fallback to some
+  other config would be worse than an error about the one they asked for").
+  The no-flag pre-init run is unchanged, which is what "a missing config is
+  not an error" was for.
+- **`resolveConfigPath` folds EVERY stat error into "not found."** So a named
+  config under a directory the user cannot traverse (a service-owned 0700
+  config dir) read "none found" too. For a named path doctor now stats again
+  to learn why, and a permission error takes the round-1 WARN. The suggested
+  fix changed `resolveConfigPath`'s signature. Declined, because its fallback
+  walk is right to skip an unreadable candidate and a new return value would
+  reach every subcommand. The reason matters only where a path was named.
+- **The launcher's doctor row names the platform path BEFORE `bridge init`
+  writes it**, so `--config` semantics would FAIL every pre-setup run.
+  `doctorCmd` is split into flag parsing and `runDoctorReport`, and the row
+  calls `buildDoctorDepsFor(path, absentIsPreSetup=true)`: its missing config
+  stays "none found", ok. `buildDoctorDeps` is the strict form, and the
+  console uses it too, so a config deleted under a running bridge FAILs
+  there.
+
+Controls, with the code committed first:
+
+| Control | Red |
+|---|---|
+| no does-not-exist branch | the named-missing CLI test; the unit subtest only after the fix below |
+| named path not re-statted | the named-missing and the unreachable tests |
+| the menu row on `--config` semantics | the menu test (config-file FAIL where it wants ok "none found") |
+
+**The unit test's first form was vacuous, and a control found it.**
+`fs.ErrNotExist`'s own text is "file does not exist", so with the dedicated
+branch disabled the generic "does not load: stat …: file does not exist" line
+still satisfied a `"does not exist"` substring. The cmd test caught it only
+because a real `os.Stat` says "no such file or directory". The unit case now
+also asserts what the answering branch must NOT say ("does not load"). **The
+first edit of that assertion did not compile**: a new field made the
+positional case literals too short. The chained command amended it anyway,
+because `tail -1` succeeded, and the control's "[build failed]" read like a
+red. It was caught before any push, and re-run with `go vet` gating the
+mutation: CLAUDE.md's "a control that fails to BUILD reads as control
+invalid, never as a pass".
+
+Measured on the built binary: `bridge doctor --config <missing>/bridge.yml`
+gives `[FAIL] config-file … does not exist`, exit 1. A named config under a
+`chmod 0` directory gives `[warn] config-file … not readable by this user:
+stat …: permission denied`.
+
+**Found, not fixed (pre-existing); fixed in round 3 below.** For an explicit `--config`, the
+config-dir check is handed the named file's directory and `MkdirAll`s it, as
+main's code did too (`d.ConfigDir = filepath.Dir(cfgPath)`). So a typo'd
+`--config /x/bridge.yml` CREATES `/x` (0700) and reports it ok, beside the
+new `config-file … does not exist`. As root that can leave a stray directory
+wherever a typo points. A diagnostic should not leave artifacts (the
+`bridge.db` stat in `buildDoctorDeps` is this file's own statement of that
+rule). It is left for its own change, because grading a named-but-missing
+directory without creating it needs a config-dir message for that state,
+which the check does not have.
+
+### Round 3: CodeRabbit at Minimal; the directory side effect fixed after all
+
+CodeRabbit's pass on the round-2 commit lowered the walkthrough to "⚪ Minimal"
+("no PR-introduced merge-blocking risk is established"). It still posted one
+Minor, the directory side effect above, and it was right that the fix is
+small. The deferral's stated reason (the check "does not have" a message for
+that state) cost one line to remove. Keeping the fix out would have left the
+report contradicting itself beside this PR's own new line: `config-file …
+does not exist` above `config-dir … ok`, for a directory doctor had just
+created.
+
+- **The fix.** When `config-file` records a NAMED config as not there
+  (`LoadErr` is `fs.ErrNotExist`), `checkConfigDir` returns ok "not checked:
+  the named config does not exist" and touches nothing. The pre-setup lookups
+  (no `--config`, and the launcher's row) record where they looked rather
+  than an error, so they still create and probe the directory `bridge init`
+  will write to, which is that check's documented purpose.
+- **Controls** (committed first, both mutations built): with the guard
+  removed, the unit test and the extended
+  `TestDoctorFailsANamedConfigThatIsNotThere` (whose named file now sits in a
+  directory that does not exist either) both find the directory created. With
+  the guard widened to any lookup, the unit test's pre-setup half finds the
+  init directory NOT created.
+- **Declined:** Gemini (medium) said `t.Context()` in the new unit test
+  "requires Go 1.24" and that the repo supports 1.23. `go.mod` declares `go
+  1.26.6`, the Dockerfile builds 1.26, every workflow installs from
+  `go-version-file: go.mod`, and `t.Context()` has 118 call sites in the
+  tree, three beside this file in `internal/doctor`. The "general rules" it
+  cited do not exist; there is no `.gemini/` style guide. Replied on the
+  thread.
