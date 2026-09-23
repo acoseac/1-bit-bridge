@@ -308,7 +308,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 			// Worker grid at per-second resolution WHILE the pool is busy
 			// (diff-suppressed, so a steadily-running job doesn't spam).
 			// Idle bridges skip this — the 5 s medium tick still carries
-			// the full upscale snapshot. UpscaleBusy is a cheap atomic
+			// the full upscale snapshot. UpscaleBusy is a cheap in-memory
 			// probe (no DB); the publish itself runs the snapshot only
 			// when the gate opens.
 			busy := s.deps.UpscaleBusy != nil && s.deps.UpscaleBusy()

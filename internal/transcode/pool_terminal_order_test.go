@@ -360,5 +360,5 @@ func TestNothingIsCountedOrAnnouncedWhileAJobStillHoldsItsPath(t *testing.T) {
 // countedLocked reads the pool's outcome counters for a caller that already
 // holds p.mu, which is why it cannot go through Stats.
 func countedLocked(p *Pool) (done, failed uint64) {
-	return p.doneCnt.Load(), p.failedCnt.Load()
+	return p.doneCnt, p.failedCnt
 }

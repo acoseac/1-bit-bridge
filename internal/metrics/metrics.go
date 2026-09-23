@@ -71,8 +71,9 @@ var SQLiteLockWaitHist = promauto.NewHistogramVec(
 var SQLiteLockWaitWindow = NewSlidingHistogram()
 
 // UpscaleJobsCompletedTotal counts terminal job outcomes (success /
-// failure). Mirrors the existing `pool.doneCnt` / `pool.failedCnt`
-// atomics so Prometheus has a label-partitioned view that /v1/upscale/stats
+// failure). Mirrors the transcode pool's done / failed counters —
+// transcode.Pool.finishJob increments both from the same outcome — so
+// Prometheus has a label-partitioned view that /v1/upscale/stats
 // doesn't surface.
 var UpscaleJobsCompletedTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{

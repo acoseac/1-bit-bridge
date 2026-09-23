@@ -4707,10 +4707,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 			}
 		},
 		UpscaleBusy: func() bool {
-			// Cheap atomic probe (Stats() = atomic counters + a map-len,
-			// no DB) gating the fast-tick worker grid. Mirror the
-			// UpscaleStats live-vs-persisted gate so a PATCHed-off feature
-			// reports not-busy even while the long-lived pool drains.
+			// Cheap in-memory probe (Stats() = counters + a map-len read
+			// in one short p.mu section, no DB) gating the fast-tick
+			// worker grid. Mirror the UpscaleStats live-vs-persisted gate
+			// so a PATCHed-off feature reports not-busy even while the
+			// long-lived pool drains.
 			live := cfgHolder.Load()
 			if upscalePool == nil || live == nil || !live.Upscale.Enabled {
 				return false

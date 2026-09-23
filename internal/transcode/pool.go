@@ -32,16 +32,13 @@ import (
 // per-instance DI shape — see `Pool.runner` and `manifest.Store.now`.
 const defaultJobTimeout = 10 * time.Minute
 
-// Pool is the long-lived worker pool that hosts SoX conversions
-// for the v1.2 PCM upscaling feature. Two consumers in production:
-//
-//  1. `bridge serve`: instantiates one Pool at startup (only when
-//     `cfg.Upscale.Enabled == true` AND the sox-on-PATH probe
-//     passes), attaches it to the api.Server, and feeds it with
-//     `POST /v1/upscale` requests.
-//  2. `bridge upscale` CLI: instantiates its own per-invocation
-//     Pool with worker count from `--workers`. Same primitive,
-//     different lifetime.
+// Pool is the long-lived worker pool that hosts SoX conversions: the
+// upscale, optimize and PCM-render variants. One consumer in production:
+// `bridge serve` constructs one Pool at startup, unconditionally (always
+// construct, never stop), attaches it to the api.Server, and feeds it from
+// `POST /v1/upscale`, the batch Coordinator and the auto-optimize sweeper.
+// The `bridge upscale` / `optimize` / `render` CLI commands run their own
+// worker loop (cmd/bridge/upscale.go) and never construct one.
 //
 // The Pool's pending-job channel is bounded (`QueueCap`); enqueues
 // are non-blocking via `select` + default → return ErrQueueFull
@@ -51,8 +48,10 @@ const defaultJobTimeout = 10 * time.Minute
 // exhausting memory.
 //
 // **Dedup keyed on (source_path, variant_id)**: a duplicate
-// enqueue while a job is already queued or running is a silent
-// no-op. The hash set is mutex-guarded; reads happen on the HTTP
+// enqueue while a job is already queued or running is refused with
+// ErrDuplicateInflight and takes no slot. A job stops being "queued or
+// running" at the same instant it is counted done or failed, never later:
+// see finishJob. The hash set is mutex-guarded; reads happen on the HTTP
 // handler goroutine, writes on the worker goroutines and the
 // enqueue site. Same lock covers both — contention is bounded by
 // the worker count.
@@ -85,7 +84,7 @@ type Pool struct {
 	mu sync.Mutex
 	// inflight maps the dedup key (source_path + "|" + variant_id) to
 	// the CLAIM GENERATION currently occupying it — not to a bare
-	// presence marker. See poolJob.claim and releaseDedup: a job may
+	// presence marker. See poolJob.claim and releaseDedupLocked: a job may
 	// outlive its own entry (DropInflight), so "is this key taken" and
 	// "is this key taken BY ME" are different questions, and only the
 	// second one may authorise a release.
@@ -93,14 +92,24 @@ type Pool struct {
 	// claimSeq issues those generations. Guarded by p.mu; pre-incremented
 	// so the first claim is 1 and a map miss (0) never matches.
 	claimSeq uint64
+	// The three counters are guarded by p.mu together with inflight, as ONE
+	// state. Enqueue claims a key and counts the job in one critical section,
+	// finishJob gives the key back and counts the outcome in another, and
+	// Stats reads all of them under the same lock. So no snapshot shows a job
+	// both in flight and counted, and a job leaves the in-flight set only as
+	// it is counted (DropInflight aside, which takes a still-running job out
+	// of it on purpose). Plain integers rather than atomics on purpose: an
+	// increment written outside the lock is then a data race the race
+	// detector reports, not an atomic that compiles and quietly reopens the
+	// window finishJob closes.
+	enqueuedCnt uint64
+	doneCnt     uint64
+	failedCnt   uint64
 
-	wg          sync.WaitGroup
-	stopCtx     context.Context
-	stopCancel  context.CancelFunc
-	closed      atomic.Bool
-	enqueuedCnt atomic.Uint64
-	doneCnt     atomic.Uint64
-	failedCnt   atomic.Uint64
+	wg         sync.WaitGroup
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	closed     atomic.Bool
 
 	// activeJobs[workerID] holds the job worker `workerID` is currently
 	// processing (nil = idle). One atomic.Pointer slot per worker, sized
@@ -142,7 +151,10 @@ type Pool struct {
 	// `manifest.Store.UpsertVariant` returns nil — i.e. AFTER the
 	// SQLite transaction commits, so any consumer-triggered manifest
 	// re-sync will observe the new `track_variants` row and the
-	// bumped `tracks.indexed_at`. Nil when not wired. cmd/bridge
+	// bumped `tracks.indexed_at` — and after finishJob has given the
+	// job's path back and counted it, so a consumer reacting to the
+	// event never meets ErrDuplicateInflight from the job it is
+	// reacting to. Nil when not wired. cmd/bridge
 	// builds an `api.UpscaleCompleteEvent` from these primitives and
 	// publishes it to the SSE broker on topic `"upscale.complete"`.
 	//
@@ -162,10 +174,12 @@ type Pool struct {
 	jobCompleteMu sync.RWMutex
 	onJobComplete func(path, variantID string, sampleRate, bitsPerSample int, durationSeconds float64, batchID uuid.UUID, completedAt time.Time)
 
-	// onJobFailed fires once per job that errored (sox failure, store
-	// write failure, per-job timeout, panic-recovery). The Coordinator
-	// (v1.3 batch.go) consumes this to bump `failed_files` on the
-	// `upscale_batches` row keyed by batchID. Pre-existing
+	// onJobFailed fires once per job that errored (sox failure, fsync
+	// failure, store write failure, per-job timeout, panic-recovery),
+	// after finishJob has given its path back and counted it — the
+	// same ordering as onJobComplete, for the same reason. The
+	// Coordinator (v1.3 batch.go) consumes this to bump `failed_files`
+	// on the `upscale_batches` row keyed by batchID. Pre-existing
 	// `onStateChange` carries only counter snapshots — without
 	// per-job attribution the Coordinator cannot tell which batch
 	// owned a failure.
@@ -382,9 +396,10 @@ func NewPool(store *manifest.Store, workers, queueCap int) *Pool {
 }
 
 // Enqueue submits a JobSpec to the worker pool. Non-blocking: if
-// the queue is full, returns ErrQueueFull immediately. Dedup is
-// silent — a duplicate (same source_path + variant_id) returns
-// nil without taking a slot. After Stop, returns ErrPoolClosed.
+// the queue is full, returns ErrQueueFull immediately. A duplicate
+// (same source_path + variant_id) returns ErrDuplicateInflight
+// without taking a slot; a job stops being one the moment it is
+// counted (see finishJob). After Stop, returns ErrPoolClosed.
 //
 // **Race-safe vs Stop**: pre-fix, Stop() did `close(p.optimizeJobs)
 // / close(p.upscaleJobs)` concurrently with an Enqueue holding
@@ -443,7 +458,7 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 	}
 	select {
 	case jobsChan <- poolJob{spec: spec, dedup: dedup, claim: claim}:
-		p.enqueuedCnt.Add(1)
+		p.enqueuedCnt++
 		// fireStateChange BEFORE the unlock. Stop() must hold p.mu to
 		// close the jobs channels and only closes stateChangeChan
 		// afterward (post wg.Wait), so this non-blocking send strictly
@@ -459,7 +474,7 @@ func (p *Pool) Enqueue(spec JobSpec) error {
 		return nil
 	default:
 		// Roll back the optimistic claim — couldn't fit the job after
-		// all. Ownership-compared like releaseDedup, even though p.mu
+		// all. Ownership-compared like releaseDedupLocked, even though p.mu
 		// has been held continuously since the claim was taken so
 		// nothing can have replaced it: the invariant that makes a bare
 		// delete safe here is non-local, and comparing keeps the
@@ -689,8 +704,9 @@ func (p *Pool) fireStateChange() bool {
 // MUST NOT be called under p.mu — a buffer-full stall while
 // holding p.mu would block any Stats() / Enqueue() that needs
 // the lock, which in turn could deadlock the broker callback if
-// it fans out via UpscaleStatsSnapshot. Workers call this from
-// processJob, never holding p.mu (releaseDedup runs first).
+// it fans out via UpscaleStatsSnapshot. The one caller is
+// announce, which processJob's tail runs after finishJob has
+// released p.mu.
 func (p *Pool) fireJobComplete(evt jobCompleteEvent) {
 	p.jobCompleteChan <- evt
 }
@@ -702,19 +718,19 @@ func (p *Pool) fireJobComplete(evt jobCompleteEvent) {
 // reason to the admin Jobs page.
 //
 // MUST NOT be called under p.mu (same reasoning as fireJobComplete).
-// Workers call this from processJob's failure branches after
-// releaseDedup.
+// Reached only through announce, after finishJob has given the job's
+// path back and counted it. Until that tail existed, the fsync and
+// store exits sent this before the release while this docblock said
+// "after releaseDedup".
 func (p *Pool) fireJobFailed(evt jobFailedEvent) {
 	p.jobFailedChan <- evt
 }
 
 // fireJobFailedFor builds + emits a jobFailedEvent for job with errMsg,
 // stamping failedAt ONCE and deriving the duration from that single
-// clock read (timestamp/duration parity — Gemini r4 F28). Centralises
-// the event construction the sox / fsync / store / panic-recovery
-// branches share so it isn't copy-pasted four times (Sonar new-code
-// duplication). Each branch's differing surrounding logic (dedup
-// release, state-change fire, logging, return) stays at the call site.
+// clock read (timestamp/duration parity — Gemini r4 F28). The sox /
+// fsync / store / panic-recovery exits each decide only the errMsg;
+// announce builds and sends the event once for all of them.
 func (p *Pool) fireJobFailedFor(job poolJob, errMsg string, startedAt time.Time) {
 	failedAt := time.Now().UTC()
 	p.fireJobFailed(jobFailedEvent{
@@ -873,11 +889,11 @@ func (p *Pool) ActiveWorkers() []ActiveJobView {
 // race shape at the call site, not here.
 //
 // Because it frees keys belonging to jobs that are still RUNNING,
-// this is precisely why releaseDedup is ownership-checked. A dropped
+// this is precisely why releaseDedupLocked is ownership-checked. A dropped
 // job later completes and asks to release a key that a resubmission
 // may already have re-claimed; the generation comparison turns that
 // into a no-op. Without it the dropped job released the NEW job's
-// claim and a third enqueue passed the dedup check — see releaseDedup
+// claim and a third enqueue passed the dedup check — see releaseDedupLocked
 // for the full sequence.
 //
 // Note the concurrency this method deliberately CREATES (job B running
@@ -941,18 +957,27 @@ func (p *Pool) DropInflight(matches func(sourcePath string) bool) int {
 // fields rather than retargeting either of the existing combined
 // values — back-compat consumers depend on QueueLen + QueueCap
 // staying ratio-coherent.
+//
+// The in-flight count and the three counters are read in one critical
+// section, the lock finishJob moves a job from one to the other under.
+// So an observer can act on what it reads: Done or Failed having moved
+// means that job has also left Inflight, and a re-enqueue of its path is
+// accepted. The console relies on exactly that (notifyUpscaleProgress in
+// app.js): it refreshes when Done+Failed advances, and bypasses its
+// refresh throttle only when that same frame shows nothing in flight or
+// queued, so a frame counting a job that still read as in flight could
+// throttle away the batch's final refresh.
 func (p *Pool) Stats() PoolStats {
 	p.mu.Lock()
-	inflight := len(p.inflight)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
 	return PoolStats{
 		Workers:  p.workers,
 		QueueCap: 2 * p.queueCap,
 		QueueLen: len(p.optimizeJobs) + len(p.upscaleJobs),
-		Inflight: inflight,
-		Enqueued: p.enqueuedCnt.Load(),
-		Done:     p.doneCnt.Load(),
-		Failed:   p.failedCnt.Load(),
+		Inflight: len(p.inflight),
+		Enqueued: p.enqueuedCnt,
+		Done:     p.doneCnt,
+		Failed:   p.failedCnt,
 	}
 }
 
@@ -1040,29 +1065,6 @@ func (p *Pool) workerLoop(workerID int) {
 	}
 }
 
-// processJob runs one job to completion (or per-job timeout). Lives
-// in its own method so `defer cancel()` on the per-job timeout
-// context releases at the end of THIS job rather than accumulating
-// until workerLoop exits — running for the lifetime of the worker
-// would leak a pending timer per processed job.
-//
-// Shutdown gating uses `p.closed.Load()`, NOT `p.stopCtx.Err()`.
-// Stop() flips `p.closed` BEFORE it cancels `p.stopCtx`, so during
-// the gap between those two operations a worker that pulled a
-// buffered job sees `stopCtx.Err() == nil` even though Stop has
-// been called — the suppression check would falsely classify the
-// graceful-shutdown error as a real failure (CodeRabbit on PR #162).
-// Reading the atomic flag instead closes the window. The flag is
-// monotonic (false→true, never reverses), so a single read at each
-// branch suffices.
-//
-// Error branches mirror the pre-timeout shape 1:1: when the SERVER
-// is stopping (`p.closed.Load()`) we suppress both the
-// failure-counter increment AND the state-change fire — graceful-
-// shutdown noise. When the server is up, every error path bumps
-// `failedCnt` and fires the callback after `releaseDedup`, including
-// the new per-job timeout branch (logged distinctly so operators
-// can tell a hung-sox kill from an internal sox failure).
 // variantFailureWriteTimeout bounds the debounce bookkeeping writes.
 //
 // Long enough to clear SQLite's own busy_timeout(5000) plus the wait for
@@ -1088,6 +1090,68 @@ func variantFailureWriteCtx(jobCtx context.Context) (context.Context, context.Ca
 	return context.WithTimeout(context.WithoutCancel(jobCtx), variantFailureWriteTimeout)
 }
 
+// jobOutcome is the counter finishJob adds a job to. outcomeUncounted is a
+// job the pool was shutting down under, or never started: its path must
+// still be given back, but it is neither a success nor a failure of the
+// source, so it moves no counter and announces nothing.
+type jobOutcome int
+
+const (
+	outcomeUncounted jobOutcome = iota
+	outcomeDone
+	outcomeFailed
+)
+
+// jobEnd is what one exit of processJob decided, applied by its deferred
+// tail once that exit's own bookkeeping has landed: the counter the job
+// joins, and what announce sends for it. The zero value is uncounted.
+type jobEnd struct {
+	outcome jobOutcome
+	// errMsg is the jobFailed event's operator-facing reason
+	// (outcomeFailed only).
+	errMsg string
+	// complete is the upscale.complete event (outcomeDone only).
+	complete jobCompleteEvent
+}
+
+// failedEnd is a counted failure carrying its operator-facing reason.
+func failedEnd(errMsg string) jobEnd {
+	return jobEnd{outcome: outcomeFailed, errMsg: errMsg}
+}
+
+// processJob runs one job to completion (or per-job timeout). Lives
+// in its own method so `defer cancel()` on the per-job timeout
+// context releases at the end of THIS job rather than accumulating
+// until workerLoop exits — running for the lifetime of the worker
+// would leak a pending timer per processed job.
+//
+// Every way out ends in the ONE deferred tail, a panic included:
+// finishJob gives the job's path back and counts it in a single p.mu
+// critical section, then announce sends its event and the state
+// change. Each exit records its outcome in `end` where it learns it,
+// does its own bookkeeping (the strike and its WARN, the orphan
+// sidecar's removal, the variant row) and returns; the tail applies
+// the outcome once that bookkeeping has landed. So a count, or an
+// event, means the job is over: its path is free and its bookkeeping
+// is done. The exits used to carry their own tails, every one of them
+// counted before it released, and the fsync and store exits announced
+// before it too; the analysis pool had the same order until #987. One
+// exit point is what stops the next path added here from choosing its
+// own order again.
+//
+// Shutdown gating uses `p.closed.Load()`, NOT `p.stopCtx.Err()`.
+// Stop() flips `p.closed` BEFORE it cancels `p.stopCtx`, so during
+// the gap between those two operations a worker that pulled a
+// buffered job sees `stopCtx.Err() == nil` even though Stop has
+// been called — the suppression check would falsely classify the
+// graceful-shutdown error as a real failure (CodeRabbit on PR #162).
+// Reading the atomic flag instead closes the window. The flag is
+// monotonic (false→true, never reverses). It is read where each exit
+// decides its outcome and never after the release: a failure the pool
+// was stopping under is neither counted nor announced (graceful-
+// shutdown noise), and a job that was counted is always announced.
+// The success exit reads it not at all — its row has committed, so it
+// counts and announces even during shutdown, and Stop drains the event.
 func (p *Pool) processJob(workerID int, job poolJob) {
 	// `startedAt` feeds durationSeconds on every failure / completion
 	// path so the Coordinator's rolling-throughput average sees the
@@ -1096,76 +1160,46 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	// meaningful value too.
 	startedAt := time.Now().UTC()
 
-	// Panic safety: a panic in p.runner (sox subprocess plumbing) or
-	// p.store.UpsertVariant (SQLite write) would otherwise (a) leak
-	// the (source, variant) dedup slot for the lifetime of the
-	// process — effectively blacklisting that variant from re-
-	// scheduling until restart — AND (b) crash the worker goroutine,
-	// reducing pool capacity until restart. The recover here contains
-	// the panic to this single job; the `released` flag preserves
-	// PR #136's documented release-then-fire ordering on the normal
-	// paths (the deferred cleanup runs ONLY when a normal path didn't
-	// get a chance to release first). The recovered panic is logged
-	// + bumps `failedCnt` so it's observable in the pool stats and
-	// admin UI; the worker stays alive to handle the next job.
-	released := false
+	var end jobEnd
 	defer func() {
-		panicVal := recover()
-		if panicVal != nil {
+		// Panic safety: a panic in p.runner (sox subprocess plumbing) or
+		// p.store.UpsertVariant (SQLite write) would otherwise (a) leak
+		// the (source, variant) dedup slot for the lifetime of the
+		// process — effectively blacklisting that variant from re-
+		// scheduling until restart — AND (b) crash the worker goroutine,
+		// reducing pool capacity until restart. The recover contains the
+		// panic to this single job, which is counted and announced as a
+		// failure like any other terminal path (CodeRabbit + Gemini +
+		// Greptile concurring on PR #183), with the recovered value in
+		// errMsg so the admin Jobs page shows the root cause instead of a
+		// generic string (Gemini r4). The worker stays alive to handle the
+		// next job. A panic after an exit has already decided still counts
+		// the job once: `end` holds one outcome, where the old per-exit
+		// tails had counted before the panic and the recover counted again.
+		if r := recover(); r != nil {
 			logger.Error("pool: recovered panic in job",
 				"path", job.spec.SourceLibraryRel,
 				"variantID", job.spec.VariantID(),
-				"panic", panicVal)
+				"panic", r)
 			if !p.closed.Load() {
-				p.failedCnt.Add(1)
-				metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
+				end = failedEnd(fmt.Sprintf("panic recovered in worker: %v", r))
 			}
 		}
-		if !released {
-			p.finishJob(workerID, job)
-			// Match the synchronous error branches' shape: fire the
-			// state-change AFTER releaseDedup so the published
-			// snapshot reflects the final state (job out of
-			// inflight). Without this, the panic-recovery path
-			// would silently skip the notification — operators would
-			// see failedCnt change in the next tick but SSE clients
-			// wouldn't get an immediate push update like every
-			// other terminal path produces. Skipped on graceful
-			// shutdown to match the runner-error branch's gate.
-			// (CodeRabbit + Gemini + Greptile concurring on PR #183.)
-			if !p.closed.Load() {
-				// Panic-recovery failure event — surfaces the
-				// recovered panic to the Coordinator so the
-				// containing batch's `failed_files` advances and
-				// the admin Jobs page renders the same outcome
-				// it does for sox / store failures. Inject the
-				// recovered panic value into errMsg so the admin
-				// Jobs page shows the root cause instead of a
-				// generic string (already logged above; panic
-				// strings are short). Gemini r4.
-				errMsg := "panic recovered in worker"
-				if panicVal != nil {
-					errMsg = fmt.Sprintf("panic recovered in worker: %v", panicVal)
-				}
-				p.fireJobFailedFor(job, errMsg, startedAt)
-				p.fireStateChange()
-			}
-		}
+		p.finishJob(workerID, job, end.outcome)
+		p.announce(job, end, startedAt)
 	}()
 
 	// Cooperative stop check before spending CPU on a sox
 	// invocation we'll just kill.
 	if p.closed.Load() {
-		p.finishJob(workerID, job)
-		released = true
 		return
 	}
 
 	// Publish this worker's active job for the live grid — AFTER the
 	// stop check so an immediately-abandoned job never flashes as active.
-	// Immutable after Store; every terminal path below clears it via
-	// finishJob (which runs BEFORE that path's fireStateChange, so the
-	// published snapshot shows the worker idle, not stale-active).
+	// Immutable after Store; finishJob clears it BEFORE announce fires the
+	// state change, so the published snapshot shows the worker idle, not
+	// stale-active.
 	p.activeJobs[workerID].Store(&ActiveJob{
 		SourceRel:        job.spec.SourceLibraryRel,
 		SourceSampleRate: job.spec.SourceSampleRate,
@@ -1190,69 +1224,54 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	res, err := p.runner(jobCtx, job.spec)
 	size, settings := res.SizeBytes, res.Settings
 	if err != nil {
-		// Drop cancellation noise — Stop() during graceful
-		// shutdown shouldn't increment the failure counter or
-		// fire the state-change callback.
-		if !p.closed.Load() {
-			p.failedCnt.Add(1)
-			metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
-			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
-				logger.Warn("pool: sox timed out",
-					"path", job.spec.SourceLibraryRel,
-					"timeout", timeout,
-					"err", err)
-			} else {
-				// The REDACTED message, same as the row and the SSE
-				// frame below. sox's stderr quotes the absolute source
-				// path and, for a DSD render, the scratch directory —
-				// the raw err carried both into the journal while
-				// `path` beside it already names the file in the
-				// library-relative form the privacy page promises.
-				logger.Warn("pool: sox failed",
-					"path", job.spec.SourceLibraryRel,
-					"err", redactSoxErr(err.Error(), job.spec))
-				// One strike against this file version. Only HERE:
-				// shutdown is excluded by the enclosing !p.closed gate,
-				// and the timeout branch above is excluded because a
-				// deadline says as much about a hung mount as about the
-				// source. A failed job writes no variant row, so without
-				// this the candidate queries re-select the same doomed
-				// source on every sweep, forever. Suppression needs
-				// `variantFailureThreshold` CONSECUTIVE strikes on the
-				// same (size, mtime), so a transient fault costs a
-				// bounded retry rather than sidelining a good file.
-				//
-				// Best-effort: a bookkeeping write must never turn into a
-				// second failure. Uses context.WithoutCancel so a job ctx
-				// already cancelled underneath us still records the fact.
-				bookCtx, bookCancel := variantFailureWriteCtx(jobCtx)
-				rerr := p.store.RecordVariantFailure(bookCtx,
-					job.spec.SourceLibraryRel, job.spec.SourceSize, job.spec.SourceMTimeNS)
-				bookCancel()
-				if rerr != nil {
-					logger.Warn("pool: record variant failure",
-						"path", job.spec.SourceLibraryRel, "err", rerr)
-				}
-			}
+		// Drop cancellation noise — Stop() during graceful shutdown
+		// shouldn't count a failure or announce one.
+		if p.closed.Load() {
+			return
 		}
-		p.finishJob(workerID, job)
-		released = true
-		// Fire AFTER releaseDedup so the published snapshot
-		// reflects the final state (job out of inflight) —
-		// CodeRabbit on PR #136 caught the inconsistency vs
-		// the success / store-failure branches which already
-		// fire post-release.
-		if !p.closed.Load() {
-			var errMsg string
-			if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
-				errMsg = "sox timed out after " + timeout.String()
-			} else {
-				// Only pay for the (up to 4 KiB) stderr redaction passes on the
-				// non-timeout path — the timeout branch discards the result.
-				errMsg = redactSoxErr(err.Error(), job.spec)
-			}
-			p.fireJobFailedFor(job, errMsg, startedAt)
-			p.fireStateChange()
+		if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
+			// Logged distinctly so operators can tell a hung-sox kill from
+			// an internal sox failure.
+			end = failedEnd("sox timed out after " + timeout.String())
+			logger.Warn("pool: sox timed out",
+				"path", job.spec.SourceLibraryRel,
+				"timeout", timeout,
+				"err", err)
+			return
+		}
+		// The REDACTED message, for the log line as for the row and the
+		// SSE frame. sox's stderr quotes the absolute source path and,
+		// for a DSD render, the scratch directory — the raw err carried
+		// both into the journal while `path` beside it already names the
+		// file in the library-relative form the privacy page promises.
+		// Redacted once: the (up to 4 KiB) passes are paid only here, the
+		// timeout exit above never needs them.
+		msg := redactSoxErr(err.Error(), job.spec)
+		end = failedEnd(msg)
+		logger.Warn("pool: sox failed",
+			"path", job.spec.SourceLibraryRel,
+			"err", msg)
+		// One strike against this file version. Only HERE: shutdown is
+		// excluded by the closed check above, and the timeout exit is
+		// excluded because a deadline says as much about a hung mount as
+		// about the source. A failed job writes no variant row, so without
+		// this the candidate queries re-select the same doomed source on
+		// every sweep, forever. Suppression needs `variantFailureThreshold`
+		// CONSECUTIVE strikes on the same (size, mtime), so a transient
+		// fault costs a bounded retry rather than sidelining a good file.
+		//
+		// Best-effort: a bookkeeping write must never turn into a second
+		// failure. Uses context.WithoutCancel so a job ctx already
+		// cancelled underneath us still records the fact. Written before
+		// the tail gives the path back, so a retry can never succeed, clear
+		// the strikes, and then have this stale strike land after it.
+		bookCtx, bookCancel := variantFailureWriteCtx(jobCtx)
+		rerr := p.store.RecordVariantFailure(bookCtx,
+			job.spec.SourceLibraryRel, job.spec.SourceSize, job.spec.SourceMTimeNS)
+		bookCancel()
+		if rerr != nil {
+			logger.Warn("pool: record variant failure",
+				"path", job.spec.SourceLibraryRel, "err", rerr)
 		}
 		return
 	}
@@ -1268,23 +1287,18 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	// is clean: a crash post-fsync but pre-commit means the next
 	// manifest scan re-transcodes — wasted work, but no torn state.
 	//
-	// On fsync failure we run the same release-and-fire path as a
-	// store failure (best-effort sidecar cleanup so a retry hits a
-	// clean slate, jobFailed event, releaseDedup, fireStateChange).
-	// Same shutdown gate as the UpsertVariant branch.
+	// On fsync failure the orphan sidecar is removed, best-effort, so a
+	// retry hits a clean slate — and removed BEFORE the tail gives the
+	// path back: a retry admitted any earlier could rename its fresh
+	// output into place first and have this remove delete it. Same
+	// shutdown gate as the UpsertVariant exit.
 	if err := p.fsyncFn(sidecarPath); err != nil {
-		if !p.closed.Load() {
-			p.failedCnt.Add(1)
-			metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
-			logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", err)
-			_ = os.Remove(sidecarPath)
-			p.fireJobFailedFor(job, "fsync sidecar: "+err.Error(), startedAt)
+		if p.closed.Load() {
+			return
 		}
-		p.finishJob(workerID, job)
-		released = true
-		if !p.closed.Load() {
-			p.fireStateChange()
-		}
+		end = failedEnd("fsync sidecar: " + err.Error())
+		logger.Error("pool: fsync sidecar", "path", job.spec.SourceLibraryRel, "err", err)
+		_ = os.Remove(sidecarPath)
 		return
 	}
 
@@ -1340,67 +1354,38 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 			"path", job.spec.SourceLibraryRel, "err", cerr)
 	}
 	if err := p.store.UpsertVariant(jobCtx, row); err != nil {
-		// Suppress failure-counter increments + logging + event
-		// firing during graceful shutdown — `jobCtx` is derived
-		// from `p.stopCtx`, so `Stop()` cancels in-flight DB
-		// writes mid-flight. Without the gate, every worker that
-		// was holding a write at shutdown emits a noisy
-		// "store variant: context canceled" line + fires a
-		// failure event to the Coordinator, which then marks
-		// the owning batch as having a failed file even though
-		// the bridge is just shutting down. Mirror of the
-		// `p.closed.Load()` gate around RunSox failure earlier
-		// in this function. Gemini Medium on PR #217.
-		if !p.closed.Load() {
-			p.failedCnt.Add(1)
-			metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
-			logger.Error("pool: store variant", "path", job.spec.SourceLibraryRel, "err", err)
-			// Best-effort: remove the orphan sidecar so a
-			// retry from a clean slate succeeds.
-			_ = os.Remove(row.SidecarPath)
-			// Surface store-side failures to the Coordinator
-			// too — admin Jobs page distinguishes them from
-			// sox failures via the errMsg prefix.
-			p.fireJobFailedFor(job, "store variant: "+err.Error(), startedAt)
+		// Suppress the failure count + logging + event during graceful
+		// shutdown — `jobCtx` is derived from `p.stopCtx`, so `Stop()`
+		// cancels in-flight DB writes mid-flight. Without the gate, every
+		// worker that was holding a write at shutdown emits a noisy
+		// "store variant: context canceled" line + fires a failure event
+		// to the Coordinator, which then marks the owning batch as having
+		// a failed file even though the bridge is just shutting down.
+		// Mirror of the `p.closed.Load()` gate around the runner failure
+		// earlier in this function. Gemini Medium on PR #217.
+		if p.closed.Load() {
+			return
 		}
-		// Release the dedup slot BEFORE publishing the state change
-		// so the publisher's snapshot reflects the post-failure
-		// `inflight` set, not a transient state still holding this
-		// failed job. Mirrors the success branch's
-		// `releaseDedup → fireStateChange` ordering (documented at
-		// the per-job completion comment below) — CodeRabbit Minor
-		// on PR #217 caught the inconsistency. The previous shape
-		// fired the SSE first while the failed job was still in
-		// `p.inflight`, briefly publishing a stale snapshot that
-		// iOS clients then had to reconcile away on the next tick.
-		p.finishJob(workerID, job)
-		released = true
-		if !p.closed.Load() {
-			// Worker isn't stalled by the publisher's CountVariants
-			// DB query — Gemini high-severity review on PR #136. The
-			// publisher consumes asynchronously on its own goroutine.
-			p.fireStateChange()
-		}
+		// Surface store-side failures to the Coordinator too — the admin
+		// Jobs page distinguishes them from sox failures via the errMsg
+		// prefix.
+		end = failedEnd("store variant: " + err.Error())
+		logger.Error("pool: store variant", "path", job.spec.SourceLibraryRel, "err", err)
+		// Best-effort: remove the orphan sidecar so a retry from a clean
+		// slate succeeds — before the release, for the fsync exit's reason.
+		_ = os.Remove(row.SidecarPath)
 		return
 	}
-	p.doneCnt.Add(1)
-	metrics.UpscaleJobsCompletedTotal.WithLabelValues("success").Inc()
 	dur := time.Since(startedAt).Seconds()
 	metrics.UpscaleDurationHist.Observe(dur)
 	metrics.UpscaleDurationWindow.Observe(dur)
-	p.finishJob(workerID, job)
-	released = true
-	// Per-job completion event fires AFTER UpsertVariant commits
-	// (success branch above) and AFTER releaseDedup so the
-	// published snapshot reflects the final state. Path field is
-	// the raw `job.spec.SourceLibraryRel` — byte-identical to the
-	// manifest's `Track.path`, which is what iOS keys on for its
-	// reverse index. Reformatting / normalising here would break
-	// the iOS-side constant-time path lookup. Invoked OUTSIDE
-	// p.mu / dedup lock — fireJobComplete blocking-sends to the
-	// publisher's bounded channel, which provides backpressure
-	// without losing events.
-	p.fireJobComplete(jobCompleteEvent{
+	// The completion event goes out from the tail: AFTER UpsertVariant
+	// commits, and after finishJob has given the path back and counted
+	// the job. Path field is the raw `job.spec.SourceLibraryRel` —
+	// byte-identical to the manifest's `Track.path`, which is what iOS
+	// keys on for its reverse index. Reformatting / normalising here
+	// would break the iOS-side constant-time path lookup.
+	end = jobEnd{outcome: outcomeDone, complete: jobCompleteEvent{
 		path:            job.spec.SourceLibraryRel,
 		variantID:       job.spec.VariantID(),
 		sampleRate:      job.spec.TargetSampleRate,
@@ -1408,7 +1393,29 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 		completedAt:     completedAt,
 		durationSeconds: completedAt.Sub(startedAt).Seconds(),
 		batchID:         job.spec.BatchID,
-	})
+	}}
+}
+
+// announce sends what a finished job has to say: its upscale.complete or
+// jobFailed event, then the state change. processJob's tail calls it after
+// finishJob, outside p.mu — both event sends BLOCK on a full buffer, which
+// is correct backpressure and must never happen under the lock — so every
+// event describes a job whose path is already free and whose count has
+// already moved, and the state change publishes a snapshot showing both.
+// An uncounted job announces nothing: that is what keeps a graceful
+// shutdown quiet.
+func (p *Pool) announce(job poolJob, end jobEnd, startedAt time.Time) {
+	switch end.outcome {
+	case outcomeDone:
+		p.fireJobComplete(end.complete)
+	case outcomeFailed:
+		p.fireJobFailedFor(job, end.errMsg, startedAt)
+	default:
+		return
+	}
+	// Non-blocking: the publisher invokes the broker callback on its own
+	// goroutine, so a slow snapshot query never stalls this worker
+	// (Gemini high-severity review on PR #136).
 	p.fireStateChange()
 }
 
@@ -1512,22 +1519,59 @@ func redactSoxErr(s string, spec JobSpec) string {
 	return s
 }
 
-// finishJob clears worker `workerID`'s active-job slot AND releases the
-// (source, variant) dedup slot — the two cleanups a job's terminal path
-// must do together, BEFORE it fires its state-change. Clearing the slot
-// before fireStateChange is load-bearing: a bare top-level `defer
-// Store(nil)` would (LIFO) run AFTER the body's explicit fireStateChange
-// and publish a snapshot still showing the just-finished worker as active
-// until the next tick. Store(nil) on an already-nil slot (the
-// cooperative-stop path runs before the slot is set) is a harmless no-op.
-func (p *Pool) finishJob(workerID int, job poolJob) {
+// finishJob is the last thing that happens to every job, however it went:
+// it clears worker `workerID`'s active-job slot, then gives back the job's
+// (source, variant) claim and adds the job to its outcome counter in ONE
+// critical section, under the p.mu that Enqueue's dedup check and Stats
+// both take.
+//
+// One step, because each half answers a question somebody acts on, and
+// splitting them opens a window whichever order they run in. Counting
+// first is what this pool used to do: a snapshot showed the job both in
+// flight and finished, so the console's final frame for a batch could
+// read "not settled" and throttle away the refresh it exists to force, and
+// a retry sent on the count met ErrDuplicateInflight, which the batch
+// Coordinator answers by dropping the path from the batch it is building.
+// Releasing first leaves a snapshot between the two steps that shows the
+// job nowhere. The analysis pool closes the same window the same way
+// (#987).
+//
+// The release is ownership-checked (releaseDedupLocked) and the count is
+// not: a job DropInflight took out of the in-flight set still finished,
+// and still counts.
+//
+// Clearing the slot before announce fires the state change is
+// load-bearing: a bare `defer Store(nil)` registered ahead of processJob's
+// tail would (LIFO) run AFTER it and publish a snapshot still showing the
+// just-finished worker as active until the next tick. Store(nil) on an
+// already-nil slot (the cooperative-stop path runs before the slot is set)
+// is a harmless no-op.
+func (p *Pool) finishJob(workerID int, job poolJob, outcome jobOutcome) {
 	p.activeJobs[workerID].Store(nil)
-	p.releaseDedup(job.dedup, job.claim)
+	p.mu.Lock()
+	p.releaseDedupLocked(job.dedup, job.claim)
+	switch outcome {
+	case outcomeDone:
+		p.doneCnt++
+	case outcomeFailed:
+		p.failedCnt++
+	}
+	p.mu.Unlock()
+	// The Prometheus mirror of the same count, decided by the same outcome.
+	// Outside the lock: a scrape reads it on its own schedule and has no
+	// in-flight figure to agree with.
+	switch outcome {
+	case outcomeDone:
+		metrics.UpscaleJobsCompletedTotal.WithLabelValues("success").Inc()
+	case outcomeFailed:
+		metrics.UpscaleJobsCompletedTotal.WithLabelValues("failure").Inc()
+	}
 }
 
-// releaseDedup drops the (source, variant) slot from the inflight set
-// so a future Enqueue for the same pair can land. Must run on every
-// job-completion path (success, failure, cancel).
+// releaseDedupLocked drops the (source, variant) slot from the inflight
+// set so a future Enqueue for the same pair can land. The caller holds
+// p.mu: finishJob calls it on every job's way out, in the critical
+// section that also counts the job.
 //
 // OWNERSHIP-CHECKED, and that check is the whole point. A job does not
 // necessarily still own the key it was enqueued under: DropInflight
@@ -1561,10 +1605,8 @@ func (p *Pool) finishJob(workerID int, job poolJob) {
 // it keeps the dedup map honest, so `C` is refused rather than admitted and
 // the pool doesn't burn a worker slot re-rendering work already in flight.
 // **Don't drop it on the grounds that the corruption it named is fixed.**
-func (p *Pool) releaseDedup(key string, claim uint64) {
-	p.mu.Lock()
+func (p *Pool) releaseDedupLocked(key string, claim uint64) {
 	if p.inflight[key] == claim {
 		delete(p.inflight, key)
 	}
-	p.mu.Unlock()
 }
