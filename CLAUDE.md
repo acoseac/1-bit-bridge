@@ -460,7 +460,23 @@ lost my library."
   `meta.New` reads the 4-byte header directly from the reader and wraps it in a
   plain `io.LimitReader` — check that still holds before adding a seek anywhere
   else in that walk. A misaligned walk bails fail-open and silently disables the
-  allocation guard, so alignment needs its own pin.
+  allocation guard, so alignment needs its own pin. **Verified against
+  mewkiz/flac v1.0.14** (2026-09-23): `meta.New` is byte-identical to 1.0.13,
+  still reads exactly 4 header bytes through a non-buffering reader, still wraps
+  the body in a plain `io.LimitReader` — and upstream's new `readString` now
+  type-asserts `*io.LimitedReader` itself, so it depends on the same property.
+  **"Anything" was aspirational until then**: there are THREE walks over the
+  same handle, and `applyFLACMultiValueArtists` drained. `block.Skip()` ALWAYS
+  drains — it checks for an `io.Seeker` and `*io.LimitedReader` never is — so
+  "skipped via Skip()" is a claim about ALLOCATION, not I/O. That distinction
+  was already drawn and paid for in #165, whose docblock on the STREAMINFO walk
+  says `Skip()` "CONSUMES the bytes from the underlying reader, NOT JUST THE
+  BUFIO BUFFER"; PR #208 then reintroduced it 30 lines from the walk that does
+  it right. **Latent, not live, and the reason is worth knowing**: the walk
+  returns at `TypeVorbisComment`, so it only drains blocks BEFORE it, and the
+  canonical `flac`/`metaflac` layout puts the comment block first (measured 0/4
+  on real files). A fixture in that order proves nothing — the pin puts PICTURE
+  first.
 - **Extraction: presence-gate the integers, refuse bit depth on lossy codecs, and
   split TIT1→Work / TIT2→Title.** dhowden returns 0 for both "tag absent" and "an
   explicit 0", so Year/TrackNumber/DiscNumber need a raw-map presence check to

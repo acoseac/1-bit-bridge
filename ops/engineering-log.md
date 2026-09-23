@@ -8688,6 +8688,91 @@ Mirror-PR obligation. The nightly fuzz corpora pass.
   this repo already records. **Do not truncate the output of a run that
   might fail.**
 
+## 2026-09-23 — the third FLAC walk drained what the second one seeks past (#TBD)
+
+Found by the 2026-09-23 code pass while checking what the `mewkiz/flac`
+1.0.13→1.0.14 bump could have invalidated. The bump invalidated nothing; the
+invariant it was checked against turned out to be false already.
+
+### The defect
+
+`.flac` extraction makes three passes over one `*os.File`:
+
+1. `extractFLACFormatFromReader` — STREAMINFO only, stops at the first block.
+2. `flacPictureBlocksSane` — notes the body offset and `Seek`s past PICTURE.
+3. `applyFLACMultiValueArtists` — called `block.Skip()` for every non-Vorbis
+   block.
+
+`Skip()` checks whether the body reader is an `io.Seeker`. `meta.New` wraps it
+in a plain `io.LimitReader` and `*io.LimitedReader` never is, so Skip ALWAYS
+falls to `io.Copy(io.Discard, …)` and reads every byte off the file. Measured
+with the fix reverted: **4,194,428 bytes read for a 4 MiB picture, against a
+1 KiB budget**.
+
+### The same defect, already diagnosed and paid for
+
+`extractFLACFormatFromReader`'s docblock records #165 fixing exactly this on
+pass 1:
+
+> the previous implementation called `flac.New(r)`, which after parsing
+> STREAMINFO walks every remaining metadata block via `block.Skip()` — **which
+> CONSUMES the bytes from the underlying reader, not just the bufio buffer**.
+> For a track with embedded ~5–10 MiB PICTURE blocks, that meant the FLAC scan
+> still pulled the picture bytes over the network … so the only thing the
+> single-open path had actually saved was the second `os.Open` syscall.
+
+PR #208's pass 3 then reintroduced it, justified as avoiding "any buffer of
+ours" — true about ALLOCATION and silent about I/O, which is precisely the
+distinction #165 had drawn. Three walks over one handle: #165 fixed the first,
+#208's `flacPictureBlocksSane` got it right, and #208's
+`applyFLACMultiValueArtists` did not.
+
+### Latent, and the reason matters for the test
+
+The walk returns as soon as it finds `TypeVorbisComment`, so it only drains
+blocks that PRECEDE it — and the canonical `flac`/`metaflac` layout is
+STREAMINFO, SEEKTABLE, VORBIS_COMMENT, PICTURE. Sampled real files: **0 of 4**
+had PICTURE first. Small sample; treat it as "the common layout is safe", not as
+a bound. It goes live for any tagger that writes PICTURE first.
+
+The consequence for the pin is concrete: a fixture in the canonical order proves
+nothing, because the walk never reaches the picture. The test puts PICTURE
+first, and asserts the artists were still parsed — otherwise "reads few bytes"
+is satisfied by a walk that gave up.
+
+### Two false comments removed
+
+The walk's own docblock said PICTURE blocks "get skipped via the block's
+`Skip()` method … without materialising the large payload into any buffer of
+ours". The CALL SITE said "the PICTURE block (the heavy 5-10 MiB JPEG) is
+skipped **via the block header's length field**" — which was simply not what the
+code did, and is now.
+
+### No ExtractorVersion bump, deliberately
+
+The rule is to bump on every extraction-logic change, and this is in the
+extraction path — so the reasoning is stated rather than assumed. Seek and drain
+leave the reader at the same offset (`pos + block.Length`) and produce identical
+parsed output; the only difference is whether the bytes cross the wire. A
+truncated file bails either way, one block later. A bump would re-extract the
+whole library and push a delta to every paired device for a change that cannot
+alter a single stored value.
+
+### The v1.0.14 check, which is why this was looked at
+
+`meta.New` is byte-identical between 1.0.13 and 1.0.14, still reads exactly 4
+header bytes through a non-buffering `internal/bits.Reader`, and still wraps the
+body in a plain `io.LimitReader`. Upstream's new `readString` now type-asserts
+`*io.LimitedReader`, so it has taken a dependency on the same property CLAUDE.md
+pins. 1.0.14's changes are three allocation caps inside `Block.Parse()`
+sub-parsers, which this repo never calls.
+
+Two of those caps are named in the comment justifying why `Block.Parse()` is not
+called — `readString`'s unvalidated `make` and the unbounded tag count — and
+both are now fixed upstream. The decision stands for a different reason (Parse
+would still allocate from a 128 MiB picture cap taken off an unvalidated field,
+and a bound we control beats one that moves with a dependency), and the comment
+says so rather than leaving stale reasoning in place.
 ## 2026-09-23 — Uninstall no-opped on a system install and the menu wiped anyway (#TBD)
 
 Found by the 2026-09-23 code pass, in `internal/packaging` — 1,636 lines with
