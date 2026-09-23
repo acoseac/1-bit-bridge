@@ -2335,6 +2335,51 @@ func writeAutoInitConfig(cfgPath string) error {
 var thumbKeyPattern = regexp.MustCompile(
 	`^(artist-)?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|local-[0-9a-f]{64}|[0-9a-f]{16})$`)
 
+// dsdRenderToolchainVerdict phrases the DSD-render toolchain verdict the
+// settings page shows: ok, or why turning `dsdRender` on would render
+// nothing.
+//
+// Pure, over an FFmpegInfo, because the interesting states are a probe
+// away and the console closure cannot be driven from a test — the same
+// reason packaging.NeedsRootFor is exported. A verdict nothing pins is
+// how this one came to be wrong.
+//
+// **The DecodersKnown branch is the fix.** HasDSD is false whenever the
+// listing did not parse — a timeout, a PATH wrapper, an ffmpeg that
+// errored — so without its own case every one of those told the operator
+// "this ffmpeg build lacks the dsd_* decoders": a confident claim about
+// their BUILD that the bridge never established. It was reported from the
+// field against the v0.2.0 Docker image, whose Dockerfile asserts all
+// four decoders at BUILD time and fails the build without them — so the
+// build is the one explanation it could not have been.
+//
+// `bridge doctor` (checkDSDRenderToolchain) and the `bridge render`
+// precheck (ffmpegDSDCLIReady) both call ProbeFFmpeg directly, keep the
+// error, and already distinguish the two. Only the console read the
+// cached snapshot, which discards it — hence FFmpegInfo.ProbeErr.
+func dsdRenderToolchainVerdict(ff transcode.FFmpegInfo) (ok bool, why string) {
+	switch {
+	case !ff.Available():
+		return false, "ffmpeg (with ffprobe) is not on PATH on the bridge host"
+	case !ff.DecodersKnown:
+		// Phrased to COMPOSE. The caller renders this as
+		// "saved, but "+why+", so no DSD track will be rendered", so
+		// doctor's standalone wording ("ffmpeg is on PATH but its
+		// decoder listing could not be read") produces "saved, but
+		// ffmpeg is on PATH but …". Caught by running the real
+		// container, not by the unit test — the test asserts the
+		// substrings, and a reader is what notices the sentence.
+		why = "ffmpeg's decoder listing could not be read"
+		if ff.ProbeErr != "" {
+			why += ": " + ff.ProbeErr
+		}
+		return false, why
+	case !ff.HasDSD:
+		return false, "this ffmpeg build lacks the dsd_* decoders (dsd_lsbf, dsd_lsbf_planar, dsd_msbf, dsd_msbf_planar)"
+	}
+	return true, ""
+}
+
 func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -4768,14 +4813,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		// The doctor's verdict for the settings page: ok, or why the
 		// `dsdRender` switch would apply and render nothing.
 		DSDRenderToolchain: func() (ok bool, why string) {
-			ff := transcode.FFmpegSnapshot()
-			switch {
-			case !ff.Available():
-				return false, "ffmpeg (with ffprobe) is not on PATH on the bridge host"
-			case !ff.HasDSD:
-				return false, "this ffmpeg build lacks the dsd_* decoders (dsd_lsbf, dsd_lsbf_planar, dsd_msbf, dsd_msbf_planar)"
-			}
-			return true, ""
+			return dsdRenderToolchainVerdict(transcode.FFmpegSnapshot())
 		},
 		BatchCoordinator: func() admin.AdminBatchCoordinator {
 			// Closure-resolved so admin doesn't see a typed-nil

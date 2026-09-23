@@ -8688,6 +8688,62 @@ Mirror-PR obligation. The nightly fuzz corpora pass.
   this repo already records. **Do not truncate the output of a run that
   might fail.**
 
+## 2026-09-23 — the console blamed an ffmpeg build for a probe it could not read (field report, #TBD)
+
+An operator on the v0.2.0 Docker image reported: "The ffmpeg build that ships
+with the Docker image doesn't seem to support DSD conversion", quoting
+*"this ffmpeg build lacks the dsd_* decoders (dsd_lsbf, dsd_lsbf_planar,
+dsd_msbf, dsd_msbf_planar)"*. They were repeating what the bridge told them.
+
+### Why the build is the one thing it could not have been
+
+`Dockerfile` asserts all four `dsd_*` decoders AND `dst` at BUILD time, in the
+runtime stage, and `exit 1`s without them — a deliberate choice recorded as "a
+base-image change that drops them then fails here rather than at the first
+render in the field". `git show v0.2.0:Dockerfile` contains that assertion, so
+an image built from the tag cannot lack them.
+
+### The actual defect
+
+`ProbeFFmpeg` sets `DecodersKnown=false` on a timeout, an unparseable listing or
+a failed exec, and `HasDSD` is false in all of those. Three surfaces turn the
+probe into an operator-facing verdict:
+
+- `doctor.checkDSDRenderToolchain` — calls `ProbeFFmpeg` directly, keeps the
+  error, has its own branch: "ffmpeg is on PATH but its decoder listing could
+  not be read: …". **Correct.**
+- `ffmpegDSDCLIReady` (`bridge render` / `optimize` precheck) — same shape,
+  prints "ffmpeg precheck: <err>" before it can reach the HasDSD message.
+  **Correct.**
+- The console's `DSDRenderToolchain` closure — reads `FFmpegSnapshot()`, which
+  does `info, _ := ProbeFFmpeg(...)` and **discards the error**, and had a
+  two-case ladder: not-on-PATH, then `!HasDSD`. **Every probe failure landed on
+  "this ffmpeg build lacks the dsd_* decoders".**
+
+So the one surface a Docker operator actually looks at — the settings page — was
+the one that could not tell the two apart. Reproduced by the negative control,
+which prints the reported sentence verbatim for an `FFmpegInfo` whose only
+problem is `ProbeErr: "ffmpeg -decoders timed out after 5s"`.
+
+### The fix
+
+`FFmpegInfo.ProbeErr` carries the reason through the cache, and the verdict
+gains its `!DecodersKnown` branch. Extracted as the pure
+`dsdRenderToolchainVerdict(FFmpegInfo)` for the reason `packaging.NeedsRootFor`
+was: the closure sits inside a Deps literal in `runServe` and cannot be driven,
+and a verdict nothing pins is how this one came to be wrong.
+
+The snapshot's 30 s TTL was checked and is NOT implicated — a transient failure
+self-heals on the next call; it is the WORDING that was wrong for the whole
+window, not the caching.
+
+### What this does and does not settle
+
+It does not prove the operator's decoders are present. It proves the message
+they were shown is not evidence that they are absent, and that the bridge had a
+better answer available the whole time. The distinguishing commands are
+`bridge doctor` inside the container (the honest ladder) and
+`ffmpeg -hide_banner -decoders | grep dsd_`.
 ## 2026-09-23 — the swap's no-file window enclosed a cross-volume copy (#TBD)
 
 Found by the 2026-09-23 code pass, in `internal/updater`, alongside the

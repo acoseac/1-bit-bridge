@@ -984,6 +984,20 @@ no failing test — which is the shape to expect in this area.
   same predicates the coordinator's walks and the auto-optimize sweeper use.
   Don't hand-roll a local reading: a source the sweep renders and the CLI
   refuses (or the reverse) is precisely the drift that indirection prevents.
+- **"We could not read the decoder listing" is not "your ffmpeg lacks the
+  decoders", and `HasDSD == false` means both.** `ProbeFFmpeg` sets
+  `DecodersKnown=false` on a timeout, an unparseable listing or a failed exec,
+  and `HasDSD` is false in every one of those — so a ladder without its own
+  `!DecodersKnown` case reports a confident fact about the operator's BUILD
+  that the bridge never established. Three surfaces phrase this verdict;
+  `bridge doctor` and `bridge render`'s precheck both call `ProbeFFmpeg`
+  directly and keep the error, and both said it correctly. The CONSOLE read
+  `FFmpegSnapshot()`, which **discards** the error — hence `FFmpegInfo.ProbeErr`,
+  so the cached path can say why. Field-reported against the v0.2.0 Docker
+  image, whose Dockerfile asserts all four `dsd_*` decoders plus `dst` at BUILD
+  time and fails without them — making the build the one explanation it could
+  not have been. The control reproduces the reported message verbatim from a
+  probe that merely timed out.
 - **A DSD source SKIPS the `soxInfo.CanDecode` check in
   `classifyUpscaleTrack`.** sox cannot open DSF/DFF at all — ffmpeg decodes
   and sox takes the raw pipe — so asking sox would refuse every DSD
