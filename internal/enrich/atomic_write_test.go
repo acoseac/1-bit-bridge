@@ -170,11 +170,41 @@ type errReader struct{ err error }
 
 func (r errReader) Read(p []byte) (int, error) { return 0, r.err }
 
+// failAfterPrefixReader serves a valid JPEG signature and then fails.
+//
+// errReader alone no longer reaches the staging file at all: the
+// image-signature check peeks the first bytes BEFORE os.CreateTemp runs,
+// so a reader that fails immediately short-circuits there and the
+// "no tmp leak" assertion below becomes vacuous — it asserts the absence
+// of a file that was never created. This one gets past the sniff and
+// fails during io.Copy, which is the path the test was written for
+// (CodeRabbit on #976).
+type failAfterPrefixReader struct {
+	prefix []byte
+	off    int
+	err    error
+}
+
+func (r *failAfterPrefixReader) Read(p []byte) (int, error) {
+	if r.off < len(r.prefix) {
+		n := copy(p, r.prefix[r.off:])
+		r.off += n
+		return n, nil
+	}
+	return 0, r.err
+}
+
 func TestWriteArtworkAtomicStream_PropagatesReadError(t *testing.T) {
 	cacheDir := t.TempDir()
 	dst := filepath.Join(cacheDir, "stream-mbid-readerr.jpg")
-	if err := writeArtworkAtomicStream(cacheDir, dst, errReader{err: io.ErrUnexpectedEOF}, 1024); err == nil {
+	src := &failAfterPrefixReader{prefix: jpegFixture(64), err: io.ErrUnexpectedEOF}
+	if err := writeArtworkAtomicStream(cacheDir, dst, src, 1024); err == nil {
 		t.Fatal("expected error from failing reader")
+	}
+	// The staging file must actually have been created, or the leak
+	// assertion below proves nothing.
+	if src.off == 0 {
+		t.Fatal("the reader was never drained past the signature; this test is not exercising the copy path")
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
 		t.Errorf("destination should not exist after read error; stat err = %v", err)
@@ -236,4 +266,23 @@ func jpegFixture(n int) []byte { return jpegFixtureFilled(n, 'X') }
 func jpegFixtureFilled(n int, fill byte) []byte {
 	b := append([]byte{}, 0xFF, 0xD8, 0xFF)
 	return append(b, bytes.Repeat([]byte{fill}, n-len(b))...)
+}
+
+// TestWriteArtworkAtomicStream_RefusesBeforeStagingOnAnImmediateError pins
+// the OTHER half explicitly, so errReader keeps a job and the short-circuit
+// is a stated property rather than an accident: a reader that fails before
+// any signature can be read never creates a staging file at all.
+func TestWriteArtworkAtomicStream_RefusesBeforeStagingOnAnImmediateError(t *testing.T) {
+	cacheDir := t.TempDir()
+	dst := filepath.Join(cacheDir, "stream-mbid-immediate.jpg")
+	if err := writeArtworkAtomicStream(cacheDir, dst, errReader{err: io.ErrUnexpectedEOF}, 1024); err == nil {
+		t.Fatal("expected error from failing reader")
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a body that failed before the signature check still created %d file(s): %v", len(entries), entries)
+	}
 }
