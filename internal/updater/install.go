@@ -341,18 +341,17 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		return status, fmt.Errorf("swap: %w", err)
 	}
 
-	// Mark pending-restart for EVERY install path, not just the auto
-	// one. It used to be set by maybeAutoInstall after Install returned,
-	// so an admin-console or CLI install left it false — and those are
-	// exactly the callers that do not restart, which is what let the
-	// next poll re-run the whole install. Setting it here means the one
-	// place that knows a swap landed is the place that records it.
+	// Record the STATE, not the intent: a swap landed and nothing has
+	// restarted into it. The one place that knows a swap happened is the
+	// place that records it.
 	//
-	// The persisted marker is the durable half (see swapAwaitingRestart);
-	// this is the in-process half, and it is what lets the auto-
-	// installer's pending-restart fast path pick up an install the
-	// operator started by hand rather than attempting a refused one.
-	u.pendingRestart.Store(true)
+	// NOT pendingRestart — that is the auto-installer's restart intent,
+	// and its own docblock forbids a manual install from setting it ("a
+	// manual admin/CLI install must NOT trigger the auto-installer's
+	// restart"). An earlier draft did exactly that, so with autoInstall
+	// on an operator's manual install would have been followed by an
+	// unrequested restart hours later (CodeRabbit on #977).
+	u.swapPending.Store(true)
 
 	// Refresh status's CurrentVersion field for the response —
 	// we'll be running TargetVersion after restart. The cached
@@ -423,6 +422,7 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 	// process for a binary that is no longer on disk. Nothing is
 	// pending any more.
 	u.pendingRestart.Store(false)
+	u.swapPending.Store(false)
 	// Status "" so DecideBootAction reads this as BootNoop — the marker
 	// survives purely to carry the rejection.
 	if err := SaveState(opts.DataDir, State{RejectedVersion: rejected}); err != nil {
@@ -494,7 +494,17 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 	if normalizeTag(st.TargetVersion) != normalizeTag(target) {
 		return false
 	}
-	return u.now().Sub(st.AttemptedAt) <= recencyWindow
+	// OR the in-process flag: recencyWindow is six hours and a manual
+	// restart can take longer. Past it the marker reads abandoned — which
+	// is the right answer for a BOOT deciding whether to roll back, and
+	// the wrong one here, because the binary on disk really is still the
+	// target and .bak really is still the rollback copy. Within this
+	// process we know that directly (CodeRabbit on #977).
+	//
+	// Safe only BELOW the target comparison above: swapPending records
+	// that a swap happened, not which version, so consulted earlier it
+	// would refuse a genuinely newer release.
+	return u.swapPending.Load() || u.now().Sub(st.AttemptedAt) <= recencyWindow
 }
 
 func rejectedVersionFor(dataDir string) string {

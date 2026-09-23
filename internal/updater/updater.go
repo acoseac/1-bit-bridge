@@ -263,15 +263,40 @@ type Updater struct {
 	// deleting an in-flight install's files.
 	installInFlight atomic.Bool
 
-	// pendingRestart marks "auto-install swapped the binary, restart
-	// deferred for active downloads". While set, maybeAutoInstall
-	// skips the whole install (a ~30 MiB re-download + verify per
-	// poll cycle) and only waits for sessions to drain before firing
-	// the restart. In-memory only: a manual admin/CLI install must
-	// NOT trigger the auto-installer's restart, so this can't be
-	// derived from update-state.json (which any successful Install
-	// arms).
+	// pendingRestart is the auto-installer's restart INTENT: "auto-install
+	// swapped the binary, restart deferred for active downloads". While
+	// set, maybeAutoInstall skips the whole install (a ~30 MiB
+	// re-download + verify per poll cycle) and only waits for sessions to
+	// drain before firing the restart. In-memory only: a manual admin/CLI
+	// install must NOT trigger the auto-installer's restart, so this
+	// can't be derived from update-state.json (which any successful
+	// Install arms).
+	//
+	// Set ONLY by maybeAutoInstall. An earlier draft of the repeat-install
+	// guard set it from Install for every path, which is exactly what the
+	// paragraph above forbids — with autoInstall on, an operator's manual
+	// install would have been followed by an unrequested restart hours
+	// later (CodeRabbit on #977). The state that guard actually needed is
+	// swapPending.
 	pendingRestart atomic.Bool
+
+	// swapPending is the STATE the intent above is often confused with:
+	// this process completed a swap and nothing has restarted into it. It
+	// says nothing about whether a restart is wanted.
+	//
+	// Set by Install on every successful swap, cleared by Rollback. Read
+	// by swapAwaitingRestart, where it covers the case the persisted
+	// marker's recency window cannot: recencyWindow is six hours and a
+	// manual restart can take longer, after which the marker reads
+	// abandoned while the binary on disk really is still the target and
+	// .bak really is still the rollback copy. Within THIS process we know
+	// better than the clock does, so the two are ORed (CodeRabbit on
+	// #977).
+	//
+	// Version-agnostic, which is why it is only ever consulted AFTER
+	// swapAwaitingRestart has matched the target: consulted before, it
+	// refused a genuinely newer release.
+	swapPending atomic.Bool
 }
 
 // New builds an Updater. The poller is not started — call Run on it
@@ -484,19 +509,27 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		// failures (download, verify, swap) are operator-actionable
 		// and stay in the log without polluting the dashboard's
 		// held-update card.
-		if errors.Is(err, ErrCompatGateRefused) {
+		if errors.Is(err, ErrCompatGateRefused) || errors.Is(err, ErrInstallPendingRestart) {
+			// Both are normal deferred states, not failures.
+			//
+			// ErrInstallPendingRestart is reachable here BECAUSE intent
+			// and state are separate: an operator's manual install sets
+			// swapPending (so the guard refuses a repeat) but not
+			// pendingRestart (so this path does not take the fast path
+			// above and tries an install). Logging that at Error would
+			// put a line in the journal every poll cycle for a bridge
+			// that is simply waiting to be restarted.
 			logger.Info(autoInstallDeferredMessage, "err", err)
 		} else {
 			logger.Error("auto-install failed", "err", err)
 		}
 		return
 	}
-	// The binary on disk is now the candidate. Install itself has
-	// already marked pending-restart — for EVERY install path, not just
-	// this one, which is what stops an admin-console or CLI install
-	// (neither of which restarts) from being re-run by the next poll.
-	// It used to be set here, so those two paths left it false.
-	//
+	// The binary on disk is now the candidate. Mark restart INTENT —
+	// here and nowhere else, because it is this path's intent and not a
+	// property of the install. Install records the STATE (swapPending),
+	// which is what the repeat-install guard reads.
+	u.pendingRestart.Store(true)
 	// restartWhenDrained re-checks the sessions gate AFTER the
 	// install: the download phase can run for many minutes and a
 	// stream may have started in the meantime (Install itself only

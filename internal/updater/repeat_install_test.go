@@ -140,3 +140,82 @@ func TestANewerReleaseIsStillInstallable(t *testing.T) {
 		t.Errorf("live binary = %q, want %q", got, want)
 	}
 }
+
+// TestAManualInstallDoesNotArmTheAutoRestart is CodeRabbit's Major on
+// #977, and the contract was written on the field itself: pendingRestart's
+// docblock says "a manual admin/CLI install must NOT trigger the
+// auto-installer's restart".
+//
+// An earlier draft of the repeat-install guard set pendingRestart from
+// Install for every path. With autoInstall enabled, a later eligible poll
+// passes that flag to restartWhenDrained — so an operator who deliberately
+// installed WITHOUT restarting would have been restarted anyway, hours
+// later. The guard needs the STATE (a swap landed); the restart is an
+// INTENT, and only maybeAutoInstall owns it.
+func TestAManualInstallDoesNotArmTheAutoRestart(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+	livePath, upd, err := fix.install(t, "0.1.0")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if upd.pendingRestart.Load() {
+		t.Error("a manual install armed the auto-installer's restart intent")
+	}
+	if !upd.swapPending.Load() {
+		t.Error("a manual install did not record that a swap landed")
+	}
+	// And the guard still works off the state, which is the whole point
+	// of keeping them apart.
+	if !upd.swapAwaitingRestart(filepath.Dir(livePath), "0.2.0") {
+		t.Error("the repeat-install guard lost its signal when the flags were split")
+	}
+}
+
+// TestTheGuardSurvivesAnExpiredRecencyWindow is CodeRabbit's Minor on
+// #977.
+//
+// recencyWindow is six hours and a manual restart can take longer. Past
+// it the persisted marker reads abandoned — the right answer for a BOOT
+// deciding whether to roll back, and the wrong one for a still-running
+// process whose binary really is the target and whose .bak really is the
+// rollback copy. Without the in-process term, the admin console could
+// install the same target again and eat .bak, which is the defect this
+// PR exists to fix, reached by waiting.
+func TestTheGuardSurvivesAnExpiredRecencyWindow(t *testing.T) {
+	fix := newInstallFixture(t, "0.2.0")
+	livePath, upd, err := fix.install(t, "0.1.0")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	dir := filepath.Dir(livePath)
+
+	// Age the marker past the window, exactly as a long-deferred manual
+	// restart would.
+	st, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.AttemptedAt = time.Now().Add(-RecencyWindow() - time.Hour)
+	if err := SaveState(dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if !upd.swapAwaitingRestart(dir, "0.2.0") {
+		t.Fatal("the guard lapsed with the recency window while this process still holds the swap")
+	}
+	if _, err := upd.Install(context.Background(), retryOptsFor(livePath)); !errors.Is(err, ErrInstallPendingRestart) {
+		t.Errorf("Install after the window lapsed: err = %v, want ErrInstallPendingRestart", err)
+	}
+	if got, want := bakBody(t, livePath), "bridge-binary-0.1.0"; got != want {
+		t.Errorf("the rollback target was destroyed once the window lapsed: .bak = %q, want %q", got, want)
+	}
+
+	// A FRESH process past the window correctly reads the marker as
+	// abandoned — that is the boot path's job, and the wedge test pins
+	// the other half.
+	fresh := New(Options{})
+	if fresh.swapAwaitingRestart(dir, "0.2.0") {
+		t.Error("a new process still refuses on an abandoned marker; the guard is a wedge")
+	}
+}
