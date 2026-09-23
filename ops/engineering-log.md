@@ -10114,6 +10114,7 @@ previous head.
 | `TestACountedFailureHasAlreadyReleasedItsPath`, `-race -count=30` | 30 / 30 red | 0 / 30 |
 | the same, `-count=30 -cpu 1,2,4`, no race | 90 / 90 red | n/a |
 | 36 concurrent `-race` processes on 12 cores, `-test.cpu=1 -test.count=20` of the flaky test | **9 / 720** in 92 s | **0 / 720** in 85 s |
+| all 13 pool tests, 12 concurrent `-race` processes, `-test.count=10` | n/a | 0 / 1,560 in 144 s, no race reports |
 
 The 9 split across both windows: 6 at line 139 (`list = (0 rows, <nil>), want
 1 before the success`, the strike not yet written) and 3 at line 146, which is
@@ -10200,6 +10201,11 @@ that no poll can be relied on to hit.
   line turned a 1-in-80 window into 30 out of 30 runs, with no production
   hook, and oversubscription is the fallback when no log line sits in the
   window.
+- **Size oversubscription to the test, not to the machine.** 36 processes of
+  all 13 pool tests put the load average at 339 on 12 cores, because
+  `TestPoolEnqueueRacingStopNoPanic` spawns hundreds of goroutines per
+  process. That run was stopped with nothing failed: at that load it measures
+  the scheduler against `waitFor`'s 3 s deadline, not the pool.
 - **The session that flagged the failure measured before handing it over.**
   Its 900 idle passes are what showed that stress on this machine could not
   answer the question.
