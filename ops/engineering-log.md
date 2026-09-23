@@ -10070,3 +10070,136 @@ on dido as `1-bit-bridge:main-21a3883` and `1-bit-bridge:dev`.
 - **Process note:** doc comments belong with the code. CodeRabbit's
   docstring check covers every function the diff touches, test helpers
   and fakes included, and the recent norm here is 100%.
+
+## 2026-09-23 — the analysis pool counts a job only once it has released its path (#987)
+
+CI on #986's docs-only head `d0c649d` failed `test -race (rest)` in a package
+that PR never touched:
+
+    --- FAIL: TestASuccessfulAnalysisClearsTheStrikes (4.77s)
+        pool_failure_test.go:145: condition not met within deadline
+    FAIL github.com/acoseac/1-bit-bridge/internal/analyze 76.708s
+
+Rerunning the failed jobs passed, and the same shard had passed on the
+previous head.
+
+### The chain
+
+- `processJob` had five terminal tails: runner error, fsync error, store
+  error, success, and the recovered panic. Every one bumped `failedCnt` or
+  `doneCnt` first. The runner-error tail then ran `noteFailure` (the strike's
+  SQLite write, then its WARN) and called `releaseDedup` last.
+- `Enqueue` answers a path still in `p.inflight` with nil and queues nothing.
+- The test waited for `Failed == 1`, flipped the runner to succeed, and
+  re-enqueued the same path. That is what a retry is. When the retry landed
+  between the count and the release, it was dropped, `Done` never reached 1,
+  and `waitFor`'s 3 s ran out at line 145.
+- The same test had a second window. It checks `ListUnreadableTracksForAdmin`
+  straight after `Failed == 1`, and the strike was written after the count.
+  CI never hit this one; oversubscription did (below).
+- **#947 met this exact window first.** Its log entry names the mechanism
+  (`failedCnt.Add(1)` before `noteFailure` and before `releaseDedup`, the next
+  `Enqueue` a silent no-op) and fixed it in `enqueueAndSettle`, which also
+  waited for idle. That fixed the three tests using the helper, which failed
+  1 run in 5, and left the pool as it was.
+  `TestASuccessfulAnalysisClearsTheStrikes`, in the same file and the same PR,
+  never used the helper. The finding stayed in this log and never reached
+  CLAUDE.md, the "inert paper" case the agent-memory rules warn about.
+
+### Measured
+
+| run | old pool | fixed pool |
+|---|---|---|
+| dev Mac, idle: `-count=300 -cpu 1,2,4`, 9.4 min (measured by the session that flagged the failure) | 0 / 900 | n/a |
+| `TestACountedFailureHasAlreadyReleasedItsPath`, `-race -count=30` | 30 / 30 red | 0 / 30 |
+| the same, `-count=30 -cpu 1,2,4`, no race | 90 / 90 red | n/a |
+| 36 concurrent `-race` processes on 12 cores, `-test.cpu=1 -test.count=20` of the flaky test | **9 / 720** in 92 s | **0 / 720** in 85 s |
+
+The 9 split across both windows: 6 at line 139 (`list = (0 rows, <nil>), want
+1 before the success`, the strike not yet written) and 3 at line 146, which is
+CI's line 145 plus the one import the red commit added. **Idle stress passing
+900 times said nothing about the window.** #947 recorded the same thing ("a
+control has to run under the conditions that produced the sighting") and it
+was not applied here until the oversubscription run.
+
+### Decisions
+
+- **Fix the pool, not the test.** The count is the pool's only completion
+  signal, and a helper that re-derives "finished" from idle is a workaround
+  every future test has to know about. Production impact was small. The
+  sweeper re-offers a dropped path on its next pass, and `bridge analyze`
+  enqueues each candidate once. So the case rests on the contract, the second
+  window, and `Stats` snapshots, which showed a job both in flight and counted.
+- **One critical section, not release-then-count.** Splitting the two opens a
+  window in either order. Count first, the retry is dropped. Release first,
+  a snapshot shows the job nowhere. Controls C3 and C4 below catch both.
+  `Stats` reads the counters under the same `p.mu`.
+- **One deferred `finishJob`, every exit included.** Every tail had the order
+  wrong, so a fix per tail would leave the next new path to get it wrong too.
+  Each path records its outcome and returns. The deferred call applies it
+  after that path's bookkeeping.
+- **The outcome is decided where `p.closed` is read today, never after the
+  release.** `bridge analyze`'s drain loop calls `Stop` the moment the pool
+  reads idle. A `p.closed` read after the release would see that `Stop` and
+  un-count the run's last job, so the CLI would exit 0 on a failed final job.
+- **Plain integers under `p.mu`, not atomics.** Moving the increment outside
+  the lock gives 15 `DATA RACE` reports across 11 tests (C6). An atomic
+  written outside the lock would compile and reopen the window silently.
+- **Two side effects, both deliberate.** A panic inside `noteFailure` used to
+  count twice (once before it, once in `recover`); it now counts once. The
+  success path's state-change fire is now gated on `!p.closed` like the error
+  paths. Nothing subscribes to that publisher in production: the only SSE
+  topics are the three `upscale.*`. The struct comment claiming `cmd/bridge`
+  published analysis snapshots to the broker was false from the start and is
+  corrected.
+- **`Enqueue`'s nil for a duplicate stays.** Once the count implies the
+  release, no caller that waits on the count can hit it. Returning a sentinel
+  is its own change. `analysisSweeper.enqueueAll` counts a duplicate as
+  enqueued, and the console's analysis card shows that number in buckets that
+  must add up to the track total, so a sentinel needs a new "already queued"
+  bucket in the DTO and in `describeAnalysisSweep`. And `bridge analyze`'s
+  producer loop stops dispatching on any error it does not recognise.
+- **The transcode pool is left for its own change.** It also counts before
+  `finishJob`, but nothing re-enqueues on its counters: the Coordinator acts
+  on the job events, and its `Enqueue` returns `ErrDuplicateInflight`. Its
+  `fireJobFailed` docblock says workers call it "after releaseDedup", which is
+  false for the fsync and store branches.
+
+### Tests and controls
+
+`TestACountedFailureHasAlreadyReleasedItsPath` parks the worker inside its own
+failure WARN, using a `slog.Handler` that blocks on `analyzeFailedMsg`
+(`parkOnLog`). No production hook is needed: `logging.Component` resolves
+`slog.Default` at log time. While the worker is parked, the job must read as
+in flight and uncounted. Once released, every poll must satisfy
+`Enqueued == Inflight + Done + Failed`, and a retry sent on `Failed == 1` must
+be accepted immediately. The test was committed red (`d6cd6e0`) before the
+fix existed.
+
+Every control ran under `-race` in a throwaway worktree at the committed fix,
+`-count=3` each except C6, which ran the whole package once. Each built and
+vetted, and each was red on every run:
+
+| control | mutation | red at |
+|---|---|---|
+| C1 | count at the decision point, before the bookkeeping | the parked check: `Inflight=1 … Failed=1`, retry `<nil>`, `Enqueued 1 -> 1` |
+| C2 | release before the bookkeeping | the parked check: `Inflight=0`, a second attempt admitted mid-write (`1 -> 2`) |
+| C3 | count, 100 ms gap, then release | conservation: `Inflight:1 … Failed:1` |
+| C3′ | C3 against the test before the conservation check | the retry check: `Enqueued = 1 … want 2` |
+| C4 | release, 100 ms gap, then count | conservation: `Inflight:0 Enqueued:1 Done:0 Failed:0` |
+| C5 | the pre-fix `pool.go` (`finishJob` absent, checked) | the parked check |
+| C6 | increment after the unlock, whole package | 15 `DATA RACE`, 11 tests |
+
+The gaps in C3 and C4 exist only to make the split visible to a 5 ms poll.
+Without a gap, two back-to-back critical sections leave a nanosecond window
+that no poll can be relied on to hit.
+
+### Process notes
+
+- **The technique is in CLAUDE.md now.** Parking a goroutine on its own log
+  line turned a 1-in-80 window into 30 out of 30 runs, with no production
+  hook, and oversubscription is the fallback when no log line sits in the
+  window.
+- **The session that flagged the failure measured before handing it over.**
+  Its 900 idle passes are what showed that stress on this machine could not
+  answer the question.

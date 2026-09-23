@@ -1115,6 +1115,29 @@ no failing test — which is the shape to expect in this area.
   body's explicit fire and publishes a stale "active" frame. `ActiveJob` is
   immutable after `Store()` and carries a start timestamp, not a ticking
   `elapsedSec`, so the SSE frame stays diff-stable; the browser ticks elapsed.
+- **In the analysis pool, a job's count and its dedup release are ONE step,
+  taken after its bookkeeping** (#987). `processJob` counted a failure, THEN
+  wrote the strike and its WARN, and released the path LAST, and `Enqueue`
+  answers a held path with a silent nil. So a caller that acted on the count,
+  which is what a retry is, queued nothing:
+  `TestASuccessfulAnalysisClearsTheStrikes` timed out on a CI runner after 900
+  clean runs on a laptop, and under 3× CPU oversubscription the old pool
+  failed 9 runs in 720, six of them on the strike not yet written when
+  `Failed` said 1. `analyze.Pool.finishJob` releases and counts in one `p.mu`
+  critical section, and `Stats` reads under the same lock. Split the two and
+  a window opens in EITHER order: count-first drops the retry, release-first
+  shows the job nowhere. Every exit reaches `finishJob` through ONE deferred
+  call, a panic included, so no new path picks its own order. The counters
+  are plain integers under `p.mu`, so an increment outside the lock is a race
+  the detector reports (measured: 15 reports across 11 tests). **Decide the
+  outcome where `p.closed` is read, never after the release**: `bridge
+  analyze` answers an idle pool with `Stop`, so a later read un-counts the
+  run's last job. #947 met this window first (its helper's tests failed 1 run
+  in 5) and fixed it in the test HELPER, leaving the pool and the one sibling
+  test that did not use the helper. **The transcode pool still counts first.**
+  Nothing re-enqueues on its counters (its consumers act on the job events,
+  and its `Enqueue` returns `ErrDuplicateInflight`), but its `fireJobFailed`
+  docblock's "after releaseDedup" is false for the fsync and store branches.
 - **Every job gets its own `context.WithTimeout`, cancelled per job**, or one
   pathological file consumes a worker slot until restart. Shutdown gating reads
   the monotonic `p.closed` flag, NOT `stopCtx.Err()` — `Stop` flips the flag
@@ -2770,6 +2793,17 @@ its twin.** The top list is older, shorter, and read first.
   `TestEveryCitedTestNameExists` lives in `cmd/bridge` and caught it on
   CI's macOS leg after a local `go test ./internal/manifest/` had passed.
   After a rename, run the package that holds the sweeps.
+- **A window between two statements is reproduced by PARKING a goroutine in
+  it, not by stress.** The analysis pool's count-before-release window passed
+  900 idle runs on the dev Mac, failed 9 in 720 under 3× CPU
+  oversubscription, and failed on every run once the worker was held inside
+  it. When a log line sits in the window, holding it there needs no
+  production hook: `logging.Component` resolves `slog.Default` at log time,
+  so a test handler that blocks on one message stops the worker right there
+  (`parkOnLog` in `internal/analyze`). With no log line in the window,
+  oversubscription is the fallback: build with `go test -c -race`, then run
+  about three processes per core. Idle stress passing is not evidence the
+  window is absent. (#987)
 
 - **A test that never touches the wiring proves nothing.** Three shapes, all of
   which shipped a dead feature with a green suite: a helper nothing calls, a
