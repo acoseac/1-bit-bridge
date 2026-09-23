@@ -60,6 +60,15 @@ func stageIntoDir(src, dst string, mode os.FileMode) (staged string, err error) 
 	tmpName := tmp.Name()
 	// Close before the rename below replaces this file: Windows refuses
 	// to touch a path that still has an open handle.
+	//
+	// Deliberately NOT the two-defer idiom (defer Remove, then defer
+	// Close) that the rest of the tree uses and that was proposed here
+	// (Gemini on #978). That idiom exists to order a deferred Close
+	// BEFORE a deferred Remove; this closes the handle explicitly, with
+	// its error checked, before the cleanup defer is even registered —
+	// strictly stronger than the ordering the rule is about. The only
+	// window it leaves is the two statements between CreateTemp and
+	// Close, neither of which can panic.
 	if cerr := tmp.Close(); cerr != nil {
 		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("close staging file: %w", cerr)
@@ -115,12 +124,18 @@ func copyFileTo(src, tmpName string) error {
 	if err != nil {
 		return fmt.Errorf("open staging file: %w", err)
 	}
+	// Deferred as well as closed explicitly below: a panic during the
+	// copy or the sync would otherwise leak the descriptor, and on
+	// Windows an open handle blocks the caller's cleanup from unlinking
+	// the staging file (Gemini on #978). The explicit Close on the
+	// success path stays, because its error is the one that means the
+	// bytes may not be durable; the deferred one is the panic net and
+	// its second call is a harmless no-op.
+	defer func() { _ = out.Close() }()
 	if _, cerr := io.Copy(out, in); cerr != nil {
-		_ = out.Close()
 		return fmt.Errorf("copy binary across devices: %w", cerr)
 	}
 	if serr := out.Sync(); serr != nil {
-		_ = out.Close()
 		return fmt.Errorf("sync staged binary: %w", serr)
 	}
 	if cerr := out.Close(); cerr != nil {
