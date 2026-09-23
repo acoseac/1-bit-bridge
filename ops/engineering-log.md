@@ -9548,3 +9548,129 @@ binary does not have.
 - `docker exec` as `bridge` can read `/proc/1/fd` of the serve process (same
   uid, dumpable, no file capabilities in the image), so the real lsof
   attributes the port without root.
+
+## 2026-09-23 — `bridge doctor` finds `./bridge.yaml` like every other subcommand (#985)
+
+#984 documented `--config /data/bridge.yaml` as the container workaround and
+left the code for its own PR. This is that PR.
+
+### The change
+
+- `buildDoctorDeps` resolves through `resolveConfigPath` (explicit `--config`,
+  else `./bridge.yaml`, else the platform dir) and calls `config.Load` only on a
+  path it found. Not `loadCLIConfig`: that one makes a missing config an error,
+  and doctor runs before `bridge init`. doctor.go stays in
+  `TestNoSubcommandTailBypassesLoadCLIConfig`'s allowlist, now for the reason
+  the allowlist states (a path already resolved), and its comment says so.
+- The `--config` help is the shared `configFlagUsage`. Doctor's own string
+  said "default: try the OS-standard location". `configFlagUsage`'s docblock
+  said the fallback is implemented by `loadCLIConfig` alone; it is
+  `resolveConfigPath`, which both use.
+
+### What `config-dir` grades
+
+The check `MkdirAll`s its directory and writes a probe file into it. What it
+vouches for is that the bridge can write beside its config: `bridge init`
+writes bridge.yaml there, `config.Save` (the console's settings save,
+`bridge library add/remove`) stages `.bridge-*.yaml` in the same directory and
+renames it over, and a relative `dataDir` resolves against it. All three
+follow the config the bridge READS.
+
+| Resolved | `ConfigDir` |
+|---|---|
+| `./bridge.yaml` | the working directory, absolute |
+| the platform `bridge.yaml` | the platform dir (unchanged) |
+| an explicit `--config`, found or not | its directory, absolute (was verbatim, so `--config bridge.yaml` printed `config-dir .`) |
+| nothing found | the platform dir, where `init` writes (unchanged) |
+| nothing found, platform dir unresolvable | empty, so the check warns (unchanged) |
+
+Rejected: keeping the platform dir for the `./bridge.yaml` row. It grades a
+directory nothing writes to, and because the check creates what it grades, it
+leaves that directory behind. The v0.2.0 image's plain `docker exec … bridge
+doctor` created `/home/bridge/.config/1-bit-bridge` (measured below). For the
+last row, `filepath.Dir` of resolveConfigPath's fallback answer (the bare
+"bridge.yaml") would have made it the working directory: a check graded on
+behalf of a config that is not there.
+
+### The menu
+
+`actDoctor`, the bare-`bridge` launcher's "Run preflight (doctor)", called
+`doctorCmd(nil)`. It is offered only in the not-initialised state, beside the
+Setup wizard that writes the platform install, and the menu reads the platform
+path everywhere else (`detectState` → `packaging.IsInitialized`). With the
+local-first lookup, a menu started from a directory holding its own
+bridge.yaml would have graded that file. It now passes `--config <platform
+path>`; an absent explicit path is graded as that directory with no config,
+which is what the row did before.
+
+### Unaffected
+
+- `bridge init`'s preflight builds its own `doctor.Deps` from `--dir` (or the
+  platform dir), and `withExistingInstallDeps` loads the config at that target.
+  Neither goes through `buildDoctorDeps`.
+- The console's Diagnostics run (`adminDoctorRunner`) is handed serve's
+  absolute resolved path, so it takes the explicit branch as before.
+
+### Tests and controls
+
+`TestDoctorResolvesTheWorkingDirectoryConfig` puts installs in both the
+working directory and the seam's platform dir, with
+`BRIDGE_UPSCALE_ENABLED=true` in the env, and requires the local one.
+`TestDoctorConfigDirFollowsTheResolvedConfig` has one subtest per table row
+other than the local hit. `TestMenuDoctorGradesTheMenusOwnConfig` drives
+`actDoctor` itself and reads the report's config-dir line. All ran with
+`-count=1`, with the fix committed before any control:
+
+| Control | Red |
+|---|---|
+| main's doctor.go | the working-directory test, whose DataDir came from this Mac's REAL platform install (the old code called `packaging.DefaultConfigDir` directly, past the `defaultConfigDirFn` seam, so it could not be tested in isolation), and all four subtests |
+| main's menu.go | the menu test: config-dir named the working directory |
+| `doctorConfigDir` without `filepath.Abs` | the working-directory test and the explicit-relative subtest |
+| no not-found special case | only the unresolvable-platform subtest |
+| the platform dir whenever `--config` is absent | only the working-directory test's ConfigDir assertion |
+| `d.UpscaleEnabled` not copied | only the working-directory test's env assertion |
+
+### Measured
+
+`dido` (Docker 29.1.3, buildx 0.30.1). Both containers ran docs/docker.md's
+"Running" command plus the "Enabling" env vars, over a two-file library
+(FLAC and ALAC), under separate names, ports and volumes. Doctor ran as the
+image's `bridge` user.
+
+| Run | v0.2.0 (`ghcr.io/acoseac/1-bit-bridge:0.2.0`) | this branch (`docker buildx build --load`, compile not cached) |
+|---|---|---|
+| `bridge doctor` | config-dir `/home/bridge/.config/1-bit-bridge`; port-api / port-admin FAIL `in use`; audio-toolchain `not enabled`; exit 1 | config-dir `/data`; both `bound by our own bridge (pid 1)`; `sox v14.4.2, FLAC supported`; 14 ok / 2 warn / 0 fail; exit 0 |
+| `bridge doctor --config /data/bridge.yaml` | ok; exit 0 | identical to the plain run; exit 0 |
+| `docker exec -e BRIDGE_FINGERPRINT_ENABLED=true … bridge doctor` | fingerprint-toolchain `not enabled` | fingerprint-toolchain FAIL `no AcoustID API key`, which is what the docs promise |
+| `docker exec -w / … bridge doctor` | FAIL; exit 1 | FAIL; exit 1. Nothing sits at `/`, so the pass above is the WORKDIR lookup |
+| `/home/bridge/.config/1-bit-bridge` after the plain run | created | absent (created later by the `-w /` run, whose nothing-found answer is the platform dir) |
+
+The two warns are service-manager and browser-opener, which a container has
+no use for; they appear with `--config` too.
+
+### Docs
+
+The published `latest` is v0.2.0, which still has the old lookup. So
+docs/docker.md keeps `--config /data/bridge.yaml` in every example (it works
+on every image) and puts the failure in the past tense, scoped to images up to
+v0.2.0. The Dockerfile describes the image built from its own tree, so its
+`lsof` comment states the fixed behaviour and gives the version history only
+as the reason the docs pass the flag.
+
+### Found, not fixed
+
+A config that EXISTS but does not load is still dropped without a word.
+`buildDoctorDeps` ignores `config.Load`'s error, as it has since doctor landed
+(#24, 2026-04-24), and grades the install config-less. Measured on a Mac: a
+bridge.yaml with one typo'd key (`libraryNmae`) on free ports gives `bridge
+doctor --config <it>` "all clear" and exit 0, graded against the default ports
+7788/7789 rather than the file's, while `bridge status` and `bridge cert info`
+exit 2 on the same file. So `ops/deployment-runbook.md`'s "Validate a config
+edit BEFORE restarting" (`bridge doctor --config <path>` … "a bad key is a
+non-zero exit") has not held since it was written on 2026-09-08. This PR
+changes which file can hit that, not whether: a broken `./bridge.yaml` is now
+dropped the way a broken platform config always was, where before doctor
+ignored the local file entirely. It is left for its own PR, because the fix is
+a new report line (fail on a config that exists and will not load, and name
+the config that was graded), which changes the CLI table, the JSON envelope
+and the console's Diagnostics at once.

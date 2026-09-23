@@ -123,11 +123,13 @@ FROM alpine:${ALPINE_VERSION}
 # lsof: `bridge doctor`'s port checks run `lsof -nP -iTCP:<port>
 # -sTCP:LISTEN -t` to confirm that the PID `bridge serve` records in
 # <dataDir>/server.pid (/data/data/server.pid under the auto-init config)
-# is the one listening, so `docker exec <container> bridge doctor --config
-# /data/bridge.yaml` reports port-api / port-admin as "bound by our own
-# bridge (pid 1)". Keep the --config: without it doctor looks for its
-# config only under ~/.config/1-bit-bridge, never reads /data/bridge.yaml,
-# cannot find the pidfile, and FAILs both ports as held by another
+# is the one listening, so `docker exec <container> bridge doctor` reports
+# port-api / port-admin as "bound by our own bridge (pid 1)". Doctor finds
+# the pidfile through the config, which it reads from the WORKDIR
+# (/data/bridge.yaml) like every other subcommand. docs/docker.md still
+# passes --config /data/bridge.yaml, which every image honours, because
+# doctor in images up to v0.2.0 never looked in the WORKDIR: without the
+# flag it found no pidfile and FAILed both ports as held by another
 # process. The package itself matters: Alpine's own /usr/bin/lsof is the
 # busybox applet, which ignores those options and lists every open file,
 # so doctor would credit any occupied port to the running bridge.
