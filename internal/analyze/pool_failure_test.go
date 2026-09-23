@@ -321,26 +321,26 @@ func captureLogs(t *testing.T) *syncBuffer {
 	return buf
 }
 
-// enqueueAndSettle submits one job and waits for the pool to go fully idle.
+// enqueueAndSettle submits one job and waits for its failure to be counted.
 //
-// `Failed` ALONE is the wrong signal and made these tests flaky (1 run in 5).
-// processJob increments failedCnt BEFORE it logs and before releaseDedup, so
-// a waiter that stops at `Failed == n` can observe the count while the log
-// line has not been written and — worse — while the dedup slot is still held,
-// which makes the NEXT Enqueue a silent no-op (a duplicate returns nil) and
-// hangs the following wait on a count that will never arrive.
+// The count alone is enough, and that is the pool's guarantee, not this
+// helper's: finishJob counts a job in the same critical section that releases
+// its path, after noteFailure has written the strike and the log line. So
+// `Failed == n` means the line has landed and the next Enqueue of the path is
+// accepted.
 //
-// Waiting for the dedup to drain fixes both, because releaseDedup runs after
-// noteFailure: idle implies the line has landed and the path is free.
+// It was not always enough. While processJob counted first and released last,
+// this helper also waited for the pool to go idle. That fixed the tests that
+// use it, which were flaky 1 run in 5, and left the pool as it was.
+// TestASuccessfulAnalysisClearsTheStrikes never used the helper and flaked the
+// same way in CI (#986). TestACountedFailureHasAlreadyReleasedItsPath pins the
+// order now.
 func enqueueAndSettle(t *testing.T, p *Pool, rel string, wantFailed uint64) {
 	t.Helper()
 	if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: rel, SourceAbsPath: "/lib/" + rel}); err != nil {
 		t.Fatalf("enqueue %s: %v", rel, err)
 	}
-	waitFor(t, func() bool {
-		st := p.Stats()
-		return st.Failed == wantFailed && st.Inflight == 0 && st.QueueLen == 0
-	})
+	waitFor(t, func() bool { return p.Stats().Failed == wantFailed })
 }
 
 // TestTheFailureWarnFiresOncePerFileVersion is the other half of the field
