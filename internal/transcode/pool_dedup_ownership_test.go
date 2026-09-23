@@ -49,10 +49,10 @@ func TestDropInflightThenCompletionDoesNotReleaseTheResubmission(t *testing.T) {
 		started  = make(chan int, 8)
 		runCount int
 	)
-	// State-change fires AFTER finishJob (documented ordering: "Fire
-	// AFTER releaseDedup so the published snapshot reflects the final
-	// state"), so it is the exact edge that says "A's release has now
-	// run" — no sleeping, no polling for the absence of a bug.
+	// State-change fires AFTER finishJob (documented ordering: announce
+	// runs in processJob's tail once finishJob has given the path back),
+	// so it is the exact edge that says "A's release has now run" — no
+	// sleeping, no polling for the absence of a bug.
 	settled := make(chan struct{}, 64)
 	p := NewPool(nil, 2, 8)
 	p.SetOnStateChange(func() {
@@ -200,7 +200,7 @@ func TestReleaseDedupFreesTheClaimItOwns(t *testing.T) {
 // Driven through Enqueue rather than by incrementing claimSeq directly
 // (CodeRabbit on PR #633): poking the counter would assert that a
 // counter counts, not that Enqueue assigns from it. The generations are
-// then read back from the inflight map, which is where releaseDedup
+// then read back from the inflight map, which is where releaseDedupLocked
 // actually compares them.
 func TestClaimGenerationsAreMonotonicAndNonZero(t *testing.T) {
 	const n = 8

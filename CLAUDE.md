@@ -1111,10 +1111,11 @@ no failing test — which is the shape to expect in this area.
   is load-bearing, and the publisher must NOT exit on `stopCtx.Done()` or a
   blocking worker send deadlocks.
 - **`finishJob` clears the worker slot and releases dedup BEFORE each terminal
-  `fireStateChange`** — a top-level `defer Store(nil)` runs LIFO *after* the
-  body's explicit fire and publishes a stale "active" frame. `ActiveJob` is
-  immutable after `Store()` and carries a start timestamp, not a ticking
-  `elapsedSec`, so the SSE frame stays diff-stable; the browser ticks elapsed.
+  `fireStateChange`** — a `defer Store(nil)` registered ahead of `processJob`'s
+  tail runs LIFO *after* that tail's fire and publishes a stale "active"
+  frame. `ActiveJob` is immutable after `Store()` and carries a start
+  timestamp, not a ticking `elapsedSec`, so the SSE frame stays diff-stable;
+  the browser ticks elapsed.
 - **In the analysis pool, a job's count and its dedup release are ONE step,
   taken after its bookkeeping** (#987). `processJob` counted a failure, THEN
   wrote the strike and its WARN, and released the path LAST, and `Enqueue`
@@ -1134,10 +1135,31 @@ no failing test — which is the shape to expect in this area.
   analyze` answers an idle pool with `Stop`, so a later read un-counts the
   run's last job. #947 met this window first (its helper's tests failed 1 run
   in 5) and fixed it in the test HELPER, leaving the pool and the one sibling
-  test that did not use the helper. **The transcode pool still counts first.**
-  Nothing re-enqueues on its counters (its consumers act on the job events,
-  and its `Enqueue` returns `ErrDuplicateInflight`), but its `fireJobFailed`
-  docblock's "after releaseDedup" is false for the fsync and store branches.
+  test that did not use the helper. The transcode pool had the same order,
+  plus events sent before the release, until #988 (next bullet).
+- **In the transcode pool, the count, the release AND the job's event are one
+  ordered tail** (#988). Every `processJob` exit counted (atomics) before
+  `finishJob`, and the fsync and store exits also sent their blocking
+  `jobFailed` before it, under a `fireJobFailed` docblock that said "after
+  releaseDedup". Each exit now records one `jobEnd` and returns. The deferred
+  tail runs `finishJob` (the ownership-checked `releaseDedupLocked` plus the
+  count, one `p.mu` section), THEN `announce` (the event and the state
+  change, outside the lock, since the sends block). So a count or an event
+  means the path is free, and three consumers act on exactly that. The batch
+  Coordinator answers `ErrDuplicateInflight` by DROPPING the path from the
+  batch it is building. `POST /v1/upscale` treats it as accepted. And the
+  console's `notifyUpscaleProgress` bypasses its refresh throttle only when
+  the frame that advanced Done+Failed also shows nothing in flight, so a count
+  that arrived first could throttle away a batch's final refresh. **A counted
+  job is always announced, an uncounted one never**: `p.closed` is read where
+  each exit decides, never after the release (the old runner-error tail
+  re-read it there and could count a failure and drop its event). The success
+  exit reads it not at all: its row has committed, so it counts and announces
+  during shutdown and `Stop` drains the event. The strike and the orphan
+  sidecar's removal stay INSIDE the claim, or a retry's fresh output is what
+  the old attempt deletes. Measured on the old pool: a busy poll saw the job
+  counted while in flight 400 times in 400, and every immediate retry was
+  refused, while a 1 ms poll saw it 0 times in 100.
 - **Every job gets its own `context.WithTimeout`, cancelled per job**, or one
   pathological file consumes a worker slot until restart. Shutdown gating reads
   the monotonic `p.closed` flag, NOT `stopCtx.Err()` — `Stop` flips the flag
@@ -2800,10 +2822,15 @@ its twin.** The top list is older, shorter, and read first.
   it. When a log line sits in the window, holding it there needs no
   production hook: `logging.Component` resolves `slog.Default` at log time,
   so a test handler that blocks on one message stops the worker right there
-  (`parkOnLog` in `internal/analyze`). With no log line in the window,
-  oversubscription is the fallback: build with `go test -c -race`, then run
-  about three processes per core. Idle stress passing is not evidence the
-  window is absent. (#987)
+  (`loggingtest.ParkOn`, a test-only package both pools share; it was
+  `parkOnLog` in `internal/analyze`). **When the window ENDS in a lock
+  acquisition, hold that lock instead**: the worker stops exactly there
+  whatever it did on the way, and something it stores lock-free just before
+  (the transcode pool's worker slot) says when it has arrived. That reaches
+  an exit with no log line in it, the transcode pool's success path (#988).
+  With neither, oversubscription is the fallback: build with `go test -c
+  -race`, then run about three processes per core. Idle stress passing is not
+  evidence the window is absent. (#987)
 
 - **A test that never touches the wiring proves nothing.** Three shapes, all of
   which shipped a dead feature with a green suite: a helper nothing calls, a

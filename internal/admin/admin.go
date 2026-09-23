@@ -258,7 +258,7 @@ type Deps struct {
 	UpscaleStats func() *UpscalePoolStats
 
 	// UpscaleBusy is a CHEAP "is the pool actively processing" probe
-	// (inflight or queued > 0) — atomic counters + a map-len, NO DB. The
+	// (inflight or queued > 0) — counters + a map-len in memory, NO DB. The
 	// SSE loop uses it to gate the live worker grid onto the fast (500 ms)
 	// tick WHILE a batch runs, so sub-5s jobs are visible at per-second
 	// resolution; idle bridges fall back to the 5 s medium tick (no cost).

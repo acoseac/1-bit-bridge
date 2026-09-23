@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -171,9 +172,9 @@ func TestASuccessfulAnalysisClearsTheStrikes(t *testing.T) {
 // So this test does not race the window. It parks the worker inside it,
 // in the failure's own WARN. That is the one step between the old count and
 // the old release a test can hold without a hook in production code: the
-// package logger resolves slog.Default at log time.
+// package logger resolves slog.Default at log time (loggingtest.ParkOn).
 func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
-	park := parkOnLog(t, analyzeFailedMsg)
+	park := loggingtest.ParkOn(t, analyzeFailedMsg)
 	s := newStore(t)
 	putTrack(t, s, "A/B/01.flac")
 	var runs atomic.Int32
@@ -188,7 +189,7 @@ func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
 	// Deferred in this order so the worker is let go BEFORE Stop waits for
 	// it, on every way out of the test, a failed assertion included.
 	defer p.Stop()
-	defer park.release()
+	defer park.Release()
 
 	// settle waits for cond and checks, on every poll rather than only at the
 	// end, that each accepted job is exactly one of in flight, done or
@@ -208,7 +209,7 @@ func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
 	if err := p.Enqueue(spec); err != nil {
 		t.Fatal(err)
 	}
-	park.wait(t)
+	park.Wait(t)
 
 	// The job is still writing its own failure, so it is still running: in
 	// flight, and not counted.
@@ -220,7 +221,7 @@ func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
 			"a retry sent now returned %v and Enqueued went %d -> %d",
 			st.Inflight, st.Done, st.Failed, retryErr, st.Enqueued, p.Stats().Enqueued)
 	}
-	park.release()
+	park.Release()
 
 	settle(func(st PoolStats) bool { return st.Failed == 1 })
 	rows, err := s.ListUnreadableTracksForAdmin(context.Background())
@@ -236,70 +237,6 @@ func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
 	}
 	settle(func(st PoolStats) bool { return st.Done == 1 })
 }
-
-// logPark holds the first goroutine that logs one message until the test lets
-// it go: a way to stop a worker between two statements of processJob with no
-// hook in production code. parkOnLog installs it; the other methods drive it.
-type logPark struct {
-	msg        string
-	hold       sync.Once // only the first matching record parks
-	parked     chan struct{}
-	resume     chan struct{}
-	resumeOnce sync.Once
-}
-
-// parkOnLog points slog.Default at a handler that parks the first goroutine
-// to log msg, and restores the previous default when the test ends. The same
-// redirection captureLogs relies on: logging.Component resolves slog.Default
-// at log time.
-func parkOnLog(t *testing.T, msg string) *logPark {
-	t.Helper()
-	lp := &logPark{msg: msg, parked: make(chan struct{}), resume: make(chan struct{})}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(parkHandler{lp}))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return lp
-}
-
-// wait blocks until a goroutine is parked in the log call, failing the test
-// if none arrives. A deadline rather than a bare receive, so a message that
-// is never logged reads as a failure and not as a hung test binary.
-func (lp *logPark) wait(t *testing.T) {
-	t.Helper()
-	select {
-	case <-lp.parked:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("nothing logged %q within 3s", lp.msg)
-	}
-}
-
-// release lets the parked goroutine go. Idempotent, because a test calls it
-// inline and defers it as well.
-func (lp *logPark) release() { lp.resumeOnce.Do(func() { close(lp.resume) }) }
-
-// parkHandler is the slog.Handler behind logPark. Every other record is
-// dropped.
-type parkHandler struct{ lp *logPark }
-
-// Enabled accepts every level, so the record reaches Handle whatever its level.
-func (h parkHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-// Handle parks the first goroutine whose record carries the watched message.
-func (h parkHandler) Handle(_ context.Context, r slog.Record) error {
-	if r.Message == h.lp.msg {
-		h.lp.hold.Do(func() {
-			close(h.lp.parked)
-			<-h.lp.resume
-		})
-	}
-	return nil
-}
-
-// WithAttrs returns the same handler: the attributes do not decide anything.
-func (h parkHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-
-// WithGroup returns the same handler, for the reason WithAttrs does.
-func (h parkHandler) WithGroup(string) slog.Handler { return h }
 
 // syncBuffer is a bytes.Buffer whose writes and reads are serialised.
 //

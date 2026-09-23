@@ -97,7 +97,7 @@ func TestPoolEnqueueReturnsErrQueueFullAtCap(t *testing.T) {
 	// worker draining slower than the test enqueued; the
 	// `Stop()/Enqueue` mutex serialisation made that timing
 	// flaky on faster machines (the worker could finish
-	// `RunSox` failure-fast and `releaseDedup` between every
+	// `RunSox` failure-fast and release its dedup slot between every
 	// pair of test-side enqueues, keeping the queue under
 	// cap). Concurrent fan-out replaces the timing assumption
 	// with a structural guarantee.
@@ -619,12 +619,12 @@ func TestPoolStopDuringJobSuppressesFailure(t *testing.T) {
 
 // TestPoolPanicInRunnerReleasesDedup pins the contract that a panic
 // inside p.runner doesn't leak the (source, variant) dedup slot —
-// pre-fix, the explicit releaseDedup calls in processJob's success/
+// pre-fix, the explicit dedup releases in processJob's success/
 // error branches were bypassed on panic, blacklisting the variant
 // from future scheduling until the bridge process restarted AND
-// crashing the worker goroutine. The recover()+deferred-release
-// pattern in processJob both contains the panic to one job AND
-// ensures the slot is reclaimed.
+// crashing the worker goroutine. The recover() in processJob's one
+// deferred tail both contains the panic to one job AND ensures the
+// slot is reclaimed.
 func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	store := openTempStoreForPool(t)
 	t.Cleanup(func() { _ = store.Close() })
@@ -727,11 +727,10 @@ func TestPoolPanicInRunnerReleasesDedup(t *testing.T) {
 	}
 
 	// Slot-reclaim assertion: poll until both the panicked-job AND
-	// the survivor-job slots are released. Polling Inflight directly
-	// (rather than gating on Stats.Failed) handles the race where
-	// failedCnt is incremented inside the runner-error branch BEFORE
-	// the synchronous releaseDedup call — Failed >= 2 doesn't imply
-	// the release has fired yet.
+	// the survivor-job slots are released. Polled on Inflight, the
+	// thing being asserted. (This comment used to say Failed >= 2 did
+	// not imply the release, which was true while the pool counted
+	// before it released; finishJob now does both in one step.)
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if p.Stats().Inflight == 0 {
