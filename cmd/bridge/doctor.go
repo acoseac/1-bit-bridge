@@ -208,9 +208,11 @@ func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
 // read "not enabled" beside BRIDGE_UPSCALE_ENABLED=true (#984 measured
 // both).
 //
-// resolveConfigPath rather than loadCLIConfig, because the two disagree
-// about absence: loadCLIConfig makes a missing config an error, and
-// doctor runs before `bridge init` has written one.
+// resolveConfigPath rather than loadCLIConfig, because loadCLIConfig
+// makes two things an error that doctor must report instead: a missing
+// config (doctor runs before `bridge init` has written one) and one that
+// does not load (a config-file FAIL beside the rest of the report, not an
+// exit before it).
 func buildDoctorDeps(cfgPath string) doctor.Deps {
 	d := doctor.Deps{
 		APIPort:   7788,
@@ -221,10 +223,29 @@ func buildDoctorDeps(cfgPath string) doctor.Deps {
 	}
 	path, found := resolveConfigPath(cfgPath)
 	d.ConfigDir = doctorConfigDir(cfgPath, path, found)
+	// The report names the config it graded, or where it looked for one.
+	d.ConfigFile = &doctor.ConfigFile{}
+	if !found {
+		for _, p := range configSearchPaths(cfgPath) {
+			d.ConfigFile.Tried = append(d.ConfigFile.Tried, absOrAsGiven(p))
+		}
+	}
 	// If a config file was found, pull LibraryRoots / ports / dataDir
 	// from it so doctor's checks are accurate.
 	if found {
-		if cfg, err := config.Load(path); err == nil {
+		d.ConfigFile.Path = absOrAsGiven(path)
+		// Loaded by its absolute name so a load error spells the path the
+		// way the report does (config.Load absolutizes it anyway).
+		cfg, err := config.Load(d.ConfigFile.Path)
+		// One that is there and does not load is REPORTED, never graded
+		// as though it were absent. Every command that reads it refuses
+		// it, so an "all clear" beside it would describe an install
+		// nothing runs. This is reachable from the working directory
+		// too: a broken ./bridge.yaml is what gets graded even when the
+		// platform config is fine, because it is what `bridge status`
+		// and `bridge serve` run from there would read.
+		d.ConfigFile.LoadErr = err
+		if err == nil {
 			d.DataDir = cfg.DataDir
 			// The cert pair `bridge serve` would load — an explicit
 			// `tlsCertPath` included, which the cert checks used to
@@ -362,11 +383,17 @@ func doctorConfigDir(explicit, resolved string, found bool) string {
 		}
 		return dir
 	}
-	dir := filepath.Dir(resolved)
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
+	return absOrAsGiven(filepath.Dir(resolved))
+}
+
+// absOrAsGiven is p made absolute for the report. It keeps p as given in
+// the one case filepath.Abs refuses, an unreadable working directory,
+// rather than losing the path entirely.
+func absOrAsGiven(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
 	}
-	return dir
+	return p
 }
 
 // relocatedSidecarCounts opens the manifest for one doctor probe and

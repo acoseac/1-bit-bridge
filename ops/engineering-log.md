@@ -9635,42 +9635,97 @@ other than the local hit. `TestMenuDoctorGradesTheMenusOwnConfig` drives
 `dido` (Docker 29.1.3, buildx 0.30.1). Both containers ran docs/docker.md's
 "Running" command plus the "Enabling" env vars, over a two-file library
 (FLAC and ALAC), under separate names, ports and volumes. Doctor ran as the
-image's `bridge` user.
+image's `bridge` user. The branch image was built with `docker buildx build
+--load` at `fa5fb65`, which carries the round-1 check below, and the compile
+was not cached. (A first build at `dd42c31`, before that check, gave the same
+rows with one line fewer: 14 ok.)
 
-| Run | v0.2.0 (`ghcr.io/acoseac/1-bit-bridge:0.2.0`) | this branch (`docker buildx build --load`, compile not cached) |
+| Run | v0.2.0 (`ghcr.io/acoseac/1-bit-bridge:0.2.0`) | this branch |
 |---|---|---|
-| `bridge doctor` | config-dir `/home/bridge/.config/1-bit-bridge`; port-api / port-admin FAIL `in use`; audio-toolchain `not enabled`; exit 1 | config-dir `/data`; both `bound by our own bridge (pid 1)`; `sox v14.4.2, FLAC supported`; 14 ok / 2 warn / 0 fail; exit 0 |
+| `bridge doctor` | config-dir `/home/bridge/.config/1-bit-bridge`; port-api / port-admin FAIL `in use`; audio-toolchain `not enabled`; exit 1 | config-file `/data/bridge.yaml`; config-dir `/data`; both ports `bound by our own bridge (pid 1)`; `sox v14.4.2, FLAC supported`; 15 ok / 2 warn / 0 fail; exit 0 |
 | `bridge doctor --config /data/bridge.yaml` | ok; exit 0 | identical to the plain run; exit 0 |
-| `docker exec -e BRIDGE_FINGERPRINT_ENABLED=true … bridge doctor` | fingerprint-toolchain `not enabled` | fingerprint-toolchain FAIL `no AcoustID API key`, which is what the docs promise |
-| `docker exec -w / … bridge doctor` | FAIL; exit 1 | FAIL; exit 1. Nothing sits at `/`, so the pass above is the WORKDIR lookup |
-| `/home/bridge/.config/1-bit-bridge` after the plain run | created | absent (created later by the `-w /` run, whose nothing-found answer is the platform dir) |
+| `docker exec -e BRIDGE_FINGERPRINT_ENABLED=true … bridge doctor` (at `dd42c31`) | fingerprint-toolchain `not enabled` | fingerprint-toolchain FAIL `no AcoustID API key`, which is what the docs promise |
+| `--config` a copy of the config plus `libraryNmae: typo` | both ports FAIL; exit 1 | config-file FAIL `… line 8: field libraryNmae not found in type config.Config`, both ports FAIL; exit 1 |
+| `--config` a copy with mode 0000 | both ports FAIL; exit 1 | config-file WARN `… not readable by this user: … permission denied`, both ports FAIL; exit 1 |
+| `docker exec -w / … bridge doctor` | FAIL; exit 1 | config-file `none found (looked at /bridge.yaml, /home/bridge/.config/1-bit-bridge/bridge.yaml)`, both ports FAIL; exit 1. Nothing sits at `/`, so the pass in the first row is the WORKDIR lookup |
+| `/home/bridge/.config/1-bit-bridge` after the plain run (at `dd42c31`) | created | absent (created later by the `-w /` run, whose nothing-found answer is the platform dir) |
 
-The two warns are service-manager and browser-opener, which a container has
-no use for; they appear with `--config` too.
+`bridge status --config` and `bridge cert info --config` exit 2 on the typo'd
+copy in both images.
+
+The old image's exit 1 on the typo'd copy is the trap in this table. It is
+right only by accident: doctor graded defaults, and in a live container the
+defaults are the bridge's own ports, which it then could not attribute. A host
+whose bridge listens anywhere else got "all clear" instead (the Mac
+measurement in round 1 below). So the runbook's validation step looked as
+though it worked on any bridge on the default ports. That is #984's lesson
+again, where a check fails for a reason other than the one it names.
+
+The two warns in the plain runs are service-manager and browser-opener, which
+a container has no use for; they appear with `--config` too.
 
 ### Docs
 
 The published `latest` is v0.2.0, which still has the old lookup. So
 docs/docker.md keeps `--config /data/bridge.yaml` in every example (it works
 on every image) and puts the failure in the past tense, scoped to images up to
-v0.2.0. The Dockerfile describes the image built from its own tree, so its
-`lsof` comment states the fixed behaviour and gives the version history only
-as the reason the docs pass the flag.
+v0.2.0. It also names the `config-file` line for later images. The
+Dockerfile describes the image built from its own tree, so its `lsof`
+comment states the fixed behaviour and gives the version history only as
+the reason the docs pass the flag. ops/deployment-runbook.md's "Validate a
+config edit BEFORE restarting" now holds, and it says from which PR, and
+that a config doctor cannot READ is only a warn, so it should be run as the
+service's user.
 
-### Found, not fixed
+### Round 1: a config that does not load (CodeRabbit), fixed here
 
-A config that EXISTS but does not load is still dropped without a word.
-`buildDoctorDeps` ignores `config.Load`'s error, as it has since doctor landed
-(#24, 2026-04-24), and grades the install config-less. Measured on a Mac: a
-bridge.yaml with one typo'd key (`libraryNmae`) on free ports gives `bridge
-doctor --config <it>` "all clear" and exit 0, graded against the default ports
-7788/7789 rather than the file's, while `bridge status` and `bridge cert info`
-exit 2 on the same file. So `ops/deployment-runbook.md`'s "Validate a config
-edit BEFORE restarting" (`bridge doctor --config <path>` … "a bad key is a
-non-zero exit") has not held since it was written on 2026-09-08. This PR
-changes which file can hit that, not whether: a broken `./bridge.yaml` is now
-dropped the way a broken platform config always was, where before doctor
-ignored the local file entirely. It is left for its own PR, because the fix is
-a new report line (fail on a config that exists and will not load, and name
-the config that was graded), which changes the CLI table, the JSON envelope
-and the console's Diagnostics at once.
+The first push recorded this as found-not-fixed and CodeRabbit flagged it as
+Major, correctly: the defect is old, but this PR made a new case of it
+reachable.
+
+- **The defect.** `buildDoctorDeps` ignored `config.Load`'s error, as it had
+  since doctor landed (#24, 2026-04-24), and graded the install config-less.
+  Measured on a Mac before the fix: a bridge.yaml with one typo'd key
+  (`libraryNmae`) on free ports gave `bridge doctor --config <it>` "all clear"
+  and exit 0. It graded the default ports 7788/7789 rather than the file's,
+  while `bridge status` and `bridge cert info` exited 2 on the same file. So
+  `ops/deployment-runbook.md`'s "Validate a config edit BEFORE restarting"
+  (`bridge doctor --config <path>` … "a bad key is a non-zero exit") had not
+  held since it was written on 2026-09-08.
+- **Why it belongs to this PR.** The local-first lookup made a broken
+  `./bridge.yaml` shadow a platform config that loads, because it is the file
+  `bridge status` and `bridge serve` run from there read. Before this PR,
+  doctor ignored the local file. The first push's entry conceded as much ("this
+  PR changes which file can hit that, not whether") and deferred it as scope.
+  CLAUDE.md's rule that a fix's own blast radius is its PR's to check says
+  otherwise.
+- **The fix.** A `config-file` check, first after `platform`:
+  - ok, naming the file, when it loaded;
+  - ok "none found (looked at …)" when missing, so a missing config stays
+    acceptable;
+  - FAIL "`<path>` does not load: `<error>`" when it is there and does not
+    load, flattened to one line because a YAML error spans lines;
+  - WARN when that error is a permission failure (`errors.Is(err,
+    fs.ErrPermission)`), a fact about who ran doctor rather than the file,
+    which is the cert checks' precedent for an unreadable key on the
+    public-mode layout;
+  - skipped when the lookup is nil. That is `bridge init`'s preflight, on
+    purpose: a broken existing config must not block the re-init that
+    replaces it.
+
+  The config is loaded by its absolute name, so the embedded error spells the
+  path the way the report does. The first draft loaded the relative
+  "bridge.yaml" and the permission control printed `read config
+  "bridge.yaml"` beside the absolute path.
+- **Controls** (committed first, `-count=1`):
+
+  | Control | Red |
+  |---|---|
+  | check not dispatched | the names test and both cmd/bridge tests |
+  | load error not recorded | only `TestDoctorReportsAWorkingDirectoryConfigThatDoesNotLoad` and `TestDoctorOnlyWarnsAboutAConfigItCannotRead`: the unit test builds its Deps by hand, so only these can see the wiring |
+  | no permission branch | the unit subtest and the end-to-end permission test (real `EACCES` through config.Load's `%w`) |
+  | summary not flattened | only the unit subtest |
+  | `Tried` not recorded | only the nothing-found subtest |
+
+- **After.** The same typo'd file gives `[FAIL] config-file … field
+  libraryNmae not found in type config.Config` and exit 1.

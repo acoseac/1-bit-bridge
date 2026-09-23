@@ -90,6 +90,13 @@ type Deps struct {
 	ConfigDir    string
 	DataDir      string
 	LibraryRoots []string
+	// ConfigFile is the caller's bridge.yaml lookup: which file it found
+	// and whether that file loaded (checkConfigFile). Nil means the
+	// caller did not look one up, which the check reports as skipped.
+	// `bridge init`'s preflight leaves it nil on purpose: it grades the
+	// install it is about to write, and a broken existing config must
+	// not block the re-init that replaces it.
+	ConfigFile *ConfigFile
 	// APIPort is the main HTTPS port the server binds, typically 7788.
 	APIPort int
 	// AdminPort is the loopback admin console port, typically 7789.
@@ -276,6 +283,7 @@ func (r *Report) HasFail() bool { return r.FailCount() > 0 }
 func Run(ctx context.Context, d Deps) Report {
 	checks := []func(context.Context, Deps) Check{
 		checkPlatform,
+		checkConfigFile,
 		checkConfigDir,
 		checkTLSCert,
 		checkTLSCertSANs,

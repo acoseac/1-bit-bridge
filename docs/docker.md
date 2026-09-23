@@ -395,7 +395,9 @@ so without the flag it graded an install with no config at all:
 port" against the bridge's own listeners, since the data dir that holds
 `server.pid` comes from the config. Later images read
 `/data/bridge.yaml` from the container's working directory, as
-`bridge status` and `bridge cert info` do.
+`bridge status` and `bridge cert info` do. They also name the file they
+graded on the report's `config-file` line, which FAILs if the file is
+there but will not load.
 
 ### Variant storage (`variantsDir`)
 

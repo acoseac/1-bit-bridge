@@ -2207,12 +2207,18 @@ mentions across the four `ops/audit-*.md` files.
   seven weeks after #639 made it write one, and a re-check without the flag
   would have CONFIRMED that, since it failed identically for another reason:
   **measure an old image's doctor with `--config`, or you are measuring its
-  config lookup.** ⚠️ **Doctor still DROPS a config that exists but will not
-  load**: `config.Load`'s error is ignored and the install is graded
-  config-less, so a typo'd key reads "all clear", exit 0, where `bridge
-  status` exits 2. It does not validate a config edit yet, whatever
-  ops/deployment-runbook.md's "Validate a config edit BEFORE restarting"
-  says (measured in the log's #985 entry). (#984, #985)
+  config lookup.** **The `config-file` line names the config the report
+  graded, and one that is THERE but will not load FAILS.** Until #985 the
+  load error was dropped without a word, so a typo'd key read "all clear",
+  exit 0, where `bridge status` exits 2 on the same file. The local-first
+  lookup made that worse: a broken `./bridge.yaml` shadows a good platform
+  config (CodeRabbit's finding). The FAIL is what makes the runbook's
+  "validate a config edit BEFORE restarting" step true. A MISSING config is
+  ok, and the line names where doctor looked. One this user cannot READ
+  only WARNS, because that is a fact about the doctor run (the public-mode
+  layout, as with the cert key). `bridge init`'s preflight leaves the
+  lookup nil, so the check reports itself skipped and a broken existing
+  config cannot block the re-init that replaces it. (#984, #985)
 - **The image's `lsof` package is load-bearing — don't drop it to slim the
   image.** Alpine's own `/usr/bin/lsof` is busybox's applet, which ignores
   `-iTCP:<port> -sTCP:LISTEN -t` and lists every open file, and

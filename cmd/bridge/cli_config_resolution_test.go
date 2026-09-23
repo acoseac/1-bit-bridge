@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/doctor"
 )
 
 // nonTestGoFilesInPackage lists the package's production .go files by base
@@ -250,6 +254,81 @@ func TestDoctorResolvesTheWorkingDirectoryConfig(t *testing.T) {
 	if !filepath.IsAbs(d.ConfigDir) || !sameFile(t, d.ConfigDir, cwd) {
 		t.Errorf("ConfigDir = %q, want the working directory %q as an absolute path", d.ConfigDir, cwd)
 	}
+	// And the report names the file it graded.
+	if d.ConfigFile == nil || d.ConfigFile.LoadErr != nil ||
+		!sameFile(t, d.ConfigFile.Path, filepath.Join(cwd, defaultConfigPath)) {
+		t.Errorf("ConfigFile = %+v, want the local bridge.yaml, loaded", d.ConfigFile)
+	}
+}
+
+// TestDoctorReportsAWorkingDirectoryConfigThatDoesNotLoad is the case the
+// lookup change made reachable (CodeRabbit on #985). A ./bridge.yaml that
+// does not load now shadows a platform config that does, because it is the
+// file `bridge status` and `bridge serve` run from the same directory read,
+// and refuse. Dropped silently, as every unloadable config used to be, it
+// left doctor grading defaults: "all clear" about ports the file does not
+// name, while every other command exits 2. It must FAIL, which is also what
+// makes `bridge doctor --config <path>` a check on a config edit before a
+// restart.
+func TestDoctorReportsAWorkingDirectoryConfigThatDoesNotLoad(t *testing.T) {
+	cwd, platform := isolateConfigEnv(t)
+	writeInstallAt(t, platform, "platform-track.flac")
+	// config.Load decodes with KnownFields, so one misspelt key is a load
+	// failure: the typo a hand edit makes.
+	if err := os.WriteFile(filepath.Join(cwd, defaultConfigPath), []byte("libraryNmae: typo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if d := buildDoctorDeps(""); d.DataDir != "" {
+		t.Errorf("DataDir = %q: doctor graded a config other than the local one "+
+			"every command run from here reads", d.DataDir)
+	}
+
+	var so, se bytes.Buffer
+	if code := doctorCmd([]string{"--json"}, &so, &se); code != 1 {
+		t.Errorf("doctor exited %d on a config that does not load, want 1; stderr:\n%s", code, se.String())
+	}
+	var rep jsonDoctorReport
+	if err := json.Unmarshal(so.Bytes(), &rep); err != nil {
+		t.Fatalf("decode the JSON report: %v\n%s", err, so.String())
+	}
+	for _, c := range rep.Checks {
+		if c.Name != "config-file" {
+			continue
+		}
+		if c.Status != string(doctor.Fail) || !strings.Contains(c.Summary, "libraryNmae") ||
+			!strings.Contains(c.Summary, defaultConfigPath) {
+			t.Errorf("config-file = %s %q, want a fail naming the local file and the key "+
+				"that does not load", c.Status, c.Summary)
+		}
+		return
+	}
+	t.Fatalf("no config-file check in the report:\n%s", so.String())
+}
+
+// TestDoctorOnlyWarnsAboutAConfigItCannotRead: a permission failure is a
+// fact about who ran doctor, not about the file (on the public-mode layout
+// the operator is not the service user), so it warns where a config that
+// does not load fails. It also checks the classification survives
+// config.Load's own error wrapping, which a hand-built error cannot.
+func TestDoctorOnlyWarnsAboutAConfigItCannotRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not deny a read on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-0000 file")
+	}
+	cwd, _ := isolateConfigEnv(t)
+	cfgPath := writeInstallAt(t, cwd, "local-track.flac")
+	if err := os.Chmod(cfgPath, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	c := findCheck(t, doctor.Run(context.Background(), buildDoctorDeps("")), "config-file")
+	if c.Status != doctor.Warn || !strings.Contains(c.Summary, defaultConfigPath) {
+		t.Errorf("config-file = %s %q on a config this user cannot read, want a warn naming it",
+			c.Status, c.Summary)
+	}
 }
 
 // TestDoctorConfigDirFollowsTheResolvedConfig pins the config-dir check's
@@ -270,8 +349,18 @@ func TestDoctorConfigDirFollowsTheResolvedConfig(t *testing.T) {
 	})
 	t.Run("no config anywhere grades the platform dir, where init writes", func(t *testing.T) {
 		_, platform := isolateConfigEnv(t)
-		if got := buildDoctorDeps("").ConfigDir; got != platform {
-			t.Errorf("ConfigDir = %q, want the platform dir %q", got, platform)
+		d := buildDoctorDeps("")
+		if d.ConfigDir != platform {
+			t.Errorf("ConfigDir = %q, want the platform dir %q", d.ConfigDir, platform)
+		}
+		// And the report says where it looked, as absolute paths.
+		if d.ConfigFile == nil {
+			t.Fatal("ConfigFile is nil: the report cannot say where it looked")
+		}
+		tried := d.ConfigFile.Tried
+		if len(tried) != 2 || !filepath.IsAbs(tried[0]) || filepath.Base(tried[0]) != defaultConfigPath ||
+			tried[1] != filepath.Join(platform, defaultConfigPath) {
+			t.Errorf("ConfigFile.Tried = %q, want ./bridge.yaml made absolute, then the platform path", tried)
 		}
 	})
 	t.Run("an explicit relative path grades its directory, made absolute", func(t *testing.T) {
@@ -341,9 +430,10 @@ func TestNoSubcommandTailBypassesLoadCLIConfig(t *testing.T) {
 		// These never hand config.Load the flag's empty default: init.go
 		// writes the file then reads it back; doctor.go resolves through
 		// resolveConfigPath, the same lookup as loadCLIConfig, and loads
-		// only a path it found, because it must also run with NO config
-		// (before `bridge init`), which loadCLIConfig treats as an error;
-		// menu.go holds packaging.IsInitialized()'s platform path.
+		// only a path it found, because it must REPORT a missing config
+		// (it runs before `bridge init`) or one that does not load, both
+		// of which loadCLIConfig makes an error; menu.go holds
+		// packaging.IsInitialized()'s platform path.
 		"init.go":   true,
 		"doctor.go": true,
 		"menu.go":   true,
