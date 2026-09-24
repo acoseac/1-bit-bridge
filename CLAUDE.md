@@ -493,6 +493,25 @@ lost my library."
   dropped for every M4A. Don't reintroduce a raw-byte alias; it would be compared
   against the mangled key and still miss. **Tests must use the real `\xa9…` byte
   keys** — UTF-8 `©ART` fixtures match the alias without reproducing the bug.
+- **dhowden/tag does not read `gnre`, and keeps the data-atom locale on every
+  MP4 freeform value** (ExtractorVersion 15, from a report that Rock / Pop listed
+  only DSD). iTunes and Music write a STANDARD genre as `gnre` (uint16, ID3v1
+  index PLUS ONE) and only a custom genre as `©gen`; `extractMP4PredefinedGenre`
+  reads it when no text genre was found, from `id3v1Genres` — dhowden's table
+  VERBATIM, pinned index by index against dhowden's own `"(n)"` expansion so an
+  M4A `gnre` and an MP3 numeric TCON name one genre (the iOS
+  `GenreNormalizer.id3GenreTable` mirrors the same table). dhowden's
+  `readCustomAtom` slices a `data` body past the type indicator but not the
+  locale, so every `----` value arrived `"\x00\x00\x00\x00<value>"` —
+  NUL-prefixed MusicBrainz ids on the wire, unparseable ReplayGain / original
+  year. `stripMP4FreeformLocales` removes it ONCE, right after `tag.ReadFrom`,
+  before any reader of `m.Raw()`; only a value STARTING with the locale is
+  touched (standard atoms never carry it). Two premise tests fail the day
+  dhowden fixes either — delete the workaround then, not before. **The moov
+  search is bounded by the FILE SIZE, never a byte span**: `findMoov` stopped at
+  4 MiB until v15, costing every moov-after-mdat M4A (ffmpeg's default) its
+  codec, rate, bits and duration. The M4A fixtures in `testdata/m4a` are
+  byte-identical to the iOS app's `AVTagFixtures`; regenerate both or neither.
 - **`Track.Enriched` allocates per row; don't reintroduce package-level singleton
   bool pointers.** `Track` is exported, so a shared pointer lets any downstream
   write clobber every subsequent read for the process lifetime. The cost is
