@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylistgen"
 )
@@ -58,7 +59,11 @@ func runSmartPlaylistRegenerator(ctx context.Context, store *manifest.Store, ana
 		opts := smartplaylistgen.DefaultOptions(time.Now().UnixNano(), analysisOn)
 		n, err := smartplaylistgen.Regenerate(ctx, store, opts)
 		if err != nil {
-			logger.Warn("smart-playlist regeneration failed", "err", err)
+			// A regeneration that shutdown stopped is not a failed one. nil
+			// still goes to the run state, since `running` has to clear.
+			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+				logger.Warn("smart-playlist regeneration failed", "err", failure)
+			}
 			status.sweepFinished(nil)
 			return
 		}

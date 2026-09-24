@@ -9,6 +9,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -160,7 +161,11 @@ func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, enabled f
 func (s *fingerprintSweeper) sweep(ctx context.Context) *admin.FingerprintSweepCounts {
 	cands, err := s.collectCandidates(ctx)
 	if err != nil {
-		logger.Warn("fingerprint sweep: list candidates", "err", err)
+		// A listing that shutdown stopped is not a failed sweep: only what
+		// is left once the cancellation is taken out is reported.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Warn("fingerprint sweep: list candidates", "err", failure)
+		}
 		return nil
 	}
 	if len(cands) == 0 {
