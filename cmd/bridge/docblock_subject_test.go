@@ -400,13 +400,12 @@ func scanDocblockSubjects(r docScanReporter, root string, wholeTree bool) (misat
 			}
 			return nil
 		}
-		// A file the go tool ignores is skipped too: a name beginning with
-		// "." or "_" (`go help packages`). Editors create such files in
-		// place — emacs's `.#name.go` lock is a dangling symlink — and
-		// parsing one failed this guard over a file no build reads
-		// (Gemini consult on #990).
-		if name := d.Name(); !strings.HasSuffix(name, ".go") ||
-			strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+		// A file the go tool ignores is skipped too (goToolIgnores: a name
+		// beginning with "." or "_"). Editors create such files in place —
+		// emacs's `.#name.go` lock is a dangling symlink — and parsing one
+		// failed this guard over a file no build reads (Gemini consult on
+		// #990; the rule became goToolIgnores in #993).
+		if name := d.Name(); !strings.HasSuffix(name, ".go") || goToolIgnores(name) {
 			return nil
 		}
 		files = append(files, path)
