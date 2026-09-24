@@ -68,6 +68,13 @@ func (r *Recorder) Failures(msgs ...string) []string {
 	})
 }
 
+// Lines returns, rendered one per line, every record logged so far whose
+// message is msg, at any level. A pass's summary is logged at Info, below
+// what Failures returns.
+func (r *Recorder) Lines(msg string) []string {
+	return r.render(func(rec slog.Record) bool { return rec.Message == msg })
+}
+
 // render formats the records match accepts as "LEVEL message key=value ...",
 // in the order they were logged.
 func (r *Recorder) render(match func(slog.Record) bool) []string {

@@ -28,6 +28,8 @@ const (
 	msgDeleteFailed      = "integrity variant sweep: DB delete failed"
 	msgOrphanListFailed  = "orphan sidecar sweep: AllVariants failed"
 	msgWalkAborted       = "orphan sidecar sweep: walk aborted"
+	msgTickComplete      = "orphan sidecar sweep: tick complete"
+	msgTickCutShort      = "orphan sidecar sweep: tick cut short"
 	cancelVariantID      = "upscaled-v2-176400-24"
 )
 
@@ -42,9 +44,12 @@ func TestAVariantSweepStoppedWhileListingReportsNothing(t *testing.T) {
 	}), &fakeDeleter{}, nil, staticDir(t.TempDir()), time.Hour, 20)
 
 	rec := loggingtest.Record(t)
-	w.tick(ctx)
+	report := w.tick(ctx)
 
 	mustNotReport(t, rec, msgVariantListFailed)
+	if !report.Skipped || !report.Cancelled {
+		t.Errorf("report = %+v, want skipped and cancelled", report)
+	}
 }
 
 // TestAVariantSweepWhoseListingFailsStillReportsIt is the twin.
@@ -53,9 +58,12 @@ func TestAVariantSweepWhoseListingFailsStillReportsIt(t *testing.T) {
 		staticDir(t.TempDir()), time.Hour, 20)
 
 	rec := loggingtest.Record(t)
-	w.tick(context.Background())
+	report := w.tick(context.Background())
 
 	mustReportOnce(t, rec, msgVariantListFailed)
+	if !report.Skipped || report.Cancelled {
+		t.Errorf("report = %+v, want skipped and not cancelled", report)
+	}
 }
 
 // TestAVariantSweepStoppedInARowWriteReportsNothing: the shutdown lands in
@@ -160,9 +168,11 @@ func TestAnOrphanSweepWhoseListingFailsStillReportsIt(t *testing.T) {
 	mustReportOnce(t, rec, msgOrphanListFailed)
 }
 
-// TestAnOrphanSweepStoppedMidWalkReportsNothing: the shutdown lands between
-// the listing and the walk, which then stops at its first entry.
-func TestAnOrphanSweepStoppedMidWalkReportsNothing(t *testing.T) {
+// TestAnOrphanSweepWhoseWalkIsStoppedReportsNothing: the shutdown lands
+// between the listing and the walk, which then stops at its first entry.
+// Nothing is reported, and the tick's summary does not call it complete: it
+// is cut short, and says the shutdown stopped it.
+func TestAnOrphanSweepWhoseWalkIsStoppedReportsNothing(t *testing.T) {
 	dir := orphanTree(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -175,6 +185,7 @@ func TestAnOrphanSweepStoppedMidWalkReportsNothing(t *testing.T) {
 	s.tick(ctx)
 
 	mustNotReport(t, rec, msgWalkAborted)
+	mustSummarise(t, rec, msgTickCutShort, "cancelled=true")
 }
 
 // TestAnOrphanSweepWhoseWalkRunsOutOfTimeStillReportsIt is the twin. The
@@ -192,6 +203,38 @@ func TestAnOrphanSweepWhoseWalkRunsOutOfTimeStillReportsIt(t *testing.T) {
 	s.tick(ctx)
 
 	mustReportOnce(t, rec, msgWalkAborted)
+	mustSummarise(t, rec, msgTickCutShort, "cancelled=false")
+}
+
+// TestAnOrphanSweepThatFinishesCallsItsTickComplete is the control for the
+// two above: a walk that finishes is summarised as complete.
+func TestAnOrphanSweepThatFinishesCallsItsTickComplete(t *testing.T) {
+	dir := orphanTree(t)
+	s := NewOrphanSidecarSweeper(sidecarListerFunc(func(context.Context) ([]VariantSnapshot, error) {
+		return []VariantSnapshot{{SidecarPath: filepath.Join(dir, "live-row.upscaled-v1-96000-24.flac")}}, nil
+	}), staticDir(dir), time.Hour)
+
+	rec := loggingtest.Record(t)
+	s.tick(context.Background())
+
+	mustSummarise(t, rec, msgTickComplete, "cancelled=false")
+}
+
+// mustSummarise fails the test unless the tick logged exactly one summary,
+// under msg, carrying attr.
+func mustSummarise(t *testing.T, rec *loggingtest.Recorder, msg, attr string) {
+	t.Helper()
+	other := msgTickComplete
+	if msg == msgTickComplete {
+		other = msgTickCutShort
+	}
+	if got := rec.Lines(other); len(got) != 0 {
+		t.Errorf("the tick was summarised as %q:\n%s", other, strings.Join(got, "\n"))
+	}
+	got := rec.Lines(msg)
+	if len(got) != 1 || !strings.Contains(got[0], " "+attr) {
+		t.Errorf("summary lines %q = %q, want one carrying %s", msg, got, attr)
+	}
 }
 
 // orphanTree is a variants directory with one sidecar in it, so a walk has
