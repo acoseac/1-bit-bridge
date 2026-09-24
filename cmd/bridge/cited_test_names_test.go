@@ -263,23 +263,15 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 			symlink(t, lockData, filepath.Join(root, ".#notes.md"))
 		}},
 		{"a worktree of another branch, with its own go.mod", false, func(t *testing.T, root string) {
-			wt := filepath.Join(root, ".claude", "worktrees", "old-branch")
-			if err := os.MkdirAll(wt, 0o755); err != nil {
-				t.Fatal(err)
-			}
 			// Its copy still defines the parked test, which would satisfy the
 			// citation in this tree's prod.go, and still cites a test this
 			// tree has never had.
-			for name, body := range map[string]string{
+			writeTree(t, filepath.Join(root, ".claude", "worktrees", "old-branch"), map[string]string{
 				".git":      "gitdir: /elsewhere/.git/worktrees/old-branch\n",
 				"go.mod":    "module x\n",
 				"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n",
 				"prod.go":   "package x\n\n// Guarded by TestOnlyTheOldBranchCites.\nfunc f() {}\n",
-			} {
-				if err := os.WriteFile(filepath.Join(wt, name), []byte(body), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
+			})
 		}},
 	}
 	for _, row := range rows {
@@ -318,6 +310,40 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 					"compiles cannot satisfy a citation", got, want)
 			}
 		})
+	}
+}
+
+// TestScanTestCitationsReadsARootNamedLikeASkippedDirectory pins that the
+// directories the walk skips by name are skipped below the root only.
+// filepath.WalkDir hands its first callback the root's own base name, so a
+// checkout cloned into a directory called bin, dist or vendor matched the
+// list, and the walk skipped the whole tree. The floors then failed on a
+// tree the guard had never read. (Gemini on #995.)
+func TestScanTestCitationsReadsARootNamedLikeASkippedDirectory(t *testing.T) {
+	for _, name := range []string{"bin", "dist", "vendor"} {
+		root := filepath.Join(t.TempDir(), name)
+		writeTree(t, root, map[string]string{
+			"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestReal(t *testing.T) { _ = t }\n",
+		})
+		if _, defined, _ := scanTestCitationsIn(t, root, nil); !defined["TestReal"] {
+			t.Errorf("a root named %q was not read: defined = %v", name, defined)
+		}
+	}
+}
+
+// writeTree creates dir and writes each file in files into it, by name. It
+// sits outside the row that uses it for SonarCloud go:S3776: inside the
+// closure its loop took the table test's cognitive complexity to 16, against
+// the 15 allowed.
+func writeTree(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -633,10 +659,13 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 	return cited, defined, len(mdCitations)
 }
 
-// skipsForCitations reports whether the walk leaves a directory unread: the
-// repository's metadata, and build output or vendored code, whose
-// conventions are not ours to police; and, below the root, any directory
-// that holds a go.mod of its own.
+// skipsForCitations reports whether the walk leaves a directory below the
+// root unread: the repository's metadata, and build output or vendored code,
+// whose conventions are not ours to police; and any directory that holds a
+// go.mod of its own. The root itself is never skipped. filepath.WalkDir hands
+// the first callback the root's own base name, so with the name list checked
+// first, a checkout cloned into a directory called bin, dist or vendor
+// skipped itself. (Gemini on #995.)
 //
 // A directory with its own go.mod is another module. `go test ./...` from
 // the root never runs it, so a test declared there satisfies no citation
@@ -655,11 +684,11 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 // of that name does not. If the stat fails for any other reason the walk
 // reads the directory, and its own ReadDir reports what is wrong.
 func skipsForCitations(root, path, name string) bool {
-	if name == ".git" || name == "dist" || name == "bin" || name == "vendor" {
-		return true
-	}
 	if path == root {
 		return false
+	}
+	if name == ".git" || name == "dist" || name == "bin" || name == "vendor" {
+		return true
 	}
 	fi, err := os.Stat(filepath.Join(path, "go.mod"))
 	return err == nil && !fi.IsDir()
