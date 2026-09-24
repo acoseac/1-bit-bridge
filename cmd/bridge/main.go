@@ -3880,6 +3880,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				rate := cfg.Upscale.EffectiveBootstrapTargetRate()
 				bits := cfg.Upscale.EffectiveBootstrapTargetBits()
 				if seedErr := manifestStore.SetUpscaleTarget(ctx, rate, bits); seedErr != nil {
+					// A shutdown that lands in the seed stops serve before
+					// it served anything. That is a requested stop, not a
+					// failed start, so it exits as a shutdown does. Only
+					// the seed can: it is the one startup step that runs
+					// on ctx and returns 1.
+					if ctxerr.WithoutCancellation(ctx, seedErr) == nil {
+						return 0
+					}
 					fmt.Fprintf(stderr, "seed upscale target: %v\n", seedErr)
 					return 1
 				}
