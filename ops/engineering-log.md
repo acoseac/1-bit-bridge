@@ -11479,8 +11479,20 @@ which reports through a three-method `docScanReporter`. The repo test runs
 it with `wholeTree` set, so the floors still apply there, and
 `TestDocblockScanReportsBothArmsOnAFixture` runs it on a synthetic package
 with a recorder. After the move the red-first run on the unfixed tree gave
-the same 19. **SonarCloud** passed every commit. **Gemini** was over its
-daily quota and reviewed no commit; the consult below stood in for it.
+the same 19. Round 3, on 68fea730 (the three files that fix touched), had
+no actionable comments and rated the merge risk minimal. **SonarCloud**
+passed every commit. **Gemini** was over its daily quota and reviewed no
+commit; the consult below stood in for it.
+
+**Main was merged in twice.** #991 arrived first (72ba5344), then #992 and
+#993 (20cb993e). The second merge conflicted only in CLAUDE.md and this
+log, where both sides appended. Before it landed, #993's branch had been
+merged into this one in a throwaway worktree: the Go merged cleanly, and
+all five guard tests passed, so #993 added no doc either arm reports.
+#993 made `goToolIgnores` the one definition cmd/bridge's Go sweeps skip
+by; this walk had the same rule inline since #990, and now calls the
+helper (1b7e503a). A dangling `.#probe.go` lock beside the package still
+passes the guard.
 
 ### Consult
 
