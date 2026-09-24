@@ -12686,7 +12686,8 @@ Red on `5f4e4b4b` (tests and the park, no fix), green on the fix:
 | test | pins |
 |---|---|
 | `TestABackupStoppedMidSnapshotReportsNothing` | the ticker's startup snapshot, cancelled INSIDE its VACUUM: nothing on stderr or stdout, no snapshot directory, `running` cleared (red before the fix: the journal line above) |
-| `TestABackupStoppedMidPruneReportsNothing` | held on the "wrote" line and cancelled before the prune: the snapshot is reported and kept, nothing else (red before the fix: the two prune lines) |
+| `TestABackupCancelledBeforeItsPruneReportsNothing` (named `…StoppedMidPrune…` until round 3) | held on the "wrote" line and cancelled before the prune: the snapshot is reported and kept, nothing else (red before the fix: the two prune lines) |
+| `TestABackupCancelledMidPruneReportsWhatItDeleted` (added in round 3) | a cancel between the prune's first and second deletion: `pruned 1` is reported, nothing else, and the two later snapshots survive |
 | `TestABackupThatFailsIsStillReported` | on a live context, a manifest that is not a database and an unreadable snapshot manifest are both still reported |
 | `TestWithoutCancellationKeepsOnlyWhatFailed` | the helper's rows: nil; the snapshot's cancel; a prune stopped before and after two failures; a genuine error in a cancelled pass; a deadline; a deadline carrying another context's cancel; another context's cancel while ctx is live |
 | `TestSnapshotStoppedMidVacuumLeavesNothing` (internal/backup) | a cancel inside the VACUUM, with the destination file on disk: `Snapshot` returns `context.Canceled` and leaves nothing; let go without the cancel, a complete snapshot (the control that the park is not the cause) |
@@ -12698,8 +12699,8 @@ apply exactly once:
 | # | mutation | red |
 |---|---|---|
 | NC1 | the snapshot site prints the raw error | mid-snapshot test |
-| NC2 | the prune site prints the raw error | mid-prune test |
-| NC3 | the orphan-sweep site prints the raw `ReapErr` | mid-prune test |
+| NC2 | the prune site prints the raw error | pre-prune test |
+| NC3 | the orphan-sweep site prints the raw `ReapErr` | pre-prune test |
 | NC4 | any done ctx is quiet (`ctx.Err() == nil` for the ctx clause) | the deadline-carrying-a-cancel row only |
 | NC5 | a join with a cancel in it is dropped whole | the two-failures row |
 | NC6 | the error is not consulted (`passCancelled`'s shape) | the genuine-error-in-a-cancelled-pass row, and the two-failures row |
@@ -12708,7 +12709,7 @@ apply exactly once:
 | NC9 | orphan-sweep problems are never printed | the genuine orphan-sweep case |
 | NC10 | `Snapshot` wraps the vacuum error with `%v` | mid-snapshot, both internal/backup cancel tests |
 | NC11 | `Snapshot` keeps its partial directory | the same three |
-| NC12 | the join filter keeps every child whole | both join rows, and the mid-prune test |
+| NC12 | the join filter keeps every child whole | both join rows, and the pre-prune test |
 | NC13 | the park never parks | every test that waits on it, by its 10 s timeout rather than a hang |
 
 ### Process notes
@@ -12764,3 +12765,19 @@ apply exactly once:
   plan limit (72 attempts in 7 days set the allowance at 2 an hour); its
   on-demand review was free for the next 16 days, and was run on the final
   head.
+- **Round 3**, on `4f1c48fa`, CodeRabbit's on-demand review (free for the
+  promotion's 16 days, ticked for this head). Gemini: no further findings.
+  CodeRabbit (Minor, outside the diff): the "falls through to the count"
+  decision, that a prune stopped part-way still prints `pruned N`, was
+  stated in the code and above but pinned by no test, and the test named
+  "mid-prune" in fact cancels before the prune starts. Both taken. The test
+  is now `TestABackupCancelledBeforeItsPruneReportsNothing`, and
+  `TestABackupCancelledMidPruneReportsWhatItDeleted` cancels between the
+  first and second deletion. PruneContext's loop has no place to hold a
+  goroutine between removals, only the `ctx.Err()` check before each, so
+  the pass's context cancels itself: `cancelWhenGone` cancels on the first
+  `Err` after the first snapshot to go has gone. If the loop stopped
+  checking between removals, the test's precondition (the two later
+  snapshots survive) fails loudly rather than passing. NC18, the ticker
+  returning before the count on a cancelled prune, turns exactly that test
+  red.

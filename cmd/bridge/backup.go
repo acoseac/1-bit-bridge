@@ -249,7 +249,8 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		}
 		// A prune the cancel stopped falls through to the count: the
 		// snapshots it removed before stopping are gone, and saying so is
-		// a fact about this pass.
+		// a fact about this pass
+		// (TestABackupCancelledMidPruneReportsWhatItDeleted).
 		if failure := withoutCancellation(ctx, err); failure != nil {
 			fmt.Fprintf(stderr, "backup (%s): prune failed: %v\n", triggered, failure)
 			return

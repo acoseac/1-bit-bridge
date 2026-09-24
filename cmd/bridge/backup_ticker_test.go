@@ -66,14 +66,16 @@ func TestABackupStoppedMidSnapshotReportsNothing(t *testing.T) {
 	}
 }
 
-// TestABackupStoppedMidPruneReportsNothing is the second half: a snapshot
-// that landed, then a prune the cancel stops. The ticker is held on its
-// "wrote" line, after Snapshot returned and before PruneContext starts, and
-// cancelled there. That used to print two failures about a pass that failed
-// at nothing: the orphan sweep's "reported a problem ... context canceled"
-// and "prune failed: context canceled". The snapshot is still reported,
-// because it was written.
-func TestABackupStoppedMidPruneReportsNothing(t *testing.T) {
+// TestABackupCancelledBeforeItsPruneReportsNothing is the second half: a
+// snapshot that landed, then a prune that starts on a cancelled context. The
+// ticker is held on its "wrote" line, after Snapshot returned and before
+// PruneContext starts, and cancelled there, so the prune stops at its first
+// check. That used to print two failures about a pass that failed at
+// nothing: the orphan sweep's "reported a problem ... context canceled" and
+// "prune failed: context canceled". The snapshot is still reported, because
+// it was written. TestABackupCancelledMidPruneReportsWhatItDeleted is the
+// cancel that lands between two deletions.
+func TestABackupCancelledBeforeItsPruneReportsNothing(t *testing.T) {
 	dataDir := t.TempDir()
 	src := backup.Sources{DataDir: dataDir, ManifestDB: filepath.Join(dataDir, "bridge.db")}
 	backuptest.WriteSource(t, src.ManifestDB)
@@ -110,12 +112,79 @@ func TestABackupStoppedMidPruneReportsNothing(t *testing.T) {
 	}
 }
 
-// TestABackupThatFailsIsStillReported is the control on the two tests
-// above. The silence covers a pass the cancel stopped, and a pass that
-// failed on its own still says so. Each case fails on a live context: a
-// manifest database that is not a SQLite file fails the snapshot, and a
-// snapshot directory whose manifest cannot be read is reported by the orphan
-// sweep after a snapshot that succeeded.
+// TestABackupCancelledMidPruneReportsWhatItDeleted cancels the prune
+// between two deletions, and requires the count of what it removed before it
+// stopped: those snapshots are gone, so "pruned N" is a fact about the pass,
+// and nothing is reported as a failure. PruneContext's loop has no place to
+// hold a goroutine between two removals, only the ctx.Err() check before
+// each one, so the pass's context cancels itself there: cancelWhenGone
+// cancels on the first Err after the first snapshot the prune deletes has
+// gone, which is the check before the second. (CodeRabbit, #998.)
+func TestABackupCancelledMidPruneReportsWhatItDeleted(t *testing.T) {
+	dataDir := t.TempDir()
+	src := backup.Sources{DataDir: dataDir, ManifestDB: filepath.Join(dataDir, "bridge.db")}
+	backuptest.WriteSource(t, src.ManifestDB)
+	// Three snapshots older than the startup threshold, so the startup
+	// pass writes a fourth. With keep 1 the prune removes all three,
+	// newest first, so old[0] is the one it deletes first.
+	root := filepath.Join(dataDir, backup.BackupsDirName)
+	now := time.Now().UTC()
+	old := []string{
+		writeSnapshotDir(t, root, now.Add(-72*time.Hour)),
+		writeSnapshotDir(t, root, now.Add(-96*time.Hour)),
+		writeSnapshotDir(t, root, now.Add(-120*time.Hour)),
+	}
+
+	base, cancel := context.WithCancel(context.Background())
+	ctx := &cancelWhenGone{Context: base, cancel: cancel, path: old[0]}
+	done := make(chan struct{})
+	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
+	var stdout, stderr safeBuffer
+	go func() {
+		defer close(done)
+		runBackupTicker(ctx, src, func() int { return 1 }, staticInterval(24*time.Hour), nil, &stdout, &stderr, nil)
+	}()
+	waitClosed(t, done, "the backup ticker")
+
+	if got := stderr.String(); got != "" {
+		t.Errorf("a prune stopped by shutdown was reported as a failure:\n%s", got)
+	}
+	if got := stdout.String(); !strings.Contains(got, "backup (startup): pruned 1 older snapshot(s)") {
+		t.Errorf("stdout = %q, want the one snapshot the prune removed before the cancel", got)
+	}
+	for i, dir := range old {
+		_, err := os.Stat(dir)
+		if gone := errors.Is(err, os.ErrNotExist); gone != (i == 0) {
+			t.Errorf("%s gone = %v, want %v: the prune stops after its first deletion", filepath.Base(dir), gone, i == 0)
+		}
+	}
+}
+
+// cancelWhenGone is a context that cancels itself the first time its Err is
+// asked after path has gone. It places a cancel between two filesystem
+// operations that have no hook between them, only a ctx.Err() check. Done
+// and every other method are the embedded context's own.
+type cancelWhenGone struct {
+	context.Context
+	cancel context.CancelFunc
+	path   string
+}
+
+// Err cancels the context once path no longer exists, then answers as the
+// embedded context does.
+func (c *cancelWhenGone) Err() error {
+	if _, err := os.Stat(c.path); errors.Is(err, os.ErrNotExist) {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// TestABackupThatFailsIsStillReported is the control on the tests above.
+// The silence covers a pass the cancel stopped, and a pass that failed on
+// its own still says so. Each case fails on a live context: a manifest
+// database that is not a SQLite file fails the snapshot, and a snapshot
+// directory whose manifest cannot be read is reported by the orphan sweep
+// after a snapshot that succeeded.
 func TestABackupThatFailsIsStillReported(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
