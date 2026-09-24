@@ -297,9 +297,9 @@ func TestACancelledTailscalePassChangesNothing(t *testing.T) {
 // auto-pilot prints went to serve's own streams. In production the two
 // are the same file, but a boot test's is a buffer, so on a host
 // running tailscaled the line escaped into `go test`'s output, printed
-// by whichever test happened to be running. The flake this file's
-// shutdown tests pin was first read beside one such line, from a run
-// that had passed.
+// by whichever test happened to be running. The flake that
+// TestServeWaitsForAnInFlightTailscaleMint pins was first read beside
+// one such line, from a run that had passed.
 func TestAMintedTailscaleCertIsReportedOnServesStdout(t *testing.T) {
 	a, le, stdout, stderr := servingAutoPilot(t, scriptedCLI{
 		detect: func(context.Context) (servertailscale.NodeInfo, error) { return fakeNodeInfo(), nil },
