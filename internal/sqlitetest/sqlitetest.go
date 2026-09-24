@@ -27,6 +27,7 @@ package sqlitetest
 import (
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,7 +67,8 @@ func Armed() bool { return armed.Load() != nil }
 type Park struct {
 	arrived chan struct{} // a comparison is waiting to be let go
 	next    chan struct{} // lets the waiting comparison go
-	off     chan struct{} // closed when the test ends: nothing waits any more
+	off     chan struct{} // closed on Disarm: nothing waits any more
+	offOnce sync.Once
 }
 
 // Arm arms a Park, and disarms it when the test ends. One at a time: the
@@ -78,15 +80,23 @@ func Arm(t testing.TB) *Park {
 	if !armed.CompareAndSwap(nil, p) {
 		t.Fatal("sqlitetest: a Park is already armed")
 	}
-	t.Cleanup(func() {
-		armed.CompareAndSwap(p, nil)
-		close(p.off)
-	})
+	t.Cleanup(p.Disarm)
 	return p
 }
 
+// Disarm stops the Park holding anything: a statement that compares keys
+// afterwards runs straight through, and one still waiting is let go. A test
+// that runs more statements after the one it stopped, such as a second scan,
+// disarms first. Idempotent; Arm's cleanup calls it too.
+func (p *Park) Disarm() {
+	p.offOnce.Do(func() {
+		armed.CompareAndSwap(p, nil)
+		close(p.off)
+	})
+}
+
 // stop is one comparison's wait: it announces itself, then waits to be let
-// go. Both halves give way once the test has ended, so a statement that a
+// go. Both halves give way once the Park is disarmed, so a statement that a
 // failed test abandoned runs to completion instead of holding the goroutine
 // that started it.
 func (p *Park) stop() {
