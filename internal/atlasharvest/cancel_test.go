@@ -54,6 +54,12 @@ func TestATickStoppedByShutdownReportsNothingAndStopsThere(t *testing.T) {
 	c := dueClient(t, srv.URL)
 	c.Booklets = booklets
 	c.BookletFiles = newFakeBookletFiles()
+	// The booklet leg is due, so an untouched universe listing below means
+	// the tick never started it, not that it had nothing to do (Gemini API
+	// review, #1003).
+	if !bookletsCheckDue(c.State.Snapshot(), c.now(), c.submitInterval()) {
+		t.Fatal("precondition: the booklet check is not due, so this test would pass having shown nothing")
+	}
 
 	rec := loggingtest.Record(t)
 	c.tick(ctx)
