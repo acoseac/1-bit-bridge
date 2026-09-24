@@ -152,7 +152,7 @@ const testDocVerbCoverageFloor = 0.90
 // an identifier, never the first word of an English sentence. It can if it
 // starts with a lowercase letter or an underscore ("fanout", "jpeg"), or if
 // it has an uppercase letter after its first character and a lowercase letter
-// somewhere ("pickVoted", "StatusCode", "Test_FileHandler_UpstreamOffline_503").
+// somewhere ("pickVoted", "StatusCode", "JobSpecVariantID_OptimizeKind").
 //
 // An English sentence opens with a capital, so a capitalised word with no
 // other capital ("The", "Snapshot", "Tailscale", "Removal") and an
@@ -178,7 +178,7 @@ func identifierShaped(word string) bool {
 // testFuncName reports whether name has the shape `go test` gives a test
 // function's name: Test, Benchmark, Fuzz or Example, then nothing or a
 // character that is not a lowercase letter. An uppercase letter, "_" and a
-// digit all qualify ("Test_Foo", "Test1"); "Testing" does not.
+// digit all qualify, and "Testing" does not.
 func testFuncName(name string) bool {
 	for _, prefix := range []string{"Test", "Benchmark", "Fuzz", "Example"} {
 		if rest, ok := strings.CutPrefix(name, prefix); ok {
@@ -329,7 +329,7 @@ func funcParamNames(fn *ast.FuncDecl) []string {
 // "JobSpecVariantID_OptimizeKind locks …". On the unfixed tree it reported
 // 19. The other five real ones follow the name with a dash, a colon or a
 // stray word, which neither arm reads:
-// "Test_FileHandler_UpstreamOffline_503 — …".
+// "…_FileHandler_UpstreamOffline_503 — …".
 //
 // On a clean tree neither arm reports anything, so the tree cannot show
 // that either one still can. TestDocblockScanReportsBothArmsOnAFixture runs
