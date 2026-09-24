@@ -17,6 +17,11 @@ import (
 // cannot: that the header the BROWSER builds is one the SERVER accepts, and
 // that a rejected chunk is re-sent rather than killing the upload.
 
+// The declaration forms this package's client sources actually use. Tried
+// in order, longest-prefix first so "async function" is not mistaken for a
+// plain "function" starting mid-token.
+var jsFunctionAnchors = []string{"export async function ", "export function ", "async function ", "function "}
+
 // extractJSFunction slices one top-level function out of app.js by name.
 // Shared by the app.js-scanning tests in this package.
 //
@@ -34,11 +39,6 @@ import (
 //
 // readFile normalizes CRLF, so the "\n}\n" terminator is present on every
 // platform (see its docblock — this has bitten three times).
-// The declaration forms this package's client sources actually use. Tried
-// in order, longest-prefix first so "async function" is not mistaken for a
-// plain "function" starting mid-token.
-var jsFunctionAnchors = []string{"export async function ", "export function ", "async function ", "function "}
-
 func extractJSFunction(t *testing.T, src, name string) string {
 	t.Helper()
 	start := -1

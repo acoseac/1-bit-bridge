@@ -359,13 +359,6 @@ func TestUpscaleDelete_pathHappyPath(t *testing.T) {
 	}
 }
 
-// TestUpscaleDelete_kindNarrowsToUpscale pins the per-kind filter
-// contract added in PR #276 (senior-review high-severity fix from
-// Gemini): a DELETE with ?kind=upscale must delete ONLY variants
-// whose variant_id begins with "upscaled-", leaving "optimized-"
-// variants untouched. Without the filter (the load-bearing
-// gap before the fix) per-kind drawer Delete buttons would have
-// silently wiped both kinds.
 // seedMixedKindFixture installs three variant rows (one upscaled +
 // two optimized) on the deleter stub. Shared by the upscale-only
 // and optimize-only kind-narrow tests below so the row literal
@@ -381,6 +374,13 @@ func seedMixedKindFixture(deleter *stubVariantDeleter) {
 	}
 }
 
+// TestUpscaleDelete_kindNarrowsToUpscale pins the per-kind filter
+// contract added in PR #276 (senior-review high-severity fix from
+// Gemini): a DELETE with ?kind=upscale must delete ONLY variants
+// whose variant_id begins with "upscaled-", leaving "optimized-"
+// variants untouched. Without the filter (the load-bearing
+// gap before the fix) per-kind drawer Delete buttons would have
+// silently wiped both kinds.
 func TestUpscaleDelete_kindNarrowsToUpscale(t *testing.T) {
 	hs, raw, deleter, _ := deleteFixture(t, true)
 	seedMixedKindFixture(deleter)

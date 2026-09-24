@@ -169,13 +169,6 @@ func Test_CDS_Browse_RootReturnsAllTracksAndFolders(t *testing.T) {
 	}
 }
 
-// Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer pins the
-// PR-pending spec-compliance fix: BrowseMetadata on ObjectID "0" MUST
-// return a single DIDL element describing the root container itself
-// (NOT empty DIDL — strict controllers like mconnect Lite issue
-// BrowseMetadata as part of their drill-down handshake and bail to an
-// infinite spinner if the response is empty). Per Gemini consult
-// 2026-05-28.
 // Test_CDS_Browse_Root_RespectsPagination pins that the root container
 // honours StartingIndex / RequestedCount (PR-pending fix — pre-fix the
 // root always returned both children regardless of the pagination
@@ -413,6 +406,13 @@ func Test_CDS_Browse_BrowseMetadata_Track(t *testing.T) {
 	})
 }
 
+// Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer pins the
+// PR-pending spec-compliance fix: BrowseMetadata on ObjectID "0" MUST
+// return a single DIDL element describing the root container itself
+// (NOT empty DIDL — strict controllers like mconnect Lite issue
+// BrowseMetadata as part of their drill-down handshake and bail to an
+// infinite spinner if the response is empty). Per Gemini consult
+// 2026-05-28.
 func Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer(t *testing.T) {
 	lib := newTestLib(testTrack("t1", "Hello"))
 	h := ContentDirectoryHandler(lib, staticServerURL("http://server"))

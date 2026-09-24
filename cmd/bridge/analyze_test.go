@@ -130,8 +130,6 @@ func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 	}
 }
 
-// waitForSweep polls the recorder until a completed sweep newer than
-// `after` is visible or the deadline hits. Returns the lastEnd observed.
 // sweeperFixture is the shared preamble for the runAnalysisSweeper cadence
 // tests: a short settle delay so a test does not wait 90 s, plus a store and a
 // live pool, each torn down in reverse order via t.Cleanup.
@@ -250,6 +248,8 @@ func TestRunAnalysisSweeperRespectsDisabledGate(t *testing.T) {
 
 }
 
+// waitForSweep polls the recorder until a completed sweep newer than
+// `after` is visible or the deadline hits. Returns the lastEnd observed.
 func waitForSweep(t *testing.T, status *sweepStatus[admin.AnalysisSweepCounts], after time.Time, deadline time.Duration) time.Time {
 	t.Helper()
 	stop := time.Now().Add(deadline)

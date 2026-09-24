@@ -182,17 +182,6 @@ func TestApiUpscaleBatchSubmit_KindDispatch(t *testing.T) {
 	})
 }
 
-// TestApiLibraryBrowseProjection_KindOptimize wires the optimize
-// deps closures and exercises the kind=optimize branch end-to-end.
-// Verifies:
-//   - the optimize section gets distinct numbers from the upscale
-//     section (no cross-contamination at the projection level)
-//   - `TargetRate=0`/`TargetBits=16` echoes back (signals
-//     "per-track family-preserved")
-//   - the response carries `Kind:"optimize"` echo
-//   - tracks failing OptimizeEligible roll into UnknownFormatFiles
-//     (a 16/44.1 source is already at the CarPlay floor → skipped)
-//
 // wireOptimizeTestDeps installs simple stubs for all four
 // projection closures + enables upscale on the test config. Pulled
 // out of `TestApiLibraryBrowseProjection_KindOptimize` so the test
@@ -235,6 +224,16 @@ func wireOptimizeTestDeps(t *testing.T, srv *Server) {
 	srv.deps.CfgHolder.Store(next)
 }
 
+// TestApiLibraryBrowseProjection_KindOptimize wires the optimize
+// deps closures and exercises the kind=optimize branch end-to-end.
+// Verifies:
+//   - the optimize section gets distinct numbers from the upscale
+//     section (no cross-contamination at the projection level)
+//   - `TargetRate=0`/`TargetBits=16` echoes back (signals
+//     "per-track family-preserved")
+//   - the response carries `Kind:"optimize"` echo
+//   - tracks failing OptimizeEligible roll into UnknownFormatFiles
+//     (a 16/44.1 source is already at the CarPlay floor → skipped)
 func TestApiLibraryBrowseProjection_KindOptimize(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	browseTestSeed(t, srv)
