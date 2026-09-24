@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -565,11 +566,16 @@ func parkIndex(t *testing.T, s *Store, spec string) {
 	}
 }
 
+// abortTriggers numbers abortOn's triggers. A name taken from the clock
+// repeats when two calls land in one tick of a coarse clock, and the second
+// CREATE TRIGGER then fails (CodeRabbit, #1000).
+var abortTriggers atomic.Int64
+
 // abortOn makes every write matching spec fail, on a live context, with a
 // trigger that raises. spec is the trigger's timing and event.
 func abortOn(t *testing.T, s *Store, spec string) {
 	t.Helper()
-	name := fmt.Sprintf("test_abort_%d", time.Now().UnixNano())
+	name := fmt.Sprintf("test_abort_%d", abortTriggers.Add(1))
 	if _, err := s.db.Exec(`CREATE TRIGGER ` + name + ` ` + spec + ` BEGIN SELECT RAISE(ABORT, 'injected failure'); END`); err != nil {
 		t.Fatalf("create trigger %q: %v", spec, err)
 	}
