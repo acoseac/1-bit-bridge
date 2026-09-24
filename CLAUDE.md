@@ -1138,7 +1138,7 @@ no failing test — which is the shape to expect in this area.
 - **In the analysis pool, a job's count and its dedup release are ONE step,
   taken after its bookkeeping** (#987). `processJob` counted a failure, THEN
   wrote the strike and its WARN, and released the path LAST, and `Enqueue`
-  answers a held path with a silent nil. So a caller that acted on the count,
+  then answered a held path with a silent nil. So a caller that acted on the count,
   which is what a retry is, queued nothing:
   `TestASuccessfulAnalysisClearsTheStrikes` timed out on a CI runner after 900
   clean runs on a laptop, and under 3× CPU oversubscription the old pool
@@ -1179,6 +1179,26 @@ no failing test — which is the shape to expect in this area.
   the old attempt deletes. Measured on the old pool: a busy poll saw the job
   counted while in flight 400 times in 400, and every immediate retry was
   refused, while a 1 ms poll saw it 0 times in 100.
+- **Both pools answer a held path with `ErrDuplicateInflight`, and a caller
+  that counts gives it a bucket of its own** (#992). The analysis pool
+  answered with nil, and `analysisSweeper.enqueueAll` counts every nil as
+  enqueued. A track has no analysis row until its job finishes, so every
+  sweep during a long first analysis re-offers the whole backlog: the
+  `auto-analysis sweep enqueued tracks count=N` line and the Jobs card's
+  `enqueued` reported a full queue of old work as new, every sweep, in a line
+  whose parts must add up to the track total. They are `AlreadyQueued` now.
+  **A new `Enqueue` answer reaches every caller in the same change**: this
+  pool has two, and `bridge analyze`'s dispatch stops on any error it does
+  not know, so the sentinel alone would have ended a run at the first
+  duplicate (unreachable today: each candidate is a distinct track, offered
+  once to a pool the run created). `AnalysisSweepCounts` states the contract
+  the line relies on (every int field but `Total` is a bucket, and the
+  buckets partition `Total`), and `TestDescribeAnalysisSweepAccountsForEveryTrack`
+  runs the shipped `describeAnalysisSweep` under node with each bucket
+  holding a distinct power of two. A count then identifies its bucket, so
+  the test names a bucket the line leaves out or shows under another's
+  label, and a part that is no bucket at all, such as one read from a field
+  the server does not send.
 - **Every job gets its own `context.WithTimeout`, cancelled per job**, or one
   pathological file consumes a worker slot until restart. Shutdown gating reads
   the monotonic `p.closed` flag, NOT `stopCtx.Err()` — `Stop` flips the flag
@@ -2668,7 +2688,11 @@ its twin.** The top list is older, shorter, and read first.
   COMMENTS ONLY — most nested reads sit inside `${…}` template interpolations,
   which `stripJSNoise` blanks. Recursion stops at the exported shared types
   (`*JobRunState` and kin), which have other consumers. **A guard that checks
-  containers proves nothing about their contents.**
+  containers proves nothing about their contents.** One of those stops is
+  `*AnalysisSweepState`, and a field added to its `last` breakdown and never
+  rendered leaves this guard green (measured on #992), so that breakdown is
+  pinned the other way: `TestDescribeAnalysisSweepAccountsForEveryTrack`
+  executes the line that renders it.
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and
@@ -2926,6 +2950,40 @@ its twin.** The top list is older, shorter, and read first.
   shape it has never seen turns up. And merge main before pushing a
   tree-wide guard: its verdict depends on code the branch did not write,
   and here that code merged while the census ran.
+- **A test that sweeps this repo's own files decides from the NAME what it
+  opens, before it opens anything** (#993). Emacs locks a file it is editing
+  with `.#<name>` beside it. Where it can, the lock is a DANGLING symlink.
+  Where it cannot, which is always on Windows (its `filelock.c`), it is a
+  REGULAR file holding `user@host.pid:boot`. The symlink fails
+  `os.ReadFile`, and the regular file fails `parser.ParseFile` or `node`, so
+  a file-type check or tolerating ENOENT each misses one shape. A census
+  planted both shapes for eleven extensions in every tracked directory and
+  ran the suite. The symlink shape failed **19 tests in four packages** and
+  the regular-file shape 6. All were sweeps that picked files by suffix
+  alone, among them `TestEveryCitedTestNameExists` and eight tests of the
+  console's static JS. `TestNoProductionCodeLowersTheHashCost` reported a
+  lock as a production caller of `SetTestHashCost`. Each population takes
+  its own rule. A Go sweep skips a name the go tool ignores, `.` or `_`
+  (`goToolIgnores`): that file is never compiled, so a test defined in it
+  never runs and must not satisfy a citation. `internal/admin`'s static
+  sweeps skip `isEditorDetritus` (`.` or `~`) but NOT `_`, because
+  `static/*` embeds a top-level `_x.js` and it ships. The citation guard
+  asks git whether a doc is tracked BEFORE opening it; it used to discard an
+  untracked doc only after reading it, so an unreadable gitignored doc
+  failed the run. It also never opens a doc whose name begins with ".",
+  which is what covers a tree with no `.git` (a fixture, or a source
+  archive), where there is no tracked set. **No directory rule was
+  widened**: the guard reads a tracked doc and a tracked Go file under
+  `.github/`, and the go tool's `.`-directory rule would drop both. **Plant
+  the census, not one probe.** A grep for `filepath.WalkDir` reached 3 of
+  the 14 files; the rest used `os.ReadDir`, `filepath.Walk` or
+  `filepath.Glob`, whose `*` matches a leading dot. A probe lock named
+  `…_test.go` passed the hash-cost guard for the wrong reason, since that
+  guard reads only non-test files. Two failures are out of reach of test
+  code. A lock at the top of an embedded directory (`static/*`,
+  `templates/*.html`, `*.tmpl`) breaks the BUILD with `cannot embed
+  irregular file`. And Go's fuzz seed-corpus reader fails on one inside
+  `testdata/fuzz/<Name>/`.
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`

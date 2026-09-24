@@ -166,6 +166,11 @@ func TestEveryBackgroundGoroutineDrainsOnCleanup(t *testing.T) {
 	fset := token.NewFileSet()
 	checked := 0
 	for _, path := range files {
+		// A glob's `*` matches a leading dot, unlike a shell's, so this
+		// also returns an editor's lock beside a test (`.#x_test.go`).
+		if goToolIgnores(filepath.Base(path)) {
+			continue
+		}
 		checked += auditBackgroundTestsIn(t, fset, path)
 	}
 	// Thirteen at the time of writing. Adding a drained test only raises

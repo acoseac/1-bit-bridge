@@ -163,9 +163,11 @@ func TestASuccessfulAnalysisClearsTheStrikes(t *testing.T) {
 // The CI failure behind it (#986's `test -race (rest)` leg) was
 // TestASuccessfulAnalysisClearsTheStrikes waiting for Failed == 1 and then
 // re-enqueueing the same path. processJob counted the failure first, then
-// wrote the strike and its WARN, and released the path last. Enqueue answers
-// a path that is still held with nil and queues nothing, so a retry landing
-// in that window was dropped without a trace and the wait for Done ran out.
+// wrote the strike and its WARN, and released the path last. Enqueue then
+// answered a path that was still held with nil and queued nothing, so a retry
+// landing in that window was dropped without a trace and the wait for Done
+// ran out. It answers ErrDuplicateInflight now, which a retry would at least
+// see; the fix is still that the window is gone.
 // The same test passed 900 runs in a row on a laptop: a window between two
 // statements shows up on a loaded runner and nowhere else.
 //
@@ -229,11 +231,11 @@ func TestACountedFailureHasAlreadyReleasedItsPath(t *testing.T) {
 		t.Fatalf("list = (%d rows, %v) once the failure is counted, want the strike already recorded", len(rows), err)
 	}
 	if err := p.Enqueue(spec); err != nil {
-		t.Fatal(err)
+		t.Fatalf("a retry sent on Failed == 1 returned %v: the job had been counted before "+
+			"it released its path", err)
 	}
 	if got := p.Stats().Enqueued; got != 2 {
-		t.Fatalf("Enqueued = %d after a retry sent on Failed == 1, want 2: the retry was dropped "+
-			"as a duplicate of a job that had already been counted", got)
+		t.Fatalf("Enqueued = %d after a retry sent on Failed == 1 was accepted, want 2", got)
 	}
 	settle(func(st PoolStats) bool { return st.Done == 1 })
 }

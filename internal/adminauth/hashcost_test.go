@@ -68,6 +68,14 @@ func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
+		// Nor a file the go tool ignores (a name beginning with "." or "_"):
+		// it is never compiled, so it cannot weaken production. Parsing one
+		// is not fail-closed, it is wrong: emacs's `.#store.go` lock is a
+		// dangling symlink or a file of lock data, and it was reported here
+		// as a production caller of the setter.
+		if name := info.Name(); strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			return nil
+		}
 		visited++
 		file, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
 		if perr != nil {

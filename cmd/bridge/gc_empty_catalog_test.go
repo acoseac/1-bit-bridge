@@ -100,7 +100,7 @@ func TestEveryGCCommandOffersTheEmptyCatalogOverride(t *testing.T) {
 	checked := 0
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || goToolIgnores(name) {
 			continue
 		}
 		raw, err := os.ReadFile(name)

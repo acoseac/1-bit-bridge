@@ -40,11 +40,7 @@ func TestEmbeddedStaticTreeMatchesDisk(t *testing.T) {
 		if d.IsDir() {
 			return nil
 		}
-		name := d.Name()
-		// Editor/OS detritus is legitimately absent from the embed and
-		// must not be in the repo either; skip rather than fail so a
-		// stray local .DS_Store doesn't break an unrelated test run.
-		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, "~") {
+		if isEditorDetritus(d.Name()) {
 			return nil
 		}
 		onDisk[filepath.ToSlash(p)] = true
@@ -83,6 +79,23 @@ func TestEmbeddedStaticTreeMatchesDisk(t *testing.T) {
 	if len(embedded) == 0 {
 		t.Fatal("no embedded static assets — the embed directive is broken")
 	}
+}
+
+// isEditorDetritus reports whether a name under static/ belongs to an editor
+// or the OS rather than to the console: a leading "." (a .DS_Store, emacs's
+// `.#name` lock, a `._name` AppleDouble file) or a trailing "~" (a backup).
+// It is legitimately absent from the embed and must not be in the repo
+// either, so every test that reads static/ from disk skips it rather than
+// fail an unrelated run over it.
+//
+// Skipping is also the only safe way to handle one. Emacs's lock is a
+// DANGLING symlink where it can make one, and a REGULAR file holding
+// `user@host.pid:boot` where it cannot (always on Windows), so the file
+// either cannot be opened or opens as something that is not JavaScript.
+// Deliberately NOT the go tool's "_" rule as well: a top-level `_name.js`
+// is embedded by `static/*` and ships, so the parity guards must read it.
+func isEditorDetritus(name string) bool {
+	return strings.HasPrefix(name, ".") || strings.HasSuffix(name, "~")
 }
 
 // TestStaticAssetsCarryPinnedContentType pins the two headers that

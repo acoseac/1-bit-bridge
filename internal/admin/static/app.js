@@ -5783,9 +5783,16 @@ function renderAnalysisCoverage(cov) {
 // AnalysisSweepCounts). Every bucket is named, so the numbers visibly account
 // for `total`: a skip category that renders nowhere is a count that silently
 // stops adding up, which is how a reader concludes the sweeper lost tracks.
+//
+// `alreadyQueued` sits beside `enqueued` and is never folded into it. During a
+// long first analysis every sweep re-offers the whole backlog, and counting
+// what the pool already held as enqueued put a full queue (5000 by default) on
+// this line as new work, every sweep.
 function describeAnalysisSweep(last) {
   if (!last) return "not yet run";
-  const parts = [`${last.enqueued ?? 0} enqueued`, `${last.upToDate ?? 0} up to date`];
+  const parts = [`${last.enqueued ?? 0} enqueued`];
+  if (last.alreadyQueued > 0) parts.push(`${last.alreadyQueued} already queued`);
+  parts.push(`${last.upToDate ?? 0} up to date`);
   if (last.dsdExcluded > 0) parts.push(`${last.dsdExcluded} DSD`);
   if (last.zeroByte > 0) parts.push(`${last.zeroByte} zero-byte`);
   if (last.missing > 0) parts.push(`${last.missing} unresolvable`);

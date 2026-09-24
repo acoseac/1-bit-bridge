@@ -122,9 +122,14 @@ func TestPoolDedupAndQueueFull(t *testing.T) {
 	}
 	<-started // worker now blocked; its dedup slot is held
 
-	// Dedup: same path returns nil without taking a slot.
-	if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/01.flac"}); err != nil {
-		t.Fatalf("dedup Enqueue should be nil: %v", err)
+	// Dedup: the same path is refused with ErrDuplicateInflight, takes no
+	// slot and is not counted. Not nil: the serve-side sweeper counts a nil
+	// as a track it enqueued, and it re-offers every path still queued.
+	if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "A/01.flac"}); !errors.Is(err, ErrDuplicateInflight) {
+		t.Fatalf("dedup Enqueue: got %v, want ErrDuplicateInflight", err)
+	}
+	if got := p.Stats().Enqueued; got != 1 {
+		t.Fatalf("Enqueued = %d after a duplicate, want 1: a refused duplicate was counted", got)
 	}
 	// Fill the cap-1 queue with a different path.
 	if err := p.Enqueue(AnalyzeSpec{SourceLibraryRel: "B/02.flac"}); err != nil {
