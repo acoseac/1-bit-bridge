@@ -498,6 +498,12 @@ lost my library."
   to a log line, never a hung exit. A writer includes a goroutine whose CHILD
   PROCESS writes files: the Tailscale auto-pilot's `tailscale cert` was the one
   unjoined writer in `runServe` until #997 (the `cmd/bridge` section below).
+- **A scan a shutdown stops reports none of its writes as failures, and the
+  final flush DROPS its batch on purpose**: the skip gate redoes exactly what
+  was dropped, and flushing on a context detached from the cancel would hold
+  shutdown for rows the next scan writes anyway
+  (`TestAScanStoppedInItsFinalWriteLosesNothingTheNextScanCannotRedo`). The
+  rule is under **The CLI and the serve wiring**. (#1000)
 - **Anything walking FLAC metadata blocks SEEKS past a validated PICTURE payload,
   never drains it.** The single-open FLAC path exists because a 5–25 MiB embedded
   cover crossing the wire twice per track halved scanner throughput on NAS-mounted
@@ -1063,6 +1069,10 @@ no failing test — which is the shape to expect in this area.
   in-flight track permanently. The HTTP-code parser must be structural
   (`HasPrefix` + `Atoi`), never a substring match, or a 4xx whose *body* mentions
   "HTTP 503" retries forever. A clean artist no-match is still NOT cached.
+- **A stamp a shutdown stopped records nothing**: no `mark skipped` count, no
+  `enrichment skipped` line, and the row stays `enriched_at = 0`. The stop is
+  at `stampEnriched` / `markSkipped`, never at the fetches that absorb their
+  own errors. The rule is under **The CLI and the serve wiring**. (#1001)
 - **Pacing derives from the client's base URL** (`minIntervalForBase`,
   fail-safe to the public interval, dot-anchored suffix match) — public MB is
   1.1s and self-hosted is 150ms — **not zero**, because Atlas's own per-IP tier
@@ -3287,10 +3297,58 @@ mentions across the four `ops/audit-*.md` files.
   the scanner's writes (#1000), the enricher (#1001), the updater (#1002),
   the harvest tick (#1003), the integrity watchers (#1004), tsnet's start
   and status query, UPnP ingest and the premium-cover record (#1005), and
-  the tsnet goroutine's binds and HTTP/3 serves (#1009, next bullet). A
-  site is covered only once its own change has landed, so check the code
+  the tsnet goroutine's binds and HTTP/3 serves (#1009, the bullet after
+  next). The rule #999–#1005 follow is the next bullet. A site is
+  covered only once its own change has landed, so check the code
   before assuming one outside those is. (Until #1009 this still named
   only #999's two, through the six changes that followed it.)
+- **Every loop `runServe` starts reports a shutdown as a STOP, and a log
+  site in one asks `ctxerr.WithoutCancellation` with the context its PASS
+  runs on** (#999, #1000–#1005). The scanner, enricher, updater, harvest
+  client, integrity watchers, fingerprint and smart-mix sweeps, tsnet and
+  UPnP ingest all do. The PASS's context, because a timeout derived from it
+  is a failure: a harvest request that runs out of its own time while the
+  loop is live is reported (`TestATickWhoseRequestTimesOutStillReportsIt`),
+  and for the updater's "Check now" the pass IS the request. Sites that
+  check only `ctx.Err() == nil` (the scanner's lookups, the enricher's
+  searches) are the older, looser form and were left: each is a read the
+  next pass redoes. That looser form is RIGHT only where the error cannot
+  carry the cancellation: a tsnet node the shutdown closed under
+  `ListenTLS` fails with the node's own error, so `tsnetListen` asks the
+  context alone. **A stopped pass reports no failure and records no
+  verdict, count or status for the work the stop interrupted.** The
+  enricher's fetches absorb their own errors, so a cancelled portrait
+  search used to reach `markSkipped`, which counted `no_mb_match` and
+  logged `enrichment skipped` for a verdict it never wrote. It now stops
+  at `stampEnriched` / `markSkipped`, where every path converges, never at
+  the five absorb sites (a sixth would be the one that forgets), and the
+  row stays `enriched_at = 0`. The updater's `LastError` and the console's
+  UPnP "Rescan now" keep the last result that ANSWERED, and a premium
+  cover whose version record a shutdown stopped stays PENDING, so the next
+  pass records it. What a pass DID before the stop is still summarised,
+  marked `cancelled` (the integrity sweeps; an orphan walk that did not
+  finish is `tick cut short`, never `tick complete`). A shutdown during
+  `runServe`'s STARTUP is a stop too: the first-run upscale seed, the one
+  startup step that runs on the serve context and exits 1, exits 0 when
+  the shutdown lands in it. **The scanner's final flush DROPS its batch on
+  a cancel, deliberately**: the skip gate compares each file with its
+  STORED row, which the dropped write never touched, so the next scan
+  redoes exactly what was dropped. Three traps. A cancellation error from
+  an AUTOCOMMIT statement does not prove the write did not land (modernc
+  answers `ctx.Err()` whenever its interrupt fired, a committed statement
+  included). database/sql can answer `sql: statement is closed` in place
+  of the cancellation (1 in 3,000 measured), which is reported rather than
+  matched by its text. And a context cancelled BEFORE the call can pass a
+  test without reaching the site at all: the seed's `GetUpscaleTarget`
+  failed on it first and the seed was skipped, so the test was green on
+  the unfixed code. Cancel INSIDE the call the test names
+  (`internal/sqlitetest`'s collation over the column a write moves, or a
+  fake upstream that cancels and holds), assert that the cancel happened
+  there (`mustHaveReachedGitHub`), and give every stopped test a twin
+  failing on a LIVE context: without one, the site's "never log" control
+  cannot bite, which happened twice here. Joining the tsnet start
+  goroutine was #997's class, not this rule's; #1009 did it (next
+  bullet).
 - **A goroutine serve starts is stopped by a context the TEARDOWN
   cancels, and joined before anything it uses is closed** (#1009).
   runServe ran the embedded tsnet node's start (up to five minutes,
@@ -4626,6 +4684,15 @@ its twin.** The top list is older, shorter, and read first.
   locked` after the busy timeout, not as `context.Canceled`. And modernc's
   `Driver.Open` reads its collation and hook lists without a lock, so
   register in `init`.
+- **A test handler that holds a request until the client gives up must
+  DRAIN a POST's body first** (#1003). net/http notices a client hanging up
+  only once the request body is consumed, so a POST held unread sits out the
+  handler's whole bound, and the test measures the timeout rather than the
+  cancel. A cancel meant for a response's WRITE step is taken on the body's
+  first `Read`, through a wrapping transport: one taken in the handler raced
+  the client reading the headers and stopped the fetch instead in about half
+  the runs, where the transport form stayed on the write in 50 of 50 under
+  `-race` (#1001).
 
 - **A test that never touches the wiring proves nothing.** Three shapes, all of
   which shipped a dead feature with a green suite: a helper nothing calls, a

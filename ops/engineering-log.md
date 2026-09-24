@@ -12801,6 +12801,349 @@ apply exactly once:
   failed (the tool's schema asks for `issue_key`, and the server answers
   "The 'issue' parameter is missing"), so it is left for the SonarCloud UI.
 
+## 2026-09-24 — every loop `runServe` starts reports a shutdown as a stop, not a failure (#999, #1000, #1001, #1002, #1003, #1004, #1005)
+
+#998's entry closed with "The class beyond this fix": about 33 log sites in
+the loops `runServe` starts where a shutdown cancel arrives as an error and
+is logged as a failure. This batch closes it. #999 moved #998's helper into
+`internal/ctxerr` so every loop can ask it, made #998's VACUUM park general
+(`internal/sqlitetest`), taught `loggingtest` to record, and fixed the two
+`cmd/bridge` sweepers that needed nothing else. Six file-disjoint PRs then
+took one subsystem each: the scanner (#1000), the enricher (#1001), the
+updater (#1002), the Atlas harvest client (#1003), the integrity watchers
+(#1004) and serve's own passes (#1005: tsnet, UPnP ingest, the
+premium-cover version record).
+
+Every lead was re-read in the source before anything was changed. Seven of
+the sites fixed were not in the survey (two of them found during review),
+and 21 leads turned out to be handled already (below).
+
+### What was measured
+
+- **What a cancel leaves behind in database/sql.** database/sql rolls a
+  cancelled transaction back from a goroutine of its own, and when that
+  goroutine wins the race the caller's next call on the transaction
+  answers `sql: statement is closed` (a bare `errors.New`) or
+  `sql.ErrTxDone`, neither of which carries the cancellation. A 500-row
+  `UpsertTrackBatch` or `IncrementMissingTracksAndDeleteAtThreshold`,
+  cancelled at a random point 3,000 times: `context.Canceled` 1,574 times,
+  `sql: statement is closed` once, `sql.ErrTxDone` never; the other 1,425
+  had finished. That one line is still reported. Recognising it would mean
+  matching error text.
+- **A cancellation error from an autocommit statement does not prove the
+  write did not land.** The first draft of the missing-count-reset test
+  asserted that a stopped `ResetTrackMissingCount` left the row untouched,
+  and found it reset. modernc's `stmt.exec` answers `ctx.Err()` whenever
+  its `interruptOnDone` goroutine has fired, and that includes a statement
+  that had already passed SQLite's last interrupt check and committed. The
+  transactional passes roll back, and their tests assert that they do.
+- **The collation park works on every write, not only VACUUM.** An index
+  `COLLATE sqlitetest_park` over the column a statement moves makes the
+  statement call into Go part-way through: an UPDATE that moves a key, an
+  INSERT, a DELETE. It needs at least one OTHER key in the index, since a
+  comparison takes two, and a partial `WHERE` keeps statements the test
+  does not want out of it. `TestAParkedWriteIsStoppedByItsCancel` pins the
+  three shapes, each against an uncancelled control. `Disarm` exists
+  because the first scanner test hung: its park was still armed for the
+  live scan that followed the cancelled one.
+- **What the sites printed.** The reconciliation tail logged up to five
+  errors for one shutdown, one per pass, because each later pass failed on
+  the same cancelled context. One harvest tick logged `tick_error` for
+  submit, poll and `booklets_check`, then `booklet_fetch_list`. The
+  updater wrote `github get: Get "http://…/releases/latest": context
+  canceled` into `Status.LastError`, so the dashboard showed a failed
+  check. The variant watcher counted a stopped deletion as a failure and
+  called the tick not cancelled (`Failed:1 Cancelled:false`). The enricher
+  counted `skipped = 1` with `no_mb_match: 1` for a track whose portrait
+  search the shutdown had cancelled.
+- **A context cancelled before the call can reach nothing.** The first
+  test of the startup seed ran `runServe` on a context cancelled before it
+  started, and passed on the unfixed code in 0.12 s: `GetUpscaleTarget`
+  failed on the cancelled context (not `ErrUpscaleTargetUnset`), so the
+  seed was skipped entirely. The flake needs the cancel to land between
+  that read and the write. Parking the seed's INSERT (`sqlitetest`, a
+  partial index over the two upscale keys and one neighbour row) and
+  cancelling inside it reproduced the CI failure's message exactly, and
+  was stable over 20 runs under `-race` and 20 at `GOMAXPROCS=1`.
+- **Where a test's cancel lands.** The premium-cover write test first
+  cancelled from the fake server's handler, which raced the client reading
+  the headers: about half the runs stopped the FETCH instead of the write.
+  Cancelling on the response body's first `Read`, through a wrapping
+  transport, stayed on the write in 50 of 50 runs under `-race`. And a
+  handler that holds a POST until the client gives up must DRAIN the body
+  first: net/http notices a client hanging up only once the request body is
+  consumed, so a POST held unread sat out the whole 5 s bound.
+
+### Decisions
+
+- **The scanner's final flush drops its batch on a cancel, deliberately**
+  (the survey's first question). The writer's drain already dropped every
+  batch after a cancel; the final flush now does the same, silently. The
+  skip gate compares each file against its STORED row, which the dropped
+  write never touched, so the next scan re-extracts exactly what was
+  dropped. Writing the batch on a context detached from the cancel would
+  hold shutdown for up to `scanBatchSize` rows that the next scan writes
+  anyway. `TestAScanStoppedInItsFinalWriteLosesNothingTheNextScanCannotRedo`
+  stops a changed file's upsert and a version-stale file's stamp inside the
+  flush, then shows the next scan writing both.
+- **The enricher stops at the stamp** (the survey's second question). The
+  tier-2 fetches absorb their own errors, so a pass whose fetch the
+  shutdown cancelled carried on to `stampEnriched` or `markSkipped` on the
+  cancelled context, and `markSkipped` then counted a skip and logged
+  `enrichment skipped` for a verdict it never wrote (usually one the
+  cancelled portrait search had led it to: a release miss, the portrait
+  fetch cancelled, `no_mb_match`). A stamp the shutdown stopped now records
+  NOTHING: no failure, no count, no `enrichment skipped`, and the row stays
+  at `enriched_at = 0` for the next run. The stop is taken at the two
+  stamps, where every path converges, rather than at the five absorb sites
+  (the artwork fetch in `enrichOne` and in the album hop, the portrait in
+  `resolveArtist` and for a recovered artist, the release-group chain),
+  because the next absorb site added would be the one that forgets. What
+  the pass does between a cancelled fetch and the stamp costs nothing:
+  every network call behind it paces through `sleepCtx`, which returns at
+  once on a done context.
+- **A stopped pass writes no status.** The updater's `LastError` keeps what
+  the last poll that answered left, and the console's UPnP "Rescan now"
+  keeps each stopped server's last real result rather than `context
+  canceled`. A stopped poll still returns false, so no auto-install runs
+  off it.
+- **A stopped record keeps its work pending** (#1005, a behaviour change of
+  the same kind). When the premium cover's bytes had landed but the
+  shutdown stopped the record of their version, the refetch reported
+  success and the harvest sweep settled the cover, leaving clients keyed
+  to the old cover until a manual clear or a full sync. The refetch now
+  answers with the cancellation, so the cover stays pending and the next
+  pass fetches the same bytes and records them. A genuine record failure
+  keeps its contract: reported, and the refetch still succeeds.
+- **Ask the context the PASS runs on.** Every harvest request runs on a
+  per-request timeout derived from the loop's context, so a request that
+  ran out of time fails with a deadline while the loop is live, and is a
+  failure (`TestATickWhoseRequestTimesOutStillReportsIt`). For the
+  updater's "Check now" the pass IS the request, so the request's context
+  is the right one: an admin client that goes away stops the pass, #997's
+  `RefreshNow` reasoning.
+- **A cancelled loop starts nothing new.** The harvest tick's five legs are
+  a list with one `ctx.Err()` check before each; separate checks between
+  legs were each redundant with the next for any one cancel, and three of
+  the four could never be pinned (only the booklet and lyrics legs touch a
+  store before their first request). `Ingester.Run` likewise starts no
+  further server once cancelled, where before each configured server
+  failed in turn, one warn line apiece.
+- **A stopped row write ends the variant tick as a cancel.** An adoption or
+  deletion the shutdown stopped is not counted as failed: the tick ends
+  there with one summary line marked cancelled, as the check at the top of
+  each pass would have ended it.
+- **Two audits became helpers so a test can reach them.** The empty-root
+  and subtree-miss audits are COUNTs with no write before them to park in,
+  so their few lines moved, unchanged, into `emptyRootMustBeSpared` and
+  `auditSubtreeMiss`, and the tests call those directly. Both still spare
+  the root on any error, and the subtree one still aborts the walk.
+- **The ctx-only gates were left as they are.** The sites below that
+  already check `ctx.Err() == nil` before logging use `passCancelled`'s
+  looser shape, which also silences a genuine failure landing during a
+  shutdown. Every one is a lookup whose failure costs the next scan or pass
+  nothing it does not redo, so converting them would be churn.
+- **A shutdown during startup exits 0** (#1005, found in review). #1001's
+  macOS leg failed `TestServeWaitsForAnInFlightTailscaleMint` with `serve
+  exit code = 1, want 0; stderr=seed upscale target: context canceled`: the
+  test cancels as soon as the Tailscale auto-pilot reaches its mint, which
+  can be while `runServe` is still starting. Of `runServe`'s 17 `return 1`
+  sites, the first-run upscale seed is the only one that runs on the serve
+  context, so it is the only one a shutdown can turn into a failed start.
+  A genuine seed failure still exits 1 and says so.
+- **The tsnet goroutine opens no listener once the shutdown has begun**
+  (#1005, from the Gemini API review). After a status query the shutdown
+  stopped, it still called `ListenTLS`, and a listen that failed against
+  the node the shutdown had closed printed `tsnet: ListenTLS: …`. That
+  error is the node's own and carries no cancellation, so `tsnetListen`
+  asks the context alone: `passCancelled`'s form, which is right exactly
+  where the error cannot carry the cancellation.
+- **A walk that did not finish is not a tick that completed** (#1004, from
+  the Gemini API review). The orphan sweep logged `tick complete` after a
+  walk the shutdown stopped; it now logs `tick cut short` with its counts
+  and `cancelled=`, as the variant sweep's summary does. The same review
+  said the aborted walk also resets the resume cursor. That is true and
+  inert: the sweeper runs on `scanCtx`, which has no deadline, so the
+  walk's only error is a shutdown, and the cursor is in memory and ends
+  with the process.
+- **The tsnet start goroutine is still not joined.** Its log is quiet on a
+  shutdown now, but joining it (cancel the start, wait before
+  `Store.Close`) is #997's class, not this one. (#1009 joined it on
+  2026-09-25.)
+
+### The survey's leads, re-read
+
+Handled already, each read in the source before this was written:
+
+| lead | why it was not a defect |
+|---|---|
+| scanner `skip-gate lookup`, `version-stale diff lookup`, `sacd skip-gate lookup`, `sacd stale-row listing`, `routed-paths fetch for missing pass failed`, `prune deletion journal` | each logs only when `ctx.Err() == nil` |
+| scanner `reconciliation skipped: routed exclusion set` | a context end logs at Info (`reconciliation skipped: scan context ended`) |
+| `RunPeriodic`'s `initial scan` / `periodic scan` | gated on `ctx.Err() == nil` |
+| enricher `MB search` | returns on `ctx.Err() != nil` before logging, with no stamp |
+| enricher `MB artist search`, `artwork`, `artist image`, `iTunes fallback` | each gated on `ctx.Err() == nil` |
+| the enricher's acoustic fallback | a map read; the veto's record is already gated |
+| fingerprint `re-queue`, and the `StreamTracks` cancel branch | gated on `ctx.Err()` |
+| harvest `booklet_fetch_failed`, `booklet_mark_fetch_failed` | gated on `ctx.Err() == nil` |
+| UPnP `ingest run failed` | `Run` returns only `ctx.Err()` from its entry check, and a Canceled is not logged |
+| harvest `refreshCovers` | checks `ctx.Err()` at the top of each candidate |
+
+Real, and not in the survey: the waveform-sidecar listing and iteration
+the deletion passes reach inside their transactions (`list waveform
+sidecars`, `iter waveform sidecars`, found by a probe that cancelled store
+transactions at random), `save dupe summary`, the console's UPnP "Rescan
+now", `Ingester.Run`'s per-server loop, and the premium cover's version
+record. Found during review: `runServe`'s first-run upscale seed (by a CI
+flake on another PR of the batch) and the tsnet goroutine's `ListenTLS`
+(by the Gemini API review).
+
+### Tests and controls
+
+Each PR went red first on a commit holding its tests and no fix, and every
+twin (the same site failing on a LIVE context, through a `RAISE(ABORT)`
+trigger, a closed store, an HTTP 500 or a fake that fails) was green before
+and after. Each "stopped" test cancels a real pass INSIDE the call it
+names: a `sqlitetest` park in a write, a fake upstream that cancels and
+holds the request until the client gives up, a fake store that cancels and
+answers with the cancellation, or a context whose first `Err()` answers
+nil and cancels, which lands a cancel just after a pass's own check.
+
+Controls, each against the committed fix with one mutation that applies
+exactly once:
+
+| PR | controls | shape |
+|---|---|---|
+| #999 | 7, then 4 in review | raw and never at both sweepers; the helper's any-done-ctx, error-not-consulted and join-dropped-whole mutations; the multi-`%w` pair and the nothing-but-the-cancellation arm; `awaitOnePass` never seeing the pass finish |
+| #1000 | 44 | raw and never at all 19 sites; raw at each of the five reconciliation call sites, and never at one |
+| #1001 | 13 | raw and never at six sites, plus one that keeps a stopped skip quiet but still counts it |
+| #1002 | 4, then 2 in review | raw and never at `poll` and `auto-install`; each call returning before its request, which the new precondition turns red |
+| #1003 | 17, then 1 in review | raw and never at eight sites, plus removing the one leg check; a booklet check that is never due |
+| #1004 | 10, then 12 in review | raw and never at both listings and the walk; both directions at each row write; a cut-short walk called complete, a summary that never says cancelled, the listing's `Cancelled` stuck either way; after each SonarCloud refactor, the moved logic again (the listing three ways; dedup removed, and both directions at each row write) |
+| #1005 | 12, then 7 in review | raw and never at both tsnet sites and the orphan sweep; both directions at the version record; each of the three filters removed; `Run`'s loop check removed; the seed's filter removed and made total; the listen's pre-check removed, its print made unconditional and made impossible; the post-listen check removed, and the overtaken listener dropped but left open (re-run after the assertion fix) |
+
+Every control went red. Five needed a second run, for the reasons in the
+process notes.
+
+### Process notes
+
+- **Two #999 controls first failed to BUILD.** Removing a site's only
+  `ctxerr` call left the import unused. They were re-run with the import
+  kept in use, and both went red, as CLAUDE.md's rule on controls that do
+  not compile says.
+- **A control that did not bite found a missing test.** The scanner's
+  "never log" control for `iter waveform sidecars` stayed green: that site
+  had no genuine-failure twin. The twin that fits is rows closed by a
+  cancellation that is NOT the pass's own while the pass's context is live
+  (`rows closed by another context`), and both of that site's controls now
+  bite. Serve's orphan-sweep report was the same case (its twin is a
+  genuine sweep failure on a live context), and got the same fix.
+- **One more control failed to build in review** (#1004): replacing a
+  variable's only use in a log call left it unused. It was re-run with the
+  variable kept in use (`stopped && false`) and went red.
+- **A level-blind assertion caught an Info line.** The first `loggingtest`
+  helper matched a message at any level and caught `duplicate stamping`,
+  which the scanner also logs at Info as the stamping's outcome.
+  `Recorder.Failures` asks at Warn and above.
+- **Blank keepers crept in twice** while the new test files were being
+  drafted (`var _ = json.Marshal`, `var _ = time.Second`), and
+  `TestNoBlankKeepers` caught both before a push.
+- **High thinking can use up a review before it says anything.** With the
+  Gemini bot out of its daily quota, each PR's diff went to
+  `gemini-3.8-flash` through `relay.py` with the bridge primer. At
+  `PRISM_THINK_LEVEL=high` the two largest batches (2,795 and 1,634 lines)
+  spent about 62,900 thinking tokens of the 65,536 budget and stopped at
+  `MAX_TOKENS` with about 2,600 tokens of visible reasoning and no
+  findings. At `medium` both finished, at 30,257 and 36,221 thinking
+  tokens. The four smaller batches finished at `high`.
+- **A harness's `--help` is not a flag until its source says so.**
+  `~/dev/gemini-review/prism_scoped.py` has no argument parser: its first
+  argument is the git BASE of the range, so `--help` ran the planner over
+  `--help..HEAD` and wrote 32 batches into a directory it created. It was
+  removed after checking that every file in it came from that run. Read a
+  harness's source before handing it flags.
+- **A tree-wide gate for file-disjoint branches runs on their MERGE.** The
+  six follow-ups were rebased onto #999's head, checked disjoint, merged
+  into one detached tree and gated there once, so no branch's gate result
+  depends on its siblings being absent.
+
+### Review
+
+- **#999, round 1** on `d90449f4`. CodeRabbit, one Minor: a `fmt.Errorf`
+  with two `%w` verbs unwraps to a list as a join does, so the helper
+  filtered it child by child and dropped its message (`prune: …` became
+  the bare failure). Reproduced by a new table row before it was taken,
+  in `ac763da7`. Only `errors.Join` is filtered child by child now,
+  identified by its concrete type; any other multi-wrapper is judged as a
+  wrapper, quiet only when all it wraps is the cancellation. Gemini: no
+  findings.
+- **#999, round 2** on `ac763da7`. CodeRabbit: "No actionable comments
+  were generated". Gemini, medium: `time.After` in a tight polling loop.
+  Not a leak on Go 1.23+, which collects an unreferenced timer, but a
+  deadline plus `time.Sleep` is simpler; taken in `363b8a2a`, with a
+  control that makes the pass never finish failing the test at its 5 s
+  deadline.
+- **#999, round 3** on `363b8a2a`. Gemini, medium: return a wrapper whole
+  and compare with `==`. **Declined by measurement**: dropped into the
+  table, the suggested body turns six rows red, since `err ==
+  context.Canceled` holds only for the bare sentinel and every site wraps
+  it. CodeRabbit paused on its plan limit ("wait 31 minutes"); its
+  included review, requested when the wait ran out, covered
+  `ac763da7..cfc5a347` clean. `cfc5a347`, a docblock rewrap, had no
+  Gemini pass: the bot had reached its daily quota. Merged with a PR
+  comment recording that.
+- **#1000–#1005: the Gemini bot answered every PR with its daily-quota
+  notice.** As a stand-in, each PR's diff (60 lines of context), its test
+  files and `internal/ctxerr` went to `gemini-3.8-flash` through
+  `relay.py` with the bridge primer, and what was done with each finding
+  was posted on the PR. Of its findings, one was fabricated (#1000: a
+  `WithoutCancellation(ctx, stampRows)` that does not exist; the code
+  passes `err`), one misread the fixture (#1001: MusicBrainz and the
+  Cover Art Archive run on separate test servers), two were true and
+  inert (#1001's `errNotFound` on a cancelled release-group lookup, which
+  both callers treat like any error before a stamp that records nothing;
+  #1003's priority nudge, which lives in memory on a context only
+  shutdown cancels), and the rest were taken: the precondition
+  assertions on #1002 and #1003, the `tick cut short` summary and the
+  listing's `Cancelled` on #1004, and `tsnetListen` on #1005. The owner
+  then said to merge each PR once ready, without the bot's pass.
+- **CodeRabbit on #1000–#1005**, at its plan's allowance of two reviews
+  an hour (in practice about one, late in the batch): #1001, #1002 and
+  #1003 clean. #1004 clean, and clean again on its SonarCloud fix round.
+  #1000: one Minor, trigger names taken from the clock can repeat on a
+  coarse clock, taken (a counter); CodeRabbit checked the fix on the
+  thread. #1005: one Major, a listener `ListenTLS` returns after the
+  shutdown began is published and served. The listener half was taken
+  (closed, not handed over, with a test that cancels inside `ListenTLS`
+  and lets it succeed). The publication half was declined as the
+  goroutine join: upstream `tsnet.Server.Close` closes every listener it
+  has handed out. CodeRabbit then corrected that: `registerListener`
+  accepts a registration after `Close` has scanned its listeners, so on
+  an exit where serve's context is still live, a listener registered in
+  that window would outlive the closed node. It agreed the join is
+  outside the PR; it is recorded as a follow-up task (it became #1009).
+  Its fix-round pass found one Minor, an unchecked `(*net.TCPListener)`
+  assertion in the new test (`forcetypeassert`), taken; the test's two
+  controls still bite.
+- **SonarCloud**: `godre:S8242` on #1001 and #1005, the `cancelOnFirstErr`
+  test context, declined as in #998. `go:S3776` (CRITICAL) on #1004's
+  `VariantWatcher.tick`, cognitive complexity 16 of 15, taken: the row
+  writes this PR's stop checks had nested three blocks deep moved into
+  `adoptRelocated` and `deleteMissing`, and pass two's bookkeeping into a
+  `deletions` value (gocognit 28 → 19; `main` is 21). The first attempt,
+  extracting only the listing branch, left SonarCloud at 16, which is
+  why the measure was taken locally before the second.
+- **CI**: #1001's macOS leg failed `TestServeWaitsForAnInFlightTailscaleMint`
+  on the startup-seed flake that #1005 then fixed; a re-run was green.
+- **Merges.** All six merged on the owner's go-ahead to merge each once
+  ready, without the Gemini bot's pass, each with a PR comment recording
+  what reviewed it: #1001 (`92845822`), #1002 (`e6a3c47b`) and #1003
+  (`c429623e`) on clean CodeRabbit passes over their heads, #1004
+  (`d0e4b0df`) after its SonarCloud fix round came back clean, #1000
+  (`fba1ce56`) after its fix round did, and #1005 (`16bbfcc9`) with its
+  last commit, the checked type assertion, confirmed by CodeRabbit on its
+  thread rather than by a formal incremental pass, which the plan limit
+  had paused. `main`'s gate was green after each merge it ran on.
+
 ## 2026-09-25 — an editor's lock beside an embedded file breaks no build and ships in no binary (#1006)
 
 #993's entry filed this as out of reach of test code. Three `//go:embed`
