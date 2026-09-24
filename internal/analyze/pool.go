@@ -27,6 +27,20 @@ var ErrQueueFull = errors.New("analyze pool queue is full")
 // ErrPoolClosed is returned by Enqueue after Stop.
 var ErrPoolClosed = errors.New("analyze pool is closed")
 
+// ErrDuplicateInflight is returned by Enqueue when the same source path is
+// already queued or running. The caller should treat it as accepted, with no
+// new work: the job the pool already holds produces the waveform. It is
+// distinct from nil because a caller that counts what it enqueued must not
+// count this. The serve-side sweeper re-offers every track that has no fresh
+// analysis row yet, which is every track still queued, so during a long first
+// analysis each sweep re-offers the whole backlog.
+//
+// A job stops being queued or running in the same critical section that
+// counts it (finishJob), so a caller that acts on the count never meets this
+// from the job it is reacting to. Same name and meaning as
+// transcode.ErrDuplicateInflight.
+var ErrDuplicateInflight = errors.New("analyze pool: job already queued or running")
+
 // Pool is the long-lived single-FIFO worker pool that runs offline
 // audio analysis. Unlike internal/transcode's two-channel priority
 // pool, analysis is purely background work, so a plain FIFO is the
@@ -35,9 +49,10 @@ var ErrPoolClosed = errors.New("analyze pool is closed")
 // The pending-job channel is bounded (queueCap); Enqueue is
 // non-blocking (select + default → ErrQueueFull). Dedup keys on the
 // source library-relative path (one waveform per source), so a
-// duplicate enqueue while a job is queued or running is a silent no-op.
-// A job stops being "queued or running" at the same instant it is
-// counted done or failed, never later: see finishJob.
+// duplicate enqueue while a job is queued or running takes no slot,
+// counts nothing and returns ErrDuplicateInflight. A job stops being
+// "queued or running" at the same instant it is counted done or failed,
+// never later: see finishJob.
 type Pool struct {
 	store    *manifest.Store
 	workers  int
@@ -163,11 +178,11 @@ func NewPool(store *manifest.Store, workers, queueCap int, opts ...PoolOption) *
 }
 
 // Enqueue submits a spec to the pool. Non-blocking; ErrQueueFull when
-// the channel is full, nil (silent no-op) on a duplicate, ErrPoolClosed
-// after Stop. Both the jobs send and the state-change signal run under
-// p.mu; Stop acquires p.mu before closing the jobs channel and only
-// closes stateChangeChan afterward (post wg.Wait), so neither send can
-// race a close and panic.
+// the channel is full, ErrDuplicateInflight when the path is already
+// queued or running, ErrPoolClosed after Stop. Both the jobs send and
+// the state-change signal run under p.mu; Stop acquires p.mu before
+// closing the jobs channel and only closes stateChangeChan afterward
+// (post wg.Wait), so neither send can race a close and panic.
 func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	if p.closed.Load() {
 		return ErrPoolClosed
@@ -180,7 +195,7 @@ func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	}
 	if _, ok := p.inflight[dedup]; ok {
 		p.mu.Unlock()
-		return nil // already queued or running
+		return ErrDuplicateInflight
 	}
 	p.inflight[dedup] = struct{}{} // optimistic claim; rolled back on full
 	select {
@@ -287,8 +302,9 @@ const (
 // splitting them opens a window whichever order they run in. Counting first
 // is what this pool used to do, with the failure's strike and WARN written
 // in between: a caller that saw the count and re-enqueued the path, which is
-// what a retry is, landed on a path the job still held, and Enqueue's nil
-// for a duplicate dropped the retry without a trace (the #986 CI failure).
+// what a retry is, landed on a path the job still held, and Enqueue, which
+// then answered a duplicate with nil, dropped the retry without a trace (the
+// #986 CI failure).
 // Releasing first leaves a snapshot between the two steps that shows the job
 // nowhere, neither in flight nor counted.
 //

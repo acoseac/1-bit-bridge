@@ -214,34 +214,7 @@ func runAnalyzeBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 
 	pool := analyze.NewPool(store, p.workers, p.queueCap)
 	total := len(candidates)
-	interrupted := false
-producer:
-	for _, c := range candidates {
-		for {
-			select {
-			case <-ctx.Done():
-				interrupted = true
-				break producer
-			default:
-			}
-			err := pool.Enqueue(c)
-			if err == nil {
-				break
-			}
-			if errors.Is(err, analyze.ErrQueueFull) {
-				// Queue is draining — back off briefly and retry.
-				select {
-				case <-ctx.Done():
-					interrupted = true
-					break producer
-				case <-time.After(100 * time.Millisecond):
-				}
-				continue
-			}
-			// ErrPoolClosed shouldn't happen here; stop dispatching.
-			break producer
-		}
-	}
+	interrupted := dispatchAnalysisCandidates(ctx, pool.Enqueue, candidates)
 
 	// Drain: wait until queued + inflight reach zero (or interrupted).
 	for !interrupted {
@@ -267,6 +240,40 @@ producer:
 		return 1
 	}
 	return 0
+}
+
+// dispatchAnalysisCandidates is `bridge analyze`'s producer loop: it offers
+// each candidate to enqueue in order, backing off while the queue is full, and
+// reports whether ctx ended the dispatch.
+//
+// A path the pool already holds (analyze.ErrDuplicateInflight) is accepted:
+// the job already queued or running produces its waveform. Today's candidates
+// cannot produce one, since each is a distinct track offered once to a pool
+// this run created, but any error the loop does not recognise stops the
+// dispatch, so an unhandled duplicate would end a run at the first one.
+func dispatchAnalysisCandidates(ctx context.Context, enqueue func(analyze.AnalyzeSpec) error, candidates []analyze.AnalyzeSpec) (interrupted bool) {
+	for _, c := range candidates {
+		for {
+			if ctx.Err() != nil {
+				return true
+			}
+			err := enqueue(c)
+			if err == nil || errors.Is(err, analyze.ErrDuplicateInflight) {
+				break
+			}
+			if !errors.Is(err, analyze.ErrQueueFull) {
+				// ErrPoolClosed shouldn't happen here; stop dispatching.
+				return false
+			}
+			// Queue is draining — back off briefly and retry.
+			select {
+			case <-ctx.Done():
+				return true
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	return false
 }
 
 // runAnalyzeGC removes orphan waveform sidecars — files under the
@@ -641,45 +648,56 @@ func (s *analysisSweeper) sweep(ctx context.Context) *admin.AnalysisSweepCounts 
 		}
 		return nil
 	}
-	enqueued, saturated, cancelled := s.enqueueAll(ctx, res.candidates)
-	if cancelled {
+	counts := &admin.AnalysisSweepCounts{
+		Total:       res.total,
+		UpToDate:    res.skipped,
+		DSDExcluded: res.dsdSkipped,
+		ZeroByte:    res.emptySkipped,
+		Missing:     res.missing,
+		Unreadable:  res.unreadable,
+	}
+	if s.enqueueAll(ctx, res.candidates, counts) {
 		return nil
 	}
-	if enqueued > 0 {
-		if saturated {
-			logger.Info("auto-analysis sweep enqueued tracks (queue now full)", "count", enqueued)
-		} else {
-			logger.Info("auto-analysis sweep enqueued tracks", "count", enqueued)
+	// Only a sweep that added work says so. One that found the whole backlog
+	// still queued adds nothing and logs nothing; `alreadyQueued` is on the
+	// line so a count well under the cap beside "queue now full" explains
+	// itself.
+	if counts.Enqueued > 0 {
+		msg := "auto-analysis sweep enqueued tracks"
+		if counts.QueueSaturated {
+			msg = "auto-analysis sweep enqueued tracks (queue now full)"
 		}
+		logger.Info(msg, "count", counts.Enqueued, "alreadyQueued", counts.AlreadyQueued)
 	}
-	return &admin.AnalysisSweepCounts{
-		Total:          res.total,
-		UpToDate:       res.skipped,
-		DSDExcluded:    res.dsdSkipped,
-		ZeroByte:       res.emptySkipped,
-		Missing:        res.missing,
-		Unreadable:     res.unreadable,
-		Enqueued:       enqueued,
-		QueueSaturated: saturated,
-	}
+	return counts
 }
 
-// enqueueAll offers every candidate to the pool. `cancelled` reports a ctx
-// cancel mid-loop, which the caller turns into a nil count — a partial pass is
-// not a breakdown worth showing on the Jobs card.
-func (s *analysisSweeper) enqueueAll(ctx context.Context, candidates []analyze.AnalyzeSpec) (enqueued int, saturated, cancelled bool) {
+// enqueueAll offers every candidate to the pool and folds each answer into
+// counts. It returns true when ctx was cancelled mid-loop, which the caller
+// turns into a nil count: a partial pass is not a breakdown worth showing on
+// the Jobs card.
+//
+// A path the pool already holds is counted as AlreadyQueued, never as
+// Enqueued. A track has no analysis row until its job finishes, so every
+// sweep during a long first analysis re-offers the whole backlog, and
+// Enqueued is the work THIS sweep added.
+func (s *analysisSweeper) enqueueAll(ctx context.Context, candidates []analyze.AnalyzeSpec, counts *admin.AnalysisSweepCounts) (cancelled bool) {
 	for _, c := range candidates {
 		if ctx.Err() != nil {
-			return enqueued, saturated, true
+			return true
 		}
 		switch err := s.pool.Enqueue(c); {
 		case err == nil:
-			enqueued++
+			counts.Enqueued++
+		case errors.Is(err, analyze.ErrDuplicateInflight):
+			counts.AlreadyQueued++
 		case errors.Is(err, analyze.ErrQueueFull), errors.Is(err, analyze.ErrPoolClosed):
 			// Queue saturated (or shutting down) — leave the rest for the
 			// next tick rather than spinning.
-			return enqueued, true, false
+			counts.QueueSaturated = true
+			return false
 		}
 	}
-	return enqueued, saturated, false
+	return false
 }
