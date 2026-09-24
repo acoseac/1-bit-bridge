@@ -146,42 +146,21 @@ func scanBlankKeepers(r docScanReporter, root string, allowed []allowedKeeper, w
 }
 
 // judgeBlankKeepers returns a verdict for every keeper, in file order, and
-// one for every allowance that matched no keeper. An allowance matches only
-// a top-level keeper.
+// one for every allowance that matched no keeper.
 func judgeBlankKeepers(root string, keepers []blankKeeper, allowed []allowedKeeper) ([]keeperVerdict, error) {
 	var out []keeperVerdict
 	used := make([]bool, len(allowed))
 	for _, k := range keepers {
-		pos := fmt.Sprintf("%s:%d", k.file, k.line)
-		why, msg := k.ordinaryVerdict()
-		for i, a := range allowed {
-			if !k.top || a.file != k.file || a.src != k.src {
-				continue
-			}
+		v := keeperVerdict{pos: fmt.Sprintf("%s:%d", k.file, k.line), src: k.src}
+		v.why, v.msg = k.ordinaryVerdict()
+		if i := allowanceFor(k, allowed); i >= 0 {
 			used[i] = true
-			if !strings.Contains(k.doc, a.docSays) {
-				why = keeperUnstated
-				msg = fmt.Sprintf("`%s%s` is allowed only while its doc says %q, and it no longer does: %s", k.form, k.src, a.docSays, msg)
-				continue
-			}
-			if why == keeperRedundant {
-				why = keeperServed
-				msg = fmt.Sprintf("`%s%s` kept its import for a use the file now has, so it keeps nothing: %s", k.form, k.src, msg)
-				continue
-			}
-			met, err := a.conditionMet(root)
-			if err != nil {
-				return nil, fmt.Errorf("%s: checking the condition `%s%s` waits for: %w", pos, k.form, k.src, err)
-			}
-			if met != "" {
-				why = keeperMet
-				msg = fmt.Sprintf("`%s%s` waited for %q, and %s. Write the check it was kept for, then delete it", k.form, k.src, a.docSays, met)
-			} else {
-				why = keeperAllowed
-				msg = fmt.Sprintf("`%s%s` allowed: its doc says %q, and that has not happened yet", k.form, k.src, a.docSays)
+			var err error
+			if v.why, v.msg, err = judgeAllowance(root, k, allowed[i], v.why, v.msg); err != nil {
+				return nil, fmt.Errorf("%s: %w", v.pos, err)
 			}
 		}
-		out = append(out, keeperVerdict{pos, k.src, why, msg})
+		out = append(out, v)
 	}
 	for i, a := range allowed {
 		if !used[i] {
@@ -190,6 +169,38 @@ func judgeBlankKeepers(root string, keepers []blankKeeper, allowed []allowedKeep
 		}
 	}
 	return out, nil
+}
+
+// allowanceFor returns the index of the entry in allowed that k is, or -1.
+// Only a top-level keeper can be one.
+func allowanceFor(k blankKeeper, allowed []allowedKeeper) int {
+	for i, a := range allowed {
+		if k.top && a.file == k.file && a.src == k.src {
+			return i
+		}
+	}
+	return -1
+}
+
+// judgeAllowance is the verdict on keeper k, which entry a allows; why and
+// msg are k's ordinary verdict, which is what it becomes when the doc no
+// longer states the condition.
+func judgeAllowance(root string, k blankKeeper, a allowedKeeper, why, msg string) (string, string, error) {
+	shape := k.form + k.src
+	if !strings.Contains(k.doc, a.docSays) {
+		return keeperUnstated, fmt.Sprintf("`%s` is allowed only while its doc says %q, and it no longer does: %s", shape, a.docSays, msg), nil
+	}
+	if why == keeperRedundant {
+		return keeperServed, fmt.Sprintf("`%s` kept its import for a use the file now has, so it keeps nothing: %s", shape, msg), nil
+	}
+	met, err := a.conditionMet(root)
+	if err != nil {
+		return "", "", fmt.Errorf("checking the condition `%s` waits for: %w", shape, err)
+	}
+	if met != "" {
+		return keeperMet, fmt.Sprintf("`%s` waited for %q, and %s. Write the check it was kept for, then delete it", shape, a.docSays, met), nil
+	}
+	return keeperAllowed, fmt.Sprintf("`%s` allowed: its doc says %q, and that has not happened yet", shape, a.docSays), nil
 }
 
 // ordinaryVerdict is the finding for k when no allowance applies.
@@ -222,160 +233,377 @@ func (k blankKeeper) ordinaryVerdict() (why, msg string) {
 
 // findBlankKeepers returns every blank keeper in the Go files under root
 // that the go tool reads, with how many non-test and test files it walked.
-// It skips vendor, testdata and node_modules, a nested module, and a file
-// or directory the go tool ignores (goToolIgnores), before opening it.
 func findBlankKeepers(root string) (keepers []blankKeeper, nonTest, test int, err error) {
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		name := d.Name()
 		if d.IsDir() {
-			if path == root {
-				return nil
-			}
-			if goToolIgnores(name) || name == "vendor" || name == "testdata" || name == "node_modules" {
-				return filepath.SkipDir
-			}
-			if _, statErr := os.Stat(filepath.Join(path, "go.mod")); statErr == nil {
-				return filepath.SkipDir
-			}
+			return keeperWalkDir(root, path, d.Name())
+		}
+		if name := d.Name(); !strings.HasSuffix(name, ".go") || goToolIgnores(name) {
 			return nil
 		}
-		if !strings.HasSuffix(name, ".go") || goToolIgnores(name) {
-			return nil
-		}
-		if strings.HasSuffix(name, "_test.go") {
+		if strings.HasSuffix(path, "_test.go") {
 			test++
 		} else {
 			nonTest++
 		}
-		src, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		found, err := blankKeepersInFile(filepath.ToSlash(rel), src)
-		if err != nil {
-			return err
-		}
+		found, err := blankKeepersInPath(root, path)
 		keepers = append(keepers, found...)
-		return nil
+		return err
 	})
 	return keepers, nonTest, test, err
+}
+
+// keeperWalkDir is findBlankKeepers' answer for a directory: nil to descend,
+// SkipDir for one no build of this module compiles, which is vendor,
+// testdata and node_modules, a nested module, and a name the go tool ignores
+// (goToolIgnores), decided before anything under it is opened.
+func keeperWalkDir(root, path, name string) error {
+	if path == root {
+		return nil
+	}
+	if goToolIgnores(name) || name == "vendor" || name == "testdata" || name == "node_modules" {
+		return filepath.SkipDir
+	}
+	if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+// blankKeepersInPath returns the keepers of the file at path, which it names
+// by its slash path relative to root. It normalises CRLF first: no
+// .gitattributes pins eol, so a Windows checkout has it.
+func blankKeepersInPath(root, path string) ([]blankKeeper, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return nil, err
+	}
+	return blankKeepersInFile(filepath.ToSlash(rel), strings.ReplaceAll(string(raw), "\r\n", "\n"))
+}
+
+// keeperFile is one file's scan: its imports, how many selector uses of each
+// it has, and the keepers found so far, whose pkgs hold their OWN uses until
+// finish turns them into the file's uses outside every keeper.
+type keeperFile struct {
+	rel     string
+	src     string
+	fset    *token.FileSet
+	imports map[string]bool
+	uses    map[string]int
+	found   []blankKeeper
 }
 
 // blankKeepersInFile returns the keepers in one file's source.
 //
 // A selector `x.Sel` names an import when x is one of the file's import
-// names and the top-level declaration holding the selector declares no x of
-// its own (declaredWithin). Nothing at the top level can shadow an import (a
-// package-level x would collide with it); inside a function a local x may be
-// what the selector names. Counting any x the declaration declares anywhere
-// as a possible local makes the statement form miss a keeper rather than
-// report a local variable, and makes a use count err low rather than high.
-func blankKeepersInFile(rel string, src []byte) ([]blankKeeper, error) {
+// names and no local named x is in scope there (localScopesIn). Nothing at
+// the top level can shadow an import, since a package-level x would collide
+// with it, so only a function's locals are tracked.
+func blankKeepersInFile(rel, src string) ([]blankKeeper, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, rel, src, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
 		return nil, err
 	}
-	imports := map[string]bool{}
+	kf := &keeperFile{rel: rel, src: src, fset: fset, imports: importNames(f), uses: map[string]int{}}
+	for _, decl := range f.Decls {
+		kf.scanDecl(decl)
+	}
+	kf.finish()
+	return kf.found, nil
+}
+
+// importNames returns the names f's imports are known by, blank and dot
+// imports aside.
+func importNames(f *ast.File) map[string]bool {
+	names := map[string]bool{}
 	for _, imp := range f.Imports {
 		if name := importName(imp); name != "_" && name != "." {
-			imports[name] = true
+			names[name] = true
 		}
 	}
-	text := func(n ast.Node) string {
-		return strings.Join(strings.Fields(string(src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset])), " ")
-	}
+	return names
+}
 
-	uses := map[string]int{} // import name -> selector uses in the file
-	var found []blankKeeper  // with pkgs holding each keeper's OWN uses
-	for _, decl := range f.Decls {
-		locals := declaredWithin(decl)
-		ast.Inspect(decl, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok {
-				if id, ok := sel.X.(*ast.Ident); ok && imports[id.Name] && !locals[id.Name] {
-					uses[id.Name]++
-				}
-			}
-			return true
-		})
-		keep := func(e ast.Expr, form string, top bool, doc *ast.CommentGroup) {
-			if !onlyNames(e) {
-				return
-			}
-			pkgs, others := namesIn(e, imports, locals)
-			switch {
-			case len(pkgs) > 0 && (top || !others):
-			case len(pkgs) == 0 && top && others:
-			default:
-				// A statement naming a local (`_ = cfg`) marks it used,
-				// and `var _ = 1` names nothing at all.
-				return
-			}
-			k := blankKeeper{file: rel, line: fset.Position(e.Pos()).Line, form: form, top: top, src: text(e), pkgs: pkgs}
-			if doc != nil {
-				k.doc = strings.Join(strings.Fields(doc.Text()), " ")
-			}
-			found = append(found, k)
+// scanDecl counts the import uses in decl and collects its keepers: the
+// top-level form from a var declaration, and the statement form from the
+// functions decl holds, a top-level `var _ = func() {…}` included.
+func (kf *keeperFile) scanDecl(decl ast.Decl) {
+	scope := localScopesIn(decl)
+	ast.Inspect(decl, func(n ast.Node) bool {
+		if name, ok := kf.importAt(n, scope); ok {
+			kf.uses[name]++
 		}
-		if gd, ok := decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
-			for _, spec := range gd.Specs {
-				vs := spec.(*ast.ValueSpec)
-				doc := vs.Doc
-				if doc == nil && !gd.Lparen.IsValid() {
-					doc = gd.Doc
-				}
-				for _, e := range blankValues(vs) {
-					keep(e, "var _ = ", true, doc)
-				}
-			}
-		}
-		// In a function, including one a top-level `var _ = func() {…}`
-		// holds: `_ = E` and `var _ = E`.
-		ast.Inspect(decl, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.AssignStmt:
-				if x.Tok != token.ASSIGN || len(x.Lhs) != len(x.Rhs) {
-					return true
-				}
-				for i, lhs := range x.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Name == "_" {
-						keep(x.Rhs[i], "_ = ", false, nil)
-					}
-				}
-			case *ast.DeclStmt:
-				if gd, ok := x.Decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
-					for _, spec := range gd.Specs {
-						for _, e := range blankValues(spec.(*ast.ValueSpec)) {
-							keep(e, "var _ = ", false, nil)
-						}
-					}
-				}
-			}
-			return true
-		})
+		return true
+	})
+	if gd, ok := decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
+		kf.scanVarSpecs(gd, scope)
 	}
-	// A keeper's use is no use: two keepers of one package (cmd/bridge's
-	// update.go had them) keep each other's import alive, and deleting both
-	// must delete it.
+	ast.Inspect(decl, func(n ast.Node) bool {
+		kf.scanStatement(n, scope)
+		return true
+	})
+}
+
+// importAt returns the import n names, when n is a selector `x.Sel` whose x
+// is an import name with no local of that name in scope at x.
+func (kf *keeperFile) importAt(n ast.Node, scope localScopes) (string, bool) {
+	sel, ok := n.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok || !kf.imports[id.Name] || scope.covers(id.Name, id.Pos()) {
+		return "", false
+	}
+	return id.Name, true
+}
+
+// scanVarSpecs collects the keepers of a top-level var declaration. A
+// spec's doc is its own, or the declaration's when it is not grouped.
+func (kf *keeperFile) scanVarSpecs(gd *ast.GenDecl, scope localScopes) {
+	for _, spec := range gd.Specs {
+		vs := spec.(*ast.ValueSpec)
+		doc := vs.Doc
+		if doc == nil && !gd.Lparen.IsValid() {
+			doc = gd.Doc
+		}
+		for _, e := range blankValues(vs) {
+			kf.keep(e, "var _ = ", true, doc, scope)
+		}
+	}
+}
+
+// scanStatement collects the keeper n is, if it is `_ = E` or `var _ = E`
+// in a function.
+func (kf *keeperFile) scanStatement(n ast.Node, scope localScopes) {
+	switch x := n.(type) {
+	case *ast.AssignStmt:
+		kf.scanAssign(x, scope)
+	case *ast.DeclStmt:
+		kf.scanDeclStmt(x, scope)
+	}
+}
+
+// scanAssign collects the keepers of an assignment: each `_ = E` pair.
+func (kf *keeperFile) scanAssign(as *ast.AssignStmt, scope localScopes) {
+	if as.Tok != token.ASSIGN || len(as.Lhs) != len(as.Rhs) {
+		return
+	}
+	for i, lhs := range as.Lhs {
+		if id, ok := lhs.(*ast.Ident); ok && id.Name == "_" {
+			kf.keep(as.Rhs[i], "_ = ", false, nil, scope)
+		}
+	}
+}
+
+// scanDeclStmt collects the keepers of a var declaration in a function.
+func (kf *keeperFile) scanDeclStmt(ds *ast.DeclStmt, scope localScopes) {
+	gd, ok := ds.Decl.(*ast.GenDecl)
+	if !ok || gd.Tok != token.VAR {
+		return
+	}
+	for _, spec := range gd.Specs {
+		for _, e := range blankValues(spec.(*ast.ValueSpec)) {
+			kf.keep(e, "var _ = ", false, nil, scope)
+		}
+	}
+}
+
+// keep records e as a keeper when it is one. The top-level form is one when
+// E names an import or, naming none, names a declaration of its own package.
+// The statement form is one only when E names imports and nothing else: a
+// statement naming a local (`_ = cfg`) is how Go code marks it used, and
+// `var _ = 1` names nothing at all.
+func (kf *keeperFile) keep(e ast.Expr, form string, top bool, doc *ast.CommentGroup, scope localScopes) {
+	if !onlyNames(e) {
+		return
+	}
+	pkgs, others := kf.namesIn(e, scope)
+	isKeeper := len(pkgs) > 0 && (top || !others) || len(pkgs) == 0 && top && others
+	if !isKeeper {
+		return
+	}
+	k := blankKeeper{file: kf.rel, line: kf.fset.Position(e.Pos()).Line, form: form, top: top, src: kf.text(e), pkgs: pkgs}
+	if doc != nil {
+		k.doc = strings.Join(strings.Fields(doc.Text()), " ")
+	}
+	kf.found = append(kf.found, k)
+}
+
+// text returns n's source with its whitespace collapsed.
+func (kf *keeperFile) text(n ast.Node) string {
+	return strings.Join(strings.Fields(kf.src[kf.fset.Position(n.Pos()).Offset:kf.fset.Position(n.End()).Offset]), " ")
+}
+
+// namesIn returns how many times e names each import (importAt), and whether
+// it names anything else: a local or package-level name. A predeclared name
+// (nil, int, error) is neither. A composite literal's key counts as a name
+// even when it is a struct field's: in a map literal the same identifier is
+// a variable, the two look alike without types, and skipping keys reported
+// `_ = map[string]int{key: http.StatusOK}`, whose deletion leaves the local
+// key unused (a Gemini consult on #996). The statement form misses
+// `_ = url.URL{Scheme: "https"}` instead, which is the safe direction.
+func (kf *keeperFile) namesIn(e ast.Expr, scope localScopes) (pkgs map[string]int, others bool) {
+	pkgs = map[string]int{}
+	ast.Inspect(e, func(n ast.Node) bool {
+		if name, ok := kf.importAt(n, scope); ok {
+			pkgs[name]++
+			return false
+		}
+		if id, ok := n.(*ast.Ident); ok && types.Universe.Lookup(id.Name) == nil {
+			others = true
+		}
+		return true
+	})
+	return pkgs, others
+}
+
+// finish turns each keeper's own uses into the file's uses outside every
+// keeper. A keeper's use is no use: two keepers of one package (cmd/bridge's
+// update.go had them) keep each other's import alive, and deleting both
+// must delete it.
+func (kf *keeperFile) finish() {
 	inKeepers := map[string]int{}
-	for i := range found {
-		for name, own := range found[i].pkgs {
+	for i := range kf.found {
+		for name, own := range kf.found[i].pkgs {
 			inKeepers[name] += own
 		}
 	}
-	for i := range found {
-		for name := range found[i].pkgs {
-			found[i].pkgs[name] = uses[name] - inKeepers[name]
+	for i := range kf.found {
+		for name := range kf.found[i].pkgs {
+			kf.found[i].pkgs[name] = kf.uses[name] - inKeepers[name]
 		}
 	}
-	return found, nil
+}
+
+// localScopes maps each name a declaration's functions declare to the
+// spans in which a local of that name is in scope.
+type localScopes map[string][]scopeSpan
+
+// scopeSpan is a half-open span of source positions.
+type scopeSpan struct{ from, to token.Pos }
+
+// covers reports whether a local named name is in scope at pos.
+func (s localScopes) covers(name string, pos token.Pos) bool {
+	for _, span := range s[name] {
+		if span.from <= pos && pos < span.to {
+			return true
+		}
+	}
+	return false
+}
+
+// localScopesIn returns the locals decl's functions declare, each scoped as
+// Go scopes it. A variable, constant or type declared in a function is in
+// scope from the end of its declaring statement (a type from its name) to
+// the end of its innermost block, where an if, for, switch or select clause
+// is a block of its own; a parameter, result or receiver is in scope in its
+// function's body; a range variable in its loop's body. So in
+// `path := path.Base(p)` the right-hand side still names the import, and an
+// `_ = path.Join` above that line is still a keeper (CodeRabbit on #996,
+// against a first draft that took any name declared anywhere in the
+// function for a local everywhere in it).
+func localScopesIn(decl ast.Decl) localScopes {
+	s := localScopes{}
+	var stack []ast.Node
+	ast.Inspect(decl, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		s.declare(n, innermostBlockEnd(stack))
+		stack = append(stack, n)
+		return true
+	})
+	return s
+}
+
+// declare records the locals n declares; blockEnd is where the innermost
+// block enclosing n ends.
+func (s localScopes) declare(n ast.Node, blockEnd token.Pos) {
+	switch x := n.(type) {
+	case *ast.FuncDecl:
+		if x.Body != nil {
+			s.addFields(x.Body, x.Recv, x.Type.TypeParams, x.Type.Params, x.Type.Results)
+		}
+	case *ast.FuncLit:
+		s.addFields(x.Body, x.Type.Params, x.Type.Results)
+	case *ast.AssignStmt:
+		if x.Tok == token.DEFINE {
+			for _, lhs := range x.Lhs {
+				s.add(lhs, x.End(), blockEnd)
+			}
+		}
+	case *ast.RangeStmt:
+		if x.Tok == token.DEFINE {
+			s.add(x.Key, x.Body.Pos(), x.Body.End())
+			s.add(x.Value, x.Body.Pos(), x.Body.End())
+		}
+	case *ast.DeclStmt:
+		s.addDeclStmt(x, blockEnd)
+	}
+}
+
+// addFields scopes every name in lists to body.
+func (s localScopes) addFields(body *ast.BlockStmt, lists ...*ast.FieldList) {
+	for _, list := range lists {
+		if list == nil {
+			continue
+		}
+		for _, field := range list.List {
+			for _, name := range field.Names {
+				s.add(name, body.Pos(), body.End())
+			}
+		}
+	}
+}
+
+// addDeclStmt scopes the names a var, const or type declaration in a
+// function declares.
+func (s localScopes) addDeclStmt(ds *ast.DeclStmt, blockEnd token.Pos) {
+	gd, ok := ds.Decl.(*ast.GenDecl)
+	if !ok {
+		return
+	}
+	for _, spec := range gd.Specs {
+		switch sp := spec.(type) {
+		case *ast.ValueSpec:
+			for _, name := range sp.Names {
+				s.add(name, sp.End(), blockEnd)
+			}
+		case *ast.TypeSpec:
+			s.add(sp.Name, sp.Name.Pos(), blockEnd)
+		}
+	}
+}
+
+// add scopes e, when it is an identifier other than _, to [from, to).
+func (s localScopes) add(e ast.Expr, from, to token.Pos) {
+	if id, ok := e.(*ast.Ident); ok && id.Name != "_" {
+		s[id.Name] = append(s[id.Name], scopeSpan{from, to})
+	}
+}
+
+// innermostBlockEnd returns where the innermost block among stack, a node's
+// ancestors, ends: a braced block, a function, or the implicit block of an
+// if, for, switch or select clause.
+func innermostBlockEnd(stack []ast.Node) token.Pos {
+	for i := len(stack) - 1; i >= 0; i-- {
+		switch stack[i].(type) {
+		case *ast.BlockStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt,
+			*ast.TypeSwitchStmt, *ast.CaseClause, *ast.CommClause, *ast.FuncLit, *ast.FuncDecl:
+			return stack[i].End()
+		}
+	}
+	return token.NoPos
 }
 
 // blankValues returns the values vs gives its blank names. A typed spec
@@ -412,22 +640,28 @@ func onlyNames(e ast.Expr) bool {
 	case *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType, *ast.StructType:
 		return true
 	case *ast.CompositeLit:
-		for _, elt := range x.Elts {
-			if kv, ok := elt.(*ast.KeyValueExpr); ok {
-				elt = kv.Value
-				if !onlyNames(kv.Key) {
-					return false
-				}
-			}
-			if !onlyNames(elt) {
-				return false
-			}
-		}
-		return true
+		return eltsOnlyName(x.Elts)
 	case *ast.CallExpr:
 		return len(x.Args) == 1 && isTypeOnly(x.Fun) && onlyNames(x.Args[0])
 	}
 	return false
+}
+
+// eltsOnlyName reports whether every element of a composite literal, key
+// and value alike, only names things.
+func eltsOnlyName(elts []ast.Expr) bool {
+	for _, elt := range elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			if !onlyNames(kv.Key) {
+				return false
+			}
+			elt = kv.Value
+		}
+		if !onlyNames(elt) {
+			return false
+		}
+	}
+	return true
 }
 
 // isTypeOnly reports whether e can only be a type, so a call of it is a
@@ -440,94 +674,6 @@ func isTypeOnly(e ast.Expr) bool {
 		return true
 	}
 	return false
-}
-
-// namesIn returns how many times e names each import (by selector, and not
-// where a local of that name may be meant), and whether it names anything
-// else: a local or package-level name. A predeclared name (nil, int, error)
-// is neither. A composite literal's key counts as a name even when it is a
-// struct field's: in a map literal the same identifier is a variable, the two
-// look alike without types, and skipping keys reported
-// `_ = map[string]int{key: http.StatusOK}`, whose deletion leaves the local
-// key unused (a Gemini consult on #996). The statement form misses
-// `_ = url.URL{Scheme: "https"}` instead, which is the safe direction.
-func namesIn(e ast.Expr, imports, locals map[string]bool) (pkgs map[string]int, others bool) {
-	pkgs = map[string]int{}
-	ast.Inspect(e, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.SelectorExpr:
-			if id, ok := x.X.(*ast.Ident); ok && imports[id.Name] && !locals[id.Name] {
-				pkgs[id.Name]++
-				return false
-			}
-		case *ast.Ident:
-			if types.Universe.Lookup(x.Name) == nil {
-				others = true
-			}
-		}
-		return true
-	})
-	return pkgs, others
-}
-
-// declaredWithin returns every name decl declares below its own top-level
-// names: a function's receiver, type parameters, parameters and results, and
-// anything declared in its body or in a function literal inside it. Scope is
-// over-approximated on purpose, a name declared in one block counting for
-// all of decl (see blankKeepersInFile).
-func declaredWithin(decl ast.Decl) map[string]bool {
-	names := map[string]bool{}
-	fields := func(fl *ast.FieldList) {
-		if fl == nil {
-			return
-		}
-		for _, field := range fl.List {
-			for _, n := range field.Names {
-				names[n.Name] = true
-			}
-		}
-	}
-	ident := func(e ast.Expr) {
-		if id, ok := e.(*ast.Ident); ok {
-			names[id.Name] = true
-		}
-	}
-	ast.Inspect(decl, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.FuncDecl:
-			fields(x.Recv)
-		case *ast.FuncType:
-			fields(x.TypeParams)
-			fields(x.Params)
-			fields(x.Results)
-		case *ast.AssignStmt:
-			if x.Tok == token.DEFINE {
-				for _, lhs := range x.Lhs {
-					ident(lhs)
-				}
-			}
-		case *ast.RangeStmt:
-			if x.Tok == token.DEFINE {
-				ident(x.Key)
-				ident(x.Value)
-			}
-		case *ast.DeclStmt:
-			if gd, ok := x.Decl.(*ast.GenDecl); ok {
-				for _, spec := range gd.Specs {
-					switch s := spec.(type) {
-					case *ast.ValueSpec:
-						for _, n := range s.Names {
-							names[n.Name] = true
-						}
-					case *ast.TypeSpec:
-						names[s.Name.Name] = true
-					}
-				}
-			}
-		}
-		return true
-	})
-	return names
 }
 
 // importName is the name an import is known by in its file: the explicit
@@ -573,7 +719,8 @@ var (
 // holds `[`, the root joins the pattern, matches nothing, and reads as "no
 // typed errors" for ever (Gemini on #996).
 func typedErrorIn(root, dir string) (string, error) {
-	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(dir)))
+	abs := filepath.Join(root, filepath.FromSlash(dir))
+	entries, err := os.ReadDir(abs)
 	if err != nil {
 		return "", err
 	}
@@ -582,40 +729,71 @@ func typedErrorIn(root, dir string) (string, error) {
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || goToolIgnores(name) || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		path := filepath.Join(root, filepath.FromSlash(dir), name)
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			return "", err
-		}
-		at := func(n ast.Node) string {
-			return fmt.Sprintf("%s/%s:%d", dir, name, fset.Position(n.Pos()).Line)
-		}
-		for _, decl := range f.Decls {
-			switch d := decl.(type) {
-			case *ast.GenDecl:
-				for _, spec := range d.Specs {
-					vs, ok := spec.(*ast.ValueSpec)
-					if !ok {
-						continue
-					}
-					for i, n := range vs.Names {
-						if sentinelName.MatchString(n.Name) || (i < len(vs.Values) && isSentinelValue(vs.Values[i])) {
-							return fmt.Sprintf("%s declares %s", at(n), n.Name), nil
-						}
-					}
-				}
-			case *ast.FuncDecl:
-				if d.Recv == nil || d.Name.Name != "Error" || d.Type.Params.NumFields() != 0 || d.Type.Results.NumFields() != 1 {
-					continue
-				}
-				if id, ok := d.Type.Results.List[0].Type.(*ast.Ident); ok && id.Name == "string" {
-					return fmt.Sprintf("%s declares an Error() string method", at(d)), nil
-				}
-			}
+		if found, err := typedErrorInFile(filepath.Join(abs, name), dir+"/"+name); found != "" || err != nil {
+			return found, err
 		}
 	}
 	return "", nil
+}
+
+// typedErrorInFile is typedErrorIn for the one file at path, which its
+// answer names rel. It normalises CRLF as blankKeepersInPath does.
+func typedErrorInFile(path, rel string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, rel, strings.ReplaceAll(string(raw), "\r\n", "\n"), parser.SkipObjectResolution)
+	if err != nil {
+		return "", err
+	}
+	for _, decl := range f.Decls {
+		if at, what := typedError(decl); at != nil {
+			return fmt.Sprintf("%s:%d declares %s", rel, fset.Position(at.Pos()).Line, what), nil
+		}
+	}
+	return "", nil
+}
+
+// typedError returns the node in decl that gives its package a typed error,
+// and what it declares, or nil.
+func typedError(decl ast.Decl) (ast.Node, string) {
+	switch d := decl.(type) {
+	case *ast.GenDecl:
+		return sentinelIn(d)
+	case *ast.FuncDecl:
+		if isErrorMethod(d) {
+			return d, "an Error() string method"
+		}
+	}
+	return nil, ""
+}
+
+// sentinelIn returns the first name gd declares a sentinel error under, or
+// nil.
+func sentinelIn(gd *ast.GenDecl) (ast.Node, string) {
+	for _, spec := range gd.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for i, n := range vs.Names {
+			if sentinelName.MatchString(n.Name) || (i < len(vs.Values) && isSentinelValue(vs.Values[i])) {
+				return n, n.Name
+			}
+		}
+	}
+	return nil, ""
+}
+
+// isErrorMethod reports whether fd is a method `Error() string`.
+func isErrorMethod(fd *ast.FuncDecl) bool {
+	if fd.Recv == nil || fd.Name.Name != "Error" || fd.Type.Params.NumFields() != 0 || fd.Type.Results.NumFields() != 1 {
+		return false
+	}
+	id, ok := fd.Type.Results.List[0].Type.(*ast.Ident)
+	return ok && id.Name == "string"
 }
 
 // isSentinelValue reports whether e makes the var it initialises a sentinel:
@@ -640,10 +818,55 @@ func isSentinelValue(e ast.Expr) bool {
 // shape, a skip rule, the scope check or an allowance's condition would pass
 // there unseen. The quiet shapes are the ones the scan must leave alone, each
 // for the reason its comment gives; the allowance cases walk it through every
-// state its entry can be in.
+// state its entry can be in, and one case writes the whole tree with CRLF
+// line endings.
 func TestBlankKeeperScanOnFixtures(t *testing.T) {
-	base := map[string]string{
-		"keep/redundant.go": `package keep
+	const tsnetKeeper = "internal/tsnet/tsnet_test.go: errors.Is: "
+	for _, c := range []struct {
+		name    string
+		changes map[string]string // path -> new content, "" to delete
+		crlf    bool              // write every file with CRLF line endings
+		tsnet   string            // the verdict on the tsnet keeper
+	}{
+		{"condition unmet", nil, false, keeperAllowed},
+		{"a CRLF checkout", nil, true, keeperAllowed},
+		{"a sentinel meets it by its name", map[string]string{
+			"internal/tsnet/err.go": "package tsnet\n\nvar ErrNotStarted = newError(\"tsnet: not started\")\n",
+		}, false, keeperMet},
+		{"a sentinel meets it by its initialiser", map[string]string{
+			"internal/tsnet/err.go": "package tsnet\n\nimport \"errors\"\n\nvar notStarted = errors.New(\"tsnet: not started\")\n",
+		}, false, keeperMet},
+		{"a sentinel meets it by another package's", map[string]string{
+			"internal/tsnet/err.go": "package tsnet\n\nimport \"net\"\n\nvar closed = net.ErrClosed\n",
+		}, false, keeperMet},
+		{"an error type meets it", map[string]string{
+			"internal/tsnet/err.go": "package tsnet\n\ntype notStarted struct{}\n\nfunc (notStarted) Error() string { return \"not started\" }\n",
+		}, false, keeperMet},
+		{"the doc drops the condition", map[string]string{
+			"internal/tsnet/tsnet_test.go": "package tsnet\n\nimport \"errors\"\n\n// This blank reference keeps errors imported.\nvar _ = errors.Is\n",
+		}, false, keeperUnstated},
+		{"the file uses the import now", map[string]string{
+			"internal/tsnet/tsnet_test.go": "package tsnet\n\nimport \"errors\"\n\n// This blank reference keeps errors imported for the check typed errors\n// will allow. Don't remove until typed errors land.\nvar _ = errors.Is\n\nfunc typed(err error) bool { return errors.Is(err, nil) }\n",
+		}, false, keeperServed},
+		{"the keeper is gone", map[string]string{
+			"internal/tsnet/tsnet_test.go": "",
+		}, false, keeperStaleEntry},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// A checkout's path may hold glob metacharacters.
+			root := filepath.Join(t.TempDir(), "clone[1]")
+			writeKeeperTree(t, root, keeperFixtureTree, c.changes, c.crlf)
+			rec := &docScanRecorder{t: t}
+			verdicts := scanBlankKeepers(rec, root, allowedKeepers, false)
+			checkKeeperVerdicts(t, rec, verdicts, append(append([]string(nil), keeperFixtureVerdicts...), tsnetKeeper+c.tsnet))
+		})
+	}
+}
+
+// keeperFixtureTree is the tree TestBlankKeeperScanOnFixtures scans, before
+// each case's changes: path -> source.
+var keeperFixtureTree = map[string]string{
+	"keep/redundant.go": `package keep
 
 import "fmt"
 
@@ -652,7 +875,7 @@ func say() string { return fmt.Sprint("x") }
 // quiet the import.
 var _ = fmt.Sprintf
 `,
-		"keep/only_use_test.go": `package keep
+	"keep/only_use_test.go": `package keep
 
 import (
 	"io"
@@ -673,8 +896,8 @@ func TestIt(t *testing.T) {
 	var _ = time.Second
 }
 `,
-		// Two keepers of one package keep each other's import alive.
-		"keep/twice.go": `package keep
+	// Two keepers of one package keep each other's import alive.
+	"keep/twice.go": `package keep
 
 import "strconv"
 
@@ -682,23 +905,24 @@ func a() { _ = strconv.IntSize }
 
 func b() { _ = strconv.IntSize }
 `,
-		// A predeclared name (nil) is not a local, so a statement naming one
-		// beside a package is still a keeper.
-		"keep/statements.go": `package keep
+	// A predeclared name (nil) is not a local, so a statement naming one
+	// beside a package is still a keeper.
+	"keep/statements.go": `package keep
 
 import "bytes"
 
 func c() { _ = (*bytes.Buffer)(nil) }
 `,
-		"keep/local.go": `package keep
+	"keep/local.go": `package keep
 
 var logger = struct{}{}
 
 var _ = logger
 `,
-		// A use of the package's name where a local of that name may be
-		// meant does not count as a use of the import.
-		"keep/shadow.go": `package keep
+	// A use of the package's name where a local of that name is in scope
+	// does not count as a use of the import, however the local was
+	// declared, and a statement naming only such a local is no keeper.
+	"keep/shadow.go": `package keep
 
 import "path"
 
@@ -707,11 +931,39 @@ func base() string {
 	return path.Base
 }
 
+func param(path struct{ Base string }) string { return path.Base }
+
+func ranged() {
+	for _, path := range []struct{ Base string }{} {
+		_ = path.Base
+	}
+}
+
+func declared() string {
+	var path struct{ Base string }
+	return path.Base
+}
+
+var lit = func(path struct{ Base string }) string { return path.Base }
+
 var _ = path.Join
 `,
-		// Each import's name is its package's: a ".v3" suffix, a "go-"
-		// prefix and a "/v2" element are not part of it.
-		"keep/names.go": `package keep
+	// A local's scope begins after its declaring statement, so both uses
+	// below name the import: the keeper above the declaration is found,
+	// and the declaration's own right-hand side is a use.
+	"keep/scope.go": `package keep
+
+import "path"
+
+func early() string {
+	_ = path.Join
+	path := path.Base("a/b")
+	return path
+}
+`,
+	// Each import's name is its package's: a ".v3" suffix, a "go-" prefix
+	// and a "/v2" element are not part of it.
+	"keep/names.go": `package keep
 
 import (
 	"github.com/example/tool/v2"
@@ -723,7 +975,7 @@ var _ = tool.Run
 var _ = isatty.IsTerminal
 var _ = yaml.Marshal
 `,
-		"keep/quiet.go": `package keep
+	"keep/quiet.go": `package keep
 
 import (
 	"errors"
@@ -764,18 +1016,18 @@ func use(cfg struct{ Name string }) {
 	_ = url.URL{Scheme: "https"}        // a field key reads as a name: missed, the safe way
 }
 `,
-		// Nothing the go tool ignores is read, nor another module, nor
-		// vendored or node_modules code. The lock file is not Go, so opening
-		// it would fail the scan.
-		"keep/.#redundant.go":     "user@host.4242:1700000000",
-		"_scratch/s.go":           "package s\n\nimport \"io\"\n\nvar _ = io.EOF\n",
-		"keep/testdata/t.go":      "package t\n\nimport \"io\"\n\nvar _ = io.EOF\n",
-		"nested/go.mod":           "module nested\n",
-		"nested/n.go":             "package n\n\nimport \"io\"\n\nvar _ = io.EOF\n",
-		"vendor/v/v.go":           "package v\n\nimport \"io\"\n\nvar _ = io.EOF\n",
-		"web/node_modules/m/m.go": "package m\n\nimport \"io\"\n\nvar _ = io.EOF\n",
-		"internal/tsnet/ts.go":    "package tsnet\n\nimport \"errors\"\n\nfunc Status() error { return errors.New(\"tsnet: Status called before Start\") }\n",
-		"internal/tsnet/tsnet_test.go": `package tsnet
+	// Nothing the go tool ignores is read, nor another module, nor vendored
+	// or node_modules code. The lock file is not Go, so opening it would
+	// fail the scan.
+	"keep/.#redundant.go":     "user@host.4242:1700000000",
+	"_scratch/s.go":           "package s\n\nimport \"io\"\n\nvar _ = io.EOF\n",
+	"keep/testdata/t.go":      "package t\n\nimport \"io\"\n\nvar _ = io.EOF\n",
+	"nested/go.mod":           "module nested\n",
+	"nested/n.go":             "package n\n\nimport \"io\"\n\nvar _ = io.EOF\n",
+	"vendor/v/v.go":           "package v\n\nimport \"io\"\n\nvar _ = io.EOF\n",
+	"web/node_modules/m/m.go": "package m\n\nimport \"io\"\n\nvar _ = io.EOF\n",
+	"internal/tsnet/ts.go":    "package tsnet\n\nimport \"errors\"\n\nfunc Status() error { return errors.New(\"tsnet: Status called before Start\") }\n",
+	"internal/tsnet/tsnet_test.go": `package tsnet
 
 import "errors"
 
@@ -783,100 +1035,77 @@ import "errors"
 // will allow. Don't remove until typed errors land.
 var _ = errors.Is
 `,
+}
+
+// keeperFixtureVerdicts is what every case of TestBlankKeeperScanOnFixtures
+// finds outside internal/tsnet, as "file: keeper: verdict".
+var keeperFixtureVerdicts = []string{
+	"keep/local.go: logger: " + keeperLocal,
+	"keep/names.go: isatty.IsTerminal: " + keeperOnlyUse,
+	"keep/names.go: tool.Run: " + keeperOnlyUse,
+	"keep/names.go: yaml.Marshal: " + keeperOnlyUse,
+	"keep/only_use_test.go: (*strings.Builder)(nil): " + keeperOnlyUse,
+	"keep/only_use_test.go: http.ErrServerClosed: " + keeperOnlyUse,
+	"keep/only_use_test.go: io.Copy: " + keeperOnlyUse,
+	"keep/only_use_test.go: time.Second: " + keeperOnlyUse,
+	"keep/redundant.go: fmt.Sprintf: " + keeperRedundant,
+	"keep/scope.go: path.Join: " + keeperRedundant,
+	"keep/shadow.go: path.Join: " + keeperOnlyUse,
+	"keep/statements.go: (*bytes.Buffer)(nil): " + keeperOnlyUse,
+	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
+	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
+}
+
+// writeKeeperTree writes tree under root with changes applied (an empty
+// change deletes the file), with CRLF line endings when crlf is set.
+func writeKeeperTree(t *testing.T, root string, tree, changes map[string]string, crlf bool) {
+	t.Helper()
+	files := map[string]string{}
+	for rel, src := range tree {
+		files[rel] = src
 	}
-	shared := []string{
-		"keep/local.go: logger: " + keeperLocal,
-		"keep/names.go: isatty.IsTerminal: " + keeperOnlyUse,
-		"keep/names.go: tool.Run: " + keeperOnlyUse,
-		"keep/names.go: yaml.Marshal: " + keeperOnlyUse,
-		"keep/only_use_test.go: (*strings.Builder)(nil): " + keeperOnlyUse,
-		"keep/only_use_test.go: http.ErrServerClosed: " + keeperOnlyUse,
-		"keep/only_use_test.go: io.Copy: " + keeperOnlyUse,
-		"keep/only_use_test.go: time.Second: " + keeperOnlyUse,
-		"keep/redundant.go: fmt.Sprintf: " + keeperRedundant,
-		"keep/shadow.go: path.Join: " + keeperOnlyUse,
-		"keep/statements.go: (*bytes.Buffer)(nil): " + keeperOnlyUse,
-		"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
-		"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
+	for rel, src := range changes {
+		files[rel] = src
 	}
-	for _, c := range []struct {
-		name    string
-		changes map[string]string // path -> new content, "" to delete
-		tsnet   string            // the verdict on the tsnet keeper
-	}{
-		{"condition unmet", nil, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperAllowed},
-		{"a sentinel meets it by its name", map[string]string{
-			"internal/tsnet/err.go": "package tsnet\n\nvar ErrNotStarted = newError(\"tsnet: not started\")\n",
-		}, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperMet},
-		{"a sentinel meets it by its initialiser", map[string]string{
-			"internal/tsnet/err.go": "package tsnet\n\nimport \"errors\"\n\nvar notStarted = errors.New(\"tsnet: not started\")\n",
-		}, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperMet},
-		{"a sentinel meets it by another package's", map[string]string{
-			"internal/tsnet/err.go": "package tsnet\n\nimport \"net\"\n\nvar closed = net.ErrClosed\n",
-		}, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperMet},
-		{"an error type meets it", map[string]string{
-			"internal/tsnet/err.go": "package tsnet\n\ntype notStarted struct{}\n\nfunc (notStarted) Error() string { return \"not started\" }\n",
-		}, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperMet},
-		{"the doc drops the condition", map[string]string{
-			"internal/tsnet/tsnet_test.go": "package tsnet\n\nimport \"errors\"\n\n// This blank reference keeps errors imported.\nvar _ = errors.Is\n",
-		}, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperUnstated},
-		{"the file uses the import now", map[string]string{
-			"internal/tsnet/tsnet_test.go": "package tsnet\n\nimport \"errors\"\n\n// This blank reference keeps errors imported for the check typed errors\n// will allow. Don't remove until typed errors land.\nvar _ = errors.Is\n\nfunc typed(err error) bool { return errors.Is(err, nil) }\n",
-		}, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperServed},
-		{"the keeper is gone", map[string]string{
-			"internal/tsnet/tsnet_test.go": "",
-		}, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperStaleEntry},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			// A checkout's path may hold glob metacharacters.
-			root := filepath.Join(t.TempDir(), "clone[1]")
-			for rel, src := range base {
-				if next, changed := c.changes[rel]; changed {
-					src = next
-				}
-				if src == "" {
-					continue
-				}
-				writeKeeperFixture(t, root, rel, src)
-			}
-			for rel, src := range c.changes {
-				if _, inBase := base[rel]; !inBase && src != "" {
-					writeKeeperFixture(t, root, rel, src)
-				}
-			}
-			rec := &docScanRecorder{t: t}
-			verdicts := scanBlankKeepers(rec, root, allowedKeepers, false)
-			var got []string
-			for _, v := range verdicts {
-				file, _, _ := strings.Cut(v.pos, ":")
-				got = append(got, file+": "+v.src+": "+v.why)
-			}
-			want := append(append([]string(nil), shared...), c.tsnet)
-			sort.Strings(got)
-			sort.Strings(want)
-			if strings.Join(got, "\n") != strings.Join(want, "\n") {
-				t.Errorf("verdicts:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
-			}
-			// Every verdict but an allowance is reported as an error.
-			wantErrors := len(want)
-			if strings.HasSuffix(c.tsnet, keeperAllowed) {
-				wantErrors--
-			}
-			if len(rec.errors) != wantErrors {
-				t.Errorf("reported %d errors, want %d:\n  %s", len(rec.errors), wantErrors, strings.Join(rec.errors, "\n  "))
-			}
-		})
+	for rel, src := range files {
+		if src == "" {
+			continue
+		}
+		if crlf {
+			src = strings.ReplaceAll(src, "\n", "\r\n")
+		}
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-// writeKeeperFixture writes src to rel under root, creating its directory.
-func writeKeeperFixture(t *testing.T, root, rel, src string) {
+// checkKeeperVerdicts compares verdicts with want as a sorted list of
+// "file: keeper: verdict", and requires one reported error for every verdict
+// but an allowance.
+func checkKeeperVerdicts(t *testing.T, rec *docScanRecorder, verdicts []keeperVerdict, want []string) {
 	t.Helper()
-	path := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
+	var got []string
+	wantErrors := 0
+	for _, v := range verdicts {
+		file, _, _ := strings.Cut(v.pos, ":")
+		got = append(got, file+": "+v.src+": "+v.why)
 	}
-	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
-		t.Fatal(err)
+	for _, w := range want {
+		if !strings.HasSuffix(w, ": "+keeperAllowed) {
+			wantErrors++
+		}
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("verdicts:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+	if len(rec.errors) != wantErrors {
+		t.Errorf("reported %d errors, want %d:\n  %s", len(rec.errors), wantErrors, strings.Join(rec.errors, "\n  "))
 	}
 }
