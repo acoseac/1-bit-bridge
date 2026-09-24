@@ -2283,8 +2283,10 @@ mentions across the four `ops/audit-*.md` files.
   snapshot (a `VACUUM INTO`, long on a big library) printed `backup
   (startup): snapshot failed: vacuum manifest db: context canceled`, and one
   during the prune printed two more lines about a pass that failed at
-  nothing. `withoutCancellation(ctx, err)` returns err with ctx's
-  cancellation taken out, and the ticker reports what is left. Both of its
+  nothing. `ctxerr.WithoutCancellation(ctx, err)` (`internal/ctxerr`, so
+  every loop can ask it; it was `withoutCancellation` in `cmd/bridge` until
+  the follow-up below) returns err with ctx's cancellation taken out, and
+  the ticker reports what is left. Both of its
   conditions are load-bearing: ctx is CANCELLED (a deadline is a failure),
   and the error IS that cancellation (a snapshot's file copies do not watch
   ctx, so an I/O error that lands during a cancelled pass is a failure). An
@@ -2305,8 +2307,10 @@ mentions across the four `ops/audit-*.md` files.
   not close the class**: a survey the same day found about 33 more log sites
   that report a shutdown cancel as a failure (scanner batch writes,
   enricher, updater poll, harvest `tick_error`, fingerprint and smart-mix
-  sweeps, integrity watchers, UPnP ingest, tsnet). They are a follow-up,
-  and this rule does not cover them.
+  sweeps, integrity watchers, UPnP ingest, tsnet). They are being closed
+  subsystem by subsystem, and until a subsystem's change lands this rule
+  does not cover it: the fingerprint sweep's candidate listing and the
+  smart-mix regeneration were the first two.
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows
@@ -3130,10 +3134,15 @@ its twin.** The top list is older, shorter, and read first.
 - **A running SQLite statement is parked from INSIDE it, by a Go collation**
   (#998). `VACUUM` copies an index with an append fast path that compares
   no keys, except an index with a non-BINARY collation, which it rebuilds by
-  seeks (SQLite's `insert.c`, `xferOptimization`). `internal/backup/backuptest`
-  registers such a collation in Go, so a VACUUM of a database `WriteSource`
+  seeks (SQLite's `insert.c`, `xferOptimization`). `internal/sqlitetest`
+  registers such a collation in Go (it lived in `internal/backup/backuptest`
+  until the scanner needed it), so a VACUUM of a database `WriteSource`
   wrote calls back mid-copy with its destination file already created, and
-  `ParkVacuum` holds it there. A cancel then reaches the statement only
+  `ParkVacuum` holds it there. The same collation stops ANY statement that
+  maintains an index a test created under it: an UPDATE that moves a key,
+  an INSERT, a DELETE. The key is compared only against keys already in the
+  index, so it needs a second row, and a partial index keeps the statements
+  the test does not want to stop out of it. A cancel then reaches the statement only
   through modernc's own `interruptOnDone` goroutine, which has to be
   scheduled before the copy finishes, so `ReleaseUntil` lets comparisons go
   one at a time after a `runtime.Gosched`. Measured over 200 runs under
