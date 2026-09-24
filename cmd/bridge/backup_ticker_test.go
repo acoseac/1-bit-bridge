@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,6 +180,89 @@ func TestABackupThatFailsIsStillReported(t *testing.T) {
 				t.Errorf("stderr = %q, want a line starting %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWithoutCancellationKeepsOnlyWhatFailed pins the classification
+// behind the ticker's silence, one row per claim in its docblock. The
+// joined rows use the exact shape PruneContext's delete loop and
+// reapOrphans return when a cancel stops them after a genuine failure,
+// errors.Join(errors.Join(errs...), ctx.Err()). Driving that through a
+// real prune would need a cancel landing between two directories, and
+// neither loop has a place to hold it.
+func TestWithoutCancellationKeepsOnlyWhatFailed(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	live := context.Background()
+
+	removeA := errors.New("remove backups/a: permission denied")
+	removeB := errors.New("remove backups/b: permission denied")
+	copyFailed := errors.New("copy tokens.json: input/output error")
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want string // "" = nil
+	}{
+		{"nil error", cancelled, nil, ""},
+		{"the snapshot's cancelled vacuum", cancelled,
+			fmt.Errorf("vacuum manifest db: %w", context.Canceled), ""},
+		{"a prune stopped before any failure", cancelled,
+			errors.Join(errors.Join(), context.Canceled), ""},
+		{"a prune stopped after two failures", cancelled,
+			errors.Join(errors.Join(removeA, removeB), context.Canceled),
+			removeA.Error() + "\n" + removeB.Error()},
+		{"a failure with no cancellation in it, in a cancelled pass", cancelled,
+			copyFailed, copyFailed.Error()},
+		{"a deadline", expired,
+			fmt.Errorf("vacuum manifest db: %w", context.DeadlineExceeded),
+			"vacuum manifest db: " + context.DeadlineExceeded.Error()},
+		// The row above is rejected by the error alone, since a deadline is
+		// not context.Canceled. This one reaches the context: a pass whose
+		// ctx ran out of time failed, even when the error it carries is a
+		// cancellation from somewhere else. Only a CANCELLED ctx is quiet,
+		// not one that is merely done.
+		{"a deadline, with another context's cancellation in the error", expired,
+			fmt.Errorf("vacuum manifest db: %w", context.Canceled),
+			"vacuum manifest db: " + context.Canceled.Error()},
+		{"another context's cancellation while ctx is live", live,
+			fmt.Errorf("vacuum manifest db: %w", context.Canceled),
+			"vacuum manifest db: " + context.Canceled.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := withoutCancellation(tc.ctx, tc.err)
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("withoutCancellation = %q, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("withoutCancellation = nil, want %q", tc.want)
+			}
+			if got.Error() != tc.want {
+				t.Errorf("withoutCancellation = %q, want %q", got, tc.want)
+			}
+			// In a cancelled pass nothing that is kept may still be the
+			// cancellation, whatever its message says.
+			if errors.Is(tc.err, context.Canceled) && errors.Is(tc.ctx.Err(), context.Canceled) &&
+				errors.Is(got, context.Canceled) {
+				t.Errorf("withoutCancellation kept the cancellation: %q", got)
+			}
+		})
+	}
+	// The kept half of a joined error is the SAME errors, not copies of
+	// their text.
+	got := withoutCancellation(cancelled, errors.Join(errors.Join(removeA, removeB), context.Canceled))
+	if !errors.Is(got, removeA) || !errors.Is(got, removeB) {
+		t.Errorf("the genuine failures lost their identity: %v", got)
+	}
+	// And an error with no cancellation in it comes back unchanged.
+	if got := withoutCancellation(cancelled, copyFailed); got != copyFailed {
+		t.Errorf("withoutCancellation rebuilt an error it had nothing to take out of: %v", got)
 	}
 }
 
