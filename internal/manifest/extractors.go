@@ -342,7 +342,28 @@ var Ext = map[string]bool{
 // writer puts in a size field it cannot fill, and a genuine 4 GiB − 1
 // payload is indistinguishable from it anyway (which is why RF64
 // exists).
-const ExtractorVersion = 14
+//
+// v15 — three things an M4A lost, found from a user report that Rock
+// and Pop listed their DSD files and none of their ALAC (2026-09-24).
+// (1) dhowden/tag does not read `gnre`, the predefined-genre atom iTunes
+// and Music write for every STANDARD genre, so those files carried no
+// genre; extractMP4PredefinedGenre reads it when no `©gen` text exists.
+// (2) dhowden keeps the data atom's 4-byte locale on every freeform
+// (`----`) value, so an M4A's MusicBrainz ids reached the wire
+// NUL-prefixed and its ReplayGain and ORIGINALDATE / ORIGINALYEAR did not
+// parse; stripMP4FreeformLocales removes it. (3) findMoov stopped at
+// 4 MiB, so an M4A written with its moov AFTER the audio (ffmpeg's
+// default without -movflags +faststart) had no codec, sample rate, bit
+// depth or duration.
+//
+// Unlike v12–v14, legitimate files DO change here: every M4A tagged by
+// iTunes / Music with a standard genre, every Picard-tagged M4A, and
+// every moov-at-end M4A. The version-stale diff-guard keeps the client
+// delta to exactly those rows; every other row rides the version-stamp
+// leg. The corrected MusicBrainz ids also make those albums eligible for
+// the Cover Art Archive for the first time, so expect one artwork
+// enrichment wave after the re-extract.
+const ExtractorVersion = 15
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -515,7 +536,22 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	return extractViaDhowdenFromReader(f, absPath, t, ec)
+	if err := extractViaDhowdenFromReader(f, absPath, t, ec); err != nil {
+		return err
+	}
+	// The iTunes predefined genre (`gnre`), which dhowden does not read —
+	// see extractMP4PredefinedGenre. Only when no text genre was found: a
+	// file carrying `©gen` chose its text on purpose, and iTunes writes one
+	// atom or the other. findMoov rewinds the reader itself.
+	if t.Genre == "" {
+		if genre, err := extractMP4PredefinedGenre(f); err != nil {
+			scanLogger.Warn("mp4 predefined-genre walk failed; manifest will carry no genre",
+				"path", absPath, "err", err)
+		} else if genre != "" {
+			t.Genre = genre
+		}
+	}
+	return nil
 }
 
 // extractByFormat is the context-aware variant of Extract. When ec
@@ -739,6 +775,13 @@ func extractViaDhowdenFromReader(f io.ReadSeeker, absPath string, t *Track, ec *
 			extractLocalArtwork(absPath, t, nil, ec)
 		}
 		return nil
+	}
+	if m.Format() == tag.MP4 {
+		// dhowden keeps the data-atom locale on every freeform (`----`)
+		// value — see stripMP4FreeformLocales. Before ANY reader of m.Raw():
+		// populate's MusicBrainz ids / ReplayGain / original year, the
+		// multi-value pickup, and the lyrics walk all read these values.
+		stripMP4FreeformLocales(m.Raw())
 	}
 	populateFromTagMetadata(m, t)
 	// ID3v2 / MP4 multi-value pickup. Reads m.Raw() for embedded
