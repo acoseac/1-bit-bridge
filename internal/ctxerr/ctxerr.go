@@ -55,10 +55,11 @@ var joinType = reflect.TypeOf(errors.Join(errors.New("a"), errors.New("b")))
 // because it cannot be rebuilt around what is left without dropping its own
 // context. fmt.Errorf with two %w verbs is a wrapper too, although it unwraps
 // to a list as a join does: quiet when every error it wraps is the
-// cancellation, and otherwise reported whole. (Gemini, #998, proposed returning the filtered inner error, which
-// drops the wrapper's context and compares errors with ==, a runtime panic on
-// an error type that is not comparable.) An error with no cancellation in it
-// comes back unchanged, the same value, message and all.
+// cancellation, and otherwise reported whole. (Gemini, #998, proposed
+// returning the filtered inner error, which drops the wrapper's context and
+// compares errors with ==, a runtime panic on an error type that is not
+// comparable.) An error with no cancellation in it comes back unchanged, the
+// same value, message and all.
 //
 // One residual, measured rather than handled. database/sql rolls a cancelled
 // transaction back from a goroutine of its own, and when that goroutine wins
