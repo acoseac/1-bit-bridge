@@ -2295,14 +2295,14 @@ mentions across the four `ops/audit-*.md` files.
   A stopped snapshot leaves nothing to report: `Snapshot` removes its
   partial directory, destination file included
   (`TestSnapshotStoppedMidVacuumLeavesNothing` cancels INSIDE the running
-  VACUUM), and the next startup takes one. The run state keeps
-  `sweepFinished(nil)`, the recorder's "no new counts" for a failed pass and
-  a stopped one alike, because `running` must clear. **This does not close
-  the class**: a survey the same day found about 33 more log sites that
-  report a shutdown cancel as a failure (scanner batch writes, enricher,
-  updater poll, harvest `tick_error`, fingerprint and smart-mix sweeps,
-  integrity watchers, UPnP ingest, tsnet). They are a follow-up, and this
-  rule does not cover them.
+  VACUUM), so the backups directory is as the pass found it. The run state
+  keeps `sweepFinished(nil)`, the recorder's "no new counts" for a failed
+  pass and a stopped one alike, because `running` must clear. **This does
+  not close the class**: a survey the same day found about 33 more log sites
+  that report a shutdown cancel as a failure (scanner batch writes,
+  enricher, updater poll, harvest `tick_error`, fingerprint and smart-mix
+  sweeps, integrity watchers, UPnP ingest, tsnet). They are a follow-up,
+  and this rule does not cover them.
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows

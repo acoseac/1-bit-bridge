@@ -12619,8 +12619,8 @@ INTO`, long on a big library) put a failure in the journal.
 
 - **Report nothing, not a neutral "stopped" line.** A stopped snapshot
   changes nothing: `Snapshot` removes its partial directory (pinned mid-
-  VACUUM below), and the next startup check finds no newer snapshot and
-  takes one. The shutdown is already in the journal (`Shutting down...`).
+  VACUUM below), so the backups directory is as the pass found it and
+  the next pass decides from the same state. The shutdown is already in the journal (`Shutting down...`).
   And #997's `passCancelled` logs nothing, so one rule keeps one
   behaviour.
 - **Ask the error, not only the context.** `passCancelled` consults ctx

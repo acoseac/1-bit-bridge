@@ -225,10 +225,10 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		dst, err := backup.Snapshot(ctx, src)
 		if err != nil {
 			// A snapshot the shutdown stopped is not reported: Snapshot has
-			// removed its partial directory, so nothing changed, and the next
-			// startup check finds no newer snapshot and takes one. nil still
-			// goes to the run state, which means "no new counts" for a failed
-			// pass and a stopped one alike, since `running` has to clear.
+			// removed its partial directory, so the backups directory is as
+			// this pass found it, and the next pass decides from there. nil
+			// still goes to the run state, which means "no new counts" for a
+			// failed pass and a stopped one alike, since `running` has to clear.
 			if failure := withoutCancellation(ctx, err); failure != nil {
 				fmt.Fprintf(stderr, "backup (%s): snapshot failed: %v\n", triggered, failure)
 			}
