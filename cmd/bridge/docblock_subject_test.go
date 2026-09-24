@@ -766,6 +766,12 @@ var capacity = 0
 
 // Removal is what keeps the case clean.
 func remove() {}
+
+// fanout writes the event.
+func fanoutLocked() {}
+
+// DST is a capability of its own.
+const dstFlag = 1
 `,
 		"pkg/pkg_test.go": `package pkg
 
@@ -796,15 +802,16 @@ func useIt() {}
 	}
 	rec := &docScanRecorder{t: t}
 	misattached, undeclared := scanDocblockSubjects(rec, root, false)
-	// Reported: a stale name on a function, another test's name on a test,
-	// and a stale name on a test file's helper; and one misattached doc.
-	// Left alone: the function's own parameter (limit), a predeclared name
-	// (nil), a sentence (Removal), a test's premise (dhowden), and an
-	// external test naming its package's declaration (pick).
-	want := []string{`opens "pickVoted returns"`, `opens "TestGone pins"`, `opens "jpegBlob is"`,
-		`opens "helper builds" but is attached to "other"`}
-	if misattached != 1 || undeclared != 3 || len(rec.errors) != len(want) {
-		t.Errorf("got %d misattached and %d undeclared in %d reports, want 1, 3 and %d:\n%s",
+	// Reported: stale names on functions (camelCase and all-lowercase),
+	// another test's name on a test, and a stale name on a test file's
+	// helper; and one misattached doc. Left alone: the function's own
+	// parameter (limit), a predeclared name (nil), a sentence (Removal), an
+	// acronym (DST), a test's premise (dhowden), and an external test naming
+	// its package's declaration (pick).
+	want := []string{`opens "pickVoted returns"`, `opens "fanout writes"`, `opens "TestGone pins"`,
+		`opens "jpegBlob is"`, `opens "helper builds" but is attached to "other"`}
+	if misattached != 1 || undeclared != 4 || len(rec.errors) != len(want) {
+		t.Errorf("got %d misattached and %d undeclared in %d reports, want 1, 4 and %d:\n%s",
 			misattached, undeclared, len(rec.errors), len(want), strings.Join(rec.errors, "\n"))
 	}
 	for _, w := range want {
