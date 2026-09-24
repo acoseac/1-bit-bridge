@@ -42,6 +42,7 @@ func TestAPollStoppedByShutdownChangesNothing(t *testing.T) {
 	if u.checkOnce(ctx) {
 		t.Fatal("a poll the shutdown stopped reported success")
 	}
+	mustHaveReachedGitHub(t, ctx, "poll")
 
 	if got := rec.Failures(msgPoll); len(got) != 0 {
 		t.Errorf("a stopped poll was reported:\n%s", strings.Join(got, "\n"))
@@ -76,6 +77,7 @@ func TestAnAutoInstallStoppedByShutdownReportsNothing(t *testing.T) {
 
 	rec := loggingtest.Record(t)
 	u.maybeAutoInstall(ctx)
+	mustHaveReachedGitHub(t, ctx, "auto-install")
 
 	if got := rec.Failures(msgAutoInstall); len(got) != 0 {
 		t.Errorf("an install the shutdown stopped was reported:\n%s", strings.Join(got, "\n"))
@@ -91,6 +93,17 @@ func TestAnAutoInstallThatFailsIsStillReported(t *testing.T) {
 
 	if got := rec.Failures(msgAutoInstall); len(got) != 1 {
 		t.Errorf("a failed install logged %d lines, want 1:\n%s", len(got), strings.Join(got, "\n"))
+	}
+}
+
+// mustHaveReachedGitHub fails the test unless ctx was cancelled, which only
+// cancellingGitHub does, from inside a request. A call that returned before
+// its request (a gate, an early error) would otherwise pass the "stopped"
+// test having stopped nothing.
+func mustHaveReachedGitHub(t *testing.T, ctx context.Context, what string) {
+	t.Helper()
+	if ctx.Err() == nil {
+		t.Fatalf("the %s never reached GitHub, so the shutdown stopped nothing", what)
 	}
 }
 
