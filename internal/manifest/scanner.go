@@ -642,25 +642,8 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 			}
 			continue
 		}
-		if observed == 0 && !hasAllowEmptySentinel(root) {
-			n, countErr := s.store.CountTracksUnderRoot(ctx, root, multiRoot)
-			if countErr != nil {
-				// Fail closed: we can't audit, so sentinel the root
-				// rather than letting the deletion pass run on
-				// untrusted state. CodeRabbit Major + Gemini medium
-				// on PR #289 — pre-fix the .warn+continue silently
-				// disabled the safety gate.
-				scanLogger.Warn("count tracks under root; conservatively sparing deletion for root",
-					"root", root, "err", countErr)
-				errorSubtrees[rootSentinel] = struct{}{}
-				continue
-			}
-			if n > 0 {
-				scanLogger.Error("suspected clean-empty mount failure",
-					"root", root, "rows_in_db", n,
-					"hint", "place .bridge-allow-empty at the root to confirm intent")
-				errorSubtrees[rootSentinel] = struct{}{}
-			}
+		if observed == 0 && !hasAllowEmptySentinel(root) && s.emptyRootMustBeSpared(ctx, root, multiRoot) {
+			errorSubtrees[rootSentinel] = struct{}{}
 		}
 	}
 
@@ -910,6 +893,30 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// routedSet: its ref stream anti-joins UPnP-routed rows in SQL.
 	scanOK = true
 	return count, nil
+}
+
+// emptyRootMustBeSpared audits a root whose walk observed nothing and
+// reports whether the deletion pass must spare it: when the DB carries rows
+// for it (a suspected clean-empty mount), and when the count fails.
+//
+// Fail closed on a failed count: we can't audit, so the root is spared
+// rather than letting the deletion pass run on untrusted state. CodeRabbit
+// Major + Gemini medium on PR #289 — pre-fix the .warn+continue silently
+// disabled the safety gate.
+func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiRoot bool) bool {
+	n, countErr := s.store.CountTracksUnderRoot(ctx, root, multiRoot)
+	if countErr != nil {
+		scanLogger.Warn("count tracks under root; conservatively sparing deletion for root",
+			"root", root, "err", countErr)
+		return true
+	}
+	if n > 0 {
+		scanLogger.Error("suspected clean-empty mount failure",
+			"root", root, "rows_in_db", n,
+			"hint", "place .bridge-allow-empty at the root to confirm intent")
+		return true
+	}
+	return false
 }
 
 // routedExclusionSet returns the set of UPnP-routed source paths that the
@@ -1799,13 +1806,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			// fs.ErrNotExist on the subtree is a legitimate operator
 			// delete and the bounded deletion pass runs as before.
 			if errors.Is(err, fs.ErrNotExist) {
-				if auditErr := auditOwningRootOnSubtreeMiss(ctx, s.store, owningRoot, multiRoot); auditErr != nil {
-					scanLogger.Error("subtree absent but owning root audit failed",
-						"path", abs, "root", owningRoot, "err", auditErr)
-					return auditErr
-				}
-				scanLogger.Info("subtree removed", "path", abs)
-				return nil
+				return s.auditSubtreeMiss(ctx, abs, owningRoot, multiRoot)
 			}
 			// Genuine transient failures (permission flap, EACCES, NAS
 			// drop) still record the subtree so the spare kicks in.
@@ -2034,6 +2035,20 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	}
 
 	return int(committed.Load()), nil
+}
+
+// auditSubtreeMiss is ScanSubtree's answer to a subtree that is not there:
+// nil, so the bounded deletion pass reaps its rows, once the owning root
+// passes auditOwningRootOnSubtreeMiss, and the audit's error otherwise,
+// which aborts the walk so the deletion pass never runs on untrusted state.
+func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, multiRoot bool) error {
+	if auditErr := auditOwningRootOnSubtreeMiss(ctx, s.store, owningRoot, multiRoot); auditErr != nil {
+		scanLogger.Error("subtree absent but owning root audit failed",
+			"path", abs, "root", owningRoot, "err", auditErr)
+		return auditErr
+	}
+	scanLogger.Info("subtree removed", "path", abs)
+	return nil
 }
 
 // walkRoot drives `filepath.WalkDir` for one root, recording folder
