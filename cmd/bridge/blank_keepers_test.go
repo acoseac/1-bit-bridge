@@ -643,7 +643,11 @@ func blankValues(vs *ast.ValueSpec) []ast.Expr {
 // to a type that cannot be a function. A call whose callee could be a
 // function is refused (`pkg.T(x)` could be either), so `var _ =
 // registry.Register(x)` and a compile-time size assertion are never keepers,
-// and so is a receive, which waits: `_ = <-pkg.Done` is not a keeper.
+// and so is anything else that does something: a receive waits, and an
+// operator that can panic (panicFree) or a slice-to-array conversion
+// (convertsToArray) can end the program. A dereference can panic on nil
+// too, but `*pkg.P` is spelled like the method expression `(*pkg.T).M`,
+// which is reported on purpose, so a star is read.
 func onlyNames(e ast.Expr) bool {
 	switch x := e.(type) {
 	case *ast.Ident, *ast.BasicLit:
@@ -657,24 +661,70 @@ func onlyNames(e ast.Expr) bool {
 	case *ast.UnaryExpr:
 		return x.Op != token.ARROW && onlyNames(x.X)
 	case *ast.BinaryExpr:
-		return onlyNames(x.X) && onlyNames(x.Y)
+		return panicFree(x.Op) && onlyNames(x.X) && onlyNames(x.Y)
 	case *ast.CompositeLit:
 		return (x.Type == nil || typeOnlyNames(x.Type)) && eltsOnlyName(x.Elts)
 	case *ast.CallExpr:
-		return len(x.Args) == 1 && isTypeOnly(x.Fun) && typeOnlyNames(x.Fun) && onlyNames(x.Args[0])
+		return len(x.Args) == 1 && isTypeOnly(x.Fun) && typeOnlyNames(x.Fun) && !convertsToArray(x.Fun) && onlyNames(x.Args[0])
 	}
 	return false
+}
+
+// panicFree reports whether a binary operator can never panic at run time.
+// Division and remainder panic on a zero divisor, a shift on a negative
+// count, and == or != on two interfaces holding one uncomparable type, so
+// `_ = 1 / pkg.Divisor` does something a keeper does not (CodeRabbit on
+// #996). The rest cannot.
+func panicFree(op token.Token) bool {
+	switch op {
+	case token.ADD, token.SUB, token.MUL, token.AND, token.OR, token.XOR, token.AND_NOT,
+		token.LAND, token.LOR, token.LSS, token.GTR, token.LEQ, token.GEQ:
+		return true
+	}
+	return false
+}
+
+// convertsToArray reports whether a conversion's type is an array or a
+// pointer to one. Converting a slice to either panics when the slice is too
+// short.
+func convertsToArray(t ast.Expr) bool {
+	for {
+		switch x := t.(type) {
+		case *ast.ParenExpr:
+			t = x.X
+		case *ast.StarExpr:
+			t = x.X
+		case *ast.ArrayType:
+			return x.Len != nil
+		default:
+			return false
+		}
+	}
 }
 
 // typeOnlyNames reports whether a type expression only names things. A type
 // holds an expression only in an array length or a type argument, and the
 // length is where a compile-time assertion computes with a call:
-// `var _ = [unsafe.Sizeof(x) - 8]byte{}` is not a keeper. A type argument
-// makes a generic instantiation, `set.Of[int]{}`, which is one.
+// `var _ = [unsafe.Sizeof(x) - 8]byte{}` is not a keeper, and neither is one
+// whose length sits in a struct's field, a function's parameter or an
+// interface's method (CodeRabbit on #996). A type argument makes a generic
+// instantiation, `set.Of[int]{}`, which is one.
 func typeOnlyNames(t ast.Expr) bool {
 	switch x := t.(type) {
-	case *ast.Ident, *ast.SelectorExpr, *ast.FuncType, *ast.InterfaceType, *ast.StructType:
+	case *ast.Ident, *ast.SelectorExpr:
 		return true
+	case *ast.StructType:
+		return fieldTypesOnlyName(x.Fields)
+	case *ast.InterfaceType:
+		return fieldTypesOnlyName(x.Methods)
+	case *ast.FuncType:
+		return fieldTypesOnlyName(x.TypeParams) && fieldTypesOnlyName(x.Params) && fieldTypesOnlyName(x.Results)
+	case *ast.Ellipsis:
+		return x.Elt == nil || typeOnlyNames(x.Elt)
+	case *ast.UnaryExpr:
+		return x.Op == token.TILDE && typeOnlyNames(x.X)
+	case *ast.BinaryExpr:
+		return x.Op == token.OR && typeOnlyNames(x.X) && typeOnlyNames(x.Y)
 	case *ast.ParenExpr:
 		return typeOnlyNames(x.X)
 	case *ast.StarExpr:
@@ -703,6 +753,21 @@ func arrayLenOnlyNames(n ast.Expr) bool {
 		return true
 	}
 	return onlyNames(n)
+}
+
+// fieldTypesOnlyName reports whether the type of every field in fl only
+// names things: a struct's fields, a function's parameters and results, an
+// interface's methods and embedded types.
+func fieldTypesOnlyName(fl *ast.FieldList) bool {
+	if fl == nil {
+		return true
+	}
+	for _, f := range fl.List {
+		if !typeOnlyNames(f.Type) {
+			return false
+		}
+	}
+	return true
 }
 
 // allTypesOnlyName reports whether every type in ts only names things.
@@ -1049,6 +1114,8 @@ import (
 var _ = &sync.Mutex{}
 var _ = time.Second * 5
 var _ = set.Of[int]{}
+var _ = struct{ M sync.Mutex }{}
+var _ = (func(...time.Duration))(nil)
 `,
 	// Each import's name is its package's: a ".v3" suffix, a "go-" prefix
 	// and a "/v2" element are not part of it.
@@ -1069,6 +1136,7 @@ var _ = yaml.Marshal
 import (
 	"errors"
 	"example.com/events"
+	"example.com/settings"
 	"fmt"
 	"net/url"
 	"os"
@@ -1091,6 +1159,19 @@ var _ = errors.New("registered")
 // literal's array length.
 var _ = [1]struct{}{}[unsafe.Sizeof(int64(0))-8]
 var _ = [unsafe.Sizeof(int64(0)) - 8]byte{}
+
+// So does a length nested in a field, a parameter or a method.
+var _ = struct{ _ [unsafe.Sizeof(int64(0)) - 8]byte }{}
+var _ = (func([unsafe.Sizeof(int64(0)) - 8]byte))(nil)
+var _ = (interface{ M([unsafe.Sizeof(int64(0)) - 8]byte) })(nil)
+
+// Each of these can panic at run time, which a keeper cannot.
+func panics() {
+	_ = 1 / settings.Divisor
+	_ = 1 << settings.Shift
+	_ = settings.A == settings.B
+	_ = [4]byte(settings.Bytes)
+}
 
 // A literal, or one of a predeclared type, keeps nothing.
 var _ = 1
@@ -1139,6 +1220,8 @@ var keeperFixtureVerdicts = []string{
 	"keep/names.go: yaml.Marshal: " + keeperOnlyUse,
 	"keep/only_use_test.go: (*strings.Builder)(nil): " + keeperOnlyUse,
 	"keep/operators.go: &sync.Mutex{}: " + keeperOnlyUse,
+	"keep/operators.go: (func(...time.Duration))(nil): " + keeperOnlyUse,
+	"keep/operators.go: struct{ M sync.Mutex }{}: " + keeperOnlyUse,
 	"keep/operators.go: set.Of[int]{}: " + keeperOnlyUse,
 	"keep/operators.go: time.Second * 5: " + keeperOnlyUse,
 	"keep/only_use_test.go: http.ErrServerClosed: " + keeperOnlyUse,
