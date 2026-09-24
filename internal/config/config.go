@@ -350,13 +350,6 @@ func (u UPnPUpstreamConfig) Validate() error {
 	return nil
 }
 
-// IntegrityConfig controls the proactive consistency watchers
-// — today just the upscale-variant sweep. The library-scanner's
-// own scheduling lives at the top-level `scanIntervalSec` for
-// back-compat with v1.0 deploys; this block exists so future
-// orthogonal integrity surfaces (artwork-cache reconcile, sidecar
-// freshness re-validate) can join the same YAML node without
-// scattering top-level fields.
 // EnrichConfig overrides the upstream sources the background enricher
 // queries. Empty fields fall back to the public services (MusicBrainz /
 // Cover Art Archive). Point them at a self-hosted 1-bit-atlas mirror to
@@ -621,6 +614,13 @@ type ArtworkConfig struct {
 	CacheMaxBytes int64 `yaml:"cacheMaxBytes,omitempty"`
 }
 
+// IntegrityConfig controls the proactive consistency watchers
+// — today just the upscale-variant sweep. The library-scanner's
+// own scheduling lives at the top-level `scanIntervalSec` for
+// back-compat with v1.0 deploys; this block exists so future
+// orthogonal integrity surfaces (artwork-cache reconcile, sidecar
+// freshness re-validate) can join the same YAML node without
+// scattering top-level fields.
 type IntegrityConfig struct {
 	// VariantSweepIntervalSec controls how often the
 	// integrity.VariantWatcher walks `track_variants` and
@@ -737,10 +737,6 @@ type ScannerConfig struct {
 	DeleteAfterMissingScans int `yaml:"deleteAfterMissingScans,omitempty"`
 }
 
-// LimitsConfig groups operator-facing throttle knobs. Today: just the
-// /v1/manifest rate limit. Lives at the top of the YAML so future
-// per-endpoint or per-resource limits can join the same block instead
-// of scattering across the config surface.
 // RetentionConfig bounds the two tables that grow without one:
 // playback history and device registrations.
 //
@@ -821,6 +817,10 @@ const MinPlaybackHistoryRetentionDays = 90
 // range to prove it.
 const MaxRetentionDays = 36500
 
+// LimitsConfig groups operator-facing throttle knobs. Today: just the
+// /v1/manifest rate limit. Lives at the top of the YAML so future
+// per-endpoint or per-resource limits can join the same block instead
+// of scattering across the config surface.
 type LimitsConfig struct {
 	Manifest ManifestLimitsConfig `yaml:"manifest,omitempty"`
 	Write    WriteLimitsConfig    `yaml:"write,omitempty"`

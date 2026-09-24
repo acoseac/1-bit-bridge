@@ -167,17 +167,6 @@ var Ext = map[string]bool{
 	".aifc": true, // AIFC = compressed-AIFF FORM type; same chunk-walker shape, accepted by extractAIFFWithContext
 }
 
-// Extract reads as much metadata as it can from the file at absPath and
-// fills in the Track at t. Path, Size, ModTime on t MUST already be set by
-// the scanner; Extract only fills tag/format fields.
-//
-// Missing or unparseable tags are NOT an error — a file with no metadata
-// still gets indexed (we fall back to path-derived heuristics later). Only
-// read/open errors propagate.
-//
-// Equivalent to ExtractWithContext(absPath, t, nil) — preserved for
-// callers (existing tests, anyone with a one-shot tag read) that don't
-// run the local-artwork extraction pipeline.
 // ExtractorVersion stamps every scanned track row (the `extractor_version`
 // column). Bump it whenever tag-extraction LOGIC changes so the scan-skip
 // gate (scanner.go) re-extracts any row whose stored stamp is < this value —
@@ -355,6 +344,17 @@ var Ext = map[string]bool{
 // exists).
 const ExtractorVersion = 14
 
+// Extract reads as much metadata as it can from the file at absPath and
+// fills in the Track at t. Path, Size, ModTime on t MUST already be set by
+// the scanner; Extract only fills tag/format fields.
+//
+// Missing or unparseable tags are NOT an error — a file with no metadata
+// still gets indexed (we fall back to path-derived heuristics later). Only
+// read/open errors propagate.
+//
+// Equivalent to ExtractWithContext(absPath, t, nil) — preserved for
+// callers (existing tests, anyone with a one-shot tag read) that don't
+// run the local-artwork extraction pipeline.
 func Extract(absPath string, t *Track) error {
 	return ExtractWithContext(absPath, t, nil)
 }

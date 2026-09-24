@@ -76,14 +76,6 @@ func archiveAndChecksumFor(rel *Release) (archive, checksums *ReleaseAsset, err 
 // operator.
 var ErrNoMatchingAsset = errors.New("no matching asset")
 
-// downloadVerified streams the archive into dst and verifies its
-// SHA-256 matches the entry in checksums.txt. The two URLs are
-// fetched in sequence on the same http.Client (TLS to github.com
-// cached) so the checksum file is the immediate sibling of the
-// asset, not a stale cache.
-//
-// Returns the verified archive's hex SHA-256 on success — used by
-// install bookkeeping for diagnostic logging.
 // maxArchiveDownloadBytes caps the release archive written to disk
 // before its checksum is verified. The bridge archive is ~30 MiB; 1 GiB
 // is generous headroom while bounding the damage from a hung CDN or a
@@ -97,6 +89,14 @@ var ErrNoMatchingAsset = errors.New("no matching asset")
 // Production code MUST NOT mutate it.
 var maxArchiveDownloadBytes int64 = 1 << 30
 
+// downloadVerified streams the archive into dst and verifies its
+// SHA-256 matches the entry in checksums.txt. The two URLs are
+// fetched in sequence on the same http.Client (TLS to github.com
+// cached) so the checksum file is the immediate sibling of the
+// asset, not a stale cache.
+//
+// Returns the verified archive's hex SHA-256 on success — used by
+// install bookkeeping for diagnostic logging.
 func downloadVerified(ctx context.Context, hc *http.Client,
 	archiveURL, archiveName, checksumsURL string,
 	dst string,

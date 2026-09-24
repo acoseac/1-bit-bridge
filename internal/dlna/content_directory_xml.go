@@ -534,11 +534,6 @@ func formatDLNADuration(seconds float64) string {
 	return fmt.Sprintf("%d:%02d:%02d.%03d", hours, minutes, secs, millis)
 }
 
-// escapeXMLText escapes the five XML-significant characters in a text
-// node value (per the XML 1.0 spec). Reuses the project's existing
-// minimal-escape pattern; using encoding/xml's `xml.EscapeText` would
-// add an io.Writer round-trip for what is fundamentally a string
-// transformation.
 // xmlTextReplacer escapes the five XML metacharacters. Package-level and
 // reused across calls: strings.Replacer is safe for concurrent use and builds
 // its lookup trie once at init, so DIDLForTrack's ~9 escapeXMLText calls per
@@ -552,6 +547,11 @@ var xmlTextReplacer = strings.NewReplacer(
 	"'", "&apos;",
 )
 
+// escapeXMLText escapes the five XML-significant characters in a text
+// node value (per the XML 1.0 spec). Reuses the project's existing
+// minimal-escape pattern; using encoding/xml's `xml.EscapeText` would
+// add an io.Writer round-trip for what is fundamentally a string
+// transformation.
 func escapeXMLText(s string) string {
 	if s == "" {
 		return ""

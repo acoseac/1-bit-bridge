@@ -1111,6 +1111,15 @@ func (e *Enricher) SkipReasons() map[string]int64 {
 	return out
 }
 
+// coverSize resolves the zero default for CoverSize so Enrichers
+// constructed field-by-field (tests) behave like NewEnricher's.
+func (e *Enricher) coverSize() int {
+	if e.CoverSize == 0 {
+		return DefaultCoverSize
+	}
+	return e.CoverSize
+}
+
 // ensureArtworkCached fetches (mbid, size) cover bytes from CAA and
 // writes them to disk. Returns (true, nil) on hit, (false, errNotFound)
 // if neither the release nor the release-group has a front cover,
@@ -1124,15 +1133,6 @@ func (e *Enricher) SkipReasons() map[string]int64 {
 // on-disk path keyed by the RELEASE MBID, so iOS's existing
 // `/v1/artwork/{releaseMBID}` request flow serves it transparently —
 // no protocol change required.
-// coverSize resolves the zero default for CoverSize so Enrichers
-// constructed field-by-field (tests) behave like NewEnricher's.
-func (e *Enricher) coverSize() int {
-	if e.CoverSize == 0 {
-		return DefaultCoverSize
-	}
-	return e.CoverSize
-}
-
 func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist, album string, size int) (bool, error) {
 	path := ArtworkCachePath(e.CacheDir, mbid, size)
 	if _, err := os.Stat(path); err == nil {
@@ -1357,6 +1357,15 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 	return filepath.Join(cacheDir, fmt.Sprintf("%s-%d.jpg", mbid, size))
 }
 
+// jpegSOI and pngMagic are the two image signatures the artwork cache
+// accepts. Mirrors internal/manifest's jpegSOI (that package cannot be
+// imported from here — the dependency runs enrich -> manifest, and this
+// is a three-byte constant, not a behaviour worth inverting an edge for).
+var (
+	jpegSOI  = []byte{0xFF, 0xD8, 0xFF}
+	pngMagic = []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
+)
+
 // writeArtworkAtomicStream streams bytes from src to path via tmp-file
 // + rename, capping the read at max+1 bytes to detect oversized inputs
 // without buffering the whole stream. Memory bound is ~32 KB
@@ -1380,15 +1389,6 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 //
 // `maxBytes` parameter (not `max`) so it doesn't shadow Go 1.21's
 // builtin `max` (CodeRabbit nit on PR #123).
-// jpegSOI and pngMagic are the two image signatures the artwork cache
-// accepts. Mirrors internal/manifest's jpegSOI (that package cannot be
-// imported from here — the dependency runs enrich -> manifest, and this
-// is a three-byte constant, not a behaviour worth inverting an edge for).
-var (
-	jpegSOI  = []byte{0xFF, 0xD8, 0xFF}
-	pngMagic = []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
-)
-
 func writeArtworkAtomicStream(root, path string, src io.Reader, maxBytes int64) error {
 	// SECOND LAYER, under the MBID shape checks every caller runs. The
 	// alphabet a valid UUID draws from makes traversal impossible, so

@@ -437,13 +437,6 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 	return nil
 }
 
-// rejectedVersionFor names the release a rollback is rejecting. The
-// install marker's TargetVersion is authoritative — version.ServerVersion
-// is only correct once the operator has already restarted onto the new
-// binary, and the admin "Roll back" button is reachable before that too.
-// Falls back to the running version when no marker survives (a
-// hand-staged .bak, or a rollback after BootCleanupBak retired the
-// marker).
 // swapAwaitingRestart reports whether a swap for `target` has ALREADY
 // landed on this host and the process has not yet restarted into it.
 //
@@ -507,6 +500,13 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 	return u.swapPending.Load() || u.now().Sub(st.AttemptedAt) <= recencyWindow
 }
 
+// rejectedVersionFor names the release a rollback is rejecting. The
+// install marker's TargetVersion is authoritative — version.ServerVersion
+// is only correct once the operator has already restarted onto the new
+// binary, and the admin "Roll back" button is reachable before that too.
+// Falls back to the running version when no marker survives (a
+// hand-staged .bak, or a rollback after BootCleanupBak retired the
+// marker).
 func rejectedVersionFor(dataDir string) string {
 	if st, err := LoadState(dataDir); err == nil && st.TargetVersion != "" {
 		return normalizeTag(st.TargetVersion)

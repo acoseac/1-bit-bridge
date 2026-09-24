@@ -47,6 +47,15 @@ type DupeStamp struct {
 	JournalDelete bool
 }
 
+// applyDupeStampBumpSQL binds (groupID, tier, suppressed, clock, path). The
+// indexed_at expression is indexedAtAdvanceSQL (store.go) verbatim — see its
+// docblock for why it is not concatenated in.
+const applyDupeStampBumpSQL = `
+		UPDATE tracks
+		   SET dupe_group_id = ?, dupe_tier = ?, dupe_suppressed = ?,
+		       indexed_at    = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
+		 WHERE path = ?`
+
 // ApplyDupeStamps writes the changed stamps in one transaction.
 //
 // Contract (the StampExtractorVersionBatch / applyReconciledTracks
@@ -59,15 +68,6 @@ type DupeStamp struct {
 // (suppression is a serving decision, not (re-)enrichment — this is
 // deliberately NOT an enriched_at writer) and NEVER rewrites tags_json.
 // Returns the number of rows actually updated.
-// applyDupeStampBumpSQL binds (groupID, tier, suppressed, clock, path). The
-// indexed_at expression is indexedAtAdvanceSQL (store.go) verbatim — see its
-// docblock for why it is not concatenated in.
-const applyDupeStampBumpSQL = `
-		UPDATE tracks
-		   SET dupe_group_id = ?, dupe_tier = ?, dupe_suppressed = ?,
-		       indexed_at    = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1)
-		 WHERE path = ?`
-
 func (s *Store) ApplyDupeStamps(ctx context.Context, stamps []DupeStamp) (int, error) {
 	if len(stamps) == 0 {
 		return 0, nil

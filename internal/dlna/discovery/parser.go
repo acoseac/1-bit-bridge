@@ -326,15 +326,6 @@ func resolveServiceURL(base *url.URL, relativeRef string) (string, error) {
 	return abs.String(), nil
 }
 
-// ParseGetProtocolInfoResponse extracts the `Sink` argument value
-// from a SOAP `GetProtocolInfoResponse` envelope. The Sink value
-// is a comma-separated list of protocolInfo strings the renderer
-// accepts (e.g. "http-get:*:audio/x-dsf:*,http-get:*:audio/x-flac:*").
-// We split on commas + trim whitespace; empty entries are skipped.
-//
-// Returns the slice on success, error on malformed XML / missing
-// element. An empty Sink (renderer responded but advertises no
-// protocols) returns ([], nil) — degenerate but legal.
 type rawSOAPEnvelope struct {
 	XMLName xml.Name `xml:"Envelope"`
 	Body    struct {
@@ -367,6 +358,15 @@ var ErrSOAPFault = errors.New("SOAP fault in GetProtocolInfo response")
 // empty sink.
 var ErrMissingResponseElement = errors.New("SOAP body has no GetProtocolInfoResponse element")
 
+// ParseGetProtocolInfoResponse extracts the `Sink` argument value
+// from a SOAP `GetProtocolInfoResponse` envelope. The Sink value
+// is a comma-separated list of protocolInfo strings the renderer
+// accepts (e.g. "http-get:*:audio/x-dsf:*,http-get:*:audio/x-flac:*").
+// We split on commas + trim whitespace; empty entries are skipped.
+//
+// Returns the slice on success, error on malformed XML / missing
+// element. An empty Sink (renderer responded but advertises no
+// protocols) returns ([], nil) — degenerate but legal.
 func ParseGetProtocolInfoResponse(body []byte) ([]string, error) {
 	var env rawSOAPEnvelope
 	if err := xml.Unmarshal(body, &env); err != nil {

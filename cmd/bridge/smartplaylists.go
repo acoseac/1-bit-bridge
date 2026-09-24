@@ -8,6 +8,14 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylistgen"
 )
 
+// smartPlaylistSettleDelay keeps the first regeneration off the startup
+// critical path — slightly longer than the analysis sweeper's, since this reads
+// the analysis it produces. A var (not const) purely as the test seam;
+// production never mutates it. Same shape as analysisSweeperSettleDelay, and
+// the reason this loop's live-gate behaviour had no test: at 120 s a unit test
+// could not observe a second run.
+var smartPlaylistSettleDelay = 120 * time.Second
+
 // runSmartPlaylistRegenerator is the serve-side smart-playlist loop. After an
 // initial settle delay (let startup scan/analysis land) and then on every
 // `interval` tick, it regenerates the populated playlist families into the
@@ -17,14 +25,7 @@ import (
 // status (nil-safe) records last/next-run timestamps for the admin
 // Jobs card — the on-demand POST /api/smart-playlists/regenerate stays
 // the synchronous trigger and is not routed through this loop.
-// smartPlaylistSettleDelay keeps the first regeneration off the startup
-// critical path — slightly longer than the analysis sweeper's, since this reads
-// the analysis it produces. A var (not const) purely as the test seam;
-// production never mutates it. Same shape as analysisSweeperSettleDelay, and
-// the reason this loop's live-gate behaviour had no test: at 120 s a unit test
-// could not observe a second run.
-var smartPlaylistSettleDelay = 120 * time.Second
-
+//
 // analysisActive is read LIVE per run, not captured.
 //
 // It used to be a plain bool — the VALUE of analysisActiveFn(), evaluated once

@@ -24,6 +24,15 @@ import (
 
 var logger = logging.Component("integrity")
 
+// stopGrace bounds how long a stopFn waits for its run goroutine to return.
+//
+// A var, not a const, so the tests can shorten it — and shared by both
+// long-lived loops in this package so there is one answer to "how long does
+// shutdown wait for integrity work". Bounded rather than unconditional for the
+// reason every other wait in this tree is: a wedged tick must degrade to a log
+// line, never a hung process exit.
+var stopGrace = 5 * time.Second
+
 // VariantWatcher walks the track_variants table on a cadence
 // configurable via cfg.Integrity.VariantSweepInterval (default
 // 1 h) and reconciles rows whose sidecar file no longer exists
@@ -67,15 +76,6 @@ var logger = logging.Component("integrity")
 // sweep fires immediately at boot — closes the "operator
 // deleted variant files while the bridge was down" case
 // without waiting for the first interval to elapse.
-// stopGrace bounds how long a stopFn waits for its run goroutine to return.
-//
-// A var, not a const, so the tests can shorten it — and shared by both
-// long-lived loops in this package so there is one answer to "how long does
-// shutdown wait for integrity work". Bounded rather than unconditional for the
-// reason every other wait in this tree is: a wedged tick must degrade to a log
-// line, never a hung process exit.
-var stopGrace = 5 * time.Second
-
 type VariantWatcher struct {
 	lister     VariantLister
 	reconciler VariantReconciler

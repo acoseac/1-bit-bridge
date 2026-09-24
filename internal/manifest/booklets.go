@@ -101,13 +101,6 @@ func (s *Store) UpsertBookletAvailability(ctx context.Context, mbid string, avai
 	return err
 }
 
-// SetBookletTagAndBumpIndex stamps the wire tag on EVERY track of the
-// release (whole-album UPDATE keyed on $.musicBrainzAlbumID — index-backed
-// by idx_tracks_release_mbid) and strict-advances indexed_at so iOS
-// delta-sync re-receives the rows. Clone of SetArtworkVersionAndBumpIndex:
-// same CASE-WHEN monotonic form, same no-op guard on an unchanged tag, and
-// deliberately NO enriched_at touch (this is not (re-)enrichment — touching
-// it would re-trigger the MB/CAA/Deezer treadmill). Holds s.mu.
 // setBookletTagSQL binds (tag, clock, releaseMBID, tag). The indexed_at
 // expression is indexedAtAdvanceSQL (store.go) verbatim — see its docblock
 // for why it is not concatenated in.
@@ -118,6 +111,13 @@ const setBookletTagSQL = `
 		 WHERE json_extract(tags_json, '$.musicBrainzAlbumID') = ?
 		   AND COALESCE(booklet_tag, '') <> COALESCE(?, '')`
 
+// SetBookletTagAndBumpIndex stamps the wire tag on EVERY track of the
+// release (whole-album UPDATE keyed on $.musicBrainzAlbumID — index-backed
+// by idx_tracks_release_mbid) and strict-advances indexed_at so iOS
+// delta-sync re-receives the rows. Clone of SetArtworkVersionAndBumpIndex:
+// same CASE-WHEN monotonic form, same no-op guard on an unchanged tag, and
+// deliberately NO enriched_at touch (this is not (re-)enrichment — touching
+// it would re-trigger the MB/CAA/Deezer treadmill). Holds s.mu.
 func (s *Store) SetBookletTagAndBumpIndex(ctx context.Context, releaseMBID, tag string) (int64, error) {
 	if releaseMBID == "" {
 		return 0, nil

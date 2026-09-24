@@ -405,6 +405,11 @@ func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, e
 	return req, "", ""
 }
 
+// errShapeRequired is the exactly-one-scope guard's message, shared by
+// the up-front validation and the unreachable default arm so the two
+// can't drift.
+var errShapeRequired = errors.New("variant delete request must set exactly one of All, Prefix, Path, Paths")
+
 // RunVariantDelete is the core delete-variants execution path,
 // extracted from `upscaleDelete` so the admin console
 // (`DELETE /api/upscale/variants`) can share it without
@@ -427,11 +432,6 @@ func parseVariantDeleteQuery(q map[string][]string) (req VariantDeleteRequest, e
 // caller — iOS reconciles via that single fan-out path no matter
 // whether the user clicked Delete in the iOS app, the admin
 // console, or invoked the HTTP endpoint directly.
-// errShapeRequired is the exactly-one-scope guard's message, shared by
-// the up-front validation and the unreachable default arm so the two
-// can't drift.
-var errShapeRequired = errors.New("variant delete request must set exactly one of All, Prefix, Path, Paths")
-
 func (s *Server) RunVariantDelete(ctx context.Context, req VariantDeleteRequest) (VariantDeleteResponse, error) {
 	if s.variantDeleter == nil {
 		return VariantDeleteResponse{}, ErrVariantDeleteUnavailable

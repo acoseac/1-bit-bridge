@@ -68,17 +68,17 @@ func restartCmd(args []string, _ io.Writer, stderr io.Writer) int {
 	return 0
 }
 
-// ensureInstalled prints a friendly error and returns false when no
-// service unit is detected. Lifecycle commands need an installed
-// unit to act on — operators running `bridge start` against a
-// non-installed binary almost certainly want to be told to run
-// `bridge init` first rather than a silent no-op.
 // installedKindFunc is the InstalledKind probe, overridable in tests to
 // exercise ensureInstalled's error branch — the real InstalledKind reads
 // live system state and can't be forced to error otherwise. Production
 // code MUST NOT mutate this; same convention as renameFunc / commandContext.
 var installedKindFunc = packaging.InstalledKind
 
+// ensureInstalled prints a friendly error and returns false when no
+// service unit is detected. Lifecycle commands need an installed
+// unit to act on — operators running `bridge start` against a
+// non-installed binary almost certainly want to be told to run
+// `bridge init` first rather than a silent no-op.
 func ensureInstalled(stderr io.Writer) bool {
 	kind, err := installedKindFunc()
 	if err != nil {

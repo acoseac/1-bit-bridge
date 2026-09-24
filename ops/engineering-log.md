@@ -10392,3 +10392,145 @@ shape is what review guards, as in #987.
   imported package costs about 5 GiB of fresh cache on the dev Mac; check
   `df -h /` first, as CLAUDE.md's 2026-09-09 LOUPE section already says of
   the DSD fixtures.
+
+## 2026-09-24 — the docblock guard reads consts and vars, and knows the verbs this tree uses (#989)
+
+#988 moved `processJob`'s docblock off `const variantFailureWriteTimeout` and
+recorded why `TestNoDocblockNamesAnotherDeclaration` (#964) had not seen it:
+the guard inspects funcs and types, not consts, and "runs" is not in its verb
+list. This entry closes both.
+
+### What the census measured
+
+A scratch tool applied the guard's two structural conditions (the named
+identifier is declared in the same package, and has no doc of its own) to the
+docs of every func, type, const, var and grouped spec, with the verb left
+OPEN, so the verb list's own blind spot could be seen:
+
+- **37 candidates, 36 genuine.** The one false positive is a group doc that is
+  a noun phrase, "eventBroker fan-out cardinality", where `\b` splits "fan" off
+  at the hyphen. Every other candidate is a doc for X glued onto Y, spot-read
+  in full.
+- **18 of the 36 sit on a const or a var** (8 of those open with a verb the old
+  list had). **28 open with a verb outside the old list.** The gaps overlap by
+  10, so either fix alone finds at most half: 8 for the const/var arm alone,
+  18 for the verbs alone.
+- **The old list's recall was measurable before any of this.** Among
+  correctly-attached docs that open with their own name and a word (4,457 at
+  the time), the 31 verbs recognised **60.9%**. A displaced block is an
+  ordinary doc comment that lost its subject, so it opens the way the rest do
+  and that share is the detector's recall. #964's 5-of-5 spot check measured
+  precision, and nothing measured recall; on this sample the realised rate was
+  8 of 36.
+- The distribution has no knee. Adding every word that opens at least k
+  correctly-attached docs:
+
+| k | words added | coverage |
+|---|---|---|
+| 20 | 13 | 71.9% |
+| 10 | 45 | 81.3% |
+| 7 | 75 | 86.5% |
+| 5 | 105 | 90.2% |
+| 4 | 130 | 92.4% |
+| 3 | 156 | 94.1% |
+
+Among the 36 are three blocks CLAUDE.md cites by name, so each had lost the
+doc its rules point at: `GetTrack` on `type TrackStat`, `marshalForStorage` on
+`HasTracksWithCodec`, and `Extract` on `const ExtractorVersion`. The others
+included `VariantWatcher`'s 43 lines on `var stopGrace`, `handleBrowse` on
+`const maxSOAPBodyBytes`, `runGC` on `runGCForwardSweep`, `playerContentType`
+(with its "Deliberately NOT `dlna.defaultMIMEForExtension`" paragraph) on
+`const octetStream`, and `invalidateLastBackup` on the function whose doc
+cross-references it.
+
+### Decisions
+
+- **The list stays closed and is derived.** A word is listed when at least five
+  correctly-attached docs open with it (k = 5, 90% coverage), or when it opened
+  one of the 36 (groups, processes, queues, sleeps, updates, prints and
+  verifies fell below five when counted). Three words at k ≥ 5 are not verbs
+  and stay out: "and", "atomically" and "re". #964's does, provides, takes and
+  tracks meet neither bar and are kept, since dropping a verb only loses
+  recall. 140 words in all.
+  The noun-ambiguous ones (bounds, caps, marks, names, checks…) were read in
+  context and are verbs in this position every time. **One latent collision is
+  known**: `internal/dlna/chunk_allocator.go` documents a const group
+  "ChunkSize bounds for the adaptive allocator", a noun phrase, and `ChunkSize`
+  is declared in that package as a method. It is shielded only because that
+  method has a doc; if it ever loses it, the guard will report the group doc,
+  and the fix is to rephrase the noun phrase.
+- **`(?:re-)?` before a listed verb.** `\b` splits "re-queues" at the hyphen,
+  and `resetArtistImageGaps re-queues` is one of the 36.
+- **A coverage floor, 85% against 90.3% measured.** The floor turns the
+  list's justification into an assertion. It fails a trimmed list or a
+  vocabulary that drifts away from it, and names the top unrecognised words.
+  The headroom is 240 openers going unrecognised, or 282 new unrecognised
+  ones, so ordinary doc churn cannot trip it.
+- **Subject of a const/var doc = every name the declaration introduces.** A
+  grouped block's doc describes the group, so any member may open it; a spec
+  doc inside the group has that spec's names. **The members' type is not a
+  subject.** go/doc files a typed group under its type, but a group doc that
+  opens by defining the type leaves the type's own slot empty. The census
+  found no such doc.
+- **A grouped member is documented only by its own spec doc or line comment**,
+  never by the group's. Measured under the open list: the stricter rule
+  added no candidate on this tree, and it is what lets a spec doc displaced
+  inside a DOCUMENTED group be reported (control NC2′ below). Types keep
+  #964's rule, where the group doc counts, because go/doc gives a grouped type
+  the group doc as its own.
+- **Consts and vars are names the guard can report as orphaned, too.** One of
+  the 36 is `adminBcryptCost`'s doc on `var logger`.
+- **`record`'s first-seen rule is unchanged.** 12 names are declared more than
+  once in a package with mixed doc status, and every one involves a method:
+  11 are methods on different types (Write, Flush, Get…), and `fingerprintOne`
+  is both a function and a method. No const or var collides.
+- **Not extended to `_test.go` files.** The same census over test files found
+  about 11 more (`TestRunGCReverseSweepRemovesOrphanRows`'s doc on the
+  forward-sweep test, `ffmpegLUFS`'s on `var ebur128Re`). They need a separate
+  verb census (tests open "TestX pins …", "… asserts …") and `foo` / `foo_test`
+  namespaces, so that is its own change.
+- **Two shapes this guard cannot report, fixed by hand:**
+  `internal/admin/player_audio.go` documented `variantFresh` as
+  "variantFreshFor", a name no commit ever declared (`git log -S`), glued onto
+  the const above it; and `runSmartPlaylistRegenerator`'s opening paragraphs
+  sat on `var smartPlaylistSettleDelay` while the function carried a later doc
+  of its own. The first is the stale-name class (a doc opening with an
+  identifier nothing declares); the census also saw `expectedTeamID`,
+  `ensurePathExists` and `errITunesNoMatch`, three docs naming an identifier
+  that no commit ever declared (`git log -S` finds only the comment's own
+  commit). The second fails the no-doc condition by
+  design. Neither is covered.
+
+### The moves
+
+38 blocks in 29 files, each moved to its subject byte-for-byte. Verified two
+ways: per file, the sequence of non-comment lines is unchanged; and across the
+diff, removed and added lines match as a multiset except for the rename and
+the separators (two lone `//` lines that would have led the next doc were
+dropped; one was added between `runSmartPlaylistRegenerator`'s restored
+paragraphs and its later doc).
+
+### Tests and controls
+
+```
+main, before:        3745 comments / 401 files / 0 misattached
+red-first (unfixed): 4772 comments / 401 files / 36 misattached / 4015 of 4451 openers (90.2%)
+fixed:               4806 comments / 401 files / 0 misattached / 4084 of 4522 openers (90.3%)
+```
+
+Controls on the committed tree, `-count=1`, each restored with
+`git checkout`:
+
+| control | mutation | result |
+|---|---|---|
+| NC1a | `processJob`'s doc re-glued onto `const variantFailureWriteTimeout` (#988's shape) | red: `"processJob runs" on const variantFailureWriteTimeout` |
+| NC1b | NC1a, and "runs" dropped from the list | green: passes unseen |
+| NC2 | a spec inserted between `tailscaleStatusInflight`'s spec doc and its spec, in a documented `var ( … )` group | red: `"tailscaleStatusInflight is" on var tailscaleStatusProbe` |
+| NC2′ | NC2, with the group doc counted as the member's own | green: passes unseen |
+| NC3 | `adminBcryptCost`'s doc re-glued onto `var logger` | red: a const on the named side |
+| NC4a | `resetArtistImageGaps`'s doc re-glued onto `clearFingerprintSuppression` | red: `"resetArtistImageGaps re-queues"` |
+| NC4b | NC4a, and `(?:re-)?` removed | green: passes unseen |
+| NC5 | the list trimmed back to #964's 31 | red: `2739 of 4522 (60.6%), below the 85% floor`, naming bounds (103), reads (57), caps (52), runs (52) … |
+
+NC1b, NC2′ and NC4b are the controls on the controls: each shows that the
+piece of the change it removes is what catches that shape.

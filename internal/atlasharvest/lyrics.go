@@ -521,13 +521,6 @@ func (c *Client) fetchReleaseTracks(ctx context.Context, st State, albumMBID str
 	return out, nil
 }
 
-// pace sleeps between upstream requests, and is context-aware so a shutdown is
-// not held up by the politeness interval.
-//
-// The interval is a field rather than the constant so the suite does not spend
-// real seconds asleep — a budget-sized sweep at the production interval is 20+
-// seconds of pure sleep, and CI already pays enough for SQLite under the race
-// detector. Zero means the default, so production never has to set it.
 // lyricsActive reports whether the tier should run right now. Nil predicate =
 // off: see Client.LyricsEnabled for why the gate is here rather than in the
 // wiring, and why nil is not a thing to guess about.
@@ -602,6 +595,13 @@ func (c *Client) releaseCooling(mbid string) bool {
 	return ok && c.now().Before(until)
 }
 
+// pace sleeps between upstream requests, and is context-aware so a shutdown is
+// not held up by the politeness interval.
+//
+// The interval is a field rather than the constant so the suite does not spend
+// real seconds asleep — a budget-sized sweep at the production interval is 20+
+// seconds of pure sleep, and CI already pays enough for SQLite under the race
+// detector. Zero means the default, so production never has to set it.
 func (c *Client) pace(ctx context.Context) {
 	d := c.LyricsPacing
 	if d <= 0 {

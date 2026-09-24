@@ -385,14 +385,6 @@ func (s *Server) getLastBackupAt(ctx context.Context) *time.Time {
 	return nil
 }
 
-// invalidateLastBackup drops the cached snapshot timestamp so the next
-// poll re-reads it. Called after an operator-triggered snapshot: waiting
-// out a TTL there would trade "why is the jobs page slow" for "did my
-// backup actually work", and the second question is the one that gets
-// answered with refresh-spam.
-//
-// A snapshot taken by the SCHEDULER is deliberately not hooked: nobody is
-// watching for it, so TTL-bounded staleness is fine.
 // invalidateAnalysisCoverage drops the TTL-cached coverage snapshot so the
 // next /api/jobs poll rebuilds it.
 //
@@ -417,6 +409,14 @@ func (s *Server) invalidateAnalysisCoverage() {
 	s.analysisCoverageMu.Unlock()
 }
 
+// invalidateLastBackup drops the cached snapshot timestamp so the next
+// poll re-reads it. Called after an operator-triggered snapshot: waiting
+// out a TTL there would trade "why is the jobs page slow" for "did my
+// backup actually work", and the second question is the one that gets
+// answered with refresh-spam.
+//
+// A snapshot taken by the SCHEDULER is deliberately not hooked: nobody is
+// watching for it, so TTL-bounded staleness is fine.
 func (s *Server) invalidateLastBackup() {
 	s.lastBackupMu.Lock()
 	s.lastBackupAt = time.Time{}
