@@ -3304,11 +3304,11 @@ its twin.** The top list is older, shorter, and read first.
   223 tests named `Test_…` (internal/dlna's convention) was ever checked, and
   five names of tests that did not exist were cited, one of them the
   engineering log's record of what guards a DLNA invariant. It is `go help
-  testfunc`'s rule now: `Test`, then an uppercase letter, a digit, or
-  underscores and a letter or digit. **Measure the population a pattern must
-  cover, not the example that prompted it**: 32 of the 223 continue in
-  lowercase after the underscore, so "`Test_` then uppercase" would have left
-  them unguarded. **A `Test_` citation passes as a prefix only if it stops on
+  testfunc`'s rule now: `Test`, then a letter of any script that is not
+  lowercase, a digit, or underscores and a letter or digit. **Measure the
+  population a pattern must cover, not the example that prompted it**: 32 of
+  the 223 continue in lowercase after the underscore, so "`Test_` then
+  uppercase" would have left them unguarded. **A `Test_` citation passes as a prefix only if it stops on
   a word boundary**, ending on an underscore or just before one
   (`…_CDS_Search_` names that family). The prefix rule had been "verifying" a
   fixture FOLDER name quoted in a comment against eighteen unrelated DLNA

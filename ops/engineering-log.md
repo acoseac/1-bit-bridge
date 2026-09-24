@@ -11560,7 +11560,7 @@ only, plans and the exempt names skipped, only a test file's comments,
 |---|---|
 | the guard's, `\bTest[A-Z]…` | 2,679 |
 | as asked, `\bTest_?[A-Z]…` | 2,774 |
-| go test's rule, `\bTest(?:[A-Z0-9]\|_+[A-Za-z0-9])…` | 2,793 |
+| go test's rule in ASCII, `\bTest(?:[A-Z0-9]\|_+[A-Za-z0-9])…` (made Unicode in round 3, with the same set collected) | 2,793 |
 
 - **Definitions**: 4,689 top-level functions beginning `Test`, 223 of them
   with an underscore after the prefix. 191 continue in uppercase and **32
@@ -11727,7 +11727,9 @@ checked in the tree or the Go source first.
   `\b` is ASCII-only, so an accented word run into a name
   (`résumé` and then a test-shaped name) would match. That was true of
   the old pattern too, and the tree has no instance, in code or docs.
-  Non-ASCII test names are the same: valid in go test, none in the tree.
+  Non-ASCII test names were left at first for the same reason (valid in go
+  test, none in the tree). Review round 3 took them, since a citation of
+  one passes unchecked, which is the direction this guard exists for.
 - **Measured and left: `testdata/`**, which the go tool ignores and this
   walk reads. The tree tracks no `.go` or `.md` file under one.
 - **Confirmed**: `path == root` is exact in `filepath.WalkDir`, whose first

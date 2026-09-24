@@ -356,10 +356,11 @@ func writeTree(t *testing.T, dir string, files map[string]string) {
 // nothing else, so no citation of a test named with an underscore after the
 // prefix, the convention in internal/dlna, was ever checked. Each shape it
 // missed (an underscore then an uppercase letter, an underscore then a
-// lowercase one, a digit) has one ghost here, each cited from a different
-// place a citation is read, beside real names of those shapes and words
-// shaped like them that are not citations. Each ghost must be reported with
-// its file, and nothing else may be collected.
+// lowercase one, a digit, and a letter outside ASCII that is not lowercase)
+// has one ghost here. The ghosts are spread over the three places a
+// citation is read, beside real names of those shapes and words shaped like
+// them that are not citations. Each ghost must be reported with its file,
+// and nothing else may be collected.
 func TestScanTestCitationsCollectsEveryNameGoTestRuns(t *testing.T) {
 	root := t.TempDir()
 	write := func(rel, body string) {
@@ -377,9 +378,9 @@ func TestScanTestCitationsCollectsEveryNameGoTestRuns(t *testing.T) {
 	// that dropped it would lose a citation here.
 	sweep := ".github/scripts/sweep/main.go"
 	write(sweep, "package main\n\n"+
-		"// Guarded by Test_UpperGhost and by Test_Real_Case. Not citations: the\n"+
-		"// Test_ prefix alone, Test__ with nothing after it, Testing, Tests, and\n"+
-		"// SetTest_Seam, whose Test does not start a word.\n"+
+		"// Guarded by Test_UpperGhost, by TestΔGhost and by Test_Real_Case. Not\n"+
+		"// citations: the Test_ prefix alone, Test__ with nothing after it,\n"+
+		"// Testing, Testé, Tests, and SetTest_Seam, whose Test does not start a word.\n"+
 		"func main() {}\n")
 	write("x_test.go", "package x\n\nimport \"testing\"\n\n"+
 		"// Pinned by Test_lowerGhost, and the case below by Test_realLower.\n"+
@@ -397,7 +398,7 @@ func TestScanTestCitationsCollectsEveryNameGoTestRuns(t *testing.T) {
 		got = append(got, name)
 	}
 	sort.Strings(got)
-	want := []string{"Test9Ghost", "Test_Real_", "Test_Real_Case", "Test_UpperGhost", "Test_lowerGhost", "Test_realLower"}
+	want := []string{"Test9Ghost", "Test_Real_", "Test_Real_Case", "Test_UpperGhost", "Test_lowerGhost", "Test_realLower", "TestΔGhost"}
 	if !slices.Equal(got, want) {
 		t.Errorf("collected %q, want exactly %q — every name go test runs is a citation, "+
 			"and the prefix alone, a lowercase continuation and a Test inside a word are not", got, want)
@@ -409,6 +410,7 @@ func TestScanTestCitationsCollectsEveryNameGoTestRuns(t *testing.T) {
 		"Test9Ghost  (cited by notes.md)",
 		"Test_UpperGhost  (cited by " + filepath.FromSlash(sweep) + ")",
 		"Test_lowerGhost  (cited by x_test.go)",
+		"TestΔGhost  (cited by " + filepath.FromSlash(sweep) + ")",
 	}
 	if got := missingCitations(cited, defined); !slices.Equal(got, wantMissing) {
 		t.Errorf("missingCitations = %q, want %q", got, wantMissing)
@@ -449,11 +451,19 @@ func TestDefinesWithPrefixEndsAnUnderscoreNameOnASegment(t *testing.T) {
 // citedRe matches a citation: a name go test would run as a test.
 //
 // Its rule (`go help testfunc`) is "Test", then nothing or a character that
-// is not a lowercase letter. So after the prefix this takes an uppercase
-// letter, a digit, or underscores followed by a letter or digit. It leaves
-// out the bare prefix, with or without trailing underscores, which names the
-// convention rather than a test, and names outside ASCII, of which this
-// tree has none.
+// is not a lowercase letter. So after the prefix this takes a letter of any
+// script that is not lowercase, a digit, or underscores followed by a letter
+// or digit, which are the characters a Go identifier may continue with. It
+// leaves out the bare prefix, with or without trailing underscores, which
+// names the convention rather than a test.
+//
+// The classes are Unicode because go test's are: a name that continues with
+// Δ or É is a test, and a citation of one went unchecked while this took
+// ASCII only. This tree has no such name, and the Unicode form collects
+// exactly the citations the ASCII one did. The `\b` in front stays ASCII
+// (RE2 has no other), so a non-ASCII letter directly before "Test" still
+// counts as a boundary. That can only report a name that is not a citation,
+// never pass one, and the tree has no instance of it. (CodeRabbit on #995.)
 //
 // It took the uppercase letter alone until #995, so no citation of the 223
 // tests named with an underscore after the prefix was ever checked. That is
@@ -479,7 +489,7 @@ func TestDefinesWithPrefixEndsAnUnderscoreNameOnASegment(t *testing.T) {
 // the guard collect three citations of its own prose. They passed, which is
 // worse than failing — each was satisfied by definesWithPrefix against
 // eighty-eight, eighteen and fifteen unrelated tests.
-var citedRe = regexp.MustCompile(`\bTest(?:[A-Z0-9]|_+[A-Za-z0-9])[A-Za-z0-9_]*`)
+var citedRe = regexp.MustCompile(`\bTest(?:[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{Nd}]|_+[\p{L}\p{Nd}])[\p{L}\p{Nd}_]*`)
 
 // The markdown docs are scanned too, and they need three exemptions that Go
 // source does not. Each is a real category, not a convenience:
