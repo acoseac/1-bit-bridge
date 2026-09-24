@@ -15,10 +15,12 @@
 //     wrapped in MP4)
 //
 // **Read budgets**:
-//   - `mp4MaxHeaderReadBudget` (4 MiB) caps the *initial* file-position
-//     search for the top-level moov. Covers fast-start M4As (moov near
-//     head). Non-fast-start files (mdat-before-moov) silently return
-//     "moov not found" — separate, pre-existing limitation.
+//   - The top-level moov search (findMoov) is bounded by the FILE SIZE,
+//     not a byte span: it reads one 8-byte header per top-level box and
+//     seeks past each payload, so a moov stored after the audio costs a
+//     couple of header reads, never the audio. Until ExtractorVersion 15
+//     it stopped at 4 MiB, which cost every moov-after-mdat file its
+//     codec, rate, bit depth and duration.
 //   - `mp4MaxAtomsPerSearch` (4096) bounds EVERY findAtom call —
 //     including the top-level moov search — by count of headers read,
 //     NOT byte span. IO is governed by atom headers (8 bytes each);
@@ -44,9 +46,8 @@ import (
 
 // MP4 atom walker constants.
 const (
-	mp4HeaderSize          = 8
-	mp4MaxHeaderReadBudget = 4 << 20 // 4 MiB — file-position cap for the top-level moov search
-	mp4MaxAtomsPerSearch   = 4096    // per-search atom-walk budget (count, not bytes)
+	mp4HeaderSize        = 8
+	mp4MaxAtomsPerSearch = 4096 // per-search atom-walk budget (count, not bytes)
 )
 
 // errMP4StructureNotFound wraps the "expected box missing" failures
@@ -179,17 +180,28 @@ func findSTSD(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
 }
 
 // findMoov rewinds the reader and locates the top-level `moov`
-// container within the initial-read budget (mp4MaxHeaderReadBudget —
-// the fast-start layout; see the header comment for the
-// mdat-before-moov limitation). The ONE moov-search policy, shared by
-// the stsd descent (codec / bits / rate) and the `mvhd` duration read,
-// so the two can never disagree about which file layouts they accept.
-// A missing moov is errMP4StructureNotFound, like every other box.
+// container anywhere in the file. The ONE moov-search policy, shared by
+// the stsd descent (codec / bits / rate), the `mvhd` duration read and
+// the `gnre` genre read, so they can never disagree about which file
+// layouts they accept.
+//
+// The search is bounded by the file's size and by findAtom's atom-count
+// budget, never by a byte span: one 8-byte header per top-level box,
+// each payload skipped by a seek. So a moov stored AFTER the audio —
+// ffmpeg's default without `-movflags +faststart` — costs the same two
+// or three header reads as a fast-start file. Until ExtractorVersion 15
+// the search stopped at 4 MiB, which silently cost every such file its
+// codec, sample rate, bit depth and duration. A missing moov is
+// errMP4StructureNotFound, like every other box.
 func findMoov(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
+	fileSize, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, 0, 0, err
+	}
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return 0, 0, 0, err
 	}
-	moovStart, moovHdr, moovSize, err := findAtom(r, "moov", 0, mp4MaxHeaderReadBudget)
+	moovStart, moovHdr, moovSize, err := findAtom(r, "moov", 0, uint64(fileSize))
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -218,8 +230,7 @@ func findMoov(r io.ReadSeeker) (start, headerSize, size uint64, err error) {
 // encoders, the sample rate for some — all far finer than the m:ss the
 // row renders. A FRAGMENTED movie (`moof` boxes) writes a zero or
 // all-ones `mvhd` duration and carries the real one in `mehd`; that
-// layout is honestly absent here (0 → nil), the same way the
-// mdat-before-moov layout is absent from every MP4 walk.
+// layout is honestly absent here (0 → nil).
 //
 // Three steps, each its own function (SonarCloud go:S3776 — the
 // dispatcher precedent): locate the box, read its bounded head, decode
