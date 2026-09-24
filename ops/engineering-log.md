@@ -12152,8 +12152,10 @@ checked against the code first.
   newest reviews and comments were never fetched. The two findings it hid
   were small. The false "Gemini is out of quota" it produced went further:
   into the report, this log, the PR body and a PR comment. The GraphQL
-  `reviewThreads` query that found it returns every thread, which is the
-  check to run before any merge.
+  `reviewThreads` query that found it is the check to run before any
+  merge, and it is a connection too: complete only once
+  `pageInfo.hasNextPage` is false. Its first draft here said it "returns
+  every thread", in the note about pagination (CodeRabbit, round 10).
 - Three controls failed to build before they ran (NC20, NW3, NW5): each
   mutation left a variable or import unused. Each was rebuilt and then went
   red. A control that does not build is invalid, never a pass.
@@ -12295,8 +12297,9 @@ that round's.
   mixed keeper forms of one package, method values, type parameters,
   build-tagged files and closures.
 - **Round 9** (`725813b2`): asked whether the PR was ready to merge, a
-  check of unresolved threads through GraphQL `reviewThreads` (which
-  returns all of them) found the two CodeRabbit findings. A paginated
+  check of unresolved threads through GraphQL `reviewThreads`
+  (`first:50`, against this PR's 15 threads) found the two CodeRabbit
+  findings. A paginated
   re-read then found the two Gemini passes as well. The report, this log,
   the PR body and a PR comment had all said "CodeRabbit clean, Gemini
   silent", so each was corrected, and CLAUDE.md gained the pagination rule.
@@ -12309,3 +12312,10 @@ that round's.
   forms" was false. `_ = bytes.Buffer{}` is in the fixture now. The control
   that makes the statement form skip `N{}` (NW14) passes every test against
   the round-8 fixture and fails against this one.
+- **Round 10** (`1820e221`): **Gemini** raised one medium, declined on a
+  measurement. It said `isErrorInterface` would panic on `interface{}`,
+  whose `Methods` it took for nil. `go/parser` sets `Methods` for every
+  interface type, empty or not (go1.26.6, three spellings), and the
+  function only ever sees parser output. **CodeRabbit** raised one minor,
+  taken: this entry and CLAUDE.md said the `reviewThreads` query "returns
+  every thread", and it is a paginated connection too.

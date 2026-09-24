@@ -3303,12 +3303,15 @@ its twin.** The top list is older, shorter, and read first.
   fetched. The report that went out said "CodeRabbit clean, Gemini silent,
   probably quota", and that story reached the engineering log, the PR body
   and a PR comment before an unresolved-thread query (GraphQL
-  `reviewThreads`, which returned them all) showed otherwise. This is the
+  `reviewThreads`) showed otherwise. This is the
   complement of the walkthrough rule above, not a correction of it: the
   walkthrough's coverage and merge risk say a review RAN on a head, while a
   review that FOUND something posts a review ("Actionable comments posted:
   N") and inline comments. "Covered, and nothing seen" is clean only when
-  every read was paginated, and before a merge, list the unresolved threads.
+  every read was paginated. Before a merge, list the unresolved threads, and
+  page that query too: `reviewThreads` is a connection, complete only once
+  `pageInfo.hasNextPage` is false (CodeRabbit, on the first draft of this
+  very rule, which said the query "returned them all").
 - **A fix round needs a FRESH pass from every bot, not just the one that
   found something.** Gemini does not re-review each push: after four rounds
   on one PR its last review still predated every fix commit on five of six
