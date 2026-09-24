@@ -15,7 +15,13 @@ package ctxerr
 import (
 	"context"
 	"errors"
+	"reflect"
 )
+
+// joinType is errors.Join's concrete type. WithoutCancellation filters a
+// multi-error child by child only when it is one, identifying it by type
+// rather than by its text.
+var joinType = reflect.TypeOf(errors.Join(errors.New("a"), errors.New("b")))
 
 // WithoutCancellation returns err with ctx's cancellation taken out of it,
 // or nil when the cancellation is all there was. A pass reports only what
@@ -39,15 +45,17 @@ import (
 // it cannot remove or read, and is then stopped by a cancel, joins what it
 // collected with ctx.Err() (PruneContext, reapOrphans, the UPnP orphan
 // sweep). Asking errors.Is of the whole error would silence those genuine
-// failures along with the cancel, so a multi-error (errors.Join) is filtered
-// child by child, and a lone survivor comes back as itself rather than as a
-// join of one.
+// failures along with the cancel, so a join (errors.Join, and only that) is
+// filtered child by child, and a lone survivor comes back as itself rather
+// than as a join of one.
 //
 // A wrapper is judged by what it wraps. `vacuum manifest db: %w` around the
 // cancellation IS the cancellation. A wrapper around a join that holds a
 // genuine failure as well is reported WHOLE, cancellation text included,
 // because it cannot be rebuilt around what is left without dropping its own
-// context. (Gemini, #998, proposed returning the filtered inner error, which
+// context. fmt.Errorf with two %w verbs is a wrapper too, although it unwraps
+// to a list as a join does: quiet when every error it wraps is the
+// cancellation, and otherwise reported whole. (Gemini, #998, proposed returning the filtered inner error, which
 // drops the wrapper's context and compares errors with ==, a runtime panic on
 // an error type that is not comparable.) An error with no cancellation in it
 // comes back unchanged, the same value, message and all.
@@ -82,10 +90,18 @@ func WithoutCancellation(ctx context.Context, err error) error {
 				kept = append(kept, child)
 			}
 		}
-		if len(kept) == 1 {
+		switch {
+		case len(kept) == 0:
+			return nil // nothing but the cancellation
+		case reflect.TypeOf(err) != joinType:
+			// Any other multi-wrapper, fmt.Errorf with two %w verbs for one,
+			// is a wrapper: its message is its own (CodeRabbit, #999).
+			return err
+		case len(kept) == 1:
 			return kept[0] // the survivor itself, not a join of one (Gemini, #998)
+		default:
+			return errors.Join(kept...)
 		}
-		return errors.Join(kept...) // nil when nothing survived
 	default:
 		return nil // errors.Is matched a leaf: the cancellation itself
 	}
