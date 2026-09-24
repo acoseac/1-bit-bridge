@@ -1119,7 +1119,7 @@ no failing test — which is the shape to expect in this area.
 - **In the analysis pool, a job's count and its dedup release are ONE step,
   taken after its bookkeeping** (#987). `processJob` counted a failure, THEN
   wrote the strike and its WARN, and released the path LAST, and `Enqueue`
-  answers a held path with a silent nil. So a caller that acted on the count,
+  then answered a held path with a silent nil. So a caller that acted on the count,
   which is what a retry is, queued nothing:
   `TestASuccessfulAnalysisClearsTheStrikes` timed out on a CI runner after 900
   clean runs on a laptop, and under 3× CPU oversubscription the old pool
@@ -1160,6 +1160,23 @@ no failing test — which is the shape to expect in this area.
   the old attempt deletes. Measured on the old pool: a busy poll saw the job
   counted while in flight 400 times in 400, and every immediate retry was
   refused, while a 1 ms poll saw it 0 times in 100.
+- **Both pools answer a held path with `ErrDuplicateInflight`, and a caller
+  that counts gives it a bucket of its own** (#991). The analysis pool
+  answered with nil, and `analysisSweeper.enqueueAll` counts every nil as
+  enqueued. A track has no analysis row until its job finishes, so every
+  sweep during a long first analysis re-offers the whole backlog: the
+  `auto-analysis sweep enqueued tracks count=N` line and the Jobs card's
+  `enqueued` reported a full queue of old work as new, every sweep, in a line
+  whose parts must add up to the track total. They are `AlreadyQueued` now.
+  **A new `Enqueue` answer reaches every caller in the same change**: this
+  pool has two, and `bridge analyze`'s dispatch stops on any error it does
+  not know, so the sentinel alone would have ended a run at the first
+  duplicate (unreachable today: each candidate is a distinct track, offered
+  once to a pool the run created). `AnalysisSweepCounts` states the contract
+  the line relies on (every int field but `Total` is a bucket, and the
+  buckets partition `Total`), and `TestDescribeAnalysisSweepAccountsForEveryTrack`
+  runs the shipped `describeAnalysisSweep` under node with each bucket
+  holding a distinct power of two, so the bucket a line leaves out is named.
 - **Every job gets its own `context.WithTimeout`, cancelled per job**, or one
   pathological file consumes a worker slot until restart. Shutdown gating reads
   the monotonic `p.closed` flag, NOT `stopCtx.Err()` — `Stop` flips the flag
@@ -2649,7 +2666,11 @@ its twin.** The top list is older, shorter, and read first.
   COMMENTS ONLY — most nested reads sit inside `${…}` template interpolations,
   which `stripJSNoise` blanks. Recursion stops at the exported shared types
   (`*JobRunState` and kin), which have other consumers. **A guard that checks
-  containers proves nothing about their contents.**
+  containers proves nothing about their contents.** One of those stops is
+  `*AnalysisSweepState`, and a field added to its `last` breakdown and never
+  rendered leaves this guard green (measured on #991), so that breakdown is
+  pinned the other way: `TestDescribeAnalysisSweepAccountsForEveryTrack`
+  executes the line that renders it.
 - **`/api/stats` is guarded in both directions too, and there "read" means the
   console OR `bridge status`.** Unlike `/api/jobs` this payload has a SECOND
   consumer — `cmd/bridge/status.go` decodes it into a `map[string]any` and

@@ -10757,3 +10757,127 @@ reads every `.go` and `.md` file and fails at the `os.ReadFile`. Its skip
 rules differ (it deliberately reads `.github/` markdown), so it was left
 for its own change rather than folded in here. The `adminauth` and
 `manifest` walkers passed the same probe.
+
+## 2026-09-24 — the analysis pool answers a held path with `ErrDuplicateInflight` (#991)
+
+#987 made a job's count and its dedup release one step, and left
+`Enqueue`'s nil for a duplicate alone. Its Decisions list says why:
+"Returning a sentinel is its own change", because the sweeper counts that
+nil and the console renders the count. This entry is that change.
+
+### What the code did
+
+- `analyze.Pool.Enqueue` answered a path already in `p.inflight` (queued or
+  running) with nil. It took no slot and counted nothing, so the pool's own
+  `enqueued` counter was right throughout. The transcode pool has answered
+  the same case with `ErrDuplicateInflight` since #515.
+- The pool has two production callers. `analysisSweeper.enqueueAll`
+  counted `err == nil` as enqueued. `runAnalyzeBatch`'s producer loop
+  (`bridge analyze`) accepted nil, backed off on `ErrQueueFull`, and stopped
+  dispatching on anything else.
+- `collectAnalysisCandidates` offers every track without a fresh analysis
+  row, and a queued track has none until its job finishes. So during a long
+  first analysis, every sweep offered the whole held backlog again: the
+  post-scan nudge, the console's "Analyze now", and the interval tick.
+
+### What it reached
+
+- **The journal.** The red test's second sweep offers three held paths and
+  one new one. Before the fix it logged
+  `auto-analysis sweep enqueued tracks count=4` while the pool accepted one
+  job; after it, `count=1 alreadyQueued=3`. On a real first analysis the
+  held set is the backlog, up to a full queue (`DefaultAnalysisQueueCap`,
+  5000) plus the jobs running, re-reported as new work on every sweep.
+- **The Jobs card.** `describeAnalysisSweep` renders `enqueued` as one part
+  of a line that adds up to `total`. The line still added up, because the
+  duplicates sat in a bucket, just the wrong one: "5000 enqueued" on every
+  sweep reads as 5000 new jobs each time.
+- **Nothing on `/v1`.** `AnalysisSweepCounts` reaches `/api/jobs`,
+  `/api/analysis/stats` and the console's SSE `analysis` frame, all admin
+  routes. `/v1/analysis/stats` carries pool and cache totals, not sweep
+  counts. PROTOCOL.md's "a silent no-op (still counted in `enqueued`)"
+  sentence is about `POST /v1/upscale` and the transcode pool. No
+  `ProtocolVersion` bump and no Mirror-PR.
+
+### Decisions
+
+- **The transcode pool's name and meaning.** `ErrDuplicateInflight`,
+  "accepted, no new work: the held job produces the waveform". It is
+  distinct from nil so a caller can tell new work from old.
+- **A bucket of its own, `AlreadyQueued`.** Dropping duplicates uncounted
+  would put them in no bucket, and the line would stop adding up to
+  `total`. Folding them into `upToDate` would be false, since they have no
+  row yet. The JSON tag has no `omitempty`, like the struct's other ints.
+  The line renders it only when non-zero, like its other optional parts,
+  beside `enqueued`.
+- **The journal line reads the counts struct and carries `alreadyQueued`.**
+  "(queue now full)" beside `count=800` explains itself once
+  `alreadyQueued=4200` is on the same line. A sweep that added nothing logs
+  nothing. Before the fix such a sweep still logged a count of the backlog.
+  The message text is unchanged, so a journal grep for it still matches.
+- **The CLI accepts the sentinel and still stops on anything else.** Its
+  candidates cannot produce one today: `tracks.path` is the primary key,
+  and each path is offered once to a pool the run created. But the loop
+  stops on any error it does not recognise, so the day that changes, a run
+  would stop at the first duplicate. `total` stays `len(candidates)`. The
+  drain loop waits on `QueueLen` and `Inflight`, never on `total`, so a
+  duplicate could skew the progress line but could not hang the run.
+- **The loop became `dispatchAnalysisCandidates`** so a test can hand it an
+  enqueue that answers with the sentinel, which no real candidate list can
+  produce.
+- **The recursive `/api/jobs` guard is left where it stops.** Recursing into
+  `*AnalysisSweepState` is the question #947 and #948 both left open: the
+  type has other consumers, and its lifecycle fields are read under other
+  roots. Control C8b below shows the gap is real. The narrower answer is a
+  test of the one line that renders these leaves.
+- **`AnalysisSweepCounts` now states its contract.** Every int field but
+  `Total` is a bucket, and the buckets partition `Total` except what a
+  saturated queue defers. The node test's reflection rests on that
+  sentence. A non-bucket int field fails the test on purpose, and so does a
+  field of any other kind, so whoever adds one decides how it renders.
+
+### Tests and controls
+
+Red commit `42a8070b`, fix `347e7804`. The red commit carried scaffolding so
+the tests compiled against the old behaviour: the sentinel declared but not
+returned, the DTO field declared but never set, and the producer loop
+extracted unchanged. #988's red commit did the same with its counter
+accessor. Red against it, for the stated reasons:
+
+| test | red at `42a8070b` |
+|---|---|
+| `TestPoolDedupAndQueueFull` (updated) | `dedup Enqueue: got <nil>, want ErrDuplicateInflight` |
+| `TestASecondSweepCountsTheQueuedBacklogAsAlreadyQueued` | `reported 4 enqueued while the pool accepted 1`; `0 already queued, want 3` |
+| `TestBridgeAnalyzeDispatchesPastAPathAlreadyQueued` | `offered [a.flac b.flac], want [a.flac b.flac c.flac]`; the closed-pool control subtest green |
+| `TestDescribeAnalysisSweepAccountsForEveryTrack` | `"alreadyQueued" (64) is not in the line`; the parts add up to 63 of 127 |
+
+The sweeper test holds its jobs with a runner that returns only when `Stop`
+cancels it. It checks the new job against the pool's own `Enqueued` counter
+rather than against a number the test chose, and it asserts its precondition
+(all three first-sweep paths still held, none finished) before the second
+sweep. The node test fills every int field but `Total` with a distinct power
+of two by reflection and sends it through `json.Marshal` of the real type. So
+a missing part is named by its value, and a Go tag and a JS read that
+disagree about a name fail the same way.
+
+Every control ran in a throwaway worktree at `347e7804`, built and vetted,
+`-count=3`, with the mutation checked as applied:
+
+| control | mutation | result |
+|---|---|---|
+| C1 | `Enqueue` returns nil for a duplicate | red: the pool test, and the sweep test on both counts |
+| C2 | the sweeper counts the sentinel as enqueued | red: `4 enqueued while the pool accepted 1`, `0 already queued` |
+| C3 | the sweeper drops the sentinel uncounted | red: `0 already queued, want 3` (`Enqueued` is right under this mutation, so this assertion stands alone) |
+| C4 | the dispatch does not accept the sentinel | red: `offered [a.flac b.flac]` |
+| C5 | the dispatch goes on past every error but a full queue | red, closed-pool subtest: `offered [a.flac b.flac c.flac], want [a.flac b.flac]` |
+| C6 | the console line drops `alreadyQueued` | red: named, 63 of 127 |
+| C7 | the Go tag renamed to `alreadyQueuedCount` | red: `"alreadyQueuedCount" (64) is not in the line` |
+| C8 | a `Deferred int` bucket declared, not rendered | red: `"deferred" (128)`, 127 of 255 |
+| C8b | the same field, run against `TestEveryJobsFieldIsRenderedSomewhere` | **green**: the recursive guard stops at `*AnalysisSweepState` and cannot see it |
+
+The new tests also ran clean under `-race` (`-count=5` for the pool and
+sweeper tests, `-count=3` for the node test), with #987's
+`TestACountedFailureHasAlreadyReleasedItsPath` and
+`TestASuccessfulAnalysisClearsTheStrikes` alongside. With the sentinel, the
+first of those now reports a refused retry by the error it got, where it
+used to fail only on the counter.
