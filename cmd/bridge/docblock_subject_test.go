@@ -34,6 +34,9 @@ import (
 // provides, takes, tracks) and are kept, since removing a verb can only
 // lose recall. docVerbCoverageFloor keeps the list from quietly falling
 // behind the vocabulary again.
+//
+// That census read non-test files only, and so does this list. Test files
+// add testDocVerbs to it.
 var docVerbs = []string{
 	"accepts", "adapts", "adds", "answers", "appends", "applies", "are",
 	"asks", "assembles", "attaches", "binds", "blocks", "bounds", "builds",
@@ -59,10 +62,43 @@ var docVerbs = []string{
 	"validates", "verifies", "walks", "wipes", "wires", "wraps", "writes",
 }
 
+// testDocVerbs are the words a _test.go file's doc comments put after their
+// own name that docVerbs lacks: a test's doc opens "… pins the …" or
+// "… asserts …", and a fixture's "newWatcherFixture stands up …". A test
+// file is read against docVerbs and this list together, because its helpers,
+// fakes and fixtures are documented like any other code.
+//
+// Derived by docVerbs' rule over the test files' own census (2026-09-24,
+// #990): a word is listed when at least five correctly-attached test-file
+// doc comments open with it, or when it opened one of the eleven misattached
+// blocks that census found ("swaps" and "slices" opened one each and clear
+// five nowhere). "regression" clears five and is not a verb: `\b` splits
+// "regression-guards" at the hyphen. It stays out, as "and", "atomically"
+// and "re" stayed out of docVerbs.
+//
+// It is kept apart rather than merged into docVerbs because the vocabulary
+// is the test files' own. "pins" opens 1,033 of their 2,843 subject-first
+// openers and 2 of the 4,522 outside them; these twenty open 16 of those
+// 4,522 in all. Non-test files are therefore read exactly as #989 measured
+// them, and docVerbs alone recognises 48% of the test files' openers.
+var testDocVerbs = []string{
+	"asserts", "confirms", "exercises", "extends", "forces", "guards",
+	"lays", "locks", "pins", "plants", "proves", "pulls", "seeds",
+	"slices", "spins", "stages", "stands", "swaps", "synthesises",
+	"upserts",
+}
+
 // openerSubject is the identifier a doc comment's first sentence opens
 // with. docOpener and anyOpener share it, so the two always capture the
 // same name, which the coverage count relies on.
 const openerSubject = `^\s*([A-Za-z_][A-Za-z0-9_]*)\s+`
+
+// verbOpener builds the opener that recognises verbs: openerSubject, then
+// one of the words, with docOpener's optional `re-`.
+func verbOpener(verbs ...[]string) *regexp.Regexp {
+	return regexp.MustCompile(openerSubject + `((?:re-)?(?:` +
+		strings.Join(slices.Concat(verbs...), "|") + `))\b`)
+}
 
 // docOpener matches the opening of a Go doc comment: the identifier it
 // documents, then one of docVerbs. The optional `re-` is there because `\b`
@@ -74,8 +110,11 @@ const openerSubject = `^\s*([A-Za-z_][A-Za-z0-9_]*)\s+`
 // directive lines, and skips a leading blank comment line — so a block
 // comment or a docblock that opens with a bare `//` is seen rather than
 // silently passing (Gemini on #964).
-var docOpener = regexp.MustCompile(openerSubject + `((?:re-)?(?:` +
-	strings.Join(docVerbs, "|") + `))\b`)
+var docOpener = verbOpener(docVerbs)
+
+// testDocOpener is docOpener for a _test.go file: docVerbs and testDocVerbs
+// together.
+var testDocOpener = verbOpener(docVerbs, testDocVerbs)
 
 // anyOpener is docOpener with the verb left open. It is only ever the
 // denominator of the coverage floor, never a detector — see docVerbs for why.
@@ -83,7 +122,7 @@ var anyOpener = regexp.MustCompile(openerSubject + `((?:re-)?[a-z]+)\b`)
 
 // docVerbCoverageFloor is the share of subject-first openers — correctly
 // attached doc comments that open "<their own name> <word>" — whose word
-// docVerbs must recognise.
+// docVerbs must recognise, in non-test files.
 //
 // A misattached block is an ordinary doc comment that lost its subject, so it
 // opens the way the rest of the tree's doc comments do, and this share is the
@@ -92,6 +131,19 @@ var anyOpener = regexp.MustCompile(openerSubject + `((?:re-)?[a-z]+)\b`)
 // floor fails a list that gets trimmed, or a vocabulary that drifts away from
 // it, and names the words to add.
 const docVerbCoverageFloor = 0.85
+
+// testDocVerbCoverageFloor is docVerbCoverageFloor for test files: the share
+// of their subject-first openers that docVerbs and testDocVerbs together must
+// recognise.
+//
+// Measured apart because one rate over both populations lets the larger carry
+// the smaller. On the 2026-09-24 census a single 85% floor passed once "pins"
+// alone was added, at 88.1% overall, while the test files' own rate was 84.5%.
+//
+// Each floor sits about five points under what its population measured when
+// it was set: 90.3% for non-test files, 94.9% here. That leaves room for 138
+// test-file openers to go unrecognised, or for 154 new unrecognised ones.
+const testDocVerbCoverageFloor = 0.90
 
 // TestNoDocblockNamesAnotherDeclaration.
 //
@@ -132,6 +184,22 @@ const docVerbCoverageFloor = 0.85
 // on the tree it was measured against. The type the members share is not a
 // subject: a group doc that opens by defining it is that type's doc in the
 // wrong slot, and the census found none.
+//
+// Test files are inspected too (#990). A census of them found eleven
+// blocks glued onto the wrong declaration, and two things differ. Their doc
+// comments open with a vocabulary of their own, read through testDocVerbs
+// and measured against a floor of their own. And "the same package" needs
+// the package NAME, not just the directory, because an external `foo_test`
+// package shares its directory with `foo`. A name is looked up the way the
+// compiler scopes it. A non-test file sees the non-test files of its
+// package. An internal test file (package `foo`) is compiled into that
+// package, so it sees those names as well as the test files'. An external
+// `foo_test` file sees only its own package. Test files are consulted first,
+// since an insertion into a test file displaces a test file's doc. The
+// cost of that lookup: 31 test docs open by naming the documented
+// production declaration they test ("loadCLIConfig is …"), and the second
+// condition is all that keeps them quiet. A production doc that is deleted
+// makes its test's prose reportable.
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	root := repoRootForCitations(t)
 	type decl struct {
@@ -139,18 +207,25 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		line   int
 		hasDoc bool
 	}
-	// package dir -> ident -> where it is declared
-	declared := map[string]map[string]decl{}
+	// scope is the set of files whose declarations are looked up together:
+	// one package in one directory, test files apart from non-test ones.
+	type scope struct {
+		dir, pkg string
+		test     bool
+	}
+	// scope -> ident -> where it is declared
+	declared := map[scope]map[string]decl{}
 	var files []string
+	nonTestFiles, testFiles := 0, 0
 
-	walk := func(fn func(path string, f *ast.File, fset *token.FileSet)) {
+	walk := func(fn func(path string, sc scope, f *ast.File, fset *token.FileSet)) {
 		for _, p := range files {
 			fset := token.NewFileSet()
 			f, err := parser.ParseFile(fset, p, nil, parser.ParseComments)
 			if err != nil {
 				t.Fatalf("parse %s: %v", p, err)
 			}
-			fn(p, f, fset)
+			fn(p, scope{filepath.Dir(p), f.Name.Name, strings.HasSuffix(p, "_test.go")}, f, fset)
 		}
 	}
 	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -172,50 +247,71 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
-			files = append(files, path)
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		files = append(files, path)
+		if strings.HasSuffix(path, "_test.go") {
+			testFiles++
+		} else {
+			nonTestFiles++
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(files) < 100 {
-		t.Fatalf("walked %d non-test .go files, want >=100 — the scan is not seeing the tree", len(files))
+	if nonTestFiles < 100 {
+		t.Fatalf("walked %d non-test .go files, want >=100 — the scan is not seeing the tree", nonTestFiles)
+	}
+	if testFiles < 100 {
+		t.Fatalf("walked %d _test.go files, want >=100 — the scan is not seeing the tests", testFiles)
 	}
 
-	record := func(dir, name, file string, line int, hasDoc bool) {
+	record := func(sc scope, name, file string, line int, hasDoc bool) {
 		// `var _ Iface = impl{}` declares nothing a doc could be about.
 		if name == "_" {
 			return
 		}
-		m := declared[dir]
+		m := declared[sc]
 		if m == nil {
 			m = map[string]decl{}
-			declared[dir] = m
+			declared[sc] = m
 		}
 		if _, seen := m[name]; !seen {
 			m[name] = decl{file, line, hasDoc}
 		}
 	}
-	walk(func(path string, f *ast.File, fset *token.FileSet) {
-		dir := filepath.Dir(path)
+	// lookup finds name as it is visible from a file in sc (see the
+	// docblock above). An external `foo_test` file has its own package
+	// name, so its second lookup finds nothing.
+	lookup := func(sc scope, name string) (decl, bool) {
+		if d, ok := declared[sc][name]; ok {
+			return d, true
+		}
+		if sc.test {
+			d, ok := declared[scope{sc.dir, sc.pkg, false}][name]
+			return d, ok
+		}
+		return decl{}, false
+	}
+	walk(func(path string, sc scope, f *ast.File, fset *token.FileSet) {
 		for _, d := range f.Decls {
 			switch n := d.(type) {
 			case *ast.FuncDecl:
-				record(dir, n.Name.Name, path, fset.Position(n.Pos()).Line, n.Doc != nil)
+				record(sc, n.Name.Name, path, fset.Position(n.Pos()).Line, n.Doc != nil)
 			case *ast.GenDecl:
 				for _, sp := range n.Specs {
 					switch s := sp.(type) {
 					case *ast.TypeSpec:
 						hasDoc := n.Doc != nil || s.Doc != nil
-						record(dir, s.Name.Name, path, fset.Position(s.Pos()).Line, hasDoc)
+						record(sc, s.Name.Name, path, fset.Position(s.Pos()).Line, hasDoc)
 					case *ast.ValueSpec:
 						// Inside `( … )` only the spec's own doc or line comment
 						// counts: the group's describes the group (see above).
 						hasDoc := s.Doc != nil || s.Comment != nil ||
 							(n.Doc != nil && !n.Lparen.IsValid())
 						for _, id := range s.Names {
-							record(dir, id.Name, path, fset.Position(id.Pos()).Line, hasDoc)
+							record(sc, id.Name, path, fset.Position(id.Pos()).Line, hasDoc)
 						}
 					}
 				}
@@ -223,44 +319,63 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		}
 	})
 
-	checked, found := 0, 0
-	subjectFirst, recognised := 0, 0
-	unrecognised := map[string]int{}
-	inspect := func(path, dir, subject string, names []string, doc *ast.CommentGroup, fset *token.FileSet) {
+	// population is what is counted apart for non-test and for test files:
+	// each is read with its own opener and held to its own coverage floor.
+	type population struct {
+		name                     string
+		files                    int
+		opener                   *regexp.Regexp
+		recognises               string // the list(s) the opener reads, with the verb, for messages
+		extend                   string // the list a missing verb belongs in
+		floor                    float64
+		checked, found           int
+		subjectFirst, recognised int
+		unrecognised             map[string]int
+	}
+	nonTest := &population{name: "non-test", files: nonTestFiles, opener: docOpener,
+		recognises: "docVerbs recognises", extend: "docVerbs", floor: docVerbCoverageFloor,
+		unrecognised: map[string]int{}}
+	test := &population{name: "test", files: testFiles, opener: testDocOpener,
+		recognises: "docVerbs and testDocVerbs recognise", extend: "testDocVerbs", floor: testDocVerbCoverageFloor,
+		unrecognised: map[string]int{}}
+	inspect := func(path string, sc scope, subject string, names []string, doc *ast.CommentGroup, fset *token.FileSet) {
 		if doc == nil {
 			return
 		}
-		checked++
+		p := nonTest
+		if sc.test {
+			p = test
+		}
+		p.checked++
 		text := doc.Text()
-		m := docOpener.FindStringSubmatch(text)
+		m := p.opener.FindStringSubmatch(text)
 		if a := anyOpener.FindStringSubmatch(text); a != nil && slices.Contains(names, a[1]) {
-			subjectFirst++
+			p.subjectFirst++
 			if m != nil {
-				recognised++
+				p.recognised++
 			} else {
-				unrecognised[a[2]]++
+				p.unrecognised[a[2]]++
 			}
 		}
 		if m == nil || slices.Contains(names, m[1]) {
 			return
 		}
-		other, ok := declared[dir][m[1]]
+		other, ok := lookup(sc, m[1])
 		if !ok || other.hasDoc {
 			return
 		}
-		found++
+		p.found++
 		t.Errorf("%s:%d — this doc comment opens %q but is attached to %s, so it "+
 			"documents that instead, and %s at %s:%d has no doc of its own. "+
 			"Move the block to its subject, or separate the two with a blank line.",
 			path, fset.Position(doc.Pos()).Line, m[1]+" "+m[2], subject,
 			m[1], filepath.Base(other.file), other.line)
 	}
-	walk(func(path string, f *ast.File, fset *token.FileSet) {
-		dir := filepath.Dir(path)
+	walk(func(path string, sc scope, f *ast.File, fset *token.FileSet) {
 		for _, d := range f.Decls {
 			switch n := d.(type) {
 			case *ast.FuncDecl:
-				inspect(path, dir, fmt.Sprintf("%q", n.Name.Name), []string{n.Name.Name}, n.Doc, fset)
+				inspect(path, sc, fmt.Sprintf("%q", n.Name.Name), []string{n.Name.Name}, n.Doc, fset)
 			case *ast.GenDecl:
 				var all []string
 				for _, sp := range n.Specs {
@@ -270,7 +385,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 						if doc == nil {
 							doc = n.Doc
 						}
-						inspect(path, dir, fmt.Sprintf("%q", s.Name.Name), []string{s.Name.Name}, doc, fset)
+						inspect(path, sc, fmt.Sprintf("%q", s.Name.Name), []string{s.Name.Name}, doc, fset)
 					case *ast.ValueSpec:
 						var names []string
 						for _, id := range s.Names {
@@ -279,7 +394,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 						all = append(all, names...)
 						// Only a spec inside `( … )` can carry a doc of its own;
 						// an ungrouped declaration's doc is the GenDecl's.
-						inspect(path, dir, fmt.Sprintf("%s %s", n.Tok, strings.Join(names, ", ")), names, s.Doc, fset)
+						inspect(path, sc, fmt.Sprintf("%s %s", n.Tok, strings.Join(names, ", ")), names, s.Doc, fset)
 					}
 				}
 				if n.Tok == token.CONST || n.Tok == token.VAR {
@@ -287,40 +402,43 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 					if n.Lparen.IsValid() {
 						subject = fmt.Sprintf("the %s block (%s)", n.Tok, strings.Join(all, ", "))
 					}
-					inspect(path, dir, subject, all, n.Doc, fset)
+					inspect(path, sc, subject, all, n.Doc, fset)
 				}
 			}
 		}
 	})
-	if checked < 500 {
-		t.Fatalf("inspected %d doc comments, want >=500 — the scan is not reaching them, "+
-			"so this guard would pass no matter what", checked)
-	}
-	if subjectFirst == 0 {
-		t.Fatal("no doc comment opened with its own subject — the coverage floor measured nothing")
-	}
-	coverage := float64(recognised) / float64(subjectFirst)
-	if coverage < docVerbCoverageFloor {
-		words := make([]string, 0, len(unrecognised))
-		for w := range unrecognised {
-			words = append(words, w)
+	for _, p := range []*population{nonTest, test} {
+		if p.checked < 500 {
+			t.Fatalf("inspected %d doc comments in %s files, want >=500 — the scan is not reaching them, "+
+				"so this guard would pass no matter what", p.checked, p.name)
 		}
-		sort.Slice(words, func(i, j int) bool {
-			if unrecognised[words[i]] != unrecognised[words[j]] {
-				return unrecognised[words[i]] > unrecognised[words[j]]
+		if p.subjectFirst == 0 {
+			t.Fatalf("no doc comment in a %s file opened with its own subject — the coverage floor measured nothing", p.name)
+		}
+		coverage := float64(p.recognised) / float64(p.subjectFirst)
+		if coverage < p.floor {
+			words := make([]string, 0, len(p.unrecognised))
+			for w := range p.unrecognised {
+				words = append(words, w)
 			}
-			return words[i] < words[j]
-		})
-		top := make([]string, 0, 15)
-		for _, w := range words[:min(len(words), 15)] {
-			top = append(top, fmt.Sprintf("%s (%d)", w, unrecognised[w]))
+			sort.Slice(words, func(i, j int) bool {
+				if p.unrecognised[words[i]] != p.unrecognised[words[j]] {
+					return p.unrecognised[words[i]] > p.unrecognised[words[j]]
+				}
+				return words[i] < words[j]
+			})
+			top := make([]string, 0, 15)
+			for _, w := range words[:min(len(words), 15)] {
+				top = append(top, fmt.Sprintf("%s (%d)", w, p.unrecognised[w]))
+			}
+			t.Errorf("%s %d of %d subject-first doc openers in %s files (%.1f%%), below the "+
+				"%.0f%% floor: a misattached block opening with any other word passes unseen. "+
+				"Most common unrecognised: %s. Add the verbs among them to %s.",
+				p.recognises, p.recognised, p.subjectFirst, p.name, 100*coverage, 100*p.floor,
+				strings.Join(top, ", "), p.extend)
 		}
-		t.Errorf("docVerbs recognises %d of %d subject-first doc openers (%.1f%%), below the "+
-			"%.0f%% floor: a misattached block opening with any other word passes unseen. "+
-			"Most common unrecognised: %s. Add the verbs among them to docVerbs.",
-			recognised, subjectFirst, 100*coverage, 100*docVerbCoverageFloor, strings.Join(top, ", "))
+		t.Logf("%s files: inspected %d doc comments across %d files; %d misattached; "+
+			"%s %d of %d subject-first openers (%.1f%%)",
+			p.name, p.checked, p.files, p.found, p.recognises, p.recognised, p.subjectFirst, 100*coverage)
 	}
-	t.Logf("inspected %d doc comments across %d files; %d misattached; "+
-		"docVerbs recognises %d of %d subject-first openers (%.1f%%)",
-		checked, len(files), found, recognised, subjectFirst, 100*coverage)
 }
