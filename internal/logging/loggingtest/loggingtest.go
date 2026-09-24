@@ -24,7 +24,7 @@ import (
 )
 
 // Recorder keeps every record logged through slog.Default while it is
-// installed. Record installs one; Logged and Failures read it.
+// installed. Record installs one; Failures reads it.
 type Recorder struct {
 	mu      sync.Mutex
 	records []slog.Record
@@ -47,16 +47,25 @@ func (r *Recorder) keep(rec slog.Record) {
 	r.records = append(r.records, rec.Clone())
 }
 
-// Logged returns, rendered one per line, every record logged so far whose
-// message is msg.
-func (r *Recorder) Logged(msg string) []string {
-	return r.render(func(rec slog.Record) bool { return rec.Message == msg })
-}
-
 // Failures returns, rendered one per line, every record logged so far at
-// Warn or above.
-func (r *Recorder) Failures() []string {
-	return r.render(func(rec slog.Record) bool { return rec.Level >= slog.LevelWarn })
+// Warn or above, and only those whose message is one of msgs when any are
+// given. A pass that logs its outcome at Info under the same message as its
+// failure (the scanner's "duplicate stamping") is why the level is asked.
+func (r *Recorder) Failures(msgs ...string) []string {
+	return r.render(func(rec slog.Record) bool {
+		if rec.Level < slog.LevelWarn {
+			return false
+		}
+		if len(msgs) == 0 {
+			return true
+		}
+		for _, m := range msgs {
+			if rec.Message == m {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // render formats the records match accepts as "LEVEL message key=value ...",

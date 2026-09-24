@@ -35,7 +35,7 @@ func TestAFingerprintSweepStoppedByShutdownReportsNothing(t *testing.T) {
 	if !ranPass {
 		t.Fatal("the sweep's enabled gate was never asked, so no pass ran and nothing was tested")
 	}
-	if got := rec.Logged(fingerprintListFailed); len(got) != 0 {
+	if got := rec.Failures(fingerprintListFailed); len(got) != 0 {
 		t.Errorf("a sweep stopped by shutdown was reported as a failure:\n%s", strings.Join(got, "\n"))
 	}
 }
@@ -47,7 +47,7 @@ func TestAFingerprintSweepThatFailsIsStillReported(t *testing.T) {
 	_ = store.Close() // every query now fails, on a context nobody cancelled
 	rec := loggingtest.Record(t)
 	runOneFingerprintPass(t, store, false)
-	if got := rec.Logged(fingerprintListFailed); len(got) != 1 {
+	if got := rec.Failures(fingerprintListFailed); len(got) != 1 {
 		t.Errorf("a candidate listing that failed on a live context logged %d lines, want 1:\n%s",
 			len(got), strings.Join(got, "\n"))
 	}
@@ -62,7 +62,7 @@ func TestASmartPlaylistRegenerationStoppedByShutdownReportsNothing(t *testing.T)
 	if !runOneSmartPlaylistPass(t, store, true) {
 		t.Fatal("the regenerator's enabled gate was never asked, so no pass ran and nothing was tested")
 	}
-	if got := rec.Logged(smartPlaylistFailed); len(got) != 0 {
+	if got := rec.Failures(smartPlaylistFailed); len(got) != 0 {
 		t.Errorf("a regeneration stopped by shutdown was reported as a failure:\n%s", strings.Join(got, "\n"))
 	}
 }
@@ -73,7 +73,7 @@ func TestASmartPlaylistRegenerationThatFailsIsStillReported(t *testing.T) {
 	_ = store.Close()
 	rec := loggingtest.Record(t)
 	runOneSmartPlaylistPass(t, store, false)
-	if got := rec.Logged(smartPlaylistFailed); len(got) != 1 {
+	if got := rec.Failures(smartPlaylistFailed); len(got) != 1 {
 		t.Errorf("a regeneration that failed on a live context logged %d lines, want 1:\n%s",
 			len(got), strings.Join(got, "\n"))
 	}
