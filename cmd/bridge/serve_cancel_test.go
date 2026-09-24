@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
@@ -453,6 +454,32 @@ func TestATsnetListenFailingAsTheShutdownClosesTheNodeReportsNothing(t *testing.
 	}
 }
 
+// TestATsnetListenThatSucceedsAsTheShutdownBeginsClosesTheListener: the
+// shutdown lands while ListenTLS runs, and the listen succeeds anyway (the
+// wrapper takes no context). The listener is closed rather than returned for
+// the goroutine to serve on (CodeRabbit, #1005).
+func TestATsnetListenThatSucceedsAsTheShutdownBeginsClosesTheListener(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	node := &listeningTsnetNode{onListen: cancel}
+	var stderr bytes.Buffer
+	if lis, ok := tsnetListen(ctx, node, "127.0.0.1:0", &stderr); ok || lis != nil {
+		t.Fatal("a listener opened as the shutdown began was returned to be served")
+	}
+	if node.opened == nil {
+		t.Fatal("precondition: ListenTLS opened no listener")
+	}
+	// A deadline, so a listener left open fails the test instead of
+	// blocking it in Accept.
+	_ = node.opened.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := node.opened.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("the listener was left open: Accept = %v", err)
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("a listen the shutdown overtook was reported: %q", got)
+	}
+}
+
 // TestATsnetListenThatFailsIsStillReported is the twin: the listen fails on
 // a live context and is reported, as before.
 func TestATsnetListenThatFailsIsStillReported(t *testing.T) {
@@ -604,11 +631,12 @@ func openMigratedServeDB(t *testing.T, dataDir string) *sql.DB {
 
 // listeningTsnetNode is a tsnet node whose ListenTLS counts its calls, runs
 // onListen first (a shutdown landing mid-call), then fails with err, or
-// opens a loopback listener when err is nil.
+// opens a loopback listener when err is nil and keeps it in opened.
 type listeningTsnetNode struct {
 	err      error
 	onListen func()
 	calls    atomic.Int32
+	opened   net.Listener
 }
 
 func (n *listeningTsnetNode) ListenTLS(addr string) (net.Listener, error) {
@@ -619,5 +647,7 @@ func (n *listeningTsnetNode) ListenTLS(addr string) (net.Listener, error) {
 	if n.err != nil {
 		return nil, n.err
 	}
-	return net.Listen("tcp", addr)
+	lis, err := net.Listen("tcp", addr)
+	n.opened = lis
+	return lis, err
 }
