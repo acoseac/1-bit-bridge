@@ -2985,8 +2985,8 @@ its twin.** The top list is older, shorter, and read first.
   `allowedKeepers` holds internal/tsnet's `var _ = errors.Is` while its doc
   says "Don't remove until typed errors land.", `typedErrorIn` finds no
   sentinel, `Error() string` method or error interface there, and the file
-  uses `errors` nowhere else. Any of those failing is reported, and so is an entry whose
-  keeper is gone. On a clean tree the sweep reports nothing, so
+  uses `errors` nowhere else. Any of those failing is reported, and so is
+  an entry whose keeper is gone. On a clean tree the sweep reports nothing, so
   `TestBlankKeeperScanOnFixtures` pins every shape, refused shape, scope
   rule, skip rule and allowance state: 47 of 49 mutations turn it red, and
   five turn the tree red. Of the two that stay green, one drops the CRLF
