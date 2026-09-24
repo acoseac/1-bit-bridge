@@ -12271,3 +12271,9 @@ that round's.
   the allowance would have stood after typed errors landed. Red-first,
   with the fixtures in place and the round-7 guard: `dot.go` read "local",
   `cgo.go` read "only-use", and both interface cases read "allowed".
+  CodeRabbit then reviewed `5922bf0d` clean (coverage "reviewed", merge
+  risk Low). Gemini still had not answered, so a last consult read the
+  finished file. It found no remaining defect, and its reasons checked out
+  against the code: external test packages, two aliases of one import,
+  mixed keeper forms of one package, method values, type parameters,
+  build-tagged files and closures.
