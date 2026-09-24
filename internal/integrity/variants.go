@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -371,9 +372,13 @@ func (w *VariantWatcher) currentVariantsDir() string {
 func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	rows, err := w.lister.AllVariants()
 	if err != nil {
-		logger.Error("integrity variant sweep: AllVariants failed",
-			slog.Any("err", err),
-		)
+		// A listing the shutdown stopped is not a failed sweep. The
+		// lister's adapter runs on the same scanCtx this tick does.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Error("integrity variant sweep: AllVariants failed",
+				slog.Any("err", failure),
+			)
+		}
 		return SweepReport{Skipped: true}
 	}
 	if len(rows) == 0 {
@@ -431,6 +436,14 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 			report.Present++
 		case SidecarRelocated:
 			if err := w.reconciler.AdoptVariantSidecar(r.SourcePath, r.VariantID, loc.Canonical); err != nil {
+				// An adoption the shutdown stopped ends the tick, as the
+				// check at the top of this loop would, rather than counting
+				// as a failure.
+				if ctxerr.WithoutCancellation(ctx, err) == nil {
+					report.Cancelled = true
+					w.logSummary(dir, report)
+					return report
+				}
 				// The file is there and the row still points at the old
 				// path; nothing is lost and the next tick asks again. Not
 				// a deletion candidate under any reading.
@@ -513,6 +526,13 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 		default:
 		}
 		if delErr := w.reconciler.DeleteVariant(r.SourcePath, r.VariantID); delErr != nil {
+			// A delete the shutdown stopped ends the tick, as above.
+			if ctxerr.WithoutCancellation(ctx, delErr) == nil {
+				report.Cancelled = true
+				w.publishDeleted(paths, variantIDs)
+				w.logSummary(dir, report)
+				return report
+			}
 			report.Failed++
 			sample.log(slog.LevelWarn, "integrity variant sweep: DB delete failed",
 				slog.String("source_path", r.SourcePath),

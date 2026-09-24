@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 )
 
 // gcChunkSize bounds the number of filesystem entries the orphan
@@ -376,9 +378,12 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	}
 	rows, err := s.lister.AllVariants(ctx)
 	if err != nil {
-		logger.Error("orphan sidecar sweep: AllVariants failed",
-			slog.Any("err", err),
-		)
+		// A listing the shutdown stopped is not a failed sweep.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Error("orphan sidecar sweep: AllVariants failed",
+				slog.Any("err", failure),
+			)
+		}
 		return 0
 	}
 	// Case-fold + clean the known-set keys so a casing delta between the
@@ -583,13 +588,16 @@ func (s *OrphanSidecarSweeper) tick(ctx context.Context) int {
 	})
 
 	if err != nil {
-		// Walk-level error (root missing, ctx cancellation that
-		// propagated up). Log at WARN — the sweeper can resume
-		// on the next tick.
-		logger.Warn("orphan sidecar sweep: walk aborted",
-			slog.String("outputDir", root),
-			slog.Any("err", err),
-		)
+		// Walk-level error: the callback returns one only for its
+		// context. A shutdown's cancellation is not reported; a deadline
+		// is a failure, logged at WARN — the sweeper can resume on the
+		// next tick.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Warn("orphan sidecar sweep: walk aborted",
+				slog.String("outputDir", root),
+				slog.Any("err", failure),
+			)
+		}
 	}
 
 	// Cursor update: if we hit the chunk cap, the next tick
