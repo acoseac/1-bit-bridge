@@ -11998,7 +11998,7 @@ literals, locals, a map key that is a local, a struct field key) and every
 skip rule (a `.#lock` that is not Go, which would fail the parse if
 opened, `_dir`, testdata, vendor, node_modules, a nested module). There
 are eight allowance states, and one case writes the whole tree with CRLF
-endings. Controls on the round-4 commit (`d492f282`), each `-count=1`,
+endings. Controls on the round-5 commit (`f1937619`), each `-count=1`,
 each restored with `git checkout` and checked clean:
 
 | control | mutation | tree | fixture |
@@ -12047,10 +12047,11 @@ each restored with `git checkout` and checked clean:
 | NC27c | a literal's type unread (the round-3 guard) | green | red: the array-length assertion reported |
 | NC27d | a type argument refused | green | red: `set.Of[int]{}` missed |
 | NC27e | an array length unread | green | red: the array-length assertion reported |
+| NC28 | a selector's `Sel` counted as a name (the round-4 guard) | green | red: two statement keepers missed |
 | NC25 | no CRLF normalisation | green | **green** |
 | NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the four met cases |
 
-Only five of the 45 turn the tree red, and NC13, the one that deletes the
+Only five of the 46 turn the tree red, and NC13, the one that deletes the
 report, is not among them. That is #994's lesson again, and why the fixture
 drives the same `scanBlankKeepers` the tree test does. NC25 is the one
 control the fixture does not catch, and it is not meant to: without the
@@ -12162,3 +12163,19 @@ checked against the code first.
   consult decided. The round-4 guard over the 37 history trees finds the
   same 699 sightings as the round-1 guard, so neither this widening nor
   round 2's scoping changed a historical finding.
+- **Round 5** (`c90c1adc`): **Gemini** had no comments. **CodeRabbit**, in
+  its pass over `afc3adfb`, raised one minor, taken in `f1937619`:
+  `namesIn` counted the `Sel` of a selector whose `X` is not a bare import
+  as a name of its own, so `_ = (*bytes.Buffer).Len` and
+  `_ = http.DefaultClient.Do` were missed in a function body while their
+  top-level twins were reported. A field or method name names no
+  declaration in scope, and `namesIn` reads only a selector's `X` now.
+  Red-first with the two statements in the fixture: both missed, and the
+  missed `(*bytes.Buffer).Len` counted as a real use of `bytes`, so its
+  neighbour `(*bytes.Buffer)(nil)` read redundant. The history re-run gave
+  the same 699 sightings with the same verdicts. Its footer said the
+  finding was "addressed in commits d492f28 to c90c1ad"; it was not until
+  `f1937619`. The first NC20 of this run did not build: the mutation
+  removed `go/types`' only use. It was rebuilt to keep the import and then
+  went red, and a control that does not build is recorded as invalid,
+  never as a pass.

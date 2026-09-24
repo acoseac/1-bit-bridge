@@ -2974,17 +2974,18 @@ its twin.** The top list is older, shorter, and read first.
   (a Gemini consult found it). A selector names an import only where no
   local of that name is in scope, scoped as Go scopes it, from the end of
   the declaring statement (a whole-function approximation missed
-  `_ = path.Join` above `path := …`; CodeRabbit). Two keepers of one
-  package are not each other's use (update.go's pair). **The one allowance
-  stands on its stated CONDITION, not its path**: `allowedKeepers` holds
-  internal/tsnet's `var _ = errors.Is` while its doc says "Don't remove
-  until typed errors land.", `typedErrorIn` finds no sentinel and no
-  `Error() string` method there, and the file uses `errors` nowhere else.
-  Any of those failing is reported, and so is an entry whose keeper is
-  gone. On a clean tree the sweep reports nothing, so
+  `_ = path.Join` above `path := …`; CodeRabbit), and a selector's field or
+  method name names nothing (`_ = http.DefaultClient.Do` is a keeper). Two
+  keepers of one package are not each other's use (update.go's pair).
+  **The one allowance stands on its stated CONDITION, not its path**:
+  `allowedKeepers` holds internal/tsnet's `var _ = errors.Is` while its doc
+  says "Don't remove until typed errors land.", `typedErrorIn` finds no
+  sentinel and no `Error() string` method there, and the file uses `errors`
+  nowhere else. Any of those failing is reported, and so is an entry whose
+  keeper is gone. On a clean tree the sweep reports nothing, so
   `TestBlankKeeperScanOnFixtures` pins every shape, scope rule, skip rule
-  and allowance state: 44 of 45 mutations turn it red, and only five turn
-  the tree red. The 45th drops the CRLF normalisation, which the scan
+  and allowance state: 45 of 46 mutations turn it red, and only five turn
+  the tree red. The 46th drops the CRLF normalisation, which the scan
   survives without; its CRLF case pins the property, not the mechanism.
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing
