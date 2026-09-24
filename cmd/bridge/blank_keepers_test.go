@@ -332,7 +332,9 @@ func blankKeepersInFile(rel, src string) ([]blankKeeper, error) {
 func importNames(f *ast.File) map[string]bool {
 	names := map[string]bool{}
 	for _, imp := range f.Imports {
-		if imp.Path.Value == `"C"` {
+		// An import path may be a raw string (`C`), so compare it unquoted
+		// (CodeRabbit on #996).
+		if path, err := strconv.Unquote(imp.Path.Value); err == nil && path == "C" {
 			continue
 		}
 		if name := importName(imp); name != "_" && name != "." {
@@ -967,6 +969,7 @@ import "bytes"
 func c() {
 	_ = (*bytes.Buffer)(nil)
 	_ = &bytes.Reader{}
+	_ = bytes.Buffer{}
 }
 `,
 	"keep/local.go": `package keep
@@ -1124,8 +1127,9 @@ func use(cfg struct{ Name string }) {
 	// A bare name in a file with a dot import may be the import's, so the
 	// local form is not read there; and cgo's pseudo-package carries the
 	// preamble, so its import is never one to delete.
-	"keep/dot.go": "package keep\n\nimport . \"sync\"\n\nvar _ = Mutex{}\n",
-	"keep/cgo.go": "package keep\n\n// #cgo LDFLAGS: -lm\nimport \"C\"\n\nvar _ = (*C.char)(nil)\n",
+	"keep/dot.go":     "package keep\n\nimport . \"sync\"\n\nvar _ = Mutex{}\n",
+	"keep/cgo.go":     "package keep\n\n// #cgo LDFLAGS: -lm\nimport \"C\"\n\nvar _ = (*C.char)(nil)\n",
+	"keep/cgo_raw.go": "package keep\n\n// #cgo LDFLAGS: -lm\nimport `C`\n\nvar _ = (*C.char)(nil)\n",
 	// Nothing the go tool ignores is read, nor another module, nor vendored
 	// or node_modules code. The lock file is not Go, so opening it would
 	// fail the scan.
@@ -1164,6 +1168,7 @@ var keeperFixtureVerdicts = []string{
 	"keep/scope.go: path.Join: " + keeperRedundant,
 	"keep/shadow.go: path.Join: " + keeperOnlyUse,
 	"keep/statements.go: &bytes.Reader{}: " + keeperOnlyUse,
+	"keep/statements.go: bytes.Buffer{}: " + keeperOnlyUse,
 	"keep/statements.go: (*bytes.Buffer)(nil): " + keeperOnlyUse,
 	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
 	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
