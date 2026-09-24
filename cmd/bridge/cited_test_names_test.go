@@ -430,8 +430,8 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 			}
 			return nil
 		}
-		isMD := strings.HasSuffix(path, ".md")
-		if !strings.HasSuffix(path, ".go") && !isMD {
+		rel, _ := filepath.Rel(root, path)
+		if !opensForCitations(d.Name(), rel, trackedMD) {
 			return nil
 		}
 		raw, err := os.ReadFile(path)
@@ -441,10 +441,9 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 		// CRLF-normalised: nothing pins eol, so a Windows checkout would make
 		// the `(?m)^func` anchor and every literal below find nothing.
 		src := strings.ReplaceAll(string(raw), "\r\n", "\n")
-		rel, _ := filepath.Rel(root, path)
 		switch {
-		case isMD:
-			collectMarkdownCitations(rel, src, trackedMD, cited, mdCitations)
+		case strings.HasSuffix(path, ".md"):
+			collectMarkdownCitations(rel, src, cited, mdCitations)
 			return nil
 		case strings.HasSuffix(path, "_test.go"):
 			return collectTestFileCitations(path, rel, src, cited, defined)
@@ -463,15 +462,38 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 	return cited, defined, len(mdCitations)
 }
 
-// collectMarkdownCitations applies the `.md` policy declared above: skip a
-// document git does not track, skip a plan, and skip the two exempt name
-// classes. Split out of the walk for SonarCloud go:S3776 — the callback had
-// grown to a cognitive complexity of 50 against the 15 allowed, most of it
-// nesting rather than logic.
-func collectMarkdownCitations(rel, src string, trackedMD map[string]bool, cited map[string][]string, mdCitations map[string]bool) {
-	if trackedMD != nil && !trackedMD[filepath.ToSlash(rel)] {
-		return // gitignored, so not part of the shared tree
+// opensForCitations reports whether the walk opens a file at all, decided
+// from its NAME before anything is read. Each half takes the rule that
+// already says what it owns:
+//
+//   - A doc is opened only if git tracks it (trackedMarkdownSet). The walk
+//     used to open every `.md` and discard an untracked one AFTER reading
+//     it, so a gitignored local doc that could not be opened failed the
+//     run over a file it was never going to scan, and so did emacs's
+//     `.#CLAUDE.md` while CLAUDE.md was open.
+//   - A Go file is opened unless the go tool ignores it (goToolIgnores): an
+//     editor's lock beside it, or a file no build compiles.
+//
+// No DIRECTORY rule is added. `.github/` holds a tracked doc and a tracked
+// Go file this guard reads, so the go tool's `.`-directory rule would drop
+// both.
+func opensForCitations(name, rel string, trackedMD map[string]bool) bool {
+	switch {
+	case strings.HasSuffix(name, ".md"):
+		return trackedMD == nil || trackedMD[filepath.ToSlash(rel)]
+	case strings.HasSuffix(name, ".go"):
+		return !goToolIgnores(name)
 	}
+	return false
+}
+
+// collectMarkdownCitations applies the `.md` policy declared above to a
+// document the walk has opened: skip a plan, and skip the two exempt name
+// classes. Whether it is opened at all (git must track it) is
+// opensForCitations's call. Split out of the walk for SonarCloud go:S3776 —
+// the callback had grown to a cognitive complexity of 50 against the 15
+// allowed, most of it nesting rather than logic.
+func collectMarkdownCitations(rel, src string, cited map[string][]string, mdCitations map[string]bool) {
 	if isPlanDoc(rel) {
 		return
 	}
