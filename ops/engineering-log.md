@@ -10972,7 +10972,10 @@ on 9f01c005, where the table tests below also answer:
 
 NC2c and NC4 are why the table tests exist. On a clean tree the arm has
 nothing to count, so it cannot floor itself, and the tree scan alone
-cannot see its lowercase half or its predeclared clause go. NC2b's first run did not build (`unicode` left unused),
+cannot see its lowercase half or its predeclared clause go. The commit
+after 9f01c005 changes only the finding's wording (it now says that a name
+real elsewhere gets the same remedy) and a table comment; NC1 was
+re-checked on it. NC2b's first run did not build (`unicode` left unused),
 which is "control invalid", never a pass; it was rebuilt with the import
 kept and re-run.
 

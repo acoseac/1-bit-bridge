@@ -445,9 +445,10 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 				p.undeclared++
 				dir, _ := filepath.Rel(root, sc.dir)
 				t.Errorf("%s:%d — this doc comment opens %q, but no package in %s declares %s, so it "+
-					"documents %s under a name that does not exist. Open it with the name of what it "+
-					"documents, or delete it if what it describes is gone. If %s is not a Go name (a "+
-					"tool, a product), open the sentence another way.",
+					"documents %s under a name that does not exist here. Open it with the name of what "+
+					"it documents, or delete it if what it describes is gone. That holds when %s names "+
+					"something real elsewhere (another package's declaration, a tool, a product): a doc "+
+					"opens with its own subject.",
 					path, fset.Position(doc.Pos()).Line, m[1]+" "+m[2], filepath.ToSlash(dir), m[1],
 					subject, m[1])
 			}
@@ -556,8 +557,8 @@ func TestIdentifierShapedTellsNamesFromSentenceWords(t *testing.T) {
 		{"fanout", true},
 		{"jpeg", true},
 		{"_leading", true},
-		// Sentence words the census found opening a doc with a recognised
-		// verb, declared by nothing.
+		// Words that can open an English sentence: the census's prose
+		// openers, and the examples the rule was first stated with.
 		{"The", false},
 		{"Snapshot", false},
 		{"Tailscale", false},
