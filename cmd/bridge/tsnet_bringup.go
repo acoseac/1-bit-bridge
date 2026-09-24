@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"tailscale.com/ipn/ipnstate"
 )
 
@@ -19,12 +20,16 @@ const tsnetStatusTimeout = 5 * time.Second
 
 // bringTsnetUp starts node, and reports whether it came up. A start that
 // failed is reported on stderr, and the LAN listener carries on without the
-// tailnet.
+// tailnet. One the shutdown stopped is not reported. ctx is serve's; the
+// start's own timeout derives from it, so a start that ran out of time is
+// still a failure.
 func bringTsnetUp(ctx context.Context, node interface{ Start(context.Context) error }, stderr io.Writer) bool {
 	startCtx, cancel := context.WithTimeout(ctx, tsnetStartTimeout)
 	defer cancel()
 	if err := node.Start(startCtx); err != nil {
-		fmt.Fprintf(stderr, "tsnet: bring node up: %v (LAN listener still active)\n", err)
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			fmt.Fprintf(stderr, "tsnet: bring node up: %v (LAN listener still active)\n", failure)
+		}
 		return false
 	}
 	return true
@@ -32,7 +37,8 @@ func bringTsnetUp(ctx context.Context, node interface{ Start(context.Context) er
 
 // tsnetH3Status asks node for the status the tailnet HTTP/3 bind needs, and
 // reports whether it answered. A query that failed is logged, and the caller
-// runs HTTP/2 only on the tailnet.
+// runs HTTP/2 only on the tailnet; one the shutdown stopped is not logged,
+// for bringTsnetUp's reasons.
 func tsnetH3Status(ctx context.Context, node interface {
 	Status(context.Context) (*ipnstate.Status, error)
 }) (*ipnstate.Status, bool) {
@@ -40,7 +46,9 @@ func tsnetH3Status(ctx context.Context, node interface {
 	defer cancel()
 	status, err := node.Status(statusCtx)
 	if err != nil {
-		logger.Warn("Failed to query tsnet status for h3 bind, running HTTP/2 only on tailnet", "err", err)
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Warn("Failed to query tsnet status for h3 bind, running HTTP/2 only on tailnet", "err", failure)
+		}
 		return nil, false
 	}
 	return status, true

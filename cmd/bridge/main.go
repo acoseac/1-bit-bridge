@@ -46,6 +46,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -471,6 +472,15 @@ func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID str
 			logging.Component("atlasharvest").Warn("artwork version: hash cover", "mbid", releaseMBID, "err", herr)
 		} else if ver != "" {
 			if _, serr := a.store.SetArtworkVersionAndBumpIndex(ctx, releaseMBID, ver); serr != nil {
+				// A record the shutdown stopped is not settled. Answering
+				// with the cancellation keeps the cover pending in the
+				// harvest sweep, whose next pass fetches the same premium
+				// bytes and records their version then; settling it here
+				// would leave clients keyed to the old cover until a manual
+				// clear or a full sync.
+				if ctxerr.WithoutCancellation(ctx, serr) == nil {
+					return false, serr
+				}
 				logging.Component("atlasharvest").Warn("artwork version: record", "mbid", releaseMBID, "err", serr)
 			}
 		}

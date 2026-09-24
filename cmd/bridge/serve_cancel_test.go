@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -199,6 +200,57 @@ func TestAnIngestWhoseServerFailsStillReportsIt(t *testing.T) {
 	if last := l.adminState.snapshot()[key]; last.Err == nil {
 		t.Error("a server that failed on a live context was not recorded as failed")
 	}
+}
+
+// TestARescanStoppedByShutdownKeepsTheServersLastResult is the ingest-stopped
+// test through the console's "Rescan now", which runs on the lifecycle's
+// context and records its own result.
+func TestARescanStoppedByShutdownKeepsTheServersLastResult(t *testing.T) {
+	store := openServeCancelStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, key := rescanAdapter(t, store, ctx, &cancellingSOAP{cancel: cancel})
+	a.state.record(upnpingest.IngestResult{PerServer: []upnpingest.ServerIngestResult{{StableKey: key, Walked: 7}}})
+
+	if err := a.ForceRescan(context.Background(), ""); err != nil {
+		t.Fatalf("ForceRescan: %v", err)
+	}
+	a.ingestWg.Wait()
+
+	if last := a.state.snapshot()[key]; last.Walked != 7 || last.Err != nil {
+		t.Errorf("the stopped rescan replaced the server's last result: %+v", last)
+	}
+}
+
+// TestARescanWhoseServerFailsRecordsIt is the twin.
+func TestARescanWhoseServerFailsRecordsIt(t *testing.T) {
+	store := openServeCancelStore(t)
+	a, key := rescanAdapter(t, store, context.Background(),
+		&cancellingSOAP{fail: errors.New("dial tcp 192.0.2.1:8200: connect: connection refused")})
+
+	if err := a.ForceRescan(context.Background(), ""); err != nil {
+		t.Fatalf("ForceRescan: %v", err)
+	}
+	a.ingestWg.Wait()
+
+	if last := a.state.snapshot()[key]; last.Err == nil {
+		t.Error("a server that failed on a live context was not recorded as failed")
+	}
+}
+
+// rescanAdapter is a console adapter whose rescans run on bgCtx through an
+// ingester over doer, and the key its one server is recorded under.
+func rescanAdapter(t *testing.T, store *manifest.Store, bgCtx context.Context, doer *cancellingSOAP) (*upnpAdminAdapter, string) {
+	t.Helper()
+	return &upnpAdminAdapter{
+		cfgHolder: runtimeCfgFor(t, newUPnPTestCfg(t, cancelTestServer)),
+		cache:     upnp.NewServerCache(),
+		store:     store,
+		ingester:  newCancelTestIngester(t, store, doer),
+		state:     newUPnPAdminState(),
+		bgCtx:     bgCtx,
+		ingestWg:  &sync.WaitGroup{},
+	}, upnpingest.StableServerKey(cancelTestServer)
 }
 
 // blockingTsnetNode is a tsnet node whose Start and Status block until

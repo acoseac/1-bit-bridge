@@ -280,7 +280,7 @@ func (a *upnpAdminAdapter) ForceRescan(_ context.Context, udn string) error {
 			// truly fatal Run-level error (ctx cancelled = shutdown).
 			return
 		}
-		a.state.record(res)
+		a.state.record(withoutStoppedServers(bgCtx, res))
 	}()
 	return nil
 }
