@@ -12017,10 +12017,11 @@ array length, compile-time size assertions, four statements that can
 panic, a receive, calls, literals, a predeclared name, locals and a
 selector through a package variable. Every skip rule is there (a `.#lock`
 that is not Go, which would fail the parse if opened, `_dir`, testdata,
-vendor, node_modules, a nested module). So are a dot-importing file and a
-cgo file, ten allowance states, and a case that writes the whole tree
-with CRLF endings. Controls on the round-8 commit (`0a07a124`), each
-`-count=1`, each restored with `git checkout` and checked clean:
+vendor, node_modules, a nested module). So are a dot-importing file, two
+cgo files (a quoted and a raw-string import), ten allowance states, and a
+case that writes the whole tree with CRLF endings. Controls on the round-9
+commit (`9f49ab2f`), each `-count=1`, each restored with `git checkout` and
+checked clean:
 
 | control | mutation | tree | fixture |
 |---|---|---|---|
@@ -12071,11 +12072,13 @@ with CRLF endings. Controls on the round-8 commit (`0a07a124`), each
 | NW10 | the local form off | green | red |
 | NW11 | any call read, its callee taken for N | red: 141 calls like `_ = os.Remove(path)` | red |
 | NW12 | the local form read in a dot-importing file | green | red: `Mutex{}` reported |
-| NW13 | cgo's `"C"` read as an import | green | red: `(*C.char)(nil)` reported |
+| NW13 | cgo's `"C"` read as an import | green | red: both cgo files reported |
+| NW13b | `"C"` compared quoted (the round-8 check) | green | red: the raw-string import reported |
+| NW14 | the statement form skips `N{}` | green | red: `bytes.Buffer{}` missed |
 | NC25 | no CRLF normalisation | green | **green** |
 | NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the six met cases |
 
-Five of the 49 turn the tree red, and NC13, the one that deletes the
+Five of the 51 turn the tree red, and NC13, the one that deletes the
 report, is not among them. That is #994's lesson again, and why the fixture
 drives the same `scanBlankKeepers` the tree test does. NW11's 141 tree
 findings are the measure of what the call refusal is worth on real code.
@@ -12144,6 +12147,16 @@ checked against the code first.
 - `writeFixtureFile` already exists in cmd/bridge (gc_mass_orphan_test.go,
   a different signature). vet caught the collision, and the fixture helper
   is `writeKeeperFixture`.
+- **Every PR read was unpaginated until round 9.** `gh api` returns 30 a
+  page. By round 7 this PR had more reviews than that, so from then on the
+  newest reviews and comments were never fetched. The two findings it hid
+  were small. The false "Gemini is out of quota" it produced went further:
+  into the report, this log, the PR body and a PR comment. The GraphQL
+  `reviewThreads` query that found it returns every thread, which is the
+  check to run before any merge.
+- Three controls failed to build before they ran (NC20, NW3, NW5): each
+  mutation left a variable or import unused. Each was rebuilt and then went
+  red. A control that does not build is invalid, never a pass.
 
 ### Review
 
@@ -12258,12 +12271,14 @@ that round's.
   package variable that it took for a local keeper. The whitelist over the
   37 history trees finds the same 699 sightings with the same verdicts, so
   the narrowing lost no keeper this repo ever had.
-- **Round 8** (`a1f526ed`): **CodeRabbit** reviewed the head (coverage
-  kind "reviewed", merge risk Low, no new comments). **Gemini** did not
-  answer `/gemini review` within 21 minutes and posted nothing, which is
-  the pattern of its daily quota running out. So a consult reviewed the
-  round-7 code in its place. It found three holes, none with an instance
-  in the tree, all taken in `0a07a124`. First, a bare name in a file with
+- **Round 8** (`a1f526ed`): **Gemini** reviewed the head at 12:14 with no
+  comments, and **CodeRabbit** posted one finding at 12:17 (round 9's
+  `N{}` fixture). Neither was seen, because every check read `gh api`
+  without `--paginate` and both sat past the first 30 reviews. The finding
+  went unanswered, and "Gemini is silent, probably out of quota" was
+  concluded from the missing review (see round 9). A consult was run to
+  stand in for it. It found three holes, none with an instance in the
+  tree, all taken in `0a07a124`. First, a bare name in a file with
   a dot import may be the import's, so `var _ = Mutex{}` under
   `import . "sync"` read as a local keeper. Second, `var _ = (*C.char)(nil)`
   read "delete it, and the import", but cgo's `import "C"` carries the
@@ -12271,9 +12286,26 @@ that round's.
   the allowance would have stood after typed errors landed. Red-first,
   with the fixtures in place and the round-7 guard: `dot.go` read "local",
   `cgo.go` read "only-use", and both interface cases read "allowed".
-  CodeRabbit then reviewed `5922bf0d` clean (coverage "reviewed", merge
-  risk Low). Gemini still had not answered, so a last consult read the
-  finished file. It found no remaining defect, and its reasons checked out
+  On `5922bf0d` Gemini again had no comments (12:44), and CodeRabbit
+  posted one more finding (12:58, round 9's raw-string `C`). Both went
+  unseen for the same reason, and the walkthrough's coverage and merge risk
+  ("reviewed", Low) were read as a clean pass. A last consult read the
+  finished file and found no remaining defect. Its reasons checked out
   against the code: external test packages, two aliases of one import,
   mixed keeper forms of one package, method values, type parameters,
   build-tagged files and closures.
+- **Round 9** (`725813b2`): asked whether the PR was ready to merge, a
+  check of unresolved threads through GraphQL `reviewThreads` (which
+  returns all of them) found the two CodeRabbit findings. A paginated
+  re-read then found the two Gemini passes as well. The report, this log,
+  the PR body and a PR comment had all said "CodeRabbit clean, Gemini
+  silent", so each was corrected, and CLAUDE.md gained the pagination rule.
+  Both findings were taken in `9f49ab2f`. First, a raw-string import path,
+  `` import `C` ``, was read as an ordinary import, so `(*C.char)(nil)` got
+  "delete the import"; `importNames` now compares the path unquoted. Red-first
+  with the round-8 guard: `keep/cgo_raw.go` read "only-use". Second, the
+  statement form had no `N{}` fixture, so no test could see it stop reading
+  an empty literal, and the claim above that every shape is there "in both
+  forms" was false. `_ = bytes.Buffer{}` is in the fixture now. The control
+  that makes the statement form skip `N{}` (NW14) passes every test against
+  the round-8 fixture and fails against this one.

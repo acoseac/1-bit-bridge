@@ -2988,7 +2988,7 @@ its twin.** The top list is older, shorter, and read first.
   uses `errors` nowhere else. Any of those failing is reported, and so is
   an entry whose keeper is gone. On a clean tree the sweep reports nothing, so
   `TestBlankKeeperScanOnFixtures` pins every shape, refused shape, scope
-  rule, skip rule and allowance state: 47 of 49 mutations turn it red, and
+  rule, skip rule and allowance state: 49 of 51 mutations turn it red, and
   five turn the tree red. Of the two that stay green, one drops the CRLF
   normalisation (the scan is CRLF-safe without it) and one widens a check
   that `keep` makes again.
@@ -3267,9 +3267,9 @@ its twin.** The top list is older, shorter, and read first.
   so it binds hardest on a multi-PR day, which is already the day this file says
   review gets skipped.
   **While you are blocked**, the marker is greppable and that is when it
-  matters: `gh api repos/acoseac/1-bit-bridge/issues/<pr>/comments --jq
-  '.[].body' | grep -c "rate limited by coderabbit"`. **Afterwards it is not**:
-  CodeRabbit EDITS the marker out of the walkthrough when the review finally
+  matters: `gh api --paginate repos/acoseac/1-bit-bridge/issues/<pr>/comments
+  --jq '.[].body' | grep -c "rate limited by coderabbit"`. **Afterwards it is
+  not**: CodeRabbit EDITS the marker out of the walkthrough when the review finally
   runs, so a later 0 is not evidence a review happened. Auditing after the fact
   asks a different question — whether the bot left any review or inline comment
   at all. Ask for the pass rather than waiting it out — but **`@coderabbitai
@@ -3296,6 +3296,19 @@ its twin.** The top list is older, shorter, and read first.
   is grepping that comment for the verdict string and comparing its
   `headCommitId` to the PR head. Absence of new findings is not a pass, and
   saying so out loud without checking is how this was learned twice. (#967–#972)
+- **Read a PR's reviews and comments with `gh api --paginate`: it returns 30
+  a page, and a long PR's newest round is on the page it drops.** On #996
+  (40 reviews, 38 review comments) every check read page one only. Two
+  CodeRabbit findings (12:17, 12:58) and two clean Gemini passes were never
+  fetched. The report that went out said "CodeRabbit clean, Gemini silent,
+  probably quota", and that story reached the engineering log, the PR body
+  and a PR comment before an unresolved-thread query (GraphQL
+  `reviewThreads`, which returned them all) showed otherwise. This is the
+  complement of the walkthrough rule above, not a correction of it: the
+  walkthrough's coverage and merge risk say a review RAN on a head, while a
+  review that FOUND something posts a review ("Actionable comments posted:
+  N") and inline comments. "Covered, and nothing seen" is clean only when
+  every read was paginated, and before a merge, list the unresolved threads.
 - **A fix round needs a FRESH pass from every bot, not just the one that
   found something.** Gemini does not re-review each push: after four rounds
   on one PR its last review still predated every fix commit on five of six
