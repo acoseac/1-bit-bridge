@@ -2952,37 +2952,40 @@ its twin.** The top list is older, shorter, and read first.
   it does not (one kept `io` in a test file because a helper in another
   file uses `io.EOF`). A top-level `var _ = logger` keeps a package-level
   name Go never reports unused anyway. Delete it, and the import too when
-  nothing else in the file uses it.
-  **Three hand sweeps each fixed only their own scope** (c062ac95 one, #855
-  three in cmd/bridge, #994 five); #825 added one between two of them, and
-  #996 found fourteen more. Five of those were in the statement form no
-  census had counted, and one, `var _ = (*manifest.Store)(nil)`, sat under
-  "Statically assert the Manifest store has the helpers we need. A missing
-  method here will fail the build". A nil conversion checks only that a
-  type exists, and every real use makes that check. A keeper's premise decays unseen, too: two began as their
-  import's only use and turned redundant as their files grew. The sweep
-  refuses any call whose callee could be a function (four
-  `_ = os.Unsetenv(…)` otherwise) and never reads a typed `var _ I = …`
-  (seven interface assertions otherwise). It holds the statement form to an
-  E naming only packages, since `_ = cfg` is how Go marks a local used, and it
-  counts a composite literal's identifier key as a name, because in a map
-  literal the key is a variable: the first draft skipped keys and reported
+  nothing else in the file uses it. **Three hand sweeps each fixed only
+  their own scope** (c062ac95 one, #855 three in cmd/bridge, #994 five);
+  #825 added one between two of them, and #996 found fourteen more. Five of
+  those were in the statement form no census had counted, and one,
+  `var _ = (*manifest.Store)(nil)`, sat under "Statically assert the
+  Manifest store has the helpers we need. A missing method here will fail
+  the build". A nil conversion checks only that a type exists, and every
+  real use makes that check. A keeper's premise decays unseen, too: two
+  began as their import's only use and turned redundant as their files
+  grew. The sweep refuses any call whose callee could be a function (four
+  `_ = os.Unsetenv(…)` otherwise) and a receive (`_ = <-pkg.Done` waits),
+  never reads a typed `var _ I = …` (seven interface assertions otherwise),
+  and reads a composite literal's type, where an array length computed by a
+  call (`[unsafe.Sizeof(x) - 8]byte{}`) makes a compile-time assertion, not
+  a keeper. It holds the statement form to an E naming only packages, since
+  `_ = cfg` is how Go marks a local used, and counts a composite literal's
+  identifier key as a name, because in a map literal the key is a variable:
+  the first draft skipped keys and reported
   `_ = map[string]int{key: http.StatusOK}`, whose deletion breaks the build
   (a Gemini consult found it). A selector names an import only where no
   local of that name is in scope, scoped as Go scopes it, from the end of
   the declaring statement (a whole-function approximation missed
   `_ = path.Join` above `path := …`; CodeRabbit). Two keepers of one
-  package are not each other's use (update.go's pair). **The one allowance stands on its stated
-  CONDITION, not its path**: `allowedKeepers` holds internal/tsnet's
-  `var _ = errors.Is` while its doc says "Don't remove until typed errors
-  land.", `typedErrorIn` finds no sentinel and no `Error() string` method
-  there, and the file uses `errors` nowhere else. Any of those failing is
-  reported, and so is an entry whose keeper is gone. On a clean tree the
-  sweep reports nothing, so `TestBlankKeeperScanOnFixtures` pins every
-  shape, scope rule, skip rule and allowance state: 39 of 40 mutations
-  turn it red, and only five turn the tree red. The 40th drops the CRLF
-  normalisation, which the scan survives without; its CRLF case pins the
-  property, not the mechanism.
+  package are not each other's use (update.go's pair). **The one allowance
+  stands on its stated CONDITION, not its path**: `allowedKeepers` holds
+  internal/tsnet's `var _ = errors.Is` while its doc says "Don't remove
+  until typed errors land.", `typedErrorIn` finds no sentinel and no
+  `Error() string` method there, and the file uses `errors` nowhere else.
+  Any of those failing is reported, and so is an entry whose keeper is
+  gone. On a clean tree the sweep reports nothing, so
+  `TestBlankKeeperScanOnFixtures` pins every shape, scope rule, skip rule
+  and allowance state: 44 of 45 mutations turn it red, and only five turn
+  the tree red. The 45th drops the CRLF normalisation, which the scan
+  survives without; its CRLF case pins the property, not the mechanism.
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing
   with `.#<name>` beside it. Where it can, the lock is a DANGLING symlink.

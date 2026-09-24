@@ -11950,7 +11950,11 @@ keepers, counting #294's keeper once although its test file was renamed
   it.
 - **Any call whose callee could be a function is refused**, because
   `pkg.T(x)` can be either without types. Only a conversion to a type that
-  cannot be a function (`(*T)(x)`, `[]byte(x)`) is read.
+  cannot be a function (`(*T)(x)`, `[]byte(x)`) is read. Operators are read
+  (`&pkg.T{}`, `time.Second * 5`) except a receive, which waits, and a
+  composite literal's type is read too: an array length computed by a call
+  (`[unsafe.Sizeof(x) - 8]byte{}`) is a compile-time assertion, not a keeper
+  (round 4).
 - **Import names follow the package-name convention**: the explicit name,
   else the last path element without a "/vN" element or ".vN" suffix, a
   "go-" prefix or a "-go" suffix. Checked against `go list` on darwin, linux
@@ -11994,7 +11998,7 @@ literals, locals, a map key that is a local, a struct field key) and every
 skip rule (a `.#lock` that is not Go, which would fail the parse if
 opened, `_dir`, testdata, vendor, node_modules, a nested module). There
 are eight allowance states, and one case writes the whole tree with CRLF
-endings. Controls on the round-2 commit (`b67db7d6`), each `-count=1`,
+endings. Controls on the round-4 commit (`d492f282`), each `-count=1`,
 each restored with `git checkout` and checked clean:
 
 | control | mutation | tree | fixture |
@@ -12038,10 +12042,15 @@ each restored with `git checkout` and checked clean:
 | NC22 | the statement form not held to imports only | green | red |
 | NC23 | the local form off | green | red |
 | NC24 | a served allowance still allowed | green | red: that case |
+| NC27a | operators refused (the round-3 guard) | green | red: two operator keepers missed |
+| NC27b | a receive accepted (the suggestion as given) | green | red: `_ = <-events.Done` reported |
+| NC27c | a literal's type unread (the round-3 guard) | green | red: the array-length assertion reported |
+| NC27d | a type argument refused | green | red: `set.Of[int]{}` missed |
+| NC27e | an array length unread | green | red: the array-length assertion reported |
 | NC25 | no CRLF normalisation | green | **green** |
 | NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the four met cases |
 
-Only five of the 40 turn the tree red, and NC13, the one that deletes the
+Only five of the 45 turn the tree red, and NC13, the one that deletes the
 report, is not among them. That is #994's lesson again, and why the fixture
 drives the same `scanBlankKeepers` the tree test does. NC25 is the one
 control the fixture does not catch, and it is not meant to: without the
@@ -12138,3 +12147,18 @@ checked against the code first.
 - **Round 3** (`cdeb23fe`): **Gemini** raised one medium, taken. The
   only-use message said "the import" when a keeper names two packages
   nothing else uses, and it says "the imports are" now.
+- **Round 4** (`afc3adfb`): **Gemini** raised one medium, taken with a
+  correction. `onlyNames` refused every unary and binary expression, so
+  `var _ = &sync.Mutex{}` and `var _ = time.Second * 5` went unseen. The
+  suggestion read every unary operator, and that includes a receive:
+  `_ = <-pkg.Done` waits, and deleting it changes what the program does.
+  So a receive stays refused (NC27b is the suggestion as given). Reading
+  the operators turned up a false positive the guard had had since round
+  1: `onlyNames` never looked at a composite literal's type, so the
+  compile-time assertion `var _ = [unsafe.Sizeof(x) - 8]byte{}` would have
+  been reported as a keeper. `typeOnlyNames` reads a literal's type and a
+  conversion's the same way, refusing an array length computed by a call
+  and still reading a generic instantiation (`set.Of[int]{}`), as the
+  consult decided. The round-4 guard over the 37 history trees finds the
+  same 699 sightings as the round-1 guard, so neither this widening nor
+  round 2's scoping changed a historical finding.

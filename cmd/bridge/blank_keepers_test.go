@@ -18,11 +18,11 @@ import (
 // blankKeeper is a blank reference whose only effect is to keep a name
 // referenced: `var _ = E` at the top of a file, or `_ = E` / `var _ = E` in
 // a function, where E does nothing but name things (identifiers, selectors,
-// literals, composite literals of those, type conversions). The name is
-// almost always an import ("silence unused-import warning"), and the keeper
-// is dead code either way. Imports are per FILE: when the file uses the
-// package elsewhere the keeper does nothing, and when it is the only use it
-// keeps an import nothing needs.
+// literals, operators and composite literals of those, type conversions).
+// The name is almost always an import ("silence unused-import warning"), and
+// the keeper is dead code either way. Imports are per FILE: when the file
+// uses the package elsewhere the keeper does nothing, and when it is the
+// only use it keeps an import nothing needs.
 type blankKeeper struct {
 	file string // slash path relative to the scanned root
 	line int
