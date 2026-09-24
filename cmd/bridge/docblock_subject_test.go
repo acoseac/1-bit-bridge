@@ -242,15 +242,15 @@ func identifierShaped(word string) bool {
 // "routesToOptimizeChannel", the name #863 retired), from a doc written under
 // a name nothing ever had ("recordIngest", "pickVoted"), and from import
 // keepers documented as helpers that never existed ("ensurePathExists"). The
-// census behind this arm found 25 across the tree, and the 20 that open with
-// a verb these lists recognise are what it reads. Two conditions keep it to
-// identifiers. The opening word must be identifierShaped, because "It is …",
-// "Removal is …" and "DST is …" open with words nothing declares either. And
-// no package in the doc's DIRECTORY may declare it, not merely none its file
-// sees, because an external `foo_test` file's prose names `foo`'s
-// declarations (LooksLikeSnapshotDir, in internal/backup). On the unfixed
-// tree those two conditions left 20 findings, and all 20 named nothing that
-// exists. The other five follow the name with a dash or a colon
+// census behind this arm found 25 across the tree. It reads the same opener
+// as the first arm, and two conditions keep it to identifiers. The opening
+// word must be identifierShaped, because "It is …", "Removal is …" and
+// "DST is …" open with words nothing declares either. And no package in the
+// doc's DIRECTORY may declare it, not merely none its file sees, because an
+// external `foo_test` file's prose names `foo`'s declarations
+// (LooksLikeSnapshotDir, in internal/backup). On the unfixed tree that left
+// 20 findings, and all 20 named nothing that exists. The other five follow
+// the name with a dash, a colon or a stray word
 // ("Test_FileHandler_UpstreamOffline_503 — …"), which neither arm reads.
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	root := repoRootForCitations(t)

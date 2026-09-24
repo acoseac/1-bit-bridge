@@ -10757,3 +10757,210 @@ reads every `.go` and `.md` file and fails at the `os.ReadFile`. Its skip
 rules differ (it deliberately reads `.github/` markdown), so it was left
 for its own change rather than folded in here. The `adminauth` and
 `manifest` walkers passed the same probe.
+
+## 2026-09-24 — the docblock guard reports a doc that opens with a name nothing declares (#991)
+
+`TestNoDocblockNamesAnotherDeclaration` reports a doc comment for X glued
+onto Y only when X is declared in the same package. A doc whose opening
+identifier nothing declares was outside it by design, and #989's census had
+seen three: `expectedTeamID` on `var appleTeamIDOverride`,
+`ensurePathExists` on `var _ = os.Stat` and `errITunesNoMatch` on
+`var _ = errors.Is`. The task was to fix those three and then MEASURE, before
+building anything, whether an arm for the class pays for itself.
+
+### What the census measured
+
+A scratch tool read the guard's own doc set on main (9365056): 8,845 doc
+comments (4,806 non-test, 4,039 test) in 1,117 files. For each it took the
+first identifier-shaped token, skipped a doc that opens with its own
+subject, and kept the opener when no top-level declaration or method
+VISIBLE from the doc's file declares it (the guard's `lookup`). It also
+recorded where else the name lives: struct fields, interface methods,
+locals, other directories, and code uses of names declared outside the
+module. Every hit was then read in the code.
+
+- **The rule as first stated gives 53 hits and 21 real (40%).** It was: an
+  uppercase letter after the first character, and nothing in the package
+  declaring the name. The other 32 are 19 all-caps words (DST, SGR, PR, GET
+  ×4, ABOVE, THE ×2, VACUUM, PROTOCOL, SSDP, DSD, MPEG, DSDIFF, WAVE, LWW,
+  MP4) and 13 more of prose: brands (AcoustID's, iOS, CodeRabbit ×2, UPnP
+  ×2), JS names in a regex's doc (classList, spriteIcon), a brace shorthand
+  (`artworkOversize{Numerator,Denominator}`), the known concept
+  (`tailscaleStatusCache`, a field in internal/api), a field as a
+  sentence's subject (OverrideCompatGate), and two names the one external
+  test package uses from `backup` (ReapOrphans, LooksLikeSnapshotDir).
+- **Refinements, each on top of the one before:**
+
+| rule | hits | real |
+|---|---|---|
+| uppercase after the first character, any word after it | 53 | 21 |
+| + a lowercase letter somewhere (drops all-caps) | 34 | 21 |
+| + no package in the DIRECTORY declares it | 32 | 21 |
+| + a verb the guard's lists recognise follows (its opener) | 16 | 16 |
+| all-lowercase opener, verb follows, nothing in the directory | 4 | 4 |
+| all-lowercase opener, any word after, nothing in the directory | 19 | 4 |
+| capitalised one-hump or all-caps opener, verb follows, nothing in the directory | 10 | 0 |
+
+- **The all-lowercase row was not asked for, and it is the finding that
+  changed the design.** An English sentence opens with a capital, so a doc
+  that opens lowercase opens with a name (`fanout writes`, `jpeg is`,
+  `container builds`, `item builds`), and all four were stale. The
+  capitalised one-hump and all-caps openers a verb followed were "Removal
+  is", "It downloads", "Three deletes", "Comments are", "Nothing stops",
+  "Chroma is", "Estimate gates", "Field names", "Claims are" and "DST is".
+  All ten are prose.
+- **25 real in all**: 16 camelCase and 4 lowercase with a listed verb, and 5
+  camelCase ones that no listed verb follows (three `Test_FileHandler_* —`
+  docs, `deletionJournalMassOpLibraryFraction:`, and
+  "TestHealthLECertNotAfterIsRead Live —", a name split by a stray space).
+  Those five have a shape neither arm's opener reads.
+- **Provenance** (`git log -G` for any commit adding or removing a
+  declaration of the name): one is a rename the doc did not follow.
+  `routesToOptimizeChannel` was declared in #283 and renamed to
+  `routesToForegroundLane` in #863. The other 24 were never declared on
+  main; the comment's own commit is the only mention. Squash merges hide a
+  rename made inside one PR, so some of those 24 may have been real names
+  during review (the `Test_FileHandler_*` docs read that way).
+- **By shape**: six are import keepers documented as helpers that never
+  existed (`ensurePathExists`, `errITunesNoMatch`, `silenceUnusedImport` ×2,
+  `silenceUnusedIO`, `smokeBodyReaderCloses`). One is also misattached:
+  "item builds an <item> snippet" documents `func it`, which had no doc,
+  and sat on `type itemSpec`; the existing arm could not see it because
+  "item" is declared nowhere. One is the doc of a test that no longer
+  exists: the monolithic
+  `Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes` was split into
+  per-method tests, and its paragraph sat glued, with no blank line, onto
+  `upstreamFixture`'s own doc. And one method,
+  `httpError.Status`, was documented under the name of the field it
+  returns, `StatusCode`, which a method on that type cannot have.
+- **The directory lookup excludes exactly one camelCase opener today**:
+  `LooksLikeSnapshotDir is …`, in `internal/backup/backup_test.go`, the
+  tree's one external test package, naming `backup`'s declaration. The
+  broad rule's only other such name, `ReapOrphans reclaims …` in the same
+  file, is followed by a word no list has.
+- **The known concept stays quiet on the verb shape.** "tailscaleStatusCache
+  memoises …" is followed by a word no list has. It would be reported if
+  "memoises" were ever listed, and rewording it would be the right answer
+  then too, since internal/advertise declares no such thing.
+- **Import keepers**: 13 top-level `var _ = pkg.X` in the tree. For each,
+  the tool counted the file's other selector uses of `pkg`. Six are this
+  class (their docs name a fake identifier), and five of those were the
+  only use of their import. The other seven have imperative docs ("silence
+  unused-import warning …") or none: four are redundant (the file uses the
+  package elsewhere) and three keep an import nothing else in the file
+  uses. Those seven are outside this class and were left for their own
+  change.
+
+### Decisions
+
+- **The arm reads the guard's own opener.** A name followed by a listed
+  verb was 20 of 20 real; followed by anything else, 26 of 31 were prose.
+  A second opener grammar for one arm would let the two arms disagree about
+  what a doc opens with, and extending the shared one (a dash, a colon)
+  changes the misattachment arm too, which needs its own census. Measured
+  for that change: an em dash after an identifier-shaped opener is 3 real
+  and 0 prose today, and a colon 1 and 1 ("class: …" in a regex's doc).
+- **`identifierShaped` includes all-lowercase openers**, beyond the
+  camelCase that was asked for, on the 4-of-4 row and the capital-letter
+  argument. Capitalised one-hump and all-caps openers stay out on the
+  10-of-10 row. Brand names ("iOS", "SQLite", "UPnP") are identifier-shaped
+  and are the known cost. None has opened a doc with a listed verb.
+- **Lowercase tool names were the obvious risk in this repo and measured
+  zero.** No doc opens with `sox`, `ffmpeg`, `launchd` or the like followed
+  by a listed verb. The one tool-name opener, "systemd unit-value escapers",
+  is a noun phrase.
+- **No exemption list.** A false positive is fixed by rewording the opening
+  sentence, the rule `TestEveryCitedTestNameExists` already applies: prose
+  should stop spelling a token it is only talking about.
+- **The lookup is the directory, not the file's scope**, so a `foo_test`
+  file's prose about `foo` is not reported. The misattachment arm keeps the
+  scope lookup #990 set, because there the question is what the FILE can
+  name.
+- **Keepers.** A keeper is deleted when its file uses the package
+  elsewhere (the keeper does nothing) and when it is the import's only use
+  (the import does nothing), and the import goes with it. `itunes.go`'s
+  `errors`, `cmd/bridge/tsnet_test.go`'s `admin` and `io` and
+  `console_smoke_test.go`'s `io` were only-uses. The exception is
+  `internal/tsnet/tsnet_test.go`, whose doc says not to remove it until
+  typed errors land. `internal/tsnet` still returns `errors.New` strings, so
+  it stays and only its opener changed ("This blank reference keeps …").
+- **The stale claims beside the names were corrected too, not just the
+  names.** `verifyBinary`'s doc said "spctl --assess + the Team-ID
+  equality check are the trust check", and nothing has ever run spctl
+  (`git log -S spctl -- internal/updater` finds only #42, and #42's code
+  never called it).
+  `runVerifyTool`'s said codesign's stderr "lands in the operator's
+  update-state.json LastError", but that file's `State` has no error field
+  and `Install` returns a verify error before it writes the marker. The
+  error reaches the console's Install response, `bridge update`'s "Install
+  failed" line and the "auto-install failed" log. `appleTeamIDOverride`'s
+  doc said to ship with `-X .../version.AppleTeamID=<TeamID>`; the ldflag
+  `.goreleaser.yaml` passes is `internal/updater.appleTeamIDOverride`, and
+  `version.AppleTeamID` never existed. Two `.goreleaser.yaml` comments named
+  "AppleTeamID". `recordIngestResult`'s doc said ForceRescan calls it;
+  ForceRescan records into the same state (`installAdminAdapter` hands the
+  adapter the lifecycle's `adminState`) through its own call. The orphaned
+  DLNA paragraph's "PR #732" is acoseac/1-bit#732, merged the same day as
+  bridge #356, which wrote the paragraph. Bridge #732 is a later dependency
+  bump.
+
+### The fixes
+
+25 docs in 20 files. Renamed to the declaration they document:
+`recordIngest`, `StatusCode` (on method `Status`), `fanout`,
+`apostropheLike` (rewritten as a predicate's doc), `pickVoted`,
+`deletionJournalMassOpLibraryFraction`, `routesToOptimizeChannel`,
+`TestStatusJSONFlag`, `noRedirect`, `TestHealthLECertNotAfterIsRead Live`,
+`jpeg`, `JobSpecVariantID_OptimizeKind`, `container`,
+`Test_FileHandler_UpstreamOffline_503`,
+`Test_FileHandler_RoutingWithNilMatch_FallsThroughToFilesystem`,
+`Test_FileHandler_VariantTrailingSegment_BypassesProxy`, and
+`expectedTeamID`. Moved: "item builds" to `func it`, with `itemSpec` given a
+line of its own. Made a free-standing section comment: the orphaned
+`Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes` paragraph, now
+opening with the tests that exist. Deleted with their keeper: five of the
+six keeper docs. Reworded: the `internal/tsnet` keeper's opener.
+
+### Tests and controls
+
+```
+main (9365056):       non-test 4806 / 401 / 0 misattached                 (arm absent)
+                      test     4039 / 716 / 0
+red-first (unfixed):  non-test 4806 / 401 / 0 misattached / 9 undeclared / 4084 of 4522 (90.3%)
+                      test     4041 / 716 / 0 / 11 / 2722 of 2868 (94.9%)
+fixed (b4e8b208):     non-test 4804 / 401 / 0 / 0 / 4091 of 4529 (90.3%)
+                      test     4039 / 716 / 0 / 0 / 2730 of 2876 (94.9%)
+```
+
+The red-first run reported exactly the census's 20 verb-shaped findings.
+Test-file comments rose by two for the new function's and test's docs.
+After the fixes the census's broad rule leaves 32 hits, all of them the
+prose listed above.
+
+Controls on b4e8b208, `-count=1`, each restored with `git checkout` and
+checked clean:
+
+| control | mutation | result |
+|---|---|---|
+| NC1 | `pick`'s doc back to "pickVoted returns", and `ct`'s back to "container builds" | red: those two, one per population |
+| NC2a | `identifierShaped` = an uppercase letter after the first (the rule as first stated) | red: `render_cli_test.go:181 "DST is"`; the table test red on fanout, jpeg, _leading, DST, GET, MP4 |
+| NC2b | `identifierShaped` = any non-empty word | red: the ten prose openers above; the table test red on every sentence word |
+| NC2c | `identifierShaped` without its lowercase-first arm | tree green; the table test red on fanout, jpeg, _leading |
+| NC3 | the directory lookup dropped | red: `backup_test.go:784 "LooksLikeSnapshotDir is"` |
+
+NC2c is why the table test exists. On a clean tree the arm has nothing to
+count, so it cannot floor itself, and the tree scan alone cannot see its
+lowercase half go. NC2b's first run did not build (`unicode` left unused),
+which is "control invalid", never a pass; it was rebuilt with the import
+kept and re-run.
+
+### Process notes
+
+- **Three sites were the part that had been seen.** The census was the
+  task's second half, and it found the class eight times wider. Every hit
+  was read in the code: the 53 under the rule as first stated, the 19
+  lowercase openers and the 10 capitalised or all-caps ones.
+- **The rule as first stated was measured, then refined in the data.**
+  Its precision was 40%. The refinement that mattered (lowercase openers
+  in, capitalised and all-caps out) came from reading the misses, not from
+  the specification.

@@ -2820,9 +2820,9 @@ its twin.** The top list is older, shorter, and read first.
   `const ( … )` doc's subject is every member, but a member counts as
   documented only by its OWN spec doc or line comment, which is what lets a
   spec doc displaced inside a documented group be caught. Still unseen: a
-  doc opening with a name nothing declares, and a subject that has since
-  grown a second doc of its own. (`_test.go` files headed this list until
-  #990.)
+  subject that has since grown a second doc of its own. (`_test.go` files
+  headed this list until #990, and a doc opening with a name nothing
+  declares until #991.)
 - **…and test files, against their own census and a floor of their own**
   (#990). The 716 `_test.go` files held eleven more, and #989's list would
   have seen four of them. A test's doc opens "… pins …": 1,033 of their
@@ -2851,6 +2851,36 @@ its twin.** The top list is older, shorter, and read first.
   emacs `.#name.go` lock is a dangling symlink, and one failed the guard
   with a parse error over a file no build reads. Still unseen: a title-line
   doc (`// Name.`, 29 in test files, none misattached).
+- **…and a doc that opens with a name NOTHING declares** (#991). "Declared
+  in the same package" left that half unread by design, and #989's census
+  had seen three (`expectedTeamID`, `ensurePathExists`, `errITunesNoMatch`).
+  Measured before building anything, the class was 25 wide: one rename the
+  doc did not follow (`routesToForegroundLane`'s said
+  `routesToOptimizeChannel`, which #863 retired) and 24 docs written under a
+  name no commit on main ever declared, six of them import keepers
+  documented as helpers that never existed. **What makes it precise is that
+  an English sentence opens with a capital.** An opener that starts
+  lowercase or has a camelCase hump (`identifierShaped`) can only be a name.
+  A capitalised one-hump word or an all-caps one can be either, and every
+  such opener a listed verb followed was prose, 10 of 10 ("It is",
+  "Removal is", "DST is"). Followed by a listed verb, the identifier-shaped
+  ones were 20 of 20 real. Followed by anything else, 26 of 31 were prose
+  (JS and CSS names, config keys, brands, "silence …" notes), so the arm
+  reads the verb shape only and the other five were fixed by hand. **The
+  lookup is the DIRECTORY, not the file's scope**: an external `foo_test`
+  file's prose names `foo`'s declarations (`LooksLikeSnapshotDir`, the one
+  exclusion today). Brand names are the known cost ("iOS", "SQLite" and
+  "UPnP" are identifier-shaped). None has opened a doc with a listed verb,
+  and when one does, reword the sentence rather than exempt the word. **On a
+  clean tree the arm counts zero, so it cannot floor itself**: a table test
+  pins `identifierShaped`, and dropping its lowercase arm turns only that
+  test red. **An import keeper is dead code, never documentation.** A
+  `var _ = pkg.X` in a file that uses `pkg` elsewhere does nothing, and one
+  that is its import's only use keeps an import nothing needs, because
+  imports are per FILE (one kept `io` in a test file because a helper in
+  another file uses `io.EOF`). Delete it, and the import too when nothing
+  else in the file uses it, unless its doc names a condition not yet met
+  (`internal/tsnet`'s waits for typed errors, which have not landed).
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`
