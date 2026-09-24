@@ -160,8 +160,10 @@ const testDocVerbCoverageFloor = 0.90
 // On the 2026-09-24 census (#994), every opener of those two shapes that
 // nothing declared and that a recognised verb followed was prose, 10 of 10.
 // Brand names, tool names and units are the known cost: "iOS", "SQLite",
-// "sox" and "dBFS" are identifier-shaped. None of them opened a doc with a
-// recognised verb that day.
+// "sox" and "dBFS" are identifier-shaped. None opened a doc with a
+// recognised verb on the census tree. The first test file merged after it
+// opened four, all on test functions, which is why namesNothingDeclared reads
+// a test function's doc only for another test's name.
 func identifierShaped(word string) bool {
 	if word == "" {
 		return false
@@ -173,14 +175,63 @@ func identifierShaped(word string) bool {
 		strings.IndexFunc(word[1:], unicode.IsUpper) >= 0
 }
 
+// testFuncName reports whether name has the shape `go test` gives a test
+// function's name: Test, Benchmark, Fuzz or Example, then nothing or a
+// character that is not a lowercase letter. An uppercase letter, "_" and a
+// digit all qualify ("Test_Foo", "Test1"); "Testing" does not.
+func testFuncName(name string) bool {
+	for _, prefix := range []string{"Test", "Benchmark", "Fuzz", "Example"} {
+		if rest, ok := strings.CutPrefix(name, prefix); ok {
+			return rest == "" || !unicode.IsLower(rune(rest[0]))
+		}
+	}
+	return false
+}
+
+// docSite is where a doc comment sits, as far as namesNothingDeclared needs
+// to know.
+type docSite struct {
+	declaredHere map[string]bool // every top-level name any package in the doc's directory declares
+	params       []string        // a documented function's receiver, type parameter, parameter and result names
+	testFunc     bool            // the doc is a test function's (testFuncName, in a _test.go file)
+}
+
 // namesNothingDeclared reports whether a doc comment's opening word names
-// something nothing declares. The word must be identifierShaped, no package
-// in the doc's directory may declare it (declaredHere), and it must not be
-// one of Go's predeclared identifiers, which the language itself declares:
-// "nil means …" and "error is …" name something real. No doc in this tree
-// opens with a predeclared name and a recognised verb today.
-func namesNothingDeclared(word string, declaredHere map[string]bool) bool {
-	return identifierShaped(word) && !declaredHere[word] && types.Universe.Lookup(word) == nil
+// something nothing declares, where the doc sits.
+//
+// The word must be identifierShaped. No package in the doc's directory may
+// declare it, and it must not be one of Go's predeclared identifiers, which
+// the language itself declares: "nil means …" and "error is …" name
+// something real. Nor may it be one of the documented function's own
+// parameters, which its doc may well discuss first. On a test function's doc
+// only a test function's name is read. That doc states a premise, and a
+// premise's subject is often no Go name at all: the first test file merged
+// after the #994 census opened four with "dhowden does …", "iTunes writes …"
+// and "QuickTime writes …". What such a doc can get wrong in this class is
+// another test's name.
+func namesNothingDeclared(word string, at docSite) bool {
+	if !identifierShaped(word) || at.declaredHere[word] || types.Universe.Lookup(word) != nil ||
+		slices.Contains(at.params, word) {
+		return false
+	}
+	return !at.testFunc || testFuncName(word)
+}
+
+// funcParamNames is every name fn's signature declares: its receiver, type
+// parameters, parameters and results.
+func funcParamNames(fn *ast.FuncDecl) []string {
+	var names []string
+	for _, fl := range []*ast.FieldList{fn.Recv, fn.Type.TypeParams, fn.Type.Params, fn.Type.Results} {
+		if fl == nil {
+			continue
+		}
+		for _, f := range fl.List {
+			for _, id := range f.Names {
+				names = append(names, id.Name)
+			}
+		}
+	}
+	return names
 }
 
 // TestNoDocblockNamesAnotherDeclaration.
@@ -254,18 +305,31 @@ func namesNothingDeclared(word string, declaredHere map[string]bool) bool {
 // a name nothing ever had ("recordIngest", "pickVoted"), and from import
 // keepers documented as helpers that never existed ("ensurePathExists"). The
 // census behind this arm found 25 across the tree. It reads the same opener
-// as the first arm, and namesNothingDeclared keeps it to identifiers. The
-// opening word must be identifierShaped, because "It is …", "Removal is …"
-// and "DST is …" open with words nothing declares either. No package in the
+// as the first arm, and namesNothingDeclared decides the rest. The opening
+// word must be identifierShaped, because "It is …", "Removal is …" and
+// "DST is …" open with words nothing declares either. No package in the
 // doc's DIRECTORY may declare it, not merely none its file sees, because an
 // external `foo_test` file's prose names `foo`'s declarations
-// (LooksLikeSnapshotDir, in internal/backup). And it must not be one of Go's
-// predeclared names ("nil means …"). A name only ANOTHER directory declares
-// is still reported: a doc opens with its own subject, and one doc in the
-// tree opens with such a name, by coincidence and without a verb. On the
-// unfixed tree that left 20 findings, and all 20 named nothing that exists.
-// The other five follow the name with a dash, a colon or a stray word
-// ("Test_FileHandler_UpstreamOffline_503 — …"), which neither arm reads.
+// (LooksLikeSnapshotDir, in internal/backup). It must not be predeclared
+// ("nil means …") or one of the documented function's own parameters. A
+// test function's doc is read only for another test's name, because it
+// states a premise whose subject is often no Go name at all. A name only
+// ANOTHER directory declares is still reported: a doc opens with its own
+// subject, and one doc in the tree opens with such a name, by coincidence
+// and without a verb.
+//
+// The test-function condition came from the first code merged after the
+// census, whose test docs opened "dhowden does …" (twice), "iTunes writes …"
+// and "QuickTime writes …". The parameter condition came from main's history:
+// runSmartPlaylistRegenerator's doc once opened "analysisActive is read LIVE
+// per run", about the parameter of that name. Measured over 18 trees sampled
+// along that history, the arm as it now stands finds 27 distinct docs, and
+// all 27 named nothing that exists. The two conditions cost one, a test's
+// own name without its Test prefix:
+// "JobSpecVariantID_OptimizeKind locks …". On the unfixed tree it reported
+// 19. The other five real ones follow the name with a dash, a colon or a
+// stray word, which neither arm reads:
+// "Test_FileHandler_UpstreamOffline_503 — …".
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	root := repoRootForCitations(t)
 	type decl struct {
@@ -417,7 +481,8 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	test := &population{name: "test", files: testFiles, opener: testDocOpener,
 		recognises: "docVerbs and testDocVerbs recognise", extend: "testDocVerbs", floor: testDocVerbCoverageFloor,
 		unrecognised: map[string]int{}}
-	inspect := func(path string, sc scope, subject string, names []string, doc *ast.CommentGroup, fset *token.FileSet) {
+	inspect := func(path string, sc scope, subject string, names []string, doc *ast.CommentGroup, fset *token.FileSet,
+		params []string, testFunc bool) {
 		if doc == nil {
 			return
 		}
@@ -441,7 +506,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		}
 		other, ok := lookup(sc, m[1])
 		if !ok {
-			if namesNothingDeclared(m[1], declaredInDir[sc.dir]) {
+			if namesNothingDeclared(m[1], docSite{declaredInDir[sc.dir], params, testFunc}) {
 				p.undeclared++
 				dir, _ := filepath.Rel(root, sc.dir)
 				t.Errorf("%s:%d — this doc comment opens %q, but no package in %s declares %s, so it "+
@@ -468,7 +533,8 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		for _, d := range f.Decls {
 			switch n := d.(type) {
 			case *ast.FuncDecl:
-				inspect(path, sc, fmt.Sprintf("%q", n.Name.Name), []string{n.Name.Name}, n.Doc, fset)
+				inspect(path, sc, fmt.Sprintf("%q", n.Name.Name), []string{n.Name.Name}, n.Doc, fset,
+					funcParamNames(n), sc.test && n.Recv == nil && testFuncName(n.Name.Name))
 			case *ast.GenDecl:
 				var all []string
 				for _, sp := range n.Specs {
@@ -478,7 +544,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 						if doc == nil {
 							doc = n.Doc
 						}
-						inspect(path, sc, fmt.Sprintf("%q", s.Name.Name), []string{s.Name.Name}, doc, fset)
+						inspect(path, sc, fmt.Sprintf("%q", s.Name.Name), []string{s.Name.Name}, doc, fset, nil, false)
 					case *ast.ValueSpec:
 						var names []string
 						for _, id := range s.Names {
@@ -487,7 +553,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 						all = append(all, names...)
 						// Only a spec inside `( … )` can carry a doc of its own;
 						// an ungrouped declaration's doc is the GenDecl's.
-						inspect(path, sc, fmt.Sprintf("%s %s", n.Tok, strings.Join(names, ", ")), names, s.Doc, fset)
+						inspect(path, sc, fmt.Sprintf("%s %s", n.Tok, strings.Join(names, ", ")), names, s.Doc, fset, nil, false)
 					}
 				}
 				if n.Tok == token.CONST || n.Tok == token.VAR {
@@ -495,7 +561,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 					if n.Lparen.IsValid() {
 						subject = fmt.Sprintf("the %s block (%s)", n.Tok, strings.Join(all, ", "))
 					}
-					inspect(path, sc, subject, all, n.Doc, fset)
+					inspect(path, sc, subject, all, n.Doc, fset, nil, false)
 				}
 			}
 		}
@@ -569,8 +635,8 @@ func TestIdentifierShapedTellsNamesFromSentenceWords(t *testing.T) {
 		{"MP4", false},
 		{"A", false},
 		{"", false},
-		// Brand names, tool names and units: identifier-shaped, and no opener
-		// of this shape has been prose yet.
+		// Brand names, tool names and units: identifier-shaped. Where they
+		// open a test function's doc, namesNothingDeclared lets them be.
 		{"iOS", true},
 		{"SQLite", true},
 		{"UPnP", true},
@@ -583,33 +649,49 @@ func TestIdentifierShapedTellsNamesFromSentenceWords(t *testing.T) {
 	}
 }
 
-// TestNamesNothingDeclaredAsksTheDirectoryAndTheLanguage pins the two
-// conditions namesNothingDeclared adds to identifierShaped, against a
-// synthetic directory. The tree cannot pin them: on a clean tree the arm has
-// nothing to report, and the one directory-declared opener it holds today
-// (LooksLikeSnapshotDir) lasts only as long as that doc's wording.
-func TestNamesNothingDeclaredAsksTheDirectoryAndTheLanguage(t *testing.T) {
+// TestNamesNothingDeclaredAsksWhereTheDocSits pins what namesNothingDeclared
+// adds to identifierShaped, against synthetic sites. The tree cannot pin it:
+// on a clean tree the arm has nothing to report, and the only openers it
+// holds today that each condition silences (LooksLikeSnapshotDir, the M4A
+// premises) last only as long as their docs' wording.
+func TestNamesNothingDeclaredAsksWhereTheDocSits(t *testing.T) {
 	here := map[string]bool{"pick": true, "LooksLikeSnapshotDir": true}
+	plain := docSite{declaredHere: here}
+	fn := docSite{declaredHere: here, params: []string{"analysisActive", "s"}}
+	test := docSite{declaredHere: here, testFunc: true}
 	for _, c := range []struct {
 		word string
+		at   docSite
 		want bool
 	}{
-		{"pickVoted", true},
-		{"fanout", true},
+		{"pickVoted", plain, true},
+		{"fanout", plain, true},
 		// Declared by a package in the directory.
-		{"pick", false},
-		{"LooksLikeSnapshotDir", false},
+		{"pick", plain, false},
+		{"LooksLikeSnapshotDir", plain, false},
 		// Declared by the language.
-		{"nil", false},
-		{"iota", false},
-		{"error", false},
-		{"len", false},
-		{"any", false},
-		// Not identifier-shaped, whatever declares it.
-		{"It", false},
+		{"nil", plain, false},
+		{"iota", plain, false},
+		{"error", plain, false},
+		{"len", plain, false},
+		{"any", plain, false},
+		// Declared by the documented function's own signature.
+		{"analysisActive", fn, false},
+		{"analysisActive", plain, true},
+		// On a test function's doc, only a test function's name.
+		{"dhowden", test, false},
+		{"iTunes", test, false},
+		{"QuickTime", test, false},
+		{"TestStatusJSONFlag", test, true},
+		{"Test_FileHandler_UpstreamOffline_503", test, true},
+		{"BenchmarkScan", test, true},
+		{"Testing", test, false},
+		{"dhowden", plain, true},
+		// Not identifier-shaped, wherever it sits.
+		{"It", plain, false},
 	} {
-		if got := namesNothingDeclared(c.word, here); got != c.want {
-			t.Errorf("namesNothingDeclared(%q) = %v, want %v", c.word, got, c.want)
+		if got := namesNothingDeclared(c.word, c.at); got != c.want {
+			t.Errorf("namesNothingDeclared(%q, %+v) = %v, want %v", c.word, c.at, got, c.want)
 		}
 	}
 }
