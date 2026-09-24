@@ -1161,7 +1161,7 @@ no failing test — which is the shape to expect in this area.
   counted while in flight 400 times in 400, and every immediate retry was
   refused, while a 1 ms poll saw it 0 times in 100.
 - **Both pools answer a held path with `ErrDuplicateInflight`, and a caller
-  that counts gives it a bucket of its own** (#991). The analysis pool
+  that counts gives it a bucket of its own** (#992). The analysis pool
   answered with nil, and `analysisSweeper.enqueueAll` counts every nil as
   enqueued. A track has no analysis row until its job finishes, so every
   sweep during a long first analysis re-offers the whole backlog: the
@@ -2668,7 +2668,7 @@ its twin.** The top list is older, shorter, and read first.
   (`*JobRunState` and kin), which have other consumers. **A guard that checks
   containers proves nothing about their contents.** One of those stops is
   `*AnalysisSweepState`, and a field added to its `last` breakdown and never
-  rendered leaves this guard green (measured on #991), so that breakdown is
+  rendered leaves this guard green (measured on #992), so that breakdown is
   pinned the other way: `TestDescribeAnalysisSweepAccountsForEveryTrack`
   executes the line that renders it.
 - **`/api/stats` is guarded in both directions too, and there "read" means the

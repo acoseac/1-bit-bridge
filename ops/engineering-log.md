@@ -10758,7 +10758,7 @@ rules differ (it deliberately reads `.github/` markdown), so it was left
 for its own change rather than folded in here. The `adminauth` and
 `manifest` walkers passed the same probe.
 
-## 2026-09-24 — the analysis pool answers a held path with `ErrDuplicateInflight` (#991)
+## 2026-09-24 — the analysis pool answers a held path with `ErrDuplicateInflight` (#992)
 
 #987 made a job's count and its dedup release one step, and left
 `Enqueue`'s nil for a duplicate alone. Its Decisions list says why:
