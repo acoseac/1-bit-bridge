@@ -1176,7 +1176,10 @@ no failing test — which is the shape to expect in this area.
   the line relies on (every int field but `Total` is a bucket, and the
   buckets partition `Total`), and `TestDescribeAnalysisSweepAccountsForEveryTrack`
   runs the shipped `describeAnalysisSweep` under node with each bucket
-  holding a distinct power of two, so the bucket a line leaves out is named.
+  holding a distinct power of two. A count then identifies its bucket, so
+  the test names a bucket the line leaves out or shows under another's
+  label, and a part that is no bucket at all, such as one read from a field
+  the server does not send.
 - **Every job gets its own `context.WithTimeout`, cancelled per job**, or one
   pathological file consumes a worker slot until restart. Shutdown gating reads
   the monotonic `p.closed` flag, NOT `stopCtx.Err()` — `Stop` flips the flag
