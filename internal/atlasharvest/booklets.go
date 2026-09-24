@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 )
 
 // PDF album booklets (v1.8). Two loops ride the harvest client's existing
@@ -213,7 +215,10 @@ func (c *Client) gcBooklets(ctx context.Context, universe []string) {
 	}
 	orphans, err := c.Booklets.DeleteBookletsNotIn(ctx, universe)
 	if err != nil {
-		c.log().WarnContext(ctx, "atlasharvest.booklet_gc_failed", "error", err)
+		// A GC the shutdown stopped deleted nothing and is not reported.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			c.log().WarnContext(ctx, "atlasharvest.booklet_gc_failed", "error", failure)
+		}
 		return
 	}
 	if len(orphans) == 0 {
@@ -264,7 +269,9 @@ func (c *Client) fetchBooklets(ctx context.Context) error {
 	if budget > len(seen) {
 		items, err := c.Booklets.BookletsToFetch(ctx, budget-len(seen), maxBookletAttempts)
 		if err != nil {
-			c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_list", "error", err)
+			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+				c.log().WarnContext(ctx, "atlasharvest.booklet_fetch_list", "error", failure)
+			}
 			return nil
 		}
 		for _, it := range items {
@@ -307,11 +314,17 @@ func (c *Client) fetchOneBooklet(ctx context.Context, st State, mbid string, see
 	if err := c.fetchBookletPDF(ctx, st, mbid); err != nil {
 		switch {
 		case errors.Is(err, errBookletGone):
+			// Writes the shutdown stopped are not reported: the row keeps its
+			// state, and the next fetch sweep meets the 404 again.
 			if uerr := c.Booklets.MarkBookletUnavailable(ctx, mbid); uerr != nil {
-				c.log().WarnContext(ctx, "atlasharvest.booklet_mark_unavailable", "mbid", mbid, "error", uerr)
+				if failure := ctxerr.WithoutCancellation(ctx, uerr); failure != nil {
+					c.log().WarnContext(ctx, "atlasharvest.booklet_mark_unavailable", "mbid", mbid, "error", failure)
+				}
 			}
 			if _, terr := c.Booklets.SetBookletTagAndBumpIndex(ctx, mbid, ""); terr != nil {
-				c.log().WarnContext(ctx, "atlasharvest.booklet_clear_tag", "mbid", mbid, "error", terr)
+				if failure := ctxerr.WithoutCancellation(ctx, terr); failure != nil {
+					c.log().WarnContext(ctx, "atlasharvest.booklet_clear_tag", "mbid", mbid, "error", failure)
+				}
 			}
 			return false, nil
 		case errors.Is(err, errUnauthorized):
@@ -341,7 +354,9 @@ func (c *Client) fetchOneBooklet(ctx context.Context, st State, mbid string, see
 		}
 	}
 	if err := c.Booklets.MarkBookletFetched(ctx, mbid); err != nil {
-		c.log().WarnContext(ctx, "atlasharvest.booklet_mark_fetched", "mbid", mbid, "error", err)
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			c.log().WarnContext(ctx, "atlasharvest.booklet_mark_fetched", "mbid", mbid, "error", failure)
+		}
 	}
 	return true, nil
 }

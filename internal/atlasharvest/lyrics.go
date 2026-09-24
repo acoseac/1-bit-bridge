@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 )
 
@@ -485,7 +486,11 @@ func (c *Client) stamp(ctx context.Context, cand LyricsCandidate, mbid, status s
 	}
 	if err := c.Lyrics.MarkAtlasLyricsAttempt(ctx, cand.Path, cand.AlbumMBID, cand.TrackMBID,
 		mbid, status, next); err != nil {
-		c.log().WarnContext(ctx, "atlaslyrics.stamp_failed", "status", status, "error", err)
+		// A stamp the shutdown stopped is not reported. The attempt is
+		// simply not recorded, as for a stamp that failed.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			c.log().WarnContext(ctx, "atlaslyrics.stamp_failed", "status", status, "error", failure)
+		}
 	}
 }
 

@@ -118,8 +118,9 @@ func TestACoverRefetchThatFailsIsStillReported(t *testing.T) {
 
 // TestABookletStepStoppedByShutdownReportsNothing covers the booklet legs'
 // store writes, one per case: the orphan GC, the fetch listing, the two
-// writes after Atlas says a booklet is gone, and the one after a booklet
-// lands. In each, the named write is where the shutdown lands.
+// writes after Atlas says a booklet is gone (the shutdown landing in each),
+// and the one after a booklet lands. In each, the named write is where the
+// shutdown lands.
 func TestABookletStepStoppedByShutdownReportsNothing(t *testing.T) {
 	for _, tc := range bookletCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -176,6 +177,16 @@ var bookletCases = []struct {
 		// the second runs on the cancelled context too.
 		name: "a booklet gone upstream", at: "MarkBookletUnavailable",
 		msgs: []string{msgMarkUnavail, msgClearTag}, twinMsgs: []string{msgMarkUnavail},
+		sink: withOneToFetch,
+		run: func(t *testing.T, ctx context.Context, s *stoppingBooklets) {
+			srv := atlasFake(t, http.NotFound)
+			_ = bookletClient(t, srv.URL, s).fetchBooklets(ctx)
+		},
+	},
+	{
+		// The same 404, with the shutdown landing in the tag clear.
+		name: "a booklet gone upstream, in its tag clear", at: "SetBookletTagAndBumpIndex",
+		msgs: []string{msgClearTag}, twinMsgs: []string{msgClearTag},
 		sink: withOneToFetch,
 		run: func(t *testing.T, ctx context.Context, s *stoppingBooklets) {
 			srv := atlasFake(t, http.NotFound)
