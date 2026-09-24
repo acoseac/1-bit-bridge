@@ -190,41 +190,55 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 // it can and as a REGULAR file holding the lock string where it cannot
 // (always on Windows): the first failed os.ReadFile, the second failed
 // parser.ParseFile. An untracked doc was opened and only then discarded, so
-// one that cannot be opened failed the run. And a test in a file whose name
-// begins with "_" was counted as defined, although the go tool never
-// compiles it, so a docblock citing it passed.
+// one that cannot be opened failed the run. A tree with no `.git` (a
+// fixture, or a source archive) has no tracked set to exclude a lock beside
+// a doc. And a test in a file whose name begins with "_" was counted as
+// defined, although the go tool never compiles it, so a docblock citing it
+// passed.
 func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 	// A lock's contents, as emacs writes them: user@host.pid:boot.
 	const lockData = "someone@host.1:1"
+	// symlink plants a dangling symlink, the shape emacs's lock takes where
+	// it can make one. A host that cannot create symlinks (Windows without
+	// the privilege) skips the row rather than fail: emacs cannot make its
+	// symlink lock there either, and the regular-file row covers the lock
+	// such a host does see.
+	symlink := func(t *testing.T, target, path string) {
+		t.Helper()
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("cannot create a symlink on this host (%v); emacs writes its "+
+				"regular-file lock here, which the regular-file row covers", err)
+		}
+	}
 	rows := []struct {
-		name  string
-		plant func(t *testing.T, root string)
+		name string
+		// notCheckout scans the tree as one with no `.git`: no tracked set,
+		// so every doc in it is in scope.
+		notCheckout bool
+		plant       func(t *testing.T, root string)
 	}{
-		{"an emacs lock beside a Go file, as a dangling symlink", func(t *testing.T, root string) {
-			if err := os.Symlink(lockData, filepath.Join(root, ".#prod.go")); err != nil {
-				t.Fatalf("symlink: %v", err)
-			}
+		{"an emacs lock beside a Go file, as a dangling symlink", false, func(t *testing.T, root string) {
+			symlink(t, lockData, filepath.Join(root, ".#prod.go"))
 		}},
-		{"an emacs lock beside a test file, as a regular file", func(t *testing.T, root string) {
+		{"an emacs lock beside a test file, as a regular file", false, func(t *testing.T, root string) {
 			if err := os.WriteFile(filepath.Join(root, ".#x_test.go"), []byte(lockData), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"a test in a file the go tool ignores", func(t *testing.T, root string) {
+		{"a test in a file the go tool ignores", false, func(t *testing.T, root string) {
 			body := "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n"
 			if err := os.WriteFile(filepath.Join(root, "_parked_test.go"), []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"an untracked doc that cannot be opened", func(t *testing.T, root string) {
-			if err := os.Symlink("gone.md", filepath.Join(root, "local.md")); err != nil {
-				t.Fatalf("symlink: %v", err)
-			}
+		{"an untracked doc that cannot be opened", false, func(t *testing.T, root string) {
+			symlink(t, "gone.md", filepath.Join(root, "local.md"))
 		}},
-		{"an emacs lock beside a tracked doc", func(t *testing.T, root string) {
-			if err := os.Symlink(lockData, filepath.Join(root, ".#notes.md")); err != nil {
-				t.Fatalf("symlink: %v", err)
-			}
+		{"an emacs lock beside a tracked doc", false, func(t *testing.T, root string) {
+			symlink(t, lockData, filepath.Join(root, ".#notes.md"))
+		}},
+		{"an emacs lock beside a doc, outside a git checkout", true, func(t *testing.T, root string) {
+			symlink(t, lockData, filepath.Join(root, ".#notes.md"))
 		}},
 	}
 	for _, row := range rows {
@@ -244,7 +258,11 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 			write("notes.md", "Pinned by TestReal.\n")
 			row.plant(t, root)
 
-			cited, defined, mdCited := scanTestCitationsIn(t, root, map[string]bool{"notes.md": true})
+			tracked := map[string]bool{"notes.md": true}
+			if row.notCheckout {
+				tracked = nil
+			}
+			cited, defined, mdCited := scanTestCitationsIn(t, root, tracked)
 
 			if !defined["TestReal"] {
 				t.Errorf("the tree's real test was not collected as defined: %v", defined)
