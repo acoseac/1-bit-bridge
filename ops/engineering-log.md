@@ -12754,3 +12754,13 @@ apply exactly once:
   | NC14 | a wrapper is judged whole (the behaviour before this round) | the wrapped-join-holding-a-failure row only |
   | NC15 | a wrapper returns its filtered inner error (the suggestion's shape) | the same row only |
   | NC16 | a leaf `errors.Is` matched is kept | every cancelled row, and both "stopped" ticker tests |
+- **Round 2**, on `efa9523d`. Gemini (medium): a single error left after
+  the join filter came back as `errors.Join` of one. The message was the
+  same, but the survivor's own type no longer answered a type switch, and
+  PruneContext's shape came back re-wrapped rather than as the join of
+  failures it had built. Taken; a lone survivor is now returned as itself,
+  pinned by identity for both shapes (NC17: reverting the shortcut turns
+  exactly those two assertions red). CodeRabbit paused on the included
+  plan limit (72 attempts in 7 days set the allowance at 2 an hour); its
+  on-demand review was free for the next 16 days, and was run on the final
+  head.
