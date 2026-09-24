@@ -47,6 +47,14 @@ func TestWithoutCancellationKeepsOnlyWhatFailed(t *testing.T) {
 			"prune: " + removeA.Error() + "\n" + context.Canceled.Error(), true},
 		{"a wrapped join holding only the cancellation", context.Canceled,
 			fmt.Errorf("prune: %w", errors.Join(errors.Join(), context.Canceled)), "", false},
+		// fmt.Errorf with two %w verbs is a wrapper too, though it unwraps
+		// to a list as a join does: its message is its own, so it is
+		// judged as a wrapper is (CodeRabbit, #999).
+		{"a multi-%w wrapper holding a failure", context.Canceled,
+			fmt.Errorf("prune: %w; %w", removeA, context.Canceled),
+			"prune: " + removeA.Error() + "; " + context.Canceled.Error(), true},
+		{"a multi-%w wrapper holding only the cancellation", context.Canceled,
+			fmt.Errorf("prune: %w; %w", context.Canceled, context.Canceled), "", false},
 		{"a failure with no cancellation in it, in a cancelled pass", context.Canceled,
 			copyFailed, copyFailed.Error(), false},
 		{"a deadline", context.DeadlineExceeded,
@@ -103,6 +111,11 @@ func TestWithoutCancellationKeepsOnlyWhatFailed(t *testing.T) {
 	}
 	if got := WithoutCancellation(cancelled, errors.Join(copyFailed, context.Canceled)); got != copyFailed {
 		t.Errorf("the one surviving error came back re-wrapped: %#v", got)
+	}
+	// A multi-%w wrapper holding a failure is reported as itself.
+	multi := fmt.Errorf("prune: %w; %w", removeA, context.Canceled)
+	if got := WithoutCancellation(cancelled, multi); got != multi {
+		t.Errorf("a multi-%%w wrapper came back as something else: %#v", got)
 	}
 }
 
