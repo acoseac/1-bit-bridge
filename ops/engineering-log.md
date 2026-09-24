@@ -10881,3 +10881,28 @@ sweeper tests, `-count=3` for the node test), with #987's
 `TestASuccessfulAnalysisClearsTheStrikes` alongside. With the sentinel, the
 first of those now reports a refused retry by the error it got, where it
 used to fail only on the counter.
+
+### Review round 1
+
+- **CodeRabbit, one finding, taken.** The node test recorded only each
+  part's number, so a line that put `alreadyQueued`'s count under
+  "enqueued" and `enqueued`'s under "already queued" passed with every
+  number and the total intact. That swap is the confusion this PR fixes.
+  A control at `d82aa949` swapping the two labels in `app.js` passed.
+  `e2ad173c` checks each count's label against `analysisSweepLabels`:
+  because every value is a distinct power of two, a count identifies its
+  bucket. The table and the type agree in both directions, so a new bucket
+  has no label until someone decides it, and a label a rename leaves behind
+  names no bucket.
+- **Gemini** posted its daily-quota notice and reviewed nothing.
+- **SonarCloud**: quality gate passed, 0 new issues.
+
+Controls at `e2ad173c`, same harness, `-count=3`, all red:
+
+| control | mutation | red at |
+|---|---|---|
+| S1 | the two labels swapped (the finding) | both parts: `"alreadyQueued" (64) is labelled "enqueued"`, and the reverse |
+| S2 | "up to date" reworded to "current" | `"upToDate" (1) is labelled "current"` |
+| S3 | a `Deferred int` bucket declared | `bucket "deferred" has no label` |
+| S4 | the tag renamed `alreadyQueuedCount` | no label for the new name, and a label for a name that is no bucket |
+| S5 | the part dropped from the line | `"alreadyQueued" (64) is not in the line`; 63 of 127 |
