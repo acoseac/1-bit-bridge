@@ -2897,10 +2897,14 @@ its twin.** The top list is older, shorter, and read first.
   "dhowden does …", "iTunes writes …" and "QuickTime writes …", which
   failed #994's CI. Brand, tool and unit names ("iOS", "sox", "dBFS") are
   still identifier-shaped wherever else they open a doc; reword the
-  sentence rather than exempt the word. **On a clean tree the arm counts
-  zero, so it cannot floor itself**: table tests pin `identifierShaped` and
-  `namesNothingDeclared` on synthetic sites, and five of the eight
-  condition controls turn only those red. **An import keeper is dead code,
+  sentence rather than exempt the word. **On a clean tree an arm counts
+  zero, so the tree cannot show it still works**: with either arm's report
+  deleted, the tree scan PASSED (CodeRabbit, round 2), which is "a helper
+  nothing calls" and had been true of the misattachment arm since #964. The
+  scan is `scanDocblockSubjects(r, root, wholeTree)`, and
+  `TestDocblockScanReportsBothArmsOnAFixture` runs it over a synthetic tree
+  with exact findings for both arms. Table tests pin `identifierShaped` and
+  `namesNothingDeclared` beside it. **An import keeper is dead code,
   never documentation.** A `var _ = pkg.X` in a file that uses `pkg`
   elsewhere does nothing, and one that is its import's only use keeps an
   import nothing needs, because imports are per FILE (one kept `io` in a

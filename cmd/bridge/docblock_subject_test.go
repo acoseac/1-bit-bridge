@@ -330,6 +330,10 @@ func funcParamNames(fn *ast.FuncDecl) []string {
 // 19. The other five real ones follow the name with a dash, a colon or a
 // stray word, which neither arm reads:
 // "Test_FileHandler_UpstreamOffline_503 — …".
+//
+// On a clean tree neither arm reports anything, so the tree cannot show
+// that either one still can. TestDocblockScanReportsBothArmsOnAFixture runs
+// the same scan over a synthetic tree with known findings for that reason.
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	scanDocblockSubjects(t, repoRootForCitations(t), true)
 }

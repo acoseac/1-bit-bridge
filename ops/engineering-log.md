@@ -10966,31 +10966,39 @@ docs differently (next section), and the figures below are for it:
 ```
 red-first (9365056 + the final guard):  non-test 4806 / 401 / 0 / 9  undeclared
                                         test     4046 / 716 / 0 / 10 undeclared
-final (87970c4d, main merged in):       non-test 4814 / 402 / 0 / 0 / 4101 of 4539 (90.4%)
-                                        test     4062 / 717 / 0 / 0 / 2740 of 2887 (94.9%)
+final (7c80fc49, main merged in):       non-test 4814 / 402 / 0 / 0 / 4101 of 4539 (90.4%)
+                                        test     4066 / 717 / 0 / 0 / 2743 of 2891 (94.9%)
 ```
 
-Controls on 87970c4d, `-count=1`, each restored with `git checkout` and
-checked clean. "Tables" means `TestIdentifierShapedTellsNamesFromSentenceWords`
-and `TestNamesNothingDeclaredAsksWhereTheDocSits`:
+Controls on 31b9b732 and, where the fixture changed, on 7c80fc49,
+`-count=1`, each restored with `git checkout` and checked clean. "Tables"
+means `TestIdentifierShapedTellsNamesFromSentenceWords` and
+`TestNamesNothingDeclaredAsksWhereTheDocSits`; "fixture" is
+`TestDocblockScanReportsBothArmsOnAFixture` (see **Review**):
 
-| control | mutation | tree | tables |
-|---|---|---|---|
-| NC0 | none | green | green |
-| NC1 | `pick`'s doc back to "pickVoted returns", `ct`'s back to "container builds" | red: those two, one per population | green |
-| NC2a | `identifierShaped` = an uppercase letter after the first (the rule as first stated) | green: its tree witness, "DST is", sits on a test function | red |
-| NC2b | `identifierShaped` = any non-empty word | red: "Comments are", "Chroma is", "Estimate gates", "Field names" (the rest of the ten sit on test functions) | red |
-| NC2c | `identifierShaped` without its lowercase-first arm | green | red |
-| NC3 | the directory condition dropped | green: its one tree witness, `LooksLikeSnapshotDir`, sits on a test function too | red |
-| NC4 | the predeclared clause dropped | green | red |
-| NC5 | the test-function condition dropped | red: the four M4A premises | red |
-| NC6 | the parameter condition dropped | green | red |
-| NC7 | `testFuncName` answers false | red: the four M4A premises, since nothing counts as a test function | red |
+| control | mutation | tree | tables | fixture |
+|---|---|---|---|---|
+| NC0 | none | green | green | green |
+| NC1 | `pick`'s doc back to "pickVoted returns", `ct`'s back to "container builds" | red: those two, one per population | green | green |
+| NC2a | `identifierShaped` = an uppercase letter after the first (the rule as first stated) | green: its tree witness, "DST is", sits on a test function | red | red |
+| NC2b | `identifierShaped` = any non-empty word | red: "Comments are", "Chroma is", "Estimate gates", "Field names" (the rest of the ten sit on test functions) | red | red |
+| NC2c | `identifierShaped` without its lowercase-first arm | green | red | red |
+| NC3 | the directory condition dropped | green: its one tree witness, `LooksLikeSnapshotDir`, sits on a test function too | red | red |
+| NC4 | the predeclared clause dropped | green | red | red |
+| NC5 | the test-function condition dropped | red: the four M4A premises | red | red |
+| NC6 | the parameter condition dropped | green | red | red |
+| NC7 | `testFuncName` answers false | red: the four M4A premises, since nothing counts as a test function | red | red |
+| W1 | the undeclared arm's report deleted | **green** | green | red: 0 undeclared, want 4 |
+| W2 | the misattachment arm's report deleted | **green** | green | red: 0 misattached, want 1 |
+| W3 | a function's parameters not passed to the arm | green | green | red: `limit` reported |
+| W4 | every function passed as a non-test | red: the four M4A premises | green | red: the premise reported |
+| W5 | the directory set left unfilled | green | green | red: the external test's `pick` reported |
 
-Five of the eight condition controls (NC2a, NC2c, NC3, NC4, NC6) are seen by
-the tables alone. On a clean tree the arm has nothing to count, so it
-cannot floor itself; the tables are what pin its conditions, on synthetic
-sites that do not depend on any doc's wording. NC2b's first run, on
+W1 and W2 are the gap the fixture closes: with either arm's report
+deleted, the tree scan passed. Five of the eight condition controls (NC2a,
+NC2c, NC3, NC4, NC6) are invisible to the tree, which on a clean tree has
+nothing to count; the tables and the fixture pin them on inputs that do not
+depend on any doc's wording. NC2b's first run, on
 b4e8b208, did not build (`unicode` left unused). That is "control invalid",
 never a pass; it was rebuilt with the import kept.
 
@@ -11056,6 +11064,23 @@ detector over sampled history, not only the tree it was written against.**
 A census of one tree is one snapshot of one vocabulary. The history also
 labels its own data, since a hit that a later commit fixed was real by that
 fix.
+
+### Review
+
+**CodeRabbit** reviewed 48a00da4 with no actionable comments. Its second
+pass had to be asked for (`@coderabbitai review`), because the push that
+merged main touched the walkthrough without reviewing. On 7080c120 it made
+one Minor finding: the table test pins the helper, and the tree scan has no
+positive case, so a change that dropped the arm's call or its report would
+pass. That is true, and measured (W1). It is CLAUDE.md's "a helper nothing
+calls", and it had been true of the misattachment arm since #964 (W2). The
+scan moved, unchanged, into `scanDocblockSubjects(r, root, wholeTree)`,
+which reports through a three-method `docScanReporter`. The repo test runs
+it with `wholeTree` set, so the floors still apply there, and
+`TestDocblockScanReportsBothArmsOnAFixture` runs it on a synthetic package
+with a recorder. After the move the red-first run on the unfixed tree gave
+the same 19. **SonarCloud** passed every commit. **Gemini** was over its
+daily quota and reviewed no commit; the consult below stood in for it.
 
 ### Consult
 
