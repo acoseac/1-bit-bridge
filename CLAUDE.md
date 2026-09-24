@@ -3134,10 +3134,15 @@ its twin.** The top list is older, shorter, and read first.
 - **A running SQLite statement is parked from INSIDE it, by a Go collation**
   (#998). `VACUUM` copies an index with an append fast path that compares
   no keys, except an index with a non-BINARY collation, which it rebuilds by
-  seeks (SQLite's `insert.c`, `xferOptimization`). `internal/backup/backuptest`
-  registers such a collation in Go, so a VACUUM of a database `WriteSource`
+  seeks (SQLite's `insert.c`, `xferOptimization`). `internal/sqlitetest`
+  registers such a collation in Go (it lived in `internal/backup/backuptest`
+  until the scanner needed it), so a VACUUM of a database `WriteSource`
   wrote calls back mid-copy with its destination file already created, and
-  `ParkVacuum` holds it there. A cancel then reaches the statement only
+  `ParkVacuum` holds it there. The same collation stops ANY statement that
+  maintains an index a test created under it: an UPDATE that moves a key,
+  an INSERT, a DELETE. The key is compared only against keys already in the
+  index, so it needs a second row, and a partial index keeps the statements
+  the test does not want to stop out of it. A cancel then reaches the statement only
   through modernc's own `interruptOnDone` goroutine, which has to be
   scheduled before the copy finishes, so `ReleaseUntil` lets comparisons go
   one at a time after a `runtime.Gosched`. Measured over 200 runs under
