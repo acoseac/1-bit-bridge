@@ -52,6 +52,21 @@ func TestEveryCitedTestNameExists(t *testing.T) {
 		t.Fatalf("only %d cited test names found in .md files — the markdown branch is broken", mdCited)
 	}
 
+	// The underscore names need one too, for the same reason: the camelCase
+	// citations alone clear every floor above, so a pattern that stopped
+	// reading internal/dlna's convention would report a clean tree. That was
+	// this guard's state until #NNN. 106 distinct names when this was set.
+	underscored := 0
+	for name := range cited {
+		if strings.HasPrefix(name, "Test_") {
+			underscored++
+		}
+	}
+	if underscored < 50 {
+		t.Fatalf("only %d cited test names continue past Test with an underscore — "+
+			"citedRe has stopped reading them", underscored)
+	}
+
 	for _, m := range missingCitations(cited, defined) {
 		t.Errorf("no test function of this name exists: %s\n"+
 			"A docblock naming a guard is a claim about what is checked. Either write it, "+
@@ -195,6 +210,13 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 // a doc. And a test in a file whose name begins with "_" was counted as
 // defined, although the go tool never compiles it, so a docblock citing it
 // passed.
+//
+// The last row failed until the walk stopped at a directory with its own
+// go.mod. Claude Code keeps its worktrees of other branches inside the tree,
+// under .claude/worktrees/, and each is a whole checkout with its own module.
+// The walk read them as this tree: an old copy's tests satisfied citations
+// this tree no longer backs, and its stale comments failed the guard in the
+// one checkout that held them.
 func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 	// A lock's contents, as emacs writes them: user@host.pid:boot.
 	const lockData = "someone@host.1:1"
@@ -240,6 +262,25 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 		{"an emacs lock beside a doc, outside a git checkout", true, func(t *testing.T, root string) {
 			symlink(t, lockData, filepath.Join(root, ".#notes.md"))
 		}},
+		{"a worktree of another branch, with its own go.mod", false, func(t *testing.T, root string) {
+			wt := filepath.Join(root, ".claude", "worktrees", "old-branch")
+			if err := os.MkdirAll(wt, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Its copy still defines the parked test, which would satisfy the
+			// citation in this tree's prod.go, and still cites a test this
+			// tree has never had.
+			for name, body := range map[string]string{
+				".git":      "gitdir: /elsewhere/.git/worktrees/old-branch\n",
+				"go.mod":    "module x\n",
+				"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n",
+				"prod.go":   "package x\n\n// Guarded by TestOnlyTheOldBranchCites.\nfunc f() {}\n",
+			} {
+				if err := os.WriteFile(filepath.Join(wt, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -280,7 +321,121 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 	}
 }
 
-// citedRe matches a citation: `Test` + an uppercase letter + the rest.
+// TestScanTestCitationsCollectsEveryNameGoTestRuns pins the citation pattern
+// on a fixture of its own. The whole-tree run cannot show that a shape of
+// name is being read at all, only that nothing it read was missing.
+//
+// go test runs a function whose name continues past "Test" with anything but
+// a lowercase letter. The pattern once took an uppercase letter there and
+// nothing else, so no citation of a test named with an underscore after the
+// prefix, the convention in internal/dlna, was ever checked. Each shape it
+// missed (an underscore then an uppercase letter, an underscore then a
+// lowercase one, a digit) has one ghost here, each cited from a different
+// place a citation is read, beside real names of those shapes and words
+// shaped like them that are not citations. Each ghost must be reported with
+// its file, and nothing else may be collected.
+func TestScanTestCitationsCollectsEveryNameGoTestRuns(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Non-test source, below a directory whose name begins with "." and that
+	// has no go.mod of its own: the guard reads .github/, so a directory rule
+	// that dropped it would lose a citation here.
+	sweep := ".github/scripts/sweep/main.go"
+	write(sweep, "package main\n\n"+
+		"// Guarded by Test_UpperGhost and by Test_Real_Case. Not citations: the\n"+
+		"// Test_ prefix alone, Test__ with nothing after it, Testing, Tests, and\n"+
+		"// SetTest_Seam, whose Test does not start a word.\n"+
+		"func main() {}\n")
+	write("x_test.go", "package x\n\nimport \"testing\"\n\n"+
+		"// Pinned by Test_lowerGhost, and the case below by Test_realLower.\n"+
+		"func Test_Real_Case(t *testing.T) { _ = t }\n\n"+
+		"func Test_realLower(t *testing.T) { _ = t }\n")
+	write("notes.md", "Pinned by Test9Ghost, and the family by Test_Real_.\n")
+
+	cited, defined, mdCited := scanTestCitationsIn(t, root, map[string]bool{"notes.md": true})
+
+	if !defined["Test_Real_Case"] || !defined["Test_realLower"] {
+		t.Errorf("the fixture's underscore tests were not collected as defined: %v", defined)
+	}
+	var got []string
+	for name := range cited {
+		got = append(got, name)
+	}
+	sort.Strings(got)
+	want := []string{"Test9Ghost", "Test_Real_", "Test_Real_Case", "Test_UpperGhost", "Test_lowerGhost", "Test_realLower"}
+	if !slices.Equal(got, want) {
+		t.Errorf("collected %q, want exactly %q — every name go test runs is a citation, "+
+			"and the prefix alone, a lowercase continuation and a Test inside a word are not", got, want)
+	}
+	if mdCited != 2 {
+		t.Errorf("mdCited = %d, want 2 — the doc's underscore and digit citations both count", mdCited)
+	}
+	wantMissing := []string{
+		"Test9Ghost  (cited by notes.md)",
+		"Test_UpperGhost  (cited by " + filepath.FromSlash(sweep) + ")",
+		"Test_lowerGhost  (cited by x_test.go)",
+	}
+	if got := missingCitations(cited, defined); !slices.Equal(got, wantMissing) {
+		t.Errorf("missingCitations = %q, want %q", got, wantMissing)
+	}
+}
+
+// TestDefinesWithPrefixEndsAnUnderscoreNameOnASegment pins where a citation
+// that names only the start of a test may stop. A name that continues past
+// "Test" with an underscore joins its words with underscores, so a prefix
+// that names a family ends on one or just before one. A prefix that stops
+// inside a word names nothing, however many tests begin with the same
+// letters. camelCase has no such boundary and keeps the leniency
+// definesWithPrefix documents.
+func TestDefinesWithPrefixEndsAnUnderscoreNameOnASegment(t *testing.T) {
+	defined := map[string]bool{
+		"Test_CDS_Search_ReturnsMatchingItems": true,
+		"Test_AdaptiveResponseWriter_Buffers":  true,
+		"TestArtworkServesTheCover":            true,
+	}
+	for _, c := range []struct {
+		cited string
+		want  bool
+	}{
+		{"Test_CDS_Search_", true},                     // a family, with its trailing underscore
+		{"Test_CDS_Search", true},                      // the same family, stopping just before it
+		{"Test_CDS_Search_ReturnsMatchingItems", true}, // the whole name, which is a prefix of itself
+		{"Test_CDS_Sea", false},                        // stops inside a word
+		{"Test_A", false},                              // the fixture folder a comment quoted, which 18 tests in the tree begin with
+		{"TestArtwork", true},                          // camelCase, a table-driven parent
+		{"TestArtworkServ", true},                      // camelCase, inside a word: still lenient
+	} {
+		if got := definesWithPrefix(defined, c.cited); got != c.want {
+			t.Errorf("definesWithPrefix(%q) = %v, want %v", c.cited, got, c.want)
+		}
+	}
+}
+
+// citedRe matches a citation: a name go test would run as a test.
+//
+// Its rule (`go help testfunc`) is "Test", then nothing or a character that
+// is not a lowercase letter. So after the prefix this takes an uppercase
+// letter, a digit, or underscores followed by a letter or digit. It leaves
+// out the bare prefix, with or without trailing underscores, which names the
+// convention rather than a test, and names outside ASCII, of which this
+// tree has none.
+//
+// It took the uppercase letter alone until #NNN, so no citation of the 223
+// tests named with an underscore after the prefix was ever checked. That is
+// internal/dlna's convention, and 32 of the 223 continue in lowercase, so
+// extending the pattern to the shape that prompted the fix, an underscore
+// then an uppercase letter, would still have missed them. Five names of
+// tests that did not exist were cited by then, one of them in the
+// engineering log's record of what guards a DLNA invariant.
 //
 // The `\b` is what keeps it off `Test`-shaped substrings of larger identifiers
 // — in `SetTestHashCost` and `allowTestAssetHost` the character before `Test`
@@ -298,7 +453,7 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 // the guard collect three citations of its own prose. They passed, which is
 // worse than failing — each was satisfied by definesWithPrefix against
 // eighty-eight, eighteen and fifteen unrelated tests.
-var citedRe = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*`)
+var citedRe = regexp.MustCompile(`\bTest(?:[A-Z0-9]|_+[A-Za-z0-9])[A-Za-z0-9_]*`)
 
 // The markdown docs are scanned too, and they need three exemptions that Go
 // source does not. Each is a real category, not a convenience:
@@ -441,9 +596,7 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 			return err
 		}
 		if d.IsDir() {
-			// Vendored or generated trees have their own conventions and are
-			// not ours to police.
-			if n := d.Name(); n == ".git" || n == "dist" || n == "bin" || n == "vendor" {
+			if skipsForCitations(root, path, d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -480,6 +633,38 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 	return cited, defined, len(mdCitations)
 }
 
+// skipsForCitations reports whether the walk leaves a directory unread: the
+// repository's metadata, and build output or vendored code, whose
+// conventions are not ours to police; and, below the root, any directory
+// that holds a go.mod of its own.
+//
+// A directory with its own go.mod is another module. `go test ./...` from
+// the root never runs it, so a test declared there satisfies no citation
+// here, and a comment there cites nothing here. The case that exists is
+// Claude Code's .claude/worktrees/, where each worktree is a whole checkout
+// of another branch with as many Go files as this tree. When citedRe was
+// extended to underscore names (#NNN), three of them, left by merged PRs,
+// still held the stale citations it corrected, and the guard failed in the
+// one checkout that held them. Their old tests could also satisfy a
+// citation this tree no longer backs, which is the worse half, because it
+// passes.
+//
+// The check is the go tool's own, from the `./...` walk in
+// cmd/go/internal/modload: a go.mod that os.Stat finds and that is not a
+// directory. So a symlink to one counts, and a dangling link or a directory
+// of that name does not. If the stat fails for any other reason the walk
+// reads the directory, and its own ReadDir reports what is wrong.
+func skipsForCitations(root, path, name string) bool {
+	if name == ".git" || name == "dist" || name == "bin" || name == "vendor" {
+		return true
+	}
+	if path == root {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(path, "go.mod"))
+	return err == nil && !fi.IsDir()
+}
+
 // opensForCitations reports whether the walk opens a file at all, decided
 // from its NAME before anything is read. Each half takes the rule that
 // already says what it owns:
@@ -496,9 +681,9 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 //   - A Go file is opened unless the go tool ignores it (goToolIgnores): an
 //     editor's lock beside it, or a file no build compiles.
 //
-// No DIRECTORY rule is added. `.github/` holds a tracked doc and a tracked
-// Go file this guard reads, so the go tool's `.`-directory rule would drop
-// both.
+// The go tool's `.`-directory rule is not borrowed. `.github/` holds a
+// tracked doc and a tracked Go file this guard reads, and that rule would
+// drop both. Its nested-module rule is borrowed, in skipsForCitations.
 func opensForCitations(name, rel string, trackedMD map[string]bool) bool {
 	switch {
 	case strings.HasSuffix(name, ".md"):
@@ -603,13 +788,35 @@ func missingCitations(cited map[string][]string, defined map[string]bool) []stri
 // So the rule to keep is the one the exemption map encodes: a citation too
 // short to identify anything is a PLACEHOLDER, and belongs in that map where
 // a reader can see it, not passing quietly through here.
+//
+// **A name that continues past "Test" with an underscore is held to its
+// words.** It joins every word with an underscore, so a prefix that names a
+// family ends on one (…_CDS_Search_, every Search test) or stops just
+// before one, and a prefix that stops inside a word names nothing
+// (endsOnSegment). When citedRe was extended to these names, three prefix
+// citations of them ended on a boundary. The one that did not was no
+// citation at all: a fixture FOLDER name quoted in a comment, which eighteen
+// tests in internal/dlna happen to begin with. camelCase has no such
+// delimiter, and holding it to one is what the paragraph above measured and
+// declined, so it keeps the leniency.
 func definesWithPrefix(defined map[string]bool, name string) bool {
 	for def := range defined {
-		if strings.HasPrefix(def, name) {
+		if strings.HasPrefix(def, name) && endsOnSegment(name, def[len(name):]) {
 			return true
 		}
 	}
 	return false
+}
+
+// endsOnSegment reports whether a citation that stops where rest begins
+// stops where its naming style puts a boundary. An underscore name has one
+// wherever an underscore is: the citation may end on one, or stop just
+// before one. Any other name has none to check, so any stop will do.
+func endsOnSegment(name, rest string) bool {
+	if !strings.HasPrefix(name, "Test_") {
+		return true
+	}
+	return rest == "" || strings.HasSuffix(name, "_") || rest[0] == '_'
 }
 
 func unique(in []string) []string {

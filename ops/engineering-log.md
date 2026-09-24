@@ -3151,7 +3151,7 @@ names, and the PR provenance.
 - **The fs scanner's missing-tracks pass SPARES UPnP-routed rows — two layers, both load-bearing** (PR #370, caught live minutes after deploying #369). Routed rows live in `tracks` but never appear in a disk walk, so the scanner counted all 15,283 of them "missing" on EVERY scan (hourly + startup); only #369's removal of the accidental per-walk `missing_count = 0` reset surfaced it, but the wipe already fired pre-#369 whenever the upstream was offline for `threshold` (3) consecutive scans — the fs-scanner's global `DELETE FROM tracks WHERE missing_count >= ?` bypassed the ingest's own don't-reap-on-failed-walk guard. Layer 1: the scanner's missing loop excludes paths in `upnp_track_routing` (`Store.UPnPRoutedSourcePaths`, read-only; fetch failure degrades to empty set). Layer 2: `IncrementMissingTracksAndDeleteAtThreshold`'s threshold DELETE carries `AND path NOT IN (SELECT source_path FROM upnp_track_routing)` so NO caller can threshold-delete a routed row regardless of pre-fix accumulated counters (heals stale state without a migration). Routed-row lifecycle belongs EXCLUSIVELY to the ingest's `last_seen_at` reconcile. **Don't drop either layer**, **don't "simplify" the DELETE back to the bare threshold form**, **don't add routed paths back into the scanner's missing accounting** (e.g. via a future beforeSet refactor that re-derives from `TrackPaths`). Locked by `TestScanner_MissingPass_SparesUPnPRoutedRows` (real temp-dir scans, threshold+1 passes) + `TestIncrementMissingTracks_ThresholdDeleteSparesRoutedRows` (at-threshold routed row survives while a filesystem row is reaped).
 - **`/v1/artwork` + `/v1/artist-image` cache-miss is a THREE-way split — 202 `pending` ONLY while enrichment is genuinely pending; known-but-imageless answers terminal 404 `no_image`** (PR-pending, 2026-08-06; Mirror-PR pair with iOS's sweep single-shot change). Pre-fix the miss branch answered 202 for ANY known MBID with no cache file, with no way to say "enrichment ran; no image exists upstream" — so the 78 artists on bridge.ars.md whose portraits Deezer simply doesn't have answered `202 pending` forever, and iOS's resumable coverage sweep paid a ~4–5 min retry ladder per artist on EVERY sync (field-diagnosed from journald: 224 futile 202s across one evening). `MBIDProbe` gained `Artwork/ArtistMBIDEnrichmentPending` (store: `EXISTS(… MBID = ? AND enriched_at = 0)`, riding the same functional MBID indexes; **fail-OPEN to pending on a DB fault** — a wrong "pending" costs one bounded retry, a wrong "complete" would terminal-404 an image about to land). The discriminator is sound because `MarkEnriched` stamps `enriched_at` on success AND on skip, while the enricher's `IsTransient` guard deliberately leaves it 0 on transient upstream failures (PROTOCOL.md line ~282) — so "no track pending + no file" = every turn the enricher will ever take was taken. Forced re-enrichment (`enriched_at = 0`) flips the answer back to 202 by construction. **No `ProtocolVersion` bump** — iOS has treated 404 on these endpoints as terminal-nil since v1.0. **Don't collapse the split back to two states**, **don't put `Retry-After` on the `no_image` response** (clients must not retry it), **don't flip the DB-fault direction to fail-closed**. Locked by `TestArtwork/ArtistImageReturns404NoImageWhenEnrichmentComplete` (+ updated 202 fixtures now requiring pending=true) and `TestStoreMBIDEnrichmentPending` (upsert→pending, one-of-two-enriched→still-pending, all-enriched→complete).
 - **UPnP upstream ingest is skip-if-unchanged — unchanged walked tracks keep `indexed_at` AND `enriched_at`** (PR #369, 2026-06-10). Pre-fix every walk re-upserted all routed tracks unconditionally; `UpsertTrack` always advances `indexed_at` and resets `enriched_at = 0`, so on a 15k-track upstream (Chord 2Go) every walk (a) wiped + re-queued the WHOLE upstream for enrichment (perpetual MB/CAA/Deezer treadmill that also discarded previously-fetched MBIDs from `tags_json`), and (b) made every iOS delta sync re-receive all 15k tracks (`/v1/manifest?since=` gates on `indexed_at`) — the client-side @Query churn behind the iOS freeze report (iOS PR #789 is the diff-before-write twin). `ingestOne` now loads `Store.ListUPnPTracksByServer` (routing-join → `tags_json` decode, read-only no `s.mu`) once per walk and skips the Track upsert when `walkFieldsEqual(existing, fresh)`. **Two `walkFieldsEqual` exclusions are load-bearing**: `ModTime` (buildTrackAndRouting stamps walkStart — including it defeats the skip entirely) and the enricher-owned fields (`MusicBrainz*` / `ArtworkMBID` / `ArtistMBID` — a fresh walk row never carries them; including them marks every ENRICHED row as changed forever → the exact wipe loop this fix stops). Genre / DiscNumber / ReplayGain* excluded in the other direction (walker never sets them). **The ROUTING row is still upserted every walk** — `last_seen_at` drives the reconcile sweep, and `res_url`/`object_id` float across upstream restarts (DHCP) without a content change; `flush()` handles routing-only batches (parent track rows already exist → FK satisfied) and triggers on the routing slice length (grows on every item, so it alone bounds the batch). **Baseline load failure degrades to nil** (= legacy rewrite-everything; upserts are ON CONFLICT keyed so correctness is unaffected) rather than failing the server. `ServerIngestResult.Unchanged` counts skips (surfaced in the wiring's walked/unchanged/reaped log line). **Don't add enricher fields or ModTime to `walkFieldsEqual`**, **don't skip the routing upsert for unchanged tracks**, **don't make the baseline load failure fatal**. Locked by the `TestWalkFieldsEqual_*` truth table + `TestIngester_Run_SecondWalkSkipsUnchangedTracks` (empty since-delta, enrichment survives, routing refreshed, no reap) + `TestIngester_Run_ChangedTrackStillUpserts`.
-- **ContentDirectory:1 SCPD MUST advertise the 3 spec-mandatory introspection actions — `GetSearchCapabilities`, `GetSortCapabilities`, `GetSystemUpdateID`** (PR #316). Pre-fix the SCPD declared only `Browse` on the (genuinely correct) reasoning "renderers tolerate optional-action absence gracefully" — that's true for `Search` / `CreateObject` / `DestroyObject` but FALSE for the 3 introspection actions which are MANDATORY per UPnP CDS:1 §2.3 regardless of whether Search is implemented. User-visible symptom: mconnect Player (and likely other strict UPnP control points) renders the root container (`Browse(0)` → "All Tracks [121]") but tap-to-drill silently does nothing. **Mechanism**: mconnect polls `GetSystemUpdateID` between every navigation step to verify directory freshness; with the action missing it returns SOAPFault 401 (InvalidAction); mconnect interprets that as "directory in inconsistent state, abandon drill" — never dispatches the downstream `Browse(child)`. Empirically validated 2026-05-28 against mconnect via a minimal Go-based UPnP server at `/tmp/upnp-test` (200 LOC, mirrors our SCPD shape-for-shape): with only `Browse` declared, mconnect repeated `Browse(0)` on every "All Tracks" tap; after adding the 3 actions and restarting, the very next refresh showed `GetSystemUpdateID → Browse("1") DirectChildren → render`. **Fix shape**: 3 new no-input action handlers in `ContentDirectoryHandler`'s actionName switch returning canonical stable values (`<SearchCaps></SearchCaps>` / `<SortCaps></SortCaps>` / `<Id>1</Id>`). Empty SortCaps declares "no sortable fields" (matches our actual capability — Browse honours `SortCriteria=""` only). **The SearchCaps half of this entry is STALE and was corrected 2026-09-01: `Search` IS implemented.** It returned empty SearchCaps ("Search not supported") when #316 shipped, but `handleSearch` exists and `searchCapsFields` now advertises `dc:title,upnp:artist,upnp:album` — the fields mirrored into the FTS5 `tracks_fts` table, which is the signal that flips the Search action on in BubbleUPnP and Linn Kazoo. Don't re-derive "the bridge has no DLNA Search" from this entry; check `internal/dlna/content_directory.go` before believing any doc about it. (This was the third stale claim of the kind, after the WAV/AIFF extractor gap and the `deletedIds` field name — see the stale-claims note at the top of CLAUDE.md's "Things that have bitten before".) **Stable `SystemUpdateID=1`** is spec-allowed for best-effort CDS impls without eventing infrastructure — the downside is controllers can't detect manifest changes via CDS poll alone, but the iOS client uses SSE for that signal so there's no functional regression. **Don't drop any of the 3 introspection actions** at any future refactor — would re-open the mconnect-silent-drill-abort regression. The pre-PR-#316 comment in `device_description.go` claimed "renderers tolerate optional-action absence gracefully" — corrected to spell out the introspection-actions-are-mandatory distinction so a future "minimize the SCPD" refactor doesn't repeat the bug. Locked by 4 cases in `internal/dlna/content_directory_test.go`: per-handler wire shape (`Test_CDS_GetSearchCapabilities_ReturnsEmptySearchCaps` / `_GetSortCapabilities_ReturnsEmptySortCaps` / `_GetSystemUpdateID_ReturnsStableID`) + SCPD declaration invariant (`Test_CDS_SCPD_AdvertisesSpecMandatoryActions`).
+- **ContentDirectory:1 SCPD MUST advertise the 3 spec-mandatory introspection actions — `GetSearchCapabilities`, `GetSortCapabilities`, `GetSystemUpdateID`** (PR #316). Pre-fix the SCPD declared only `Browse` on the (genuinely correct) reasoning "renderers tolerate optional-action absence gracefully" — that's true for `Search` / `CreateObject` / `DestroyObject` but FALSE for the 3 introspection actions which are MANDATORY per UPnP CDS:1 §2.3 regardless of whether Search is implemented. User-visible symptom: mconnect Player (and likely other strict UPnP control points) renders the root container (`Browse(0)` → "All Tracks [121]") but tap-to-drill silently does nothing. **Mechanism**: mconnect polls `GetSystemUpdateID` between every navigation step to verify directory freshness; with the action missing it returns SOAPFault 401 (InvalidAction); mconnect interprets that as "directory in inconsistent state, abandon drill" — never dispatches the downstream `Browse(child)`. Empirically validated 2026-05-28 against mconnect via a minimal Go-based UPnP server at `/tmp/upnp-test` (200 LOC, mirrors our SCPD shape-for-shape): with only `Browse` declared, mconnect repeated `Browse(0)` on every "All Tracks" tap; after adding the 3 actions and restarting, the very next refresh showed `GetSystemUpdateID → Browse("1") DirectChildren → render`. **Fix shape**: 3 new no-input action handlers in `ContentDirectoryHandler`'s actionName switch returning canonical stable values (`<SearchCaps></SearchCaps>` / `<SortCaps></SortCaps>` / `<Id>1</Id>`). Empty SortCaps declares "no sortable fields" (matches our actual capability — Browse honours `SortCriteria=""` only). **The SearchCaps half of this entry is STALE and was corrected 2026-09-01: `Search` IS implemented.** It returned empty SearchCaps ("Search not supported") when #316 shipped, but `handleSearch` exists and `searchCapsFields` now advertises `dc:title,upnp:artist,upnp:album` — the fields mirrored into the FTS5 `tracks_fts` table, which is the signal that flips the Search action on in BubbleUPnP and Linn Kazoo. Don't re-derive "the bridge has no DLNA Search" from this entry; check `internal/dlna/content_directory.go` before believing any doc about it. (This was the third stale claim of the kind, after the WAV/AIFF extractor gap and the `deletedIds` field name — see the stale-claims note at the top of CLAUDE.md's "Things that have bitten before".) **Stable `SystemUpdateID=1`** is spec-allowed for best-effort CDS impls without eventing infrastructure — the downside is controllers can't detect manifest changes via CDS poll alone, but the iOS client uses SSE for that signal so there's no functional regression. **Don't drop any of the 3 introspection actions** at any future refactor — would re-open the mconnect-silent-drill-abort regression. The pre-PR-#316 comment in `device_description.go` claimed "renderers tolerate optional-action absence gracefully" — corrected to spell out the introspection-actions-are-mandatory distinction so a future "minimize the SCPD" refactor doesn't repeat the bug. Locked by 4 cases in `internal/dlna/content_directory_test.go`: per-handler wire shape (`Test_CDS_GetSearchCapabilities_AdvertisesSearchableFields` / `_GetSortCapabilities_ReturnsEmptySortCaps` / `_GetSystemUpdateID_ReturnsStableID`; the first was `…_ReturnsEmptySearchCaps` until #331 implemented Search) + SCPD declaration invariant (`Test_CDS_SCPD_AdvertisesSpecMandatoryActions`).
 - **Chord 2Go file-fetch identifies as generic MPD — `chordFamily` matchers don't fire on file-stream requests** (latent invariant, no code change shipped). The 2Go's playback worker sends `User-Agent: "Music Player Daemon 0.21.26"` for the actual `/dlna/file/{id}` GET (the SSDP description / GetProtocolInfo / SetAVTransportURI dispatches come over different transports — DLNA SOAP control vs raw HTTP fetch). `internal/dlna/renderer_profile.go::MatchProfile` walks `Profiles` in declared order; `profileChordFamily()`'s matchers (`["Chord", "2go", "Poly"]`) don't fire on the MPD UA, so file-stream requests from real 2Go hardware fall through to `profileMPDGeneric()`. The chordFamily docblock acknowledges this explicitly. **Today this is moot** because (a) both profiles' `PreferredMIME` maps are identical (`.dsf → audio/x-dsf`, `.dff → audio/x-dff`) and (b) neither `KnownBugs` nor `MaxSafeFileSize` is enforced anywhere in the bridge's file-fetch path. **It becomes a real silent-failure if any future PR adds enforcement** — `MaxSafeFileSize` blocks for the 2Go's `BugID3OffsetOverflowOver2GB` 2 GiB cap would NOT fire because real 2Go traffic lands on `mpdGeneric` (no cap). **Don't reintroduce a `"Music Player Daemon 0.21"` UA matcher to `profileChordFamily` as a prophylactic fix** — version-anchored substring matchers rot the moment Chord ships a firmware update with a different MPD version (the 0.21 → silent regression hazard). When adding enforcement, the structurally correct shape is either (a) explicit fall-through dispatch (e.g. `applyChordCapsTo(profile)` when `(host + UA) signal points at Chord hardware`) keyed off SSDP-derived metadata cached against the source IP, OR (b) per-call enforcement parameterized on `Profile` IDs the file handler resolves explicitly. Per Gemini cross-codebase audit 2026-05-28.
 - **Docker image runs as non-root `bridge` user** (PR #84). `mkdir -p /data && chown bridge:bridge /data` happens in the same `RUN` layer that creates the user, BEFORE `USER bridge` switches contexts. Without the explicit chown, `WORKDIR` / `VOLUME` create `/data` with `root:root` ownership and the runtime fails on first-run TLS-cert mint or manifest-DB create. Operators bind-mounting their own pre-owned volume override the in-image baseline naturally. **`VERSION` build-arg feeds `-ldflags`**: `-X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=${VERSION}` so `bridge version` reports the build identity; default arg is `"docker"` for unpinned builds. **Env-var overrides** (`BRIDGE_LISTEN_ADDRESS`, `BRIDGE_ADMIN_ADDRESS`, `BRIDGE_DATA_DIR`, `BRIDGE_LIBRARY_NAME`, `BRIDGE_LIBRARY_ROOTS`) are applied in `config.applyEnvOverrides` BETWEEN `applyDefaults` and `resolvePaths`, so relative paths from env inherit the same "relative-to-config-dir" semantics as YAML fields. `BRIDGE_LIBRARY_ROOTS` is colon-separated regardless of host OS — accepted universally because the only realistic container deployments are linux/amd64 + linux/arm64. Empty / unset env = no change. Documented precedence: env > yaml > defaults.
 - **Audio-analysis decode commits ONLY on a length-complete decode — gated by `decodedShortOfDuration` (probed duration), NOT exit code / `-xerror` / stderr matching** ([internal/analyze/decode.go](internal/analyze/decode.go), PRs #448 ffmpeg + #449 sox, found by the v0.1.7 pre-release review). BOTH decoders exit 0 on a truncated-but-openable source: ffmpeg conceals a mid-stream error and exits 0; sox opens a truncated FLAC via its intact front STREAMINFO, decodes ~half, prints `sox FAIL ... LOST_SYNC`, and exits 0. Pre-fix `decodeFrames` treated a clean exit as a clean decode and committed a PARTIAL waveform (wrong duration + biased ReplayGain/key/tempo) keyed to the file's mtime+size, so the scan-skip gate never re-analyzed it — a permanently-wrong sidecar (field case: a partially-uploaded rclone-to-B2 faststart m4a, non-zero-byte so it passes the #446 zero-byte skip). Fix: probe the expected duration once at `probeChannels` time (`sox --i -D` on the sox path, ffprobe `format=duration` on the ffmpeg path) and reject when the decoded length is < 90% of it (`minDecodedFraction`); nothing is committed so the candidate re-flows until fully re-uploaded. Unknown duration (probe miss → 0) skips the check (commit as before). **Two alternatives REJECTED, both empirically disproven — DON'T reintroduce:** (a) ffmpeg `-xerror` aborts on ANY decode error → also fails a glitchy-but-COMPLETE file (one concealed bad frame) → no sidecar + a permanent treadmill (a failed analysis writes NO row, so the candidate re-flows every sweep). (b) sox stderr-marker matching (`sox FAIL`/`LOST_SYNC`) CANNOT distinguish truncation from a glitchy-but-complete file — a 200-byte mid-stream flip on a 10s FLAC decodes to FULL length (sox resyncs to EOF) yet prints the SAME `sox FAIL ... LOST_SYNC`; the decoded-LENGTH check distinguishes them (truncated = short → reject; resynced-complete = full → commit). The `sox WARN ... MD5 checksum mismatch` line is ALSO a trap — it's a WARN (not FAIL) that fires on a valid tag-edited FLAC, so matching it would treadmill valid files. **`sox --i -D` is safe for VBR MP3** — verified it matches the decoded length within <0.1% both WITH and WITHOUT the Xing/Info tag, so it doesn't false-reject complete VBR MP3s. **All exec sites resolve via `resolveBin(soxLookPath,"sox")` / `resolveBin(ffprobeLookPath,"ffprobe")`** — absolute-path / `filepath.IsAbs` defense-in-depth, which ALSO keeps new code clear of SonarCloud `go:S4036` (it fires on bare-name execs in new code; the pre-existing bare-name execs across the repo are grandfathered, but new ones must use `resolveBin`). Locked by `TestDecodedShortOfDuration` + `TestRunAnalysisTruncatedFLACWritesNoSidecar` + `TestRunAnalysisGlitchyCompleteFLACCommits`.
@@ -11228,7 +11228,7 @@ module. Every hit was then read in the code.
   and sat on `type itemSpec`; the existing arm could not see it because
   "item" is declared nowhere. One is the doc of a test that no longer
   exists: the monolithic
-  `Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes` was split into
+  `…_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes` was split into
   per-method tests, and its paragraph sat glued, with no blank line, onto
   `upstreamFixture`'s own doc. And one method,
   `httpError.Status`, was documented under the name of the field it
@@ -11332,12 +11332,12 @@ module. Every hit was then read in the code.
 `deletionJournalMassOpLibraryFraction`, `routesToOptimizeChannel`,
 `TestStatusJSONFlag`, `noRedirect`, `TestHealthLECertNotAfterIsRead Live`,
 `jpeg`, `JobSpecVariantID_OptimizeKind`, `container`,
-`Test_FileHandler_UpstreamOffline_503`,
-`Test_FileHandler_RoutingWithNilMatch_FallsThroughToFilesystem`,
-`Test_FileHandler_VariantTrailingSegment_BypassesProxy`, and
+`…_FileHandler_UpstreamOffline_503`,
+`…_FileHandler_RoutingWithNilMatch_FallsThroughToFilesystem`,
+`…_FileHandler_VariantTrailingSegment_BypassesProxy`, and
 `expectedTeamID`. Moved: "item builds" to `func it`, with `itemSpec` given a
 line of its own. Made a free-standing section comment: the orphaned
-`Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes` paragraph, now
+`…_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes` paragraph, now
 opening with the tests that exist. Deleted with their keeper: five of the
 six keeper docs. Reworded: the `internal/tsnet` keeper's opener.
 
@@ -11537,3 +11537,179 @@ what else "declared nowhere" leaves out.
   the first push went up without main merged in, so CI found the M4A docs
   one push later than a local run could have. Merge main before pushing a
   guard that reads the whole tree, and re-run it there.
+
+## 2026-09-24 — the citation guard reads every name go test runs (#NNN)
+
+`TestEveryCitedTestNameExists` collected citations with
+`\bTest[A-Z][A-Za-z0-9_]*`, so it never read a name with an underscore
+after the prefix. The tree defines 223 such tests, internal/dlna's
+convention (21 files: 18 there and one each in internal/updater,
+internal/metrics and cmd/bridge), and no citation of any of them had ever
+been checked. The task measured the gap on main after #991 (232 distinct
+tokens of that shape, five naming nothing) and asked for the pattern to
+take the prefix, an underscore and an uppercase letter.
+
+### What the census measured
+
+A scratch tool mirrored the guard's selection and parsing (tracked docs
+only, plans and the exempt names skipped, only a test file's comments,
+`goToolIgnores`) and compared three patterns on a clean worktree of main at
+`d9759a00`:
+
+| pattern | distinct citations |
+|---|---|
+| the guard's, `\bTest[A-Z]…` | 2,679 |
+| as asked, `\bTest_?[A-Z]…` | 2,774 |
+| go test's rule, `\bTest(?:[A-Z0-9]\|_+[A-Za-z0-9])…` | 2,793 |
+
+- **Definitions**: 4,689 top-level functions beginning `Test`, 223 of them
+  with an underscore after the prefix. 191 continue in uppercase and **32
+  in lowercase**, which go test runs because an underscore is not a
+  lowercase letter (`go help testfunc`). None continues with a digit, and
+  no name in the tree has a non-ASCII character after the prefix.
+- **The pattern as asked would have missed 19 citations**: 18 of those
+  lowercase names, every one cited (mostly by its own doc), and one digit
+  example. Extending a pattern to the shape that prompted the fix covers
+  the examples, not the population it is meant to cover.
+- **go test's rule reads 114 citations the guard did not.** 103 name a
+  test exactly. 3 name a family by a prefix that ends on an underscore
+  (`…_CDS_Search_`, `…_FileHandler_` and `…_FileHandler_UPnPRoutedTrack_`).
+  1 names nothing and passes as a prefix anyway (see **The prefix rule**).
+  7 name no test at all.
+- **The 7** are the task's five and two examples #994 added to
+  `testFuncName`'s doc after the task's count: "an uppercase letter, "_"
+  and a digit all qualify", with a name spelled out for the underscore and
+  the digit. Of the five, one was a live claim. The #316 entry named the
+  test that locks the SearchCaps half of the introspection actions, and
+  #331 renamed that test when it implemented Search. The other four were
+  the monolithic file-handler test that was split per method, and the
+  three stale doc openers that #994's own entry quotes.
+- **Every hit was read.** Apart from the folder name and the two examples,
+  nothing the new pattern collects is anything but a test's name. `\b`
+  still keeps it off an underscore name inside a longer one:
+  `TestSetRenameFuncForTest_restoresPrevious` is one name, not two.
+
+### The prefix rule
+
+`definesWithPrefix` accepts a citation that is a prefix of any defined
+test. Four underscore citations passed that way. Three were families, each
+ending on an underscore. The fourth was a FIXTURE FOLDER NAME in a comment
+in `internal/manifest/store_browse_test.go` (the prefix, an underscore and
+a capital A), and eighteen `…_AdaptiveResponseWriter_…` tests in
+internal/dlna begin with it. A word that cites nothing was "verified"
+against eighteen unrelated tests, which is the masking the docblock already
+described for the two one-letter placeholders.
+
+An underscore name joins every word with an underscore, so the guard can
+tell a family from a truncation. A prefix citation of such a name must now
+end on an underscore or stop just before one (`endsOnSegment`), which keeps
+all three families and rejects the folder name. **camelCase keeps the
+lenient rule**: it has no delimiter to check, and the docblock already
+records that holding it to an underscore boundary rejects legitimate
+truncations. 20 camelCase citations pass only as prefixes today, six of
+them ending on an underscore (`TestUpscaleDelete_`, `TestProxyUPnP_`, …),
+and this change moves none of them.
+
+The comment now describes the two folders instead of spelling them. Its
+test's docblock was corrected with it. Since #203 it had described a
+folder with a `%` in its name, which the code never planted, beside a
+LIKE-escape that #532 replaced with a byte range.
+
+### Nested checkouts
+
+The walk skipped `.git`, `dist`, `bin` and `vendor` by name and read
+everything else. Claude Code keeps worktrees of other branches under
+`.claude/worktrees/`, each a whole checkout with its own `go.mod` and
+1,120–1,123 `.go` files. #993's entry recorded that three root walks read
+them. This is the first change they affected:
+
+- **The extended guard failed in the main checkout and nowhere else.**
+  Three leftover worktrees, from #992, #993 and #994, held copies of the
+  files this change corrects. The run reported the stale citations in all
+  three, so it was red locally and would have been green on CI.
+- **The other direction passes.** An old copy's tests count as
+  definitions, so a citation of a test this tree has since renamed is
+  satisfied by a worktree that still declares it. The new fixture row
+  plants both: its old copy defines the parked test, and the unfixed walk
+  reported the old copy's ghost in place of this tree's.
+
+A directory below the root with its own `go.mod` is now skipped
+(`skipsForCitations`). That is the go tool's own boundary. `go test ./...`
+never runs a nested module, so its tests satisfy nothing here and its
+comments cite nothing here. The check is the go tool's too, from the
+`./...` walk in `cmd/go/internal/modload/search.go`: `os.Stat` finds a
+`go.mod` that is not a directory, so a symlink to one counts and a
+dangling link does not. The first draft used `os.Lstat` and no directory
+test (see **Consult**). The tracked tree has one `go.mod`, at the root,
+so the rule drops nothing git tracks. It costs one `Lstat` per directory,
+about 85 of them. The `.`-directory rule is still not borrowed, for #993's
+`.github/` reason. **Not done here**: the hash-cost and flac-handle walks
+still read the worktrees, as #993 recorded. Nothing in this change makes
+them fail.
+
+### The fixes
+
+- **Repointed**: the #316 entry's SearchCaps test, to the name #331 gave
+  it, with the old name elided beside it.
+- **Elided**: the split monolithic test, in
+  `internal/dlna/file_handler_upnp_test.go` and twice in #994's entry, and
+  the three stale openers in #994's list and in the docblock guard's own
+  doc.
+- **Reworded rather than spelled**: `identifierShaped`'s third example is
+  now `JobSpecVariantID_OptimizeKind`, a stale opener of the same shape
+  from the same census. `testFuncName`'s doc states the rule without the
+  two example names. The rollup test describes its folders.
+- **CLAUDE.md's elision rule** said the regex needs `Test` followed by an
+  uppercase letter. What it needs is the prefix itself, and an underscore
+  name elides to `…_FileHandler_…`.
+
+### Tests and controls
+
+Red-first, against the unchanged guard, each new test failing for its own
+reason:
+
+```
+TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks, the worktree row:
+  missingCitations = ["…OnlyTheOldBranchCites  (cited by .claude/worktrees/old-branch/prod.go)"],
+  want ["…ParkedNeverRuns  (cited by prod.go)"]
+TestScanTestCitationsCollectsEveryNameGoTestRuns:
+  collected [], want exactly the six names; mdCited = 0, want 2;
+  missingCitations = [], want the three ghosts
+TestDefinesWithPrefixEndsAnUnderscoreNameOnASegment:
+  a stop inside a word = true, want false (both rows)
+```
+
+With the new pattern and rule, before any citation was fixed, the
+whole-tree run reported exactly eight names, all in this tree: the seven
+above and the folder name.
+
+### Consult
+
+A direct consult (`consult.py`, gemini-3.8-flash, with the guard file as
+context) was asked to break each of the three changes. Each answer was
+checked in the tree or the Go source first.
+
+- **Taken: the nested-module check.** `os.Lstat` alone treats a directory
+  named `go.mod` or a dangling link of that name as a module. The
+  suggested fix, `IsRegular()`, would have diverged from the go tool the
+  other way, since the go tool follows a symlinked `go.mod`, so the check
+  now copies `modload`'s instead.
+- **Declined: rejecting a family cited at a camelCase hump inside an
+  underscore name** (a citation stopping at `…_clampPage` when the test
+  goes on to `Negative`, or at `…_IPv` before a digit). Such a citation
+  does fail now. The census found none, and holding it to the hump
+  instead lets an acronym through: `…_FileHandler_U` stops before an
+  uppercase letter too. A strict rule's failure names the citation and is
+  fixed by citing to an underscore. A lenient rule's failure is a pass.
+- **Measured and left: a non-ASCII rune directly before `Test`.** RE2's
+  `\b` is ASCII-only, so an accented word run into a name
+  (`résumé` and then a test-shaped name) would match. That was true of
+  the old pattern too, and the tree has no instance, in code or docs.
+  Non-ASCII test names are the same: valid in go test, none in the tree.
+- **Measured and left: `testdata/`**, which the go tool ignores and this
+  walk reads. The tree tracks no `.go` or `.md` file under one.
+- **Confirmed**: `path == root` is exact in `filepath.WalkDir`, whose first
+  callback receives the root as passed; `endsOnSegment` cannot index out
+  of range (`HasPrefix` bounds the slice and `rest == ""` short-circuits);
+  and `.git` would be the wrong boundary, since a nested module inside the
+  same checkout shares the parent's `.git`.

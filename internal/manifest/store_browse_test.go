@@ -248,18 +248,20 @@ func TestRollupByPrefix_EmptyMatchesAll(t *testing.T) {
 	}
 }
 
-// TestRollupByPrefix_LikeEscapeProtectsAgainstWildcard plants a
-// folder containing `%` in its name and verifies the rollup for a
-// SISTER folder doesn't include it. Without likeEscape on the
-// prefix, the `%` in the sister query would match the bogus
-// folder's contents.
+// TestRollupByPrefix_LikeEscapeProtectsAgainstWildcard plants two
+// sibling folders whose names differ in one character, an underscore in
+// the first where the second has a letter, and verifies that the rollup
+// for the first does not include the second. `_` is LIKE's
+// one-character wildcard, so the LIKE the rollup ran until #532 needed
+// likeEscape to keep the sibling out. The byte range that replaced it
+// has no wildcard, and this pins that it matches the underscore
+// literally.
 func TestRollupByPrefix_LikeEscapeProtectsAgainstWildcard(t *testing.T) {
 	s := openTempStore(t)
 	t.Cleanup(func() { _ = s.Close() })
 
-	// Folder shaped "Test_A" and a separate "Test%A" — without
-	// LIKE-escape the underscore in "Test_A" would match any
-	// single character including the % in "Test%A".
+	// The first folder has "_" where the second has "Q", so an unescaped
+	// LIKE prefix scan for the first matches both.
 	folders := []string{"Test_A", "Test_A/album", "TestQA", "TestQA/album"}
 	for _, p := range folders {
 		if err := s.UpsertFolder(context.Background(), &Folder{Path: p}); err != nil {

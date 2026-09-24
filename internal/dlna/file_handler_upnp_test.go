@@ -113,7 +113,7 @@ func routedHandlerFixture(t *testing.T) (handler http.HandlerFunc, upstreamBody 
 // Test_FileHandler_UPnPRoutedTrack_GET — bit-exact upstream bytes
 // surface on a vanilla GET (no Range header). Replaces the prior
 // `t.Run("GET returns upstream bytes bit-exact", ...)` sub-test of a
-// monolithic `Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes`
+// monolithic `…_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes`
 // to keep cognitive complexity below SonarCloud's S3776 threshold —
 // each per-method axis is now its own top-level test.
 func Test_FileHandler_UPnPRoutedTrack_GET(t *testing.T) {

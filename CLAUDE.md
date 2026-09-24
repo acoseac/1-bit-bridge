@@ -3290,14 +3290,36 @@ its twin.** The top list is older, shorter, and read first.
   clone — a verdict that depends on untracked local files is not a guard. The
   discriminator is `.git`: absent means a fixture tree with no ignore rules,
   present means git must answer and a failing git is reported, never quietly
-  widened back. **Elide the `Test` prefix** (`…ServeDrainsOnCleanup`) when a
-  note must name a test that no longer exists: the regex needs `Test` +
-  uppercase, so the name stays readable without claiming to exist. Four stale
+  widened back. **Elide the `Test` prefix** (`…ServeDrainsOnCleanup`, or
+  `…_FileHandler_…` for an underscore name) when a note must name a test that
+  no longer exists: the pattern needs the prefix itself, so the name stays
+  readable without claiming to exist. Four stale
   citations were corrected, not exempted — three plain renames and the guard
   name #945 retired — plus one FALSE POSITIVE, a UA string literal that was
   being discussed rather than cited. Keep the two apart: a stale citation is
   repointed or elided, a false positive means the prose should stop spelling a
   token it is only talking about. (#946)
+- **…and every name `go test` runs, which is more than `Test` and an
+  uppercase letter.** The pattern took only that shape, so no citation of the
+  223 tests named `Test_…` (internal/dlna's convention) was ever checked, and
+  five names of tests that did not exist were cited, one of them the
+  engineering log's record of what guards a DLNA invariant. It is `go help
+  testfunc`'s rule now: `Test`, then an uppercase letter, a digit, or
+  underscores and a letter or digit. **Measure the population a pattern must
+  cover, not the example that prompted it**: 32 of the 223 continue in
+  lowercase after the underscore, so "`Test_` then uppercase" would have left
+  them unguarded. **A `Test_` citation passes as a prefix only if it stops on
+  a word boundary**, ending on an underscore or just before one
+  (`…_CDS_Search_` names that family). The prefix rule had been "verifying" a
+  fixture FOLDER name quoted in a comment against eighteen unrelated DLNA
+  tests. camelCase has no delimiter to check and keeps its leniency. **The
+  walk skips a directory below the root that has its own `go.mod`**: another
+  module, which `go test ./...` never runs. `.claude/worktrees/` is the case
+  that exists. Three leftover worktrees still held the stale citations, so
+  the extended guard went red in the main checkout alone, and an old copy's
+  tests can satisfy a citation this tree no longer backs, which passes. That
+  is the one directory rule added; #993's reason for not borrowing the go
+  tool's `.`-directory rule (`.github/`) still holds. (#NNN)
 - **The Dockerfile REQUIRES BuildKit, and its builder `FROM` says so through
   an invalid fallback:**
   `--platform=${BUILDPLATFORM:-this-Dockerfile-requires-BuildKit--build-with-docker-buildx}`.
