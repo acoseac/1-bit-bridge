@@ -11735,3 +11735,31 @@ checked in the tree or the Go source first.
   of range (`HasPrefix` bounds the slice and `rest == ""` short-circuits);
   and `.git` would be the wrong boundary, since a nested module inside the
   same checkout shares the parent's `.git`.
+
+### Review
+
+**Round 1, on `0be3cb89`.**
+
+- **SonarCloud** passed its gate with one new issue, and it was real:
+  go:S3776 on the table test, cognitive complexity 16 against the 15
+  allowed. The worktree row's loop and two error checks sat inside the
+  row's closure. They moved into `writeTree`, the shape this file already
+  used for `collectMarkdownCitations` under the same rule.
+- **Gemini** (medium), taken: `filepath.WalkDir` hands its first callback
+  the ROOT's own base name, so with the name list checked before the root
+  exemption, a checkout cloned into a directory called `bin`, `dist` or
+  `vendor` skipped itself. Every floor would then fail on a tree the guard
+  never read. The inline check had had the same order since it was
+  written, and extracting it into `skipsForCitations` is what put the two
+  checks side by side. `TestScanTestCitationsReadsARootNamedLikeASkippedDirectory`
+  failed red-first for all three names and passes with the root checked
+  first. Its control (the old order back) turns exactly that test red.
+- **A control that did not take.** The first attempt at that control
+  swapped the two checks with a Perl `\Q…\E` whose `\t` and `\n` sat inside
+  the quoting, where they match a literal backslash and a letter. Nothing
+  changed, and the run was green. The printed diff was empty, and that is
+  what showed it. The same swap as an exact string replace, asserting one
+  match first, went red. This is the "check what the mutation actually
+  did" rule under **Build, CI, and test discipline**, which the helper for
+  the other eight controls enforced and an inline one-off did not.
+- **CodeRabbit** had posted only its placeholder when this was written.
