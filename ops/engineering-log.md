@@ -12072,3 +12072,20 @@ checked against the code first.
 - `writeFixtureFile` already exists in cmd/bridge (gc_mass_orphan_test.go,
   a different signature). vet caught the collision, and the fixture helper
   is `writeKeeperFixture`.
+
+### Review
+
+- **Round 1** (`2115be9a`): **Gemini** raised two mediums, both taken.
+  `typedErrorIn` globbed `filepath.Join(root, dir, "*.go")`, which puts the
+  checkout's own path into the pattern. Under a clone at `…/my[repo]/` it
+  matches nothing and the tsnet condition reads "unmet" for ever: a silent
+  fail-open. Red-first: with the fixture root moved under `clone[1]` and the
+  `Glob` still in place, exactly the four cases that must see a typed error
+  failed. It lists the directory with `os.ReadDir` now, and the fixture
+  root keeps the brackets. The second finding was that the use-count pass
+  ranged over the keepers by value and relied on the map field being a
+  reference; it indexes now. The repo's two other `filepath.Glob` calls
+  were checked for the same shape. `TestEveryBackgroundGoroutineDrainsOnCleanup`
+  globs its own directory, and under such a path it fails loudly on its
+  floors rather than passing, so it was left. The DSD render test globs a
+  `t.TempDir()`.

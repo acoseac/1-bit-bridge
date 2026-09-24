@@ -365,14 +365,14 @@ func blankKeepersInFile(rel string, src []byte) ([]blankKeeper, error) {
 	// update.go had them) keep each other's import alive, and deleting both
 	// must delete it.
 	inKeepers := map[string]int{}
-	for _, k := range found {
-		for name, own := range k.pkgs {
+	for i := range found {
+		for name, own := range found[i].pkgs {
 			inKeepers[name] += own
 		}
 	}
-	for _, k := range found {
-		for name := range k.pkgs {
-			k.pkgs[name] = uses[name] - inKeepers[name]
+	for i := range found {
+		for name := range found[i].pkgs {
+			found[i].pkgs[name] = uses[name] - inKeepers[name]
 		}
 	}
 	return found, nil
@@ -568,17 +568,21 @@ var (
 // method `Error() string`, which makes its receiver an error type. An
 // errors.New inside a function, which is what internal/tsnet returns today,
 // is neither.
+//
+// It lists the directory rather than globbing it: under a checkout whose path
+// holds `[`, the root joins the pattern, matches nothing, and reads as "no
+// typed errors" for ever (Gemini on #996).
 func typedErrorIn(root, dir string) (string, error) {
-	paths, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(dir), "*.go"))
+	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(dir)))
 	if err != nil {
 		return "", err
 	}
-	sort.Strings(paths)
-	for _, path := range paths {
-		name := filepath.Base(path)
-		if goToolIgnores(name) || strings.HasSuffix(name, "_test.go") {
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || goToolIgnores(name) || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
+		path := filepath.Join(root, filepath.FromSlash(dir), name)
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 		if err != nil {
@@ -824,7 +828,8 @@ var _ = errors.Is
 		}, "internal/tsnet/tsnet_test.go: errors.Is: " + keeperStaleEntry},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			root := t.TempDir()
+			// A checkout's path may hold glob metacharacters.
+			root := filepath.Join(t.TempDir(), "clone[1]")
 			for rel, src := range base {
 				if next, changed := c.changes[rel]; changed {
 					src = next
