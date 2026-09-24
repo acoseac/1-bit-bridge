@@ -49,9 +49,10 @@ var ErrDuplicateInflight = errors.New("analyze pool: job already queued or runni
 // The pending-job channel is bounded (queueCap); Enqueue is
 // non-blocking (select + default → ErrQueueFull). Dedup keys on the
 // source library-relative path (one waveform per source), so a
-// duplicate enqueue while a job is queued or running is a silent no-op.
-// A job stops being "queued or running" at the same instant it is
-// counted done or failed, never later: see finishJob.
+// duplicate enqueue while a job is queued or running takes no slot,
+// counts nothing and returns ErrDuplicateInflight. A job stops being
+// "queued or running" at the same instant it is counted done or failed,
+// never later: see finishJob.
 type Pool struct {
 	store    *manifest.Store
 	workers  int
@@ -177,11 +178,11 @@ func NewPool(store *manifest.Store, workers, queueCap int, opts ...PoolOption) *
 }
 
 // Enqueue submits a spec to the pool. Non-blocking; ErrQueueFull when
-// the channel is full, nil (silent no-op) on a duplicate, ErrPoolClosed
-// after Stop. Both the jobs send and the state-change signal run under
-// p.mu; Stop acquires p.mu before closing the jobs channel and only
-// closes stateChangeChan afterward (post wg.Wait), so neither send can
-// race a close and panic.
+// the channel is full, ErrDuplicateInflight when the path is already
+// queued or running, ErrPoolClosed after Stop. Both the jobs send and
+// the state-change signal run under p.mu; Stop acquires p.mu before
+// closing the jobs channel and only closes stateChangeChan afterward
+// (post wg.Wait), so neither send can race a close and panic.
 func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	if p.closed.Load() {
 		return ErrPoolClosed
@@ -194,7 +195,7 @@ func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	}
 	if _, ok := p.inflight[dedup]; ok {
 		p.mu.Unlock()
-		return nil // already queued or running
+		return ErrDuplicateInflight
 	}
 	p.inflight[dedup] = struct{}{} // optimistic claim; rolled back on full
 	select {
@@ -301,8 +302,9 @@ const (
 // splitting them opens a window whichever order they run in. Counting first
 // is what this pool used to do, with the failure's strike and WARN written
 // in between: a caller that saw the count and re-enqueued the path, which is
-// what a retry is, landed on a path the job still held, and Enqueue's nil
-// for a duplicate dropped the retry without a trace (the #986 CI failure).
+// what a retry is, landed on a path the job still held, and Enqueue, which
+// then answered a duplicate with nil, dropped the retry without a trace (the
+// #986 CI failure).
 // Releasing first leaves a snapshot between the two steps that shows the job
 // nowhere, neither in flight nor counted.
 //

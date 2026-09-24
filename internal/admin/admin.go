@@ -975,8 +975,16 @@ type AnalysisSweepState struct {
 
 // AnalysisSweepCounts is the last completed sweep's candidate
 // breakdown — the exact per-run numbers from
-// collectAnalysisCandidates (the SQL coverage tile is the approximate
-// whole-library view; these are the sweeper's own truth).
+// collectAnalysisCandidates and the enqueue pass after it (the SQL
+// coverage tile is the approximate whole-library view; these are the
+// sweeper's own truth).
+//
+// Every int field but Total is a bucket, and the buckets partition Total:
+// each track lands in exactly one, except those a saturated queue left for
+// the next sweep (QueueSaturated). The console's describeAnalysisSweep
+// renders each bucket as a part of Total, so a new int field is a new part
+// that line has to name. TestDescribeAnalysisSweepAccountsForEveryTrack
+// fails until it does.
 type AnalysisSweepCounts struct {
 	Total       int `json:"total"`
 	UpToDate    int `json:"upToDate"`
@@ -992,7 +1000,10 @@ type AnalysisSweepCounts struct {
 	Enqueued   int `json:"enqueued"`
 	// AlreadyQueued is how many candidates THIS sweep found already queued
 	// or running (analyze.ErrDuplicateInflight). Kept apart from Enqueued,
-	// which is only the work this sweep added.
+	// which is only the work this sweep added: a track has no analysis row
+	// until its job finishes, so every sweep during a long first analysis
+	// re-offers the whole backlog, and counting those as enqueued reported
+	// a full queue of old work as new, every sweep.
 	AlreadyQueued  int  `json:"alreadyQueued"`
 	QueueSaturated bool `json:"queueSaturated,omitempty"`
 }

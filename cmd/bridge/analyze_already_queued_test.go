@@ -39,10 +39,10 @@ func heldAnalysisPool(t *testing.T, store *manifest.Store) *analyze.Pool {
 // A track has no analysis row until its job finishes, so every sweep during a
 // long first analysis re-offers the whole backlog. The pool answered a path it
 // already held with nil, and enqueueAll counted every nil as enqueued: each
-// sweep reported up to the queue cap (DefaultAnalysisQueueCap, 5000) of old
-// work as new, in the `auto-analysis sweep enqueued tracks` line and in the
-// Jobs card's `enqueued`, a part of a line that has to add up to the track
-// total.
+// sweep reported a full queue of old work (DefaultAnalysisQueueCap is 5000,
+// plus the jobs running) as new, in the `auto-analysis sweep enqueued tracks`
+// line and in the Jobs card's `enqueued`, a part of a line that has to add up
+// to the track total.
 //
 // The second sweep re-offers three held paths and one new one. The honest
 // answer (1 enqueued, 3 already queued) and the old one (4 enqueued) differ in
