@@ -11641,7 +11641,7 @@ comments cite nothing here. The check is the go tool's too, from the
 `go.mod` that is not a directory, so a symlink to one counts and a
 dangling link does not. The first draft used `os.Lstat` and no directory
 test (see **Consult**). The tracked tree has one `go.mod`, at the root,
-so the rule drops nothing git tracks. It costs one `Lstat` per directory,
+so the rule drops nothing git tracks. It costs one `Stat` per directory,
 about 85 of them. The `.`-directory rule is still not borrowed, for #993's
 `.github/` reason. **Not done here**: the hash-cost and flac-handle walks
 still read the worktrees, as #993 recorded. Nothing in this change makes
@@ -11763,3 +11763,14 @@ checked in the tree or the Go source first.
   did" rule under **Build, CI, and test discipline**, which the helper for
   the other eight controls enforced and an inline one-off did not.
 - **CodeRabbit** had posted only its placeholder when this was written.
+
+**Round 2, on `73df3576`.** Gemini's fresh pass had no comments. SonarCloud
+closed the S3776 issue (0 open). CodeRabbit's first review came in here,
+with one Minor finding, and it was correct. The scan-cost sentence under
+**Nested checkouts** still said one `Lstat` per directory after the
+consult had moved the code to `os.Stat`. The paragraph above it was
+updated in that change, and the sentence three lines below was not. That
+is the stale-claim-beside-its-code class this log keeps recording, and the
+distinction matters here: `Stat` follows a symlinked `go.mod`, as the go
+tool does. The two remaining mentions of `Lstat` in this entry are the
+first draft's history and are meant.
