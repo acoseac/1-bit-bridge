@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -180,6 +181,87 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 	}
 }
 
+// TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks plants, one per row,
+// a file an editor or a checkout leaves beside the ones this guard scans, and
+// requires the scan to finish as if it were not there.
+//
+// Each row failed while the walk selected files by suffix alone. Emacs locks
+// a file it is editing with `.#<name>` beside it, as a DANGLING symlink where
+// it can and as a REGULAR file holding the lock string where it cannot
+// (always on Windows): the first failed os.ReadFile, the second failed
+// parser.ParseFile. An untracked doc was opened and only then discarded, so
+// one that cannot be opened failed the run. And a test in a file whose name
+// begins with "_" was counted as defined, although the go tool never
+// compiles it, so a docblock citing it passed.
+func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
+	// A lock's contents, as emacs writes them: user@host.pid:boot.
+	const lockData = "someone@host.1:1"
+	rows := []struct {
+		name  string
+		plant func(t *testing.T, root string)
+	}{
+		{"an emacs lock beside a Go file, as a dangling symlink", func(t *testing.T, root string) {
+			if err := os.Symlink(lockData, filepath.Join(root, ".#prod.go")); err != nil {
+				t.Fatalf("symlink: %v", err)
+			}
+		}},
+		{"an emacs lock beside a test file, as a regular file", func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, ".#x_test.go"), []byte(lockData), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a test in a file the go tool ignores", func(t *testing.T, root string) {
+			body := "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n"
+			if err := os.WriteFile(filepath.Join(root, "_parked_test.go"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"an untracked doc that cannot be opened", func(t *testing.T, root string) {
+			if err := os.Symlink("gone.md", filepath.Join(root, "local.md")); err != nil {
+				t.Fatalf("symlink: %v", err)
+			}
+		}},
+		{"an emacs lock beside a tracked doc", func(t *testing.T, root string) {
+			if err := os.Symlink(lockData, filepath.Join(root, ".#notes.md")); err != nil {
+				t.Fatalf("symlink: %v", err)
+			}
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			root := t.TempDir()
+			write := func(name, body string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The same small tree under every row: one real test, one citation
+			// of it from each side, and one citation of the parked test, which
+			// exists only in the row that plants it and never runs in any.
+			write("prod.go", "package x\n\n// Guarded by TestReal and by TestParkedNeverRuns.\nfunc f() {}\n")
+			write("x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestReal(t *testing.T) { _ = t }\n")
+			write("notes.md", "Pinned by TestReal.\n")
+			row.plant(t, root)
+
+			cited, defined, mdCited := scanTestCitationsIn(t, root, map[string]bool{"notes.md": true})
+
+			if !defined["TestReal"] {
+				t.Errorf("the tree's real test was not collected as defined: %v", defined)
+			}
+			if !slices.Contains(cited["TestReal"], "notes.md") || mdCited != 1 {
+				t.Errorf("the tracked doc was not scanned (cited by %v, mdCited = %d) — "+
+					"the markdown half must still read what git tracks", cited["TestReal"], mdCited)
+			}
+			want := []string{"TestParkedNeverRuns  (cited by prod.go)"}
+			if got := missingCitations(cited, defined); !slices.Equal(got, want) {
+				t.Errorf("missingCitations = %q, want %q — a test the go tool never "+
+					"compiles cannot satisfy a citation", got, want)
+			}
+		})
+	}
+}
+
 // citedRe matches a citation: `Test` + an uppercase letter + the rest.
 //
 // The `\b` is what keeps it off `Test`-shaped substrings of larger identifiers
@@ -311,9 +393,17 @@ func isPlanDoc(rel string) bool {
 	return strings.HasPrefix(filepath.ToSlash(rel), "ops/plan-")
 }
 
-// scanTestCitations walks the tree once, collecting names defined in _test.go
-// files and names cited from non-test source AND from the COMMENTS of test
-// files.
+// scanTestCitations is scanTestCitationsIn over the docs git tracks under
+// root: the entry point the whole-tree guard and the fixtures share.
+func scanTestCitations(t *testing.T, root string) (cited map[string][]string, defined map[string]bool, mdCited int) {
+	t.Helper()
+	return scanTestCitationsIn(t, root, trackedMarkdownSet(t, root))
+}
+
+// scanTestCitationsIn walks the tree once, collecting names defined in
+// _test.go files and names cited from non-test source AND from the COMMENTS
+// of test files. trackedMD is trackedMarkdownSet's answer, taken as a
+// parameter so a fixture can pin the markdown half without a git checkout.
 //
 // Test files were skipped entirely at first, and fifteen stale citations sat
 // in their docblocks — a renamed sibling named under its old name, a
@@ -324,11 +414,10 @@ func isPlanDoc(rel string) bool {
 // else — a test file's CODE names tests legitimately, and its string
 // literals can hold anything (a User-Agent value spelled like a test name,
 // say — one does). Gemini on #921 folded the two passes into one.
-func scanTestCitations(t *testing.T, root string) (cited map[string][]string, defined map[string]bool, mdCited int) {
+func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (cited map[string][]string, defined map[string]bool, mdCited int) {
 	t.Helper()
 	cited, defined = map[string][]string{}, map[string]bool{}
 	mdCitations := map[string]bool{}
-	trackedMD := trackedMarkdownSet(t, root)
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
