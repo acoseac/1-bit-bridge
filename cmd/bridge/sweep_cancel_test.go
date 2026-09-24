@@ -164,15 +164,14 @@ func awaitOnePass[T any](t *testing.T, asked <-chan struct{}, snapshot func() (b
 	case <-time.After(5 * time.Second):
 		return false
 	}
-	deadline := time.After(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if running, _, lastEnd, _, _ := snapshot(); !running && !lastEnd.IsZero() {
 			return true
 		}
-		select {
-		case <-deadline:
+		if time.Now().After(deadline) {
 			t.Fatal("the pass started and did not finish within 5s")
-		case <-time.After(time.Millisecond):
 		}
+		time.Sleep(time.Millisecond) // one clock read per poll, not a timer (Gemini, #999)
 	}
 }
