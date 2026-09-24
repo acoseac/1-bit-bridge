@@ -141,8 +141,9 @@ const docVerbCoverageFloor = 0.85
 // alone was added, at 88.1% overall, while the test files' own rate was 84.5%.
 //
 // Each floor sits about five points under what its population measured when
-// it was set: 90.3% for non-test files, 94.9% here. That leaves room for 138
-// test-file openers to go unrecognised, or for 154 new unrecognised ones.
+// it was set: 90.3% for non-test files, 94.9% here (2,720 of 2,866). That
+// leaves room for 140 test-file openers to go unrecognised, or for 156 new
+// unrecognised ones.
 const testDocVerbCoverageFloor = 0.90
 
 // TestNoDocblockNamesAnotherDeclaration.
@@ -195,11 +196,15 @@ const testDocVerbCoverageFloor = 0.90
 // package. An internal test file (package `foo`) is compiled into that
 // package, so it sees those names as well as the test files'. An external
 // `foo_test` file sees only its own package. Test files are consulted first,
-// since an insertion into a test file displaces a test file's doc. The
-// cost of that lookup: 31 test docs open by naming the documented
-// production declaration they test ("loadCLIConfig is …"), and the second
-// condition is all that keeps them quiet. A production doc that is deleted
-// makes its test's prose reportable.
+// since an insertion into a test file displaces a test file's doc.
+//
+// That lookup has a measured cost. 31 test docs open by naming the
+// production declaration they test ("loadCLIConfig is …"), 14 of them with a
+// verb these lists recognise, and the second condition alone keeps those 14
+// quiet: every one names a documented declaration. Delete one of those
+// production docs and its test's prose is reported. The finding is then
+// half right, since the production declaration really has lost its doc, and
+// the fix is to restore that doc, not to move the test's.
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	root := repoRootForCitations(t)
 	type decl struct {

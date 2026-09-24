@@ -10534,3 +10534,162 @@ Controls on the committed tree, `-count=1`, each restored with
 
 NC1b, NC2′ and NC4b are the controls on the controls: each shows that the
 piece of the change it removes is what catches that shape.
+
+## 2026-09-24 — the docblock guard reads test files, against their own verbs and floor (#990)
+
+#989 left `_test.go` files out of `TestNoDocblockNamesAnotherDeclaration` and
+said why: test docs need a verb census of their own, and a directory can
+hold two packages (`foo` and `foo_test`). This entry closes both.
+
+### What the census measured
+
+A scratch tool applied the guard's two structural conditions to every `.go`
+file with the verb left OPEN, under three namespace models: the directory
+alone; directory, package name and test-ness, with an internal test file
+also seeing its package's non-test names; and the same without that last
+rule. Before anything else, it had to reproduce #989's non-test figures
+exactly (4,806 comments, 4,522 subject-first openers, 90.3%), and it did.
+
+- **716 test files, 4,025 doc comments, 2,843 subject-first openers.**
+  `docVerbs` recognised 1,370 of them, **48.2%**, against 90.3% outside
+  test files.
+- **13 open-verb candidates in test files, 11 genuine.** Every one was read
+  in the code. The two false positives are prose: "Same contract on the
+  artist-image twin" (`Same` is a stub's method in another test file) and
+  "ModTime comes off the same stat" (the `FileInfo` method the test is
+  about). "contract" and "comes" never open a subject-first doc anywhere,
+  so no census-derived list can admit either.
+- **The 11 open with pins (5), polls, wires, removes, runs, swaps and
+  slices.** `docVerbs` alone would have seen 4.
+- **The vocabulary is distinct.** "pins" opens 1,033 test docs and 2
+  non-test ones. The twenty words listed below open 1,327 of the test
+  openers (46.7%) and 16 of the non-test ones (0.35%).
+- Adding every word that opens at least k correctly-attached test docs:
+
+| k | words added | coverage |
+|---|---|---|
+| 20 | 5 | 90.3% |
+| 10 | 11 | 93.2% |
+| 7 | 13 | 93.8% |
+| 5 | 19 | 95.0% |
+| 4 | 25 | 95.8% |
+| 3 | 31 | 96.4% |
+| 2 | 48 | 97.6% |
+
+- **Counting both populations together at k = 5 adds 36 words**, 15 of
+  which clear five in neither population alone: issues, mints, produces,
+  collapses, measures, accumulates, closes, collects, fails, launches,
+  registers, says, sets, submits, sweeps.
+- **The tree has one external test file**, `internal/backup/backup_test.go`
+  (package `backup_test`), and it declares no name that `backup` does. The
+  dir-only and dir-plus-package models disagree on no candidate, and no
+  directory mixes non-test package names. The keying is therefore
+  correctness by construction here, and it is controlled on synthetic
+  shapes below.
+- **31 test docs open by naming a non-test declaration**, in every case the
+  production declaration their test is about, and all 31 are documented.
+  14 do it with a listed verb ("loadCLIConfig is", "ScanSubtree carries",
+  "reconcileAlbumTitles rewrites"). The other 17 use a word no list has
+  ("must" in most of them), so they can never be reported.
+- **29 test docs open with a title line** (`// Name.`, as this guard's own
+  doc does), and none is misattached. The opener regex cannot see that
+  shape.
+- **26 names are declared more than once with mixed doc status, as seen
+  from a test scope**, and 19 of them involve a test declaration. Every one
+  is a method, with three exceptions: `raceBuild`, a const in two
+  build-tag-exclusive test files of which one documents it, and the types
+  `Track` and `UpdateInfo`, which share a name with a test fake's method.
+  `record`'s first-seen rule is unchanged. A test scope is consulted before
+  the package's non-test names.
+
+### Decisions
+
+- **A separate, closed list, `testDocVerbs`, of 20 words.** It holds the 18
+  verbs that clear five in the test population (asserts, confirms,
+  exercises, extends, forces, guards, lays, locks, pins, plants, proves,
+  pulls, seeds, spins, stages, stands, synthesises, upserts), plus "swaps"
+  and "slices" by the misattachment arm: each opened one of the 11 and
+  clears five nowhere. "regression" also clears five and is not a verb,
+  since `\b` splits "regression-guards" and "regression-tests" at the
+  hyphen, so it stays out, as "and", "atomically" and "re" did in #989.
+- **Read in test files only, beside `docVerbs`.** Test files document
+  helpers, fakes and fixtures like any other code, which is why `docVerbs`
+  stays in their list. Merging `testDocVerbs` into `docVerbs` would add 16
+  openers (0.35%) to non-test recall and change no non-test finding, but it
+  would turn `docVerbs`' derivation into a blend. Counting the two
+  populations together would admit the 15 words that clear five in neither.
+- **One floor per population.** The non-test floor stays at 85% (reads
+  90.3%). Test files get 90% (reads 94.9%, 2,720 of 2,866), which leaves
+  room for 140 openers to go unrecognised or 156 new unrecognised ones.
+  Measured failure of the blended form: one 85% floor over both passes
+  once "pins" alone is added (88.1% overall) while the test files sit at
+  84.5%.
+- **The existing floors are unchanged.** `nonTestFiles < 100` and the
+  non-test `checked < 500` count what they counted before. The test arm
+  gets its own `testFiles < 100` and `checked < 500`, and each population
+  fails if nothing in it opened with its own subject.
+- **Names are keyed by directory, package name and test-ness.** A non-test
+  file sees the non-test files of its package, which is exactly what it saw
+  before. An internal test file sees its own package's test files first,
+  then the non-test ones. An external `foo_test` file sees only its own
+  package.
+- **The price of "internal tests see the package's names" is recorded, not
+  hidden.** The 14 docs above are kept quiet only by the no-doc condition,
+  the same shielding #989 recorded for `ChunkSize`. If one of those
+  production docs is deleted, the guard reports the test's prose (NC6a).
+  The fix is then to restore the production doc, not to move the test's.
+
+### The moves
+
+11 blocks in 11 files, each moved to its subject byte-for-byte:
+`TestRunGCReverseSweepRemovesOrphanRows` (on the forward-sweep test),
+`TestCollectCandidatesSkipsMatchedAndConsumedRows` (on `candidateFixture`),
+`TestCertExpiryBandsMirrorTheGoWindow` (on `rejectedCertGradingShapes`),
+`TestApiLibraryBrowseProjection_KindOptimize` (on `wireOptimizeTestDeps`),
+`TestUpscaleDelete_kindNarrowsToUpscale` (on `seedMixedKindFixture`),
+`Test_CDS_Browse_BrowseMetadata_RootReturnsRootContainer` (on the pagination
+test), `waitForSweep` (on `sweeperFixture`), `stripJSNoise` (on
+`jsFunctionBody`), `manageControls` (on `loopbackReq`), `extractJSFunction`
+(on `var jsFunctionAnchors`) and `ffmpegLUFS` (on `var ebur128Re`). They
+were verified two ways, as #989's were. Per file, the sequence of
+non-comment lines is unchanged. Across the diff, the removed and added
+comment lines match as a multiset, except for two bare `//` separators that
+would have led the next doc.
+
+### Tests and controls
+
+```
+#989 guard (0869717): 4806 comments / 401 files / 0 misattached (test files not read)
+red-first (ffd80cf):  non-test 4806 / 401 / 0 / 4084 of 4522 (90.3%)
+                      test     4029 / 716 / 11 / 2701 of 2847 (94.9%)
+fixed (bc9e215):      non-test 4806 / 401 / 0 / 4084 of 4522 (90.3%)
+                      test     4039 / 716 / 0 / 2720 of 2866 (94.9%)
+```
+
+Controls on the committed tree, `-count=1`, each restored with
+`git checkout` and checked clean:
+
+| control | mutation | result |
+|---|---|---|
+| NC0 | none | green |
+| NC1a | `TestRunGCReverseSweepRemovesOrphanRows`'s doc re-glued onto the forward-sweep test | red: that one finding |
+| NC1b | NC1a, read by #989's guard | green: passes unseen |
+| NC2a | `manageControls`'s doc re-glued onto `loopbackReq`'s | red: `"manageControls swaps" on "loopbackReq"` |
+| NC2b | NC2a, and "swaps" dropped from `testDocVerbs` | green: passes unseen, and the floor does not move |
+| NC3 | `ffmpegLUFS`'s doc re-glued onto `var ebur128Re` | red: the var shape, in a test file |
+| NC4 | "pins" dropped from `testDocVerbs` | red, on the test floor alone: `1681 of 2866 (58.7%)`, naming pins (1039) |
+| NC5a | `backup_test` redeclares `trimTrailingSlash` undocumented (`backup`'s is documented), and a doc naming it is glued onto a var | red |
+| NC5a′ | NC5a, keyed by directory alone | green: missed, because it resolves to `backup`'s documented one |
+| NC5b | a `backup_test` doc naming `backup`'s undocumented `readManifest`, glued onto a var | green |
+| NC5b′ | NC5b, keyed by directory alone | red: prose reported against a name `backup_test` cannot see |
+| NC6a | `loadCLIConfig`'s production doc deleted | red: `configpath_test.go:140 "loadCLIConfig is"` on its test, the price recorded above |
+| NC6b | NC6a, and an internal test file sees only the test files' names | green |
+
+NC1b, NC2b, NC5a′, NC5b′ and NC6b are the controls on the controls. NC1b
+shows the test-file arm is what catches NC1a. NC2b shows the misattachment
+arm of the criterion earns "swaps". NC5a′ and NC5b′ show the package-name
+key in both directions, a miss and a false positive, on a shape the tree
+does not contain. NC6b shows the non-test lookup is what makes NC6a
+reportable. NC4 shows the floor catches the list being trimmed of its one
+dominant word, even though the detector itself goes blind to every "pins"
+block.

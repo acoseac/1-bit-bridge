@@ -2819,9 +2819,31 @@ its twin.** The top list is older, shorter, and read first.
   naming the words to add. Don't trim the list for tidiness. A grouped
   `const ( … )` doc's subject is every member, but a member counts as
   documented only by its OWN spec doc or line comment, which is what lets a
-  spec doc displaced inside a documented group be caught. Still unseen:
-  `_test.go` files, a doc opening with a name nothing declares, and a
-  subject that has since grown a second doc of its own.
+  spec doc displaced inside a documented group be caught. Still unseen: a
+  doc opening with a name nothing declares, and a subject that has since
+  grown a second doc of its own. (`_test.go` files headed this list until
+  #990.)
+- **…and test files, against their own census and a floor of their own**
+  (#990). The 716 `_test.go` files held eleven more, and #989's list would
+  have seen four of them. A test's doc opens "… pins …": 1,033 of their
+  2,843 subject-first openers, against 2 of the 4,522 elsewhere, so
+  `docVerbs` recognised only 48% of them. `testDocVerbs` is derived by
+  #989's rule over the test files ALONE and read only there, beside
+  `docVerbs`, so non-test files read exactly as #989 measured them. **A
+  coverage floor over two populations is measured per population.** One
+  85% floor over both passed with "pins" alone added (88.1% overall) while
+  the test files sat at 84.5%: the larger population carried the smaller.
+  Names resolve the way the compiler scopes them, keyed by directory,
+  package NAME and test-ness. An external `foo_test` file sees only
+  itself, and an internal test file also sees its package's non-test
+  names. Both directions were negative-controlled on synthetic shapes,
+  since nothing collides across the tree's one external test package. The
+  second rule has a measured price: 14 test docs open by naming the
+  production declaration they test, with a listed verb ("loadCLIConfig is
+  …"), and only the no-doc condition keeps them quiet. Delete one of those
+  production docs and its test's prose is reported; restore the
+  production doc rather than moving the test's. Still unseen: a
+  title-line doc (`// Name.`, 29 in test files, none misattached).
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`
