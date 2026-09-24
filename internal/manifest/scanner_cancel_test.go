@@ -462,6 +462,13 @@ func TestTheWaveformListingStoppedByShutdownReportsNothing(t *testing.T) {
 		closed.listWaveformSidecars(context.Background(), "source_path = ?", "Album/a.flac")
 		mustReportOnce(t, rec, msgListWaveforms)
 	})
+	// Rows closed by a cancellation that is not the pass's own, while the
+	// pass's context is live: a failure as far as the pass can tell.
+	t.Run("rows closed by another context", func(t *testing.T) {
+		rec := loggingtest.Record(t)
+		listWaveformSidecarsQ(context.Background(), closedByCancel{q: s.db}, "source_path = ?", "Album/a.flac")
+		mustReportOnce(t, rec, msgIterWaveforms)
+	})
 }
 
 // TestAnEmptyRootAuditStoppedByShutdownReportsNothing: the full scan audits
@@ -726,7 +733,9 @@ func seedWaveformRow(t *testing.T, s *Store, path string) {
 
 // closedByCancel runs a query, then cancels its context and waits until
 // database/sql has closed the rows in response, so the caller iterates rows
-// the cancel closed part-way. Columns fails once the rows are closed.
+// the cancel closed part-way. Columns fails once the rows are closed. With
+// no cancel, the query runs on a context of its own, which it cancels, so
+// the caller's context stays live.
 type closedByCancel struct {
 	q      rowQueryer
 	cancel context.CancelFunc
@@ -735,11 +744,16 @@ type closedByCancel struct {
 // QueryContext runs the query, cancels, and returns the rows once they are
 // closed.
 func (c closedByCancel) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	cancel := c.cancel
+	if cancel == nil {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
 	rows, err := c.q.QueryContext(ctx, query, args...)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	c.cancel()
+	cancel()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, cerr := rows.Columns(); cerr != nil {
