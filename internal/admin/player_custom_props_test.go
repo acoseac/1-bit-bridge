@@ -91,7 +91,7 @@ func jsSetCustomProperties(t *testing.T) map[string]bool {
 	}
 	set := map[string]bool{}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".js") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".js") || isEditorDetritus(e.Name()) {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(dir, e.Name()))

@@ -26,7 +26,7 @@ func nonTestGoFilesInPackage(t *testing.T) []string {
 	var out []string
 	for _, e := range entries {
 		n := e.Name()
-		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") || goToolIgnores(n) {
 			continue
 		}
 		out = append(out, n)

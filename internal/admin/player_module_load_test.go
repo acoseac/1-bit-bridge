@@ -53,7 +53,7 @@ func TestEveryPlayerModuleLoads(t *testing.T) {
 	}
 	var mods []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".js") {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".js") && !isEditorDetritus(e.Name()) {
 			mods = append(mods, e.Name())
 		}
 	}
@@ -127,7 +127,7 @@ func TestPlayerModuleLoadCatchesATemporalDeadZone(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || isEditorDetritus(e.Name()) {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(src, e.Name()))

@@ -478,6 +478,11 @@ func TestNoHandRolledIndexedAtBump(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
+		// A name beginning with "." or "_" is not the package's source (the
+		// go tool ignores it), and emacs's `.#store.go` lock is one.
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
 		src, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)

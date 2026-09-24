@@ -119,7 +119,7 @@ func jsSourceFiles(t *testing.T) []string {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), ".js") {
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".js") && !isEditorDetritus(d.Name()) {
 			out = append(out, filepath.ToSlash(p))
 		}
 		return nil
