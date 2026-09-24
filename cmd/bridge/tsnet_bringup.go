@@ -79,5 +79,13 @@ func tsnetListen(ctx context.Context, node interface {
 		}
 		return nil, false
 	}
+	if ctx.Err() != nil {
+		// The shutdown began while the listen ran, and the wrapper takes
+		// no context, so the listen could still succeed. The listener is
+		// closed here rather than handed over to be served (CodeRabbit,
+		// #1005).
+		_ = lis.Close()
+		return nil, false
+	}
 	return lis, true
 }
