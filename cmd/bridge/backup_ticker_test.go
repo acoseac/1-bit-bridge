@@ -271,6 +271,16 @@ func TestWithoutCancellationKeepsOnlyWhatFailed(t *testing.T) {
 	if got := withoutCancellation(cancelled, copyFailed); got != copyFailed {
 		t.Errorf("withoutCancellation rebuilt an error it had nothing to take out of: %v", got)
 	}
+	// A lone survivor comes back as itself, not as a join of one, so its
+	// own type still answers a type switch. For PruneContext's shape that
+	// is the very join of failures it collected.
+	errs := errors.Join(removeA, removeB)
+	if got := withoutCancellation(cancelled, errors.Join(errs, context.Canceled)); got != errs {
+		t.Errorf("the one surviving child came back re-wrapped: %#v", got)
+	}
+	if got := withoutCancellation(cancelled, errors.Join(copyFailed, context.Canceled)); got != copyFailed {
+		t.Errorf("the one surviving error came back re-wrapped: %#v", got)
+	}
 }
 
 // contextThatEnded returns a context that is live when ended is nil,

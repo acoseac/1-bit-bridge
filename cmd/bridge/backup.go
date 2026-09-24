@@ -348,7 +348,10 @@ func withoutCancellation(ctx context.Context, err error) error {
 				kept = append(kept, child)
 			}
 		}
-		return errors.Join(kept...)
+		if len(kept) == 1 {
+			return kept[0] // the survivor itself, not a join of one (Gemini, #998)
+		}
+		return errors.Join(kept...) // nil when nothing survived
 	default:
 		return nil // errors.Is matched a leaf: the cancellation itself
 	}
