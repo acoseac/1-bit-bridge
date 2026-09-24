@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
@@ -52,4 +53,18 @@ func tsnetH3Status(ctx context.Context, node interface {
 		return nil, false
 	}
 	return status, true
+}
+
+// tsnetListen opens the tailnet HTTPS listener, and reports whether it did.
+// A listen that failed is reported on stderr, and the LAN listener carries
+// on without the tailnet.
+func tsnetListen(ctx context.Context, node interface {
+	ListenTLS(addr string) (net.Listener, error)
+}, addr string, stderr io.Writer) (net.Listener, bool) {
+	lis, err := node.ListenTLS(addr)
+	if err != nil {
+		fmt.Fprintf(stderr, "tsnet: ListenTLS: %v\n", err)
+		return nil, false
+	}
+	return lis, true
 }

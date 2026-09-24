@@ -5279,9 +5279,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 				}
 			}
 
-			lis, err := tsnetServer.ListenTLS(cfg.ListenAddress)
-			if err != nil {
-				fmt.Fprintf(stderr, "tsnet: ListenTLS: %v\n", err)
+			lis, ok := tsnetListen(ctx, tsnetServer, cfg.ListenAddress, stderr)
+			if !ok {
 				return
 			}
 			// Build a sibling http.Server pointing at the same handler

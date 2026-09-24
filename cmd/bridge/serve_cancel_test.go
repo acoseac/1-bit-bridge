@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -416,6 +417,69 @@ func mustReportOnceServe(t *testing.T, rec *loggingtest.Recorder, msgs ...string
 	}
 }
 
+// TestATsnetListenAfterTheShutdownBeganOpensNothing: the shutdown landed
+// while the goroutine was still bringing the tailnet up (in its HTTP/3
+// status query, say), so no listener is opened and nothing is reported.
+func TestATsnetListenAfterTheShutdownBeganOpensNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	node := &listeningTsnetNode{}
+	var stderr bytes.Buffer
+	if lis, ok := tsnetListen(ctx, node, "127.0.0.1:0", &stderr); ok || lis != nil {
+		t.Fatal("a listen after the shutdown began opened a listener")
+	}
+	if n := node.calls.Load(); n != 0 {
+		t.Errorf("ListenTLS was called %d time(s) after the shutdown began", n)
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("a listen the shutdown got to first was reported: %q", got)
+	}
+}
+
+// TestATsnetListenFailingAsTheShutdownClosesTheNodeReportsNothing: the
+// shutdown begins while ListenTLS runs and closes the node under it. The
+// error that comes back is the node's and carries no cancellation, so it is
+// the context that shows the shutdown caused it.
+func TestATsnetListenFailingAsTheShutdownClosesTheNodeReportsNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	node := &listeningTsnetNode{err: errors.New("tsnet: server closed"), onListen: cancel}
+	var stderr bytes.Buffer
+	if _, ok := tsnetListen(ctx, node, "127.0.0.1:0", &stderr); ok {
+		t.Fatal("a failed listen reported the listener open")
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("a listen the shutdown closed the node under was reported: %q", got)
+	}
+}
+
+// TestATsnetListenThatFailsIsStillReported is the twin: the listen fails on
+// a live context and is reported, as before.
+func TestATsnetListenThatFailsIsStillReported(t *testing.T) {
+	node := &listeningTsnetNode{err: errors.New("listen tcp :443: address already in use")}
+	var stderr bytes.Buffer
+	if _, ok := tsnetListen(context.Background(), node, "127.0.0.1:0", &stderr); ok {
+		t.Fatal("a failed listen reported the listener open")
+	}
+	if got := stderr.String(); !strings.Contains(got, "tsnet: ListenTLS: listen tcp :443: address already in use") {
+		t.Errorf("a failed listen was not reported: %q", got)
+	}
+}
+
+// TestATsnetListenOnALiveContextOpensTheListener: the ordinary case.
+func TestATsnetListenOnALiveContextOpensTheListener(t *testing.T) {
+	node := &listeningTsnetNode{}
+	var stderr bytes.Buffer
+	lis, ok := tsnetListen(context.Background(), node, "127.0.0.1:0", &stderr)
+	if !ok || lis == nil {
+		t.Fatalf("tsnetListen = (%v, %v), want the listener", lis, ok)
+	}
+	_ = lis.Close()
+	if got := stderr.String(); got != "" {
+		t.Errorf("a listen that succeeded reported: %q", got)
+	}
+}
+
 // TestAServeStoppedInItsUpscaleSeedExitsCleanly: the shutdown lands while
 // serve, not yet up, seeds the upscale target on a fresh database. That is
 // a requested stop, so serve exits 0 and reports no failed seed. A boot
@@ -536,4 +600,24 @@ func openMigratedServeDB(t *testing.T, dataDir string) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// listeningTsnetNode is a tsnet node whose ListenTLS counts its calls, runs
+// onListen first (a shutdown landing mid-call), then fails with err, or
+// opens a loopback listener when err is nil.
+type listeningTsnetNode struct {
+	err      error
+	onListen func()
+	calls    atomic.Int32
+}
+
+func (n *listeningTsnetNode) ListenTLS(addr string) (net.Listener, error) {
+	n.calls.Add(1)
+	if n.onListen != nil {
+		n.onListen()
+	}
+	if n.err != nil {
+		return nil, n.err
+	}
+	return net.Listen("tcp", addr)
 }
