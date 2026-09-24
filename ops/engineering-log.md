@@ -12722,3 +12722,35 @@ apply exactly once:
 - **The release strategy was measured, not reasoned.** `ReleaseUntil`'s
   docblock first asserted that a plain hand-off could leave the driver's
   goroutine waiting; the table above is what now stands behind it.
+
+### Review
+
+- **Round 1**, on `34a4e454`. CodeRabbit: "No actionable comments were
+  generated" (covered commit `34a4e454`, merge risk minimal). SonarCloud
+  (gate passed): two findings, both taken. The helper's table held a
+  `context.Context` field (godre:S8242), so each row now names how its
+  context ended. `TestSnapshotStoppedMidVacuumLeavesNothing` was at
+  cognitive complexity 23 of 15 (go:S3776), so its case body and
+  assertions moved into helpers. **Gemini (HIGH)**: a join under a `%w`
+  wrapper holding a genuine failure beside the cancellation was silenced
+  whole. Nothing builds that shape today, but the failure mode was quiet,
+  the wrong direction for a filter. Taken, with a different
+  implementation: a wrapper is quiet only when what it wraps is nothing
+  but the cancellation, and is otherwise reported whole, cancellation text
+  included. The suggested code returned the filtered inner error, which
+  drops the wrapper's context, and compared errors with `==`, which panics
+  at runtime on an uncomparable dynamic type. The type switch now follows
+  `errors.Is`'s own order, `Unwrap() error` before `Unwrap() []error`. No
+  error type in the tree implements both, so that order is not separately
+  pinned.
+
+  Controls on `490b951a`: NC4 to NC7 and NC12 re-run against the new
+  shape, each red on its rows above plus the new wrapped-join rows where
+  they apply; NC10, NC11 and NC13 re-run on the restructured internal/backup
+  test, red as before. Three new:
+
+  | # | mutation | red |
+  |---|---|---|
+  | NC14 | a wrapper is judged whole (the behaviour before this round) | the wrapped-join-holding-a-failure row only |
+  | NC15 | a wrapper returns its filtered inner error (the suggestion's shape) | the same row only |
+  | NC16 | a leaf `errors.Is` matched is kept | every cancelled row, and both "stopped" ticker tests |
