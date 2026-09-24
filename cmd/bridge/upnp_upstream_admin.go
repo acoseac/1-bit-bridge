@@ -288,9 +288,10 @@ func (a *upnpAdminAdapter) ForceRescan(_ context.Context, udn string) error {
 // Lifecycle integration helpers. These are called from the lifecycle's
 // tick loop so the admin surface always reflects the most recent run.
 
-// recordIngest captures one Ingester.Run result into the admin state.
-// Called from runOneIngest (lifecycle); also called by ForceRescan
-// (admin path).
+// recordIngestResult captures one Ingester.Run result into the admin
+// state. Called from runOneIngest (lifecycle). ForceRescan (the admin
+// path) records its run into the same state itself (the adapter's
+// state is this adminState) and does not come through here.
 func (l *upnpUpstreamLifecycle) recordIngestResult(res upnpingest.IngestResult) {
 	if l == nil || l.adminState == nil {
 		return

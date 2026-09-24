@@ -344,7 +344,7 @@ func TestHealthLECertNotAfterEmittedWhenSet(t *testing.T) {
 	}
 }
 
-// TestHealthLECertNotAfterIsRead Live — autocert renews in the
+// TestHealthLECertNotAfterIsReadLive — autocert renews in the
 // background, so the provider must be called per-request (not
 // stamped at WithLECertExpiry time). Drive a mutable counter
 // through the closure; assert the second /v1/health probe sees

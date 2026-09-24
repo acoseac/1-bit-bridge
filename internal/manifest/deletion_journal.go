@@ -62,7 +62,7 @@ const deletionJournalRetention = 180 * 24 * time.Hour
 // safer for clients than a five-digit tombstone list.
 const (
 	deletionJournalMassOpAbsolute = 10_000
-	// deletionJournalMassOpLibraryFraction: >25% of the library.
+	// deletionJournalMassOpLibraryDivisor: >25% of the library.
 	deletionJournalMassOpLibraryDivisor = 4
 )
 

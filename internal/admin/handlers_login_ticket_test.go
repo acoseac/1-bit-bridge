@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// noRedirect keeps the 302 visible so the test can assert on it.
+// noRedirectClient keeps the 302 visible so the test can assert on it.
 func noRedirectClient() *http.Client {
 	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse

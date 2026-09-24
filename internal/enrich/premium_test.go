@@ -33,8 +33,9 @@ func (f *fakeClearableCred) Clear() error {
 	return nil
 }
 
-// jpeg is a tiny valid-enough JPEG-ish blob (SOI marker + payload). The
-// premium fetcher streams bytes verbatim; content is opaque to it.
+// premiumJPEG is a tiny valid-enough JPEG-ish blob (SOI marker +
+// payload). The premium fetcher streams bytes verbatim; content is
+// opaque to it.
 var premiumJPEG = append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte("ATLAS-PREMIUM")...)
 
 func TestAtlasPremiumFetcher_TryCache(t *testing.T) {

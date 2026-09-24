@@ -46,8 +46,8 @@ func TestStatusServiceNotRunning(t *testing.T) {
 	}
 }
 
-// TestStatusJSONFlag pins: --json route gates on the JSON branch
-// (we can't easily exercise a fake admin server here without
+// TestStatusJSONFlagSurfacesNotRunning pins: --json route gates on the
+// JSON branch (we can't easily exercise a fake admin server here without
 // duplicating handlers; the test scope is "the flag is wired and
 // not-running still surfaces").
 func TestStatusJSONFlagSurfacesNotRunning(t *testing.T) {

@@ -36,17 +36,18 @@ func (s *stubHostResolver) LiveHost(_ string) (string, bool) {
 	return s.host, true
 }
 
-// Test_FileHandler_UPnPRoutedTrack_ProxiesUpstreamBytes asserts the
-// new fast-path: a manifest track whose RelativePath has a row in
+// The Test_FileHandler_UPnPRoutedTrack_* tests below assert the
+// fast-path: a manifest track whose RelativePath has a row in
 // `upnp_track_routing` (the upstream MediaServer feature) is proxied
 // through the upnpproxy package instead of being mapped to a
 // filesystem path and 404'ing.
 //
-// This is the regression guard for the bug surfaced by the post-pair-A
-// operator verification of PR #732: iOS casts a 2Go-routed track to a
-// DLNA renderer via the bridge → renderer GETs
+// They are the regression guard for the bug surfaced by the post-pair-A
+// operator verification of acoseac/1-bit#732: iOS casts a 2Go-routed
+// track to a DLNA renderer via the bridge → renderer GETs
 // `/dlna/file/{trackID}` → pre-fix the handler returned 404 → silent
 // decline at the renderer.
+
 // upstreamFixture spins up a stub "2Go" upstream that returns FLAC
 // magic + a few bytes, mirroring how the real 2Go's MiniDLNA serves
 // `/MediaItems/<id>.flac`. Pulled out as a helper so the per-method
@@ -183,11 +184,11 @@ func Test_FileHandler_UPnPRoutedTrack_HEAD(t *testing.T) {
 	}
 }
 
-// Test_FileHandler_UpstreamOffline_503 — when SSDP hasn't discovered
-// the upstream yet (or it went offline), the proxy returns
-// PreStreamError(503, "upnp_server_offline") and the dlna handler
-// surfaces that as plain-text HTTP 503 (renderer sees a real error
-// status, not a silent decline OR a 404 misclassification).
+// Test_FileHandler_UPnPRoutedTrack_UpstreamOffline_Returns503 — when
+// SSDP hasn't discovered the upstream yet (or it went offline), the
+// proxy returns PreStreamError(503, "upnp_server_offline") and the dlna
+// handler surfaces that as plain-text HTTP 503 (renderer sees a real
+// error status, not a silent decline OR a 404 misclassification).
 func Test_FileHandler_UPnPRoutedTrack_UpstreamOffline_Returns503(t *testing.T) {
 	const relPath = "2go/x.flac"
 	lib := newTestLib(TrackInfo{
@@ -255,7 +256,7 @@ func Test_FileHandler_NoRoutingLookup_FallsThroughToFilesystem(t *testing.T) {
 	expectFilesystemServeOK(t, FileHandler(lib, nil, nil, nil), "local", "fLaC local content")
 }
 
-// Test_FileHandler_RoutingWithNilMatch_FallsThroughToFilesystem — the
+// Test_FileHandler_RoutingMissForFilesystemTrack_StillServesLocally — the
 // routing lookup is wired but returns (nil, nil) for the requested
 // path (it's a filesystem track, not an upstream-routed one). The
 // handler must serve from the local filesystem AbsolutePath.
@@ -322,7 +323,7 @@ func Test_FileHandler_RoutingLookupError_OnFilesystemTrack_FallsThrough(t *testi
 	expectFilesystemServeOK(t, FileHandler(lib, routing, proxy, nil), "fs-err", "local-fs-bytes")
 }
 
-// Test_FileHandler_VariantTrailingSegment_BypassesProxy — a request
+// Test_FileHandler_VariantSegment_BypassesUPnPProxy — a request
 // to `/dlna/file/{trackID}/variant-{id}{ext}` MUST NOT be proxied to
 // the upstream even when the track has a routing row, because
 // variants are bridge-minted sidecars by definition. The legacy

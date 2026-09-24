@@ -371,7 +371,7 @@ func TestUserLogfRaceFreeWithAuthURL(t *testing.T) {
 	}
 }
 
-// silenceUnusedImport keeps `errors` from being elided when test
+// This blank reference keeps `errors` from being elided when test
 // imports change. errors.Is is the kind of check we'll want as
 // soon as Status / ListenTLS gain typed errors — currently the
 // stub-shape return `errors.New(...)` strings are matched by

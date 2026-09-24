@@ -27,18 +27,19 @@ func browsePage(didl string, numberReturned, totalMatches int) string {
 	return string(wrapBrowse(didl, numberReturned, totalMatches))
 }
 
-// container builds a <container> snippet.
+// ct builds a <container> snippet.
 func ct(id, parentID, title string) string {
 	return `<container id="` + id + `" parentID="` + parentID + `"><dc:title>` + title + `</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>`
 }
 
-// item builds an <item> snippet with the given fields.
+// itemSpec holds the fields of one <item>, for `it` to render.
 type itemSpec struct {
 	id, parentID, title, artist, album, ext, proto string
 	trackNo                                        int
 	size                                           int64
 }
 
+// it builds an <item> snippet with the given fields.
 func it(s itemSpec) string {
 	ext := s.ext
 	if ext == "" {

@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -235,7 +234,3 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
-
-// smokeBodyReaderCloses keeps io imported for the helper above without a
-// blank import; it is used by the module-load test's sibling helpers.
-var _ = io.Discard

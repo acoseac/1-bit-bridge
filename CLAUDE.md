@@ -2863,9 +2863,9 @@ its twin.** The top list is older, shorter, and read first.
   `const ( … )` doc's subject is every member, but a member counts as
   documented only by its OWN spec doc or line comment, which is what lets a
   spec doc displaced inside a documented group be caught. Still unseen: a
-  doc opening with a name nothing declares, and a subject that has since
-  grown a second doc of its own. (`_test.go` files headed this list until
-  #990.)
+  subject that has since grown a second doc of its own. (`_test.go` files
+  headed this list until #990, and a doc opening with a name nothing
+  declares until #994.)
 - **…and test files, against their own census and a floor of their own**
   (#990). The 716 `_test.go` files held eleven more, and #989's list would
   have seen four of them. A test's doc opens "… pins …": 1,033 of their
@@ -2894,6 +2894,62 @@ its twin.** The top list is older, shorter, and read first.
   emacs `.#name.go` lock is a dangling symlink, and one failed the guard
   with a parse error over a file no build reads. Still unseen: a title-line
   doc (`// Name.`, 29 in test files, none misattached).
+- **…and a doc that opens with a name NOTHING declares** (#994). "Declared
+  in the same package" left that half unread by design, and #989's census
+  had seen three (`expectedTeamID`, `ensurePathExists`, `errITunesNoMatch`).
+  Measured before building anything, the class was 25 wide: one rename the
+  doc did not follow (`routesToForegroundLane`'s said
+  `routesToOptimizeChannel`, which #863 retired) and 24 docs written under a
+  name no commit on main ever declared, six of them import keepers
+  documented as helpers that never existed. **What makes it precise is that
+  an English sentence opens with a capital.** An opener that starts
+  lowercase or has a camelCase hump (`identifierShaped`) can only be a name.
+  A capitalised one-hump word or an all-caps one can be either, and every
+  such opener a listed verb followed was prose, 10 of 10 ("It is",
+  "Removal is", "DST is"). Followed by anything but a listed verb, 26 of 31
+  identifier-shaped openers were prose (JS and CSS names, config keys,
+  brands, "silence …" notes), so the arm reads the verb shape only. **The
+  lookup is the DIRECTORY, not the file's scope and not the module**: an
+  external `foo_test` file's prose names `foo`'s declarations
+  (`LooksLikeSnapshotDir`), while a name only another package declares is
+  still reported, because a doc opens with its own subject. Predeclared
+  names (`nil`, `error`) and a documented function's own parameters count as
+  declared (`namesNothingDeclared`). **A test function's doc is read only
+  for a test-shaped name** (`testFuncName`, go test's rule). It states a
+  premise, and a premise's subject is often a library or a writer: the first
+  test file merged after the census (#991's M4A tests) opened four docs
+  "dhowden does …", "iTunes writes …" and "QuickTime writes …", which
+  failed #994's CI. Brand, tool and unit names ("iOS", "sox", "dBFS") are
+  still identifier-shaped wherever else they open a doc; reword the
+  sentence rather than exempt the word. **On a clean tree an arm counts
+  zero, so the tree cannot show it still works**: with either arm's report
+  deleted, the tree scan PASSED (CodeRabbit, round 2), which is "a helper
+  nothing calls" and had been true of the misattachment arm since #964. The
+  scan is `scanDocblockSubjects(r, root, wholeTree)`, and
+  `TestDocblockScanReportsBothArmsOnAFixture` runs it over a synthetic tree
+  with exact findings for both arms. Table tests pin `identifierShaped` and
+  `namesNothingDeclared` beside it. **An import keeper is dead code,
+  never documentation.** A `var _ = pkg.X` in a file that uses `pkg`
+  elsewhere does nothing, and one that is its import's only use keeps an
+  import nothing needs, because imports are per FILE (one kept `io` in a
+  test file because a helper in another file uses `io.EOF`). Delete it, and
+  the import too when nothing else in the file uses it, unless its doc names
+  a condition not yet met (`internal/tsnet`'s waits for typed errors, which
+  have not landed).
+- **Measure a new detector over sampled HISTORY, not only the tree it was
+  written against** (#994). The undeclared-name arm read 20 of 20 on its
+  census tree and then met four false positives in the first test file
+  merged after it: one tree is one snapshot of the vocabulary. The detector,
+  copied into a standalone program, ran over 18 trees sampled along main's
+  first-parent history (`git archive <sha> | tar -x`, April to September,
+  minutes). It found 29 distinct hits, and the history had already judged
+  most of them: a hit a later commit fixed was real by that fix. That run
+  showed which condition each false positive needed and what each would
+  cost, one real finding. A census of today's tree says what a detector
+  finds now; the history says what it would have found, and how often a
+  shape it has never seen turns up. And merge main before pushing a
+  tree-wide guard: its verdict depends on code the branch did not write,
+  and here that code merged while the census ran.
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing
   with `.#<name>` beside it. Where it can, the lock is a DANGLING symlink.

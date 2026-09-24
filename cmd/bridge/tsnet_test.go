@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -13,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
@@ -393,16 +391,6 @@ tailscale:
 	}
 	return cfgPath
 }
-
-// silenceUnusedImport keeps the admin import alive — admin.TailscaleStatus
-// is the return shape of newTailscaleAdminSource.Status(); the type
-// itself is exercised by the disabled-sentinel tests above.
-var _ = admin.TailscaleStatus{}
-
-// silenceUnusedIO keeps io.EOF imported — the tsnetLogoutCmd helper
-// references io.EOF in its scanner-error path, and tests of that
-// path don't exercise the symbol via the function call alone.
-var _ = io.EOF
 
 // writeMinimalConfigWithAdminAddr is like writeMinimalConfigInDir
 // but overrides the adminAddress — used by the running-instance

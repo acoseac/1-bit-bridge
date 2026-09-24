@@ -264,7 +264,7 @@ func (v voteMap) add(s string) {
 	}
 }
 
-// pickVoted returns the most-voted value; ties break on the
+// pick returns the most-voted value; ties break on the
 // lexicographically smallest so the result never depends on map
 // iteration or arrival order.
 func (v voteMap) pick() string {

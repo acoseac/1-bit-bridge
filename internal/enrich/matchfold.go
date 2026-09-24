@@ -185,8 +185,9 @@ func foldForMatch(s string, stripArticle bool) string {
 	return out
 }
 
-// apostropheLike is every character a tagger might use where a human
-// reads an apostrophe or a quote. All are deleted, never spaced.
+// isApostropheLike reports whether r is one of the characters a tagger
+// might use where a human reads an apostrophe or a quote. All of them are
+// deleted, never spaced.
 func isApostropheLike(r rune) bool {
 	switch r {
 	case '\'', '‘', '’', '‚', '‛', // ' ‘ ’ ‚ ‛

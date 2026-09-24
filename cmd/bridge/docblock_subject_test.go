@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // docVerbs are the words a Go doc comment in this tree puts after the name of
@@ -146,6 +148,92 @@ const docVerbCoverageFloor = 0.85
 // unrecognised ones.
 const testDocVerbCoverageFloor = 0.90
 
+// identifierShaped reports whether a doc comment's opening word can only be
+// an identifier, never the first word of an English sentence. It can if it
+// starts with a lowercase letter or an underscore ("fanout", "jpeg"), or if
+// it has an uppercase letter after its first character and a lowercase letter
+// somewhere ("pickVoted", "StatusCode", "Test_FileHandler_UpstreamOffline_503").
+//
+// An English sentence opens with a capital, so a capitalised word with no
+// other capital ("The", "Snapshot", "Tailscale", "Removal") and an
+// all-capitals one ("DST", "GET", "MP4") are left out: each could be either.
+// On the 2026-09-24 census (#994), every opener of those two shapes that
+// nothing declared and that a recognised verb followed was prose, 10 of 10.
+// Brand names, tool names and units are the known cost: "iOS", "SQLite",
+// "sox" and "dBFS" are identifier-shaped. None opened a doc with a
+// recognised verb on the census tree. The first test file merged after it
+// opened four, all on test functions, which is why namesNothingDeclared reads
+// a test function's doc only for another test's name.
+func identifierShaped(word string) bool {
+	if word == "" {
+		return false
+	}
+	if first := rune(word[0]); unicode.IsLower(first) || first == '_' {
+		return true
+	}
+	return strings.IndexFunc(word, unicode.IsLower) >= 0 &&
+		strings.IndexFunc(word[1:], unicode.IsUpper) >= 0
+}
+
+// testFuncName reports whether name has the shape `go test` gives a test
+// function's name: Test, Benchmark, Fuzz or Example, then nothing or a
+// character that is not a lowercase letter. An uppercase letter, "_" and a
+// digit all qualify ("Test_Foo", "Test1"); "Testing" does not.
+func testFuncName(name string) bool {
+	for _, prefix := range []string{"Test", "Benchmark", "Fuzz", "Example"} {
+		if rest, ok := strings.CutPrefix(name, prefix); ok {
+			return rest == "" || !unicode.IsLower(rune(rest[0]))
+		}
+	}
+	return false
+}
+
+// docSite is where a doc comment sits, as far as namesNothingDeclared needs
+// to know.
+type docSite struct {
+	declaredHere map[string]bool // every top-level name any package in the doc's directory declares
+	params       []string        // a documented function's receiver, type parameter, parameter and result names
+	testFunc     bool            // the doc is a test function's (testFuncName, in a _test.go file)
+}
+
+// namesNothingDeclared reports whether a doc comment's opening word names
+// something nothing declares, where the doc sits.
+//
+// The word must be identifierShaped. No package in the doc's directory may
+// declare it, and it must not be one of Go's predeclared identifiers, which
+// the language itself declares: "nil means …" and "error is …" name
+// something real. Nor may it be one of the documented function's own
+// parameters, which its doc may well discuss first. On a test function's doc
+// only a test function's name is read. That doc states a premise, and a
+// premise's subject is often no Go name at all: the first test file merged
+// after the #994 census opened four with "dhowden does …", "iTunes writes …"
+// and "QuickTime writes …". What such a doc can get wrong in this class is
+// another test's name.
+func namesNothingDeclared(word string, at docSite) bool {
+	if !identifierShaped(word) || at.declaredHere[word] || types.Universe.Lookup(word) != nil ||
+		slices.Contains(at.params, word) {
+		return false
+	}
+	return !at.testFunc || testFuncName(word)
+}
+
+// funcParamNames is every name fn's signature declares: its receiver, type
+// parameters, parameters and results.
+func funcParamNames(fn *ast.FuncDecl) []string {
+	var names []string
+	for _, fl := range []*ast.FieldList{fn.Recv, fn.Type.TypeParams, fn.Type.Params, fn.Type.Results} {
+		if fl == nil {
+			continue
+		}
+		for _, f := range fl.List {
+			for _, id := range f.Names {
+				names = append(names, id.Name)
+			}
+		}
+	}
+	return names
+}
+
 // TestNoDocblockNamesAnotherDeclaration.
 //
 // A doc comment for X glued — no blank line — onto the declaration of a
@@ -208,8 +296,63 @@ const testDocVerbCoverageFloor = 0.90
 // production docs and its test's prose is reported. The finding is then
 // half right, since the production declaration really has lost its doc, and
 // the fix is to restore that doc, not to move the test's.
+//
+// A doc comment that opens with a name nothing declares is reported too
+// (#994). That is the other half of the first condition, and `go doc` then
+// documents a declaration under a name no reader can search for. It comes
+// from a rename the doc did not follow (routesToForegroundLane's doc said
+// "routesToOptimizeChannel", the name #863 retired), from a doc written under
+// a name nothing ever had ("recordIngest", "pickVoted"), and from import
+// keepers documented as helpers that never existed ("ensurePathExists"). The
+// census behind this arm found 25 across the tree. It reads the same opener
+// as the first arm, and namesNothingDeclared decides the rest. The opening
+// word must be identifierShaped, because "It is …", "Removal is …" and
+// "DST is …" open with words nothing declares either. No package in the
+// doc's DIRECTORY may declare it, not merely none its file sees, because an
+// external `foo_test` file's prose names `foo`'s declarations
+// (LooksLikeSnapshotDir, in internal/backup). It must not be predeclared
+// ("nil means …") or one of the documented function's own parameters. A
+// test function's doc is read only for another test's name, because it
+// states a premise whose subject is often no Go name at all. A name only
+// ANOTHER directory declares is still reported: a doc opens with its own
+// subject, and one doc in the tree opens with such a name, by coincidence
+// and without a verb.
+//
+// The test-function condition came from the first code merged after the
+// census, whose test docs opened "dhowden does …" (twice), "iTunes writes …"
+// and "QuickTime writes …". The parameter condition came from main's history:
+// runSmartPlaylistRegenerator's doc once opened "analysisActive is read LIVE
+// per run", about the parameter of that name. Measured over 18 trees sampled
+// along that history, the arm as it now stands finds 27 distinct docs, and
+// all 27 named nothing that exists. The two conditions cost one, a test's
+// own name without its Test prefix:
+// "JobSpecVariantID_OptimizeKind locks …". On the unfixed tree it reported
+// 19. The other five real ones follow the name with a dash, a colon or a
+// stray word, which neither arm reads:
+// "Test_FileHandler_UpstreamOffline_503 — …".
+//
+// On a clean tree neither arm reports anything, so the tree cannot show
+// that either one still can. TestDocblockScanReportsBothArmsOnAFixture runs
+// the same scan over a synthetic tree with known findings for that reason.
 func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
-	root := repoRootForCitations(t)
+	scanDocblockSubjects(t, repoRootForCitations(t), true)
+}
+
+// docScanReporter is the part of *testing.T that scanDocblockSubjects
+// reports through, so a test can run the scan over a fixture tree and read
+// its findings instead of failing on them.
+type docScanReporter interface {
+	Errorf(format string, args ...any)
+	Fatalf(format string, args ...any)
+	Logf(format string, args ...any)
+}
+
+// scanDocblockSubjects is TestNoDocblockNamesAnotherDeclaration's scan of the
+// tree under root, with both arms, reported through r. It returns how many
+// docs each arm reported. wholeTree holds the scan to the floors that prove
+// it reached this repo's whole tree (file and doc counts, the verb coverage
+// floors); a fixture tree has none of those to meet.
+func scanDocblockSubjects(r docScanReporter, root string, wholeTree bool) (misattached, undeclared int) {
 	type decl struct {
 		file   string
 		line   int
@@ -223,6 +366,8 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	}
 	// scope -> ident -> where it is declared
 	declared := map[scope]map[string]decl{}
+	// dir -> every ident any of its packages declares, test files included
+	declaredInDir := map[string]map[string]bool{}
 	var files []string
 	nonTestFiles, testFiles := 0, 0
 
@@ -231,7 +376,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			fset := token.NewFileSet()
 			f, err := parser.ParseFile(fset, p, nil, parser.ParseComments)
 			if err != nil {
-				t.Fatalf("parse %s: %v", p, err)
+				r.Fatalf("parse %s: %v", p, err)
 			}
 			fn(p, scope{filepath.Dir(p), f.Name.Name, strings.HasSuffix(p, "_test.go")}, f, fset)
 		}
@@ -255,13 +400,12 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			}
 			return nil
 		}
-		// A file the go tool ignores is skipped too: a name beginning with
-		// "." or "_" (`go help packages`). Editors create such files in
-		// place — emacs's `.#name.go` lock is a dangling symlink — and
-		// parsing one failed this guard over a file no build reads
-		// (Gemini consult on #990).
-		if name := d.Name(); !strings.HasSuffix(name, ".go") ||
-			strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+		// A file the go tool ignores is skipped too (goToolIgnores: a name
+		// beginning with "." or "_"). Editors create such files in place —
+		// emacs's `.#name.go` lock is a dangling symlink — and parsing one
+		// failed this guard over a file no build reads (Gemini consult on
+		// #990; the rule became goToolIgnores in #993).
+		if name := d.Name(); !strings.HasSuffix(name, ".go") || goToolIgnores(name) {
 			return nil
 		}
 		files = append(files, path)
@@ -272,13 +416,13 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		r.Fatalf("%v", err)
 	}
-	if nonTestFiles < 100 {
-		t.Fatalf("walked %d non-test .go files, want >=100 — the scan is not seeing the tree", nonTestFiles)
+	if wholeTree && nonTestFiles < 100 {
+		r.Fatalf("walked %d non-test .go files, want >=100 — the scan is not seeing the tree", nonTestFiles)
 	}
-	if testFiles < 100 {
-		t.Fatalf("walked %d _test.go files, want >=100 — the scan is not seeing the tests", testFiles)
+	if wholeTree && testFiles < 100 {
+		r.Fatalf("walked %d _test.go files, want >=100 — the scan is not seeing the tests", testFiles)
 	}
 
 	record := func(sc scope, name, file string, line int, hasDoc bool) {
@@ -286,6 +430,10 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		if name == "_" {
 			return
 		}
+		if declaredInDir[sc.dir] == nil {
+			declaredInDir[sc.dir] = map[string]bool{}
+		}
+		declaredInDir[sc.dir][name] = true
 		m := declared[sc]
 		if m == nil {
 			m = map[string]decl{}
@@ -343,6 +491,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		extend                   string // the list a missing verb belongs in
 		floor                    float64
 		checked, found           int
+		undeclared               int // docs opening with a name nothing declares
 		subjectFirst, recognised int
 		unrecognised             map[string]int
 	}
@@ -352,7 +501,8 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 	test := &population{name: "test", files: testFiles, opener: testDocOpener,
 		recognises: "docVerbs and testDocVerbs recognise", extend: "testDocVerbs", floor: testDocVerbCoverageFloor,
 		unrecognised: map[string]int{}}
-	inspect := func(path string, sc scope, subject string, names []string, doc *ast.CommentGroup, fset *token.FileSet) {
+	inspect := func(path string, sc scope, subject string, names []string, doc *ast.CommentGroup, fset *token.FileSet,
+		params []string, testFunc bool) {
 		if doc == nil {
 			return
 		}
@@ -375,11 +525,25 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			return
 		}
 		other, ok := lookup(sc, m[1])
-		if !ok || other.hasDoc {
+		if !ok {
+			if namesNothingDeclared(m[1], docSite{declaredInDir[sc.dir], params, testFunc}) {
+				p.undeclared++
+				dir, _ := filepath.Rel(root, sc.dir)
+				r.Errorf("%s:%d — this doc comment opens %q, but no package in %s declares %s, so it "+
+					"documents %s under a name that does not exist here. Open it with the name of what "+
+					"it documents, or delete it if what it describes is gone. That holds when %s names "+
+					"something real elsewhere (another package's declaration, a tool, a product): a doc "+
+					"opens with its own subject.",
+					path, fset.Position(doc.Pos()).Line, m[1]+" "+m[2], filepath.ToSlash(dir), m[1],
+					subject, m[1])
+			}
+			return
+		}
+		if other.hasDoc {
 			return
 		}
 		p.found++
-		t.Errorf("%s:%d — this doc comment opens %q but is attached to %s, so it "+
+		r.Errorf("%s:%d — this doc comment opens %q but is attached to %s, so it "+
 			"documents that instead, and %s at %s:%d has no doc of its own. "+
 			"Move the block to its subject, or separate the two with a blank line.",
 			path, fset.Position(doc.Pos()).Line, m[1]+" "+m[2], subject,
@@ -389,7 +553,8 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 		for _, d := range f.Decls {
 			switch n := d.(type) {
 			case *ast.FuncDecl:
-				inspect(path, sc, fmt.Sprintf("%q", n.Name.Name), []string{n.Name.Name}, n.Doc, fset)
+				inspect(path, sc, fmt.Sprintf("%q", n.Name.Name), []string{n.Name.Name}, n.Doc, fset,
+					funcParamNames(n), sc.test && n.Recv == nil && testFuncName(n.Name.Name))
 			case *ast.GenDecl:
 				var all []string
 				for _, sp := range n.Specs {
@@ -399,7 +564,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 						if doc == nil {
 							doc = n.Doc
 						}
-						inspect(path, sc, fmt.Sprintf("%q", s.Name.Name), []string{s.Name.Name}, doc, fset)
+						inspect(path, sc, fmt.Sprintf("%q", s.Name.Name), []string{s.Name.Name}, doc, fset, nil, false)
 					case *ast.ValueSpec:
 						var names []string
 						for _, id := range s.Names {
@@ -408,7 +573,7 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 						all = append(all, names...)
 						// Only a spec inside `( … )` can carry a doc of its own;
 						// an ungrouped declaration's doc is the GenDecl's.
-						inspect(path, sc, fmt.Sprintf("%s %s", n.Tok, strings.Join(names, ", ")), names, s.Doc, fset)
+						inspect(path, sc, fmt.Sprintf("%s %s", n.Tok, strings.Join(names, ", ")), names, s.Doc, fset, nil, false)
 					}
 				}
 				if n.Tok == token.CONST || n.Tok == token.VAR {
@@ -416,18 +581,25 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 					if n.Lparen.IsValid() {
 						subject = fmt.Sprintf("the %s block (%s)", n.Tok, strings.Join(all, ", "))
 					}
-					inspect(path, sc, subject, all, n.Doc, fset)
+					inspect(path, sc, subject, all, n.Doc, fset, nil, false)
 				}
 			}
 		}
 	})
 	for _, p := range []*population{nonTest, test} {
+		misattached += p.found
+		undeclared += p.undeclared
+		if !wholeTree {
+			r.Logf("%s files: inspected %d doc comments across %d files; %d misattached; "+
+				"%d opening with a name nothing declares", p.name, p.checked, p.files, p.found, p.undeclared)
+			continue
+		}
 		if p.checked < 500 {
-			t.Fatalf("inspected %d doc comments in %s files, want >=500 — the scan is not reaching them, "+
+			r.Fatalf("inspected %d doc comments in %s files, want >=500 — the scan is not reaching them, "+
 				"so this guard would pass no matter what", p.checked, p.name)
 		}
 		if p.subjectFirst == 0 {
-			t.Fatalf("no doc comment in a %s file opened with its own subject — the coverage floor measured nothing", p.name)
+			r.Fatalf("no doc comment in a %s file opened with its own subject — the coverage floor measured nothing", p.name)
 		}
 		coverage := float64(p.recognised) / float64(p.subjectFirst)
 		if coverage < p.floor {
@@ -445,14 +617,215 @@ func TestNoDocblockNamesAnotherDeclaration(t *testing.T) {
 			for _, w := range words[:min(len(words), 15)] {
 				top = append(top, fmt.Sprintf("%s (%d)", w, p.unrecognised[w]))
 			}
-			t.Errorf("%s %d of %d subject-first doc openers in %s files (%.1f%%), below the "+
+			r.Errorf("%s %d of %d subject-first doc openers in %s files (%.1f%%), below the "+
 				"%.0f%% floor: a misattached block opening with any other word passes unseen. "+
 				"Most common unrecognised: %s. Add the verbs among them to %s.",
 				p.recognises, p.recognised, p.subjectFirst, p.name, 100*coverage, 100*p.floor,
 				strings.Join(top, ", "), p.extend)
 		}
-		t.Logf("%s files: inspected %d doc comments across %d files; %d misattached; "+
-			"%s %d of %d subject-first openers (%.1f%%)",
-			p.name, p.checked, p.files, p.found, p.recognises, p.recognised, p.subjectFirst, 100*coverage)
+		r.Logf("%s files: inspected %d doc comments across %d files; %d misattached; "+
+			"%d opening with a name nothing declares; %s %d of %d subject-first openers (%.1f%%)",
+			p.name, p.checked, p.files, p.found, p.undeclared, p.recognises, p.recognised,
+			p.subjectFirst, 100*coverage)
+	}
+	return misattached, undeclared
+}
+
+// TestIdentifierShapedTellsNamesFromSentenceWords pins identifierShaped's
+// verdict on the words the census sorted. The two shapes that can open an
+// English sentence stay out: a capitalised word with no other capital, and
+// an all-capitals one. Brand names, tool names and units are
+// identifier-shaped, which is the cost its docblock names.
+func TestIdentifierShapedTellsNamesFromSentenceWords(t *testing.T) {
+	for _, c := range []struct {
+		word string
+		want bool
+	}{
+		// Stale names the census found, both shapes.
+		{"expectedTeamID", true},
+		{"pickVoted", true},
+		{"StatusCode", true},
+		{"TestStatusJSONFlag", true},
+		{"Test_FileHandler_UpstreamOffline_503", true},
+		{"JobSpecVariantID_OptimizeKind", true},
+		{"fanout", true},
+		{"jpeg", true},
+		{"_leading", true},
+		// Words that can open an English sentence: the census's prose
+		// openers, and the examples the rule was first stated with.
+		{"The", false},
+		{"Snapshot", false},
+		{"Tailscale", false},
+		{"Removal", false},
+		{"It", false},
+		{"DST", false},
+		{"GET", false},
+		{"MP4", false},
+		{"A", false},
+		{"", false},
+		// Brand names, tool names and units: identifier-shaped. Where they
+		// open a test function's doc, namesNothingDeclared lets them be.
+		{"iOS", true},
+		{"SQLite", true},
+		{"UPnP", true},
+		{"sox", true},
+		{"dBFS", true},
+	} {
+		if got := identifierShaped(c.word); got != c.want {
+			t.Errorf("identifierShaped(%q) = %v, want %v", c.word, got, c.want)
+		}
+	}
+}
+
+// TestNamesNothingDeclaredAsksWhereTheDocSits pins what namesNothingDeclared
+// adds to identifierShaped, against synthetic sites. The tree cannot pin it:
+// on a clean tree the arm has nothing to report, and the only openers it
+// holds today that each condition silences (LooksLikeSnapshotDir, the M4A
+// premises) last only as long as their docs' wording.
+func TestNamesNothingDeclaredAsksWhereTheDocSits(t *testing.T) {
+	here := map[string]bool{"pick": true, "LooksLikeSnapshotDir": true}
+	plain := docSite{declaredHere: here}
+	fn := docSite{declaredHere: here, params: []string{"analysisActive", "s"}}
+	test := docSite{declaredHere: here, testFunc: true}
+	for _, c := range []struct {
+		word string
+		at   docSite
+		want bool
+	}{
+		{"pickVoted", plain, true},
+		{"fanout", plain, true},
+		// Declared by a package in the directory.
+		{"pick", plain, false},
+		{"LooksLikeSnapshotDir", plain, false},
+		// Declared by the language.
+		{"nil", plain, false},
+		{"iota", plain, false},
+		{"error", plain, false},
+		{"len", plain, false},
+		{"any", plain, false},
+		// Declared by the documented function's own signature.
+		{"analysisActive", fn, false},
+		{"analysisActive", plain, true},
+		// On a test function's doc, only a test function's name.
+		{"dhowden", test, false},
+		{"iTunes", test, false},
+		{"QuickTime", test, false},
+		{"TestStatusJSONFlag", test, true},
+		{"Test_FileHandler_UpstreamOffline_503", test, true},
+		{"BenchmarkScan", test, true},
+		{"Testing", test, false},
+		{"dhowden", plain, true},
+		// Not identifier-shaped, wherever it sits.
+		{"It", plain, false},
+	} {
+		if got := namesNothingDeclared(c.word, c.at); got != c.want {
+			t.Errorf("namesNothingDeclared(%q, %+v) = %v, want %v", c.word, c.at, got, c.want)
+		}
+	}
+}
+
+// docScanRecorder collects what scanDocblockSubjects reports as errors, for a
+// test that expects findings. Anything fatal still fails the test.
+type docScanRecorder struct {
+	t      *testing.T
+	errors []string
+}
+
+func (r *docScanRecorder) Errorf(format string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprintf(format, args...))
+}
+
+func (r *docScanRecorder) Fatalf(format string, args ...any) {
+	r.t.Helper()
+	r.t.Fatalf(format, args...)
+}
+
+func (r *docScanRecorder) Logf(format string, args ...any) { r.t.Logf(format, args...) }
+
+// TestDocblockScanReportsBothArmsOnAFixture runs the scan over a synthetic
+// tree whose findings are known, so the wiring of both arms is pinned. On
+// this repo's own tree a clean scan reports nothing, so a change that lost
+// either arm's report, or passed an arm the wrong context, would pass there
+// unseen (CodeRabbit on #994). Each quiet case in the fixture is one the arm
+// must leave alone and the reason it must.
+func TestDocblockScanReportsBothArmsOnAFixture(t *testing.T) {
+	root := t.TempDir()
+	for rel, src := range map[string]string{
+		"pkg/pkg.go": `package pkg
+
+// pickVoted returns the most-voted value.
+func pick() string { return "" }
+
+func helper() {}
+
+// helper builds the fixture.
+func other() {}
+
+// limit bounds v.
+func clamp(v, limit int) int { return v }
+
+// nil means no limit.
+var capacity = 0
+
+// Removal is what keeps the case clean.
+func remove() {}
+
+// fanout writes the event.
+func fanoutLocked() {}
+
+// DST is a capability of its own.
+const dstFlag = 1
+`,
+		"pkg/pkg_test.go": `package pkg
+
+import "testing"
+
+// dhowden does not read the atom.
+func TestPick(t *testing.T) {}
+
+// TestGone pins the clamp.
+func TestClamp(t *testing.T) {}
+
+// jpegBlob is a tiny blob.
+func newFixture() {}
+`,
+		"pkg/ext_test.go": `package pkg_test
+
+// pick returns the value the package elects.
+func useIt() {}
+`,
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := &docScanRecorder{t: t}
+	misattached, undeclared := scanDocblockSubjects(rec, root, false)
+	// Reported: stale names on functions (camelCase and all-lowercase),
+	// another test's name on a test, and a stale name on a test file's
+	// helper; and one misattached doc. Left alone: the function's own
+	// parameter (limit), a predeclared name (nil), a sentence (Removal), an
+	// acronym (DST), a test's premise (dhowden), and an external test naming
+	// its package's declaration (pick).
+	want := []string{`opens "pickVoted returns"`, `opens "fanout writes"`, `opens "TestGone pins"`,
+		`opens "jpegBlob is"`, `opens "helper builds" but is attached to "other"`}
+	if misattached != 1 || undeclared != 4 || len(rec.errors) != len(want) {
+		t.Errorf("got %d misattached and %d undeclared in %d reports, want 1, 4 and %d:\n%s",
+			misattached, undeclared, len(rec.errors), len(want), strings.Join(rec.errors, "\n"))
+	}
+	for _, w := range want {
+		n := 0
+		for _, e := range rec.errors {
+			if strings.Contains(e, w) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%d reports contain %s, want exactly one:\n%s", n, w, strings.Join(rec.errors, "\n"))
+		}
 	}
 }
