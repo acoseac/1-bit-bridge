@@ -2278,6 +2278,35 @@ mentions across the four `ops/audit-*.md` files.
   `TestACompletedTailscaleCallIsAppliedAfterACancel` pins it. Joining a
   writer makes its cancelled exit path run before shutdown completes, so
   check what that path reports and what it changes. (#997)
+- **…and the backup ticker applies the rule by asking the ERROR too,
+  because one error can carry both** (#998). A shutdown during the startup
+  snapshot (a `VACUUM INTO`, long on a big library) printed `backup
+  (startup): snapshot failed: vacuum manifest db: context canceled`, and one
+  during the prune printed two more lines about a pass that failed at
+  nothing. `withoutCancellation(ctx, err)` returns err with ctx's
+  cancellation taken out, and the ticker reports what is left. Both of its
+  conditions are load-bearing: ctx is CANCELLED (a deadline is a failure),
+  and the error IS that cancellation (a snapshot's file copies do not watch
+  ctx, so an I/O error that lands during a cancelled pass is a failure). An
+  `errors.Join` is filtered child by child: `PruneContext` and its orphan
+  sweep keep going past a directory they cannot remove or read, then join
+  those failures with `ctx.Err()` when a later cancel stops them, so
+  `errors.Is` on the whole error would silence the failures with the cancel.
+  A join under a `%w` WRAPPER is reported whole, cancellation text
+  included, since the wrapper cannot be rebuilt around what is left without
+  losing its context (Gemini's suggestion returned the filtered inner error
+  and compared errors with `==`, a runtime panic on an uncomparable type).
+  A stopped snapshot leaves nothing to report: `Snapshot` removes its
+  partial directory, destination file included
+  (`TestSnapshotStoppedMidVacuumLeavesNothing` cancels INSIDE the running
+  VACUUM), so the backups directory is as the pass found it. The run state
+  keeps `sweepFinished(nil)`, the recorder's "no new counts" for a failed
+  pass and a stopped one alike, because `running` must clear. **This does
+  not close the class**: a survey the same day found about 33 more log sites
+  that report a shutdown cancel as a failure (scanner batch writes,
+  enricher, updater poll, harvest `tick_error`, fingerprint and smart-mix
+  sweeps, integrity watchers, UPnP ingest, tsnet). They are a follow-up,
+  and this rule does not cover them.
 - **Anything reading Go source in a test must normalize CRLF first.** No
   `.gitattributes` pins `eol`, so a Windows checkout has CRLF and every
   `\n`-literal scan finds nothing. One such guard failed loudly on the Windows
@@ -3098,6 +3127,25 @@ its twin.** The top list is older, shorter, and read first.
   With neither, oversubscription is the fallback: build with `go test -c
   -race`, then run about three processes per core. Idle stress passing is not
   evidence the window is absent. (#987)
+- **A running SQLite statement is parked from INSIDE it, by a Go collation**
+  (#998). `VACUUM` copies an index with an append fast path that compares
+  no keys, except an index with a non-BINARY collation, which it rebuilds by
+  seeks (SQLite's `insert.c`, `xferOptimization`). `internal/backup/backuptest`
+  registers such a collation in Go, so a VACUUM of a database `WriteSource`
+  wrote calls back mid-copy with its destination file already created, and
+  `ParkVacuum` holds it there. A cancel then reaches the statement only
+  through modernc's own `interruptOnDone` goroutine, which has to be
+  scheduled before the copy finishes, so `ReleaseUntil` lets comparisons go
+  one at a time after a `runtime.Gosched`. Measured over 200 runs under
+  `-race`: letting them all go at once let the copy finish before the
+  cancel landed in 2 runs at `GOMAXPROCS=1`; one at a time without the
+  yield, the cancel landed as late as the last comparison. Two traps met on
+  the way. A held LOCK is not a park inside the statement: a VACUUM of a
+  DELETE-mode source behind `BEGIN EXCLUSIVE` waits in `Ping`'s `select 1`,
+  before the VACUUM starts, and a cancel there comes back as `database is
+  locked` after the busy timeout, not as `context.Canceled`. And modernc's
+  `Driver.Open` reads its collation and hook lists without a lock, so
+  register in `init`.
 
 - **A test that never touches the wiring proves nothing.** Three shapes, all of
   which shipped a dead feature with a green suite: a helper nothing calls, a

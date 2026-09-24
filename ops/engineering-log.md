@@ -12487,7 +12487,8 @@ records, the snapshot runs inline in `runSweepLoop`'s sweep, and
 synchronously in its handler. It has the neighbouring shape instead: a
 shutdown during it logs `backup (startup): snapshot failed: vacuum
 manifest db: context canceled`, seen in these tests' stderr, which is the
-cancelled-is-not-failed rule one subsystem over. Left for its own change.
+cancelled-is-not-failed rule one subsystem over. Left for its own change,
+which it got in #998 (the next entry).
 
 Every other `go` statement in runServe was read. The unjoined ones are the
 HTTP servers (shut down explicitly), the catalog invalidator (an epoch bump
@@ -12550,3 +12551,247 @@ before the PR:
   ERROR the cancel caused is quiet. `TestACompletedTailscaleCallIsAppliedAfterACancel`
   pins the decision in both directions (NC12, NC13).
 
+
+## 2026-09-24 — a backup pass stopped by shutdown reports nothing (#998)
+
+#997's entry left this for its own change. A boot test that cancels
+`runServe` shortly after start got `backup (startup): snapshot failed:
+vacuum manifest db: context canceled` on stderr. `runBackupTicker` is
+`bgWriters`-joined, so nothing wrote after `runServe` returned. The
+defect was the report: a shutdown during the startup snapshot (a `VACUUM
+INTO`, long on a big library) put a failure in the journal.
+
+### What was measured
+
+- **What reaches the ticker's three report sites on a cancel.** The
+  snapshot: `vacuum manifest db: context canceled`, the failure line
+  above. The prune, cancelled after a snapshot that landed: two lines,
+  `orphan sweep reported a problem (prune unaffected): context canceled`
+  and `prune failed: context canceled`. `reapOrphans` checks ctx at the
+  top of each directory and `PruneContext` checks it again before
+  listing, so a cancelled prune produces both.
+- **A cancel inside a running VACUUM returns the cancellation.** On a
+  134 MB WAL source (uncancelled `VACUUM INTO`: 502 ms), a cancel 0 to
+  26 ms after the destination appeared came back as `context canceled` in
+  6 of 6 runs, 64 µs to 3.2 ms after the cancel. It leaves the
+  destination file (0 bytes in every run) for `vacuumInto` and
+  `Snapshot`'s deferred `RemoveAll` to remove. The mechanism is modernc
+  v1.59.0's `stmt.exec`: when its `interruptOnDone` goroutine has fired,
+  the deferred check replaces whatever the step returned with
+  `ctx.Err()`.
+- **A held lock does not park the statement.** A DELETE-mode source
+  behind `BEGIN EXCLUSIVE` parks the snapshot's connection in `Ping`
+  (`select 1` still takes the shared lock), before the VACUUM starts, and
+  the destination never appears. Cancelled and then released, it returns
+  `context canceled` from the exec's pre-check. Cancelled and NOT
+  released, it returns `database is locked (5) (SQLITE_BUSY)` after the
+  5 s busy timeout, because the wait is inside prepare and
+  `interruptOnDone` does not cover prepare. The ticker reports that as a
+  failure, and it is one: the database really was locked for the whole
+  timeout. The production database is WAL, where a reader does not wait
+  on a writer.
+- **A Go collation does park it.** With an index `COLLATE`d under a
+  registered Go function, the VACUUM called the collation mid-copy with
+  its destination file already created. Held there, cancelled, then let
+  go: `context canceled` after 1 comparison. Let go without the cancel: a
+  normal finish after 2 (a 3-row probe). SQLite's `xferOptimization`
+  explains why: VACUUM copies an index with an append fast path that
+  compares nothing, except an index with a non-BINARY collation, which it
+  rebuilds by seeks.
+- **How the park is released, 200 cancelled snapshots each under
+  `-race`** (32 rows, 31 comparisons in a full copy):
+
+  | release | `GOMAXPROCS=1` | default |
+  |---|---|---|
+  | as shipped: one at a time, `Gosched` first | 0 failures; stopped after 1 in 197, 2 in 3 | 0 failures; 1 in 199, 2 in 1 |
+  | one at a time, no yield | 0 failures; as late as the 5th | 0 failures; once the 17th, once the 31st (the last) |
+  | all at once | **2 failures**: the copy finished before the cancel reached it | 0 failures |
+
+- **What the run state shows.** `sweepFinished(nil)` is documented as
+  "failed or cancelled", and every sweeper passes nil on a cancel. For
+  backups `jobRunClosure` drops `last`, the card renders only
+  `run.nextDueAt` plus `lastBackupAt` (from the snapshot listing), and the
+  recorder is created per `runServe` and discarded with it. A failed pass
+  and a stopped one are indistinguishable there, and nothing needed to
+  change.
+
+### Decisions
+
+- **Report nothing, not a neutral "stopped" line.** A stopped snapshot
+  changes nothing: `Snapshot` removes its partial directory (pinned mid-
+  VACUUM below), so the backups directory is as the pass found it and
+  the next pass decides from the same state. The shutdown is already in the journal (`Shutting down...`).
+  And #997's `passCancelled` logs nothing, so one rule keeps one
+  behaviour.
+- **Ask the error, not only the context.** `passCancelled` consults ctx
+  alone because exec's error on a cancel IS the cancel. Here it need not
+  be: `Snapshot`'s file copies and manifest write do not watch ctx, so an
+  EIO arriving as shutdown begins is a genuine failure in a cancelled
+  pass. `withoutCancellation` requires both: ctx cancelled (a deadline is
+  a failure), and the error wraps `context.Canceled`.
+- **Filter a join child by child.** `PruneContext`'s delete loop and
+  `reapOrphans` keep going past a directory they cannot remove or read,
+  and when a cancel stops them they return
+  `errors.Join(errors.Join(errs...), ctx.Err())`. An `errors.Is` of the
+  whole would silence those genuine failures along with the cancel. A
+  single chain is judged whole, which is exact for every error these
+  functions return: neither wraps a join. An error with no cancellation
+  in it comes back unchanged, the same value, so its message is
+  byte-identical to before.
+- **A prune stopped part-way still prints "pruned N".** The snapshots it
+  removed are gone, and that is a fact about this pass. A genuine failure
+  in the same pass still returns before that line, as it always did.
+- **The admin `POST /api/backups` handler is left.** It logs nothing
+  (`writeError` writes JSON, and the console has no request logging). Its
+  request context derives from the admin server's `BaseContext`, so a
+  shutdown mid-snapshot answers a still-connected requester 500
+  `snapshot-failed`, which is true: no snapshot was written. A shutdown
+  after the snapshot landed answers 200 with `pruneWarning: context
+  canceled`. That is noise, but only to a requester watching the bridge
+  go down.
+- **The park is a shared test-only package**, `internal/backup/backuptest`,
+  for `loggingtest`'s reason: the part that makes it work (the collation
+  rule, and registering in `init` because modernc's `Driver.Open` reads its
+  collation list without a lock) is easy to lose in a copy, and two test
+  binaries need it.
+
+### The class beyond this fix
+
+An Explore survey of every loop `runServe` starts found about 33 more log
+sites where a shutdown cancel arrives as an error and nothing checks for
+it. They include the scanner's batch writes (`upsert batch`, `stamp
+extractor-version batch`), the missing-count and reconciliation passes
+and duplicate stamping, the enricher (`list unenriched`, `mark enriched`,
+`mark skipped`, `release-group lookup`, premium cover fetch and write), the
+updater (`poll`, `auto-install failed`), the harvest client (`tick_error`
+for five legs, `cover_refetch_failed`, booklet GC and fetch,
+`atlaslyrics.stamp_failed`), the fingerprint sweep's `list candidates`,
+`smart-playlist regeneration failed`, the integrity watchers' `AllVariants
+failed` and orphan-sweep `walk aborted`, UPnP ingest's orphan sweep and
+per-server errors, and tsnet's `bring node up`. Four were read in the
+source before this entry was written (`fingerprint_sweeper.go`
+`list candidates`, `updater.go` `poll`, `scanner.go` `upsert batch`, and
+the harvest `handleErr`), and each logs whatever error arrives,
+cancellation included. `runDuplicatesSweeper`, `runRetentionSweeper`, the
+analysis sweeper, the auto-optimize sweeper, the artwork cache sweeper and
+`scanner.RunPeriodic`'s own top-level lines already distinguish a cancel
+(also read in the source; most check `ctx.Err()`, and the artwork sweeper
+treats a deadline as a shutdown too).
+The rest is a follow-up task, deliberately not folded into this change.
+
+### Tests and controls
+
+Red on `5f4e4b4b` (tests and the park, no fix), green on the fix:
+
+| test | pins |
+|---|---|
+| `TestABackupStoppedMidSnapshotReportsNothing` | the ticker's startup snapshot, cancelled INSIDE its VACUUM: nothing on stderr or stdout, no snapshot directory, `running` cleared (red before the fix: the journal line above) |
+| `TestABackupCancelledBeforeItsPruneReportsNothing` (named `…StoppedMidPrune…` until round 3) | held on the "wrote" line and cancelled before the prune: the snapshot is reported and kept, nothing else (red before the fix: the two prune lines) |
+| `TestABackupCancelledMidPruneReportsWhatItDeleted` (added in round 3) | a cancel between the prune's first and second deletion: `pruned 1` is reported, nothing else, and the two later snapshots survive |
+| `TestABackupThatFailsIsStillReported` | on a live context, a manifest that is not a database and an unreadable snapshot manifest are both still reported |
+| `TestWithoutCancellationKeepsOnlyWhatFailed` | the helper's rows: nil; the snapshot's cancel; a prune stopped before and after two failures; a genuine error in a cancelled pass; a deadline; a deadline carrying another context's cancel; another context's cancel while ctx is live |
+| `TestSnapshotStoppedMidVacuumLeavesNothing` (internal/backup) | a cancel inside the VACUUM, with the destination file on disk: `Snapshot` returns `context.Canceled` and leaves nothing; let go without the cancel, a complete snapshot (the control that the park is not the cause) |
+| `TestSnapshotFailureReapsPartialDir` (strengthened) | a pre-cancelled snapshot returns `context.Canceled` itself, not merely an error |
+
+Controls, each against the committed fix with one mutation, asserted to
+apply exactly once:
+
+| # | mutation | red |
+|---|---|---|
+| NC1 | the snapshot site prints the raw error | mid-snapshot test |
+| NC2 | the prune site prints the raw error | pre-prune test |
+| NC3 | the orphan-sweep site prints the raw `ReapErr` | pre-prune test |
+| NC4 | any done ctx is quiet (`ctx.Err() == nil` for the ctx clause) | the deadline-carrying-a-cancel row only |
+| NC5 | a join with a cancel in it is dropped whole | the two-failures row |
+| NC6 | the error is not consulted (`passCancelled`'s shape) | the genuine-error-in-a-cancelled-pass row, and the two-failures row |
+| NC7 | ctx is not consulted | the other-context row only |
+| NC8 | snapshot failures are never printed | the genuine snapshot case |
+| NC9 | orphan-sweep problems are never printed | the genuine orphan-sweep case |
+| NC10 | `Snapshot` wraps the vacuum error with `%v` | mid-snapshot, both internal/backup cancel tests |
+| NC11 | `Snapshot` keeps its partial directory | the same three |
+| NC12 | the join filter keeps every child whole | both join rows, and the pre-prune test |
+| NC13 | the park never parks | every test that waits on it, by its 10 s timeout rather than a hang |
+
+### Process notes
+
+- **NC4 found a hole in the table, not in the code.** Its first run bit
+  nothing. The deadline row's error wraps `DeadlineExceeded`, so the ERROR
+  clause rejects it before the ctx clause is asked, and the claim "only a
+  CANCELLED ctx is quiet" had no row that reached the ctx. The row that
+  does (an expired ctx whose error wraps another context's cancel) went
+  in before the re-run.
+- **The release strategy was measured, not reasoned.** `ReleaseUntil`'s
+  docblock first asserted that a plain hand-off could leave the driver's
+  goroutine waiting; the table above is what now stands behind it.
+
+### Review
+
+- **Round 1**, on `34a4e454`. CodeRabbit: "No actionable comments were
+  generated" (covered commit `34a4e454`, merge risk minimal). SonarCloud
+  (gate passed): two findings, both taken. The helper's table held a
+  `context.Context` field (godre:S8242), so each row now names how its
+  context ended. `TestSnapshotStoppedMidVacuumLeavesNothing` was at
+  cognitive complexity 23 of 15 (go:S3776), so its case body and
+  assertions moved into helpers. **Gemini (HIGH)**: a join under a `%w`
+  wrapper holding a genuine failure beside the cancellation was silenced
+  whole. Nothing builds that shape today, but the failure mode was quiet,
+  the wrong direction for a filter. Taken, with a different
+  implementation: a wrapper is quiet only when what it wraps is nothing
+  but the cancellation, and is otherwise reported whole, cancellation text
+  included. The suggested code returned the filtered inner error, which
+  drops the wrapper's context, and compared errors with `==`, which panics
+  at runtime on an uncomparable dynamic type. The type switch now follows
+  `errors.Is`'s own order, `Unwrap() error` before `Unwrap() []error`. No
+  error type in the tree implements both, so that order is not separately
+  pinned.
+
+  Controls on `490b951a`: NC4 to NC7 and NC12 re-run against the new
+  shape, each red on its rows above plus the new wrapped-join rows where
+  they apply; NC10, NC11 and NC13 re-run on the restructured internal/backup
+  test, red as before. Three new:
+
+  | # | mutation | red |
+  |---|---|---|
+  | NC14 | a wrapper is judged whole (the behaviour before this round) | the wrapped-join-holding-a-failure row only |
+  | NC15 | a wrapper returns its filtered inner error (the suggestion's shape) | the same row only |
+  | NC16 | a leaf `errors.Is` matched is kept | every cancelled row, and both "stopped" ticker tests |
+- **Round 2**, on `efa9523d`. Gemini (medium): a single error left after
+  the join filter came back as `errors.Join` of one. The message was the
+  same, but the survivor's own type no longer answered a type switch, and
+  PruneContext's shape came back re-wrapped rather than as the join of
+  failures it had built. Taken; a lone survivor is now returned as itself,
+  pinned by identity for both shapes (NC17: reverting the shortcut turns
+  exactly those two assertions red). CodeRabbit paused on the included
+  plan limit (72 attempts in 7 days set the allowance at 2 an hour); its
+  on-demand review was free for the next 16 days, and was run on the final
+  head.
+- **Round 3**, on `4f1c48fa`, CodeRabbit's on-demand review (free for the
+  promotion's 16 days, ticked for this head). Gemini: no further findings.
+  CodeRabbit (Minor, outside the diff): the "falls through to the count"
+  decision, that a prune stopped part-way still prints `pruned N`, was
+  stated in the code and above but pinned by no test, and the test named
+  "mid-prune" in fact cancels before the prune starts. Both taken. The test
+  is now `TestABackupCancelledBeforeItsPruneReportsNothing`, and
+  `TestABackupCancelledMidPruneReportsWhatItDeleted` cancels between the
+  first and second deletion. PruneContext's loop has no place to hold a
+  goroutine between removals, only the `ctx.Err()` check before each, so
+  the pass's context cancels itself: `cancelWhenGone` cancels on the first
+  `Err` after the first snapshot to go has gone. If the loop stopped
+  checking between removals, the test's precondition (the two later
+  snapshots survive) fails loudly rather than passing. NC18, the ticker
+  returning before the count on a cancelled prune, turns exactly that test
+  red.
+- **Round 4**, on `90788201` (CodeRabbit's free on-demand review again).
+  CodeRabbit: "No actionable comments were generated", and in chat it
+  confirmed both parts of round 3 and recorded a learning. Gemini: no
+  further feedback. CI: 20 of 20 checks pass. SonarCloud (gate passed):
+  one finding, **declined**. godre:S8242 flagged `cancelWhenGone`'s
+  embedded `context.Context`. That type IS a context, and embedding the
+  parent is how every derived context is built, the standard library's
+  own `cancelCtx` included. The rule's concern, a context stored in a data
+  structure and outliving the call that owns it, does not apply. A
+  deterministic cancel between two deletions needs a custom `Err`, and so a
+  custom context. The same rule's round-1 finding, on a test table's
+  context field, was taken. Marking it through the SonarCloud MCP tool
+  failed (the tool's schema asks for `issue_key`, and the server answers
+  "The 'issue' parameter is missing"), so it is left for the SonarCloud UI.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -223,7 +224,14 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		status.sweepStarted()
 		dst, err := backup.Snapshot(ctx, src)
 		if err != nil {
-			fmt.Fprintf(stderr, "backup (%s): snapshot failed: %v\n", triggered, err)
+			// A snapshot the shutdown stopped is not reported: Snapshot has
+			// removed its partial directory, so the backups directory is as
+			// this pass found it, and the next pass decides from there. nil
+			// still goes to the run state, which means "no new counts" for a
+			// failed pass and a stopped one alike, since `running` has to clear.
+			if failure := withoutCancellation(ctx, err); failure != nil {
+				fmt.Fprintf(stderr, "backup (%s): snapshot failed: %v\n", triggered, failure)
+			}
 			status.sweepFinished(nil)
 			return
 		}
@@ -236,11 +244,15 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		// Warning, not a failure — see the same handling in
 		// backupCmd. Pre-split this early-returned and suppressed
 		// the "pruned N" line on every tick, forever.
-		if res.ReapErr != nil {
-			fmt.Fprintf(stderr, "backup (%s): orphan sweep reported a problem (prune unaffected): %v\n", triggered, res.ReapErr)
+		if problem := withoutCancellation(ctx, res.ReapErr); problem != nil {
+			fmt.Fprintf(stderr, "backup (%s): orphan sweep reported a problem (prune unaffected): %v\n", triggered, problem)
 		}
-		if err != nil {
-			fmt.Fprintf(stderr, "backup (%s): prune failed: %v\n", triggered, err)
+		// A prune the cancel stopped falls through to the count: the
+		// snapshots it removed before stopping are gone, and saying so is
+		// a fact about this pass
+		// (TestABackupCancelledMidPruneReportsWhatItDeleted).
+		if failure := withoutCancellation(ctx, err); failure != nil {
+			fmt.Fprintf(stderr, "backup (%s): prune failed: %v\n", triggered, failure)
 			return
 		}
 		if res.Deleted > 0 {
@@ -287,6 +299,63 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 	// "back up now" button on this path (the CLI's `bridge backup` runs
 	// its own snapshot).
 	runSweepLoop(ctx, status, 0, interval, nil, rearm, sweep)
+}
+
+// withoutCancellation returns err with ctx's cancellation taken out of it,
+// or nil when the cancellation is all there was. The backup ticker reports
+// only what is left, which is how it tells a pass that shutdown STOPPED from
+// one that FAILED: passCancelled's rule for the Tailscale auto-pilot, one
+// subsystem over.
+//
+// It has to do more than passCancelled does, because an error here can carry
+// both at once. PruneContext and its orphan sweep keep going past a directory
+// they cannot remove or read, and when a cancel stops them later they join
+// what they collected with ctx.Err(). Asking errors.Is of the whole error
+// would silence those genuine failures along with the cancel. So a
+// multi-error (errors.Join) is filtered child by child.
+//
+// A wrapper is judged by what it wraps. `vacuum manifest db: %w` around the
+// cancellation IS the cancellation. A wrapper around a join that holds a
+// genuine failure as well is reported WHOLE, cancellation text included,
+// because it cannot be rebuilt around what is left without dropping its own
+// context. Snapshot and PruneContext build no such error today; this is so
+// the next one to wrap a join is not silenced by it. (Gemini, #998, proposed
+// returning the filtered inner error, which drops the wrapper's context and
+// compares errors with ==, a runtime panic on an error type that is not
+// comparable.)
+//
+// The error has to be the cancellation, not merely arrive after one. A
+// snapshot's file copies do not watch ctx, so one that fails as shutdown
+// begins is a failure and is reported. And only ctx's own cancellation is
+// quiet: a deadline is a failure, as is a context.Canceled from somewhere
+// else while ctx is live. An error with no cancellation in it comes back
+// unchanged, message and all.
+func withoutCancellation(ctx context.Context, err error) error {
+	if !errors.Is(err, context.Canceled) || !errors.Is(ctx.Err(), context.Canceled) {
+		return err
+	}
+	// The cases in errors.Is's own order, so this walks the chain that
+	// errors.Is matched above.
+	switch e := err.(type) {
+	case interface{ Unwrap() error }:
+		if withoutCancellation(ctx, e.Unwrap()) == nil {
+			return nil
+		}
+		return err
+	case interface{ Unwrap() []error }:
+		var kept []error
+		for _, child := range e.Unwrap() {
+			if child = withoutCancellation(ctx, child); child != nil {
+				kept = append(kept, child)
+			}
+		}
+		if len(kept) == 1 {
+			return kept[0] // the survivor itself, not a join of one (Gemini, #998)
+		}
+		return errors.Join(kept...) // nil when nothing survived
+	default:
+		return nil // errors.Is matched a leaf: the cancellation itself
+	}
 }
 
 // startupSnapshotShouldSkip reports whether the most-recent existing
