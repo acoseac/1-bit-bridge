@@ -17,10 +17,9 @@ import (
 
 // blankKeeper is a blank reference whose only effect is to keep a name
 // referenced: `var _ = E` at the top of a file, or `_ = E` / `var _ = E` in
-// a function, where E does nothing but name things (identifiers, selectors,
-// literals, operators and composite literals of those, type conversions).
-// The name is almost always an import ("silence unused-import warning"), and
-// the keeper is dead code either way. Imports are per FILE: when the file
+// a function, where E has one of the four shapes keeperName reads. The name
+// is almost always an import ("silence unused-import warning"), and the
+// keeper is dead code either way. Imports are per FILE: when the file
 // uses the package elsewhere the keeper does nothing, and when it is the
 // only use it keeps an import nothing needs.
 type blankKeeper struct {
@@ -78,15 +77,14 @@ var allowedKeepers = []allowedKeeper{{
 // along main's first-parent history held 24 distinct keepers. Three hand
 // sweeps removed nine (c062ac95, #855, #994), each covering only its own
 // scope, and #825 added one between two of them. #996 removed the other
-// fourteen and left allowedKeepers' one. Every blank reference of these
-// shapes in those trees was a keeper, and no other blank form ever held
-// one (`var _ T`, `const _`, `type _`, `func _`), so the sweep reads only
-// these. Such a reference can check at most that a name exists
-// (`(*manifest.Store)(nil)` had a doc claiming it checked the store's
-// methods), and every real use of the name makes that check; a name nothing
-// uses needs none. The typed form, `var _ I = (*T)(nil)` or `var _
-// func(*T) error = (*T).M`, is how Go states a compile-time assertion, and
-// is never read.
+// fourteen and left allowedKeepers' one. Each of the 24 took one of the
+// shapes keeperName reads, and no other blank form ever held one (`var _ T`,
+// `const _`, `type _`, `func _`), so the sweep reads nothing else. Such a
+// reference can check at most that a name exists (`(*manifest.Store)(nil)`
+// had a doc claiming it checked the store's methods), and every real use of
+// the name makes that check; a name nothing uses needs none. The typed
+// form, `var _ I = (*T)(nil)`, is how Go states a compile-time assertion,
+// and is never read.
 //
 // On a clean tree this finds nothing, so the tree cannot show that it still
 // can. TestBlankKeeperScanOnFixtures runs the same scan over synthetic trees
@@ -421,18 +419,20 @@ func (kf *keeperFile) scanDeclStmt(ds *ast.DeclStmt, scope localScopes) {
 	}
 }
 
-// keep records e as a keeper when it is one. The top-level form is one when
-// E names an import or, naming none, names a declaration of its own package.
-// The statement form is one only when E names imports and nothing else: a
-// statement naming a local (`_ = cfg`) is how Go code marks it used, and
-// `var _ = 1` names nothing at all.
+// keep records e as a keeper when it has a keeper's shape (keeperName) and
+// the name it keeps is an import or, in the top-level form only, a bare
+// identifier of the file's own package. A statement naming a local
+// (`_ = cfg`) is how Go code marks it used, and a selector through a
+// package-level variable (`var _ = cfg.Name`) can dereference it.
 func (kf *keeperFile) keep(e ast.Expr, form string, top bool, doc *ast.CommentGroup, scope localScopes) {
-	if !onlyNames(e) {
+	name, ok := keeperName(e)
+	if !ok {
 		return
 	}
-	pkgs, others := kf.namesIn(e, scope)
-	isKeeper := len(pkgs) > 0 && (top || !others) || len(pkgs) == 0 && top && others
-	if !isKeeper {
+	pkgs := map[string]int{}
+	if pkg, isImport := kf.importAt(name, scope); isImport {
+		pkgs[pkg] = 1
+	} else if _, isIdent := name.(*ast.Ident); !top || !isIdent {
 		return
 	}
 	k := blankKeeper{file: kf.rel, line: kf.fset.Position(e.Pos()).Line, form: form, top: top, src: kf.text(e), pkgs: pkgs}
@@ -445,40 +445,6 @@ func (kf *keeperFile) keep(e ast.Expr, form string, top bool, doc *ast.CommentGr
 // text returns n's source with its whitespace collapsed.
 func (kf *keeperFile) text(n ast.Node) string {
 	return strings.Join(strings.Fields(kf.src[kf.fset.Position(n.Pos()).Offset:kf.fset.Position(n.End()).Offset]), " ")
-}
-
-// namesIn returns how many times e names each import (importAt), and whether
-// it names anything else: a local or package-level name. A predeclared name
-// (nil, int, error) is neither. A composite literal's key counts as a name
-// even when it is a struct field's: in a map literal the same identifier is
-// a variable, the two look alike without types, and skipping keys reported
-// `_ = map[string]int{key: http.StatusOK}`, whose deletion leaves the local
-// key unused (a Gemini consult on #996). The statement form misses
-// `_ = url.URL{Scheme: "https"}` instead, which is the safe direction.
-func (kf *keeperFile) namesIn(e ast.Expr, scope localScopes) (pkgs map[string]int, others bool) {
-	pkgs = map[string]int{}
-	var visit func(n ast.Node) bool
-	visit = func(n ast.Node) bool {
-		if name, ok := kf.importAt(n, scope); ok {
-			pkgs[name]++
-			return false
-		}
-		switch x := n.(type) {
-		case *ast.SelectorExpr:
-			// Sel names a field or method, never a declaration in scope, so
-			// `(*bytes.Buffer).Len` and `http.DefaultClient.Do` name only
-			// their import (CodeRabbit on #996).
-			ast.Inspect(x.X, visit)
-			return false
-		case *ast.Ident:
-			if types.Universe.Lookup(x.Name) == nil {
-				others = true
-			}
-		}
-		return true
-	}
-	ast.Inspect(e, visit)
-	return pkgs, others
 }
 
 // finish turns each keeper's own uses into the file's uses outside every
@@ -637,174 +603,64 @@ func blankValues(vs *ast.ValueSpec) []ast.Expr {
 	return out
 }
 
-// onlyNames reports whether evaluating e can do nothing but name things:
-// identifiers, selectors, literals, operators on those (`&pkg.T{}`,
-// `time.Second * 5`, Gemini on #996), composite literals, and conversions
-// to a type that cannot be a function. A call whose callee could be a
-// function is refused (`pkg.T(x)` could be either), so `var _ =
-// registry.Register(x)` and a compile-time size assertion are never keepers,
-// and so is anything else that does something: a receive waits, and an
-// operator that can panic (panicFree) or a slice-to-array conversion
-// (convertsToArray) can end the program. A dereference can panic on nil
-// too, but `*pkg.P` is spelled like the method expression `(*pkg.T).M`,
-// which is reported on purpose, so a star is read.
-func onlyNames(e ast.Expr) bool {
+// keeperName returns the name e keeps, when e has one of the shapes a
+// keeper takes: N, N{}, &N{} or (*N)(nil), where N is a name (isName). All
+// 24 keepers in the 37 history trees took the first, second or last.
+// Nothing else is read. A general "E only names things" test came first,
+// and each review round found a construct it misread (#996): an operator
+// that panics, a compile-time assertion in an array length, a call spelled
+// like a conversion. A keeper spelled any other way goes unseen, which is
+// the safe direction; CLAUDE.md's rule still says to delete it.
+//
+// (*N)(nil) is the one ambiguous shape. It is also a call through a
+// pointer-to-function variable with a nil argument. Measured on 2026-09-24,
+// no exported pointer-to-function variable is declared in this module, the
+// standard library or any module it depends on.
+func keeperName(e ast.Expr) (ast.Expr, bool) {
 	switch x := e.(type) {
-	case *ast.Ident, *ast.BasicLit:
-		return true
-	case *ast.SelectorExpr:
-		return onlyNames(x.X)
-	case *ast.ParenExpr:
-		return onlyNames(x.X)
-	case *ast.StarExpr:
-		return onlyNames(x.X)
-	case *ast.UnaryExpr:
-		return x.Op != token.ARROW && onlyNames(x.X)
-	case *ast.BinaryExpr:
-		return panicFree(x.Op) && onlyNames(x.X) && onlyNames(x.Y)
 	case *ast.CompositeLit:
-		return (x.Type == nil || typeOnlyNames(x.Type)) && eltsOnlyName(x.Elts)
-	case *ast.CallExpr:
-		return len(x.Args) == 1 && isTypeOnly(x.Fun) && typeOnlyNames(x.Fun) && !convertsToArray(x.Fun) && onlyNames(x.Args[0])
-	}
-	return false
-}
-
-// panicFree reports whether a binary operator can never panic at run time.
-// Division and remainder panic on a zero divisor, a shift on a negative
-// count, and == or != on two interfaces holding one uncomparable type, so
-// `_ = 1 / pkg.Divisor` does something a keeper does not (CodeRabbit on
-// #996). The rest cannot.
-func panicFree(op token.Token) bool {
-	switch op {
-	case token.ADD, token.SUB, token.MUL, token.AND, token.OR, token.XOR, token.AND_NOT,
-		token.LAND, token.LOR, token.LSS, token.GTR, token.LEQ, token.GEQ:
-		return true
-	}
-	return false
-}
-
-// convertsToArray reports whether a conversion's type is an array or a
-// pointer to one. Converting a slice to either panics when the slice is too
-// short.
-func convertsToArray(t ast.Expr) bool {
-	for {
-		switch x := t.(type) {
-		case *ast.ParenExpr:
-			t = x.X
-		case *ast.StarExpr:
-			t = x.X
-		case *ast.ArrayType:
-			return x.Len != nil
-		default:
-			return false
-		}
-	}
-}
-
-// typeOnlyNames reports whether a type expression only names things. A type
-// holds an expression only in an array length or a type argument, and the
-// length is where a compile-time assertion computes with a call:
-// `var _ = [unsafe.Sizeof(x) - 8]byte{}` is not a keeper, and neither is one
-// whose length sits in a struct's field, a function's parameter or an
-// interface's method (CodeRabbit on #996). A type argument makes a generic
-// instantiation, `set.Of[int]{}`, which is one.
-func typeOnlyNames(t ast.Expr) bool {
-	switch x := t.(type) {
-	case *ast.Ident, *ast.SelectorExpr:
-		return true
-	case *ast.StructType:
-		return fieldTypesOnlyName(x.Fields)
-	case *ast.InterfaceType:
-		return fieldTypesOnlyName(x.Methods)
-	case *ast.FuncType:
-		return fieldTypesOnlyName(x.TypeParams) && fieldTypesOnlyName(x.Params) && fieldTypesOnlyName(x.Results)
-	case *ast.Ellipsis:
-		return x.Elt == nil || typeOnlyNames(x.Elt)
+		return emptyLiteralOf(x)
 	case *ast.UnaryExpr:
-		return x.Op == token.TILDE && typeOnlyNames(x.X)
-	case *ast.BinaryExpr:
-		return x.Op == token.OR && typeOnlyNames(x.X) && typeOnlyNames(x.Y)
-	case *ast.ParenExpr:
-		return typeOnlyNames(x.X)
-	case *ast.StarExpr:
-		return typeOnlyNames(x.X)
-	case *ast.ArrayType:
-		return arrayLenOnlyNames(x.Len) && typeOnlyNames(x.Elt)
-	case *ast.MapType:
-		return typeOnlyNames(x.Key) && typeOnlyNames(x.Value)
-	case *ast.ChanType:
-		return typeOnlyNames(x.Value)
-	case *ast.IndexExpr:
-		return typeOnlyNames(x.X) && typeOnlyNames(x.Index)
-	case *ast.IndexListExpr:
-		return typeOnlyNames(x.X) && allTypesOnlyName(x.Indices)
-	}
-	return false
-}
-
-// arrayLenOnlyNames reports whether an array type's length only names
-// things: absent (a slice), `...`, or a constant expression with no call.
-func arrayLenOnlyNames(n ast.Expr) bool {
-	if n == nil {
-		return true
-	}
-	if _, ok := n.(*ast.Ellipsis); ok {
-		return true
-	}
-	return onlyNames(n)
-}
-
-// fieldTypesOnlyName reports whether the type of every field in fl only
-// names things: a struct's fields, a function's parameters and results, an
-// interface's methods and embedded types.
-func fieldTypesOnlyName(fl *ast.FieldList) bool {
-	if fl == nil {
-		return true
-	}
-	for _, f := range fl.List {
-		if !typeOnlyNames(f.Type) {
-			return false
+		if lit, ok := x.X.(*ast.CompositeLit); ok && x.Op == token.AND {
+			return emptyLiteralOf(lit)
 		}
+		return nil, false
+	case *ast.CallExpr:
+		return nilConversionTo(x)
 	}
-	return true
+	return e, isName(e)
 }
 
-// allTypesOnlyName reports whether every type in ts only names things.
-func allTypesOnlyName(ts []ast.Expr) bool {
-	for _, t := range ts {
-		if !typeOnlyNames(t) {
-			return false
-		}
-	}
-	return true
+// emptyLiteralOf returns the type of lit when lit is N{}: no elements, and
+// a type that is a name.
+func emptyLiteralOf(lit *ast.CompositeLit) (ast.Expr, bool) {
+	return lit.Type, len(lit.Elts) == 0 && isName(lit.Type)
 }
 
-// eltsOnlyName reports whether every element of a composite literal, key
-// and value alike, only names things.
-func eltsOnlyName(elts []ast.Expr) bool {
-	for _, elt := range elts {
-		if kv, ok := elt.(*ast.KeyValueExpr); ok {
-			if !onlyNames(kv.Key) {
-				return false
-			}
-			elt = kv.Value
-		}
-		if !onlyNames(elt) {
-			return false
-		}
+// nilConversionTo returns N when call is (*N)(nil).
+func nilConversionTo(call *ast.CallExpr) (ast.Expr, bool) {
+	paren, ok := call.Fun.(*ast.ParenExpr)
+	if !ok || len(call.Args) != 1 {
+		return nil, false
 	}
-	return true
+	star, ok := paren.X.(*ast.StarExpr)
+	if !ok {
+		return nil, false
+	}
+	arg, ok := call.Args[0].(*ast.Ident)
+	return star.X, ok && arg.Name == "nil" && isName(star.X)
 }
 
-// isTypeOnly reports whether e can only be a type, so a call of it is a
-// conversion.
-func isTypeOnly(e ast.Expr) bool {
+// isName reports whether e is a name a keeper can keep: an identifier that
+// is not predeclared, or a selector on one (pkg.X). Evaluating either can
+// do nothing but name it; keep decides which kinds of name count.
+func isName(e ast.Expr) bool {
 	switch x := e.(type) {
-	case *ast.ParenExpr:
-		return isTypeOnly(x.X)
-	case *ast.StarExpr, *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType, *ast.StructType:
-		return true
+	case *ast.Ident:
+		return types.Universe.Lookup(x.Name) == nil
+	case *ast.SelectorExpr:
+		_, ok := x.X.(*ast.Ident)
+		return ok
 	}
 	return false
 }
@@ -1038,20 +894,14 @@ func a() { _ = strconv.IntSize }
 
 func b() { _ = strconv.IntSize }
 `,
-	// A predeclared name (nil) is not a local, and a selector's field or
-	// method name names no declaration at all, so each statement below
-	// names only an import and is a keeper.
+	// The statement form reads the same shapes as the top-level one.
 	"keep/statements.go": `package keep
 
-import (
-	"bytes"
-	"net/http"
-)
+import "bytes"
 
 func c() {
 	_ = (*bytes.Buffer)(nil)
-	_ = (*bytes.Buffer).Len
-	_ = http.DefaultClient.Do
+	_ = &bytes.Reader{}
 }
 `,
 	"keep/local.go": `package keep
@@ -1102,20 +952,13 @@ func early() string {
 	return path
 }
 `,
-	// An operator or a type argument only names things too.
-	"keep/operators.go": `package keep
+	// An empty literal of a name, or its address, is a keeper.
+	"keep/literals.go": `package keep
 
-import (
-	"example.com/set"
-	"sync"
-	"time"
-)
+import "sync"
 
 var _ = &sync.Mutex{}
-var _ = time.Second * 5
-var _ = set.Of[int]{}
-var _ = struct{ M sync.Mutex }{}
-var _ = (func(...time.Duration))(nil)
+var _ = sync.WaitGroup{}
 `,
 	// Each import's name is its package's: a ".v3" suffix, a "go-" prefix
 	// and a "/v2" element are not part of it.
@@ -1134,12 +977,17 @@ var _ = yaml.Marshal
 	"keep/quiet.go": `package keep
 
 import (
+	"bytes"
 	"errors"
 	"example.com/events"
+	"example.com/set"
 	"example.com/settings"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
+	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -1173,9 +1021,27 @@ func panics() {
 	_ = [4]byte(settings.Bytes)
 }
 
-// A literal, or one of a predeclared type, keeps nothing.
+// A literal, one of a predeclared type, or a predeclared name keeps
+// nothing, and a selector through a package-level variable can
+// dereference it.
 var _ = 1
 var _ = [2]int{}
+var _ = true
+var cfgVar = struct{ Field int }{}
+var _ = cfgVar.Field
+
+// None of these has one of keeperName's four shapes, so none is read,
+// whatever it keeps: an operator, a type argument, a literal of an unnamed
+// type, a conversion to one, a method expression, a selector chain, a
+// star call with an argument, a name in an array length.
+var _ = time.Second * 5
+var _ = set.Of[int]{}
+var _ = struct{ M sync.Mutex }{}
+var _ = (func(...time.Duration))(nil)
+var _ = (*bytes.Buffer).Len
+var _ = http.DefaultClient.Do
+var _ = (*settings.Hook)(0)
+var _ = struct{ _ [settings.MinSize - 8]byte }{}
 
 func use(cfg struct{ Name string }) {
 	_ = cfg                    // marks a local used
@@ -1185,8 +1051,8 @@ func use(cfg struct{ Name string }) {
 	os := struct{ Args []string }{}
 	_ = os.Args // os is the local here, not the import
 	key := "k"
-	_ = map[string]any{key: fmt.Sprint} // the key is a local, too
-	_ = url.URL{Scheme: "https"}        // a field key reads as a name: missed, the safe way
+	_ = map[string]any{key: fmt.Sprint} // a literal with elements
+	_ = url.URL{Scheme: "https"}        // so is this, whatever its keys
 	_ = <-events.Done                   // a receive waits
 }
 `,
@@ -1215,24 +1081,20 @@ var _ = errors.Is
 // finds outside internal/tsnet, as "file: keeper: verdict".
 var keeperFixtureVerdicts = []string{
 	"keep/local.go: logger: " + keeperLocal,
+	"keep/literals.go: &sync.Mutex{}: " + keeperOnlyUse,
+	"keep/literals.go: sync.WaitGroup{}: " + keeperOnlyUse,
 	"keep/names.go: isatty.IsTerminal: " + keeperOnlyUse,
 	"keep/names.go: tool.Run: " + keeperOnlyUse,
 	"keep/names.go: yaml.Marshal: " + keeperOnlyUse,
 	"keep/only_use_test.go: (*strings.Builder)(nil): " + keeperOnlyUse,
-	"keep/operators.go: &sync.Mutex{}: " + keeperOnlyUse,
-	"keep/operators.go: (func(...time.Duration))(nil): " + keeperOnlyUse,
-	"keep/operators.go: struct{ M sync.Mutex }{}: " + keeperOnlyUse,
-	"keep/operators.go: set.Of[int]{}: " + keeperOnlyUse,
-	"keep/operators.go: time.Second * 5: " + keeperOnlyUse,
 	"keep/only_use_test.go: http.ErrServerClosed: " + keeperOnlyUse,
 	"keep/only_use_test.go: io.Copy: " + keeperOnlyUse,
 	"keep/only_use_test.go: time.Second: " + keeperOnlyUse,
 	"keep/redundant.go: fmt.Sprintf: " + keeperRedundant,
 	"keep/scope.go: path.Join: " + keeperRedundant,
 	"keep/shadow.go: path.Join: " + keeperOnlyUse,
+	"keep/statements.go: &bytes.Reader{}: " + keeperOnlyUse,
 	"keep/statements.go: (*bytes.Buffer)(nil): " + keeperOnlyUse,
-	"keep/statements.go: (*bytes.Buffer).Len: " + keeperOnlyUse,
-	"keep/statements.go: http.DefaultClient.Do: " + keeperOnlyUse,
 	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
 	"keep/twice.go: strconv.IntSize: " + keeperOnlyUse,
 }
