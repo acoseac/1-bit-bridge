@@ -2961,24 +2961,23 @@ its twin.** The top list is older, shorter, and read first.
   the build". A nil conversion checks only that a type exists, and every
   real use makes that check. A keeper's premise decays unseen, too: two
   began as their import's only use and turned redundant as their files
-  grew. The sweep refuses any call whose callee could be a function (four
-  `_ = os.Unsetenv(…)` otherwise) and anything else that does something: a
-  receive (`_ = <-pkg.Done` waits), and an operator or conversion that can
-  panic (`/`, `%`, a shift, `==` on interfaces, a slice-to-array
-  conversion). It never reads a typed `var _ I = …` (seven interface
-  assertions otherwise), and reads a composite literal's type down through
-  its fields, parameters and methods, where an array length computed by a
-  call (`[unsafe.Sizeof(x) - 8]byte{}`) makes a compile-time assertion, not
-  a keeper. It holds the statement form to an E naming only packages, since
-  `_ = cfg` is how Go marks a local used, and counts a composite literal's
-  identifier key as a name, because in a map literal the key is a variable:
-  the first draft skipped keys and reported
-  `_ = map[string]int{key: http.StatusOK}`, whose deletion breaks the build
-  (a Gemini consult found it). A selector names an import only where no
-  local of that name is in scope, scoped as Go scopes it, from the end of
-  the declaring statement (a whole-function approximation missed
-  `_ = path.Join` above `path := …`; CodeRabbit), and a selector's field or
-  method name names nothing (`_ = http.DefaultClient.Do` is a keeper). Two
+  grew. **The sweep reads the four shapes keepers took, and nothing else**
+  (`keeperName`): `N`, `N{}`, `&N{}` and `(*N)(nil)`, where N is an
+  unshadowed import selector or, at the top level only, a bare identifier.
+  All 24 keepers in 37 sampled history trees took one of them. A general
+  "has no effect" classifier came first, and six review rounds each found
+  a construct it misread: an operator that can panic, a compile-time
+  assertion hidden in an array length, a call through a function pointer
+  spelled like a conversion. Syntax cannot tell those apart without the
+  type checker, so a keeper spelled any other way goes unseen, which is the
+  safe direction; the rule above still applies to it. `(*N)(nil)` keeps one
+  ambiguity (a call through a pointer-to-function variable with a nil
+  argument), and no such exported variable exists in this module, the
+  standard library or any dependency. The statement form reads imports
+  only (`_ = cfg` marks a local used; the tree has 23), and a selector
+  names an import only where no local of that name is in scope, scoped as
+  Go scopes it, from the end of the declaring statement (a whole-function
+  approximation missed `_ = path.Join` above `path := …`; CodeRabbit). Two
   keepers of one package are not each other's use (update.go's pair).
   **The one allowance stands on its stated CONDITION, not its path**:
   `allowedKeepers` holds internal/tsnet's `var _ = errors.Is` while its doc
@@ -2986,10 +2985,11 @@ its twin.** The top list is older, shorter, and read first.
   sentinel and no `Error() string` method there, and the file uses `errors`
   nowhere else. Any of those failing is reported, and so is an entry whose
   keeper is gone. On a clean tree the sweep reports nothing, so
-  `TestBlankKeeperScanOnFixtures` pins every shape, scope rule, skip rule
-  and allowance state: 54 of 55 mutations turn it red, and only five turn
-  the tree red. The 55th drops the CRLF normalisation, which the scan
-  survives without; its CRLF case pins the property, not the mechanism.
+  `TestBlankKeeperScanOnFixtures` pins every shape, refused shape, scope
+  rule, skip rule and allowance state: 43 of 45 mutations turn it red, and
+  five turn the tree red. Of the two that stay green, one drops the CRLF
+  normalisation (the scan is CRLF-safe without it) and one widens a check
+  that `keep` makes again.
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing
   with `.#<name>` beside it. Where it can, the lock is a DANGLING symlink.

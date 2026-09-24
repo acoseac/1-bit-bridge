@@ -11931,34 +11931,41 @@ keepers, counting #294's keeper once although its test file was renamed
   other sweeps do). It reports both keeper forms, saying for each import
   whether the file uses it outside its keepers. Two keepers of one package
   are not each other's use.
-- **The statement form is included** because five of the fourteen were
-  statements, and a guard reading only the top-level form would have
-  passed all five. It is held to an E that names only imports, since
-  `_ = cfg` is how Go code marks a local used. A selector counts as naming
+- **The sweep reads four shapes, the ones keepers took, and nothing
+  else** (`keeperName`): `N`, `N{}`, `&N{}` and `(*N)(nil)`. N is an
+  import selector `pkg.X` on an unshadowed import or, in the top-level form
+  only, a bare identifier of the file's own package. All 24 historical
+  keepers took `N`, `N{}` or `(*N)(nil)`, and `&N{}` is the natural fourth
+  spelling. A general "E only names things" classifier came first. Each
+  review round found a construct it misread: an operator that panics, a
+  compile-time assertion in an array length (through a call, a named
+  constant, a nested field), a call through a function pointer spelled like
+  a conversion (see **Review**). Without the type checker the syntax cannot
+  tell those apart, and the history says keepers do not take those forms,
+  so none is read. A keeper spelled any other way goes unseen, which is the
+  safe direction.
+- **`(*N)(nil)` carries the one ambiguity**: it is also a call through a
+  pointer-to-function variable with a nil argument. Measured 2026-09-24,
+  no exported variable of that type is declared in this module, the Go
+  standard library or any module dependency. The second consult suggested
+  dropping the shape. It stays on that measurement, because it is the shape
+  whose doc claimed a static assertion.
+- **The statement form is included, for imports only.** Five of the
+  fourteen were statements, and a guard reading only the top-level form
+  would have passed all five. A statement naming a local (`_ = cfg`) is how
+  Go code marks it used, and the tree has 23 of them (NW8). A selector names
   import `x` only where no local named `x` is in scope, and a local is
   scoped as Go scopes it (`localScopesIn`): from the end of its declaring
   statement to the end of its innermost block, and a parameter over its
   function's body. The first draft took an `x` declared anywhere in the
-  function for a local everywhere in it (see **Review**, round 2).
-- **The local form is included** for tailscale's, and read only at the top
-  level.
-- **Existence checks are reported deliberately.** `(*T)(nil)`, and a method
-  expression like `(*T).M`, can check at most that a name exists, and every
-  real use of the name makes that check. A name nothing uses needs none.
-  Go states a compile-time assertion in the typed form (`var _ I =
-  (*T)(nil)`, `var _ func(*T) error = (*T).M`), and the sweep never reads
-  it.
-- **Any call whose callee could be a function is refused**, because
-  `pkg.T(x)` can be either without types. Only a conversion to a type that
-  cannot be a function (`(*T)(x)`, `[]byte(x)`) is read. Operators are read
-  (`&pkg.T{}`, `time.Second * 5`), but nothing that does something: a
-  receive waits, and an operator that can panic (`/`, `%`, a shift, `==` or
-  `!=` on interfaces) or a slice-to-array conversion can end the program
-  (rounds 4 and 6). A composite literal's type is read too, fields,
-  parameters and methods included: an array length computed by a call
-  (`[unsafe.Sizeof(x) - 8]byte{}`) is a compile-time assertion, not a
-  keeper. A dereference can panic on nil but is read, because `*pkg.P` is
-  spelled like the method expression `(*pkg.T).M`.
+  function for a local everywhere in it (round 2).
+- **The local form reads a bare identifier, at the top level only**
+  (tailscale's `logger`). `var _ = cfg.Name` selects through a
+  package-level variable, which can be a nil pointer.
+- **Existence checks are reported deliberately.** `(*T)(nil)` can check at
+  most that a name exists, and every real use of the name makes that
+  check. A name nothing uses needs none. Go states a compile-time assertion
+  in the typed form (`var _ I = (*T)(nil)`), and the sweep never reads it.
 - **Import names follow the package-name convention**: the explicit name,
   else the last path element without a "/vN" element or ".vN" suffix, a
   "go-" prefix or a "-go" suffix. Checked against `go list` on darwin, linux
@@ -11990,28 +11997,28 @@ the whole-tree run passes in 0.3 s.
 
 `TestBlankKeeperScanOnFixtures` runs `scanBlankKeepers`, with the real
 `allowedKeepers`, over synthetic trees under a root named `clone[1]`. Each
-reported shape is there: both verdicts, the conversion, the grouped spec,
-the in-function `var`, the local keeper, the two-keeper pair, the three
-import-name conventions and a predeclared `nil` beside a package. The
-scoping cases are there too: a keeper above a later local of its import's
-name, that local's own right-hand side counted as a use, and a local
-shadowing the import in each way one is declared (`:=`, parameter, range
-variable, `var` statement, func-literal parameter). So are the quiet
-shapes: a typed assertion, a call, a receive, compile-time size assertions
-(indexed, in a literal's array length, and nested in a field, a parameter
-and a method), four statements that can panic, literals, locals, a map key
-that is a local, a struct field key. So is every
-skip rule (a `.#lock` that is not Go, which would fail the parse if
-opened, `_dir`, testdata, vendor, node_modules, a nested module). There
-are eight allowance states, and one case writes the whole tree with CRLF
-endings. Controls on the round-6 commit (`41b37e85`), each `-count=1`,
-each restored with `git checkout` and checked clean:
+of the four shapes is there in both forms. So are both verdicts, the
+grouped spec, the in-function `var`, the local keeper, the two-keeper pair
+and the three import-name conventions. The scoping cases are there too: a
+keeper above a later local of its import's name, that local's own
+right-hand side counted as a use, and a local shadowing the import in each
+way one is declared (`:=`, parameter, range variable, `var` statement,
+func-literal parameter). So is every shape the whitelist refuses that a
+round of review raised: operators, a type argument, literals of an
+unnamed type or with elements, a conversion to an unnamed type, a method
+expression, a selector chain, a star call with a non-nil argument, a named
+array length, compile-time size assertions, four statements that can
+panic, a receive, calls, literals, a predeclared name, locals and a
+selector through a package variable. Every skip rule is there (a `.#lock`
+that is not Go, which would fail the parse if opened, `_dir`, testdata,
+vendor, node_modules, a nested module), and so are eight allowance states
+and a case that writes the whole tree with CRLF endings. Controls on the
+round-7 commit (`46a2be63`), each `-count=1`, each restored with
+`git checkout` and checked clean:
 
 | control | mutation | tree | fixture |
 |---|---|---|---|
 | NC0 | none | green | green |
-| NC1 | `onlyNames` accepts any call | red: four `_ = os.Unsetenv(…)` in supervision_unix_test.go | red |
-| NC2 | `isTypeOnly` takes a selector callee as a type | red: the same four | red |
 | NC3 | typed specs read | red: the seven interface assertions | red |
 | NC4a | a local covers its whole declaration (the first draft) | green | red |
 | NC4b | a local's scope starts at its statement's start | green | red: the right-hand side stops counting |
@@ -12043,40 +12050,37 @@ each restored with `git checkout` and checked clean:
 | NC17c | "/v2" taken as the name | green | red |
 | NC18 | the real entry's condition text drifts | red: condition-dropped | red |
 | NC19 | the walk reads no file | red: the file floor | red |
-| NC20 | predeclared names count as locals | green | red |
-| NC21 | identifier keys skipped (the first draft) | green | red: the map-key case |
-| NC22 | the statement form not held to imports only | green | red |
-| NC23 | the local form off | green | red |
 | NC24 | a served allowance still allowed | green | red: that case |
-| NC27a | operators refused (the round-3 guard) | green | red: two operator keepers missed |
-| NC27b | a receive accepted (the suggestion as given) | green | red: `_ = <-events.Done` reported |
-| NC27c | a literal's type unread (the round-3 guard) | green | red: the array-length assertion reported |
-| NC27d | a type argument refused | green | red: `set.Of[int]{}` missed |
-| NC27e | an array length unread | green | red: the array-length assertion reported |
-| NC28 | a selector's `Sel` counted as a name (the round-4 guard) | green | red: two statement keepers missed |
-| NC29a | every binary operator taken for panic-free | green | red: the three panicking operators reported |
-| NC29b | division and remainder taken for panic-free | green | red: `1 / settings.Divisor` reported |
-| NC29c | shifts taken for panic-free | green | red: `1 << settings.Shift` reported |
-| NC29d | `==` and `!=` taken for panic-free | green | red: `settings.A == settings.B` reported |
-| NC30 | a slice-to-array conversion accepted | green | red: `[4]byte(settings.Bytes)` reported |
-| NC31a | struct fields unread | green | red: the field's assertion reported |
-| NC31b | function signatures unread | green | red: the parameter's and the method's assertions reported |
-| NC31c | interface methods unread | green | red: the method's assertion reported |
-| NC31d | a variadic parameter refused | green | red: `(func(...time.Duration))(nil)` missed |
+| NW1 | `N{}` not read | green | red |
+| NW2 | `&N{}` not read | green | red |
+| NW3 | `(*N)(nil)` not read | green | red |
+| NW4 | a literal with elements read | green | red |
+| NW5 | `(*N)(x)` read for any x (the round-6 guard) | green | red: `(*settings.Hook)(0)` reported |
+| NW6 | a selector on anything read | green | **green** |
+| NW7 | a predeclared identifier read as a name | green | red |
+| NW8 | the statement form reads a bare local | red: 23 statements like `_ = cfg` | red |
+| NW9 | the local form reads a selector | green | red: `cfgVar.Field` reported |
+| NW10 | the local form off | green | red |
+| NW11 | any call read, its callee taken for N | red: 141 calls like `_ = os.Remove(path)` | red |
 | NC25 | no CRLF normalisation | green | **green** |
 | NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the four met cases |
 
-Only five of the 55 turn the tree red, and NC13, the one that deletes the
+Five of the 45 turn the tree red, and NC13, the one that deletes the
 report, is not among them. That is #994's lesson again, and why the fixture
-drives the same `scanBlankKeepers` the tree test does. NC25 is the one
-control the fixture does not catch, and it is not meant to: without the
-normalisation the scan is still CRLF-safe, because `strings.Fields` and
-go/scanner both drop the `\r` (CodeRabbit's own premise). The CRLF case
-pins that property, not the mechanism, and it is the property a later edit
-comparing raw source would break. NC15 stays green on
-the tree although three leftover `.claude/worktrees/` checkouts hold
-pre-fix keepers: each carries its own go.mod, so the nested-module rule
-skips them too.
+drives the same `scanBlankKeepers` the tree test does. NW11's 141 tree
+findings are the measure of what the call refusal is worth on real code.
+Two controls leave the fixture green, and neither is a gap. NW6 widens
+`isName` to a selector on any expression, and `keep` still refuses the
+chain, because `importAt` only names an import through a bare identifier:
+the check is stated twice on purpose, once as keeperName's contract. NC25
+drops the CRLF normalisation, and the scan is CRLF-safe without it
+(`strings.Fields` and go/scanner both drop the `\r`, CodeRabbit's own
+premise). The CRLF case pins that property, not the mechanism. NC15 stays
+green on the tree although three leftover `.claude/worktrees/` checkouts
+hold pre-fix keepers: each carries its own go.mod, so the nested-module
+rule skips them too. Rounds 1 to 6 ran controls against the classifier
+that round 7 removed (up to 55 of them). The shapes those controls pinned
+are now quiet fixture cases.
 
 ### Consult
 
@@ -12109,6 +12113,18 @@ checked against the code first.
   test (`_ = worker.ActiveCount`). No such read appears in the 37 trees. If
   one is ever deliberate, `allowedKeepers` can carry it with its condition.
 
+- **A second consult, at round 7, on the design.** It was asked whether a
+  whitelist of the measured shapes should replace the classifier, and to
+  break the four shapes. It agreed that syntax cannot resolve Go's
+  call-or-conversion and index-or-instantiation ambiguities without the
+  type checker, and that a missed keeper is benign while a false positive
+  breaks CI. It said to keep `N`, `N{}` and `&N{}` and to add no operator,
+  method expression or instantiation. It suggested dropping `(*N)(nil)` as
+  the one shape that can match a real call, and gave the falsification
+  test: look for pointer-to-function variables. The measurement found none
+  in the module, the standard library or any dependency, so the shape
+  stays.
+
 ### Process notes
 
 - **The first draft counted a keeper as a use.** Each of update.go's pair
@@ -12120,6 +12136,11 @@ checked against the code first.
   is `writeKeeperFixture`.
 
 ### Review
+
+Rounds 1 to 6 describe the classifier that round 7 replaced. The
+functions they name (`onlyNames`, `namesIn`, `typeOnlyNames`, `panicFree`,
+`convertsToArray`, `declaredWithin`) no longer exist, and their "now" is
+that round's.
 
 - **Round 1** (`2115be9a`): **Gemini** raised two mediums, both taken.
   `typedErrorIn` globbed `filepath.Join(root, dir, "*.go")`, which puts the
@@ -12210,3 +12231,20 @@ checked against the code first.
   Red-first with the fixtures in place and the round-5 guard: all seven
   quiet shapes were reported. The history re-run again gave the same 699
   sightings with the same verdicts.
+- **Round 7** (`4227b7ad`): **Gemini** had no comments. **CodeRabbit**
+  found two more false positives: `_ = (*pkg.F)(0)`, a call through a
+  pointer-to-function variable spelled exactly like the conversion
+  `(*pkg.T)(0)` (major), and `struct{ _ [pkg.MinSize - 8]byte }{}`, an
+  assertion made with a named constant (minor). That made six rounds in
+  which review found a construct the general classifier misread, and the
+  finding was about the design, not the construct. So `46a2be63` replaced
+  the classifier with `keeperName`'s four shapes, after the second consult
+  above. It reverses three earlier acceptances, each now a quiet fixture
+  case with a reason: operators (round 4), selector chains and method
+  expressions (round 5), generic instantiations (the first consult). Both
+  findings are refused by construction. Red-first: the round-6 guard, run
+  against the round-7 fixture, reported nine of its quiet shapes, among
+  them both findings and `var _ = cfgVar.Field`, a selector through a
+  package variable that it took for a local keeper. The whitelist over the
+  37 history trees finds the same 699 sightings with the same verdicts, so
+  the narrowing lost no keeper this repo ever had.
