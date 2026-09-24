@@ -2278,6 +2278,13 @@ type serveOpts struct {
 	configPath    string
 	addrOverride  string
 	initIfMissing bool
+	// tailscaleCLI stands in for the host's Tailscale CLI in the cli-mode
+	// auto-pilot. Nil (the host's CLI) everywhere but the boot tests,
+	// which pass a fake so a mint can be held open across a shutdown
+	// without a tailscaled on the host. Per invocation, not a package
+	// var: a leaked auto-pilot from an earlier test could otherwise read
+	// a later test's fake.
+	tailscaleCLI tailscaleCLI
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -2660,6 +2667,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	// already exiting; it just waits for them, grace-bounded so a wedged
 	// writer can't block process exit.
 	//
+	// It joins writers of FILES too, not only of the store: the backup
+	// ticker, the trash, upload and artwork-cache sweepers, the updater, and
+	// the Tailscale auto-pilot, whose `tailscale cert` writes <dataDir>/tls.
+	// The contract is that nothing runServe starts outlives its return; its
+	// timeout line says "background writers" for that reason.
+	//
 	// The wait is INLINE here, NOT routed through a function variable assigned
 	// later in runServe: any early return between the first tracked goroutine
 	// and that assignment would leave the variable nil, make this defer a
@@ -2691,7 +2704,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 		select {
 		case <-done:
 		case <-graceTimer.C:
-			fmt.Fprintln(stderr, "shutdown: background manifest writers did not drain within grace")
+			fmt.Fprintln(stderr, "shutdown: background writers did not drain within grace")
 		}
 	}()
 	// Single source of truth for the artwork cache directory. The
@@ -2846,8 +2859,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	var tsnetServer *tsnet.Server
 	switch tsMode {
 	case config.TailscaleModeCLI:
-		tailscaleAuto = newTailscaleAutoPilot(cfg.DataDir, cfg.ListenAddress, certManager, stderr)
-		tailscaleAuto.Start(scanCtx)
+		tailscaleAuto = newTailscaleAutoPilot(cfg.DataDir, cfg.ListenAddress, certManager, opts.tailscaleCLI, stdout, stderr)
+		// bgWriters-joined: the startup mint writes <dataDir>/tls, and a
+		// bare goroutine let it land after runServe had returned.
+		tailscaleAuto.Start(scanCtx, &bgWriters)
 	case config.TailscaleModeTsnet:
 		// Build the tsnet.Server but DO NOT block the listen step
 		// on Up() — interactive auth can take minutes on first

@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +61,27 @@ type tailscaleStatus struct {
 	TailscaleIPs []string `json:"tailscaleIPs,omitempty"`
 }
 
+// tailscaleCLI is the auto-pilot's view of the host's Tailscale CLI:
+// the two calls detectAndMint makes. Production uses hostTailscaleCLI,
+// which is internal/tailscale. The boot tests hand runServe a fake
+// through serveOpts, which is how the shutdown join is driven on a host
+// with no tailscaled.
+type tailscaleCLI interface {
+	Detect(ctx context.Context) (servertailscale.NodeInfo, error)
+	MintCert(ctx context.Context, binary, magicDNS, certPath, keyPath string) error
+}
+
+// hostTailscaleCLI is the real CLI, via internal/tailscale.
+type hostTailscaleCLI struct{}
+
+func (hostTailscaleCLI) Detect(ctx context.Context) (servertailscale.NodeInfo, error) {
+	return servertailscale.Detect(ctx)
+}
+
+func (hostTailscaleCLI) MintCert(ctx context.Context, binary, magicDNS, certPath, keyPath string) error {
+	return servertailscale.MintCert(ctx, binary, magicDNS, certPath, keyPath)
+}
+
 // tailscaleAutoPilot owns the auto-mint + auto-renew lifecycle and
 // surfaces the status snapshot for the admin tile. One instance per
 // `bridge serve` process; threadsafe — admin handlers read via
@@ -71,6 +91,8 @@ type tailscaleAutoPilot struct {
 	dataDir     string
 	listenAddr  string
 	certManager *servertls.Manager
+	cli         tailscaleCLI
+	stdout      io.Writer
 	stderr      io.Writer
 
 	// minMintInterval rate-limits operator-triggered "Re-mint now"
@@ -116,11 +138,20 @@ type tailscaleAutoPilot struct {
 // to compose the operator-facing magic-DNS URL with the right port
 // for the admin tile's "iOS clients reach the bridge over Tailscale
 // at <url>" hint.
-func newTailscaleAutoPilot(dataDir, listenAddr string, mgr *servertls.Manager, stderr io.Writer) *tailscaleAutoPilot {
+//
+// A nil cli is the host's CLI. stdout and stderr are serve's own
+// streams, so every line the auto-pilot prints lands where the rest of
+// serve's output does.
+func newTailscaleAutoPilot(dataDir, listenAddr string, mgr *servertls.Manager, cli tailscaleCLI, stdout, stderr io.Writer) *tailscaleAutoPilot {
+	if cli == nil {
+		cli = hostTailscaleCLI{}
+	}
 	return &tailscaleAutoPilot{
 		dataDir:         dataDir,
 		listenAddr:      listenAddr,
 		certManager:     mgr,
+		cli:             cli,
+		stdout:          stdout,
 		stderr:          stderr,
 		minMintInterval: 30 * time.Second,
 	}
@@ -145,17 +176,34 @@ func (a *tailscaleAutoPilot) magicDNSURL(magicDNS string) string {
 // ticker. Both honour ctx.Done so SIGINT clears them out cleanly
 // alongside the rest of the periodic workers.
 //
+// Both are joined on wg, which runServe waits on, grace-bounded, before
+// it returns. They WRITE: the mint's `tailscale cert` puts the LE pair
+// in <dataDir>/tls. Launched bare, a mint still running at shutdown
+// finished after runServe had returned (in 23 of 36 instrumented runs,
+// by up to 9 ms), and on a host running tailscaled a boot test's
+// cleanup then found <dataDir>/tls not empty. The cancel only asks the
+// CLI to stop, and internal/tailscale's group kill can miss a process
+// forked at that instant; the wait is what makes runServe's return mean
+// that it has stopped.
+//
 // PR 4: derives a child ctx so Disable() can cancel ONLY the
 // auto-pilot's two goroutines without affecting the caller's
 // shared scanCtx. The child ctx is also cancelled when the
 // parent fires (SIGINT path stays correct).
-func (a *tailscaleAutoPilot) Start(ctx context.Context) {
+func (a *tailscaleAutoPilot) Start(ctx context.Context, wg *sync.WaitGroup) {
 	childCtx, cancel := context.WithCancel(ctx)
 	a.mu.Lock()
 	a.cancelLocal = cancel
 	a.mu.Unlock()
-	go a.runStartup(childCtx)
-	go a.runRenewer(childCtx)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		a.runStartup(childCtx)
+	}()
+	go func() {
+		defer wg.Done()
+		a.runRenewer(childCtx)
+	}()
 }
 
 // Disable cancels the per-auto-pilot child ctx (stopping the
@@ -247,8 +295,11 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	now := time.Now().UTC()
 	snap := tailscaleStatus{LastChecked: &now}
 
-	info, err := servertailscale.Detect(ctx)
+	info, err := a.cli.Detect(ctx)
 	if err != nil {
+		if passCancelled(ctx) {
+			return a.Snapshot()
+		}
 		snap.CLIAvailable = info.CLIAvailable
 		snap.LastError = info.LastError
 		fmt.Fprintf(a.stderr, "tailscale (%s): detect failed: %v\n", trigger, err)
@@ -383,7 +434,10 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	a.lastMintAttempt = time.Now()
 	a.mu.Unlock()
 
-	if err := servertailscale.MintCert(ctx, info.BinaryPath, info.MagicDNSName, certPath, keyPath); err != nil {
+	if err := a.cli.MintCert(ctx, info.BinaryPath, info.MagicDNSName, certPath, keyPath); err != nil {
+		if passCancelled(ctx) {
+			return a.Snapshot()
+		}
 		switch {
 		case errors.Is(err, servertailscale.ErrHTTPSCertsDisabled):
 			snap.LastError = "HTTPS Certificates not enabled in tailnet — visit https://login.tailscale.com/admin/dns and toggle on"
@@ -419,7 +473,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 		snap.CertNotAfter = &expiry
 		expiryStr = expiry.Format("2006-01-02")
 	}
-	fmt.Fprintf(os.Stdout, "tailscale (%s): minted LE cert for %s, expires %s\n",
+	fmt.Fprintf(a.stdout, "tailscale (%s): minted LE cert for %s, expires %s\n",
 		trigger, info.MagicDNSName, expiryStr)
 	// A freshly-minted LE cert should be ~90 days from expiry. If
 	// we're already under 30 days remaining, Tailscale's control
@@ -434,6 +488,33 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	}
 	a.publish(snap)
 	return snap
+}
+
+// passCancelled reports whether a CLI call's error came from the pass
+// being CANCELLED rather than from the call failing. It is consulted on
+// the two error paths only. Three things cancel a pass and none is a
+// failure: shutdown, Disable(), and an admin client that went away
+// mid-"Re-mint now" (RefreshNow runs on the request's context). A call
+// stopped that way returns the snapshot the pass found. It logs no
+// failure, publishes no snapshot, and above all does not unload an LE
+// cert that is still valid. The Detect error branch unloads it, so a
+// cancelled `tailscale status` used to leave every *.ts.net client on
+// the self-signed cert until a later pass succeeded, up to a day later
+// on the renewer. Since serve now waits for this pass, its shutdown-time
+// "mint failed: context canceled" would otherwise reach the journal too.
+//
+// A call that COMPLETED is not second-guessed. exec reports success only
+// when the process finished on its own (a kill it sent turns the result
+// into ctx.Err()), so the answer, MagicDNS off or a fresh pair on disk,
+// is true whatever the context did afterwards, and the pass applies it.
+// Checking again after a success would discard exactly what "Re-mint
+// now" asked for; TestACompletedTailscaleCallIsAppliedAfterACancel pins
+// that.
+//
+// Cancelled, not merely done: a pass that ran out of time failed, and
+// is reported like any other failure.
+func passCancelled(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
 }
 
 // warnLECertExpiringSoon returns the operator-facing warning string

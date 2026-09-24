@@ -11112,6 +11112,8 @@ fail only the four toolchain fuzz targets.
   …/data/tls: directory not empty`). `cmd/bridge/tailscale.go` starts the
   startup cert mint with a bare `go a.runStartup(childCtx)`, and it wrote
   into `data/tls` after the test's cleanup began. CI has no tailscaled.
+  (Fixed in #997, below. The goroutine was half of it; the other half was
+  that the cancel never reached the process doing the writing.)
 
 ### Review
 
@@ -12319,3 +12321,232 @@ that round's.
   function only ever sees parser output. **CodeRabbit** raised one minor,
   taken: this entry and CLAUDE.md said the `reviewThreads` query "returns
   every thread", and it is a paginated connection too.
+
+## 2026-09-24 — the Tailscale auto-pilot stops when serve does, and serve waits for it (#997)
+
+`TestServeWiresResolvedConfigPathIntoAdminAndBackups` failed 4 of 12 runs
+on a Mac running tailscaled, at `9365056c` and on #993's branch alike,
+with `TempDir RemoveAll cleanup: unlinkat …/data/tls: directory not
+empty`. #993 recorded it as out of reach. The hypothesis handed to this
+PR was the bare `go a.runStartup(childCtx)` / `go a.runRenewer(childCtx)`
+in `tailscaleAutoPilot.Start`. That was half of it.
+
+### What was measured
+
+- **The flake, on main.** 3 of 12, then 0 of 36, then (instrumented) 1 of
+  8, 2 of 24 and 0 of 36, one afternoon on one host: 6 of 116. The rate
+  moves with how fast tailscaled answers, so it is not evidence either
+  way. The branch failed 0 of 120.
+- **The ordering, which is the evidence.** Each `mint end` line matched to
+  the run that produced it by the run's data dir, 36 runs each: on main
+  the cancelled mint returned AFTER runServe in 23 of 36 (2 to 9 ms
+  after); on the branch it returned BEFORE runServe in 36 of 36 (6 to 10
+  ms before).
+- **The host's CLI.** `/usr/local/bin/tailscale` here is a 68-byte POSIX
+  shell script, `/Applications/Tailscale.app/Contents/MacOS/Tailscale "$@"`
+  with no `exec`: the standalone app's "Install CLI" helper. So
+  `CommandContext`'s kill, which signals the direct child, reached
+  `/bin/sh`, and the app carried on as an orphan holding the pipes `Wait`
+  blocks on.
+- **A synthetic stand-in** (a wrapper without `exec` around a child that
+  sleeps 2 s then writes a file; cancel at 200 ms), three ways:
+
+  | shape | `Wait` returned after | child wrote? |
+  |---|---|---|
+  | `CommandContext` default (main) | 2369 ms, the child's whole run | yes |
+  | `Cmd.WaitDelay` 200 ms only | 402 ms | yes, 3 s later, orphaned |
+  | process group + group kill | 203 ms | no |
+
+- **The real wrapper, read-only** (`status --json --peers=false`,
+  cancelled at 2 to 20 ms, output recorded at the instant the kill was
+  sent): output after the kill in 36 of 42 runs with the default kill (the
+  other 6 died before the shell had started the app), and in 1 of 42 with
+  the group kill. Output after the kill does not by itself prove a
+  survivor (bytes written just before it drain afterwards), so the next
+  probe settles it.
+- **The fork race, falsified directly.** A stand-in wrapper whose inner
+  script writes a marker a second after starting, with no pipes, cancelled
+  at 0 to 4 ms in 25 us steps, 10 runs per step: with the group kill, 23,
+  14 and 8 of 1,610 cancels in three runs left an inner that wrote its
+  marker a second later. Without it, 490 of 1,610. The band where escapes
+  happen moves between runs (2.2 ms; 3.45 to 3.9 ms; 2.4 to 3.75 ms), which
+  fits a child forked while the group signal is delivered. Linux's
+  copy_process restarts such a fork; macOS evidently does not.
+- **What the escapee does to Wait.** The same stand-in WITH pipes (a
+  0.3 s inner, cancels at 1.9 to 2.6 ms): 8 of 426 escaped, and in 8 of 8
+  `Wait` returned only after the escapee had written. That is the property
+  the join builds on.
+
+### Decisions
+
+- **Cancel and wait, not "let the mint finish".** A mint that takes LE
+  round trips can run for tens of seconds, and shutdown should not wait
+  on that when the call is idempotent. The next pass re-mints. A kill
+  between the CLI's two atomic renames can leave a new cert beside the
+  old key; `LoadTailscaleCertFromDisk` then fails at the next boot, which
+  mints again, and tailscaled hands back its cached pair. What must not
+  happen is the write landing AFTER serve has returned, and the join
+  guarantees that.
+- **The group kill AND the join, because neither covers the other.** The
+  kill is what makes a cancelled call return promptly. The join is what
+  makes runServe's return mean the call has stopped. The fork-race escape
+  is the case only the join covers: the escaped process holds the pipes,
+  so `Wait` returns only once it has exited, and the join holds runServe
+  until then, grace-bounded. It also covers the exec-side asymmetry: the
+  kill is sent from exec's own goroutine, after runServe's cancel.
+- **`Cmd.WaitDelay` rejected.** It unblocks `Wait` by closing the pipes,
+  which is exactly how an escaped writer would be abandoned (8 of 8 above).
+- **Cancel asks `os.Process` before the group kill.** `watchCtx` can pick
+  `ctx.Done()` after `Process.Wait` has reaped the leader (the window
+  before `Wait` receives from `ctxResult`), and from then on the pid, and
+  so the group id, may be reused. The default Cancel is safe there because
+  `os.Process` orders its signals against the reap and answers
+  `ErrProcessDone`; a bare `kill(-pid)` is not. `Signal(0)` through
+  `os.Process` first closes all but the gap between two adjacent calls.
+  The window cannot be hit by timing, so the test drives it: run a
+  command to completion, then call its Cancel, and see through the
+  `killGroup` variable that no group kill is sent. The fallback to
+  `Process.Kill` after a failed group kill was dropped: a group whose
+  members cannot be signalled has a leader that cannot be either.
+- **Windows keeps the default kill.** `resolveBinary` finds
+  `tailscale.exe`, the CLI itself, so killing the direct child stops the
+  writer. A `.cmd` wrapper on PATH would need a job object; nothing ships
+  one.
+- **Joined on `bgWriters`, not a wait of its own.** One grace window
+  instead of two in sequence, and `scanCancel` already runs before that
+  wait (LIFO), so the auto-pilot's child context is cancelled by then. The
+  timeout line said "background manifest writers", false since the backup
+  ticker, the sweepers and the updater joined; it says "background
+  writers" now.
+- **A cancelled pass changes nothing (`passCancelled`).** Joining the pass
+  makes its cancelled exit path run before shutdown completes, so what it
+  reports matters. It reported a failure: "mint failed: context canceled",
+  or, for `tailscale status`, "detect failed", and that branch UNLOADS the
+  LE cert and the MagicDNS suffix. For shutdown that was noise. For the
+  admin "Re-mint now" (RefreshNow runs on the request context) a client
+  leaving mid-detect moved every `*.ts.net` client to the self-signed
+  cert until the next good pass, up to a day later on the renewer: a
+  latent defect found beside this one, fixed by the same decision.
+  `errors.Is(ctx.Err(), context.Canceled)`, not `ctx.Err() != nil`: a
+  deadline is a failure and is still reported.
+- **The "minted LE cert" line goes to serve's stdout.** It went to
+  `os.Stdout`. In production the two are the same file. In a boot test it
+  escaped into `go test` output, from whichever test happened to be
+  running, and the flake was first read beside one such line from a run
+  that had passed.
+- **The seam is per invocation, `serveOpts.tailscaleCLI`, not a package
+  var.** An auto-pilot leaked from an earlier test could otherwise read a
+  later test's fake.
+
+### Tests and controls
+
+Red on `8d9dff4b` (seam and tests, no fix), green on the fix:
+
+| test | pins |
+|---|---|
+| `TestCancelStopsTheWholeCLIProcessTree` (internal/tailscale, `!windows`) | Detect and MintCert against a wrapper-shaped fake return within 5 s of the cancel, and the inner pid is gone |
+| `TestCancelNeverSignalsTheGroupOfAReapedLeader` (internal/tailscale, `!windows`) | a Cancel after the leader was reaped answers `ErrProcessDone` and sends no group kill (added with the consult) |
+| `TestServeLeavesNoTailscaleCLIRunning` (`!windows`) | the same shape on PATH, driven by runServe with no seam: after runServe returns, the `tailscale cert` it started is dead and writes nothing |
+| `TestServeWaitsForAnInFlightTailscaleMint` | runServe does not return while a mint that ignores its context runs, and the mint's write lands before it returns |
+| `TestServeGivesUpOnAWedgedTailscaleMintAfterTheGrace` | a mint that never returns costs the grace and the timeout line, never a hung exit |
+| `TestACancelledTailscalePassChangesNothing` | a cancelled detect or mint keeps the LE cert serving and publishes nothing; a deadline is still reported |
+| `TestAMintedTailscaleCertIsReportedOnServesStdout` | the happy path through the seam, and where its line goes |
+| `TestACompletedTailscaleCallIsAppliedAfterACancel` | a detect or mint that COMPLETED is applied though the context was cancelled as it returned (added in review round 1) |
+
+Controls, each against the committed fix with one mutation, asserted to
+apply exactly once:
+
+| # | mutation | red |
+|---|---|---|
+| NC1 | no `stopTreeOnCancel` in MintCert | tree test (MintCert), and the runServe exec test |
+| NC2 | no `stopTreeOnCancel` in Detect | tree test (Detect) |
+| NC3 | `Setpgid` kept, Cancel kills the leader only | tree test, both rows |
+| NC4 | `Start` launches bare goroutines | the held-mint and wedged-mint tests; the exec test stays GREEN, as it should: it pins the kill, not the join |
+| NC5 | `passCancelled` is `ctx.Err() != nil` | the deadline case |
+| NC6 | no cancel check at the Detect site | the detect case |
+| NC7 | no cancel check at the MintCert site | the mint case |
+| NC8 | the minted line to `io.Discard` | the stdout test |
+| NC9 | bgWriters grace of an hour | the wedged-mint test (at its own 15 s bound) |
+| NC10 | grace expiry prints nothing | the wedged-mint test |
+| NC11 | no `os.Process` check before the group kill | the reaped-leader test only |
+| NC12 | review round 1's re-check after a SUCCESSFUL Detect | the completed-detect case only |
+| NC13 | review round 1's re-check after a SUCCESSFUL MintCert | the completed-mint case only |
+
+NC1 to NC3 were run again after the consult changed `Cancel`, with the
+same result.
+
+Not separately pinned: the renewer's join. Its mint runs on a 24 h tick,
+and `Start` joins both goroutines the same way.
+
+### The backup "startup" snapshot, and the rest of runServe
+
+`backup.go`'s startup snapshot is not the same shape. `runBackupTicker`
+has been `bgWriters`-joined since the `data/backups` flake its comment
+records, the snapshot runs inline in `runSweepLoop`'s sweep, and
+`internal/backup` starts no goroutines. `POST /api/backups` snapshots
+synchronously in its handler. It has the neighbouring shape instead: a
+shutdown during it logs `backup (startup): snapshot failed: vacuum
+manifest db: context canceled`, seen in these tests' stderr, which is the
+cancelled-is-not-failed rule one subsystem over. Left for its own change.
+
+Every other `go` statement in runServe was read. The unjoined ones are the
+HTTP servers (shut down explicitly), the catalog invalidator (an epoch bump
+in memory), and tsnet mode's startup goroutine, which was not examined
+beyond that.
+
+### Consult
+
+A direct Gemini consult (`consult.py`) on the process-group design,
+before the PR:
+
+- **Taken:** the post-reap Cancel window, and that the `Process.Kill`
+  fallback was redundant (both above).
+- **Taken as a question, and answered by measurement:** that the 1-in-42
+  output after the group kill could be bytes written before it, drained
+  after. The fork-race probe shows real escapes, 45 of 4,830.
+- **Declined:** "rejecting WaitDelay is incorrect", on the grounds that a
+  D-state process or a daemon holding the pipes could block `Wait`
+  forever. A D-state leader blocks `Process.Wait`, which WaitDelay does
+  not bound. A daemon that leaves the group and keeps the pipes is not
+  something this CLI does. The case WaitDelay WOULD change is the measured
+  escape, and it changes it for the worse.
+- **Declined:** resolving `/usr/local/bin/tailscale` to the app binary on
+  darwin. It fixes the one wrapper path that is known, and leaves any
+  other (an operator's own script, a package manager's shim) with the
+  orphan. The group kill covers every wrapper.
+
+### Process notes
+
+- **Two measurement errors, both mine, caught before merge.** A "serve
+  has returned" marker printed from a `t.Cleanup` registered after the
+  drain runs BEFORE the drain (LIFO). It put "11 to 48 ms after runServe"
+  into a commit message and a docblock, and the right marker, printed
+  where `run()` returns, contradicted it. Then, under `-count`, late lines
+  from one run printed during the next and were read as the next run's.
+  Matching by data dir fixed that. The rule is in CLAUDE.md under Build,
+  CI, and test discipline.
+- **The drain sweep sees launches in a Test's own body only.** A first
+  draft factored the serve launch into a helper, which that sweep's
+  docblock names as its blind spot. The launch is inlined in each test.
+
+### Review
+
+- **Round 1**, on `d9fa815b`. Gemini: no findings. SonarCloud (gate
+  passed): three findings, all taken. The empty Windows
+  `stopTreeOnCancel` says in its body that it is empty on purpose
+  (go:S1186). `TestACancelledTailscalePassChangesNothing`'s assertions
+  moved into `assertPassChangedNothing` (go:S3776, complexity 17 of 15).
+  The served-cert check drops a one-use variable (godre:S8193).
+  **CodeRabbit** raised two findings, both declined with the reasoning
+  recorded in their threads: re-check `passCancelled` after a SUCCESSFUL
+  Detect (Major) and after a SUCCESSFUL MintCert (Minor). A completed call
+  reports a fact. exec answers success only when the process finished on
+  its own: a kill it sent turns the result into `ctx.Err()`. So MagicDNS
+  off, or a fresh pair on disk, is true whatever the context did
+  afterwards. Discarding it would leave the bridge serving what it knows
+  to be stale, and turn a completed "Re-mint now" into a no-op. The
+  accurate half was taken: the docblock and CLAUDE.md read broader than
+  the rule ("a cancelled pass changes nothing"), and now say that only an
+  ERROR the cancel caused is quiet. `TestACompletedTailscaleCallIsAppliedAfterACancel`
+  pins the decision in both directions (NC12, NC13).
+
