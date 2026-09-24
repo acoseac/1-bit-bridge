@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -177,17 +176,34 @@ func (a *tailscaleAutoPilot) magicDNSURL(magicDNS string) string {
 // ticker. Both honour ctx.Done so SIGINT clears them out cleanly
 // alongside the rest of the periodic workers.
 //
+// Both are joined on wg, which runServe waits on, grace-bounded, before
+// it returns. They WRITE: the mint's `tailscale cert` puts the LE pair
+// in <dataDir>/tls. Launched bare, a mint still running at shutdown
+// finished after runServe had returned (in 23 of 36 instrumented runs,
+// by up to 9 ms), and on a host running tailscaled a boot test's
+// cleanup then found <dataDir>/tls not empty. The cancel only asks the
+// CLI to stop, and internal/tailscale's group kill can miss a process
+// forked at that instant; the wait is what makes runServe's return mean
+// that it has stopped.
+//
 // PR 4: derives a child ctx so Disable() can cancel ONLY the
 // auto-pilot's two goroutines without affecting the caller's
 // shared scanCtx. The child ctx is also cancelled when the
 // parent fires (SIGINT path stays correct).
-func (a *tailscaleAutoPilot) Start(ctx context.Context) {
+func (a *tailscaleAutoPilot) Start(ctx context.Context, wg *sync.WaitGroup) {
 	childCtx, cancel := context.WithCancel(ctx)
 	a.mu.Lock()
 	a.cancelLocal = cancel
 	a.mu.Unlock()
-	go a.runStartup(childCtx)
-	go a.runRenewer(childCtx)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		a.runStartup(childCtx)
+	}()
+	go func() {
+		defer wg.Done()
+		a.runRenewer(childCtx)
+	}()
 }
 
 // Disable cancels the per-auto-pilot child ctx (stopping the
@@ -281,6 +297,9 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 
 	info, err := a.cli.Detect(ctx)
 	if err != nil {
+		if passCancelled(ctx) {
+			return a.Snapshot()
+		}
 		snap.CLIAvailable = info.CLIAvailable
 		snap.LastError = info.LastError
 		fmt.Fprintf(a.stderr, "tailscale (%s): detect failed: %v\n", trigger, err)
@@ -416,6 +435,9 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	a.mu.Unlock()
 
 	if err := a.cli.MintCert(ctx, info.BinaryPath, info.MagicDNSName, certPath, keyPath); err != nil {
+		if passCancelled(ctx) {
+			return a.Snapshot()
+		}
 		switch {
 		case errors.Is(err, servertailscale.ErrHTTPSCertsDisabled):
 			snap.LastError = "HTTPS Certificates not enabled in tailnet — visit https://login.tailscale.com/admin/dns and toggle on"
@@ -451,7 +473,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 		snap.CertNotAfter = &expiry
 		expiryStr = expiry.Format("2006-01-02")
 	}
-	fmt.Fprintf(os.Stdout, "tailscale (%s): minted LE cert for %s, expires %s\n",
+	fmt.Fprintf(a.stdout, "tailscale (%s): minted LE cert for %s, expires %s\n",
 		trigger, info.MagicDNSName, expiryStr)
 	// A freshly-minted LE cert should be ~90 days from expiry. If
 	// we're already under 30 days remaining, Tailscale's control
@@ -466,6 +488,24 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	}
 	a.publish(snap)
 	return snap
+}
+
+// passCancelled reports whether a detect+mint pass was CANCELLED, as
+// opposed to failing. Three things cancel it and none is a failure:
+// shutdown, Disable(), and an admin client that went away mid-"Re-mint
+// now" (RefreshNow runs on the request's context). A cancelled pass
+// returns the snapshot it found. It logs no failure, publishes no
+// snapshot, and above all does not unload an LE cert that is still
+// valid. The Detect error branch unloads it, so a cancelled `tailscale
+// status` used to leave every *.ts.net client on the self-signed cert
+// until a later pass succeeded, up to a day later on the renewer. Since
+// serve now waits for this pass, its shutdown-time "mint failed:
+// context canceled" would otherwise reach the journal too.
+//
+// Cancelled, not merely done: a pass that ran out of time failed, and
+// is reported like any other failure.
+func passCancelled(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
 }
 
 // warnLECertExpiringSoon returns the operator-facing warning string

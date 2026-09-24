@@ -147,6 +147,7 @@ func Detect(ctx context.Context) (NodeInfo, error) {
 	// large tailnet the full peer set adds avoidable latency + JSON
 	// volume to startup and every operator-triggered refresh.
 	cmd := commandContext(ctx, binary, "status", "--json", "--peers=false")
+	stopTreeOnCancel(cmd)
 	stdout := &cappedBuffer{cap: maxCLIOutputBytes}
 	stderr := &cappedBuffer{cap: maxCLIOutputBytes}
 	cmd.Stdout = stdout
@@ -266,6 +267,7 @@ func MintCert(ctx context.Context, binary, magicDNS, certPath, keyPath string) e
 		"--key-file="+keyPath,
 		magicDNS,
 	)
+	stopTreeOnCancel(cmd)
 	stdout := &cappedBuffer{cap: maxCLIOutputBytes}
 	stderr := &cappedBuffer{cap: maxCLIOutputBytes}
 	cmd.Stdout = stdout
