@@ -2837,13 +2837,20 @@ its twin.** The top list is older, shorter, and read first.
   package NAME and test-ness. An external `foo_test` file sees only its own
   package, and an internal test file also sees its package's non-test names.
   Both directions were negative-controlled on synthetic shapes, since
-  nothing collides across the tree's one external test package. The second
-  rule has a measured price: 14 test docs open by naming the production
-  declaration they test, with a listed verb ("loadCLIConfig is …"), and only
-  the no-doc condition keeps them quiet. Delete one of those production docs
-  and its test's prose is reported; restore the production doc rather than
-  moving the test's. Still unseen: a title-line doc (`// Name.`, 29 in test
-  files, none misattached).
+  nothing collides across the tree's one external test package. A name an
+  internal test file sees in both counts as documented if EITHER declaration
+  is: answering from the test scope first let a test fake's undocumented
+  method, recorded by bare name like every method, strip the production doc
+  from under a test's prose about it (a Gemini consult found it; NC7
+  reproduces it). Seeing the package's names has a measured price: 14 test
+  docs open by naming the production declaration they test, with a listed
+  verb ("loadCLIConfig is …"), and only the no-doc condition keeps them
+  quiet. Delete one of those production docs and its test's prose is
+  reported; restore the production doc rather than moving the test's. This
+  guard's walk skips `.`- and `_`-prefixed files, as the go tool does: an
+  emacs `.#name.go` lock is a dangling symlink, and one failed the guard
+  with a parse error over a file no build reads. Still unseen: a title-line
+  doc (`// Name.`, 29 in test files, none misattached).
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`

@@ -10599,8 +10599,9 @@ exactly (4,806 comments, 4,522 subject-first openers, 90.3%), and it did.
   is a method, with three exceptions: `raceBuild`, a const in two
   build-tag-exclusive test files of which one documents it, and the types
   `Track` and `UpdateInfo`, which share a name with a test fake's method.
-  `record`'s first-seen rule is unchanged. A test scope is consulted before
-  the package's non-test names.
+  `record`'s first-seen rule is unchanged within a scope. Across the two
+  scopes an internal test file sees, a name counts as documented if either
+  declaration is (see **Review**).
 
 ### Decisions
 
@@ -10630,9 +10631,11 @@ exactly (4,806 comments, 4,522 subject-first openers, 90.3%), and it did.
   fails if nothing in it opened with its own subject.
 - **Names are keyed by directory, package name and test-ness.** A non-test
   file sees the non-test files of its package, which is exactly what it saw
-  before. An internal test file sees its own package's test files first,
-  then the non-test ones. An external `foo_test` file sees only its own
-  package.
+  before. An internal test file sees its own package's test files and its
+  non-test ones, and a name declared in both counts as documented if either
+  declaration is. The first form answered from the test files first; see
+  **Review** below for why that changed. An external `foo_test` file sees
+  only its own package.
 - **The price of "internal tests see the package's names" is recorded, not
   hidden.** The 14 docs above are kept quiet only by the no-doc condition,
   the same shielding #989 recorded for `ChunkSize`. If one of those
@@ -10666,8 +10669,9 @@ fixed (bc9e215):      non-test 4806 / 401 / 0 / 4084 of 4522 (90.3%)
                       test     4039 / 716 / 0 / 2720 of 2866 (94.9%)
 ```
 
-Controls on the committed tree, `-count=1`, each restored with
-`git checkout` and checked clean:
+Controls on the final commit (8335b4b), `-count=1`, each restored with
+`git checkout` and checked clean. NC0–NC6 first ran on bc9e215 with the
+same verdicts. The whole set was re-run after the review changes below:
 
 | control | mutation | result |
 |---|---|---|
@@ -10684,12 +10688,72 @@ Controls on the committed tree, `-count=1`, each restored with
 | NC5b′ | NC5b, keyed by directory alone | red: prose reported against a name `backup_test` cannot see |
 | NC6a | `loadCLIConfig`'s production doc deleted | red: `configpath_test.go:140 "loadCLIConfig is"` on its test, the price recorded above |
 | NC6b | NC6a, and an internal test file sees only the test files' names | green |
+| NC7a | an undocumented `Prune` method on a fake in `internal/backup`'s internal test file, and a test whose doc opens "Prune asserts …" (`backup.Prune` is documented) | green |
+| NC7b | NC7a, with the test scope answering first (bc9e215's lookup) | red: the test's prose reported against the fake's method |
+| NC8a | an emacs lock symlink `.#configpath_test.go` beside the file | green |
+| NC8b | NC8a, with the walk's old filter (every `*.go` name) | red: `parse …/.#configpath_test.go: … no such file or directory` |
 
-NC1b, NC2b, NC5a′, NC5b′ and NC6b are the controls on the controls. NC1b
-shows the test-file arm is what catches NC1a. NC2b shows the misattachment
-arm of the criterion earns "swaps". NC5a′ and NC5b′ show the package-name
-key in both directions, a miss and a false positive, on a shape the tree
-does not contain. NC6b shows the non-test lookup is what makes NC6a
-reportable. NC4 shows the floor catches the list being trimmed of its one
-dominant word, even though the detector itself goes blind to every "pins"
-block.
+NC1b, NC2b, NC5a′, NC5b′, NC6b, NC7b and NC8b are the controls on the
+controls. NC1b shows the test-file arm is what catches NC1a. NC2b shows the
+misattachment arm of the criterion earns "swaps". NC5a′ and NC5b′ show the
+package-name key in both directions, a miss and a false positive, on a shape
+the tree does not contain. NC6b shows the non-test lookup is what makes NC6a
+reportable. NC7b and NC8b show each review fix is what removes its failure.
+NC4 shows the floor catches the list being trimmed of its one dominant word,
+even though the detector itself goes blind to every "pins" block.
+
+### Review
+
+**CodeRabbit** found one defect in round 1, in the CLAUDE.md prose: an
+external `foo_test` file "sees only itself". It sees its whole package,
+which is what the guard's docblock, this entry and the PR body already said.
+Round 2, on 4d7dbf3, was clean, and CodeRabbit verified the fix on the
+thread. **SonarCloud** passed.
+
+**The Gemini app was over its daily quota**, as it was on #989. A direct
+consult (`consult.py`, gemini-3.8-flash, with the guard file as context)
+stood in for it and made seven claims. Each was checked against the SDK or
+the tree before anything changed:
+
+- **Taken: a test fake's method stripped a production doc.** Declarations
+  are recorded by bare name, methods included, and the test scope answered
+  first. So a fake's undocumented method named like a documented production
+  declaration turned a test's prose about that declaration into a finding.
+  Reproduced before fixing (NC7b). Now a name an internal test file sees in
+  both scopes counts as documented if either declaration is. That has a
+  cost: a displaced doc for a fake's method is now hidden when a production
+  namesake is documented. But that needs a fake method to have had a doc at
+  all, and to have lost it. The prose shape needs only a test doc naming
+  what it tests (the census found 31) plus a fake whose method shares the
+  name, which fakes implementing a production interface routinely have. The
+  tree has 16 names where an undocumented test declaration shares its name
+  with a documented non-test one (`Write`, `Flush`, `Publish`,
+  `GetTrackInfo`, `Track` and others). A test doc naming any of them was
+  exposed under the old lookup; none happens to exist yet.
+- **Taken: the walk parsed files the go tool ignores.** Names beginning with
+  "." or "_" are skipped (`go help packages`). None exists in the tree, but
+  an editor makes one: emacs's `.#name.go` lock is a dangling symlink, and
+  with one beside configpath_test.go the guard failed on a parse error
+  (NC8b). This is pre-existing since #964, for non-test files too.
+- **Declined: "`CommentGroup.Text()` keeps `//go:` directives."** It removes
+  them. `go/ast/ast.go:98` says so ("Comment directives like "//line" and
+  "//go:noinline" are also removed"), and a probe printed `"Foo does work.\n"`
+  for a doc opening `//go:noinline`.
+- **Declined: grouped `type ( … )` docs are inspected once per spec.** True
+  of #964's code, but the tree has no grouped type block with both a group
+  doc and two specs. If it did, the group doc marks every grouped type
+  documented, so the extra inspections could only raise `checked`.
+- **Declined: build-tag duplicates resolve first-seen.** That is `record`'s
+  rule since #964. The census shows `raceBuild` is the only non-method
+  collision in a test scope, and no doc opens with it.
+- **Declined: generated files.** There are none in the tree.
+- **Declined: a `foo_test` file cannot see `foo`'s names.** That is by
+  design. It cannot reference them unqualified, and NC5b′ shows what seeing
+  them costs.
+
+**The same lock-file failure is in `TestEveryCitedTestNameExists`**,
+measured with a `.#lockprobe_test.go` symlink in `cmd/bridge`: its walk
+reads every `.go` and `.md` file and fails at the `os.ReadFile`. Its skip
+rules differ (it deliberately reads `.github/` markdown), so it was left
+for its own change rather than folded in here. The `adminauth` and
+`manifest` walkers passed the same probe.
