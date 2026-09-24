@@ -298,8 +298,11 @@ type keeperFile struct {
 	src     string
 	fset    *token.FileSet
 	imports map[string]bool
-	uses    map[string]int
-	found   []blankKeeper
+	// dotImport is whether the file dot-imports a package, whose names it
+	// then uses bare, like its own.
+	dotImport bool
+	uses      map[string]int
+	found     []blankKeeper
 }
 
 // blankKeepersInFile returns the keepers in one file's source.
@@ -314,7 +317,7 @@ func blankKeepersInFile(rel, src string) ([]blankKeeper, error) {
 	if err != nil {
 		return nil, err
 	}
-	kf := &keeperFile{rel: rel, src: src, fset: fset, imports: importNames(f), uses: map[string]int{}}
+	kf := &keeperFile{rel: rel, src: src, fset: fset, imports: importNames(f), dotImport: hasDotImport(f), uses: map[string]int{}}
 	for _, decl := range f.Decls {
 		kf.scanDecl(decl)
 	}
@@ -323,15 +326,30 @@ func blankKeepersInFile(rel, src string) ([]blankKeeper, error) {
 }
 
 // importNames returns the names f's imports are known by, blank and dot
-// imports aside.
+// imports aside, and cgo's pseudo-package "C" too: that import carries the
+// preamble's #cgo directives, so "delete it, and the import" is never the
+// right advice for it.
 func importNames(f *ast.File) map[string]bool {
 	names := map[string]bool{}
 	for _, imp := range f.Imports {
+		if imp.Path.Value == `"C"` {
+			continue
+		}
 		if name := importName(imp); name != "_" && name != "." {
 			names[name] = true
 		}
 	}
 	return names
+}
+
+// hasDotImport reports whether f dot-imports a package.
+func hasDotImport(f *ast.File) bool {
+	for _, imp := range f.Imports {
+		if imp.Name != nil && imp.Name.Name == "." {
+			return true
+		}
+	}
+	return false
 }
 
 // scanDecl counts the import uses in decl and collects its keepers: the
@@ -422,8 +440,10 @@ func (kf *keeperFile) scanDeclStmt(ds *ast.DeclStmt, scope localScopes) {
 // keep records e as a keeper when it has a keeper's shape (keeperName) and
 // the name it keeps is an import or, in the top-level form only, a bare
 // identifier of the file's own package. A statement naming a local
-// (`_ = cfg`) is how Go code marks it used, and a selector through a
-// package-level variable (`var _ = cfg.Name`) can dereference it.
+// (`_ = cfg`) is how Go code marks it used, a selector through a
+// package-level variable (`var _ = cfg.Name`) can dereference it, and in a
+// file with a dot import a bare name may be the import's rather than the
+// package's own, which the syntax cannot tell apart.
 func (kf *keeperFile) keep(e ast.Expr, form string, top bool, doc *ast.CommentGroup, scope localScopes) {
 	name, ok := keeperName(e)
 	if !ok {
@@ -432,7 +452,7 @@ func (kf *keeperFile) keep(e ast.Expr, form string, top bool, doc *ast.CommentGr
 	pkgs := map[string]int{}
 	if pkg, isImport := kf.importAt(name, scope); isImport {
 		pkgs[pkg] = 1
-	} else if _, isIdent := name.(*ast.Ident); !top || !isIdent {
+	} else if _, isIdent := name.(*ast.Ident); !top || !isIdent || kf.dotImport {
 		return
 	}
 	k := blankKeeper{file: kf.rel, line: kf.fset.Position(e.Pos()).Line, form: form, top: top, src: kf.text(e), pkgs: pkgs}
@@ -750,7 +770,10 @@ func typedErrorInFile(path, rel string) (string, error) {
 func typedError(decl ast.Decl) (ast.Node, string) {
 	switch d := decl.(type) {
 	case *ast.GenDecl:
-		return sentinelIn(d)
+		if at, what := sentinelIn(d); at != nil {
+			return at, what
+		}
+		return errorInterfaceIn(d)
 	case *ast.FuncDecl:
 		if isErrorMethod(d) {
 			return d, "an Error() string method"
@@ -776,13 +799,49 @@ func sentinelIn(gd *ast.GenDecl) (ast.Node, string) {
 	return nil, ""
 }
 
-// isErrorMethod reports whether fd is a method `Error() string`.
-func isErrorMethod(fd *ast.FuncDecl) bool {
-	if fd.Recv == nil || fd.Name.Name != "Error" || fd.Type.Params.NumFields() != 0 || fd.Type.Results.NumFields() != 1 {
+// errorInterfaceIn returns the first interface type gd declares that is an
+// error, one embedding `error` or declaring `Error() string` (as
+// net.Error does), or nil. errors.As matches one, so it is a typed error
+// as much as a sentinel is.
+func errorInterfaceIn(gd *ast.GenDecl) (ast.Node, string) {
+	for _, spec := range gd.Specs {
+		ts, ok := spec.(*ast.TypeSpec)
+		if !ok {
+			continue
+		}
+		if it, ok := ts.Type.(*ast.InterfaceType); ok && isErrorInterface(it) {
+			return ts.Name, "the error interface " + ts.Name.Name
+		}
+	}
+	return nil, ""
+}
+
+// isErrorInterface reports whether it embeds error or declares a method
+// `Error() string`.
+func isErrorInterface(it *ast.InterfaceType) bool {
+	for _, m := range it.Methods.List {
+		if id, ok := m.Type.(*ast.Ident); ok && len(m.Names) == 0 && id.Name == "error" {
+			return true
+		}
+		if ft, ok := m.Type.(*ast.FuncType); ok && len(m.Names) == 1 && m.Names[0].Name == "Error" && returnsOnlyString(ft) {
+			return true
+		}
+	}
+	return false
+}
+
+// returnsOnlyString reports whether ft takes nothing and returns a string.
+func returnsOnlyString(ft *ast.FuncType) bool {
+	if ft.Params.NumFields() != 0 || ft.Results.NumFields() != 1 {
 		return false
 	}
-	id, ok := fd.Type.Results.List[0].Type.(*ast.Ident)
+	id, ok := ft.Results.List[0].Type.(*ast.Ident)
 	return ok && id.Name == "string"
+}
+
+// isErrorMethod reports whether fd is a method `Error() string`.
+func isErrorMethod(fd *ast.FuncDecl) bool {
+	return fd.Recv != nil && fd.Name.Name == "Error" && returnsOnlyString(fd.Type)
 }
 
 // isSentinelValue reports whether e makes the var it initialises a sentinel:
@@ -827,6 +886,12 @@ func TestBlankKeeperScanOnFixtures(t *testing.T) {
 		}, false, keeperMet},
 		{"a sentinel meets it by another package's", map[string]string{
 			"internal/tsnet/err.go": "package tsnet\n\nimport \"net\"\n\nvar closed = net.ErrClosed\n",
+		}, false, keeperMet},
+		{"an error interface meets it", map[string]string{
+			"internal/tsnet/err.go": "package tsnet\n\ntype Error interface {\n\terror\n\tTimeout() bool\n}\n",
+		}, false, keeperMet},
+		{"an interface with an Error method meets it", map[string]string{
+			"internal/tsnet/err.go": "package tsnet\n\ntype Failure interface {\n\tError() string\n}\n",
 		}, false, keeperMet},
 		{"an error type meets it", map[string]string{
 			"internal/tsnet/err.go": "package tsnet\n\ntype notStarted struct{}\n\nfunc (notStarted) Error() string { return \"not started\" }\n",
@@ -1056,6 +1121,11 @@ func use(cfg struct{ Name string }) {
 	_ = <-events.Done                   // a receive waits
 }
 `,
+	// A bare name in a file with a dot import may be the import's, so the
+	// local form is not read there; and cgo's pseudo-package carries the
+	// preamble, so its import is never one to delete.
+	"keep/dot.go": "package keep\n\nimport . \"sync\"\n\nvar _ = Mutex{}\n",
+	"keep/cgo.go": "package keep\n\n// #cgo LDFLAGS: -lm\nimport \"C\"\n\nvar _ = (*C.char)(nil)\n",
 	// Nothing the go tool ignores is read, nor another module, nor vendored
 	// or node_modules code. The lock file is not Go, so opening it would
 	// fail the scan.
