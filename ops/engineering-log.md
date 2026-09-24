@@ -12488,7 +12488,7 @@ synchronously in its handler. It has the neighbouring shape instead: a
 shutdown during it logs `backup (startup): snapshot failed: vacuum
 manifest db: context canceled`, seen in these tests' stderr, which is the
 cancelled-is-not-failed rule one subsystem over. Left for its own change,
-which it got in #PRNUM (the next entry).
+which it got in #998 (the next entry).
 
 Every other `go` statement in runServe was read. The unjoined ones are the
 HTTP servers (shut down explicitly), the catalog invalidator (an epoch bump
@@ -12552,7 +12552,7 @@ before the PR:
   pins the decision in both directions (NC12, NC13).
 
 
-## 2026-09-24 — a backup pass stopped by shutdown reports nothing (#PRNUM)
+## 2026-09-24 — a backup pass stopped by shutdown reports nothing (#998)
 
 #997's entry left this for its own change. A boot test that cancels
 `runServe` shortly after start got `backup (startup): snapshot failed:

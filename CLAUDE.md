@@ -2279,7 +2279,7 @@ mentions across the four `ops/audit-*.md` files.
   writer makes its cancelled exit path run before shutdown completes, so
   check what that path reports and what it changes. (#997)
 - **…and the backup ticker applies the rule by asking the ERROR too,
-  because one error can carry both** (#PRNUM). A shutdown during the startup
+  because one error can carry both** (#998). A shutdown during the startup
   snapshot (a `VACUUM INTO`, long on a big library) printed `backup
   (startup): snapshot failed: vacuum manifest db: context canceled`, and one
   during the prune printed two more lines about a pass that failed at
@@ -3124,7 +3124,7 @@ its twin.** The top list is older, shorter, and read first.
   -race`, then run about three processes per core. Idle stress passing is not
   evidence the window is absent. (#987)
 - **A running SQLite statement is parked from INSIDE it, by a Go collation**
-  (#PRNUM). `VACUUM` copies an index with an append fast path that compares
+  (#998). `VACUUM` copies an index with an append fast path that compares
   no keys, except an index with a non-BINARY collation, which it rebuilds by
   seeks (SQLite's `insert.c`, `xferOptimization`). `internal/backup/backuptest`
   registers such a collation in Go, so a VACUUM of a database `WriteSource`
