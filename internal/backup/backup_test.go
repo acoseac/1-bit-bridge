@@ -140,8 +140,11 @@ func TestSnapshotFailureReapsPartialDir(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // VACUUM INTO observes the cancellation and fails
 
-	if _, err := backup.Snapshot(ctx, src); err == nil {
-		t.Fatalf("Snapshot with cancelled ctx should fail")
+	// The cancellation itself, not merely an error: the serve-side ticker
+	// keys its silence on errors.Is(err, context.Canceled), so a wrap that
+	// dropped it would turn every shutdown into a reported failure.
+	if _, err := backup.Snapshot(ctx, src); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Snapshot with a cancelled ctx: err = %v, want context.Canceled", err)
 	}
 
 	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
