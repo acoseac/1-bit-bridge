@@ -372,17 +372,7 @@ func (w *VariantWatcher) currentVariantsDir() string {
 func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	rows, err := w.lister.AllVariants()
 	if err != nil {
-		// A listing the shutdown stopped is not a failed sweep. The
-		// lister's adapter runs on the same scanCtx this tick does, and
-		// the report says the tick was cancelled, as every other stop in
-		// it does (Gemini API review, #1004).
-		failure := ctxerr.WithoutCancellation(ctx, err)
-		if failure != nil {
-			logger.Error("integrity variant sweep: AllVariants failed",
-				slog.Any("err", failure),
-			)
-		}
-		return SweepReport{Skipped: true, Cancelled: failure == nil}
+		return listingFailed(ctx, err)
 	}
 	if len(rows) == 0 {
 		return SweepReport{}
@@ -559,6 +549,21 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	w.publishDeleted(paths, variantIDs)
 	w.logSummary(dir, report)
 	return report
+}
+
+// listingFailed reports a catalog listing that failed, and returns the
+// report of a tick that could not sweep. A listing the shutdown stopped is
+// not a failed sweep: the lister's adapter runs on the same scanCtx the tick
+// does, and the report says the tick was cancelled, as every other stop in
+// it does (Gemini API review, #1004).
+func listingFailed(ctx context.Context, err error) SweepReport {
+	failure := ctxerr.WithoutCancellation(ctx, err)
+	if failure != nil {
+		logger.Error("integrity variant sweep: AllVariants failed",
+			slog.Any("err", failure),
+		)
+	}
+	return SweepReport{Skipped: true, Cancelled: failure == nil}
 }
 
 // publishDeleted fires the single batched callback per sweep that
