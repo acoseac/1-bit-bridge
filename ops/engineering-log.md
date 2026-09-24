@@ -11803,3 +11803,272 @@ not a citation, never pass one, and the tree has no instance. Before
 editing, every ASCII-scope statement in the change was grepped: CLAUDE.md's
 statement of the rule and the Consult note were updated, and the census
 table's row now says it measured the ASCII form. The rest are history.
+
+## 2026-09-24 — every blank keeper goes, and a sweep test keeps them gone (#996)
+
+#994 recorded the rule ("An import keeper is dead code, never
+documentation") and deleted the five keepers whose docs named helpers that
+never existed. It left seven top-level `var _ = pkg.X` whose docs are
+imperative ("silence unused-import warning …") or absent, and the task that
+opened this PR listed them with their per-file counts. The task counted the
+`var _ = pkg.X` shape only. A census of every blank reference found seven
+more, and history showed the class had already come back once after a
+cleanup.
+
+### What the census measured
+
+A scratch AST tool listed every blank reference whose value only names
+things: a top-level `var _ = E` with no declared type, and `_ = E` or
+`var _ = E` in a function, where E is identifiers, selectors, literals,
+composite literals of those, or a conversion to a type that cannot be a
+function. For each import E names it counted the file's other selector
+uses of that import. On main at `2135cbf2`:
+
+| site | keeper | other uses in the file | verdict | doc |
+|---|---|---|---|---|
+| cmd/bridge/update.go:193 | `_ = version.ServerVersion` | 0 outside keepers | only use | none |
+| cmd/bridge/update.go:200 | `_ = version.ServerVersion` | 0 outside keepers | only use | "silence unused-import warning if version isn't referenced elsewhere" |
+| internal/admin/handlers_api.go:3484 | `var _ = (*manifest.Store)(nil)` | 1 | redundant | "Statically assert the Manifest store has the helpers we need. A missing method here will fail the build" |
+| internal/admin/handlers_settings_network_test.go:280 | `_ = config.TailscaleModeDisabled`, inside a never-called `var _ = func() {…}` | 0 | only use | "Silence "declared but not used" via no-op consume." |
+| internal/admin/shutdown_test.go:131 | `_ = http.ErrServerClosed` | 0 | only use | "Avoid hijacking the `http` import being unused." |
+| internal/api/files_test.go:615 | `var _ = fmt.Sprintf` | 1 | redundant | "quiet unused-import warning — keeps fmt alive for future assertion helpers." |
+| internal/api/gzip_test.go:350 | `_ = httptest.NewRequest` | 0 | only use | "silence unused import if test changes" |
+| internal/api/upnp_proxy_test.go:255 | `var _ = io.Copy` | 0 | only use | "silence "imported but unused" if a future test goes through a different path." |
+| internal/dlna/content_directory.go:1378 | `var _ = strings.Builder{}` | 13 | redundant | "Quiet "imported but unused" if a future test removes the only call site …" |
+| internal/dlna/file_handler.go:364 | `var _ = path.Base` | 0 | only use | "Avoid `path` import being flagged if a future refactor uses `filepath` exclusively …" |
+| internal/manifest/extractors_test.go:1283 | `var _ = atomic.Bool{}` | 0 | only use | "Suppresses unused-import warning when running individual tests …" |
+| internal/manifest/extractors_test.go:1284 | `var _ = time.Now` | 24 | redundant | the same doc |
+| internal/tailscale/tailscale.go:422 | `var _ = logger` | (a local name) | keeps nothing | "silence unused-import warning if `logger` ends up being reorg'd later." |
+| internal/tls/manager_test.go:48 | `var _ = time.Hour` | 1 | redundant | "silence unused-import warning; time is referenced in tests below …" |
+| internal/tsnet/tsnet_test.go:379 | `var _ = errors.Is` | 0 | allowed | "… Don't remove until typed errors land." |
+
+The task's seven counts all held (fmt 1, io 0, strings 13, path 0, atomic
+0, time 24, time 1). The seven it did not list:
+
+- **Four statement keepers**, which no census before this one had counted:
+  update.go's pair, shutdown_test.go's and gzip_test.go's. The pair in
+  update.go kept `internal/version` imported between them. Nothing else in
+  the file used it, so each was the other's only other "use".
+- **A statement keeper inside a compile-time type pin**:
+  handlers_settings_network_test.go's `var _ = func() {…}` assigns
+  `func(bool) {}` and `func() {}` to the two Deps fields, then consumed
+  `config.TailscaleModeDisabled`, the only use of `config` in the file.
+- **A conversion**, `var _ = (*manifest.Store)(nil)`. Its doc claims a
+  method check, and a nil conversion checks only that the type exists.
+  Every method the admin handlers call is checked at its call site. The
+  keeper was `manifest`'s only use in the file when it was written (the
+  admin console's first commit, 3b56bb7e) and is redundant now that
+  `buildComposition` takes `[]manifest.FormatGroup`.
+- **`var _ = logger`** keeps a package-level var, not an import. Go never
+  reports an unused package-level declaration, so it silenced nothing in
+  any build. The logger itself had never logged a line: #102 created it and
+  its keeper in the same commit, and `git log -G` finds no log call on it
+  since.
+
+### History
+
+The same tool ran over 37 trees sampled every 30 commits along main's
+first-parent history (`git archive <sha> | tar -x`, 2026-04-23 to
+2026-09-24), and so did the final guard's `findBlankKeepers`, through a
+throwaway probe test. They agree tree by tree: 699 sightings, 24 distinct
+keepers, counting #294's keeper once although its test file was renamed
+(`handlers_settings_pr4_test.go` became
+`handlers_settings_network_test.go`).
+
+- **Introduced**: 13 in April, 8 in May, 2 in June, none in July or
+  August, and one in September, #825's `var _ = io.Discard` in
+  internal/admin/console_smoke_test.go (2026-09-02). The per-tree count
+  peaked at 23.
+- **Removed by hand before this PR, three times, each time within its own
+  scope**: c062ac95 (2026-07-21) removed #204's `var _ = context.TODO`
+  from internal/transcode/batch.go. #855 (2026-09-06, a LOUPE of
+  cmd/bridge) removed three there: `os.Stdin` and `json.Marshal` in
+  doctor.go, `time.Time{}` in upnp_upstream_admin.go. It wrote no rule and
+  no guard, and it missed #825's, which had landed in internal/admin four
+  days earlier. #994 removed five. This PR removes the other fourteen and
+  leaves the tsnet one.
+- **A keeper's premise decays without anything noticing.** At introduction
+  21 of the 24 were their import's only use. Two of those, `strings` in
+  content_directory.go and `manifest` in handlers_api.go, became redundant
+  as their files grew, and from then on they kept nothing even by their
+  own reasoning. Three were redundant from the day they were written
+  (`time.Now`, `time.Hour`, `context.TODO`).
+- **Precision**: every one of the 24 was a keeper. Its doc says silence,
+  quiet, keep or keepalive, names a helper that never existed, or claims a
+  check it does not make, and the undocumented ones are statement keepers
+  or sit beside a documented one.
+- **The other blank forms never held one.** Across the 37 trees there is
+  no `var _ T` without a value, no `const _`, no `type _`, no `func _`, no
+  multi-name blank spec and no top-level `var _ = f(x)`. There are 7
+  distinct typed `var _ I = impl` specs, all interface assertions. So the
+  sweep reads the two keeper forms and nothing else.
+
+### Decisions
+
+- **Every keeper goes except tsnet's, and each import goes when nothing
+  else in its file uses it**: io (upnp_proxy_test.go), path
+  (file_handler.go), sync/atomic (extractors_test.go), internal/version
+  (update.go), net/http (shutdown_test.go), net/http/httptest
+  (gzip_test.go), internal/config (handlers_settings_network_test.go) and
+  internal/logging (tailscale.go). `go vet` of the seven touched packages
+  is clean on all six `make build-all` targets. vet compiles the test files,
+  so each deleted import was unused.
+- **internal/tailscale loses the logger too.** Keeping `var logger`
+  without its keeper would leave a declaration nothing uses and no tool
+  here reports. A package that needs to log adds the one line back.
+- **handlers_settings_network_test.go keeps its `var _ = func() {…}`.**
+  Only the keeper statement inside it and the `config` import went. The
+  func literal is a compile-time type pin, redundant with the six
+  assignments to the same fields in the same file's tests. It is a
+  legitimate idiom and not a keeper, and the sweep never reads a func
+  literal.
+- **extractors_test.go's doc rested on a false premise**: "Suppresses
+  unused-import warning when running individual tests". `-run` selects
+  tests after the whole package has compiled, and imports are per file.
+- **A sweep test, because the class regrows and cleanups stay scoped.**
+  `TestNoBlankKeepers` walks the tree the go tool reads (vendor, testdata,
+  node_modules, nested modules and `goToolIgnores` names skipped, as the
+  other sweeps do). It reports both keeper forms, saying for each import
+  whether the file uses it outside its keepers. Two keepers of one package
+  are not each other's use.
+- **The statement form is included** because five of the fourteen were
+  statements, and a guard reading only the top-level form would have
+  passed all five. It is held to an E that names only imports, since
+  `_ = cfg` is how Go code marks a local used. A selector counts as naming
+  import `x` only if the enclosing top-level declaration declares no `x`
+  anywhere (`declaredWithin`). That over-approximates scope toward missing
+  a keeper, never toward reporting a local.
+- **The local form is included** for tailscale's, and read only at the top
+  level.
+- **Existence checks are reported deliberately.** `(*T)(nil)`, and a method
+  expression like `(*T).M`, can check at most that a name exists, and every
+  real use of the name makes that check. A name nothing uses needs none.
+  Go states a compile-time assertion in the typed form (`var _ I =
+  (*T)(nil)`, `var _ func(*T) error = (*T).M`), and the sweep never reads
+  it.
+- **Any call whose callee could be a function is refused**, because
+  `pkg.T(x)` can be either without types. Only a conversion to a type that
+  cannot be a function (`(*T)(x)`, `[]byte(x)`) is read.
+- **Import names follow the package-name convention**: the explicit name,
+  else the last path element without a "/vN" element or ".vN" suffix, a
+  "go-" prefix or a "-go" suffix. Checked against `go list` on darwin, linux
+  and windows: it matches the package name for 161 of the 162 paths the
+  tree imports. The one it misses, `github.com/prometheus/client_model/go`
+  (package `io_prometheus_client`), is imported under an explicit name
+  everywhere.
+- **The allowance stands on its stated condition, not its path.**
+  `allowedKeepers` holds internal/tsnet's `var _ = errors.Is` while four
+  things hold: the keeper still exists, its doc still says "Don't remove
+  until typed errors land.", `typedErrorIn` finds no typed error in
+  internal/tsnet's non-test files, and the file uses `errors` nowhere
+  else. `typedErrorIn` looks for a sentinel (a var or const named ErrX or
+  errX, or initialised by errors.New, errors.Join, fmt.Errorf or another
+  package's sentinel) and for an `Error() string` method. The fourth check
+  covers typed errors arriving by another route: once the `errors.Is` check
+  is written, the keeper keeps nothing. The premise was re-checked first:
+  internal/tsnet still returns `errors.New` strings from Status and
+  ListenTLS, and tsnet_test.go matches them by substring at five sites. Each
+  failed check is reported, and so is an entry whose keeper is gone. An
+  allowed keeper is logged on every run.
+
+### Tests and controls
+
+Red-first, with the final guard file in a throwaway worktree of
+`2135cbf2`: exactly the fourteen above, each with the verdict in the
+census table, and the tsnet keeper logged as allowed. After the deletions
+the whole-tree run passes in 0.3 s.
+
+`TestBlankKeeperScanOnFixtures` runs `scanBlankKeepers`, with the real
+`allowedKeepers`, over synthetic trees. Each reported shape is there: both
+verdicts, the conversion, the grouped spec, the in-function `var`, the
+local keeper, the two-keeper pair, a use behind a shadowing local, the
+three import-name conventions and a predeclared `nil` beside a package. So
+are the quiet ones (a typed assertion, a call, a compile-time size
+assertion, literals, locals, a map key that is a local, a struct field
+key), every skip rule (a `.#lock` that is not Go, which would fail the
+parse if opened, `_dir`, testdata, vendor, node_modules, a nested module),
+and eight allowance states. Controls on the commit, each `-count=1`, each restored with
+`git checkout` and checked clean:
+
+| control | mutation | tree | fixture |
+|---|---|---|---|
+| NC0 | none | green | green |
+| NC1 | `onlyNames` accepts any call | red: four `_ = os.Unsetenv(…)` in supervision_unix_test.go | red |
+| NC2 | `isTypeOnly` takes a selector callee as a type | red: the same four | red |
+| NC3 | typed specs read | red: the seven interface assertions | red |
+| NC4 | no scope (`declaredWithin` empty) | green | red |
+| NC5 | the `_ = E` statement arm removed | green | red |
+| NC6 | the in-function `var _ = E` arm removed | green | red |
+| NC7 | a keeper's use counts as a use | green | red: the pair reads redundant |
+| NC8 | the condition never consulted | green | red: the four met cases |
+| NC9 | the doc condition not checked | green | red: that case |
+| NC10 | a stale allowance not reported | green | red: that case |
+| NC11 | the `Error() string` arm off | green | red: that case |
+| NC12a | the sentinel-name arm off | green | red: that case |
+| NC12b | the sentinel-initialiser arm off | green | red: its two cases |
+| NC12c | another package's sentinel not read | green | red: that case |
+| NC13 | `scanBlankKeepers` reports nothing | **green** | red |
+| NC14 | nested modules walked | green | red |
+| NC14b | vendor walked | green | red |
+| NC14c | node_modules walked | green | red |
+| NC14d | testdata walked | green | red |
+| NC15 | `.`/`_` directories walked | green | red |
+| NC16 | `.`/`_` files opened | green | red: the lock fails the parse |
+| NC17a | ".v3" kept in an import name | green | red |
+| NC17b | "go-" kept | green | red |
+| NC17c | "/v2" taken as the name | green | red |
+| NC18 | the real entry's condition text drifts | red: condition-dropped | red |
+| NC19 | the walk reads no file | red: the file floor | red |
+| NC20 | predeclared names count as locals | green | red |
+| NC21 | identifier keys skipped (the first draft) | green | red: the map-key case |
+| NC22 | the statement form not held to imports only | green | red |
+| NC23 | the local form off | green | red |
+| NC24 | a served allowance still allowed | green | red: that case |
+
+Only five of the 31 turn the tree red, and NC13, the one that deletes the
+report, is not among them. That is #994's lesson again, and why the fixture
+drives the same `scanBlankKeepers` the tree test does. NC15 stays green on
+the tree although three leftover `.claude/worktrees/` checkouts hold
+pre-fix keepers: each carries its own go.mod, so the nested-module rule
+skips them too.
+
+### Consult
+
+A direct consult (`consult.py`, gemini-3.8-flash, the guard file as
+context) was asked to break the sweep: legitimate idioms it would report,
+locals its scope rule would report, gaps in `typedErrorIn`. Each answer was
+checked against the code first.
+
+- **Taken: a map key that is a local.** The first draft skipped every
+  identifier key in a composite literal as a struct field name. In a map
+  literal the key is a variable, so
+  `_ = map[string]int{key: http.StatusOK}` was reported, and deleting it
+  leaves `key` unused, which fails the build. Without types a field key and
+  a variable key look alike, so keys now count as names. The statement form
+  misses `_ = url.URL{Scheme: "https"}` instead, which is the safe
+  direction. The fixture has both, and NC21 is the first draft.
+- **Taken in part: sentinels by alias.** `var closed = net.ErrClosed` and an
+  `errors.Join` initialiser now count. A custom constructor was already
+  caught by the name (`var ErrNotStarted = newError(…)` is the name arm's
+  fixture). An unconventionally named sentinel from a custom constructor is
+  still unseen, and the fourth check covers the moment the test that needs
+  it is written.
+- **Declined: a method-existence pin**, `var _ = (*http.Request).Context`.
+  It is reported on purpose, like `(*T)(nil)`: every real use of the
+  method checks that it exists, and the typed form states a signature
+  assertion.
+- **Declined: a generic instantiation**, `var _ = pkg.Set[int]{}`, on the
+  same ground. Every real use of the instantiation checks the constraint.
+- **Declined: a deliberate racy read** of another package's global in a
+  test (`_ = worker.ActiveCount`). No such read appears in the 37 trees. If
+  one is ever deliberate, `allowedKeepers` can carry it with its condition.
+
+### Process notes
+
+- **The first draft counted a keeper as a use.** Each of update.go's pair
+  saw the other and read "redundant", although deleting both leaves
+  `internal/version` unused. The red-first output showed it; no test did.
+  The pair is now a fixture, and NC7 reproduces the draft.
+- `writeFixtureFile` already exists in cmd/bridge (gc_mass_orphan_test.go,
+  a different signature). vet caught the collision, and the fixture helper
+  is `writeKeeperFixture`.

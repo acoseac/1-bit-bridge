@@ -2928,14 +2928,8 @@ its twin.** The top list is older, shorter, and read first.
   scan is `scanDocblockSubjects(r, root, wholeTree)`, and
   `TestDocblockScanReportsBothArmsOnAFixture` runs it over a synthetic tree
   with exact findings for both arms. Table tests pin `identifierShaped` and
-  `namesNothingDeclared` beside it. **An import keeper is dead code,
-  never documentation.** A `var _ = pkg.X` in a file that uses `pkg`
-  elsewhere does nothing, and one that is its import's only use keeps an
-  import nothing needs, because imports are per FILE (one kept `io` in a
-  test file because a helper in another file uses `io.EOF`). Delete it, and
-  the import too when nothing else in the file uses it, unless its doc names
-  a condition not yet met (`internal/tsnet`'s waits for typed errors, which
-  have not landed).
+  `namesNothingDeclared` beside it. (The import-keeper rule this bullet
+  carried until #996 has its own bullet now, after the next one.)
 - **Measure a new detector over sampled HISTORY, not only the tree it was
   written against** (#994). The undeclared-name arm read 20 of 20 on its
   census tree and then met four false positives in the first test file
@@ -2950,6 +2944,40 @@ its twin.** The top list is older, shorter, and read first.
   shape it has never seen turns up. And merge main before pushing a
   tree-wide guard: its verdict depends on code the branch did not write,
   and here that code merged while the census ran.
+- **An import keeper is dead code, never documentation, and
+  `TestNoBlankKeepers` fails on one** (#996). A keeper is a blank reference
+  that only names something: a top-level `var _ = pkg.X`, or `_ = pkg.X` /
+  `var _ = pkg.X` in a function. Imports are per FILE, so it does nothing
+  when the file uses `pkg` elsewhere and keeps an import nothing needs when
+  it does not (one kept `io` in a test file because a helper in another
+  file uses `io.EOF`). A top-level `var _ = logger` keeps a package-level
+  name Go never reports unused anyway. Delete it, and the import too when
+  nothing else in the file uses it.
+  **Three hand sweeps each fixed only their own scope** (c062ac95 one, #855
+  three in cmd/bridge, #994 five); #825 added one between two of them, and
+  #996 found fourteen more. Five of those were in the statement form no
+  census had counted, and one, `var _ = (*manifest.Store)(nil)`, sat under
+  "Statically assert the Manifest store has the helpers we need. A missing
+  method here will fail the build". A nil conversion checks only that a
+  type exists, and every real use makes that check. A keeper's premise decays unseen, too: two began as their
+  import's only use and turned redundant as their files grew. The sweep
+  refuses any call whose callee could be a function (four
+  `_ = os.Unsetenv(…)` otherwise) and never reads a typed `var _ I = …`
+  (seven interface assertions otherwise). It holds the statement form to an
+  E naming only packages, since `_ = cfg` is how Go marks a local used, and it
+  counts a composite literal's identifier key as a name, because in a map
+  literal the key is a variable: the first draft skipped keys and reported
+  `_ = map[string]int{key: http.StatusOK}`, whose deletion breaks the build
+  (a Gemini consult found it). Two keepers of one package are not each
+  other's use (update.go's pair). **The one allowance stands on its stated
+  CONDITION, not its path**: `allowedKeepers` holds internal/tsnet's
+  `var _ = errors.Is` while its doc says "Don't remove until typed errors
+  land.", `typedErrorIn` finds no sentinel and no `Error() string` method
+  there, and the file uses `errors` nowhere else. Any of those failing is
+  reported, and so is an entry whose keeper is gone. On a clean tree the
+  sweep reports nothing, so `TestBlankKeeperScanOnFixtures` pins every
+  shape, skip rule and allowance state: 31 mutations turn it red, and only
+  five of them turn the tree red.
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing
   with `.#<name>` beside it. Where it can, the lock is a DANGLING symlink.
