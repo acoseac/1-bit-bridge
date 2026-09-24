@@ -11683,6 +11683,28 @@ With the new pattern and rule, before any citation was fixed, the
 whole-tree run reported exactly eight names, all in this tree: the seven
 above and the folder name.
 
+Negative controls ran in a throwaway worktree at the commit, except NC6's
+second half, which needs the leftover worktrees and ran in the main
+checkout. Each mutation was confirmed present before its run, every run
+was `-count=1`, and the tree was restored and checked clean after each.
+
+| # | mutation | red | stays green |
+|---|---|---|---|
+| NC1 | the old pattern | the collection fixture (nothing collected); the whole-tree guard, on the new floor (0 underscore citations, under 50) | |
+| NC2 | the bare prefix admitted | the collection fixture: it collects the prefix alone and the double underscore, and reports the latter | the whole tree, which has neither |
+| NC3 | the pattern as asked, uppercase only after the underscore | the collection fixture: the lowercase ghost goes unreported, a stale citation that passes | the whole tree, whose 18 lowercase citations all name a test exactly |
+| NC4 | no digit | the collection fixture | the whole tree |
+| NC5 | any stop accepted | the prefix table, exactly its two mid-word rows | the whole tree and every scan fixture |
+| NC6 | no nested-module skip | the worktree row; in the main checkout, the whole-tree guard, 7 names cited only by `.claude/worktrees/` copies, in 1.66 s against 0.28 s | |
+| NC7 | the #316 repoint reverted | the whole-tree guard, naming it | |
+| NC8 | a `.`-directory rule in place of `go.mod` | the collection fixture only: its `.github/` citation is lost | the worktree row, which a `.`-rule satisfies too |
+
+NC2 to NC5 and NC8 leave the whole-tree run green because the tree holds
+no instance of what they break. That is why each one has a fixture of its
+own, and why the collection fixture cites from under `.github/`: NC8 shows
+that without that citation, a rule broad enough to drop a tracked
+directory passes every test.
+
 ### Consult
 
 A direct consult (`consult.py`, gemini-3.8-flash, with the guard file as
