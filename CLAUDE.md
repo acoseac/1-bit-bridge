@@ -2254,10 +2254,10 @@ mentions across the four `ops/audit-*.md` files.
   …/data/tls: directory not empty`). CI has no tailscaled and never saw it.
   Every CLI call in `internal/tailscale` runs in its own process group now,
   and `stopTreeOnCancel` kills the group. **Neither the group kill nor the
-  join is enough alone.** A child forked while the signal is delivered can
-  miss it (1 of 42 measured cancels), and it holds the output pipes, so
-  `Wait` returns only once it has exited, and the auto-pilot joined on
-  `bgWriters` with it. **Never set `Cmd.WaitDelay` there**: it unblocks
+  join is enough alone.** On macOS a child forked while the signal is
+  delivered can miss it (45 of 4,830 cancels in a probe), and it holds the
+  output pipes, so `Wait` returns only once it has exited (8 of 8 escapes),
+  and the auto-pilot joined on `bgWriters` with it. **Never set `Cmd.WaitDelay` there**: it unblocks
   `Wait` by closing those pipes, which abandons exactly the process the join
   exists to outlast. `TestServeLeavesNoTailscaleCLIRunning` drives a
   wrapper-shaped fake through the real exec path and pins the kill;

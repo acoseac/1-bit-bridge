@@ -12361,8 +12361,21 @@ in `tailscaleAutoPilot.Start`. That was half of it.
   cancelled at 2 to 20 ms, output recorded at the instant the kill was
   sent): output after the kill in 36 of 42 runs with the default kill (the
   other 6 died before the shell had started the app), and in 1 of 42 with
-  the group kill. That one fits a child forked while the group signal was
-  being delivered, which the group kill can miss.
+  the group kill. Output after the kill does not by itself prove a
+  survivor (bytes written just before it drain afterwards), so the next
+  probe settles it.
+- **The fork race, falsified directly.** A stand-in wrapper whose inner
+  script writes a marker a second after starting, with no pipes, cancelled
+  at 0 to 4 ms in 25 us steps, 10 runs per step: with the group kill, 23,
+  14 and 8 of 1,610 cancels in three runs left an inner that wrote its
+  marker a second later. Without it, 490 of 1,610. The band where escapes
+  happen moves between runs (2.2 ms; 3.45 to 3.9 ms; 2.4 to 3.75 ms), which
+  fits a child forked while the group signal is delivered. Linux's
+  copy_process restarts such a fork; macOS evidently does not.
+- **What the escapee does to Wait.** The same stand-in WITH pipes (a
+  0.3 s inner, cancels at 1.9 to 2.6 ms): 8 of 426 escaped, and in 8 of 8
+  `Wait` returned only after the escapee had written. That is the property
+  the join builds on.
 
 ### Decisions
 
@@ -12376,13 +12389,24 @@ in `tailscaleAutoPilot.Start`. That was half of it.
   guarantees that.
 - **The group kill AND the join, because neither covers the other.** The
   kill is what makes a cancelled call return promptly. The join is what
-  makes runServe's return mean the call has stopped. The 1-in-42 escape is
-  the case only the join covers: the escaped process holds the pipes, so
-  `Wait` returns only once it has exited, and the join holds runServe
-  until then, grace-bounded.
+  makes runServe's return mean the call has stopped. The fork-race escape
+  is the case only the join covers: the escaped process holds the pipes,
+  so `Wait` returns only once it has exited, and the join holds runServe
+  until then, grace-bounded. It also covers the exec-side asymmetry: the
+  kill is sent from exec's own goroutine, after runServe's cancel.
 - **`Cmd.WaitDelay` rejected.** It unblocks `Wait` by closing the pipes,
-  which is exactly how an escaped writer would be abandoned. The table
-  above is the measurement.
+  which is exactly how an escaped writer would be abandoned (8 of 8 above).
+- **Cancel asks `os.Process` before the group kill.** `watchCtx` can pick
+  `ctx.Done()` after `Process.Wait` has reaped the leader (the window
+  before `Wait` receives from `ctxResult`), and from then on the pid, and
+  so the group id, may be reused. The default Cancel is safe there because
+  `os.Process` orders its signals against the reap and answers
+  `ErrProcessDone`; a bare `kill(-pid)` is not. `Signal(0)` through
+  `os.Process` first closes all but the gap between two adjacent calls.
+  **Not pinned by a test**: it differs from the bare kill only when a
+  reaped pid is reused in that gap. The fallback to `Process.Kill` after a
+  failed group kill was dropped: a group whose members cannot be signalled
+  has a leader that cannot be either.
 - **Windows keeps the default kill.** `resolveBinary` finds
   `tailscale.exe`, the CLI itself, so killing the direct child stops the
   writer. A `.cmd` wrapper on PATH would need a job object; nothing ships
@@ -12460,6 +12484,27 @@ Every other `go` statement in runServe was read. The unjoined ones are the
 HTTP servers (shut down explicitly), the catalog invalidator (an epoch bump
 in memory), and tsnet mode's startup goroutine, which was not examined
 beyond that.
+
+### Consult
+
+A direct Gemini consult (`consult.py`) on the process-group design,
+before the PR:
+
+- **Taken:** the post-reap Cancel window, and that the `Process.Kill`
+  fallback was redundant (both above).
+- **Taken as a question, and answered by measurement:** that the 1-in-42
+  output after the group kill could be bytes written before it, drained
+  after. The fork-race probe shows real escapes, 45 of 4,830.
+- **Declined:** "rejecting WaitDelay is incorrect", on the grounds that a
+  D-state process or a daemon holding the pipes could block `Wait`
+  forever. A D-state leader blocks `Process.Wait`, which WaitDelay does
+  not bound. A daemon that leaves the group and keeps the pipes is not
+  something this CLI does. The case WaitDelay WOULD change is the measured
+  escape, and it changes it for the worse.
+- **Declined:** resolving `/usr/local/bin/tailscale` to the app binary on
+  darwin. It fixes the one wrapper path that is known, and leaves any
+  other (an operator's own script, a package manager's shim) with the
+  orphan. The group kill covers every wrapper.
 
 ### Process notes
 

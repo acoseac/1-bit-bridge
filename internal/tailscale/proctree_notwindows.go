@@ -26,12 +26,19 @@ import (
 // descendants inherit, and Cancel signals the whole group. Measured
 // against that wrapper, cancelling `status --json` 2 to 20 ms in: the
 // app went on to produce output after the kill in 36 of 42 runs without
-// the group kill, and in 1 of 42 with it. That one fits a child forked
-// while the signal was being delivered, which a group kill can miss.
-// The caller's wait covers it: the escaped process holds the output
-// pipes, so Wait returns only once it has exited. That is also why
-// Cmd.WaitDelay is NOT set here. It would unblock Wait by closing those
-// pipes, abandoning exactly the process the wait is there to outlast.
+// the group kill, and in 1 of 42 with it.
+//
+// A group kill can miss a child the wrapper is forking at that instant.
+// Linux's copy_process restarts a fork a group signal lands in; on
+// macOS, a stand-in whose inner script writes a marker a second later
+// escaped in 45 of 4,830 cancels spread over 0 to 4 ms, in three runs.
+// The caller's wait covers that case:
+// the escaped child inherits the output pipes, so Wait returns only
+// once it has exited (8 of 8 escapes, measured with pipes attached),
+// and a caller that joins the goroutine making the call gets the write
+// before it returns, never after. That is why Cmd.WaitDelay is NOT set
+// here. It would unblock Wait by closing those pipes, abandoning
+// exactly the process the wait is there to outlast.
 //
 // The group is this call's alone, so the kill reaches nothing else. The
 // cost is that a terminal's Ctrl-C no longer reaches the CLI directly;
@@ -42,22 +49,22 @@ func stopTreeOnCancel(cmd *exec.Cmd) {
 	}
 	cmd.SysProcAttr.Setpgid = true
 	cmd.Cancel = func() error {
-		// Cancel runs only after a successful Start, so Process is set,
-		// and with Setpgid the group id is the child's pid.
+		// Ask os.Process first. exec can run Cancel after Wait has reaped
+		// the leader, and from then on its pid, and with it the group id,
+		// may belong to another process. os.Process orders its own
+		// signals against the reap and answers ErrProcessDone past it,
+		// which a bare kill(-pid) cannot.
+		if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+			return err
+		}
+		// Setpgid made the group id the child's pid.
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		switch {
-		case err == nil:
-			return nil
-		case errors.Is(err, syscall.ESRCH):
+		if errors.Is(err, syscall.ESRCH) {
 			// Nothing is left in the group: the call finished before the
 			// cancel reached it. exec reads ErrProcessDone as exactly
 			// that and reports the command's own exit status.
 			return os.ErrProcessDone
-		default:
-			// The group could not be signalled. Kill the leader, which is
-			// all CommandContext did before, so a failed group kill never
-			// leaves the CLI itself running.
-			return cmd.Process.Kill()
 		}
+		return err
 	}
 }
