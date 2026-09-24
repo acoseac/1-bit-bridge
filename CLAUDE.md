@@ -2962,9 +2962,12 @@ its twin.** The top list is older, shorter, and read first.
   real use makes that check. A keeper's premise decays unseen, too: two
   began as their import's only use and turned redundant as their files
   grew. The sweep refuses any call whose callee could be a function (four
-  `_ = os.Unsetenv(…)` otherwise) and a receive (`_ = <-pkg.Done` waits),
-  never reads a typed `var _ I = …` (seven interface assertions otherwise),
-  and reads a composite literal's type, where an array length computed by a
+  `_ = os.Unsetenv(…)` otherwise) and anything else that does something: a
+  receive (`_ = <-pkg.Done` waits), and an operator or conversion that can
+  panic (`/`, `%`, a shift, `==` on interfaces, a slice-to-array
+  conversion). It never reads a typed `var _ I = …` (seven interface
+  assertions otherwise), and reads a composite literal's type down through
+  its fields, parameters and methods, where an array length computed by a
   call (`[unsafe.Sizeof(x) - 8]byte{}`) makes a compile-time assertion, not
   a keeper. It holds the statement form to an E naming only packages, since
   `_ = cfg` is how Go marks a local used, and counts a composite literal's
@@ -2984,8 +2987,8 @@ its twin.** The top list is older, shorter, and read first.
   nowhere else. Any of those failing is reported, and so is an entry whose
   keeper is gone. On a clean tree the sweep reports nothing, so
   `TestBlankKeeperScanOnFixtures` pins every shape, scope rule, skip rule
-  and allowance state: 45 of 46 mutations turn it red, and only five turn
-  the tree red. The 46th drops the CRLF normalisation, which the scan
+  and allowance state: 54 of 55 mutations turn it red, and only five turn
+  the tree red. The 55th drops the CRLF normalisation, which the scan
   survives without; its CRLF case pins the property, not the mechanism.
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing

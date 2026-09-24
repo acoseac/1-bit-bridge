@@ -11951,10 +11951,14 @@ keepers, counting #294's keeper once although its test file was renamed
 - **Any call whose callee could be a function is refused**, because
   `pkg.T(x)` can be either without types. Only a conversion to a type that
   cannot be a function (`(*T)(x)`, `[]byte(x)`) is read. Operators are read
-  (`&pkg.T{}`, `time.Second * 5`) except a receive, which waits, and a
-  composite literal's type is read too: an array length computed by a call
-  (`[unsafe.Sizeof(x) - 8]byte{}`) is a compile-time assertion, not a keeper
-  (round 4).
+  (`&pkg.T{}`, `time.Second * 5`), but nothing that does something: a
+  receive waits, and an operator that can panic (`/`, `%`, a shift, `==` or
+  `!=` on interfaces) or a slice-to-array conversion can end the program
+  (rounds 4 and 6). A composite literal's type is read too, fields,
+  parameters and methods included: an array length computed by a call
+  (`[unsafe.Sizeof(x) - 8]byte{}`) is a compile-time assertion, not a
+  keeper. A dereference can panic on nil but is read, because `*pkg.P` is
+  spelled like the method expression `(*pkg.T).M`.
 - **Import names follow the package-name convention**: the explicit name,
   else the last path element without a "/vN" element or ".vN" suffix, a
   "go-" prefix or a "-go" suffix. Checked against `go list` on darwin, linux
@@ -11993,12 +11997,14 @@ scoping cases are there too: a keeper above a later local of its import's
 name, that local's own right-hand side counted as a use, and a local
 shadowing the import in each way one is declared (`:=`, parameter, range
 variable, `var` statement, func-literal parameter). So are the quiet
-shapes (a typed assertion, a call, a compile-time size assertion,
-literals, locals, a map key that is a local, a struct field key) and every
+shapes: a typed assertion, a call, a receive, compile-time size assertions
+(indexed, in a literal's array length, and nested in a field, a parameter
+and a method), four statements that can panic, literals, locals, a map key
+that is a local, a struct field key. So is every
 skip rule (a `.#lock` that is not Go, which would fail the parse if
 opened, `_dir`, testdata, vendor, node_modules, a nested module). There
 are eight allowance states, and one case writes the whole tree with CRLF
-endings. Controls on the round-5 commit (`f1937619`), each `-count=1`,
+endings. Controls on the round-6 commit (`41b37e85`), each `-count=1`,
 each restored with `git checkout` and checked clean:
 
 | control | mutation | tree | fixture |
@@ -12048,10 +12054,19 @@ each restored with `git checkout` and checked clean:
 | NC27d | a type argument refused | green | red: `set.Of[int]{}` missed |
 | NC27e | an array length unread | green | red: the array-length assertion reported |
 | NC28 | a selector's `Sel` counted as a name (the round-4 guard) | green | red: two statement keepers missed |
+| NC29a | every binary operator taken for panic-free | green | red: the three panicking operators reported |
+| NC29b | division and remainder taken for panic-free | green | red: `1 / settings.Divisor` reported |
+| NC29c | shifts taken for panic-free | green | red: `1 << settings.Shift` reported |
+| NC29d | `==` and `!=` taken for panic-free | green | red: `settings.A == settings.B` reported |
+| NC30 | a slice-to-array conversion accepted | green | red: `[4]byte(settings.Bytes)` reported |
+| NC31a | struct fields unread | green | red: the field's assertion reported |
+| NC31b | function signatures unread | green | red: the parameter's and the method's assertions reported |
+| NC31c | interface methods unread | green | red: the method's assertion reported |
+| NC31d | a variadic parameter refused | green | red: `(func(...time.Duration))(nil)` missed |
 | NC25 | no CRLF normalisation | green | **green** |
 | NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the four met cases |
 
-Only five of the 46 turn the tree red, and NC13, the one that deletes the
+Only five of the 55 turn the tree red, and NC13, the one that deletes the
 report, is not among them. That is #994's lesson again, and why the fixture
 drives the same `scanBlankKeepers` the tree test does. NC25 is the one
 control the fixture does not catch, and it is not meant to: without the
@@ -12179,3 +12194,19 @@ checked against the code first.
   removed `go/types`' only use. It was rebuilt to keep the import and then
   went red, and a control that does not build is recorded as invalid,
   never as a pass.
+- **Round 6** (`4a8b6a41`): **Gemini** had no comments. **CodeRabbit**
+  raised a minor and a major, both false positives and both taken in
+  `41b37e85`. The minor was `_ = 1 / settings.Divisor`: it reads only
+  names, but it can panic, and deleting it changes what the program does.
+  The finding named `/` and `%`, and the fix admits only the operators
+  that cannot panic (`panicFree`). A shift can panic on a negative count,
+  and `==` or `!=` on two interfaces holding one uncomparable type, so an
+  enumeration of the two named operators would have been the defect over
+  again. A slice-to-array conversion panics on a short slice
+  (`convertsToArray`). The major was that `typeOnlyNames` accepted struct,
+  interface and function types unread, so
+  `struct{ _ [unsafe.Sizeof(x) - 8]byte }{}` hid its assertion in a field.
+  It now reads every field, parameter, result and method, with `...T`.
+  Red-first with the fixtures in place and the round-5 guard: all seven
+  quiet shapes were reported. The history re-run again gave the same 699
+  sightings with the same verdicts.
