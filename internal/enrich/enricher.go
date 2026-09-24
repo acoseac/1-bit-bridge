@@ -21,6 +21,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
@@ -306,7 +307,10 @@ func (e *Enricher) Run(ctx context.Context) {
 		}
 		batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
 		if err != nil {
-			logger.Error("list unenriched", "err", err)
+			// A listing the shutdown stopped is not a failed one.
+			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+				logger.Error("list unenriched", "err", failure)
+			}
 			if !sleepCtx(ctx, e.PollInterval) {
 				return
 			}
@@ -1064,11 +1068,18 @@ func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) s
 // it, which is the right outcome for a transient store error.
 //
 // Deliberately NOT shared with markSkipped, which differs on both counts: it
-// tallies a skip rather than a success, and it does not return early on error
-// because it still has a reason to record.
+// tallies a skip rather than a success, and it does not return early on a
+// failed stamp because it still has a reason to record.
+//
+// A stamp the shutdown stopped is not reported: the row stays at enriched_at
+// = 0 and the next run retries it, exactly as for a failed one. The tier-2
+// fetches (artwork, portrait) absorb their own errors, so a pass whose fetch
+// the shutdown cancelled reaches this on the cancelled context.
 func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
-		logger.Error("mark enriched", "path", t.Path, "err", err)
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Error("mark enriched", "path", t.Path, "err", failure)
+		}
 		return
 	}
 	e.done.Add(1)
@@ -1080,9 +1091,22 @@ func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
 // `reason` must be one of the skipReason* constants — it keys the
 // bounded skipReasons map. `detail` carries the variable part (an error
 // string, the query that came back empty) and rides the log line only.
+//
+// A stamp the shutdown stopped records nothing at all: no failure, no count,
+// no "enrichment skipped". Nothing was skipped, since the row stays at
+// enriched_at = 0 and the next run tries it again, possibly to a different
+// verdict. And the verdict is suspect in the first place, because what
+// usually leads here on a cancelled context is a tier-2 fetch the shutdown
+// cancelled: the portrait search after a release miss, whose error the pass
+// absorbs. So the pass stops at the one place every such path converges
+// (this and stampEnriched), rather than at each fetch that can be cancelled.
 func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, detail string) {
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
-		logger.Error("mark skipped", "path", t.Path, "err", err)
+		failure := ctxerr.WithoutCancellation(ctx, err)
+		if failure == nil {
+			return
+		}
+		logger.Error("mark skipped", "path", t.Path, "err", failure)
 	}
 	e.skipped.Add(1)
 	e.skipReasonsMu.Lock()
@@ -1198,8 +1222,11 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 	if rgErr != nil {
 		// Logging the resolve error but returning the original
 		// release-level not-found so callers stamp the "no artwork"
-		// state consistently with pre-fallback behaviour.
-		logger.Error("release-group lookup", "mbid", mbid, "err", rgErr)
+		// state consistently with pre-fallback behaviour. A lookup the
+		// shutdown stopped is not reported.
+		if failure := ctxerr.WithoutCancellation(ctx, rgErr); failure != nil {
+			logger.Error("release-group lookup", "mbid", mbid, "err", failure)
+		}
 		// Don't bail yet — iTunes may still have the album by name,
 		// and a transient MB lookup error shouldn't block the iTunes
 		// fallback below.
