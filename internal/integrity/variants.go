@@ -373,13 +373,16 @@ func (w *VariantWatcher) tick(ctx context.Context) SweepReport {
 	rows, err := w.lister.AllVariants()
 	if err != nil {
 		// A listing the shutdown stopped is not a failed sweep. The
-		// lister's adapter runs on the same scanCtx this tick does.
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		// lister's adapter runs on the same scanCtx this tick does, and
+		// the report says the tick was cancelled, as every other stop in
+		// it does (Gemini API review, #1004).
+		failure := ctxerr.WithoutCancellation(ctx, err)
+		if failure != nil {
 			logger.Error("integrity variant sweep: AllVariants failed",
 				slog.Any("err", failure),
 			)
 		}
-		return SweepReport{Skipped: true}
+		return SweepReport{Skipped: true, Cancelled: failure == nil}
 	}
 	if len(rows) == 0 {
 		return SweepReport{}
