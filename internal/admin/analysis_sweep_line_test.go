@@ -79,8 +79,10 @@ func TestDescribeAnalysisSweepAccountsForEveryTrack(t *testing.T) {
 	// label would be checked against "", and a label a rename left behind
 	// describes a bucket that no longer exists.
 	isBucket := map[string]bool{}
+	isValue := map[int]bool{}
 	for _, b := range buckets {
 		isBucket[b.name] = true
+		isValue[b.value] = true
 		if _, ok := analysisSweepLabels[b.name]; !ok {
 			t.Errorf("bucket %q has no label in analysisSweepLabels: decide what "+
 				"describeAnalysisSweep calls it, and add it there", b.name)
@@ -131,6 +133,13 @@ func TestDescribeAnalysisSweepAccountsForEveryTrack(t *testing.T) {
 		n, err := strconv.Atoi(pm[1])
 		if err != nil {
 			t.Fatalf("part %q of %q: %v", part, line, err)
+		}
+		// Every part is a bucket, as well as every bucket a part. A part the
+		// DTO does not carry renders as "0 <label>" when its read falls back to
+		// zero, which the sum cannot see (Gemini, standing in on #992).
+		if !isValue[n] {
+			t.Errorf("part %q of %q is no bucket of AnalysisSweepCounts: the line "+
+				"renders a count the server does not send", part, line)
 		}
 		labelOf[n] = pm[2]
 		sum += n
