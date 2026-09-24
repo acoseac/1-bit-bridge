@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -347,5 +346,4 @@ func TestSSEEndpointsNotGzippedAfterManifestGzipChange(t *testing.T) {
 			t.Errorf("path=%s: Content-Encoding = %q, want empty or identity", path, ce)
 		}
 	}
-	_ = httptest.NewRequest // silence unused import if test changes
 }

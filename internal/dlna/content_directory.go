@@ -1372,7 +1372,3 @@ func staticServerURL(url string) func(r *http.Request) string {
 		return "http://" + r.Host
 	}
 }
-
-// Quiet "imported but unused" if a future test removes the only call
-// site for staticServerURL or the `strings` import here.
-var _ = strings.Builder{}

@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1275,10 +1274,3 @@ func TestMultiValueArtistTrimsWhitespacePerSegment(t *testing.T) {
 }
 
 func floatPtr(v float64) *float64 { return &v }
-
-// Suppresses unused-import warning when running individual tests
-// (atomic / time are used but the package's other test files cover
-// some of these — keeping explicit references here makes the file
-// self-contained without depending on testdata_test.go's ordering).
-var _ = atomic.Bool{}
-var _ = time.Now

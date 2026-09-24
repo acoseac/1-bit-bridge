@@ -3478,7 +3478,3 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 func writeError(w http.ResponseWriter, code int, short, msg string) {
 	writeJSON(w, code, map[string]string{"error": short, "message": msg})
 }
-
-// Statically assert the Manifest store has the helpers we need. A missing
-// method here will fail the build rather than at first admin request.
-var _ = (*manifest.Store)(nil)

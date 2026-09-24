@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"net"
-	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,6 +126,4 @@ func TestShutdownGraceCappedForStuckScan(t *testing.T) {
 	case <-time.After(7 * time.Second):
 		t.Errorf("Serve hung past shutdown grace")
 	}
-	// Avoid hijacking the `http` import being unused.
-	_ = http.ErrServerClosed
 }

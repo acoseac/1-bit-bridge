@@ -15,7 +15,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
-	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
 // updateCmd implements `bridge update [--check] [--yes]`.
@@ -190,14 +189,12 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 				return 1
 			}
 			fmt.Fprintln(stdout, "bridge: service restart requested.")
-			_ = version.ServerVersion
 			return 0
 		}
 	}
 
 	fmt.Fprintln(stdout, "\nRestart the bridge to load the new binary:")
 	printManualRestartHint(stdout, kind)
-	_ = version.ServerVersion // silence unused-import warning if version isn't referenced elsewhere
 	return 0
 }
 
