@@ -3319,7 +3319,7 @@ its twin.** The top list is older, shorter, and read first.
   the extended guard went red in the main checkout alone, and an old copy's
   tests can satisfy a citation this tree no longer backs, which passes. That
   is the one directory rule added; #993's reason for not borrowing the go
-  tool's `.`-directory rule (`.github/`) still holds. (#NNN)
+  tool's `.`-directory rule (`.github/`) still holds. (#995)
 - **The Dockerfile REQUIRES BuildKit, and its builder `FROM` says so through
   an invalid fallback:**
   `--platform=${BUILDPLATFORM:-this-Dockerfile-requires-BuildKit--build-with-docker-buildx}`.

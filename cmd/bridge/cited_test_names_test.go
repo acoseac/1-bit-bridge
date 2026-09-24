@@ -55,7 +55,7 @@ func TestEveryCitedTestNameExists(t *testing.T) {
 	// The underscore names need one too, for the same reason: the camelCase
 	// citations alone clear every floor above, so a pattern that stopped
 	// reading internal/dlna's convention would report a clean tree. That was
-	// this guard's state until #NNN. 106 distinct names when this was set.
+	// this guard's state until #995. 106 distinct names when this was set.
 	underscored := 0
 	for name := range cited {
 		if strings.HasPrefix(name, "Test_") {
@@ -429,7 +429,7 @@ func TestDefinesWithPrefixEndsAnUnderscoreNameOnASegment(t *testing.T) {
 // convention rather than a test, and names outside ASCII, of which this
 // tree has none.
 //
-// It took the uppercase letter alone until #NNN, so no citation of the 223
+// It took the uppercase letter alone until #995, so no citation of the 223
 // tests named with an underscore after the prefix was ever checked. That is
 // internal/dlna's convention, and 32 of the 223 continue in lowercase, so
 // extending the pattern to the shape that prompted the fix, an underscore
@@ -643,7 +643,7 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 // here, and a comment there cites nothing here. The case that exists is
 // Claude Code's .claude/worktrees/, where each worktree is a whole checkout
 // of another branch with as many Go files as this tree. When citedRe was
-// extended to underscore names (#NNN), three of them, left by merged PRs,
+// extended to underscore names (#995), three of them, left by merged PRs,
 // still held the stale citations it corrected, and the guard failed in the
 // one checkout that held them. Their old tests could also satisfy a
 // citation this tree no longer backs, which is the worse half, because it

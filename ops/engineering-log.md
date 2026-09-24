@@ -11538,7 +11538,7 @@ what else "declared nowhere" leaves out.
   one push later than a local run could have. Merge main before pushing a
   guard that reads the whole tree, and re-run it there.
 
-## 2026-09-24 — the citation guard reads every name go test runs (#NNN)
+## 2026-09-24 — the citation guard reads every name go test runs (#995)
 
 `TestEveryCitedTestNameExists` collected citations with
 `\bTest[A-Z][A-Za-z0-9_]*`, so it never read a name with an underscore
