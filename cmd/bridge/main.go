@@ -2278,6 +2278,13 @@ type serveOpts struct {
 	configPath    string
 	addrOverride  string
 	initIfMissing bool
+	// tailscaleCLI stands in for the host's Tailscale CLI in the cli-mode
+	// auto-pilot. Nil (the host's CLI) everywhere but the boot tests,
+	// which pass a fake so a mint can be held open across a shutdown
+	// without a tailscaled on the host. Per invocation, not a package
+	// var: a leaked auto-pilot from an earlier test could otherwise read
+	// a later test's fake.
+	tailscaleCLI tailscaleCLI
 }
 
 func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -2846,7 +2853,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) int
 	var tsnetServer *tsnet.Server
 	switch tsMode {
 	case config.TailscaleModeCLI:
-		tailscaleAuto = newTailscaleAutoPilot(cfg.DataDir, cfg.ListenAddress, certManager, stderr)
+		tailscaleAuto = newTailscaleAutoPilot(cfg.DataDir, cfg.ListenAddress, certManager, opts.tailscaleCLI, stdout, stderr)
 		tailscaleAuto.Start(scanCtx)
 	case config.TailscaleModeTsnet:
 		// Build the tsnet.Server but DO NOT block the listen step

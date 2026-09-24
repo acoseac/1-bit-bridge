@@ -62,6 +62,27 @@ type tailscaleStatus struct {
 	TailscaleIPs []string `json:"tailscaleIPs,omitempty"`
 }
 
+// tailscaleCLI is the auto-pilot's view of the host's Tailscale CLI:
+// the two calls detectAndMint makes. Production uses hostTailscaleCLI,
+// which is internal/tailscale. The boot tests hand runServe a fake
+// through serveOpts, which is how the shutdown join is driven on a host
+// with no tailscaled.
+type tailscaleCLI interface {
+	Detect(ctx context.Context) (servertailscale.NodeInfo, error)
+	MintCert(ctx context.Context, binary, magicDNS, certPath, keyPath string) error
+}
+
+// hostTailscaleCLI is the real CLI, via internal/tailscale.
+type hostTailscaleCLI struct{}
+
+func (hostTailscaleCLI) Detect(ctx context.Context) (servertailscale.NodeInfo, error) {
+	return servertailscale.Detect(ctx)
+}
+
+func (hostTailscaleCLI) MintCert(ctx context.Context, binary, magicDNS, certPath, keyPath string) error {
+	return servertailscale.MintCert(ctx, binary, magicDNS, certPath, keyPath)
+}
+
 // tailscaleAutoPilot owns the auto-mint + auto-renew lifecycle and
 // surfaces the status snapshot for the admin tile. One instance per
 // `bridge serve` process; threadsafe — admin handlers read via
@@ -71,6 +92,8 @@ type tailscaleAutoPilot struct {
 	dataDir     string
 	listenAddr  string
 	certManager *servertls.Manager
+	cli         tailscaleCLI
+	stdout      io.Writer
 	stderr      io.Writer
 
 	// minMintInterval rate-limits operator-triggered "Re-mint now"
@@ -116,11 +139,20 @@ type tailscaleAutoPilot struct {
 // to compose the operator-facing magic-DNS URL with the right port
 // for the admin tile's "iOS clients reach the bridge over Tailscale
 // at <url>" hint.
-func newTailscaleAutoPilot(dataDir, listenAddr string, mgr *servertls.Manager, stderr io.Writer) *tailscaleAutoPilot {
+//
+// A nil cli is the host's CLI. stdout and stderr are serve's own
+// streams, so every line the auto-pilot prints lands where the rest of
+// serve's output does.
+func newTailscaleAutoPilot(dataDir, listenAddr string, mgr *servertls.Manager, cli tailscaleCLI, stdout, stderr io.Writer) *tailscaleAutoPilot {
+	if cli == nil {
+		cli = hostTailscaleCLI{}
+	}
 	return &tailscaleAutoPilot{
 		dataDir:         dataDir,
 		listenAddr:      listenAddr,
 		certManager:     mgr,
+		cli:             cli,
+		stdout:          stdout,
 		stderr:          stderr,
 		minMintInterval: 30 * time.Second,
 	}
@@ -247,7 +279,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	now := time.Now().UTC()
 	snap := tailscaleStatus{LastChecked: &now}
 
-	info, err := servertailscale.Detect(ctx)
+	info, err := a.cli.Detect(ctx)
 	if err != nil {
 		snap.CLIAvailable = info.CLIAvailable
 		snap.LastError = info.LastError
@@ -383,7 +415,7 @@ func (a *tailscaleAutoPilot) detectAndMint(ctx context.Context, trigger string) 
 	a.lastMintAttempt = time.Now()
 	a.mu.Unlock()
 
-	if err := servertailscale.MintCert(ctx, info.BinaryPath, info.MagicDNSName, certPath, keyPath); err != nil {
+	if err := a.cli.MintCert(ctx, info.BinaryPath, info.MagicDNSName, certPath, keyPath); err != nil {
 		switch {
 		case errors.Is(err, servertailscale.ErrHTTPSCertsDisabled):
 			snap.LastError = "HTTPS Certificates not enabled in tailnet — visit https://login.tailscale.com/admin/dns and toggle on"
