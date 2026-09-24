@@ -58,12 +58,25 @@ func tsnetH3Status(ctx context.Context, node interface {
 // tsnetListen opens the tailnet HTTPS listener, and reports whether it did.
 // A listen that failed is reported on stderr, and the LAN listener carries
 // on without the tailnet.
+//
+// It opens none once the shutdown has begun: serve is stopping, so the
+// listener would only be closed again, or fail against a node the shutdown
+// has closed. A listen that fails after the shutdown began is not reported.
+// That failure is the node closing under it, and it carries no
+// cancellation for ctxerr to find, so the context is what tells it apart.
+// Joining this goroutine before the node closes would remove the race; it
+// is not joined yet (#997's class).
 func tsnetListen(ctx context.Context, node interface {
 	ListenTLS(addr string) (net.Listener, error)
 }, addr string, stderr io.Writer) (net.Listener, bool) {
+	if ctx.Err() != nil {
+		return nil, false
+	}
 	lis, err := node.ListenTLS(addr)
 	if err != nil {
-		fmt.Fprintf(stderr, "tsnet: ListenTLS: %v\n", err)
+		if ctx.Err() == nil {
+			fmt.Fprintf(stderr, "tsnet: ListenTLS: %v\n", err)
+		}
 		return nil, false
 	}
 	return lis, true
