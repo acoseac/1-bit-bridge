@@ -2977,16 +2977,18 @@ its twin.** The top list is older, shorter, and read first.
   only (`_ = cfg` marks a local used; the tree has 23), and a selector
   names an import only where no local of that name is in scope, scoped as
   Go scopes it, from the end of the declaring statement (a whole-function
-  approximation missed `_ = path.Join` above `path := …`; CodeRabbit). Two
-  keepers of one package are not each other's use (update.go's pair).
+  approximation missed `_ = path.Join` above `path := …`; CodeRabbit). The
+  local form is not read in a file with a dot import, and cgo's `C` is
+  never read as an import (its import carries the preamble). Two keepers of
+  one package are not each other's use (update.go's pair).
   **The one allowance stands on its stated CONDITION, not its path**:
   `allowedKeepers` holds internal/tsnet's `var _ = errors.Is` while its doc
   says "Don't remove until typed errors land.", `typedErrorIn` finds no
-  sentinel and no `Error() string` method there, and the file uses `errors`
-  nowhere else. Any of those failing is reported, and so is an entry whose
+  sentinel, `Error() string` method or error interface there, and the file
+  uses `errors` nowhere else. Any of those failing is reported, and so is an entry whose
   keeper is gone. On a clean tree the sweep reports nothing, so
   `TestBlankKeeperScanOnFixtures` pins every shape, refused shape, scope
-  rule, skip rule and allowance state: 43 of 45 mutations turn it red, and
+  rule, skip rule and allowance state: 47 of 49 mutations turn it red, and
   five turn the tree red. Of the two that stay green, one drops the CRLF
   normalisation (the scan is CRLF-safe without it) and one widens a check
   that `keep` makes again.

@@ -11961,7 +11961,11 @@ keepers, counting #294's keeper once although its test file was renamed
   function for a local everywhere in it (round 2).
 - **The local form reads a bare identifier, at the top level only**
   (tailscale's `logger`). `var _ = cfg.Name` selects through a
-  package-level variable, which can be a nil pointer.
+  package-level variable, which can be a nil pointer. It is not read at all
+  in a file with a dot import, where a bare name may be the import's.
+  cgo's pseudo-package `C` is never read as an import, because that import
+  carries the preamble's `#cgo` directives and deleting it is never the
+  right advice. The tree has no dot import and no cgo (round 8).
 - **Existence checks are reported deliberately.** `(*T)(nil)` can check at
   most that a name exists, and every real use of the name makes that
   check. A name nothing uses needs none. Go states a compile-time assertion
@@ -11980,7 +11984,9 @@ keepers, counting #294's keeper once although its test file was renamed
   internal/tsnet's non-test files, and the file uses `errors` nowhere
   else. `typedErrorIn` looks for a sentinel (a var or const named ErrX or
   errX, or initialised by errors.New, errors.Join, fmt.Errorf or another
-  package's sentinel) and for an `Error() string` method. The fourth check
+  package's sentinel), an `Error() string` method, and an error interface
+  (one embedding `error` or declaring `Error() string`, as `net.Error`
+  does), which `errors.As` matches. The fourth check
   covers typed errors arriving by another route: once the `errors.Is` check
   is written, the keeper keeps nothing. The premise was re-checked first:
   internal/tsnet still returns `errors.New` strings from Status and
@@ -12011,10 +12017,10 @@ array length, compile-time size assertions, four statements that can
 panic, a receive, calls, literals, a predeclared name, locals and a
 selector through a package variable. Every skip rule is there (a `.#lock`
 that is not Go, which would fail the parse if opened, `_dir`, testdata,
-vendor, node_modules, a nested module), and so are eight allowance states
-and a case that writes the whole tree with CRLF endings. Controls on the
-round-7 commit (`46a2be63`), each `-count=1`, each restored with
-`git checkout` and checked clean:
+vendor, node_modules, a nested module). So are a dot-importing file and a
+cgo file, ten allowance states, and a case that writes the whole tree
+with CRLF endings. Controls on the round-8 commit (`0a07a124`), each
+`-count=1`, each restored with `git checkout` and checked clean:
 
 | control | mutation | tree | fixture |
 |---|---|---|---|
@@ -12031,10 +12037,12 @@ round-7 commit (`46a2be63`), each `-count=1`, each restored with
 | NC5 | the `_ = E` statement arm removed | green | red |
 | NC6 | the in-function `var _ = E` arm removed | green | red |
 | NC7 | a keeper's use counts as a use | green | red: the pair reads redundant |
-| NC8 | the condition never consulted | green | red: the four met cases |
+| NC8 | the condition never consulted | green | red: the six met cases |
 | NC9 | the doc condition not checked | green | red: that case |
 | NC10 | a stale allowance not reported | green | red: that case |
 | NC11 | the `Error() string` arm off | green | red: that case |
+| NC11b | an interface embedding `error` not a typed error | green | red: that case |
+| NC11c | an interface declaring `Error() string` not a typed error | green | red: that case |
 | NC12a | the sentinel-name arm off | green | red: that case |
 | NC12b | the sentinel-initialiser arm off | green | red: its two cases |
 | NC12c | another package's sentinel not read | green | red: that case |
@@ -12062,10 +12070,12 @@ round-7 commit (`46a2be63`), each `-count=1`, each restored with
 | NW9 | the local form reads a selector | green | red: `cfgVar.Field` reported |
 | NW10 | the local form off | green | red |
 | NW11 | any call read, its callee taken for N | red: 141 calls like `_ = os.Remove(path)` | red |
+| NW12 | the local form read in a dot-importing file | green | red: `Mutex{}` reported |
+| NW13 | cgo's `"C"` read as an import | green | red: `(*C.char)(nil)` reported |
 | NC25 | no CRLF normalisation | green | **green** |
-| NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the four met cases |
+| NC26 | `typedErrorIn` globs (round 1's defect) | green | red: the six met cases |
 
-Five of the 45 turn the tree red, and NC13, the one that deletes the
+Five of the 49 turn the tree red, and NC13, the one that deletes the
 report, is not among them. That is #994's lesson again, and why the fixture
 drives the same `scanBlankKeepers` the tree test does. NW11's 141 tree
 findings are the measure of what the call refusal is worth on real code.
@@ -12248,3 +12258,16 @@ that round's.
   package variable that it took for a local keeper. The whitelist over the
   37 history trees finds the same 699 sightings with the same verdicts, so
   the narrowing lost no keeper this repo ever had.
+- **Round 8** (`a1f526ed`): **CodeRabbit** reviewed the head (coverage
+  kind "reviewed", merge risk Low, no new comments). **Gemini** did not
+  answer `/gemini review` within 21 minutes and posted nothing, which is
+  the pattern of its daily quota running out. So a consult reviewed the
+  round-7 code in its place. It found three holes, none with an instance
+  in the tree, all taken in `0a07a124`. First, a bare name in a file with
+  a dot import may be the import's, so `var _ = Mutex{}` under
+  `import . "sync"` read as a local keeper. Second, `var _ = (*C.char)(nil)`
+  read "delete it, and the import", but cgo's `import "C"` carries the
+  preamble. Third, `typedErrorIn` missed an exported error interface, so
+  the allowance would have stood after typed errors landed. Red-first,
+  with the fixtures in place and the round-7 guard: `dot.go` read "local",
+  `cgo.go` read "only-use", and both interface cases read "allowed".
