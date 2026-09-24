@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -180,6 +181,105 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 	}
 }
 
+// TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks plants, one per row,
+// a file an editor or a checkout leaves beside the ones this guard scans, and
+// requires the scan to finish as if it were not there.
+//
+// Each row failed while the walk selected files by suffix alone. Emacs locks
+// a file it is editing with `.#<name>` beside it, as a DANGLING symlink where
+// it can and as a REGULAR file holding the lock string where it cannot
+// (always on Windows): the first failed os.ReadFile, the second failed
+// parser.ParseFile. An untracked doc was opened and only then discarded, so
+// one that cannot be opened failed the run. A tree with no `.git` (a
+// fixture, or a source archive) has no tracked set to exclude a lock beside
+// a doc. And a test in a file whose name begins with "_" was counted as
+// defined, although the go tool never compiles it, so a docblock citing it
+// passed.
+func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
+	// A lock's contents, as emacs writes them: user@host.pid:boot.
+	const lockData = "someone@host.1:1"
+	// symlink plants a dangling symlink, the shape emacs's lock takes where
+	// it can make one. A host that cannot create symlinks (Windows without
+	// the privilege) skips the row rather than fail: emacs cannot make its
+	// symlink lock there either, and the regular-file row covers the lock
+	// such a host does see.
+	symlink := func(t *testing.T, target, path string) {
+		t.Helper()
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("cannot create a symlink on this host (%v); emacs writes its "+
+				"regular-file lock here, which the regular-file row covers", err)
+		}
+	}
+	rows := []struct {
+		name string
+		// notCheckout scans the tree as one with no `.git`: no tracked set,
+		// so every doc in it is in scope.
+		notCheckout bool
+		plant       func(t *testing.T, root string)
+	}{
+		{"an emacs lock beside a Go file, as a dangling symlink", false, func(t *testing.T, root string) {
+			symlink(t, lockData, filepath.Join(root, ".#prod.go"))
+		}},
+		{"an emacs lock beside a test file, as a regular file", false, func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, ".#x_test.go"), []byte(lockData), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a test in a file the go tool ignores", false, func(t *testing.T, root string) {
+			body := "package x\n\nimport \"testing\"\n\nfunc TestParkedNeverRuns(t *testing.T) { _ = t }\n"
+			if err := os.WriteFile(filepath.Join(root, "_parked_test.go"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"an untracked doc that cannot be opened", false, func(t *testing.T, root string) {
+			symlink(t, "gone.md", filepath.Join(root, "local.md"))
+		}},
+		{"an emacs lock beside a tracked doc", false, func(t *testing.T, root string) {
+			symlink(t, lockData, filepath.Join(root, ".#notes.md"))
+		}},
+		{"an emacs lock beside a doc, outside a git checkout", true, func(t *testing.T, root string) {
+			symlink(t, lockData, filepath.Join(root, ".#notes.md"))
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			root := t.TempDir()
+			write := func(name, body string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The same small tree under every row: one real test, one citation
+			// of it from each side, and one citation of the parked test, which
+			// exists only in the row that plants it and never runs in any.
+			write("prod.go", "package x\n\n// Guarded by TestReal and by TestParkedNeverRuns.\nfunc f() {}\n")
+			write("x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestReal(t *testing.T) { _ = t }\n")
+			write("notes.md", "Pinned by TestReal.\n")
+			row.plant(t, root)
+
+			tracked := map[string]bool{"notes.md": true}
+			if row.notCheckout {
+				tracked = nil
+			}
+			cited, defined, mdCited := scanTestCitationsIn(t, root, tracked)
+
+			if !defined["TestReal"] {
+				t.Errorf("the tree's real test was not collected as defined: %v", defined)
+			}
+			if !slices.Contains(cited["TestReal"], "notes.md") || mdCited != 1 {
+				t.Errorf("the tracked doc was not scanned (cited by %v, mdCited = %d) — "+
+					"the markdown half must still read what git tracks", cited["TestReal"], mdCited)
+			}
+			want := []string{"TestParkedNeverRuns  (cited by prod.go)"}
+			if got := missingCitations(cited, defined); !slices.Equal(got, want) {
+				t.Errorf("missingCitations = %q, want %q — a test the go tool never "+
+					"compiles cannot satisfy a citation", got, want)
+			}
+		})
+	}
+}
+
 // citedRe matches a citation: `Test` + an uppercase letter + the rest.
 //
 // The `\b` is what keeps it off `Test`-shaped substrings of larger identifiers
@@ -311,9 +411,17 @@ func isPlanDoc(rel string) bool {
 	return strings.HasPrefix(filepath.ToSlash(rel), "ops/plan-")
 }
 
-// scanTestCitations walks the tree once, collecting names defined in _test.go
-// files and names cited from non-test source AND from the COMMENTS of test
-// files.
+// scanTestCitations is scanTestCitationsIn over the docs git tracks under
+// root: the entry point the whole-tree guard and the fixtures share.
+func scanTestCitations(t *testing.T, root string) (cited map[string][]string, defined map[string]bool, mdCited int) {
+	t.Helper()
+	return scanTestCitationsIn(t, root, trackedMarkdownSet(t, root))
+}
+
+// scanTestCitationsIn walks the tree once, collecting names defined in
+// _test.go files and names cited from non-test source AND from the COMMENTS
+// of test files. trackedMD is trackedMarkdownSet's answer, taken as a
+// parameter so a fixture can pin the markdown half without a git checkout.
 //
 // Test files were skipped entirely at first, and fifteen stale citations sat
 // in their docblocks — a renamed sibling named under its old name, a
@@ -324,11 +432,10 @@ func isPlanDoc(rel string) bool {
 // else — a test file's CODE names tests legitimately, and its string
 // literals can hold anything (a User-Agent value spelled like a test name,
 // say — one does). Gemini on #921 folded the two passes into one.
-func scanTestCitations(t *testing.T, root string) (cited map[string][]string, defined map[string]bool, mdCited int) {
+func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (cited map[string][]string, defined map[string]bool, mdCited int) {
 	t.Helper()
 	cited, defined = map[string][]string{}, map[string]bool{}
 	mdCitations := map[string]bool{}
-	trackedMD := trackedMarkdownSet(t, root)
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -341,8 +448,8 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 			}
 			return nil
 		}
-		isMD := strings.HasSuffix(path, ".md")
-		if !strings.HasSuffix(path, ".go") && !isMD {
+		rel, _ := filepath.Rel(root, path)
+		if !opensForCitations(d.Name(), rel, trackedMD) {
 			return nil
 		}
 		raw, err := os.ReadFile(path)
@@ -352,10 +459,9 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 		// CRLF-normalised: nothing pins eol, so a Windows checkout would make
 		// the `(?m)^func` anchor and every literal below find nothing.
 		src := strings.ReplaceAll(string(raw), "\r\n", "\n")
-		rel, _ := filepath.Rel(root, path)
 		switch {
-		case isMD:
-			collectMarkdownCitations(rel, src, trackedMD, cited, mdCitations)
+		case strings.HasSuffix(path, ".md"):
+			collectMarkdownCitations(rel, src, cited, mdCitations)
 			return nil
 		case strings.HasSuffix(path, "_test.go"):
 			return collectTestFileCitations(path, rel, src, cited, defined)
@@ -374,15 +480,45 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 	return cited, defined, len(mdCitations)
 }
 
-// collectMarkdownCitations applies the `.md` policy declared above: skip a
-// document git does not track, skip a plan, and skip the two exempt name
-// classes. Split out of the walk for SonarCloud go:S3776 — the callback had
-// grown to a cognitive complexity of 50 against the 15 allowed, most of it
-// nesting rather than logic.
-func collectMarkdownCitations(rel, src string, trackedMD map[string]bool, cited map[string][]string, mdCitations map[string]bool) {
-	if trackedMD != nil && !trackedMD[filepath.ToSlash(rel)] {
-		return // gitignored, so not part of the shared tree
+// opensForCitations reports whether the walk opens a file at all, decided
+// from its NAME before anything is read. Each half takes the rule that
+// already says what it owns:
+//
+//   - A doc is opened only if git tracks it (trackedMarkdownSet). The walk
+//     used to open every `.md` and discard an untracked one AFTER reading
+//     it, so a gitignored local doc that could not be opened failed the
+//     run over a file it was never going to scan, and so did emacs's
+//     `.#CLAUDE.md` while CLAUDE.md was open. Nor is a doc opened whose
+//     name begins with ".", an editor's or the OS's: a tree with no `.git`
+//     (a fixture, or a source archive) has no tracked set, and a lock
+//     there is still not a doc. Not "_" as well, as the go tool would: a
+//     tracked `_name.md` is a real doc.
+//   - A Go file is opened unless the go tool ignores it (goToolIgnores): an
+//     editor's lock beside it, or a file no build compiles.
+//
+// No DIRECTORY rule is added. `.github/` holds a tracked doc and a tracked
+// Go file this guard reads, so the go tool's `.`-directory rule would drop
+// both.
+func opensForCitations(name, rel string, trackedMD map[string]bool) bool {
+	switch {
+	case strings.HasSuffix(name, ".md"):
+		if strings.HasPrefix(name, ".") {
+			return false
+		}
+		return trackedMD == nil || trackedMD[filepath.ToSlash(rel)]
+	case strings.HasSuffix(name, ".go"):
+		return !goToolIgnores(name)
 	}
+	return false
+}
+
+// collectMarkdownCitations applies the `.md` policy declared above to a
+// document the walk has opened: skip a plan, and skip the two exempt name
+// classes. Whether it is opened at all (git must track it) is
+// opensForCitations's call. Split out of the walk for SonarCloud go:S3776 —
+// the callback had grown to a cognitive complexity of 50 against the 15
+// allowed, most of it nesting rather than logic.
+func collectMarkdownCitations(rel, src string, cited map[string][]string, mdCitations map[string]bool) {
 	if isPlanDoc(rel) {
 		return
 	}

@@ -10756,7 +10756,9 @@ measured with a `.#lockprobe_test.go` symlink in `cmd/bridge`: its walk
 reads every `.go` and `.md` file and fails at the `os.ReadFile`. Its skip
 rules differ (it deliberately reads `.github/` markdown), so it was left
 for its own change rather than folded in here. The `adminauth` and
-`manifest` walkers passed the same probe.
+`manifest` walkers passed the same probe. (Corrected in the #993 entry below:
+`adminauth` passed only because the probe's lock was named `…_test.go`, and
+its guard reads non-test files alone. A non-test-named lock fails it.)
 
 ## 2026-09-24 — the analysis pool answers a held path with `ErrDuplicateInflight` (#992)
 
@@ -10956,3 +10958,202 @@ Controls at `e2ad173c`, same harness, `-count=3`, all red:
   after the merge is where to confirm this.
 - **CodeRabbit** re-reviewed `5c533442`: no findings, and it resolved its
   round-1 thread.
+
+## 2026-09-24 — every source sweep decides from the name what it opens (#993)
+
+#990 fixed the docblock guard's walk and recorded that
+`TestEveryCitedTestNameExists` fails the same way on an editor's lock. This
+entry fixes that guard and every other test the census below found with the
+same shape.
+
+### An editor's lock has two shapes
+
+Emacs locks a file it is editing with `.#<name>` in the same directory. Its
+`src/filelock.c` (emacs-mirror, read 2026-09-24) makes the lock a symlink
+whose target is `USER@HOST.PID:BOOT`. Where a symlink cannot be made, it
+writes a REGULAR file with that string as its contents, and on Windows
+(`WINDOWSNT`) it never tries the symlink at all. The two shapes fail
+differently:
+
+- The dangling symlink fails `os.ReadFile` with ENOENT.
+- The regular file opens. A Go parser then fails on it (`.#x_test.go:1:1:
+  expected 'package', found someone`), `node` fails on it as a module, and
+  a plain text scan reads it harmlessly.
+
+So a file-type check (skip what is not regular) misses the Windows shape,
+and tolerating ENOENT misses it too. NC6 below measures the first.
+
+### The census
+
+`go test -count=1 ./...` on `9365056c` (main, after #990), once per shape,
+with `.#zz.<ext>` planted for eleven extensions (`.go`, `_test.go`, `.md`,
+`.js`, `.css`, `.html`, `.json`, `.yml`, `.sh`, `.tmpl`, `.txt`) in every
+tracked directory: 790 locks. The three spots an embed pattern matches are
+skipped, because a lock there breaks the build (see the last section).
+
+| package | symlink | regular file |
+|---|---|---|
+| `cmd/bridge` | 8 | 2 |
+| `internal/admin` | 9 | 3 |
+| `internal/adminauth` | 1 | 1 |
+| `internal/manifest` | 1 | 0 |
+| **total** | **19** | **6** |
+
+Four fuzz targets failed in both runs too, and they are not in the table:
+they are the Go toolchain's, below. The 19 are 15 sweep sites in 14 files:
+
+- `cmd/bridge`: the citation guard; `TestEveryBackgroundGoroutineDrainsOnCleanup`,
+  whose `filepath.Glob(…"*_test.go")` returns `.#x_test.go` because a glob's
+  `*` matches a leading dot (a shell's does not); `nonTestGoFilesInPackage`,
+  behind `TestNoSubcommandTailBypassesLoadCLIConfig`,
+  `TestEveryFilterFlagsetGuardsItsPositionals` and
+  `TestEveryPathScopedFlagsetGuardsItsPositionals`; and the three GC-override
+  sweeps, `TestEveryGCCommandOffersTheEmptyCatalogOverride`,
+  `TestEveryForwardSweepingGCCommandOffersTheMassOrphanOverride` and
+  `TestEveryTranscodeGCCommandOffersTheMassDeleteOverride`.
+- `internal/admin`: `trayScriptBodies` (three tray tests), `jsSourceFiles`
+  (`TestAppJSHasNoCallsToDeletedHelpers`), `emittedPlayerClasses`,
+  `jsSetCustomProperties`, both player-module loaders
+  (`TestEveryPlayerModuleLoads`, `TestPlayerModuleLoadCatchesATemporalDeadZone`),
+  and the omitempty-time sweep over `internal/admin` and `internal/api`.
+- `internal/adminauth`: `TestNoProductionCodeLowersTheHashCost`. It fails
+  closed on a file it cannot parse, and it reported the lock as a
+  production caller: "non-test files call SetTestHashCost, which would
+  weaken password hashing in production: [.#store.go: could not parse …]".
+- `internal/manifest`: `TestNoHandRolledIndexedAtBump`.
+
+On `0869717`, before #990, the symlink run also failed
+`TestNoDocblockNamesAnotherDeclaration`, 20 in all. The regular-file row for
+`cmd/bridge` was measured in a throwaway worktree at `9365056c`, after the
+first run compiled a half-edited file mid-census.
+
+**A grep is not the census.** The `filepath.WalkDir` grep reached 3 of the
+14 files. The other eleven enumerate with `os.ReadDir` (nine), `filepath.Walk`
+or `filepath.Glob`. Grepping by what a sweep SELECTS (`HasSuffix(…, ".go")`
+and kin) found more, but the census is what settled the list. **A probe's
+name decides what it reaches.** The earlier 2026-09-24 probe reported the
+hash-cost guard passing with a lock in its package, and it was named `…_test.go`,
+which that guard never reads. `flac_handle_discipline` and `playlist_covers`
+passed both shapes on the merits: each treats an unparseable file as absent.
+
+### The rule, per population
+
+- **Go sweeps skip what the go tool ignores**, a name beginning with "." or
+  "_" (`go help packages`): `goToolIgnores` in `cmd/bridge`, inline in the
+  three packages with one sweep each. Measured: `go test -list` does not
+  list a test defined in `_x_test.go` or `.x_test.go`. So the citation
+  guard no longer counts such a test as defined (the fixture's parked-test
+  row), and the hash-cost guard's fail-closed parse still covers everything
+  that is compiled.
+- **The static sweeps skip `isEditorDetritus`**, a leading "." or a
+  trailing "~". It is `TestEmbeddedStaticTreeMatchesDisk`'s existing disk
+  rule, extracted so the six siblings take the same definition. Not "_": a
+  top-level `_x.js` is embedded by `static/*` and ships, so the parity
+  guards must read it.
+- **The citation guard's docs ask git BEFORE the read.** The walk opened
+  every `.md` and discarded an untracked one afterwards. The main checkout
+  holds seven gitignored `ops/*.md` docs that every run opened for nothing,
+  and one that could not be opened failed the run (NC4). Nor does it open a
+  doc whose name begins with "." (review round 1): a tree with no `.git`
+  has no tracked set to exclude an editor's lock beside a doc.
+- **No directory rule.** No tracked `.go` or `.md` file's name begins with
+  "." or "_", and nothing tracked is a symlink, so the file rule drops
+  nothing the guard reads. The go tool's `.`-directory rule would drop
+  `.github/pull_request_template.md` and `.github/scripts/printtmpdir/main.go`.
+
+### The floors
+
+On the fixed tree, the citation guard collects `defined` 4,667 (floor
+200), `cited` 2,663 (floor 5) and `mdCited` 353 (floor 50). Those are
+identical to the old walk's figures on a clean tree. The same floors catch a
+predicate that opens nothing (NC7).
+
+### Controls
+
+`TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks` was committed red
+first (`f68fc139`): all five rows failed against the suffix-only walk, each
+for its own reason. The controls ran on the committed fix (`d11e4bfe`),
+restoring the file and removing the plant after each.
+
+| control | mutation | result |
+|---|---|---|
+| NC1 | `cmd/bridge/.#lockprobe_test.go` symlink, the reported reproduction | old walk red, new green |
+| NC2 | `.#CLAUDE.md` symlink | old red, new green |
+| NC3 | `cmd/bridge/.#configpath_test.go` as a regular file of lock data | old red (`expected 'package'`), new green |
+| NC4 | gitignored `ops/audit-zz-probe.md`, a dangling symlink | old red; docs decided by NAME alone red; new green |
+| NC5 | `goToolIgnores` with "." only | the parked-test row red |
+| NC6 | a file-type check in place of the name rule | the regular-file and parked rows red |
+| NC7a | the doc half opens nothing | `mdCited` floor: 0 |
+| NC7b | the Go half inverted | `defined` floor: 0 |
+
+After the sweep commit (`f56f6870`) the census was repeated. Both shapes
+fail only the four toolchain fuzz targets.
+
+### Out of reach of test code, and left for their own changes
+
+- **An embed pattern that matches a lock breaks the BUILD.** `static/*`,
+  `templates/*.html` and packaging's `*.tmpl` each match a leading-dot name
+  at their top level, and embed refuses an irregular file: `pattern
+  static/*: cannot embed irregular file static/.#app.js`, and `go build
+  ./cmd/bridge` fails the same way for `.#systemd.service.tmpl`. Emacs's
+  Windows lock is a regular file, so there it would be EMBEDDED instead.
+- **Go's fuzz seed-corpus reader** reads every file in
+  `testdata/fuzz/<Name>/`. A lock there fails the four targets with a
+  tracked corpus: "failed to read corpus file" for the symlink, "unmarshal:
+  must include version" for the regular file.
+- **The root-walking guards descend into nested checkouts.** From the main
+  checkout, `.claude/worktrees/` holds whole checkouts of other branches,
+  and the citation, hash-cost and flac-handle walks read their files: 1,118
+  `.go` files for one worktree. The go tool ignores `.claude/`, and the
+  docblock guard skips `.`-directories.
+- **`TestServeWiresResolvedConfigPathIntoAdminAndBackups` is flaky on a host
+  running tailscaled**: 4 of 12 runs failed at `9365056c` and at this
+  branch alike, with no lock planted (`TempDir RemoveAll cleanup: unlinkat
+  …/data/tls: directory not empty`). `cmd/bridge/tailscale.go` starts the
+  startup cert mint with a bare `go a.runStartup(childCtx)`, and it wrote
+  into `data/tls` after the test's cleanup began. CI has no tailscaled.
+
+### Review
+
+- **CodeRabbit** raised one finding (Major), and it was correct: the
+  fixture's symlink rows failed rather than skipped on a Windows host
+  without the symlink privilege. They now skip there with the reason. Emacs
+  writes its regular-file lock on such a host, and that row runs on every
+  host; CI's Windows leg creates symlinks, so it still runs all of them.
+- **The Gemini GitHub app was over its daily quota**, as on #989 and #990. A
+  direct consult stood in, and each claim was checked in the tree first:
+  - **Taken:** a tree with no `.git` has no tracked set, so the doc half
+    opened an editor's lock there. That is a fixture's tree, and also a
+    source archive. The doc half now refuses a name beginning with "."
+    before it asks the tracked set. It is "." alone, because a tracked
+    `_name.md` would be a real doc. Red first in `2fb40bf7`, fixed in
+    `f02ac471`.
+  - **Taken:** the Windows symlink privilege, the same finding as
+    CodeRabbit's.
+  - **Declined:** "a real checkout reaches a nil tracked set when git
+    refuses the repository (`safe.directory`)". `trackedMarkdownSet`
+    returns nil only when `.git` is absent, and fails the test on any git
+    error in a checkout.
+  - **Declined:** "a case-only rename on NTFS misses the tracked set". The
+    lookup key is the one `collectMarkdownCitations` used before this
+    change, so the behaviour is unchanged, and a wholesale miss is what the
+    `mdCited` floor catches.
+- **The first consult was sent a two-dot diff after `main` had moved.** #991
+  merged during the review, so `origin/main..HEAD` showed #991 in reverse,
+  and the reviewer reported #991's files as "unrelated regressions caused by
+  a dirty base branch". Send a reviewer the three-dot diff
+  (`origin/main...HEAD`, from the merge base).
+- **A count of my own was wrong.** CLAUDE.md said "six static-JS guards".
+  Six is the number of sweep SITES; eight TESTS failed.
+- **Round-1 controls** on `f02ac471`: without the "." check (NC8), only the
+  outside-a-checkout row is red, and the real guard stays green in a
+  checkout, where the tracked set already excludes a lock. With
+  `os.Symlink` forced to fail (NC9), the four symlink rows skip and the
+  regular-file and parked rows still pass.
+- **The local gate's first run failed one test this PR does not touch**,
+  `TestSendMSearchStreakResetsOnRestart` in `internal/dlna/discovery`: "a
+  restarted client logged 0 first-failure Warns, want 1". It passed 20 of 20
+  re-runs under `-race`, here and at `9365056c`. The likely mechanism, not
+  reproduced on demand, is that the test's real `Start()` sends a live
+  M-SEARCH, and a send the host refuses before `Stop()` leaves the streak at
+  1 when the test drives its single failure.

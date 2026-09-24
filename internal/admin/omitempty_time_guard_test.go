@@ -47,6 +47,11 @@ func checkOmitemptyTimes(t *testing.T, dir string) {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
+		// A name beginning with "." or "_" is not the package's source (the
+		// go tool ignores it), and emacs's `.#name.go` lock is one.
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
 		checkFileForOmitemptyTimes(t, filepath.Join(dir, name))
 	}
 	// No vacuous-pass floor: zero violations is the PASSING state here, so a

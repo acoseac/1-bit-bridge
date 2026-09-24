@@ -56,7 +56,7 @@ func trayScriptBodies(t *testing.T) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	err := filepath.WalkDir("static", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || filepath.Ext(path) != ".js" {
+		if err != nil || d.IsDir() || filepath.Ext(path) != ".js" || isEditorDetritus(d.Name()) {
 			return err
 		}
 		b, readErr := os.ReadFile(path)
