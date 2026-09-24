@@ -10938,9 +10938,15 @@ Controls at `e2ad173c`, same harness, `-count=3`, all red:
 - **SonarCloud** passed its gate but raised one new `go:S3776` on the node
   test itself: its body reached cognitive complexity 19 against 15 once
   round 1's label checks landed. `bcbbfcc7` moves rendering, parsing and
-  the label table's check into three helpers, with every assertion and
-  message unchanged, and S1 to S5 and G1 are all still red against it.
-  #944 did the same to a guard test for the same rule.
+  the label table's check into three helpers, and S1 to S5 and G1 are all
+  still red against it. #944 did the same to a guard test for the same
+  rule. Its commit message says every assertion is unchanged, and one is
+  not quite (the stand-in's pass on the refactor): the line's total is now
+  compared as a number, as its parts always were, where it used to be
+  compared as a string. The only input that tells the two apart is a
+  zero-padded total ("0127 tracks"), which the old form rejected and the
+  new one accepts. It stays numeric, because the test is about the
+  arithmetic. A formatting rule would be an assertion of its own.
 - **The extraction in the fix is expected to close an older `go:S3776`.**
   `runAnalyzeBatch` has been open at complexity 20 since June. With the
   producer loop moved into `dispatchAnalysisCandidates` it loses both
