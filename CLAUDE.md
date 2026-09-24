@@ -2882,29 +2882,46 @@ its twin.** The top list is older, shorter, and read first.
   lowercase or has a camelCase hump (`identifierShaped`) can only be a name.
   A capitalised one-hump word or an all-caps one can be either, and every
   such opener a listed verb followed was prose, 10 of 10 ("It is",
-  "Removal is", "DST is"). Followed by a listed verb, the identifier-shaped
-  ones were 20 of 20 real. Followed by anything else, 26 of 31 were prose
-  (JS and CSS names, config keys, brands, "silence …" notes), so the arm
-  reads the verb shape only and the other five were fixed by hand. **The
+  "Removal is", "DST is"). Followed by anything but a listed verb, 26 of 31
+  identifier-shaped openers were prose (JS and CSS names, config keys,
+  brands, "silence …" notes), so the arm reads the verb shape only. **The
   lookup is the DIRECTORY, not the file's scope and not the module**: an
   external `foo_test` file's prose names `foo`'s declarations
-  (`LooksLikeSnapshotDir`, the one exclusion today), while a name only
-  another package declares is still reported. A doc opens with its own
-  subject, and a module-wide lookup would silence a stale name that some
-  other package happens to declare. Go's predeclared names (`nil`, `error`)
-  count as declared (`namesNothingDeclared`). Brand names, tool names and
-  units are the known cost ("iOS", "sox" and "dBFS" are identifier-shaped).
-  None has opened a doc with a listed verb, and when one does, reword the
+  (`LooksLikeSnapshotDir`), while a name only another package declares is
+  still reported, because a doc opens with its own subject. Predeclared
+  names (`nil`, `error`) and a documented function's own parameters count as
+  declared (`namesNothingDeclared`). **A test function's doc is read only
+  for a test-shaped name** (`testFuncName`, go test's rule). It states a
+  premise, and a premise's subject is often a library or a writer: the first
+  test file merged after the census (#991's M4A tests) opened four docs
+  "dhowden does …", "iTunes writes …" and "QuickTime writes …", which
+  failed #994's CI. Brand, tool and unit names ("iOS", "sox", "dBFS") are
+  still identifier-shaped wherever else they open a doc; reword the
   sentence rather than exempt the word. **On a clean tree the arm counts
   zero, so it cannot floor itself**: table tests pin `identifierShaped` and
-  `namesNothingDeclared`, and dropping the lowercase arm or the predeclared
-  clause turns only those red. **An import keeper is dead code, never documentation.** A
-  `var _ = pkg.X` in a file that uses `pkg` elsewhere does nothing, and one
-  that is its import's only use keeps an import nothing needs, because
-  imports are per FILE (one kept `io` in a test file because a helper in
-  another file uses `io.EOF`). Delete it, and the import too when nothing
-  else in the file uses it, unless its doc names a condition not yet met
-  (`internal/tsnet`'s waits for typed errors, which have not landed).
+  `namesNothingDeclared` on synthetic sites, and five of the eight
+  condition controls turn only those red. **An import keeper is dead code,
+  never documentation.** A `var _ = pkg.X` in a file that uses `pkg`
+  elsewhere does nothing, and one that is its import's only use keeps an
+  import nothing needs, because imports are per FILE (one kept `io` in a
+  test file because a helper in another file uses `io.EOF`). Delete it, and
+  the import too when nothing else in the file uses it, unless its doc names
+  a condition not yet met (`internal/tsnet`'s waits for typed errors, which
+  have not landed).
+- **Measure a new detector over sampled HISTORY, not only the tree it was
+  written against** (#994). The undeclared-name arm read 20 of 20 on its
+  census tree and then met four false positives in the first test file
+  merged after it: one tree is one snapshot of the vocabulary. The detector,
+  copied into a standalone program, ran over 18 trees sampled along main's
+  first-parent history (`git archive <sha> | tar -x`, April to September,
+  minutes). It found 29 distinct hits, and the history had already judged
+  most of them: a hit a later commit fixed was real by that fix. That run
+  showed which condition each false positive needed and what each would
+  cost, one real finding. A census of today's tree says what a detector
+  finds now; the history says what it would have found, and how often a
+  shape it has never seen turns up. And merge main before pushing a
+  tree-wide guard: its verdict depends on code the branch did not write,
+  and here that code merged while the census ran.
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
   the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`

@@ -10864,11 +10864,15 @@ module. Every hit was then read in the code.
   camelCase that was asked for, on the 4-of-4 row and the capital-letter
   argument. Capitalised one-hump and all-caps openers stay out on the
   10-of-10 row. Brand names ("iOS", "SQLite", "UPnP") are identifier-shaped
-  and are the known cost. None has opened a doc with a listed verb.
+  and are the known cost. On the census tree none opened a doc with a listed
+  verb. **That stopped being true the same day**; see **CI, and the census
+  as history** below.
 - **Lowercase tool names were the obvious risk in this repo and measured
-  zero.** No doc opens with `sox`, `ffmpeg`, `launchd` or the like followed
-  by a listed verb. The one tool-name opener, "systemd unit-value escapers",
-  is a noun phrase.
+  zero on the census tree.** No doc there opens with `sox`, `ffmpeg`,
+  `launchd` or the like followed by a listed verb, and the one tool-name
+  opener, "systemd unit-value escapers", is a noun phrase. The first test
+  file merged after the census opened two test docs with "dhowden", the tag
+  library.
 - **No exemption list.** A false positive is fixed by rewording the opening
   sentence, the rule `TestEveryCitedTestNameExists` already applies: prose
   should stop spelling a token it is only talking about.
@@ -10946,38 +10950,112 @@ red-first (unfixed):  non-test 4806 / 401 / 0 misattached / 9 undeclared / 4084 
                       test     4041 / 716 / 0 / 11 / 2722 of 2868 (94.9%)
 fixed (b4e8b208):     non-test 4804 / 401 / 0 / 0 / 4091 of 4529 (90.3%)
                       test     4039 / 716 / 0 / 0 / 2730 of 2876 (94.9%)
-final (9f01c005):     non-test 4804 / 401 / 0 / 0 / 4091 of 4529 (90.3%)
+hardened (9f01c005):  non-test 4804 / 401 / 0 / 0 / 4091 of 4529 (90.3%)
                       test     4041 / 716 / 0 / 0 / 2732 of 2878 (94.9%)
 ```
 
 The red-first run reported exactly the census's 20 verb-shaped findings.
 Test-file comments rose by two for the new function's and test's docs, and
-by two more in 9f01c005 for `namesNothingDeclared` and its test.
-After the fixes the census's broad rule leaves 32 hits, all of them the
-prose listed above.
+by two more in 9f01c005 for `namesNothingDeclared` and its test. After the
+fixes the census's broad rule leaves 32 hits, all of them the prose listed
+above.
 
-Controls, `-count=1`, each restored with `git checkout` and checked clean.
-NC1–NC3 first ran on b4e8b208 with the same tree verdicts; all were re-run
-on 9f01c005, where the table tests below also answer:
+That was the arm as first built. The one that ships reads test functions'
+docs differently (next section), and the figures below are for it:
 
-| control | mutation | result |
-|---|---|---|
-| NC0 | none | green |
-| NC1 | `pick`'s doc back to "pickVoted returns", and `ct`'s back to "container builds" | red: those two, one per population |
-| NC2a | `identifierShaped` = an uppercase letter after the first (the rule as first stated) | red: `render_cli_test.go:181 "DST is"`; both tables red (fanout, jpeg, _leading, sox; DST, GET, MP4) |
-| NC2b | `identifierShaped` = any non-empty word | red: the ten prose openers above; both tables red on every sentence word |
-| NC2c | `identifierShaped` without its lowercase-first arm | tree green; both tables red (fanout, jpeg, _leading, sox) |
-| NC3 | the directory condition dropped | red: `backup_test.go:784 "LooksLikeSnapshotDir is"`; the table red on pick and LooksLikeSnapshotDir |
-| NC4 | the predeclared clause dropped | tree green; the table red on nil, iota, error, len, any |
+```
+red-first (9365056 + the final guard):  non-test 4806 / 401 / 0 / 9  undeclared
+                                        test     4046 / 716 / 0 / 10 undeclared
+final (87970c4d, main merged in):       non-test 4814 / 402 / 0 / 0 / 4101 of 4539 (90.4%)
+                                        test     4062 / 717 / 0 / 0 / 2740 of 2887 (94.9%)
+```
 
-NC2c and NC4 are why the table tests exist. On a clean tree the arm has
-nothing to count, so it cannot floor itself, and the tree scan alone
-cannot see its lowercase half or its predeclared clause go. The commit
-after 9f01c005 changes only the finding's wording (it now says that a name
-real elsewhere gets the same remedy) and a table comment; NC1 was
-re-checked on it. NC2b's first run did not build (`unicode` left unused),
-which is "control invalid", never a pass; it was rebuilt with the import
-kept and re-run.
+Controls on 87970c4d, `-count=1`, each restored with `git checkout` and
+checked clean. "Tables" means `TestIdentifierShapedTellsNamesFromSentenceWords`
+and `TestNamesNothingDeclaredAsksWhereTheDocSits`:
+
+| control | mutation | tree | tables |
+|---|---|---|---|
+| NC0 | none | green | green |
+| NC1 | `pick`'s doc back to "pickVoted returns", `ct`'s back to "container builds" | red: those two, one per population | green |
+| NC2a | `identifierShaped` = an uppercase letter after the first (the rule as first stated) | green: its tree witness, "DST is", sits on a test function | red |
+| NC2b | `identifierShaped` = any non-empty word | red: "Comments are", "Chroma is", "Estimate gates", "Field names" (the rest of the ten sit on test functions) | red |
+| NC2c | `identifierShaped` without its lowercase-first arm | green | red |
+| NC3 | the directory condition dropped | green: its one tree witness, `LooksLikeSnapshotDir`, sits on a test function too | red |
+| NC4 | the predeclared clause dropped | green | red |
+| NC5 | the test-function condition dropped | red: the four M4A premises | red |
+| NC6 | the parameter condition dropped | green | red |
+| NC7 | `testFuncName` answers false | red: the four M4A premises, since nothing counts as a test function | red |
+
+Five of the eight condition controls (NC2a, NC2c, NC3, NC4, NC6) are seen by
+the tables alone. On a clean tree the arm has nothing to count, so it
+cannot floor itself; the tables are what pin its conditions, on synthetic
+sites that do not depend on any doc's wording. NC2b's first run, on
+b4e8b208, did not build (`unicode` left unused). That is "control invalid",
+never a pass; it was rebuilt with the import kept.
+
+### CI, and the census as history
+
+CI failed on #994 (48a00da4). Between the census and the push, main had
+merged #991 (the M4A work), and its new `internal/manifest/mp4_ilst_test.go`
+opened four test docs with a name nothing in `internal/manifest` declares:
+
+- "dhowden does not read `gnre`. If this ever fails, dhowden learned the
+  atom …", on `TestDhowdenPremise_DoesNotReadTheITunesPredefinedGenre`
+- "dhowden keeps the data-atom locale on a freeform value …", on
+  `TestDhowdenPremise_KeepsTheFreeformDataAtomLocale`
+- "iTunes writes one atom or the other; a file carrying both chose its
+  text.", on `TestExtract_BothGenreAtoms_TheTextOneWins`
+- "QuickTime writes `meta` as a plain container …", on
+  `TestExtractMP4PredefinedGenre_PlainQuickTimeMeta`
+
+All four are prose, and good prose: a test's doc states a premise, and a
+premise's subject is often a library or a writer. The census had measured
+brand and tool openers at zero on 8,845 docs; the next test file had four.
+
+**So the arm was measured over history.** A standalone copy of it, the
+exact conditions and verb lists, ran over 18 trees sampled every 60 commits
+along main's first-parent history (`git archive <sha> | tar -x`, 2026-04-24
+to 2026-09-24). Hits rose from 2 in April to 28 on 2026-09-09. It found 29
+distinct docs:
+
+- The census tree's 20.
+- Eight more, all real, and each confirmed by the later commit that fixed
+  it: `ensureNotInitialized is` on `ensureDoctorClean` (present in 17 of
+  the 18 trees, fixed before 9365056), `variantFreshFor mirrors` (#989's
+  known case), and six stale test names in test functions' docs. None of
+  those tests exists now, so they are written here with the `Test` prefix
+  elided: `…BoundedHandler_setsWriteDeadline`,
+  `…RenameWithRetry_byteEqualFallback`, `…CountChildFoldersSkipsRollup`,
+  `…ExtractLocalArtwork_RejectsPNGCandidates`,
+  `…FsyncFileAndParent_DirectoryAsPathSurfacesError` and
+  `…RoutesToOptimizeChannel` (#863's rename, seen once).
+- One prose: `runSmartPlaylistRegenerator`'s doc opened "analysisActive is
+  read LIVE per run, not captured.", about its own parameter of that name.
+
+The pattern was sharp. Every real hit on a test function but one opened
+with another test's name, and none of the four premises did. Two
+conditions follow, both in `namesNothingDeclared`:
+
+- **A test function's doc is read only for a test-shaped name**
+  (`testFuncName`: Test, Benchmark, Fuzz or Example, then nothing or a
+  character that is not a lowercase letter, which is go test's own rule).
+  `go doc` never shows a test's doc, and the one thing it gets wrong in
+  this class is another test's name.
+- **A documented function's own signature declares names**: receiver,
+  type parameters, parameters, results.
+
+Measured with both, over the same 18 trees: 27 distinct, all real. On the
+merged tree, 0. They cost one real finding, "JobSpecVariantID_OptimizeKind
+locks …" on `TestJobSpecVariantID_OptimizeKind`, a test's own name without
+its Test prefix. Red-first on the unfixed tree (a throwaway worktree of
+9365056 with the final guard file): 19, the census's 20 without that one.
+
+The rule taken from this goes into CLAUDE.md as its own bullet: **measure a
+detector over sampled history, not only the tree it was written against.**
+A census of one tree is one snapshot of one vocabulary. The history also
+labels its own data, since a hit that a later commit fixed was real by that
+fix.
 
 ### Consult
 
@@ -11017,3 +11095,8 @@ what else "declared nowhere" leaves out.
   Its precision was 40%. The refinement that mattered (lowercase openers
   in, capitalised and all-caps out) came from reading the misses, not from
   the specification.
+- **A tree-wide guard's verdict depends on code the branch did not write.**
+  The branch was cut from 9365056, #991 merged while the census ran, and
+  the first push went up without main merged in, so CI found the M4A docs
+  one push later than a local run could have. Merge main before pushing a
+  guard that reads the whole tree, and re-run it there.
