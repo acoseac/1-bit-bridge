@@ -152,6 +152,13 @@ func (p *Park) Wait(t testing.TB) {
 // parked, and the yield before each release is where the driver's goroutine
 // runs: a plain hand-off between this goroutine and the parked one can pass
 // the processor back and forth between the two and leave it waiting.
+//
+// Both halves were measured, 200 cancelled snapshots each under -race.
+// Letting every comparison go at once let the copy finish before the cancel
+// reached it in 2 runs at GOMAXPROCS=1. One at a time without the yield
+// never failed, but the cancel landed as late as the 31st comparison, the
+// last one WriteSource's rows produce. As written it lands on the first or
+// the second.
 func (p *Park) ReleaseUntil(t testing.TB, done <-chan struct{}) int {
 	t.Helper()
 	released := 0
