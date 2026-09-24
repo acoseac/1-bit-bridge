@@ -13,10 +13,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
-// manageControls swaps the server's live config for one whose control
-// plane owns `names`. Clone → mutate → Store, which is the same
-// copy-on-write path the settings PATCH uses; mutating Load()'s result in
-// place is the thing config.RuntimeConfig exists to prevent.
 // loopbackReq builds a request the admin listener will accept.
 // httptest.NewRequest sets RemoteAddr to 192.0.2.1, which loopbackOnly
 // refuses — with a 403, the same status a managed control returns. A test
@@ -34,6 +30,10 @@ func loopbackReq(method, path, body string) *http.Request {
 	return r
 }
 
+// manageControls swaps the server's live config for one whose control
+// plane owns `names`. Clone → mutate → Store, which is the same
+// copy-on-write path the settings PATCH uses; mutating Load()'s result in
+// place is the thing config.RuntimeConfig exists to prevent.
 func manageControls(t *testing.T, srv *Server, names ...string) {
 	t.Helper()
 	cfg := srv.deps.CfgHolder.Clone()

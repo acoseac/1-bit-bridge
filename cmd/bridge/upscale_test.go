@@ -126,22 +126,6 @@ func TestBootstrapTranscodeCmdHonorsVariantsDir(t *testing.T) {
 	})
 }
 
-// TestRunGCReverseSweepRemovesOrphanRows pins the load-bearing fix:
-// a `track_variants` row whose `sidecar_path` is missing on disk
-// must be removed by `bridge upscale --gc`, AND the parent track's
-// `indexed_at` must be bumped so the next iOS delta sync sees the
-// variant disappear.
-//
-// Field-confirmed scenario this guards against (Abdullah Ibrahim /
-// "The Balance" album, 2026-05-12): operator generated v1 upscale
-// variants under a 64-char-hash sidecar naming scheme; later upscale
-// pass migrated to v2 with 16-char-hash naming; v1 sidecar files
-// were removed but the v1 `track_variants` rows survived. Every iOS
-// play attempt of the affected tracks resolved to the dead v1
-// variant, hit `410 Gone` on `/v1/download`, fell back to source via
-// PR #351; next manifest sync re-pulled the same dead v1 ID and the
-// loop restarted. The reverse-sweep gc breaks the loop at the
-// source-of-truth layer.
 // The forward sweep must not delete a live sidecar when the DB
 // SidecarPath and the on-disk (WalkDir) path differ only in case — the
 // data-loss hazard on case-insensitive filesystems (Windows / macOS).
@@ -183,6 +167,22 @@ func TestRunGCForwardSweepCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestRunGCReverseSweepRemovesOrphanRows pins the load-bearing fix:
+// a `track_variants` row whose `sidecar_path` is missing on disk
+// must be removed by `bridge upscale --gc`, AND the parent track's
+// `indexed_at` must be bumped so the next iOS delta sync sees the
+// variant disappear.
+//
+// Field-confirmed scenario this guards against (Abdullah Ibrahim /
+// "The Balance" album, 2026-05-12): operator generated v1 upscale
+// variants under a 64-char-hash sidecar naming scheme; later upscale
+// pass migrated to v2 with 16-char-hash naming; v1 sidecar files
+// were removed but the v1 `track_variants` rows survived. Every iOS
+// play attempt of the affected tracks resolved to the dead v1
+// variant, hit `410 Gone` on `/v1/download`, fell back to source via
+// PR #351; next manifest sync re-pulled the same dead v1 ID and the
+// loop restarted. The reverse-sweep gc breaks the loop at the
+// source-of-truth layer.
 func TestRunGCReverseSweepRemovesOrphanRows(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "bridge.db")

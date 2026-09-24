@@ -391,27 +391,6 @@ func TestCollectCandidatesSkipsTracksTheEnricherHasNotTriedYet(t *testing.T) {
 	}
 }
 
-// TestCollectCandidatesSkipsMatchedAndConsumedRows pins the restart cost fix.
-//
-// The dedup cache is in-memory, so before this check every restart re-collected
-// the rows whose fingerprint verdict had already been accepted AND applied — on
-// the production bridge ~1,300 rows whose artist MBID landed but whose release
-// the text ladder still cannot find. Each re-run pays a whole-object read on a
-// network-backed library plus an AcoustID lookup, reproduces the identical
-// artist (the write-target discipline means a fingerprint can never supply the
-// missing release MBID), and the re-queue then re-stamps indexed_at into a
-// no-op delta for every paired device. Per restart, forever.
-//
-// Three rows discriminate the shapes:
-//   - consumed.flac: matched + artist MBID present → the verdict landed; must
-//     NOT be re-collected.
-//   - vetoed.flac: matched + no artist MBID → accepted but never applied
-//     (apply-time veto, or a restart between re-queue and enrichment); MUST
-//     stay retryable.
-//   - text.flac: artist MBID from the TEXT ladder, no match → a legitimate
-//     candidate (release still missing); a skip keyed on ArtistMBID alone
-//     would wrongly drop it.
-//
 // candidateFixture is the shared setup for the collectCandidates tests that
 // seed already-attempted rows and assert which ones survive into the pool.
 //
@@ -499,6 +478,26 @@ func (f *candidateFixture) collect(t *testing.T) map[string]bool {
 	return paths
 }
 
+// TestCollectCandidatesSkipsMatchedAndConsumedRows pins the restart cost fix.
+//
+// The dedup cache is in-memory, so before this check every restart re-collected
+// the rows whose fingerprint verdict had already been accepted AND applied — on
+// the production bridge ~1,300 rows whose artist MBID landed but whose release
+// the text ladder still cannot find. Each re-run pays a whole-object read on a
+// network-backed library plus an AcoustID lookup, reproduces the identical
+// artist (the write-target discipline means a fingerprint can never supply the
+// missing release MBID), and the re-queue then re-stamps indexed_at into a
+// no-op delta for every paired device. Per restart, forever.
+//
+// Three rows discriminate the shapes:
+//   - consumed.flac: matched + artist MBID present → the verdict landed; must
+//     NOT be re-collected.
+//   - vetoed.flac: matched + no artist MBID → accepted but never applied
+//     (apply-time veto, or a restart between re-queue and enrichment); MUST
+//     stay retryable.
+//   - text.flac: artist MBID from the TEXT ladder, no match → a legitimate
+//     candidate (release still missing); a skip keyed on ArtistMBID alone
+//     would wrongly drop it.
 func TestCollectCandidatesSkipsMatchedAndConsumedRows(t *testing.T) {
 	ctx := context.Background()
 	f := newCandidateFixture(t)

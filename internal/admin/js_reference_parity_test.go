@@ -256,8 +256,6 @@ func TestAppJSHasNoCallsToDeletedHelpers(t *testing.T) {
 	}
 }
 
-// stripJSNoise removes comments and string literals so an identifier
-// mentioned in prose or inside a string is not mistaken for code.
 // jsFunctionBody returns the source of the named top-level function in
 // static/app.js, from its declaration to the next one, with COMMENTS
 // stripped and CRLF normalised.
@@ -314,6 +312,8 @@ func jsFunctionBody(t *testing.T, decl string) string {
 	return jsLineCommentRe.ReplaceAllString(body, " ")
 }
 
+// stripJSNoise removes comments and string literals so an identifier
+// mentioned in prose or inside a string is not mistaken for code.
 func stripJSNoise(s string) string {
 	s = jsBlockCommentRe.ReplaceAllString(s, " ")
 	s = jsLineCommentRe.ReplaceAllString(s, " ")

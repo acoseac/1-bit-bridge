@@ -31,11 +31,11 @@ func sineMeter(channels int, amp float64, seconds int) (*loudnessMeter, []float6
 	return m, interleaved
 }
 
+var ebur128Re = regexp.MustCompile(`I:\s+(-?\d+(?:\.\d+)?)\s+LUFS`)
+
 // ffmpegLUFS runs ffmpeg's ebur128 filter over raw f32le interleaved
 // samples and returns the integrated loudness. Returns (_, false) when
 // ffmpeg isn't installed (the cross-check test skips).
-var ebur128Re = regexp.MustCompile(`I:\s+(-?\d+(?:\.\d+)?)\s+LUFS`)
-
 func ffmpegLUFS(t *testing.T, interleaved []float64, channels int) (float64, bool) {
 	t.Helper()
 	ff, err := exec.LookPath("ffmpeg")

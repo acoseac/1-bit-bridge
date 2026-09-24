@@ -221,24 +221,6 @@ func TestJSBracketFieldReadsSeesEveryBracketForm(t *testing.T) {
 // every form these two constants have ever taken.
 var certExpiryWindowConstRe = regexp.MustCompile(`const\s+(CERT_[A-Z_]+_MS)\s*=\s*([0-9_ *]+);`)
 
-// TestCertExpiryBandsMirrorTheGoWindow pins the console's 30-day band to
-// servertls.ExpiryWarningWindow — the value `bridge doctor`, `bridge
-// cert info` and the startup warning all grade against.
-//
-// The Go side moved off a day count in #951 because DaysUntilExpiry
-// truncates toward zero: a certificate with 30 days 23 hours left reads
-// as 30, so a surface keyed on `<= 30` calls it expiring while every
-// surface comparing the DURATION stays quiet. Same certificate, same
-// host, two answers. The three console tiles were still on the day
-// count, and the threshold was spelled three times, which is how two of
-// them rendered the 30-day band in `.badge.running` — green, the
-// healthy colour, under the word "expiring" — while the third had been
-// corrected.
-//
-// Reading the constant out of the source rather than asserting a
-// literal 2592000000 is what makes this a PARITY test: the Go window is
-// the subject, and a change to it has to reach the console or fail
-// here.
 // rejectedCertGradingShapes are the two ways a cert tile drifts from the
 // CLI, as REGEXPS rather than substrings.
 //
@@ -268,6 +250,24 @@ var rejectedCertGradingShapes = []struct {
 		"renders an expiry warning in the healthy green badge; .badge.warn is the yellow one"},
 }
 
+// TestCertExpiryBandsMirrorTheGoWindow pins the console's 30-day band to
+// servertls.ExpiryWarningWindow — the value `bridge doctor`, `bridge
+// cert info` and the startup warning all grade against.
+//
+// The Go side moved off a day count in #951 because DaysUntilExpiry
+// truncates toward zero: a certificate with 30 days 23 hours left reads
+// as 30, so a surface keyed on `<= 30` calls it expiring while every
+// surface comparing the DURATION stays quiet. Same certificate, same
+// host, two answers. The three console tiles were still on the day
+// count, and the threshold was spelled three times, which is how two of
+// them rendered the 30-day band in `.badge.running` — green, the
+// healthy colour, under the word "expiring" — while the third had been
+// corrected.
+//
+// Reading the constant out of the source rather than asserting a
+// literal 2592000000 is what makes this a PARITY test: the Go window is
+// the subject, and a change to it has to reach the console or fail
+// here.
 func TestCertExpiryBandsMirrorTheGoWindow(t *testing.T) {
 	js := stripJSNoise(readConsoleJS(t, "static/app.js"))
 	got := map[string]int64{}
