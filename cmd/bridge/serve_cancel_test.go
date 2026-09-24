@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +18,8 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/sqlitetest"
+	servertailscale "github.com/acoseac/1-bit-bridge/internal/tailscale"
 	"github.com/acoseac/1-bit-bridge/internal/upnp"
 	"github.com/acoseac/1-bit-bridge/internal/upnpingest"
 	"tailscale.com/ipn/ipnstate"
@@ -411,4 +414,126 @@ func mustReportOnceServe(t *testing.T, rec *loggingtest.Recorder, msgs ...string
 			t.Errorf("a failure on a live context logged %q %d times, want 1:\n%s", m, len(got), strings.Join(got, "\n"))
 		}
 	}
+}
+
+// TestAServeStoppedInItsUpscaleSeedExitsCleanly: the shutdown lands while
+// serve, not yet up, seeds the upscale target on a fresh database. That is
+// a requested stop, so serve exits 0 and reports no failed seed. A boot
+// test's early cancel landed there on #1001's macOS leg: `serve exit code
+// = 1, want 0; stderr=seed upscale target: context canceled`.
+//
+// The seed's INSERT is parked (sqlitetest) and the cancel lands inside it.
+// A context cancelled before runServe starts cannot reach the seed at all:
+// the GetUpscaleTarget read before it fails first, and the seed is skipped.
+func TestAServeStoppedInItsUpscaleSeedExitsCleanly(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	parkUpscaleSeed(t, filepath.Join(filepath.Dir(cfgPath), "data"))
+	park := sqlitetest.Arm(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	stderr := &safeBuffer{}
+	done := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: "127.0.0.1:0", tailscaleCLI: noTailscaleCLI()},
+			&safeBuffer{}, stderr)
+	}()
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
+
+	park.Wait(t)
+	cancel()
+	park.ReleaseUntil(t, exited)
+	if code := <-done; code != 0 {
+		t.Errorf("a serve stopped in its upscale seed exited %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if s := stderr.String(); strings.Contains(s, msgUpscaleSeed) {
+		t.Errorf("a startup the shutdown stopped reported its upscale seed as failed; stderr=%s", s)
+	}
+}
+
+// TestAServeWhoseUpscaleSeedFailsStillExitsWithAnError is the twin: the
+// seed fails on a live context, through a trigger that refuses it, and
+// serve still refuses to start and says why.
+func TestAServeWhoseUpscaleSeedFailsStillExitsWithAnError(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	refuseUpscaleSeed(t, filepath.Join(filepath.Dir(cfgPath), "data"))
+	stderr := &safeBuffer{}
+	code := runServe(context.Background(),
+		serveOpts{configPath: cfgPath, addrOverride: "127.0.0.1:0", tailscaleCLI: noTailscaleCLI()},
+		&safeBuffer{}, stderr)
+	if code != 1 {
+		t.Errorf("a serve whose upscale seed failed exited %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if s := stderr.String(); !strings.Contains(s, msgUpscaleSeed) {
+		t.Errorf("a failed upscale seed was not reported; stderr=%s", s)
+	}
+}
+
+// msgUpscaleSeed opens the line serve prints when the upscale seed fails.
+const msgUpscaleSeed = "seed upscale target:"
+
+// noTailscaleCLI is a Tailscale CLI with no node behind it, so a boot test's
+// auto-pilot finds nothing to mint and never reaches the host's CLI.
+func noTailscaleCLI() tailscaleCLI {
+	return scriptedCLI{
+		detect: func(context.Context) (servertailscale.NodeInfo, error) { return servertailscale.NodeInfo{}, nil },
+		mint: func(context.Context, string, string) error {
+			return errors.New("noTailscaleCLI: nothing to mint")
+		},
+	}
+}
+
+// refuseUpscaleSeed migrates the manifest database serve will open under
+// dataDir and adds a trigger that refuses the upscale target's first write,
+// the way a failing disk would.
+func refuseUpscaleSeed(t *testing.T, dataDir string) {
+	t.Helper()
+	db := openMigratedServeDB(t, dataDir)
+	if _, err := db.Exec(`CREATE TRIGGER refuse_upscale_seed BEFORE INSERT ON scan_state
+		WHEN NEW.k = '` + manifest.UpscaleTargetRateKey + `'
+		BEGIN SELECT RAISE(ABORT, 'refused by the test'); END`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// parkUpscaleSeed migrates the manifest database serve will open under
+// dataDir and indexes the upscale target's keys under sqlitetest's
+// collation, beside one neighbour row, so the seed's INSERT compares a key
+// and parks while a Park is armed. The partial index leaves every other
+// scan_state write out of it.
+func parkUpscaleSeed(t *testing.T, dataDir string) {
+	t.Helper()
+	db := openMigratedServeDB(t, dataDir)
+	keys := "'" + manifest.UpscaleTargetRateKey + "', '" + manifest.UpscaleTargetBitsKey + "', 'sqlitetest_neighbour'"
+	for _, stmt := range []string{
+		"CREATE INDEX park_upscale_seed ON scan_state(k COLLATE " + sqlitetest.Collation + ") WHERE k IN (" + keys + ")",
+		"INSERT INTO scan_state(k, v) VALUES('sqlitetest_neighbour', '')",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// openMigratedServeDB migrates the manifest database serve will open under
+// dataDir and returns a plain handle to it, closed when the test ends.
+func openMigratedServeDB(t *testing.T, dataDir string) *sql.DB {
+	t.Helper()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := manifest.DefaultDBPath(dataDir)
+	store, err := manifest.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
