@@ -10906,3 +10906,29 @@ Controls at `e2ad173c`, same harness, `-count=3`, all red:
 | S3 | a `Deferred int` bucket declared | `bucket "deferred" has no label` |
 | S4 | the tag renamed `alreadyQueuedCount` | no label for the new name, and a label for a name that is no bucket |
 | S5 | the part dropped from the line | `"alreadyQueued" (64) is not in the line`; 63 of 127 |
+
+### Review round 2
+
+- **CodeRabbit** re-reviewed `1db0a5a7` (its walkthrough's
+  `coveredCommitId` is that head, `kind: reviewed`): no findings, merge
+  risk "minimal". All 20 checks passed on that head, including CodeQL,
+  SonarCloud and the Windows and macOS legs. The node test cannot report a
+  skip from those legs, since they run without `-v`, but the runner images
+  list Node.js among their installed software (Node 22.23.2 on
+  `windows-2025-vs2026`), so it runs there rather than skipping.
+- **Gemini, standing in** through a direct consult because the review app
+  was over its daily quota (the #990 precedent): the first pass over the
+  whole code diff at `d82aa949` found nothing, and a second pass over the
+  round-1 diff found one gap, **taken in `cf59e2d3`**. A part for a field
+  the DTO does not carry, rendered unconditionally with a zero fallback,
+  shows as "0 <label>". Zero adds nothing to the sum and no check asked
+  whether each part is a bucket, so it passed. That is a JS read of a
+  field the server does not send, the class the `/api/jobs` guards exist
+  for. Each part's count is now checked against the bucket values, so
+  parts and buckets correspond one to one, and the sum still catches a
+  duplicated part. Control G1 (`${last.ghost ?? 0} ghost` added) passed at
+  `1db0a5a7`, with the old test confirmed in place, and is red at
+  `cf59e2d3`. S1 to S5 are still red there.
+- **Declined: the test does not exercise `queueSaturated`.** True, and on
+  purpose: the suffix is not a bucket, this change does not touch it, and
+  a saturated line's parts deliberately do not add up to the total.
