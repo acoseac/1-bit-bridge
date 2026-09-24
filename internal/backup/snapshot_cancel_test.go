@@ -24,75 +24,92 @@ import (
 // cancel, has to produce a complete snapshot, so the failure in the other
 // case is the cancel's and not the park's.
 func TestSnapshotStoppedMidVacuumLeavesNothing(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		cancel bool
-	}{
-		{"cancelled mid-copy", true},
-		{"let go without a cancel", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dataDir := t.TempDir()
-			src := primeLiveState(t, dataDir)
-			backuptest.WriteSource(t, src.ManifestDB)
-			backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
+	t.Run("cancelled mid-copy", func(t *testing.T) {
+		dst, err := snapshotParkedMidVacuum(t, true)
+		assertCancelledSnapshotLeftNothing(t, dst, err)
+	})
+	t.Run("let go without a cancel", func(t *testing.T) {
+		dst, err := snapshotParkedMidVacuum(t, false)
+		if err != nil {
+			t.Fatalf("Snapshot let go without a cancel: %v", err)
+		}
+		if !backup.LooksLikeSnapshotDir(dst) {
+			t.Errorf("Snapshot let go without a cancel wrote %s, which is not a complete snapshot", dst)
+		}
+	})
+}
 
-			ctx, cancel := context.WithCancel(context.Background())
-			finished := make(chan struct{})
-			// Registered before the park, so it runs after the park's own
-			// cleanup has let any held comparison go: on a failing path the
-			// snapshot must still finish before t.TempDir removes the
-			// directory it is writing into.
-			t.Cleanup(func() {
-				cancel()
-				select {
-				case <-finished:
-				case <-time.After(10 * time.Second):
-					t.Errorf("the snapshot did not return within 10s of its cancel")
-				}
-			})
-			park := backuptest.ParkVacuum(t)
+// snapshotParkedMidVacuum runs a Snapshot, parks its VACUUM INTO mid-copy,
+// checks that the partial snapshot is on disk at that moment, then cancels
+// the snapshot's context if cancelIt is set and lets the copy go. After a
+// cancel it also checks that nothing is left under the backups root. It
+// returns what Snapshot returned.
+func snapshotParkedMidVacuum(t *testing.T, cancelIt bool) (string, error) {
+	t.Helper()
+	dataDir := t.TempDir()
+	src := primeLiveState(t, dataDir)
+	backuptest.WriteSource(t, src.ManifestDB)
 
-			var dst string
-			var err error
-			go func() {
-				defer close(finished)
-				dst, err = backup.Snapshot(ctx, src)
-			}()
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	// Registered before the park, so it runs after the park's own cleanup
+	// has let any held comparison go: on a failing path the snapshot must
+	// still finish before t.TempDir removes the directory it is writing
+	// into.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Errorf("the snapshot did not return within 10s of its cancel")
+		}
+	})
+	park := backuptest.ParkVacuum(t)
 
-			park.Wait(t)
-			partial := onlySnapshotDir(t, backupsRoot)
-			if !pathExists(t, filepath.Join(partial, backup.ManifestDBFileName)) {
-				t.Fatalf("the VACUUM is copying, but its destination under %s does not exist yet", partial)
-			}
-			if tc.cancel {
-				cancel()
-			}
-			park.ReleaseUntil(t, finished)
+	var dst string
+	var err error
+	go func() {
+		defer close(finished)
+		dst, err = backup.Snapshot(ctx, src)
+	}()
 
-			if !tc.cancel {
-				if err != nil {
-					t.Fatalf("Snapshot let go without a cancel: %v", err)
-				}
-				if !backup.LooksLikeSnapshotDir(dst) {
-					t.Errorf("Snapshot let go without a cancel wrote %s, which is not a complete snapshot", dst)
-				}
-				return
-			}
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("Snapshot cancelled mid-copy: err = %v, want context.Canceled", err)
-			}
-			if dst != "" {
-				t.Errorf("Snapshot cancelled mid-copy returned the path %s", dst)
-			}
-			entries, rerr := os.ReadDir(backupsRoot)
-			if rerr != nil {
-				t.Fatalf("read backups root: %v", rerr)
-			}
-			for _, e := range entries {
-				t.Errorf("a snapshot cancelled mid-copy left %s under the backups root", e.Name())
-			}
-		})
+	park.Wait(t)
+	partial := onlySnapshotDir(t, filepath.Join(dataDir, backup.BackupsDirName))
+	if !pathExists(t, filepath.Join(partial, backup.ManifestDBFileName)) {
+		t.Fatalf("the VACUUM is copying, but its destination under %s does not exist yet", partial)
+	}
+	if cancelIt {
+		cancel()
+	}
+	park.ReleaseUntil(t, finished)
+	if cancelIt {
+		// Nothing may be left under the root the partial snapshot was in.
+		assertEmptyDir(t, filepath.Dir(partial))
+	}
+	return dst, err
+}
+
+// assertCancelledSnapshotLeftNothing checks what a Snapshot cancelled
+// mid-copy returned: the cancellation itself, and no path.
+func assertCancelledSnapshotLeftNothing(t *testing.T, dst string, err error) {
+	t.Helper()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Snapshot cancelled mid-copy: err = %v, want context.Canceled", err)
+	}
+	if dst != "" {
+		t.Errorf("Snapshot cancelled mid-copy returned the path %s", dst)
+	}
+}
+
+// assertEmptyDir fails the test for every entry under dir.
+func assertEmptyDir(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		t.Errorf("a snapshot cancelled mid-copy left %s under %s", e.Name(), dir)
 	}
 }
 

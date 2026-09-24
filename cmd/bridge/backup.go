@@ -311,9 +311,17 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 // they cannot remove or read, and when a cancel stops them later they join
 // what they collected with ctx.Err(). Asking errors.Is of the whole error
 // would silence those genuine failures along with the cancel. So a
-// multi-error (errors.Join) is filtered child by child. Any other error IS
-// the cancellation when it wraps context.Canceled: Snapshot and PruneContext
-// never wrap a join, so a single chain can be judged whole.
+// multi-error (errors.Join) is filtered child by child.
+//
+// A wrapper is judged by what it wraps. `vacuum manifest db: %w` around the
+// cancellation IS the cancellation. A wrapper around a join that holds a
+// genuine failure as well is reported WHOLE, cancellation text included,
+// because it cannot be rebuilt around what is left without dropping its own
+// context. Snapshot and PruneContext build no such error today; this is so
+// the next one to wrap a join is not silenced by it. (Gemini, #998, proposed
+// returning the filtered inner error, which drops the wrapper's context and
+// compares errors with ==, a runtime panic on an error type that is not
+// comparable.)
 //
 // The error has to be the cancellation, not merely arrive after one. A
 // snapshot's file copies do not watch ctx, so one that fails as shutdown
@@ -325,17 +333,25 @@ func withoutCancellation(ctx context.Context, err error) error {
 	if !errors.Is(err, context.Canceled) || !errors.Is(ctx.Err(), context.Canceled) {
 		return err
 	}
-	joined, ok := err.(interface{ Unwrap() []error })
-	if !ok {
-		return nil
-	}
-	var kept []error
-	for _, child := range joined.Unwrap() {
-		if child = withoutCancellation(ctx, child); child != nil {
-			kept = append(kept, child)
+	// The cases in errors.Is's own order, so this walks the chain that
+	// errors.Is matched above.
+	switch e := err.(type) {
+	case interface{ Unwrap() error }:
+		if withoutCancellation(ctx, e.Unwrap()) == nil {
+			return nil
 		}
+		return err
+	case interface{ Unwrap() []error }:
+		var kept []error
+		for _, child := range e.Unwrap() {
+			if child = withoutCancellation(ctx, child); child != nil {
+				kept = append(kept, child)
+			}
+		}
+		return errors.Join(kept...)
+	default:
+		return nil // errors.Is matched a leaf: the cancellation itself
 	}
-	return errors.Join(kept...)
 }
 
 // startupSnapshotShouldSkip reports whether the most-recent existing

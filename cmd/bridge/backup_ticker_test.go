@@ -190,50 +190,59 @@ func TestABackupThatFailsIsStillReported(t *testing.T) {
 // errors.Join(errors.Join(errs...), ctx.Err()). Driving that through a
 // real prune would need a cancel landing between two directories, and
 // neither loop has a place to hold it.
+//
+// Each row names how its pass's context ENDED rather than holding the
+// context: nil for a pass that is still live.
 func TestWithoutCancellationKeepsOnlyWhatFailed(t *testing.T) {
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-	defer cancelExpired()
-	live := context.Background()
-
 	removeA := errors.New("remove backups/a: permission denied")
 	removeB := errors.New("remove backups/b: permission denied")
 	copyFailed := errors.New("copy tokens.json: input/output error")
 
 	for _, tc := range []struct {
-		name string
-		ctx  context.Context
-		err  error
-		want string // "" = nil
+		name       string
+		ended      error // how the pass's ctx ended: nil, Canceled or DeadlineExceeded
+		err        error
+		want       string // "" = nil
+		wantCancel bool   // what is reported still carries a cancellation
 	}{
-		{"nil error", cancelled, nil, ""},
-		{"the snapshot's cancelled vacuum", cancelled,
-			fmt.Errorf("vacuum manifest db: %w", context.Canceled), ""},
-		{"a prune stopped before any failure", cancelled,
-			errors.Join(errors.Join(), context.Canceled), ""},
-		{"a prune stopped after two failures", cancelled,
+		{"nil error", context.Canceled, nil, "", false},
+		{"the snapshot's cancelled vacuum", context.Canceled,
+			fmt.Errorf("vacuum manifest db: %w", context.Canceled), "", false},
+		{"a cancellation wrapped twice", context.Canceled,
+			fmt.Errorf("snapshot: %w", fmt.Errorf("vacuum manifest db: %w", context.Canceled)), "", false},
+		{"a prune stopped before any failure", context.Canceled,
+			errors.Join(errors.Join(), context.Canceled), "", false},
+		{"a prune stopped after two failures", context.Canceled,
 			errors.Join(errors.Join(removeA, removeB), context.Canceled),
-			removeA.Error() + "\n" + removeB.Error()},
-		{"a failure with no cancellation in it, in a cancelled pass", cancelled,
-			copyFailed, copyFailed.Error()},
-		{"a deadline", expired,
+			removeA.Error() + "\n" + removeB.Error(), false},
+		// A join under a wrapper cannot be rebuilt around what is left
+		// without dropping the wrapper's own context, so it is reported
+		// whole when it holds a genuine failure, and is quiet only when the
+		// cancellation is all it holds.
+		{"a wrapped join holding a failure", context.Canceled,
+			fmt.Errorf("prune: %w", errors.Join(removeA, context.Canceled)),
+			"prune: " + removeA.Error() + "\n" + context.Canceled.Error(), true},
+		{"a wrapped join holding only the cancellation", context.Canceled,
+			fmt.Errorf("prune: %w", errors.Join(errors.Join(), context.Canceled)), "", false},
+		{"a failure with no cancellation in it, in a cancelled pass", context.Canceled,
+			copyFailed, copyFailed.Error(), false},
+		{"a deadline", context.DeadlineExceeded,
 			fmt.Errorf("vacuum manifest db: %w", context.DeadlineExceeded),
-			"vacuum manifest db: " + context.DeadlineExceeded.Error()},
+			"vacuum manifest db: " + context.DeadlineExceeded.Error(), false},
 		// The row above is rejected by the error alone, since a deadline is
 		// not context.Canceled. This one reaches the context: a pass whose
 		// ctx ran out of time failed, even when the error it carries is a
 		// cancellation from somewhere else. Only a CANCELLED ctx is quiet,
 		// not one that is merely done.
-		{"a deadline, with another context's cancellation in the error", expired,
+		{"a deadline, with another context's cancellation in the error", context.DeadlineExceeded,
 			fmt.Errorf("vacuum manifest db: %w", context.Canceled),
-			"vacuum manifest db: " + context.Canceled.Error()},
-		{"another context's cancellation while ctx is live", live,
+			"vacuum manifest db: " + context.Canceled.Error(), true},
+		{"another context's cancellation while ctx is live", nil,
 			fmt.Errorf("vacuum manifest db: %w", context.Canceled),
-			"vacuum manifest db: " + context.Canceled.Error()},
+			"vacuum manifest db: " + context.Canceled.Error(), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := withoutCancellation(tc.ctx, tc.err)
+			got := withoutCancellation(contextThatEnded(t, tc.ended), tc.err)
 			if tc.want == "" {
 				if got != nil {
 					t.Fatalf("withoutCancellation = %q, want nil", got)
@@ -246,14 +255,12 @@ func TestWithoutCancellationKeepsOnlyWhatFailed(t *testing.T) {
 			if got.Error() != tc.want {
 				t.Errorf("withoutCancellation = %q, want %q", got, tc.want)
 			}
-			// In a cancelled pass nothing that is kept may still be the
-			// cancellation, whatever its message says.
-			if errors.Is(tc.err, context.Canceled) && errors.Is(tc.ctx.Err(), context.Canceled) &&
-				errors.Is(got, context.Canceled) {
-				t.Errorf("withoutCancellation kept the cancellation: %q", got)
+			if errors.Is(got, context.Canceled) != tc.wantCancel {
+				t.Errorf("errors.Is(result, context.Canceled) = %v, want %v", !tc.wantCancel, tc.wantCancel)
 			}
 		})
 	}
+	cancelled := contextThatEnded(t, context.Canceled)
 	// The kept half of a joined error is the SAME errors, not copies of
 	// their text.
 	got := withoutCancellation(cancelled, errors.Join(errors.Join(removeA, removeB), context.Canceled))
@@ -264,6 +271,27 @@ func TestWithoutCancellationKeepsOnlyWhatFailed(t *testing.T) {
 	if got := withoutCancellation(cancelled, copyFailed); got != copyFailed {
 		t.Errorf("withoutCancellation rebuilt an error it had nothing to take out of: %v", got)
 	}
+}
+
+// contextThatEnded returns a context that is live when ended is nil,
+// cancelled when it is context.Canceled, and past its deadline when it is
+// context.DeadlineExceeded.
+func contextThatEnded(t *testing.T, ended error) context.Context {
+	t.Helper()
+	switch {
+	case ended == nil:
+		return context.Background()
+	case errors.Is(ended, context.Canceled):
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	case errors.Is(ended, context.DeadlineExceeded):
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	t.Fatalf("contextThatEnded: no context ends with %v", ended)
+	return nil
 }
 
 // assertNoSnapshotDirs fails the test if anything is under dataDir's backups

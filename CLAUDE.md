@@ -2292,6 +2292,10 @@ mentions across the four `ops/audit-*.md` files.
   sweep keep going past a directory they cannot remove or read, then join
   those failures with `ctx.Err()` when a later cancel stops them, so
   `errors.Is` on the whole error would silence the failures with the cancel.
+  A join under a `%w` WRAPPER is reported whole, cancellation text
+  included, since the wrapper cannot be rebuilt around what is left without
+  losing its context (Gemini's suggestion returned the filtered inner error
+  and compared errors with `==`, a runtime panic on an uncomparable type).
   A stopped snapshot leaves nothing to report: `Snapshot` removes its
   partial directory, destination file included
   (`TestSnapshotStoppedMidVacuumLeavesNothing` cancels INSIDE the running
