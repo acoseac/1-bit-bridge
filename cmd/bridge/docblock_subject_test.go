@@ -157,7 +157,7 @@ const testDocVerbCoverageFloor = 0.90
 // An English sentence opens with a capital, so a capitalised word with no
 // other capital ("The", "Snapshot", "Tailscale", "Removal") and an
 // all-capitals one ("DST", "GET", "MP4") are left out: each could be either.
-// On the 2026-09-24 census (#991), every opener of those two shapes that
+// On the 2026-09-24 census (#994), every opener of those two shapes that
 // nothing declared and that a recognised verb followed was prose, 10 of 10.
 // Brand names, tool names and units are the known cost: "iOS", "SQLite",
 // "sox" and "dBFS" are identifier-shaped. None of them opened a doc with a
@@ -247,7 +247,7 @@ func namesNothingDeclared(word string, declaredHere map[string]bool) bool {
 // the fix is to restore that doc, not to move the test's.
 //
 // A doc comment that opens with a name nothing declares is reported too
-// (#991). That is the other half of the first condition, and `go doc` then
+// (#994). That is the other half of the first condition, and `go doc` then
 // documents a declaration under a name no reader can search for. It comes
 // from a rename the doc did not follow (routesToForegroundLane's doc said
 // "routesToOptimizeChannel", the name #863 retired), from a doc written under

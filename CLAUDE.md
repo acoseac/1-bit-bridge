@@ -2822,7 +2822,7 @@ its twin.** The top list is older, shorter, and read first.
   spec doc displaced inside a documented group be caught. Still unseen: a
   subject that has since grown a second doc of its own. (`_test.go` files
   headed this list until #990, and a doc opening with a name nothing
-  declares until #991.)
+  declares until #994.)
 - **…and test files, against their own census and a floor of their own**
   (#990). The 716 `_test.go` files held eleven more, and #989's list would
   have seen four of them. A test's doc opens "… pins …": 1,033 of their
@@ -2851,7 +2851,7 @@ its twin.** The top list is older, shorter, and read first.
   emacs `.#name.go` lock is a dangling symlink, and one failed the guard
   with a parse error over a file no build reads. Still unseen: a title-line
   doc (`// Name.`, 29 in test files, none misattached).
-- **…and a doc that opens with a name NOTHING declares** (#991). "Declared
+- **…and a doc that opens with a name NOTHING declares** (#994). "Declared
   in the same package" left that half unread by design, and #989's census
   had seen three (`expectedTeamID`, `ensurePathExists`, `errITunesNoMatch`).
   Measured before building anything, the class was 25 wide: one rename the

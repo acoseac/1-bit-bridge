@@ -10758,7 +10758,7 @@ rules differ (it deliberately reads `.github/` markdown), so it was left
 for its own change rather than folded in here. The `adminauth` and
 `manifest` walkers passed the same probe.
 
-## 2026-09-24 — the docblock guard reports a doc that opens with a name nothing declares (#991)
+## 2026-09-24 — the docblock guard reports a doc that opens with a name nothing declares (#994)
 
 `TestNoDocblockNamesAnotherDeclaration` reports a doc comment for X glued
 onto Y only when X is declared in the same package. A doc whose opening
