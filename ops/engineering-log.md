@@ -12781,3 +12781,17 @@ apply exactly once:
   snapshots survive) fails loudly rather than passing. NC18, the ticker
   returning before the count on a cancelled prune, turns exactly that test
   red.
+- **Round 4**, on `90788201` (CodeRabbit's free on-demand review again).
+  CodeRabbit: "No actionable comments were generated", and in chat it
+  confirmed both parts of round 3 and recorded a learning. Gemini: no
+  further feedback. CI: 20 of 20 checks pass. SonarCloud (gate passed):
+  one finding, **declined**. godre:S8242 flagged `cancelWhenGone`'s
+  embedded `context.Context`. That type IS a context, and embedding the
+  parent is how every derived context is built, the standard library's
+  own `cancelCtx` included. The rule's concern, a context stored in a data
+  structure and outliving the call that owns it, does not apply. A
+  deterministic cancel between two deletions needs a custom `Err`, and so a
+  custom context. The same rule's round-1 finding, on a test table's
+  context field, was taken. Marking it through the SonarCloud MCP tool
+  failed (the tool's schema asks for `issue_key`, and the server answers
+  "The 'issue' parameter is missing"), so it is left for the SonarCloud UI.
